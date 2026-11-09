@@ -343,6 +343,7 @@ enum OperationKind {
   OPERATION_KIND_METRICS = 5;
   OPERATION_KIND_PORT_FORWARD = 6;
   OPERATION_KIND_NETWORK_EXPLAIN = 7;
+  OPERATION_KIND_TRACE = 8;
 }
 
 message OperationRequest {
@@ -368,6 +369,14 @@ message OperationRequest {
   bool acknowledges_output = 15;
   // NETWORK_EXPLAIN: authenticated node ID whose path decision is requested.
   string peer_id = 16;
+  // TRACE: bpftrace source compiled and run in-process by the node agent.
+  string trace_source = 17;
+  // TRACE: exact Pod UIDs assigned to this authenticated node whose live
+  // cgroups may contribute events.
+  repeated string trace_pod_uids = 18;
+  // TRACE: hard node-side deadline. The agent rejects zero and out-of-range
+  // values rather than accepting an unbounded tracing session.
+  uint64 trace_duration_milliseconds = 19;
 }
 
 message OperationInput {

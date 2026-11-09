@@ -168,6 +168,22 @@
       (is (search "containerd" output))
       (is (search "42 bytes" output)))))
 
+(test trace-command-parses-auth-scope-duration-and-source
+  (let ((options
+          (parse-cli-options
+           '("trace" "--server" "https://cp:6443" "--namespace" "alpha"
+             "--selector" "app=api" "--duration" "30s" "--token" "secret"
+             "--ca-file" "/tmp/ca.crt"
+             "kprobe:tcp_sendmsg { @[comm] = count(); }"))))
+    (is (eq :trace (getf options :command)))
+    (is (equal "alpha" (getf options :namespace)))
+    (is (equal "app=api" (getf options :selector)))
+    (is (= 30000 (getf options :duration-milliseconds)))
+    (is (equal "secret" (getf options :token)))
+    (is (search "tcp_sendmsg" (getf options :source))))
+  (signals error (parse-cli-options '("trace" "--selector" "app=api")))
+  (signals error (parse-cli-options '("trace" "--duration" "301s" "kprobe:vfs_read {}"))))
+
 (test cli-options-describe-a-loopback-containerd-server
   (let ((options
           (parse-cli-options

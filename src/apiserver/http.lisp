@@ -164,6 +164,7 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
 (defun builtin-api-groups ()
   "Describe the groups this server always serves, whatever its store holds."
   (let ((groups (vector (rbac-api-group)
+                       (trace-api-group)
                        (event-api-group) (workload-api-group) (batch-api-group) (budget-api-group) (storage-api-group) (csr-api-group) (endpointslice-api-group) (networking-api-group)
                        (policy-api-group "node.k8s.io") (policy-api-group "scheduling.k8s.io") (admission-api-group-object) (gateway-api-group) (cert-manager-api-group)
                        (resource-metrics-api-group))))
@@ -1390,6 +1391,10 @@ Watches are long-running requests, which that filter leaves alone."
   "Answer the current request from whichever API handler serves PATH."
   (progn
         (cond
+          ((and store (eq method :get)
+                (cl-ppcre:scan "^/apis/gr8s[.]io/v1/namespaces/[^/]+/traces$" path))
+           (serve-trace-websocket store reconciler
+                                  (nth 5 (uiop:split-string path :separator '(#\/)))))
           ((string= path "/gr8s/v1/network/explain")
            (unless (eq method :get)
              (core-resource-error 405 "MethodNotAllowed" "network explain requires GET"))
@@ -1436,6 +1441,8 @@ Watches are long-running requests, which that filter leaves alone."
            (if (aggregated-discovery-requested-p)
                (aggregated-discovery-response store runtime reconciler "/apis")
                (api-groups-response store)))
+          ((string= path "/apis/gr8s.io") (json-response (trace-api-group)))
+          ((string= path "/apis/gr8s.io/v1") (trace-resources-response))
           ((string= path "/apis/metrics.k8s.io")
            (json-response (resource-metrics-api-group)))
           ((string= path "/apis/metrics.k8s.io/v1beta1")

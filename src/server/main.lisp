@@ -688,6 +688,8 @@ The new identity takes effect when the node agent next starts."
      (parse-kubeconfig-options (rest arguments)))
     ((string= "runtime" (first arguments))
      (parse-runtime-options (rest arguments)))
+    ((string= "trace" (first arguments))
+     (parse-trace-options (rest arguments)))
     ((string= "wireguard" (first arguments))
      (parse-wireguard-options (rest arguments)))
     ((string= "network" (first arguments))
@@ -695,6 +697,135 @@ The new identity takes effect when the node agent next starts."
     ((string= "doctor" (first arguments))
      (parse-doctor-options (rest arguments)))
     (t (error "unknown command: ~A" (first arguments)))))
+
+(defun parse-trace-duration (text)
+  "Parse a trace duration in milliseconds, seconds, or minutes."
+  (let* ((unit (cond ((uiop:string-suffix-p text "ms") "ms")
+                     ((uiop:string-suffix-p text "s") "s")
+                     ((uiop:string-suffix-p text "m") "m")
+                     (t nil)))
+         (digits (if unit (subseq text 0 (- (length text) (length unit))) text))
+         (value (parse-integer digits :junk-allowed nil))
+         (milliseconds (* value (cond ((equal unit "m") 60000)
+                                      ((equal unit "s") 1000)
+                                      (t 1)))))
+    (unless (<= 1 milliseconds 300000)
+      (error "trace duration must be between 1ms and 300s"))
+    milliseconds))
+
+(defun parse-trace-options (arguments)
+  "Parse `gr8s trace` selector, authentication and bpftrace source options."
+  (let ((options (list :command :trace :server "https://127.0.0.1:6443"
+                       :namespace "default" :selector "" :duration-milliseconds 30000))
+        (rest arguments))
+    (loop while (and rest (uiop:string-prefix-p "--" (first rest)))
+          do (let ((option (pop rest)))
+               (unless rest (error "~A requires a value" option))
+               (let ((value (pop rest)))
+                 (cond ((string= option "--server") (setf (getf options :server) value))
+                       ((string= option "--namespace") (setf (getf options :namespace) value))
+                       ((string= option "--selector") (setf (getf options :selector) value))
+                       ((string= option "--duration")
+                        (setf (getf options :duration-milliseconds) (parse-trace-duration value)))
+                       ((string= option "--token") (setf (getf options :token) value))
+                       ((string= option "--ca-file") (setf (getf options :ca-file) value))
+                       (t (error "unknown trace option: ~A" option))))))
+    (unless (= 1 (length rest))
+      (error "usage: gr8s trace [options] BPFTRACE-SOURCE"))
+    (setf (getf options :source) (first rest))
+    options))
+
+(defun trace-server-parts (url namespace)
+  (let* ((secure-p (uiop:string-prefix-p "https://" url))
+         (prefix (if secure-p "https://" "http://")))
+    (unless (or secure-p (uiop:string-prefix-p "http://" url))
+      (error "trace server must use http:// or https://"))
+    (let* ((tail (subseq url (length prefix)))
+           (slash (or (position #\/ tail) (length tail)))
+           (authority (subseq tail 0 slash))
+           (colon (position #\: authority :from-end t))
+           (host (if colon (subseq authority 0 colon) authority))
+           (port (if colon (parse-integer (subseq authority (1+ colon)) :junk-allowed nil)
+                     (if secure-p 443 80))))
+      (values secure-p host port
+              (format nil "/apis/gr8s.io/v1/namespaces/~A/traces" namespace)))))
+
+(defun open-trace-client-stream (secure-p host port ca-file)
+  (let* ((socket (usocket:socket-connect host port :element-type '(unsigned-byte 8)))
+         (stream (usocket:socket-stream socket)))
+    (values
+     (if secure-p
+         (progn
+           (unless ca-file (error "https trace requires --ca-file"))
+           (pure-tls:make-tls-client-stream
+            stream :hostname host
+            :context (pure-tls:make-tls-context
+                      :verify-mode pure-tls:+verify-required+
+                      :ca-file ca-file :auto-load-system-ca nil)))
+         stream)
+     socket)))
+
+(defun run-trace-command (options)
+  "Open the trace WebSocket, send its request frame, and print node-labelled records."
+  (multiple-value-bind (secure-p host port path)
+      (trace-server-parts (getf options :server) (getf options :namespace))
+    (multiple-value-bind (stream socket)
+        (open-trace-client-stream secure-p host port (getf options :ca-file))
+      (unwind-protect
+           (let* ((key-bytes (make-array 16 :element-type '(unsigned-byte 8)))
+                  (key (progn (dotimes (index 16)
+                                (setf (aref key-bytes index) (random 256)))
+                              (ag-grpc:base64-encode key-bytes)))
+                  (token (getf options :token)))
+             (write-sequence
+              (gr8s.protocol::ascii-octets
+               (with-output-to-string (request)
+                 (flet ((line (control &rest arguments)
+                          (apply #'format request control arguments)
+                          (write-char #\Return request)
+                          (write-char #\Linefeed request)))
+                   (line "GET ~A HTTP/1.1" path)
+                   (line "Host: ~A:~D" host port)
+                   (line "Upgrade: websocket")
+                   (line "Connection: Upgrade")
+                   (line "Sec-WebSocket-Version: 13")
+                   (line "Sec-WebSocket-Key: ~A" key)
+                   (line "Sec-WebSocket-Protocol: gr8s.trace.v1")
+                   (when token (line "Authorization: Bearer ~A" token))
+                   (line ""))))
+              stream)
+             (finish-output stream)
+             (multiple-value-bind (status headers)
+                 (gr8s.protocol::parse-http-response-head
+                  (gr8s.protocol::read-http-response-head stream))
+               (declare (ignore headers))
+               (unless (= status 101)
+                 (error "Trace API rejected the WebSocket upgrade with HTTP ~D" status)))
+             (gr8s.protocol::write-websocket-frame
+              stream 1
+              (trivial-utf-8:string-to-utf-8-bytes
+               (com.inuoe.jzon:stringify
+                (core-object "selector" (getf options :selector)
+                             "source" (getf options :source)
+                             "durationMilliseconds" (getf options :duration-milliseconds))))
+              :masked-p t)
+             (loop
+               (multiple-value-bind (opcode payload)
+                   (gr8s.protocol:read-websocket-frame stream)
+                 (case opcode
+                   (1 (let* ((object (com.inuoe.jzon:parse
+                                      (trivial-utf-8:utf-8-bytes-to-string payload)))
+                             (data (gethash "data" object)))
+                        (if data
+                            (format t "[~A] ~A" (gethash "node" object) data)
+                            (format t "~A~%" (trivial-utf-8:utf-8-bytes-to-string payload)))
+                        (finish-output)))
+                   (8 (return 0))
+                   (9 (gr8s.protocol::write-websocket-frame stream 10 payload :masked-p t))
+                   (otherwise nil)))))
+        (ignore-errors (close stream))
+        (ignore-errors (usocket:socket-close socket))))))
+
 
 (defun parse-runtime-options (arguments)
   "Parse `runtime install <gvisor|kata> [options]` / `runtime list [options]`."
@@ -1413,6 +1544,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
   (format t "Tools:~%")
   (format t "  kubeconfig   Print or write a cluster kubeconfig~%")
   (format t "  doctor       Diagnose a node's state directory~%")
+  (format t "  trace        Trace selector-matched Pods with an ephemeral bpftrace program~%")
   (format t "  wireguard rotate-key   Replace this node's WireGuard identity on its next start~%")
   (format t "  network explain NODE PEER   Explain an agent's selected WireGuard path~%")
   (format t "  version      Print the gr8s version~%")
@@ -1504,6 +1636,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
               (:runtime-list
                (print-runtime-list (getf options :state-directory))
                0)
+              (:trace (run-trace-command options))
               (:wireguard-rotate-key
                (rotate-wireguard-node-key options))
               (:network-explain

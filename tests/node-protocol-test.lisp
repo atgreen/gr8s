@@ -123,6 +123,32 @@
       (is-false (ag-grpc::handler-client-streaming-p track-image))
       (is-false (ag-grpc::handler-server-streaming-p track-image)))))
 
+(test trace-operation-request-roundtrips-source-scope-and-deadline
+  "A trace request carries the complete node-local execution contract."
+  (let* ((request
+           (make-instance 'gr8s.node.v1::operation-request
+                          :operation-id "trace-7"
+                          :kind gr8s.node.v1::+operationkind-operation_kind_trace+
+                          :namespace "payments"
+                          :trace-source
+                          "kprobe:tcp_sendmsg { @[comm] = count(); }"
+                          :trace-pod-uids '("pod-a" "pod-b")
+                          :trace-duration-milliseconds 30000
+                          :acknowledges-output t))
+         (restored
+           (roundtrip-node-message request 'gr8s.node.v1::operation-request)))
+    (is (= gr8s.node.v1::+operationkind-operation_kind_trace+
+           (slot-value restored 'gr8s.node.v1::kind)))
+    (is (string= "payments" (slot-value restored 'gr8s.node.v1::namespace)))
+    (is (string= "kprobe:tcp_sendmsg { @[comm] = count(); }"
+                 (slot-value restored 'gr8s.node.v1::trace-source)))
+    (is (equal '("pod-a" "pod-b")
+               (slot-value restored 'gr8s.node.v1::trace-pod-uids)))
+    (is (= 30000
+           (slot-value restored
+                       'gr8s.node.v1::trace-duration-milliseconds)))
+    (is-true (slot-value restored 'gr8s.node.v1::acknowledges-output))))
+
 (test node-underlay-and-peer-route-fields-survive-protobuf-roundtrips
   (let* ((public-key (make-array 32 :element-type '(unsigned-byte 8)
                                     :initial-element 17))

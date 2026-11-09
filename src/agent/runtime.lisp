@@ -1804,6 +1804,11 @@ unsupported kind, becomes a single failed response."
   (last-input-sequence 0)
   (exit-code 0)
   (finished-p nil)
+  (trace-p nil)
+  (cancel-requested-p nil)
+  cancellation-error
+  (output-bytes 0)
+  (max-output-bytes most-positive-fixnum)
   ;; Output sent to a control plane that acknowledges it, and not yet acknowledged.
   (unacknowledged-output 0)
   (lock (bt:make-lock "gr8s interactive exec operation"))
@@ -2117,6 +2122,9 @@ errors becomes a failed response; an error on any other variant is re-signaled."
            ((= (slot-value payload 'gr8s.node.v1::kind)
                gr8s.node.v1::+operationkind-operation_kind_port_forward+)
             (start-node-port-forward-operation node-runtime payload emit))
+           ((= (slot-value payload 'gr8s.node.v1::kind)
+               gr8s.node.v1::+operationkind-operation_kind_trace+)
+            (start-node-trace-operation node-runtime payload emit))
            ;; Every exec streams through the runtime's streaming server, as kubelet's do: a
            ;; synchronous one would hold this session's reader until the command ended.
            ((member (slot-value payload 'gr8s.node.v1::kind)
@@ -2146,6 +2154,8 @@ errors becomes a failed response; an error on any other variant is re-signaled."
               (handler-case (write-node-port-forward-input operation payload)
                 (error (condition)
                   (finish-node-exec-operation operation :error (princ-to-string condition)))))
+             ((node-exec-operation-trace-p operation)
+              (acknowledge-node-trace-output operation payload))
              (t
               (handler-case (write-node-exec-input operation payload)
                 (error (condition)
@@ -2156,10 +2166,11 @@ errors becomes a failed response; an error on any other variant is re-signaled."
                   node-runtime
                   (slot-value payload 'gr8s.node.v1::operation-id))))
            (when operation
-             (finish-node-exec-operation
-              operation :error
-              (or (slot-value payload 'gr8s.node.v1::reason)
-                  "operation cancelled")))))
+             (let ((reason (or (slot-value payload 'gr8s.node.v1::reason)
+                               "operation cancelled")))
+               (if (node-exec-operation-trace-p operation)
+                   (request-node-trace-stop operation reason)
+                   (finish-node-exec-operation operation :error reason))))))
         (:session-closed
          (abandon-all-node-operations node-runtime))
         (otherwise

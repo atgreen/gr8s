@@ -118,6 +118,12 @@ so that a rule limited by resourceNames can allow reading and watching just that
          (verb (if (and (equal group "") (equal resource "pods") (eq method :get)
                         (member (third resource-parts) '("exec" "attach" "portforward") :test #'equal))
                    "create"
+                   verb))
+         ;; Like Pod exec, traces are opened with a WebSocket GET but create an
+         ;; ephemeral privileged operation; list permission must never authorize one.
+         (verb (if (and (equal group "gr8s.io") (equal resource "traces")
+                        namespaced (eq method :get))
+                   "create"
                    verb)))
     (values verb group
             (when resource (if (third resource-parts) (format nil "~A/~A" resource (third resource-parts)) resource))

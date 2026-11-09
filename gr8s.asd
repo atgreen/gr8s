@@ -19,7 +19,7 @@
                "com.inuoe.jzon" "hunchentoot" "cl-ppcre"
                "pure-tls/acme" "drakma" "ironclad"
                "sb-posix" "slynk" "trivial-utf-8" "usocket" "version-string"
-               "whistler/loader")
+               "whistler/loader" "whistler/bpftrace")
   :serial t
   :components ((:static-file "schema/podtemplate-v1.json")
                (:static-file "schema/crd-v1.json")
@@ -291,6 +291,7 @@
                                            (:file "pod-binding")
                                            (:file "aggregated-discovery")
                                            (:file "core-resource-http")
+                                           (:file "trace-coordinator")
                                            (:file "storage-http")
                                            (:file "policy-http")
                                            (:file "csr-http")
@@ -364,6 +365,7 @@
                                            (:file "integration")
                                            (:file "session")
                                            (:file "runtime")
+                                           (:file "trace")
                                            (:file "port-forward")
                                            (:file "compat")))
                              (:module "server"
@@ -389,6 +391,7 @@
                              (:file "oci-mirror-test")
                              (:file "websocket-test")
                              (:file "node-protocol-test")
+                             (:file "agent-trace-test")
                              (:file "dns-test")
                              (:file "dns-port-pair-test")
                              (:file "model-test")
@@ -422,6 +425,7 @@
                              (:file "pod-pool-test")
                              (:file "pki-test")
                              (:file "node-session-test")
+                             (:file "trace-coordinator-test")
                              (:file "reconciler-test")
                              (:file "agent-runtime-test")
                              (:file "grpc-unix-test")
