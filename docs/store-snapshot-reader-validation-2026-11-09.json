@@ -46,5 +46,17 @@
     "Production WAL recovery and automatic compaction",
     "Real-process restart/failover/catch-up validation"
   ],
-  "fullGoalComplete": false
+  "fullGoalComplete": false,
+  "mergedValidation": {
+    "sourceCommit": "cc7e361",
+    "integratedMain": "ad10dcf",
+    "passed": true,
+    "checks": 308,
+    "suites": {
+      "store-snapshot": 59,
+      "service-lb": 249
+    },
+    "nativeBuildPassed": true,
+    "nativeSha256": "fe7c43a4698d6bec70a5299ca7280ac97784ba0f4781ea3ba531db12f3e719ed"
+  }
 }
