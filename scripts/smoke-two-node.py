@@ -40,9 +40,13 @@ def wait_for(description, predicate, timeout=90):
 
 
 class Smoke:
-    def __init__(self):
-        self.root = Path(tempfile.mkdtemp(prefix='gr8s-two-node.'))
-        self.binary = Path(__file__).resolve().parents[1] / 'build/gr8s'
+    def __init__(self, *, binary=None, startup_timeout=90, state_parent=None,
+                 shutdown_timeout=20, pod_cleanup_timeout=30):
+        self.root = Path(tempfile.mkdtemp(prefix='gr8s-two-node.', dir=state_parent))
+        self.binary = Path(binary).resolve() if binary else Path(__file__).resolve().parents[1] / 'build/gr8s'
+        self.startup_timeout = startup_timeout
+        self.shutdown_timeout = shutdown_timeout
+        self.pod_cleanup_timeout = pod_cleanup_timeout
         self.prefix = f'g8t{os.getpid():x}'
         self.table = self.prefix
         self.api_port = int(os.environ.get('GR8S_TWO_NODE_PORT', '18084'))
@@ -143,6 +147,14 @@ class Smoke:
             self.keepers[index] = keeper
             wait_for('node mount namespace', lambda: os.readlink(f'/proc/{keeper.pid}/ns/mnt') !=
                      os.readlink('/proc/self/ns/mnt'), timeout=5)
+            # Each simulated node needs its own kubelet sockets/checkpoints.
+            # The device-plugin and PodResources endpoints use standard paths
+            # under /var/lib/kubelet, even when gr8s state roots differ.
+            kubelet_root = self.root / f'kubelet-{index}'
+            kubelet_root.mkdir()
+            self.in_node(index, 'mount', '--make-rprivate', '/')
+            self.in_node(index, 'mkdir', '-p', '/var/lib/kubelet')
+            self.in_node(index, 'mount', '--bind', kubelet_root, '/var/lib/kubelet')
             # ip netns exec remounts sysfs for the node and hides cgroup mounts.
             if self.in_node(index, 'stat', '-f', '-c', '%T', '/sys/fs/cgroup').stdout.strip() != 'cgroup2fs':
                 self.in_node(index, 'mount', '-t', 'cgroup2', 'none', '/sys/fs/cgroup')
@@ -190,7 +202,8 @@ class Smoke:
                                         f'--net=/run/netns/{self.namespaces[index]}', '--', *args],
                                        f'agent-{index}')
         wait_for(f'worker-{index} connection', lambda:
-                 f'gr8s_dataplane_node_ready{{node="worker-{index}"}} 1' in self.metrics())
+                 f'gr8s_dataplane_node_ready{{node="worker-{index}"}} 1' in self.metrics(),
+                 timeout=self.startup_timeout)
 
     def check_pods(self, expected=None):
         pods = [self.pod(index) for index in range(2)]
@@ -464,7 +477,7 @@ class Smoke:
                                     str(self.root / f'agent-{index}') in line for line in processes)
                         return result.returncode == 0 and not shims
                     try:
-                        wait_for('Pod namespace cleanup', absent, timeout=30)
+                        wait_for('Pod namespace cleanup', absent, timeout=self.pod_cleanup_timeout)
                     except (RuntimeError, subprocess.SubprocessError) as error:
                         print(f'Cleanup did not converge for worker-{index}: {error}', flush=True)
                         self.success = False
@@ -472,7 +485,7 @@ class Smoke:
             if process and process.poll() is None:
                 process.terminate()
                 try:
-                    process.wait(timeout=20)
+                    process.wait(timeout=self.shutdown_timeout)
                 except subprocess.TimeoutExpired:
                     print(f'Cleanup forcibly stopping process {process.pid}', flush=True)
                     process.kill()

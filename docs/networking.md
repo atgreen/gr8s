@@ -91,8 +91,15 @@ This remains disabled by default. A real Kata guest has reached a same-node
 native backend through IPv4 TCP and UDP ClusterIP translation, with TC request
 and reply counters and guest source-IP preservation verified. See
 [the guest validation evidence](service-guest-validation-2026-11-09.json).
-Cross-node guest traffic remains unverified. Kernel packet tests additionally
-cover policy ordering and program lifetime. Flow garbage collection, restart reconciliation, source NAT/hairpin,
+The two-node guest regression also verifies TCP/UDP traffic over VXLAN to a
+backend on another node, source-IP preservation, native socket acceleration,
+guest egress policy on backend addresses/ports, reply handling under default-deny
+guest ingress, and remote backend ingress denial/recovery. It uses two agents in
+separate mount/network namespaces within one disposable VM; physical-host and NIC
+offload behavior remains unverified. See
+[the cross-node validation evidence](service-guest-two-node-validation-2026-11-09.json).
+Kernel packet tests additionally cover program lifetime. Flow garbage collection,
+restart reconciliation, source NAT/hairpin,
 return-tuple collision resolution, IPv6 packet translation and external Service
 replacement remain in development. Hairpin and conflicting return tuples
 currently drop safely. See [the engine validation scope](service-packet-engine-validation-2026-11-09.json)
@@ -114,6 +121,11 @@ counters in both directions. Its test-only Kata configuration allows 120 seconds
 for agent connection on slow nested machines and enables diagnostics. `--ctr`
 can select an existing containerd `ctr` binary to preload the test image directly
 when testing independently of the image mirror.
+
+`scripts/test-service-guest-two-node.py` accepts the same binary, bundle, checksum,
+and report arguments for the cross-node checks. Copy it with the two guest-test
+helpers and `scripts/smoke-two-node.py`. The fixture isolates each node's standard
+kubelet sockets/checkpoints and preserves that directory across agent restarts.
 
 `NodePort` and `LoadBalancer` Services allocate node ports from 30000–32767. The
 agent relays each in userspace, for TCP and UDP, with client-address affinity, so
