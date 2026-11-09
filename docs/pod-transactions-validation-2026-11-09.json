@@ -251,6 +251,12 @@
           "GR8S"
         ]
       ]
+    },
+    "fullSuite": {
+      "log": "/tmp/gr8s-pod-clocks-full.log",
+      "checks": 22295,
+      "failures": 50,
+      "sameFailureCasesAsBaseline": false
     }
   },
   "limitations": [

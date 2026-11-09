@@ -51,7 +51,10 @@ and the other HA correctness items also remain open.
 
 Pod desired state and checkpoints now use per-key staged transactions instead of
 complete Pod-index serialization. Desired UID/version preconditions are checked at
-apply time, and status-only commands cannot resurrect deleted objects. General
+apply time, and status-only commands cannot resurrect deleted objects. A
+[validation record](pod-transactions-validation-2026-11-09.json) covers constrained
+heap use, application conflicts, native leadership handoff and persisted Pod
+recovery. General
 cross-resource transactions and production crash-recovery integration remain open.
 
 In-process patch trains now provide signed, journaled rolling Lisp updates. Full
@@ -90,7 +93,7 @@ of code?":
 | Rank | Priority | Gap | Why it is material | Tracking |
 |---:|---|---|---|---|
 | 1 | P0 | Control-plane memory safety | The historical whole-state allocation paths have been replaced by streamed checkpoints and per-key HA deltas. Journal replay now streams and bounds retained history. Production HA still retains all committed Raft entries without automatic snapshot compaction/catch-up, so historical payload growth remains an availability risk. | `podster-ucm.1`, `podster-ucm.11`; historical `podster-061`, `podster-bwu.2` |
-| 2 | P1 | HA availability and failover correctness | A disconnected follower caused an unbounded AppendEntries queue and founder OOM. Queue coalescing and blocking idle waits are implemented, but the incident still lacks live HA closure. Production voter hard-state/log recovery and witness WAL recovery are not wired; image-tracker state is not consistent across members; a follower can lose its node-heartbeat monitor; and Pod replication retains a narrower leader-crash-before-commit window. These are active availability/correctness risks in the k3s-comparable HA path. | `podster-8r7`; `podster-uvi`; `podster-i5vx`; `podster-7ni6.3.5`; `podster-bwu.1` |
+| 2 | P1 | HA availability and failover correctness | A disconnected follower caused an unbounded AppendEntries queue and founder OOM. Queue coalescing and blocking idle waits are implemented, but the incident still lacks live HA closure. Production voter hard-state/log recovery and witness WAL recovery are not wired; image-tracker state is not consistent across members; a follower can lose its node-heartbeat monitor; and Node mutations still publish locally before consensus. Pod changes now stage until commit, but durable application-boundary recovery remains incomplete. These are active availability/correctness risks in the k3s-comparable HA path. | `podster-8r7`; `podster-uvi`; `podster-i5vx`; `podster-7ni6.3.5`; `podster-bwu.1` |
 | 3 | P1 | Backup and restore | Internal Raft snapshots are not an operator recovery workflow. There is no supported, tested way to capture and restore the datastore together with cluster identity, encryption material, and signing keys, nor scheduled retention and remote-copy support. Until this exists, a cluster cannot be treated as recoverable. | `podster-oime` |
 | 4 | P1 | Secrets at rest | Kubernetes Secret values are persisted without encryption. A stolen state directory or backup therefore exposes workload credentials, and there is no staged key-rotation or re-encryption workflow. This compounds the backup gap: safe recovery artifacts also need confidentiality and key custody. | `podster-dcge`; [Secret API](configmap-secret-api.md) |
 | 5 | P1 | Certificate lifecycle | gr8s has no cluster-wide certificate expiry inventory, warnings, selective leaf rotation, or safe CA/signing-key rotation workflow. Automatic member renewal is not a substitute for an operator-visible trust-lifecycle procedure. | `podster-6l63` |
