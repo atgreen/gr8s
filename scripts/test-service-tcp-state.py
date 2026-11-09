@@ -294,7 +294,7 @@ def option_handshake(runner, port, *, start=1000, server=9000, stamp=100,
     p.publish(runner)
     p.assert_forward(runner, request(port, start, tcp_options=options(stamp, client_scale), window=window))
     state = tcp_state(runner, port)
-    assert state[54] == min(client_scale, 14)
+    assert state[54] & 15 == min(client_scale, 14)
     assert struct.unpack_from("<I", state, 32)[0] == window, "SYN window was scaled"
     c, s = (start + 1) & 0xffffffff, (server + 1) & 0xffffffff
     translate_reply(runner, reply(port, server, c, tcp_options=options(300, server_scale, stamp),
@@ -341,6 +341,25 @@ def simultaneous_open(runner):
     assert tcp_state(runner, 50720) == before, "future pending-handshake ACK poisoned the stream"
     assert runner.lookup("gr8s_pkt_forward", key) == forward
     return cases + 2
+
+
+def retained_option_compatibility(runner):
+    c, s = option_handshake(runner, 50730)
+    key = p.flow_key(sport=50730, protocol=6)
+    state = bytearray(tcp_state(runner, 50730))
+    # Previous agents kept raw windows and had no negotiated-option metadata.
+    struct.pack_into("<II", state, 32, 1, 1)
+    struct.pack_into("<H", state, 48, 7)
+    state[50:56] = bytes(6)
+    runner.update("gr8s_pkt_tcp", key, state)
+    p.assert_forward(runner, request(50730, c, s, 0x18, payload=bytes(64), window=1))
+    assert struct.unpack_from("<I", tcp_state(runner, 50730), 16)[0] == c + 64, \
+        "retained raw window prevented active connection tracking after upgrade"
+    p.publish(runner, backend="10.88.2.4")
+    p.assert_forward(runner, request(50730, c + 100, tcp_options=options(200, 7)), "10.88.2.4")
+    assert tcp_state(runner, 50730)[54] & 128
+    p.assert_unlocked(runner)
+    return 4
 
 
 def option_exercise(runner):
@@ -415,7 +434,7 @@ def option_exercise(runner):
     p.assert_forward(runner, request(50601, c, s, 0x18, payload=bytes(3000), tcp_options=options(102)))
     p.publish(runner, backend=replacement)
     p.assert_forward(runner, request(50601, 1000, tcp_options=options(103, 1)))
-    assert tcp_state(runner, 50601)[54] == 7, "SYN retransmit renegotiated window scaling"
+    assert tcp_state(runner, 50601)[54] & 15 == 7, "SYN retransmit renegotiated window scaling"
     p.assert_forward(runner, request(50601, 2000, tcp_options=options(104, 7)), replacement)
     assert struct.unpack_from("<I", tcp_state(runner, 50601), 8)[0] == 2000
     cases += 5
@@ -582,6 +601,7 @@ def main():
         print(f"Service TCP reordered close: {reordered_closure(runner)} cases passed")
         print(f"Service TCP options ({cls.__name__}): {option_exercise(runner)} cases passed")
         print(f"Service TCP simultaneous open: {simultaneous_open(runner)} cases passed")
+        print(f"Service TCP retained options: {retained_option_compatibility(runner)} cases passed")
     finally:
         runner.close()
     limited = dict(descriptors)

@@ -156,13 +156,16 @@ Caller holds the forward reservation; reverse readers cannot commit concurrently
         (age (if reverse 'gr8s-pkt-tcp-state-server-ts-age 'gr8s-pkt-tcp-state-client-ts-age))
         (ts-bit (if reverse 34816 17408)) (ws-bit (if reverse 8192 4096)))
     `(progn
+       ;; The high scale byte bit marks initialized option metadata, including
+       ;; a SYN without options. Older retained flows keep compatibility tracking.
+       ,@(unless reverse '((setf (gr8s-pkt-tcp-state-client-scale state) 128)))
        (when (/= (logand (gr8s-pkt-meta-flags meta) 256) 0)
          (setf (,timestamp state) (gr8s-pkt-meta-timestamp meta)
                (,age state) (cast u16 (/ now 60000000000))
                (gr8s-pkt-tcp-state-flags state)
                (logior (gr8s-pkt-tcp-state-flags state) ,ts-bit)))
        (when (/= (logand (gr8s-pkt-meta-flags meta) 512) 0)
-         (setf (,scale state) (logand (>> (gr8s-pkt-meta-flags meta) 12) 15)
+         (setf (,scale state) (logior ,(if reverse 0 128) (logand (>> (gr8s-pkt-meta-flags meta) 12) 15))
                (gr8s-pkt-tcp-state-flags state)
                (logior (gr8s-pkt-tcp-state-flags state) ,ws-bit))))))
 
@@ -176,6 +179,7 @@ window shrink. Timestamp floors advance only at/before observed receiver ACKs."
         (age (if reverse 'gr8s-pkt-tcp-state-server-ts-age 'gr8s-pkt-tcp-state-client-ts-age))
         (valid (if reverse 32768 16384)))
     `(or (/= (logand (gr8s-pkt-tcp-state-flags state) 512) 0)
+         (= (logand (gr8s-pkt-tcp-state-client-scale state) 128) 0)
          (and
           ;; RST must reach ordinary sequence validation even without TSopt.
           (or (/= (logand (gr8s-pkt-meta-flags meta) 4) 0)
@@ -228,7 +232,7 @@ window shrink. Timestamp floors advance only at/before observed receiver ACKs."
          ;; SYN window fields are never scaled; both peers must have offered WSopt.
          (when (and (= (logand (gr8s-pkt-meta-flags meta) 2) 0)
                     (= (logand (gr8s-pkt-tcp-state-flags state) 12288) 12288))
-           (let ((shift u32 (,scale state)))
+           (let ((shift u32 (logand (,scale state) 15)))
              (when (> shift 14) (setf shift 14))
              (setf window (cast u32 (<< window shift)))))
          (when (> window (,window-field state))
