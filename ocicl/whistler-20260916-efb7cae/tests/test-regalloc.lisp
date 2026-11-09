@@ -335,3 +335,24 @@
                          "(setf total (if (> (get-prandom-u32) 0) (+ total 1) (+ total 2)))")))
          (bytes (w-body body)))
     (is (= 88 (interpret-scalar-bpf bytes (append '(1 2 4 8 16 32) (make-list 25 :initial-element 1)))))))
+
+(test spilled-buffer-address-preserves-live-caller-register
+  "Stack buffer/address emission must use reserved R0, never overwrite an allocated R1."
+  (dolist (address-op '(:struct-alloc :stack-addr))
+    (let* ((prog (spill-compaction-test-program
+                  (append '((:call 1 ((:helper 7))))
+                          (if (eq address-op :struct-alloc)
+                              '((:struct-alloc 2 ((:imm 16))))
+                              '((:stack-addr 2 (1))))
+                          '((:ret nil (1))))))
+           (homes (make-hash-table)))
+      (setf (gethash 1 homes) '(:reg 1) (gethash 2 homes) '(:stack -8))
+      (sb-int:encapsulate 'whistler/ir::linear-scan-alloc 'force-buffer-spill
+                         (lambda (function &rest arguments)
+                           (declare (ignore function arguments))
+                           (values homes -8)))
+      (unwind-protect
+           (let* ((cu (whistler/ir::emit-ir-to-bpf prog))
+                  (bytes (whistler/bpf:insn-bytes (whistler/compiler:cu-insns cu))))
+             (is (= 42 (interpret-scalar-bpf bytes '(42)))))
+        (sb-int:unencapsulate 'whistler/ir::linear-scan-alloc 'force-buffer-spill)))))
