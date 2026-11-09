@@ -1,0 +1,1041 @@
+{
+  "date": "2026-11-09",
+  "issue": "podster-p9c.6",
+  "implementationCommit": "a485fb94c8f386edb12728716d19bf3f2c47eda7",
+  "nativeSHA256": "d53daf4f2b14f27a23c509858532f1d77ef0f00a3011e26645abed7ea0195340",
+  "nativeVersion": "gr8s 1.37.2-ga485fb9, patch level 0",
+  "cniClientDeadlineSeconds": 5,
+  "buildPreparation": {
+    "plainSeconds": 2.805,
+    "serviceSeconds": 13.729,
+    "plainMaps": 16,
+    "plainPrograms": 2,
+    "serviceMaps": 27,
+    "servicePrograms": 5
+  },
+  "baselineNativeCommit": "22c5cbf",
+  "baselineEnvironment": "Disposable Fedora44 VM22292, one native serve process with local agent and no Pods. Temporary precursor of the committed probe measures first/cached guard lookup, then map creation/program loading separately. Shared development host; these are observed timings, not universal latency bounds.",
+  "baselineProfile": {
+    "root": "/var/tmp/gr8s-cni-profile.yrfg96cd",
+    "binary": "/var/tmp/flatback-cni-profile-3571112/gr8s",
+    "measurements": [
+      {
+        "name": "cache",
+        "status": "ok",
+        "output": "(:PLAIN-COLD T :SERVICE-COLD T)\n"
+      },
+      {
+        "name": "service",
+        "status": "ok",
+        "output": "(:WALL-SECONDS 16.234877 :CPU-SECONDS 16.797527 :MAPS 27 :PROGRAMS 5)\n"
+      },
+      {
+        "name": "plain",
+        "status": "ok",
+        "output": "(:WALL-SECONDS 1.964985 :CPU-SECONDS 2.030776 :MAPS 16 :PROGRAMS 2)\n"
+      },
+      {
+        "name": "service",
+        "status": "ok",
+        "output": "(:WALL-SECONDS 0.0 :CPU-SECONDS 6.0e-6 :MAPS 27 :PROGRAMS 5)\n"
+      },
+      {
+        "name": "plain",
+        "status": "ok",
+        "output": "(:WALL-SECONDS 0.0 :CPU-SECONDS 5.0e-6 :MAPS 16 :PROGRAMS 2)\n"
+      },
+      {
+        "name": "kernel-load",
+        "status": "ok",
+        "output": "(:WALL-SECONDS 0.038999 :CPU-SECONDS 0.074943 :MAPS 27 :PROGRAMS 5)\n"
+      }
+    ],
+    "passed": true,
+    "exitCode": 0
+  },
+  "priorActualGuestEvidence": "service-tcp-close-validation-2026-11-09.json records two cold CNI ADD timeouts per simulated node before this fix.",
+  "preparedProfileEnvironment": "Fresh native process in the same disposable VM22292. Both caches must already be present. Repeated Service and ordinary kernel loads validate relocations without attaching endpoint programs.",
+  "preparedProfile": {
+    "root": "/var/tmp/gr8s-cni-profile.ptjqzohb",
+    "nativeSHA256": "d53daf4f2b14f27a23c509858532f1d77ef0f00a3011e26645abed7ea0195340",
+    "measurements": [
+      {
+        "name": "cache",
+        "status": "ok",
+        "output": "(:PLAIN-COLD NIL :SERVICE-COLD NIL)\n"
+      },
+      {
+        "name": "service",
+        "status": "ok",
+        "output": "(:WALL-SECONDS 0.0 :CPU-SECONDS 1.1e-5 :MAPS 27 :PROGRAMS 5)\n",
+        "wall-seconds": 0.0,
+        "cpu-seconds": 1.1e-05,
+        "maps": 27,
+        "programs": 5
+      },
+      {
+        "name": "plain",
+        "status": "ok",
+        "output": "(:WALL-SECONDS 0.003 :CPU-SECONDS 1.89e-4 :MAPS 16 :PROGRAMS 2)\n",
+        "wall-seconds": 0.003,
+        "cpu-seconds": 0.000189,
+        "maps": 16,
+        "programs": 2
+      },
+      {
+        "name": "service",
+        "status": "ok",
+        "output": "(:WALL-SECONDS 0.0 :CPU-SECONDS 9.0e-6 :MAPS 27 :PROGRAMS 5)\n",
+        "wall-seconds": 0.0,
+        "cpu-seconds": 9e-06,
+        "maps": 27,
+        "programs": 5
+      },
+      {
+        "name": "plain",
+        "status": "ok",
+        "output": "(:WALL-SECONDS 0.0 :CPU-SECONDS 7.0e-6 :MAPS 16 :PROGRAMS 2)\n",
+        "wall-seconds": 0.0,
+        "cpu-seconds": 7e-06,
+        "maps": 16,
+        "programs": 2
+      },
+      {
+        "name": "kernel-load",
+        "status": "ok",
+        "output": "(:WALL-SECONDS 0.039 :CPU-SECONDS 0.074117 :MAPS 27 :PROGRAMS 5\n :TEMPLATES-UNCHANGED T)\n",
+        "wall-seconds": 0.039,
+        "cpu-seconds": 0.074117,
+        "maps": 27,
+        "programs": 5
+      },
+      {
+        "name": "kernel-load",
+        "status": "ok",
+        "output": "(:WALL-SECONDS 0.037 :CPU-SECONDS 0.071772 :MAPS 27 :PROGRAMS 5\n :TEMPLATES-UNCHANGED T)\n",
+        "wall-seconds": 0.037,
+        "cpu-seconds": 0.071772,
+        "maps": 27,
+        "programs": 5
+      },
+      {
+        "name": "kernel-load-plain",
+        "status": "ok",
+        "output": "(:WALL-SECONDS 0.017 :CPU-SECONDS 0.031446 :MAPS 16 :PROGRAMS 2\n :TEMPLATES-UNCHANGED T)\n",
+        "wall-seconds": 0.017,
+        "cpu-seconds": 0.031446,
+        "maps": 16,
+        "programs": 2
+      }
+    ],
+    "passed": true,
+    "exitCode": 0,
+    "cleanupCompleted": true
+  },
+  "focusedLisp": {
+    "passed": 939,
+    "failed": 0,
+    "skipped": 0
+  },
+  "guestEnvironment": "Disposable Fedora44 VM22291, real Kata guest6.18.56 vs host6.19.10. Two simulated nodes in separate mount/network namespaces in one VM, VXLAN; original checksum-pinned Kata4.3.1 archive. Official ctr preload bypasses podster-fp8. Both runs use fresh clusters and the tested native image.",
+  "guestRuns": [
+    {
+      "root": "/var/tmp/gr8s-two-node.gvz5tb36",
+      "checks": [
+        {
+          "name": "differentNodes",
+          "passed": true,
+          "observed": {
+            "client": "10.80.0.1",
+            "backend": "10.80.16.1",
+            "nodes": [
+              "worker-0",
+              "worker-1"
+            ]
+          }
+        },
+        {
+          "name": "realGuestKernel",
+          "passed": true,
+          "observed": {
+            "guest": "6.18.56",
+            "host": "6.19.10-300.fc44.x86_64",
+            "qemu": [
+              {
+                "pid": 1825199,
+                "command": "/var/tmp/gr8s-two-node.gvz5tb36/agent-0/runtime-addons/kata/opt/kata/bin/qemu-system-x86_64 -name sandbox-c1cd73cec9943f2006ebc76650dc8cfa19fab358faf6265a026c6edeb7d63926 -kernel /var/tmp/gr8s-two-node.gvz5tb36/agent-0/runtime-addons/kata/opt/kata/share/kata-containers/vmlinux-6.18.56-208 -append reboot=k panic=1 systemd.unit=kata-containers.target systemd.mask=systemd-networkd.service systemd.mask=systemd-networkd.socket agent.log_vport=1025 root=/dev/pmem0p1 rootflags=dax,data=ordered,errors=remount-ro ro rootfstype=ext4 agent.cdh_api_timeout=50 agent.log=debug cgroup_no_v1=all systemd.unified_cgroup_hierarchy=1 selinux=0 console=hvc0 -smp 1 -machine q35,accel=kvm,nvdimm=on,kernel_irqchip=on,memory-backend=entire-guest-memory-share -cpu host,pmu=off -m 2G,slots=10,maxmem=3903M -object memory-backend-file,id=entire-guest-memory-share,mem-path=/dev/shm,size=2G,share=on,prealloc=off,readonly=off -qmp unix:fd=16,server=on,wait=off -rtc base=utc,clock=host,driftfix=slew -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-pci,rng=rng0 -device pci-bridge,bus=pcie.0,id=pci-bridge-0,chassis_nr=1,shpc=off,addr=2,io-reserve=4k,mem-reserve=1m,pref64-reserve=1m -device virtio-scsi-pci,id=scsi0,disable-modern=true -device vhost-vsock-pci,disable-modern=true,vhostfd=17,guest-cid=21259259 -netdev tap,id=network-tap0_kata,vhost=on,vhostfds=20,fds=19 -device virtio-net-pci,netdev=network-tap0_kata,mac=02:b8:93:77:69:b9,disable-modern=true,mq=on,vectors=4 -chardev socket,id=virtiofsd-chardev,path=/run/kata/c1cd73cec9943f2006ebc76650dc8cfa19fab358faf6265a026c6edeb7d63926/root/virtiofsd.sock -device vhost-user-fs-pci,chardev=virtiofsd-chardev,tag=kataShared,queue-size=1024 -object memory-backend-file,id=TODO,mem-path=/var/tmp/gr8s-two-node.gvz5tb36/agent-0/runtime-addons/kata/opt/kata/share/kata-containers/kata-ubuntu-resolute.image,size=256M,share=off,prealloc=off,readonly=on -device nvdimm,memdev=TODO,unarmed=on -device virtio-serial-pci,id=serial0 -device virtconsole,id=console0,chardev=charconsole0 -chardev socket,id=charconsole0,server=on,wait=off,path=/run/kata/c1cd73cec9943f2006ebc76650dc8cfa19fab358faf6265a026c6edeb7d63926/root/console.sock -vga none -no-user-config -nodefaults -nographic -no-reboot "
+              }
+            ]
+          }
+        },
+        {
+          "name": "worker0UsesOverlay",
+          "passed": true,
+          "observed": [
+            {
+              "dst": "10.80.16.1",
+              "gateway": "10.80.16.0",
+              "dev": "gr8s-vxlan",
+              "prefsrc": "10.80.0.0",
+              "flags": [],
+              "uid": 0,
+              "cache": []
+            }
+          ]
+        },
+        {
+          "name": "worker1UsesOverlay",
+          "passed": true,
+          "observed": [
+            {
+              "dst": "10.80.0.1",
+              "gateway": "10.80.0.0",
+              "dev": "gr8s-vxlan",
+              "prefsrc": "10.80.16.0",
+              "flags": [],
+              "uid": 0,
+              "cache": []
+            }
+          ]
+        },
+        {
+          "name": "httpDirectBackend",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "two-node-1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "httpCrossNodeClusterIP",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "two-node-1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "httpTCBothDirections",
+          "passed": true,
+          "observed": {
+            "before": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "after": [
+              6,
+              4,
+              0,
+              0,
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "name": "httpPreservesSource",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "10.80.0.1:53238"
+              ]
+            }
+          }
+        },
+        {
+          "name": "udpDirectBackend",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "two-node-1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "udpCrossNodeClusterIP",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "two-node-1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "udpTCBothDirections",
+          "passed": true,
+          "observed": {
+            "before": [
+              12,
+              8,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "after": [
+              13,
+              9,
+              0,
+              0,
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "name": "udpPreservesSource",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "10.80.0.1:40489"
+              ]
+            }
+          }
+        },
+        {
+          "name": "nativeSocketAcceleration",
+          "passed": true,
+          "observed": {
+            "response": "two-node-1",
+            "before": [
+              [
+                14,
+                10,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            ],
+            "after": [
+              [
+                14,
+                10,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            ]
+          }
+        },
+        {
+          "name": "guestTcpProbeVerified",
+          "passed": true,
+          "observed": "46746afee5ba83c925a154bb22d5b461fd19370fd56721b22c5c3ddde75c89b6"
+        },
+        {
+          "name": "guestTcpInitialGeneration",
+          "passed": true,
+          "observed": {
+            "connection": {
+              "localIP": "10.80.0.1",
+              "localPort": 25090,
+              "peerIP": "10.96.0.11",
+              "peerPort": 80,
+              "body": "two-node-1"
+            },
+            "state": {
+              "backend": "10.80.16.1",
+              "backendPort": 8080,
+              "clientISN": 2643902455,
+              "serverISN": 1439456462,
+              "clientEnd": 2643902531,
+              "serverEnd": 1439456590,
+              "flags": 135
+            }
+          }
+        },
+        {
+          "name": "guestTcpResetObserved",
+          "passed": true,
+          "observed": {
+            "backend": "10.80.16.1",
+            "backendPort": 8080,
+            "clientISN": 2643902455,
+            "serverISN": 1439456462,
+            "clientEnd": 2643902531,
+            "serverEnd": 1439456590,
+            "flags": 135
+          }
+        },
+        {
+          "name": "guestTcpSourcePortReused",
+          "passed": true,
+          "observed": {
+            "before": {
+              "localIP": "10.80.0.1",
+              "localPort": 25090,
+              "peerIP": "10.96.0.11",
+              "peerPort": 80,
+              "body": "two-node-1"
+            },
+            "after": {
+              "localIP": "10.80.0.1",
+              "localPort": 25090,
+              "peerIP": "10.96.0.11",
+              "peerPort": 80,
+              "body": "tcp-alternate"
+            }
+          }
+        },
+        {
+          "name": "guestTcpNewGenerationSelectsReplacement",
+          "passed": true,
+          "observed": {
+            "before": {
+              "backend": "10.80.16.1",
+              "backendPort": 8080,
+              "clientISN": 2643902455,
+              "serverISN": 1439456462,
+              "clientEnd": 2643902531,
+              "serverEnd": 1439456590,
+              "flags": 135
+            },
+            "after": {
+              "backend": "10.80.16.2",
+              "backendPort": 8080,
+              "clientISN": 2678716995,
+              "serverISN": 2466351434,
+              "clientEnd": 2678717071,
+              "serverEnd": 2466351565,
+              "flags": 135
+            },
+            "replacement": "10.80.16.2"
+          }
+        },
+        {
+          "name": "guestTcpGracefulCloseObserved",
+          "passed": true,
+          "observed": {
+            "connection": {
+              "localIP": "10.80.0.1",
+              "localPort": 25091,
+              "peerIP": "10.96.0.11",
+              "peerPort": 80,
+              "body": "tcp-alternate"
+            },
+            "state": {
+              "backend": "10.80.16.2",
+              "backendPort": 8080,
+              "clientISN": 21425297,
+              "serverISN": 1549179456,
+              "clientEnd": 21425374,
+              "serverEnd": 1549179588,
+              "flags": 383
+            }
+          }
+        },
+        {
+          "name": "httpGuestEgressDenied",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "errors": [
+                "Get \"http://10.96.0.10:80/hostname\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+              ]
+            }
+          }
+        },
+        {
+          "name": "udpGuestEgressDenied",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "errors": [
+                "reading from udp connection failed. err:'read udp 10.80.0.1:40279->10.96.0.10:81: i/o timeout'"
+              ]
+            }
+          }
+        },
+        {
+          "name": "httpPolicySeesBackendAndAllowsReplies",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "two-node-1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "udpPolicySeesBackendAndAllowsReplies",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "two-node-1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "httpRemoteIngressDenied",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "errors": [
+                "Get \"http://10.96.0.10:80/hostname\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+              ]
+            }
+          }
+        },
+        {
+          "name": "udpRemoteIngressDenied",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "errors": [
+                "reading from udp connection failed. err:'read udp 10.80.0.1:57660->10.96.0.10:81: i/o timeout'"
+              ]
+            }
+          }
+        },
+        {
+          "name": "httpRemoteIngressRecovers",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "two-node-1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "udpRemoteIngressRecovers",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "two-node-1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "coldCniAddsMeetDeadline",
+          "passed": true,
+          "observed": {
+            "0": 0,
+            "1": 0
+          }
+        }
+      ],
+      "overlay": "vxlan",
+      "kataSHA256": "1463a2b86845f4d3d8e87f2f764ec59856fc0fee3520967a79ade32762be2e97",
+      "agentReconnectTimeoutMs": 120000,
+      "passed": true,
+      "cleanupCompleted": true,
+      "runtimeCniErrorsByNode": {
+        "0": [],
+        "1": []
+      }
+    },
+    {
+      "root": "/var/tmp/gr8s-two-node.e730vbph",
+      "checks": [
+        {
+          "name": "differentNodes",
+          "passed": true,
+          "observed": {
+            "client": "10.80.0.1",
+            "backend": "10.80.16.1",
+            "nodes": [
+              "worker-0",
+              "worker-1"
+            ]
+          }
+        },
+        {
+          "name": "realGuestKernel",
+          "passed": true,
+          "observed": {
+            "guest": "6.18.56",
+            "host": "6.19.10-300.fc44.x86_64",
+            "qemu": [
+              {
+                "pid": 1830456,
+                "command": "/var/tmp/gr8s-two-node.e730vbph/agent-0/runtime-addons/kata/opt/kata/bin/qemu-system-x86_64 -name sandbox-a4d54117c322c92d13f5e10703f229f222224241615ab3858e937131db8f5c3a -kernel /var/tmp/gr8s-two-node.e730vbph/agent-0/runtime-addons/kata/opt/kata/share/kata-containers/vmlinux-6.18.56-208 -append reboot=k panic=1 systemd.unit=kata-containers.target systemd.mask=systemd-networkd.service systemd.mask=systemd-networkd.socket agent.log_vport=1025 root=/dev/pmem0p1 rootflags=dax,data=ordered,errors=remount-ro ro rootfstype=ext4 agent.cdh_api_timeout=50 agent.log=debug cgroup_no_v1=all systemd.unified_cgroup_hierarchy=1 selinux=0 console=hvc0 -smp 1 -machine q35,accel=kvm,nvdimm=on,kernel_irqchip=on,memory-backend=entire-guest-memory-share -cpu host,pmu=off -m 2G,slots=10,maxmem=3903M -object memory-backend-file,id=entire-guest-memory-share,mem-path=/dev/shm,size=2G,share=on,prealloc=off,readonly=off -qmp unix:fd=16,server=on,wait=off -rtc base=utc,clock=host,driftfix=slew -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-pci,rng=rng0 -device pci-bridge,bus=pcie.0,id=pci-bridge-0,chassis_nr=1,shpc=off,addr=2,io-reserve=4k,mem-reserve=1m,pref64-reserve=1m -device virtio-scsi-pci,id=scsi0,disable-modern=true -device vhost-vsock-pci,disable-modern=true,vhostfd=17,guest-cid=3221405174 -netdev tap,id=network-tap0_kata,vhost=on,vhostfds=20,fds=19 -device virtio-net-pci,netdev=network-tap0_kata,mac=02:55:41:5a:78:2c,disable-modern=true,mq=on,vectors=4 -chardev socket,id=virtiofsd-chardev,path=/run/kata/a4d54117c322c92d13f5e10703f229f222224241615ab3858e937131db8f5c3a/root/virtiofsd.sock -device vhost-user-fs-pci,chardev=virtiofsd-chardev,tag=kataShared,queue-size=1024 -object memory-backend-file,id=TODO,mem-path=/var/tmp/gr8s-two-node.e730vbph/agent-0/runtime-addons/kata/opt/kata/share/kata-containers/kata-ubuntu-resolute.image,size=256M,share=off,prealloc=off,readonly=on -device nvdimm,memdev=TODO,unarmed=on -device virtio-serial-pci,id=serial0 -device virtconsole,id=console0,chardev=charconsole0 -chardev socket,id=charconsole0,server=on,wait=off,path=/run/kata/a4d54117c322c92d13f5e10703f229f222224241615ab3858e937131db8f5c3a/root/console.sock -vga none -no-user-config -nodefaults -nographic -no-reboot "
+              }
+            ]
+          }
+        },
+        {
+          "name": "worker0UsesOverlay",
+          "passed": true,
+          "observed": [
+            {
+              "dst": "10.80.16.1",
+              "gateway": "10.80.16.0",
+              "dev": "gr8s-vxlan",
+              "prefsrc": "10.80.0.0",
+              "flags": [],
+              "uid": 0,
+              "cache": []
+            }
+          ]
+        },
+        {
+          "name": "worker1UsesOverlay",
+          "passed": true,
+          "observed": [
+            {
+              "dst": "10.80.0.1",
+              "gateway": "10.80.0.0",
+              "dev": "gr8s-vxlan",
+              "prefsrc": "10.80.16.0",
+              "flags": [],
+              "uid": 0,
+              "cache": []
+            }
+          ]
+        },
+        {
+          "name": "httpDirectBackend",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "two-node-1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "httpCrossNodeClusterIP",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "two-node-1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "httpTCBothDirections",
+          "passed": true,
+          "observed": {
+            "before": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "after": [
+              6,
+              4,
+              0,
+              0,
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "name": "httpPreservesSource",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "10.80.0.1:44360"
+              ]
+            }
+          }
+        },
+        {
+          "name": "udpDirectBackend",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "two-node-1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "udpCrossNodeClusterIP",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "two-node-1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "udpTCBothDirections",
+          "passed": true,
+          "observed": {
+            "before": [
+              12,
+              8,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "after": [
+              13,
+              9,
+              0,
+              0,
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "name": "udpPreservesSource",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "10.80.0.1:52448"
+              ]
+            }
+          }
+        },
+        {
+          "name": "nativeSocketAcceleration",
+          "passed": true,
+          "observed": {
+            "response": "two-node-1",
+            "before": [
+              [
+                14,
+                10,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            ],
+            "after": [
+              [
+                14,
+                10,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            ]
+          }
+        },
+        {
+          "name": "guestTcpProbeVerified",
+          "passed": true,
+          "observed": "46746afee5ba83c925a154bb22d5b461fd19370fd56721b22c5c3ddde75c89b6"
+        },
+        {
+          "name": "guestTcpInitialGeneration",
+          "passed": true,
+          "observed": {
+            "connection": {
+              "localIP": "10.80.0.1",
+              "localPort": 25090,
+              "peerIP": "10.96.0.11",
+              "peerPort": 80,
+              "body": "two-node-1"
+            },
+            "state": {
+              "backend": "10.80.16.1",
+              "backendPort": 8080,
+              "clientISN": 214291223,
+              "serverISN": 2106447542,
+              "clientEnd": 214291299,
+              "serverEnd": 2106447670,
+              "flags": 135
+            }
+          }
+        },
+        {
+          "name": "guestTcpResetObserved",
+          "passed": true,
+          "observed": {
+            "backend": "10.80.16.1",
+            "backendPort": 8080,
+            "clientISN": 214291223,
+            "serverISN": 2106447542,
+            "clientEnd": 214291299,
+            "serverEnd": 2106447670,
+            "flags": 135
+          }
+        },
+        {
+          "name": "guestTcpSourcePortReused",
+          "passed": true,
+          "observed": {
+            "before": {
+              "localIP": "10.80.0.1",
+              "localPort": 25090,
+              "peerIP": "10.96.0.11",
+              "peerPort": 80,
+              "body": "two-node-1"
+            },
+            "after": {
+              "localIP": "10.80.0.1",
+              "localPort": 25090,
+              "peerIP": "10.96.0.11",
+              "peerPort": 80,
+              "body": "tcp-alternate"
+            }
+          }
+        },
+        {
+          "name": "guestTcpNewGenerationSelectsReplacement",
+          "passed": true,
+          "observed": {
+            "before": {
+              "backend": "10.80.16.1",
+              "backendPort": 8080,
+              "clientISN": 214291223,
+              "serverISN": 2106447542,
+              "clientEnd": 214291299,
+              "serverEnd": 2106447670,
+              "flags": 135
+            },
+            "after": {
+              "backend": "10.80.16.2",
+              "backendPort": 8080,
+              "clientISN": 244877426,
+              "serverISN": 3129110528,
+              "clientEnd": 244877502,
+              "serverEnd": 3129110659,
+              "flags": 135
+            },
+            "replacement": "10.80.16.2"
+          }
+        },
+        {
+          "name": "guestTcpGracefulCloseObserved",
+          "passed": true,
+          "observed": {
+            "connection": {
+              "localIP": "10.80.0.1",
+              "localPort": 25091,
+              "peerIP": "10.96.0.11",
+              "peerPort": 80,
+              "body": "tcp-alternate"
+            },
+            "state": {
+              "backend": "10.80.16.2",
+              "backendPort": 8080,
+              "clientISN": 1876045627,
+              "serverISN": 2209820673,
+              "clientEnd": 1876045704,
+              "serverEnd": 2209820805,
+              "flags": 383
+            }
+          }
+        },
+        {
+          "name": "httpGuestEgressDenied",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "errors": [
+                "Get \"http://10.96.0.10:80/hostname\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+              ]
+            }
+          }
+        },
+        {
+          "name": "udpGuestEgressDenied",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "errors": [
+                "reading from udp connection failed. err:'read udp 10.80.0.1:60611->10.96.0.10:81: i/o timeout'"
+              ]
+            }
+          }
+        },
+        {
+          "name": "httpPolicySeesBackendAndAllowsReplies",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "two-node-1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "udpPolicySeesBackendAndAllowsReplies",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "two-node-1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "httpRemoteIngressDenied",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "errors": [
+                "Get \"http://10.96.0.10:80/hostname\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+              ]
+            }
+          }
+        },
+        {
+          "name": "udpRemoteIngressDenied",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "errors": [
+                "reading from udp connection failed. err:'read udp 10.80.0.1:36011->10.96.0.10:81: i/o timeout'"
+              ]
+            }
+          }
+        },
+        {
+          "name": "httpRemoteIngressRecovers",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "two-node-1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "udpRemoteIngressRecovers",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "two-node-1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "coldCniAddsMeetDeadline",
+          "passed": true,
+          "observed": {
+            "0": 0,
+            "1": 0
+          }
+        }
+      ],
+      "overlay": "vxlan",
+      "kataSHA256": "1463a2b86845f4d3d8e87f2f764ec59856fc0fee3520967a79ade32762be2e97",
+      "agentReconnectTimeoutMs": 120000,
+      "passed": true,
+      "cleanupCompleted": true,
+      "runtimeCniErrorsByNode": {
+        "0": [],
+        "1": []
+      }
+    }
+  ],
+  "scope": "Completes the measured native cold endpoint-compilation/CNI deadline bug. Native build embeds both fixed endpoint bytecode templates and map/relocation descriptors, without live kernel FDs. Runtime loads a relocated copy per endpoint and preserves the templates. Source-based runs retain lazy compilation. Fail-closed identity, policy, stage availability and shared-map validation remain covered; packet Services remain opt-in. Full parent objective, remaining TCP lifecycle, retained-program upgrades, IPv6 packet path, SNAT/hairpin/collisions and packet NodePort are still unfinished.",
+  "hostedCI": "GitHub job did not start because of account billing/spending restrictions; local focused and disposable VM evidence is recorded here."
+}

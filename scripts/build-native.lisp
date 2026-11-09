@@ -19,6 +19,20 @@
 (asdf:load-system :gr8s)
 (gr8s::embed-runtime-assets #P"build/containerd/")
 
+;; Both endpoint pipelines use fixed in-image source. Preserve their compiled
+;; specs in the dumped heap so the first CNI ADD only creates/loads kernel
+;; objects: compiling the Service pipeline can exceed the CNI IPC deadline.
+;; These are relocatable byte vectors and map descriptors, never live BPF FDs.
+;; The loader patches a copy for each endpoint. Source-based runs retain the
+;; same lazy compilation path through EGRESS-GUARD-SPECS.
+(dolist (service-packets '(nil t))
+  (let* ((start (get-internal-real-time))
+         (specs (gr8s.network::egress-guard-specs :service-packets service-packets)))
+    (format t "build-native: prepared ~A endpoint pipeline (~D maps, ~D programs) in ~,3Fs~%"
+            (if service-packets "Service" "plain")
+            (length (car specs)) (length (cdr specs))
+            (/ (- (get-internal-real-time) start) internal-time-units-per-second))))
+
 ;; Embed a gzip of the collected third-party NOTICES (produced by `make
 ;; notices`) so the full attribution ships inside the single binary; `gr8s
 ;; notices` decompresses and prints it. salza2 is only needed here, at build.

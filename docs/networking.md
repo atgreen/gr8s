@@ -3,9 +3,10 @@
 gr8s has **no kube-proxy and no iptables**. Packet handling lives in the kernel,
 programmed from Common Lisp through **Whistler**, which compiles s-expressions
 directly to eBPF bytecode — no LLVM, no clang, no `.c`, no hand-written ELF. The
-eBPF compiler and loader live *inside* the running agent, so dataplane programs
-are compiled and loaded on the fly, and per-Pod state lives in BPF maps the agent
-updates.
+eBPF compiler and loader live *inside* the agent. Native builds prepare the
+fixed endpoint bytecode templates before saving the executable; the agent loads
+a relocated copy for each Pod. Other dataplane programs compile in the running
+agent, and per-Pod state lives in BPF maps the agent updates.
 
 This document covers the whole dataplane: the egress guard, NetworkPolicy,
 Services and load balancing, the Gateway API, CNI/IPAM, DNS, and the VXLAN and
@@ -26,6 +27,25 @@ repeated CNI ADD calls. Each endpoint keeps `rejected_spoofs`,
 under `AGENT_STATE_DIR/containerd/bpf/CONTAINER_ID/`. CNI CHECK validates kernel
 map schemas, identity, and the TCX interface/direction; DEL removes staged links
 and all maps even after the Pod namespace disappears.
+
+The native image contains both ordinary and Service-enabled endpoint templates,
+including their map descriptors and relocations. First CNI ADD uses the existing
+five-second IPC deadline for kernel map creation, verification and attachment;
+it reuses the prepared templates. Source-based runs compile them lazily once.
+An isolated native VM measurement found 16.2 seconds of cold Service template
+compilation versus 39 milliseconds for map creation and kernel program loading.
+Native preparation moves that compilation into the build. The startup probe `scripts/probe-native-endpoint-startup.py`
+measures both cache variants and loads unattached Service and ordinary pipelines,
+checking that relocation preserves the templates. Run it in a disposable root VM
+with `scripts/gr8s-debug.py` alongside it:
+
+```sh
+python3 scripts/probe-native-endpoint-startup.py --gr8s /root/gr8s \
+  --require-prepared --report-directory /var/tmp/startup-evidence
+```
+
+Two fresh cross-node native/Kata runs pass all 28 checks with zero CNI ADD
+timeouts on either node. See [the cold-start evidence](service-cni-startup-validation-2026-11-09.json).
 
 Tests exercise the actual compiled bytecode on packet fixtures with both an
 interpreter and the Linux BPF test-run facility. The privileged native smoke
