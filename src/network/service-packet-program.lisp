@@ -256,6 +256,15 @@ cannot create a reverse-translatable TCP flow without its metadata."
                  (setf (,end-field state) (gr8s-pkt-meta-end meta)))
                (when (/= (logand (gr8s-pkt-meta-flags meta) 16) 0)
                  (when (and (= (logand (gr8s-pkt-meta-flags meta) 4) 0)
+                            ;; ACK evidence must come from this generation's
+                            ;; observed sender stream, including retransmissions.
+                            (or (/= (logand (gr8s-pkt-tcp-state-flags state) 512) 0)
+                                (and (not (pkt-seq-after
+                                           (,(if reverse 'gr8s-pkt-tcp-state-server-ack
+                                                         'gr8s-pkt-tcp-state-client-ack) state)
+                                           (gr8s-pkt-meta-seq meta)))
+                                     (not (pkt-seq-after (gr8s-pkt-meta-seq meta)
+                                                        (,end-field state)))))
                             (not (pkt-seq-after (gr8s-pkt-meta-ack meta)
                                                (,(if reverse 'gr8s-pkt-tcp-state-client-end
                                                              'gr8s-pkt-tcp-state-server-end) state)))

@@ -227,6 +227,18 @@ def closure(runner):
         p.publish(runner, backend="10.88.2.4")
         p.assert_forward(runner, request(port, 1000), "10.88.2.4")
         cases += 9
+    # Delayed controls from the prior incarnation on the same backend must not
+    # teach a new receiver-ACK edge and make an old reset appear current.
+    port = 50432
+    c, s = establish(runner, port)
+    p.assert_forward(runner, request(port, 2000))
+    translate_reply(runner, reply(port, 7000, 2001), port)
+    p.assert_forward(runner, request(port, 2001, 7001, 0x10))
+    translate_reply(runner, reply(port, s, c, 0x11), port)
+    p.assert_forward(runner, request(port, c, s + 1, 0x10))
+    translate_reply(runner, reply(port, s + 1, 0, 0x04), port)
+    assert not tcp_flags(runner, port) & 384, "old FIN/ACK/RST retired the replacement generation"
+    cases += 4
     # Refusal in SYN-SENT: ACK identifies the SYN even with an arbitrary RST seq.
     p.publish(runner)
     p.assert_forward(runner, request(50430, 0xffffffff))
