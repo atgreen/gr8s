@@ -38,6 +38,8 @@
   ;; term of the last entry the snapshot includes. log[0] is index snapshot-index+1.
   (snapshot-index 0 :type fixnum)
   (snapshot-term 0 :type fixnum)
+  snapshot-state                       ; immutable envelope at snapshot-index
+  snapshot-pending                     ; durable install awaiting application restore
   leader-id
   ;; membership (podster-c2d.6). ROLES maps member-id -> :voter | :witness |
   ;; :learner; PEERS stays the quorum+replication set (voters+witnesses, so the
@@ -181,6 +183,57 @@ is a borrowed sequence; retain only entries after INDEX. Caller holds the node l
 ;;; ---------------------------------------------------------------------------
 ;;; Snapshot / compaction.
 
+(defun raft-snapshot-envelope-p (state)
+  (and (consp state) (eq :gr8s-raft-snapshot (first state)) (eql 1 (second state))))
+
+(defun raft-capture-snapshot (node application boundary)
+  "Freeze configuration at the same boundary as APPLICATION, including learners."
+  (flet ((alist (table)
+           (sort (loop for key being the hash-keys of table using (hash-value value)
+                       collect (cons key (copy-tree value))) #'string< :key #'car)))
+    (list :gr8s-raft-snapshot 1 :application application
+          :application-present (and (= boundary (raft-node-last-applied node))
+                                    (or (not (null (raft-node-snapshot-fn node))) (null (raft-node-apply-fn node))))
+          :members (if (plusp (hash-table-count (raft-node-roles node)))
+                       (alist (raft-node-roles node)) (raft-current-config node))
+          :addresses (alist (raft-node-peer-addresses node))
+          :api-urls (alist (raft-node-api-urls node)))))
+
+(defun raft-restore-snapshot-contents (node state)
+  "Restore application and configuration. Legacy local snapshots contain only application data."
+  (when (and (raft-snapshot-envelope-p state) (not (getf (cddr state) :application-present)))
+    (error "Snapshot lacks an exact application/configuration boundary; replay its complete log instead"))
+  (when (raft-node-restore-fn node)
+    (funcall (raft-node-restore-fn node)
+             (if (raft-snapshot-envelope-p state) (getf (cddr state) :application) state)))
+  (when (raft-snapshot-envelope-p state)
+    (clrhash (raft-node-peer-addresses node))
+    (clrhash (raft-node-api-urls node))
+    (raft-adopt-config node (getf (cddr state) :members)
+                           (getf (cddr state) :addresses)
+                           (getf (cddr state) :api-urls))))
+
+(defun raft-publish-snapshot (node index term state entries)
+  "Publish an already durable snapshot. Restore callbacks must support retries."
+  (raft-restore-snapshot-contents node state)
+  (let* ((log (raft-node-log node)) (end (fill-pointer log)) (count 0))
+    (map nil (lambda (entry)
+               (when (> (raft-entry-index entry) index)
+                 (if (< count (length log)) (setf (aref log count) entry)
+                     (vector-push-extend entry log))
+                 (incf count))) entries)
+    (loop for i from count below end do (setf (aref log i) nil))
+    (setf (fill-pointer log) count))
+  (setf (raft-node-snapshot-index node) index (raft-node-snapshot-term node) term
+        (raft-node-snapshot-state node) state (raft-node-last-applied node) index
+        (raft-node-commit-index node) index))
+
+(defun raft-resume-snapshot-install (node)
+  (when (raft-node-snapshot-pending node)
+    (destructuring-bind (index term state entries) (raft-node-snapshot-pending node)
+      (raft-publish-snapshot node index term state entries)
+      (setf (raft-node-snapshot-pending node) nil))))
+
 (defun raft-compact (node upto)
   "Persist a snapshot before releasing its committed prefix. When SNAPSHOT-FN
 captures current application state, UPTO must equal LAST-APPLIED: that callback
@@ -191,7 +244,8 @@ cannot reconstruct an arbitrary older application revision."
              (raft-node-last-applied node) upto))
     (let* ((term (raft-log-term node upto))
            (drop (- upto (raft-node-snapshot-index node)))
-           (state (and (raft-node-snapshot-fn node) (funcall (raft-node-snapshot-fn node)))))
+           (state (raft-capture-snapshot
+                   node (and (raft-node-snapshot-fn node) (funcall (raft-node-snapshot-fn node))) upto)))
       ;; Snapshot construction or persistence may fail; keep the complete old log
       ;; and boundary until the durable replacement succeeds.
       (raft-storage-replace-snapshot
@@ -203,7 +257,8 @@ cannot reconstruct an arbitrary older application revision."
         (loop for i from remaining below end do (setf (aref log i) nil))
         (setf (fill-pointer log) remaining))
       (setf (raft-node-snapshot-index node) upto
-            (raft-node-snapshot-term node) term))))
+            (raft-node-snapshot-term node) term
+            (raft-node-snapshot-state node) state))))
 
 (defun raft-restore-snapshot (node index term state)
   "Restore a newer snapshot into memory; the caller owns durable installation.
@@ -211,14 +266,7 @@ Stale snapshots cannot roll back committed state. Snapshot transport must persis
 an atomic replacement, including its log-tail policy, before calling this helper."
   (when (<= index (raft-node-commit-index node))
     (return-from raft-restore-snapshot nil))
-  (when (raft-node-restore-fn node) (funcall (raft-node-restore-fn node) state))
-  (let ((log (raft-node-log node)))
-    (loop for i below (fill-pointer log) do (setf (aref log i) nil))
-    (setf (fill-pointer log) 0))
-  (setf (raft-node-snapshot-index node) index
-        (raft-node-snapshot-term node) term
-        (raft-node-last-applied node) index
-        (raft-node-commit-index node) index)
+  (raft-publish-snapshot node index term state #())
   t)
 
 (defun raft-majority (node)
@@ -238,9 +286,13 @@ an atomic replacement, including its log-tail policy, before calling this helper
 (defun raft-replicate-ids (node)
   "Everyone the leader replicates to: quorum peers, members being added, and
    members being removed (until they apply the config and learn they are out)."
-  (append (raft-node-peers node)
-          (loop for id being the hash-keys of (raft-node-pending-members node) collect id)
-          (loop for id being the hash-keys of (raft-node-departing-members node) collect id)))
+  (remove-duplicates
+   (append (raft-node-peers node)
+           (loop for id being the hash-keys of (raft-node-roles node) using (hash-value role)
+                 when (and (eq role :learner) (not (equal id (raft-node-id node)))) collect id)
+           (loop for id being the hash-keys of (raft-node-pending-members node) collect id)
+           (loop for id being the hash-keys of (raft-node-departing-members node) collect id))
+   :test #'equal))
 
 (defun raft-configure (node members &optional (default-self-role :voter))
   "Set NODE's membership from MEMBERS, an alist (id . role) for the whole cluster
@@ -259,8 +311,10 @@ an atomic replacement, including its log-tail policy, before calling this helper
 
 (defun raft-current-config (node)
   "The current membership as an alist (id . role), including self."
-  (cons (cons (raft-node-id node) (raft-node-self-role node))
-        (loop for id in (raft-node-peers node) collect (cons id (raft-member-role node id)))))
+  (if (plusp (hash-table-count (raft-node-roles node)))
+      (loop for id being the hash-keys of (raft-node-roles node) using (hash-value role) collect (cons id role))
+      (cons (cons (raft-node-id node) (raft-node-self-role node))
+            (loop for id in (raft-node-peers node) collect (cons id (raft-member-role node id))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Role transitions.
@@ -387,7 +441,7 @@ alone so existing persisted commands remain deliverable."
          (prev-index (1- next))
          (bytes 0)
          (entries
-           (loop for i from next to (raft-last-log-index node)
+           (loop for i from (max next (1+ (raft-node-snapshot-index node))) to (raft-last-log-index node)
                  for count from 0
                  for entry = (raft-log-entry node i)
                  for weight = (+ 128 (raft-command-wire-weight (raft-entry-command entry)))
@@ -395,6 +449,15 @@ alone so existing persisted commands remain deliverable."
                             (or (zerop count) (<= (+ bytes weight) (raft-node-append-byte-budget node))))
                  do (incf bytes weight)
                  collect entry)))
+    (when (<= next (raft-node-snapshot-index node))
+      (unless (raft-snapshot-envelope-p (raft-node-snapshot-state node))
+        (error "Snapshot lacks configuration; create a fresh configured snapshot before transfer"))
+      (unless (getf (cddr (raft-node-snapshot-state node)) :application-present)
+        (error "Snapshot lacks application state; provide a snapshot callback before transfer"))
+      (return-from raft-append-message
+        (list :type :install-snapshot :term (raft-node-current-term node) :from (raft-node-id node)
+              :last-index (raft-node-snapshot-index node) :last-term (raft-node-snapshot-term node)
+              :state (raft-node-snapshot-state node))))
     (list :type :append-entries
           :term (raft-node-current-term node)
           :from (raft-node-id node)
@@ -467,7 +530,7 @@ alone so existing persisted commands remain deliverable."
   "Leader appends COMMAND and replicates it. CALLBACK (if given) is invoked with
    the state-machine result once the entry commits. Returns (values index t) on
    the leader, or (values nil nil) otherwise so the caller can redirect."
-  (if (eq (raft-node-role node) :leader)
+  (if (and (eq (raft-node-role node) :leader) (not (raft-node-snapshot-pending node)))
       (let ((entry (raft-log-append node (make-raft-entry :term (raft-node-current-term node)
                                                           :command command))))
         (when callback (setf (gethash (raft-entry-index entry) (raft-node-pending node)) callback))
@@ -647,6 +710,12 @@ alone so existing persisted commands remain deliverable."
        (raft-reset-election-timer node)
        (let ((prev-index (getf msg :prev-log-index))
              (prev-term (getf msg :prev-log-term)))
+         (when (< prev-index (raft-node-snapshot-index node))
+           (raft-send node leader (list :type :append-entries-reply
+                                       :term (raft-node-current-term node) :from (raft-node-id node)
+                                       :success nil :match-index 0
+                                       :next-index (1+ (raft-node-snapshot-index node))))
+           (return-from raft-handle-append-entries nil))
          (if (and (> prev-index 0)
                   (/= (raft-log-term node prev-index) prev-term))
              ;; Log mismatch: reject so the leader backs up.
@@ -688,18 +757,85 @@ alone so existing persisted commands remain deliverable."
             (raft-apply-committed node))
           ;; Back up and retry on the next replication round.
           (setf (gethash peer (raft-node-next-index node))
-                (max 1 (1- (gethash peer (raft-node-next-index node) 1))))))))
+                (min (1+ (raft-last-log-index node))
+                     (max (1+ (gethash peer (raft-node-match-index node) 0))
+                          (or (getf msg :next-index)
+                              (1- (gethash peer (raft-node-next-index node) 1))))))))))
+
+(defun raft-validate-snapshot-envelope (state)
+  (unless (raft-snapshot-envelope-p state) (error "Unsupported snapshot envelope"))
+  (unless (getf (cddr state) :application-present) (error "Snapshot lacks application state"))
+  (let ((members (getf (cddr state) :members)) (seen (make-hash-table :test 'equal)))
+    (unless (consp members) (error "Snapshot has no membership"))
+    (dolist (member members)
+      (unless (and (consp member) (stringp (car member))
+                   (member (cdr member) '(:voter :witness :learner))
+                   (not (gethash (car member) seen)))
+        (error "Invalid snapshot member"))
+      (setf (gethash (car member) seen) t)))
+  (dolist (entry (getf (cddr state) :addresses))
+    (unless (and (consp entry) (stringp (car entry)) (listp (cdr entry))
+                 (= 2 (length (cdr entry))) (stringp (second entry))
+                 (typep (third entry) '(integer 1 65535)))
+      (error "Invalid snapshot address")))
+  (dolist (entry (getf (cddr state) :api-urls))
+    (unless (and (consp entry) (stringp (car entry)) (stringp (cdr entry)))
+      (error "Invalid snapshot API URL"))))
+
+(defun raft-handle-install-snapshot (node msg)
+  "Durably install a complete snapshot; transport assembles bounded chunks first."
+  (let ((term (getf msg :term)) (leader (getf msg :from))
+        (index (getf msg :last-index)) (last-term (getf msg :last-term))
+        (state (getf msg :state)))
+    (raft-step-down-if-stale node term)
+    (when (< term (raft-node-current-term node))
+      (raft-send node leader (list :type :install-snapshot-reply :term (raft-node-current-term node)
+                                  :from (raft-node-id node) :success nil :match-index 0))
+      (return-from raft-handle-install-snapshot nil))
+    (unless (eq :follower (raft-node-role node)) (raft-become-follower node term leader))
+    (setf (raft-node-leader-id node) leader (raft-node-leader-contact-elapsed node) 0)
+    (raft-reset-election-timer node)
+    (unless (and (typep index '(integer 1 *)) (typep last-term '(integer 0 *)) (<= last-term term))
+      (error "Invalid snapshot boundary"))
+    (when (> index (raft-node-commit-index node))
+      (raft-validate-snapshot-envelope state)
+      (when (and (raft-node-apply-fn node) (null (raft-node-restore-fn node)))
+        (error "Application snapshots require a restore callback"))
+      (let ((tail (if (= last-term (raft-log-term node index)) (raft-node-log node) #())))
+        (raft-storage-replace-snapshot (raft-node-storage node) index last-term state
+                                      (raft-node-current-term node) (raft-node-voted-for node) tail)
+        (setf (raft-node-snapshot-pending node) (list index last-term state tail))
+        (raft-resume-snapshot-install node)))
+    (raft-send node leader (list :type :install-snapshot-reply :term (raft-node-current-term node)
+                                :from (raft-node-id node) :success t :match-index index))))
+
+(defun raft-handle-install-snapshot-reply (node msg)
+  (raft-step-down-if-stale node (getf msg :term))
+  (when (and (eq :leader (raft-node-role node))
+             (= (getf msg :term) (raft-node-current-term node)) (getf msg :success)
+             (member (getf msg :from) (raft-replicate-ids node) :test #'equal)
+             (<= 0 (getf msg :match-index) (raft-last-log-index node)))
+    (let ((peer (getf msg :from)) (index (getf msg :match-index)))
+      (setf (gethash peer (raft-node-match-index node))
+            (max index (gethash peer (raft-node-match-index node) 0))
+            (gethash peer (raft-node-next-index node))
+            (max (1+ index) (gethash peer (raft-node-next-index node) 1)))
+      (raft-advance-commit node)
+      (raft-apply-committed node))))
 
 (defun raft-handle-message (node msg)
   "Dispatch MSG to the handler for its :type (request-vote and its reply,
    append-entries and its reply). Signals on an unknown type."
+  (when (raft-node-snapshot-pending node) (raft-resume-snapshot-install node))
   (ecase (getf msg :type)
     (:pre-vote (raft-handle-pre-vote node msg))
     (:pre-vote-reply (raft-handle-pre-vote-reply node msg))
     (:request-vote (raft-handle-request-vote node msg))
     (:request-vote-reply (raft-handle-request-vote-reply node msg))
     (:append-entries (raft-handle-append-entries node msg))
-    (:append-entries-reply (raft-handle-append-entries-reply node msg))))
+    (:append-entries-reply (raft-handle-append-entries-reply node msg))
+    (:install-snapshot (raft-handle-install-snapshot node msg))
+    (:install-snapshot-reply (raft-handle-install-snapshot-reply node msg))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Logical clock.
@@ -708,7 +844,7 @@ alone so existing persisted commands remain deliverable."
   "Advance one logical tick: voter candidates/followers may start an election,
    leaders send heartbeats. A witness or learner never starts an election (so it
    never becomes leader); a removed member does nothing."
-  (unless (raft-node-removed node)
+  (unless (or (raft-node-removed node) (raft-node-snapshot-pending node))
     (case (raft-node-role node)
       ((:follower :candidate)
        (incf (raft-node-leader-contact-elapsed node))   ; time since a leader heartbeat (Pre-Vote)

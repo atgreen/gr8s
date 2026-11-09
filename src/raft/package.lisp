@@ -90,6 +90,8 @@
    #:raft-node-send-fn
    #:raft-node-snapshot-fn
    #:raft-node-snapshot-index
+   #:raft-node-snapshot-state
+   #:raft-node-snapshot-pending
    #:raft-node-snapshot-term
    #:raft-node-storage
    #:raft-node-timeout-fn

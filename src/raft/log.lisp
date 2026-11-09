@@ -70,6 +70,8 @@ It holds replicated state including Secrets, so only its owner may read it."
   "Replace the WAL without reading or retaining discarded historical records.
 The old WAL remains usable on a pre-rename failure. A post-rename failure closes
 both streams: its durable outcome is uncertain and requires recovery before use."
+  (when (and (raft-snapshot-envelope-p state) (not (getf (cddr state) :application-present)))
+    (error "Cannot discard a durable log without an exact application/configuration snapshot"))
   (unless (and (file-raft-storage-stream storage)
                (open-stream-p (file-raft-storage-stream storage)))
     (error "Raft WAL is closed; recover it before checkpointing"))
@@ -168,10 +170,11 @@ both streams: its durable outcome is uncertain and requires recovery before use.
           (raft-node-voted-for node) (raft-recovered-vote recovered)
           (raft-node-snapshot-index node) (raft-recovered-snapshot-index recovered)
           (raft-node-snapshot-term node) (raft-recovered-snapshot-term recovered)
+          (raft-node-snapshot-state node) (raft-recovered-snapshot-state recovered)
           (raft-node-last-applied node) (raft-recovered-snapshot-index recovered)
           (raft-node-commit-index node) (raft-recovered-snapshot-index recovered))
-    (when (and (raft-recovered-snapshot-state recovered) (raft-node-restore-fn node))
-      (funcall (raft-node-restore-fn node) (raft-recovered-snapshot-state recovered)))
+    (when (raft-recovered-snapshot-state recovered)
+      (raft-restore-snapshot-contents node (raft-recovered-snapshot-state recovered)))
     (let ((v (raft-node-log node)))
       (setf (fill-pointer v) 0)
       (dolist (entry (raft-recovered-entries recovered)) (vector-push-extend entry v)))

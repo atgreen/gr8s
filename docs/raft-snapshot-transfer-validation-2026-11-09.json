@@ -1,0 +1,94 @@
+{
+  "date": "2026-11-09",
+  "tracking": "podster-ucm.11.2",
+  "algorithmSource": "https://raft.github.io/raft.pdf",
+  "scope": "Configured core snapshot installation and bounded peer transfer after explicit compaction. Production application artifacts, automatic compaction and crash-abandoned transfer cleanup remain incomplete.",
+  "changes": [
+    "Capture immutable versioned envelopes with application coverage, membership including learners, peer addresses and API URLs",
+    "Persist snapshot and matching suffix before retryable application restore; block consensus clock while restore is pending",
+    "Reject incomplete application/configuration boundaries before discarding a durable WAL",
+    "Retain a matching suffix, discard conflicting tails and reject older images without rolling back committed state",
+    "Transfer file-backed snapshots over member mTLS in ordered chunks of at most 65536 raw bytes, with SHA256 and identity checks",
+    "Coalesce pending replication retries, retain one partial per running member, and expire inactive partials after 60 seconds",
+    "Preserve committed learners in replication/configuration and honor learner admission over Join",
+    "Use control-plane state filesystem or WAL directory for private transfer files; cap a transfer at 16 GiB"
+  ],
+  "verification": {
+    "checks": 507,
+    "failures": 0,
+    "suites": [
+      "raft-snapshot",
+      "raft",
+      "raft-transport",
+      "raft-membership",
+      "raft-tls",
+      "raft-cluster",
+      "ha-pod-failover",
+      "ha-node-cidr"
+    ],
+    "log": "/tmp/gr8s-snapshot-final-v5.log",
+    "snapshotSuiteChecks": 95,
+    "realTransport": {
+      "mutualTLS": true,
+      "members": 4,
+      "roles": {
+        "a": "voter",
+        "b": "voter",
+        "w": "witness",
+        "l": "learner"
+      },
+      "applicationBlobBytes": 262144,
+      "injectedMidTransferFailure": true,
+      "maximumRawChunkBytes": 65536,
+      "voterAndLearnerCatchup": true,
+      "voterLeadershipHandoffWithWitness": true,
+      "learnerReplicatesAfterHandoff": true
+    },
+    "failureAndRecovery": [
+      "Matching suffix, exact application boundary, configuration/address/API URL recovery from a file WAL",
+      "Conflicting suffix discarded; stale installation does not roll back committed state",
+      "Storage failure causes no restore or success acknowledgement",
+      "Application restore failure leaves a durable pending install, blocks the clock and succeeds on retry",
+      "Wrong chunk order, checksum corruption and oversize chunks do not apply",
+      "Abandoned live-process partials expire; retries remove the preceding partial",
+      "Wire encoding ignores debug printer/read-base settings",
+      "Incomplete application/configuration snapshots cannot discard a file WAL or be transferred"
+    ],
+    "memory": {
+      "passed": true,
+      "rounds": 16,
+      "entries": 2048,
+      "payloadBytes": 65536,
+      "cumulativePayloadMiB": 128,
+      "maxCheckpointBytes": 196842,
+      "retainedTailEntries": 2,
+      "restartRecovered": true,
+      "heapLimitMiB": 384,
+      "seconds": 3.693974
+    },
+    "memoryLog": "/tmp/gr8s-snapshot-memory-final.log",
+    "nativeBuild": "passed",
+    "nativeBuildLog": "/tmp/gr8s-snapshot-native-final.log",
+    "nativeBinarySHA256": "c439da9bc7b5a9303853940f5656e9c7125c14fa6071990e04e12f2de7d497f0",
+    "earlierFailure": {
+      "log": "/tmp/gr8s-snapshot-final.log",
+      "test": "MEMBERS-REPLICATE-OVER-MUTUAL-TLS",
+      "condition": "TLS decode_error; server invalid record content type131",
+      "tracking": "podster-ucm.2.5",
+      "status": "Intermittent cause unresolved; final run passes all96 TLS checks. Not classified as a baseline failure."
+    }
+  },
+  "remaining": [
+    "Crash-abandoned scratch roots and partial-file reaping:podster-ucm.11.2.1",
+    "Production streamed application artifacts and exact-boundary store capture/restore:podster-ucm.11",
+    "Production WAL recovery before accepting traffic:podster-ucm.2.1",
+    "Automatic compaction and live disconnected production-member acceptance:podster-ucm.11",
+    "Intermittent enrollment TLS record failure:podster-ucm.2.5"
+  ],
+  "limitations": [
+    "Opaque callback application data is reconstructed with the Lisp reader on receipt. Chunk bounds do not establish a bounded heap for a large production snapshot; streamed artifact callbacks remain required.",
+    "The mTLS test uses independent loopback members within one SBCL process. The native binary builds; no new native multi-process snapshot test was run.",
+    "Snapshot metadata is versioned, but no mixed-binary snapshot capability negotiation is implemented.",
+    "The full root test suite was not rerun; previously recorded baseline and intermittent failures remain open."
+  ]
+}

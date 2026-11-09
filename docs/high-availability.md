@@ -125,7 +125,27 @@ does not reread discarded WAL history, and recovery disables reader evaluation.
 The [checkpoint validation record](raft-checkpoint-validation-2026-11-09.json)
 includes repeated reclamation, fault injection, and constrained-heap tail recovery.
 
-Automatic production snapshot compaction and snapshot transfer to lagging members
-remain under `podster-ucm.11`; the retained log is therefore not yet bounded over
+The core and peer transport support configured snapshot catch-up after explicit
+compaction. Snapshots preserve voter, witness and learner membership, peer
+addresses and API URLs. Installation retains a matching suffix or discards a
+conflicting one, persists the replacement before restoring application state,
+and acknowledges only after restore succeeds. Failed restore blocks voting and
+the logical clock until a retry succeeds; restore callbacks must be retryable.
+
+Transfer uses ordered chunks containing at most 64 KiB of file data, authenticated
+by the existing member mTLS connection. SHA-256 and header checks precede install.
+One private partial file is retained per member; retries replace it and abandoned
+files expire after 60 seconds. Control-plane transfers use the state filesystem;
+other members default to their WAL directory, or a temporary directory for
+volatile test members. Each transfer is limited to 16 GiB. A log-only checkpoint
+without an application snapshot callback cannot be transferred as application state.
+Crash-abandoned transfer-file cleanup remains under `podster-ucm.11.2.1`;
+the current cleanup guarantees cover running members and graceful shutdown.
+
+Production store snapshot capture/restore and automatic compaction remain under
+`podster-ucm.11`. The generic callback path reconstructs an opaque Lisp application
+snapshot on receipt: bounded RPC chunks alone do not bound that reconstruction's
+heap usage. Large production stores need streamed application artifacts before
+automatic compaction can be enabled. The retained production log is therefore not yet bounded over
 the lifetime of a cluster. Operator backup/restore is separate work under
 `podster-ucm.3`. gr8s has not passed Kubernetes conformance.

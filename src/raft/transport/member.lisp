@@ -35,8 +35,9 @@
       (setf (getf wire :entries)
             (mapcar (lambda (e) (list (raft-entry-index e) (raft-entry-term e) (raft-entry-command e)))
                     (getf wire :entries))))
-    (let ((*print-readably* nil) (*print-circle* nil) (*print-pretty* nil))
-      (babel:string-to-octets (prin1-to-string wire) :encoding :utf-8))))
+    (with-standard-io-syntax
+      (let ((*print-readably* nil) (*print-circle* nil) (*print-pretty* nil))
+        (babel:string-to-octets (prin1-to-string wire) :encoding :utf-8)))))
 
 (defun octets->raft-message (octets)
   "Decode OCTETS back into a Raft message plist, reading the form with *READ-EVAL*
@@ -44,7 +45,7 @@
    RAFT-MESSAGE->OCTETS."
   (let* ((string (babel:octets-to-string (coerce octets '(vector (unsigned-byte 8)))
                                           :encoding :utf-8))
-         (wire (let ((*read-eval* nil)) (read-from-string string))))
+         (wire (with-standard-io-syntax (let ((*read-eval* nil)) (read-from-string string)))))
     (when (getf wire :entries)
       (setf (getf wire :entries)
             (mapcar (lambda (triple)
@@ -81,6 +82,8 @@
   ;; Installed after the node gRPC server starts. RelayOperation dispatches
   ;; incoming frames here; NIL on witnesses and transport-only tests.
   operation-server
+  snapshot-directory snapshot-root snapshot-receiver
+  (snapshot-max-bytes (* 16 1024 1024 1024))
   ;; This member's RAFT-CREDENTIALS. Only in-process tests run without any.
   credentials)
 
@@ -92,10 +95,10 @@
    unreachable. Other Raft messages retain their order. Fire-and-forget: never
    blocks on the peer."
   (bt:with-lock-held ((raft-peer-link-lock link))
-    (when (eq :append-entries (getf message :type))
+    (when (member (getf message :type) '(:append-entries :install-snapshot))
       (setf (raft-peer-link-items link)
-            (delete :append-entries (raft-peer-link-items link)
-                    :key (lambda (item) (getf item :type)))))
+            (delete-if (lambda (item) (member (getf item :type) '(:append-entries :install-snapshot)))
+                       (raft-peer-link-items link))))
     (setf (raft-peer-link-items link)
           (nconc (raft-peer-link-items link) (list message)))
     (bt:condition-notify (raft-peer-link-changed link))))
@@ -145,11 +148,9 @@
       (let ((stub (raft-link-stub member link)))
         (when stub
           (handler-case
-              (gr8s.node.v1::raft-transport-deliver
-               stub (make-instance 'gr8s.node.v1::raft-envelope
-                                   :protocol-version 1
-                                   :payload (raft-message->octets message))
-               :timeout 2)
+              (if (eq :install-snapshot (getf message :type))
+                  (raft-link-send-snapshot member stub message)
+                  (raft-link-deliver-message stub message))
             (error () (raft-link-drop link))))))))
 
 (defun raft-member-tick-loop (member tick-seconds)
@@ -159,13 +160,14 @@
     (sleep tick-seconds)
     (when (raft-member-running member)
       (bt:with-lock-held ((raft-member-lock member))
-        (raft-tick (raft-member-node member))))))
+        (raft-tick (raft-member-node member))
+        (raft-member-expire-snapshot-receiver member)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Lifecycle.
 
 (defun start-raft-member (id &key (host "127.0.0.1") (port 0) apply-fn storage
-                                  snapshot-fn restore-fn
+                                  snapshot-fn restore-fn snapshot-directory
                                   ;; election timeout ~1-2s at a 50ms tick; well above gRPC call latency
                                   (timeout-fn (lambda () (+ 20 (random 20))))
                                   (heartbeat-ticks 2)
@@ -174,7 +176,8 @@
    RaftTransport gRPC server, and the delivery machinery. Peers are set with
    RAFT-MEMBER-SET-PEERS (so a fresh member cannot self-elect before it knows
    them); ticking starts with RAFT-MEMBER-START."
-  (let* ((member (make-raft-member :host host :port port :credentials credentials))
+  (let* ((member (make-raft-member :host host :port port :credentials credentials
+                                  :snapshot-directory snapshot-directory))
          (node (make-raft-node
                 :id id :peers nil
                 :heartbeat-timeout heartbeat-ticks :timeout-fn timeout-fn
@@ -199,7 +202,10 @@
                         (let ((msg (gr8s::authenticated-raft-message
                                     credentials request context)))
                           (bt:with-lock-held ((raft-member-lock member))
-                            (raft-handle-message (raft-member-node member) msg)))
+                            (case (getf msg :type)
+                              (:snapshot-chunk (raft-member-receive-snapshot-chunk member msg))
+                              (:install-snapshot (error "Snapshots must use bounded chunk transport"))
+                              (t (raft-handle-message (raft-member-node member) msg)))))
                         (make-instance 'gr8s.node.v1::raft-ack))
      :propose-handler
      (lambda (request context)
@@ -450,4 +456,9 @@ id, or NIL."
            (raft-member-links member))
   (ignore-errors (ag-grpc:server-stop (raft-member-grpc-server member)))
   (when (and (raft-member-server-thread member) (bt:thread-alive-p (raft-member-server-thread member)))
-    (ignore-errors (bt:join-thread (raft-member-server-thread member)))))
+    (ignore-errors (bt:join-thread (raft-member-server-thread member))))
+  (bt:with-lock-held ((raft-member-lock member))
+    (raft-member-clear-snapshot-receiver member)
+    (when (raft-member-snapshot-root member)
+      (uiop:delete-directory-tree (raft-member-snapshot-root member) :validate t :if-does-not-exist :ignore)
+      (setf (raft-member-snapshot-root member) nil))))

@@ -64,7 +64,8 @@
                           (apply #'gr8s::install-node-enrollment-command
                                  store (second command))))))))
     (when credentials (setf (gr8s::raft-credentials-node-pki credentials) pki))
-    (setf member (start-raft-member id :host host :port port :apply-fn apply-fn :credentials credentials))
+    (setf member (start-raft-member id :host host :port port :apply-fn apply-fn :credentials credentials
+                                     :snapshot-directory (merge-pathnames "raft/transfers/" (gr8s::pod-store-path store))))
     (cond
       (init
        (raft-cluster-init member :api-url api-url)

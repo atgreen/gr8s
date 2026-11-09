@@ -115,6 +115,7 @@
                               :serial t
                               :components ((:file "package")
                                            (:file "member")
+                                           (:file "snapshot")
                                            (:file "cluster")))
                              (:module "ha"
                               :serial t
@@ -434,6 +435,7 @@
                              (:file "raft-plane-test")
                              (:file "raft-membership-test")
                              (:file "raft-tls-test")
+                             (:file "raft-snapshot-test")
                              (:file "ha-certificates-test")
                              (:file "core-resources-test")
                              (:file "re2-test")
