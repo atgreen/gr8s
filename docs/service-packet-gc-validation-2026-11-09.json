@@ -945,5 +945,6 @@
     "https://www.kernel.org/doc/html/latest/bpf/bpf_prog_run.html",
     "https://raw.githubusercontent.com/torvalds/linux/master/include/uapi/linux/bpf.h"
   ],
-  "scope": "Completes bounded IPv4 TCP/UDP idle/orphan reclamation and forward/reverse capacity recovery for current reservation-aware packet programs. TCP SYN/FIN/RST lifecycle, automatic older-bytecode refresh, guest established-flow restart survival, broader live affinity/churn/empty-Service tests, SNAT/hairpin/collision resolution, IPv6 packet translation, packet NodePort and remaining parent diagnostics remain open. Packet Services remain opt-in."
+  "scope": "Completes bounded IPv4 TCP/UDP idle/orphan reclamation and forward/reverse capacity recovery for current reservation-aware packet programs. TCP SYN/FIN/RST lifecycle, automatic older-bytecode refresh, guest established-flow restart survival, broader live affinity/churn/empty-Service tests, SNAT/hairpin/collision resolution, IPv6 packet translation, packet NodePort and remaining parent diagnostics remain open. Packet Services remain opt-in.",
+  "startupObservation": "The final guest regression observed one cold CNI Add timeout on each simulated node. Runtime retries recovered; all21 checks and normal cleanup passed. Cause remains unproven on the shared nested-VM host. Investigation is tracked as podster-p9c.6; this run does not establish cold-start performance."
 }
