@@ -20,6 +20,69 @@
   (trivial-utf-8:utf-8-bytes-to-string
    (gr8s::core-base64-bytes (gethash "token" (gethash "data" secret)) "token")))
 
+(defun service-account-token-key-id (token)
+  "Return TOKEN's JOSE key identifier."
+  (let* ((header (first (uiop:split-string token :separator '(#\.))))
+         (json (trivial-utf-8:utf-8-bytes-to-string
+                (gr8s::base64url-decode header))))
+    (gethash "kid" (com.inuoe.jzon:parse json))))
+
+(test service-account-signing-key-rotation-is-staged-and-preserves-verification
+  (with-temporary-store (store directory)
+    (let* ((account (service-account-test-store store))
+           (path (gr8s::service-account-signing-key-path store))
+           (old-token (gr8s::mint-service-account-token store account :seconds 1200))
+           (old-kid (service-account-token-key-id old-token))
+           (now (gr8s::unix-time-now)))
+      (let* ((new-kid (gr8s::prepare-service-account-signing-key-rotation store :now now))
+             (prepared (com.inuoe.jzon:parse path))
+             (jwks-before (com.inuoe.jzon:stringify (gr8s::service-account-jwks-object store)))
+             (still-old (gr8s::mint-service-account-token store account :seconds 1200)))
+        (is (= 2 (gethash "formatVersion" prepared)))
+        (is (= 2 (length (gethash "keys" prepared))))
+        (is (equal old-kid (gethash "activeKid" prepared)))
+        (is (equal new-kid (gethash "preparedKid" prepared)))
+        (is (equal old-kid (service-account-token-key-id still-old)))
+        (is (string= jwks-before
+                     (com.inuoe.jzon:stringify (gr8s::service-account-jwks-object store))))
+        (is (= 2 (length (gethash "keys" (gr8s::service-account-jwks-object store)))))
+        (is (equal new-kid
+                   (gr8s::promote-service-account-signing-key-rotation store :now now)))
+        (let ((new-token (gr8s::mint-service-account-token store account :seconds 1200)))
+          (is (equal new-kid (service-account-token-key-id new-token)))
+          (is (gr8s::verify-service-account-jwt-signature store old-token))
+          (is (gr8s::verify-service-account-jwt-signature store new-token))
+          (signals error
+            (gr8s::finalize-service-account-signing-key-rotation store :now (+ now 1199)))
+          (is (equal new-kid
+                     (gr8s::finalize-service-account-signing-key-rotation store
+                                                                         :now (+ now 1201))))
+          (is (= 1 (length (gethash "keys" (com.inuoe.jzon:parse path)))))
+          (is (null (gr8s::verify-service-account-jwt-signature store old-token)))
+          (is (gr8s::verify-service-account-jwt-signature store new-token)))))))
+
+(test legacy-service-account-signing-key-migration-keeps-the-full-safety-window
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (let* ((key (gr8s::load-service-account-signing-key store))
+           (parts (ironclad:destructure-private-key key))
+           (path (gr8s::service-account-signing-key-path store))
+           (now (gr8s::unix-time-now)))
+      (gr8s::write-private-text-atomically
+       path (com.inuoe.jzon:stringify
+             (gr8s::core-object "d" (gr8s::octets-to-hex (getf parts :x))
+                                "q" (gr8s::octets-to-hex (getf parts :y)))))
+      (gr8s::prepare-service-account-signing-key-rotation store :now now)
+      (let* ((migrated (com.inuoe.jzon:parse path))
+             (old (find (gethash "activeKid" migrated) (gethash "keys" migrated)
+                        :key (lambda (entry) (gethash "kid" entry)) :test #'equal)))
+        (is (>= (gethash "latestExpiry" old)
+                (+ now gr8s::+service-account-token-maximum-seconds+))))
+      (gr8s::promote-service-account-signing-key-rotation store :now now)
+      (signals error
+        (gr8s::finalize-service-account-signing-key-rotation
+         store :now (+ now gr8s::+service-account-token-maximum-seconds+ -1))))))
+
 (test native-namespace-creation-publishes-and-restores-the-real-root-ca
   (with-temporary-store (store directory)
     (setf (gr8s::pod-store-in-cluster-config store) (list :ca-pem "the-cluster-ca"))

@@ -19,6 +19,34 @@
   (signals error (parse-cli-options '("certificate" "status" "--warn-within" "soon")))
   (signals error (parse-cli-options '("certificate" "status" "--output" "yaml"))))
 
+(test service-account-signing-key-rotation-cli-options-are-explicit
+  (dolist (stage '(("prepare" :certificate-service-account-key-prepare)
+                   ("promote" :certificate-service-account-key-promote)
+                   ("finalize" :certificate-service-account-key-finalize)))
+    (let ((options (parse-cli-options
+                    (list "certificate" "service-account-key" (first stage)
+                          "--state-directory" "/srv/gr8s"))))
+      (is (eq (second stage) (getf options :command)))
+      (is (equal "/srv/gr8s" (getf options :state-directory)))))
+  (signals error (parse-cli-options '("certificate" "service-account-key" "replace")))
+  (signals error (parse-cli-options '("certificate" "service-account-key" "prepare" "--bogus"))))
+
+(test service-account-signing-key-rotation-dispatches-through-the-public-cli
+  (with-temporary-store (store directory)
+    (gr8s::load-service-account-signing-key store)
+    (dolist (stage '("prepare" "promote" "finalize"))
+      (let ((output
+              (with-output-to-string (*standard-output*)
+                (is (= 0 (gr8s::main-with-environment
+                          (list "certificate" "service-account-key" stage
+                                "--state-directory" (namestring directory))
+                          (constantly nil) (constantly 99)))))))
+        (is (plusp (length (string-trim '(#\Newline) output))))))
+    (let ((record (com.inuoe.jzon:parse
+                   (gr8s::service-account-signing-key-path store))))
+      (is (= 1 (length (gethash "keys" record))))
+      (is (null (gethash "preparedKid" record))))))
+
 (test certificate-inventory-is-read-only-deterministic-and-classifies-expiry
   (with-temporary-store (store directory)
     (declare (ignore store))

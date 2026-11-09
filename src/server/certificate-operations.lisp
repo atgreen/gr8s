@@ -38,33 +38,40 @@
     (* number multiplier)))
 
 (defun parse-certificate-options (arguments)
-  "Parse certificate status inventory options. Rotation subcommands are added by their owning stages."
-  (unless (string= (first arguments) "status")
-    (error "unknown certificate subcommand: ~A" (or (first arguments) "")))
-  (let ((options (list :command :certificate-status
+  "Parse certificate inventory and staged ServiceAccount signing-key operations."
+  (let* ((subcommand (first arguments))
+         (rotation-p (string= subcommand "service-account-key"))
+         (stage (and rotation-p (second arguments)))
+         (command (cond
+                    ((string= subcommand "status") :certificate-status)
+                    ((and rotation-p (string= stage "prepare")) :certificate-service-account-key-prepare)
+                    ((and rotation-p (string= stage "promote")) :certificate-service-account-key-promote)
+                    ((and rotation-p (string= stage "finalize")) :certificate-service-account-key-finalize)
+                    (t (error "unknown certificate subcommand: ~{~A~^ ~}" arguments)))))
+    (let ((options (list :command command
                        :state-directory (namestring (default-state-directory))
                        :output-format :table
                        :warn-within +certificate-warning-seconds+))
-        (arguments (rest arguments)))
-    (loop while arguments
+          (arguments (nthcdr (if rotation-p 2 1) arguments)))
+      (loop while arguments
           for option = (first arguments)
           do (cond
                ((string= option "--state-directory")
                 (setf (getf options :state-directory) (option-value arguments option)
                       arguments (cddr arguments)))
-               ((string= option "--warn-within")
+               ((and (eq command :certificate-status) (string= option "--warn-within"))
                 (setf (getf options :warn-within)
                       (certificate-status-duration (option-value arguments option))
                       arguments (cddr arguments)))
-               ((string= option "--output")
+               ((and (eq command :certificate-status) (string= option "--output"))
                 (let ((value (option-value arguments option)))
                   (setf (getf options :output-format)
                         (cond ((string= value "table") :table)
                               ((string= value "json") :json)
                               (t (error "certificate status output must be table or json")))
                         arguments (cddr arguments))))
-               (t (error "unknown certificate status option: ~A" option))))
-    options))
+               (t (error "unknown certificate option: ~A" option))))
+      options)))
 
 (defun certificate-status-stamp (universal-time)
   "Format UNIVERSAL-TIME as a deterministic UTC RFC3339 timestamp."
@@ -193,3 +200,16 @@
                            '(:warning :expired :not-yet-valid :invalid)))
                  records)
         1 0)))
+
+(defun run-service-account-signing-key-rotation (options)
+  "Run one staged signing-key transition and print the resulting active or prepared key id."
+  (let* ((store (open-store (getf options :state-directory)))
+         (kid (ecase (getf options :command)
+                (:certificate-service-account-key-prepare
+                 (prepare-service-account-signing-key-rotation store))
+                (:certificate-service-account-key-promote
+                 (promote-service-account-signing-key-rotation store))
+                (:certificate-service-account-key-finalize
+                 (finalize-service-account-signing-key-rotation store)))))
+    (format t "~A~%" kid)
+    0))

@@ -42,18 +42,121 @@
   "Return the ServiceAccount signing key path beneath a control plane's PKI ROOT."
   (merge-pathnames "service-account-signing-key.json" (uiop:ensure-directory-pathname root)))
 
+(defmacro with-service-account-signing-key-lock ((store) &body body)
+  "Serialize signing-set mutation across threads and operator CLI processes."
+  (let ((store-var (gensym "STORE")) (path-var (gensym "PATH"))
+        (stream-var (gensym "STREAM")) (fd-var (gensym "FD")))
+    `(let* ((,store-var ,store)
+            (,path-var (merge-pathnames "pki/service-account-signing-key.lock"
+                                        (pod-store-path ,store-var))))
+       (bt:with-lock-held ((pod-store-credential-lock ,store-var))
+         (ensure-directories-exist ,path-var)
+         (with-open-file (,stream-var ,path-var :direction :io
+                                      :if-does-not-exist :create :if-exists :overwrite)
+           (let ((,fd-var (sb-sys:fd-stream-fd ,stream-var)))
+             (sb-posix:fchmod ,fd-var #o600)
+             (unless (zerop (cffi:foreign-funcall "flock" :int ,fd-var :int 2 :int))
+               (error "cannot lock ServiceAccount signing-key state"))
+             (unwind-protect (progn ,@body)
+               (cffi:foreign-funcall "flock" :int ,fd-var :int 8 :int))))))))
+
 (defun service-account-signing-key-from-record (record)
-  "Decode and validate the private key in parsed JSON RECORD."
-  (ironclad:make-private-key :secp256r1
-                             :x (hex-to-octets (gethash "d" record))
-                             :y (hex-to-octets (gethash "q" record))))
+  "Decode the active private key in legacy or version-two JSON RECORD."
+  (let* ((entry (if (gethash "keys" record)
+                    (find (gethash "activeKid" record) (gethash "keys" record)
+                          :key (lambda (candidate) (gethash "kid" candidate)) :test #'equal)
+                    record)))
+    (unless entry (error "ServiceAccount signing set has no active key"))
+    (if (gethash "keys" record)
+        (service-account-key-from-entry entry)
+        (ironclad:make-private-key :secp256r1
+                                   :x (hex-to-octets (gethash "d" entry))
+                                   :y (hex-to-octets (gethash "q" entry))))))
+
+(defun service-account-key-entry (key &key (latest-expiry 0))
+  "Encode private KEY and its latest issued token expiry as a durable set entry."
+  (let ((parts (ironclad:destructure-private-key key)))
+    (core-object "kid" (service-account-key-id key)
+                 "d" (octets-to-hex (getf parts :x))
+                 "q" (octets-to-hex (getf parts :y))
+                 "latestExpiry" latest-expiry)))
+
+(defun service-account-key-from-entry (entry)
+  "Decode and validate one private-key ENTRY."
+  (let ((key (ironclad:make-private-key :secp256r1
+                                         :x (hex-to-octets (gethash "d" entry))
+                                         :y (hex-to-octets (gethash "q" entry)))))
+    (unless (equal (gethash "kid" entry) (service-account-key-id key))
+      (error "ServiceAccount signing-key identifier does not match its public key"))
+    key))
+
+(defun make-service-account-signing-key-set (key &key (latest-expiry 0))
+  "Return the version-two one-key signing set for KEY."
+  (let ((entry (service-account-key-entry key :latest-expiry latest-expiry)))
+    (core-object "formatVersion" 2 "activeKid" (gethash "kid" entry)
+                 "keys" (vector entry))))
+
+(defun validate-service-account-signing-key-set (record)
+  "Validate and return version-two signing-set RECORD."
+  (unless (= 2 (gethash "formatVersion" record 0))
+    (error "unsupported ServiceAccount signing-key format"))
+  (let* ((entries (gethash "keys" record))
+         (active (gethash "activeKid" record))
+         (prepared (gethash "preparedKid" record))
+         (ids (and (vectorp entries)
+                   (loop for entry across entries
+                         collect (progn (service-account-key-from-entry entry)
+                                        (gethash "kid" entry))))))
+    (unless (and ids (= (length ids) (length (remove-duplicates ids :test #'equal)))
+                 (member active ids :test #'equal)
+                 (or (null prepared) (and (not (equal active prepared))
+                                          (member prepared ids :test #'equal))))
+      (error "invalid ServiceAccount signing-key set")))
+  record)
+
+(defun migrate-service-account-signing-key-record (record now)
+  "Convert a legacy single-key RECORD without shortening any possible token lifetime."
+  (make-service-account-signing-key-set
+   (service-account-signing-key-from-record record)
+   :latest-expiry (+ now +service-account-token-maximum-seconds+)))
+
+(defun write-service-account-signing-key-set (path record)
+  "Atomically persist validated signing-set RECORD at PATH."
+  (validate-service-account-signing-key-set record)
+  (ensure-directories-exist path)
+  (write-private-text-atomically path (com.inuoe.jzon:stringify record))
+  record)
+
+(defun read-service-account-signing-key-set (store &key (now (unix-time-now)))
+  "Read, create, or safely migrate STORE's durable signing set.
+The caller must hold STORE's credential lock."
+  (let* ((path (service-account-signing-key-path store))
+         (legacy (legacy-service-account-signing-key-path store)))
+    (unless (probe-file path)
+      (if (probe-file legacy)
+          (install-shared-service-account-signing-key
+           (merge-pathnames "pki/" (pod-store-path store)) (uiop:read-file-string legacy))
+          (write-service-account-signing-key-set
+           path (make-service-account-signing-key-set
+                 (ironclad:generate-key-pair :secp256r1)))))
+    (let ((record (com.inuoe.jzon:parse path)))
+      (if (gethash "keys" record)
+          (validate-service-account-signing-key-set record)
+          (write-service-account-signing-key-set
+           path (migrate-service-account-signing-key-record record now))))))
 
 (defun install-shared-service-account-signing-key (pki-root json)
   "Install the cluster ServiceAccount signing key beneath PKI-ROOT without replacing a different one."
   (let* ((path (service-account-signing-key-path-under-pki-root pki-root))
-         (incoming (service-account-signing-key-from-record (com.inuoe.jzon:parse json))))
+         (incoming-record (com.inuoe.jzon:parse json))
+         (incoming (service-account-signing-key-from-record incoming-record)))
+    (when (gethash "keys" incoming-record)
+      (validate-service-account-signing-key-set incoming-record))
     (when (probe-file path)
-      (let ((existing (service-account-signing-key-from-record (com.inuoe.jzon:parse path))))
+      (let* ((existing-record (com.inuoe.jzon:parse path))
+             (existing (service-account-signing-key-from-record existing-record)))
+        (when (gethash "keys" existing-record)
+          (validate-service-account-signing-key-set existing-record))
         (unless (equal (service-account-key-id existing) (service-account-key-id incoming))
           (pki-fail "service-account-signing-key-conflict"
                     "~A already has a different ServiceAccount signing key" pki-root))
@@ -63,31 +166,64 @@
     path))
 
 (defun load-service-account-signing-key (store)
-  "Return the cluster's signing key, generating and persisting it once."
-  (or (pod-store-service-account-signing-key store)
-      (bt:with-lock-held ((pod-store-credential-lock store))
-        (or (pod-store-service-account-signing-key store)
-            (let* ((path (service-account-signing-key-path store))
-                   (legacy (legacy-service-account-signing-key-path store))
-                   (key
-                     (cond
-                       ((probe-file path)
-                        (service-account-signing-key-from-record (com.inuoe.jzon:parse path)))
-                       ((probe-file legacy)
-                        (let ((json (uiop:read-file-string legacy)))
-                          (install-shared-service-account-signing-key
-                           (merge-pathnames "pki/" (pod-store-path store)) json)
-                          (service-account-signing-key-from-record (com.inuoe.jzon:parse json))))
-                       (t
-                        (let* ((private (ironclad:generate-key-pair :secp256r1))
-                               (parts (ironclad:destructure-private-key private)))
-                          (ensure-directories-exist path)
-                          (write-private-text-atomically
-                           path (com.inuoe.jzon:stringify
-                                 (core-object "d" (octets-to-hex (getf parts :x))
-                                              "q" (octets-to-hex (getf parts :y)))))
-                          private)))))
-              (setf (pod-store-service-account-signing-key store) key))))))
+  "Return the cluster's active signing key, creating or migrating its set once."
+  (with-service-account-signing-key-lock (store)
+    (let ((key (service-account-signing-key-from-record
+                (read-service-account-signing-key-set store))))
+      (setf (pod-store-service-account-signing-key store) key)
+      key)))
+
+(defun prepare-service-account-signing-key-rotation (store &key (now (unix-time-now)))
+  "Add and publish a prepared key without changing the active signer."
+  (with-service-account-signing-key-lock (store)
+    (let* ((path (service-account-signing-key-path store))
+           (record (read-service-account-signing-key-set store :now now))
+           (entries (gethash "keys" record)))
+      (when (gethash "preparedKid" record)
+        (error "ServiceAccount signing-key rotation is already prepared"))
+      (unless (= 1 (length entries))
+        (error "finalize the previous ServiceAccount signing-key rotation first"))
+      (let* ((entry (service-account-key-entry (ironclad:generate-key-pair :secp256r1)))
+             (kid (gethash "kid" entry)))
+        (setf (gethash "keys" record) (vector (aref entries 0) entry)
+              (gethash "preparedKid" record) kid)
+        (write-service-account-signing-key-set path record)
+        kid))))
+
+(defun promote-service-account-signing-key-rotation (store &key (now (unix-time-now)))
+  "Make the prepared key the sole signer while retaining every verification key."
+  (with-service-account-signing-key-lock (store)
+    (let* ((path (service-account-signing-key-path store))
+           (record (read-service-account-signing-key-set store :now now))
+           (prepared (gethash "preparedKid" record)))
+      (unless prepared (error "ServiceAccount signing-key rotation is not prepared"))
+      (setf (gethash "activeKid" record) prepared)
+      (remhash "preparedKid" record)
+      (write-service-account-signing-key-set path record)
+      (setf (pod-store-service-account-signing-key store)
+            (service-account-signing-key-from-record record))
+      prepared)))
+
+(defun finalize-service-account-signing-key-rotation (store &key (now (unix-time-now)))
+  "Remove inactive verification keys only after all of their issued tokens expire."
+  (with-service-account-signing-key-lock (store)
+    (let* ((path (service-account-signing-key-path store))
+           (record (read-service-account-signing-key-set store :now now))
+           (active (gethash "activeKid" record))
+           (inactive (remove active (coerce (gethash "keys" record) 'list)
+                             :key (lambda (entry) (gethash "kid" entry)) :test #'equal)))
+      (when (gethash "preparedKid" record)
+        (error "promote the prepared ServiceAccount signing key before finalizing"))
+      (unless inactive (error "ServiceAccount signing-key rotation has nothing to finalize"))
+      (let ((unsafe (find-if (lambda (entry) (> (gethash "latestExpiry" entry 0) now)) inactive)))
+        (when unsafe
+          (error "ServiceAccount signing key ~A must remain until Unix time ~D"
+                 (gethash "kid" unsafe) (gethash "latestExpiry" unsafe))))
+      (setf (gethash "keys" record)
+            (vector (find active (gethash "keys" record)
+                          :key (lambda (entry) (gethash "kid" entry)) :test #'equal)))
+      (write-service-account-signing-key-set path record)
+      active)))
 
 (defun service-account-public-point (key)
   "Return the uncompressed public point of signing KEY."
@@ -108,14 +244,27 @@
 
 (defun sign-service-account-claims (store claims)
   "Return the compact ES256 token carrying CLAIMS."
-  (let* ((key (load-service-account-signing-key store))
-         (signed (concatenate 'string
-                              (jwt-json-segment (core-object "alg" "ES256" "kid" (service-account-key-id key)))
-                              "."
-                              (jwt-json-segment claims))))
-    (concatenate 'string signed "."
-                 (base64url-encode
-                  (ironclad:sign-message key (ironclad:digest-sequence :sha256 (trivial-utf-8:string-to-utf-8-bytes signed)))))))
+  (with-service-account-signing-key-lock (store)
+    (let* ((path (service-account-signing-key-path store))
+           (record (read-service-account-signing-key-set store))
+           (active (gethash "activeKid" record))
+           (entry (find active (gethash "keys" record)
+                        :key (lambda (candidate) (gethash "kid" candidate)) :test #'equal))
+           (expiry (gethash "exp" claims))
+           (key (service-account-key-from-entry entry)))
+      ;; Persist the retirement gate before a token can escape this process.
+      (when (and (integerp expiry) (> expiry (gethash "latestExpiry" entry 0)))
+        (setf (gethash "latestExpiry" entry) expiry)
+        (write-service-account-signing-key-set path record))
+      (let ((signed (concatenate 'string
+                                 (jwt-json-segment (core-object "alg" "ES256" "kid" active))
+                                 "."
+                                 (jwt-json-segment claims))))
+        (concatenate 'string signed "."
+                     (base64url-encode
+                      (ironclad:sign-message
+                       key (ironclad:digest-sequence
+                            :sha256 (trivial-utf-8:string-to-utf-8-bytes signed)))))))))
 
 (defun mint-service-account-token (store account &key audiences (seconds +service-account-token-default-seconds+) binding node)
   "Mint a token for the stored ACCOUNT. BINDING is (kind name uid), NODE is (name uid) of its Pod's node.
@@ -157,22 +306,32 @@ Returns the token and its Unix expiry."
           claims))))
 
 (defun verify-service-account-jwt-signature (store token)
-  "Return TOKEN's claims when this cluster's key signed it, otherwise NIL."
+  "Return TOKEN's claims when a published cluster key signed it, otherwise NIL."
   (let ((parts (uiop:split-string token :separator '(#\.))))
     (when (= 3 (length parts))
-      (let* ((key (load-service-account-signing-key store))
-             (header (base64url-decode (first parts)))
+      (let* ((header (base64url-decode (first parts)))
              (payload (base64url-decode (second parts)))
              (signature (base64url-decode (third parts)))
              (signed (concatenate 'string (first parts) "." (second parts))))
         (when (and header payload signature (= 64 (length signature)))
           (let ((header-object (ignore-errors (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string header)))))
-            (when (and (hash-table-p header-object) (equal "ES256" (gethash "alg" header-object))
-                       (ironclad:verify-signature
-                        (ironclad:make-public-key :secp256r1 :y (service-account-public-point key))
-                        (ironclad:digest-sequence :sha256 (trivial-utf-8:string-to-utf-8-bytes signed))
-                        (coerce signature '(simple-array (unsigned-byte 8) (*)))))
-              (ignore-errors (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string payload))))))))))
+            (when (and (hash-table-p header-object) (equal "ES256" (gethash "alg" header-object)))
+              (let* ((kid (gethash "kid" header-object))
+                     (entry
+                       (bt:with-lock-held ((pod-store-credential-lock store))
+                         (find kid (gethash "keys" (read-service-account-signing-key-set store))
+                               :key (lambda (candidate) (gethash "kid" candidate)) :test #'equal))))
+                (when (and entry
+                           (ironclad:verify-signature
+                            (ironclad:make-public-key
+                             :secp256r1 :y (service-account-public-point
+                                            (service-account-key-from-entry entry)))
+                            (ironclad:digest-sequence
+                             :sha256 (trivial-utf-8:string-to-utf-8-bytes signed))
+                            (coerce signature '(simple-array (unsigned-byte 8) (*)))))
+                  (ignore-errors
+                   (com.inuoe.jzon:parse
+                    (trivial-utf-8:utf-8-bytes-to-string payload))))))))))))
 
 (defun service-account-claims-bound-live-p (store namespace kubernetes)
   "Check any Pod or Secret the claims name is still the same live object."
@@ -234,16 +393,27 @@ Returns the identity and the audiences it is valid for, intersected with REQUIRE
                               "subject_types_supported" #("public")
                               "id_token_signing_alg_values_supported" #("ES256"))))
 
+(defun service-account-jwks-object (store)
+  "Return every verification JWK in stable key-id order."
+  (let ((entries
+          (bt:with-lock-held ((pod-store-credential-lock store))
+            (sort (copy-list (coerce (gethash "keys" (read-service-account-signing-key-set store)) 'list))
+                  #'string< :key (lambda (entry) (gethash "kid" entry))))))
+    (core-object
+     "keys"
+     (coerce
+      (loop for entry in entries
+            for key = (service-account-key-from-entry entry)
+            for point = (service-account-public-point key)
+            collect (core-object "use" "sig" "kty" "EC" "crv" "P-256" "alg" "ES256"
+                                 "kid" (gethash "kid" entry)
+                                 "x" (base64url-encode (subseq point 1 33))
+                                 "y" (base64url-encode (subseq point 33 65))))
+      'vector))))
+
 (defun openid-jwks-response (store)
-  "Serve the public signing key as a JSON Web Key Set."
-  (let* ((key (load-service-account-signing-key store))
-         (point (service-account-public-point key))
-         (response (json-response
-                    (core-object "keys"
-                                 (vector (core-object "use" "sig" "kty" "EC" "crv" "P-256" "alg" "ES256"
-                                                      "kid" (service-account-key-id key)
-                                                      "x" (base64url-encode (subseq point 1 33))
-                                                      "y" (base64url-encode (subseq point 33 65))))))))
+  "Serve all retained public signing keys as a JSON Web Key Set."
+  (let ((response (json-response (service-account-jwks-object store))))
     (setf (hunchentoot:content-type*) "application/jwk-set+json")
     response))
 

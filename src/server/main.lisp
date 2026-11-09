@@ -1615,6 +1615,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
   (format t "  wireguard rotate-key   Replace this node's WireGuard identity on its next start~%")
   (format t "  network explain NODE PEER   Explain an agent's selected WireGuard path~%")
   (format t "  certificate status     Inventory local certificates and expiry warnings~%")
+  (format t "  certificate service-account-key <prepare|promote|finalize>   Rotate the token signer safely~%")
   (format t "  version      Print the gr8s version~%")
   (format t "  notices      Print third-party copyright and license notices~%~%")
   (format t "serve options:~%")
@@ -1716,6 +1717,10 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                (print-network-explanation options))
               (:certificate-status
                (run-certificate-status options))
+              ((:certificate-service-account-key-prepare
+                :certificate-service-account-key-promote
+                :certificate-service-account-key-finalize)
+               (run-service-account-signing-key-rotation options))
               (:doctor
                (if (plusp (apply #'run-doctor
                                  (append
