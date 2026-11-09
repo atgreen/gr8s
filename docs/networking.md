@@ -87,13 +87,33 @@ reverse translation restores the Service source address. Missing continuation
 programs drop traffic and fail CNI CHECK. The continuation table is pinned with
 the endpoint, and Service map pins survive clean agent shutdown.
 
-This remains disabled by default. Kernel packet tests cover translation, policy
-ordering and program lifetime; they do not establish live guest or cross-node
-support. Flow garbage collection, restart reconciliation, source NAT/hairpin,
+This remains disabled by default. A real Kata guest has reached a same-node
+native backend through IPv4 TCP and UDP ClusterIP translation, with TC request
+and reply counters and guest source-IP preservation verified. See
+[the guest validation evidence](service-guest-validation-2026-11-09.json).
+Cross-node guest traffic remains unverified. Kernel packet tests additionally
+cover policy ordering and program lifetime. Flow garbage collection, restart reconciliation, source NAT/hairpin,
 return-tuple collision resolution, IPv6 packet translation and external Service
 replacement remain in development. Hairpin and conflicting return tuples
 currently drop safely. See [the engine validation scope](service-packet-engine-validation-2026-11-09.json)
 and [the guard integration evidence](service-packet-guard-validation-2026-11-09.json).
+
+To repeat the guest test in a disposable root VM with nested KVM, copy
+`scripts/test-service-guest.py` and `scripts/test-service-traffic.py` together,
+then run:
+
+```sh
+python3 test-service-guest.py --gr8s /root/gr8s \
+  --kata-bundle /root/kata-static-4.3.1-amd64.tar.zst \
+  --kata-sha256 VERIFIED_BUNDLE_SHA256 --report-directory /var/tmp/guest-evidence
+```
+
+The runner installs the checksum-pinned addon, enables experimental TC Services,
+and requires a distinct guest kernel, an owned QEMU process, and translation
+counters in both directions. Its test-only Kata configuration allows 120 seconds
+for agent connection on slow nested machines and enables diagnostics. `--ctr`
+can select an existing containerd `ctr` binary to preload the test image directly
+when testing independently of the image mirror.
 
 `NodePort` and `LoadBalancer` Services allocate node ports from 30000–32767. The
 agent relays each in userspace, for TCP and UDP, with client-address affinity, so
