@@ -277,7 +277,7 @@ class Interpreter:
 
 class Kernel:
     """Load both programs into Linux and run them with BPF_PROG_TEST_RUN."""
-    def __init__(self, programs, ids, descriptors):
+    def __init__(self, programs, ids, descriptors, program_types=None):
         self.fds = []
         self.libc = ctypes.CDLL(None, use_errno=True)
         self.syscall_number = {'x86_64': 321, 'aarch64': 280}[platform.machine()]
@@ -299,9 +299,12 @@ class Kernel:
                 instructions = ctypes.create_string_buffer(bytes(code))
                 license = ctypes.create_string_buffer(b'GPL')
                 log = ctypes.create_string_buffer(1024 * 1024)
-                attr = struct.pack('<IIQQIIQ', 3, len(code) // 8,
+                program_type, attach_type = (program_types or {}).get(program, (3, None))
+                attr = struct.pack('<IIQQIIQ', program_type, len(code) // 8,
                                    ctypes.addressof(instructions), ctypes.addressof(license),
                                    1, len(log), ctypes.addressof(log))
+                if attach_type is not None:
+                    attr += bytes(28) + struct.pack('<I', attach_type)
                 try:
                     fd = self.bpf(5, attr)
                 except OSError as error:
