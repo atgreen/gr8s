@@ -140,7 +140,7 @@
     (when (and (gethash "name" metadata) (not (equal name (gethash "name" metadata))))
       (core-resource-error 400 "BadRequest" "metadata.name does not match request name"))
     (when (and (stringp expected) (plusp (length expected))
-               (not (pod-revision-satisfied-p store expected (pod-resource-version pod))))
+               (not (gr8s.store::pod-client-revision-satisfied-p store expected (pod-resource-version pod))))
       (core-resource-error 409 "Conflict" "Pod resourceVersion has changed"))
     (let ((replacement (parse-pod (pod-resize-merged-object pod input))))
       (validate-pod-resize pod replacement)

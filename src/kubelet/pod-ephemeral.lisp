@@ -89,7 +89,7 @@
     (when (and (gethash "uid" metadata) (not (equal (gethash "uid" metadata) (pod-uid pod))))
       (core-resource-error 409 "Conflict" "UID precondition does not match"))
     (when (and (stringp expected) (plusp (length expected))
-               (not (pod-revision-satisfied-p store expected (pod-resource-version pod))))
+               (not (gr8s.store::pod-client-revision-satisfied-p store expected (pod-resource-version pod))))
       (core-resource-error 409 "Conflict" "Pod resourceVersion has changed"))
     (let* ((object (copy-json-object (pod-to-object pod)))
            (requested (gethash "ephemeralContainers" (require-object (gethash "spec" input) "spec") #())))

@@ -586,7 +586,7 @@ renewals use the same compact one-key delta without changing resourceVersion."
         (loop for change across changes
               for current = (or (node-replicated-object
                                  (gethash (gethash "name" change) (pod-store-nodes store))) 'null)
-              unless (or (json-value-equal-p current (gethash "expected" change))
+              unless (or (node-object-same-state-p current (gethash "expected" change))
                          (node-object-same-state-p current (gethash "object" change)))
                 do (return-from install-node-state-delta (list :node-conflict))))
       (loop for change across changes
@@ -636,6 +636,12 @@ renewals use the same compact one-key delta without changing resourceVersion."
     (load-pod-status-state store)
     (load-pod-revision store)
     (load-consensus-pod-revision store)
+    (let ((boundary (merge-pathnames "metadata/snapshot-boundary.json" (store-data-path store))))
+      (when (store-generation-stat boundary)
+        (let ((floor (gethash "podEpochFloor" (read-private-generation-json boundary) 0)))
+          (unless (typep floor `(integer 0 ,(pod-store-pod-revision store)))
+            (error "Invalid restored Pod revision epoch"))
+          (setf (pod-store-pod-revision-epoch-floor store) floor))))
     (load-pod-publications store)
   store)
 

@@ -431,9 +431,11 @@ if writes overtake a staged generation, rematerialize it with fresh minima.
 With a resource minimum, materialization gives every resource the new boundary
 revision and discards pre-restore history. Its history floors advance to that
 boundary so old watches and signed continuation pages expire instead of reading
-a different state under an old revision. With a Pod minimum, Pods, Nodes and Pod
-publications receive the new local boundary; matching observation revisions are
-translated with the desired Pod revision. The original artifact and its digest
+a different state under an old revision. With a Pod minimum, Nodes and Pod
+publications receive the new local boundary. Pod desired and observation revisions
+remain unchanged because replicated delta preconditions and agent acknowledgments
+use them across members. A durable local Pod epoch rejects pre-restore client
+versions while allowing newly published versions. The original artifact and its digest
 remain unchanged. Transformation happens one validated record at a time.
 
 A private `metadata/snapshot-boundary.json` records the materialized clocks and

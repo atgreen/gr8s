@@ -135,13 +135,10 @@ validated marker visible. This function never writes the live selector."
                         (merge-pathnames (format nil "nodes/~A.json" (gethash "id" object)) path) object))
                       ((equal kind "pod")
                        (when minimum-pod-revision
-                         (let* ((metadata (gethash "metadata" object)) (old (gethash "resourceVersion" metadata))
-                                (new (write-to-string (gethash "podRevision" target-clocks)))
-                                (checkpoint (gethash "checkpoint" record)))
-                           (setf (gethash "resourceVersion" metadata) new
-                                 (gethash "resourceVersion" (gethash "publication" record)) new)
-                           (when (equal old (gethash "observedResourceVersion" checkpoint))
-                             (setf (gethash "observedResourceVersion" checkpoint) new))))
+                         ;; Desired/observation revisions are shared Raft CAS
+                         ;; identities. Rebase only the member's API publication.
+                         (setf (gethash "resourceVersion" (gethash "publication" record))
+                               (write-to-string (gethash "podRevision" target-clocks))))
                        (let* ((pod (gr8s.store::store-parse-pod object)) (uid (pod-uid pod))
                               (publication (gethash "publication" record)))
                          (write-snapshot-generation-json (merge-pathnames (format nil "~A.json" uid) path) object)
@@ -189,7 +186,10 @@ validated marker visible. This function never writes the live selector."
            (write-snapshot-generation-json
             (merge-pathnames "metadata/snapshot-boundary.json" path)
             (core-object "version" 1 "index" (gethash "index" header) "term" (gethash "term" header)
-                         "resourceRevision" (gethash "resourceRevision" clocks) "podRevision" (gethash "podRevision" clocks)))
+                         "resourceRevision" (gethash "resourceRevision" clocks) "podRevision" (gethash "podRevision" clocks)
+                         "resourceEpochFloor" (gethash "resourceHistoryStart" clocks)
+                         "podEpochFloor" (if minimum-pod-revision (gethash "podRevision" clocks)
+                                             (gethash "podEpochFloor" clocks 0))))
            (dolist (field fields) (delete-file (merge-pathnames (format nil "staging-~A.part" field) path)))
            (delete-file artifact)
            (dolist (directory '("objects/" "nodes/" "observations/" "publications/" "metadata/" "image-tracker/" ""))

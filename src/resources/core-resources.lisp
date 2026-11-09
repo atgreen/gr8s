@@ -667,8 +667,11 @@ unrelated keys already present in STORE are never replaced by a stale author."
             for object = (gethash "object" change)
             do (if (eq object 'null)
                    (remhash key resources)
-                   (setf (gethash key resources)
-                         (decrypt-secret-object store (first key) object))))
+                   (let ((object (decrypt-secret-object store (first key) object)))
+                     ;; Revisions, including post-restore epochs, are local to
+                     ;; this member; the next delta must not move one backwards.
+                     (setf (gethash "resourceVersion" (gethash "metadata" object)) (write-to-string revision)
+                           (gethash key resources) object))))
       (when (gethash "workloadDeletions" delta)
         (setf workload-deletions
               (apply-core-map-delta workload-deletions

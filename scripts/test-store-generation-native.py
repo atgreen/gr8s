@@ -36,6 +36,8 @@ def main():
     parser.add_argument("--keep", action="store_true")
     parser.add_argument("--pending-restore", action="store_true",
                         help="Seed a restore intent instead of an active selector")
+    parser.add_argument("--revision-epoch", action="store_true",
+                        help="Seed a restored API revision epoch while preserving canonical Pod revisions")
     args = parser.parse_args()
     evidence = Path(tempfile.mkdtemp(prefix="gr8s-generation-native-"))
     state = evidence / "state"
@@ -64,7 +66,12 @@ def main():
                                                    uid=published_uid, resourceVersion="3"),
         spec=dict(nodeName="external-worker", containers=[dict(name="main", image="busybox")])))
     # Materialized generations carry this clock even when reopened standalone.
-    private_json(generation / "metadata" / "consensus-pod-revision.txt", 3)
+    epoch = 10000 if args.revision_epoch else 0
+    private_json(generation / "metadata" / "consensus-pod-revision.txt", epoch or 3)
+    if epoch:
+        private_json(generation / "metadata" / "snapshot-boundary.json", dict(
+            version=1, index=42, term=7, resourceRevision=1, resourceEpochFloor=1,
+            podRevision=epoch, podEpochFloor=epoch))
     legacy_uid = "33333333-3333-4333-8333-333333333333"
     private_json(state / (legacy_uid + ".json"), dict(
         apiVersion="v1", kind="Pod", metadata=dict(name="legacy-pod", namespace="default",
@@ -114,6 +121,18 @@ def main():
                 except urllib.error.HTTPError as error:
                     assert error.code == 404
                 published = request("/api/v1/namespaces/default/pods/published-pod")
+                if epoch:
+                    assert int(published["metadata"]["resourceVersion"]) >= epoch
+                    stale = json.loads(json.dumps(published))
+                    stale["metadata"]["resourceVersion"] = "3"
+                    req = urllib.request.Request(
+                        f"http://127.0.0.1:{api_port}/api/v1/namespaces/default/pods/published-pod",
+                        data=json.dumps(stale).encode(), method="PUT", headers={"Content-Type": "application/json"})
+                    try:
+                        urllib.request.urlopen(req, timeout=5).close()
+                        raise AssertionError("native API accepted a pre-restore Pod version")
+                    except urllib.error.HTTPError as error:
+                        assert error.code == 409
                 committed_clock = int((generation / "metadata" / "consensus-pod-revision.txt").read_text())
                 assert committed_clock >= int(published["metadata"]["resourceVersion"]), "committed Pod clock lags publication"
                 if cycle == 0:
@@ -141,6 +160,7 @@ def main():
                       pendingRestoreRecovered=args.pending_restore,
                       applicationWriteSurvivesRestart=True, podPublicationSurvivesRestart=True,
                       committedPodClockSurvivesRestart=True,
+                      podRevisionEpochEnforced=args.revision_epoch,
                       memberPrivateFilePreserved=True,
                       gracefulShutdown=True)
     except Exception as error:

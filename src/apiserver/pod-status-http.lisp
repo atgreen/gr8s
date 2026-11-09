@@ -185,7 +185,7 @@ or NIL when it is already current."
     (when (and (gethash "uid" metadata) (not (equal (gethash "uid" metadata) (pod-uid pod))))
       (core-resource-error 409 "Conflict" "UID precondition does not match"))
     (when (and (stringp expected) (plusp (length expected))
-               (not (pod-revision-satisfied-p store expected (pod-resource-version pod))))
+               (not (gr8s.store::pod-client-revision-satisfied-p store expected (pod-resource-version pod))))
       (core-resource-error 409 "Conflict" "Pod resourceVersion has changed"))
     (loop for condition across (gethash "conditions" status #())
           do (unless (and (hash-table-p condition) (stringp (gethash "type" condition))

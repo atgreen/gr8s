@@ -12,7 +12,7 @@
     pod-store-workload-deletions pod-store-job-controller-states
     pod-store-pod-finalization-states pod-store-pod-observed-phases pod-store-pod-observed-statuses
     pod-store-pod-observed-resource-versions pod-store-pod-condition-histories
-    pod-store-consensus-pod-revision pod-store-pod-revision pod-store-pod-revision-ceiling
+    pod-store-consensus-pod-revision pod-store-pod-revision pod-store-pod-revision-ceiling pod-store-pod-revision-epoch-floor
     pod-store-pod-watch-floor pod-store-pod-watch-journal pod-store-pod-watch-journal-length
     pod-store-pod-watch-journal-bytes pod-store-pod-watch-views
     pod-store-node-watch-floor pod-store-node-watch-journal pod-store-node-watch-journal-length pod-store-node-watch-journal-bytes
@@ -45,18 +45,20 @@
   (let* ((path (store-generation-root (pod-store-path store) id))
          (boundary (progn (check-store-generation-directory (merge-pathnames "metadata/" path))
                           (read-private-generation-json (merge-pathnames "metadata/snapshot-boundary.json" path)))))
-    (unless (and (hash-table-p boundary) (= 5 (hash-table-count boundary))
+    (unless (and (hash-table-p boundary) (= 7 (hash-table-count boundary))
                  (eql 1 (gethash "version" boundary))
                  (eql (gethash "index" descriptor) (gethash "index" boundary))
                  (eql (gethash "term" descriptor) (gethash "term" boundary))
                  (typep (gethash "resourceRevision" boundary) '(unsigned-byte 64))
-                 (typep (gethash "podRevision" boundary) '(unsigned-byte 64)))
+                 (typep (gethash "resourceEpochFloor" boundary) `(integer 0 ,(gethash "resourceRevision" boundary)))
+                 (typep (gethash "podRevision" boundary) '(unsigned-byte 64))
+                 (typep (gethash "podEpochFloor" boundary) `(integer 0 ,(gethash "podRevision" boundary))))
       (error "Invalid materialized snapshot revision boundary"))
     ;; A failed load may already have installed these exact clocks. Retry the
     ;; pending generation without demanding another revision bump.
     (unless (and (not (pod-store-application-loaded-p store)) (equal path (store-data-path store)))
-      (unless (and (> (gethash "resourceRevision" boundary) (pod-store-resource-revision store))
-                   (> (gethash "podRevision" boundary) (max (pod-store-pod-revision store)
+      (unless (and (> (gethash "resourceEpochFloor" boundary) (pod-store-resource-revision store))
+                   (> (gethash "podEpochFloor" boundary) (max (pod-store-pod-revision store)
                                                            (pod-store-pod-revision-ceiling store))))
         (error "Snapshot generation must be rematerialized above the member's revision clocks")))
     boundary))
@@ -102,6 +104,8 @@ It runs under the barriers and must not reenter public store operations."
                  (sb-ext:gc :full t)
                  (load-store-application-files store))
                (unless (and (= (pod-store-resource-revision store) (gethash "resourceRevision" boundary))
+                            (>= (pod-store-template-history-floor store) (gethash "resourceEpochFloor" boundary))
+                            (= (pod-store-pod-revision-epoch-floor store) (gethash "podEpochFloor" boundary))
                             (>= (pod-store-pod-revision store) (gethash "podRevision" boundary)))
                  (error "Loaded application clocks disagree with staged snapshot boundary"))
                (when commit-recovery (funcall commit-recovery descriptor store))
