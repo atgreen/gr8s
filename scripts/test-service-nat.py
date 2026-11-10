@@ -18,7 +18,8 @@ import struct
 spec = importlib.util.spec_from_file_location("packet_test", Path(__file__).with_name("test-service-packet-program.py"))
 packet = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(packet)
-NAMES = ("gr8s_nat_select", "gr8s_nat_commit", "gr8s_nat_prepare", "gr8s_nat_restore", "gr8s_nat_generation")
+NAMES = ("gr8s_nat_select", "gr8s_nat_commit", "gr8s_nat_prepare", "gr8s_nat_restore",
+         "gr8s_nat_generation", "gr8s_nat_gc")
 FWD, REV, IDENT = "gr8s_nat_fwd_v2", "gr8s_nat_rev_v2", "gr8s_nat_id_v2"
 CLIENT, ALIAS, BACKEND, BACK_ALIAS = packet.CLIENT, "10.88.0.9", packet.BACKEND, "10.88.1.9"
 ZERO = bytes(20)
