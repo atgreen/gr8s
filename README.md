@@ -42,6 +42,24 @@ Run `gr8s skill` for built-in operator and AI agent guidance, including first-re
 checks, live Slynk inspection, and selector-scoped kernel tracing. It works offline
 and can be saved with `gr8s skill > gr8s-guide.md`.
 
+## How is gr8s different from k3s?
+
+Both provide a Kubernetes-compatible cluster that you can operate with
+`kubectl`. k3s is a packaged Kubernetes distribution built from upstream
+components and familiar ecosystem add-ons. gr8s is an independent
+implementation: one native Common Lisp executable runs the API, controllers,
+scheduler, node agent, and embedded runtime. It uses its own Raft datastore and
+an eBPF dataplane rather than assembling the usual separate control-plane and
+networking components.
+
+That architecture gives gr8s an integrated system to explore and develop,
+with features such as live Lisp inspection and a directly compiled eBPF
+dataplane. It also means its compatibility and operational behavior differ from
+k3s. gr8s is experimental and has not passed Kubernetes conformance; it does
+not yet provide every k3s add-on or operational workflow. Check the
+[compatibility gaps](docs/k3s-gap-inventory.md), [API coverage](docs/kubernetes-surface.md),
+and [conformance results](docs/CONFORMANCE.md) before choosing it for a workload.
+
 ## Getting started
 
 Build gr8s on Linux with **SBCL** and the project's ASDF dependencies. To run a
