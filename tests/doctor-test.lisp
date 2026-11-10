@@ -51,6 +51,48 @@
   (flet ((absent (argv) (declare (ignore argv)) (values "" nil)))
     (is (null (nth-value 0 (gr8s::doctor-firewall-state :runner #'absent))))))
 
+(test doctor-classifies-live-stale-and-absent-kubelet-endpoints
+  (with-temporary-store (store path)
+    (declare (ignore store))
+    (let* ((live (merge-pathnames "live.sock" path))
+           (stale (merge-pathnames "stale.sock" path))
+           (listener (make-instance 'sb-bsd-sockets:local-socket :type :stream :protocol 0)))
+      (unwind-protect
+           (progn
+             (sb-bsd-sockets:socket-bind listener (namestring live))
+             (sb-bsd-sockets:socket-listen listener 1)
+             (is (eq :active (gr8s::kubelet-endpoint-status live)))
+             (sb-bsd-sockets:socket-close listener)
+             (rename-file live stale)
+             (is (eq :stale (gr8s::kubelet-endpoint-status stale)))
+             (is (eq :absent (gr8s::kubelet-endpoint-status live))))
+        (ignore-errors (sb-bsd-sockets:socket-close listener))))))
+
+(test doctor-fails-on-a-live-kubelet-endpoint-with-actionable-output
+  (let ((output
+          (with-output-to-string (*standard-output*)
+            (is (= 1 (gr8s::doctor-check-kubelet-endpoints
+                      (lambda (path)
+                        (if (search "device-plugins" (namestring path))
+                            :active
+                            :absent))))))))
+    (is (search "/var/lib/kubelet/device-plugins/kubelet.sock" output))
+    (is (search "another kubelet is listening" output))
+    (is (search "systemctl stop k3s" output))))
+
+(test managed-node-preflight-refuses-a-live-kubelet-without-a-backtrace
+  (let ((condition
+          (handler-case
+              (gr8s::ensure-kubelet-endpoints-available
+               :probe (lambda (path)
+                        (declare (ignore path))
+                        :active)
+               :command "serve")
+            (gr8s.runtime:runtime-error (error) error))))
+    (is (typep condition 'gr8s.runtime:runtime-error))
+    (is (search "another kubelet is listening" (princ-to-string condition)))
+    (is (search "gr8s serve --disable-agent" (princ-to-string condition)))))
+
 (test doctor-run-returns-fail-count-with-injected-firewall
   ;; A smoke of the orchestrator: with a firewall that blocks DNS it still only
   ;; warns (no FAILs) on a sane host; the return value is the FAIL count.

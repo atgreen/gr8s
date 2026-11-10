@@ -31,6 +31,7 @@
    #:make-pod-parser-policy
    #:node-record
    #:node-record-annotations
+   #:node-record-certificate-issuer-fingerprint
    #:node-record-api-only
    #:node-record-api-status
    #:node-record-capacity

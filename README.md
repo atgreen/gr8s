@@ -51,6 +51,11 @@ working cgroups. Install **`kubectl`** to use the Kubernetes API. See the
 [runtime payload details](docs/runtime.md#the-self-contained-payload) for the
 full setup. Start with a disposable Linux VM.
 
+Like k3s and k0s, `gr8s serve` exposes one authenticated HTTPS Kubernetes API.
+It listens on `0.0.0.0:6443` by default; there is no separate unauthenticated
+localhost HTTP API. The generated owner-only kubeconfig embeds the cluster CA
+and an administrative client certificate.
+
 From the repository root:
 
 ```sh

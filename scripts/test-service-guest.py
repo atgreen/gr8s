@@ -122,6 +122,71 @@ def write_pinned_values(path, entries, value_size):
         os.close(fd)
 
 
+def delete_pinned_keys(path, keys):
+    """Delete keys from a disposable VM's pinned map after checking its key size."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    number = {"x86_64": 321, "aarch64": 280}[platform.machine()]
+
+    def bpf(command, attr):
+        buffer = ctypes.create_string_buffer(attr)
+        result = libc.syscall(number, command, ctypes.byref(buffer), len(attr))
+        if result < 0:
+            raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))
+        return result
+
+    name = ctypes.create_string_buffer(os.fsencode(path))
+    fd = bpf(7, struct.pack("<QII", ctypes.addressof(name), 0, 0))
+    try:
+        info = ctypes.create_string_buffer(256)
+        bpf(15, struct.pack("<IIQ", fd, 256, ctypes.addressof(info)))
+        key_size = struct.unpack_from("<I", info.raw, 8)[0]
+        if any(len(key) != key_size for key in keys):
+            raise ValueError("pinned map schema does not match delete keys")
+        for encoded in keys:
+            key = ctypes.create_string_buffer(encoded)
+            bpf(3, struct.pack("<IIQ", fd, 0, ctypes.addressof(key)))
+    finally:
+        os.close(fd)
+
+
+def list_pinned_keys(path):
+    """Return the current keys of a pinned map for disposable VM diagnostics."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    number = {"x86_64": 321, "aarch64": 280}[platform.machine()]
+
+    def bpf(command, attr):
+        buffer = ctypes.create_string_buffer(attr)
+        result = libc.syscall(number, command, ctypes.byref(buffer), len(attr))
+        if result < 0:
+            raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))
+        return result
+
+    name = ctypes.create_string_buffer(os.fsencode(path))
+    fd = bpf(7, struct.pack("<QII", ctypes.addressof(name), 0, 0))
+    try:
+        info = ctypes.create_string_buffer(256)
+        bpf(15, struct.pack("<IIQ", fd, 256, ctypes.addressof(info)))
+        key_size, max_entries = struct.unpack_from("<II", info.raw, 8)[0], struct.unpack_from("<I", info.raw, 16)[0]
+        keys = []
+        previous = None
+        for _ in range(max_entries + 1):
+            next_key = ctypes.create_string_buffer(key_size)
+            attr = struct.pack("<IIQQ", fd, 0,
+                               ctypes.addressof(previous) if previous is not None else 0,
+                               ctypes.addressof(next_key))
+            try:
+                bpf(4, attr)
+            except OSError as error:
+                if error.errno == errno.ENOENT:
+                    return keys
+                raise
+            keys.append(next_key.raw)
+            previous = ctypes.create_string_buffer(next_key.raw)
+        raise RuntimeError("pinned map key enumeration did not terminate")
+    finally:
+        os.close(fd)
+
+
 def read_packet_counters(path):
     return [struct.unpack("<Q", value)[0] for value in
             read_pinned_values(path, [struct.pack("<I", index) for index in range(7)], 8)]

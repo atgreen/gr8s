@@ -426,11 +426,15 @@ receiving-node installation/readiness gating remain in progress.
 
 A separate ABI-v2 packet component registers direct and Service tuples, reserves
 return ownership, and uses private source addresses and ports for hairpin or
-colliding connections. Its four stages put translation around egress and ingress
+colliding connections. Its stages put translation around egress and ingress
 policy boundaries. Source and backend incarnation checks prevent tuple reuse by
-a replacement endpoint. It is not installed by the node agent yet: retained-map/program validation,
-alias-aware policy, retained-flow migration and receiver installation
-acknowledgments must be integrated before activation.
+a replacement endpoint. Native routed CNI can attach the graph for an explicitly
+opted-in v2 endpoint after the local risk inventory and exact owner pair are
+published. The native build embeds the graph, and CNI validates shared map
+schemas before attachment. After both TCX guards attach, CNI marks the exact
+local owner pair receiver-ready; DEL disables that pair before removing links.
+Cluster-wide receiver proof, retained-flow migration, and Service traffic
+activation remain in progress.
 `make test-service-nat` runs its synthetic packet interpreter tests. The same
 fixture passed 42 packet cases and seven capacity/contention cases using real
 BPF programs in a disposable VM; see

@@ -84,7 +84,7 @@
         (gr8s::cni-policy-map-info 42 "endpoint_identity" :profile :v2
                                    :object-info (lambda (fd) (declare (ignore fd)) info))))))
 
-(test cni-v2-attachment-waits-for-local-identity-and-publication-fence
+(test cni-v2-attachment-requires-trusted-native-owner-before-map-access
   (let ((object (com.inuoe.jzon:parse *valid-cni-config*))
         (mutations nil))
     (setf (gethash "servicePacketRoot" object) "/pins/service-lb/"
@@ -95,7 +95,24 @@
        (gr8s::make-cni-context) "/pins/rejected_spoofs" "/pins/tcx-ingress"
        :ensure-directory (lambda (&rest ignored) (declare (ignore ignored)) (push :ensure mutations))
        :open-pinned (lambda (&rest ignored) (declare (ignore ignored)) (push :open mutations))))
-    (is (null mutations))))
+    (is (null mutations))
+    (let ((configuration (gr8s::parse-cni-configuration
+                          (com.inuoe.jzon:stringify object))))
+      (setf (gr8s::cni-configuration-service-node-id configuration) "node-1"
+            (gr8s::cni-configuration-service-return-address configuration) "10.88.0.9"
+            (gr8s::cni-configuration-endpoint-addresses configuration) '("10.88.0.2"))
+      (signals error
+        (gr8s::install-cni-policy
+         configuration (gr8s::make-cni-context)
+         "/pins/rejected_spoofs" "/pins/tcx-ingress"
+         :ensure-directory (lambda (&rest ignored)
+                             (declare (ignore ignored)) (push :ensure mutations))
+         :check-owner (lambda (&rest ignored)
+                        (declare (ignore ignored)) (push :owner mutations))
+         :open-pinned (lambda (&rest ignored)
+                        (declare (ignore ignored)) (push :open mutations)
+                        (error "shared map absent"))))
+      (is (equal '(:owner :ensure :open) (reverse mutations))))))
 
 (test cni-v2-stage-publication-requires-all-eight-programs
   (let* ((object (gr8s::%make-egress-policy-object nil nil))

@@ -149,12 +149,11 @@
 (defun parse-serve-options (arguments)
   "Parse `gr8s serve' ARGUMENTS into an options plist on top of the serve
    defaults. Signals on an unknown option, a missing option value, or an out-of-
-   range value, and -- because gr8s v1 serves only on loopback -- unless --listen
-   is 127.0.0.1."
+   range value."
   (let ((options (list :command :serve
                        :state-directory (namestring (default-state-directory))
-                       :listen "127.0.0.1"
-                       :port 8080
+                       :listen "0.0.0.0"
+                       :port 6443
                        :node-port 7443
                        :node-listen "127.0.0.1"
                        :node-address nil
@@ -334,8 +333,6 @@
                       (setf (getf options :local-storage-path) value))
                      (t (error "unknown serve option: ~A" option)))
                    (setf arguments (cddr arguments)))))
-    (unless (string= "127.0.0.1" (getf options :listen))
-      (error "gr8s v1 only listens on 127.0.0.1"))
     (unless (eq (null (getf options :image-credential-provider-config))
                 (null (getf options :image-credential-provider-bin-dir)))
       (error "image credential provider config and bin directory must be specified together"))
@@ -580,7 +577,8 @@
    --server URL). Signals on an unknown option."
   (let ((options (list :command :kubeconfig
                        :output nil
-                       :server "http://127.0.0.1:8080")))
+                       :server "https://127.0.0.1:6443"
+                       :state-directory (namestring (default-state-directory)))))
     (loop while arguments
           for option = (first arguments)
           for value = (option-value arguments option)
@@ -589,6 +587,8 @@
                 (setf (getf options :output) value))
                ((string= option "--server")
                 (setf (getf options :server) value))
+               ((string= option "--state-directory")
+                (setf (getf options :state-directory) value))
                (t (error "unknown kubeconfig option: ~A" option)))
              (setf arguments (cddr arguments)))
     options))
@@ -1217,27 +1217,62 @@ The new identity takes effect when the node agent next starts."
       (t (error "unknown runtime subcommand: ~A (use install or list)"
                 (or subcommand "<none>"))))))
 
-(defun print-kubeconfig (stream server-url)
-  "Write a minimal gr8s kubeconfig -- one cluster, context and anonymous user
-   pointing at SERVER-URL -- to STREAM."
-  (format stream
-          "apiVersion: v1~%kind: Config~%clusters:~%  - name: gr8s~%    cluster:~%      server: ~A~%contexts:~%  - name: gr8s~%    context:~%      cluster: gr8s~%      namespace: default~%      user: gr8s~%current-context: gr8s~%users:~%  - name: gr8s~%    user: {}~%"
-          server-url))
+(defun kubeconfig-ca-data (ca-certificate ca-certificates)
+  (let ((octets
+          (if ca-certificates
+              (babel:string-to-octets
+               (with-output-to-string (stream)
+                 (dolist (certificate ca-certificates)
+                   (write-string (certificate-pem certificate) stream)))
+               :encoding :utf-8)
+              (pure-tls::read-file-bytes ca-certificate))))
+    (ag-grpc:base64-encode octets)))
 
-(defun write-kubeconfig (path server-url &key private)
+(defun print-kubeconfig (stream server-url &key ca-certificate ca-certificates
+                                             client-certificate client-key)
+  "Write an authenticated gr8s administrative kubeconfig to STREAM."
+  (unless (and (or ca-certificate ca-certificates) client-certificate client-key)
+    (error "a CA certificate, client certificate, and client key are required"))
+  (format stream
+          "apiVersion: v1~%kind: Config~%clusters:~%  - name: gr8s~%    cluster:~%      certificate-authority-data: ~A~%      server: ~A~%contexts:~%  - name: gr8s~%    context:~%      cluster: gr8s~%      namespace: default~%      user: gr8s~%current-context: gr8s~%users:~%  - name: gr8s~%    user:~%      client-certificate-data: ~A~%      client-key-data: ~A~%"
+          (kubeconfig-ca-data ca-certificate ca-certificates) server-url
+          (ag-grpc:base64-encode (pure-tls::read-file-bytes client-certificate))
+          (ag-grpc:base64-encode (pure-tls::read-file-bytes client-key))))
+
+(defun write-kubeconfig (path server-url &key private ca-certificate ca-certificates
+                                             client-certificate client-key)
   "Write a kubeconfig to PATH, readable only by its owner when PRIVATE."
   (ensure-directories-exist path)
   (with-open-file (stream path
                           :direction :output
                           :if-exists :supersede
                           :if-does-not-exist :create)
-    (print-kubeconfig stream server-url))
+    (print-kubeconfig stream server-url :ca-certificate ca-certificate
+                      :ca-certificates ca-certificates
+                      :client-certificate client-certificate :client-key client-key))
   (when private (sb-posix:chmod path #o600))
   path)
 
 (defun default-kubeconfig-path (options)
   "Return where serve writes its kubeconfig when none was named."
   (merge-pathnames "kubeconfig" (uiop:ensure-directory-pathname (getf options :state-directory))))
+
+(defun write-administrative-kubeconfig (options &optional stream)
+  "Write or print a kubeconfig for the existing cluster selected by OPTIONS."
+  (let* ((state (uiop:ensure-directory-pathname (getf options :state-directory)))
+         (root (merge-pathnames "pki/" state)))
+    (unless (and (probe-file (merge-pathnames "pki/cluster-ca.crt" root))
+                 (probe-file (merge-pathnames "pki/cluster-ca.key" root)))
+      (error "cluster PKI does not exist in the selected state directory"))
+    (let ((pki (ensure-cluster-pki root)))
+      (multiple-value-bind (certificate key) (ensure-admin-client-credentials pki)
+        (if stream
+                            (print-kubeconfig stream (getf options :server)
+                              :ca-certificates (cluster-pki-trust-certificates pki)
+                              :client-certificate certificate :client-key key)
+            (write-kubeconfig (getf options :output) (getf options :server)
+                              :ca-certificates (cluster-pki-trust-certificates pki)
+                              :client-certificate certificate :client-key key :private t))))))
 
 (defun runtime-from-options (options)
   "Construct the Pod runtime OPTIONS select, returning (values runtime manager).
@@ -1339,6 +1374,32 @@ The new identity takes effect when the node agent next starts."
           collect (multiple-value-bind (host port) (parse-agent-server trimmed)
                     (list host port))))
 
+(defun managed-containerd-options-p (options)
+  "True when OPTIONS starts gr8s's managed containerd node services."
+  (and (equal "containerd" (getf options :runtime))
+       (equal "managed" (getf options :containerd-mode))))
+
+(defun ensure-kubelet-endpoints-available
+    (&key (probe #'gr8s.kubelet::kubelet-endpoint-status) (command "agent"))
+  "Refuse to replace a live kubelet's host-wide endpoints before node startup."
+  (dolist (path +kubelet-host-endpoints+)
+    (case (funcall probe path)
+      (:active
+       (error 'runtime-error
+              :message
+              (format nil
+                      "another kubelet is listening on ~A; stop it (for example, 'sudo systemctl stop k3s')~A"
+                      path
+                      (if (string= command "serve")
+                          " or run 'gr8s serve --disable-agent'"
+                          ""))))
+      (:non-socket
+       (error 'runtime-error
+              :message
+              (format nil "kubelet endpoint ~A exists and is not a Unix socket; move it out of the way"
+                      path)))))
+  t)
+
 (defun agent (options &key control
                             (stop-predicate (lambda () *shutdown-requested*)))
   "Run a node agent against the control plane at --server until STOP-PREDICATE is
@@ -1347,6 +1408,8 @@ The new identity takes effect when the node agent next starts."
    server, then runs the node session -- reconciling desired-state snapshots and
    dispatching operations -- and stops the kubelet and runtime on exit. CONTROL,
    when given, is the session control handle (used by the in-process agent)."
+  (when (managed-containerd-options-p options)
+    (ensure-kubelet-endpoints-available :command "agent"))
   (let* ((enrollment-endpoints (parse-agent-servers (getf options :server)))
          (session-endpoints
            (parse-agent-servers (or (getf options :session-server)
@@ -1500,6 +1563,10 @@ The new identity takes effect when the node agent next starts."
                                    (remove-duplicates (remove nil (list (discover-local-primary-ipv4) "127.0.0.1"))
                                                       :test #'equal))
         (setf (getf options :kubelet-port) 0))
+    (when (managed-containerd-options-p options)
+      ;; Run synchronously so serve's top-level error handler prints one concise
+      ;; diagnostic instead of an unhandled backtrace from the local-agent thread.
+      (ensure-kubelet-endpoints-available :command "serve"))
     (setf (local-node-agent-thread worker)
           (bt:make-thread
            (lambda ()
@@ -1680,6 +1747,12 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
   (call-with-serve-state-ownership
    options
    (lambda ()
+     (when (and (not (getf options :disable-agent))
+                (managed-containerd-options-p options))
+       ;; Fail before opening the store, PKI, listeners, or containerd. The
+       ;; top-level handler then emits one actionable line without a worker
+       ;; thread backtrace.
+       (ensure-kubelet-endpoints-available :command "serve"))
      (unwind-protect
           (progn (bootstrap-patches options) (serve-owned options))
        (shutdown-patches)))))
@@ -1689,8 +1762,8 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
    PKI, starts the memory monitor, optional HA/Raft, and the node gRPC server
    (opening its firewalld port when it listens off loopback); unless
    --disable-agent, starts an in-process local node agent, and on a managed
-   containerd node also brings up the in-cluster API server, aggregator and
-   Service network. Writes a kubeconfig, serves the HTTP API, and runs the
+   containerd node also brings up the API aggregator and Service network.
+   Writes an authenticated kubeconfig, serves the HTTPS API, and runs the
    reconciliation worker. On *SHUTDOWN-REQUESTED* it tears every component down in
    reverse, withdrawing the firewalld port it opened."
   (require-serve-state-ownership options)
@@ -1712,15 +1785,17 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
          (pool (ensure-controller-node-pool store state-directory options))
          (pki (ensure-control-plane-pki state-directory options))
          (server nil)
-         (api-server nil)
          (debug-port nil)
+         (api-server nil)
          (service-network-created nil)
          (aggregator nil)
          (worker nil)
          (node-server nil)
          (ha nil)
          (memory-monitor nil)
-         (local-agent nil))
+         (local-agent nil)
+         (pki-authority-observer nil)
+         (kubeconfig-path nil))
     (declare (ignore patch-policy-checked))
     (setf *shutdown-requested* nil)
     (install-shutdown-handlers)
@@ -1729,8 +1804,52 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
            (setf memory-monitor (start-memory-monitor store))
            (setf ha (maybe-start-ha-control-plane store pki options))
            (unless (wait-for-ha-application ha) (return-from serve-owned 0))
+           (when ha
+             (ensure-ha-pki-authority store ha)
+             ;; Extraction can promote a different CA than the one loaded before
+             ;; Raft joined. All subsequently started listeners receive this object.
+             (setf pki (ensure-cluster-pki (merge-pathnames "pki/" state-directory)))
+             (setf pki-authority-observer
+                   (lambda ()
+                     (let ((current
+                             (ensure-cluster-pki
+                              (merge-pathnames "pki/" state-directory))))
+                       ;; PKI is a lexical cell also captured by certificate
+                       ;; reconcilers started below, so future issuance follows
+                       ;; the replicated active signer as well.
+                       (setf pki current)
+                       (multiple-value-bind (certificate key)
+                           (ensure-apiserver-kubelet-client-credentials current)
+                         (setf *kubelet-proxy-credentials*
+                               (list (cluster-pki-trust-certificates current)
+                                     certificate key)))
+                       (when node-server
+                         (refresh-node-grpc-server-pki node-server current))
+                       (when server
+                         (ensure-kubernetes-api-credentials
+                          current :addresses
+                          (list address (serve-api-advertise-address options)))
+                         (setf (slot-value server 'gr8s.apiserver::client-ca)
+                               (cluster-pki-trust-certificates current)))
+                       (when kubeconfig-path
+                         (multiple-value-bind (admin-certificate admin-key)
+                             (ensure-admin-client-credentials current)
+                           (write-kubeconfig
+                            kubeconfig-path
+                            (format nil "https://~A:~D"
+                                    (serve-api-advertise-address options) port)
+                            :ca-certificates (cluster-pki-trust-certificates current)
+                            :client-certificate admin-certificate :client-key admin-key
+                            :private (null (getf options :kubeconfig)))))
+                       (when (pod-store-in-cluster-config store)
+                         (setf (getf (pod-store-in-cluster-config store) :ca-pem)
+                               (uiop:read-file-string
+                                (cluster-pki-ca-certificate-path current)))))))
+             (gr8s.resources::add-pki-authority-observer
+              store pki-authority-observer))
            (multiple-value-bind (certificate key) (ensure-apiserver-kubelet-client-credentials pki)
-             (setf *kubelet-proxy-credentials* (list (cluster-pki-ca-certificate pki) certificate key)))
+             (setf *kubelet-proxy-credentials*
+                   (list (cluster-pki-trust-certificates pki) certificate key)))
            (setf node-server
                  (start-node-grpc-server
                   store :host (getf options :node-listen "127.0.0.1")
@@ -1746,6 +1865,10 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                   :wireguard-relay-port-start (getf options :wireguard-relay-port-start)
                   :wireguard-relay-max-channels
                   (getf options :wireguard-relay-max-channels)))
+           ;; Close the registration race with an authority application between
+           ;; the initial reload and listener construction.
+           (when pki-authority-observer
+             (funcall pki-authority-observer))
            (when ha
              (configure-raft-node-operation-routing
               (ha-control-plane-member ha) node-server))
@@ -1814,7 +1937,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                                  (equal "managed" (getf options :containerd-mode)))
                         (when leaderp
                           (ensure-extension-apiserver-authentication store pki)
-                          (ensure-native-api-service store))
+                          (ensure-native-api-service store (serve-api-advertise-address options) port))
                         (setf aggregator (start-api-aggregator store pki))
                         (setf service-network-created (ensure-in-cluster-network pki))
                         (setf api-server
@@ -1832,10 +1955,10 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                                                     :path (getf options :local-storage-path))))
                     (start-volume-reclaimer store node-server (lambda () *shutdown-requested*))
                     (setf server
-                          (start-server
-                           :address address :port port
-                           :store store :runtime runtime
-                           :reconciler reconciler
+                          (start-in-cluster-api
+                           store runtime reconciler pki :address address :port port
+                           :certificate-addresses
+                           (list (serve-api-advertise-address options))
                            :debug-state-directory state-directory
                            :debug-member-resolver (make-debug-member-resolver ha)
                            :control-plane-metrics-fn (when ha (lambda () (gr8s.ha::ha-metrics-text ha)))
@@ -1872,12 +1995,19 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                                       ;; in-cluster API address present.
                                       (when service-network-created
                                         (ensure-in-cluster-network pki)))))
-                    (let ((kubeconfig (or (getf options :kubeconfig) (default-kubeconfig-path options))))
+                    (let* ((kubeconfig (or (getf options :kubeconfig) (default-kubeconfig-path options)))
+                           (client-address (serve-api-advertise-address options)))
+                      (setf kubeconfig-path kubeconfig)
                       ;; A file the user named keeps its usual mode, as they may read it as another user.
-                      (write-kubeconfig kubeconfig (format nil "http://~A:~D" address port)
-                                        :private (null (getf options :kubeconfig)))
+                      (multiple-value-bind (admin-certificate admin-key)
+                          (ensure-admin-client-credentials pki)
+                        (write-kubeconfig
+                         kubeconfig (format nil "https://~A:~D" client-address port)
+                         :ca-certificates (cluster-pki-trust-certificates pki)
+                         :client-certificate admin-certificate :client-key admin-key
+                         :private (null (getf options :kubeconfig))))
                       (format t "gr8s kubeconfig: ~A~%" (namestring kubeconfig)))
-                    (format t "gr8s listening on http://~A:~D~%" address port)
+                    (format t "gr8s listening on https://~A:~D~%" address port)
                     (finish-output)
                     (loop until *shutdown-requested* do (sleep 0.1)))
                (when debug-port (stop-debug-server debug-port))
@@ -1886,9 +2016,13 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                (when runtime (stop-runtime-deletions runtime))
                (when server (stop-server server))
                (when api-server (stop-server api-server))
-               (when (or api-server service-network-created) (remove-in-cluster-network pki))
+               (when (or api-server service-network-created)
+                 (remove-in-cluster-network pki))
                (setf (pod-store-in-cluster-config store) nil))))
       (stop-patch-coordinator)
+      (when pki-authority-observer
+        (gr8s.resources::remove-pki-authority-observer
+         store pki-authority-observer))
       (when local-agent (stop-local-node-agent local-agent))
       (when ha (stop-ha-control-plane ha))
       (when node-server
@@ -1943,7 +2077,8 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
          :node-name (getf options :raft-node-name)
          :token (getf options :raft-token)
          :ca-pin (getf options :raft-ca-pin)
-         :api-url (format nil "http://~A:~D" (getf options :listen) (getf options :port))
+         :api-url (format nil "https://~A:~D" (serve-api-advertise-address options)
+                          (getf options :port))
          :pki pki)))))
 
 (defun make-debug-member-resolver (ha)
@@ -2093,6 +2228,20 @@ docs/runtime.md covers runtime payloads and air-gapped images;
 docs/design-gr8s-trace.md describes tracing limits and authorization.
 " stream))
 
+(defun ensure-ha-pki-authority (store ha &key (timeout 30))
+  "Wait for the encrypted cluster PKI bootstrap record, creating it only on the leader.
+No HA API may start from member-local certificate state before this converges."
+  (loop repeat (* timeout 10)
+        for envelope = (gr8s.resources::current-pki-authority-envelope store)
+        do (cond
+             (envelope
+              (gr8s.resources::reconcile-pki-authority store)
+              (return envelope))
+             ((ha-control-plane-leader-p ha)
+              (return (gr8s.resources::publish-pki-authority store)))
+             (t (sleep 0.1)))
+        finally (error "HA PKI authority did not converge within ~D seconds" timeout)))
+
 (defparameter +cli-commands+
   '(("serve" "Run the control plane and local node agent")
     ("agent" "Run a node agent") ("witness" "Run an HA quorum witness")
@@ -2130,6 +2279,12 @@ docs/design-gr8s-trace.md describes tracing limits and authorization.
                         ("--runtime NAME" "containerd or fake")
                         ("--containerd-mode MODE" "managed or external")
                         ("--cni-mode MODE" "native or external")
+                        ("--help, -h" "show help"))))
+      ((equal path '("kubeconfig"))
+       (page "Print or write an authenticated cluster kubeconfig" "[OPTIONS]"
+             :options '(("--state-directory DIR" "Folder holding cluster state")
+                        ("--server URL" "Kubernetes API URL")
+                        ("--output FILE" "Write kubeconfig to a private file")
                         ("--help, -h" "show help"))))
       ((equal path '("agent"))
        (page "Run a node agent" "[OPTIONS]"
@@ -2187,8 +2342,23 @@ docs/design-gr8s-trace.md describes tracing limits and authorization.
       ((equal path '("certificate"))
        (page "Manage certificates" "COMMAND [OPTIONS]"
              :commands '(("status" "Inventory certificates and expiry warnings")
+                         ("check" "Inventory certificates and expiry warnings")
+                         ("rotate" "Rotate locally owned leaf certificates")
+                         ("rotate-ca" "Stage a cluster CA trust transition")
                          ("service-account-key" "Rotate the token signer safely"))
              :options '(("--help, -h" "show help"))))
+      ((member path '(("certificate" "rotate-ca")
+                      ("certificate" "service-account-key")) :test #'equal)
+       (page (if (equal (second path) "rotate-ca")
+                 "Rotate the cluster certificate authority"
+                 "Rotate the ServiceAccount signing key")
+             "COMMAND [OPTIONS]"
+             :commands '(("prepare" "Stage new signing material alongside the active material")
+                         ("promote" "Make the staged signing material active")
+                         ("finalize" "Remove retiring material after safety gates pass"))
+             :options '(("--kubeconfig PATH" "update replicated HA authority through the API")
+                        ("--state-directory PATH" "operate on an offline single-node state directory")
+                        ("--help, -h" "show help"))))
       ((equal path '("secrets-encrypt"))
        (page "Manage secrets encryption" "COMMAND [OPTIONS]"
              :commands '(("status" "Show encryption status")
@@ -2277,8 +2447,8 @@ docs/design-gr8s-trace.md describes tracing limits and authorization.
               (:notices (print-notices) 0)
               (:kubeconfig
                (if (getf options :output)
-                   (write-kubeconfig (getf options :output) (getf options :server))
-                   (print-kubeconfig *standard-output* (getf options :server)))
+                   (write-administrative-kubeconfig options)
+                   (write-administrative-kubeconfig options *standard-output*))
                0)
               (:join-token (print-node-join-token options))
               (:runtime-install
@@ -2302,6 +2472,10 @@ docs/design-gr8s-trace.md describes tracing limits and authorization.
                (print-network-explanation options))
               (:certificate-status
                (run-certificate-status options))
+              (:certificate-rotate
+               (run-certificate-rotation options))
+              ((:certificate-ca-prepare :certificate-ca-promote :certificate-ca-finalize)
+               (run-cluster-ca-rotation options))
               ((:certificate-service-account-key-prepare
                 :certificate-service-account-key-promote
                 :certificate-service-account-key-finalize)

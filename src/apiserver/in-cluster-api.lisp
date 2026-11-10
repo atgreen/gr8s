@@ -2,55 +2,79 @@
 ;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Purpose:
-;;;; Serve the in-cluster Kubernetes API over pure-tls with a distinct server
-;;;; certificate, cluster service DNS/IP SANs, token/certificate authentication and
-;;;; live RBAC checks. The existing local administrative HTTP endpoint remains
-;;;; separate from this authenticated listener.
+;;;; Serve the Kubernetes API over pure-tls with cluster service DNS/IP SANs,
+;;;; token/certificate authentication and live RBAC checks.  The same server is
+;;;; reached directly by administrators and through the in-cluster Service.
 
 (in-package #:gr8s.apiserver)
 
-(defun kubernetes-api-san-extension ()
-  "Encode the service DNS identities and IPv4 addresses of the API listener."
-  (apply #'pure-tls/acme::encode-sequence
-         (append
-          (loop for name in '("kubernetes" "kubernetes.default" "kubernetes.default.svc"
-                             "kubernetes.default.svc.cluster.local" "localhost")
-                collect (pure-tls/acme::encode-der #x82 (pki-ascii-octets name)))
-          (list (pure-tls/acme::encode-der #x87 #(10 96 0 1))
-                (pure-tls/acme::encode-der #x87 #(127 0 0 1))))))
+(defparameter +kubernetes-api-dns-names+
+  '("kubernetes" "kubernetes.default" "kubernetes.default.svc"
+    "kubernetes.default.svc.cluster.local" "localhost"))
 
-(defun ensure-kubernetes-api-credentials (pki)
+(defparameter +certificate-leaf-renewal-seconds+ (* 90 86400)
+  "Renew locally owned one-year leaf certificates within this startup window.")
+
+(defun certificate-renewal-due-p (path renew-within)
+  "True when PATH's leaf expires within RENEW-WITHIN seconds or cannot be read."
+  (handler-case
+      (let ((leaf (first (pure-tls:load-certificate-chain path))))
+        (or (null leaf)
+            (<= (- (pure-tls:certificate-not-after leaf) (get-universal-time))
+                renew-within)))
+    (error () t)))
+
+(defun kubernetes-api-addresses (addresses)
+  "Return the unique API ADDRESSES plus the stable Service and loopback addresses."
+  (remove-duplicates (append addresses '("10.96.0.1" "127.0.0.1")) :test #'equal))
+
+(defun ensure-kubernetes-api-credentials
+    (pki &key (addresses nil) (renew-within +certificate-leaf-renewal-seconds+) rotate-key)
   "Create or validate a persisted Kubernetes API server identity under the cluster CA."
   (let ((certificate-path (merge-pathnames "kubernetes-api.crt" (cluster-pki-root pki)))
-        (key-path (merge-pathnames "kubernetes-api.key" (cluster-pki-root pki))))
+        (key-path (merge-pathnames "kubernetes-api.key" (cluster-pki-root pki)))
+        (names (kubernetes-api-addresses addresses)))
     (bt:with-lock-held ((cluster-pki-lock pki))
-      (cond
-        ((and (probe-file certificate-path) (probe-file key-path))
-         (let ((leaf (first (pure-tls:load-certificate-chain certificate-path))))
-           (pure-tls::verify-certificate-chain (list leaf) (list (cluster-pki-ca-certificate pki))
-                                             :purpose :server-auth :trust-anchor-mode :replace)
-           (pure-tls::verify-hostname leaf "kubernetes.default.svc")))
-        ((or (probe-file certificate-path) (probe-file key-path))
-         (pki-fail "incomplete-api-identity" "Kubernetes API certificate/key pair is incomplete"))
-        (t
-         (multiple-value-bind (private public) (ironclad:generate-key-pair :secp256r1)
-           (let* ((der (certificate-der
-                        (pure-tls/acme::encode-subject +pki-ca-common-name+)
-                        (pure-tls/acme::encode-subject "kubernetes.default.svc")
-                        (pure-tls/acme::encode-ec-public-key public)
-                        (list (pure-tls/acme::encode-critical-extension +oid-key-usage+
-                                (pure-tls/acme::encode-bit-string #(#x80) 7))
-                              (pure-tls/acme::encode-extension +oid-extended-key-usage+
-                                (pure-tls/acme::encode-sequence (pure-tls/acme::encode-oid '(1 3 6 1 5 5 7 3 1))))
-                              (pure-tls/acme::encode-extension pure-tls/acme::*oid-subject-alt-name*
-                                (kubernetes-api-san-extension)))
-                        (cluster-pki-ca-private-key pki)))
-                  (chain (concatenate 'string (pure-tls/acme::wrap-pem "CERTIFICATE" der)
-                                      (uiop:read-file-string (cluster-pki-ca-certificate-path pki)))))
-             (write-private-text-exclusively key-path (pure-tls/acme::encode-ec-private-key-pem private))
-             (handler-case (write-private-text-exclusively certificate-path chain)
-               (error (condition) (ignore-errors (delete-file key-path)) (error condition))))))))
+      (finish-pending-leaf-rotation certificate-path key-path)
+      (unless
+          (and (probe-file certificate-path) (probe-file key-path)
+               (not (certificate-renewal-due-p certificate-path renew-within))
+               (handler-case
+                   (let ((leaf (first (pure-tls:load-certificate-chain certificate-path))))
+                     (pure-tls::verify-certificate-chain
+                      (list leaf) (list (cluster-pki-ca-certificate pki))
+                      :purpose :server-auth :trust-anchor-mode :replace)
+                     (every (lambda (name) (pure-tls::verify-hostname leaf name) t)
+                            (append names +kubernetes-api-dns-names+)))
+                 (error () nil)))
+        ;; Atomic replacement also migrates pre-HTTPS-only installations whose
+        ;; certificate did not cover the externally selected listener address.
+        (issue-cluster-certificate
+         pki certificate-path key-path "kubernetes.default.svc" nil
+         :server t :addresses names :dns-names +kubernetes-api-dns-names+
+         :rotate-key rotate-key)))
     (values certificate-path key-path)))
+
+(defun ensure-admin-client-credentials
+    (pki &key (renew-within +certificate-leaf-renewal-seconds+) rotate-key)
+  "Return the persisted system:admin client identity used by generated kubeconfigs."
+  (let ((certificate (merge-pathnames "admin.crt" (cluster-pki-root pki)))
+        (key (merge-pathnames "admin.key" (cluster-pki-root pki))))
+    (bt:with-lock-held ((cluster-pki-lock pki))
+      (finish-pending-leaf-rotation certificate key)
+      (unless (and (probe-file certificate) (probe-file key)
+                   (not (certificate-renewal-due-p certificate renew-within))
+                   (handler-case
+                       (progn
+                         (pure-tls::verify-certificate-chain
+                          (list (first (pure-tls:load-certificate-chain certificate)))
+                          (list (cluster-pki-ca-certificate pki))
+                          :purpose :client-auth :trust-anchor-mode :replace)
+                         t)
+                     (error () nil)))
+        (issue-cluster-certificate pki certificate key "system:admin" "system:masters"
+                                   :rotate-key rotate-key)))
+    (values certificate key)))
 
 (defclass gr8s-in-cluster-acceptor (gr8s-acceptor)
   ((certificate :initarg :certificate :reader in-cluster-certificate)
@@ -193,18 +217,24 @@ one then answers 404 rather than 403, as upstream's does."
         (call-next-method))
     (kubernetes-error (condition) (kubernetes-error-response condition))))
 
-(defun start-in-cluster-api (store runtime reconciler pki
-                             &key (address "10.96.0.1") (port 443)
-                               debug-state-directory debug-member-resolver)
-  "Start a TLS API listener; the caller owns its service address and shutdown."
-  (multiple-value-bind (certificate key) (ensure-kubernetes-api-credentials pki)
+(defun start-in-cluster-api (store runtime reconciler pki &key (address "0.0.0.0") (port 6443)
+                                                               (certificate-addresses nil)
+                                                               leader-status-fn
+                                                               debug-state-directory
+                                                               debug-member-resolver
+                                                               control-plane-metrics-fn)
+  "Start the authenticated TLS Kubernetes API listener."
+  (multiple-value-bind (certificate key)
+      (ensure-kubernetes-api-credentials pki :addresses (cons address certificate-addresses))
     (hunchentoot:start
      (make-instance 'gr8s-in-cluster-acceptor :address address :port port :store store
                     :runtime runtime :reconciler reconciler
+                    :leader-status-fn leader-status-fn
                     :debug-state-directory debug-state-directory
                     :debug-member-resolver debug-member-resolver
+                    :control-plane-metrics-fn control-plane-metrics-fn
                     :certificate (namestring certificate) :private-key (namestring key)
-                    :client-ca (cluster-pki-ca-certificate pki)))))
+                    :client-ca (cluster-pki-trust-certificates pki)))))
 
 (defparameter +service-network-interface+ "gr8s-services")
 

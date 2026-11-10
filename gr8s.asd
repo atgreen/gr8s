@@ -148,6 +148,7 @@
                               :components ((:file "integration")
                                            (:file "secret-encryption")
                                            (:file "core-resources")
+                                           (:file "pki-authority")
                                            (:file "store-snapshot")
                                            (:file "store-snapshot-index")
                                            (:file "store-image-tracker")

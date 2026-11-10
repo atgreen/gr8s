@@ -90,6 +90,10 @@
   ready-since
   (labels nil)
   (annotations nil)
+  ;; SHA-256 fingerprint of the CA that signed the client certificate used by
+  ;; the node's most recent authenticated session. Internal rotation evidence,
+  ;; not user-editable Node metadata.
+  certificate-issuer-fingerprint
   (resource-version "1")
   ;; Quantity strings the node's agent measured about itself.
   capacity

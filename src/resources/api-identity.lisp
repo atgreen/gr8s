@@ -51,7 +51,9 @@
   (when chain
     (handler-case
         (progn
-          (pure-tls::verify-certificate-chain chain (list ca) :purpose :client-auth :trust-anchor-mode :replace)
+          (pure-tls::verify-certificate-chain
+           chain (if (listp ca) ca (list ca))
+           :purpose :client-auth :trust-anchor-mode :replace)
           (let* ((leaf (first chain))
                  (raw (pure-tls::x509-certificate-raw-der leaf))
                  (tbs (pure-tls::asn1-children (first (pure-tls::asn1-children (pure-tls::parse-der raw)))))

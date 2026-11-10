@@ -81,7 +81,7 @@ than silently replacing the node's authenticated network identity."
             ;; Connect additionally requires a verified, name-bound peer cert.
             :tls-verify-client :optional
             :tls-ca-certificate
-            (pure-tls::make-trust-store :certificates (list (cluster-pki-ca-certificate pki)))))))
+            (pure-tls::make-trust-store :certificates (cluster-pki-trust-certificates pki))))))
 
 (defun authenticate-node-server-stream (stream ca-pin ca-certificate-path)
   "Verify, from the client side, that STREAM's peer presented the pinned cluster
@@ -92,7 +92,7 @@ than silently replacing the node's authenticated network identity."
   (let* ((chain (pure-tls:tls-peer-certificate-chain stream))
          (leaf (first chain))
          (ca (if ca-certificate-path
-                 (first (pure-tls:load-certificate-chain ca-certificate-path))
+                 (pure-tls:load-certificate-chain ca-certificate-path)
                  (find-if
                   (lambda (certificate)
                     (and (pure-tls::certificate-is-ca-p certificate)
@@ -101,7 +101,7 @@ than silently replacing the node's authenticated network identity."
                   chain))))
     (unless (and leaf ca (or ca-pin ca-certificate-path))
       (pki-fail "untrusted-server" "Server did not present the pinned cluster CA"))
-    (when (and ca-pin
+    (when (and ca-pin (not ca-certificate-path)
                (not (string-equal ca-pin (octets-to-hex (pure-tls:certificate-fingerprint ca)))))
       (pki-fail "ca-pin-mismatch" "Server CA fingerprint does not match"))
     (verify-node-server-certificate leaf ca)
@@ -190,4 +190,5 @@ ended the whole server (podster-uqb.138 focused run, 117b50c)."
         (pki-fail "unauthenticated-node" "Persistent node sessions require a client certificate"))
       (verify-node-certificate
        pki (pure-tls/acme::wrap-pem "CERTIFICATE" (pure-tls::x509-certificate-raw-der certificate))
-       node-name))))
+       node-name)
+      certificate)))

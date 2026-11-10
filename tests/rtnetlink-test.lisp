@@ -359,13 +359,22 @@
                 (is (equal '("10.42.0.1") addresses))
                 (is (equal "10.42.0.2" alias))
                 (push :owner-check events))
+              :withdraw-service-owner
+              (lambda (config ctx addresses alias)
+                (is (eq configuration config)) (is (eq context ctx))
+                (is (equal '("10.42.0.1") addresses))
+                (is (equal "10.42.0.2" alias))
+                (push :owner-withdraw events))
+              :remove-link (lambda (ctx) (is (eq context ctx)) (push :link-delete events))
               :policy (gr8s::make-cni-operations
                        :add (lambda (&rest ignored)
                               (declare (ignore ignored))
                               (push :policy events)
                               (error "attachment remains gated"))
                        :check (lambda (&rest ignored)
-                                (declare (ignore ignored)) (push :policy-check events))))))
+                                (declare (ignore ignored)) (push :policy-check events))
+                       :delete (lambda (&rest ignored)
+                                 (declare (ignore ignored)) (push :policy-delete events))))))
       (funcall (gr8s::cni-operations-prepare operations) configuration context)
       (signals error
         (funcall (gr8s::cni-operations-add operations)
@@ -380,7 +389,12 @@
         (funcall (gr8s::cni-operations-check operations)
                  configuration context "/pins/local/endpoint_identity" "/pins/local/tcx-ingress"))
       (is (equal '(:link-check) (reverse events)))
-      (is (equal "10.42.0.2" (gr8s::service-snat-address ipam "sandbox-1" "eth0"))))))
+      (is (equal "10.42.0.2" (gr8s::service-snat-address ipam "sandbox-1" "eth0")))
+      (setf events nil)
+      (funcall (gr8s::cni-operations-delete operations)
+               configuration context "/pins/local/endpoint_identity" "/pins/local/tcx-ingress" "/pins/local/")
+      (is (equal '(:owner-withdraw :policy-delete :link-delete) (reverse events)))
+      (is (null (gr8s::service-snat-address ipam "sandbox-1" "eth0"))))))
 
 (test cni-return-path-keeps-default-and-ipv6-only-allocation-behavior
   (dolist (scenario '(("10.42.0.0/29" nil nil) ("fd42::/125" t nil) ("10.42.0.0/29" nil t)))

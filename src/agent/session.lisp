@@ -235,6 +235,41 @@ complete snapshot to the next one."
           (gethash "assignedPodCIDRs" identity) cidrs)
     (persist-agent-identity identity-path identity)))
 
+(defun install-agent-session-credentials (hello ca-certificate-path certificate-path)
+  "Install HELLO's renewed leaf and authenticated trust bundle without stranding the node.
+Return true when a renewed leaf was installed, so the caller can reconnect and
+prove the new credential to the control plane."
+  (let ((bundle (slot-value hello 'gr8s.node.v1::cluster-ca-bundle)))
+    (when (and ca-certificate-path certificate-path bundle (plusp (length bundle)))
+      (let ((temporary (gr8s.security::private-temporary-path ca-certificate-path)))
+        (unwind-protect
+             (progn
+               (gr8s.security::write-private-text-exclusively
+                temporary (babel:octets-to-string bundle :encoding :utf-8))
+               (let* ((trust (pure-tls:load-certificate-chain temporary))
+                      (renewed-octets
+                        (slot-value hello 'gr8s.node.v1::renewed-node-certificate))
+                      (renewed-p (and renewed-octets (plusp (length renewed-octets))))
+                      (renewed-pem (and renewed-p
+                                        (babel:octets-to-string renewed-octets :encoding :utf-8)))
+                      (leaf (if renewed-p
+                                (gr8s.security::certificate-from-pem renewed-pem)
+                                (first (pure-tls:load-certificate-chain certificate-path)))))
+                 (unless (and trust leaf)
+                   (error "Server supplied an empty cluster CA bundle"))
+                 (pure-tls::verify-certificate-chain
+                  (list leaf) trust :purpose :client-auth :trust-anchor-mode :replace)
+                 ;; Bundle first: both the old and renewed leaf work if interrupted.
+                 (write-private-text-atomically
+                  ca-certificate-path (babel:octets-to-string bundle :encoding :utf-8))
+                 (when renewed-p
+                   (write-private-text-atomically certificate-path renewed-pem))
+                 renewed-p))
+          (when (probe-file temporary) (delete-file temporary)))))))
+
+(defun install-agent-cluster-ca-bundle (hello ca-certificate-path certificate-path)
+  (install-agent-session-credentials hello ca-certificate-path certificate-path))
+
 (defun write-agent-session-envelope (session variant payload)
   (bt:with-lock-held ((agent-node-session-send-lock session))
     (ag-grpc:stream-send
@@ -729,6 +764,10 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
                               :node-name node-name
                               :patch-inventory-json (if gr8s.patch:*manager*
                                                        (gr8s.patch::octets (com.inuoe.jzon:stringify (gr8s.patch:inventory gr8s.patch:*manager*))) #())
+                              :certificate-request
+                              (if private-key-path
+                                  (generate-node-key-and-csr node-name private-key-path)
+                                  #())
                               :boot-id (generate-uid)
                               :agent-version "gr8s"
                               :underlay-address
@@ -790,11 +829,19 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
              (let ((server-hello
                      (require-server-envelope
                       (ag-grpc:stream-read-message stream) :hello)))
-               (accept-agent-server-hello identity identity-path server-hello)
-               (setf heartbeat-interval
-                     (max 1 (slot-value server-hello
-                                        'gr8s.node.v1::heartbeat-interval-seconds)))
-               (let* ((snapshot
+               (let ((credentials-renewed-p
+                       (install-agent-session-credentials
+                        server-hello ca-certificate-path certificate-path)))
+                 (accept-agent-server-hello identity identity-path server-hello)
+                 ;; The server can only prove installation by authenticating a
+                 ;; fresh TLS connection. End this old-CA stream immediately;
+                 ;; RUN-NODE-SESSION will reconnect with the installed leaf.
+                 (when (and credentials-renewed-p (not one-shot-p))
+                   (return-from run-one-node-session nil))
+                 (setf heartbeat-interval
+                       (max 1 (slot-value server-hello
+                                          'gr8s.node.v1::heartbeat-interval-seconds)))
+                 (let* ((snapshot
                         (assemble-node-snapshot
                          session
                          (require-server-envelope
@@ -825,7 +872,7 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
                              while envelope
                              do (handle-node-server-envelope
                                  session envelope identity identity-path
-                                 apply-snapshot operation-handler snapshot-worker))))))))
+                                 apply-snapshot operation-handler snapshot-worker)))))))))
       (finish-session)
       (when credential-token-function-setter
         (funcall credential-token-function-setter nil))

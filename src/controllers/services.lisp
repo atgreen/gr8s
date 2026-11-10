@@ -712,8 +712,7 @@ Turning affinity off clears the timeout a client read back with the Service."
           (invalid-pod "the API service address is reserved"))
         (when (equal "10.96.0.1" (aref addresses 0))
           (let ((ports (gethash "ports" spec)))
-            (unless (and (= 1 (length ports)) (= 443 (gethash "port" (aref ports 0)))
-                         (eql 443 (gethash "targetPort" (aref ports 0))))
+            (unless (and (= 1 (length ports)) (= 443 (gethash "port" (aref ports 0))))
               (invalid-pod "the API Service must retain its HTTPS port")))))
       (setf (gethash "type" spec) type)
       (assign-service-node-ports spec namespace (gethash "name" metadata)
@@ -755,41 +754,53 @@ containers' and, as upstream's FindPort does, its restartable (sidecar) init con
                             always (and labels (equal value (gethash key labels)))))
               collect (list address target)))))
 
-(defun ensure-native-api-endpoints (store)
+(defun ensure-native-api-endpoints (store api-address api-port)
   "Publish the API listener as the Kubernetes Service's Endpoints and EndpointSlice, as an API server does."
   (flet ((ensure (resource object)
            (handler-case (create-core-resource store resource object "default")
              (kubernetes-error (condition)
-               (unless (= 409 (kubernetes-error-status-code condition)) (error condition))))))
+               (unless (= 409 (kubernetes-error-status-code condition)) (error condition))
+               (update-core-resource
+                store resource "default" "kubernetes"
+                (lambda (existing)
+                  (dolist (field (if (equal resource "endpoints")
+                                     '("subsets") '("addressType" "endpoints" "ports")))
+                    (setf (gethash field existing) (gethash field object)))
+                  existing))))))
     (ensure "endpoints"
             (core-object "metadata" (core-object "name" "kubernetes"
                                                  ;; This server writes the slice itself below.
                                                  "labels" (core-object "endpointslice.kubernetes.io/skip-mirror" "true"))
-                         "subsets" (vector (core-object "addresses" (vector (core-object "ip" "10.96.0.1"))
-                                                        "ports" (vector (core-object "name" "https" "port" 443 "protocol" "TCP"))))))
+                         "subsets" (vector (core-object "addresses" (vector (core-object "ip" api-address))
+                                                        "ports" (vector (core-object "name" "https" "port" api-port "protocol" "TCP"))))))
     (ensure "endpointslices"
             (core-object "metadata" (core-object "name" "kubernetes"
                                                  "labels" (core-object "kubernetes.io/service-name" "kubernetes"
                                                                        "endpointslice.kubernetes.io/managed-by" "gr8s-apiserver"))
                          "addressType" "IPv4"
-                         "endpoints" (vector (core-object "addresses" (vector "10.96.0.1")
+                         "endpoints" (vector (core-object "addresses" (vector api-address)
                                                           "conditions" (core-object "ready" t "serving" t "terminating" nil)))
-                         "ports" (vector (core-object "name" "https" "port" 443 "protocol" "TCP"))))))
+                         "ports" (vector (core-object "name" "https" "port" api-port "protocol" "TCP"))))))
 
-(defun ensure-native-api-service (store)
+(defun ensure-native-api-service (store &optional (api-address "127.0.0.1") (api-port 6443))
   "Publish the real native HTTPS listener as the reserved Kubernetes Service."
   (prog1
       (handler-case
           (create-core-resource store "services"
            (core-object "metadata" (core-object "name" "kubernetes")
                         "spec" (core-object "clusterIP" "10.96.0.1"
-                                             "ports" (vector (core-object "name" "https" "port" 443 "targetPort" 443))))
+                                             "ports" (vector (core-object "name" "https" "port" 443 "targetPort" api-port))))
            "default")
         (kubernetes-error (condition)
           (unless (= 409 (kubernetes-error-status-code condition)) (error condition))
           (let ((existing (get-core-resource store "services" "default" "kubernetes")))
             (unless (equal "10.96.0.1" (gethash "clusterIP" (gethash "spec" existing)))
               (error 'runtime-error :message "Kubernetes API Service has an unexpected clusterIP"))
-            existing)))
-    (ensure-native-api-endpoints store)
+            (update-core-resource
+             store "services" "default" "kubernetes"
+             (lambda (service)
+               (let ((ports (gethash "ports" (gethash "spec" service))))
+                 (setf (gethash "targetPort" (aref ports 0)) api-port))
+               service)))))
+    (ensure-native-api-endpoints store api-address api-port)
     (ensure-default-service-cidr store)))

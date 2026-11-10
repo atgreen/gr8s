@@ -1141,6 +1141,20 @@ Call with STORE's lock held."
           (setf (node-record-kubelet-port node) port)
           (publish-node-change-unlocked store old node))))))
 
+(defun record-node-certificate-issuer (store node-name fingerprint)
+  "Persist the CA fingerprint proven by NODE-NAME's authenticated session."
+  (with-store-lock (store)
+    (let ((node (get-node-unlocked store node-name)))
+      (unless node (node-conflict "Node ~A is not registered" node-name))
+      (unless (equal fingerprint (node-record-certificate-issuer-fingerprint node))
+        (let ((updated (copy-node-record node)))
+          (setf (node-record-certificate-issuer-fingerprint updated) fingerprint)
+          (persist-node store updated)
+          (setf (node-record-certificate-issuer-fingerprint node) fingerprint)
+          ;; This evidence must survive HA failover before offline finalization.
+          (note-node-state-change store node))))
+  fingerprint))
+
 (defun update-node-capacity (store node-name capacity &key allocatable)
   "Persist the quantities NODE-NAME's agent measured, leaving a missing report unchanged."
   (with-store-lock (store)

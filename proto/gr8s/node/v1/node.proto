@@ -134,6 +134,9 @@ message NodeHello {
   bytes wireguard_public_key = 10;
   repeated WireguardEndpoint wireguard_endpoints = 11;
   bytes patch_inventory_json = 12;
+  // Signed by the node's existing private key. The authenticated session binds
+  // the requested CN to node_name, so this cannot mint another identity.
+  bytes certificate_request = 13;
 }
 
 message Heartbeat {
@@ -269,6 +272,11 @@ message ServerHello {
   uint32 heartbeat_interval_seconds = 2;
   string assigned_pod_cidr = 3;
   repeated string assigned_pod_cidrs = 4;
+  // Current cluster trust bundle, delivered only inside the authenticated node
+  // session. Agents install it only when it still validates their own client leaf.
+  bytes cluster_ca_bundle = 5;
+  // Present when the authenticated node leaf was not issued by the active CA.
+  bytes renewed_node_certificate = 6;
 }
 
 message DesiredStateSnapshot {

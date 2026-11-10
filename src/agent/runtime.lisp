@@ -99,15 +99,25 @@ v2 backend risk map. Remote node acknowledgement is a separate requirement."
            (integerp ready) (>= ready 0)
            (= ready (node-runtime-received-revision node-runtime))))))
 
-(defun ensure-node-snapshot-service-risk-ready (node-runtime)
-  "Withhold a v2 snapshot ACK until its local risk map has been read back.
+(defun ensure-node-snapshot-service-risk-ready
+    (node-runtime &key (owner-lookup #'whistler/loader:map-lookup)
+                       (owner-next-key #'whistler/loader:map-get-next-key))
+  "Withhold a v2 snapshot ACK until risk and trusted owner rows are read back.
 The snapshot worker retries NODE-SNAPSHOT-INCOMPLETE without losing Pod work."
-  (when (and (node-runtime-service-lb node-runtime)
-             (service-lb-map (node-runtime-service-lb node-runtime)
-                             "gr8s_nat_risk_v2")
-             (not (node-runtime-local-risk-ready-p node-runtime)))
-    (error 'node-snapshot-incomplete
-           :message "v2 Service risk inventory is not published for the current snapshot")))
+  (let* ((dataplane (node-runtime-service-lb node-runtime))
+         (risk (and dataplane (service-lb-map dataplane "gr8s_nat_risk_v2"))))
+    (when risk
+      (unless (node-runtime-local-risk-ready-p node-runtime)
+        (error 'node-snapshot-incomplete
+               :message "v2 Service risk inventory is not published for the current snapshot"))
+      (let ((owners (service-lb-map dataplane "gr8s_nat_id_v2"))
+            (network (node-runtime-network node-runtime)))
+        (unless (and network
+                     (gr8s.network::service-nat-identities-published-p
+                      owners (gethash "serviceTranslations" network #())
+                      :lookup owner-lookup :next-key owner-next-key))
+          (error 'node-snapshot-incomplete
+                 :message "v2 Service owner inventory is not published for the current snapshot"))))))
 
 (defun node-snapshot-service-risk-granted-p (snapshot)
   "Validate a nonempty grant against this snapshot's exact discovery bytes."
@@ -648,7 +658,7 @@ Returns NETWORK; signals INVALID-CNI on any violation."
 
 (defun publish-node-runtime-service-nat-inventory
     (node-runtime &optional (network (node-runtime-network node-runtime))
-     &key reset-readiness)
+     &key reset-readiness previous-networks (ipam (node-runtime-ipam node-runtime)))
   "Seed the shared v2 managed-address and identity tables from the network assignment.
 Called after a new assignment and after a retained Service LB map is opened on
 restart, since the network may be restored before the dataplane starts."
@@ -661,9 +671,28 @@ restart, since the network may be restored before the dataplane starts."
     (when (and identities reset-readiness)
       (gr8s.network::clear-service-nat-owner-readiness identities))
     (when (and identities network)
-      (gr8s.network::publish-service-nat-identities
-       identities (gethash "serviceTranslations" network #())
-       :preserve-readiness (not reset-readiness)))))
+      (bt:with-lock-held (gr8s.network::*service-nat-owner-lifecycle-lock*)
+       (gr8s.network::publish-service-nat-identities
+        identities (gethash "serviceTranslations" network #())
+        :preserve-readiness (not reset-readiness))
+       (when previous-networks
+        ;; CNI leases are allocated before owner rows are written. Hold IPAM
+        ;; through retirement so a concurrent ADD cannot be mistaken for a
+        ;; withdrawn replicated claim in this agent process.
+        (if ipam
+            (bt:with-lock-held ((node-ipam-lock ipam))
+              (gr8s.network::retire-service-nat-withdrawn-identities
+               identities previous-networks (gethash "serviceTranslations" network #())
+               (loop for key being the hash-keys of (node-ipam-service-snat-allocations ipam)
+                       using (hash-value alias)
+                     for addresses = (gethash key (node-ipam-allocations ipam))
+                     for primary = (find-if-not (lambda (address) (find #\: address)) addresses)
+                     when (and primary alias)
+                       append (gr8s.network::service-nat-identity-pair
+                               (node-runtime-node-id node-runtime) (car key) (cdr key)
+                               primary alias))))
+            (gr8s.network::retire-service-nat-withdrawn-identities
+             identities previous-networks (gethash "serviceTranslations" network #()) nil)))))))
 
 (defun configure-node-runtime-network (node-runtime network &key (persist t))
   "Apply NETWORK as this node's overlay configuration and record it on the runtime.
@@ -714,6 +743,11 @@ conflicting network."
         ;; would drop the forwarded/encapsulated packets without a scoped ACCEPT.
         ;; No-op without firewalld; fail-soft. Only meaningful for a managed node.
         (ignore-errors (ensure-node-runtime-overlay-firewall node-runtime network))
+        ;; Retire withdrawn owner incarnations while the previous applied
+        ;; network is still durable. A crash after promotion must not strand
+        ;; enabled rows that the new assignment no longer names.
+        (publish-node-runtime-service-nat-inventory
+         node-runtime network :previous-networks previous :ipam ipam)
         (when persist
           (write-private-text-atomically
            (node-runtime-network-path node-runtime)
@@ -729,7 +763,6 @@ conflicting network."
                   (lambda () (node-runtime-local-risk-ready-p node-runtime))
                   :mtu (gethash "mtu" network)
                   :dns-address (gethash "dnsAddress" network)))))
-  (publish-node-runtime-service-nat-inventory node-runtime network)
   node-runtime)
 
 (defun node-network-overlay-firewall-identity (network)

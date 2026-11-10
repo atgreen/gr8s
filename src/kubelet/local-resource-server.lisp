@@ -7,6 +7,28 @@
   (lock (bt:make-lock "local resource server")))
 (defvar *local-resource-worker* nil)
 
+(defun kubelet-endpoint-status (path)
+  "Classify PATH as :ABSENT, :ACTIVE, :STALE, or :NON-SOCKET.
+ACTIVE means a Unix stream listener accepted a connection. STALE is a socket
+inode with no listener and is safe for a kubelet to replace."
+  (let* ((path (pathname path))
+         (stat (ignore-errors (sb-posix:lstat path))))
+    (cond
+      ((null stat) :absent)
+      ((/= sb-posix:s-ifsock
+           (logand sb-posix:s-ifmt (sb-posix:stat-mode stat)))
+       :non-socket)
+      (t
+       (let ((probe (make-instance 'sb-bsd-sockets:local-socket
+                                   :type :stream :protocol 0)))
+         (unwind-protect
+              (if (ignore-errors
+                    (sb-bsd-sockets:socket-connect probe (namestring path))
+                    t)
+                  :active
+                  :stale)
+           (sb-bsd-sockets:socket-close probe)))))))
+
 (defun local-resource-accept-loop (server)
   "Bound local RPC workers and track every transport for deterministic shutdown."
   (let ((slots (bt:make-semaphore :count 32)))
