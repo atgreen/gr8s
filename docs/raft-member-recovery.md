@@ -173,3 +173,33 @@ applied-progress receipts: a new leader must obtain fresh current-term evidence
 before proposing promotion. Join admission and the automatic promotion driver
 use this metadata to resume outstanding work. Learners without applied-progress
 receipts remain learners.
+
+The native learner probe builds an instrumented executable from the same gr8s
+systems and exercises the internal artifact-backed startup/admission path:
+
+```sh
+sbcl --noinform --non-interactive --load scripts/build-learner-native-harness.lisp
+python3 scripts/test-learner-native.py
+```
+
+The default payload is 1024 records of 64 KiB each, with a 384 MiB heap per
+process. The runner throttles snapshot chunks, verifies that the existing voter
+continues committing writes, checks the blocked receiver's incomplete snapshot
+file, kills the receiver with SIGKILL, restarts from its WAL and rejoins. It then
+checks automatic promotion, preserved payload and intervening writes, and a
+repeated Join without additional configuration entries. Logs, state and a JSON
+report remain in the printed temporary evidence directory, including on failure.
+`--records 64` runs a smaller smoke check and marks large-payload acceptance false.
+
+This probe uses unprivileged loopback plaintext transport and ordinary files.
+Its JSON scope distinguishes the instrumented harness from production `serve`.
+VM execution, authenticated native transport and leader handoff during catch-up
+remain separate acceptance requirements under `podster-ucm.2.9.4`. Production
+voter startup integration remains under `podster-ucm.2.1.4`.
+
+The 2026-11-10 native run passes the 4 MiB smoke case. The 64 MiB receiver
+exhausts its 384 MiB heap after interrupted transfer/rejoin, including with
+bounded control-file parsing. The root cause is tracked in
+`podster-ucm.2.9.4.1`; large-payload acceptance remains incomplete. The machine
+report `learner-native-validation-2026-11-10.json` retains both failure logs and
+the final smoke result. A larger diagnostic heap does not establish acceptance.

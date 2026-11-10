@@ -1,0 +1,249 @@
+{
+  "date": "2026-11-10",
+  "bead": "podster-ucm.2.9.4",
+  "heapBug": "podster-ucm.2.9.4.1",
+  "sourceBaseCommit": "def66101c1cbe1573eefec25061981d50ce46885",
+  "sourceSha256": {
+    "scripts/build-learner-native-harness.lisp": "da6830d1d1cd1755c481f8b581ada5f80077b52d56f9829ea32a56da63ac1968",
+    "scripts/learner-native-harness.lisp": "765bd5ccdc04cfb7ab5211061183e21a407e17fb1da7c8d280fbdaa6bd1372f9",
+    "scripts/test-learner-native.py": "21fb86ca138f94e85155b78f0c3fcaa2c55c88da68521acb20d1a2f3bafc5dfa"
+  },
+  "scope": {
+    "nativeInstrumentedHarness": true,
+    "productionServe": false,
+    "rootOrBpfOperations": false,
+    "transport": "loopback plaintext",
+    "vmExecution": false
+  },
+  "validation": {
+    "nativeBuildExitCode": 0,
+    "pythonCompileExitCode": 0,
+    "final4MiBSmokeExitCode": 0,
+    "finalSmoke": {
+      "passed": true,
+      "nativeHarness": true,
+      "productionServe": false,
+      "vmAcceptance": false,
+      "fullAcceptanceComplete": false,
+      "evidence": "/tmp/gr8s-learner-native-28bo8brg",
+      "records": 64,
+      "payloadBytes": 4194304,
+      "heapLimitMiB": 384,
+      "chunkDelay": 0.03,
+      "binarySha256": "9449955e32ee5041184d8888034f75db3659a8c46e00cf6ba2c43f8a707645e4",
+      "partialTransfer": {
+        "offset": 1048576,
+        "total": 4209648,
+        "token": "beec1a38-ca4e-4294-af70-ce65c382fc0e"
+      },
+      "beforeInterruption": {
+        "role": "leader",
+        "selfRole": "voter",
+        "term": 1,
+        "quorumMembers": 1,
+        "commit": 3,
+        "applied": 3,
+        "lastIndex": 3,
+        "members": [
+          {
+            "id": "sink",
+            "role": "learner"
+          },
+          {
+            "id": "source",
+            "role": "voter"
+          }
+        ],
+        "blocked": false,
+        "heapLimitMiB": 384,
+        "resources": 65,
+        "lastPayloadBytes": 65536,
+        "nonce": "87ebf2c68a474d209f5010ad291d1a8f"
+      },
+      "interruptedReceiver": {
+        "role": "follower",
+        "selfRole": "learner",
+        "term": 1,
+        "quorumMembers": 1,
+        "commit": 0,
+        "applied": 0,
+        "lastIndex": 0,
+        "members": [
+          {
+            "id": "sink",
+            "role": "learner"
+          }
+        ],
+        "blocked": true,
+        "heapLimitMiB": 384,
+        "nonce": "45505ecf83e14e1f8f542d79f7b05f11"
+      },
+      "partialFilesBeforeSigkill": [
+        {
+          "path": "raft/.gr8s-raft-transfers-v2-1002/.raft-transfer-v2-P28MTE/in-41176769-6b6b-4fcb-9700-167a2da4539d.snapshot",
+          "bytes": 1179648
+        }
+      ],
+      "disconnected": {
+        "role": "leader",
+        "selfRole": "voter",
+        "term": 1,
+        "quorumMembers": 1,
+        "commit": 5,
+        "applied": 5,
+        "lastIndex": 5,
+        "members": [
+          {
+            "id": "sink",
+            "role": "learner"
+          },
+          {
+            "id": "source",
+            "role": "voter"
+          }
+        ],
+        "blocked": false,
+        "heapLimitMiB": 384,
+        "resources": 67,
+        "lastPayloadBytes": 65536,
+        "nonce": "4b5007a1ddf44ed1afde40f34d6fae97"
+      },
+      "sigkillExit": -9,
+      "promoted": {
+        "role": "leader",
+        "selfRole": "voter",
+        "term": 1,
+        "quorumMembers": 2,
+        "commit": 6,
+        "applied": 6,
+        "lastIndex": 6,
+        "members": [
+          {
+            "id": "sink",
+            "role": "voter"
+          },
+          {
+            "id": "source",
+            "role": "voter"
+          }
+        ],
+        "blocked": false,
+        "heapLimitMiB": 384,
+        "resources": 67,
+        "lastPayloadBytes": 65536,
+        "nonce": "8245ddec0575463fbcb1c8c64c0d0264"
+      },
+      "restored": {
+        "role": "follower",
+        "selfRole": "voter",
+        "term": 1,
+        "quorumMembers": 2,
+        "commit": 6,
+        "applied": 6,
+        "lastIndex": 6,
+        "members": [
+          {
+            "id": "sink",
+            "role": "voter"
+          },
+          {
+            "id": "source",
+            "role": "voter"
+          }
+        ],
+        "blocked": false,
+        "heapLimitMiB": 384,
+        "resources": 67,
+        "lastPayloadBytes": 65536,
+        "nonce": "6dcd92bcbd494dc789a5c59977726f9d"
+      },
+      "repeatedJoin": {
+        "role": "leader",
+        "selfRole": "voter",
+        "term": 1,
+        "quorumMembers": 2,
+        "commit": 6,
+        "applied": 6,
+        "lastIndex": 6,
+        "members": [
+          {
+            "id": "sink",
+            "role": "voter"
+          },
+          {
+            "id": "source",
+            "role": "voter"
+          }
+        ],
+        "blocked": false,
+        "heapLimitMiB": 384,
+        "resources": 67,
+        "lastPayloadBytes": 65536,
+        "nonce": "63d98edfad264135a31a23ec3deda11b"
+      },
+      "largePayloadAcceptance": false,
+      "remaining": [
+        "VM execution",
+        "leader handoff during catch-up",
+        "production serve recovery integration"
+      ],
+      "sinkExit": 0,
+      "sourceExit": 0
+    },
+    "failed64MiBRuns": [
+      {
+        "run": "64m",
+        "report": {
+          "passed": false,
+          "nativeHarness": true,
+          "productionServe": false,
+          "vmAcceptance": false,
+          "fullAcceptanceComplete": false,
+          "evidence": "/tmp/gr8s-learner-native-6wvnb0ym",
+          "records": 1024,
+          "payloadBytes": 67108864,
+          "heapLimitMiB": 384,
+          "chunkDelay": 0.02,
+          "binarySha256": "af97e52feca03f0d86f3bda81ffc9007843f642f0231f359f1494df73ab84fe1",
+          "error": "native acceptance condition did not become true",
+          "sinkExit": 1,
+          "sourceExit": 0
+        },
+        "receiverFailureLog": "Heap exhausted during garbage collection: 0 bytes available, 65568 requested.\n     | Immobile Objects |\n Gen layout symbol   code  Boxed   Cons    Raw   Code  SmMix  Mixed  LgRaw LgCode  LgMix Waste%       Alloc        Trig   Dirty GCs Mem-age\n  1      0      0      2     10     15   3088      0     10     51    214      0      0   32.1    75358752     4026531    3388   0  1.4391\n  2      0      0      0      0      0      0      0      0      0      0      0      0    0.0           0     4026531       0   0  0.0000\n  3      0      0      0      0      0      0      0      0      0      0      0      0    0.0           0     4026531       0   0  0.0000\n  4      0      0      0      0      0      0      0      0      0      0      0      0    0.0           0     4026531       0   0  0.0000\n  5     80      0     67     24     38     36      1      5     48   5135      0      0   19.8   138956080   142982611    5173   2  0.0000\n  6   2455  30009  49079    754    424    199     31     99    157     15      0     58    2.9    55284384     2000000      29   0  0.0000\n  7      0      0      0      7      3   1588      0      1     21      0      0      0   32.7    35738704     2000000    1620   0  0.0000\nTot   2535  30009  49148    795    480   4911     32    115    277   5364      0     58   22.6   305334592 [75.8% of 402653184 max]\nGC control variables:\n   *GC-INHIBIT* = true\n   *GC-PENDING* = true\n   *STOP-FOR-GC-PENDING* = false\nCollection trigger variables:\n   dynamic_space_size = 402653184\n   bytes_allocated = 305334592\n   auto_gc_trigger = 286706595\n   bytes_consed_between_gcs = 20132659\nfatal error encountered in SBCL pid 940945 tid 940945:\nHeap exhausted, game over.\n\n   0: fp=0x7f88a09bf9d0 pc=0xb8000ba532 UIOP/STREAM::COPY-STREAM-TO-STREAM\n   1: fp=0x7f88a09bfba0 pc=0xb8000bacc9 UIOP/STREAM::SLURP-STREAM-STRING\n   2: fp=0x7f88a09bfc40 pc=0xb8000b82dc UIOP/STREAM::CALL-WITH-INPUT-FILE\n   3: fp=0x7f88a09bfdd8 pc=0xb80122aad2 CL-USER::LEARNER-NATIVE-MAIN\n   4: fp=0x7f88a09bfe70 pc=0xb801d2da99 (FLET SB-UNIX::BODY :IN SB-IMPL::START-LISP)\n   5: fp=0x7f88a09bff30 pc=0xb801d2d89d (FLET \"WITHOUT-INTERRUPTS-BODY-3\" :IN SB-IMPL::START-LISP)\n   6: fp=0x7f88a09bffc8 pc=0xb801d2d6e2 SB-IMPL::%START-LISP\n",
+        "receiverFailureLogSha256": "835af8a5bbf73fe542d48fc6d009c7d689baec20e3148bd672faf70570e165d9"
+      },
+      {
+        "run": "64m-bounded",
+        "report": {
+          "passed": false,
+          "nativeHarness": true,
+          "productionServe": false,
+          "vmAcceptance": false,
+          "fullAcceptanceComplete": false,
+          "evidence": "/tmp/gr8s-learner-native-kz6k49wi",
+          "records": 1024,
+          "payloadBytes": 67108864,
+          "heapLimitMiB": 384,
+          "chunkDelay": 0.02,
+          "binarySha256": "9449955e32ee5041184d8888034f75db3659a8c46e00cf6ba2c43f8a707645e4",
+          "error": "sink exited 1; see /tmp/gr8s-learner-native-kz6k49wi/sink-2.log",
+          "sinkExit": 1,
+          "sourceExit": 0
+        },
+        "receiverFailureLog": "Heap exhausted during garbage collection: 65536 bytes available, 65568 requested.\n     | Immobile Objects |\n Gen layout symbol   code  Boxed   Cons    Raw   Code  SmMix  Mixed  LgRaw LgCode  LgMix Waste%       Alloc        Trig   Dirty GCs Mem-age\n  1      0      0      2     12     16   3092      0     12     45    309      0      0   31.7    78010400     4026531    3486   0  1.4230\n  2      0      0      0      0      0      0      0      0      0      0      0      0    0.0           0     4026531       0   0  0.0000\n  3      0      0      0      0      0      0      0      0      0      0      0      0    0.0           0     4026531       0   0  0.0000\n  4      0      0      0      0      0      0      0      0      0      0      0      0    0.0           0     4026531       0   0  0.0000\n  5     80      0     67     25     38     36      1      4     45   5135      0      0   19.8   138921040   142947571    5173   2  0.0000\n  6   2455  30009  49079    754    424    199     31     98    158     15      0     58    2.9    55291696     2000000      30   0  0.0000\n  7      0      0      0      7      3   1504      0      1     20      5      0      0   32.6    34025152     2000000    1540   0  0.0000\nTot   2535  30009  49148    798    481   4831     32    115    268   5464      0     58   22.4   306244960 [76.1% of 402653184 max]\nGC control variables:\n   *GC-INHIBIT* = true\n   *GC-PENDING* = true\n   *STOP-FOR-GC-PENDING* = false\nCollection trigger variables:\n   dynamic_space_size = 402653184\n   bytes_allocated = 306244960\n   auto_gc_trigger = 289016003\n   bytes_consed_between_gcs = 20132659\nfatal error encountered in SBCL pid 941807 tid 941813:\nHeap exhausted, game over.\n\n   0: fp=0x7f08e17de1a8 pc=0xb80083cf3e AG-GRPC::MAKE-TRAILERS\n   1: fp=0x7f08e17de1f0 pc=0xb80085f584 AG-GRPC::SERVER-SEND-TRAILERS\n   2: fp=0x7f08e17de350 pc=0xb80085d323 AG-GRPC::SERVER-HANDLE-UNARY\n   3: fp=0x7f08e17de490 pc=0xb80085cdc7 AG-GRPC::SERVER-DISPATCH-HANDLER\n   4: fp=0x7f08e17de648 pc=0xb80085aedf AG-GRPC::SERVER-CONNECTION-LOOP\n   5: fp=0x7f08e17de6e0 pc=0xb80085a800 AG-GRPC::SERVER-HANDLE-CONNECTION\n   6: fp=0x7f08e17de840 pc=0xb800859e2f (LAMBDA () :IN AG-GRPC::SERVER-ACCEPT-LOOP)\n   7: fp=0x7f08e17de8c0 pc=0xb80045178a (LABELS BORDEAUX-THREADS::%BINDING-DEFAULT-SPECIALS-WRAPPER :IN BORDEAUX-THREADS::BINDING-DEFAULT-SPECIALS)\n   8: fp=0x7f08e17de9b0 pc=0xb801993cbc (FLET SB-UNIX::BODY :IN SB-THREAD::RUN)\n   9: fp=0x7f08e17deaa0 pc=0xb8019945da (FLET \"WITHOUT-INTERRUPTS-BODY-\" :IN SB-THREAD::RUN)\n  10: fp=0x7f08e17debf8 pc=0xb801993872 (FLET SB-UNIX::BODY :IN SB-THREAD::RUN)\n  11: fp=0x7f08e17dece8 pc=0xb801993f97 (FLET \"WITHOUT-INTERRUPTS-BODY-\" :IN SB-THREAD::RUN)\n  12: fp=0x7f08e17dedd8 pc=0xb801993664 SB-THREAD::RUN\n  13: fp=0x7f08e17dee10 pc=0x4013b2 Foreign function call_into_lisp_\n",
+        "receiverFailureLogSha256": "76be524c5bc7e578405313a2bed0e1adb13fa0db3c98dbcbbe6dc273090ef0be"
+      }
+    ]
+  },
+  "conclusion": "4MiB interruption/rejoin/promotion passes;64MiB receiver heap exhaustion reproduces at384MiB even with bounded consume-once control parsing. Root cause unproven; large-payload/native admission acceptance is incomplete.",
+  "remaining": [
+    "Diagnose and fix384MiB native receiver exhaustion",
+    "Repeat64MiB interrupted learner acceptance",
+    "Leader handoff during catch-up",
+    "Authenticated native transport and VM execution",
+    "Production voter startup integration"
+  ],
+  "fullAcceptanceComplete": false,
+  "productionVoterRecoveryEnabled": false,
+  "fullGoalComplete": false
+}
