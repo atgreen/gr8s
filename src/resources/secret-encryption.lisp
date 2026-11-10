@@ -122,44 +122,38 @@
           (remhash +secret-encrypted-data-field+ copy)
           copy))))
 
-(defun encrypt-secret-history-entry (store entry)
+(defun transform-secret-history-entry (store entry transform)
+  "History is immutable. Copy only the wrapper when a Secret field changes."
   (if (not (hash-table-p entry))
       entry
-      (let* ((copy (copy-core-object entry))
-             (resource (gethash "resource" copy)))
+      (let ((result entry) (resource (gethash "resource" entry)))
         (dolist (field '("old" "new"))
-          (let ((object (gethash field copy)))
+          (let ((object (gethash field entry)))
             (when (hash-table-p object)
-              (setf (gethash field copy)
-                    (encrypt-secret-object store resource object)))))
-        copy)))
+              (let ((value (funcall transform store resource object)))
+                (unless (eq value object)
+                  (when (eq result entry) (setf result (alexandria:copy-hash-table entry)))
+                  (setf (gethash field result) value))))))
+        result)))
+
+(defun encrypt-secret-history-entry (store entry)
+  (transform-secret-history-entry store entry #'encrypt-secret-object))
 
 (defun decrypt-secret-history-entry (store entry)
-  (if (not (hash-table-p entry))
-      entry
-      (let* ((copy (copy-core-object entry))
-             (resource (gethash "resource" copy)))
-        (dolist (field '("old" "new"))
-          (let ((object (gethash field copy)))
-            (when (hash-table-p object)
-              (setf (gethash field copy)
-                    (decrypt-secret-object store resource object)))))
-        copy)))
+  (transform-secret-history-entry store entry #'decrypt-secret-object))
 
 (defun decrypt-core-state-secrets (store state)
-  "Decrypt every Secret-bearing checkpoint field in STATE in place."
-  (setf (gethash "items" state)
-        (map 'vector
-             (lambda (object)
-               (decrypt-secret-object
-                store
-                (if (equal "Secret" (gethash "kind" object)) "secrets" "")
-                object))
-             (gethash "items" state #()))
-        (gethash "templateHistory" state)
-        (map 'vector (lambda (entry)
-                       (decrypt-secret-history-entry store entry))
-             (gethash "templateHistory" state #())))
+  "Decrypt the unpublished parsed checkpoint in place, replacing one entry at a time.
+Do not retain a second transformed vector of payloads during checkpoint load."
+  (let ((items (coerce (gethash "items" state #()) 'vector))
+        (history (coerce (gethash "templateHistory" state #()) 'vector)))
+    (setf (gethash "items" state) items (gethash "templateHistory" state) history)
+    (dotimes (i (length items))
+      (let ((object (aref items i)))
+        (setf (aref items i)
+              (decrypt-secret-object store (if (equal "Secret" (gethash "kind" object)) "secrets" "") object))))
+    (dotimes (i (length history))
+      (setf (aref history i) (decrypt-secret-history-entry store (aref history i)))))
   state)
 
 (defun new-secret-encryption-config ()
