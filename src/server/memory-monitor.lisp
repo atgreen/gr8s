@@ -89,6 +89,45 @@ zero capacity. These process-local families have no path or resource labels."
                     for value in statistics
                     do (emit suffix help value))))))))
 
+(defun datastore-file-observation (path)
+  "Return measurement success, presence and apparent bytes for one regular file.
+A missing path is an observed absence; other failures do not invent zero sizes."
+  (handler-case
+      (let ((stat (sb-posix:stat (namestring path))))
+        (if (sb-posix:s-isreg (sb-posix:stat-mode stat))
+            (values t 1 (sb-posix:stat-size stat))
+            (values nil nil nil)))
+    (sb-posix:syscall-error (condition)
+      (if (= sb-posix:enoent (sb-posix:syscall-errno condition))
+          (values t 0 nil)
+          (values nil nil nil)))
+    (error () (values nil nil nil))))
+
+(defun datastore-file-metrics-text (&optional store)
+  "Measure three known durable files, following the selected application root.
+Copy paths under the raw store mutex, then sample metadata outside store locks."
+  (if (null store) ""
+      (let* ((paths
+               (bt:with-lock-held ((pod-store-lock store))
+                 (list (list "core_checkpoint" (gr8s.resources::core-resource-state-path store))
+                       (list "core_journal" (gr8s.resources::core-journal-path store))
+                       (list "raft_wal" (merge-pathnames "raft/control-plane.log" (pod-store-path store))))))
+             (observations
+               (loop for (name path) in paths collect
+                 (multiple-value-bind (available present bytes) (datastore-file-observation path)
+                   (list name available present bytes)))))
+        (with-output-to-string (out)
+          (loop for (name help field) in
+                  '(("gr8s_datastore_file_stats_available" "One when known-file metadata was sampled, including an observed absence." 1)
+                    ("gr8s_datastore_file_present" "One when a known durable file exists, zero when absent." 2)
+                    ("gr8s_datastore_file_size_bytes" "Apparent length of an existing durable file; not allocated disk blocks." 3))
+                do (gr8s.kubelet::write-prometheus-family
+                    out name help "gauge"
+                    (loop for (file available present bytes) in observations
+                          when (or (= field 1) (and available (or (= field 2) (= present 1))))
+                            collect (list (list (cons "file" file))
+                                          (case field (1 (if available 1 0)) (2 present) (3 bytes))))))))))
+
 (defun heap-exhausted-message (condition)
   "Explain CONDITION, a heap exhaustion, in one line."
   (format nil "gr8s FATAL: out of memory in thread ~S: ~A ~D MiB of the ~D MiB heap was in use ~

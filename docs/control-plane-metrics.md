@@ -101,7 +101,7 @@ locks, reads worker counters under the worker lock, and formats text after
 releasing those locks. Worker and Raft samples can represent slightly different
 instants. Comparing retained bytes with the configured budget helps identify
 write backpressure; sustained apply or peer replication lag needs investigation.
-Heartbeat freshness, datastore file growth, and reconciliation convergence remain
+Heartbeat freshness and reconciliation convergence remain
 separate telemetry work under `podster-ucm.6`.
 
 ## State filesystem capacity
@@ -132,3 +132,38 @@ separately. Falling available bytes or free inodes can prevent WAL and snapshot
 publication even while the Lisp heap has space. Check
 `gr8s_datastore_filesystem_stats_available == 0` separately from low-capacity
 alerts so failed sampling cannot appear healthy.
+
+## Datastore file growth
+
+The API process also samples three known files. The `file` label has exactly
+these values:
+
+| File label | Location |
+|---|---|
+| `core_checkpoint` | `objects/state.json` in the selected application generation |
+| `core_journal` | `objects/journal.jsonl` in the selected application generation |
+| `raft_wal` | `raft/control-plane.log` in the stable member state directory |
+
+| Gauge | Meaning |
+|---|---|
+| `gr8s_datastore_file_stats_available{file=...}` | One when metadata was sampled, including a confirmed absence; zero on failure |
+| `gr8s_datastore_file_present{file=...}` | One for an existing regular file, zero for a confirmed absence; omitted on measurement failure |
+| `gr8s_datastore_file_size_bytes{file=...}` | Apparent file length; emitted only for an existing regular file |
+
+A missing core journal after checkpointing is normal. A standalone server has
+no production Raft WAL. These absences have availability one and presence zero,
+with no size sample. Permission failures and non-regular paths produce
+availability zero rather than a false zero-byte file. A process without a store
+omits these families.
+
+The collector copies the current paths under the raw store mutex, then performs
+at most three metadata queries outside that lock. It reads no file contents and
+scans no directories. The samples are not an atomic filesystem snapshot;
+checkpointing and generation changes can occur between queries. File lengths
+can shrink after checkpointing, so these gauges are not cumulative write counts.
+
+Use these series to identify growth in the main core and Raft files, alongside
+filesystem availability and Raft retention metrics. They exclude snapshot
+artifacts, catch-up cache files, temporary files, Pod/Node records and workload
+logs. Apparent length also differs from allocated disk blocks for sparse files.
+They are not total gr8s disk usage.
