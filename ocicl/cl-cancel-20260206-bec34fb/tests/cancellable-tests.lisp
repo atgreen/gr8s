@@ -134,7 +134,7 @@
 
 (test with-deadline-basic
   "Deadline cancels at specified time"
-  (let ((deadline-time (+ (get-current-time) 0.1)))
+  (let ((deadline-time (+ (get-current-time) 1/10)))
     (multiple-value-bind (ctx cancel)
         (with-deadline (background) deadline-time)
       (declare (ignore cancel))
@@ -146,8 +146,8 @@
 
 (test with-deadline-inherits-shorter-parent
   "Child inherits shorter deadline from parent"
-  (let ((parent-deadline (+ (get-current-time) 0.1))
-        (child-deadline (+ (get-current-time) 10.0)))
+  (let ((parent-deadline (+ (get-current-time) 1/10))
+        (child-deadline (+ (get-current-time) 10)))
     (multiple-value-bind (parent parent-cancel)
         (with-deadline (background) parent-deadline)
       (declare (ignore parent-cancel))
@@ -162,8 +162,8 @@
 
 (test with-deadline-uses-shorter-child
   "Child uses its own shorter deadline"
-  (let ((parent-deadline (+ (get-current-time) 10.0))
-        (child-deadline (+ (get-current-time) 0.1)))
+  (let ((parent-deadline (+ (get-current-time) 10))
+        (child-deadline (+ (get-current-time) 1/10)))
     (multiple-value-bind (parent parent-cancel)
         (with-deadline (background) parent-deadline)
       (declare (ignore parent-cancel))
@@ -239,7 +239,7 @@
 (test with-deadline-context-macro
   "with-deadline-context macro works"
   (signals deadline-exceeded
-    (let ((deadline-time (+ (get-current-time) 0.1)))
+    (let ((deadline-time (+ (get-current-time) 1/10)))
       (with-deadline-context (ctx deadline-time)
         (sleep 0.2)))))
 
@@ -361,3 +361,53 @@
         (let ((*current-cancel-context* ctx2))
           (is (eq (ensure-cancellable) ctx2))
           (is (eq (ensure-cancellable nil) ctx2)))))))
+
+
+(test timeout-duration-retains-precision-at-epoch-scale
+  "Float durations are normalized before epoch addition, not after rounding."
+  (dolist (duration '(0.1 1.0 0.1d0 1/10 1))
+    (let ((before (get-current-time)))
+      (multiple-value-bind (ctx cancel) (with-timeout (background) duration)
+        (unwind-protect
+             (let ((after (get-current-time)))
+               (is (rationalp (deadline ctx)))
+               (is (<= (+ before (rational duration)) (deadline ctx)
+                       (+ after (rational duration)))))
+          (funcall cancel))))))
+
+(test absolute-double-float-deadlines-normalize-without-changing-the-value
+  (let ((requested (coerce (+ (get-current-time) 60) 'double-float)))
+    (multiple-value-bind (ctx cancel) (with-deadline (background) requested)
+      (unwind-protect
+           (progn (is (rationalp (deadline ctx))) (is (= requested (deadline ctx))))
+        (funcall cancel)))))
+
+(test deadline-scopes-preserve-values-and-clean-up-nonlocal-exits
+  (is (equal '(1 2) (multiple-value-list
+                     (with-timeout-context (ctx 60) (values 1 2)))))
+  (is (equal '(3 4) (multiple-value-list
+                     (with-deadline-context (ctx (+ (get-current-time) 60)) (values 3 4)))))
+  (let ((captured nil))
+    (is (eq :escaped
+            (catch 'scope-exit
+              (with-timeout-context (ctx 60)
+                (setf captured ctx)
+                (throw 'scope-exit :escaped)))))
+    (is (cancelled-p captured))
+    (is (null (cl-cancel::cancellable-timer-entry captured)))))
+
+(test deadline-scopes-preserve-body-errors
+  (let ((original (make-condition 'simple-error :format-control "body failed")))
+    (is (eq original
+            (handler-case
+                (with-timeout-context (ctx 60)
+                  (cancel ctx (make-condition 'deadline-exceeded :cancellable ctx))
+                  (error original))
+              (error (condition) condition))))))
+
+(test expired-deadline-scope-does-not-enter-body
+  (let ((entered nil))
+    (signals deadline-exceeded
+      (with-deadline-context (ctx (1- (get-current-time)))
+        (setf entered t)))
+    (is (null entered))))

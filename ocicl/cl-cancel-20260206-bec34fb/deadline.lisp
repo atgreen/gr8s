@@ -333,9 +333,12 @@ with-deadline has no effect.
 Returns (values cancellable cancel-function)
 The cancel function is a lambda accepting an optional error parameter."
   (let* ((parent-deadline (deadline parent))
+         ;; Normalize an absolute float without changing its numeric value.
+         ;; Relative durations must be rationalized before adding epoch time.
+         (requested-deadline (rational deadline-time))
          (actual-deadline (if parent-deadline
-                              (min deadline-time parent-deadline)
-                              deadline-time)))
+                              (min requested-deadline parent-deadline)
+                              requested-deadline)))
     (multiple-value-bind (ctx cancel-func)
         (with-cancel parent)
       (change-class ctx 'deadline-context :deadline actual-deadline)
@@ -368,11 +371,14 @@ call cancel as soon as the operations running in this cancellable complete.
 
 Returns (values cancellable cancel-function)
 The cancel function is a lambda accepting an optional error parameter."
-  (with-deadline parent (+ (get-current-time) timeout-seconds)))
+  ;; Adding a single float to a large epoch timestamp first coerces the entire
+  ;; sum to single precision, losing seconds or even minutes of resolution.
+  (with-deadline parent (+ (get-current-time) (rational timeout-seconds))))
 
 (defmacro with-deadline-context ((var deadline-time &optional (parent '*current-cancel-context*)) &body body)
   "Convenience macro to execute BODY with a deadline context.
-Automatically cancels the context when done.
+Checks cancellation before BODY and after its normal return, and always cancels
+the context on exit. Cancellation is cooperative; BODY is not interrupted.
 DEADLINE-TIME is fractional seconds since epoch (supports sub-second precision).
 
 Example:
@@ -383,12 +389,15 @@ Example:
          (with-deadline (ensure-cancellable ,parent) ,deadline-time)
        (unwind-protect
             (with-cancellable (,var ,var)
-              ,@body)
+              (check-cancellation ,var)
+              (multiple-value-prog1 (progn ,@body)
+                (check-cancellation ,var)))
          (funcall ,cancel)))))
 
 (defmacro with-timeout-context ((var timeout-seconds &optional (parent '*current-cancel-context*)) &body body)
   "Convenience macro to execute BODY with a timeout context.
-Automatically cancels the context when done.
+Checks cancellation before BODY and after its normal return, and always cancels
+the context on exit. Cancellation is cooperative; BODY is not interrupted.
 TIMEOUT-SECONDS can be fractional (e.g., 0.5 for 500ms) for sub-second precision.
 
 Example:
@@ -401,5 +410,7 @@ Example:
          (with-timeout (ensure-cancellable ,parent) ,timeout-seconds)
        (unwind-protect
             (with-cancellable (,var ,var)
-              ,@body)
+              (check-cancellation ,var)
+              (multiple-value-prog1 (progn ,@body)
+                (check-cancellation ,var)))
          (funcall ,cancel)))))

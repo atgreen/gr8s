@@ -44,7 +44,7 @@
              (dotimes (i 1000)
                (ag-grpc:call-unary channel "/lifetime.Probe/Echo"
                                    (make-instance 'gr8s.node.v1::raft-ack)
-                                   :response-type 'gr8s.node.v1::raft-ack :timeout 5))
+                                   :response-type 'gr8s.node.v1::raft-ack :timeout 0.75))
              (lifetime-await (lambda () (zerop (lifetime-stream-count server-mux))))
              (let ((client-mux (ag-http2:connection-multiplexer (ag-grpc::channel-connection channel))))
                (assert (zerop (lifetime-stream-count client-mux)))
@@ -65,6 +65,7 @@
                               "vmAcceptance" nil
                               "heapLimitMiB" (/ (sb-ext:dynamic-space-size) (* 1024 1024))
                               "calls" calls "connections" 1 "peakServerStreams" peak
+                              "rpcTimeoutSeconds" 0.75
                               "growthAllowanceBytes" allowance "samples" (coerce (nreverse samples) 'vector)))
       (when channel (ignore-errors (ag-grpc:channel-close channel)))
       (ag-grpc:server-stop server)

@@ -433,3 +433,28 @@
                (is (every #'cl-cancel:cancelled-p children))
                (is (every (lambda (child) (null (cl-cancel::cancellable-timer-entry child))) children))))
         (funcall cancel-parent)))))
+
+(test grpc-fractional-wire-timeouts-retain-epoch-deadline-precision
+  (with-http2-close-connection (connection socket peer listener)
+    (let ((server (ag-grpc:make-grpc-server 0 :host "127.0.0.1")))
+      (ag-grpc:server-register-handler server "/precision.Test/Echo"
+                                     (lambda (request context) (declare (ignore request context)))
+                                     :request-type 'gr8s.node.v1::raft-ack
+                                     :response-type 'gr8s.node.v1::raft-ack)
+      (dolist (case '(("100m" 1/10) ("100000u" 1/10) ("99999999n" 99999999/1000000000)))
+        (destructuring-bind (wire duration) case
+          (let* ((stream (ag-http2::connection-new-stream connection))
+                 (id (ag-http2:stream-id stream))
+                 (before (cl-cancel:get-current-time)))
+            (is (= duration (ag-grpc::parse-grpc-timeout wire)))
+            (is (rationalp (ag-grpc::parse-grpc-timeout wire)))
+            (setf (ag-http2:stream-state stream) :open
+                  (ag-http2:stream-headers stream)
+                  (list (cons :path "/precision.Test/Echo") (cons "grpc-timeout" wire)))
+            (ag-grpc::server-handle-headers server connection
+                                           (ag-http2::make-headers-frame id #() :end-headers t) "test")
+            (let* ((after (cl-cancel:get-current-time))
+                   (context (ag-grpc::connection-get-stream-context connection stream))
+                   (deadline (cl-cancel:deadline (ag-grpc::context-cancel-context context))))
+              (is (rationalp deadline))
+              (is (<= (+ before duration) deadline (+ after duration))))))))))
