@@ -28,6 +28,7 @@
    #:create-pod
    #:create-pod-unlocked
    #:copy-pod-status-value
+   #:public-pod-status-value
    #:current-status-pod-p
    #:current-timestamp
    #:delete-pod

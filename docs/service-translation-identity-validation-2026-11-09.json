@@ -1,0 +1,370 @@
+{
+  "date": "2026-11-09",
+  "issue": "podster-p9c.10",
+  "nativeCommit": "1b2cc46",
+  "nativeVersion": "gr8s 1.37.2-g1b2cc46, patch level 0",
+  "nativeSHA256": "f48e40684f7ccb12b3fd0981adb684fe32fc370b9f54e31ea2617e4f13720fa6",
+  "implementationCommits": [
+    "bd32bdc",
+    "1b2cc46"
+  ],
+  "additionalTestCommit": "053808e",
+  "scope": "Trusted private translation identity transport and durable route-ownership restoration. No packet source NAT or alias return-route installation is activated.",
+  "identityInvariant": "Only the current assigned Pod UID/revision and accepted durable Node ID can report the current CRI sandbox lease. Both normal and private address claims are checked for conflicts under the observation commit lock. Public status/watches and client status writes exclude the private record.",
+  "persistence": "Raw observation checkpoints and replicated Pod state retain the identity. A typed optional NodeNetworkConfig inventory carries current records; readiness loss retains them, while Pod/node incarnation changes and explicit lease withdrawal remove them. Received/restored inventories validate address range, owner fields and uniqueness.",
+  "broaderFocused": {
+    "passed": 7701,
+    "failed": 0,
+    "logSHA256": "e1b385111ddaf84fc3c56e2efa06d283ad76fbb1d9627a8d891bda7aa5f3d457"
+  },
+  "finalIdentityAndPool": {
+    "passed": 133,
+    "failed": 0,
+    "logSHA256": "3e34e072ed5d70f2c050ab6c502c871eaa28aaa5664683b6a653eb52e1c50575"
+  },
+  "integratedFocused": {
+    "passed": 7195,
+    "failed": 0,
+    "logSHA256": "4a08d420eb9a614fec17f6f84390aa139ede55a0f20558392125130afd2001a4"
+  },
+  "integratedCoverage": "CNI, IPAM, Pod pool, translation identity, node protocol/session, Pod conditions/status/watch/termination, HA store, snapshot materialization and member restore. Includes streamed artifact materialization of private identity while public status stays filtered.",
+  "protocolGeneration": {
+    "passed": true,
+    "logSHA256": "06289ceac973cfec57fb859e4a971e66f77046e5c73b8fb8f8a06e949570081e"
+  },
+  "nativeEnvironment": "Disposable Fedora44 VM22291, two native containerd agents in isolated mount/network namespaces over VXLAN, one control plane. Normal native binary; no debug server. No physical-host or native multi-member HA claim.",
+  "nativeLeaseProvisioning": "Fixture provisions and withdraws IPAM format3 offline with the owner agent stopped; actual agents obtain CRI sandbox ownership and publish/retain/withdraw the private identity. This does not exercise an active CNI allocator call for SNAT.",
+  "nativeReportSHA256": "1d0ff2015071adfc2d174fd59da86bd539b7a499f51ea15a84f3272b71b07fdc",
+  "nativeReport": {
+    "root": "/var/tmp/gr8s-two-node.arcnew_t",
+    "checks": [
+      {
+        "name": "noPrivateIdentitiesBeforeLease",
+        "passed": true,
+        "observed": [
+          [],
+          []
+        ]
+      },
+      {
+        "name": "authenticatedIdentityProjected",
+        "passed": true,
+        "observed": [
+          [
+            {
+              "podUID": "e360b9bf-ac34-4902-9570-45d7b02dd687",
+              "nodeID": "4523768c-2e4c-4d52-9ed2-83341e213054",
+              "nodeName": "worker-0",
+              "podIP": "10.80.0.1",
+              "address": "10.80.0.2",
+              "sandboxID": "7bea2a525e592ae14be2ad2f3bd6c8bf76d88672211d094472372136fbff6db4",
+              "interfaceName": "eth0"
+            }
+          ],
+          [
+            {
+              "podUID": "e360b9bf-ac34-4902-9570-45d7b02dd687",
+              "nodeID": "4523768c-2e4c-4d52-9ed2-83341e213054",
+              "nodeName": "worker-0",
+              "podIP": "10.80.0.1",
+              "address": "10.80.0.2",
+              "sandboxID": "7bea2a525e592ae14be2ad2f3bd6c8bf76d88672211d094472372136fbff6db4",
+              "interfaceName": "eth0"
+            }
+          ]
+        ]
+      },
+      {
+        "name": "privateIdentityHiddenFromPodStatus",
+        "passed": true,
+        "observed": {
+          "conditions": [
+            {
+              "lastTransitionTime": "2026-11-10T00:20:27Z",
+              "observedGeneration": 1,
+              "status": "True",
+              "type": "PodScheduled"
+            },
+            {
+              "lastTransitionTime": "2026-11-10T00:20:27Z",
+              "observedGeneration": 1,
+              "status": "True",
+              "type": "Initialized"
+            },
+            {
+              "lastTransitionTime": "2026-11-10T00:20:33Z",
+              "observedGeneration": 1,
+              "status": "True",
+              "type": "ContainersReady"
+            },
+            {
+              "lastTransitionTime": "2026-11-10T00:20:33Z",
+              "observedGeneration": 1,
+              "status": "True",
+              "type": "Ready"
+            }
+          ],
+          "containerStatuses": [
+            {
+              "containerID": "containerd://ee48895d0f4ac4dbb2a320b5d3888be585e1d82aa5e190d5d05fc7ca546e77a8",
+              "image": "registry.k8s.io/e2e-test-images/agnhost:2.66.1",
+              "imageID": "sha256:2f0df2a116185c62076f0ecf923662cb00ac107da66d057c8d514313dc8f38d5",
+              "name": "netexec",
+              "ready": true,
+              "resources": {},
+              "restartCount": 0,
+              "started": true,
+              "state": {
+                "running": {
+                  "startedAt": "2026-11-10T00:20:32Z"
+                }
+              }
+            }
+          ],
+          "hostIP": "198.18.253.2",
+          "hostIPs": [
+            {
+              "ip": "198.18.253.2"
+            }
+          ],
+          "observedGeneration": 1,
+          "phase": "Running",
+          "podIP": "10.80.0.1",
+          "podIPs": [
+            {
+              "ip": "10.80.0.1"
+            }
+          ],
+          "qosClass": "BestEffort",
+          "startTime": "2026-11-10T00:20:27Z"
+        }
+      },
+      {
+        "name": "workloadsUnchangedAfterLease",
+        "passed": true,
+        "observed": [
+          {
+            "uid": "e360b9bf-ac34-4902-9570-45d7b02dd687",
+            "ip": "10.80.0.1",
+            "containers": [
+              "containerd://ee48895d0f4ac4dbb2a320b5d3888be585e1d82aa5e190d5d05fc7ca546e77a8"
+            ]
+          },
+          {
+            "uid": "97a358ab-d158-42d3-84df-8852319e83fb",
+            "ip": "10.80.16.1",
+            "containers": [
+              "containerd://f80115a84c1cc12f836da6817a8c73e99a7f26dcee4b00036d0d92b0333f19bd"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "privateIdentityCheckpointed",
+        "passed": true,
+        "observed": {
+          "address": "10.80.0.2",
+          "podIP": "10.80.0.1",
+          "sandboxID": "7bea2a525e592ae14be2ad2f3bd6c8bf76d88672211d094472372136fbff6db4",
+          "interfaceName": "eth0",
+          "podUID": "e360b9bf-ac34-4902-9570-45d7b02dd687",
+          "nodeName": "worker-0",
+          "nodeID": "4523768c-2e4c-4d52-9ed2-83341e213054"
+        }
+      },
+      {
+        "name": "identityRetainedAcrossOwnerRestart",
+        "passed": true,
+        "observed": [
+          [
+            {
+              "podUID": "e360b9bf-ac34-4902-9570-45d7b02dd687",
+              "nodeID": "4523768c-2e4c-4d52-9ed2-83341e213054",
+              "nodeName": "worker-0",
+              "podIP": "10.80.0.1",
+              "address": "10.80.0.2",
+              "sandboxID": "7bea2a525e592ae14be2ad2f3bd6c8bf76d88672211d094472372136fbff6db4",
+              "interfaceName": "eth0"
+            }
+          ],
+          [
+            {
+              "podUID": "e360b9bf-ac34-4902-9570-45d7b02dd687",
+              "nodeID": "4523768c-2e4c-4d52-9ed2-83341e213054",
+              "nodeName": "worker-0",
+              "podIP": "10.80.0.1",
+              "address": "10.80.0.2",
+              "sandboxID": "7bea2a525e592ae14be2ad2f3bd6c8bf76d88672211d094472372136fbff6db4",
+              "interfaceName": "eth0"
+            }
+          ]
+        ]
+      },
+      {
+        "name": "identityWithdrawnOnBothNodes",
+        "passed": true,
+        "observed": [
+          [],
+          []
+        ]
+      },
+      {
+        "name": "publicStatusStillPrivate",
+        "passed": true,
+        "observed": {
+          "conditions": [
+            {
+              "lastTransitionTime": "2026-11-10T00:20:27Z",
+              "observedGeneration": 1,
+              "status": "True",
+              "type": "PodScheduled"
+            },
+            {
+              "lastTransitionTime": "2026-11-10T00:20:27Z",
+              "observedGeneration": 1,
+              "status": "True",
+              "type": "Initialized"
+            },
+            {
+              "lastTransitionTime": "2026-11-10T00:20:33Z",
+              "observedGeneration": 1,
+              "status": "True",
+              "type": "ContainersReady"
+            },
+            {
+              "lastTransitionTime": "2026-11-10T00:20:33Z",
+              "observedGeneration": 1,
+              "status": "True",
+              "type": "Ready"
+            }
+          ],
+          "containerStatuses": [
+            {
+              "containerID": "containerd://ee48895d0f4ac4dbb2a320b5d3888be585e1d82aa5e190d5d05fc7ca546e77a8",
+              "image": "registry.k8s.io/e2e-test-images/agnhost:2.66.1",
+              "imageID": "sha256:2f0df2a116185c62076f0ecf923662cb00ac107da66d057c8d514313dc8f38d5",
+              "name": "netexec",
+              "ready": true,
+              "resources": {},
+              "restartCount": 0,
+              "started": true,
+              "state": {
+                "running": {
+                  "startedAt": "2026-11-10T00:20:32Z"
+                }
+              }
+            }
+          ],
+          "hostIP": "198.18.253.2",
+          "hostIPs": [
+            {
+              "ip": "198.18.253.2"
+            }
+          ],
+          "observedGeneration": 1,
+          "phase": "Running",
+          "podIP": "10.80.0.1",
+          "podIPs": [
+            {
+              "ip": "10.80.0.1"
+            }
+          ],
+          "qosClass": "BestEffort",
+          "startTime": "2026-11-10T00:20:27Z"
+        }
+      },
+      {
+        "name": "nativeTrafficAfterWithdrawal",
+        "passed": true,
+        "observed": [
+          "two-node-1",
+          "two-node-0"
+        ]
+      }
+    ],
+    "lease": {
+      "podIP": "10.80.0.1",
+      "address": "10.80.0.2",
+      "sandboxID": "7bea2a525e592ae14be2ad2f3bd6c8bf76d88672211d094472372136fbff6db4",
+      "interfaceName": "eth0"
+    },
+    "passed": true,
+    "cleanupCompleted": true
+  },
+  "nativeLogs": {
+    "agent-0.log": {
+      "sha256": "1cb7eb3b8426448d9b9844661640345f37c98e5cce5466a03736aaeafe3c09d9",
+      "diagnostics": [
+        "gr8s: Service packet upgrade deferred for /var/tmp/gr8s-two-node.arcnew_t/agent-0/containerd/bpf/7bea2a525e592ae14be2ad2f3bd6c8bf76d88672211d094472372136fbff6db4/: BPF error in prog-load: errno 28 (No space left on device)",
+        "gr8s: Service flow GC deferred: packet pipeline upgrades are pending",
+        "gr8s: Service packet upgrade deferred for /var/tmp/gr8s-two-node.arcnew_t/agent-0/containerd/bpf/7bea2a525e592ae14be2ad2f3bd6c8bf76d88672211d094472372136fbff6db4/: BPF error in prog-load: errno 28 (No space left on device)",
+        "gr8s: Service flow GC deferred: packet pipeline upgrades are pending"
+      ],
+      "gcVerifiedAfterLastDeferral": true,
+      "cniAddTimeouts": 0
+    },
+    "agent-1.log": {
+      "sha256": "e7eaadbe641e2c36640c0b51793f2e73aaf8f1e5ac8d38a1b2f51a812dd795e4",
+      "diagnostics": [],
+      "gcVerifiedAfterLastDeferral": true,
+      "cniAddTimeouts": 0
+    },
+    "control.log": {
+      "sha256": "a012a38325c4a2b1e569b75673522fc76f15158efa4e422d1c22906ed2ab2349",
+      "diagnostics": [],
+      "gcVerifiedAfterLastDeferral": true,
+      "cniAddTimeouts": 0
+    }
+  },
+  "initialNativeFailure": {
+    "nativeCommit": "bd32bdc",
+    "nativeSHA256": "37015c89d9f612f1cf03006d5bed58c93e3471bcddd70e977bfdbfe4395edca6",
+    "report": {
+      "root": "/var/tmp/gr8s-two-node.4fyr0_64",
+      "checks": [
+        {
+          "name": "noPrivateIdentitiesBeforeLease",
+          "passed": true,
+          "observed": [
+            [],
+            []
+          ]
+        }
+      ],
+      "lease": {
+        "podIP": "10.80.0.1",
+        "address": "10.80.0.2",
+        "sandboxID": "b0b283276649ae79b7a3341b71cc9e7dd43f99ee22836bc2e2a572f3d81b9bd5",
+        "interfaceName": "eth0"
+      },
+      "passed": false,
+      "error": "RuntimeError: timed out waiting for worker-0 fresh connection: None",
+      "cleanupCompleted": true
+    },
+    "agentLogSHA256": "07319b2dc3b618c1bcd6751083441374b7447197fd4cc4df2dbc00e4314420fe",
+    "cause": "Secondary startup route journal reader only recognized IPAM formats1/2 and rejected format3. Fixed1b2cc46 by restoring through the central validator; private aliases have the same checked veth ownership. Initial run failed and its cleanup did not converge normally; owned leftovers were reaped before the corrected rerun."
+  },
+  "diagnosticsFollowup": "Two temporary prog-load errno28 deferrals in the passing native run were followed by GC verification. Original errno/verifier details and root cause remain podster-p9c.9; no zero-error claim.",
+  "remaining": "podster-p9c.10 still requires CNI return routes, receiving-node capability/installation readiness before activation, versioned flow/direct-tuple ownership, policy identity normalization, reservation/GC/program-upgrade integration and actual TCP/UDP hairpin/collision traffic. Parent also retains IPv6 packet NAT, packet NodePort policies/source/health checks, broader live Service semantics and diagnostics.",
+  "integratedCommit": "725d69d",
+  "additionalSnapshotTestCommit": "8a8ae66",
+  "hostedCI": {
+    "head": "c645dd06d86ce27e70252a7c06d24ed36d6100f7",
+    "run": 42728989000,
+    "status": "Job not started because recent account payments failed or spending limit must be increased; no hosted test result."
+  },
+  "postWALIntegrationFirstAttempt": {
+    "commit": "c645dd0",
+    "passed": 7434,
+    "failed": 1,
+    "logSHA256": "e188706846e7c4d8598faf8dc0f854bf0d850e30fde723b0037d22d8a609818a",
+    "failure": "The repeated application-WAL process-kill child reached its60s ready-file deadline during dependency compilation after concurrent uncommitted loader edits. Those edits were set aside, and a source-stable rerun is required; this attempt is not a passing gate."
+  },
+  "postWALIntegrationFinal": {
+    "commit": "c645dd06d86ce27e70252a7c06d24ed36d6100f7",
+    "passed": 7482,
+    "failed": 0,
+    "logSHA256": "9156525b28390fbbfd8d6ef574bbf51a9575f129c80daf9c3a0aa09d5cc6b477",
+    "scope": "The integrated identity/CNI/IPAM/node/Pod/HA/materialization/member-restore gate plus Raft and witness suites after integrating upstream3044c43. Source unchanged during this run; repeated application-WAL process-kill regression passes48checks."
+  }
+}

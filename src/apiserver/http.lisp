@@ -90,7 +90,7 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
    When POD carries a status revision, metadata.resourceVersion is set to it (as a
    string). The source object is copied, so POD is left unchanged."
   (let ((object (copy-json-object (pod-to-object pod))))
-    (setf (gethash "status" object) status)
+    (setf (gethash "status" object) (public-pod-status-value status))
     (when (pod-status-revision pod)
       (setf (gethash "resourceVersion" (gethash "metadata" object))
             (write-to-string (pod-status-revision pod))))
