@@ -109,3 +109,20 @@ Production callers must acquire state-directory ownership before opening the
 application, use the durable bootstrap/recovery path, and admit new voters as
 learners until they catch up. Capture registration, native multi-voter acceptance
 and automatic compaction remain unfinished.
+
+`serve` acquires exclusive ownership of its canonical state directory before
+opening the application store, pool or PKI. The CLI acquires that ownership
+before evaluating startup patches and retains it through patch shutdown and
+server teardown. Initialization failures release ownership; process death also
+releases the kernel lock. A second process or an alias of the same directory
+cannot acquire ownership. The stable `.gr8s-serve.lock` file remains in place:
+do not delete it to bypass an active owner.
+
+`metadata/server-mode.json` records standalone or HA intent atomically before
+application initialization. Explicit `--raft-init` or `--raft-join` can transition
+standalone state to HA. Once HA intent is recorded, restart with the appropriate
+Raft options; omitting them is refused, including after failed HA initialization.
+Existing Raft WAL, bootstrap or PKI evidence also prevents standalone fallback.
+A witness WAL is rejected by `serve`. These guards do not yet establish shared
+ownership across every administrative command or enable production voter WAL
+recovery.
