@@ -473,7 +473,9 @@ validates and reconciles against."
                              "podIP" (slot-value identity 'gr8s.node.v1::pod-ip)
                              "address" (slot-value identity 'gr8s.node.v1::translation-ip)
                              "sandboxID" (slot-value identity 'gr8s.node.v1::sandbox-id)
-                             "interfaceName" (slot-value identity 'gr8s.node.v1::interface-name)))
+                             "interfaceName" (slot-value identity 'gr8s.node.v1::interface-name)
+                             "incarnationGeneration"
+                             (slot-value identity 'gr8s.node.v1::incarnation-generation)))
               (slot-value network 'gr8s.node.v1::service-translations)) 'vector)
      "dnsAddress" (slot-value network 'gr8s.node.v1::dns-address)
      "vni" (slot-value network 'gr8s.node.v1::vni)
@@ -1458,10 +1460,16 @@ deletion deadline cannot postpone an earlier one. Holds the store lock."
                         (member primary (mapcar #'gr8s.network::service-translation-address-key
                                                 (gr8s.network::service-translation-status-addresses status))
                                 :test #'equal))
-                return (json-object "address" alias "podIP" primary "sandboxID" sandbox-id
-                                    "interfaceName" (cdr key) "podUID" (pod-uid pod)
-                                    "nodeID" (node-runtime-node-id node-runtime)
-                                    "nodeName" (node-runtime-node-name node-runtime)))))))
+                return (let ((record
+                               (json-object "address" alias "podIP" primary
+                                            "sandboxID" sandbox-id "interfaceName" (cdr key)
+                                            "podUID" (pod-uid pod)
+                                            "nodeID" (node-runtime-node-id node-runtime)
+                                            "nodeName" (node-runtime-node-name node-runtime)))
+                             (generation (gethash key (gr8s.network::node-ipam-incarnations ipam))))
+                         (when generation
+                           (setf (gethash "incarnationGeneration" record) generation))
+                         record))))))
 
 (defun cache-node-observation (node-runtime pod status)
   "Persist actual status and transport Events without confusing runtime deletion with public phase."

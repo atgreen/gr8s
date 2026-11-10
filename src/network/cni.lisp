@@ -84,7 +84,7 @@
 (defstruct cni-configuration
   version name type direction program map-pin-root previous-result endpoint-address
   endpoint-addresses policy-interface-name service-packet-root service-packet-profile
-  service-node-id service-return-address)
+  service-node-id service-return-address service-incarnation)
 
 (defvar *cni-policy-update-lock* (bt:make-lock "gr8s endpoint policy updates")
   "Serialize agent CNI ADD/DEL with retained endpoint program migration.

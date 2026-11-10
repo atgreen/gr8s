@@ -28,7 +28,7 @@
     numeric))
 
 (defun service-translation-incarnation-token
-    (node-id sandbox-id interface-name primary alias)
+    (node-id sandbox-id interface-name primary alias &optional generation)
   "The same 128-bit owner token is computed at local CNI ADD and from the
 validated replicated claim. The sandbox ID identifies a fresh Pod incarnation;
 Pod UID is checked when accepting the claim, but is unavailable at CNI ADD."
@@ -36,14 +36,24 @@ Pod UID is checked when accepting the claim, but is unavailable at CNI ADD."
     (unless (and (stringp value) (<= 1 (length value) 256)
                  (not (find #\Null value)))
       (error "Invalid Service translation incarnation field")))
+  (when (and generation (not (equal generation "")))
+    (unless (and (stringp generation) (= 32 (length generation))
+                 (every (lambda (character)
+                          (or (digit-char-p character)
+                              (find character "abcdef")))
+                        generation))
+      (error "Invalid Service translation lease generation")))
   (let* ((canonical-primary (format-pod-address :ipv4
                                                 (canonical-service-translation-ipv4 primary)))
          (canonical-alias (format-pod-address :ipv4
                                               (canonical-service-translation-ipv4 alias)))
          (bytes (trivial-utf-8:string-to-utf-8-bytes
                  (com.inuoe.jzon:stringify
-                  (vector node-id sandbox-id interface-name
-                          canonical-primary canonical-alias)))))
+                  (if (and generation (not (equal generation "")))
+                      (vector node-id sandbox-id interface-name
+                              canonical-primary canonical-alias generation)
+                      (vector node-id sandbox-id interface-name
+                              canonical-primary canonical-alias))))))
     (subseq (ironclad:digest-sequence :sha256 bytes) 0 16)))
 
 (defun service-translation-address-key (address)
@@ -80,6 +90,7 @@ Caller holds STORE's lock through the subsequent observation commit."
              (primary (service-translation-string claim "podIP"))
              (sandbox (service-translation-string claim "sandboxID"))
              (interface (service-translation-string claim "interfaceName"))
+             (generation (gethash "incarnationGeneration" claim))
              (alias-number (canonical-service-translation-ipv4 address))
              (pod-number (canonical-service-translation-ipv4 primary))
              (node (or (gethash node-name (pod-store-nodes store))
@@ -88,6 +99,9 @@ Caller holds STORE's lock through the subsequent observation commit."
                             (coerce (node-record-all-pod-cidrs node) 'list))))
         (unless (equal (service-translation-string claim "nodeID") (node-record-id node))
           (error "Service translation claim belongs to a replaced node record"))
+        (when generation
+          (service-translation-incarnation-token
+           (node-record-id node) sandbox interface primary address generation))
         (unless (and cidr (/= alias-number pod-number)
                      (member primary (mapcar #'service-translation-address-key
                                              (service-translation-status-addresses status)) :test #'equal))
@@ -111,9 +125,13 @@ Caller holds STORE's lock through the subsequent observation commit."
                     (error "Service translation identity conflicts with another Pod"))))))))
         ;; Node and Pod identity come from the authenticated assignment, never
         ;; from mutable client annotations or the inner JSON claim.
-        (json-object "address" address "podIP" primary "sandboxID" sandbox
-                     "interfaceName" interface "podUID" (pod-uid pod) "nodeName" node-name
-                     "nodeID" (node-record-id node))))))
+        (let ((record
+                (json-object "address" address "podIP" primary "sandboxID" sandbox
+                             "interfaceName" interface "podUID" (pod-uid pod)
+                             "nodeName" node-name "nodeID" (node-record-id node))))
+          (when generation
+            (setf (gethash "incarnationGeneration" record) generation))
+          record)))))
 
 (defun service-translation-identity-messages (store)
   "Project retained trusted observations, including temporarily unready nodes."
@@ -128,7 +146,10 @@ Caller holds STORE's lock through the subsequent observation commit."
                            :pod-uid (gethash "podUID" record) :node-name (gethash "nodeName" record)
                            :node-id (gethash "nodeID" record)
                            :pod-ip (gethash "podIP" record) :translation-ip (gethash "address" record)
-                           :sandbox-id (gethash "sandboxID" record) :interface-name (gethash "interfaceName" record))))))
+                           :sandbox-id (gethash "sandboxID" record)
+                           :interface-name (gethash "interfaceName" record)
+                           :incarnation-generation
+                           (gethash "incarnationGeneration" record ""))))))
 
 (defun validate-service-translation-network (network)
   "Check a received/restored identity inventory before any dataplane consumer."
@@ -148,6 +169,11 @@ Caller holds STORE's lock through the subsequent observation commit."
                 for owner = (service-translation-string record "podUID")
                 do (dolist (key '("sandboxID" "interfaceName" "nodeName" "nodeID"))
                      (service-translation-string record key))
+                   (when (gethash "incarnationGeneration" record)
+                     (service-translation-incarnation-token
+                      (gethash "nodeID" record) (gethash "sandboxID" record)
+                      (gethash "interfaceName" record) primary alias
+                      (gethash "incarnationGeneration" record)))
                    (when (or (gethash alias aliases) (gethash primary pods) (gethash owner owners))
                      (error "Duplicate Service translation identity"))
                    (dolist (address (list alias primary))

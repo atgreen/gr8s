@@ -24,7 +24,7 @@ previous CIDRs while old endpoints may still have live flows."
         (incf count)))))
 
 (defun service-nat-identity-pair
-    (node-id sandbox-id interface-name primary alias)
+    (node-id sandbox-id interface-name primary alias &optional generation)
   "Encode both owner rows from one Pod incarnation. The local agent uses its
 trusted IPAM lease; the replicated inventory uses an authenticated Pod claim.
 Only the enabled bit is staged: attachment publishes local receiver readiness,
@@ -38,7 +38,7 @@ while complete history and cluster-wide receiver proof need further fences."
    (let* ((primary-key (address-key primary))
          (alias-key (address-key alias))
          (epoch (service-translation-incarnation-token
-                 node-id sandbox-id interface-name primary alias))
+                 node-id sandbox-id interface-name primary alias generation))
          (flags (service-lb-bytes #x20001 4)))
     (unless (and (not (equalp primary-key alias-key))
                  (some #'plusp epoch))
@@ -55,7 +55,8 @@ while complete history and cluster-wide receiver proof need further fences."
    (service-translation-string record "sandboxID")
    (service-translation-string record "interfaceName")
    (service-translation-string record "podIP")
-   (service-translation-string record "address")))
+   (service-translation-string record "address")
+   (gethash "incarnationGeneration" record)))
 
 (defun cni-service-nat-owner-map-path (configuration)
   (unless (eq (cni-service-profile configuration) :v2)
@@ -159,7 +160,7 @@ the attachment fence keeps incomplete owner state out of the live datapath."
          (rows (service-nat-identity-pair
                 (cni-configuration-service-node-id configuration)
                 (cni-context-container-id context) (cni-context-interface-name context)
-                primary alias))
+                primary alias (cni-configuration-service-incarnation configuration)))
          (path (cni-service-nat-owner-map-path configuration))
          (fd (funcall open path)))
     (unwind-protect
@@ -199,7 +200,8 @@ the attachment fence keeps incomplete owner state out of the live datapath."
   (let* ((rows (service-nat-identity-pair
                 (cni-configuration-service-node-id configuration)
                 (cni-context-container-id context) (cni-context-interface-name context)
-                (find-if-not (lambda (address) (find #\: address)) addresses) alias))
+                (find-if-not (lambda (address) (find #\: address)) addresses) alias
+                (cni-configuration-service-incarnation configuration)))
          (fd (funcall open (cni-service-nat-owner-map-path configuration))))
     (unwind-protect
          (mark-service-nat-owner-receiver-ready
@@ -223,7 +225,7 @@ Missing pins are harmless; matching rows are left as disabled tombstones."
                    (cni-configuration-service-node-id configuration)
                    (cni-context-container-id context) (cni-context-interface-name context)
                    (find-if-not (lambda (address) (find #\: address)) addresses)
-                   alias))
+                   alias (cni-configuration-service-incarnation configuration)))
             (fd (funcall open path)))
         (unwind-protect
              (withdraw-service-nat-owner-pair
@@ -244,7 +246,7 @@ reporting the retained v2 endpoint healthy. It never creates owner rows."
          (rows (service-nat-identity-pair
                 (cni-configuration-service-node-id configuration)
                 (cni-context-container-id context) (cni-context-interface-name context)
-                primary alias))
+                primary alias (cni-configuration-service-incarnation configuration)))
          (fd (funcall open (cni-service-nat-owner-map-path configuration))))
     (unwind-protect
          (let ((map (funcall map-info fd "gr8s_nat_id_v2" :profile :v2)))
