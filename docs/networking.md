@@ -402,6 +402,18 @@ for endpoints from older versions. See
 Packet source NAT, versioned flow ownership, policy identity normalization and
 receiving-node installation/readiness gating remain in progress.
 
+A separate ABI-v2 packet component registers direct and Service tuples, reserves
+return ownership, and uses private source addresses and ports for hairpin or
+colliding connections. Its four stages put translation around egress and ingress
+policy boundaries. Source and backend incarnation checks prevent tuple reuse by
+a replacement endpoint. It is not installed by the node agent yet: TCP lifecycle
+tracking, garbage collection, alias-aware policy, retained-flow migration and
+receiver installation acknowledgments must be integrated before activation.
+`make test-service-nat` runs its synthetic packet interpreter tests. The same
+fixture passed 42 packet cases and seven capacity/contention cases using real
+BPF programs in a disposable VM; see
+[the component validation evidence](service-nat-component-validation-2026-11-09.json).
+
 Use `--cni-mode external --cni-conf-dir /etc/cni/net.d` to give ownership of
 Pod links, addresses, routes, IPAM, and cross-node transport to operator-supplied
 CNI configuration. Repeat `--cni-bin-dir DIR` to add plugin search directories;
