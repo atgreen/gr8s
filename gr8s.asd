@@ -234,6 +234,7 @@
                                            (:file "service-nat-program")
                                            (:file "service-nat-policy")
                                            (:file "service-nat-guard")
+                                           (:file "service-wire")
                                            (:file "service-lb-dataplane")
                                            (:file "service-packet-state")
                                            (:file "service-packet-upgrade")
