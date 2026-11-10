@@ -23,7 +23,7 @@
                (original-capacity (symbol-function 'gr8s.raft::raft-replication-capacity-index))
                (lock (bt:make-lock "compaction probe state"))
                (armed nil) (held nil) (held-index nil) (stopping nil)
-               (completed 0) (finished nil) (failure nil) (refusals 0)
+               (completed 0) (finished nil) (failure nil) (refusals 0) (conflict-retries 0)
                (loaded-history (reduce #'+ (gr8s::pod-store-template-history store)
                                        :key #'gr8s.resources::template-history-entry-bytes)))
           (labels
@@ -33,7 +33,16 @@
                      (when (bt:with-lock-held (lock) stopping) (error "Probe stopping"))
                      (handler-case (progn (funcall function) (return t))
                        (gr8s:kubernetes-error (condition)
-                         (unless (= 503 (gr8s::kubernetes-error-status-code condition)) (error condition))))
+                         (cond
+                           ((= 503 (gr8s::kubernetes-error-status-code condition)))
+                           ;; CORE-CONFLICT is a committed no-op: rebuilding the
+                           ;; transaction against the now-current state is safe.
+                           ;; Do not retry AlreadyExists or arbitrary conflicts.
+                           ((and (= 409 (gr8s::kubernetes-error-status-code condition))
+                                 (equal "Resource changed before its consensus transaction committed"
+                                        (gr8s::kubernetes-error-message condition)))
+                            (bt:with-lock-held (lock) (incf conflict-retries)))
+                           (t (error condition)))))
                      (when (> (get-internal-real-time) deadline) (error "Probe write timed out"))
                      (sleep 0.02))))
                (input (name value)
@@ -74,6 +83,7 @@
                            (gethash "completedRounds" object) completed
                            (gethash "churnFinished" object) (if finished t nil)
                            (gethash "replicationCapacityRefusals" object) refusals
+                           (gethash "committedConflictRetries" object) conflict-retries
                            (gethash "churnError" object) failure))
                    object))
                (churn ()

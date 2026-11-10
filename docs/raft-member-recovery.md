@@ -562,6 +562,13 @@ held while the other voters continue writing. The follower refuses replication
 above its 32 MiB retained-log budget, then catches up after release. All three
 processes restart with markers and credential hashes preserved. This partial
 cluster run does not establish full-history cluster memory acceptance.
+The first full three-process attempt stopped at round 916 after a leadership
+change: the load generator treated a committed no-op transaction conflict as
+fatal. The probe now rebuilds and retries only that specific conflict, counts
+those retries, and continues to reject unrelated conflicts and AlreadyExists.
+The failed run is retained in the async-worker evidence. It also exposed
+repeated snapshot catch-up on the delayed follower; full cluster acceptance
+remains open under `podster-ucm.11.3.9.10`.
 
 The [three-voter smoke validation](compaction-cluster-smoke-validation-2026-11-10.json)
 uses three separate 384 MiB processes and offline mTLS fixtures. It holds all
