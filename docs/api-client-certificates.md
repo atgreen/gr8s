@@ -1,6 +1,7 @@
 # Kubernetes API client certificates
 
-The public Kubernetes TLS API accepts client certificates signed by its cluster
+The Kubernetes API is exposed only through its authenticated TLS listener. It
+accepts client certificates signed by its cluster
 CA. TLS requests optional client certificates and verifies the actual
 CertificateVerify signature proving possession of the private key. HTTP
 certificate authentication then verifies the chain, validity, key usage and
@@ -42,8 +43,9 @@ retry authorization using another identity. Peer certificate identity is isolate
 and retained across keepalive requests. Every request rechecks certificate
 validity and current RBAC bindings. This TLS implementation's resumption tickets
 do not retain verified peer chains, so each new connection uses a full handshake
-with a fresh ticket key. The local administrative HTTP listener keeps its
-existing explicit administrative trust model.
+with a fresh ticket key. `gr8s serve` does not open a separate administrative
+HTTP listener; its generated kubeconfig uses a `system:masters` client
+certificate against this same HTTPS endpoint.
 
 [API certificate profile policies](certificate-signing-requests.md) continue to
 separate API credentials from internal enrollment credentials. API-issued

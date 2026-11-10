@@ -26,14 +26,13 @@ service-proxy-name, which names another proxy, or headless."
 (defun service-lb-eligible-p (service)
   "True for a Service the socket LB should load-balance: a selector/endpoint
 ClusterIP Service with a real virtual address.  ExternalName, headless (None),
-the API Service (10.96.0.1, served by the real HTTPS listener), and a Service
-labelled for another proxy are excluded."
+and Services labelled for another proxy are excluded.  The API Service is
+translated from 10.96.0.1:443 to the host API listener like every other Service."
   (let ((address (gethash "clusterIP" (gethash "spec" service))))
     (and (not (service-external-name-p service))
          (service-proxied-p service)
          (stringp address)
-         (not (equal address "None"))
-         (not (equal address "10.96.0.1")))))
+         (not (equal address "None")))))
 
 (defun service-cluster-addresses (service)
   "Return every real ClusterIP of SERVICE in API order, including both families."

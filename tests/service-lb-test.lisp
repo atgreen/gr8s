@@ -874,17 +874,20 @@
       (is (null (ingress "beta"))))))
 
 (test service-lb-plan-excludes-ineligible-services
-  ;; Headless (None), the API Service, and ExternalName never reach the maps.
+  ;; Headless (None) and ExternalName never reach the maps; the API Service does.
   (let ((services (list (fake-lb-service "None")
                         (fake-lb-service "10.96.0.1")
                         (fake-lb-service "10.96.0.9" :external-name "db.example.com")
                         (fake-lb-service "10.96.0.10"))))
     (multiple-value-bind (service-entries backend-entries slots)
         (gr8s::service-lb-plan services (lambda (s p) (declare (ignore s p)) '(("10.88.1.5" 8080))))
-      (is (= 1 (length service-entries)))
-      (is (= 1 (length backend-entries)))
-      (is (= 1 slots))
-      (is (equalp (gr8s::service-lb-vip-key "10.96.0.10" 80) (car (first service-entries)))))))
+      (is (= 2 (length service-entries)))
+      (is (= 2 (length backend-entries)))
+      (is (= 2 slots))
+      (is (find (gr8s::service-lb-vip-key "10.96.0.1" 80) service-entries
+                :test #'equalp :key #'car))
+      (is (find (gr8s::service-lb-vip-key "10.96.0.10" 80) service-entries
+                :test #'equalp :key #'car)))))
 
 (test service-lb-plan-packs-backends-deterministically
   (let ((services (list (fake-lb-service "10.96.0.10" :ports '(80))

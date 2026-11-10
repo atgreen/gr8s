@@ -51,12 +51,56 @@
                        for octets = (ipv4-address-octets address)
                        when octets collect (pure-tls/acme::encode-der #x87 octets)))))
 
+(defun leaf-rotation-manifest-path (certificate-path)
+  (make-pathname :name (format nil ".~A-rotation" (pathname-name certificate-path))
+                 :type "json" :defaults certificate-path))
+
+(defun finish-pending-leaf-rotation (certificate-path key-path)
+  "Complete a durable key/certificate replacement interrupted after its intent was recorded."
+  (let ((manifest-path (leaf-rotation-manifest-path certificate-path)))
+    (when (probe-file manifest-path)
+      (let ((record (com.inuoe.jzon:parse manifest-path)))
+        (unless (and (hash-table-p record)
+                     (equal "gr8s-leaf-rotation" (gethash "format" record))
+                     (eql 1 (gethash "version" record))
+                     (stringp (gethash "key" record))
+                     (stringp (gethash "certificate" record)))
+          (pki-fail "invalid-leaf-rotation" "Invalid leaf rotation manifest ~A" manifest-path))
+        (write-private-text-atomically key-path (gethash "key" record))
+        (write-private-text-atomically certificate-path (gethash "certificate" record))
+        (delete-file manifest-path)))))
+
+(defun replace-leaf-key-pair (certificate-path key-path certificate-pem key-pem)
+  "Durably replace a complete leaf identity, recoverable by FINISH-PENDING-LEAF-ROTATION."
+  (let ((manifest-path (leaf-rotation-manifest-path certificate-path)))
+    (write-private-text-atomically
+     manifest-path
+     (com.inuoe.jzon:stringify
+      (gr8s.resources::core-object "format" "gr8s-leaf-rotation" "version" 1
+                                   "key" key-pem "certificate" certificate-pem)))
+    (write-private-text-atomically key-path key-pem)
+    (write-private-text-atomically certificate-path certificate-pem)
+    (delete-file manifest-path)))
+
 (defun issue-cluster-certificate (pki certificate-path key-path common-name organization
-                                  &key server (addresses nil) (dns-names nil))
-  "Write a fresh key and a cluster-CA certificate for COMMON-NAME in ORGANIZATION, for
-server authentication with SANs when SERVER is true and client authentication otherwise."
-  (multiple-value-bind (private public) (ironclad:generate-key-pair :secp256r1)
-    (let ((der (certificate-der
+                                  &key server (addresses nil) (dns-names nil) rotate-key)
+  "Issue COMMON-NAME while preserving an existing key, so renewal replaces one file.
+An initial interrupted key-first creation is retryable; a certificate without its key is refused."
+  (finish-pending-leaf-rotation certificate-path key-path)
+  (when (and (probe-file certificate-path) (not (probe-file key-path)))
+    (pki-fail "incomplete-leaf-identity" "Certificate ~A exists without its private key" certificate-path))
+  (let ((new-key-p (or rotate-key (not (probe-file key-path))))
+        (old-key-pem (when (probe-file key-path) (uiop:read-file-string key-path))))
+    (multiple-value-bind (private public)
+        (if new-key-p
+            (ironclad:generate-key-pair :secp256r1)
+            (let* ((private (pure-tls:load-private-key key-path))
+                   (parameters (ironclad:destructure-private-key private))
+                   (encoded-public (getf parameters :y)))
+              (unless (and (getf parameters :x) encoded-public)
+                (pki-fail "invalid-leaf-key" "Private key ~A must be a P-256 EC key" key-path))
+              (values private (ironclad:make-public-key :secp256r1 :y encoded-public))))
+    (let* ((der (certificate-der
                 (pure-tls/acme::encode-subject +pki-ca-common-name+)
                 (encode-kubelet-subject common-name organization)
                 (pure-tls/acme::encode-ec-public-key public)
@@ -70,14 +114,27 @@ server authentication with SANs when SERVER is true and client authentication ot
                  (when server
                    (list (pure-tls/acme::encode-extension pure-tls/acme::*oid-subject-alt-name*
                                                           (kubelet-san-extension addresses dns-names)))))
-                (cluster-pki-ca-private-key pki))))
+                (cluster-pki-ca-private-key pki)))
+           (key-pem (and new-key-p (pure-tls/acme::encode-ec-private-key-pem private)))
+           (certificate-pem
+             (concatenate 'string (pure-tls/acme::wrap-pem "CERTIFICATE" der)
+                          (pure-tls/acme::wrap-pem
+                           "CERTIFICATE"
+                           (pure-tls::x509-certificate-raw-der
+                            (cluster-pki-ca-certificate pki))))))
       (ensure-directories-exist certificate-path)
-      (write-private-text-atomically key-path (pure-tls/acme::encode-ec-private-key-pem private))
-      (write-private-text-atomically
-       certificate-path
-       (concatenate 'string (pure-tls/acme::wrap-pem "CERTIFICATE" der)
-                    (uiop:read-file-string (cluster-pki-ca-certificate-path pki))))
-      (values certificate-path key-path))))
+      (handler-case
+          (if (and rotate-key old-key-pem (probe-file certificate-path))
+              (replace-leaf-key-pair certificate-path key-path certificate-pem key-pem)
+              (progn
+                (when new-key-p (write-private-text-atomically key-path key-pem))
+                (write-private-text-atomically certificate-path certificate-pem)))
+        (error (condition)
+          (when (and rotate-key old-key-pem)
+            (write-private-text-atomically key-path old-key-pem)
+            (ignore-errors (delete-file (leaf-rotation-manifest-path certificate-path))))
+          (error condition)))
+      (values certificate-path key-path)))))
 
 (defun kubelet-credential-paths (directory)
   "Return the serving certificate, its key, the client certificate and its key under DIRECTORY."
@@ -96,13 +153,25 @@ Both are issued afresh, so an address that changed is covered."
                                  :dns-names (remove-duplicates (list node-name (machine-instance)) :test #'equal))
       (issue-cluster-certificate pki client-certificate client-key subject "system:nodes"))))
 
-(defun ensure-apiserver-kubelet-client-credentials (pki)
+(defun ensure-apiserver-kubelet-client-credentials
+    (pki &key (renew-within +certificate-leaf-renewal-seconds+) rotate-key)
   "Return the API server's client certificate and key toward kubelets, issuing them when missing."
   (let ((certificate (merge-pathnames "apiserver-kubelet-client.crt" (cluster-pki-root pki)))
         (key (merge-pathnames "apiserver-kubelet-client.key" (cluster-pki-root pki))))
     (bt:with-lock-held ((cluster-pki-lock pki))
-      (unless (and (probe-file certificate) (probe-file key))
-        (issue-cluster-certificate pki certificate key +kubelet-apiserver-client-name+ "system:masters")))
+      (finish-pending-leaf-rotation certificate key)
+      (unless (and (probe-file certificate) (probe-file key)
+                   (not (certificate-renewal-due-p certificate renew-within))
+                   (handler-case
+                       (progn
+                         (pure-tls::verify-certificate-chain
+                          (list (first (pure-tls:load-certificate-chain certificate)))
+                          (list (cluster-pki-ca-certificate pki))
+                          :purpose :client-auth :trust-anchor-mode :replace)
+                         t)
+                     (error () nil)))
+        (issue-cluster-certificate pki certificate key +kubelet-apiserver-client-name+ "system:masters"
+                                   :rotate-key rotate-key)))
     (values certificate key)))
 
 ;;; HTTPS requests with client credentials
@@ -548,7 +617,7 @@ sorted HTML listing, a file as itself, and a directory named without its trailin
         (values (node-reported-address node) (node-record-kubelet-port node))))))
 
 (defvar *kubelet-proxy-credentials* nil
-  "The cluster CA certificate, and the API server's kubelet client certificate and key paths, once known.")
+  "The cluster CA trust set, and the API server's kubelet client certificate and key paths, once known.")
 
 (defun kubelet-proxy-response (store name port suffix method)
   "Forward a Node proxy read to NAME's kubelet and relay its status, type and body."
@@ -564,7 +633,8 @@ sorted HTML listing, a file as itself, and a directory named without its trailin
                 (tls-http-request :address address :port target-port :server-name address :method method
                                   :target (concatenate 'string suffix (or query ""))
                                   :headers '(("Accept" . "*/*"))
-                                  :trust-certificates (list ca) :client-certificate certificate :client-key key)
+                                  :trust-certificates (if (listp ca) ca (list ca))
+                                  :client-certificate certificate :client-key key)
               (error (condition)
                 (core-resource-error 503 "ServiceUnavailable" "error trying to reach the kubelet of node ~A: ~A"
                                      name (remove #\Newline (princ-to-string condition)))))

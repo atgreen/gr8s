@@ -44,6 +44,8 @@ NODE-PKI is the control plane's own, whose CA is shared with voters it enrolls."
 
 (defun load-raft-credentials (root)
   "Load the enrolled credentials under ROOT, including the PKI when this member holds the CA key."
+  (gr8s.apiserver::finish-pending-leaf-rotation
+   (raft-member-certificate-path root) (raft-member-key-path root))
   (make-raft-credentials
    :ca-path (raft-ca-certificate-path root)
    :certificate-path (raft-member-certificate-path root)

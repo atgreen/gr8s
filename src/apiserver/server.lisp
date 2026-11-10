@@ -67,7 +67,13 @@
           (sb-sys:fd-stream-fd (usocket:socket-stream socket))))))
 
 (defmethod hunchentoot:process-connection :around ((acceptor gr8s-acceptor) socket)
-  (let ((*api-connection-socket* socket)) (call-next-method)))
+  (let ((*api-connection-socket* socket)
+        ;; STOP wakes an acceptor with a connection that closes without an HTTP
+        ;; request (and, for the in-cluster API, without a TLS handshake).  That
+        ;; is expected shutdown traffic, not an application error.
+        (hunchentoot::*log-lisp-errors-p*
+          (not (hunchentoot::acceptor-shutdown-p acceptor))))
+    (call-next-method)))
 
 (defparameter +stream-idle-timeout-seconds+ (* 4 60 60)
   "How long an upgraded exec or attach stream may wait for its client: kubelet's default
@@ -216,22 +222,60 @@ without input, and a client without WebSocket pings (any before v5.channel.k8s.i
                     :debug-member-resolver debug-member-resolver
                     :leader-status-fn leader-status-fn))))
 
+(defparameter +api-listener-shutdown-timeout+ 2.0
+  "Seconds to wait for a Hunchentoot listener after repeated shutdown wakes.")
+
 (defmethod hunchentoot:stop :around ((acceptor gr8s-acceptor) &key soft)
-  "Keep waking the listener: STOP has one wake attempt and then an unbounded join."
-  ;; The single dummy connection swallows its own errors, and the host suite
-  ;; intermittently hung here with the listener never exiting (podster-uqb.82).
+  "Bound Hunchentoot's otherwise unbounded listener join during STOP."
+  ;; Hunchentoot joins its listener without a timeout.  A wake is normally
+  ;; enough, but a listener has intermittently remained in accept(2), leaving
+  ;; `gr8s serve' stuck forever.  Keep waking only while the listener lives,
+  ;; then terminate that one acceptor thread at the deadline so outer component
+  ;; teardown can continue.
   (declare (ignorable soft))
-  (let ((stopped nil))
-    (bt:make-thread
-     (lambda ()
-       (loop until stopped
-             do (sleep 0.5)
-                (unless stopped
-                  (ignore-errors (hunchentoot::wake-acceptor-for-shutdown acceptor)))))
-     :name "gr8s server stop waker")
-    ;; The waker notices within half a second; STOP need not wait for it.
-    (unwind-protect (call-next-method)
-      (setf stopped t))))
+  (let* ((stopped nil)
+         (forced nil)
+         (taskmaster (hunchentoot::acceptor-taskmaster acceptor))
+         (listener (hunchentoot::acceptor-process taskmaster))
+         (deadline (+ (get-internal-real-time)
+                      (* +api-listener-shutdown-timeout+
+                         internal-time-units-per-second)))
+         (waker
+           (bt:make-thread
+            (lambda ()
+              ;; Let CALL-NEXT-METHOD set the shutdown flag before the first
+              ;; wake connection can be accepted as ordinary client traffic.
+              (loop until (or stopped
+                              (hunchentoot::acceptor-shutdown-p acceptor))
+                    do (sleep 0.001))
+              (loop until (or stopped (not (bt:thread-alive-p listener)))
+                    do (when (>= (get-internal-real-time) deadline)
+                         (format *error-output*
+                                 "gr8s API listener did not stop in time; terminating it.~%")
+                         (setf forced t)
+                         (ignore-errors (bt:destroy-thread listener))
+                         (return))
+                       (ignore-errors
+                         (hunchentoot::wake-acceptor-for-shutdown acceptor))
+                       (sleep 0.1)))
+            :name "gr8s server stop waker")))
+    (unwind-protect
+         (handler-case (call-next-method)
+           (sb-thread:join-thread-error (condition)
+             ;; A listener terminated by the deadline is reported as an
+             ;; abnormal join by Hunchentoot before it can close this socket.
+             ;; Complete those final two STOP steps here; propagate any join
+             ;; failure that did not come from our terminated listener.
+             (if (or (not forced) (bt:thread-alive-p listener))
+                 (error condition)
+                 (progn
+                   (ignore-errors
+                     (usocket:socket-close
+                      (hunchentoot::acceptor-listen-socket acceptor)))
+                   (setf (hunchentoot::acceptor-listen-socket acceptor) nil)
+                   acceptor))))
+      (setf stopped t)
+      (ignore-errors (bt:join-thread waker)))))
 
 (defun stop-server (server)
   "Stop the API server SERVER (a running acceptor), blocking until its listener

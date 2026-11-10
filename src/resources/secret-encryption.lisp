@@ -248,6 +248,9 @@ Do not retain a second transformed vector of payloads during checkpoint load."
 
 (defun enable-secret-encryption (store)
   "Enable encryption and atomically rewrite all currently durable Secret data."
+  ;; Secret encryption derives its KEK from the store-local cluster identity.
+  ;; This is deliberately separate from the control-plane serving PKI rooted
+  ;; below STATE/pki/.
   (gr8s.security::ensure-cluster-pki (pod-store-path store))
   (bt:with-lock-held ((pod-store-consensus-write-lock store))
     (bt:with-lock-held ((pod-store-lock store))

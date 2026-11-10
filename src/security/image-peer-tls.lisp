@@ -62,7 +62,7 @@
               :verify pure-tls:+verify-peer+
               :trust-store
               (pure-tls::make-trust-store
-               :certificates (list (cluster-pki-ca-certificate pki)))
+               :certificates (cluster-pki-trust-certificates pki))
               :alpn-protocols (list +image-peer-alpn+))))
     (handler-case
         (values tls (authenticate-image-peer-stream pki tls))

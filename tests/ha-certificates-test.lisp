@@ -71,6 +71,78 @@
           :timeout 10)
       (ignore-errors (ag-grpc:channel-close channel)))))
 
+(test encrypted-pki-authority-transitions-replicate-to-every-voter
+  (with-founded-cluster (founder)
+    (with-temporary-store (s2 p2)
+      (with-temporary-store (s3 p3)
+        (let ((h2 nil) (h3 nil)
+              (leader-store (gr8s::ha-control-plane-store founder)))
+          (unwind-protect
+               (progn
+                 (gr8s.resources::publish-pki-authority leader-store)
+                 (setf h2 (join-control-plane founder s2 p2 "cp2")
+                       h3 (join-control-plane founder s3 p3 "cp3"))
+                 (is (poll-until
+                      (lambda ()
+                        (and (gr8s.resources::current-pki-authority-envelope s2)
+                             (gr8s.resources::current-pki-authority-envelope s3)))
+                      :timeout 15))
+                 (gr8s.server::update-replicated-pki-authority leader-store "ca" :prepare)
+                 (is (poll-until
+                      (lambda ()
+                        (every (lambda (root)
+                                 (probe-file (merge-pathnames "pki/pki/cluster-ca-next.key" root)))
+                               (list (gr8s::pod-store-path leader-store) p2 p3)))
+                      :timeout 15)
+                     "every voter extracts prepared CA material")
+                 (gr8s.server::update-replicated-pki-authority leader-store "ca" :promote)
+                 (is (poll-until
+                      (lambda ()
+                        (let ((fingerprints
+                                (mapcar
+                                 (lambda (root)
+                                   (gr8s::cluster-pki-ca-fingerprint
+                                    (gr8s:ensure-cluster-pki
+                                     (merge-pathnames "pki/" root))))
+                                 (list (gr8s::pod-store-path leader-store) p2 p3))))
+                          (and (every (lambda (fingerprint)
+                                        (equal (first fingerprints) fingerprint))
+                                      (rest fingerprints))
+                               (every (lambda (root)
+                                        (probe-file
+                                         (merge-pathnames "pki/pki/cluster-ca-retiring.key" root)))
+                                      (list (gr8s::pod-store-path leader-store) p2 p3)))))
+                      :timeout 15)
+                     "promotion installs one active CA and retiring key on every voter")
+                 (gr8s::stop-ha-control-plane founder)
+                 (is (poll-until
+                      (lambda () (= 1 (count-if #'gr8s::ha-control-plane-leader-p
+                                                (list h2 h3))))
+                      :timeout 15)
+                     "the surviving voters elect a leader after the founder stops")
+                 (let* ((new-leader (find-if #'gr8s::ha-control-plane-leader-p
+                                             (list h2 h3)))
+                        (new-store (gr8s::ha-control-plane-store new-leader)))
+                   (is-true (gr8s.resources::current-pki-authority-envelope new-store)
+                            "the new leader retained the encrypted authority record")
+                   (gr8s.server::update-replicated-pki-authority
+                    new-store "service-account-key" :prepare)
+                   (is (poll-until
+                        (lambda ()
+                          (let ((files
+                                  (mapcar
+                                   (lambda (root)
+                                     (merge-pathnames
+                                      "pki/service-account-signing-key.json" root))
+                                   (list p2 p3))))
+                            (and (every #'probe-file files)
+                                 (string= (uiop:read-file-string (first files))
+                                          (uiop:read-file-string (second files))))))
+                        :timeout 15)
+                       "a post-failover signing-key transition converges on both survivors")))
+            (gr8s::stop-ha-control-plane h3)
+            (gr8s::stop-ha-control-plane h2)))))))
+
 (test agents-keep-working-after-failing-over-to-another-control-plane
   (with-founded-cluster (founder node-pki)
     (with-temporary-store (store path)

@@ -271,6 +271,60 @@
         (when tls (ignore-errors (close tls)))
         (ignore-errors (usocket:socket-close socket))))))
 
+(test tls-api-stop-returns-after-waking-its-listener
+  (with-temporary-store (store directory)
+    (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory)))
+           (runtime (make-fake-runtime))
+           (reconciler (make-reconciler store runtime))
+           (server (start-test-tls-api store runtime reconciler pki))
+           (stopper nil))
+      (unwind-protect
+           (progn
+             (setf stopper
+                   (bt:make-thread (lambda () (stop-server server))
+                                   :name "test TLS API stopper"))
+             (is-true (wait-until (lambda () (not (bt:thread-alive-p stopper)))
+                                  :timeout 3)))
+        (when (and stopper (bt:thread-alive-p stopper))
+          (ignore-errors
+            (usocket:socket-close (hunchentoot::acceptor-listen-socket server)))
+          (ignore-errors (bt:destroy-thread stopper)))
+        (when stopper (ignore-errors (bt:join-thread stopper)))))))
+
+(defclass unresponsive-test-acceptor (gr8s::gr8s-acceptor) ())
+
+(defmethod hunchentoot:accept-connections ((acceptor unresponsive-test-acceptor))
+  "Model the intermittent listener that remains blocked after its wake connection."
+  (declare (ignore acceptor))
+  (loop (sleep 60)))
+
+(test api-stop-is-bounded-when-the-listener-does-not-wake
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (let* ((runtime (make-fake-runtime))
+           (reconciler (make-reconciler store runtime))
+           (server (hunchentoot:start
+                    (make-instance 'unresponsive-test-acceptor
+                                   :address "127.0.0.1" :port 0
+                                   :store store :runtime runtime :reconciler reconciler)))
+           (taskmaster (hunchentoot::acceptor-taskmaster server))
+           (listener (hunchentoot::acceptor-process taskmaster))
+           (stopper nil))
+      (unwind-protect
+           (progn
+             (setf stopper
+                   (bt:make-thread (lambda () (stop-server server))
+                                   :name "test unresponsive API stopper"))
+             (is-true (wait-until (lambda () (not (bt:thread-alive-p stopper)))
+                                  :timeout 3)))
+        (when (bt:thread-alive-p listener)
+          (ignore-errors (bt:destroy-thread listener)))
+        (when (and stopper (bt:thread-alive-p stopper))
+          (ignore-errors (bt:destroy-thread stopper)))
+        (when stopper (ignore-errors (bt:join-thread stopper)))
+        (ignore-errors
+          (usocket:socket-close (hunchentoot::acceptor-listen-socket server)))))))
+
 (test tls-api-requires-credentials-and-live-rbac-grants
   (with-temporary-store (store directory)
     (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory)))
