@@ -1,0 +1,305 @@
+{
+  "date": "2026-11-11",
+  "productCommit": "140878a",
+  "passed": false,
+  "scope": "128-round native internal HCP smoke; no full or production acceptance",
+  "binarySha256": "cc8458b2300cdfc3fe2af9c9c0042719ad6659ef2d269d9188dfec10fc9446b1",
+  "elapsedSeconds": 97.30683379108086,
+  "rounds": 128,
+  "heapLimitMiB": 384,
+  "error": "AssertionError: Delayed follower reset history instead of replaying the missing prefix",
+  "leadershipStabilityAcceptance": true,
+  "diskCatchupAcceptance": true,
+  "catchupHistoryContinuous": false,
+  "cleanupExitCodes": {
+    "cp-a": 0,
+    "cp-b": 0,
+    "cp-c": 0
+  },
+  "members": {
+    "cp-a": {
+      "term": 1,
+      "applied": 265,
+      "snapshot": 224,
+      "historyEstimatedBytes": 13028864,
+      "compactionMemberLocks": [
+        {
+          "section": "check",
+          "attempts": 6056,
+          "totalSeconds": 0.976992,
+          "maxSeconds": 0.163997,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.105788,
+          "gcMaxSeconds": 0.031724,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "freeze",
+          "attempts": 5,
+          "totalSeconds": 0.005,
+          "maxSeconds": 0.003,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "publish",
+          "attempts": 5,
+          "totalSeconds": 0.088999,
+          "maxSeconds": 0.052999,
+          "lastSeconds": 0.008,
+          "gcTotalSeconds": 0.012632,
+          "gcMaxSeconds": 0.012632,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "resume",
+          "attempts": 5,
+          "totalSeconds": 0.003,
+          "maxSeconds": 0.001,
+          "lastSeconds": 0.001,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        }
+      ],
+      "compactionPhases": [
+        {
+          "phase": "freeze",
+          "attempts": 5,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "phase": "capture",
+          "attempts": 5,
+          "totalSeconds": 3.764969,
+          "maxSeconds": 2.766977,
+          "lastSeconds": 0.366997,
+          "gcTotalSeconds": 0.337587,
+          "gcMaxSeconds": 0.2408,
+          "gcLastSeconds": 0.028475
+        },
+        {
+          "phase": "retain",
+          "attempts": 5,
+          "totalSeconds": 4.244966,
+          "maxSeconds": 1.429987,
+          "lastSeconds": 1.429987,
+          "gcTotalSeconds": 0.683268,
+          "gcMaxSeconds": 0.177576,
+          "gcLastSeconds": 0.177576
+        },
+        {
+          "phase": "publish",
+          "attempts": 5,
+          "totalSeconds": 0.083999,
+          "maxSeconds": 0.051999,
+          "lastSeconds": 0.006,
+          "gcTotalSeconds": 0.012632,
+          "gcMaxSeconds": 0.012632,
+          "gcLastSeconds": 0.0
+        }
+      ]
+    },
+    "cp-b": {
+      "term": 1,
+      "applied": 265,
+      "snapshot": 224,
+      "historyEstimatedBytes": 2136784,
+      "compactionMemberLocks": [
+        {
+          "section": "check",
+          "attempts": 5147,
+          "totalSeconds": 0.180999,
+          "maxSeconds": 0.007999,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.00628,
+          "gcMaxSeconds": 0.00628,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "freeze",
+          "attempts": 2,
+          "totalSeconds": 0.007,
+          "maxSeconds": 0.007,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "publish",
+          "attempts": 2,
+          "totalSeconds": 0.02,
+          "maxSeconds": 0.011,
+          "lastSeconds": 0.009,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "resume",
+          "attempts": 2,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        }
+      ],
+      "compactionPhases": [
+        {
+          "phase": "freeze",
+          "attempts": 2,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "phase": "capture",
+          "attempts": 2,
+          "totalSeconds": 18.042852,
+          "maxSeconds": 17.902853,
+          "lastSeconds": 0.139999,
+          "gcTotalSeconds": 1.095413,
+          "gcMaxSeconds": 1.095413,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "phase": "retain",
+          "attempts": 2,
+          "totalSeconds": 0.598996,
+          "maxSeconds": 0.400997,
+          "lastSeconds": 0.400997,
+          "gcTotalSeconds": 0.038573,
+          "gcMaxSeconds": 0.033465,
+          "gcLastSeconds": 0.033465
+        },
+        {
+          "phase": "publish",
+          "attempts": 2,
+          "totalSeconds": 0.019,
+          "maxSeconds": 0.011,
+          "lastSeconds": 0.008,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        }
+      ]
+    },
+    "cp-c": {
+      "term": 1,
+      "applied": 265,
+      "snapshot": 261,
+      "historyEstimatedBytes": 13028864,
+      "compactionMemberLocks": [
+        {
+          "section": "check",
+          "attempts": 6055,
+          "totalSeconds": 0.533997,
+          "maxSeconds": 0.088999,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.00806,
+          "gcMaxSeconds": 0.004355,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "freeze",
+          "attempts": 6,
+          "totalSeconds": 0.003,
+          "maxSeconds": 0.001,
+          "lastSeconds": 0.001,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "publish",
+          "attempts": 6,
+          "totalSeconds": 0.046999,
+          "maxSeconds": 0.01,
+          "lastSeconds": 0.009,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "resume",
+          "attempts": 6,
+          "totalSeconds": 0.003,
+          "maxSeconds": 0.001,
+          "lastSeconds": 0.001,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        }
+      ],
+      "compactionPhases": [
+        {
+          "phase": "freeze",
+          "attempts": 6,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "phase": "capture",
+          "attempts": 6,
+          "totalSeconds": 4.019967,
+          "maxSeconds": 2.864976,
+          "lastSeconds": 0.343996,
+          "gcTotalSeconds": 0.158816,
+          "gcMaxSeconds": 0.08951,
+          "gcLastSeconds": 0.010509
+        },
+        {
+          "phase": "retain",
+          "attempts": 6,
+          "totalSeconds": 4.271964,
+          "maxSeconds": 1.13999,
+          "lastSeconds": 1.13999,
+          "gcTotalSeconds": 0.347389,
+          "gcMaxSeconds": 0.091011,
+          "gcLastSeconds": 0.071695
+        },
+        {
+          "phase": "publish",
+          "attempts": 6,
+          "totalSeconds": 0.036999,
+          "maxSeconds": 0.007,
+          "lastSeconds": 0.006,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        }
+      ]
+    }
+  },
+  "artifactObservation": {
+    "receiver": "cp-b",
+    "snapshotIndex": 224,
+    "artifactHistoryRecords": 218,
+    "artifactResourceRevision": 219,
+    "selectedGenerationHistoryRecords": 0,
+    "selectedGenerationHistoryFloor": 219
+  },
+  "followupIssue": "podster-ucm.11.3.3.13",
+  "limits": [
+    "Cold restart assertions were not reached.",
+    "No continuity assertions or resource budgets were relaxed.",
+    "Artifact inspection and source show minimum-revision presence triggers unconditional history reset; focused rebase regression and product fix are pending."
+  ]
+}
