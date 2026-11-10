@@ -1137,8 +1137,12 @@ before any state is published."
     (expire-core-events-unlocked store)
     (unless (or (equal resource "events") *resource-quota-admission-exempt*)
       (require-namespace-accepts-content store namespace))
-    (let* ((input (copy-core-object input))
-           (metadata (require-object (gethash "metadata" input) "metadata")))
+    ;; Name allocation/resourceVersion cleanup only mutate metadata here. The
+    ;; normalizer below makes the deep private copy of the complete object;
+    ;; copying large data/spec strings once more beforehand wastes heap space.
+    (let* ((input (alexandria:copy-hash-table (require-object input "resource")))
+           (metadata (copy-core-object (require-object (gethash "metadata" input) "metadata"))))
+      (setf (gethash "metadata" input) metadata)
       (when (csr-resource-p resource)
         (assign-generated-csr-name-unlocked store input)
         (when (member (gethash "resourceVersion" metadata) '(null "") :test #'equal) (remhash "resourceVersion" metadata)))

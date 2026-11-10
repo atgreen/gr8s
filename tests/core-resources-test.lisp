@@ -273,4 +273,31 @@
                   (lambda () (gr8s::decode-core-resource-protobuf
                                (map '(vector (unsigned-byte 8)) #'identity bad) "ConfigMap"))))))))
 
+(test create-copies-large-payload-only-for-normalization-and-private-response
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (let* ((payload (make-string 65536 :initial-element #\x))
+           (input (gr8s::core-object "apiVersion" "v1" "kind" "ConfigMap"
+                    "metadata" (gr8s::core-object "generateName" "copy-" "resourceVersion" "")
+                    "data" (gr8s::core-object "value" payload)))
+           (copy (symbol-function 'gr8s::copy-core-object))
+           (bulk-copies 0) (result nil))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s::copy-core-object)
+                   (lambda (object)
+                     (when (and (stringp object) (= 65536 (length object))) (incf bulk-copies))
+                     (funcall copy object)))
+             (setf result (gr8s::create-core-resource store "configmaps" input "default")))
+        (setf (symbol-function 'gr8s::copy-core-object) copy))
+      (is (= 2 bulk-copies))
+      (is (not (gethash "name" (gethash "metadata" input))))
+      (is (equal "" (gethash "resourceVersion" (gethash "metadata" input))))
+      (is (equal payload (gethash "value" (gethash "data" result))))
+      (setf (char (gethash "value" (gethash "data" result)) 0) #\y)
+      (is (char= #\x (char payload 0)))
+      (is (char= #\x (char (gethash "value" (gethash "data"
+                               (gr8s::get-core-resource store "configmaps" "default"
+                                 (gethash "name" (gethash "metadata" result))))) 0))))))
+
 (in-suite gr8s)
