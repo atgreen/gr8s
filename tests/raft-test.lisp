@@ -1388,3 +1388,101 @@
              (is-false *raft-wal-reader-evaluated*)
              (is (zerop (gr8s.raft::raft-storage-catchup-usage storage))))
         (gr8s::close-file-raft-storage storage)))))
+
+(test disk-catchup-copies-unicode-frames-after-checkpoint-and-recovery-without-printing-payloads
+  (with-temporary-store (store root)
+    (values store)
+    (let* ((path (merge-pathnames "frames.log" root))
+           (storage (gr8s::open-file-raft-storage path))
+           (node (make-disk-catchup-test-node storage))
+           (text (concatenate 'string "λ😀" (make-string 70000 :initial-element #\x)))
+           (original (symbol-function 'gr8s.raft::raft-wal-form-metrics)))
+      (unwind-protect
+           (progn
+             ;; Keep an uncommitted Unicode suffix while checkpointing the
+             ;; exact applied boundary; arbitrary older application capture is
+             ;; deliberately rejected by the core.
+             (let ((entry (gr8s.raft:make-raft-entry :index 4 :term 2 :command (list :payload text))))
+               (gr8s.raft:raft-storage-append-entry storage entry)
+               (vector-push-extend entry (gr8s.raft:raft-node-log node)))
+             (is (= 3 (gr8s.raft:raft-node-last-applied node)))
+             (gr8s.raft:raft-compact node 3)
+             (is (= 1 (hash-table-count (gr8s.raft::file-raft-storage-entry-frames storage))))
+             (gr8s::close-file-raft-storage storage)
+             (setf node (gr8s.raft::make-raft-node :id "recovered" :catchup-byte-limit (* 8 1024 1024)))
+             (gr8s.raft::recover-raft-node node path)
+             (setf storage (gr8s.raft:raft-node-storage node))
+             (gr8s.raft:raft-storage-save-commit-index storage 4)
+             (setf (gr8s.raft:raft-node-commit-index node) 4)
+             (gr8s.raft::raft-apply-committed node)
+             (is (= 1 (hash-table-count (gr8s.raft::file-raft-storage-entry-frames storage))))
+             (is (plusp (gr8s.raft::raft-catchup-framed-prefix-size storage node 4)))
+             ;; The only printable forms are tiny snapshot/commit boundaries.
+             ;; Any entry printer invocation fails this fast-path regression.
+             (setf (symbol-function 'gr8s.raft::raft-wal-form-metrics)
+                   (lambda (form &optional output)
+                     (when (eq :entry (first form)) (error "Copied entry was reserialized"))
+                     (funcall original form output)))
+             (gr8s.raft:raft-compact node 4)
+             (let ((batch (gr8s.raft::raft-storage-read-catchup storage node 4)))
+               (is (not (null batch)))
+               (is (= 2 (car batch)))
+               (is (equal (list (list :payload text))
+                          (mapcar #'gr8s.raft:raft-entry-command (cdr batch)))))
+             (is (zerop (hash-table-count (gr8s.raft::file-raft-storage-entry-frames storage)))))
+        (setf (symbol-function 'gr8s.raft::raft-wal-form-metrics) original)
+        (gr8s::close-file-raft-storage storage)))))
+
+(test disk-catchup-frame-index-follows-truncation-and-reopened-append-offsets
+  (with-temporary-store (store root)
+    (values store)
+    (let* ((path (merge-pathnames "frames.log" root))
+           (storage (gr8s::open-file-raft-storage path))
+           (node nil))
+      (unwind-protect
+           (progn
+             (gr8s.raft:raft-storage-save-hard-state storage 3 nil)
+             (loop for i from 1 to 3 do
+               (gr8s.raft:raft-storage-append-entry storage
+                 (gr8s.raft:make-raft-entry :index i :term 2 :command (list :old i))))
+             (gr8s.raft:raft-storage-save-commit-index storage 1)
+             (gr8s.raft:raft-storage-truncate storage 2)
+             (is (= 1 (hash-table-count (gr8s.raft::file-raft-storage-entry-frames storage))))
+             (gr8s::close-file-raft-storage storage)
+             ;; Exercise O_APPEND reopening without recovery first: its initial
+             ;; OS offset is zero, but the new frame belongs at the existing EOF.
+             (let ((old-size (raft-wal-size path)))
+               (setf storage (gr8s::open-file-raft-storage path))
+               (gr8s.raft:raft-storage-append-entry storage
+                 (gr8s.raft:make-raft-entry :index 2 :term 3 :command '(:new "λ")))
+               (is (= old-size (aref (gethash 2 (gr8s.raft::file-raft-storage-entry-frames storage)) 1))))
+             (gr8s.raft:raft-storage-save-commit-index storage 2)
+             (gr8s::close-file-raft-storage storage)
+             (setf node (gr8s.raft::make-raft-node :id "recovered" :catchup-byte-limit 65536))
+             (gr8s.raft::recover-raft-node node path)
+             (setf storage (gr8s.raft:raft-node-storage node))
+             (is (= 2 (hash-table-count (gr8s.raft::file-raft-storage-entry-frames storage))))
+             (is (null (gethash 3 (gr8s.raft::file-raft-storage-entry-frames storage))))
+             (gr8s.raft:raft-compact node 2)
+             (let ((batch (gr8s.raft::raft-storage-read-catchup storage node 1)))
+               (is (equal '((:old 1) (:new "λ")) (mapcar #'gr8s.raft:raft-entry-command (cdr batch))))))
+        (gr8s::close-file-raft-storage storage)))))
+
+(test failed-checkpoint-preserves-frame-offset-index-and-missing-index-falls-back
+  (with-temporary-store (store root)
+    (values store)
+    (let* ((storage (gr8s::open-file-raft-storage (merge-pathnames "frames.log" root)))
+           (node (make-disk-catchup-test-node storage))
+           (frames (gr8s.raft::file-raft-storage-entry-frames storage)))
+      (unwind-protect
+           (progn
+             (change-class storage 'checkpoint-failing-raft-storage :phase :file)
+             (signals error (gr8s.raft:raft-compact node 3))
+             (is (eq frames (gr8s.raft::file-raft-storage-entry-frames storage)))
+             (is (= 3 (hash-table-count frames)))
+             (setf (checkpoint-failure-phase storage) nil)
+             (clrhash frames)
+             (is (null (gr8s.raft::raft-catchup-framed-prefix-size storage node 3)))
+             (gr8s.raft:raft-compact node 3)
+             (is (not (null (gr8s.raft::raft-storage-read-catchup storage node 1)))))
+        (gr8s::close-file-raft-storage storage)))))

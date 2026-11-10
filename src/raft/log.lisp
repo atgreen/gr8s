@@ -23,6 +23,8 @@
 (defclass file-raft-storage ()
   ((path :initarg :path :reader file-raft-storage-path)
    (stream :initarg :stream :initform nil :accessor file-raft-storage-stream)
+   ;; Only scalar byte offsets/terms, never command or payload references.
+   (entry-frames :initform (make-hash-table) :accessor file-raft-storage-entry-frames)
    (catchup-segments :initform nil :accessor file-raft-storage-catchup-segments)
    (catchup-error :initform nil :accessor file-raft-storage-catchup-error)
    (ownership-fd :initarg :ownership-fd :initform nil :accessor file-raft-storage-ownership-fd)))
@@ -262,6 +264,20 @@ Legacy forms are read strictly; only explicit frame boundaries can be repaired."
         (setf (file-raft-storage-stream storage) nil)
         (error condition)))))
 
+(defun raft-index-wal-frame (frames form start end &optional (framed t))
+  "Track only current entry frames. Caller publishes this index with its WAL."
+  (case (first form)
+    (:entry
+     (if framed
+         (setf (gethash (second form) frames) (vector (third form) start end))
+         (remhash (second form) frames)))
+    (:truncate
+     (loop for index being the hash-keys of frames
+           when (>= index (second form)) do (remhash index frames)))
+    (:snapshot
+     (loop for index being the hash-keys of frames
+           when (<= index (second form)) do (remhash index frames)))))
+
 (defun file-raft-write (storage form)
   "Append one checksummed frame and fsync it before acknowledging persistence."
   (let ((stream (file-raft-storage-stream storage)))
@@ -269,9 +285,15 @@ Legacy forms are read strictly; only explicit frame boundaries can be repaired."
       (error "Raft WAL is closed; recover it before writing"))
     (handler-case
         (progn
-          (raft-wal-write-frame form stream)
-          (finish-output stream)
-          (sb-posix:fsync (sb-sys:fd-stream-fd stream)))
+          ;; A reopened O_APPEND descriptor initially has position zero. Seek
+          ;; through the stream before observing its byte position.
+          (file-position stream :end)
+          (let ((start (file-position stream)))
+            (raft-wal-write-frame form stream)
+            (finish-output stream)
+            (sb-posix:fsync (sb-sys:fd-stream-fd stream))
+            (raft-index-wal-frame (file-raft-storage-entry-frames storage)
+                                  form start (file-position stream))))
       (error (condition)
         ;; An uncertain partial append must not be followed by another append.
         ;; Retain the ownership lease until explicit close and recovery.
@@ -318,6 +340,7 @@ both streams: its durable outcome is uncertain and requires recovery before use.
   (let* ((target (namestring (merge-pathnames (file-raft-storage-path storage))))
          (temporary (format nil "~A.checkpoint-~36R" target (random (expt 36 20))))
          (old (file-raft-storage-stream storage))
+         (frames (make-hash-table))
          (stream nil) (created nil) (renamed nil) (completed nil))
     (unwind-protect
          (progn
@@ -330,7 +353,11 @@ both streams: its durable outcome is uncertain and requires recovery before use.
                (error (condition) (sb-posix:close fd) (error condition))))
            (let ((*print-readably* t) (*print-circle* nil) (*print-pretty* nil)
                  (*read-eval* nil))
-             (flet ((record (form) (raft-wal-write-frame form stream)))
+             (flet ((record (form)
+                      (let ((start (file-position stream)))
+                        (raft-wal-write-frame form stream)
+                        (finish-output stream)
+                        (raft-index-wal-frame frames form start (file-position stream)))))
                (record (list :hard hard-term vote))
                (record (list :snapshot index term state))
                (map nil (lambda (entry)
@@ -344,7 +371,8 @@ both streams: its durable outcome is uncertain and requires recovery before use.
            ;; RENAME takes exact path strings, including extensionless WAL names.
            (sb-sys:without-interrupts
              (sb-posix:rename temporary target)
-             (setf renamed t (file-raft-storage-stream storage) stream))
+             (setf renamed t (file-raft-storage-stream storage) stream
+                   (file-raft-storage-entry-frames storage) frames))
            (let ((fd (sb-posix:open
                       (namestring (uiop:pathname-directory-pathname target)) sb-posix:o-rdonly 0)))
              (unwind-protect (file-raft-checkpoint-sync storage :directory fd)
@@ -364,6 +392,7 @@ both streams: its durable outcome is uncertain and requires recovery before use.
   (when (file-raft-storage-stream storage)
     (ignore-errors (close (file-raft-storage-stream storage))))
   (setf (file-raft-storage-stream storage) nil)
+  (clrhash (file-raft-storage-entry-frames storage))
   (when (file-raft-storage-ownership-fd storage)
     (sb-posix:close (file-raft-storage-ownership-fd storage))
     (setf (file-raft-storage-ownership-fd storage) nil)))
@@ -383,6 +412,7 @@ both streams: its durable outcome is uncertain and requires recovery before use.
   (let ((*read-eval* nil)
         (term 0) (vote nil) (commit-index 0) (commit-marker-p nil)
         (by-index (make-hash-table))    ; index -> (term . command)
+        (frames (when repair-storage (make-hash-table)))
         (snapshot-index 0) (snapshot-term 0) (snapshot-state nil))
     (when (probe-file path)
       (when repair-storage
@@ -391,6 +421,8 @@ both streams: its durable outcome is uncertain and requires recovery before use.
       (with-open-file (in path :direction :input :element-type 'character :external-format :utf-8 :if-does-not-exist nil)
         (with-open-file (binary path :direction :input :element-type '(unsigned-byte 8))
           (loop
+            (let* ((framed (eql (peek-char t in nil nil) #\@))
+                   (start (file-position in)))
             (multiple-value-bind (form boundary) (raft-wal-read-record in binary)
               (when (eq form :eof) (return))
               (when (eq form :torn)
@@ -417,7 +449,10 @@ both streams: its durable outcome is uncertain and requires recovery before use.
                       (setf snapshot-index (second form) snapshot-term (third form)
                             snapshot-state (fourth form) commit-index (max commit-index snapshot-index))
                       (loop for k being the hash-keys of by-index
-                            when (<= k snapshot-index) do (remhash k by-index)))))))))
+                            when (<= k snapshot-index) do (remhash k by-index))))
+              (when frames (raft-index-wal-frame frames form start (file-position in) framed))))))))
+    (when repair-storage
+      (setf (file-raft-storage-entry-frames repair-storage) frames))
     (let ((entries (loop for index in (sort (loop for k being the hash-keys of by-index collect k) #'<)
                          for cell = (gethash index by-index)
                          collect (make-raft-entry :index index :term (car cell) :command (cdr cell)))))
@@ -485,10 +520,57 @@ both streams: its durable outcome is uncertain and requires recovery before use.
             (sb-sys:make-fd-stream fd :input t :external-format :utf-8 :auto-close t))
       (error (condition) (sb-posix:close fd) (error condition)))))
 
+(defun raft-catchup-framed-prefix-size (storage node index)
+  "Return exact archive bytes when every selected entry has a current WAL frame.
+Missing/legacy metadata uses the existing serializer. No payload is inspected."
+  (unless (<= (raft-node-snapshot-index node) index (raft-node-commit-index node))
+    (error "Catch-up cache requires a committed local prefix"))
+  (let ((size (+ (* 2 +raft-wal-header-length+)
+                 (raft-wal-form-metrics (list :snapshot (raft-node-snapshot-index node)
+                                             (raft-node-snapshot-term node) nil))
+                 (raft-wal-form-metrics (list :commit index))))
+        (file-size (sb-posix:stat-size
+                    (sb-posix:fstat (sb-sys:fd-stream-fd (file-raft-storage-stream storage))))))
+    (loop for offset below (- index (raft-node-snapshot-index node))
+          for entry = (aref (raft-node-log node) offset)
+          for frame = (gethash (raft-entry-index entry) (file-raft-storage-entry-frames storage))
+          do (unless (and frame (= (raft-entry-index entry) (+ 1 offset (raft-node-snapshot-index node)))
+                          (= (aref frame 0) (raft-entry-term entry))
+                          (<= 0 (aref frame 1))
+                          (< (+ (aref frame 1) +raft-wal-header-length+) (aref frame 2))
+                          (<= (aref frame 2) file-size))
+               (return-from raft-catchup-framed-prefix-size nil))
+             (incf size (- (aref frame 2) (aref frame 1))))
+    size))
+
+(defun raft-catchup-copy-framed-prefix (storage node index output)
+  "Copy certified entry frames with a fixed buffer; only tiny boundary forms print."
+  (flet ((boundary (form)
+           (write-sequence
+            (trivial-utf-8:string-to-utf-8-bytes
+             (with-output-to-string (text) (raft-wal-write-frame form text))) output)))
+    (boundary (list :snapshot (raft-node-snapshot-index node) (raft-node-snapshot-term node) nil))
+    (with-open-file (input (format nil "/proc/self/fd/~D"
+                                  (sb-sys:fd-stream-fd (file-raft-storage-stream storage)))
+                           :direction :input :element-type '(unsigned-byte 8))
+      (let ((buffer (make-array 65536 :element-type '(unsigned-byte 8))))
+        (loop for offset below (- index (raft-node-snapshot-index node))
+              for entry = (aref (raft-node-log node) offset)
+              for frame = (gethash (raft-entry-index entry) (file-raft-storage-entry-frames storage))
+              do (file-position input (aref frame 1))
+                 (loop with remaining = (- (aref frame 2) (aref frame 1))
+                       while (plusp remaining)
+                       for count = (min remaining (length buffer))
+                       do (unless (= count (read-sequence buffer input :end count))
+                            (error "Short read copying a certified WAL frame"))
+                          (write-sequence buffer output :end count)
+                          (decf remaining count)))))
+    (boundary (list :commit index))))
+
 (defmethod raft-storage-cache-prefix ((storage file-raft-storage) node index byte-limit)
   "Retain a checksummed, anonymous disk segment; cache failure cannot change WAL truth."
   (handler-case
-      (let ((size 0) (fd nil) (kept nil)
+      (let ((size 0) (fd nil) (kept nil) (framed-size nil)
             (*print-readably* t) (*print-circle* nil) (*print-pretty* nil)
             (*print-base* 10) (*print-radix* nil) (*print-case* :upcase)
             (*package* (find-package :gr8s.raft)))
@@ -496,8 +578,11 @@ both streams: its durable outcome is uncertain and requires recovery before use.
                      (open-stream-p (file-raft-storage-stream storage)))
           (error "Catch-up cache requires owned open WAL"))
         (when (= index (raft-node-snapshot-index node)) (return-from raft-storage-cache-prefix nil))
-        (map-raft-catchup-prefix node index
-          (lambda (form) (incf size (+ +raft-wal-header-length+ (raft-wal-form-metrics form)))))
+        (setf framed-size (raft-catchup-framed-prefix-size storage node index))
+        (if framed-size
+            (setf size framed-size)
+            (map-raft-catchup-prefix node index
+              (lambda (form) (incf size (+ +raft-wal-header-length+ (raft-wal-form-metrics form))))))
         (when (> size byte-limit) (return-from raft-storage-cache-prefix nil))
         (raft-catchup-evict storage size byte-limit)
         (unwind-protect
@@ -512,8 +597,12 @@ both streams: its durable outcome is uncertain and requires recovery before use.
                      (writer nil))
                  (unwind-protect
                       (progn
-                        (setf writer (sb-sys:make-fd-stream writer-fd :output t :external-format :utf-8 :auto-close t))
-                        (map-raft-catchup-prefix node index (lambda (form) (raft-wal-write-frame form writer)))
+                        (setf writer (if framed-size
+                                         (sb-sys:make-fd-stream writer-fd :output t :element-type '(unsigned-byte 8) :auto-close t)
+                                         (sb-sys:make-fd-stream writer-fd :output t :external-format :utf-8 :auto-close t)))
+                        (if framed-size
+                            (raft-catchup-copy-framed-prefix storage node index writer)
+                            (map-raft-catchup-prefix node index (lambda (form) (raft-wal-write-frame form writer))))
                         (finish-output writer)
                         (sb-posix:fsync writer-fd))
                    (if writer

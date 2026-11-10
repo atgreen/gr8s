@@ -594,6 +594,15 @@ Storage close, worker disable, or process exit releases them. Backup/recovery
 continues to use the current WAL and application artifact; this cache is
 expendable and is not a new recovery format. The worker restores the previous
 cache policy when stopped, respecting a stricter existing policy.
+
+For canonical checksummed WALs, cache construction copies the selected durable
+entry frames through a fixed 64 KiB buffer. A private index holds only terms and
+byte offsets for current WAL entries; it never retains command payloads. Durable
+append, truncation, checkpoint replacement, and recovery maintain that index.
+Missing or legacy frame metadata uses the original serializer. The archive
+reader still verifies framing and checksums before replication. This removes
+repeated payload printing from cache creation; it does not by itself establish
+a bound on checkpoint pauses or prove leadership stability.
 This implementation still needs fresh native cluster acceptance under
 `podster-ucm.11.3.9.10.1`; automatic compaction remains disabled by default.
 
