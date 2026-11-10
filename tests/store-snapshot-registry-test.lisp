@@ -338,6 +338,61 @@
         (when receiver (gr8s::stop-raft-member receiver))))))
 
 (in-suite store-snapshot-registry)
+(test unpublished-artifact-pins-protect-retention-and-unwind-independently
+  (with-temporary-store (store root)
+    (let* ((member (gr8s.resources::start-store-member-from-wal
+                    store "source" (merge-pathnames "raft/control-plane.log" root)
+                    :bootstrap-role :founder :host "127.0.0.1" :port 0))
+           (source (merge-pathnames "unpublished.jsonl" root)))
+      (unwind-protect
+           (progn
+             (gr8s.resources::capture-store-snapshot store source 2 1)
+             (let* ((digest (snapshot-test-digest source))
+                    (reference (gr8s.resources::store-snapshot-artifact-reference 2 1 digest))
+                    (target nil))
+               (flet ((reap ()
+                        (bt:with-lock-held ((gr8s::raft-member-lock member))
+                          (gr8s.resources::reap-store-snapshot-artifacts-unlocked member root))))
+                 (is (null (gr8s.raft.transport::raft-member-artifact-pins member)))
+                 (is (eq :done
+                         (gr8s.resources::call-with-store-artifact-pin
+                          member reference
+                          (lambda ()
+                            (is (not (sb-thread:holding-mutex-p (gr8s::raft-member-lock member))))
+                            ;; The pin is installed before the artifact even exists.
+                            (is (= 0 (reap)))
+                            (setf target (gr8s.resources::retain-store-snapshot-artifact root source 2 1 digest))
+                            (is (= 0 (reap)))
+                            (is (probe-file target))
+                            (signals error
+                              (gr8s.resources::call-with-store-artifact-pin
+                               member reference
+                               (lambda ()
+                                 (is (= 2 (length (gr8s.raft.transport::raft-member-artifact-pins member))))
+                                 (is (= 0 (reap)))
+                                 (error "abandoned inner capture"))))
+                            (is (= 1 (length (gr8s.raft.transport::raft-member-artifact-pins member))))
+                            ;; Corrupt roots stop reclamation before any deletion.
+                            (let ((before (gr8s.raft.transport::raft-member-artifact-pins member)))
+                              (unwind-protect
+                                   (progn
+                                     (setf (gr8s.raft.transport::raft-member-artifact-pins member) '((:invalid)))
+                                     (signals error (reap))
+                                     (is (probe-file target)))
+                                (setf (gr8s.raft.transport::raft-member-artifact-pins member) before)))
+                            (is (= 0 (reap)))
+                            ;; Caller-owned strings cannot mutate the private pin.
+                            (setf (aref (eighth reference) 0) #\z)
+                            (is (= 0 (reap)))
+                            :done))))
+                 (is (null (gr8s.raft.transport::raft-member-artifact-pins member)))
+                 (is (= 1 (reap)))
+                 (is (null (probe-file target)))
+                 (signals error
+                   (gr8s.resources::call-with-store-artifact-pin member reference (lambda () (fail "Invalid pin ran"))))
+                 (is (null (gr8s.raft.transport::raft-member-artifact-pins member))))))
+        (gr8s::stop-raft-member member)))))
+
 (test artifact-reclamation-preserves-durable-pending-and-outbound-roots
   (with-temporary-store (store root)
     (let* ((member (gr8s.resources::start-store-member-from-wal

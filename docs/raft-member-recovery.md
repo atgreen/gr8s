@@ -499,6 +499,16 @@ still takes time proportional to the indexes and mutable containers. The worker
 does not yet use this interface: retaining an unpublished artifact safely and
 integrating prepared publication remain required before the availability proof.
 
+`call-with-store-artifact-pin` protects an unpublished portable artifact reference
+before its file appears in the registry. It registers a private reference under
+the member mutex, runs the retention/publication callback outside that mutex,
+and removes only its own pin on unwind. Cleanup preserves pinned files alongside
+the durable, pending, bootstrap and outbound roots. The callback must publish its
+durable Raft reference before returning; abandoned files become reclaimable.
+Pins are transient: after a crash, the WAL and other durable roots decide which
+artifacts remain necessary. The worker still needs to use this scope when it
+adopts frozen capture.
+
 For a standalone full-history memory probe, build with
 `sbcl --noinform --non-interactive --load scripts/build-snapshot-freeze-native-harness.lisp`
 and run `python3 scripts/test-snapshot-freeze-native.py --checkpoint STATE_JSON
