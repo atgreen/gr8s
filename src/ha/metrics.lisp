@@ -4,7 +4,7 @@
 
 (defun ha-metrics-text (hcp)
   "Copy local Raft/worker measurements without encoding commands or changing state."
-  (let ((member (ha-control-plane-member hcp)) (samples nil) (peers nil) (phases nil))
+  (let ((member (ha-control-plane-member hcp)) (samples nil) (peers nil) (phases nil) (sections nil))
     (bt:with-lock-held ((raft-member-lock member))
       (let* ((node (raft-member-node member))
              (last (gr8s.raft::raft-last-log-index node))
@@ -49,7 +49,11 @@
     (bt:with-lock-held ((ha-control-plane-compaction-lock hcp))
       (setf phases (loop for name in '("freeze" "capture" "retain" "publish")
                          for row across (ha-control-plane-compaction-phase-times hcp)
-                         collect (cons name (if row (coerce row 'list) '(0 0 0 0)))))
+                         collect (cons name (if row (coerce row 'list) '(0 0 0 0 0 0 0)))))
+      (setf sections
+            (loop for name in '("check" "freeze" "publish" "resume")
+                  for row across (ha-control-plane-compaction-member-lock-times hcp)
+                  collect (cons name (if row (coerce row 'list) '(0 0 0 0 0 0 0)))))
       (setf samples
             (append samples
                     (list (list "gr8s_compaction_completed_total" "Successful local automatic/manual worker checkpoints."
@@ -62,17 +66,24 @@
       (dolist (sample (sort samples #'string< :key #'first))
         (destructuring-bind (name help value &optional (type "gauge")) sample
           (gr8s.kubelet::write-prometheus-family out name help type (list (list nil value)))))
-      (loop for (suffix help type column) in
-              '(("observations_total" "Executed phase attempts, including errors and superseded publications." "counter" 0)
-                ("duration_seconds_total" "Total monotonic time spent executing the phase." "counter" 1)
-                ("duration_seconds_max" "Longest observed phase execution since control-plane startup." "gauge" 2)
-                ("duration_seconds_last" "Latest observed phase execution time." "gauge" 3))
-            do (gr8s.kubelet::write-prometheus-family
-                out (concatenate 'string "gr8s_compaction_phase_" suffix) help type
-                (loop for (name . row) in phases
-                      collect (list (list (cons "phase" name))
-                                    (if (zerop column) (nth column row)
-                                        (/ (float (nth column row) 1d0) internal-time-units-per-second))))))
+      (loop for (prefix label rows) in
+              (list (list "gr8s_compaction_phase_" "phase" phases)
+                    (list "gr8s_compaction_member_lock_" "section" sections))
+            do (loop for (suffix help type column) in
+                     '(("observations_total" "Executed attempts, including abnormal exits." "counter" 0)
+                       ("duration_seconds_total" "Total monotonic execution time; excludes lock acquisition wait." "counter" 1)
+                       ("duration_seconds_max" "Longest observed execution since control-plane startup." "gauge" 2)
+                       ("duration_seconds_last" "Latest observed execution time." "gauge" 3)
+                       ("gc_seconds_total" "Sum of process GC-time deltas during executions; not exclusive attribution." "counter" 4)
+                       ("gc_seconds_max" "Largest process GC-time delta during an execution." "gauge" 5)
+                       ("gc_seconds_last" "Process GC-time delta during the latest execution." "gauge" 6))
+                     do (gr8s.kubelet::write-prometheus-family
+                         out (concatenate 'string prefix suffix) help type
+                         (loop for (name . row) in rows
+                               collect (list (list (cons label name))
+                                             (if (zerop column) (nth column row)
+                                                 (/ (float (nth column row) 1d0)
+                                                    internal-time-units-per-second)))))))
       (gr8s.kubelet::write-prometheus-family
        out "gr8s_raft_peer_replication_lag_entries" "Leader's last log index minus peer acknowledged match index; leader only." "gauge"
        (loop for (id lag queued) in peers when lag collect (list (list (cons "peer" id)) lag)))

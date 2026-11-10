@@ -31,25 +31,46 @@
                   (sb-posix:fstat (sb-sys:fd-stream-fd (gr8s.raft::file-raft-storage-stream storage))))
                  (ha-control-plane-compaction-bytes hcp))))))
 
-(defun call-with-ha-compaction-phase (hcp phase function)
-  "Measure an executed phase, including errors/nonlocal exits, in monotonic ticks.
-Rows hold count, total, maximum and latest duration. There are four fixed phases."
-  (let ((index (or (position phase '(:freeze :capture :retain :publish))
-                   (error "Unknown compaction phase: ~S" phase)))
-        (started (get-internal-real-time)))
+(defun call-with-ha-compaction-measurement (hcp rows index function)
+  "Record attempts, wall ticks and process GC ticks, including abnormal exits.
+Rows contain count, wall total/max/last and process GC total/max/last. GC deltas
+include other threads and overlapping measurements; they are not CPU attribution."
+  (let ((started (get-internal-real-time)) (gc-started sb-ext:*gc-run-time*))
     (unwind-protect (funcall function)
-      (let ((elapsed (max 0 (- (get-internal-real-time) started))))
+      (let ((elapsed (max 0 (- (get-internal-real-time) started)))
+            (gc (max 0 (- sb-ext:*gc-run-time* gc-started))))
         (bt:with-lock-held ((ha-control-plane-compaction-lock hcp))
-          (let ((row (or (aref (ha-control-plane-compaction-phase-times hcp) index)
-                         (setf (aref (ha-control-plane-compaction-phase-times hcp) index)
-                               (make-array 4 :initial-element 0)))))
+          (let ((row (or (aref rows index)
+                         (setf (aref rows index) (make-array 7 :initial-element 0)))))
             (incf (aref row 0))
             (incf (aref row 1) elapsed)
+            (incf (aref row 4) gc)
             (setf (aref row 2) (max (aref row 2) elapsed)
-                  (aref row 3) elapsed)))))))
+                  (aref row 3) elapsed
+                  (aref row 5) (max (aref row 5) gc)
+                  (aref row 6) gc)))))))
+
+(defun call-with-ha-compaction-phase (hcp phase function)
+  (call-with-ha-compaction-measurement
+   hcp (ha-control-plane-compaction-phase-times hcp)
+   (or (position phase '(:freeze :capture :retain :publish))
+       (error "Unknown compaction phase: ~S" phase)) function))
 
 (defmacro with-ha-compaction-phase ((hcp phase) &body body)
   `(call-with-ha-compaction-phase ,hcp ,phase (lambda () ,@body)))
+
+(defun call-with-ha-compaction-member-lock (hcp section function)
+  "Measure the entire compactor critical section after acquiring the member lock.
+Includes trigger checks, preparation, gate changes and reaping, as applicable;
+excludes acquisition wait and the diagnostic counter update at section exit."
+  (let ((index (or (position section '(:check :freeze :publish :resume))
+                   (error "Unknown compaction member-lock section: ~S" section))))
+    (bt:with-lock-held ((raft-member-lock (ha-control-plane-member hcp)))
+      (call-with-ha-compaction-measurement
+       hcp (ha-control-plane-compaction-member-lock-times hcp) index function))))
+
+(defmacro with-ha-compaction-member-lock ((hcp section) &body body)
+  `(call-with-ha-compaction-member-lock ,hcp ,section (lambda () ,@body)))
 
 (defun compact-ha-store-once (hcp)
   "Allow only one frozen view per control plane, including manual callers."
@@ -67,7 +88,7 @@ Drain again before WAL replacement so uncertain durability remains fail-closed."
   (let ((member (ha-control-plane-member hcp)) (store (ha-control-plane-store hcp))
         (owns-gate nil) (prepared nil) (view nil) (temporary nil))
     (when (or (gr8s.store::store-access-blocked-p store)
-              (not (bt:with-lock-held ((raft-member-lock member))
+              (not (with-ha-compaction-member-lock (hcp :check)
                      (ha-compaction-due-unlocked-p hcp))))
       (return-from compact-ha-store-once-exclusive nil))
     (unwind-protect
@@ -77,7 +98,7 @@ Drain again before WAL replacement so uncertain durability remains fail-closed."
            (gr8s.store::call-with-store-application-barriers
             store
             (lambda ()
-              (bt:with-lock-held ((raft-member-lock member))
+              (with-ha-compaction-member-lock (hcp :freeze)
                 (when (ha-compaction-due-unlocked-p hcp)
                   (setf prepared (gr8s.raft::raft-prepare-compaction (raft-member-node member)))
                   (when prepared
@@ -113,7 +134,7 @@ Drain again before WAL replacement so uncertain durability remains fail-closed."
                   (gr8s.store::call-with-store-application-barriers
                    store
                    (lambda ()
-                     (bt:with-lock-held ((raft-member-lock member))
+                     (with-ha-compaction-member-lock (hcp :publish)
                        (when (and (gr8s.raft.transport::raft-member-running member)
                                   (gr8s.resources::member-store-restore-may-resume-p member)
                                   (with-ha-compaction-phase (hcp :publish)
@@ -133,7 +154,7 @@ Drain again before WAL replacement so uncertain durability remains fail-closed."
         (gr8s.store::call-with-store-application-barriers
          store
          (lambda ()
-           (bt:with-lock-held ((raft-member-lock member))
+           (with-ha-compaction-member-lock (hcp :resume)
              (when (gr8s.resources::member-store-restore-may-resume-p member)
                (gr8s.store::resume-store-access store))))))))))
 

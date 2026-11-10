@@ -88,7 +88,38 @@ timings. They are execution durations, not a complete measure of request latency
 or heartbeat interruption. GC pauses during a phase contribute to its elapsed
 time. All four labels are emitted with zero values before observation.
 
-All these families are gauges except the phase observation/time totals and
+Each phase also reports `gr8s_compaction_phase_gc_seconds_total`,
+`gr8s_compaction_phase_gc_seconds_max`, and
+`gr8s_compaction_phase_gc_seconds_last`, with the same `phase` labels. These
+measure changes in SBCL's process-wide cumulative GC CPU time during the phase.
+They do not directly measure stop-the-world pause durations.
+Other threads can trigger that GC. Nested or overlapping intervals count the
+same GC time, so do not add these series to estimate total process GC time or
+subtract them from wall time to infer exclusive compaction CPU time.
+
+The `gr8s_compaction_member_lock_` families measure compaction's member-lock
+critical sections, using the fixed `section` labels `check`, `freeze`, `publish`,
+and `resume`. Each has the suffixes `observations_total`,
+`duration_seconds_total`, `duration_seconds_max`, `duration_seconds_last`,
+`gc_seconds_total`, `gc_seconds_max`, and `gc_seconds_last`.
+
+- `check` includes the initial trigger and readiness checks.
+- `freeze` includes trigger rechecking, prepared-boundary construction, the
+  application-view copy, and gate reopening.
+- `publish` includes readiness rechecking, checkpoint publication, artifact
+  reaping and successful-checkpoint bookkeeping.
+- `resume` includes the cleanup path's readiness check and gate reopening.
+
+Timing starts after acquiring the member lock and ends after the section body,
+including abnormal exits. It excludes acquisition wait and the timing-counter
+update just before lock release. These measurements cover the compaction pass;
+they do not measure every member-lock holder, worker startup/shutdown, outer
+barrier waits, gate-drain time, thread scheduling delays or end-to-end heartbeat
+latency. GC deltas have the same process-wide attribution limits as phase GC
+measurements. All section labels emit zero before their first observation.
+
+All these families are gauges except the phase and member-lock observation,
+execution-time and GC-time totals and
 `gr8s_compaction_completed_total`, which are counters scoped to the control-plane instance. Peer labels use
 configured peer IDs; no command payloads or error messages are exposed. Peer series disappear
 when their links are removed. Replication lag reflects acknowledged log

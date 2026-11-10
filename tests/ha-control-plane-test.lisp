@@ -500,6 +500,10 @@
                (loop for row across (gr8s.ha::ha-control-plane-compaction-phase-times ha) do
                  (is (and row (plusp (aref row 0))))
                  (is (<= 0 (aref row 3) (aref row 2) (aref row 1))))
+               (loop for row across (gr8s.ha::ha-control-plane-compaction-member-lock-times ha) do
+                 (is (and row (plusp (aref row 0))))
+                 (is (<= 0 (aref row 3) (aref row 2) (aref row 1)))
+                 (is (<= 0 (aref row 6) (aref row 5) (aref row 4))))
                (setf store (gr8s:open-store root :defer-restore-completion t)
                      ha (gr8s::start-ha-control-plane store :id "compact" :init t :port port))
                (is (= boundary (gr8s::raft-node-snapshot-index (gr8s::raft-member-node (gr8s::ha-control-plane-member ha)))))
@@ -700,3 +704,48 @@
       (is (search "gr8s_compaction_phase_observations_total{phase=\"publish\"} 0" text))
       (dolist (suffix '("duration_seconds_total" "duration_seconds_max" "duration_seconds_last"))
         (is (search (concatenate 'string "gr8s_compaction_phase_" suffix "{phase=\"capture\"}") text))))))
+
+(test compaction-member-lock-measurements-preserve-locking-and-control-flow
+  (let* ((member (gr8s.raft.transport::make-raft-member :node (gr8s::make-raft-node)))
+         (ha (gr8s.ha::make-ha-control-plane :member member))
+         (lock (gr8s::raft-member-lock member)))
+    (is (equal '(1 2)
+               (multiple-value-list
+                (gr8s.ha::with-ha-compaction-member-lock (ha :publish)
+                  (is (sb-thread:holding-mutex-p lock))
+                  (values 1 2)))))
+    (signals simple-error
+      (gr8s.ha::with-ha-compaction-member-lock (ha :publish) (error "expected")))
+    (is (eq :escaped
+            (catch 'lock-exit
+              (gr8s.ha::with-ha-compaction-member-lock (ha :publish)
+                (throw 'lock-exit :escaped)))))
+    (is (not (sb-thread:holding-mutex-p lock)))
+    (signals simple-error
+      (gr8s.ha::with-ha-compaction-member-lock (ha :unknown) (fail "Invalid section ran")))
+    (let ((row (aref (gr8s.ha::ha-control-plane-compaction-member-lock-times ha) 2)))
+      (is (= 3 (aref row 0)))
+      (is (<= 0 (aref row 3) (aref row 2) (aref row 1)))
+      (is (<= 0 (aref row 6) (aref row 5) (aref row 4))))
+    (let ((text (gr8s.ha::ha-metrics-text ha)))
+      (is (search "gr8s_compaction_member_lock_observations_total{section=\"publish\"} 3" text))
+      (is (search "gr8s_compaction_member_lock_observations_total{section=\"check\"} 0" text))
+      (dolist (prefix '("gr8s_compaction_phase_" "gr8s_compaction_member_lock_"))
+        (dolist (suffix '("gc_seconds_total" "gc_seconds_max" "gc_seconds_last"))
+          (is (search (concatenate 'string prefix suffix "{") text)))))))
+
+(test compaction-gc-deltas-accumulate-on-normal-and-abnormal-exits
+  (let* ((member (gr8s.raft.transport::make-raft-member :node (gr8s::make-raft-node)))
+         (ha (gr8s.ha::make-ha-control-plane :member member))
+         ;; A thread-local counter binding gives exact, deterministic deltas;
+         ;; no global GC hooks or other threads' counters are modified.
+         (sb-ext:*gc-run-time* 0))
+    (gr8s.ha::with-ha-compaction-phase (ha :capture) (incf sb-ext:*gc-run-time* 7))
+    (signals simple-error
+      (gr8s.ha::with-ha-compaction-phase (ha :capture)
+        (incf sb-ext:*gc-run-time* 11) (error "expected")))
+    (let ((row (aref (gr8s.ha::ha-control-plane-compaction-phase-times ha) 1)))
+      (is (= 2 (aref row 0)))
+      (is (= 18 (aref row 4)))
+      (is (= 11 (aref row 5)))
+      (is (= 11 (aref row 6))))))
