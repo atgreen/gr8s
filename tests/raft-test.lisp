@@ -1406,6 +1406,12 @@
                (gr8s.raft:raft-storage-append-entry storage entry)
                (vector-push-extend entry (gr8s.raft:raft-node-log node)))
              (is (= 3 (gr8s.raft:raft-node-last-applied node)))
+             ;; Neither archived prefix nor retained checkpoint suffix may print
+             ;; an entry when its durable frame is available.
+             (setf (symbol-function 'gr8s.raft::raft-wal-form-metrics)
+                   (lambda (form &optional output)
+                     (when (eq :entry (first form)) (error "Copied entry was reserialized"))
+                     (funcall original form output)))
              (gr8s.raft:raft-compact node 3)
              (is (= 1 (hash-table-count (gr8s.raft::file-raft-storage-entry-frames storage))))
              (gr8s::close-file-raft-storage storage)
@@ -1417,12 +1423,6 @@
              (gr8s.raft::raft-apply-committed node)
              (is (= 1 (hash-table-count (gr8s.raft::file-raft-storage-entry-frames storage))))
              (is (plusp (gr8s.raft::raft-catchup-framed-prefix-size storage node 4)))
-             ;; The only printable forms are tiny snapshot/commit boundaries.
-             ;; Any entry printer invocation fails this fast-path regression.
-             (setf (symbol-function 'gr8s.raft::raft-wal-form-metrics)
-                   (lambda (form &optional output)
-                     (when (eq :entry (first form)) (error "Copied entry was reserialized"))
-                     (funcall original form output)))
              (gr8s.raft:raft-compact node 4)
              (let ((batch (gr8s.raft::raft-storage-read-catchup storage node 4)))
                (is (not (null batch)))
@@ -1485,4 +1485,40 @@
              (is (null (gr8s.raft::raft-catchup-framed-prefix-size storage node 3)))
              (gr8s.raft:raft-compact node 3)
              (is (not (null (gr8s.raft::raft-storage-read-catchup storage node 1)))))
+        (gr8s::close-file-raft-storage storage)))))
+
+
+(test checkpoint-mixes-copied-and-serialized-unicode-entries-and-remains-appendable
+  (with-temporary-store (store root)
+    (values store)
+    (let* ((path (merge-pathnames "mixed.log" root))
+           (storage (gr8s::open-file-raft-storage path))
+           (node (make-disk-catchup-test-node storage)))
+      (unwind-protect
+           (progn
+             (loop for index from 4 to 5
+                   for command in '((:unicode "λ😀") (:copied "日本語"))
+                   for entry = (gr8s.raft:make-raft-entry :index index :term 2 :command command)
+                   do (gr8s.raft:raft-storage-append-entry storage entry)
+                      (vector-push-extend entry (gr8s.raft:raft-node-log node)))
+             ;; The first suffix entry must use the legacy/missing-index
+             ;; serializer, followed by raw binary copying and a text trailer.
+             (remhash 4 (gr8s.raft::file-raft-storage-entry-frames storage))
+             (gr8s.raft:raft-compact node 3)
+             (let ((entry (gr8s.raft:make-raft-entry :index 6 :term 2 :command '(:after "é"))))
+               (gr8s.raft:raft-storage-append-entry storage entry)
+               (vector-push-extend entry (gr8s.raft:raft-node-log node)))
+             (gr8s.raft:raft-storage-save-commit-index storage 6)
+             (let ((loaded (gr8s.raft::load-raft-log path)))
+               (is (= 6 (gr8s.raft::raft-recovered-commit-index loaded)))
+               (is (equal '((:unicode "λ😀") (:copied "日本語") (:after "é"))
+                          (mapcar #'gr8s.raft:raft-entry-command (gr8s.raft::raft-recovered-entries loaded)))))
+             (is (= 3 (hash-table-count (gr8s.raft::file-raft-storage-entry-frames storage))))
+             (setf (gr8s.raft:raft-node-commit-index node) 6)
+             (gr8s.raft::raft-apply-committed node)
+             (gr8s.raft:raft-compact node 6)
+             (is (equal '((:unicode "λ😀") (:copied "日本語") (:after "é"))
+                        (loop for next from 4 to 6 append
+                          (mapcar #'gr8s.raft:raft-entry-command
+                                  (cdr (gr8s.raft::raft-storage-read-catchup storage node next)))))))
         (gr8s::close-file-raft-storage storage)))))

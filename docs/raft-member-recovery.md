@@ -599,6 +599,11 @@ For canonical checksummed WALs, cache construction copies the selected durable
 entry frames through a fixed 64 KiB buffer. A private index holds only terms and
 byte offsets for current WAL entries; it never retains command payloads. Durable
 append, truncation, checkpoint replacement, and recovery maintain that index.
+Checkpoint replacement also copies available durable suffix frames into its
+private replacement file. Boundary records and entries lacking frame metadata
+use the serializer; switching between binary copying and text output flushes
+and resynchronizes the private file descriptors. The replacement index is
+adopted with its WAL, preserving the existing fsync/rename failure behavior.
 Missing or legacy frame metadata uses the original serializer. The archive
 reader still verifies framing and checksums before replication. This removes
 repeated payload printing from cache creation; it does not by itself establish

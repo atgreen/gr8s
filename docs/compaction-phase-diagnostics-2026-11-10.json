@@ -746,5 +746,86 @@
         ]
       }
     }
+  },
+  "cacheOnlyFullStabilityFailure": {
+    "criterion": "No unforced leadership term changes during ordinary full-workload compaction",
+    "outcome": "failed",
+    "reason": "Leadership advanced from term1 to term2; the sustained-stability requirement is already contradicted. Stop this experiment after preserving evidence, then test the remaining WAL serialization fix against the complete workload.",
+    "runnerPid": 1203931,
+    "observedTerms": {
+      "cp-a": 2,
+      "cp-b": 2,
+      "cp-c": 2
+    },
+    "completedRounds": 729,
+    "fullWorkloadCompleted": false,
+    "observedAtUnixSeconds": 1794343748.5235431,
+    "runnerResult": {
+      "passed": false,
+      "fullChurnAcceptance": false,
+      "elapsedSeconds": 440.74370453716256,
+      "cleanupExitCodes": {
+        "cp-a": 0,
+        "cp-b": 0,
+        "cp-c": 0
+      }
+    },
+    "runnerExitCode": 130,
+    "stagesAtStop": {
+      "cp-a": [
+        {
+          "stage": "cache-prefix",
+          "attempts": 32,
+          "totalSeconds": 0.28299900000000006,
+          "maxSeconds": 0.044,
+          "lastSeconds": 0.006
+        },
+        {
+          "stage": "replace-wal",
+          "attempts": 32,
+          "totalSeconds": 23.250837,
+          "maxSeconds": 1.772987,
+          "lastSeconds": 0.566997
+        }
+      ],
+      "cp-b": [
+        {
+          "stage": "cache-prefix",
+          "attempts": 33,
+          "totalSeconds": 0.18699900000000008,
+          "maxSeconds": 0.033,
+          "lastSeconds": 0.006
+        },
+        {
+          "stage": "replace-wal",
+          "attempts": 34,
+          "totalSeconds": 24.616832000000006,
+          "maxSeconds": 1.51199,
+          "lastSeconds": 0.677996
+        }
+      ],
+      "cp-c": [
+        {
+          "stage": "cache-prefix",
+          "attempts": 33,
+          "totalSeconds": 0.21099700000000007,
+          "maxSeconds": 0.038999,
+          "lastSeconds": 0.005
+        },
+        {
+          "stage": "replace-wal",
+          "attempts": 34,
+          "totalSeconds": 22.06886,
+          "maxSeconds": 1.775987,
+          "lastSeconds": 0.671997
+        }
+      ]
+    }
+  },
+  "walSuffixCopySource": {
+    "passed": true,
+    "raftChecks": 5028,
+    "log": "/tmp/gr8s-wal-suffix-copy-bounded-batch-tests.log",
+    "scope": "Checksummed retained-suffix raw copying, mixed Unicode serialized/copied records, subsequent append and bounded batch recovery; source only, native timing/recovery pending"
   }
 }

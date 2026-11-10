@@ -323,6 +323,26 @@ Legacy forms are read strictly; only explicit frame boundaries can be repaired."
     (declare (ignore storage phase))
     (sb-posix:fsync fd)))
 
+(defun raft-current-entry-frame (storage entry file-size)
+  "Borrow scalar offsets only when they describe this entry in the owned WAL."
+  (let ((frame (gethash (raft-entry-index entry) (file-raft-storage-entry-frames storage))))
+    (when (and frame (= (aref frame 0) (raft-entry-term entry))
+               (<= 0 (aref frame 1))
+               (< (+ (aref frame 1) +raft-wal-header-length+) (aref frame 2))
+               (<= (aref frame 2) file-size))
+      frame)))
+
+(defun raft-copy-entry-frame (input output frame buffer)
+  "Copy one complete frame through caller-owned bounded scratch space."
+  (file-position input (aref frame 1))
+  (loop with remaining = (- (aref frame 2) (aref frame 1))
+        while (plusp remaining)
+        for count = (min remaining (length buffer))
+        do (unless (= count (read-sequence buffer input :end count))
+             (error "Short read copying a durable WAL frame"))
+           (write-sequence buffer output :end count)
+           (decf remaining count)))
+
 (defmethod raft-storage-replace-snapshot
     ((storage file-raft-storage) index term state hard-term vote entries &key (commit-index index))
   "Replace the WAL without reading or retaining discarded historical records.
@@ -341,7 +361,7 @@ both streams: its durable outcome is uncertain and requires recovery before use.
          (temporary (format nil "~A.checkpoint-~36R" target (random (expt 36 20))))
          (old (file-raft-storage-stream storage))
          (frames (make-hash-table))
-         (stream nil) (created nil) (renamed nil) (completed nil))
+         (stream nil) (binary-output nil) (created nil) (renamed nil) (completed nil))
     (unwind-protect
          (progn
            (let ((fd (sb-posix:open temporary
@@ -351,21 +371,46 @@ both streams: its durable outcome is uncertain and requires recovery before use.
                  (setf stream (sb-sys:make-fd-stream fd :output t :element-type 'character
                                                     :external-format :utf-8 :auto-close t))
                (error (condition) (sb-posix:close fd) (error condition))))
-           (let ((*print-readably* t) (*print-circle* nil) (*print-pretty* nil)
-                 (*read-eval* nil))
-             (flet ((record (form)
-                      (let ((start (file-position stream)))
-                        (raft-wal-write-frame form stream)
-                        (finish-output stream)
-                        (raft-index-wal-frame frames form start (file-position stream)))))
-               (record (list :hard hard-term vote))
-               (record (list :snapshot index term state))
-               (map nil (lambda (entry)
-                          (when (> (raft-entry-index entry) index)
-                            (record (list :entry (raft-entry-index entry)
-                                          (raft-entry-term entry) (raft-entry-command entry)))))
-                    entries)
-               (record (list :commit commit-index))))
+           ;; Independent descriptors let existing frames remain bytes, while
+           ;; the normal character writer handles boundary and legacy records.
+           ;; Flush before switching and seek the other writer to EOF afterward.
+           (let ((fd (sb-posix:open (format nil "/proc/self/fd/~D" (sb-sys:fd-stream-fd stream))
+                                    (logior sb-posix:o-wronly #o2000000) 0)))
+             (handler-case
+                 (setf binary-output (sb-sys:make-fd-stream fd :output t :element-type '(unsigned-byte 8) :auto-close t))
+               (error (condition) (sb-posix:close fd) (error condition))))
+           (with-open-file (input (format nil "/proc/self/fd/~D" (sb-sys:fd-stream-fd old))
+                                  :direction :input :element-type '(unsigned-byte 8))
+             (let ((*print-readably* t) (*print-circle* nil) (*print-pretty* nil)
+                   (*read-eval* nil)
+                   (file-size (sb-posix:stat-size (sb-posix:fstat (sb-sys:fd-stream-fd old))))
+                   (buffer (make-array 65536 :element-type '(unsigned-byte 8))))
+               (labels ((record (form)
+                          (let ((start (file-position stream)))
+                            (raft-wal-write-frame form stream)
+                            (finish-output stream)
+                            (raft-index-wal-frame frames form start (file-position stream))))
+                        (entry-record (entry)
+                          (let ((frame (raft-current-entry-frame storage entry file-size)))
+                            (if frame
+                                (progn
+                                  (finish-output stream)
+                                  (file-position binary-output :end)
+                                  (let ((start (file-position binary-output)))
+                                    (raft-copy-entry-frame input binary-output frame buffer)
+                                    (finish-output binary-output)
+                                    (file-position stream :end)
+                                    (raft-index-wal-frame frames
+                                      (list :entry (raft-entry-index entry) (raft-entry-term entry) nil)
+                                      start (file-position stream))))
+                                (record (list :entry (raft-entry-index entry)
+                                              (raft-entry-term entry) (raft-entry-command entry)))))))
+                 (record (list :hard hard-term vote))
+                 (record (list :snapshot index term state))
+                 (map nil (lambda (entry) (when (> (raft-entry-index entry) index) (entry-record entry))) entries)
+                 (record (list :commit commit-index)))))
+           (close binary-output)
+           (setf binary-output nil)
            (finish-output stream)
            (file-raft-checkpoint-sync storage :file (sb-sys:fd-stream-fd stream))
            ;; RENAME takes exact path strings, including extensionless WAL names.
@@ -379,6 +424,7 @@ both streams: its durable outcome is uncertain and requires recovery before use.
                (sb-posix:close fd)))
            (close old)
            (setf completed t))
+      (when binary-output (ignore-errors (close binary-output :abort t)))
       (unless completed
         (when stream (ignore-errors (close stream :abort t)))
         (when renamed
@@ -533,12 +579,8 @@ Missing/legacy metadata uses the existing serializer. No payload is inspected."
                     (sb-posix:fstat (sb-sys:fd-stream-fd (file-raft-storage-stream storage))))))
     (loop for offset below (- index (raft-node-snapshot-index node))
           for entry = (aref (raft-node-log node) offset)
-          for frame = (gethash (raft-entry-index entry) (file-raft-storage-entry-frames storage))
-          do (unless (and frame (= (raft-entry-index entry) (+ 1 offset (raft-node-snapshot-index node)))
-                          (= (aref frame 0) (raft-entry-term entry))
-                          (<= 0 (aref frame 1))
-                          (< (+ (aref frame 1) +raft-wal-header-length+) (aref frame 2))
-                          (<= (aref frame 2) file-size))
+          for frame = (raft-current-entry-frame storage entry file-size)
+          do (unless (and frame (= (raft-entry-index entry) (+ 1 offset (raft-node-snapshot-index node))))
                (return-from raft-catchup-framed-prefix-size nil))
              (incf size (- (aref frame 2) (aref frame 1))))
     size))
@@ -557,14 +599,7 @@ Missing/legacy metadata uses the existing serializer. No payload is inspected."
         (loop for offset below (- index (raft-node-snapshot-index node))
               for entry = (aref (raft-node-log node) offset)
               for frame = (gethash (raft-entry-index entry) (file-raft-storage-entry-frames storage))
-              do (file-position input (aref frame 1))
-                 (loop with remaining = (- (aref frame 2) (aref frame 1))
-                       while (plusp remaining)
-                       for count = (min remaining (length buffer))
-                       do (unless (= count (read-sequence buffer input :end count))
-                            (error "Short read copying a certified WAL frame"))
-                          (write-sequence buffer output :end count)
-                          (decf remaining count)))))
+              do (raft-copy-entry-frame input output frame buffer))))
     (boundary (list :commit index))))
 
 (defmethod raft-storage-cache-prefix ((storage file-raft-storage) node index byte-limit)
