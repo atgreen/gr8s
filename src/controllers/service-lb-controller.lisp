@@ -402,18 +402,37 @@ Writes every backend before the service that references it (so the program never
 reads a VIP whose slots are missing), then removes freed backend slots and
 withdrawn VIPs. When PUBLISH-SERVICES-P is false, publish the full risk inventory
 but withdraw Service selection tables; this is the first phase of v2 activation.
+When it is :RETAIN, keep only a previously applied plan whose Service settings
+and backend tuples remain valid in the current plan. The caller must supply a
+server-validated retained owner/receiver grant before requesting this mode.
 A plan identical to the last applied one writes nothing."
   (bt:with-lock-held ((gr8s.network:service-lb-dataplane-lock
                        (service-lb-controller-dataplane controller)))
     (service-lb-adopt-map-state controller next-key)
     (let* ((dataplane (service-lb-controller-dataplane controller))
            (risk-map (service-lb-map dataplane "gr8s_nat_risk_v2"))
-           (services (funcall list-services)))
-     (multiple-value-bind (service-entries backend-entries slot-count index-entries)
+           (services (funcall list-services))
+           (old-signature (service-lb-controller-applied-signature controller)))
+     (multiple-value-bind (desired-services desired-backends desired-slot-count desired-indices)
       (if publish-services-p
           (service-lb-plan services endpoints-of)
           (values nil nil 0 nil))
-      (let* ((risk-keys (when risk-map (service-risk-keys services risk-backends-of)))
+      (let* ((retained-p
+               (and (eq publish-services-p :retain) old-signature
+                    (service-lb-plan-retains-selection-p
+                     (first old-signature) (second old-signature)
+                     desired-services desired-backends)))
+             (publish-selection-p (or (eq publish-services-p t) retained-p))
+             (service-entries (cond (retained-p (first old-signature))
+                                    (publish-selection-p desired-services)))
+             (backend-entries (cond (retained-p (second old-signature))
+                                    (publish-selection-p desired-backends)))
+             (index-entries (cond (retained-p (third old-signature))
+                                  (publish-selection-p desired-indices)))
+             (slot-count (if retained-p
+                             (service-lb-controller-applied-slot-count controller)
+                             desired-slot-count))
+             (risk-keys (when risk-map (service-risk-keys services risk-backends-of)))
              (signature (list service-entries backend-entries index-entries risk-keys)))
         (unless (equalp signature (service-lb-controller-applied-signature controller))
           (let* ((new-keys (mapcar #'car service-entries))
@@ -425,7 +444,7 @@ A plan identical to the last applied one writes nothing."
             ;; A retained selector must be removed even when risk publication
             ;; subsequently fails. Otherwise restart could serve through an old
             ;; VIP while its new/empty risk map is still incomplete.
-            (unless publish-services-p
+            (unless publish-selection-p
               (service-lb-withdraw-unused-selection
                controller new-keys new-backend-keys new-index-keys delete))
             ;; Publish risk before exposing a new Service/backend tuple. Retain
@@ -453,7 +472,7 @@ A plan identical to the last applied one writes nothing."
                        (car entry) (cdr entry)))
             ;; The normal path retains its risk-before-exposure order, then
             ;; withdraws old selectors after new ones are fully published.
-            (when publish-services-p
+            (when publish-selection-p
               (service-lb-withdraw-unused-selection
                controller new-keys new-backend-keys new-index-keys delete))
             (setf (service-lb-controller-applied-backend-keys controller) new-backend-keys
@@ -463,8 +482,8 @@ A plan identical to the last applied one writes nothing."
                          :test #'equalp)
                   (service-lb-controller-applied-service-keys controller) new-keys
                   (service-lb-controller-applied-slot-count controller) slot-count
-                  (service-lb-controller-applied-signature controller) signature)))))))
-  nil)
+                  (service-lb-controller-applied-signature controller) signature)))
+        retained-p)))))
 
 (defun service-lb-risk-published-p
     (controller &key (lookup #'whistler/loader:map-lookup)
