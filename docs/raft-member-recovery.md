@@ -478,3 +478,9 @@ history clock is frozen so a slow host cannot make history expire before the
 byte cap is exercised; a pass requires sampled history within 128 KiB of that
 cap. This is an internal single-member native probe rather
 than production CLI, multi-member or VM acceptance.
+
+For retained logs, binary identity and a JSON result on success, failure or
+timeout, run `python3 scripts/test-compaction-native.py` after building. It
+creates a new private evidence directory and allows 30 minutes by default;
+`--timeout SECONDS` changes only the observation deadline. A timeout leaves
+acceptance unproven and preserves the last progress samples.
