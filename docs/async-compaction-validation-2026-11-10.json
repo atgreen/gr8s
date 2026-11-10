@@ -949,5 +949,17 @@
       "elapsedSeconds": 504.5696955639869
     },
     "classification": "Failed at round916 after leadership changed: fixture rejected an explicitly committed-no-op core CAS conflict; no full cluster acceptance. Slow follower also repeatedly installed snapshots, tracked separately as podster-ucm.11.3.9.10."
+  },
+  "conflictRetryHarnessSmoke": {
+    "testedHarnessCommit": "5d0881e",
+    "evidence": "/tmp/gr8s-compaction-cluster-native-mdarp9fr",
+    "binarySha256": "ae9c957c94fc0e5f20130e49a595bbeb7e15c7e2f2a6bc9dee9e7a5d91758b1d",
+    "passed": true,
+    "rounds": 128,
+    "elapsedSeconds": 101.66577482502908,
+    "asymmetricCaptureAcceptance": true,
+    "identitiesPreserved": true,
+    "fullChurnAcceptance": false,
+    "note": "This smoke did not encounter a transaction conflict; the full rerun is required to exercise recovery from that failure."
   }
 }
