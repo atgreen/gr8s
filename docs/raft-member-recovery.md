@@ -207,6 +207,15 @@ Join. Both processes exit cleanly.
 
 `learner-native-validation-2026-11-10.json` preserves the original failures;
 `http2-request-retention-validation-2026-11-10.json` records the fix and passing
-native runs. Retired stream metadata remains under `podster-ucm.2.10`. Native
-leader handoff, authenticated transport, VM execution and production voter startup
-remain separate work; these runs do not establish their completion.
+native runs. Completed unary calls now retire their stream records on both sides
+of a live connection. Per-parity stream ID high-water marks keep retired IDs
+closed without retaining one tombstone per call; unread client responses remain
+available until application finalization. A further interrupted native 64 MiB run
+passes at the same heap limit with this change. The retirement, late-frame,
+shutdown, snapshot and node-session checks total 392 passing assertions; evidence
+is in `http2-stream-retirement-validation-2026-11-10.json`.
+
+The broader streaming error-path audit and long-running native memory plateau
+remain under `podster-ucm.2.10`. Native leader handoff, authenticated transport,
+VM execution and production voter startup remain separate work; these runs do
+not establish their completion.

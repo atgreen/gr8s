@@ -1,0 +1,213 @@
+{
+  "date": "2026-11-10",
+  "bead": "podster-ucm.2.10",
+  "implementationCommit": "c213bc5",
+  "sourceSha256": {
+    "ocicl/ag-gRPC-20260920-a87f647/ag-grpc/call.lisp": "ec0e43b5cd051391f9b805ccbe266a21cec18dd30b2e501b4462c2309999b39e",
+    "ocicl/ag-gRPC-20260920-a87f647/ag-grpc/channel.lisp": "a275cd79bae7b8967b735c5ff80cca1a4377ed82cb9ce8f14478d06f95360bf9",
+    "ocicl/ag-gRPC-20260920-a87f647/ag-grpc/server.lisp": "edd6336a066135053e946411e79cf7fcb5037f31520dd71630b4e40ba4b43287",
+    "ocicl/ag-gRPC-20260920-a87f647/ag-http2/connection.lisp": "c95c3f237fc1f976bbaa15a9f5beb4e003005838e1d76f3a6398d7d1b7ef2b9f",
+    "ocicl/ag-gRPC-20260920-a87f647/ag-http2/streams.lisp": "3bd6bcad5ca3e2a2a3d1300cdb96a7430a4d99f5a1b41ba46558f24fcfd075e0",
+    "tests/grpc-close-test.lisp": "f71e595213be544e823046282acc40763480987f402a6650de1aa1ab92765272"
+  },
+  "targetedTests": [
+    {
+      "name": "retirement-v4",
+      "exitCode": 0,
+      "checks": 302,
+      "failures": 0,
+      "runner": "(require :asdf)\n(asdf:load-asd (truename \"gr8s.asd\"))\n(asdf:load-system \"gr8s/tests\")\n(in-package :gr8s/tests)\n(let ((ok t))\n  (dolist (target '(grpc-close ag-grpc-channel-connects-over-a-unix-socket raft-transport raft-cluster raft-join raft-snapshot))\n    (assert (fiveam:get-test target))\n    (unless (fiveam:run! target) (setf ok nil)))\n  (uiop:quit (if ok 0 1)))\n",
+      "logSha256": "7e9fd540fb1239f1f9f88a7d1b6c69450116e838c36ba2e15c2e0f50df27c530"
+    },
+    {
+      "name": "retirement-streaming",
+      "exitCode": 0,
+      "checks": 90,
+      "failures": 0,
+      "runner": "(require :asdf)\n(asdf:load-asd (truename \"gr8s.asd\"))\n(asdf:load-system \"gr8s/tests\")\n(in-package :gr8s/tests)\n(let ((ok t))\n  (dolist (target '(grpc-inflate device-plugins revisioned-node-session-reconnects-acknowledges-and-expires-heartbeats persistent-node-session-renews-its-heartbeat-lease blocked-status-provider-does-not-stop-node-heartbeats blocked-heartbeat-send-reconnects-the-session closing-a-session-leaves-the-reading-thread-a-closed-connection-to-find cancelling-persistent-node-session-wakes-blocked-read cancelling-agent-during-server-hello-wait-unwinds-the-session local-agent-starts-through-grpc-and-stops-cleanly persistent-agent-applies-deltas-and-resyncs-after-reconnecting))\n    (assert (fiveam:get-test target))\n    (unless (fiveam:run! target) (setf ok nil)))\n  (uiop:quit (if ok 0 1)))\n",
+      "logSha256": "39a82281fdd6c670dad2bafdf2eba5f0fd806ee7eaabf198871434f848957755"
+    }
+  ],
+  "remaining": [
+    "Constructor send-failure and pre-handler error-path audit",
+    "Abandoned streaming scope lifecycle audit",
+    "Long-lived native memory plateau evidence"
+  ],
+  "productionServeAcceptance": false,
+  "vmAcceptance": false,
+  "nativeRun": {
+    "exitCode": 0,
+    "reportSha256": "2211c15807aa431724537ea8fbfd13b1101d7241acbd3c6e07f7c02df29621de",
+    "report": {
+      "passed": true,
+      "nativeHarness": true,
+      "productionServe": false,
+      "vmAcceptance": false,
+      "fullAcceptanceComplete": false,
+      "evidence": "/tmp/gr8s-learner-native-1cm1nweu",
+      "records": 1024,
+      "payloadBytes": 67108864,
+      "heapLimitMiB": 384,
+      "chunkDelay": 0.02,
+      "binarySha256": "a43127d6b9e4a56518ef90df5ebfbcbd316714253aaadd3ad172d98eadf8f74a",
+      "partialTransfer": {
+        "offset": 1048576,
+        "total": 67347866,
+        "token": "1f0f5f28-dc4e-463b-9365-d22d1a51fbdb"
+      },
+      "beforeInterruption": {
+        "role": "leader",
+        "selfRole": "voter",
+        "term": 1,
+        "quorumMembers": 1,
+        "commit": 3,
+        "applied": 3,
+        "lastIndex": 3,
+        "members": [
+          {
+            "id": "sink",
+            "role": "learner"
+          },
+          {
+            "id": "source",
+            "role": "voter"
+          }
+        ],
+        "blocked": false,
+        "heapLimitMiB": 384,
+        "resources": 1025,
+        "lastPayloadBytes": 65536,
+        "nonce": "c40f67df8d9e4233b3fca717101e1962"
+      },
+      "interruptedReceiver": {
+        "role": "follower",
+        "selfRole": "learner",
+        "term": 1,
+        "quorumMembers": 1,
+        "commit": 0,
+        "applied": 0,
+        "lastIndex": 0,
+        "members": [
+          {
+            "id": "sink",
+            "role": "learner"
+          }
+        ],
+        "blocked": true,
+        "heapLimitMiB": 384,
+        "nonce": "65f8884a89f64ae18cc15f89887b7815"
+      },
+      "partialFilesBeforeSigkill": [
+        {
+          "path": "raft/.gr8s-raft-transfers-v2-1002/.raft-transfer-v2-a8Aqvj/in-940e8eca-f6c1-47ad-bb8c-2412e11e73e5.snapshot",
+          "bytes": 1245184
+        }
+      ],
+      "disconnected": {
+        "role": "leader",
+        "selfRole": "voter",
+        "term": 1,
+        "quorumMembers": 1,
+        "commit": 5,
+        "applied": 5,
+        "lastIndex": 5,
+        "members": [
+          {
+            "id": "sink",
+            "role": "learner"
+          },
+          {
+            "id": "source",
+            "role": "voter"
+          }
+        ],
+        "blocked": false,
+        "heapLimitMiB": 384,
+        "resources": 1027,
+        "lastPayloadBytes": 65536,
+        "nonce": "83ba498a7e50471ab95c46209791a5d5"
+      },
+      "sigkillExit": -9,
+      "promoted": {
+        "role": "leader",
+        "selfRole": "voter",
+        "term": 1,
+        "quorumMembers": 2,
+        "commit": 6,
+        "applied": 6,
+        "lastIndex": 6,
+        "members": [
+          {
+            "id": "sink",
+            "role": "voter"
+          },
+          {
+            "id": "source",
+            "role": "voter"
+          }
+        ],
+        "blocked": false,
+        "heapLimitMiB": 384,
+        "resources": 1027,
+        "lastPayloadBytes": 65536,
+        "nonce": "f237e811ed804c7799c382df737d2b99"
+      },
+      "restored": {
+        "role": "follower",
+        "selfRole": "voter",
+        "term": 1,
+        "quorumMembers": 2,
+        "commit": 6,
+        "applied": 6,
+        "lastIndex": 6,
+        "members": [
+          {
+            "id": "sink",
+            "role": "voter"
+          },
+          {
+            "id": "source",
+            "role": "voter"
+          }
+        ],
+        "blocked": false,
+        "heapLimitMiB": 384,
+        "resources": 1027,
+        "lastPayloadBytes": 65536,
+        "nonce": "1c2a2c9181cc4954873f47b68fc9478b"
+      },
+      "repeatedJoin": {
+        "role": "leader",
+        "selfRole": "voter",
+        "term": 1,
+        "quorumMembers": 2,
+        "commit": 6,
+        "applied": 6,
+        "lastIndex": 6,
+        "members": [
+          {
+            "id": "sink",
+            "role": "voter"
+          },
+          {
+            "id": "source",
+            "role": "voter"
+          }
+        ],
+        "blocked": false,
+        "heapLimitMiB": 384,
+        "resources": 1027,
+        "lastPayloadBytes": 65536,
+        "nonce": "c56734cec2fb4d5588544302cd130a76"
+      },
+      "largePayloadAcceptance": true,
+      "remaining": [
+        "VM execution",
+        "leader handoff during catch-up",
+        "production serve recovery integration"
+      ],
+      "sinkExit": 0,
+      "sourceExit": 0
+    }
+  }
+}
