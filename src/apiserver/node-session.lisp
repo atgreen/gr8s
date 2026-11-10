@@ -422,6 +422,8 @@ cannot forward traffic between healthy nodes."
                       (slot-value snapshot 'gr8s.node.v1::pods))
      :removed-pod-uids (loop for uid being the hash-keys of base-pods
                              unless (gethash uid current) collect uid)
+     :service-risk-grant-digest
+     (slot-value snapshot 'gr8s.node.v1::service-risk-grant-digest)
      :service-discovery-changed service-discovery-changed
      :service-discovery-objects-json
      (when service-discovery-changed
@@ -2092,6 +2094,8 @@ candidates; agents still require their transactional handshake/probe gates."
   (and left right (same-node-snapshot-topology-p left right)
        (equalp (slot-value left 'gr8s.node.v1::service-discovery-objects-json)
                (slot-value right 'gr8s.node.v1::service-discovery-objects-json))
+       (equalp (slot-value left 'gr8s.node.v1::service-risk-grant-digest)
+               (slot-value right 'gr8s.node.v1::service-risk-grant-digest))
        (= (length (slot-value left 'gr8s.node.v1::pods)) (length (slot-value right 'gr8s.node.v1::pods)))
        (every #'same-pod-assignment-p (slot-value left 'gr8s.node.v1::pods) (slot-value right 'gr8s.node.v1::pods))))
 

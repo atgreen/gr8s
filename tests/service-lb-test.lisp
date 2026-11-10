@@ -1117,6 +1117,44 @@
            :maps (list (fake-lb-map "gr8s_service_v4" 1))))
     (is (null (gr8s.agent::ensure-node-snapshot-service-risk-ready runtime)))))
 
+(test v2-service-grant-binds-selection-to-current-discovery
+  (let* ((one (make-array 2 :element-type '(unsigned-byte 8)
+                          :initial-contents '(1 2)))
+         (two (make-array 1 :element-type '(unsigned-byte 8)
+                          :initial-contents '(3)))
+         (projection (list one two))
+         (digest (gr8s.protocol::service-risk-projection-digest projection))
+         (snapshot (make-instance 'gr8s.node.v1::desired-state-snapshot
+                                  :revision 4
+                                  :service-discovery-objects-json projection))
+         (dataplane (gr8s::%make-service-lb-dataplane
+                     :maps (list (fake-lb-map "gr8s_nat_risk_v2" 4))))
+         (runtime (gr8s.agent::%make-node-runtime
+                   :service-lb dataplane :received-revision 4
+                   :service-risk-ready-revision 4)))
+    (is (= 32 (length digest)))
+    (is-false (equalp digest
+                      (gr8s.protocol::service-risk-projection-digest
+                       (list (make-array 1 :element-type '(unsigned-byte 8)
+                                         :initial-element 1)
+                             (make-array 2 :element-type '(unsigned-byte 8)
+                                         :initial-contents '(2 3))))))
+    (is-false (gr8s.agent::node-snapshot-service-risk-granted-p snapshot))
+    (setf (slot-value snapshot 'gr8s.node.v1::service-risk-grant-digest)
+          (copy-seq digest))
+    (is-true (gr8s.agent::node-snapshot-service-risk-granted-p snapshot))
+    (signals gr8s::node-snapshot-incomplete
+      (gr8s.agent::ensure-node-snapshot-service-selection-ready runtime snapshot))
+    (setf (gr8s.agent::node-runtime-service-selection-ready-revision runtime) 4)
+    (is (null (gr8s.agent::ensure-node-snapshot-service-selection-ready runtime snapshot)))
+    (setf (gr8s.agent::node-runtime-received-revision runtime) 5)
+    (signals gr8s::node-snapshot-incomplete
+      (gr8s.agent::ensure-node-snapshot-service-selection-ready runtime snapshot))
+    (setf (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json)
+          (list one))
+    (signals gr8s::node-snapshot-incomplete
+      (gr8s.agent::node-snapshot-service-risk-granted-p snapshot))))
+
 (test service-risk-publication-failure-does-not-expose-service
   (let* ((dataplane (gr8s::%make-service-lb-dataplane
                      :maps (list (fake-lb-map "gr8s_service_v4" 1)

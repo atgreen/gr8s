@@ -194,6 +194,8 @@ complete snapshot to the next one."
                    :revision (slot-value snapshot 'gr8s.node.v1::revision)
                    :network (slot-value snapshot 'gr8s.node.v1::network)
                    :routes (slot-value snapshot 'gr8s.node.v1::routes)
+                   :service-risk-grant-digest
+                   (slot-value snapshot 'gr8s.node.v1::service-risk-grant-digest)
                    :service-discovery-objects-json
                    (slot-value (if (slot-value snapshot 'gr8s.node.v1::service-discovery-changed) snapshot base)
                                'gr8s.node.v1::service-discovery-objects-json)

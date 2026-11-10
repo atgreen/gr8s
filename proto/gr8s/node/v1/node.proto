@@ -287,6 +287,10 @@ message DesiredStateSnapshot {
   uint64 base_revision = 6;
   repeated string removed_pod_uids = 7;
   bool service_discovery_changed = 8;
+  // SHA-256 of the complete length-framed discovery projection. Empty means
+  // risk publication only. The server grants a digest after all v2-capable
+  // nodes ACK the same projection; the agent verifies it before selection.
+  bytes service_risk_grant_digest = 9;
 }
 
 message PodAssignment {

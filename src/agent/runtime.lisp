@@ -76,6 +76,7 @@
   service-lb
   service-lb-controller
   (service-risk-ready-revision nil) ; current snapshot's local v2 risk map was read back
+  (service-selection-ready-revision nil) ; grant-matched Service tables converged
   ;; Listening host ports by (ip . port); see pod-host-ports.lisp.
   (host-port-forwarders (make-hash-table :test #'equal))
   ;; Listening Service node ports by (protocol ip . port), likewise.
@@ -108,15 +109,44 @@ The snapshot worker retries NODE-SNAPSHOT-INCOMPLETE without losing Pod work."
     (error 'node-snapshot-incomplete
            :message "v2 Service risk inventory is not published for the current snapshot")))
 
-(defun converge-node-runtime-service-lb (node-runtime)
-  "Publish the v2 risk phase without exposing new Service/backend selection.
-The v1 socket LB remains active; a later cluster grant will release v2 tables."
+(defun node-snapshot-service-risk-granted-p (snapshot)
+  "Validate a nonempty grant against this snapshot's exact discovery bytes."
+  (let ((grant (slot-value snapshot 'gr8s.node.v1::service-risk-grant-digest)))
+    (unless (zerop (length grant))
+      (unless (and (= 32 (length grant))
+                   (equalp grant
+                           (gr8s.protocol::service-risk-projection-digest
+                            (slot-value snapshot
+                                        'gr8s.node.v1::service-discovery-objects-json))))
+        (error 'node-snapshot-incomplete
+               :message "v2 Service grant does not match the current discovery projection"))
+      t)))
+
+(defun node-runtime-local-selection-ready-p (node-runtime)
+  (bt:with-lock-held ((node-runtime-arrival-lock node-runtime))
+    (let ((ready (node-runtime-service-selection-ready-revision node-runtime)))
+      (and (integerp ready) (>= ready 0)
+           (= ready (node-runtime-received-revision node-runtime))))))
+
+(defun ensure-node-snapshot-service-selection-ready (node-runtime snapshot)
+  "Do not ACK a granted snapshot until its Service tables were converged."
+  (when (node-snapshot-service-risk-granted-p snapshot)
+    (unless (and (node-runtime-local-risk-ready-p node-runtime)
+                 (node-runtime-local-selection-ready-p node-runtime))
+      (error 'node-snapshot-incomplete
+             :message "v2 Service selection is not published for the current grant"))))
+
+(defun converge-node-runtime-service-lb (node-runtime &key (publish-services-p nil supplied-p))
+  "Keep v2 in the risk-only phase until this revision's grant was applied.
+The v1 socket LB remains active; a validated grant can release v2 tables."
   (let ((controller (node-runtime-service-lb-controller node-runtime))
         (dataplane (node-runtime-service-lb node-runtime)))
     (when controller
       (converge-service-lb-controller
        controller :publish-services-p
-       (not (and dataplane (service-lb-map dataplane "gr8s_nat_risk_v2")))))))
+       (if supplied-p publish-services-p
+           (or (not (and dataplane (service-lb-map dataplane "gr8s_nat_risk_v2")))
+               (node-runtime-local-selection-ready-p node-runtime)))))))
 
 (defun node-runtime-external-cni-endpoints-path (node-runtime)
   "Return the durable external-CNI endpoint registry path for NODE-RUNTIME."
@@ -1060,7 +1090,8 @@ the node from starting."
                        :v2 t))))))
     (when dataplane
       (bt:with-lock-held ((node-runtime-arrival-lock node-runtime))
-        (setf (node-runtime-service-risk-ready-revision node-runtime) nil))
+        (setf (node-runtime-service-risk-ready-revision node-runtime) nil
+              (node-runtime-service-selection-ready-revision node-runtime) nil))
       (setf (node-runtime-service-lb node-runtime) dataplane
             (node-runtime-service-lb-controller node-runtime)
             (make-service-lb-controller (node-runtime-store node-runtime) dataplane
@@ -1085,7 +1116,8 @@ the node from starting."
         (setf (node-runtime-gateway-steering node-runtime) nil))
       (when (node-runtime-service-lb node-runtime)
         (bt:with-lock-held ((node-runtime-arrival-lock node-runtime))
-          (setf (node-runtime-service-risk-ready-revision node-runtime) nil))
+          (setf (node-runtime-service-risk-ready-revision node-runtime) nil
+                (node-runtime-service-selection-ready-revision node-runtime) nil))
         ;; Endpoint guards hold these same maps. Keep the canonical pins so a
         ;; clean agent restart reopens them rather than creating disconnected
         ;; Service tables while existing endpoint links still use the old ones.
@@ -1701,7 +1733,8 @@ so the revision is retried."
   (bt:with-lock-held ((node-runtime-apply-lock node-runtime))
     (ensure-node-snapshot-current node-runtime snapshot)
     (bt:with-lock-held ((node-runtime-arrival-lock node-runtime))
-      (setf (node-runtime-service-risk-ready-revision node-runtime) nil))
+      (setf (node-runtime-service-risk-ready-revision node-runtime) nil
+            (node-runtime-service-selection-ready-revision node-runtime) nil))
     (apply-node-runtime-network node-runtime snapshot)
     (let ((assignments (slot-value snapshot 'gr8s.node.v1::pods))
           (failed nil))
@@ -1738,6 +1771,14 @@ so the revision is retried."
                   (when (= (node-runtime-received-revision node-runtime)
                            (slot-value snapshot 'gr8s.node.v1::revision))
                     (setf (node-runtime-service-risk-ready-revision node-runtime)
+                          (slot-value snapshot 'gr8s.node.v1::revision)))))
+              (when (and (node-snapshot-service-risk-granted-p snapshot)
+                         (node-runtime-local-risk-ready-p node-runtime))
+                (converge-node-runtime-service-lb node-runtime :publish-services-p t)
+                (bt:with-lock-held ((node-runtime-arrival-lock node-runtime))
+                  (when (= (node-runtime-received-revision node-runtime)
+                           (slot-value snapshot 'gr8s.node.v1::revision))
+                    (setf (node-runtime-service-selection-ready-revision node-runtime)
                           (slot-value snapshot 'gr8s.node.v1::revision))))))
           (error (condition)
             (format *error-output* "gr8s: Service LB convergence failed: ~A~%" condition))))
@@ -1822,6 +1863,7 @@ so the revision is retried."
                  :message (format nil "~D Pod assignment~:P not applied"
                                   (+ (length failed) (count nil parsed)))))
         (ensure-node-snapshot-service-risk-ready node-runtime)
+        (ensure-node-snapshot-service-selection-ready node-runtime snapshot)
         statuses))))
 
 (defun node-operation-response (request status &key (exit-code 0) (message ""))

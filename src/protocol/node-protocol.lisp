@@ -17,6 +17,21 @@
 
 (defconstant +node-protocol-version+ 2)
 
+(defun service-risk-projection-digest (objects)
+  "SHA-256 of the ordered, length-framed discovery bytes carried by a snapshot.
+Framing keeps different object boundaries from sharing the same digest input."
+  (let ((digest (ironclad:make-digest :sha256))
+        (length-bytes (make-array 8 :element-type '(unsigned-byte 8))))
+    (dolist (bytes objects)
+      (unless (typep bytes '(vector (unsigned-byte 8)))
+        (error "Service discovery entry is not an octet vector"))
+      (dotimes (index 8)
+        (setf (aref length-bytes index)
+              (ldb (byte 8 (* 8 index)) (length bytes))))
+      (ironclad:update-digest digest length-bytes)
+      (ironclad:update-digest digest bytes))
+    (ironclad:produce-digest digest)))
+
 (define-condition unsupported-node-protocol-version (error)
   ((received
     :initarg :received
