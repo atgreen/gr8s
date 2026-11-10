@@ -350,7 +350,8 @@ cannot forward traffic between healthy nodes."
   (snapshots (make-hash-table :test #'equal))
   (statuses (make-hash-table :test #'equal))
   (acknowledged-revisions (make-hash-table :test #'equal))
-  ;; Latest validated complete local receiver report: (session revision proofs).
+  ;; Latest validated complete local receiver report:
+  ;; (session revision proofs owner-projection).
   (service-receiver-reports (make-hash-table :test #'equal))
   ;; A grant is tied to discovery, trusted owner inventory, and the exact
   ;; authenticated sessions that acknowledged the risk-only phase.
@@ -1350,9 +1351,17 @@ An explicit unready or malformed current report withdraws its prior proof."
               (if valid-p
                   (setf (gethash node-name
                                  (node-grpc-server-service-receiver-reports server))
-                        (list current revision proofs))
-                  (remhash node-name
-                           (node-grpc-server-service-receiver-reports server))))))
+                        (list current revision proofs
+                              (service-risk-snapshot-owner-projection snapshot)))
+                  ;; Status and ACK use the same stream but separate sending
+                  ;; threads. A new revision's status may reach us before its
+                  ;; ACK; keep the old projection-bound report until the next
+                  ;; complete status after ACK. An invalid ACKed report revokes.
+                  (when (<= revision
+                            (gethash node-name
+                                     (node-grpc-server-acknowledged-revisions server) 0))
+                    (remhash node-name
+                             (node-grpc-server-service-receiver-reports server)))))))
         (values proofs valid-p)))))
 
 (defun credential-token-response (store node-name request)
@@ -2261,6 +2270,59 @@ An explicit unready or malformed current report withdraws its prior proof."
       (mapcar #'ag-proto:serialize-to-bytes
               (slot-value network 'gr8s.node.v1::service-translations)))))
 
+(defun service-risk-receivers-published-locked-p
+    (server owner-projection identities)
+  "Require every trusted owner in this projection to have a current, complete
+local receiver report from its authenticated node session. The caller holds
+the server lock. A grant-only revision may retain the prior report while the
+owner projection stays byte-identical."
+  (let ((nodes (make-hash-table :test #'equal))
+        (expected (make-hash-table :test #'equal)))
+    (dolist (identity identities)
+      (setf (gethash (car identity) nodes) (cdr identity)
+            (gethash (car identity) expected) (make-hash-table :test #'equal)))
+    (dolist (bytes owner-projection)
+      (let* ((owner (ag-proto:deserialize-from-bytes
+                     'gr8s.node.v1::service-translation-identity bytes))
+             (name (slot-value owner 'gr8s.node.v1::node-name))
+             (uid (slot-value owner 'gr8s.node.v1::pod-uid))
+             (table (gethash name expected)))
+        (unless (and table (equal (gethash name nodes)
+                                  (slot-value owner 'gr8s.node.v1::node-id))
+                     (not (gethash uid table)))
+          (return-from service-risk-receivers-published-locked-p nil))
+        (setf (gethash uid table)
+              (gr8s.network::service-translation-incarnation-token
+               (slot-value owner 'gr8s.node.v1::node-id)
+               (slot-value owner 'gr8s.node.v1::sandbox-id)
+               (slot-value owner 'gr8s.node.v1::interface-name)
+               (slot-value owner 'gr8s.node.v1::pod-ip)
+               (slot-value owner 'gr8s.node.v1::translation-ip)))))
+    (every
+     (lambda (identity)
+       (let* ((name (car identity))
+              (session (gethash name (node-grpc-server-sessions server)))
+              (report (gethash name (node-grpc-server-service-receiver-reports server)))
+              (proofs (third report))
+              (table (gethash name expected))
+              (seen (make-hash-table :test #'equal)))
+         (and report session
+              (eq session (first report))
+              (not (node-agent-session-evicted-p session))
+              (<= (second report)
+                  (gethash name (node-grpc-server-acknowledged-revisions server) 0))
+              (equalp (fourth report) owner-projection)
+              (= (length proofs) (hash-table-count table))
+              (every (lambda (proof)
+                       (let* ((uid (slot-value proof 'gr8s.node.v1::pod-uid))
+                              (epoch (gethash uid table)))
+                         (and epoch (not (gethash uid seen))
+                              (setf (gethash uid seen) t)
+                              (equalp epoch
+                                      (slot-value proof 'gr8s.node.v1::incarnation)))))
+                     proofs))))
+     identities)))
+
 (defun service-risk-grant-for-snapshot-locked (server node-name snapshot)
   "Return this session's grant only for its discovery and owner projections.
 The caller holds the server lock; a newly joined or replaced session gets none."
@@ -2277,6 +2339,9 @@ The caller holds the server lock; a newly joined or replaced session gets none."
                (slot-value snapshot 'gr8s.node.v1::network)
                (equalp (node-grpc-server-service-risk-grant-owner-projection server)
                        (service-risk-snapshot-owner-projection snapshot))
+               (service-risk-receivers-published-locked-p
+                server (node-grpc-server-service-risk-grant-owner-projection server)
+                identities)
                (equalp digest
                        (gr8s.protocol::service-risk-projection-digest
                         (slot-value snapshot
@@ -2382,14 +2447,18 @@ and discovery/owner projections. The next snapshot carries or revokes it."
                             (node-grpc-server-service-risk-grant-owner-projection server))
                     (equal identities (node-grpc-server-service-risk-grant-identities server))
                     (equal sessions (node-grpc-server-service-risk-grant-sessions server))
+                    (service-risk-receivers-published-locked-p
+                     server owner-projection identities)
                     (every (lambda (session)
                              (and session (not (node-agent-session-evicted-p session))
                                   (node-agent-session-service-risk-v2-p session)))
                            sessions))))
         (unless retained
           (clear-service-risk-grant-locked server)
-          (when (service-risk-projection-published-locked-p
-                 server projection owner-projection identities)
+          (when (and (service-risk-projection-published-locked-p
+                      server projection owner-projection identities)
+                     (service-risk-receivers-published-locked-p
+                      server owner-projection identities))
             (setf (node-grpc-server-service-risk-grant-digest server) digest
                   (node-grpc-server-service-risk-grant-owner-projection server)
                   owner-projection

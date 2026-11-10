@@ -552,11 +552,23 @@
             (second (gr8s::current-node-snapshot server "worker-b")))
         (is (= 0 (length (slot-value first 'gr8s.node.v1::service-risk-grant-digest))))
         (is (= 0 (length (slot-value second 'gr8s.node.v1::service-risk-grant-digest))))
-        (setf (gethash "worker-a" acks) (slot-value first 'gr8s.node.v1::revision)))
+        (setf (gethash "worker-a" acks) (slot-value first 'gr8s.node.v1::revision))
+        (gr8s.apiserver::note-node-service-receiver-status
+         server "worker-a"
+         (make-instance 'gr8s.node.v1::node-status
+                        :service-receiver-report-present t
+                        :service-receiver-revision (slot-value first 'gr8s.node.v1::revision))
+         (gethash "worker-a" sessions)))
       (gr8s::publish-service-discovery-snapshots runtime)
       (is-false (gr8s::node-grpc-server-service-risk-grant-digest server))
       (let ((second (gr8s::current-node-snapshot server "worker-b")))
-        (setf (gethash "worker-b" acks) (slot-value second 'gr8s.node.v1::revision)))
+        (setf (gethash "worker-b" acks) (slot-value second 'gr8s.node.v1::revision))
+        (gr8s.apiserver::note-node-service-receiver-status
+         server "worker-b"
+         (make-instance 'gr8s.node.v1::node-status
+                        :service-receiver-report-present t
+                        :service-receiver-revision (slot-value second 'gr8s.node.v1::revision))
+         (gethash "worker-b" sessions)))
       (gr8s::publish-service-discovery-snapshots runtime)
       (let ((digest (gr8s::node-grpc-server-service-risk-grant-digest server)))
         (is (= 32 (length digest)))
@@ -593,6 +605,13 @@
             (setf (gethash name acks)
                   (slot-value (gr8s::current-node-snapshot server name)
                               'gr8s.node.v1::revision)))
+          (gr8s.apiserver::note-node-service-receiver-status
+           server "worker-b"
+           (make-instance 'gr8s.node.v1::node-status
+                          :service-receiver-report-present t
+                          :service-receiver-revision
+                          (gethash "worker-b" acks))
+           replacement)
           (gr8s::publish-service-discovery-snapshots runtime)
           (is (= 32 (length (gr8s::node-grpc-server-service-risk-grant-digest server))))
           ;; A newly registered node invalidates the old cluster grant even
@@ -665,9 +684,59 @@
                                        :service-receiver-report-present t) session)
     (is-false (gethash "worker-a" (gr8s::node-grpc-server-service-receiver-reports server)))
     (gr8s.apiserver::note-node-service-receiver-status server "worker-a" status session)
+    (setf (slot-value snapshot 'gr8s.node.v1::revision) 4
+          (slot-value status 'gr8s.node.v1::service-receiver-revision) 4)
+    (gr8s.apiserver::note-node-service-receiver-status server "worker-a" status session)
+    (is (= 3 (second (gethash "worker-a"
+                             (gr8s::node-grpc-server-service-receiver-reports server))))
+        "A status racing ahead of its ACK must retain the prior proof")
+    (setf (gethash "worker-a" (gr8s::node-grpc-server-acknowledged-revisions server)) 4)
+    (gr8s.apiserver::note-node-service-receiver-status server "worker-a" status session)
+    (is (= 4 (second (gethash "worker-a"
+                             (gr8s::node-grpc-server-service-receiver-reports server)))))
     (setf (slot-value proof 'gr8s.node.v1::pod-uid) "foreign-pod")
     (gr8s.apiserver::note-node-service-receiver-status server "worker-a" status session)
     (is-false (gethash "worker-a" (gr8s::node-grpc-server-service-receiver-reports server)))))
+
+(test service-grant-requires-current-complete-receiver-reports
+  (let* ((server (gr8s::%make-node-grpc-server))
+         (session (gr8s::make-node-agent-session nil))
+         (record (make-instance 'gr8s.node.v1::service-translation-identity
+                                :pod-uid "pod-a" :node-name "worker-a" :node-id "node-a"
+                                :sandbox-id "sandbox-a" :interface-name "eth0"
+                                :pod-ip "10.88.1.2" :translation-ip "10.88.1.9"))
+         (projection (list (ag-proto:serialize-to-bytes record)))
+         (snapshot (make-instance 'gr8s.node.v1::desired-state-snapshot
+                                  :revision 3
+                                  :network (make-instance 'gr8s.node.v1::node-network-config
+                                                          :service-translations (list record))))
+         (proof (make-instance 'gr8s.node.v1::service-receiver-proof
+                               :pod-uid "pod-a"
+                               :incarnation (gr8s.network::service-translation-incarnation-token
+                                             "node-a" "sandbox-a" "eth0"
+                                             "10.88.1.2" "10.88.1.9")))
+         (reports (gr8s::node-grpc-server-service-receiver-reports server)))
+    (setf (gr8s::node-agent-session-node-id session) "node-a"
+          (gethash "worker-a" (gr8s::node-grpc-server-sessions server)) session
+          (gethash "worker-a" (gr8s::node-grpc-server-snapshots server)) snapshot
+          (gethash "worker-a" (gr8s::node-grpc-server-acknowledged-revisions server)) 3)
+    (labels ((published ()
+               (bt:with-lock-held ((gr8s::node-grpc-server-lock server))
+                 (gr8s.apiserver::service-risk-receivers-published-locked-p
+                  server projection '(("worker-a" . "node-a"))))))
+      (is-false (published))
+      (setf (gethash "worker-a" reports) (list session 3 (list proof) projection))
+      (is-true (published))
+      (setf (third (gethash "worker-a" reports)) nil)
+      (is-false (published))
+      (setf (gethash "worker-a" reports)
+            (list session 3 (list proof) (list (make-array 1 :element-type '(unsigned-byte 8)
+                                                           :initial-element 0))))
+      (is-false (published))
+      (setf (gethash "worker-a" reports) (list session 3 (list proof) projection)
+            (gethash "worker-a" (gr8s::node-grpc-server-sessions server))
+            (gr8s::make-node-agent-session nil))
+      (is-false (published)))))
 
 (test snapshot-ack-from-replaced-node-session-is-ignored
   (let* ((server (gr8s::%make-node-grpc-server))
