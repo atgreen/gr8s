@@ -187,16 +187,31 @@ Retirement and complete-history/receiver bits are left to the activation fence."
     count))
 
 (defun service-nat-identities-published-p
-    (map records &key (lookup #'whistler/loader:map-lookup))
-  "Read back every trusted owner pair after publication. A missing half, an
-old incarnation, or a disabled row withholds the node's snapshot ACK."
+    (map records &key (lookup #'whistler/loader:map-lookup)
+                      (next-key #'whistler/loader:map-get-next-key))
+  "Read back exactly the trusted owner inventory before a snapshot ACK.
+Missing, stale, disabled, duplicate or extra rows keep the receiver unready."
   (and map (vectorp records) (not (stringp records))
        (bt:with-lock-held (*service-nat-owner-publication-lock*)
-         (loop for record across records
-               always (every (lambda (row)
-                               (service-nat-owner-row-matches-p
-                                (funcall lookup map (car row)) (cdr row)))
-                             (service-nat-identity-rows record))))))
+         ;; This lock serializes agent writers. A separate cross-process fence
+         ;; is required before CNI can publish receiver readiness to live Pods.
+         (let* ((rows (loop for record across records
+                            append (service-nat-identity-rows record)))
+                (expected (make-hash-table :test #'equalp))
+                (seen (make-hash-table :test #'equalp)))
+           (dolist (row rows) (setf (gethash (car row) expected) t))
+           (and (= (length rows) (hash-table-count expected))
+                (every (lambda (row)
+                         (service-nat-owner-row-matches-p
+                          (funcall lookup map (car row)) (cdr row)))
+                       rows)
+                (loop for key = (funcall next-key map nil)
+                        then (funcall next-key map key)
+                      while key
+                      always (and (gethash key expected)
+                                  (not (gethash key seen))
+                                  (setf (gethash key seen) t)))
+                (= (hash-table-count seen) (hash-table-count expected)))))))
 
 (defparameter *service-nat-policy-key-form*
   '(whistler::defstruct whistler::netpol-flow-key-v2

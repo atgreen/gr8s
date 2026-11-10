@@ -185,9 +185,27 @@ def main():
             raise RuntimeError("retained owner map lost readiness test values before restart")
         cluster.start()
         traffic.wait_for("v2 readiness cleared after restart", 120, identities_published)
+        def selectors_withheld():
+            for key in selection_keys:
+                try:
+                    guest.read_pinned_values(selection, [key], 16)
+                except OSError as error:
+                    if error.errno == errno.ENOENT:
+                        continue
+                    raise
+                return False
+            return True
+
+        # The restored synthetic owner is absent from the server's trusted
+        # inventory. Exact readback must keep the restarted node risk-only.
+        traffic.wait_for("v2 selectors withheld for extra owner", 120, selectors_withheld)
+        time.sleep(3)
+        if not selectors_withheld():
+            raise RuntimeError("v2 grant reappeared with an untrusted retained owner")
         report.update({"restoredIdentityMap": str(identity_map),
                        "restoredPrimary": str(primary), "restoredAlias": str(alias),
-                       "readinessClearedAfterRestart": True})
+                       "readinessClearedAfterRestart": True,
+                       "extraOwnerWithheldGrant": True})
         print(json.dumps(report, indent=2))
     finally:
         cluster.stop()
