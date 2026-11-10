@@ -150,6 +150,7 @@
                                            (:file "store-snapshot")
                                            (:file "store-snapshot-index")
                                            (:file "store-image-tracker")
+                                           (:file "store-snapshot-freeze")
                                            (:file "store-snapshot-materialize")
                                            (:file "store-snapshot-registry")
                                            (:file "store-member-bootstrap")

@@ -4,6 +4,118 @@
 (def-suite store-snapshot :in gr8s)
 (in-suite store-snapshot)
 
+(defun freeze-test-store-snapshot (store index term)
+  (gr8s.store::quiesce-store-access store :timeout 0)
+  (unwind-protect
+       (gr8s.store::call-with-store-application-barriers
+        store (lambda () (gr8s.resources::freeze-store-snapshot store index term)))
+    (gr8s.store::resume-store-access store)))
+
+(test frozen-application-snapshot-is-independent-of-live-containers
+  (with-temporary-store (store root)
+    (let* ((pod (ha-make-pod store "frozen-pod"))
+           (node (gr8s:make-node-record :id "frozen-node" :name "frozen-node"
+                                       :pod-cidr "10.88.0.0/20"))
+           (bulk (make-string 65536 :initial-element #\x))
+           (object (gr8s::core-object "payload" bulk))
+           (history (gr8s::core-object "resource" "configmaps" "old" object))
+           (controller (gr8s::core-object "nested" (vector (gr8s::core-object "count" 1))))
+           (ordinary (merge-pathnames "before.jsonl" root))
+           (target (merge-pathnames "frozen.jsonl" root)))
+      (gr8s:register-node store node)
+      (setf (gr8s.model::node-record-labels node) (gr8s::core-object "pool" "original")
+            (gethash (gr8s:pod-uid pod) (gr8s.store::pod-store-pod-condition-histories store))
+            (vector (gr8s::core-object "type" "Ready" "status" "False"))
+            (gethash (gr8s:pod-uid pod) (gr8s.store::pod-store-pod-published-statuses store))
+            (gr8s::core-object "phase" "Pending"))
+      (setf (gethash '("configmaps" "default" "bulk") (gr8s::pod-store-resources store)) object
+            (gr8s::pod-store-template-history store) (list history)
+            (gethash "job" (gr8s::pod-store-job-controller-states store)) controller
+            (gethash "deletion" (gr8s::pod-store-workload-deletions store))
+            (gr8s::core-object "nested" (vector 1 2)))
+      (populate-snapshot-tracker store)
+      (gr8s.resources::capture-store-snapshot store ordinary 42 7)
+      (let* ((view (freeze-test-store-snapshot store 42 7))
+             (shadow (gr8s.resources::frozen-store-snapshot-store view))
+             (original (symbol-function 'com.inuoe.jzon:stringify))
+             (writes 0))
+        (is (not (eq store shadow)))
+        (is (eq object (gethash '("configmaps" "default" "bulk") (gr8s::pod-store-resources shadow))))
+        (is (not (eq (gr8s::pod-store-template-history store) (gr8s::pod-store-template-history shadow))))
+        (is (eq history (first (gr8s::pod-store-template-history shadow))))
+        (is (eq bulk (gethash "payload" (gethash '("configmaps" "default" "bulk")
+                                                 (gr8s::pod-store-resources shadow)))))
+        ;; Core publication replaces objects; mutable model/controller containers
+        ;; can change in place and must already have private snapshot copies.
+        (clrhash (gr8s::pod-store-resources store))
+        (setf (gr8s::pod-store-template-history store) nil
+              (gethash "count" (aref (gethash "nested" controller) 0)) 2
+              (aref (gethash "nested" (gethash "deletion" (gr8s::pod-store-workload-deletions store))) 0) 9
+              (gethash "changed" (gethash "metadata" (gr8s:pod-to-object pod))) t
+              (gethash "pool" (gr8s.model::node-record-labels node)) "changed"
+              (gethash "status" (aref (gethash (gr8s:pod-uid pod)
+                                               (gr8s.store::pod-store-pod-condition-histories store)) 0)) "True"
+              (gethash "phase" (gethash (gr8s:pod-uid pod)
+                                        (gr8s.store::pod-store-pod-published-statuses store))) "Running")
+        (clrhash (gr8s::pod-store-pods store))
+        (clrhash (gr8s::pod-store-nodes store))
+        (gr8s.image-distribution::clear-image-tracker-state (gr8s.store:pod-store-image-tracker store))
+        (unwind-protect
+             (progn
+               (setf (symbol-function 'com.inuoe.jzon:stringify)
+                     (lambda (value &rest arguments)
+                       (dolist (lock (list (gr8s::pod-store-lock store)
+                                           (gr8s.store::pod-store-workload-lock store)
+                                           (gr8s.store::pod-store-credential-lock store)
+                                           (gr8s.store::pod-store-consensus-write-lock store)))
+                         (is (not (sb-thread:holding-mutex-p lock))))
+                       (incf writes)
+                       (apply original value arguments)))
+               (gr8s.resources::capture-frozen-store-snapshot view target))
+          (setf (symbol-function 'com.inuoe.jzon:stringify) original))
+        (let ((expected (read-store-snapshot-records ordinary))
+              (actual (read-store-snapshot-records target)))
+          (is (= writes (length actual)))
+          (is (= (length expected) (length actual)))
+          (is (every (lambda (record) (member record actual :test #'equalp)) expected)))
+        (signals error (gr8s.resources::capture-frozen-store-snapshot view target))
+        (is (= #o600 (logand #o777 (sb-posix:stat-mode (sb-posix:stat (namestring target))))))))))
+
+(test frozen-application-snapshot-requires-drained-outer-barriers
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (signals error (gr8s.resources::freeze-store-snapshot store 1 1))
+    (gr8s.store::call-with-store-application-barriers
+     store (lambda () (signals error (gr8s.resources::freeze-store-snapshot store 1 1))))))
+
+(test frozen-secret-snapshot-pins-keys-before-credential-changes
+  (with-temporary-store (store root)
+    (gr8s::enable-secret-encryption store)
+    (gr8s::create-core-resource
+     store "secrets"
+     (gr8s::core-object "apiVersion" "v1" "kind" "Secret"
+                        "metadata" (gr8s::core-object "name" "frozen-secret")
+                        "data" (gr8s::core-object "password" "cGlubmVk")) "default")
+    (let* ((view (freeze-test-store-snapshot store 42 7))
+           (shadow (gr8s.resources::frozen-store-snapshot-store view))
+           (target (merge-pathnames "frozen-secret.jsonl" root))
+           (config (gr8s::pod-store-secret-encryption-config store)))
+      (delete-file (merge-pathnames "pki/cluster-ca.key" root))
+      (setf (gr8s::pod-store-secret-encryption-config store) nil)
+      (gr8s.resources::capture-frozen-store-snapshot view target)
+      (is (null (search "cGlubmVk" (uiop:read-file-string target))))
+      (let* ((records (read-store-snapshot-records target))
+             (row (find "resource" records :test #'equal :key (lambda (row) (gethash "kind" row))))
+             (gr8s.resources::*snapshot-secret-keys*
+               (gr8s.resources::frozen-store-snapshot-secret-keys view)))
+        (is (equal "cGlubmVk"
+                   (gethash "password"
+                            (gethash "data" (gr8s.resources::decrypt-secret-object shadow "secrets" (gethash "object" row))))))
+        ;; A different store must never inherit the snapshot's credentials, and
+        ;; a record not pinned in this view must not fall back to today's key.
+        (signals error (gr8s.resources::derive-secret-encryption-key store (aref (gethash "keys" config) 0)))
+        (signals error (gr8s.resources::derive-secret-encryption-key shadow (gr8s::core-object "salt" "invalid")))))))
+
 (defun read-store-snapshot-records (path)
   (with-open-file (stream path)
     (loop for line = (read-line stream nil) while line collect (com.inuoe.jzon:parse line))))

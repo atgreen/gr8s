@@ -1,0 +1,97 @@
+{
+  "date": "2026-11-10",
+  "scope": "Standalone full-history frozen application capture, not HA/serve/VM acceptance",
+  "baseCommit": "0b98cdac30941dc80324d16482c109368d0b00b4",
+  "sourceFilesSha256": {
+    "gr8s.asd": "8d6ab71f37d0e7baddbec725e08e581b767327e48c3f72dec98779166a43022b",
+    "src/resources/secret-encryption.lisp": "7197f8eb9373dcb578db1348237e6e064b680b9bee844040225ea379adfe50f5",
+    "src/resources/store-snapshot.lisp": "0c627c0b84d47a082319bd64bb2105ec9600c49f60a59d2255185ff6ef8bc7ac",
+    "src/resources/store-snapshot-freeze.lisp": "33c02d5daac7315bf993a2c7c9e943ac8904fb79ff1c77164a484b2bd33d757d",
+    "src/resources/store-image-tracker.lisp": "b9c031ce56603bf3625714f730570ad9e7edd51b2db170f1ca2ea39adc291f72",
+    "scripts/build-snapshot-freeze-native-harness.lisp": "4f257e1c2fb378044eeee9837d4055678cd9eaf15628a74846b888b3483fd877",
+    "scripts/snapshot-freeze-native-harness.lisp": "3e80b6f955da54141b2d702b885fae27494911d5deb69a447351a641785b7b63",
+    "scripts/test-snapshot-freeze-native.py": "d26ccd93e7251319506416db7d7920d6f7c2641c6ebe811b41d55219a9b58e46",
+    "tests/store-snapshot-test.lisp": "1b530d9073175b4e3387c42cf40db74506082f3e3f445fa3e509016151e0bed0"
+  },
+  "native": {
+    "passed": true,
+    "evidence": "/tmp/gr8s-snapshot-freeze-native-24h0ac1q",
+    "binarySha256": "1ab8c86b174d87a3880cf65302d30364137a117caa930e07c946d289ecd4aff8",
+    "historyClock": 4003312851,
+    "inputs": {
+      "state.json": {
+        "source": "/tmp/gr8s-compaction-native-un4ue6p8/cold-state/application-generations/c15ad730-e166-4d11-84b6-58f9701641cd/objects/state.json",
+        "bytes": 130354588,
+        "sha256": "c931bcceeb47454b50c6d18e00f97dcc43bb2ca7e591932b9b3f8695a4a7041b"
+      },
+      "journal.jsonl": {
+        "source": "/tmp/gr8s-compaction-native-un4ue6p8/cold-state/application-generations/c15ad730-e166-4d11-84b6-58f9701641cd/objects/journal.jsonl",
+        "bytes": 59844018,
+        "sha256": "ffa9969c60857d676cd8de7d925053cf235a1f903e5bbbf9ee3eb70dda21cd68"
+      }
+    },
+    "timeoutSeconds": 900,
+    "exitCode": 0,
+    "report": {
+      "passed": true,
+      "nativeHarness": true,
+      "productionServe": false,
+      "haAcceptance": false,
+      "vmAcceptance": false,
+      "heapLimitMiB": 384,
+      "loadedHistoryEstimatedBytes": 100656464,
+      "frozenHistoryRecords": 1978,
+      "records": 1984,
+      "frozenRevision": 4099,
+      "liveRevision": 4100,
+      "artifactBytes": 130409664,
+      "artifactSha256": "807d03fda9911cc87b4bfb737c6ea4facfef0e8dfdfee1e6fb5031c6e0a9d2d8",
+      "sentinelPreserved": true,
+      "postFreezeWriteExcluded": true
+    },
+    "elapsedSeconds": 29.859348562080413
+  },
+  "sourceChecks": [
+    {
+      "log": "/tmp/gr8s-application-freeze-tests-2.log",
+      "checks": 471,
+      "failures": 0,
+      "selectors": [
+        "store-image-tracker-snapshot",
+        "store-snapshot",
+        "store-member-restore",
+        "ha-control-plane"
+      ]
+    },
+    {
+      "log": "/tmp/gr8s-application-freeze-final-tests.log",
+      "checks": 354,
+      "failures": 0,
+      "selectors": [
+        "store-snapshot",
+        "core-checkpoint-reader",
+        "store-snapshot-materialize",
+        "secret-encryption-enable-rewrites-durable-data-and-round-trips",
+        "encrypted-secret-journal-round-trips-and-authentication-fails-closed",
+        "encrypted-secret-recovery-requires-the-cluster-identity",
+        "secret-encryption-rotation-stages-retain-old-keys-until-reencrypted",
+        "secret-encryption-and-key-rotation-replicate-without-plaintext",
+        "secrets-encrypt-lifecycle-dispatches-through-the-public-cli"
+      ],
+      "note": "Snapshot suite repeated after strengthening Pod condition/publication and Node label mutation coverage; overlaps first integration run."
+    }
+  ],
+  "earlierFailures": [
+    {
+      "evidence": "/tmp/gr8s-snapshot-freeze-native-3h0idwbe/result.json",
+      "reason": "Runner placed launch.json in store root, treated as malformed legacy Pod. Failed before history load. Corrected runner to use a separate state directory; native executable unchanged."
+    }
+  ],
+  "remaining": [
+    "Worker still captures synchronously under member lock",
+    "Unpublished artifact retention and prepared publication integration",
+    "Multi-member capture/heartbeat availability proof",
+    "Production compaction default remains disabled",
+    "Broader ten-gap epic remains active"
+  ]
+}

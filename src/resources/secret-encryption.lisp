@@ -10,6 +10,11 @@
 (defparameter +secret-encrypted-data-field+ "gr8s.io/encryptedData")
 (defparameter +secret-encryption-context+ "gr8s secret encryption v1")
 
+;; Bound only while serializing a private frozen snapshot. Match both the store
+;; and exact frozen key record: unrelated stores never inherit these keys.
+(defstruct snapshot-secret-keys store (records (make-hash-table :test #'eq)))
+(defvar *snapshot-secret-keys* nil)
+
 (defun secret-json-object (&rest pairs)
   (let ((object (make-hash-table :test #'equal)))
     (loop for (key value) on pairs by #'cddr
@@ -32,6 +37,11 @@
 
 (defun derive-secret-encryption-key (store record)
   "Derive a data-encryption key from cluster identity plus RECORD's public salt."
+  (when (and *snapshot-secret-keys*
+             (eq store (snapshot-secret-keys-store *snapshot-secret-keys*)))
+    (return-from derive-secret-encryption-key
+      (or (gethash record (snapshot-secret-keys-records *snapshot-secret-keys*))
+          (error "Secret key was not pinned at snapshot capture"))))
   (let ((hmac (ironclad:make-hmac (secret-encryption-ca-key-bytes store) :sha256)))
     (ironclad:update-hmac
      hmac
