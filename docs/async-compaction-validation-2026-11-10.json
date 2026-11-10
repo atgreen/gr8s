@@ -580,5 +580,23 @@
     "focusedFollowerRetention": 22,
     "snapshotCheckpointEncryption": 354,
     "note": "Focused checks overlap the broad suite; totals are not additive."
+  },
+  "mainIntegration": {
+    "mergeCommit": "6b542222543c96e729607c85eee19d2653b6ac18",
+    "mainParent": "abc69bc",
+    "lanternfishParent": "0fc7977",
+    "published": false,
+    "log": "/tmp/gr8s-main-async-compaction-integration.log",
+    "logSha256": "06436f102b620caa1e8a08fc11894984b8bd458a32d7d65886e074ff00b7fb93",
+    "suites": {
+      "raft": 4952,
+      "raftMembership": 96,
+      "raftTransport": 52,
+      "raftSnapshot": 177,
+      "haControlPlane": 139
+    },
+    "totalChecks": 5416,
+    "allPassed": true,
+    "scope": "Prepared merge tree; publication waits for full native cluster acceptance."
   }
 }
