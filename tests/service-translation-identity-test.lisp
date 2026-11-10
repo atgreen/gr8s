@@ -195,3 +195,28 @@
       (is (equal "10.88.1.1" (gethash "podIP" record)))
       (is (equal alias (gethash "address" record)))
       (is (equal "fd88::1" (gethash "podIP" status))))))
+
+(test translation-identities-survive-streamed-store-artifact-materialization
+  (with-temporary-store (source source-root)
+    (let* ((server (translation-fixture-server source))
+           (pod (translation-fixture-pod source "artifact-client"))
+           (artifact (merge-pathnames "translation-source.jsonl" source-root)))
+      (translation-fixture-report server pod (translation-fixture-status))
+      (gr8s.resources::capture-store-snapshot source artifact 42 7)
+      (with-temporary-store (sink sink-root)
+        (declare (ignore sink))
+        (multiple-value-bind (path descriptor)
+            (gr8s.resources::materialize-store-snapshot
+             sink-root artifact (gr8s.raft.transport::raft-snapshot-file-digest artifact)
+             :expected-index 42 :expected-term 7)
+          (declare (ignore path))
+          (gr8s.store::publish-store-generation sink-root (gethash "generation" descriptor)))
+        (let* ((restored (gr8s:open-store sink-root))
+               (current (gr8s:get-pod restored (pod-namespace pod) (pod-name pod)))
+               (records (gr8s.network::service-translation-identity-messages restored)))
+          (is (= 1 (length records)))
+          (is (equal (pod-uid pod) (slot-value (first records) 'gr8s.node.v1::pod-uid)))
+          (is (equal "10.88.1.8" (gethash "address" (gethash "gr8sServiceTranslation"
+                                                            (gr8s::pod-observed-status restored current)))))
+          (is-false (gethash "gr8sServiceTranslation"
+                            (gethash "status" (gr8s::pod-published-view restored current)))))))))
