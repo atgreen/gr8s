@@ -44,7 +44,8 @@ kubectl --kubeconfig /tmp/gr8s.kubeconfig delete pod POD_NAME
 
 ### Entry paths
 
-- `gr8s serve` runs the HTTP control plane and a loopback gRPC node endpoint, and
+- `gr8s serve` runs the authenticated HTTPS control plane and a private gRPC
+  node endpoint, and
   optionally joins a Raft cluster with `--raft-init`/`--raft-join` (see
   [high availability](high-availability.md)). It starts a local agent named
   `gr8s-local` by default. `--disable-agent` runs a control-plane-only process.

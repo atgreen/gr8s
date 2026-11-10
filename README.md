@@ -91,6 +91,11 @@ See [Building, running & testing](docs/building-and-testing.md) to add
 containerd, or run tests. The runtime guide explains how to
 [preload images](docs/runtime.md#preloaded-images-airgap).
 
+For expiry inventory, leaf replacement, staged cluster-CA rotation, and
+ServiceAccount signer rotation, see [Certificate management](docs/certificate-management.md).
+Secrets encryption and key rotation are described in the
+[ConfigMap and Secret API guide](docs/configmap-secret-api.md).
+
 To manage a persistent server or agent with systemd, see
 [Installing and operating gr8s with systemd](docs/installing.md).
 It covers verified upgrades, rollback, scoped cleanup, and uninstall.
