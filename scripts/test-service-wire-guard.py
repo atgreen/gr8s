@@ -381,6 +381,8 @@ def capacity(factory, table):
         original = graph.packet(protocol=17, sport=46017)
         encoded = run(client, 0, original)
         foreign_key = n.key(graph.packet(p.BACKEND, p.CLIENT, 59999, 59998, 17))
+        if table == RI:
+            foreign_key = wire.metadata(17) + foreign_key
         size = backend.descriptors[table][2] if hasattr(backend, "descriptors") else backend.maps.descriptors[table][2]
         sentinel = bytes([0xa5]) * size
         backend.update(table, foreign_key, sentinel)
