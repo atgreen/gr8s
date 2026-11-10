@@ -406,13 +406,24 @@ A separate ABI-v2 packet component registers direct and Service tuples, reserves
 return ownership, and uses private source addresses and ports for hairpin or
 colliding connections. Its four stages put translation around egress and ingress
 policy boundaries. Source and backend incarnation checks prevent tuple reuse by
-a replacement endpoint. It is not installed by the node agent yet: TCP lifecycle
-tracking, garbage collection, alias-aware policy, retained-flow migration and
-receiver installation acknowledgments must be integrated before activation.
+a replacement endpoint. It is not installed by the node agent yet: garbage collection, alias-aware
+policy, retained-flow migration and receiver installation acknowledgments must
+be integrated before activation.
 `make test-service-nat` runs its synthetic packet interpreter tests. The same
 fixture passed 42 packet cases and seven capacity/contention cases using real
 BPF programs in a disposable VM; see
 [the component validation evidence](service-nat-component-validation-2026-11-09.json).
+
+The component also has a SYN generation preflight and incarnation-keyed TCP
+metadata, with sequence/window checks, timestamps, handshake and closure
+lifetimes. TCP observation runs in the policy-approved commit/restore stages.
+The same check target exercises interleaved Service, direct and hairpin streams;
+480 interpreter and 478 real-kernel TCP cases passed (two nonlinear-skb checks
+are interpreter-only). After a return claim is removed, unmatched traffic to a
+primary address passes unchanged without altering the new TCP state; unmatched
+private-alias replies are dropped. This remains synthetic component evidence,
+with no live workload or agent activation claim. See
+[the TCP validation evidence](service-nat-tcp-validation-2026-11-09.json).
 
 Use `--cni-mode external --cni-conf-dir /etc/cni/net.d` to give ownership of
 Pod links, addresses, routes, IPAM, and cross-node transport to operator-supplied
