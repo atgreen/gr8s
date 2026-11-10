@@ -56,6 +56,7 @@
    #:raft-log-truncate
    #:raft-majority
    #:raft-maybe-become-leader
+   #:raft-peer-ready-for-promotion-p
    #:raft-member-role
    #:raft-node
    #:raft-node-api-urls

@@ -67,6 +67,9 @@
   ;; leader volatile
   (next-index (make-hash-table :test 'equal))
   (match-index (make-hash-table :test 'equal))
+  ;; Current-leadership applied receipts: peer -> (term . applied-index).
+  ;; Log match alone does not establish that application restore has completed.
+  (peer-applied (make-hash-table :test 'equal))
   ;; candidate volatile
   (votes (make-hash-table :test 'equal))
   ;; pre-candidate volatile (Pre-Vote, Raft dissertation §9.6): a node that times
@@ -411,6 +414,7 @@ an atomic replacement, including its log-tail policy, before calling this helper
         (raft-node-leader-id node) (raft-node-id node))
   (clrhash (raft-node-next-index node))
   (clrhash (raft-node-match-index node))
+  (clrhash (raft-node-peer-applied node))
   (dolist (peer (raft-replicate-ids node))
     (setf (gethash peer (raft-node-next-index node)) (1+ (raft-last-log-index node))
           (gethash peer (raft-node-match-index node)) 0))
@@ -571,6 +575,23 @@ alone so existing persisted commands remain deliverable."
   (when (raft-node-on-configured node)
     (funcall (raft-node-on-configured node) node)))
 
+(defun raft-peer-ready-for-promotion-p (node id)
+  "A learner must acknowledge application of this leader's current-term commit.
+Caller serializes access to NODE. Receipt evidence is volatile and reacquired
+following leadership changes; old peers without applied receipts cannot qualify."
+  (let ((boundary (raft-node-commit-index node))
+        (receipt (gethash id (raft-node-peer-applied node))))
+    (and (eq :leader (raft-node-role node))
+         (eq :learner (gethash id (raft-node-roles node)))
+         (not (raft-node-removed node))
+         (zerop (hash-table-count (raft-node-pending-members node)))
+         (plusp boundary)
+         (= (raft-node-current-term node) (raft-log-term node boundary))
+         (= boundary (raft-node-last-applied node))
+         receipt (= (car receipt) (raft-node-current-term node))
+         (>= (cdr receipt) boundary)
+         (>= (gethash id (raft-node-match-index node) 0) boundary))))
+
 (defun raft-propose-config (node &key add remove (role :voter) address api-url callback)
   "Leader-only single-member change. ADD = a member id to add with ROLE (:voter
    or :witness) and ADDRESS = its (host port) so every member can reach it;
@@ -581,6 +602,9 @@ alone so existing persisted commands remain deliverable."
   (cond
     ((not (eq (raft-node-role node) :leader)) (values nil :not-leader))
     ((plusp (hash-table-count (raft-node-pending-members node))) (values nil :change-in-flight))
+    ((and add (eq role :voter) (eq :learner (gethash add (raft-node-roles node)))
+          (not (raft-peer-ready-for-promotion-p node add)))
+     (values nil :learner-not-ready))
     ((and remove (equal remove (raft-node-id node))) (values nil :cannot-remove-self))
     (t
      (let ((members (raft-current-config node)))
@@ -739,7 +763,8 @@ alone so existing persisted commands remain deliverable."
                  (raft-send node leader (list :type :append-entries-reply
                                               :term (raft-node-current-term node)
                                               :from (raft-node-id node)
-                                              :success t :match-index last-new))))))))))
+                                              :success t :match-index last-new
+                                              :applied-index (min last-new (raft-node-last-applied node))))))))))))
 
 (defun raft-handle-append-entries-reply (node msg)
   "Handle an AppendEntries reply as leader: on success record the peer's
@@ -754,6 +779,17 @@ alone so existing persisted commands remain deliverable."
           (progn
             (setf (gethash peer (raft-node-match-index node)) (getf msg :match-index)
                   (gethash peer (raft-node-next-index node)) (1+ (getf msg :match-index)))
+            (let ((applied (getf msg :applied-index))
+                  (matched (getf msg :match-index)))
+              (when (and (member peer (raft-replicate-ids node) :test #'equal)
+                         (typep applied '(integer 0 #.most-positive-fixnum))
+                         (typep matched '(integer 0 #.most-positive-fixnum))
+                         (<= applied matched (raft-last-log-index node)))
+                (let ((prior (gethash peer (raft-node-peer-applied node))))
+                  (setf (gethash peer (raft-node-peer-applied node))
+                        (cons (raft-node-current-term node)
+                              (max applied (if (and prior (= (car prior) (raft-node-current-term node)))
+                                               (cdr prior) 0)))))))
             (raft-advance-commit node)
             (raft-apply-committed node))
           ;; Back up and retry on the next replication round.

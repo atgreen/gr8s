@@ -133,3 +133,18 @@ The production Raft default is port 7000; internal transport callers may still
 request an ephemeral port for isolated tests. Restart with the original endpoints.
 Changes and malformed or nonprivate descriptors are refused before application
 initialization. Endpoint publication does not enable production WAL recovery.
+
+A learner-to-voter configuration change now requires an applied-progress receipt.
+Successful AppendEntries replies report `:applied-index` only after application
+succeeds, bounded by the acknowledged log match. The leader tracks receipts for
+its current term and clears them when assuming leadership. Promotion requires
+that the leader has applied a current-term committed boundary and the learner
+has both replicated and acknowledged application through that boundary. A new
+commit can make an older receipt insufficient. Missing receipts from older
+binaries, failed application, stale terms and invalid applied indices cannot
+establish readiness; rejected promotions return `:learner-not-ready`.
+
+This guard does not yet make Join admit requested voters as learners. Durable
+promotion intent, automatic promotion after catch-up and native interrupted-join
+acceptance remain under `podster-ucm.2.9`. Production durable voter recovery
+remains disabled until the complete admission and startup paths are integrated.

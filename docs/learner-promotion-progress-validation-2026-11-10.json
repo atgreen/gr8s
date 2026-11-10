@@ -1,0 +1,76 @@
+{
+  "date": "2026-11-10",
+  "bead": "podster-ucm.2.9.1",
+  "validation": {
+    "suites": {
+      "raft": 4281,
+      "raft-membership": 48,
+      "raft-transport": 34,
+      "raft-snapshot": 142,
+      "ha-control-plane": 37,
+      "ha-store": 43,
+      "store-member-bootstrap": 97
+    },
+    "totalChecks": 4682,
+    "failures": 0,
+    "skips": 0,
+    "initialRun": {
+      "exitCode": 1,
+      "sha256": "db9830ecb80e2656c6e831547e16181883235ae0030e692d7b17e53a16eb2819",
+      "checks": [
+        4281,
+        48,
+        34,
+        142,
+        37,
+        43,
+        97
+      ],
+      "failures": [
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0
+      ],
+      "failure": "HA scratch cleanup fixture supplied API port zero, rejected by stable endpoint validation before injected open-store"
+    },
+    "followupRun": {
+      "exitCode": 0,
+      "sha256": "ad0638a14decd0ede8349b2fed42152e8b5dc820d1c12cca45e38d73cdb6a0ae",
+      "checks": [
+        48,
+        142
+      ],
+      "failures": [
+        0,
+        0
+      ],
+      "suites": [
+        "raft-membership",
+        "raft-snapshot"
+      ],
+      "changes": "Fixture uses port8080 without binding a listener; added new-term receipt/current-term commit coverage"
+    },
+    "method": "Fresh SBCL load gr8s/tests, assert fiveam:get-test for every named suite, fiveam:run! each, nonzero exit on failure",
+    "scope": "Deterministic Raft, loopback transport/TLS snapshots, file-WAL/process-kill tests and source application recovery. No privileged runtime or BPF acceptance."
+  },
+  "invariants": [
+    "Successful AppendEntries reports applied index only after application succeeds",
+    "Applied receipt is bounded by acknowledged match and recorded only for replicated members",
+    "Absent, failed, stale-term and invalid applied receipts cannot establish readiness",
+    "Learner-to-voter config proposal requires current-term commit applied on leader and acknowledged applied on learner",
+    "New commits invalidate insufficient receipts; new leadership clears receipt evidence"
+  ],
+  "remaining": [
+    "Join still directly admits new requested voters",
+    "Persisted promotion intent and automatic learner promotion are not implemented",
+    "Native slow-snapshot and interrupted join acceptance remains open",
+    "Production durable voter startup remains unwired"
+  ],
+  "learnerFirstJoinEnabled": false,
+  "productionVoterRecoveryEnabled": false,
+  "fullGoalComplete": false
+}
