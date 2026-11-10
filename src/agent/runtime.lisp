@@ -671,10 +671,11 @@ restart, since the network may be restored before the dataplane starts."
     (when (and identities reset-readiness)
       (gr8s.network::clear-service-nat-owner-readiness identities))
     (when (and identities network)
-      (gr8s.network::publish-service-nat-identities
-       identities (gethash "serviceTranslations" network #())
-       :preserve-readiness (not reset-readiness))
-      (when previous-networks
+      (bt:with-lock-held (gr8s.network::*service-nat-owner-lifecycle-lock*)
+       (gr8s.network::publish-service-nat-identities
+        identities (gethash "serviceTranslations" network #())
+        :preserve-readiness (not reset-readiness))
+       (when previous-networks
         ;; CNI leases are allocated before owner rows are written. Hold IPAM
         ;; through retirement so a concurrent ADD cannot be mistaken for a
         ;; withdrawn replicated claim in this agent process.
@@ -691,7 +692,7 @@ restart, since the network may be restored before the dataplane starts."
                                (node-runtime-node-id node-runtime) (car key) (cdr key)
                                primary alias))))
             (gr8s.network::retire-service-nat-withdrawn-identities
-             identities previous-networks (gethash "serviceTranslations" network #()) nil))))))
+             identities previous-networks (gethash "serviceTranslations" network #()) nil)))))))
 
 (defun configure-node-runtime-network (node-runtime network &key (persist t))
   "Apply NETWORK as this node's overlay configuration and record it on the runtime.

@@ -431,8 +431,10 @@ policy boundaries. Source and backend incarnation checks prevent tuple reuse by
 a replacement endpoint. Native routed CNI can attach the graph for an explicitly
 opted-in v2 endpoint after the local risk inventory and exact owner pair are
 published. The native build embeds the graph, and CNI validates shared map
-schemas before attachment. Receiver readiness, retained-flow migration, and
-Service traffic activation remain in progress.
+schemas before attachment. After both TCX guards attach, CNI marks the exact
+local owner pair receiver-ready; DEL disables that pair before removing links.
+Cluster-wide receiver proof, retained-flow migration, and Service traffic
+activation remain in progress.
 `make test-service-nat` runs its synthetic packet interpreter tests. The same
 fixture passed 42 packet cases and seven capacity/contention cases using real
 BPF programs in a disposable VM; see

@@ -427,6 +427,7 @@ prevResult and only installs, checks, or removes its policy datapath."
        (program-fd #'whistler/loader:prog-info-fd)
        (initialize-identity #'initialize-cni-identity)
        (check-owner #'check-cni-service-nat-owner)
+       (mark-receiver #'mark-cni-service-nat-receiver-ready)
        (pin-object #'whistler/loader:pin-bpf-object)
        (rename-pin #'uiop:rename-file-overwriting-target)
        (staged-links #'cni-policy-staged-links)
@@ -523,6 +524,10 @@ prevResult and only installs, checks, or removes its policy datapath."
                     (funcall close-fd link-fd)
                     (setf link-fd nil)
                     (dolist (old (funcall staged-links path)) (funcall remove-path old))))
+           (when (eq (cni-service-profile configuration) :v2)
+             (funcall mark-receiver configuration context
+                      (cni-configuration-endpoint-addresses configuration)
+                      (cni-configuration-service-return-address configuration)))
       (when link-fd (funcall close-fd link-fd))
       (let ((owned (when object
                      (loop for spec in (append (cni-local-policy-map-specs configuration)

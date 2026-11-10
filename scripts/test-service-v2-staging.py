@@ -143,6 +143,12 @@ def main():
                 raise RuntimeError("v2 CNI CHECK failed: " + checked.stdout + checked.stderr)
             report["v2CniChecked"] = True
             pod_address = json.loads(answer.stdout)["ips"][0]["address"].split("/", 1)[0]
+            cni_owner = cluster.root / "state/agent/containerd/bpf/service-lb/gr8s_nat_id_v2"
+            cni_keys = [ipaddress.ip_address(pod_address).packed, (probes[0] + 1).packed]
+            cni_rows = guest.read_pinned_values(cni_owner, cni_keys, 32)
+            if [struct.unpack_from("<I", row, 4)[0] for row in cni_rows] != [0x20005] * 2:
+                raise RuntimeError("v2 CNI attachment did not publish paired receiver readiness")
+            report["v2ReceiverReadyAfterAttachment"] = True
             source_port = 40000 + os.getpid() % 10000
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as host:
                 host.bind(("0.0.0.0", 0))
@@ -208,12 +214,11 @@ def main():
         if delete_answer is None or delete_answer.returncode != 0:
             raise RuntimeError("v2 CNI DEL failed after partial ADD: "
                                + (delete_answer.stdout + delete_answer.stderr if delete_answer else "not run"))
-        cni_owner = cluster.root / "state/agent/containerd/bpf/service-lb/gr8s_nat_id_v2"
         cni_keys = [probes[0].packed, (probes[0] + 1).packed]
         cni_rows = guest.read_pinned_values(cni_owner, cni_keys, 32)
         if [struct.unpack_from("<I", row, 4)[0] for row in cni_rows] != [0x20000] * 2:
             raise RuntimeError("v2 CNI DEL left an enabled owner after partial ADD")
-        report["partialAddOwnerRetiredOnDel"] = True
+        report["v2OwnerRetiredOnDel"] = True
         report.update({"backend": backend, "service": vip, "riskKeys": [key.hex() for key in keys],
                        "riskMap": str(risk), "managedPodCIDRs": cidrs,
                        "managedPodMap": str(managed), "source": "unready manual EndpointSlice"})

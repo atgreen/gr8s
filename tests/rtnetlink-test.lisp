@@ -393,7 +393,7 @@
       (setf events nil)
       (funcall (gr8s::cni-operations-delete operations)
                configuration context "/pins/local/endpoint_identity" "/pins/local/tcx-ingress" "/pins/local/")
-      (is (equal '(:policy-delete :owner-withdraw :link-delete) (reverse events)))
+      (is (equal '(:owner-withdraw :policy-delete :link-delete) (reverse events)))
       (is (null (gr8s::service-snat-address ipam "sandbox-1" "eth0"))))))
 
 (test cni-return-path-keeps-default-and-ipv6-only-allocation-behavior
