@@ -9,7 +9,12 @@
                    :reconciler (make-reconciler store (make-fake-runtime)))))
       (is-false (search "last_success_age_seconds" (gr8s.server::reconciliation-worker-metrics-text worker)))
       (is (equal '(7 9) (multiple-value-list
-                         (gr8s.server::call-with-reconciliation-metrics worker (lambda () (values 7 9))))))
+                         (gr8s.server::call-with-reconciliation-metrics
+                          worker (lambda ()
+                                   (is (= 1 (gr8s.server::reconciliation-worker-metrics-in-flight worker)))
+                                   (is (search "gr8s_reconciliation_in_flight 1"
+                                               (gr8s.server::reconciliation-worker-metrics-text worker)))
+                                   (values 7 9))))))
       (let ((success (gr8s.server::reconciliation-worker-metrics-last-success worker)))
         (signals simple-error
           (gr8s.server::call-with-reconciliation-metrics worker (lambda () (error "fixture failure"))))
