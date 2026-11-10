@@ -107,15 +107,18 @@ by default or that all kube-proxy Service modes are complete.
 
 The packet path currently keys return translation on transport tuples. If the
 same backend is exposed through multiple Service VIPs and independent flows
-produce indistinguishable tuples, Service identity can be ambiguous. This is a
-documented limitation of the chosen default, similar to the multiple-VIP
-collision noted in Cilium's [kube-proxy replacement documentation][cilium-lb].
-Workloads that need this exact pattern should avoid sharing the backend through
-multiple VIPs until a targeted solution is implemented and tested. The
+produce indistinguishable tuples, Service identity can be ambiguous. Cilium
+documents this [multiple-VIP collision][cilium-lb]. The next packet-path
+increment will adapt Calico's [collision-triggered source-port NAT][calico-nat]
+where a reserved port and return route can be proved unique for the flow. Normal
+flows should keep their source address and port. An unresolved collision must
+drop instead of delivering to the wrong Service. This is planned behavior, not
+a claim about the current opt-in packet pipeline. The
 [experimental identity envelope](service-wire-protocol.md) is retained as
 research and is not part of the default dataplane.
 
 [cilium-lb]: https://docs.cilium.io/en/latest/network/kubernetes/kubeproxy-free/
+[calico-nat]: https://github.com/projectcalico/calico/blob/master/felix/design/bpf-services.md
 
 The experimental IPv4 TCP/UDP TC Service pipeline can be enabled with
 `GR8S_ENABLE_PACKET_SERVICES=1` on the node agent. The generated CNI configuration
