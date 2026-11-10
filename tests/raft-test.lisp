@@ -922,3 +922,23 @@
       (is (= (length damaged) (raft-wal-size path))))))
 
 (in-suite gr8s)
+
+(in-suite raft)
+
+(test raft-wal-malformed-records-cannot-masquerade-as-eof-or-repair-status
+  (with-raft-temp-dir (path)
+    (dolist (form '(:eof :torn nil 42 "invalid" (:hard) (:hard -1 nil)
+                   (:hard 2 nil :extra) (:entry 0 1 :bad-index) (:snapshot 1 -1 nil)))
+      (dolist (framed '(nil t))
+        (let* ((record (if framed (raft-test-record-octets form)
+                           (trivial-utf-8:string-to-utf-8-bytes (format nil "~S~%" form))))
+               (bytes (concatenate '(vector (unsigned-byte 8)) record
+                                   (raft-test-record-octets '(:hard 9 "later")))))
+          (raft-test-write-octets path bytes)
+          (signals error (gr8s::load-raft-log path))
+          (let ((node (gr8s::make-raft-node :id "malformed")))
+            (signals error (gr8s::recover-raft-node node path))
+            (is (null (gr8s::raft-node-storage node))))
+          (is (= (length bytes) (raft-wal-size path))))))))
+
+(in-suite gr8s)

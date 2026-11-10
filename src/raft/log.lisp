@@ -161,12 +161,24 @@ Scan with bounded overlap, including candidates that cross a read-buffer edge."
              (setf carry (min end (1- +raft-wal-header-length+)))
              (replace buffer buffer :start1 0 :start2 (- end carry) :end2 end))))
 
+(defun raft-wal-require-record-form (form)
+  "Reject malformed records, including atoms that resemble reader status values."
+  (let* ((arity (and (consp form) (list-length form)))
+         (expected (and arity (case (first form) (:hard 3) (:entry 4) (:truncate 2) (:snapshot 4)))))
+    (unless (and expected (= arity expected)
+                 (integerp (second form)) (<= 0 (second form))
+                 (or (not (eq (first form) :entry)) (plusp (second form)))
+                 (or (not (member (first form) '(:entry :snapshot)))
+                     (and (integerp (third form)) (<= 0 (third form)))))
+      (error "Malformed Raft WAL record"))
+    form))
+
 (defun raft-wal-read-record (input binary)
   "Return FORM, or :EOF, or :TORN with its frame boundary as a second value.
 Legacy forms are read strictly; only explicit frame boundaries can be repaired."
   (let ((first (peek-char t input nil :eof)))
     (when (eq first :eof) (return-from raft-wal-read-record :eof))
-    (unless (eql first #\@) (return-from raft-wal-read-record (read input)))
+    (unless (eql first #\@) (return-from raft-wal-read-record (raft-wal-require-record-form (read input))))
     (let ((start (file-position input))
           (header (make-string +raft-wal-header-length+)))
       (dotimes (i +raft-wal-header-length+)
@@ -197,7 +209,7 @@ Legacy forms are read strictly; only explicit frame boundaries can be repaired."
         ;; Parse only after the complete payload has passed byte-level integrity.
         ;; FILE-POSITION on this UTF-8 fd stream is the logical octet position.
         (let* ((*package* (find-package :gr8s.raft)) (*read-base* 10)
-               (form (read-preserving-whitespace input)))
+               (form (raft-wal-require-record-form (read-preserving-whitespace input))))
           (unless (and (eql #\Newline (read-char input nil nil))
                        (= (file-position input) (+ body-start length)))
             (error "Raft WAL frame does not contain exactly one record"))
