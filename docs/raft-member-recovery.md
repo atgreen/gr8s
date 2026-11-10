@@ -3,9 +3,10 @@
 The witness command reopens `raft/witness.log` under its state directory before
 accepting peer RPCs. WAL open synchronizes the file and its parent directory
 before startup continues. Recovery loads the durable term, vote, snapshot/configuration
-and remaining log. It does not treat every retained entry as committed: the live
-leader supplies the committed boundary during catch-up. The witness has no
-application state machine to replay.
+and remaining log. It restores the durably proven committed prefix, including
+membership, before listening. Retained entries beyond that boundary still require
+leader confirmation. The witness has no application payload to replay, but its
+committed membership must be restored before voting.
 
 A witness starts with the witness role and completes its join handshake before
 starting the election clock. It reuses its saved member certificate on restart.
@@ -56,13 +57,44 @@ as `podster-ucm.7.1`.
 These checks protect against interrupted append writes and detected corruption;
 they do not reconstruct acknowledged data lost to arbitrary storage failure.
 
+Commit progress is recorded as `(:commit INDEX)` frames before the member
+publishes the new boundary, applies commands, or acknowledges application to its
+leader/client. Checkpoints retain this watermark even when a committed suffix
+remains beyond the snapshot. Recovery rejects regressing boundaries, missing
+committed prefixes, and attempts to overwrite/truncate committed entries.
+
+This is necessary for membership safety: a snapshot may describe the original
+single-voter founder while later committed entries add voters. Reopening with
+only the old snapshot configuration could incorrectly restore a one-voter quorum.
+The committed configuration is now replayed before elections or peer traffic;
+a retained, uncommitted removal is not applied.
+
+A configuration append first records the previously proven boundary, even when
+the new configuration never commits. Legacy logs with a configuration tail and
+no commit watermark are ambiguous and are refused during writable recovery;
+read-only inspection remains available. Recover them from a trusted snapshot
+rather than guessing which membership committed. Older readers without commit
+record support also cannot read newly written `:commit` frames, even if they
+understand framing. Upgrade/rollback capability checks remain `podster-ucm.7.1`.
+
+The regression records a committed voter addition followed by an uncommitted
+removal. Before the fix, restart recovered quorum1 with no applied suffix; now it
+recovers quorum2 at committed/applied index1 and retains the removal at index2
+without applying it. The six Raft/recovery suites pass 4,772 checks, including
+repeated process kills and confirmed application replay before listener creation.
+The rebuilt interrupted native 64 MiB learner probe also passes at 384 MiB per
+process. Source hashes, the standalone reproducer and measurements are in
+`raft-commit-recovery-validation-2026-11-10.json`. These checks do not enable the
+production voter startup path described below.
+
 The internal `gr8s.resources::start-store-member-from-wal` function recovers a
 store from a WAL with a retained application artifact. It drains application
 access, acquires the outer writer barriers and installs callbacks before the
 peer listener is constructed. Recovery validates the WAL's configuration and
 artifact reference, restores that exact baseline and only then attaches the
-remaining log. Selected application files can contain later updates; restoring
-the retained baseline provides the starting state for deterministic suffix replay.
+remaining log. It replays the durably proven committed suffix before opening the
+listener and leaves unconfirmed entries unapplied. Selected application files can
+contain later updates; the retained baseline remains the starting state for replay.
 Member identity and private keys stay at their existing root paths.
 
 For a fresh member, the same internal startup helper accepts

@@ -1,0 +1,245 @@
+{
+  "date": "2026-11-10",
+  "bead": "podster-ucm.2.1.4.4",
+  "fixCommit": "88085aba3c6441581758cdb83cf20cd4024965a4",
+  "sourceSha256": {
+    "src/raft/core.lisp": "7ff8337fe25c5a23e336b8169c3a8a863d3087cf9640fe543cc1b4095abb8946",
+    "src/raft/log.lisp": "557eba09ff004925c622797d3f1553ce302ca85b4796e67a15b5c16476658a40",
+    "src/raft/package.lisp": "aee4ec8cd1b3372ec9380b8d1363a19980b50b48d772d2605dfc4cec6dd6ff6f",
+    "tests/raft-test.lisp": "eaec2cb415b9b489f2d45f0b63b4c3c48dcfabfd2f8d327b64dcca88c1001ef8",
+    "tests/store-member-restore-test.lisp": "682c91e1f3d846b3a012b1ec9fc6a7c39ae905a08f465fdddd11de6221255d98"
+  },
+  "problem": "Recovery restored obsolete snapshot membership even when a later WAL configuration had committed; a former sole voter could recover an incorrect one-voter quorum.",
+  "change": [
+    "Persist commit watermark before memory publication, state-machine apply and acknowledgement",
+    "Restore only the proven committed prefix before peer listener startup, including membership and application commands",
+    "Preserve watermark through snapshot replacement, including committed retained suffixes",
+    "Reject regressing/missing commit references and committed entry overwrite/truncation",
+    "Keep uncommitted configuration removals unapplied; refuse ambiguous legacy unmarked configuration tails"
+  ],
+  "reproducer": {
+    "runner": "(require :asdf)\n(require :sb-posix)\n(dolist (system '(\"bordeaux-threads\" \"ironclad\" \"cffi\" \"flexi-streams\" \"trivial-utf-8\")) (asdf:load-system system))\n(load \"src/raft/package.lisp\")\n(load \"src/raft/core.lisp\")\n(load \"src/raft/log.lisp\")\n(in-package :gr8s.raft)\n(let* ((root (uiop:ensure-directory-pathname (sb-posix:mkdtemp \"/tmp/gr8s-config-recovery-XXXXXX\")))\n       (path (merge-pathnames \"member.log\" root))\n       (storage (open-file-raft-storage path))\n       (node (make-raft-node :id \"one\" :storage storage :current-term 1 :role :leader\n                             :send-fn (lambda (&rest args) (declare (ignore args)))))\n       (recovered (make-raft-node :id \"one\")))\n  (unwind-protect\n       (progn\n         (raft-configure node '((\"one\" . :voter)))\n         (raft-storage-save-hard-state storage 1 \"one\")\n         (raft-propose node '(:raft-config :members ((\"one\" . :voter) (\"two\" . :voter))))\n         (assert (= 1 (raft-node-commit-index node)))\n         (raft-propose node '(:raft-config :members ((\"one\" . :voter))))\n         (assert (= 1 (raft-node-commit-index node)))\n         (close-file-raft-storage storage)\n         (recover-raft-node recovered path)\n         (format t \"Recovered quorum ~D, applied ~D, commit ~D, tail ~D~%\"\n                 (raft-majority recovered) (raft-node-last-applied recovered)\n                 (raft-node-commit-index recovered) (raft-last-log-index recovered))\n         (assert (= 2 (raft-majority recovered)))\n         (assert (= 1 (raft-node-last-applied recovered) (raft-node-commit-index recovered)))\n         (assert (= 2 (raft-last-log-index recovered))))\n    (close-file-raft-storage storage)\n    (when (raft-node-storage recovered) (close-file-raft-storage (raft-node-storage recovered)))\n    (uiop:delete-directory-tree root :validate t)))\n",
+    "before": {
+      "exitCode": 1,
+      "result": "Recovered quorum 1, applied 0, commit 0, tail 2",
+      "logSha256": "7d2caed9a8fc2062315eb4953cbac979b72da3d95dbe03c95648189b0ccc52c0"
+    },
+    "after": {
+      "exitCode": 0,
+      "result": "Recovered quorum 2, applied 1, commit 1, tail 2",
+      "logSha256": "9b48564b835372579efe0bcef291c418a2dc4d6640a21c15d75a78351f33ab61"
+    }
+  },
+  "focusedRegressions": {
+    "checks": 27,
+    "failures": 0,
+    "logSha256": "30972cd528b462846fe379eee92e566e4e3495761d66ae1fa819f0e746d8d405",
+    "exitCode": 0,
+    "selectors": 7,
+    "runner": "(require :asdf)\n(asdf:load-asd (truename \"gr8s.asd\"))\n(asdf:load-system \"gr8s/tests\")\n(in-package :gr8s/tests)\n(let ((ok t))\n (dolist (target '(raft-recovery-restores-committed-membership-without-applying-uncommitted-removal raft-failed-commit-persistence-does-not-publish-apply-or-acknowledge raft-wal-rejects-commit-regression-missing-prefix-and-committed-overwrite raft-checkpoint-preserves-proven-commit-beyond-the-snapshot raft-recovery-refuses-ambiguous-legacy-configuration-tails raft-old-matching-heartbeat-cannot-regress-the-commit-boundary startup-replays-a-durably-proven-application-suffix-before-listening))\n  (assert (fiveam:get-test target))\n  (unless (fiveam:run! target) (setf ok nil)))\n (uiop:quit (if ok 0 1)))\n"
+  },
+  "integration": {
+    "checks": 4772,
+    "failures": 0,
+    "logSha256": "f0492f313a4cc5911e2b22a4ddd6e251a882eae9caf179a989cf2accbb89e14d",
+    "exitCode": 0,
+    "selectors": 6,
+    "runner": "(require :asdf)\n(asdf:load-asd (truename \"gr8s.asd\"))\n(asdf:load-system \"gr8s/tests\")\n(in-package :gr8s/tests)\n(let ((ok t))\n (dolist (target '(raft raft-cluster raft-join raft-snapshot store-member-bootstrap store-member-restore))\n  (assert (fiveam:get-test target))\n  (unless (fiveam:run! target) (setf ok nil)))\n (uiop:quit (if ok 0 1)))\n"
+  },
+  "nativeLearnerRun": {
+    "exitCode": 0,
+    "reportSha256": "bf0a40f2d44babdfc202d88c3bde96dcb6a0f94841fb2053b284071be08b25d9",
+    "report": {
+      "passed": true,
+      "nativeHarness": true,
+      "productionServe": false,
+      "vmAcceptance": false,
+      "fullAcceptanceComplete": false,
+      "evidence": "/tmp/gr8s-learner-native-ypo0455y",
+      "records": 1024,
+      "payloadBytes": 67108864,
+      "heapLimitMiB": 384,
+      "chunkDelay": 0.02,
+      "binarySha256": "6aa6a9f27f481457fe6108ce0b8b5ff4e298f03c75877c195eeed87cc1a85f32",
+      "partialTransfer": {
+        "offset": 1048576,
+        "total": 67347866,
+        "token": "098aada2-28d1-4eac-ba69-29c0361bc436"
+      },
+      "beforeInterruption": {
+        "role": "leader",
+        "selfRole": "voter",
+        "term": 1,
+        "quorumMembers": 1,
+        "commit": 3,
+        "applied": 3,
+        "lastIndex": 3,
+        "members": [
+          {
+            "id": "sink",
+            "role": "learner"
+          },
+          {
+            "id": "source",
+            "role": "voter"
+          }
+        ],
+        "blocked": false,
+        "heapLimitMiB": 384,
+        "resources": 1025,
+        "lastPayloadBytes": 65536,
+        "nonce": "9e7a9a919f234d7b94b785b380e93434"
+      },
+      "interruptedReceiver": {
+        "role": "follower",
+        "selfRole": "learner",
+        "term": 1,
+        "quorumMembers": 1,
+        "commit": 0,
+        "applied": 0,
+        "lastIndex": 0,
+        "members": [
+          {
+            "id": "sink",
+            "role": "learner"
+          }
+        ],
+        "blocked": true,
+        "heapLimitMiB": 384,
+        "nonce": "390d382f125c43cabad969991b6a2268"
+      },
+      "partialFilesBeforeSigkill": [
+        {
+          "path": "raft/.gr8s-raft-transfers-v2-1002/.raft-transfer-v2-qqJzwr/in-59480a5f-1704-463b-8139-5a6252a82372.snapshot",
+          "bytes": 1245184
+        }
+      ],
+      "disconnected": {
+        "role": "leader",
+        "selfRole": "voter",
+        "term": 1,
+        "quorumMembers": 1,
+        "commit": 5,
+        "applied": 5,
+        "lastIndex": 5,
+        "members": [
+          {
+            "id": "sink",
+            "role": "learner"
+          },
+          {
+            "id": "source",
+            "role": "voter"
+          }
+        ],
+        "blocked": false,
+        "heapLimitMiB": 384,
+        "resources": 1027,
+        "lastPayloadBytes": 65536,
+        "nonce": "0ef55727084e42d5953bed0892b0e558"
+      },
+      "sigkillExit": -9,
+      "promoted": {
+        "role": "leader",
+        "selfRole": "voter",
+        "term": 1,
+        "quorumMembers": 2,
+        "commit": 6,
+        "applied": 6,
+        "lastIndex": 6,
+        "members": [
+          {
+            "id": "sink",
+            "role": "voter"
+          },
+          {
+            "id": "source",
+            "role": "voter"
+          }
+        ],
+        "blocked": false,
+        "heapLimitMiB": 384,
+        "resources": 1027,
+        "lastPayloadBytes": 65536,
+        "nonce": "5c5a511e904546dcaf17e36d7c7e3301"
+      },
+      "restored": {
+        "role": "follower",
+        "selfRole": "voter",
+        "term": 1,
+        "quorumMembers": 2,
+        "commit": 6,
+        "applied": 6,
+        "lastIndex": 6,
+        "members": [
+          {
+            "id": "sink",
+            "role": "voter"
+          },
+          {
+            "id": "source",
+            "role": "voter"
+          }
+        ],
+        "blocked": false,
+        "heapLimitMiB": 384,
+        "resources": 1027,
+        "lastPayloadBytes": 65536,
+        "nonce": "90da8cf29f5140b696d8194bcdd73af5"
+      },
+      "repeatedJoin": {
+        "role": "leader",
+        "selfRole": "voter",
+        "term": 1,
+        "quorumMembers": 2,
+        "commit": 6,
+        "applied": 6,
+        "lastIndex": 6,
+        "members": [
+          {
+            "id": "sink",
+            "role": "voter"
+          },
+          {
+            "id": "source",
+            "role": "voter"
+          }
+        ],
+        "blocked": false,
+        "heapLimitMiB": 384,
+        "resources": 1027,
+        "lastPayloadBytes": 65536,
+        "nonce": "82a511eb6f5b46098db24f64abc6045d"
+      },
+      "largePayloadAcceptance": true,
+      "remaining": [
+        "VM execution",
+        "leader handoff during catch-up",
+        "production serve recovery integration"
+      ],
+      "sinkExit": 0,
+      "sourceExit": 0
+    }
+  },
+  "mergedCompilerVerification": {
+    "checks": 93,
+    "failures": 0,
+    "logSha256": "0ccd8afbc15dc77263b46ee5e9ea3c2c29164a754b36090ffeca5f2c6b45c0f7",
+    "exitCode": 0,
+    "mergeCommit": "4e727b0a53bf2c68fbe2364c9225a2ccc1a7638b",
+    "scope": "Independent BPF emitter relocation change; recorded Raft source hashes remain unchanged."
+  },
+  "compatibility": {
+    "frame": "@GR8SWAL1",
+    "newRecord": "(:commit INDEX)",
+    "legacyUnmarkedConfigurationTail": "Writable recovery refuses ambiguity; restore a trusted snapshot. Read-only inspection remains available.",
+    "olderBinary": "Readers without :commit support cannot consume new records.",
+    "upgradeRollbackFollowUp": "podster-ucm.7.1"
+  },
+  "remaining": [
+    "Production start-ha-control-plane still uses in-memory startup; durable wiring draft not enabled",
+    "Preserve pending application restore intent until WAL validation in serve startup",
+    "Register guarded application capture before enabling any automatic compaction",
+    "Production native multi-voter/witness restart, authenticated recovery and leader-handoff acceptance"
+  ]
+}
