@@ -166,3 +166,29 @@
               (sb-ext:process-kill process sb-posix:sigkill)
               (sb-ext:process-wait process))
             (sb-ext:process-close process))))))))
+
+(test published-bootstrap-never-rebuilds-a-lost-empty-or-corrupt-wal
+  (dolist (failure '(:missing :empty :corrupt))
+    (with-temporary-store (store root)
+      (let ((wal (merge-pathnames "raft/control-plane.log" root))
+            (journal (merge-pathnames "raft/bootstrap.json" root)))
+        (call-with-bootstrap-barriers store (lambda () (gr8s.resources::bootstrap-store-member-wal store "fresh")))
+        (if (eq failure :missing)
+            (delete-file wal)
+            (with-open-file (out wal :direction :output :if-exists :supersede)
+              (when (eq failure :corrupt) (write-string "not a WAL" out))))
+        (let ((before (when (probe-file wal) (uiop:read-file-string wal)))
+              (marker (uiop:read-file-string journal)))
+          (call-with-bootstrap-barriers store (lambda () (signals error (gr8s.resources::bootstrap-store-member-wal store "fresh"))))
+          (is (equal marker (uiop:read-file-string journal)))
+          (if (eq failure :missing)
+              (is (not (probe-file wal)))
+              (is (equal before (uiop:read-file-string wal)))))))))
+
+(test learner-zero-boundary-is-always-the-canonical-zero-term
+  (let ((digest (make-string 64 :initial-element #\a)))
+    (is (equal (list :gr8s-store-artifact 1 :index 0 :term 0 :sha256 digest)
+               (gr8s.resources::store-snapshot-artifact-reference 0 0 digest)))
+    (signals error (gr8s.resources::store-snapshot-artifact-reference 0 1 digest))
+    (signals error (gr8s.ha::make-member-generation-validator
+                    (gr8s::make-raft-member) 1 0 1 digest :recover t))))

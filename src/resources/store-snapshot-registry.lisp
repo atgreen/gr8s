@@ -6,6 +6,7 @@
   "Portable WAL identity; index zero is reserved for a local learner baseline."
   (unless (and (typep index '(integer 0 #.most-positive-fixnum))
                (typep term '(integer 0 #.most-positive-fixnum))
+               (or (plusp index) (zerop term))
                (stringp digest) (= 64 (length digest))
                (every (lambda (char) (find char "0123456789abcdef")) digest))
     (error "Invalid store snapshot artifact identity"))

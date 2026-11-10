@@ -574,11 +574,14 @@ The memory probe supports `GR8S_SNAPSHOT_LIVE_TRANSFER=1`: it starts a separate
 receiver process with a 384 MiB heap and checks that its live store loads the
 complete payload and publishes the applied boundary. Add
 `GR8S_SNAPSHOT_RECOVER_RECEIVER=1` to restart that receiver from its retained WAL
-artifact and confirm catch-up without retransmitting the artifact. For example:
+artifact and confirm catch-up without retransmitting the artifact. Add
+`GR8S_SNAPSHOT_BOOTSTRAP=1` to publish a fresh founder WAL from the resident store,
+reload that exact baseline and verify its current-term commit/readiness gate in the
+same constrained process. For example:
 
 ```sh
 GR8S_SNAPSHOT_LIVE_TRANSFER=1 GR8S_SNAPSHOT_RECOVER_RECEIVER=1 \
-  GR8S_SNAPSHOT_RELOAD=1 \
+  GR8S_SNAPSHOT_RELOAD=1 GR8S_SNAPSHOT_BOOTSTRAP=1 \
   sbcl --dynamic-space-size 384 --noinform --non-interactive \
   --load scripts/test-store-snapshot-memory.lisp
 ```

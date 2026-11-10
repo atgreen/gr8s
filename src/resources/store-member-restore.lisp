@@ -183,32 +183,32 @@ Production control-plane integration remains separate."
     (setf options (loop for (key value) on options by #'cddr
                         unless (member key '(:bootstrap-role :bootstrap-api-url))
                           append (list key value)))
-  (gr8s.store::quiesce-store-access store)
-  (let ((member nil) (completed nil))
-    (unwind-protect
-         (gr8s.store::call-with-store-application-barriers
-          store
-          (lambda ()
-            (when bootstrap-role
-              (unless (equal (merge-pathnames wal)
-                             (merge-pathnames "raft/control-plane.log" (pod-store-path store)))
-                (error "Fresh application bootstrap must use its member-root WAL"))
-              (bootstrap-store-member-wal store id :role bootstrap-role :api-url bootstrap-api-url))
-            (setf member
-                  (apply #'gr8s.raft.transport:start-raft-member id :storage-path wal
-                         :apply-fn (gr8s.ha::make-store-raft-apply-function store)
-                         :prepare-fn
-                         (lambda (incoming)
-                           (configure-member-store-restore incoming store :startup t)
-                           (setf (pod-store-consensus-commit-fn store) (gr8s.ha::make-store-raft-commit-function incoming)))
-                         :validate-recovery-fn
-                         (lambda (incoming recovered)
-                           (declare (ignore incoming))
-                           (validate-store-member-recovered-baseline store recovered))
-                         options))
-            (bt:with-lock-held ((gr8s.raft.transport:raft-member-lock member))
-              (gr8s.raft.transport:raft-member-enable-dynamic-membership member)
-              (gr8s.raft.transport:raft-member-reconcile-links member))
-            (setf completed t)
-            member))
-      (unless completed (when member (gr8s.raft.transport:stop-raft-member member)))))))
+    (gr8s.store::quiesce-store-access store)
+    (let ((member nil) (completed nil))
+      (unwind-protect
+           (gr8s.store::call-with-store-application-barriers
+            store
+            (lambda ()
+              (when bootstrap-role
+                (unless (equal (merge-pathnames wal)
+                               (merge-pathnames "raft/control-plane.log" (pod-store-path store)))
+                  (error "Fresh application bootstrap must use its member-root WAL"))
+                (bootstrap-store-member-wal store id :role bootstrap-role :api-url bootstrap-api-url))
+              (setf member
+                    (apply #'gr8s.raft.transport:start-raft-member id :storage-path wal
+                           :apply-fn (gr8s.ha::make-store-raft-apply-function store)
+                           :prepare-fn
+                           (lambda (incoming)
+                             (configure-member-store-restore incoming store :startup t)
+                             (setf (pod-store-consensus-commit-fn store) (gr8s.ha::make-store-raft-commit-function incoming)))
+                           :validate-recovery-fn
+                           (lambda (incoming recovered)
+                             (declare (ignore incoming))
+                             (validate-store-member-recovered-baseline store recovered))
+                           options))
+              (bt:with-lock-held ((gr8s.raft.transport:raft-member-lock member))
+                (gr8s.raft.transport:raft-member-enable-dynamic-membership member)
+                (gr8s.raft.transport:raft-member-reconcile-links member))
+              (setf completed t)
+              member))
+        (unless completed (when member (gr8s.raft.transport:stop-raft-member member)))))))

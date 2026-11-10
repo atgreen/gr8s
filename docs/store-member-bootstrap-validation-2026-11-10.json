@@ -1,0 +1,132 @@
+{
+  "date": "2026-11-10",
+  "issues": [
+    "podster-ucm.2.1.4.1",
+    "podster-ucm.2.8",
+    "podster-ucm.11.3.5"
+  ],
+  "commits": {
+    "raftConsistency": "656d789",
+    "bootstrap": "9d0991f",
+    "upstreamIntegration": "e2e8196391c9f8a4c81398d8534dbc0932cd917c",
+    "upstreamMain": "79efc4a"
+  },
+  "behavior": "Publish a private fsynced bootstrap journal under the stable WAL lease before data-file creation; retain a precise application artifact, atomically checkpoint the pristine WAL and durably mark publication. Resume each interrupted phase without recapturing a prepared baseline from later files. Founder uses index1/term0, learner uses local index0/term0; live snapshot installation remains positive-index only.",
+  "raftConsistencyFix": "An absent previous index cannot match term0. Reproduced learner snapshot0/last2/applied2/commit3 before the fix. Ten explicit rejection/retry checks now preserve contiguity; founder-to-learner artifact transfer succeeds.",
+  "validation": {
+    "initialBootstrapAndRecoveryChecks": 482,
+    "raftWitnessAndHAChecks": 4411,
+    "mergedChecks": 1037,
+    "mergedSelectorChecks": [
+      97,
+      167,
+      168,
+      62,
+      265,
+      21,
+      54,
+      16,
+      14,
+      3,
+      1,
+      15,
+      19,
+      48,
+      72,
+      15
+    ],
+    "failed": 0,
+    "skipped": 0,
+    "sourceProcessCrashPhases": [
+      "before WAL creation after durable journal",
+      "after retained artifact reference publication",
+      "after atomic WAL checkpoint publication",
+      "after final journal publication"
+    ],
+    "coverage": [
+      "Exact founder and learner baselines and idempotent pristine publication",
+      "Refusal of unjournaled or initialized WALs and mismatched member identity/role",
+      "Refusal to rebuild published missing, empty or corrupt WALs",
+      "WAL lease acquired before preparation callback or data-file creation, including callback failure cleanup",
+      "Four separate384MiB child processes killed with SIGKILL; retained baseline reused despite later local files and CA key SHA unchanged",
+      "Fresh learner stays blocked, installs founder snapshot and replicates later durable writes",
+      "Local zero boundary requires term0; positive live install boundary retained"
+    ],
+    "logs": [
+      {
+        "file": "gr8s-bootstrap-fixed2-tests.log",
+        "sha256": "db3c005728493c87a50d92a371ec33cfeeb5e72d62667b46116eca12b21f849b"
+      },
+      {
+        "file": "gr8s-bootstrap-raft-ha-tests.log",
+        "sha256": "b78affeccbe2812d5c060c288dbbb1718a14853e1efad9360c270bda81c29f23"
+      },
+      {
+        "file": "gr8s-bootstrap-final-merged-tests.log",
+        "sha256": "c1c0a9e5394be05ad0a11001301362a6293617df35f4f9cc6adae7b9ed14e8a5"
+      }
+    ]
+  },
+  "memory": {
+    "heapMiBPerProcess": 384,
+    "result": {
+      "passed": true,
+      "legacy": false,
+      "records": 1024,
+      "validatedRecords": 1028,
+      "materializedRecords": 1028,
+      "residentResourcesAfterOperation": 1024,
+      "reloadedSameStore": true,
+      "retainedArtifactAfterTransferCleanup": true,
+      "transferredArtifact": true,
+      "liveReceiver": {
+        "passed": true,
+        "liveApplicationRestore": true,
+        "startupRecovered": true,
+        "records": 1024,
+        "payloadBytes": 67108864,
+        "appliedIndex": 1,
+        "resourceRevision": 2
+      },
+      "bootstrapFounder": {
+        "passed": true,
+        "records": 1024,
+        "appliedIndex": 2,
+        "resourceRevision": 3
+      },
+      "payloadBytes": 67108864,
+      "artifactBytes": 67347643
+    },
+    "logSHA256": "14974362127263a1d3d0edb8de57cd61819ed24e6b0486bf5d779b23bbebba31",
+    "initialFailure": {
+      "heapMiB": 384,
+      "phase": "Second application reload full GC during founder startup",
+      "logSHA256": "8bff9b7aee01dbb6e603736c38d4c4e526be1850496685b1f259d82df898c31b"
+    },
+    "rootDiagnosis": {
+      "diagnosticHeapMiB": 768,
+      "acceptanceResult": false,
+      "finding": "Original probe-created resource table was directly pinned by the main-thread stack after reset. The later loaded/reset table was collectible. Seeding and assertions moved to separate functions; original payload/count/last-payload checks retained. No production reference leak is established by this fixture failure.",
+      "logSHA256": "5bad0ab34e1065a6dc40f5925f02870250c9a988a0a2f05a298fc4a473097ec1"
+    }
+  },
+  "sourceSHA256": {
+    "src/raft/core.lisp": "1f2d07c0fc9efb959263e81558e46f4ac726e49ca765a0f7156c271412aa2df1",
+    "src/raft/log.lisp": "1861fe77ffca8142ea474831dcba3c423722d7abacbc3f26038ff5fa44335188",
+    "src/resources/store-member-bootstrap.lisp": "ca79cd5fea59fe0e41dcb53253de971a7aec3ab98bdba2a64aad239d30b3ef5b",
+    "src/resources/store-member-restore.lisp": "2dfd2d0d301c71fd1f401d0eb7144de07d0a078ee674f771a39566e26eec5c8e",
+    "src/resources/store-snapshot-registry.lisp": "57e0de5c3ed9fc0c6220d0b94e65c0212a4654359e6f569105a44ad8ac65380f",
+    "src/ha/control-plane.lisp": "458fc1e679a106ad402a2b9b138838ee79f63e58eaa478ccd95b190c768b50bb",
+    "scripts/test-store-snapshot-memory.lisp": "7c8d84019d0ba12393601a2829b1a5c4e8874c94f7f7f29a659c2f2e514a255d"
+  },
+  "productionServeActivated": false,
+  "automaticCompactionEnabled": false,
+  "fullGoalComplete": false,
+  "remaining": [
+    "Production state-directory ownership before open-store, durable advertised endpoint and mode lifecycle",
+    "Learner-first requested-voter admission and durable promotion/catch-up intent: podster-ucm.2.9",
+    "Production caller/capture registration and native multi-voter/witness interrupted startup/reference-drain acceptance: podster-ucm.2.1.4",
+    "Compaction scheduling and retained-artifact lifecycle acceptance"
+  ],
+  "scope": "Source SBCL processes, loopback Raft, file persistence and fake application runtime. BPF diagnostic integration uses injected calls. No native or privileged runtime certification."
+}
