@@ -420,7 +420,8 @@ rotation guard only needs the cryptographic issuer relationship."
     (unless (and (probe-file retiring-certificate) (probe-file retiring-key))
       (error "no promoted cluster CA transition exists"))
     (let* ((retiring (first (pure-tls:load-certificate-chain retiring-certificate)))
-           (old-leaves (retiring-ca-local-leaves state-directory retiring)))
+           (old-leaves (retiring-ca-local-leaves
+                        (or store-directory state-directory) retiring)))
       (when old-leaves
         (error "refusing to finalize: credentials still use the retiring CA: ~{~A~^, ~}"
                old-leaves))

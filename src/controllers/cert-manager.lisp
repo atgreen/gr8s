@@ -74,10 +74,13 @@
                   (pure-tls/acme::encode-sequence
                    (pure-tls/acme::encode-oid '(1 3 6 1 5 5 7 3 1)))))))  ; serverAuth
     (when dns-names
-      (setf extensions (append extensions (list (pure-tls/acme::encode-san-extension dns-names)))))
+      (setf extensions
+            (append extensions
+                    (list (pure-tls/acme::encode-extension pure-tls/acme::*oid-subject-alt-name*
+                            (pure-tls/acme::encode-san-extension dns-names))))))
     extensions))
 
-(defun cm-issue-leaf (&key common-name dns-names duration-seconds issuer-subject-der signer-key)
+(defun cm-issue-leaf (&key common-name dns-names duration-seconds issuer-subject-der signer-key issuer-certificate)
   "Mint an EC P-256 server leaf. For a CA issuer pass ISSUER-SUBJECT-DER and
    SIGNER-KEY (the CA); for selfSigned leave both NIL (issuer = subject, signed
    with the leaf's own key). Returns (values cert-pem key-pem not-before not-after)."
@@ -99,7 +102,14 @@
                  (pure-tls/acme::encode-validity not-before not-after)
                  subject
                  (pure-tls/acme::encode-ec-public-key public-key)
-                 (pure-tls/acme::encode-x509-extensions (cm-server-leaf-extensions dns-names))))
+                 (pure-tls/acme::encode-x509-extensions
+                  (append (cm-server-leaf-extensions dns-names)
+                          (gr8s.security::certificate-key-identifier-extensions
+                           (gr8s.security::subject-public-key-identifier (pure-tls/acme::encode-ec-public-key public-key))
+                           (if issuer-certificate
+                               (gr8s.security::certificate-issuer-key-identifier issuer-certificate)
+                               (ironclad:digest-sequence :sha1
+                                 (getf (ironclad:destructure-private-key signer) :y))))))))
            (certificate-der (pure-tls/acme::encode-sequence
                              tbs algorithm
                              (pure-tls/acme::encode-bit-string (ecdsa-sign-der signer tbs)))))
@@ -127,7 +137,7 @@
    ca-key) for a ca issuer, or NIL for an unsupported/unknown type."
   (cond ((gethash "selfSigned" issuer-spec) :self-signed)
         ((gethash "ca" issuer-spec)
-         (values (csr-ca-subject-der pki) (cluster-pki-ca-private-key pki)))
+         (values (csr-ca-subject-der pki) (cluster-pki-ca-private-key pki) (cluster-pki-ca-certificate pki)))
         (t nil)))
 
 ;;; ---------------------------------------------------------------------------
@@ -213,14 +223,15 @@
          (secret-name (gethash "secretName" spec))
          (issuer-spec (cm-resolve-issuer-spec store namespace (gethash "issuerRef" spec))))
     (when issuer-spec
-      (multiple-value-bind (issuer-subject-der signer-key) (cm-issuer-signer pki issuer-spec)
+      (multiple-value-bind (issuer-subject-der signer-key issuer-certificate) (cm-issuer-signer pki issuer-spec)
         (when issuer-subject-der                       ; NIL => unsupported issuer type
           (multiple-value-bind (cert-pem key-pem not-before not-after)
               (cm-issue-leaf :common-name (gethash "commonName" spec)
                              :dns-names (coerce (gethash "dnsNames" spec #()) 'list)
                              :duration-seconds (cm-parse-duration (gethash "duration" spec))
                              :issuer-subject-der (unless (eq issuer-subject-der :self-signed) issuer-subject-der)
-                             :signer-key (unless (eq issuer-subject-der :self-signed) signer-key))
+                             :signer-key (unless (eq issuer-subject-der :self-signed) signer-key)
+                             :issuer-certificate issuer-certificate)
             (cm-write-tls-secret store namespace secret-name cert-pem key-pem certificate)
             (cm-set-ready-status store namespace name not-before not-after
                                  (cm-renewal-time spec not-before not-after))
