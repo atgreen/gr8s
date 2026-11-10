@@ -1242,3 +1242,25 @@
         (is (= 1 verified))
         (is (= 0 (hash-table-count (gr8s::service-lb-dataplane-upgrade-warnings dataplane))))
         (is (null (gr8s::service-lb-dataplane-gc-warning dataplane)))))))
+
+(test service-nat-policy-schema-is-separate-from-legacy-policy-state
+  (let* ((legacy (copy-tree gr8s.network::*egress-guard-map-forms*))
+         (forms (gr8s.network::service-nat-policy-map-forms)))
+    (flet ((spec (name) (find name forms :key #'second)))
+      (is (= 48 (getf (cddr (spec 'whistler::endpoint-identity)) :value-size)))
+      (is (= 32 (getf (cddr (spec 'whistler::netpol-flows-v2)) :key-size)))
+      (is (= 8 (getf (cddr (spec 'whistler::netpol-flows-v2)) :value-size)))
+      (is (= 128 (getf (cddr (spec 'whistler::gr8s-nat-id-v2)) :map-flags)))
+      (is (= 129 (getf (cddr (spec 'whistler::gr8s-nat-pod-v2)) :map-flags)))
+      (is-false (spec 'whistler::netpol-flows)))
+    (is (equal legacy gr8s.network::*egress-guard-map-forms*))
+    (is (= 32 (getf (cddr (find 'whistler::endpoint-identity legacy :key #'second)) :value-size)))
+    (is (= 12 (getf (cddr (find 'whistler::netpol-flows legacy :key #'second)) :key-size)))))
+
+(test legacy-policy-adoption-rejects-the-v2-local-identity-width
+  (let ((info (make-array 256 :element-type '(unsigned-byte 8) :initial-element 0)))
+    (loop for (offset value) in '((0 2) (8 4) (12 48) (16 1) (20 128))
+          do (replace info (gr8s::netlink-integer value 4) :start1 offset))
+    (signals gr8s::cni-error
+      (gr8s::cni-policy-map-info 42 "endpoint_identity"
+                               :object-info (lambda (fd) (declare (ignore fd)) info)))))

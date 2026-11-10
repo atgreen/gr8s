@@ -46,6 +46,10 @@ class Kernel(packet.Kernel):
             result, output, context = self.stage(NAMES[4], data, context)
             if result != packet.OK:
                 return result, output, context
+        return self.stage_raw(name, data, context)
+
+    def stage_raw(self, name, data, context=ZERO):
+        data = bytes(data)
         incoming, outgoing = ctypes.create_string_buffer(data), ctypes.create_string_buffer(len(data) + 256)
         ctx_in, ctx_out = ctypes.create_string_buffer(192), ctypes.create_string_buffer(192)
         ctypes.memmove(ctypes.addressof(ctx_in) + 48, context, 20)
