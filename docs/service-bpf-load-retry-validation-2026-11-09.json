@@ -1,0 +1,375 @@
+{
+  "date": "2026-11-09",
+  "issue": "podster-p9c.11",
+  "implementationCommit": "f6810bf40490fd4ccae681adab936183eba5ea50",
+  "integrationCommit": "cb91e80",
+  "integratedUpstream": "0b48297",
+  "scope": "Retry only EAGAIN immediately, at most5 syscalls per initial/logging phase, preserving first condition/all attempted failure errnos and successful FD ownership. No userspace delay, permanent-error retry loop or change to retained-pipeline verification/GC gating.",
+  "bounds": "Default at most10 total BPF_PROG_LOAD syscalls per program if both phases exhaust. Public per-phase budget1..16; invalid budgets fail before a syscall. Non-EAGAIN ends its phase immediately and does not consume the remaining EAGAIN allowance. The existing eight-endpoint preparation budget is unchanged; each preparation includes several separately bounded program loads.",
+  "loaderSuite": {
+    "passed": 352,
+    "failed": 0,
+    "logSHA256": "288a3138acce28006fd78b5ea878a2d80a65ebab772334157b18273185f56c07"
+  },
+  "networkingAndCNI": {
+    "passed": 1087,
+    "failed": 0,
+    "logSHA256": "ed6d93d2428b3d73f135e9edd1e4e6bd82f1b7e5cd510a12b2063911ed1aa8bb"
+  },
+  "integratedNetworkingCNIRaft": {
+    "passed": 5358,
+    "failed": 0,
+    "logSHA256": "53781eb2266340eb644222e7fda1caa0b52eab7a882eb3eaa935530a42bd3a1e"
+  },
+  "testCoverage": "Initial/logging EAGAIN-then-success, both-phase exhaustion, intervening permanent failures including EACCES subtype preservation, complete errno history, budget validation, previous loader checks and Networking/Service/CNI/NetworkPolicy/retained GC gating. Integrated gate adds Raft after upstream WAL framing changes.",
+  "native": {
+    "version": "gr8s 1.37.2-gf6810bf, patch level 0",
+    "sha256": "6f117931467f39d6ce123fa129f9a8a60fdcf3027f24afd0e2b734e97f9df488",
+    "buildLogSHA256": "534d47f8accf6c864af6d2b7f30ba8bd291c40a67ed39c7bab2513d4eed91f24",
+    "environment": "Disposable Fedora44 VM22291; two actual native containerd agents over VXLAN, one control plane, no debug server. Private leases provisioned/withdrawn offline; no packet source-NAT claim. Native source predates unrelated upstream WAL framing integration; the combined-source unit gate is separate.",
+    "reportSHA256": "03d15dc0adac526b17bba3a9f6a7311d5540bbe470fbf50f465a5763472e2100",
+    "report": {
+      "root": "/var/tmp/gr8s-two-node.ro48da5v",
+      "checks": [
+        {
+          "name": "noPrivateIdentitiesBeforeLease",
+          "passed": true,
+          "observed": [
+            [],
+            []
+          ]
+        },
+        {
+          "name": "authenticatedIdentityProjected",
+          "passed": true,
+          "observed": [
+            [
+              {
+                "podUID": "ba115e86-7496-48f4-9f39-dd830da1a604",
+                "nodeID": "df06243c-fed0-447f-881e-fd6f11fdc4c9",
+                "nodeName": "worker-0",
+                "podIP": "10.80.0.1",
+                "address": "10.80.0.2",
+                "sandboxID": "aa2c28228766a27b3b527f31ffeb5b3ead210d00f950cf1152ab0c685235cd82",
+                "interfaceName": "eth0"
+              }
+            ],
+            [
+              {
+                "podUID": "ba115e86-7496-48f4-9f39-dd830da1a604",
+                "nodeID": "df06243c-fed0-447f-881e-fd6f11fdc4c9",
+                "nodeName": "worker-0",
+                "podIP": "10.80.0.1",
+                "address": "10.80.0.2",
+                "sandboxID": "aa2c28228766a27b3b527f31ffeb5b3ead210d00f950cf1152ab0c685235cd82",
+                "interfaceName": "eth0"
+              }
+            ]
+          ]
+        },
+        {
+          "name": "privateIdentityHiddenFromPodStatus",
+          "passed": true,
+          "observed": {
+            "conditions": [
+              {
+                "lastTransitionTime": "2026-11-10T00:57:08Z",
+                "observedGeneration": 1,
+                "status": "True",
+                "type": "PodScheduled"
+              },
+              {
+                "lastTransitionTime": "2026-11-10T00:57:08Z",
+                "observedGeneration": 1,
+                "status": "True",
+                "type": "Initialized"
+              },
+              {
+                "lastTransitionTime": "2026-11-10T00:57:38Z",
+                "observedGeneration": 1,
+                "status": "True",
+                "type": "ContainersReady"
+              },
+              {
+                "lastTransitionTime": "2026-11-10T00:57:38Z",
+                "observedGeneration": 1,
+                "status": "True",
+                "type": "Ready"
+              }
+            ],
+            "containerStatuses": [
+              {
+                "containerID": "containerd://481213b3ede28aa2881f8f017e65a4612c6ccdeed44084dfa7832e2949ca459a",
+                "image": "registry.k8s.io/e2e-test-images/agnhost:2.66.1",
+                "imageID": "sha256:2f0df2a116185c62076f0ecf923662cb00ac107da66d057c8d514313dc8f38d5",
+                "name": "netexec",
+                "ready": true,
+                "resources": {},
+                "restartCount": 0,
+                "started": true,
+                "state": {
+                  "running": {
+                    "startedAt": "2026-11-10T00:57:12Z"
+                  }
+                }
+              }
+            ],
+            "hostIP": "198.18.253.2",
+            "hostIPs": [
+              {
+                "ip": "198.18.253.2"
+              }
+            ],
+            "observedGeneration": 1,
+            "phase": "Running",
+            "podIP": "10.80.0.1",
+            "podIPs": [
+              {
+                "ip": "10.80.0.1"
+              }
+            ],
+            "qosClass": "BestEffort",
+            "startTime": "2026-11-10T00:57:08Z"
+          }
+        },
+        {
+          "name": "workloadsUnchangedAfterLease",
+          "passed": true,
+          "observed": [
+            {
+              "uid": "ba115e86-7496-48f4-9f39-dd830da1a604",
+              "ip": "10.80.0.1",
+              "containers": [
+                "containerd://481213b3ede28aa2881f8f017e65a4612c6ccdeed44084dfa7832e2949ca459a"
+              ]
+            },
+            {
+              "uid": "705e5f97-c615-4412-9d1c-ff80f9240adb",
+              "ip": "10.80.16.1",
+              "containers": [
+                "containerd://7d512cba427fc0e26d98c50d51c2456b9d2eef39fa1a8e42f470162058f3ef97"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "privateIdentityCheckpointed",
+          "passed": true,
+          "observed": {
+            "address": "10.80.0.2",
+            "podIP": "10.80.0.1",
+            "sandboxID": "aa2c28228766a27b3b527f31ffeb5b3ead210d00f950cf1152ab0c685235cd82",
+            "interfaceName": "eth0",
+            "podUID": "ba115e86-7496-48f4-9f39-dd830da1a604",
+            "nodeName": "worker-0",
+            "nodeID": "df06243c-fed0-447f-881e-fd6f11fdc4c9"
+          }
+        },
+        {
+          "name": "identityRetainedAcrossOwnerRestart",
+          "passed": true,
+          "observed": [
+            [
+              {
+                "podUID": "ba115e86-7496-48f4-9f39-dd830da1a604",
+                "nodeID": "df06243c-fed0-447f-881e-fd6f11fdc4c9",
+                "nodeName": "worker-0",
+                "podIP": "10.80.0.1",
+                "address": "10.80.0.2",
+                "sandboxID": "aa2c28228766a27b3b527f31ffeb5b3ead210d00f950cf1152ab0c685235cd82",
+                "interfaceName": "eth0"
+              }
+            ],
+            [
+              {
+                "podUID": "ba115e86-7496-48f4-9f39-dd830da1a604",
+                "nodeID": "df06243c-fed0-447f-881e-fd6f11fdc4c9",
+                "nodeName": "worker-0",
+                "podIP": "10.80.0.1",
+                "address": "10.80.0.2",
+                "sandboxID": "aa2c28228766a27b3b527f31ffeb5b3ead210d00f950cf1152ab0c685235cd82",
+                "interfaceName": "eth0"
+              }
+            ]
+          ]
+        },
+        {
+          "name": "identityWithdrawnOnBothNodes",
+          "passed": true,
+          "observed": [
+            [],
+            []
+          ]
+        },
+        {
+          "name": "publicStatusStillPrivate",
+          "passed": true,
+          "observed": {
+            "conditions": [
+              {
+                "lastTransitionTime": "2026-11-10T00:57:08Z",
+                "observedGeneration": 1,
+                "status": "True",
+                "type": "PodScheduled"
+              },
+              {
+                "lastTransitionTime": "2026-11-10T00:57:08Z",
+                "observedGeneration": 1,
+                "status": "True",
+                "type": "Initialized"
+              },
+              {
+                "lastTransitionTime": "2026-11-10T00:57:38Z",
+                "observedGeneration": 1,
+                "status": "True",
+                "type": "ContainersReady"
+              },
+              {
+                "lastTransitionTime": "2026-11-10T00:57:38Z",
+                "observedGeneration": 1,
+                "status": "True",
+                "type": "Ready"
+              }
+            ],
+            "containerStatuses": [
+              {
+                "containerID": "containerd://481213b3ede28aa2881f8f017e65a4612c6ccdeed44084dfa7832e2949ca459a",
+                "image": "registry.k8s.io/e2e-test-images/agnhost:2.66.1",
+                "imageID": "sha256:2f0df2a116185c62076f0ecf923662cb00ac107da66d057c8d514313dc8f38d5",
+                "name": "netexec",
+                "ready": true,
+                "resources": {},
+                "restartCount": 0,
+                "started": true,
+                "state": {
+                  "running": {
+                    "startedAt": "2026-11-10T00:57:12Z"
+                  }
+                }
+              }
+            ],
+            "hostIP": "198.18.253.2",
+            "hostIPs": [
+              {
+                "ip": "198.18.253.2"
+              }
+            ],
+            "observedGeneration": 1,
+            "phase": "Running",
+            "podIP": "10.80.0.1",
+            "podIPs": [
+              {
+                "ip": "10.80.0.1"
+              }
+            ],
+            "qosClass": "BestEffort",
+            "startTime": "2026-11-10T00:57:08Z"
+          }
+        },
+        {
+          "name": "nativeTrafficAfterWithdrawal",
+          "passed": true,
+          "observed": [
+            "two-node-1",
+            "two-node-0"
+          ]
+        }
+      ],
+      "lease": {
+        "podIP": "10.80.0.1",
+        "address": "10.80.0.2",
+        "sandboxID": "aa2c28228766a27b3b527f31ffeb5b3ead210d00f950cf1152ab0c685235cd82",
+        "interfaceName": "eth0"
+      },
+      "passed": true,
+      "cleanupCompleted": true
+    },
+    "logs": {
+      "agent-0.log": {
+        "sha256": "875d683a926e4e457018be4bb0ae065ed21b4d2727741fd8d7e0ce4735691cff",
+        "events": [
+          "gr8s: Service flow GC verified 1 retained endpoint pipelines",
+          "gr8s: Service flow GC verified 1 retained endpoint pipelines",
+          ";; BPF load recovered after 1 EAGAIN retries (initial phase)",
+          "gr8s: Service flow GC verified 1 retained endpoint pipelines"
+        ],
+        "gcVerifiedAfterLastDeferral": true,
+        "cniAddTimeouts": 0
+      },
+      "agent-1.log": {
+        "sha256": "014e94bcd17aadd8709316b5e51ab8a36c50e4a02c53721195fa56a8338caeee",
+        "events": [
+          "gr8s: Service packet upgrade deferred for /var/tmp/gr8s-two-node.ro48da5v/agent-1/containerd/bpf/0b8851be1f039533b6ecaf14eeb5f276fd61f47ca221a1ae1c9fd748685a987a/: BPF error in open pinned BPF object at /var/tmp/gr8s-two-node.ro48da5v/agent-1/containerd/bpf/0b8851be1f039533b6ecaf14eeb5f276fd61f47ca221a1ae1c9fd748685a987a/gr8s_pkt_stages: errno 2 (No such file or directory)",
+          "gr8s: Service flow GC deferred: packet pipeline upgrades are pending"
+        ],
+        "gcVerifiedAfterLastDeferral": false,
+        "cniAddTimeouts": 0
+      },
+      "control.log": {
+        "sha256": "4726d13f9602f60268a0b07dfc5c30b6890ca5cae668dfa8aaff4650a41b82ce",
+        "events": [],
+        "gcVerifiedAfterLastDeferral": true,
+        "cniAddTimeouts": 0
+      }
+    }
+  },
+  "observedRecovery": "Actual agent0 program load recovered after one EAGAIN retry in the initial phase, followed by verification of1 retained endpoint pipeline. All9 workload/identity/restart/withdrawal/native HTTP checks and cleanup pass.",
+  "otherObservedDeferral": "Agent1 logged a missing-stage-pin ENOENT and deferred GC. Its log contains no later positive-endpoint verification line before cleanup. This is retained as observed evidence; no zero-deferral or all-worker-GC-verification claim.",
+  "kernelProbe": {
+    "binarySHA256": "d7a743a225627593043adc077e78639b231bf3f7eda60bcbda506026263fc581",
+    "buildLogSHA256": "d8772ae9bf27bdd6b27f938799de8b5c957cfd397b39438c32f05837d78e415a",
+    "reportSHA256": "5b166b1c74bae7067724b441ffdda5d0faf4abd7eeb2bc15e5cac496ada4f29b",
+    "report": {
+      "passed": true,
+      "checks": [
+        {
+          "name": "validProgramLoads",
+          "passed": true
+        },
+        {
+          "name": "validProgramFDClosed",
+          "passed": true
+        },
+        {
+          "name": "shortLogPreservesInitialAndRetryErrors",
+          "passed": true,
+          "initialErrno": 13,
+          "retryErrno": 28,
+          "logBufferSize": 8,
+          "log": "read 0\n",
+          "reported": "BPF program load failed: initial BPF error in prog-load: errno 13 (Permission denied); logging retry errno 28 (No space left on device); verifier log 7/8 bytes; attempt errnos (13\n                                                                                                                                                                                 28)\nread 0\n"
+        },
+        {
+          "name": "fullLogPreservesVerifierRejection",
+          "passed": true,
+          "initialErrno": 13,
+          "retryErrno": 13,
+          "logBufferSize": 65536,
+          "log": "func#0 @0\nLive regs before insn:\n      0: 0......... (95) exit\n0: R1=ctx() R10=fp0\n0: (95) exit\nR0 !read_ok\nverification time 22 usec\nstack depth 0\nprocessed 1 insns (limit 1000000) max_states_per_insn 0 total_states 0 peak_states 0 mark_read 0\n",
+          "reported": "BPF program load failed: initial BPF error in prog-load: errno 13 (Permission denied); logging retry errno 13 (Permission denied); verifier log 245/65536 bytes; attempt errnos (13\n                                                                                                                                                                                 13)\nfunc#0 @0\nLive regs before insn:\n      0: 0......... (95) exit\n0: R1=ctx() R10=fp0\n0: (95) exit\nR0 !read_ok\nverification time 22 usec\nstack depth 0\nprocessed 1 insns (limit 1000000) max_states_per_insn 0 total_states 0 peak_states 0 mark_read 0\n"
+        },
+        {
+          "name": "controlledEagainRetryReturnsAndClosesRealProgramFD",
+          "passed": true,
+          "calls": 2,
+          "trace": ";; BPF load recovered after 1 EAGAIN retries (initial phase)\n"
+        },
+        {
+          "name": "controlledLoggingEagainPreservesRealVerifierFailure",
+          "passed": true,
+          "calls": 3,
+          "attemptErrnos": [
+            13,
+            11,
+            13
+          ],
+          "reported": "BPF program load failed: initial BPF error in prog-load: errno 13 (Permission denied); logging retry errno 13 (Permission denied); verifier log 245/65536 bytes; attempt errnos (13\n                                                                                                                                                                                 11\n                                                                                                                                                                                 13)\nfunc#0 @0\nLive regs before insn:\n      0: 0......... (95) exit\n0: R1=ctx() R10=fp0\n0: (95) exit\nR0 !read_ok\nverification time 24 usec\nstack depth 0\nprocessed 1 insns (limit 1000000) max_states_per_insn 0 total_states 0 peak_states 0 mark_read 0\n"
+        }
+      ]
+    },
+    "scope": "Six real-kernel probe checks. Two explicitly inject EAGAIN at the syscall boundary: a successful retry returns an actual kernel program FD that closes, and a logging retry preserves real verifier EACCES with13/11/13 history. Four prior checks cover valid FD lifecycle and actual invalid-program EACCES/ENOSPC logs. The injected EAGAIN is distinct from the natural agent0 recovery."
+  },
+  "reference": "https://github.com/torvalds/linux/blob/master/tools/lib/bpf/bpf.c (sys_bpf_prog_load bounded EAGAIN retry rule).",
+  "limits": "Origin of the initial EAGAIN remains unproven. No throughput, physical multi-host, certified-conformance or complete-parent claim.",
+  "remainingParent": "Source-NAT/hairpin/collision child10, IPv6 packet NAT, packet NodePort policies/source/health checks and broader live Service semantics remain active."
+}
