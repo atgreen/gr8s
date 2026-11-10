@@ -4,6 +4,29 @@
 (def-suite store-snapshot-registry :in gr8s)
 (in-suite store-snapshot-registry)
 
+(test publication-validates-new-inode-once-and-rechecks-existing-winners
+  (with-temporary-store (store root)
+    (let ((source (merge-pathnames "transfer.jsonl" root))
+          (validate (symbol-function 'gr8s.resources::validate-store-snapshot))
+          (scans 0))
+      (gr8s.resources::capture-store-snapshot store source 42 7)
+      (let ((digest (snapshot-test-digest source)))
+        (unwind-protect
+             (progn
+               (setf (symbol-function 'gr8s.resources::validate-store-snapshot)
+                     (lambda (path &rest args)
+                       (incf scans)
+                       (apply validate path args)))
+               (let ((target (gr8s.resources::retain-store-snapshot-artifact root source 42 7 digest)))
+                 (is (= 1 scans))
+                 (setf scans 0)
+                 (is (equal target (gr8s.resources::retain-store-snapshot-artifact root source 42 7 digest)))
+                 (is (= 2 scans))
+                 (with-open-file (out target :direction :output :if-exists :append)
+                   (write-line "corrupt" out))
+                 (signals error (gr8s.resources::retain-store-snapshot-artifact root source 42 7 digest))))
+          (setf (symbol-function 'gr8s.resources::validate-store-snapshot) validate))))))
+
 (test retained-artifacts-survive-source-cleanup-and-reopen
   (with-temporary-store (store root)
     (let ((source (merge-pathnames "transfer.jsonl" root)))
