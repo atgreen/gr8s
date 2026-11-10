@@ -237,6 +237,37 @@ def exercise(runner):
     for wire, original, vip in wires:
         reply(wire, original, vip, 80)
     cases += 17
+    owner(runner, CLIENT, ALIAS, 9)
+    # A partially withdrawn alias row must not authorize source translation.
+    alias_key = ipaddress.ip_address(ALIAS).packed
+    saved = runner.lookup(IDENT, alias_key)
+    disabled = bytearray(saved)
+    struct.pack_into("<I", disabled, 4, 0x20000)
+    runner.update(IDENT, alias_key, disabled)
+    stage(NAMES[0], packet.packet(destination="10.96.0.20", sport=49000, protocol=17), verdict=packet.SHOT)
+    runner.update(IDENT, alias_key, saved)
+    # Source-preserved Service bindings also need a known backend incarnation.
+    packet.publish(runner, 17, vip="10.96.0.24")
+    original = packet.packet(destination="10.96.0.24", sport=49001, protocol=17)
+    backend_key = ipaddress.ip_address(BACKEND).packed
+    saved = runner.lookup(IDENT, backend_key)
+    runner.delete(IDENT, backend_key)
+    stage(NAMES[0], original, verdict=packet.SHOT)
+    runner.update(IDENT, backend_key, saved)
+    wire = forward(original)
+    reply(wire, original, "10.96.0.24", 80)
+    # Replacing the backend owner must neither accept an old reply nor retarget
+    # the live flow on its next request. Fresh flows may use the new incarnation.
+    binding = runner.lookup(FWD, key(original))
+    owner(runner, BACKEND, BACK_ALIAS, 42)
+    response = packet.packet(BACKEND, CLIENT, 8080, 49001, 17)
+    stage(NAMES[2], response, verdict=packet.SHOT)
+    stage(NAMES[0], original, verdict=packet.SHOT)
+    assert runner.lookup(FWD, key(original)) == binding
+    fresh = packet.packet(destination="10.96.0.24", sport=49002, protocol=17)
+    wire = forward(fresh)
+    reply(wire, fresh, "10.96.0.24", 80)
+    cases += 3
     return cases
 
 

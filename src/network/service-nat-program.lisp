@@ -129,6 +129,7 @@ Expand only PKT macros: ordinary Lisp/Whistler control forms must stay source."
                        (/= (load u32 owner 0) (load u32 ,state 32))) (setf valid 0))
              (let ((alias (map-lookup-ptr gr8s-nat-id-v2 (+ ,state 32))))
                (unless (and (nat-owner-p alias (gr8s-pkt-flow-source ,original) 2)
+                            (/= (logand (load u32 alias 4) 1) 0)
                             (= (load u32 alias 0) (load u32 ,state 32))
                             (= (load u64 alias 8) (load u64 ,state 16))
                             (= (load u64 alias 16) (load u64 ,state 24)))
@@ -141,9 +142,15 @@ Expand only PKT macros: ordinary Lisp/Whistler control forms must stay source."
                         (or (= (logand (load u8 ,state 38) 2) 0)
                             (/= (logand (load u32 backend 4) 4) 0)))
              (setf valid 0))))
-       (when (and (/= (logand (load u8 ,state 38) 2) 0) (= (load u32 ,state 44) 0))
+       (when (and (/= (load u8 ,state 38) 0) (= (load u32 ,state 44) 0))
          (setf valid 0)))
      valid))
+
+(defmacro nat-same-source-incarnation (state original)
+  `(let ((owner (map-lookup-ptr gr8s-nat-id-v2 ,original)))
+     (and (nat-owner-p owner (gr8s-pkt-flow-source ,original) 1)
+          (= (load u64 owner 8) (load u64 ,state 16))
+          (= (load u64 owner 16) (load u64 ,state 24)))))
 
 (defmacro nat-retire (original state probe)
   `(progn
@@ -257,8 +264,15 @@ alias ports. Only an identical original tuple/incarnation may adopt a claim."
       (pkt-lock :forward flow)
       (when-let ((held (map-lookup-ptr gr8s-nat-fwd-v2 flow)))
         (nat-copy state held 64)
-        (if (and (nat-live-p state flow) (/= (nat-valid-state state flow) 0))
-            (setf have 1)
+        (if (nat-live-p state flow)
+            (if (/= (nat-valid-state state flow) 0)
+                (setf have 1)
+                ;; Revoking a receiver/alias or replacing a backend must not
+                ;; silently retarget an active connection. A new source owner
+                ;; may retire its predecessor's binding under paired locks.
+                (if (nat-same-source-incarnation state flow)
+                    (pkt-drop failed)
+                    (nat-retire flow state probe)))
             (nat-retire flow state probe)))
       (when (= have 0)
         ;; A retired binding must not leave old kind/backend epochs in the new one.
