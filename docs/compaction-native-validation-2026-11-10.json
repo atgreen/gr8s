@@ -1,0 +1,87 @@
+{
+  "scope": "Single-member automatic compaction, in-place application recovery, and separate cold-process recovery",
+  "testedSourceCommit": "910f8d4505dae548c49aa64a7e0327376ea4cf2d",
+  "testedSourceTree": "3f51a19c256057194e6080e76fac717162fb8d04",
+  "result": {
+    "passed": true,
+    "evidence": "/tmp/gr8s-compaction-native-un4ue6p8",
+    "binarySha256": "712b63f76c7cab8fb6e61844550dee8d4ca5a5a2392b4a155449cfe2ae9ca209",
+    "requestedRounds": 2048,
+    "timeoutSeconds": 3600.0,
+    "exitCode": 0,
+    "nativeReport": {
+      "passed": true,
+      "nativeHarness": true,
+      "productionServe": false,
+      "vmAcceptance": false,
+      "automaticWorker": true,
+      "productionDefaultEnabled": false,
+      "rounds": 2048,
+      "payloadBytesWritten": 134217728,
+      "walTriggerBytes": 16777216,
+      "historyClockFrozen": true,
+      "historyClock": 4003312851,
+      "historyByteBudget": 100663296,
+      "heapLimitMiB": 384,
+      "checkpoints": 93,
+      "sampledMaxWalBytes": 2923640,
+      "sampledMaxArtifactCount": 2,
+      "sampledMaxHistoryEstimatedBytes": 100656464,
+      "samples": 65,
+      "memberPort": 40473,
+      "inPlaceMemberRecovery": true,
+      "sentinelRecovered": true
+    },
+    "coldExitCode": 0,
+    "coldRecoveryReport": {
+      "passed": true,
+      "phase": "cold-recovery",
+      "heapLimitMiB": 384,
+      "loadedHistoryEstimatedBytes": 100656464,
+      "historyEstimatedBytes": 610144,
+      "coldRecovery": true,
+      "sentinelRecovered": true
+    },
+    "elapsedSeconds": 1593.922305741813
+  },
+  "memoryObservation": {
+    "measurement": "SBCL dynamic-space limit, not operating-system RSS",
+    "maximumSampledHeapAfterGcBytes": 241255312,
+    "finalSample": {
+      "resourceRevision": 4099,
+      "heapAfterGcBytes": 232490192,
+      "historyEstimatedBytes": 100656464,
+      "historyUniqueBytes": 68842680,
+      "logRetainedEntries": 11,
+      "logCommandHeapBytes": 2904484
+    },
+    "historyBudget": "Unchanged96MiB physical allocation estimate including large-string allocator pages"
+  },
+  "nonemptyRecoveryFixture": [
+    {
+      "checkpointBytes": 130354588,
+      "journalBytes": 59844018,
+      "location": "cold-state/application-generations/c15ad730-e166-4d11-84b6-58f9701641cd/objects/state.json"
+    }
+  ],
+  "limitations": [
+    "Internal loopback coordinator; no production serve, multiple-member availability, containers, BPF, TLS, VM or conformance acceptance.",
+    "Automatic compaction remains disabled by default pending asynchronous application freezing and multi-member availability proof.",
+    "The native binary predates e29ed80 prepared-compaction core refactor and the subsequent streamed Secret metadata update; these require their own scoped evidence.",
+    "Live object memory remains proportional to the current cluster; history and pending-command budgets do not cap the entire process."
+  ],
+  "priorFailures": [
+    {
+      "evidence": "/tmp/gr8s-compaction-native-ae_zvu_a/result.json",
+      "result": "Full write body passed; aggregate checkpoint parsing exhausted the heap during reopening."
+    },
+    {
+      "evidence": "/tmp/gr8s-compaction-native-k20imc0x/result.json",
+      "result": "Full write body passed; reopening with old store still retained exhausted the heap before recovery-root and lifecycle corrections."
+    },
+    {
+      "evidence": "/tmp/gr8s-compaction-native-rlwbnuf9/result.json",
+      "result": "Full write body passed; restart refused the already-blocked shutdown gate. Checked owned-gate handoff regression added before the passing run."
+    }
+  ]
+}
