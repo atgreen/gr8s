@@ -1,0 +1,24 @@
+{
+  "newRequestVerdict": 2,
+  "expectedVerdict": 0,
+  "receiverRows": 1,
+  "receiverIndexes": 1,
+  "translatedTuple": [
+    "10.88.0.2",
+    "10.88.1.3",
+    43017,
+    8080
+  ],
+  "passed": false,
+  "kernel": false,
+  "issue": "podster-p9c.19",
+  "scope": "Interpreter diagnostic using raw-offset-corrected stages and the standalone collector with matching map schemas. Not canonical full-rebuild or kernel proof.",
+  "probe": "scripts/probe-service-receiver-reuse.py",
+  "probeSHA256": "160a14bbb9dcb0d737d0cf644ce8076c184a01ffe6310321573c9d6ab6b00ffe",
+  "sequence": [
+    "Deliver UDP ServiceA request.",
+    "Age both nodes179seconds. Backend emits reply, refreshing RX; reply is lost.",
+    "Age both nodes2seconds. Collect expired source FWD/REV; backend RX remains live.",
+    "Send ServiceB using the same source port and backend. Receiver incorrectly drops it through the tuple-only RI."
+  ]
+}
