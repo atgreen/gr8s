@@ -26,6 +26,11 @@ The standalone tuple engine has no local endpoint map and leaves this disabled."
     ;; role: primary=1, alias=2. Programs cannot modify authoritative identities.
     (whistler::defmap whistler::gr8s-nat-id-v2 :type :hash
       :key-size 4 :value-size 32 :max-entries 65536 :map-flags 128)
+    ;; (backend IPv4, port, protocol) pairs advertised by any Service. A
+    ;; local source using one of these tuples can form an inverse Service
+    ;; request with a peer before either node observes ingress.
+    (whistler::defmap whistler::gr8s-nat-risk-v2 :type :hash
+      :key-size 8 :value-size 4 :max-entries 65536 :map-flags 1)
     (whistler::defmap whistler::gr8s-nat-st-v2 :type :array
       :key-size 4 :value-size 8 :max-entries 7)))
 
@@ -363,6 +368,19 @@ alias ports. Only an identical original tuple/incarnation may adopt a claim."
                    (or (= (logand owner-flags 2) 0)
                        (= (cast u32 (gr8s-nat-state-backend state)) (gr8s-pkt-flow-source flow))))
           (setf (gr8s-nat-state-kind state) 3 (gr8s-nat-state-wire-source state) alias))
+        ;; A Service request originating from a published backend tuple can
+        ;; be the exact inverse of an independent peer request. Neither node
+        ;; can detect that race from its own conntrack history. Use the
+        ;; endpoint's private return address before emitting the request;
+        ;; ordinary source tuples retain their original address and port.
+        (when (= (logand (gr8s-nat-state-kind state) 1) 1)
+          (let ((risk-key u64
+                  (logior (cast u64 (gr8s-pkt-flow-source flow))
+                          (<< (cast u64 (gr8s-pkt-flow-sport flow)) 32)
+                          (<< (cast u64 (gr8s-pkt-flow-protocol flow)) 48))))
+            (when (/= (map-lookup gr8s-nat-risk-v2 risk-key) 0)
+              (setf (gr8s-nat-state-kind state) 3
+                    (gr8s-nat-state-wire-source state) alias))))
         (nat-reserve-candidates flow state probe alias)
         (when (/= (map-update-ptr gr8s-nat-fwd-v2 flow state 1) 0) (pkt-drop failed)))
       (unless (nat-local-source-p flow state) (pkt-drop failed))

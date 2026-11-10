@@ -1,0 +1,31 @@
+{
+  "date": "2026-11-10",
+  "scope": "Staged v2 primary and private return-address identities from a validated replicated network inventory",
+  "host": {
+    "serviceLbChecks": 417,
+    "failures": 0,
+    "nativeBuild": "passed",
+    "pythonSyntax": "passed",
+    "diffCheck": "passed"
+  },
+  "vm": {
+    "image": "Fedora 44 under QEMU/KVM, real root",
+    "runner": "scripts/test-service-v2-staging.py",
+    "result": "passed",
+    "source": "synthetic validated Service translation record restored from network.json after an agent restart",
+    "primary": "10.80.0.11",
+    "privateReturnAddress": "10.80.0.12",
+    "pinnedMap": "gr8s_nat_id_v2",
+    "rowSizeBytes": 32,
+    "rows": 2,
+    "flags": "0x00020001, enabled ABI v2 only",
+    "epoch": "the primary and return rows shared a nonzero 128-bit incarnation token",
+    "roles": [1, 2],
+    "otherChecks": ["managed Pod CIDR lookup", "unready EndpointSlice TCP and UDP backend risk keys"]
+  },
+  "limitations": [
+    "The restored identity record was synthetic; live Pod observation and cross-node publication were not exercised.",
+    "Complete-history and receiver-readiness bits remain clear. The v2 TC endpoint graph is not installed.",
+    "Publication fencing, stale-identity retirement and safe risk-key reclamation remain outstanding."
+  ]
+}
