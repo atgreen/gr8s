@@ -1,0 +1,47 @@
+{
+  "date": "2026-11-11",
+  "issue": "podster-ucm.11.9.1",
+  "baseline": "a9a327f",
+  "sourceSha256": {
+    "src/protocol/grpc-close-compat.lisp": "9ca4002bb3817da5179a77c1c2f299c59688a48f143d3d6c598cd53708a1db8a",
+    "tests/grpc-close-test.lisp": "401f808a390e24be34fae36c4e7080b684dc4f93cc5d05ad7e097a8be34a3616",
+    "scripts/probe-http2-close-buffer.lisp": "8477ac40358d5da2350eb830dd1880a1a560e1445e56f472ad11c8842b7f76e5"
+  },
+  "passed": true,
+  "integration": {
+    "exitCode": 0,
+    "checks": 822,
+    "suites": {
+      "GRPC-CLOSE": 197,
+      "HA-CONTROL-PLANE": 195,
+      "APISERVER-METRICS": 95,
+      "RAFT-TLS": 103,
+      "SERVICE-ACCOUNTS": 173,
+      "STORE-SNAPSHOT-MATERIALIZE": 59
+    },
+    "log": "/tmp/gr8s-http2-safe-close-integration.log"
+  },
+  "standaloneProbe": {
+    "command": "sbcl --noinform --non-interactive --load scripts/probe-http2-close-buffer.lisp",
+    "exitCode": 0,
+    "bufferTailBefore": 1,
+    "bufferTailAfter": 1,
+    "mutatedWhileWriterOwnedLock": false,
+    "socketReleasedAfterWriterUnlock": true
+  },
+  "covered": [
+    "Bounded close while a writer holds connection-write-lock",
+    "Output buffer and stream retained until writer releases lock",
+    "Cancellation handoff while the caller owns the write lock",
+    "Real socket backpressure: shutdown wakes writer before disposal",
+    "No stale DATA replay before GOAWAY",
+    "Repeated and overlapping close cannot shutdown reused descriptors",
+    "Pending cleanup callbacks and message/flow waiters",
+    "Original HA/API/TLS/service-account suite order plus snapshot materialization"
+  ],
+  "limits": [
+    "Source and loopback socket validation; no native VM or container acceptance in this record.",
+    "Deferred disposal retains the stream and its worker until the active writer releases the lock.",
+    "This fixes a confirmed HTTP2 buffer ownership defect, not a proven cause of the original invalid-UTF8 snapshot spool. Parent podster-ucm.11.9 remains open."
+  ]
+}

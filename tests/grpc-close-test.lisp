@@ -123,7 +123,7 @@
                     (lambda ()
                       ;; Pause exactly after the ownership claim and before
                       ;; entering the upstream finalizer's unwind protection.
-                      (let ((gr8s::*upstream-http2-connection-close*
+                      (let ((gr8s.protocol::*http2-connection-close-body*
                               (lambda (&rest args)
                                 (declare (ignore args))
                                 (bt:signal-semaphore entered)
@@ -521,3 +521,86 @@
         (ag-grpc:with-bidi-stream (stream channel "/scope")
           (close (ag-http2::connection-stream connection))))
       (is (zerop (hash-table-count (ag-http2::multiplexer-streams mux)))))))
+
+(test close-preserves-active-writer-buffer-until-write-lock-is-released
+  (with-http2-close-connection (connection socket peer listener)
+    (let ((closed (bt:make-semaphore)) (closer nil) (failure nil))
+      (setf (ag-http2:connection-state connection) :open)
+      (unwind-protect
+           (progn
+             (bt2:with-lock-held ((ag-http2::connection-write-lock connection))
+               (write-byte 42 (usocket:socket-stream socket))
+               (let ((tail (sb-impl::buffer-tail
+                            (sb-impl::fd-stream-obuf (usocket:socket-stream socket)))))
+                 (is (plusp tail))
+                 (setf closer
+                       (bt:make-thread
+                        (lambda ()
+                          (unwind-protect
+                               (handler-case (ag-http2:connection-close connection)
+                                 (error (condition) (setf failure condition)))
+                            (bt:signal-semaphore closed)))
+                        :name "HTTP/2 close with active writer"))
+                 ;; The upstream GOAWAY lock timeout is one second. Close must
+                 ;; return without recycling a buffer still owned by this writer.
+                 (is (bt:wait-on-semaphore closed :timeout 3))
+                 (is (null failure))
+                 (is (eq :closed (ag-http2:connection-state connection)))
+                 (is (open-stream-p (usocket:socket-stream socket)))
+                 (is (= tail (sb-impl::buffer-tail
+                              (sb-impl::fd-stream-obuf (usocket:socket-stream socket)))))
+                 (ag-http2:connection-close connection)
+                 (is (open-stream-p (usocket:socket-stream socket)))))
+             (when closer (bt:join-thread closer))
+             (is (wait-until (lambda () (not (open-stream-p (usocket:socket-stream socket))))
+                             :timeout 3))
+             (check-fresh-connection-after-repeated-close connection listener socket))
+        (when closer (bt:join-thread closer))))))
+
+(test interrupted-close-defers-buffer-release-while-writer-holds-lock
+  (with-http2-close-connection (connection socket peer listener)
+    (bt2:with-lock-held ((ag-http2::connection-write-lock connection))
+      (write-byte 42 (usocket:socket-stream socket))
+      (let ((gr8s.protocol::*http2-connection-close-body*
+              (lambda (&rest args) (declare (ignore args))
+                (error 'http2-close-cancelled))))
+        (signals http2-close-cancelled (ag-http2:connection-close connection)))
+      (is (open-stream-p (usocket:socket-stream socket)))
+      (is (= 1 (sb-impl::buffer-tail
+                (sb-impl::fd-stream-obuf (usocket:socket-stream socket))))))
+    (is (wait-until (lambda () (not (open-stream-p (usocket:socket-stream socket))))
+                    :timeout 3))
+    (check-fresh-connection-after-repeated-close connection listener socket)))
+
+(test socket-shutdown-wakes-a-backpressured-writer-before-buffer-disposal
+  (with-http2-close-connection (connection socket peer listener)
+    (let ((writer nil) (finished nil) (write-failed nil)
+          (payload (make-array (* 4 1024 1024) :element-type '(unsigned-byte 8)
+                                                   :initial-element 42)))
+      (setf (ag-http2:connection-state connection) :open)
+      (unwind-protect
+           (progn
+             (setf writer
+                   (bt:make-thread
+                    (lambda ()
+                      (unwind-protect
+                           (handler-case
+                               (sb-sys:with-deadline (:seconds 10)
+                                 (bt2:with-lock-held ((ag-http2::connection-write-lock connection))
+                                   (write-sequence payload (usocket:socket-stream socket))
+                                   (force-output (usocket:socket-stream socket))))
+                             (error () (setf write-failed t)))
+                        (setf finished t)))
+                    :name "HTTP/2 backpressured frame writer"))
+             ;; Leave the peer unread so output fills the socket. Seeing input
+             ;; proves the writer started; FINISHED must still be false.
+             (is (wait-until (lambda () (listen (usocket:socket-stream peer))) :timeout 3))
+             (is (not finished))
+             (ag-http2:connection-close connection)
+             (is (wait-until (lambda () finished) :timeout 3))
+             (is-true write-failed)
+             (is (wait-until (lambda () (not (open-stream-p (usocket:socket-stream socket))))
+                             :timeout 3)))
+        (when (open-stream-p (usocket:socket-stream socket))
+          (ignore-errors (usocket:socket-shutdown socket :io)))
+        (when writer (bt:join-thread writer))))))

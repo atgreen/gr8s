@@ -6,6 +6,8 @@
 ;;;; connection reader close the same object concurrently or repeatedly. On
 ;;;; SBCL, closing a usocket stream leaves its socket object's numeric FD intact;
 ;;;; a second shutdown can therefore terminate an unrelated, newly opened socket.
+;;;; Buffer reset and stream disposal also require the frame writer lock: socket
+;;;; shutdown wakes blocked writes before a deferred finalizer recycles buffers.
 
 (in-package #:gr8s.protocol)
 
@@ -32,26 +34,25 @@ Socket and flow-control wakeups cannot wake a server STREAM-RECV waiter: its
 message buffer is closed only by the stream callback. Upstream atomically
 claims each callback, so this sweep cannot repeat an already invoked callback."
   (unwind-protect
-       (let ((mux (ag-http2:connection-multiplexer connection)))
-         (when mux
-           (maphash
-            (lambda (id stream)
-              (declare (ignore id))
-              ;; Keep attempting other pending callbacks if one fails, while
-              ;; preserving the caller's original error/cancellation condition.
-              (handler-case (ag-http2::stream-run-cleanup stream)
-                (serious-condition () nil)))
-            (ag-http2::multiplexer-streams mux))))
+       (let* ((mux (ag-http2:connection-multiplexer connection))
+              (streams (when mux
+                         (bt2:with-lock-held ((ag-http2::multiplexer-lock mux))
+                           (loop for stream being the hash-values of
+                                 (ag-http2::multiplexer-streams mux) collect stream)))))
+         (dolist (stream streams)
+           ;; Preserve the original error while attempting every pending callback.
+           (handler-case (ag-http2::stream-run-cleanup stream)
+             (serious-condition () nil))))
     (setf (ag-http2:connection-state connection) :closed)
     (bt2:with-lock-held ((ag-http2::connection-flow-control-lock connection))
       (bt2:condition-broadcast (ag-http2::connection-flow-control-cv connection)))
     (let ((socket (ag-http2::connection-socket connection)))
       (when (and socket (open-stream-p (usocket:socket-stream socket)))
         (ignore-errors (usocket:socket-shutdown socket :io))
-        (ignore-errors (usocket:socket-close socket))))))
+        (release-http2-socket-after-writer connection)))))
 
 (defun discard-unsent-http2-output (connection)
-  "Drop bytes left in CONNECTION's output buffer by a writer that was unwound.
+  "With CONNECTION's write lock held, drop bytes left by an unwound writer.
 Every ag-http2 frame write is followed by FORCE-OUTPUT, so nothing legitimate is
 pending at close. But SBCL's FLUSH-OUTPUT-BUFFER resets the buffer only after
 write(2) returns: an interrupt that unwinds a writer there (a superseded Pod
@@ -70,25 +71,66 @@ on SBCL fd-streams, so reset the buffer itself."
   #-sbcl
   (ignore-errors (clear-output (ag-http2::connection-stream connection))))
 
+(defun release-http2-socket-after-writer (connection)
+  "Recycle stream buffers only after the last active frame writer releases them.
+The owner has already shut down the socket, which wakes blocked kernel writes.
+A delayed writer must not make the closing caller wait indefinitely. Retain the
+socket in a private finalizer until its write lock becomes available instead."
+  (let ((lock (ag-http2::connection-write-lock connection)))
+    (flet ((release-socket ()
+             (ignore-errors (discard-unsent-http2-output connection))
+             (ignore-errors
+               (usocket:socket-close (ag-http2::connection-socket connection)))))
+      (if (ignore-errors (bt2:acquire-lock lock :wait nil))
+          (unwind-protect (release-socket) (bt2:release-lock lock))
+          (bt:make-thread
+           (lambda ()
+             (bt2:with-lock-held (lock) (release-socket)))
+           :name "gr8s HTTP/2 deferred socket close")))))
+
+(defun close-http2-connection-body (connection &key error-code debug-data)
+  "Pinned upstream cleanup/GOAWAY semantics with exclusive output-buffer access."
+  (let* ((mux (ag-http2:connection-multiplexer connection))
+         (streams (when mux
+                    (bt2:with-lock-held ((ag-http2::multiplexer-lock mux))
+                      (loop for stream being the hash-values of
+                            (ag-http2::multiplexer-streams mux) collect stream)))))
+    (dolist (stream streams)
+      (setf (ag-http2:stream-state stream) :closed)
+      (ag-http2::stream-run-cleanup stream)))
+  (when (eq :open (ag-http2:connection-state connection))
+    (setf (ag-http2:connection-state connection) :closing)
+    (bt2:with-lock-held ((ag-http2::connection-flow-control-lock connection))
+      (bt2:condition-broadcast (ag-http2::connection-flow-control-cv connection)))
+    (ignore-errors
+      (bt2:with-lock-held ((ag-http2::connection-write-lock connection)
+                           :timeout ag-http2::+goaway-lock-timeout+)
+        (discard-unsent-http2-output connection)
+        (ag-http2:write-frame
+         (ag-http2::make-goaway-frame (ag-http2::connection-last-stream-id connection)
+                                      error-code debug-data)
+         (ag-http2::connection-stream connection))
+        (force-output (ag-http2::connection-stream connection))))))
+
+(defvar *http2-connection-close-body* nil
+  "Close body hook, also used to exercise cancellation at ownership handoff.")
+
 (defun ag-http2:connection-close (connection &key (error-code ag-http2::+error-no-error+) debug-data)
-  "Run the pinned upstream finalizer once; never retry a potentially reused FD.
-Keep upstream cleanup callbacks, best-effort GOAWAY, bounded write-lock wait,
-flow-control wakeup, and unwind-protected socket release unchanged. Establish
-our own unwind protection before admitting cancellation after the claim."
+  "Finalize once, keeping active writers' buffers alive until they release them.
+Shutdown wakes socket and flow-control waiters immediately. Stream disposal may
+finish asynchronously when a writer still owns the connection write lock."
   (let ((owned nil))
     #+sbcl
     (sb-sys:without-interrupts
       (unwind-protect
            (when (setf owned (claim-http2-connection-close connection))
-             (ignore-errors (discard-unsent-http2-output connection))
              (sb-sys:with-local-interrupts
-               (funcall *upstream-http2-connection-close* connection
+               (funcall (or *http2-connection-close-body* #'close-http2-connection-body) connection
                         :error-code error-code :debug-data debug-data)))
         (when owned (finish-open-http2-socket connection))))
     #-sbcl
     (unwind-protect
          (when (setf owned (claim-http2-connection-close connection))
-           (ignore-errors (discard-unsent-http2-output connection))
-           (funcall *upstream-http2-connection-close* connection
+           (funcall (or *http2-connection-close-body* #'close-http2-connection-body) connection
                     :error-code error-code :debug-data debug-data))
       (when owned (finish-open-http2-socket connection)))))
