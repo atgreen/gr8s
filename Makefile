@@ -153,6 +153,7 @@ build/gr8s-service-nat-test.json: src/network/service-nat-program.lisp src/netwo
 test-service-nat: build/gr8s-service-nat-test.json
 	python3 scripts/test-service-nat.py $<
 	python3 scripts/test-service-nat-tcp.py $<
+	python3 scripts/test-service-nat-gc.py $<
 
 build/gr8s-legacy-service-packet-guard-test.json: scripts/compile-legacy-service-packet-guard-fixture.lisp scripts/compile-endpoint-policy-fixture.lisp tests/fixtures/service-packet-pre-reservation.lisp $(wildcard src/network/*.lisp) gr8s.asd $(WHISTLER_FIXTURE_SOURCES)
 	sbcl --noinform --script scripts/compile-legacy-service-packet-guard-fixture.lisp $@ service-packet-guard

@@ -1,0 +1,288 @@
+{
+  "date": "2026-11-09",
+  "issue": "podster-p9c.10",
+  "implementationCommit": "78a07db",
+  "scope": "Standalone v2 per-key kernel collector, bounded userspace enumeration and strict active TCP metadata fencing. No node-agent activation.",
+  "fixtureSHA256": "38f514ab06845245e6f8c945d08a710f8a0bb1518721c938fb3db89f0023ab9f",
+  "sourceSHA256": {
+    "src/network/service-nat-program.lisp": "9ddc12b19df0f3e9e60c915cc6f1785fcb3bf9f181695d5067eb36253927d55a",
+    "src/network/service-packet-state.lisp": "0b328045d2301b1dd6d14a96e71e104b31bd4714ff1249d604413b0fc76e9483",
+    "tests/service-lb-test.lisp": "19760557bb5495575d8e1f248aaf0cba7ddc1281b98d4d8feeeb121ae0fe7f58",
+    "scripts/test-service-nat.py": "9728e23e3326ef9c743926a0ae0b8356d3fc28237c161277756910c48eeb9a21",
+    "scripts/test-service-nat-tcp.py": "28cce7a162f29651d09346f580c2d9670b7b96456b786a03dfbaa24a13d8a120",
+    "scripts/test-service-nat-gc.py": "c74e6edf268ae045f967f543c493d1cc881367bd008890591ed12d3eda571bd6",
+    "scripts/test-service-tcp-state.py": "3e712b1b350e4008c3c8c996007af89eb411705964b89cd44da6305deb3890bd"
+  },
+  "programs": {
+    "gr8s_nat_generation": 1565,
+    "gr8s_nat_select": 8436,
+    "gr8s_nat_commit": 2315,
+    "gr8s_nat_prepare": 1079,
+    "gr8s_nat_restore": 2473,
+    "gr8s_nat_gc": 1137
+  },
+  "mapCount": 11,
+  "interpreter": {
+    "packet": {
+      "passed": true,
+      "kernel": false,
+      "cases": 42,
+      "capacityCases": [
+        "fullReverseMapPreservesActiveOwner",
+        "reverseCapacityRecovery",
+        "fullForwardMapCannotAuthorizeOrphanReply",
+        "otherServiceCannotStealInterruptedClaim",
+        "interruptedClaimAdoptedOnlyByOriginalOwner",
+        "flContentionDoesNotReleaseForeignReservation",
+        "rlContentionDoesNotReleaseForeignReservation"
+      ]
+    },
+    "tcp": {
+      "passed": true,
+      "kernel": false,
+      "cases": {
+        "exercise": 59,
+        "closure": 120,
+        "early_data_refusal": 63,
+        "early_data_handshake": 81,
+        "reordered_closure": 36,
+        "option_exercise": 51,
+        "simultaneous_open": 38,
+        "retained_option_compatibility": 4,
+        "translated_streams": 22,
+        "metadata_capacity": 6
+      }
+    },
+    "collector": {
+      "passed": true,
+      "kernel": false,
+      "cases": {
+        "ownership": [
+          "pendingPolicyClaimExpires",
+          "protocol17Direction0Preservesgr8s_nat_fl_v2",
+          "protocol17Direction0Preservesgr8s_nat_rl_v2",
+          "protocol17Direction0ExpiryReclaimsPair",
+          "protocol17Direction1Preservesgr8s_nat_fl_v2",
+          "protocol17Direction1Preservesgr8s_nat_rl_v2",
+          "protocol17Direction1ExpiryReclaimsPair",
+          "protocol6Direction0Preservesgr8s_nat_fl_v2",
+          "protocol6Direction0Preservesgr8s_nat_rl_v2",
+          "protocol6Direction0ExpiryReclaimsPair",
+          "protocol6Direction1Preservesgr8s_nat_fl_v2",
+          "protocol6Direction1Preservesgr8s_nat_rl_v2",
+          "protocol6Direction1ExpiryReclaimsPair",
+          "protocol6Direction2Preservesgr8s_nat_fl_v2",
+          "protocol6Direction2Preservesgr8s_nat_rl_v2",
+          "protocol6Direction2ExpiryReclaimsPair",
+          "expiredForwardPreservesForeignReturnOwner",
+          "obsoleteReversePreservesSameEpochReplacementTCP",
+          "orphanTCPWithoutForwardReclaimed",
+          "oldEpochOrphansPreserveReplacement",
+          "invalidEnvelopeRefused"
+        ],
+        "metadataFence": [
+          "missingMetadataFailsClosed",
+          "mismatchedMetadataFailsClosed"
+        ],
+        "tcpClosure": 24,
+        "tcpLifetimes": 6,
+        "capacity": [
+          "oneEntryMapsRecoverAfterPairCollection",
+          "InterruptedForwardCapacityClaimCollectedWithoutStealingTCP",
+          "MetadataCapacityRecoversAfterOrphanCollection"
+        ],
+        "packetsDuringCollection": {
+          "threaded": false,
+          "iterations": 64,
+          "workers": [
+            {
+              "worker": 0,
+              "completed": 64,
+              "deferred": 0,
+              "reclaimed": 0
+            },
+            {
+              "worker": 1,
+              "completed": 64,
+              "deferred": 0,
+              "reclaimed": 0
+            },
+            {
+              "worker": 2,
+              "completed": 64,
+              "deferred": 0,
+              "reclaimed": 0
+            },
+            {
+              "worker": 3,
+              "completed": 64,
+              "deferred": 0,
+              "reclaimed": 0
+            },
+            {
+              "worker": 4,
+              "completed": 256,
+              "deferred": 0,
+              "reclaimed": 0
+            },
+            {
+              "worker": 5,
+              "completed": 320,
+              "deferred": 0,
+              "reclaimed": 0
+            }
+          ]
+        }
+      }
+    },
+    "collectorCasesExcludingConcurrency": 56
+  },
+  "kernel": {
+    "environment": "Disposable Fedora44 VM22291, kernel6.19.10-300.fc44.x86_64, FD-only maps/programs. BPF_PROG_TEST_RUN synthetic packets; all six verified. Owned run directory removed.",
+    "packet": {
+      "passed": true,
+      "kernel": true,
+      "cases": 42,
+      "capacityCases": [
+        "fullReverseMapPreservesActiveOwner",
+        "reverseCapacityRecovery",
+        "fullForwardMapCannotAuthorizeOrphanReply",
+        "otherServiceCannotStealInterruptedClaim",
+        "interruptedClaimAdoptedOnlyByOriginalOwner",
+        "flContentionDoesNotReleaseForeignReservation",
+        "rlContentionDoesNotReleaseForeignReservation"
+      ]
+    },
+    "tcp": {
+      "passed": true,
+      "kernel": true,
+      "cases": {
+        "exercise": 58,
+        "closure": 120,
+        "early_data_refusal": 63,
+        "early_data_handshake": 81,
+        "reordered_closure": 36,
+        "option_exercise": 50,
+        "simultaneous_open": 38,
+        "retained_option_compatibility": 4,
+        "translated_streams": 22,
+        "metadata_capacity": 6
+      }
+    },
+    "collector": {
+      "passed": true,
+      "kernel": true,
+      "cases": {
+        "ownership": [
+          "pendingPolicyClaimExpires",
+          "protocol17Direction0Preservesgr8s_nat_fl_v2",
+          "protocol17Direction0Preservesgr8s_nat_rl_v2",
+          "protocol17Direction0ExpiryReclaimsPair",
+          "protocol17Direction1Preservesgr8s_nat_fl_v2",
+          "protocol17Direction1Preservesgr8s_nat_rl_v2",
+          "protocol17Direction1ExpiryReclaimsPair",
+          "protocol6Direction0Preservesgr8s_nat_fl_v2",
+          "protocol6Direction0Preservesgr8s_nat_rl_v2",
+          "protocol6Direction0ExpiryReclaimsPair",
+          "protocol6Direction1Preservesgr8s_nat_fl_v2",
+          "protocol6Direction1Preservesgr8s_nat_rl_v2",
+          "protocol6Direction1ExpiryReclaimsPair",
+          "protocol6Direction2Preservesgr8s_nat_fl_v2",
+          "protocol6Direction2Preservesgr8s_nat_rl_v2",
+          "protocol6Direction2ExpiryReclaimsPair",
+          "expiredForwardPreservesForeignReturnOwner",
+          "obsoleteReversePreservesSameEpochReplacementTCP",
+          "orphanTCPWithoutForwardReclaimed",
+          "oldEpochOrphansPreserveReplacement",
+          "invalidEnvelopeRefused"
+        ],
+        "metadataFence": [
+          "missingMetadataFailsClosed",
+          "mismatchedMetadataFailsClosed"
+        ],
+        "tcpClosure": 24,
+        "tcpLifetimes": 6,
+        "capacity": [
+          "oneEntryMapsRecoverAfterPairCollection",
+          "InterruptedForwardCapacityClaimCollectedWithoutStealingTCP",
+          "MetadataCapacityRecoversAfterOrphanCollection"
+        ],
+        "packetsDuringCollection": {
+          "threaded": true,
+          "iterations": 64,
+          "workers": [
+            {
+              "worker": 0,
+              "completed": 64,
+              "deferred": 0,
+              "reclaimed": 0
+            },
+            {
+              "worker": 1,
+              "completed": 64,
+              "deferred": 0,
+              "reclaimed": 0
+            },
+            {
+              "worker": 2,
+              "completed": 64,
+              "deferred": 0,
+              "reclaimed": 0
+            },
+            {
+              "worker": 3,
+              "completed": 64,
+              "deferred": 0,
+              "reclaimed": 0
+            },
+            {
+              "worker": 4,
+              "completed": 256,
+              "deferred": 0,
+              "reclaimed": 0
+            },
+            {
+              "worker": 5,
+              "completed": 320,
+              "deferred": 0,
+              "reclaimed": 0
+            }
+          ]
+        }
+      }
+    },
+    "collectorCasesExcludingConcurrency": 56
+  },
+  "networking": {
+    "passed": 1611,
+    "failed": 0,
+    "skipped": 0,
+    "newChecks": 77,
+    "scope": "All previous networking/CNI/IPAM/policy/Service suites plus bounded v2 three-map scanning, full32-byte key preservation, failure/cursor advancement, contention accounting, v1/v2 program separation and envelope ABI checks."
+  },
+  "logSHA256": {
+    "compile": "fc0dbe51b7d761844204ed0a056ff6513555a9abd30be7eb10e62bdaecdb0468",
+    "interpreterPacketAndTCP": "22f89b6defd8089a65aba646f17d6f8a9e53e7e367ef13a4d9784a18e96d8d7e",
+    "finalInterpreterCollector": "e54420c1ae5ee1f23e5905d846624cde997c1b3a5557055549ed181042fa3cf9",
+    "kernel": "5289e3b3baf8484be528b725335135d1de7c787659d48c37c341f5b59a9e5f90",
+    "networking": "0e03a179d1b477227efbbe9349efbe1a93ebbbb8f126537de7f0928f1ef1bdb5"
+  },
+  "behavior": [
+    "Forward, reverse and incarnation-keyed TCP collection run as one reserved BPF transaction per candidate. Userspace only enumerates keys.",
+    "Expired pending/UDP/SYN/established/closed/reset pairs release their owned return and TCP state. An expired forward cannot delete a foreign return row.",
+    "Deleting an obsolete reverse row from the same source epoch preserves the replacement generation TCP key. Old-epoch orphans cannot erase current forward/TCP/return state.",
+    "Active TCP metadata missing or bound to a different backend fails closed on request, SYN preflight and reply. It is not reconstructed as legacy; mismatched reset metadata cannot shorten the conservative lifetime.",
+    "A v2 scanner visits at most128 keys in each of three maps by default (384 total), saves the next cursor before mutation and defers contended transactions without waiting. It uses a separate program/profile from v1.",
+    "Real one-entry map cases recover after pair/orphan collection, including interrupted forward publication and TCP metadata capacity; recovery uses collector transactions, not manual deletion of capacity owners."
+  ],
+  "concurrency": "Six concurrent calling threads ran64 iterations each: four TCP/UDP Service/direct traffic workers and forward/reverse/TCP collectors. All256 packet/reply groups and576 collector invocations completed with zero recorded deferred/reclaimed entries. Output addresses/checksums, independent owners, final usable bindings and empty reservations were checked. Zero contention means actual parallel kernel execution is not established by this run; deterministic reservation tests separately prove contention preservation/release.",
+  "testMechanics": "Fault cases explicitly seed foreign/orphan rows or remove/corrupt metadata. Kernel expiry tests age retained seen timestamps with the harness; they do not wait through multi-hour idle lifetimes. The shared v1 scanner now delegates to the same bounded enumeration helper while retaining its original map names, program, budgets and key ABI.",
+  "developmentCorrection": "The first test invocation stopped before loading programs because the fixture expected exactly five names; it now explicitly expects all six. The initial six-program compiler run succeeded.",
+  "limits": [
+    "No active node-agent scanner, pinned v2 adoption or writer compatibility proof yet; the caller must validate retained writers/map identities before enabling the v2 profile.",
+    "No real TCP sockets, guest/native CNI source NAT, alias-aware NetworkPolicy or distributed receiving-node installation acknowledgment.",
+    "The Lisp scanner/envelope is checked with host unit fakes; real kernel transactions use the Python control-envelope runner. Actual native agent integration remains required.",
+    "Legacy retained-flow migration/upgrade/rollback, live guest/native traffic/restarts, IPv6 packet NAT, packet NodePort and broader parent Service semantics remain outstanding."
+  ],
+  "remaining": "Child podster-p9c.10 and parent podster-p9c remain active."
+}

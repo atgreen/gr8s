@@ -6,20 +6,19 @@
 
 (in-package #:gr8s.network)
 
-(defun run-service-packet-gc-key (program-fd direction key)
-  "Run one maintenance transaction without injecting a live network packet.
-DIRECTION is 0 for forward, 1 for reverse; KEY is the canonical 16-byte tuple.
-BPF_PROG_TEST_RUN executes all acquire/mutate/release operations in one kernel
-invocation, even if the requesting agent exits while the syscall is running."
-  (check-type direction (integer 0 1))
-  (unless (= (length key) 16) (error "Invalid packet Service GC key width"))
-  (let ((packet (make-array 52 :element-type '(unsigned-byte 8) :initial-element 0))
-        (attribute (whistler/loader::make-attr-buf)))
-    ;; Ethernet + IPv4 envelope, followed by kind, padding, and tuple. No live
-    ;; frame flags are set, no interface is attached, and the program does no I/O.
-    (setf (aref packet 12) 8 (aref packet 14) #x45 (aref packet 17) 38
+(defun service-gc-envelope (direction key)
+  "Build the private maintenance envelope; never inject it on a network."
+  (let ((packet (make-array (+ 36 (length key)) :element-type '(unsigned-byte 8)
+                                                  :initial-element 0)))
+    (setf (aref packet 12) 8 (aref packet 14) #x45
+          (aref packet 17) (- (length packet) 14)
           (aref packet 22) 64 (aref packet 23) 253 (aref packet 34) direction)
     (replace packet key :start1 36)
+    packet))
+
+(defun run-service-gc-envelope (program-fd direction key)
+  (let ((packet (service-gc-envelope direction key))
+        (attribute (whistler/loader::make-attr-buf)))
     (whistler/loader::put-u32 attribute 0 program-fd)
     (whistler/loader::put-u32 attribute 8 (length packet))
     (whistler/loader::put-u32 attribute 32 1)
@@ -27,6 +26,19 @@ invocation, even if the requesting agent exits while the syscall is running."
       (whistler/loader::put-ptr attribute 16 (sb-sys:vector-sap packet))
       (whistler/loader::%bpf 10 attribute 80 "packet Service GC"))
     (netlink-read-integer attribute 4 4)))
+
+(defun run-service-packet-gc-key (program-fd direction key)
+  "Run one v1 transaction in one BPF_PROG_TEST_RUN invocation, never live I/O."
+  (check-type direction (integer 0 1))
+  (unless (= (length key) 16) (error "Invalid packet Service GC key width"))
+  (run-service-gc-envelope program-fd direction key))
+
+(defun run-service-nat-gc-key (program-fd direction key)
+  "Run one v2 transaction: direction0 forward,1 reverse,2 incarnation-keyed TCP."
+  (check-type direction (integer 0 2))
+  (unless (= (length key) (if (= direction 2) 32 16))
+    (error "Invalid versioned Service GC key width"))
+  (run-service-gc-envelope program-fd direction key))
 
 (defun packet-program-map-ids (program-id)
   "Read a program's actual kernel map IDs, never trusting its display name."
@@ -113,21 +125,15 @@ Pending or failed migration keeps GC deferred; never race legacy writers."
                   (setf (service-lb-dataplane-gc-warning dataplane) message)))
               nil)))))))
 
-(defun sweep-service-packet-state
-    (dataplane &key (budget 128)
-                   (next-key #'whistler/loader:map-get-next-key)
-                   (run #'run-service-packet-gc-key))
-  "Visit at most BUDGET keys in each flow map, resuming at the next key next tick.
-Maintenance never takes a tuple reservation in userspace. A busy key is deferred,
-not waited on. Errors advance the cursor so one failing key cannot starve the
-rest of the map. The dataplane lock protects descriptors from concurrent close."
+(defun sweep-service-state-profile (dataplane program-name map-directions budget next-key run)
+  "Bounded enumeration only; ownership/lifetime decisions stay in the BPF syscall."
   (check-type budget (integer 1 65536))
   (bt:with-lock-held ((service-lb-dataplane-lock dataplane))
-    (let ((program (cdr (assoc "gr8s_packet_gc" (service-lb-dataplane-programs dataplane)
+    (let ((program (cdr (assoc program-name (service-lb-dataplane-programs dataplane)
                                :test #'equal)))
           (scanned 0) (reclaimed 0) (deferred 0))
       (when program
-        (loop for name in '("gr8s_pkt_forward" "gr8s_pkt_reverse") for direction from 0
+        (loop for (name direction) in map-directions
               for map = (service-lb-map dataplane name)
               do (unless map (error "Packet Service maintenance map ~A is unavailable" name))
                  (let ((key (or (gethash name (service-lb-dataplane-gc-cursors dataplane))
@@ -152,3 +158,25 @@ rest of the map. The dataplane lock protects descriptors from concurrent close."
                                 (error condition)))
                             (setf key next)))))
       (values scanned reclaimed deferred))))
+
+
+(defun sweep-service-packet-state
+    (dataplane &key (budget 128) (next-key #'whistler/loader:map-get-next-key)
+                   (run #'run-service-packet-gc-key))
+  "Visit at most BUDGET keys per v1 flow map, resuming at the next key each tick.
+Busy keys are deferred. Run failures advance the cursor before propagating."
+  (sweep-service-state-profile dataplane "gr8s_packet_gc"
+                               '(("gr8s_pkt_forward" 0) ("gr8s_pkt_reverse" 1))
+                               budget next-key run))
+
+(defun sweep-service-nat-state
+    (dataplane &key (budget 128) (next-key #'whistler/loader:map-get-next-key)
+                   (run #'run-service-nat-gc-key))
+  "Standalone v2 enumeration: at most BUDGET keys in each of three state maps.
+The caller must validate retained writers/map identities before enabling this
+profile. It is not yet called by the node agent. Descriptor lifetime, cursors,
+counters and failure advancement use the same lock as v1 maintenance."
+  (sweep-service-state-profile dataplane "gr8s_nat_gc"
+                               '(("gr8s_nat_fwd_v2" 0) ("gr8s_nat_rev_v2" 1)
+                                 ("gr8s_nat_tcp_v2" 2))
+                               budget next-key run))
