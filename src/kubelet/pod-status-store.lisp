@@ -9,11 +9,13 @@
 
 (in-package #:gr8s)
 
-(defun save-pod-observation (store pod status)
-  "Persist an actual observation only while POD's exact desired UID/revision exists."
+(defun save-pod-observation (store pod status &key validator)
+  "Persist an actual observation only while POD's exact desired UID/revision exists.
+VALIDATOR may normalize COPY or reject it while the observation lock is held."
   (let ((copy (copy-pod-status-value status)) (changed nil))
     (with-store-lock (store)
       (unless (current-status-pod-p store pod) (return-from save-pod-observation nil))
+      (when validator (funcall validator copy))
       (let ((uid (pod-uid pod)))
         (unless (and (equal (pod-resource-version pod) (gethash uid (pod-store-pod-observed-resource-versions store)))
                      (equalp copy (gethash uid (pod-store-pod-observed-statuses store))))

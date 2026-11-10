@@ -15,6 +15,12 @@
   "Copy JSON status data before publishing it outside a store transaction."
   (when value (com.inuoe.jzon:parse (com.inuoe.jzon:stringify value))))
 
+(defun public-pod-status-value (value)
+  "Copy API status without private, node-authenticated networking identity."
+  (let ((copy (copy-pod-status-value value)))
+    (when (hash-table-p copy) (remhash "gr8sServiceTranslation" copy))
+    copy))
+
 (defun current-status-pod-p (store pod)
   "Check POD's UID and revision against STORE while its lock is held."
   (let ((current (gethash (pod-key (pod-namespace pod) (pod-name pod))

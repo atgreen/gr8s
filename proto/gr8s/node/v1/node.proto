@@ -311,6 +311,18 @@ message NodeNetworkConfig {
   uint32 wireguard_listen_port = 8;
   repeated string cluster_pod_cidrs = 9;
   repeated string node_pod_cidrs = 10;
+  // Private node-authenticated identities for Service source translation.
+  repeated ServiceTranslationIdentity service_translations = 11;
+}
+
+message ServiceTranslationIdentity {
+  string pod_uid = 1;
+  string node_name = 2;
+  string pod_ip = 3;
+  string translation_ip = 4;
+  string sandbox_id = 5;
+  string interface_name = 6;
+  string node_id = 7;
 }
 
 message NodeRoute {
