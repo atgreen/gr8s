@@ -17,11 +17,23 @@
                      (bpf-error-errno c)
                      (sb-int:strerror (bpf-error-errno c))))))
 
-(define-condition bpf-verifier-error (bpf-error)
-  ((log :initarg :log :reader bpf-verifier-error-log))
+(define-condition bpf-program-load-error (bpf-error)
+  ((initial-error :initarg :initial-error :reader bpf-program-load-error-initial-error)
+   (log :initarg :log :reader bpf-program-load-error-log :reader bpf-verifier-error-log)
+   (log-buf-size :initarg :log-buf-size :reader bpf-program-load-error-log-buf-size))
   (:report (lambda (c s)
-             (format s "BPF verifier rejected program~%~a"
-                     (bpf-verifier-error-log c)))))
+             (if (slot-boundp c 'initial-error)
+                 (format s "BPF program load failed: initial ~a; logging retry errno ~d (~a); verifier log ~d/~d bytes~%~a"
+                         (bpf-program-load-error-initial-error c)
+                         (bpf-error-errno c) (sb-int:strerror (bpf-error-errno c))
+                         (length (bpf-program-load-error-log c))
+                         (bpf-program-load-error-log-buf-size c)
+                         (bpf-program-load-error-log c))
+                 ;; Keep explicitly constructed legacy verifier conditions
+                 ;; printable when callers provide only the original :LOG.
+                 (format s "BPF verifier rejected program~%~a" (bpf-program-load-error-log c))))))
+
+(define-condition bpf-verifier-error (bpf-program-load-error) ())
 
 ;;; ========== Syscall numbers (x86-64) ==========
 
