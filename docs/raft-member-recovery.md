@@ -219,3 +219,36 @@ The broader streaming error-path audit and long-running native memory plateau
 remain under `podster-ucm.2.10`. Native leader handoff, authenticated transport,
 VM execution and production voter startup remain separate work; these runs do
 not establish their completion.
+
+
+### Long-lived RPC memory probe
+
+Build and run the native, unprivileged loopback probe:
+
+```sh
+sbcl --noinform --non-interactive --load scripts/build-http2-lifetime-harness.lisp
+build/gr8s-http2-lifetime --dynamic-space-size 384
+```
+
+It keeps one client/server connection open for 6,000 RPCs, samples live heap after
+full GC every 1,000 calls, and checks that growth after the warm-up sample stays
+within 1 MiB. Its JSON includes retained stream counts and pending deadline timer
+entries. TCP_NODELAY is enabled on the probe's sockets to avoid packet-coalescing
+delays; it does not change production socket configuration.
+
+This probe found retention outside HTTP/2: canceled deadline contexts remained
+in the timer heap, and popped heap entries retained references beyond the array's
+fill pointer. Indexed cancellation now removes timer entries immediately and
+clears vacated slots. Before the fix, post-GC live heap grew by 5.6 MB over the
+measured calls. Two fixed runs stay within 0.11 MB across their samples, with zero
+retained stream records and zero pending timers. The rebuilt interrupted 64 MiB
+learner probe also passes at 384 MiB per process.
+
+`deadline-retention-validation-2026-11-10.json` records those runs, 430 passing
+gRPC/Raft/node-session integration checks, and 22 focused timer checks. It also
+records seven failures in the bundled cancellation library's 316-check suite;
+the same failures reproduce against the unchanged library. Deadline precision
+and context-macro semantics are tracked in `podster-ucm.2.11`. Direct channel
+cancellation and abnormal bidirectional scope exits remain in the lifetime audit
+under `podster-ucm.2.10`. These probes do not establish production HA or VM
+acceptance.

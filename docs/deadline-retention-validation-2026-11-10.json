@@ -1,0 +1,418 @@
+{
+  "date": "2026-11-10",
+  "bead": "podster-ucm.2.10.1",
+  "implementationCommit": "2942954d643124a337236aebfade2f4c074698ba",
+  "beforeProductCommit": "bffe429",
+  "change": [
+    "Remove cancelled deadline entries immediately using indexed heap removal",
+    "Clear vacated heap backing slots after removal",
+    "Preserve expiry ordering and cancellation during timer registration"
+  ],
+  "sourceSha256": {
+    "ocicl/cl-cancel-20260206-bec34fb/deadline.lisp": "a40cc2382b49fd775a39117ae977130a051b23ca75a5db5b9c59d626185ee6f2",
+    "tests/grpc-close-test.lisp": "0be03373f7a61946876036015a610eb7b0e40520051f67f0205fd83608c7e01e",
+    "scripts/http2-lifetime-harness.lisp": "b62a1ec9f1f96d1b7f77538c1b4fdb5c52db65f3d352d4bfcedc353a83c717e4",
+    "scripts/build-http2-lifetime-harness.lisp": "3159780c45895851df8d553385d7e32e53943d7aaee7ce974679201b377891ad"
+  },
+  "integration": {
+    "exitCode": 1,
+    "checks": 746,
+    "grpcRaftNodeAndStreamingChecks": 430,
+    "grpcRaftNodeAndStreamingFailures": 0,
+    "upstreamCancellationChecks": 316,
+    "upstreamCancellationFailures": 7,
+    "failureNames": [
+      "WITH-DEADLINE-CONTEXT-MACRO",
+      "WITH-TIMEOUT-CONTEXT-MACRO",
+      "WITH-DEADLINE-USES-SHORTER-CHILD",
+      "WITH-DEADLINE-BASIC",
+      "WITH-TIMEOUT-MANUAL-CANCEL-BEFORE-TIMEOUT",
+      "WITH-TIMEOUT-MANUAL-CANCEL-BEFORE-TIMEOUT",
+      "WITH-TIMEOUT-BASIC"
+    ],
+    "logSha256": "d55eb07fbc76dacdcb58cd9ac5c7d890a7fb920ec638a8da11d48b86e9a116a2",
+    "runner": "(require :asdf)\n(asdf:load-asd (truename \"gr8s.asd\"))\n(asdf:load-system \"gr8s/tests\")\n(asdf:load-system \"cl-cancel/tests\")\n(in-package :gr8s/tests)\n(let ((ok t))\n  (dolist (target '(grpc-close ag-grpc-channel-connects-over-a-unix-socket raft-transport raft-cluster raft-join raft-snapshot grpc-inflate device-plugins revisioned-node-session-reconnects-acknowledges-and-expires-heartbeats persistent-node-session-renews-its-heartbeat-lease blocked-status-provider-does-not-stop-node-heartbeats blocked-heartbeat-send-reconnects-the-session closing-a-session-leaves-the-reading-thread-a-closed-connection-to-find cancelling-persistent-node-session-wakes-blocked-read cancelling-agent-during-server-hello-wait-unwinds-the-session local-agent-starts-through-grpc-and-stops-cleanly persistent-agent-applies-deltas-and-resyncs-after-reconnecting :cl-cancel))\n    (assert (fiveam:get-test target))\n    (unless (fiveam:run! target) (setf ok nil)))\n  (uiop:quit (if ok 0 1)))\n"
+  },
+  "unchangedBaseline": {
+    "exitCode": 1,
+    "checks": 316,
+    "failures": 7,
+    "failureNames": [
+      "WITH-DEADLINE-CONTEXT-MACRO",
+      "WITH-TIMEOUT-CONTEXT-MACRO",
+      "WITH-DEADLINE-USES-SHORTER-CHILD",
+      "WITH-DEADLINE-BASIC",
+      "WITH-TIMEOUT-MANUAL-CANCEL-BEFORE-TIMEOUT",
+      "WITH-TIMEOUT-MANUAL-CANCEL-BEFORE-TIMEOUT",
+      "WITH-TIMEOUT-BASIC"
+    ],
+    "logSha256": "5f584bc0fadd8f3512c957cda110516cc62eff938aa2f2ac72130be910b5d4be",
+    "followUpBead": "podster-ucm.2.11"
+  },
+  "focusedTimerChecks": {
+    "exitCode": 0,
+    "checks": 22,
+    "failures": 0,
+    "logSha256": "dc172e8e8b837078c5ab41c8bc0a6e3c982c4e3fced719238047832b8f79c346",
+    "runner": "(require :asdf)\n(asdf:load-asd (truename \"gr8s.asd\"))\n(asdf:load-system \"gr8s/tests\")\n(in-package :gr8s/tests)\n(let ((ok t))\n  (dolist (target '(deadline-heap-removes-arbitrary-entries-and-clears-backing-slots\n                    cancelled-deadlines-release-timer-registration-including-parent-cancel\n                    concurrent-deadline-setup-and-cancel-leaves-no-registrations\n                    deadline-timer-still-fires-after-arbitrary-cancellation parent-cancel-racing-with-deadline-registration-leaves-no-timers))\n    (assert (fiveam:get-test target))\n    (unless (fiveam:run! target) (setf ok nil)))\n  (uiop:quit (if ok 0 1)))\n"
+  },
+  "nativeRpcRuns": [
+    {
+      "name": "before-timer-fix",
+      "exitCode": 1,
+      "reportSha256": "7cd46da673c66afd4ce91ec0ab84d29c5386e37fffc854d852bfa96f9dca6b49",
+      "binarySha256": null,
+      "report": {
+        "passed": false,
+        "nativeHarness": true,
+        "productionServe": false,
+        "vmAcceptance": false,
+        "heapLimitMiB": 384,
+        "calls": 6000,
+        "connections": 1,
+        "peakServerStreams": 1,
+        "growthAllowanceBytes": 1048576,
+        "samples": [
+          {
+            "calls": 1000,
+            "liveBytesAfterFullGc": 57937712,
+            "clientStreams": 0,
+            "serverStreams": 0
+          },
+          {
+            "calls": 2000,
+            "liveBytesAfterFullGc": 59106832,
+            "clientStreams": 0,
+            "serverStreams": 0
+          },
+          {
+            "calls": 3000,
+            "liveBytesAfterFullGc": 60232128,
+            "clientStreams": 0,
+            "serverStreams": 0
+          },
+          {
+            "calls": 4000,
+            "liveBytesAfterFullGc": 61319360,
+            "clientStreams": 0,
+            "serverStreams": 0
+          },
+          {
+            "calls": 5000,
+            "liveBytesAfterFullGc": 62470368,
+            "clientStreams": 0,
+            "serverStreams": 0
+          },
+          {
+            "calls": 6000,
+            "liveBytesAfterFullGc": 63563808,
+            "clientStreams": 0,
+            "serverStreams": 0
+          }
+        ]
+      }
+    },
+    {
+      "name": "after-timer-fix",
+      "exitCode": 0,
+      "reportSha256": "ce15be6d5e83741c83a1571417f80324850e957925a9af1b3a77d4da7ebaa677",
+      "binarySha256": "c3bd7a9aabeb752ece7b8758f0ed682fe3eae036d88353bc1331b2a3156c543c",
+      "report": {
+        "passed": true,
+        "nativeHarness": true,
+        "productionServe": false,
+        "vmAcceptance": false,
+        "heapLimitMiB": 384,
+        "calls": 6000,
+        "connections": 1,
+        "peakServerStreams": 1,
+        "growthAllowanceBytes": 1048576,
+        "samples": [
+          {
+            "calls": 1000,
+            "liveBytesAfterFullGc": 57160752,
+            "pendingDeadlineEntries": 0,
+            "clientStreams": 0,
+            "serverStreams": 0
+          },
+          {
+            "calls": 2000,
+            "liveBytesAfterFullGc": 57203552,
+            "pendingDeadlineEntries": 0,
+            "clientStreams": 0,
+            "serverStreams": 0
+          },
+          {
+            "calls": 3000,
+            "liveBytesAfterFullGc": 57266464,
+            "pendingDeadlineEntries": 0,
+            "clientStreams": 0,
+            "serverStreams": 0
+          },
+          {
+            "calls": 4000,
+            "liveBytesAfterFullGc": 57171600,
+            "pendingDeadlineEntries": 0,
+            "clientStreams": 0,
+            "serverStreams": 0
+          },
+          {
+            "calls": 5000,
+            "liveBytesAfterFullGc": 57267040,
+            "pendingDeadlineEntries": 0,
+            "clientStreams": 0,
+            "serverStreams": 0
+          },
+          {
+            "calls": 6000,
+            "liveBytesAfterFullGc": 57201360,
+            "pendingDeadlineEntries": 0,
+            "clientStreams": 0,
+            "serverStreams": 0
+          }
+        ]
+      }
+    },
+    {
+      "name": "after-timer-fix-repeat",
+      "exitCode": 0,
+      "reportSha256": "078c7dd0f3f3a4fad20f941524b5992e2f2ae4d942cee0370d6a765bbd8adfa1",
+      "binarySha256": "c3bd7a9aabeb752ece7b8758f0ed682fe3eae036d88353bc1331b2a3156c543c",
+      "report": {
+        "passed": true,
+        "nativeHarness": true,
+        "productionServe": false,
+        "vmAcceptance": false,
+        "heapLimitMiB": 384,
+        "calls": 6000,
+        "connections": 1,
+        "peakServerStreams": 1,
+        "growthAllowanceBytes": 1048576,
+        "samples": [
+          {
+            "calls": 1000,
+            "liveBytesAfterFullGc": 57022160,
+            "pendingDeadlineEntries": 0,
+            "clientStreams": 0,
+            "serverStreams": 0
+          },
+          {
+            "calls": 2000,
+            "liveBytesAfterFullGc": 56991904,
+            "pendingDeadlineEntries": 0,
+            "clientStreams": 0,
+            "serverStreams": 0
+          },
+          {
+            "calls": 3000,
+            "liveBytesAfterFullGc": 56995072,
+            "pendingDeadlineEntries": 0,
+            "clientStreams": 0,
+            "serverStreams": 0
+          },
+          {
+            "calls": 4000,
+            "liveBytesAfterFullGc": 56986192,
+            "pendingDeadlineEntries": 0,
+            "clientStreams": 0,
+            "serverStreams": 0
+          },
+          {
+            "calls": 5000,
+            "liveBytesAfterFullGc": 57021760,
+            "pendingDeadlineEntries": 0,
+            "clientStreams": 0,
+            "serverStreams": 0
+          },
+          {
+            "calls": 6000,
+            "liveBytesAfterFullGc": 56981152,
+            "pendingDeadlineEntries": 0,
+            "clientStreams": 0,
+            "serverStreams": 0
+          }
+        ]
+      }
+    }
+  ],
+  "remaining": [
+    "Direct channel cancellation and abnormal bidi scope lifetime audit",
+    "Production durable HA startup",
+    "Authenticated native recovery, leader handoff and VM acceptance"
+  ],
+  "nativeLearnerRun": {
+    "exitCode": 0,
+    "reportSha256": "857e62aeda51f6951dcf9dbdc866d566f823e37b48e291368f0b321deb47bb38",
+    "report": {
+      "passed": true,
+      "nativeHarness": true,
+      "productionServe": false,
+      "vmAcceptance": false,
+      "fullAcceptanceComplete": false,
+      "evidence": "/tmp/gr8s-learner-native-mg6m8whk",
+      "records": 1024,
+      "payloadBytes": 67108864,
+      "heapLimitMiB": 384,
+      "chunkDelay": 0.02,
+      "binarySha256": "e197d6faf0b8fe7b2388f70c808e5bc6b10bf76d6fda67363886387b32b9b38d",
+      "partialTransfer": {
+        "offset": 1048576,
+        "total": 67347866,
+        "token": "58107343-42ba-451c-9c7b-8a2cfeb41a59"
+      },
+      "beforeInterruption": {
+        "role": "leader",
+        "selfRole": "voter",
+        "term": 1,
+        "quorumMembers": 1,
+        "commit": 3,
+        "applied": 3,
+        "lastIndex": 3,
+        "members": [
+          {
+            "id": "sink",
+            "role": "learner"
+          },
+          {
+            "id": "source",
+            "role": "voter"
+          }
+        ],
+        "blocked": false,
+        "heapLimitMiB": 384,
+        "resources": 1025,
+        "lastPayloadBytes": 65536,
+        "nonce": "6e8079fe966c42db9ccdadcff609d9ef"
+      },
+      "interruptedReceiver": {
+        "role": "follower",
+        "selfRole": "learner",
+        "term": 1,
+        "quorumMembers": 1,
+        "commit": 0,
+        "applied": 0,
+        "lastIndex": 0,
+        "members": [
+          {
+            "id": "sink",
+            "role": "learner"
+          }
+        ],
+        "blocked": true,
+        "heapLimitMiB": 384,
+        "nonce": "6dc265d6a6394af0804b809723c49140"
+      },
+      "partialFilesBeforeSigkill": [
+        {
+          "path": "raft/.gr8s-raft-transfers-v2-1002/.raft-transfer-v2-KdhoBF/in-d9cd9e3b-2783-4636-9411-61d611d6e6a5.snapshot",
+          "bytes": 1245184
+        }
+      ],
+      "disconnected": {
+        "role": "leader",
+        "selfRole": "voter",
+        "term": 1,
+        "quorumMembers": 1,
+        "commit": 5,
+        "applied": 5,
+        "lastIndex": 5,
+        "members": [
+          {
+            "id": "sink",
+            "role": "learner"
+          },
+          {
+            "id": "source",
+            "role": "voter"
+          }
+        ],
+        "blocked": false,
+        "heapLimitMiB": 384,
+        "resources": 1027,
+        "lastPayloadBytes": 65536,
+        "nonce": "2b535b52585942cc90d81ffa1da1e16b"
+      },
+      "sigkillExit": -9,
+      "promoted": {
+        "role": "leader",
+        "selfRole": "voter",
+        "term": 1,
+        "quorumMembers": 2,
+        "commit": 6,
+        "applied": 6,
+        "lastIndex": 6,
+        "members": [
+          {
+            "id": "sink",
+            "role": "voter"
+          },
+          {
+            "id": "source",
+            "role": "voter"
+          }
+        ],
+        "blocked": false,
+        "heapLimitMiB": 384,
+        "resources": 1027,
+        "lastPayloadBytes": 65536,
+        "nonce": "c08344780ca94baebb1b2763a9401aca"
+      },
+      "restored": {
+        "role": "follower",
+        "selfRole": "voter",
+        "term": 1,
+        "quorumMembers": 2,
+        "commit": 6,
+        "applied": 6,
+        "lastIndex": 6,
+        "members": [
+          {
+            "id": "sink",
+            "role": "voter"
+          },
+          {
+            "id": "source",
+            "role": "voter"
+          }
+        ],
+        "blocked": false,
+        "heapLimitMiB": 384,
+        "resources": 1027,
+        "lastPayloadBytes": 65536,
+        "nonce": "7299cb203253437ba742546ab688adff"
+      },
+      "repeatedJoin": {
+        "role": "leader",
+        "selfRole": "voter",
+        "term": 1,
+        "quorumMembers": 2,
+        "commit": 6,
+        "applied": 6,
+        "lastIndex": 6,
+        "members": [
+          {
+            "id": "sink",
+            "role": "voter"
+          },
+          {
+            "id": "source",
+            "role": "voter"
+          }
+        ],
+        "blocked": false,
+        "heapLimitMiB": 384,
+        "resources": 1027,
+        "lastPayloadBytes": 65536,
+        "nonce": "ba92c038a9e9465ca495a8d9ea88c67e"
+      },
+      "largePayloadAcceptance": true,
+      "remaining": [
+        "VM execution",
+        "leader handoff during catch-up",
+        "production serve recovery integration"
+      ],
+      "sinkExit": 0,
+      "sourceExit": 0
+    }
+  }
+}
