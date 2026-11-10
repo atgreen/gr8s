@@ -585,15 +585,20 @@ Returns NETWORK; signals INVALID-CNI on any violation."
       (invalid-cni "invalid WireGuard listen port")))
   network)
 
-(defun publish-node-runtime-managed-cidrs (node-runtime &optional (network (node-runtime-network node-runtime)))
-  "Seed the shared v2 managed-address table from the durable network assignment.
+(defun publish-node-runtime-service-nat-inventory
+    (node-runtime &optional (network (node-runtime-network node-runtime)))
+  "Seed the shared v2 managed-address and identity tables from the network assignment.
 Called after a new assignment and after a retained Service LB map is opened on
 restart, since the network may be restored before the dataplane starts."
   (let* ((dataplane (node-runtime-service-lb node-runtime))
-         (managed (and dataplane (service-lb-map dataplane "gr8s_nat_pod_v2"))))
+         (managed (and dataplane (service-lb-map dataplane "gr8s_nat_pod_v2")))
+         (identities (and dataplane (service-lb-map dataplane "gr8s_nat_id_v2"))))
     (when (and managed network)
       (gr8s.network::publish-service-nat-managed-cidrs
-       managed (persisted-node-network-cidrs network "clusterPodCIDRs" "clusterPodCIDR")))))
+       managed (persisted-node-network-cidrs network "clusterPodCIDRs" "clusterPodCIDR")))
+    (when (and identities network)
+      (gr8s.network::publish-service-nat-identities
+       identities (gethash "serviceTranslations" network #())))))
 
 (defun configure-node-runtime-network (node-runtime network &key (persist t))
   "Apply NETWORK as this node's overlay configuration and record it on the runtime.
@@ -656,7 +661,7 @@ conflicting network."
             (make-routed-cni-operations
              ipam :mtu (gethash "mtu" network)
                   :dns-address (gethash "dnsAddress" network)))))
-  (publish-node-runtime-managed-cidrs node-runtime network)
+  (publish-node-runtime-service-nat-inventory node-runtime network)
   node-runtime)
 
 (defun node-network-overlay-firewall-identity (network)
@@ -1025,7 +1030,7 @@ the node from starting."
                                         (lambda (endpoints)
                                           (steer-service-endpoints
                                            node-runtime endpoints))))
-      (publish-node-runtime-managed-cidrs node-runtime))
+      (publish-node-runtime-service-nat-inventory node-runtime))
     (handler-case
         (setf (node-runtime-gateway-steering node-runtime) (start-gateway-steering))
       (error (condition)

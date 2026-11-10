@@ -91,6 +91,37 @@ def main():
         report.update({"backend": backend, "service": vip, "riskKeys": [key.hex() for key in keys],
                        "riskMap": str(risk), "managedPodCIDRs": cidrs,
                        "managedPodMap": str(managed), "source": "unready manual EndpointSlice"})
+        # Restore a synthetic, validated identity from durable node state. This
+        # proves the node's startup path writes both rows to the real BPF map;
+        # it does not claim a Pod or enable the v2 TC graph.
+        cluster.stop()
+        primary, alias = probes[0] + 10, probes[0] + 11
+        network["serviceTranslations"] = [{
+            "podIP": str(primary), "address": str(alias), "nodeID": "staging-node",
+            "nodeName": "staging-node", "podUID": "staging-pod",
+            "sandboxID": "staging-sandbox", "interfaceName": "eth0"}]
+        network_file.write_text(json.dumps(network))
+        cluster.start()
+        identity_map = cluster.root / "state/agent/containerd/bpf/service-lb/gr8s_nat_id_v2"
+
+        def identities_published():
+            if not identity_map.exists():
+                return False
+            try:
+                values = guest.read_pinned_values(identity_map, [primary.packed, alias.packed], 32)
+            except OSError as error:
+                if error.errno == errno.ENOENT:
+                    return False
+                raise
+            return (all(value[:4] == alias.packed and value[24:28] == primary.packed and
+                        struct.unpack_from("<I", value, 4)[0] == 0x20001 for value in values)
+                    and values[0][8:24] == values[1][8:24]
+                    and any(values[0][8:24])
+                    and [struct.unpack_from("<I", value, 28)[0] for value in values] == [1, 2])
+
+        traffic.wait_for("v2 restored identity pair", 120, identities_published)
+        report.update({"restoredIdentityMap": str(identity_map),
+                       "restoredPrimary": str(primary), "restoredAlias": str(alias)})
         print(json.dumps(report, indent=2))
     finally:
         cluster.stop()

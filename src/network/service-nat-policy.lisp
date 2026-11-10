@@ -23,6 +23,49 @@ previous CIDRs while old endpoints may still have live flows."
         (funcall update map (netpol-cidr-lpm-key cidr) present)
         (incf count)))))
 
+(defun service-nat-identity-rows (record)
+  "Encode the trusted primary/return-address pair for one Pod incarnation.
+The 128-bit token changes with the authenticated Pod, node or sandbox owner.
+Only the enabled bit is staged: complete history and receiver readiness need
+separate cluster-wide publication fences before the v2 graph is attached."
+  (flet ((address-key (address)
+           (let ((number (canonical-service-translation-ipv4 address)))
+             (make-array 4 :element-type '(unsigned-byte 8)
+                         :initial-contents
+                         (list (ldb (byte 8 24) number) (ldb (byte 8 16) number)
+                               (ldb (byte 8 8) number) (ldb (byte 8 0) number))))))
+   (let* ((primary (service-translation-string record "podIP"))
+         (alias (service-translation-string record "address"))
+         (owner (mapcar (lambda (key) (service-translation-string record key))
+                        '("nodeID" "podUID" "sandboxID" "interfaceName")))
+         (primary-key (address-key primary))
+         (alias-key (address-key alias))
+         (epoch (subseq (ironclad:digest-sequence
+                         :sha256
+                         (trivial-utf-8:string-to-utf-8-bytes
+                          (com.inuoe.jzon:stringify
+                           (coerce (append owner (list primary alias)) 'vector))))
+                        0 16))
+         (flags (service-lb-bytes #x20001 4)))
+    (unless (and (not (equalp primary-key alias-key))
+                 (some #'plusp epoch))
+      (invalid-cni "invalid v2 Service translation identity"))
+    (flet ((value (role)
+             (concatenate '(vector (unsigned-byte 8))
+                          alias-key flags epoch primary-key (service-lb-bytes role 4))))
+      (list (cons primary-key (value 1)) (cons alias-key (value 2)))))))
+
+(defun publish-service-nat-identities
+    (map records &key (update #'whistler/loader:map-update))
+  "Stage paired v2 identity rows from the validated replicated inventory.
+Retirement and complete-history/receiver bits are left to the activation fence."
+  (let ((count 0))
+    (loop for record across records do
+      (dolist (row (service-nat-identity-rows record))
+        (funcall update map (car row) (cdr row))
+        (incf count)))
+    count))
+
 (defparameter *service-nat-policy-key-form*
   '(whistler::defstruct whistler::netpol-flow-key-v2
      (whistler::peer whistler::u32) (whistler::pod-port whistler::u16)
