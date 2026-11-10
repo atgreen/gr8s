@@ -1,0 +1,253 @@
+{
+  "scope": "Instrumented checkpoint phase diagnostics; does not replace completed full workload acceptance",
+  "originalResult": "/tmp/gr8s-compaction-cluster-native-bchvysuk/result.json",
+  "binarySha256": "26167df5e6f40f6795cb7aaed53ffa58c43aba43bbec03c4439cc0dbc0d6557e",
+  "passed": false,
+  "elapsedSeconds": 57.62318722601049,
+  "error": "",
+  "limitation": "Blank AssertionError after held marker phase; original runner omitted asymmetric state before assertions, so failing condition and cause are unproven. Diagnostic-only runner changes preserve assertions and capture state/traceback for rerun.",
+  "cleanupExitCodes": {
+    "cp-a": 0,
+    "cp-b": 0,
+    "cp-c": 0
+  },
+  "heldMarkerCommit": 53,
+  "heldBefore": {
+    "cp-a": {
+      "term": 1,
+      "role": "leader",
+      "applied": 51,
+      "blocked": false,
+      "captureHeld": true,
+      "heldIndex": 51,
+      "completedRounds": 21,
+      "compactionPhases": [
+        {
+          "phase": "freeze",
+          "attempts": 1,
+          "totalSeconds": 0.001,
+          "maxSeconds": 0.001,
+          "lastSeconds": 0.001
+        },
+        {
+          "phase": "capture",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0
+        },
+        {
+          "phase": "retain",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0
+        },
+        {
+          "phase": "publish",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0
+        }
+      ]
+    },
+    "cp-b": {
+      "term": 1,
+      "role": "follower",
+      "applied": 50,
+      "blocked": false,
+      "captureHeld": true,
+      "heldIndex": 50,
+      "completedRounds": 0,
+      "compactionPhases": [
+        {
+          "phase": "freeze",
+          "attempts": 1,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0
+        },
+        {
+          "phase": "capture",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0
+        },
+        {
+          "phase": "retain",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0
+        },
+        {
+          "phase": "publish",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0
+        }
+      ]
+    },
+    "cp-c": {
+      "term": 1,
+      "role": "follower",
+      "applied": 51,
+      "blocked": false,
+      "captureHeld": true,
+      "heldIndex": 50,
+      "completedRounds": 0,
+      "compactionPhases": [
+        {
+          "phase": "freeze",
+          "attempts": 1,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0
+        },
+        {
+          "phase": "capture",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0
+        },
+        {
+          "phase": "retain",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0
+        },
+        {
+          "phase": "publish",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0
+        }
+      ]
+    }
+  },
+  "heldAfterMarker": {
+    "cp-a": {
+      "term": 1,
+      "role": "leader",
+      "applied": 53,
+      "blocked": false,
+      "captureHeld": true,
+      "heldIndex": 51,
+      "completedRounds": 22,
+      "compactionPhases": [
+        {
+          "phase": "freeze",
+          "attempts": 1,
+          "totalSeconds": 0.001,
+          "maxSeconds": 0.001,
+          "lastSeconds": 0.001
+        },
+        {
+          "phase": "capture",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0
+        },
+        {
+          "phase": "retain",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0
+        },
+        {
+          "phase": "publish",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0
+        }
+      ]
+    },
+    "cp-b": {
+      "term": 1,
+      "role": "follower",
+      "applied": 53,
+      "blocked": false,
+      "captureHeld": true,
+      "heldIndex": 50,
+      "completedRounds": 0,
+      "compactionPhases": [
+        {
+          "phase": "freeze",
+          "attempts": 1,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0
+        },
+        {
+          "phase": "capture",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0
+        },
+        {
+          "phase": "retain",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0
+        },
+        {
+          "phase": "publish",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0
+        }
+      ]
+    },
+    "cp-c": {
+      "term": 1,
+      "role": "follower",
+      "applied": 53,
+      "blocked": false,
+      "captureHeld": true,
+      "heldIndex": 50,
+      "completedRounds": 0,
+      "compactionPhases": [
+        {
+          "phase": "freeze",
+          "attempts": 1,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0
+        },
+        {
+          "phase": "capture",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0
+        },
+        {
+          "phase": "retain",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0
+        },
+        {
+          "phase": "publish",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0
+        }
+      ]
+    }
+  }
+}

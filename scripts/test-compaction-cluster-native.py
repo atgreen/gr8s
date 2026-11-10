@@ -7,6 +7,7 @@ Uses offline credentials and instrumented HCP workers, not production serve,
 VMs, containers, BPF or conformance. Smoke runs are explicitly partial evidence.
 """
 import argparse
+import traceback
 import hashlib
 import importlib.util
 import json
@@ -126,16 +127,19 @@ def main():
 
         def asymmetric_progress():
             values = states()
+            result["lastAsymmetricSample"] = values
             # Advance the leader checkpoint past the stalled follower so release
             # must exercise archived-prefix replication, not only the live tail.
             return values if (values[current.name]["completedRounds"] >= start_round + 32 and
                               values[current.name]["snapshot"] > values[slow.name]["applied"]) else None
 
         asymmetric = probe.await_value(asymmetric_progress, timeout=240)
-        assert asymmetric[slow.name]["captureHeld"]
-        assert asymmetric[slow.name]["replicationCapacityRefusals"] > 0
-        assert asymmetric[slow.name]["retainedEstimatedBytes"] <= asymmetric[slow.name]["retainedBudgetBytes"]
-        assert {name: value["term"] for name, value in asymmetric.items()} == terms
+        result.update(asymmetricHeldFollower=slow.name, asymmetricCapture=asymmetric)
+        assert asymmetric[slow.name]["captureHeld"], "Delayed follower capture unexpectedly released"
+        assert asymmetric[slow.name]["replicationCapacityRefusals"] > 0, "Delayed follower never refused excess retained-log capacity"
+        assert asymmetric[slow.name]["retainedEstimatedBytes"] <= asymmetric[slow.name]["retainedBudgetBytes"], "Delayed follower exceeded retained-log budget"
+        actual_terms = {name: value["term"] for name, value in asymmetric.items()}
+        assert actual_terms == terms, f"Leadership term changed during asymmetric capture: {terms} -> {actual_terms}"
         result.update(asymmetricHeldFollower=slow.name, asymmetricCapture=asymmetric,
                       asymmetricCaptureAcceptance=True)
         slow.rpc("release-capture")
@@ -201,7 +205,8 @@ def main():
         result.update(afterRestart=recovered, identitiesPreserved=True,
                       fullChurnAcceptance=not args.smoke, passed=True)
     except Exception as error:
-        result["error"] = str(error)
+        result["error"] = f"{type(error).__name__}: {error}"
+        result["traceback"] = traceback.format_exc()
     finally:
         result["cleanupExitCodes"] = {}
         for node in nodes:
