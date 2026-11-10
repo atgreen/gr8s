@@ -2,6 +2,29 @@
 
 (in-suite gr8s)
 
+(test node-ipam-incarnation-survives-retry-and-restart-but-not-reallocation
+  (let ((directory
+          (merge-pathnames
+           (format nil "gr8s-node-incarnation-~36R/" (random (expt 36 8)))
+           (uiop:temporary-directory))))
+    (unwind-protect
+         (let* ((ipam (gr8s::open-node-ipam directory "10.42.0.0/29"))
+                (address (gr8s::allocate-pod-address ipam "sandbox-a" "eth0"))
+                (first (gr8s::pod-address-incarnation ipam "sandbox-a" "eth0")))
+           (is (and (stringp first) (= 32 (length first))))
+           (is (equal first
+                      (progn (gr8s::allocate-pod-address ipam "sandbox-a" "eth0")
+                             (gr8s::pod-address-incarnation ipam "sandbox-a" "eth0"))))
+           (let ((reopened (gr8s::open-node-ipam directory "10.42.0.0/29")))
+             (is (equal first (gr8s::pod-address-incarnation reopened "sandbox-a" "eth0")))
+             (gr8s::release-pod-address reopened "sandbox-a" "eth0")
+             (is (null (gr8s::pod-address-incarnation reopened "sandbox-a" "eth0")))
+             (is (equal address (gr8s::allocate-pod-address reopened "sandbox-a" "eth0")))
+             (is (not (equal first
+                             (gr8s::pod-address-incarnation reopened "sandbox-a" "eth0"))))))
+      (when (probe-file directory)
+        (uiop:delete-directory-tree directory :validate t)))))
+
 (test node-ipam-allocations-are-idempotent-and-survive-restart
   (let ((directory
           (merge-pathnames
@@ -195,16 +218,20 @@
                         (gr8s::persist-node-ipam-state candidate))))))
            (signals error
              (gr8s::allocate-pod-address ipam "sandbox-a" "eth0"))
+           (is (null (gr8s::pod-address-incarnation ipam "sandbox-a" "eth0")))
            (setf fail-p nil)
            (is (string= "10.42.32.1"
                         (gr8s::allocate-pod-address
                          ipam "sandbox-b" "eth0")))
+           (let ((incarnation (gr8s::pod-address-incarnation ipam "sandbox-b" "eth0")))
            (setf fail-p t)
            (signals error
              (gr8s::release-pod-address ipam "sandbox-b" "eth0"))
            (is (string= "10.42.32.1"
                         (gr8s::check-pod-address
-                         ipam "sandbox-b" "eth0"))))
+                         ipam "sandbox-b" "eth0")))
+           (is (equal incarnation
+                      (gr8s::pod-address-incarnation ipam "sandbox-b" "eth0")))))
       (when (probe-file directory)
         (uiop:delete-directory-tree directory :validate t)))))
 
