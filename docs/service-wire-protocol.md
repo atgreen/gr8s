@@ -94,3 +94,9 @@ overwritten. CNI readiness must gate compatible receivers and retained writer
 upgrades. MTU negotiation/ICMP, nested VXLAN/WireGuard forwarding, segmentation
 and checksum offloads require real disposable-VM network tests before this
 profile can be enabled. The codec results alone do not establish those behaviors.
+
+The experimental graph uses a distinct wire-ready identity flag8. An alias-ready
+flag4 alone does not identify a compatible receiver. Local typed stages require
+enabled1, alias-ready4 and wire-ready8 together; complete-history2 remains a
+separate source-selection property. This is an enforcement check in the graph,
+not a claim that the node agent publishes or acknowledges these flags yet.
