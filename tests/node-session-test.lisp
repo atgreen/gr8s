@@ -757,6 +757,58 @@
             (gr8s::make-node-agent-session nil))
       (is-false (published)))))
 
+(test retained-service-grant-requires-old-owner-and-current-session-proof
+  (let* ((server (gr8s::%make-node-grpc-server))
+         (session (gr8s::make-node-agent-session nil))
+         (old (make-instance 'gr8s.node.v1::service-translation-identity
+                             :pod-uid "old" :node-name "worker-a" :node-id "node-a"
+                             :sandbox-id "sandbox-old" :interface-name "eth0"
+                             :pod-ip "10.88.1.2" :translation-ip "10.88.1.9"))
+         (added (make-instance 'gr8s.node.v1::service-translation-identity
+                               :pod-uid "new" :node-name "worker-a" :node-id "node-a"
+                               :sandbox-id "sandbox-new" :interface-name "eth0"
+                               :pod-ip "10.88.1.3" :translation-ip "10.88.1.10"))
+         (old-bytes (ag-proto:serialize-to-bytes old))
+         (new-bytes (ag-proto:serialize-to-bytes added))
+         (proof (make-instance 'gr8s.node.v1::service-receiver-proof
+                               :pod-uid "old"
+                               :incarnation
+                               (gr8s.network::service-translation-incarnation-token
+                                "node-a" "sandbox-old" "eth0" "10.88.1.2" "10.88.1.9")))
+         (reports (gr8s::node-grpc-server-service-receiver-reports server)))
+    (setf (gr8s::node-agent-session-node-id session) "node-a"
+          (gr8s::node-agent-session-service-risk-v2-p session) t
+          (gethash "worker-a" (gr8s::node-grpc-server-sessions server)) session
+          (gethash "worker-a" (gr8s::node-grpc-server-acknowledged-revisions server)) 3
+          (gethash "worker-a" reports) (list session 3 (list proof) (list old-bytes))
+          (gr8s::node-grpc-server-service-risk-grant-digest server)
+          (make-array 32 :element-type '(unsigned-byte 8) :initial-element 1)
+          (gr8s::node-grpc-server-service-risk-grant-owner-projection server)
+          (list old-bytes)
+          (gr8s::node-grpc-server-service-risk-grant-receiver-projection server)
+          (list (ag-proto:serialize-to-bytes proof))
+          (gr8s::node-grpc-server-service-risk-grant-identities server)
+          '( ("worker-a" . "node-a"))
+          (gr8s::node-grpc-server-service-risk-grant-sessions server) (list session))
+    (labels ((retained (owners)
+               (bt:with-lock-held ((gr8s::node-grpc-server-lock server))
+                 (gr8s.apiserver::service-risk-retained-grant-locked-p
+                  server owners '(("worker-a" . "node-a"))))))
+      (is-true (retained (list old-bytes new-bytes)))
+      (setf (gethash "worker-a" reports)
+            (list session 3 (list proof) (list old-bytes new-bytes)))
+      (is-true (retained (list old-bytes new-bytes)))
+      (is-false (retained (list new-bytes)))
+      (is-false (retained (list old-bytes old-bytes new-bytes)))
+      (setf (gethash "worker-a" reports)
+            (list session 3 nil (list old-bytes new-bytes)))
+      (is-false (retained (list old-bytes new-bytes)))
+      (setf (gethash "worker-a" reports)
+            (list session 3 (list proof) (list old-bytes new-bytes))
+            (gethash "worker-a" (gr8s::node-grpc-server-sessions server))
+            (gr8s::make-node-agent-session nil))
+      (is-false (retained (list old-bytes new-bytes))))))
+
 (test two-node-service-receiver-set-must-reach-both-snapshots
   (let* ((server (gr8s::%make-node-grpc-server))
          (identities '(("worker-a" . "node-a") ("worker-b" . "node-b")))

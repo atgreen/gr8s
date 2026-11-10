@@ -1348,6 +1348,50 @@
                          (gr8s::service-lb-risk-key "10.88.1.5" 8080 "TCP"))
                    entries)))))
 
+(test v2-retained-selection-stages-risk-without-exposing-new-backend
+  (let* ((entries (make-hash-table :test #'equalp))
+         (dataplane (gr8s::%make-service-lb-dataplane
+                     :maps (list (fake-lb-map "gr8s_service_v4" 1)
+                                 (fake-lb-map "gr8s_backend_v4" 2)
+                                 (fake-lb-map "gr8s_backend_index_v4" 3)
+                                 (fake-lb-map "gr8s_nat_risk_v2" 4))))
+         (controller (gr8s::make-service-lb-controller nil dataplane))
+         (service (fake-lb-service "10.96.0.10"))
+         (backends '(("10.88.1.5" 8080) ("10.88.1.6" 8080)))
+         (update (lambda (map key value)
+                   (setf (gethash (list (whistler/loader:map-info-name map) (copy-seq key)) entries)
+                         (copy-seq value))))
+         (delete (lambda (map key)
+                   (remhash (list (whistler/loader:map-info-name map) key) entries)))
+         (vip-key (gr8s::service-lb-vip-key "10.96.0.10" 80)))
+    (labels ((converge (mode)
+               (gr8s::converge-service-lb-controller
+                controller :publish-services-p mode
+                :list-services (constantly (list service))
+                :endpoints-of (lambda (&rest ignored)
+                                (declare (ignore ignored)) backends)
+                :risk-backends-of (lambda (&rest ignored)
+                                    (declare (ignore ignored)) backends)
+                :update update :delete delete))
+             (count-selected ()
+               (let ((value (gethash (list "gr8s_service_v4" vip-key) entries)))
+                 (and value (gr8s::netlink-read-integer value 0 2)))))
+      (converge t)
+      (is (= 2 (count-selected)))
+      (setf backends '( ("10.88.1.5" 8080) ("10.88.1.6" 8080)
+                       ("10.88.1.7" 8080)))
+      (is-true (converge :retain))
+      (is (= 2 (count-selected)))
+      (is (null (gethash (list "gr8s_backend_v4" (gr8s::service-lb-backend-key 2))
+                         entries)))
+      (is (gethash (list "gr8s_nat_risk_v2"
+                         (gr8s::service-lb-risk-key "10.88.1.7" 8080 "TCP")) entries))
+      (converge t)
+      (is (= 3 (count-selected)))
+      (setf backends '( ("10.88.1.5" 8080) ("10.88.1.7" 8080)))
+      (is-false (converge :retain))
+      (is (null (count-selected))))))
+
 (test v2-local-risk-readiness-is-fenced-by-received-revision
   (let* ((dataplane (gr8s::%make-service-lb-dataplane
                      :maps (list (fake-lb-map "gr8s_nat_risk_v2" 4)
@@ -1389,6 +1433,7 @@
          (digest (gr8s.protocol::service-risk-projection-digest projection))
          (snapshot (make-instance 'gr8s.node.v1::desired-state-snapshot
                                   :revision 4
+                                  :network (make-instance 'gr8s.node.v1::node-network-config)
                                   :service-discovery-objects-json projection))
          (dataplane (gr8s::%make-service-lb-dataplane
                      :maps (list (fake-lb-map "gr8s_nat_risk_v2" 4))))
@@ -1406,6 +1451,7 @@
     (setf (slot-value snapshot 'gr8s.node.v1::service-risk-grant-digest)
           (copy-seq digest))
     (is-true (gr8s.agent::node-snapshot-service-risk-granted-p snapshot))
+    (is (eq :current (gr8s.agent::node-snapshot-service-grant-mode runtime snapshot)))
     (signals gr8s::node-snapshot-incomplete
       (gr8s.agent::ensure-node-snapshot-service-selection-ready runtime snapshot))
     (setf (gr8s.agent::node-runtime-service-selection-ready-revision runtime) 4)
@@ -1415,6 +1461,12 @@
       (gr8s.agent::ensure-node-snapshot-service-selection-ready runtime snapshot))
     (setf (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json)
           (list one))
+    (setf (gr8s.agent::node-runtime-service-selection-grant-digest runtime)
+          (copy-seq digest))
+    (is (eq :retained (gr8s.agent::node-snapshot-service-grant-mode runtime snapshot)))
+    (is (null (gr8s.agent::ensure-node-snapshot-service-selection-ready runtime snapshot)))
+    (setf (gr8s.agent::node-runtime-service-selection-grant-digest runtime) nil)
+    (is (null (gr8s.agent::node-snapshot-service-grant-mode runtime snapshot)))
     (signals gr8s::node-snapshot-incomplete
       (gr8s.agent::node-snapshot-service-risk-granted-p snapshot))))
 

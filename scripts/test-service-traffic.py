@@ -160,11 +160,8 @@ def http_get(address, port, path, timeout=3):
         return None, str(error)
 
 
-def pinned_service_value(path, address, port):
-    """Read one IPv4 Service selector from a pinned BPF map for VM diagnostics."""
-    octets = ipaddress.IPv4Address(address).packed
-    vip = int.from_bytes(octets, "little")
-    key_bytes = struct.pack("<Q", (6 << 48) | (vip << 16) | socket.htons(port))
+def pinned_map_value(path, key_bytes, value_size):
+    """Read one entry from a pinned BPF map in the disposable VM."""
     libc = ctypes.CDLL(None, use_errno=True)
     number = {"x86_64": 321, "aarch64": 280}[platform.machine()]
 
@@ -179,16 +176,25 @@ def pinned_service_value(path, address, port):
     fd = bpf(7, struct.pack("<QII", ctypes.addressof(name), 0, 0))
     try:
         key = ctypes.create_string_buffer(key_bytes)
-        value = ctypes.create_string_buffer(16)
+        value = ctypes.create_string_buffer(value_size)
         try:
             bpf(1, struct.pack("<IIQQQ", fd, 0, ctypes.addressof(key), ctypes.addressof(value), 0))
         except OSError as error:
             if error.errno == 2:
                 return None
             raise
-        return value.raw.hex()
+        return value.raw
     finally:
         os.close(fd)
+
+
+def pinned_service_value(path, address, port):
+    """Return an IPv4 Service selector as hex for transition reports."""
+    octets = ipaddress.IPv4Address(address).packed
+    vip = int.from_bytes(octets, "little")
+    key_bytes = struct.pack("<Q", (6 << 48) | (vip << 16) | socket.htons(port))
+    value = pinned_map_value(path, key_bytes, 16)
+    return value.hex() if value else None
 
 
 def server_pod(name):
@@ -415,7 +421,12 @@ def main():
             wait_for("third backend in the slice", 300, lambda: len([
                 endpoint for slice_ in cluster.get("endpointslices", "-l", "kubernetes.io/service-name=sticky")["items"]
                 for endpoint in slice_.get("endpoints") or [] if endpoint.get("conditions", {}).get("ready")]) == 3)
-            time.sleep(3)
+            if arguments.trace_affinity_selector:
+                wait_for("three-backend selector", 120,
+                         lambda: (value := pinned_service_value(selector_map, sticky_ip, 80))
+                         and int.from_bytes(bytes.fromhex(value)[:2], "little") == 3)
+            else:
+                time.sleep(3)
             after = {http_get(sticky_ip, 80, "/hostname")[1] for _ in range(10)}
         finally:
             stop_sampling.set()
@@ -527,6 +538,28 @@ def main():
                        for family in ("v4", "v6")]
         check("serviceControlMapsArePinned", all(path.exists() for path in shared_maps),
               [str(path) for path in shared_maps])
+
+        # Withdrawal must retire the removed backend's membership before a
+        # sticky client can reuse it after the selector shrinks.
+        removed_ip = cluster.get("pod", "web-2")["status"]["podIP"]
+        cluster.kubectl("delete", "pod", "web-2", "--wait=false")
+        wait_for("third backend removed from the slice", 120, lambda: len([
+            endpoint for slice_ in cluster.get("endpointslices", "-l", "kubernetes.io/service-name=sticky")["items"]
+            for endpoint in slice_.get("endpoints") or [] if endpoint.get("conditions", {}).get("ready")]) == 2)
+        sticky_key = struct.pack("<Q", (6 << 48) |
+                                 (int.from_bytes(ipaddress.IPv4Address(sticky_ip).packed, "little") << 16) |
+                                 socket.htons(80))
+        removed_backend = ipaddress.IPv4Address(removed_ip).packed + struct.pack("!H", 8080) + b"\0\0"
+        removed_index = sticky_key + removed_backend
+        index_map = shared_root / "gr8s_backend_index_v4"
+        wait_for("two-backend selector after removal", 120,
+                 lambda: (value := pinned_service_value(shared_root / "gr8s_service_v4", sticky_ip, 80))
+                 and int.from_bytes(bytes.fromhex(value)[:2], "little") == 2)
+        wait_for("removed backend membership withdrawn", 120,
+                 lambda: pinned_map_value(index_map, removed_index, 4) is None)
+        after_removal = {http_get(sticky_ip, 80, "/hostname")[1] for _ in range(10)}
+        check("affinitySurvivesBackendRemoval", after_removal == held,
+              {"before": sorted(held), "after": sorted(after_removal), "removed": removed_ip})
     except Exception as error:  # Every failure is still reported with partial observations.
         failures.append(f"exception: {error}")
     finally:

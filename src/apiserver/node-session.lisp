@@ -2352,13 +2352,74 @@ owner projection stays byte-identical."
                      proofs))))
      identities)))
 
+(defun service-risk-retained-grant-locked-p
+    (server current-owners identities)
+  "Keep a previous grant only while every old receiver remains live.
+The new owner projection may add Pods, but it cannot remove or replace an old
+incarnation. Reports may cover either the old or new projection while nodes
+converge; every old receiver must still be proven by its original session."
+  (let ((old-owners (node-grpc-server-service-risk-grant-owner-projection server))
+        (sessions (node-grpc-server-service-risk-grant-sessions server)))
+    (and (node-grpc-server-service-risk-grant-digest server)
+         old-owners sessions
+         (equal identities (node-grpc-server-service-risk-grant-identities server))
+         (every (lambda (old) (= 1 (count old current-owners :test #'equalp))) old-owners)
+         (every
+          (lambda (identity previous-session)
+            (let* ((name (car identity))
+                   (session (gethash name (node-grpc-server-sessions server)))
+                   (report (gethash name (node-grpc-server-service-receiver-reports server)))
+                   (reported-owners (fourth report))
+                   (proofs (third report)))
+              (and session (eq session previous-session)
+                   (equal (node-agent-session-node-id session) (cdr identity))
+                   (not (node-agent-session-evicted-p session))
+                   (node-agent-session-service-risk-v2-p session)
+                   report (<= (second report)
+                              (gethash name
+                                       (node-grpc-server-acknowledged-revisions server) 0))
+                   (every (lambda (reported)
+                            (member reported current-owners :test #'equalp))
+                          reported-owners)
+                   (every
+                    (lambda (bytes)
+                      (let* ((owner (ag-proto:deserialize-from-bytes
+                                     'gr8s.node.v1::service-translation-identity bytes))
+                             (uid (slot-value owner 'gr8s.node.v1::pod-uid))
+                             (epoch
+                               (gr8s.network::service-translation-incarnation-token
+                                (slot-value owner 'gr8s.node.v1::node-id)
+                                (slot-value owner 'gr8s.node.v1::sandbox-id)
+                                (slot-value owner 'gr8s.node.v1::interface-name)
+                                (slot-value owner 'gr8s.node.v1::pod-ip)
+                                (slot-value owner 'gr8s.node.v1::translation-ip))))
+                        (or (not (equal name (slot-value owner 'gr8s.node.v1::node-name)))
+                            (and (member bytes reported-owners :test #'equalp)
+                                 (= 1 (count uid proofs :test #'equal
+                                             :key (lambda (proof)
+                                                    (slot-value proof
+                                                                'gr8s.node.v1::pod-uid))))
+                                 (some (lambda (proof)
+                                         (and (equal uid
+                                                     (slot-value proof
+                                                                 'gr8s.node.v1::pod-uid))
+                                              (equalp epoch
+                                                      (slot-value proof
+                                                                  'gr8s.node.v1::incarnation))))
+                                       proofs)))))
+                    old-owners))))
+          identities sessions))))
+
 (defun service-risk-grant-for-snapshot-locked (server node-name snapshot)
-  "Return this session's grant only for its discovery and owner projections.
-The caller holds the server lock; a newly joined or replaced session gets none."
+  "Return this session's current or safely retained previous grant.
+The caller holds the server lock; a newly joined or replaced session gets none.
+The agent must match a retained digest to its previously approved selection and
+check that selection against the current Service plan before preserving it."
   (let* ((digest (node-grpc-server-service-risk-grant-digest server))
          (identities (node-grpc-server-service-risk-grant-identities server))
          (position (position node-name identities :test #'equal :key #'car))
-         (session (gethash node-name (node-grpc-server-sessions server))))
+         (session (gethash node-name (node-grpc-server-sessions server)))
+         (owners (service-risk-snapshot-owner-projection snapshot)))
     (when (and digest position session
                (equal identities
                       (service-risk-node-identities (node-grpc-server-store server)))
@@ -2366,17 +2427,25 @@ The caller holds the server lock; a newly joined or replaced session gets none."
                (eq session (nth position
                                 (node-grpc-server-service-risk-grant-sessions server)))
                (slot-value snapshot 'gr8s.node.v1::network)
-               (equalp (node-grpc-server-service-risk-grant-owner-projection server)
-                       (service-risk-snapshot-owner-projection snapshot))
-               (equalp (node-grpc-server-service-risk-grant-receiver-projection server)
-                       (service-risk-snapshot-receiver-projection snapshot))
-               (service-risk-receivers-published-locked-p
-                server (node-grpc-server-service-risk-grant-owner-projection server)
-                identities)
-               (equalp digest
-                       (gr8s.protocol::service-risk-projection-digest
-                        (slot-value snapshot
-                                    'gr8s.node.v1::service-discovery-objects-json))))
+               (equalp owners
+                       (service-risk-owner-projection (node-grpc-server-store server)))
+               (or (and (equalp owners
+                                (node-grpc-server-service-risk-grant-owner-projection server))
+                        (equalp (node-grpc-server-service-risk-grant-receiver-projection server)
+                                (service-risk-snapshot-receiver-projection snapshot))
+                        (service-risk-receivers-published-locked-p
+                         server owners identities)
+                        (equalp digest
+                                (gr8s.protocol::service-risk-projection-digest
+                                 (slot-value snapshot
+                                             'gr8s.node.v1::service-discovery-objects-json))))
+                   (and (service-risk-retained-grant-locked-p server owners identities)
+                        (every (lambda (old)
+                                 (member old
+                                         (service-risk-snapshot-receiver-projection snapshot)
+                                         :test #'equalp))
+                               (node-grpc-server-service-risk-grant-receiver-projection
+                                server)))))
       (copy-seq digest))))
 
 (defun publish-node-desired-state (server node-name snapshot &key deduplicate)
@@ -2392,10 +2461,21 @@ The caller holds the server lock; a newly joined or replaced session gets none."
   (let ((revision nil)
         (session nil))
     (bt:with-lock-held ((node-grpc-server-lock server))
-      (setf (slot-value snapshot 'gr8s.node.v1::service-receivers)
-            (cluster-service-ready-receivers-locked
-             server (service-risk-snapshot-owner-projection snapshot)
-             (service-risk-node-identities (node-grpc-server-store server))))
+      (let* ((owners (service-risk-snapshot-owner-projection snapshot))
+             (identities (service-risk-node-identities (node-grpc-server-store server)))
+             (current (cluster-service-ready-receivers-locked
+                       server owners identities)))
+        (setf (slot-value snapshot 'gr8s.node.v1::service-receivers)
+              (or current
+                  (when (and (equalp owners (service-risk-owner-projection
+                                            (node-grpc-server-store server)))
+                             (service-risk-retained-grant-locked-p
+                              server owners identities))
+                    (mapcar (lambda (bytes)
+                              (ag-proto:deserialize-from-bytes
+                               'gr8s.node.v1::service-receiver-proof bytes))
+                            (node-grpc-server-service-risk-grant-receiver-projection
+                             server))))))
       (setf (slot-value snapshot 'gr8s.node.v1::service-risk-grant-digest)
             (or (service-risk-grant-for-snapshot-locked server node-name snapshot)
                 (make-array 0 :element-type '(unsigned-byte 8))))
@@ -2489,7 +2569,7 @@ and discovery/owner projections. The next snapshot carries or revokes it."
              (ready (cluster-service-ready-receivers-locked
                      server owner-projection identities))
              (receiver-projection (mapcar #'ag-proto:serialize-to-bytes ready))
-             (retained
+             (current-grant
                (and (node-grpc-server-service-risk-grant-digest server)
                     (equalp digest (node-grpc-server-service-risk-grant-digest server))
                     (equalp owner-projection
@@ -2503,22 +2583,26 @@ and discovery/owner projections. The next snapshot carries or revokes it."
                     (every (lambda (session)
                              (and session (not (node-agent-session-evicted-p session))
                                   (node-agent-session-service-risk-v2-p session)))
-                           sessions))))
-        (unless retained
-          (clear-service-risk-grant-locked server)
-          (when (and (service-risk-projection-published-locked-p
-                      server projection owner-projection identities)
-                     (service-risk-receivers-published-locked-p
-                      server owner-projection identities)
-                     (service-risk-receiver-projection-published-locked-p
-                      server receiver-projection identities))
-            (setf (node-grpc-server-service-risk-grant-digest server) digest
-                  (node-grpc-server-service-risk-grant-owner-projection server)
-                  owner-projection
-                  (node-grpc-server-service-risk-grant-receiver-projection server)
-                  receiver-projection
-                  (node-grpc-server-service-risk-grant-identities server) identities
-                  (node-grpc-server-service-risk-grant-sessions server) sessions)))))
+                           sessions)))
+             (next-ready
+               (and (service-risk-projection-published-locked-p
+                     server projection owner-projection identities)
+                    (service-risk-receivers-published-locked-p
+                     server owner-projection identities)
+                    (service-risk-receiver-projection-published-locked-p
+                     server receiver-projection identities))))
+        (cond (current-grant nil)
+              (next-ready
+               (setf (node-grpc-server-service-risk-grant-digest server) digest
+                     (node-grpc-server-service-risk-grant-owner-projection server)
+                     owner-projection
+                     (node-grpc-server-service-risk-grant-receiver-projection server)
+                     receiver-projection
+                     (node-grpc-server-service-risk-grant-identities server) identities
+                     (node-grpc-server-service-risk-grant-sessions server) sessions))
+              ((service-risk-retained-grant-locked-p server owner-projection identities)
+               nil)
+              (t (clear-service-risk-grant-locked server)))))
     ;; The store is independent of the session lock. If it changed while the
     ;; decision was made, discard this candidate and retry on the next tick.
     (unless (and (= revision-before (pod-store-resource-revision store))
