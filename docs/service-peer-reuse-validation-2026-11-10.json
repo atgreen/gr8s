@@ -1,0 +1,216 @@
+{
+  "date": "2026-11-10",
+  "issue": "podster-p9c.10",
+  "implementationCommit": "bfdb030",
+  "testCommit": "3a7ac77",
+  "scope": "Fix replacement peer ingress blocked by obsolete backend direct reply claims, and pending plain direct claims blocking policy evaluation. No runtime activation.",
+  "sourceSHA256": {
+    "src/network/service-nat-program.lisp": "ae2107e3866e6179e3e5be2b8f0c39bee9e394a1b116b0e9f266d3a07ced93ef",
+    "scripts/test-service-nat-guard.py": "01255da3ce6f0f6ee89ecc92e04795d81803446b1881c28cebbd2a26fa5952e8"
+  },
+  "fixtureSHA256": "6d982e2cc1ce0a657ce9ec6c36232e11d3f023a53a1e7e18b51e102848c8f573",
+  "mapCount": 29,
+  "programInstructions": {
+    "gr8s_egress_guard": 343,
+    "gr8s_ingress_guard": 155,
+    "gr8s_v2_eg_policy": 1247,
+    "gr8s_v2_in_policy": 788,
+    "gr8s_nat_generation": 1675,
+    "gr8s_nat_select": 8559,
+    "gr8s_nat_commit": 2401,
+    "gr8s_nat_prepare": 1452,
+    "gr8s_nat_restore": 2527,
+    "gr8s_nat_deliver": 99,
+    "gr8s_nat_gc": 1137
+  },
+  "interpreter": {
+    "passed": true,
+    "kernel": false,
+    "cases": {
+      "sameNode": [
+        "protocol6EgressDenyDoesNotCommit",
+        "protocol6PolicySeesBackendBeforeVIPRestoration",
+        "protocol6AliasMatchesCanonicalPolicyAndReplies",
+        "protocol6DirectAndServiceReturnTuplesStaySeparate",
+        "protocol6HairpinThroughDefaultDeny",
+        "protocol17EgressDenyDoesNotCommit",
+        "protocol17PolicySeesBackendBeforeVIPRestoration",
+        "protocol17AliasMatchesCanonicalPolicyAndReplies",
+        "protocol17DirectAndServiceReturnTuplesStaySeparate",
+        "protocol17HairpinThroughDefaultDeny",
+        "sourceSpoofCannotPublishNATState",
+        "MACSpoofCannotPublishNATState"
+      ],
+      "backendException": [
+        "backendIPBlockExceptMatchesCanonicalSourceAfterSNAT",
+        "deniedAliasRequestCannotAuthorizeBackendReply"
+      ],
+      "missingStages": [
+        "missingStage0FailsClosed",
+        "missingStage1FailsClosed",
+        "missingStage2FailsClosed",
+        "missingStage3FailsClosed",
+        "missingStage4FailsClosed",
+        "missingStage5FailsClosed",
+        "missingStage6FailsClosed",
+        "missingStage7FailsClosed",
+        "tailCallLimitFailsClosed",
+        "fragmentsCannotEscapeTupleOwnershipOrPortPolicy"
+      ],
+      "delivery": [
+        "sameNodeDeliveryHappensAfterSourceCommit",
+        "nodeDNSRedirectCannotSkipCommit"
+      ],
+      "localEpoch": [
+        "gr8s_nat_selectFencesStaleLocalEpoch",
+        "gr8s_nat_commitFencesStaleLocalEpoch",
+        "gr8s_nat_prepareFencesStaleLocalEpoch",
+        "gr8s_nat_restoreFencesStaleLocalEpoch",
+        "oldEndpointCannotPublishReplacementOwnerClaim",
+        "oldEndpointCannotRetireReplacementTCPGeneration"
+      ],
+      "separateNodeState": [
+        "protocol6EgressDenyDoesNotCommit",
+        "protocol6PolicySeesBackendBeforeVIPRestoration",
+        "protocol6AliasMatchesCanonicalPolicyAndReplies",
+        "protocol6DirectAndServiceReturnTuplesStaySeparate",
+        "protocol6HairpinThroughDefaultDeny",
+        "protocol17EgressDenyDoesNotCommit",
+        "protocol17PolicySeesBackendBeforeVIPRestoration",
+        "protocol17AliasMatchesCanonicalPolicyAndReplies",
+        "protocol17DirectAndServiceReturnTuplesStaySeparate",
+        "protocol17HairpinThroughDefaultDeny",
+        "sourceSpoofCannotPublishNATState",
+        "MACSpoofCannotPublishNATState"
+      ],
+      "peerChurn": [
+        "protocol6replacement",
+        "protocol6policyDenied",
+        "protocol6reverseContention",
+        "protocol6forwardContention",
+        "protocol6disabledPeer",
+        "protocol6sameEpoch",
+        "protocol6serviceClaim",
+        "protocol17replacement",
+        "protocol17policyDenied",
+        "protocol17reverseContention",
+        "protocol17forwardContention",
+        "protocol17disabledPeer",
+        "protocol17sameEpoch",
+        "protocol17serviceClaim"
+      ]
+    }
+  },
+  "kernel": {
+    "passed": true,
+    "kernel": true,
+    "cases": {
+      "sameNode": [
+        "protocol6EgressDenyDoesNotCommit",
+        "protocol6PolicySeesBackendBeforeVIPRestoration",
+        "protocol6AliasMatchesCanonicalPolicyAndReplies",
+        "protocol6DirectAndServiceReturnTuplesStaySeparate",
+        "protocol6HairpinThroughDefaultDeny",
+        "protocol17EgressDenyDoesNotCommit",
+        "protocol17PolicySeesBackendBeforeVIPRestoration",
+        "protocol17AliasMatchesCanonicalPolicyAndReplies",
+        "protocol17DirectAndServiceReturnTuplesStaySeparate",
+        "protocol17HairpinThroughDefaultDeny",
+        "sourceSpoofCannotPublishNATState",
+        "MACSpoofCannotPublishNATState"
+      ],
+      "backendException": [
+        "backendIPBlockExceptMatchesCanonicalSourceAfterSNAT",
+        "deniedAliasRequestCannotAuthorizeBackendReply"
+      ],
+      "missingStages": [
+        "missingStage0FailsClosed",
+        "missingStage1FailsClosed",
+        "missingStage2FailsClosed",
+        "missingStage3FailsClosed",
+        "missingStage4FailsClosed",
+        "missingStage5FailsClosed",
+        "missingStage6FailsClosed",
+        "missingStage7FailsClosed",
+        "tailCallLimitFailsClosed",
+        "fragmentsCannotEscapeTupleOwnershipOrPortPolicy"
+      ],
+      "delivery": [
+        "sameNodeDeliveryHappensAfterSourceCommit",
+        "nodeDNSRedirectCannotSkipCommit"
+      ],
+      "localEpoch": [
+        "gr8s_nat_selectFencesStaleLocalEpoch",
+        "gr8s_nat_commitFencesStaleLocalEpoch",
+        "gr8s_nat_prepareFencesStaleLocalEpoch",
+        "gr8s_nat_restoreFencesStaleLocalEpoch",
+        "oldEndpointCannotPublishReplacementOwnerClaim",
+        "oldEndpointCannotRetireReplacementTCPGeneration"
+      ],
+      "separateNodeState": [
+        "protocol6EgressDenyDoesNotCommit",
+        "protocol6PolicySeesBackendBeforeVIPRestoration",
+        "protocol6AliasMatchesCanonicalPolicyAndReplies",
+        "protocol6DirectAndServiceReturnTuplesStaySeparate",
+        "protocol6HairpinThroughDefaultDeny",
+        "protocol17EgressDenyDoesNotCommit",
+        "protocol17PolicySeesBackendBeforeVIPRestoration",
+        "protocol17AliasMatchesCanonicalPolicyAndReplies",
+        "protocol17DirectAndServiceReturnTuplesStaySeparate",
+        "protocol17HairpinThroughDefaultDeny",
+        "sourceSpoofCannotPublishNATState",
+        "MACSpoofCannotPublishNATState"
+      ],
+      "peerChurn": [
+        "protocol6replacement",
+        "protocol6policyDenied",
+        "protocol6reverseContention",
+        "protocol6forwardContention",
+        "protocol6disabledPeer",
+        "protocol6sameEpoch",
+        "protocol6serviceClaim",
+        "protocol17replacement",
+        "protocol17policyDenied",
+        "protocol17reverseContention",
+        "protocol17forwardContention",
+        "protocol17disabledPeer",
+        "protocol17sameEpoch",
+        "protocol17serviceClaim"
+      ],
+      "pinnedLifetime": [
+        "pinnedTableRetainsClosedContinuationFDs",
+        "pinnedTableKeepsReversePolicyAndRestoration"
+      ]
+    }
+  },
+  "networking": {
+    "passed": 1621,
+    "failed": 0,
+    "skipped": 0
+  },
+  "standaloneCoreRegression": "make test-service-nat passed:42 packet +7 capacity,480 TCP,56 collector cases plus serial stress.",
+  "environment": "BPF_PROG_TEST_RUN on disposable Fedora44 VM22291, kernel6.19.10-300.fc44.x86_64. All11 graph programs accepted; separate backend and client state for all14 peer-churn cases. Unique run directory/pins removed. No live CNI or actual sockets.",
+  "beforeFix": "Existing compiled graph drops a new epoch9 client SYN at backend preparation after a TCP connection using epoch1 on the same IP/port. The new regression fails against that pre-fix fixture.",
+  "behavior": [
+    "Only exactly owned plain direct claims with a changed enabled primary peer incarnation can be retired. Both reservations are held; foreign reservations survive.",
+    "Replacement incoming packets still undergo ingress policy. Cleanup does not seed reply exceptions or refresh NAT/TCP state.",
+    "Pending untranslated direct claims admit no translation or reply authorization. Ordinary packets reach ingress policy unchanged; snapshots prove neither denied nor allowed ingress refreshes their pending state or creates TCP metadata.",
+    "Service claims, disabled peers and same-epoch corrupted metadata retain fail-closed behavior."
+  ],
+  "limits": [
+    "Manually seeded identities/readiness/CIDRs; no CNI/agent profile installation or live native/Kata proof.",
+    "The58/60 passing scenarios do not prove complete incoming tuple ownership. A separate interpreter repro found cross-Service misclassification before a backend first replies; trackedpodster-p9c.14 and blocking activation.",
+    "Native UDP socket reverse ambiguity remains inpodster-p9c.13.",
+    "Distributed identity readiness, retained-writer drain/migration/rollback, fragmentation, IPv6 packet NAT, NodePort and broader parent semantics remain outstanding."
+  ],
+  "knownPassiveGap": "incoming request ('10.88.0.2', '10.88.1.3', 49017, 8080)\nindependent backend Service request ('10.88.1.3', '10.96.0.99', 8080, 80)\nbackend output ('10.88.1.3', '10.88.0.2', 8080, 49017)\nclient receives ('10.96.0.10', '10.88.0.2', 80, 49017)\nTraceback (most recent call last):\n  File \"/tmp/flatback-repro-passive-tuple.py\", line 27, in <module>\n    assert p.endpoints(received)[0] != p.VIP, 'independent Service request misclassified as first Service reply'\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: independent Service request misclassified as first Service reply\n",
+  "logSHA256": {
+    "graph": "34260836a31c700baee9a3c052f5ec59b8caa76de5a3ded783f66cef97a14a11",
+    "kernel": "c37a10efddc7d419bfbadae3247942cf55c26b6c1735cc1bd6972396084b78f4",
+    "core": "f921b9e3be5732290bb4f97bb36ef00223d407c4d949c8e014c858196a866da1",
+    "networking": "f855abd45e04086c1af79c9df601cecf6eb04a86bdd4438d8c7e4362ea190708",
+    "before": "344d188b4dd7da15292876ff130ce76362bf57c3e721f19f65714381b9b5107e",
+    "passiveGap": "a856bd555e58386bb8c91e979a7398cc63efc7722d358dabcf4b7922c31ee54c"
+  },
+  "remaining": "Parent podster-p9c and child10 remain active."
+}
