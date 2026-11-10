@@ -93,5 +93,13 @@
     "Multi-member capture/heartbeat availability proof",
     "Production compaction default remains disabled",
     "Broader ten-gap epic remains active"
-  ]
+  ],
+  "publication": {
+    "candidateCommit": "e918035e99e61c1d5f8f66727b08e6724f4f1517",
+    "checks": 354,
+    "failures": 0,
+    "log": "/tmp/gr8s-main-application-freeze-tests.log",
+    "nativeRelevantSourcesMatch": true,
+    "note": "Current main node-session/protocol updates merged cleanly; all recorded source hashes match the native/source-tested implementation."
+  }
 }
