@@ -142,10 +142,12 @@ def main():
         with (base / "samples.jsonl").open("w") as out:
             while True:
                 values = states()
+                result["lastChurnSample"] = values
                 out.write(json.dumps(values) + "\n")
                 out.flush()
                 samples += 1
                 if values[current.name]["churnFinished"]:
+                    result["churnCompleted"] = True
                     break
                 if time.monotonic() > deadline:
                     raise TimeoutError("Full churn did not complete")
@@ -155,9 +157,11 @@ def main():
             value["applied"] >= final_commit and not value["blocked"] and
             value["checkpoints"] >= (1 if args.smoke else 2)
             for value in values.values()) else None)(states()), timeout=240)
-        if not args.smoke:
-            assert all(value["historyEstimatedBytes"] >= 96 * 1024 * 1024 - 2 * 65536 for value in final.values())
         result.update(beforeRestart=final, samples=samples)
+        if not args.smoke:
+            histories = {name: value["historyEstimatedBytes"] for name, value in final.items()}
+            assert all(value >= 96 * 1024 * 1024 - 2 * 65536 for value in histories.values()), \
+                f"Full retained history missing before restart: {histories}"
         for node in nodes:
             assert node.rpc("read", name="while-held")["value"] == "committed-with-all-captures-held"
             assert node.rpc("read", name="sentinel")["value"] == "preserved"
@@ -171,8 +175,9 @@ def main():
         probe.await_value(lambda: leader(nodes), timeout=240)
         recovered = states()
         if not args.smoke:
-            assert all(value["loadedHistoryEstimatedBytes"] >= 96 * 1024 * 1024 - 2 * 65536
-                       for value in recovered.values())
+            histories = {name: value["loadedHistoryEstimatedBytes"] for name, value in recovered.items()}
+            assert all(value >= 96 * 1024 * 1024 - 2 * 65536 for value in histories.values()), \
+                f"Full retained history missing on cold load: {histories}"
         for node in nodes:
             assert node.rpc("read", name="while-held")["value"] == "committed-with-all-captures-held"
             assert node.rpc("read", name="sentinel")["value"] == "preserved"
