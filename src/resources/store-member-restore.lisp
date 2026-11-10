@@ -169,18 +169,31 @@ that gate blocked for a later ordinary RPC to retry under the same outer barrier
   "Restore an artifact-backed WAL before listening. API access stays blocked until
 current-term committed catch-up. Durable writes use the shared HA dispatcher;
 the caller starts ticking and publishes its application endpoints.
-Genesis bootstrap and production control-plane integration remain separate."
+Use :BOOTSTRAP-ROLE :FOUNDER or :LEARNER only for fresh/journaled bootstrap.
+Production control-plane integration remains separate."
   (unless (or (pathnamep wal) (stringp wal)) (error "Invalid application WAL pathname"))
   (unless (evenp (length options)) (error "Invalid store member startup options"))
   (loop for key in options by #'cddr
         when (member key '(:storage :storage-path :prepare-fn :validate-recovery-fn :restore-fn :apply-fn))
           do (error "Store member startup owns ~S" key))
+  (let ((bootstrap-role (getf options :bootstrap-role))
+        (bootstrap-api-url (getf options :bootstrap-api-url)))
+    (when (and bootstrap-api-url (null bootstrap-role))
+      (error "Bootstrap API URL requires a fresh bootstrap role"))
+    (setf options (loop for (key value) on options by #'cddr
+                        unless (member key '(:bootstrap-role :bootstrap-api-url))
+                          append (list key value)))
   (gr8s.store::quiesce-store-access store)
   (let ((member nil) (completed nil))
     (unwind-protect
          (gr8s.store::call-with-store-application-barriers
           store
           (lambda ()
+            (when bootstrap-role
+              (unless (equal (merge-pathnames wal)
+                             (merge-pathnames "raft/control-plane.log" (pod-store-path store)))
+                (error "Fresh application bootstrap must use its member-root WAL"))
+              (bootstrap-store-member-wal store id :role bootstrap-role :api-url bootstrap-api-url))
             (setf member
                   (apply #'gr8s.raft.transport:start-raft-member id :storage-path wal
                          :apply-fn (gr8s.ha::make-store-raft-apply-function store)
@@ -198,4 +211,4 @@ Genesis bootstrap and production control-plane integration remain separate."
               (gr8s.raft.transport:raft-member-reconcile-links member))
             (setf completed t)
             member))
-      (unless completed (when member (gr8s.raft.transport:stop-raft-member member))))))
+      (unless completed (when member (gr8s.raft.transport:stop-raft-member member)))))))

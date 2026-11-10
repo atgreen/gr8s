@@ -65,6 +65,24 @@ remaining log. Selected application files can contain later updates; restoring
 the retained baseline provides the starting state for deterministic suffix replay.
 Member identity and private keys stay at their existing root paths.
 
+For a fresh member, the same internal startup helper accepts
+`:bootstrap-role :founder` or `:bootstrap-role :learner`, with the WAL at
+`raft/control-plane.log`. Bootstrap requires drained application access and outer
+writer barriers. It fsyncs `raft/bootstrap.json` under the WAL ownership lease
+before creating the data file, retains an exact application artifact, records
+that reference in the journal, and publishes the initial WAL through atomic
+checkpoint replacement. It then marks publication durable. A restart can resume
+at each boundary without recapturing an already retained baseline from later files.
+Published WALs that disappear, become empty or gain later hard/log state are never
+reinitialized. Bootstrap identity and API URL changes are refused.
+
+The founder baseline is index1/term0 with one voter. A learner starts at
+index0/term0 and cannot campaign. Its local zero-index artifact supports restart;
+live snapshot installation still requires a positive index. Catch-up must install
+the founder's baseline before applying later entries, preserving application state
+that existed before founding. The internal bootstrap helper does not publish API
+endpoints, acquire process-wide application ownership or enable compaction.
+
 API access remains blocked after the listener starts. An authenticated leader's
 AppendEntries must confirm a current-term committed boundary that this member
 has fully applied. Vote requests and stale-term heartbeats cannot open access.
@@ -82,9 +100,12 @@ Startup failures leave application access blocked.
 `start-raft-member` supports `:prepare-fn` for callback installation before WAL
 recovery and `:validate-recovery-fn` for checking recovered state before it mutates
 the node. The latter must return exactly T. Direct `recover-raft-node` callers
-can supply the corresponding `:validate-fn` callback.
+can supply the corresponding `:validate-fn` callback. `open-file-raft-storage`
+also accepts `:prepare-fn` for journal publication under its lease before data-file
+creation; errors release that newly acquired lease.
 
 Production `start-ha-control-plane` does not invoke this recovery helper yet.
-Genesis/bootstrap needs to establish a durable baseline, and production callers
-must coordinate state-directory ownership and membership readiness before
-enabling automatic compaction.
+Production callers must acquire state-directory ownership before opening the
+application, use the durable bootstrap/recovery path, and admit new voters as
+learners until they catch up. Capture registration, native multi-voter acceptance
+and automatic compaction remain unfinished.
