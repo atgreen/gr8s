@@ -695,3 +695,28 @@
                     (is (= 0 (gr8s::main-with-environment
                               arguments (constantly nil) (constantly 99)))))))
       (is (search "skill" output)))))
+
+
+(test serve-compaction-is-explicit-and-requires-ha
+  (is-false (getf (gr8s::parse-serve-options '("--raft-init")) :raft-compaction))
+  (is-true (getf (gr8s::parse-serve-options '("--raft-init" "--raft-compaction")) :raft-compaction))
+  (is-true (getf (gr8s::parse-serve-options '("--raft-compaction" "--raft-join" "127.0.0.1:7449")) :raft-compaction))
+  (signals error (gr8s::parse-serve-options '("--raft-compaction"))))
+
+(test production-ha-startup-forwards-the-compaction-opt-in
+  (dolist (enabled '(nil t))
+    (with-temporary-store (store root)
+      (declare (ignore root))
+      (let* ((options (gr8s::parse-serve-options
+                       (append '("--raft-init" "--node-name" "cli-compaction" "--listen" "127.0.0.1")
+                               (when enabled '("--raft-compaction")))))
+             (ha nil))
+        ;; Bind an ephemeral transport port in this source-level startup test.
+        (setf (getf options :raft-port) 0)
+        (unwind-protect
+             (progn
+               (setf ha (gr8s.server::maybe-start-ha-control-plane store nil options))
+               (is (not (null ha)))
+               (is (eq enabled (not (null (gr8s.ha::ha-control-plane-compaction-thread ha)))))
+               (is (eql (if enabled 1 nil) (gr8s.ha::ha-control-plane-compaction-interval ha))))
+          (when ha (gr8s::stop-ha-control-plane ha)))))))

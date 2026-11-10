@@ -1,0 +1,17 @@
+{
+  "scope": "Production HA startup compaction opt-in plumbing; source-level real coordinator startup with ephemeral TCP ports, not complete serve/VM acceptance",
+  "defaultEnabled": false,
+  "option": "serve --raft-compaction",
+  "requires": [
+    "--raft-init or --raft-join"
+  ],
+  "passed": true,
+  "checks": 10,
+  "log": "/tmp/gr8s-serve-compaction-opt-in-tests.log",
+  "verified": [
+    "Default remains disabled",
+    "Parser accepts founder and joiner opt-in, rejects standalone opt-in",
+    "Production maybe-start-ha-control-plane starts a real checkpoint worker only when requested",
+    "Worker uses one-second interval and stops with coordinator"
+  ]
+}

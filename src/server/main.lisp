@@ -164,6 +164,7 @@
                        :wireguard-relay-max-channels 1024
                        :node-name "gr8s-local"
                        :disable-agent nil
+                       :raft-compaction nil
                        :cluster-pod-cidr +default-cluster-pod-cidr+
                        :cluster-pod-cidrs (vector +default-cluster-pod-cidr+)
                        :node-pod-prefix +default-node-pod-prefix+
@@ -190,10 +191,11 @@
                        :local-storage-path +default-local-storage-path+)))
     (loop while arguments
           for option = (first arguments)
-          do (if (member option '("--disable-agent" "--raft-init" "--containerd-no-sync") :test #'string=)
+          do (if (member option '("--disable-agent" "--raft-init" "--raft-compaction" "--containerd-no-sync") :test #'string=)
                  (progn
                    (cond ((string= option "--disable-agent") (setf (getf options :disable-agent) t))
                          ((string= option "--raft-init") (setf (getf options :raft-init) t))
+                         ((string= option "--raft-compaction") (setf (getf options :raft-compaction) t))
                          ((string= option "--containerd-no-sync") (setf (getf options :containerd-no-sync) t)))
                    (setf arguments (rest arguments)))
                  (let ((value (option-value arguments option)))
@@ -333,6 +335,9 @@
                       (setf (getf options :local-storage-path) value))
                      (t (error "unknown serve option: ~A" option)))
                    (setf arguments (cddr arguments)))))
+    (when (and (getf options :raft-compaction)
+               (not (or (getf options :raft-init) (getf options :raft-join))))
+      (error "--raft-compaction requires --raft-init or --raft-join"))
     (unless (eq (null (getf options :image-credential-provider-config))
                 (null (getf options :image-credential-provider-bin-dir)))
       (error "image credential provider config and bin directory must be specified together"))
@@ -2073,6 +2078,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
          :host (or (getf options :raft-listen) "127.0.0.1")
          :port (or (getf options :raft-port) +serve-raft-default-port+)
          :init (getf options :raft-init)
+         :compaction-interval (when (getf options :raft-compaction) 1)
          :join-host join-host :join-port join-port
          :node-name (getf options :raft-node-name)
          :token (getf options :raft-token)
@@ -2275,6 +2281,9 @@ No HA API may start from member-local certificate state before this converges."
                         ("--listen IPV4" "API listen address") ("--port PORT" "API port")
                         ("--node-port PORT" "Agent supervisor port") ("--node-name NAME" "Node name")
                         ("--disable-agent" "Run only the control plane")
+                        ("--raft-init" "Found an HA control-plane cluster")
+                        ("--raft-join HOST:PORT" "Join an HA control-plane cluster")
+                        ("--raft-compaction" "Opt in to automatic HA checkpoints; requires --raft-init or --raft-join")
                         ("--overlay-backend NAME" "vxlan or wireguard")
                         ("--runtime NAME" "containerd or fake")
                         ("--containerd-mode MODE" "managed or external")

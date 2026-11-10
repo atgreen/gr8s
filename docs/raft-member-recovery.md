@@ -616,6 +616,13 @@ writes falling from seconds to milliseconds. Sustained leadership stability
 remains open under `podster-ucm.11.3.9.11`; automatic compaction remains disabled
 by default.
 
+Operators can opt in on each HA server by adding `--raft-compaction` to the
+existing `gr8s serve` command, alongside `--raft-init` or `--raft-join HOST:PORT`.
+The switch starts that server's checkpoint worker with the normal thresholds
+and a one-second check interval. Omit it to keep automatic compaction disabled.
+It is rejected outside HA mode. This exposes the opt-in production startup path;
+it does not replace the separate production/VM and sustained-availability gates.
+
 Build this internal harness with
 `sbcl --noinform --non-interactive --load scripts/build-compaction-cluster-native-harness.lisp`.
 Run `python3 scripts/test-compaction-cluster-native.py` for 2,048 rounds and
