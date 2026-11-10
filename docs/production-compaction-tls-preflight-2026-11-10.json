@@ -1,0 +1,13 @@
+{
+  "scope": "Real CLI TLS API preflight; workload did not start because default strict certificate verification failed",
+  "testedProductCommit": "535ca30",
+  "passed": false,
+  "binarySha256": "f57299ddaf7106eb6f070e849f3a6e99f8b3b870a963527b3ee8ad7e01c4c29b",
+  "evidence": "/tmp/gr8s-ha-production-n4k78cp_",
+  "error": "TimeoutError: native HA condition did not become true: <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: Missing Authority Key Identifier (_ssl.c:1082)>",
+  "traceback": "Traceback (most recent call last):\n  File \"/home/green/orca/workspaces/gr8s/lanternfish/scripts/test-ha-production-native.py\", line 337, in main\n    wait_for(nodes[0].ready)\n    ~~~~~~~~^^^^^^^^^^^^^^^^\n  File \"/home/green/orca/workspaces/gr8s/lanternfish/scripts/test-ha-production-native.py\", line 47, in wait_for\n    raise TimeoutError(f\"native HA condition did not become true: {last}\")\nTimeoutError: native HA condition did not become true: <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: Missing Authority Key Identifier (_ssl.c:1082)>\n",
+  "compactionAcceptance": false,
+  "fullCompactionAcceptance": false,
+  "reason": "API server leaf lacks Authority Key Identifier. Preserve strict client validation; product certificate generation fix tracked by podster-ucm.5.1.",
+  "standard": "https://www.rfc-editor.org/rfc/rfc5280#section-4.2.1.1"
+}
