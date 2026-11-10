@@ -345,5 +345,26 @@
     "cause": "Secondary startup route journal reader only recognized IPAM formats1/2 and rejected format3. Fixed1b2cc46 by restoring through the central validator; private aliases have the same checked veth ownership. Initial run failed and its cleanup did not converge normally; owned leftovers were reaped before the corrected rerun."
   },
   "diagnosticsFollowup": "Two temporary prog-load errno28 deferrals in the passing native run were followed by GC verification. Original errno/verifier details and root cause remain podster-p9c.9; no zero-error claim.",
-  "remaining": "podster-p9c.10 still requires CNI return routes, receiving-node capability/installation readiness before activation, versioned flow/direct-tuple ownership, policy identity normalization, reservation/GC/program-upgrade integration and actual TCP/UDP hairpin/collision traffic. Parent also retains IPv6 packet NAT, packet NodePort policies/source/health checks, broader live Service semantics and diagnostics."
+  "remaining": "podster-p9c.10 still requires CNI return routes, receiving-node capability/installation readiness before activation, versioned flow/direct-tuple ownership, policy identity normalization, reservation/GC/program-upgrade integration and actual TCP/UDP hairpin/collision traffic. Parent also retains IPv6 packet NAT, packet NodePort policies/source/health checks, broader live Service semantics and diagnostics.",
+  "integratedCommit": "725d69d",
+  "additionalSnapshotTestCommit": "8a8ae66",
+  "hostedCI": {
+    "head": "c645dd06d86ce27e70252a7c06d24ed36d6100f7",
+    "run": 42728989000,
+    "status": "Job not started because recent account payments failed or spending limit must be increased; no hosted test result."
+  },
+  "postWALIntegrationFirstAttempt": {
+    "commit": "c645dd0",
+    "passed": 7434,
+    "failed": 1,
+    "logSHA256": "e188706846e7c4d8598faf8dc0f854bf0d850e30fde723b0037d22d8a609818a",
+    "failure": "The repeated application-WAL process-kill child reached its60s ready-file deadline during dependency compilation after concurrent uncommitted loader edits. Those edits were set aside, and a source-stable rerun is required; this attempt is not a passing gate."
+  },
+  "postWALIntegrationFinal": {
+    "commit": "c645dd06d86ce27e70252a7c06d24ed36d6100f7",
+    "passed": 7482,
+    "failed": 0,
+    "logSHA256": "9156525b28390fbbfd8d6ef574bbf51a9575f129c80daf9c3a0aa09d5cc6b477",
+    "scope": "The integrated identity/CNI/IPAM/node/Pod/HA/materialization/member-restore gate plus Raft and witness suites after integrating upstream3044c43. Source unchanged during this run; repeated application-WAL process-kill regression passes48checks."
+  }
 }
