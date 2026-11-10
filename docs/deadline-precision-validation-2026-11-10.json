@@ -1,0 +1,97 @@
+{
+  "date": "2026-11-10",
+  "bead": "podster-ucm.2.11",
+  "implementationCommit": "c4cd61219209db6d7f6ea6f96c5ae5f359c1f668",
+  "sourceSha256": {
+    "ocicl/ag-gRPC-20260920-a87f647/ag-grpc/metadata.lisp": "b6c9c90c89fc3e4daa8e11a56be3dbe9e98275a3d27c76aa81b59d3600986953",
+    "ocicl/cl-cancel-20260206-bec34fb/README.md": "20ac9efa5f8ea4ef212068bdf6e1bfc4ef9a5359bc41baa54df4114ddb05074e",
+    "ocicl/cl-cancel-20260206-bec34fb/deadline.lisp": "f2b644cd628ca0b7cae5b6ef7ea803d6fc8a08e52b1a65f6dabde18d0c7289c7",
+    "ocicl/cl-cancel-20260206-bec34fb/tests/cancellable-tests.lisp": "590e7cc8760eba9f77036722f6e67d43c4edf079dab6d8e17bbd53f8f792575f",
+    "scripts/http2-lifetime-harness.lisp": "1bbd2b7b3ea4246c418f8fe11e65ae57bb24bc1fa5e24981dbbec1805fffbe6e",
+    "tests/grpc-close-test.lisp": "3cd4c9f6f4fb30623f8de71a76aed38fe83085f1a71bc4b90c4ce4555ea5917a"
+  },
+  "baselineEvidence": "deadline-retention-validation-2026-11-10.json",
+  "change": [
+    "Normalize relative float durations before adding rational epoch time",
+    "Represent fractional grpc-timeout wire units as exact rational seconds",
+    "Normalize absolute float inputs without altering their supplied numeric value",
+    "Check deadline scopes before body and after normal return; preserve values, original errors and nonlocal exits during cleanup"
+  ],
+  "testConstructionCorrection": "Absolute-deadline tests now add rational offsets to epoch time. An absolute timestamp rounded by the caller before entering with-deadline cannot be repaired inside that API. Relative timeout tests continue to exercise single and double floats.",
+  "integration": {
+    "exitCode": 0,
+    "selectors": 18,
+    "checks": 781,
+    "failures": 0,
+    "upstreamCancellationChecks": 336,
+    "logSha256": "fb1fba6905ebe9d0c5db982d0cefc9ae45a58511d4aad1583b3caa47bd77ea4c",
+    "runner": "(require :asdf)\n(asdf:load-asd (truename \"gr8s.asd\"))\n(asdf:load-system \"gr8s/tests\")\n(asdf:load-system \"cl-cancel/tests\")\n(in-package :gr8s/tests)\n(let ((ok t))\n  (dolist (target '(grpc-close ag-grpc-channel-connects-over-a-unix-socket raft-transport raft-cluster raft-join raft-snapshot grpc-inflate device-plugins revisioned-node-session-reconnects-acknowledges-and-expires-heartbeats persistent-node-session-renews-its-heartbeat-lease blocked-status-provider-does-not-stop-node-heartbeats blocked-heartbeat-send-reconnects-the-session closing-a-session-leaves-the-reading-thread-a-closed-connection-to-find cancelling-persistent-node-session-wakes-blocked-read cancelling-agent-during-server-hello-wait-unwinds-the-session local-agent-starts-through-grpc-and-stops-cleanly persistent-agent-applies-deltas-and-resyncs-after-reconnecting :cl-cancel))\n    (assert (fiveam:get-test target))\n    (unless (fiveam:run! target) (setf ok nil)))\n  (uiop:quit (if ok 0 1)))\n"
+  },
+  "nativeRun": {
+    "exitCode": 0,
+    "command": "build/gr8s-http2-lifetime --dynamic-space-size 384",
+    "binarySha256": "2b5ed892a8a0da466ee6be2e44e86bf93224f79e1e998692b812bdf007419e16",
+    "reportSha256": "90f9eb1b37615a483fc22b5def03f5ae21fb3de4ba94e2cb84197ef6f4e48665",
+    "report": {
+      "passed": true,
+      "nativeHarness": true,
+      "productionServe": false,
+      "vmAcceptance": false,
+      "heapLimitMiB": 384,
+      "calls": 6000,
+      "connections": 1,
+      "peakServerStreams": 1,
+      "rpcTimeoutSeconds": 0.75,
+      "growthAllowanceBytes": 1048576,
+      "samples": [
+        {
+          "calls": 1000,
+          "liveBytesAfterFullGc": 56930288,
+          "pendingDeadlineEntries": 0,
+          "clientStreams": 0,
+          "serverStreams": 0
+        },
+        {
+          "calls": 2000,
+          "liveBytesAfterFullGc": 56996144,
+          "pendingDeadlineEntries": 0,
+          "clientStreams": 0,
+          "serverStreams": 0
+        },
+        {
+          "calls": 3000,
+          "liveBytesAfterFullGc": 57073056,
+          "pendingDeadlineEntries": 0,
+          "clientStreams": 0,
+          "serverStreams": 0
+        },
+        {
+          "calls": 4000,
+          "liveBytesAfterFullGc": 56986128,
+          "pendingDeadlineEntries": 0,
+          "clientStreams": 0,
+          "serverStreams": 0
+        },
+        {
+          "calls": 5000,
+          "liveBytesAfterFullGc": 56978416,
+          "pendingDeadlineEntries": 0,
+          "clientStreams": 0,
+          "serverStreams": 0
+        },
+        {
+          "calls": 6000,
+          "liveBytesAfterFullGc": 57004128,
+          "pendingDeadlineEntries": 0,
+          "clientStreams": 0,
+          "serverStreams": 0
+        }
+      ]
+    }
+  },
+  "remaining": [
+    "Direct channel cancellation and abnormal bidi scope lifetime audit",
+    "Production durable HA startup",
+    "Native authenticated recovery, leader handoff and VM acceptance"
+  ]
+}

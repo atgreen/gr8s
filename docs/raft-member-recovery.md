@@ -230,7 +230,8 @@ sbcl --noinform --non-interactive --load scripts/build-http2-lifetime-harness.li
 build/gr8s-http2-lifetime --dynamic-space-size 384
 ```
 
-It keeps one client/server connection open for 6,000 RPCs, samples live heap after
+It keeps one client/server connection open for 6,000 RPCs using 750 ms deadlines,
+samples live heap after
 full GC every 1,000 calls, and checks that growth after the warm-up sample stays
 within 1 MiB. Its JSON includes retained stream counts and pending deadline timer
 entries. TCP_NODELAY is enabled on the probe's sockets to avoid packet-coalescing
@@ -247,8 +248,29 @@ learner probe also passes at 384 MiB per process.
 `deadline-retention-validation-2026-11-10.json` records those runs, 430 passing
 gRPC/Raft/node-session integration checks, and 22 focused timer checks. It also
 records seven failures in the bundled cancellation library's 316-check suite;
-the same failures reproduce against the unchanged library. Deadline precision
-and context-macro semantics are tracked in `podster-ucm.2.11`. Direct channel
+the same failures reproduced against the unchanged library. They are resolved
+under `podster-ucm.2.11`, as described below. Direct channel
 cancellation and abnormal bidirectional scope exits remain in the lifetime audit
 under `podster-ucm.2.10`. These probes do not establish production HA or VM
 acceptance.
+
+
+### Fractional deadlines
+
+Timeout durations are normalized before adding epoch time, and fractional
+gRPC timeout units are parsed as exact rational seconds. This prevents single
+precision rounding from turning a short future deadline into a past timestamp.
+Absolute timestamps already rounded by a caller cannot be repaired; use rational
+offsets when constructing them directly.
+
+Deadline context scopes check cancellation before the body and after a normal
+return, preserve multiple values and original errors/nonlocal exits, and always
+release their timer registration. Their cancellation remains cooperative.
+
+All 781 checks in the combined cancellation, transport, Raft, snapshot and
+node-session run pass, including the cancellation library's 336 checks. The
+rebuilt native 6,000-RPC probe also passes at 384 MiB with 750 ms deadlines,
+zero retained stream records and zero pending deadline entries at each sample.
+See `deadline-precision-validation-2026-11-10.json` for source and binary hashes,
+the test runner and native measurements. Production HA integration and the
+remaining stream-lifetime audit are still separate work.
