@@ -313,3 +313,75 @@
              (is (not (probe-file (merge-pathnames "application-generations/" root)))))
         (gr8s::stop-raft-member sender)
         (when receiver (gr8s::stop-raft-member receiver))))))
+
+(in-suite store-snapshot-registry)
+(test artifact-reclamation-preserves-durable-pending-and-outbound-roots
+  (with-temporary-store (store root)
+    (let* ((member (gr8s.resources::start-store-member-from-wal
+                    store "source" (merge-pathnames "raft/control-plane.log" root)
+                    :bootstrap-role :founder :host "127.0.0.1" :port 0))
+           (link (gr8s.raft.transport::make-raft-peer-link :id "peer"))
+           (paths nil) (references nil))
+      (unwind-protect
+           (progn
+             (dotimes (i 4)
+               (let ((source (merge-pathnames (format nil "sample-~D.jsonl" i) root)))
+                 (gr8s.resources::capture-store-snapshot store source (+ 2 i) 1)
+                 (multiple-value-bind (path reference)
+                     (gr8s.resources::retain-store-snapshot-artifact root source (+ 2 i) 1 (snapshot-test-digest source))
+                   (push path paths) (push reference references))))
+             (setf paths (nreverse paths) references (nreverse references))
+             (flet ((envelope (reference)
+                      (list :gr8s-raft-snapshot 1 :application reference :application-present t
+                            :members '(("source" . :voter))))
+                    (reap () (bt:with-lock-held ((gr8s::raft-member-lock member))
+                               (gr8s.resources::reap-store-snapshot-artifacts-unlocked member root))))
+               (signals error (gr8s.resources::reap-store-snapshot-artifacts-unlocked member root))
+               (bt:with-lock-held ((gr8s::raft-member-lock member))
+                 (setf (gethash "peer" (gr8s.raft.transport::raft-member-links member)) link
+                       (gr8s.raft.transport::raft-peer-link-items link)
+                       (list (list :type :install-snapshot :state (envelope (first references))))
+                       (gr8s.raft.transport::raft-peer-link-active-items link)
+                       (list (list :type :install-snapshot :state (envelope (second references))))
+                       (gr8s.raft:raft-node-snapshot-pending (gr8s::raft-member-node member))
+                       (list 4 1 (envelope (third references)) #())))
+               (let* ((journal (merge-pathnames "raft/bootstrap.json" root))
+                      (before (uiop:read-file-string journal)))
+                 (unwind-protect
+                      (progn
+                        (gr8s::write-private-text-atomically journal "{}")
+                        (signals error (reap))
+                        (is (every #'probe-file paths)))
+                   (gr8s::write-private-text-atomically journal before)))
+               (is (= 1 (reap)))
+               (is (not (probe-file (fourth paths))))
+               (is (every #'probe-file (subseq paths 0 3)))
+               (bt:with-lock-held ((gr8s::raft-member-lock member))
+                 (setf (gr8s.raft.transport::raft-peer-link-items link) nil
+                       (gr8s.raft.transport::raft-peer-link-active-items link) nil
+                       (gr8s.raft:raft-node-snapshot-pending (gr8s::raft-member-node member)) nil))
+               ;; Unsafe/unknown files are preserved even if their basename is a digest.
+               (sb-posix:chmod (namestring (first paths)) #o644)
+               (sb-posix:link (namestring (second paths)) (namestring (merge-pathnames "other-link" root)))
+               (delete-file (third paths))
+               (sb-posix:symlink "missing" (namestring (third paths)))
+               (is (= 0 (reap)))
+               (is (probe-file (first paths)))
+               (is (probe-file (second paths)))
+               (is (sb-posix:s-islnk (sb-posix:stat-mode (sb-posix:lstat (namestring (third paths))))))
+               (delete-file (third paths))
+               (delete-file (merge-pathnames "other-link" root))
+               (sb-posix:chmod (namestring (first paths)) #o600)
+               (is (= 2 (reap)))
+               ;; A different current snapshot must not reclaim the journal baseline.
+               (let* ((node (gr8s::raft-member-node member))
+                      (baseline (gr8s.resources::checked-store-snapshot-artifact-path
+                                 root (getf (cddr (gr8s.raft:raft-node-snapshot-state node)) :application)))
+                      (source (merge-pathnames "sample-0.jsonl" root)))
+                 (gr8s.resources::retain-store-snapshot-artifact root source 2 1 (snapshot-test-digest source))
+                 (bt:with-lock-held ((gr8s::raft-member-lock member))
+                   (setf (gr8s.raft:raft-node-snapshot-state node) (envelope (first references))))
+                 (is (= 0 (reap)))
+                 (is (probe-file baseline))
+                 (is (probe-file (first paths))))))
+        (gr8s::stop-raft-member member)))))
