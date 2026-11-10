@@ -1,10 +1,10 @@
 # Custom resources
 
 The `apiextensions.k8s.io/v1` CustomResourceDefinition API accepts JSON and
-checksum-pinned typed Kubernetes protobuf requests, and installs actual
-schema-backed JSON resource routes. A definition becomes Established only after
-its group, names, scope, versions and structural schemas pass admission. Its
-served versions appear in discovery; their custom object and list schemas and
+checksum-pinned typed Kubernetes protobuf requests. It installs schema-backed
+JSON resource routes. A definition becomes Established only after its group,
+names, scope, versions, and structural schemas pass admission. Its served
+versions appear in discovery. Their custom object and list schemas and
 CRUD/status paths appear in OpenAPI v2 and v3. Definitions remain scoped to their
 own durable store rather than entering a process-global user registry. Discovery
 uses Kubernetes version priority, preserving native storage and workload groups.
@@ -37,15 +37,15 @@ Deleting a definition deletes its actual custom instances. User finalizers block
 instance deletion and keep the definition's cleanup finalizer and routes alive.
 Owner garbage collection resolves exact custom owner UIDs across declared
 versions and respects unknown external kinds. The controller resumes cleanup
-after restart; failed durable writes do not
-publish route or resource deletion. Recreating a definition is possible only
+after restart. Failed durable writes do not publish route or resource deletion.
+A definition can be recreated only
 after its previous instances have been removed.
 
-CEL, conversion webhooks, scale
-subresources, additional printer columns, custom field selectors, server-side
+CEL, conversion webhooks, scale subresources, additional printer columns,
+custom field selectors, server-side
 apply, protobuf requests for unstructured custom objects, and protobuf OpenAPI
-v2 wire negotiation are not implemented and are
-not advertised as functioning features. Unsupported executable schema/conversion
+v2 wire negotiation are not implemented. gr8s does not advertise these features.
+Unsupported executable schema and conversion
 features are rejected. The native kubectl smoke passes strict creation,
 real streamed watches, version identity, restart persistence and finalizer
 cleanup without disabling validation. Run it against a dumped executable with:

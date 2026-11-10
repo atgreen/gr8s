@@ -23,7 +23,7 @@ resource permissions by itself. As in the pinned [privileged group authorizer](h
 a verified certificate whose signed organizations contain `system:masters`
 receives standard privileged authorization without a RoleBinding. Ordinary
 users and groups retain their namespace, resource and verb grants. CSR approval
-and signing additionally require
+and signing also require
 signer-specific `approve` and `sign` permission; the same admission applies to
 certificate users and ServiceAccount tokens. CSR username, UID, groups and
 credential extra are derived from authenticated credentials. Client-supplied

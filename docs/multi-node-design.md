@@ -6,8 +6,8 @@ gr8s becomes a small multi-node Kubernetes-compatible Pod control plane without
 giving up its single-binary deployment. One dumped native image supplies three
 roles:
 
-- `gr8s serve` runs the Kubernetes API and cluster control plane;
-- `gr8s agent` runs the node-local runtime and networking control loop;
+- `gr8s serve` runs the Kubernetes API and cluster control plane.
+- `gr8s agent` runs the node-local runtime and networking control loop.
 - CNI environment variables dispatch that same image into its thin CNI entry
   point.
 
@@ -39,7 +39,7 @@ CNI operation fails rather than making an unrecorded network change.
 ## Agent protocol
 
 The node initiates every management connection. Nodes expose no management
-listener to the cluster network. A private, versioned ag-gRPC bidirectional
+listener on the cluster network. A private, versioned ag-gRPC bidirectional
 stream over TLS carries:
 
 - node registration and capabilities;

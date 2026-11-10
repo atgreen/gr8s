@@ -1,15 +1,15 @@
 # Runtime & the container stack
 
-gr8s does not reimplement an OCI runtime. It embeds containerd and speaks to it
-over CRI — the same runtime boundary k3s uses — while owning everything above
-that boundary itself.
+gr8s does not reimplement an OCI runtime. It embeds containerd and communicates
+through CRI, the same runtime boundary that k3s uses. gr8s owns everything above
+that boundary.
 
 ## The self-contained payload
 
 The native build embeds pinned, statically linked **containerd 2.4.2**,
 `containerd-shim-runc-v2`, **runc 1.5.2**, and the `bridge`, `host-local`, and
-`loopback` CNI plugins 1.9.1 — no system containerd, no host glibc, no separate
-CNI helper binary.
+`loopback` CNI plugins 1.9.1. It needs no system containerd, host glibc, or
+separate CNI helper binary.
 
 At startup the local gr8s agent mounts a private `tmpfs`, materializes the
 payload there, starts its own containerd, and unmounts the payload after
@@ -43,7 +43,7 @@ creation and start, status/exit-code observation, CRI log output, and clean
 container/sandbox removal.
 
 The dumped gr8s image is exposed to containerd under the `gr8s` CNI name, so a CNI
-invocation is selected automatically when `CNI_COMMAND` is present — there is no
+invocation is selected automatically when `CNI_COMMAND` is present. There is no
 separate CNI helper binary.
 
 For development against an already-running containerd, opt into external mode:
@@ -77,18 +77,19 @@ behavior, supported scope and the disposable-VM test.
 handler reaches CRI `RunPodSandbox`, so an unconfigured handler leaves the Pod
 pending with the runtime's error. The runtime-handler configuration is
 **data-driven** (`extra-runtime-handlers`), so stronger-isolation runtimes
-register as handlers and a Pod opts into one with its `runtimeClassName` — default
-`runc` for one workload, a sandbox or microVM for the next, on the same node.
+register as handlers. A Pod selects one with its `runtimeClassName`. The same
+node can run one workload with the default `runc` and another in a sandbox or
+microVM.
 
 Two optional runtimes provide stronger workload isolation:
 
-### Sandboxed runtimes — gVisor
+### Sandboxed runtimes: gVisor
 
 **gVisor (`runsc`)** is a userspace application kernel that intercepts a
 container's syscalls instead of passing them straight to the host kernel, shrinking
 the host attack surface without a full VM.
 
-### microVM runtimes — Kata Containers
+### microVM runtimes: Kata Containers
 
 **Kata Containers** runs Pods in lightweight virtual machines with their own
 guest kernels, providing hardware-virtualized isolation. The installer supports
@@ -110,7 +111,7 @@ to the name of that `RuntimeClass` to select its isolation runtime.
 ## Preloaded images (airgap)
 
 An agent with its own managed containerd imports every `*.tar` image archive in
-its `images/` state directory at startup, before any Pod can start — as k3s does
+its `images/` state directory at startup, before any Pod can start, as k3s does
 with its airgap images. For `serve`'s local agent that directory is
 `<state>/agent/images/`; for `gr8s agent` it is `<state>/images/`. Archives may be
 OCI image layouts or `docker save` output; they go into containerd's `k8s.io`

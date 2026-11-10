@@ -8,7 +8,7 @@ leader supplies the committed boundary during catch-up. The witness has no
 application state machine to replay.
 
 A witness starts with the witness role and completes its join handshake before
-starting the election clock. It reuses its saved member certificate on restart;
+starting the election clock. It reuses its saved member certificate on restart.
 a new enrollment token is unnecessary when those credentials remain usable.
 Restart with the same member ID, state directory and advertised listening
 address. The member owns the recovered WAL stream and closes it after its server
@@ -18,7 +18,7 @@ The transport API exposes this lifecycle as
 `start-raft-member :storage-path PATH :initial-role :witness`. Recovery runs under
 the member mutex before constructing the RPC listener. `:storage-path` and an
 externally supplied `:storage` are mutually exclusive. Only storage opened via
-`:storage-path` is closed by member shutdown; callers retain ownership of storage
+`:storage-path` is closed by member shutdown. Callers retain ownership of storage
 they explicitly supply. A malformed WAL aborts startup before the listener opens.
 
 Each writable WAL holds a nonblocking exclusive process lock on a stable

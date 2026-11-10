@@ -9,7 +9,7 @@ at committed apply.
 
 Every replica checks all conditions before changing any resource, controller
 state map, encryption policy, history or revision. Comparison includes UID and
-object content, with case-sensitive JSON equality, but excludes the object's
+object content, with case-sensitive JSON equality. It excludes the object's
 member-local `metadata.resourceVersion`. Local Events and restored revision
 epochs can make those numbers differ across members holding the same replicated
 state. Controller-map changes have per-key presence and value conditions too.
@@ -21,14 +21,14 @@ leader. Retrying requires reading current state and preparing a fresh transactio
 The successful apply result is the small readable value `(:core-ok)`.
 
 Expected Secret objects use the same authenticated encryption as replacement
-objects; adding preconditions does not put old Secret data in the WAL as
+objects. Adding preconditions does not put old Secret data in the WAL as
 plaintext when encryption is enabled. A transaction authored under an outdated
 encryption policy is rejected before decrypting its conditions or changing local
 policy. Deltas contain only changed keys and their prior values, not a full
 cluster checkpoint.
 
 Version 1 entries remain readable for existing WAL replay. These checks require
-all members to run the new apply implementation; they do not provide mixed-version
+all members to run the new apply implementation. They do not provide mixed-version
 protocol negotiation. UID comparison prevents a stale delete from removing a
 new object created at the same name. Content comparison alone does not detect an
 object changing away and back to exactly the same content while retaining its

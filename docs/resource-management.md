@@ -108,8 +108,8 @@ NUMA conformance certification.
 
 The [native validation record](resource-management-native-2026-11-09.json)
 contains the tested binary hash, live process/container identity, upstream RPC
-responses and host-suite comparison with clean main. DRA reporting is additionally
-checked with an independent upstream client against prepared-claim fixtures;
+responses and host-suite comparison with clean main. An independent upstream
+client also checks DRA reporting against prepared-claim fixtures.
 only claims prepared for that exact Pod UID are reported.
 
 The ordinary restart check runs before the deliberate SIGBUS exec. Combined

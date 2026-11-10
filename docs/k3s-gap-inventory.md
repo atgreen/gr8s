@@ -31,7 +31,7 @@ Current work is tracked by **`podster-ucm`**, with children `.1` (journal recove
 `.2` (HA correctness), `.3` (backup/restore), `.4` (secrets encryption), `.5`
 (certificates), `.6` (telemetry), `.7` (installation/upgrades), `.8` (IPv6
 acceptance), `.9` (AddOn/Helm), and `.10` (audit). Child `.11` tracks bounded Raft
-log retention and snapshot catch-up; `.12` tracks per-Pod transactions. Historical references remain for provenance,
+log retention and snapshot catch-up. `.12` tracks per-Pod transactions. Historical references remain for provenance,
 not as evidence of their current status.
 
 Source reconciliation found streamed checkpoints, per-key HA deltas, coalesced
@@ -40,16 +40,16 @@ recovery now streams records, trims history during replay, applies its byte budg
 and collects older-generation garbage under heap pressure. A [constrained-heap
 recovery run](core-recovery-validation-2026-11-09.json) replays 512 MiB of journal
 within a 384 MiB heap using default retention settings. These changes address
-specific allocation paths; they do not establish an unrestricted cluster size.
+specific allocation paths. They do not establish an unrestricted cluster size.
 Replication retries now use bounded entry batches instead of serializing the
 whole retained suffix. Compaction/truncation clear discarded backing-array slots,
 and snapshot persistence precedes in-memory compaction. These primitive fixes do
 not enable production snapshotting by themselves. Explicit file-backed compaction
-now atomically replaces its WAL, reclaiming discarded records; the
+now atomically replaces its WAL and reclaims discarded records. The
 [checkpoint validation](raft-checkpoint-validation-2026-11-09.json) covers repeated
 reclamation, failure boundaries and tail recovery. Production HA still retains its
 committed Raft log without automatic compaction
-or snapshot catch-up; that P0 work remains open. Live disconnected-peer acceptance
+or snapshot catch-up. That P0 work remains open. Live disconnected-peer acceptance
 and the other HA correctness items also remain open.
 
 The core and peer transport now support configured snapshot catch-up with bounded
@@ -66,7 +66,7 @@ complete Pod-index serialization. Desired UID/version preconditions are checked 
 apply time, and status-only commands cannot resurrect deleted objects. A
 [validation record](pod-transactions-validation-2026-11-09.json) covers constrained
 heap use, application conflicts, native leadership handoff and persisted Pod
-recovery. Node writes also stage private records and publish only after consensus;
+recovery. Node writes also stage private records and publish only after consensus.
 [validation](node-transactions-validation-2026-11-09.json) covers failed proposals,
 replica watch publication and enrollment persistence retries.
 [Concurrent Node write validation](node-conflicts-validation-2026-11-09.json) covers

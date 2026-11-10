@@ -17,7 +17,7 @@ No helper Pod, image or NFS client package is needed for the built-in kinds.
 
 PV and PVC `v1` and the `storage.k8s.io/v1` StorageClass, VolumeAttributesClass,
 CSIDriver, CSINode, VolumeAttachment and CSIStorageCapacity APIs support durable CRUD,
-JSON/merge/strategic patches, optimistic resource versions, selectors, paginated
+JSON, merge, and strategic patches, optimistic resource versions, selectors, paginated
 lists, JSON watches and typed Kubernetes protobuf requests. PV, PVC, CSINode and
 VolumeAttachment status subresources preserve specification fields. CSINode
 `status.storageHealth` is dropped, as Kubernetes does while its alpha
@@ -40,7 +40,8 @@ NFS volumes. Two things differ from Kubernetes:
 - **CSI:** a CSI volume is measured at its published path, rather than through the
   driver's `NodeGetVolumeStats`.
 
-The record of each mounted claim is kept with the Pod's volumes, so it survives an agent restart.
+The record of each mounted claim stays with the Pod's volumes. It survives an
+agent restart.
 
 ## Node-local volumes
 
