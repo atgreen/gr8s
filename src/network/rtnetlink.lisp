@@ -432,11 +432,11 @@
       (rtnetlink-error (condition)
         (unless (= 17 (rtnetlink-error-errno condition)) (error condition))))))
 
-(defun replace-network-route (destination prefix name &key gateway source)
+(defun replace-network-route (destination prefix name &key gateway source exclusive)
   "Install or replace the main-table route to DESTINATION/PREFIX out of the link
    NAME (RTM_NEWROUTE, NLM_F_CREATE|NLM_F_REPLACE) as a static unicast route,
    optionally via GATEWAY and with preferred SOURCE. Signals INVALID-CNI on a
-   prefix outside 0..32."
+   prefix outside 0..32. With EXCLUSIVE, fail rather than replace an existing route."
   (multiple-value-bind (family bytes bits) (network-address-wire-values destination)
     (unless (<= 0 prefix bits) (invalid-cni "invalid route prefix ~A" prefix))
     (flet ((same-family-bytes (value)
@@ -447,7 +447,7 @@
                    (invalid-cni "route address families do not match"))
                  other-bytes))))
       (call-rtnetlink
-       24 #x500 ; RTM_NEWROUTE, CREATE | REPLACE
+       24 (if exclusive #x600 #x500) ; RTM_NEWROUTE, CREATE | EXCL or REPLACE
        (netlink-octets
         (vector family prefix 0 0 254 4 (if gateway 0 253) 1)
         (netlink-integer 0 4)

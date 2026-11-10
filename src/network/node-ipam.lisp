@@ -330,6 +330,12 @@ It is not configured in the Pod or exposed through the CNI IP result."
               (error (condition) (remhash key leases) (error condition)))
             address)))))
 
+(defun service-snat-address (ipam sandbox-id interface-name)
+  "Read an existing private return lease without allocating or changing it."
+  (bt:with-lock-held ((node-ipam-lock ipam))
+    (gethash (pod-address-key sandbox-id interface-name)
+             (node-ipam-service-snat-allocations ipam))))
+
 (defun allocate-pod-addresses (ipam sandbox-id interface-name)
   "Allocate or return the stable ordered address list for a Pod interface."
   (bt:with-lock-held ((node-ipam-lock ipam))
