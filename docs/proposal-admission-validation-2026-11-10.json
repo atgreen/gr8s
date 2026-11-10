@@ -108,5 +108,15 @@
     },
     "failures": 0,
     "nativeBuildSourcesUnchanged": true
+  },
+  "additionalMergeValidation": {
+    "commit": "be94b0b9ee12ff07dbe05bac36610f046ebe281b",
+    "upstreamMerged": "1efe4dc",
+    "checks": 899,
+    "selectors": 38,
+    "scope": "All36 CNI tests plus egress-guard and service-lb suites",
+    "failures": 0,
+    "nativeBuildSourcesUnchanged": true,
+    "previousPush": "Rejected non-fast-forward; fetched and merged without force"
   }
 }
