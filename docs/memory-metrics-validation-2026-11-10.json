@@ -1,0 +1,30 @@
+{
+  "scope": "Authenticated API endpoint Lisp memory and watch retention metrics",
+  "publishedMainCommit": "fe3ab7bc76dacf31df920c3b60f9428bc22857a9",
+  "implementationCommit": "1888bf3",
+  "checks": 41,
+  "passed": true,
+  "exactMainLog": "/tmp/gr8s-main-memory-metrics-exact-tests.log",
+  "exactMainLogSha256": "bb179d8f10bf06b092d8d0c5c9a4e953fe82145d9f1455bc8a63db91e7354e6e",
+  "sourceSha256": {
+    "src/server/memory-monitor.lisp": "a9db555e49a1c0ecbf7991b0c880322968a1ab789c2861b6478828f66f9a6623",
+    "src/apiserver/http.lisp": "e52d3d414a15f717bb6059a241661196d6084e1c06ab0ce2ff6f70ac5fb0ca4b",
+    "tests/apiserver-metrics-test.lisp": "f7a647bddf4c26050150dcb35eb17566446de5bf548397f108ad75917b9c700e",
+    "docs/control-plane-metrics.md": "982938b2e1deccd0b7da4f6660181366498b923a24a951bf9a3854e6bc29ad0c"
+  },
+  "covered": [
+    "Real HTTP metrics endpoint",
+    "Reported heap limit numeric value",
+    "Allocation and GC CPU counter types",
+    "Post-GC series absent until observed",
+    "Store-less omission of watch-history series",
+    "Fixed three-kind watch labels and retention accounting",
+    "Application revisions unchanged by scrape",
+    "Collector can read history behind closed application gate"
+  ],
+  "limits": [
+    "This scoped validation does not establish Raft, capacity or reconciliation telemetry completeness.",
+    "No claim that an entire HTTP scrape can bypass a closed application gate; the memory collector is checked independently.",
+    "The suite checks the text endpoint, not a separately deployed Prometheus server."
+  ]
+}
