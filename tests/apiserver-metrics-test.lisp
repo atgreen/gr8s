@@ -11,6 +11,52 @@
 (def-suite apiserver-metrics :in gr8s)
 (in-suite apiserver-metrics)
 
+(test lisp-memory-metrics-report-real-counters-and-omit-unobserved-gc
+  (let ((gr8s.server::*heap-after-gc* 0)
+        (sb-ext:*gc-run-time* (* 5 internal-time-units-per-second)))
+    (let ((text (gr8s.server::memory-metrics-text)))
+      (is (search "# TYPE gr8s_lisp_allocated_bytes_total counter" text))
+      (is (search "gr8s_lisp_gc_cpu_seconds_total 5" text))
+      (let* ((line (find-if (lambda (line) (uiop:string-prefix-p "gr8s_lisp_heap_limit_bytes " line))
+                            (uiop:split-string text :separator '(#\Newline))))
+             (*read-eval* nil) (*read-default-float-format* 'double-float))
+        (is (= (sb-ext:dynamic-space-size) (read-from-string (subseq line (1+ (position #\Space line)))))))
+      (is (search "# TYPE gr8s_lisp_heap_used_bytes gauge" text))
+      (is-false (search "gr8s_lisp_heap_after_gc_bytes" text))
+      (is-false (search "gr8s_watch_history" text)))
+    (setf gr8s.server::*heap-after-gc* 123456)
+    (is (search "gr8s_lisp_heap_after_gc_bytes 123456" (gr8s.server::memory-metrics-text)))))
+
+(test lisp-memory-metrics-scrape-is-read-only-and-history-labels-are-bounded
+  (with-temporary-store (store path)
+    (values path)
+    (gr8s::create-core-resource store "namespaces"
+                                (gr8s::core-object "metadata" (gr8s::core-object "name" "metrics-example")) nil)
+    (let ((revision (gr8s::pod-store-resource-revision store))
+          (bytes (reduce #'+ (gr8s::pod-store-template-history store)
+                         :key #'gr8s.resources::template-history-entry-bytes))
+          (server nil))
+      (unwind-protect
+           (progn
+             (setf server (start-http-test-server :store store :runtime (make-fake-runtime)))
+             (multiple-value-bind (body code) (apiserver-metrics-request "/metrics")
+               (is (= 200 code))
+               (is (search "gr8s_lisp_heap_used_bytes " body))
+               (is (search (format nil "gr8s_watch_history_bytes{kind=\"resources\"} ~D" bytes) body))
+               (is (search "gr8s_watch_history_entries{kind=\"nodes\"} " body))
+               (is (search "gr8s_watch_history_entries{kind=\"pods\"} " body))
+               (is-false (search "metrics-example" body)))
+             (is (= revision (gr8s::pod-store-resource-revision store)))
+             ;; The collector remains read-only even while the application gate
+             ;; is closed; it does not enter the consensus transaction wrapper.
+             (gr8s.store::quiesce-store-access store)
+             (unwind-protect
+                  (progn
+                    (is (search "gr8s_watch_history_bytes" (gr8s.server::memory-metrics-text store)))
+                    (is (= revision (gr8s::pod-store-resource-revision store))))
+               (gr8s.store::resume-store-access store)))
+        (when server (stop-server server))))))
+
 (defun apiserver-metrics-request (path &rest options)
   "Call the real listener on its kernel-assigned port, returning the body as text and the status."
   (multiple-value-bind (body code)

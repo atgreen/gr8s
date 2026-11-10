@@ -28,6 +28,40 @@
   "Record the heap left in use by the collection that just finished. It must not cons."
   (setf *heap-after-gc* (sb-kernel:dynamic-usage)))
 
+(defun memory-metrics-text (&optional store)
+  "Render process-local Lisp memory and retained watch histories without collecting.
+Use the raw store mutex: a scrape must neither propose a transaction nor fail
+because application access is temporarily gated during snapshot publication."
+  (let ((histories
+          (when store
+            (bt:with-lock-held ((pod-store-lock store))
+              (list (list "pods" (pod-store-pod-watch-journal-length store)
+                          (pod-store-pod-watch-journal-bytes store))
+                    (list "resources" (length (pod-store-template-history store))
+                          (reduce #'+ (pod-store-template-history store) :key #'template-history-entry-bytes))
+                    (list "nodes" (pod-store-node-watch-journal-length store)
+                          (pod-store-node-watch-journal-bytes store)))))))
+    (with-output-to-string (out)
+      (flet ((emit (name help type value)
+               (gr8s.kubelet::write-prometheus-family out name help type (list (list nil value)))))
+        (emit "gr8s_lisp_allocated_bytes_total" "Bytes allocated by Lisp since process startup." "counter"
+              (sb-ext:get-bytes-consed))
+        (emit "gr8s_lisp_gc_cpu_seconds_total" "CPU time spent in Lisp garbage collection since process startup." "counter"
+              (/ sb-ext:*gc-run-time* internal-time-units-per-second 1d0))
+        (when (plusp *heap-after-gc*)
+          (emit "gr8s_lisp_heap_after_gc_bytes" "Dynamic heap usage after the latest observed garbage collection." "gauge"
+                *heap-after-gc*))
+        (emit "gr8s_lisp_heap_limit_bytes" "Lisp dynamic heap limit; excludes native allocations and thread stacks." "gauge"
+              (sb-ext:dynamic-space-size))
+        (emit "gr8s_lisp_heap_used_bytes" "Current Lisp dynamic heap usage, including uncollected garbage." "gauge"
+              (sb-kernel:dynamic-usage)))
+      (dolist (family '(("gr8s_watch_history_bytes" "Estimated retained watch-history bytes, including allocation overhead." 2)
+                        ("gr8s_watch_history_entries" "Retained watch-history entries." 1)))
+        (gr8s.kubelet::write-prometheus-family
+         out (first family) (second family) "gauge"
+         (loop for history in histories
+               collect (list (list (cons "kind" (first history))) (nth (third family) history))))))))
+
 (defun heap-exhausted-message (condition)
   "Explain CONDITION, a heap exhaustion, in one line."
   (format nil "gr8s FATAL: out of memory in thread ~S: ~A ~D MiB of the ~D MiB heap was in use ~
