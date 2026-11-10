@@ -98,6 +98,16 @@ v2 backend risk map. Remote node acknowledgement is a separate requirement."
            (integerp ready) (>= ready 0)
            (= ready (node-runtime-received-revision node-runtime))))))
 
+(defun ensure-node-snapshot-service-risk-ready (node-runtime)
+  "Withhold a v2 snapshot ACK until its local risk map has been read back.
+The snapshot worker retries NODE-SNAPSHOT-INCOMPLETE without losing Pod work."
+  (when (and (node-runtime-service-lb node-runtime)
+             (service-lb-map (node-runtime-service-lb node-runtime)
+                             "gr8s_nat_risk_v2")
+             (not (node-runtime-local-risk-ready-p node-runtime)))
+    (error 'node-snapshot-incomplete
+           :message "v2 Service risk inventory is not published for the current snapshot")))
+
 (defun node-runtime-external-cni-endpoints-path (node-runtime)
   "Return the durable external-CNI endpoint registry path for NODE-RUNTIME."
   (merge-pathnames "external-cni-endpoints.json"
@@ -1708,7 +1718,8 @@ so the revision is retried."
        (node-runtime-store node-runtime) assignments
        (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json))
       ;; Converge the socket LB from the just-installed Service/EndpointSlice
-      ;; discovery data. A transient map error must not abort snapshot application.
+      ;; discovery data. A transient map error must not abort Pod reconciliation;
+      ;; the v2 snapshot acknowledgement is withheld below until risk readback.
       (when (node-runtime-service-lb-controller node-runtime)
         (handler-case
             (let ((controller (node-runtime-service-lb-controller node-runtime)))
@@ -1801,6 +1812,7 @@ so the revision is retried."
           (error 'node-snapshot-incomplete
                  :message (format nil "~D Pod assignment~:P not applied"
                                   (+ (length failed) (count nil parsed)))))
+        (ensure-node-snapshot-service-risk-ready node-runtime)
         statuses))))
 
 (defun node-operation-response (request status &key (exit-code 0) (message ""))
