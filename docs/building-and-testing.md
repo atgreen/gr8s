@@ -257,9 +257,31 @@ and run records.
 
 ## Debugging a running cluster
 
-`gr8s serve --debug-slynk-port PORT` starts an opt-in
+The preferred debugger is opened on demand through the authenticated Kubernetes
+API. It does not require a debugger flag at server startup:
+
+```sh
+gr8s debug slynk --node worker-a --kubeconfig /path/to/config
+gr8s debug slynk --selector 'kubernetes.io/hostname=worker-a' --kubeconfig /path/to/config
+gr8s debug slynk --member cp-2 --kubeconfig /path/to/config
+```
+
+The kubeconfig must contain a bearer token or client certificate authorized to
+create the dedicated `nodes/slynk` or `controlplanemembers/slynk` subresource.
+A selector must resolve to exactly one Ready node. The command listens only on
+`127.0.0.1:4005` (override with `--local-port`), routes bytes to that exact gr8s
+process over the existing authenticated cluster transports, and removes the
+remote Slynk server when the client disconnects or the command is interrupted.
+Only one on-demand Slynk session may exist in a target process at a time.
+
+Connect SLY to the printed loopback endpoint. The API tunnel authenticates to
+the private process-local Slynk listener internally, so no `.sly-secret` needs
+to be copied to the operator workstation.
+
+For compatibility, `gr8s serve --debug-slynk-port PORT` still starts an opt-in
 [Slynk](https://github.com/joaotavora/sly) server for inspecting a live process.
-It is off by default and is for disposable environments only: **it allows
+This legacy startup listener is off by default and is for disposable
+environments only: **it allows
 arbitrary code execution as the gr8s user, normally root.** It binds to
 `127.0.0.1` and requires a secret, newly generated at each start in
 `<state>/debug/slynk.secret` (because `hostNetwork` Pods share loopback); a

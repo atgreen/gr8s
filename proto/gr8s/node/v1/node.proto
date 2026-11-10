@@ -363,6 +363,8 @@ enum OperationKind {
   OPERATION_KIND_NETWORK_EXPLAIN = 7;
   OPERATION_KIND_TRACE = 8;
   OPERATION_KIND_PATCH = 9;
+  // Privileged, explicitly authorized on-demand debugger byte stream.
+  OPERATION_KIND_SLYNK = 10;
 }
 
 message OperationRequest {

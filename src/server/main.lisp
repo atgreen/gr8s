@@ -593,6 +593,289 @@
              (setf arguments (cddr arguments)))
     options))
 
+(defun default-client-kubeconfig ()
+  (or (uiop:getenv "KUBECONFIG")
+      (namestring (merge-pathnames ".kube/config" (user-homedir-pathname)))))
+
+(defun parse-debug-options (arguments)
+  "Parse `gr8s debug slynk' target and local tunnel options."
+  (unless (equal "slynk" (first arguments))
+    (error "unknown debug subcommand: ~A" (or (first arguments) "")))
+  (let ((options (list :command :debug-slynk :local-port 4005
+                       :kubeconfig (default-client-kubeconfig)))
+        (rest (rest arguments)))
+    (loop while rest
+          for option = (pop rest)
+          do (unless rest (error "~A requires a value" option))
+             (let ((value (pop rest)))
+               (cond ((equal option "--node") (setf (getf options :node) value))
+                     ((equal option "--selector") (setf (getf options :selector) value))
+                     ((equal option "--member") (setf (getf options :member) value))
+                     ((equal option "--kubeconfig") (setf (getf options :kubeconfig) value))
+                     ((equal option "--local-port")
+                      (setf (getf options :local-port)
+                            (parse-integer value :junk-allowed nil)))
+                     (t (error "unknown debug slynk option: ~A" option)))))
+    (unless (= 1 (count-if (lambda (key) (getf options key)) '(:node :selector :member)))
+      (error "debug slynk requires exactly one of --node, --selector, or --member"))
+    (unless (<= 1 (getf options :local-port) 65535)
+      (error "debug slynk --local-port must be 1..65535"))
+    (dolist (key '(:node :member))
+      (when (and (getf options key) (not (path-segment-name-p (getf options key))))
+        (error "debug slynk target must be a valid Kubernetes name")))
+    options))
+
+(defun selected-ready-node-name (items selector)
+  "Return the sole Ready node in ITEMS, with errors that name SELECTOR."
+  (let ((ready
+          (loop for node across items
+                for conditions = (gethash "conditions" (gethash "status" node) #())
+                when (find-if (lambda (condition)
+                                (and (equal "Ready" (gethash "type" condition))
+                                     (equal "True" (gethash "status" condition))))
+                              conditions)
+                  collect (gethash "name" (gethash "metadata" node)))))
+    (unless (= 1 (length ready))
+      (error "node selector ~S resolved to ~D Ready nodes; exactly one is required"
+             selector (length ready)))
+    (first ready)))
+
+(defun kubeconfig-named-entry (entries name)
+  (or (find name entries :test #'equal
+            :key (lambda (entry) (gethash "name" entry)))
+      (error "kubeconfig refers to missing entry ~S" name)))
+
+(defun read-debug-kubeconfig (path)
+  "Return server, token, CA, client certificate and key from PATH's current context."
+  (let* ((file (truename path))
+         (root (gr8s.resources::yaml-parse (uiop:read-file-string file)))
+         (context-entry (kubeconfig-named-entry
+                         (gethash "contexts" root #()) (gethash "current-context" root)))
+         (context (gethash "context" context-entry))
+         (cluster (gethash "cluster" (kubeconfig-named-entry
+                                      (gethash "clusters" root #()) (gethash "cluster" context))))
+         (user (gethash "user" (kubeconfig-named-entry
+                                 (gethash "users" root #()) (gethash "user" context))))
+         (directory (uiop:pathname-directory-pathname file)))
+    (labels ((relative (value) (and value (namestring (merge-pathnames value directory)))))
+      (list :server (gethash "server" cluster)
+            :token (gethash "token" user)
+            :ca-file (relative (gethash "certificate-authority" cluster))
+            :ca-data (gethash "certificate-authority-data" cluster)
+            :client-certificate (relative (gethash "client-certificate" user))
+            :client-certificate-data (gethash "client-certificate-data" user)
+            :client-key (relative (gethash "client-key" user))
+            :client-key-data (gethash "client-key-data" user)))))
+
+(defun materialize-kubeconfig-data (text suffix)
+  (when text
+    (let ((path (merge-pathnames (format nil "gr8s-debug-~A.~A" (generate-uid) suffix)
+                                 (uiop:temporary-directory))))
+      (with-open-file (out path :direction :output :if-exists :error
+                                :element-type '(unsigned-byte 8))
+        (write-sequence (ag-grpc:base64-decode text) out))
+      (sb-posix:chmod path #o600)
+      (namestring path))))
+
+(defun debug-api-url-parts (url)
+  (let* ((secure-p (uiop:string-prefix-p "https://" url))
+         (prefix (if secure-p "https://" "http://")))
+    (unless (or secure-p (uiop:string-prefix-p "http://" url))
+      (error "kubeconfig server must use http:// or https://"))
+    (let* ((tail (subseq url (length prefix)))
+           (slash (or (position #\/ tail) (length tail)))
+           (authority (subseq tail 0 slash))
+           (base-path (if (< slash (length tail)) (subseq tail slash) ""))
+           (colon (position #\: authority :from-end t))
+           (host (if colon (subseq authority 0 colon) authority))
+           (port (if colon (parse-integer (subseq authority (1+ colon)))
+                     (if secure-p 443 80))))
+      (values secure-p host port base-path))))
+
+(defun open-debug-api-stream (config)
+  (multiple-value-bind (secure-p host port base-path)
+      (debug-api-url-parts (getf config :server))
+    (let* ((socket (usocket:socket-connect host port :element-type '(unsigned-byte 8)))
+           (plain (usocket:socket-stream socket)))
+      (values
+       (if secure-p
+           (pure-tls:make-tls-client-stream
+            plain :hostname host
+            :context (pure-tls:make-tls-context
+                      :verify-mode pure-tls:+verify-required+
+                      :ca-file (getf config :ca-file) :auto-load-system-ca nil)
+            :client-certificate (getf config :client-certificate)
+            :client-key (getf config :client-key))
+           plain)
+       socket host port base-path))))
+
+(defun write-debug-http-request (stream method host port target token &key websocket-key)
+  (write-sequence
+   (gr8s.protocol::ascii-octets
+    (with-output-to-string (request)
+      (flet ((line (control &rest args)
+               (apply #'format request control args)
+               (write-string (format nil "~C~C" #\Return #\Linefeed) request)))
+        (line "~A ~A HTTP/1.1" method target)
+        (line "Host: ~A:~D" host port)
+        (line "Connection: ~A" (if websocket-key "Upgrade" "close"))
+        (when websocket-key
+          (line "Upgrade: websocket")
+          (line "Sec-WebSocket-Version: 13")
+          (line "Sec-WebSocket-Key: ~A" websocket-key)
+          (line "Sec-WebSocket-Protocol: gr8s.slynk.v1"))
+        (when token (line "Authorization: Bearer ~A" token))
+        (line ""))))
+   stream)
+  (finish-output stream))
+
+(defun debug-api-get-json (config target)
+  (multiple-value-bind (stream socket host port base-path) (open-debug-api-stream config)
+    (unwind-protect
+         (progn
+           (write-debug-http-request stream "GET" host port (concatenate 'string base-path target)
+                                     (getf config :token))
+           (multiple-value-bind (status headers)
+               (gr8s.protocol::parse-http-response-head
+                (gr8s.protocol::read-http-response-head stream))
+             (unless (= status 200) (error "Kubernetes API returned HTTP ~D" status))
+             (let* ((length (parse-integer (or (cdr (assoc :content-length headers)) "0")))
+                    (body (make-array length :element-type '(unsigned-byte 8))))
+               (read-sequence body stream)
+               (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string body)))))
+      (ignore-errors (close stream))
+      (ignore-errors (usocket:socket-close socket)))))
+
+(defun random-websocket-key ()
+  (ag-grpc:base64-encode (secure-random-octets 16)))
+
+(defun open-debug-websocket (config target)
+  (multiple-value-bind (stream socket host port base-path) (open-debug-api-stream config)
+    (let ((key (random-websocket-key)))
+      (handler-case
+          (progn
+            (write-debug-http-request stream "GET" host port
+                                      (concatenate 'string base-path target)
+                                      (getf config :token) :websocket-key key)
+            (multiple-value-bind (status headers)
+                (gr8s.protocol::parse-http-response-head
+                 (gr8s.protocol::read-http-response-head stream))
+              (declare (ignore headers))
+              (unless (= status 101)
+                (error "Slynk API rejected the WebSocket upgrade with HTTP ~D" status)))
+            (values stream socket))
+        (error (condition)
+          (ignore-errors (close stream))
+          (ignore-errors (usocket:socket-close socket))
+          (error condition))))))
+
+(defun debug-slynk-target (options config)
+  (cond
+    ((getf options :member)
+     (format nil "/apis/gr8s.io/v1/controlplanemembers/~A/slynk" (getf options :member)))
+    (t
+     (let ((node (or (getf options :node)
+                     (let* ((selector (getf options :selector))
+                            (response (debug-api-get-json
+                                       config
+                                       (format nil "/api/v1/nodes?labelSelector=~A"
+                                               (drakma:url-encode selector :utf-8)))))
+                       (selected-ready-node-name (gethash "items" response #()) selector)))))
+       (format nil "/apis/gr8s.io/v1/nodes/~A/slynk" node)))))
+
+(defun relay-local-slynk-to-websocket (local remote write-lock)
+  (let ((buffer (make-array 65536 :element-type '(unsigned-byte 8)))
+        (fd (sb-sys:fd-stream-fd local)))
+    (loop for count = (sb-sys:with-pinned-objects (buffer)
+                        (or (sb-unix:unix-read fd (sb-sys:vector-sap buffer) (length buffer)) 0))
+          while (plusp count)
+          do (bt:with-lock-held (write-lock)
+               (gr8s.protocol::write-websocket-frame remote 2 (subseq buffer 0 count) :masked-p t)))))
+
+(defun relay-websocket-to-local-slynk (remote local write-lock)
+  (loop
+    (multiple-value-bind (opcode payload) (gr8s.protocol:read-websocket-frame remote)
+      (case opcode
+        (2 (write-sequence payload local) (finish-output local))
+        (8 (return))
+        (9 (bt:with-lock-held (write-lock)
+             (gr8s.protocol::write-websocket-frame remote 10 payload :masked-p t)))
+        (10)
+        (otherwise (error "Slynk API sent an unsupported WebSocket frame"))))))
+
+(defun run-debug-slynk-command-with-config (options config)
+  (let ((target (debug-slynk-target options config)))
+    (multiple-value-bind (remote remote-socket) (open-debug-websocket config target)
+      (let ((listener nil) (local-socket nil) (local nil) (writer nil)
+            (local-disconnected nil)
+            (write-lock (bt:make-lock "gr8s debug Slynk websocket writer")))
+        (unwind-protect
+             (progn
+               (setf listener (usocket:socket-listen "127.0.0.1" (getf options :local-port)
+                                                     :reuse-address t
+                                                     :element-type '(unsigned-byte 8)))
+               (format t "gr8s Slynk tunnel: 127.0.0.1:~D -> ~A~%"
+                       (usocket:get-local-port listener) target)
+               (format t "Connect SLY now; Ctrl-C closes the local and remote debugger.~%")
+               (finish-output)
+               (setf local-socket (usocket:socket-accept listener)
+                     local (usocket:socket-stream local-socket)
+                     writer (bt:make-thread
+                             (lambda ()
+                               (unwind-protect
+                                    (handler-case
+                                        (relay-local-slynk-to-websocket local remote write-lock)
+                                      (error () nil))
+                                 ;; Local SLY EOF must interrupt the blocking
+                                 ;; API read so this command closes the remote
+                                 ;; debugger instead of leaving an orphaned
+                                 ;; tunnel until Ctrl-C.
+                                 (bt:with-lock-held (write-lock)
+                                   (setf local-disconnected t))
+                                 (ignore-errors
+                                  (usocket:socket-shutdown remote-socket :io))))
+                             :name "gr8s debug Slynk local input"))
+               (handler-case
+                   (relay-websocket-to-local-slynk remote local write-lock)
+                 (error (condition)
+                   (unless (bt:with-lock-held (write-lock) local-disconnected)
+                     (error condition))))
+               0)
+          (when writer (stop-exec-input-reader writer))
+          (when writer (ignore-errors (bt:join-thread writer)))
+          (when local-socket (ignore-errors (usocket:socket-close local-socket)))
+          (when listener (ignore-errors (usocket:socket-close listener)))
+          (ignore-errors
+           (bt:with-lock-held (write-lock)
+             (gr8s.protocol::write-websocket-frame
+              remote 8 (make-array 2 :element-type '(unsigned-byte 8)
+                                     :initial-contents '(3 232)) :masked-p t)))
+          (ignore-errors (close remote))
+          (ignore-errors (usocket:socket-close remote-socket)))))))
+
+(defun run-debug-slynk-command (options)
+  (handler-case
+      (let* ((config (read-debug-kubeconfig (getf options :kubeconfig)))
+             (temporary nil))
+        (labels ((materialize (data-key file-key suffix)
+                   (when (and (null (getf config file-key)) (getf config data-key))
+                     (let ((path (materialize-kubeconfig-data (getf config data-key) suffix)))
+                       (push path temporary)
+                       (setf (getf config file-key) path)))))
+          (unwind-protect
+               (progn
+                 (materialize :ca-data :ca-file "ca.crt")
+                 (materialize :client-certificate-data :client-certificate "client.crt")
+                 (materialize :client-key-data :client-key "client.key")
+                 (unless (or (getf config :token)
+                             (and (getf config :client-certificate) (getf config :client-key)))
+                   (error "kubeconfig has no bearer token or client certificate credentials"))
+                 (run-debug-slynk-command-with-config options config))
+            (dolist (path temporary) (ignore-errors (delete-file path))))))
+    (sb-sys:interactive-interrupt ()
+      (format t "~&gr8s Slynk tunnel closed.~%")
+      0)))
+
 (defun parse-doctor-options (arguments)
   "Parse `gr8s doctor' options: --state-directory/--cluster-pod-cidr VALUE, or a
 bare positional state directory for backward compatibility.  A missing
@@ -727,7 +1010,7 @@ The new identity takes effect when the node agent next starts."
                                  arguments)))
     ((and (null (rest arguments))
           (member (first arguments)
-                  '("runtime" "patch" "wireguard" "network"
+                  '("runtime" "patch" "wireguard" "network" "debug"
                     "certificate" "secrets-encrypt")
                   :test #'string=))
      (list :command :help :help-path arguments))
@@ -756,6 +1039,8 @@ The new identity takes effect when the node agent next starts."
      (gr8s.patch:parse-options (rest arguments)))
     ((string= "trace" (first arguments))
      (parse-trace-options (rest arguments)))
+    ((string= "debug" (first arguments))
+     (parse-debug-options (rest arguments)))
     ((string= "wireguard" (first arguments))
      (parse-wireguard-options (rest arguments)))
     ((string= "network" (first arguments))
@@ -1476,6 +1761,8 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                 (getf options :wireguard-relay-max-channels))))
            (let* ((runtime (make-control-plane-runtime store node-server))
                   (reconciler (make-reconciler store runtime)))
+             (when ha
+               (install-member-slynk-handler node-server state-directory store reconciler))
              (when gr8s.patch:*manager* (start-patch-coordinator store node-server ha))
              (unless (getf options :disable-agent)
                (setf local-agent
@@ -1521,7 +1808,11 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                           (ensure-native-api-service store))
                         (setf aggregator (start-api-aggregator store pki))
                         (setf service-network-created (ensure-in-cluster-network pki))
-                        (setf api-server (start-in-cluster-api store runtime reconciler pki))
+                        (setf api-server
+                              (start-in-cluster-api
+                               store runtime reconciler pki
+                               :debug-state-directory state-directory
+                               :debug-member-resolver (make-debug-member-resolver ha)))
                         (setf (pod-store-in-cluster-config store)
                               (list :host "10.96.0.1" :port 443
                                     :ca-pem (uiop:read-file-string (cluster-pki-ca-certificate-path pki))))
@@ -1536,6 +1827,8 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                            :address address :port port
                            :store store :runtime runtime
                            :reconciler reconciler
+                           :debug-state-directory state-directory
+                           :debug-member-resolver (make-debug-member-resolver ha)
                            :leader-status-fn (when ha (lambda () (ha-control-plane-leader-status ha)))))
                     (setf worker (start-reconciliation-worker reconciler
                                   :leader-gate (when ha (lambda () (ha-control-plane-leader-p ha)))
@@ -1643,6 +1936,17 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
          :api-url (format nil "http://~A:~D" (getf options :listen) (getf options :port))
          :pki pki)))))
 
+(defun make-debug-member-resolver (ha)
+  "Return an exact member lookup closure for the Slynk API, or NIL outside HA."
+  (when ha
+    (let ((member (ha-control-plane-member ha)))
+      (lambda (id)
+        (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
+          (let* ((node (gr8s.raft.transport::raft-member-node member))
+                 (role (gethash id (gr8s.raft:raft-node-roles node)))
+                 (url (gethash id (gr8s.raft:raft-node-api-urls node))))
+            (values (equal id (gr8s.raft:raft-node-id node)) url (not (null role)))))))))
+
 (defparameter +cli-commands+
   '(("serve" "Run the control plane and local node agent")
     ("agent" "Run a node agent") ("witness" "Run an HA quorum witness")
@@ -1650,6 +1954,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
     ("runtime" "Manage sandbox runtimes") ("patch" "Manage live patches")
     ("kubeconfig" "Print or write a cluster kubeconfig")
     ("doctor" "Diagnose a node state directory")
+    ("debug" "Open an authenticated on-demand debugger tunnel")
     ("trace" "Trace Pods with bpftrace") ("wireguard" "Manage WireGuard identity")
     ("network" "Inspect cluster networking") ("certificate" "Manage certificates")
     ("secrets-encrypt" "Manage secrets encryption")
@@ -1702,6 +2007,18 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                         ("--help, -h" "show help"))))
       ((equal path '("runtime" "list"))
        (simple "List embedded assets and installed runtime addons" "[--state-directory DIR]"))
+      ((equal path '("debug"))
+       (page "Open authenticated on-demand debugger tunnels" "COMMAND [OPTIONS]"
+             :commands '(("slynk" "Open Slynk to one node or control-plane member"))
+             :options '(("--help, -h" "show help"))))
+      ((equal path '("debug" "slynk"))
+       (page "Open a lifetime-bound Slynk tunnel" "(--node NAME | --selector LABELS | --member ID) [OPTIONS]"
+             :options '(("--node NAME" "Target one exact Kubernetes node")
+                        ("--selector LABELS" "Require exactly one Ready matching node")
+                        ("--member ID" "Target one exact HA control-plane member")
+                        ("--kubeconfig FILE" "Authentication and API endpoint")
+                        ("--local-port PORT" "Loopback port (default 4005)")
+                        ("--help, -h" "show help"))))
       ((equal path '("patch"))
        (page "Manage live patches" "COMMAND [OPTIONS]"
              :commands '( ("inspect IMAGE" "Inspect a patch image") ("plan IMAGE" "Plan a rollout")
@@ -1736,7 +2053,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
       ((and (= (length path) 1) (assoc (first path) +cli-commands+ :test #'string=))
        (simple (second (assoc (first path) +cli-commands+ :test #'string=))))
       ((and (> (length path) 1)
-            (member (first path) '("patch" "wireguard" "network" "certificate" "secrets-encrypt")
+            (member (first path) '("patch" "wireguard" "network" "debug" "certificate" "secrets-encrypt")
                     :test #'string=))
        (simple (format nil "Run the ~{~A~^ ~} command" path)))
       (t (error "no help for command: ~{~A~^ ~}" path)))))
@@ -1828,6 +2145,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                0)
               (:patch (gr8s.patch:run-command options))
               (:trace (run-trace-command options))
+              (:debug-slynk (run-debug-slynk-command options))
               (:wireguard-rotate-key
                (rotate-wireguard-node-key options))
               (:network-explain

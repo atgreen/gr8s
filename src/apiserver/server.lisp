@@ -33,6 +33,11 @@
   ((store :initarg :store :reader acceptor-store)
    (runtime :initarg :runtime :reader acceptor-runtime)
    (reconciler :initarg :reconciler :reader acceptor-reconciler)
+   (debug-state-directory :initarg :debug-state-directory :initform nil
+                          :reader acceptor-debug-state-directory)
+   ;; Called with a member id; returns (values local-p api-url exists-p).
+   (debug-member-resolver :initarg :debug-member-resolver :initform nil
+                          :reader acceptor-debug-member-resolver)
    ;; HA (podster-c2d.7.3): NIL (single-node) or a function returning
    ;; (values self-leader-p leader-api-url). A follower redirects mutating
    ;; requests to the leader so writes always land where consensus happens.
@@ -180,7 +185,8 @@ without input, and a client without WebSocket pings (any before v5.channel.k8s.i
                           request))))
 
 (defun start-server (&key (address "127.0.0.1") (port 8080)
-                          store runtime reconciler leader-status-fn)
+                          store runtime reconciler leader-status-fn
+                          debug-state-directory debug-member-resolver)
   "Start the gr8s API server on ADDRESS:PORT and return the running acceptor.
    Signals an error unless ADDRESS is 127.0.0.1 (v1 listens only on loopback).
    STORE, RUNTIME, and RECONCILER default from one another: a RECONCILER supplies
@@ -206,6 +212,8 @@ without input, and a client without WebSocket pings (any before v5.channel.k8s.i
                     :store actual-store
                     :runtime actual-runtime
                     :reconciler actual-reconciler
+                    :debug-state-directory debug-state-directory
+                    :debug-member-resolver debug-member-resolver
                     :leader-status-fn leader-status-fn))))
 
 (defmethod hunchentoot:stop :around ((acceptor gr8s-acceptor) &key soft)

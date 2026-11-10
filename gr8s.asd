@@ -321,6 +321,7 @@
                                            (:file "apiserver-metrics")
                                            (:file "resource-metrics-api")
                                            (:file "http")
+                                           (:file "slynk-tunnel")
                                            (:file "pod-port-forward")
                                            (:file "pod-exec-spdy")
                                            (:file "pod-binding")
@@ -402,6 +403,7 @@
                                            (:file "runtime")
                                            (:file "trace")
                                            (:file "port-forward")
+                                           (:file "slynk-debug")
                                            (:file "compat")))
                              (:module "server"
                               :serial t

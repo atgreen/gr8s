@@ -1414,6 +1414,9 @@ Watches are long-running requests, which that filter leaves alone."
                 (cl-ppcre:scan "^/apis/gr8s[.]io/v1/namespaces/[^/]+/traces$" path))
            (serve-trace-websocket store reconciler
                                   (nth 5 (uiop:split-string path :separator '(#\/)))))
+          ((and store (eq method :get)
+                (cl-ppcre:scan "^/apis/gr8s[.]io/v1/(nodes|controlplanemembers)/[^/]+/slynk$" path))
+           (serve-slynk-websocket store runtime reconciler path))
           ((string= path "/gr8s/v1/network/explain")
            (unless (eq method :get)
              (core-resource-error 405 "MethodNotAllowed" "network explain requires GET"))

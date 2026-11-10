@@ -125,6 +125,10 @@ so that a rule limited by resourceNames can allow reading and watching just that
                         namespaced (eq method :get))
                    "create"
                    verb)))
+    (when (and (equal group "gr8s.io") (eq method :get)
+               (equal (third resource-parts) "slynk")
+               (member resource '("nodes" "controlplanemembers") :test #'equal))
+      (setf verb "create"))
     (values verb group
             (when resource (if (third resource-parts) (format nil "~A/~A" resource (third resource-parts)) resource))
             (or name
@@ -189,12 +193,16 @@ one then answers 404 rather than 403, as upstream's does."
         (call-next-method))
     (kubernetes-error (condition) (kubernetes-error-response condition))))
 
-(defun start-in-cluster-api (store runtime reconciler pki &key (address "10.96.0.1") (port 443))
+(defun start-in-cluster-api (store runtime reconciler pki
+                             &key (address "10.96.0.1") (port 443)
+                               debug-state-directory debug-member-resolver)
   "Start a TLS API listener; the caller owns its service address and shutdown."
   (multiple-value-bind (certificate key) (ensure-kubernetes-api-credentials pki)
     (hunchentoot:start
      (make-instance 'gr8s-in-cluster-acceptor :address address :port port :store store
                     :runtime runtime :reconciler reconciler
+                    :debug-state-directory debug-state-directory
+                    :debug-member-resolver debug-member-resolver
                     :certificate (namestring certificate) :private-key (namestring key)
                     :client-ca (cluster-pki-ca-certificate pki)))))
 
