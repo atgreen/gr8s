@@ -55,6 +55,38 @@ values are stored as base64. `gr8s secrets-encrypt` manages authenticated
 encryption at rest and key rotation. Encrypted data depends on the cluster CA
 private key, so backups must retain cluster identity as well as application data.
 
+### Encryption-at-rest operations
+
+Secret encryption management currently operates directly on a standalone state
+directory. Stop gr8s before changing it and take a verified backup containing
+both the application data and cluster identity. There is not yet a leader-routed
+HA key-management workflow; do not run these commands independently against
+individual voters.
+
+Enable encryption and rewrite existing Secrets in one operation:
+
+```sh
+sudo systemctl stop gr8s-server.service
+sudo gr8s secrets-encrypt enable --state-directory /var/lib/gr8s/server
+sudo systemctl start gr8s-server.service
+```
+
+For a staged key change, prepare a key, promote it for new writes, rewrite every
+existing Secret, and only then discard superseded keys:
+
+```sh
+sudo gr8s secrets-encrypt status    --state-directory /var/lib/gr8s/server
+sudo gr8s secrets-encrypt prepare   --state-directory /var/lib/gr8s/server
+sudo gr8s secrets-encrypt promote   --state-directory /var/lib/gr8s/server
+sudo gr8s secrets-encrypt reencrypt --state-directory /var/lib/gr8s/server
+sudo gr8s secrets-encrypt finalize  --state-directory /var/lib/gr8s/server
+```
+
+Each command prints JSON containing the phase and non-secret key identifiers.
+`finalize` refuses to discard keys until re-encryption has completed. To return
+to plaintext storage, `disable` first rewrites Secrets and then removes the
+encryption configuration. External KMS providers are not implemented.
+
 ## Runtime integration
 
 Objects are scoped by the namespace in the request URL. Pods can consume
