@@ -6,14 +6,18 @@
 
 (defun service-wire-gc-fixture ()
   (let ((keys (make-hash-table :test #'equal))
-        (names '("gr8s_nat_rx_v2" "gr8s_nat_ri_v2")))
+        (names '("gr8s_nat_rx_v2" "gr8s_nat_ri_v3")))
     (loop for name in names for count in '(4 3)
           do (setf (gethash name keys)
                    (loop for i from 1 to count
-                         collect (let ((key (make-array 16 :element-type '(unsigned-byte 8)
+                         collect (let ((key (make-array (if (equal name "gr8s_nat_ri_v3") 64 16)
+                                                          :element-type '(unsigned-byte 8)
                                                           :initial-element i)))
-                                   (setf (aref key 12) 17 (aref key 13) 0
-                                         (aref key 14) 0 (aref key 15) 0) key))))
+                                   (let ((offset (if (= (length key) 64) 48 0)))
+                                     (setf (aref key (+ offset 12)) 17
+                                           (aref key (+ offset 13)) 0
+                                           (aref key (+ offset 14)) 0
+                                           (aref key (+ offset 15)) 0)) key))))
     (values
      (gr8s::%make-service-lb-dataplane
       :programs (list (cons "gr8s_wire_gc" (fake-lb-program 900151)))
@@ -33,9 +37,9 @@
              dataplane :budget 1 :next-key next-key
              :run (lambda (fd direction key)
                     (is (= fd 900151))
-                    (is (= 16 (length key)))
+                    (is (= (if (= direction 0) 16 64) (length key)))
                     (push (list direction (aref key 0)) seen)
-                    (let ((name (nth direction '("gr8s_nat_rx_v2" "gr8s_nat_ri_v2"))))
+                    (let ((name (nth direction '("gr8s_nat_rx_v2" "gr8s_nat_ri_v3"))))
                       (setf (gethash name keys) (remove key (gethash name keys) :test #'equalp)))
                     1))
           (is (<= scanned 2))
@@ -85,4 +89,4 @@
   (signals type-error (gr8s.network::run-service-wire-gc-key 0 2 (make-array 16)))
   (signals type-error (gr8s.network::run-service-wire-gc-key 0 -1 (make-array 16)))
   (signals simple-error (gr8s.network::run-service-wire-gc-key 0 0 (make-array 32)))
-  (signals simple-error (gr8s.network::run-service-wire-gc-key 0 1 (make-array 8))))
+  (signals simple-error (gr8s.network::run-service-wire-gc-key 0 1 (make-array 16))))

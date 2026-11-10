@@ -47,10 +47,10 @@ class Interpreter(p.Interpreter):
 
 
 def frame(kind, key):
-    data = bytearray(52)
+    data = bytearray(36 + len(key))
     data[:14] = bytes.fromhex("0200000000010200000000020800")
     data[14], data[22], data[23], data[34] = 0x45, 64, 253, kind
-    struct.pack_into("!H", data, 16, 38)
+    struct.pack_into("!H", data, 16, len(data) - 14)
     struct.pack_into("!H", data, 24, p.checksum(bytes(data[14:34])))
     data[36:] = key
     return bytes(data)
@@ -85,8 +85,8 @@ def seed(runner, protocol=17, active=1, indexed=True, age=0, port=49000, visible
            struct.pack("<QII", (now - int(age * 1e9)) & p.endpoint.MASK, 1, active))
     runner.update(RX, visible, row)
     if indexed:
-        runner.update(RI, incoming, visible)
-    return incoming, visible, row
+        runner.update(RI, row[:64], visible)
+    return row[:64], visible, row
 
 
 def snapshot(runner):
@@ -197,7 +197,7 @@ def exercise(factory, kernel):
         for lock in (FL, RL, WL):
             def contention(r, direction=direction, lock=lock):
                 wire, visible, _ = seed(r, age=181)
-                key = wire if lock == RL else visible
+                key = wire[48:] if lock == RL else visible
                 sentinel = b"\xa5" * 8
                 r.update(lock, key, sentinel)
                 held = snapshot(r)
@@ -213,7 +213,7 @@ def exercise(factory, kernel):
     def invalid(r):
         wire, _, _ = seed(r)
         held = snapshot(r)
-        valid = frame(0, wire)
+        valid = frame(0, wire[48:])
         packets = [valid[:14], valid[:51], valid + b"\0", frame(2, wire)]
         for offset, value in ((12, 0), (14, 0x46), (23, 6), (35, 1), (49, 1), (50, 1)):
             changed = bytearray(valid)

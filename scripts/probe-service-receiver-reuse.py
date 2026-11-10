@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Reproduce retained receiver ownership after source Service collection.
 
---kernel requires a disposable root VM. Until fixed, exits1 when a new Service
-request is incorrectly dropped. This is synthetic graph evidence, not live CNI.
+--kernel requires a disposable root VM. Exits1 when a new Service request is
+incorrectly dropped. This is synthetic graph evidence, not live CNI.
 """
 import argparse
 import importlib.util
@@ -58,6 +58,7 @@ def exercise(factory):
         assert verdict == 1 and output == data
         assert not client.keys(n.FWD) and not client.keys(n.REV)
         assert len(backend.keys(t.RX)) == len(backend.keys(t.RI)) == 1
+        old_index = backend.keys(t.RI)[0]
         new_vip = "10.96.0.99"
         p.publish(client, 17, vip=new_vip)
         second = t.graph.packet(destination=new_vip, protocol=17, sport=43017)
@@ -72,6 +73,8 @@ def exercise(factory):
         if verdict != p.OK:
             result["passed"] = False
             return result
+        assert old_index in backend.keys(t.RI)
+        assert len(backend.keys(t.RI)) == len(backend.keys(t.RX)) == 2
         source, destination, sport, dport = p.endpoints(delivered)
         response = t.graph.packet(destination, source, dport, sport, 17, mac=t.graph.BACK_MAC)
         restored = t.run(client, 1, t.run(backend, 0, response))

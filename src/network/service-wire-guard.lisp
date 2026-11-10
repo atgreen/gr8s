@@ -6,8 +6,8 @@
 (defparameter *service-wire-rx-maps*
   '((whistler::defmap whistler::gr8s-nat-rx-v2 :type :hash
       :key-size 16 :value-size 96 :max-entries 65536 :map-flags 1)
-    (whistler::defmap whistler::gr8s-nat-ri-v2 :type :hash
-      :key-size 16 :value-size 16 :max-entries 65536 :map-flags 1)
+    (whistler::defmap whistler::gr8s-nat-ri-v3 :type :hash
+      :key-size 64 :value-size 16 :max-entries 65536 :map-flags 1)
     (whistler::defmap whistler::gr8s-nat-wl-v2 :type :hash
       :key-size 16 :value-size 8 :max-entries 65536 :map-flags 1)))
 
@@ -18,7 +18,8 @@
 
 (defparameter *service-wire-rx-structs*
   '((whistler::defstruct whistler::wire-metadata (whistler::words (array whistler::u64 6)))
-    (whistler::defstruct whistler::wire-rx-state (whistler::words (array whistler::u64 12)))))
+    (whistler::defstruct whistler::wire-rx-state (whistler::words (array whistler::u64 12)))
+    (whistler::defstruct whistler::wire-index-key (whistler::words (array whistler::u64 8)))))
 
 (in-package #:whistler)
 
@@ -240,7 +241,7 @@
       (when (= row 0) (nat-pass))
       (unless (and (wire-rx-live-p row) (wire-rx-owner-p row)) (pkt-drop failed))
       (pkt-lock :reverse (+ row 48))
-      (let ((index (map-lookup-ptr gr8s-nat-ri-v2 (+ row 48))))
+      (let ((index (map-lookup-ptr gr8s-nat-ri-v3 row)))
         (unless (and (/= index 0) (wire-flow-equal-p index flow)) (pkt-drop failed)))
       (nat-copy metadata row 48)
       (store u8 metadata 5 2)
@@ -255,17 +256,19 @@
 (defun gr8s.network::service-wire-reply-commit-body ()
   '((when (= wire-offset 0)
       (pkt-unlock) (tail-call gr8s-nat-stages 3) (return TC_ACT_SHOT))
-    (let ((raw u64 (wire-raw-data)) (incoming (make-gr8s-pkt-flow)))
+    (let ((raw u64 (wire-raw-data)) (index-key (make-wire-index-key)))
       (when (> (+ raw 102) (tc-data-end)) (pkt-drop failed))
       (unless (= (load u8 raw 59) 2) (pkt-drop failed))
-      (wire-invert incoming flow)
-      (pkt-lock :reverse incoming)
-      (let ((index (map-lookup-ptr gr8s-nat-ri-v2 incoming)))
+      (nat-copy index-key (+ raw 54) 48)
+      (store u8 index-key 5 1)
+      (wire-invert (+ index-key 48) flow)
+      (pkt-lock :reverse (+ index-key 48))
+      (let ((index (map-lookup-ptr gr8s-nat-ri-v3 index-key)))
         (when (= index 0) (pkt-drop failed))
         (pkt-lock :forward index)
         (let ((row (map-lookup-ptr gr8s-nat-rx-v2 index)))
           (unless (and (/= row 0) (wire-rx-live-p row) (wire-rx-owner-p row)
-                       (wire-flow-equal-p (+ row 48) incoming)) (pkt-drop failed))
+                       (wire-flow-equal-p (+ row 48) (+ index-key 48))) (pkt-drop failed))
           (unless (and (= (load u64 row 0) (logxor (load u64 raw 54) #x030000000000))
                        (= (load u64 row 8) (load u64 raw 62))
                        (= (load u64 row 16) (load u64 raw 70))
@@ -290,7 +293,7 @@
                            (wire-flow-equal-p (+ other 48) (+ ,entry 48)))))
          (when (/= (map-update-ptr gr8s-nat-rx-v2 ,candidate ,entry 1) 0)
            (unless (/= other 0) (pkt-drop failed)))
-         (when (/= (map-update-ptr gr8s-nat-ri-v2 (+ ,entry 48) ,candidate 1) 0)
+         (when (/= (map-update-ptr gr8s-nat-ri-v3 ,entry ,candidate 1) 0)
            ;; This entry was either newly created or an identical orphan. The
            ;; reverse reservation prevents a concurrent owner publication.
            (map-delete-ptr gr8s-nat-rx-v2 ,candidate)
@@ -313,7 +316,7 @@
       (store u64 entry 80 now) (store u32 entry 88 1)
       (unless (wire-rx-owner-p-for-new entry) (pkt-drop failed))
       (pkt-lock :reverse flow)
-      (let ((index (map-lookup-ptr gr8s-nat-ri-v2 flow)))
+      (let ((index (map-lookup-ptr gr8s-nat-ri-v3 entry)))
         (when (/= index 0)
           (nat-copy candidate index 16)
           (pkt-lock :forward candidate)

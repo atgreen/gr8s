@@ -25,7 +25,7 @@ graph = load("wire_graph_base", "test-service-nat-guard.py")
 wire = load("wire_codec", "test-service-wire.py")
 p, n = graph.p, graph.n
 EXTRA = ("gr8s_wire_request", "gr8s_wire_reply", "gr8s_wire_receive", "gr8s_wire_reply_commit")
-RX, RI, WL = "gr8s_nat_rx_v2", "gr8s_nat_ri_v2", "gr8s_nat_wl_v2"
+RX, RI, WL = "gr8s_nat_rx_v2", "gr8s_nat_ri_v3", "gr8s_nat_wl_v2"
 WIRE_GC = "gr8s_wire_gc"
 graph.GLOBAL.update((RX, RI, WL))
 
@@ -276,10 +276,10 @@ def receiver_collection(factory, protocol, direction):
         def collect():
             assert len(backend.keys(RX)) == len(backend.keys(RI)) == 1
             key = backend.keys((RX, RI)[direction])[0]
-            control = bytearray(52)
+            control = bytearray(36 + len(key))
             control[:14] = bytes.fromhex("0200000000010200000000020800")
             control[14], control[22], control[23], control[34] = 0x45, 64, 253, direction
-            struct.pack_into("!H", control, 16, 38)
+            struct.pack_into("!H", control, 16, len(control) - 14)
             struct.pack_into("!H", control, 24, p.checksum(bytes(control[14:34])))
             control[36:] = key
             verdict, output = backend.run(WIRE_GC, control)
@@ -314,7 +314,7 @@ def receiver_collection(factory, protocol, direction):
             backend.delete(RX, backend.keys(RX)[0])
         # Use the same ABI with the key of the surviving half.
         key = backend.keys((RX, RI)[direction])[0]
-        control = bytearray(52)
+        control = bytearray(36 + len(key))
         control[12:14], control[14], control[23], control[34] = b"\x08\x00", 0x45, 253, direction
         control[36:] = key
         verdict, output = backend.run(WIRE_GC, control)

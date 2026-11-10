@@ -115,9 +115,11 @@ preserving the metadata across both policy checks.
 ## Receiver collection
 
 The experimental graph includes `gr8s_wire_gc`, a maintenance program invoked
-only through `BPF_PROG_TEST_RUN`. Its private52-byte control frame uses IPv4
-protocol253, a direction byte at34 (visible reply0, incoming wire1), and a16-byte
-tuple at36. Return values are unchanged0, reclaimed1, busy/helper failure2, and
+only through `BPF_PROG_TEST_RUN`. Its private control frame uses IPv4
+protocol253 and a direction byte at34. Direction0 carries a16-byte visible
+reply tuple at36 in a52-byte frame. Direction1 carries a64-byte index key at36
+in a100-byte frame: request metadata48 followed by the incoming wire tuple16.
+Return values are unchanged0, reclaimed1, busy/helper failure2, and
 invalid or unknown schema3. These control frames must never be sent on a network.
 
 Receiver rows contain metadata48, original incoming tuple16, visible incoming
@@ -133,9 +135,11 @@ per tick, resumes both cursors, defers busy keys and advances before reporting a
 syscall or schema failure. It is not called by the node agent. Retained-writer
 and profile compatibility must be verified before enabling it.
 
-The current incoming index is keyed by the wire tuple alone. A receiver entry
-can outlive its sender's collected flow, so a different Service reusing that
-tuple is currently dropped. `probe-service-receiver-reuse.py` reproduces this
-case; `podster-p9c.19` tracks qualifying the index by Service and full endpoint
-incarnations before activation. The kernel collector tests do not establish
-that the entire Service graph or this reuse case is correct.
+The `gr8s_nat_ri_v3` index key includes the exact request metadata and wire
+tuple. This keeps receiver claims for different Services and endpoint
+incarnations separate even if they reuse the same source port and backend.
+The visible reply tuple remains unique in `gr8s_nat_rx_v2`; an occupied tuple
+causes allocation of a trusted remote alias/port. The receiver collector
+matches all64 key bytes before deleting an index and preserves foreign rows.
+`probe-service-receiver-reuse.py` exercises sender expiry with a still-live
+receiver claim; `podster-p9c.19` tracks its verification before activation.
