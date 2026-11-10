@@ -21,9 +21,10 @@
                (store (gr8s:open-store root)) (member nil) (ha nil) (producer nil)
                (original (symbol-function 'gr8s.resources::capture-frozen-store-snapshot))
                (original-capacity (symbol-function 'gr8s.raft::raft-replication-capacity-index))
+               (original-catchup (symbol-function 'gr8s.raft::raft-storage-read-catchup))
                (lock (bt:make-lock "compaction probe state"))
                (armed nil) (held nil) (held-index nil) (stopping nil)
-               (completed 0) (finished nil) (failure nil) (refusals 0) (conflict-retries 0)
+               (completed 0) (finished nil) (failure nil) (refusals 0) (conflict-retries 0) (cache-batches 0)
                (loaded-history (reduce #'+ (gr8s::pod-store-template-history store)
                                        :key #'gr8s.resources::template-history-entry-bytes)))
           (labels
@@ -62,6 +63,8 @@
                                 "applied" (gr8s::raft-node-last-applied node)
                                 "snapshot" (gr8s::raft-node-snapshot-index node)
                                 "quorumMembers" (gr8s::raft-cluster-size node)
+                                "catchupCacheBytes" (gr8s.raft::raft-storage-catchup-usage (gr8s.raft:raft-node-storage node))
+                                "catchupCacheSegments" (nth-value 1 (gr8s.raft::raft-storage-catchup-usage (gr8s.raft:raft-node-storage node)))
                                 "retainedBudgetBytes" (or (gr8s.raft::raft-node-retained-byte-limit node) 0)
                                 "retainedEstimatedBytes"
                                 (loop for entry across (gr8s.raft:raft-node-log node)
@@ -84,6 +87,7 @@
                            (gethash "churnFinished" object) (if finished t nil)
                            (gethash "replicationCapacityRefusals" object) refusals
                            (gethash "committedConflictRetries" object) conflict-retries
+                           (gethash "catchupCacheBatches" object) cache-batches
                            (gethash "churnError" object) failure))
                    object))
                (churn ()
@@ -125,6 +129,11 @@
                            (let ((denied (funcall original-capacity node previous entries)))
                              (when denied (bt:with-lock-held (lock) (incf refusals)))
                              denied)))
+                   (setf (symbol-function 'gr8s.raft::raft-storage-read-catchup)
+                         (lambda (storage node next)
+                           (let ((result (funcall original-catchup storage node next)))
+                             (when result (bt:with-lock-held (lock) (incf cache-batches)))
+                             result)))
                    (gr8s.ha::start-ha-compaction-worker ha)
                    (learner-native-write-json (merge-pathnames "ready.json" control) (gr8s::core-object "ready" t))
                    (loop
@@ -171,5 +180,6 @@
               (when ha (gr8s::stop-ha-control-plane ha))
               (when (and member (null ha)) (gr8s::stop-raft-member member))
               (setf (symbol-function 'gr8s.resources::capture-frozen-store-snapshot) original
-                    (symbol-function 'gr8s.raft::raft-replication-capacity-index) original-capacity)))))
+                    (symbol-function 'gr8s.raft::raft-replication-capacity-index) original-capacity
+                    (symbol-function 'gr8s.raft::raft-storage-read-catchup) original-catchup)))))
     (error (condition) (format *error-output* "Compaction cluster probe failed: ~A~%" condition) (uiop:quit 1))))

@@ -576,6 +576,27 @@ three capture writers for two seconds, commits a new marker while they remain
 held, verifies unchanged election terms, then releases capture and restarts all
 processes with the marker and credential hashes preserved. Its 64 rounds are
 partial evidence, not the full retained-history memory acceptance.
+The first complete 2,048-round cluster churn reached the full history budget on
+the healthy voters without heap or worker errors, but failed its final catch-up
+deadline. The delayed voter repeatedly installed snapshots while newer
+checkpoints removed the suffix it needed. This failed run remains in the
+async-worker evidence; it does not prove restart acceptance.
+
+The worker now enables a separate disk catch-up window, capped at 128 MiB and
+128 anonymous segments per member. Before replacing a local checkpoint, Raft
+streams the discarded committed prefix into checksummed segments. A lagging
+peer can receive ordinary bounded AppendEntries from these segments even after
+the live log has been trimmed. No old command objects remain in the heap. Gaps,
+eviction, corruption, or unsupported anonymous-file storage fall back to the
+ordinary snapshot protocol; cache errors cannot change the durable WAL.
+Segments have no filesystem names and their descriptors are close-on-exec.
+Storage close, worker disable, or process exit releases them. Backup/recovery
+continues to use the current WAL and application artifact; this cache is
+expendable and is not a new recovery format. The worker restores the previous
+cache policy when stopped, respecting a stricter existing policy.
+This implementation still needs fresh native cluster acceptance under
+`podster-ucm.11.3.9.10.1`; automatic compaction remains disabled by default.
+
 Build this internal harness with
 `sbcl --noinform --non-interactive --load scripts/build-compaction-cluster-native-harness.lisp`.
 Run `python3 scripts/test-compaction-cluster-native.py` for 2,048 rounds and

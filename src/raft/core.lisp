@@ -30,6 +30,8 @@
   (log (make-array 0 :adjustable t :fill-pointer 0))  ; vector of RAFT-ENTRY after snapshot-index
   (commit-index 0 :type fixnum)
   (last-applied 0 :type fixnum)
+  ;; Optional disk-only committed-prefix cache; never part of recovered state.
+  (catchup-byte-limit nil :type (or null (integer 1 *)))
   ;; Bound retry encoding and per-peer outbox payload while a follower is behind.
   ;; A single legacy large command may exceed the budget and is sent alone.
   (append-entry-limit 64 :type (integer 1 *))
@@ -126,6 +128,14 @@
   (:method ((storage null) index) (declare (ignore index)) nil))
 (defgeneric raft-storage-save-snapshot (storage index term state)
   (:method ((storage null) index term state) (declare (ignore index term state)) nil))
+(defgeneric raft-storage-cache-prefix (storage node index byte-limit)
+  (:method (storage node index byte-limit) (declare (ignore storage node index byte-limit)) nil))
+(defgeneric raft-storage-read-catchup (storage node next)
+  (:method (storage node next) (declare (ignore storage node next)) nil))
+(defgeneric raft-storage-clear-catchup (storage)
+  (:method (storage) (declare (ignore storage)) nil))
+(defgeneric raft-storage-catchup-usage (storage)
+  (:method (storage) (declare (ignore storage)) (values 0 0)))
 (defgeneric raft-storage-replace-snapshot (storage index term state hard-term vote entries &key commit-index)
   (:documentation "Persist a snapshot with exact hard state and log tail. ENTRIES
 is a borrowed sequence; retain only entries after INDEX. Caller holds the node lock.")
@@ -288,6 +298,8 @@ Returns NIL if no newer boundary is available or an installation is pending."
 (defun raft-persist-compaction (node upto term state)
   "Persist a checked boundary before changing the live log. Caller owns the node lock."
   (let ((drop (- upto (raft-node-snapshot-index node))))
+    (when (raft-node-catchup-byte-limit node)
+      (raft-storage-cache-prefix (raft-node-storage node) node upto (raft-node-catchup-byte-limit node)))
     (raft-storage-replace-snapshot
      (raft-node-storage node) upto term state
      (raft-node-current-term node) (raft-node-voted-for node) (raft-node-log node)
@@ -530,7 +542,14 @@ RPC can widen the same string. This is distinct from printed-wire expansion."
 Retries never encode the entire retained suffix. One oversized command travels
 alone so existing persisted commands remain deliverable."
   (let* ((next (gethash peer (raft-node-next-index node) (1+ (raft-last-log-index node))))
-         (prev-index (1- next))
+         (cached (when (and (raft-node-catchup-byte-limit node) (<= next (raft-node-snapshot-index node)))
+                   (raft-storage-read-catchup (raft-node-storage node) node next))))
+    (when cached
+      (return-from raft-append-message
+        (list :type :append-entries :term (raft-node-current-term node) :from (raft-node-id node)
+              :prev-log-index (1- next) :prev-log-term (car cached) :entries (cdr cached)
+              :leader-commit (raft-node-commit-index node))))
+    (let* ((prev-index (1- next))
          (bytes 0)
          (entries
            (loop for i from (max next (1+ (raft-node-snapshot-index node))) to (raft-last-log-index node)
@@ -556,7 +575,7 @@ alone so existing persisted commands remain deliverable."
           :prev-log-index prev-index
           :prev-log-term (raft-log-term node prev-index)
           :entries entries
-          :leader-commit (raft-node-commit-index node))))
+          :leader-commit (raft-node-commit-index node)))))
 
 (defun raft-broadcast-append (node)
   "Send every replicated member (peers, joiners, and departing members) an

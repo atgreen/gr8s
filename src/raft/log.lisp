@@ -23,7 +23,32 @@
 (defclass file-raft-storage ()
   ((path :initarg :path :reader file-raft-storage-path)
    (stream :initarg :stream :initform nil :accessor file-raft-storage-stream)
+   (catchup-segments :initform nil :accessor file-raft-storage-catchup-segments)
+   (catchup-error :initform nil :accessor file-raft-storage-catchup-error)
    (ownership-fd :initarg :ownership-fd :initform nil :accessor file-raft-storage-ownership-fd)))
+
+(defstruct raft-catchup-segment fd first last previous-term bytes)
+
+(defmethod raft-storage-catchup-usage ((storage file-raft-storage))
+  (values (reduce #'+ (file-raft-storage-catchup-segments storage)
+                  :key #'raft-catchup-segment-bytes :initial-value 0)
+          (length (file-raft-storage-catchup-segments storage))))
+
+(defmethod raft-storage-clear-catchup ((storage file-raft-storage))
+  (sb-sys:without-interrupts
+    (let ((segments (file-raft-storage-catchup-segments storage)))
+      (setf (file-raft-storage-catchup-segments storage) nil)
+      (dolist (segment segments) (ignore-errors (sb-posix:close (raft-catchup-segment-fd segment)))))))
+
+(defun raft-catchup-evict (storage extra limit)
+  "Reserve EXTRA physical bytes and one segment, evicting oldest segments first."
+  (loop while (and (file-raft-storage-catchup-segments storage)
+                   (or (> (+ extra (raft-storage-catchup-usage storage)) limit)
+                       (>= (length (file-raft-storage-catchup-segments storage)) 128)))
+        do (let* ((segments (file-raft-storage-catchup-segments storage)) (oldest (car (last segments))))
+             (sb-sys:without-interrupts
+               (setf (file-raft-storage-catchup-segments storage) (butlast segments))
+               (sb-posix:close (raft-catchup-segment-fd oldest))))))
 
 (defun open-file-raft-storage (path &key prepare-fn)
   "Own and open an append-only WAL. A stable sidecar lease survives checkpoint
@@ -335,6 +360,7 @@ both streams: its durable outcome is uncertain and requires recovery before use.
 
 (defun close-file-raft-storage (storage)
   "Close the WAL and release its ownership lease. Safe to call repeatedly."
+  (raft-storage-clear-catchup storage)
   (when (file-raft-storage-stream storage)
     (ignore-errors (close (file-raft-storage-stream storage))))
   (setf (file-raft-storage-stream storage) nil)
@@ -439,3 +465,104 @@ both streams: its durable outcome is uncertain and requires recovery before use.
            (setf completed t)
            node)
       (unless completed (close-file-raft-storage storage)))))
+
+(defun map-raft-catchup-prefix (node index function)
+  "Borrow committed entries only; never retain the caller's log vector."
+  (unless (<= (raft-node-snapshot-index node) index (raft-node-commit-index node))
+    (error "Catch-up cache requires a committed local prefix"))
+  (funcall function (list :snapshot (raft-node-snapshot-index node) (raft-node-snapshot-term node) nil))
+  (loop for offset below (- index (raft-node-snapshot-index node))
+        for entry = (aref (raft-node-log node) offset)
+        do (funcall function (list :entry (raft-entry-index entry) (raft-entry-term entry) (raft-entry-command entry))))
+  (funcall function (list :commit index)))
+
+(defun raft-catchup-open (segment &key binary)
+  "Independent file descriptions: checksum reads must not move the parser's offset."
+  (let ((fd (sb-posix:open (format nil "/proc/self/fd/~D" (raft-catchup-segment-fd segment))
+                           (logior sb-posix:o-rdonly #o2000000) 0))) ; Linux O_CLOEXEC
+    (handler-case
+        (if binary (sb-sys:make-fd-stream fd :input t :element-type '(unsigned-byte 8) :auto-close t)
+            (sb-sys:make-fd-stream fd :input t :external-format :utf-8 :auto-close t))
+      (error (condition) (sb-posix:close fd) (error condition)))))
+
+(defmethod raft-storage-cache-prefix ((storage file-raft-storage) node index byte-limit)
+  "Retain a checksummed, anonymous disk segment; cache failure cannot change WAL truth."
+  (handler-case
+      (let ((size 0) (fd nil) (kept nil)
+            (*print-readably* t) (*print-circle* nil) (*print-pretty* nil)
+            (*print-base* 10) (*print-radix* nil) (*print-case* :upcase)
+            (*package* (find-package :gr8s.raft)))
+        (unless (and (file-raft-storage-ownership-fd storage)
+                     (open-stream-p (file-raft-storage-stream storage)))
+          (error "Catch-up cache requires owned open WAL"))
+        (when (= index (raft-node-snapshot-index node)) (return-from raft-storage-cache-prefix nil))
+        (map-raft-catchup-prefix node index
+          (lambda (form) (incf size (+ +raft-wal-header-length+ (raft-wal-form-metrics form)))))
+        (when (> size byte-limit) (return-from raft-storage-cache-prefix nil))
+        (raft-catchup-evict storage size byte-limit)
+        (unwind-protect
+             (progn
+               ;; Linux headers: O_TMPFILE=(020000000|O_DIRECTORY), O_CLOEXEC=02000000.
+               ;; No pathname ever exists, including across SIGKILL or failed publication.
+               (setf fd (sb-posix:open
+                         (namestring (uiop:pathname-directory-pathname (file-raft-storage-path storage)))
+                         (logior sb-posix:o-rdwr #o20200000 #o2000000) #o600))
+               (let ((writer-fd (sb-posix:open (format nil "/proc/self/fd/~D" fd)
+                                               (logior sb-posix:o-wronly #o2000000) 0))
+                     (writer nil))
+                 (unwind-protect
+                      (progn
+                        (setf writer (sb-sys:make-fd-stream writer-fd :output t :external-format :utf-8 :auto-close t))
+                        (map-raft-catchup-prefix node index (lambda (form) (raft-wal-write-frame form writer)))
+                        (finish-output writer)
+                        (sb-posix:fsync writer-fd))
+                   (if writer
+                       (unwind-protect (close writer)
+                         (when (open-stream-p writer) (close writer :abort t)))
+                       (sb-posix:close writer-fd))))
+               (unless (= size (sb-posix:stat-size (sb-posix:fstat fd)))
+                 (error "Catch-up cache size changed while writing"))
+               (let ((segment (make-raft-catchup-segment
+                               :fd fd :first (1+ (raft-node-snapshot-index node))
+                               :last index :previous-term (raft-node-snapshot-term node) :bytes size)))
+                 (sb-sys:without-interrupts
+                   (push segment (file-raft-storage-catchup-segments storage))
+                   (setf kept t (file-raft-storage-catchup-error storage) nil))))
+          (when (and fd (not kept)) (sb-posix:close fd))))
+    (error (condition)
+      (setf (file-raft-storage-catchup-error storage) (princ-to-string condition))
+      nil)))
+
+(defmethod raft-storage-read-catchup ((storage file-raft-storage) node next)
+  "Decode at most one ordinary bounded AppendEntries batch; older forms are discarded."
+  (handler-case
+      (let ((segment (find-if (lambda (segment)
+                               (and (<= (raft-catchup-segment-first segment) next (raft-catchup-segment-last segment))
+                                    (<= (raft-catchup-segment-last segment) (raft-node-snapshot-index node))))
+                             (file-raft-storage-catchup-segments storage))))
+        (when segment
+          (with-open-stream (input (raft-catchup-open segment))
+            (with-open-stream (binary (raft-catchup-open segment :binary t))
+              (unless (equal (raft-wal-read-record input binary)
+                             (list :snapshot (1- (raft-catchup-segment-first segment))
+                                   (raft-catchup-segment-previous-term segment) nil))
+                (error "Catch-up cache boundary mismatch"))
+              (let ((previous (raft-catchup-segment-previous-term segment))
+                    (entries nil) (bytes 0) (count 0))
+                (loop for expected from (raft-catchup-segment-first segment) to (raft-catchup-segment-last segment)
+                      for form = (raft-wal-read-record input binary)
+                      do (unless (and (consp form) (eq :entry (first form)) (= expected (second form)))
+                           (error "Catch-up cache is not contiguous"))
+                         (if (< expected next)
+                             (setf previous (third form))
+                             (let ((weight (+ 128 (raft-command-wire-weight (fourth form)))))
+                               (when (or (>= count (raft-node-append-entry-limit node))
+                                         (and (plusp count) (> (+ bytes weight) (raft-node-append-byte-budget node))))
+                                 (return))
+                               (push (make-raft-entry :index expected :term (third form) :command (fourth form)) entries)
+                               (incf bytes weight) (incf count))))
+                (when entries (cons previous (nreverse entries))))))))
+    (error (condition)
+      (setf (file-raft-storage-catchup-error storage) (princ-to-string condition))
+      (raft-storage-clear-catchup storage)
+      nil)))

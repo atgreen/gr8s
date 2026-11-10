@@ -1228,3 +1228,144 @@
     (is (= 2 (gr8s::raft-last-log-index node)))))
 
 (in-suite gr8s)
+
+(in-suite raft)
+
+(defun make-disk-catchup-test-node (storage)
+  (let ((node (gr8s.raft::make-raft-node
+   :id "leader" :role :leader :current-term 2 :storage storage
+   :catchup-byte-limit (* 8 1024 1024) :append-entry-limit 1
+   :commit-index 3 :last-applied 3
+   :log (make-array 3 :adjustable t :fill-pointer 3
+                     :initial-contents
+                     (loop for index from 1 to 3 collect
+                       (gr8s.raft::make-raft-entry :index index :term (if (= index 1) 1 2)
+                                                  :command (list :payload index)))))))
+    (gr8s.raft::raft-persist-hard-state node)
+    (map nil (lambda (entry) (gr8s.raft:raft-storage-append-entry storage entry)) (gr8s.raft:raft-node-log node))
+    (gr8s.raft:raft-storage-save-commit-index storage 3)
+    node))
+
+(test disk-catchup-replicates-through-multiple-compactions-without-live-prefix
+  (with-temporary-store (store root)
+    (values store)
+    (let* ((storage (gr8s::open-file-raft-storage (merge-pathnames "cache.log" root)))
+           (node (make-disk-catchup-test-node storage))
+           (follower (gr8s.raft::make-raft-node :id "follower"
+                                                :send-fn (lambda (&rest args) (declare (ignore args)))))
+           (files (length (uiop:directory-files root))))
+      (unwind-protect
+           (progn
+             (gr8s.raft:raft-compact node 3)
+             (is-true (nth-value 1 (gr8s.raft:raft-propose node '(:payload 4))))
+             (is-true (nth-value 1 (gr8s.raft:raft-propose node '(:payload 5))))
+             (gr8s.raft:raft-compact node 5)
+             (is (zerop (length (gr8s.raft:raft-node-log node))))
+             (is (= 2 (nth-value 1 (gr8s.raft::raft-storage-catchup-usage storage))))
+             (is (= files (length (uiop:directory-files root))))
+             (loop for next from 1 to 5 do
+               (setf (gethash "follower" (gr8s.raft:raft-node-next-index node)) next)
+               (let ((message (gr8s.raft::raft-append-message node "follower")))
+                 (is (eq :append-entries (getf message :type)))
+                 (is (= 1 (length (getf message :entries))))
+                 (is (= (1- next) (getf message :prev-log-index)))
+                 (is (= (cond ((= next 1) 0) ((= next 2) 1) (t 2)) (getf message :prev-log-term)))
+                 (gr8s.raft::raft-handle-append-entries follower message)))
+             (is (= 5 (gr8s.raft:raft-node-commit-index follower)))
+             (is (= 5 (gr8s.raft:raft-node-last-applied follower)))
+             (is (equal '((:payload 1) (:payload 2) (:payload 3) (:payload 4) (:payload 5))
+                        (map 'list #'gr8s.raft:raft-entry-command (gr8s.raft:raft-node-log follower)))))
+        (gr8s::close-file-raft-storage storage)))))
+
+(test disk-catchup-eviction-and-close-release-anonymous-descriptors
+  (with-temporary-store (store root)
+    (values store)
+    (let* ((storage (gr8s::open-file-raft-storage (merge-pathnames "cache.log" root)))
+           (node (make-disk-catchup-test-node storage)))
+      (unwind-protect
+           (progn
+             (gr8s.raft:raft-compact node 3)
+             (let* ((segment (first (gr8s.raft::file-raft-storage-catchup-segments storage)))
+                    (fd (gr8s.raft::raft-catchup-segment-fd segment))
+                    (stat (sb-posix:fstat fd)))
+               (is (zerop (sb-posix:stat-nlink stat)))
+               (is (= #o600 (logand #o777 (sb-posix:stat-mode stat))))
+               (is (logtest 1 (cffi:foreign-funcall "fcntl" :int fd :int 1 :int)))
+               (gr8s.raft::raft-catchup-evict storage 1 1)
+               (signals sb-posix:syscall-error (sb-posix:fstat fd)))
+             (is (zerop (gr8s.raft::raft-storage-catchup-usage storage)))
+             (setf (gethash "follower" (gr8s.raft:raft-node-next-index node)) 1)
+             (is (eq :install-snapshot (getf (gr8s.raft::raft-append-message node "follower") :type)))
+             (gr8s.raft:raft-propose node '(:payload 4))
+             (gr8s.raft:raft-compact node 4)
+             (let ((fd (gr8s.raft::raft-catchup-segment-fd
+                        (first (gr8s.raft::file-raft-storage-catchup-segments storage)))))
+               (gr8s::close-file-raft-storage storage)
+               (signals sb-posix:syscall-error (sb-posix:fstat fd))))
+        (gr8s::close-file-raft-storage storage)))))
+
+(test corrupt-disk-catchup-falls-back-to-snapshot-without-changing-durable-state
+  (with-temporary-store (store root)
+    (values store)
+    (let* ((path (merge-pathnames "cache.log" root))
+           (storage (gr8s::open-file-raft-storage path))
+           (node (make-disk-catchup-test-node storage)))
+      (unwind-protect
+           (progn
+             (gr8s.raft:raft-compact node 3)
+             (let ((fd (gr8s.raft::raft-catchup-segment-fd
+                        (first (gr8s.raft::file-raft-storage-catchup-segments storage)))))
+               (with-open-file (out (format nil "/proc/self/fd/~D" fd) :direction :output :if-exists :overwrite)
+                 (write-char #\! out)))
+             (setf (gethash "follower" (gr8s.raft:raft-node-next-index node)) 1)
+             (is (eq :install-snapshot (getf (gr8s.raft::raft-append-message node "follower") :type)))
+             (is (not (null (gr8s.raft::file-raft-storage-catchup-error storage))))
+             (is (zerop (gr8s.raft::raft-storage-catchup-usage storage)))
+             (is (= 3 (gr8s.raft::raft-recovered-commit-index (gr8s.raft::load-raft-log path))))
+             (is (= 3 (gr8s.raft:raft-node-last-applied node))))
+        (gr8s::close-file-raft-storage storage)))))
+
+(test failed-checkpoint-cannot-publish-an-unadopted-disk-cache-boundary
+  (with-temporary-store (store root)
+    (values store)
+    (let* ((path (merge-pathnames "cache.log" root))
+           (storage (gr8s::open-file-raft-storage path))
+           (node (make-disk-catchup-test-node storage)))
+      (unwind-protect
+           (progn
+             (change-class storage 'checkpoint-failing-raft-storage :phase :file)
+             (let ((bytes (raft-wal-size path)))
+               (signals error (gr8s.raft:raft-compact node 3))
+               (is (= bytes (raft-wal-size path))))
+             (is (zerop (gr8s.raft:raft-node-snapshot-index node)))
+             (is (null (gr8s.raft::raft-storage-read-catchup storage node 1)))
+             (is (= 3 (gr8s.raft::raft-recovered-commit-index (gr8s.raft::load-raft-log path))))
+             (setf (checkpoint-failure-phase storage) nil)
+             (gr8s.raft:raft-compact node 3)
+             (is (not (null (gr8s.raft::raft-storage-read-catchup storage node 1)))))
+        (gr8s::close-file-raft-storage storage)))))
+
+(test disk-catchup-budget-and-opt-out-preserve-snapshot-fallback
+  (with-temporary-store (store root)
+    (values store)
+    (let* ((storage (gr8s::open-file-raft-storage (merge-pathnames "cache.log" root)))
+           (node (make-disk-catchup-test-node storage)))
+      (unwind-protect
+           (progn
+             (setf (gr8s.raft::raft-node-catchup-byte-limit node) 1)
+             (gr8s.raft:raft-compact node 3)
+             (is (zerop (gr8s.raft::raft-storage-catchup-usage storage)))
+             (setf (gethash "follower" (gr8s.raft:raft-node-next-index node)) 1)
+             (is (eq :install-snapshot (getf (gr8s.raft::raft-append-message node "follower") :type)))
+             (setf (gr8s.raft::raft-node-catchup-byte-limit node) 65536)
+             (gr8s.raft:raft-propose node '(:payload 4))
+             (gr8s.raft:raft-compact node 4)
+             (setf (gethash "follower" (gr8s.raft:raft-node-next-index node)) 4
+                   (gr8s.raft::raft-node-append-entry-limit node) 64
+                   (gr8s.raft::raft-node-append-byte-budget node) 1)
+             (let ((message (gr8s.raft::raft-append-message node "follower")))
+               (is (eq :append-entries (getf message :type)))
+               (is (= 1 (length (getf message :entries)))))
+             (setf (gr8s.raft::raft-node-catchup-byte-limit node) nil)
+             (is (eq :install-snapshot (getf (gr8s.raft::raft-append-message node "follower") :type))))
+        (gr8s::close-file-raft-storage storage)))))

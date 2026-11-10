@@ -14,7 +14,7 @@
 (test ha-health-metrics-report-prefix-and-peer-pressure-without-payloads
   (let* ((node (gr8s::make-raft-node :id "metrics" :role :leader :current-term 3
                                     :snapshot-index 5 :commit-index 11 :last-applied 10
-                                    :retained-byte-limit 4096 :uncommitted-weight-fn (constantly 100)
+                                    :catchup-byte-limit 8192 :retained-byte-limit 4096 :uncommitted-weight-fn (constantly 100)
                                     :log (make-array 7 :adjustable t :fill-pointer 7
                                                      :initial-contents
                                                      (loop for index from 6 to 12 collect
@@ -33,7 +33,9 @@
                          "gr8s_raft_applied_index 10" "gr8s_raft_snapshot_index 5"
                          "gr8s_raft_apply_lag_entries 1" "gr8s_raft_retained_entries 7"
                          "gr8s_raft_uncommitted_entries 1" "gr8s_raft_retained_bytes 1596"
-                         "gr8s_raft_retained_limit_bytes 4096" "gr8s_compaction_completed_total 7"
+                         "gr8s_raft_retained_limit_bytes 4096" "gr8s_raft_catchup_cache_limit_bytes 8192"
+                         "gr8s_raft_catchup_cache_bytes 0" "gr8s_raft_catchup_cache_segments 0"
+                         "gr8s_raft_catchup_cache_error 0" "gr8s_compaction_completed_total 7"
                          "gr8s_compaction_in_flight 1" "gr8s_compaction_error 1"
                          "gr8s_raft_peer_replication_lag_entries{peer=\"peer\\\"one\"} 4"
                          "gr8s_raft_peer_outbox_messages{peer=\"peer\\\"one\"} 2"))
@@ -631,3 +633,22 @@
              (is (gr8s.ha::compact-ha-store-once ha))
              (is (not (gr8s.store::store-access-blocked-p store))))
         (gr8s::stop-ha-control-plane ha)))))
+
+(test compaction-worker-restores-disk-cache-policy-without-overwriting-external-changes
+  (with-temporary-store (store root)
+    (values root)
+    (dolist (previous '(nil 1024))
+      (let* ((node (gr8s.raft::make-raft-node :catchup-byte-limit previous))
+             (member (gr8s.raft.transport::make-raft-member :node node))
+             (ha (gr8s.ha::make-ha-control-plane :member member :store store :compaction-interval 3600)))
+        (unwind-protect
+             (progn
+               (gr8s.ha::start-ha-compaction-worker ha)
+               (is (= (or previous (* 128 1024 1024)) (gr8s.raft::raft-node-catchup-byte-limit node)))
+               (gr8s.ha::stop-ha-compaction-worker ha)
+               (is (eql previous (gr8s.raft::raft-node-catchup-byte-limit node)))
+               (gr8s.ha::start-ha-compaction-worker ha)
+               (setf (gr8s.raft::raft-node-catchup-byte-limit node) 2048)
+               (gr8s.ha::stop-ha-compaction-worker ha)
+               (is (= 2048 (gr8s.raft::raft-node-catchup-byte-limit node))))
+          (gr8s.ha::stop-ha-compaction-worker ha))))))

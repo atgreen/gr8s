@@ -126,7 +126,10 @@ def main():
 
         def asymmetric_progress():
             values = states()
-            return values if values[current.name]["completedRounds"] >= start_round + 32 else None
+            # Advance the leader checkpoint past the stalled follower so release
+            # must exercise archived-prefix replication, not only the live tail.
+            return values if (values[current.name]["completedRounds"] >= start_round + 32 and
+                              values[current.name]["snapshot"] > values[slow.name]["applied"]) else None
 
         asymmetric = probe.await_value(asymmetric_progress, timeout=240)
         assert asymmetric[slow.name]["captureHeld"]
@@ -158,6 +161,10 @@ def main():
             value["checkpoints"] >= (1 if args.smoke else 2)
             for value in values.values()) else None)(states()), timeout=240)
         result.update(beforeRestart=final, samples=samples)
+        result["diskCatchupAcceptance"] = any(value["catchupCacheBatches"] > 0 for value in final.values())
+        assert result["diskCatchupAcceptance"], "No archived-prefix batch was replicated"
+        assert all(value["catchupCacheBytes"] <= 128 * 1024 * 1024 and
+                   value["catchupCacheSegments"] <= 128 for value in final.values()), final
         if not args.smoke:
             histories = {name: value["historyEstimatedBytes"] for name, value in final.items()}
             assert all(value >= 96 * 1024 * 1024 - 2 * 65536 for value in histories.values()), \

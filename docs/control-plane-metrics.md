@@ -59,6 +59,10 @@ quorum. A leader gauge of one alone is not proof that writes can commit.
 | `gr8s_raft_uncommitted_entries` | Entries beyond the local commit index |
 | `gr8s_raft_retained_bytes` | Retained command estimate using the same estimator as admission |
 | `gr8s_raft_retained_limit_bytes` | Retained-log admission budget; omitted when no policy is configured |
+| `gr8s_raft_catchup_cache_bytes` | Physical disk bytes in anonymous committed-prefix segments |
+| `gr8s_raft_catchup_cache_segments` | Open anonymous segment descriptors |
+| `gr8s_raft_catchup_cache_limit_bytes` | Disk cache budget; omitted when disabled |
+| `gr8s_raft_catchup_cache_error` | One after a cache error, cleared by a successfully retained segment |
 | `gr8s_raft_peer_replication_lag_entries{peer=...}` | Leader's last index minus peer acknowledged match index; omitted on followers |
 | `gr8s_raft_peer_outbox_messages{peer=...}` | Queued plus sender-owned messages on each configured peer link |
 | `gr8s_compaction_completed_total` | Successful checkpoints through the local worker/manual worker API |

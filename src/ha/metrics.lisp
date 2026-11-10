@@ -28,6 +28,15 @@
         (when (gr8s.raft::raft-node-retained-byte-limit node)
           (push (list "gr8s_raft_retained_limit_bytes" "Configured retained-log admission budget."
                       (gr8s.raft::raft-node-retained-byte-limit node)) samples))
+        (multiple-value-bind (bytes count) (gr8s.raft::raft-storage-catchup-usage (gr8s.raft:raft-node-storage node))
+          (push (list "gr8s_raft_catchup_cache_bytes" "Physical bytes retained in anonymous catch-up segments." bytes) samples)
+          (push (list "gr8s_raft_catchup_cache_segments" "Anonymous catch-up segment descriptors retained locally." count) samples))
+        (when (gr8s.raft::raft-node-catchup-byte-limit node)
+          (push (list "gr8s_raft_catchup_cache_limit_bytes" "Configured disk catch-up cache budget."
+                      (gr8s.raft::raft-node-catchup-byte-limit node)) samples))
+        (push (list "gr8s_raft_catchup_cache_error" "Whether the disk cache encountered an error since its last successful segment."
+                    (if (and (typep (gr8s.raft:raft-node-storage node) 'gr8s.raft::file-raft-storage)
+                             (gr8s.raft::file-raft-storage-catchup-error (gr8s.raft:raft-node-storage node))) 1 0)) samples)
         (maphash
          (lambda (id link)
            (bt:with-lock-held ((gr8s.raft.transport::raft-peer-link-lock link))
