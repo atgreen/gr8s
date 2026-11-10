@@ -10,7 +10,7 @@
 (defun skip-core-checkpoint-value (parser)
   "Consume one value without retaining its containers, keys or earlier strings."
   (loop with depth = 0
-        for token = (com.inuoe.jzon:parse-next parser)
+        for token = (progn (maybe-collect-core-recovery-garbage) (com.inuoe.jzon:parse-next parser))
         do (case token
              ((:begin-array :begin-object)
               (when (> (incf depth) 127) (error "Core checkpoint nesting exceeds limit")))
@@ -42,8 +42,9 @@
   (unless (eq :begin-array (com.inuoe.jzon:parse-next parser))
     (error "Core checkpoint collection must be an array"))
   (loop with end = (gensym "ARRAY-END")
-        for value = (com.inuoe.jzon:parse-next-element parser :max-depth 126
-                                                      :eof-error-p nil :eof-value end)
+        for value = (progn (maybe-collect-core-recovery-garbage)
+                           (com.inuoe.jzon:parse-next-element parser :max-depth 126
+                                                                  :eof-error-p nil :eof-value end))
         until (eq value end) do (funcall visitor value)))
 
 (defun core-checkpoint-history-key (entry)
@@ -162,6 +163,7 @@ decrypted, deduplicated by exact value and trimmed while records are consumed."
           (setf history (remove-if (lambda (entry) (<= (gethash "revision" entry) floor)) history))
           (setf (gethash "templateHistory" state) (coerce history 'vector)
                 (gethash "templateHistoryFloor" state) floor)
+          (unless (nth-value 1 (gethash "items" state)) (setf (gethash "items" state) #()))
           ;; Items may precede history in legacy/arbitrarily ordered objects.
           ;; Reuse their exact values there too, without altering public values.
           (dolist (entry history)

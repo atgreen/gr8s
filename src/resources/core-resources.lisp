@@ -239,6 +239,11 @@ Startup instead passes the streaming iterator directly to REPLAY-CORE-JOURNAL."
           (unless record (return (values (nreverse records) torn bytes)))
           (push record records))))))
 
+(defun maybe-collect-core-recovery-garbage ()
+  "Reclaim older decoded buffers before another recovery record needs space."
+  (when (> (sb-kernel:dynamic-usage) (* 2/3 (sb-ext:dynamic-space-size)))
+    (sb-ext:gc :full t)))
+
 (defun replay-core-journal (store state records)
   "Apply journal RECORDS newer than STATE's revision to STATE, a parsed checkpoint,
 rebuilding the history a commit used to write. RECORDS may be a zero-argument
@@ -248,15 +253,17 @@ iterator instead of a list; its final values are returned after STATE."
          (floor (gethash "templateHistoryFloor" state (gethash "revision" state)))
          (expirations (gethash "eventExpirations" state (make-hash-table :test #'equal)))
          (time nil) (torn nil) (bytes 0))
+    ;; INDEX/HISTORY now own these values. Keeping the original vectors in STATE
+    ;; would pin versions that subsequent records remove from the bounded view.
+    (setf (gethash "items" state) #() (gethash "customResourceItems" state) #()
+          (gethash "templateHistory" state) #())
     (loop for record = (if (functionp records)
                           (multiple-value-bind (record tail complete)
                               (progn
                                 ;; Large decoded strings can survive young-generation
                                 ;; collections and fragment a constrained SBCL heap.
                                 ;; Reclaim them before the next record needs space.
-                                (when (> (sb-kernel:dynamic-usage)
-                                         (* 2/3 (sb-ext:dynamic-space-size)))
-                                  (sb-ext:gc :full t))
+                                (maybe-collect-core-recovery-garbage)
                                 (funcall records))
                             (setf torn tail bytes complete) record)
                           (pop records))
@@ -311,16 +318,17 @@ iterator instead of a list; its final values are returned after STATE."
                  index)
         (setf expirations events))
       (setf (gethash "version" state) 2
-            (gethash "templateHistory" state) (coerce history 'vector)
             (gethash "templateHistoryFloor" state) floor
-            (gethash "eventExpirations" state) expirations
-            (gethash "items" state)
+            (gethash "eventExpirations" state) expirations))
+    ;; An empty or already-applied journal must retain its checkpoint too.
+    (setf (gethash "templateHistory" state) (coerce history 'vector)
+          (gethash "items" state)
             (coerce (loop for key being the hash-keys of index using (hash-value object)
                           unless (custom-resource-key-p (first key)) collect object) 'vector)
             (gethash "customResourceItems" state)
             (coerce (loop for key being the hash-keys of index using (hash-value object)
                           when (custom-resource-key-p (first key))
-                            collect (core-object "resource" (first key) "object" object)) 'vector)))
+                            collect (core-object "resource" (first key) "object" object)) 'vector))
     (values state torn bytes)))
 
 (defun read-durable-core-state (store)
@@ -355,6 +363,7 @@ whether the journal must be rewritten (a torn record) and its complete bytes."
   (multiple-value-bind (state torn journal-bytes) (read-durable-core-state store)
     (when state
       (setf (pod-store-resource-revision store) (gethash "revision" state)
+            (pod-store-template-history-recent store) nil
             (pod-store-workload-deletions store) (gethash "workloadDeletions" state (make-hash-table :test #'equal))
             (pod-store-job-controller-states store) (gethash "jobControllerStates" state (make-hash-table :test #'equal))
             (pod-store-event-expirations store) (gethash "eventExpirations" state (make-hash-table :test #'equal))
@@ -681,10 +690,10 @@ An object is streamed to the file, never held as one string as large as the stor
                (pod-store-resource-revision store) revision
                (pod-store-template-history store) history
                (pod-store-template-history-recent store)
-               (let ((recent (append added (pod-store-template-history-recent store))))
-                 (if (nthcdr +template-history-recent-limit+ recent)
-                     (subseq recent 0 +template-history-recent-limit+)
-                     recent))
+               (loop for entry in (append added (pod-store-template-history-recent store))
+                     repeat +template-history-recent-limit+
+                     while (> (gethash "revision" entry) floor)
+                     collect entry)
                (pod-store-template-history-floor store) floor
                (pod-store-template-token-key store) token-key
                (pod-store-event-expirations store) event-expirations))))))
