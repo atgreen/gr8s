@@ -463,6 +463,56 @@
                       (slot-value response 'gr8s.node.v1::payload-case)))))
       (ignore-errors (ag-grpc:channel-close channel)))))
 
+(test cluster-service-risk-publication-requires-matching-current-acks
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (dolist (entry '(("worker-a" "10.88.0.0/24")
+                     ("worker-b" "10.88.1.0/24")))
+      (gr8s:register-node
+       store (gr8s:make-node-record :id (first entry) :name (first entry)
+                                    :pod-cidr (second entry))))
+    (let* ((server (gr8s::%make-node-grpc-server :store store))
+           (projection (gr8s.kubelet::service-discovery-projection store))
+           (sessions (gr8s::node-grpc-server-sessions server))
+           (snapshots (gr8s::node-grpc-server-snapshots server))
+           (acks (gr8s::node-grpc-server-acknowledged-revisions server)))
+      (is-false (gr8s.apiserver::cluster-service-risk-published-p server))
+      (dolist (name '("worker-a" "worker-b"))
+        (let ((session (gr8s::make-node-agent-session nil)))
+          (setf (gr8s::node-agent-session-node-id session) name
+                (gr8s::node-agent-session-service-risk-v2-p session) t
+                (gethash name sessions) session
+                (gethash name snapshots)
+                (make-instance 'gr8s.node.v1::desired-state-snapshot
+                               :revision 1 :service-discovery-objects-json projection)
+                (gethash name acks) 1)))
+      (is-true (gr8s.apiserver::cluster-service-risk-published-p server))
+      (setf (gr8s::node-agent-session-node-id
+             (gethash "worker-b" sessions)) "replaced-node-id")
+      (is-false (gr8s.apiserver::cluster-service-risk-published-p server))
+      (setf (gr8s::node-agent-session-node-id
+             (gethash "worker-b" sessions)) "worker-b")
+      (setf (gethash "worker-b" acks) 0)
+      (is-false (gr8s.apiserver::cluster-service-risk-published-p server))
+      (setf (gethash "worker-b" acks) 1
+            (gr8s::node-agent-session-service-risk-v2-p
+             (gethash "worker-b" sessions)) nil)
+      (is-false (gr8s.apiserver::cluster-service-risk-published-p server))
+      (setf (gr8s::node-agent-session-service-risk-v2-p
+             (gethash "worker-b" sessions)) t
+            (slot-value (gethash "worker-b" snapshots) 'gr8s.node.v1::revision) 2)
+      (is-false (gr8s.apiserver::cluster-service-risk-published-p server))
+      (setf (slot-value (gethash "worker-b" snapshots) 'gr8s.node.v1::revision) 1
+            (slot-value (gethash "worker-b" snapshots)
+                        'gr8s.node.v1::service-discovery-objects-json)
+            (list (make-array 1 :element-type '(unsigned-byte 8)
+                              :initial-element 1)))
+      (is-false (gr8s.apiserver::cluster-service-risk-published-p server))
+      (setf (slot-value (gethash "worker-b" snapshots)
+                        'gr8s.node.v1::service-discovery-objects-json) projection)
+      (remhash "worker-b" sessions)
+      (is-false (gr8s.apiserver::cluster-service-risk-published-p server)))))
+
 (test snapshot-ack-from-replaced-node-session-is-ignored
   (let* ((server (gr8s::%make-node-grpc-server))
          (old (gr8s::make-node-agent-session nil))
@@ -486,6 +536,7 @@
                     store :host "127.0.0.1" :port 0
                     :heartbeat-timeout-seconds 1))
            (applied nil)
+           (risk-capability-observed nil)
            (ack-before-replay nil))
       (unwind-protect
            (progn
@@ -495,9 +546,15 @@
               "127.0.0.1" (gr8s:node-grpc-server-port server)
               "worker-a" identity-path
               (lambda (snapshot)
-                (push (slot-value snapshot 'gr8s.node.v1::revision) applied))
+                (push (slot-value snapshot 'gr8s.node.v1::revision) applied)
+                (setf risk-capability-observed
+                      (gr8s::node-agent-session-service-risk-v2-p
+                       (gethash "worker-a"
+                                (gr8s::node-grpc-server-sessions server)))))
+              :capabilities '("service-risk-v2")
               :max-sessions 1 :reconnect-delay 0.01)
              (is (equal '(1) applied))
+             (is-true risk-capability-observed)
              (is (= 1 (gr8s:node-session-acknowledged-revision
                        server "worker-a")))
              (is (probe-file identity-path))

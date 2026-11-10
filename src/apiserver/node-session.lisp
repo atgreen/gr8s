@@ -372,9 +372,13 @@ cannot forward traffic between healthy nodes."
 (defstruct (node-agent-session
              (:constructor make-node-agent-session (stream)))
   stream
+  node-id
   (lock (bt:make-lock "gr8s node agent session"))
   (last-envelope-time (get-universal-time))
   (evicted-p nil)
+  ;; The agent opened the pinned v2 risk map before this authenticated hello.
+  ;; Its snapshot ACK is withheld until local risk readback succeeds.
+  (service-risk-v2-p nil)
   ;; Whether the agent applies desired-state deltas, and the last snapshot this
   ;; session delivered, which the next delta changes (podster-uqb.139).
   deltas-p
@@ -1534,8 +1538,13 @@ candidates; agents still require their transactional handshake/probe gates."
                       (update-node-kubelet-port (node-grpc-server-store server) node-name
                                                 (or (slot-value hello 'gr8s.node.v1::kubelet-port) 0))
                       (let ((session (make-node-agent-session stream)))
-                        (setf (node-agent-session-deltas-p session)
+                        (setf (node-agent-session-node-id session) (node-record-id node)
+                              (node-agent-session-deltas-p session)
                               (member +desired-state-delta-capability+
+                                      (slot-value hello 'gr8s.node.v1::capabilities)
+                                      :test #'equal)
+                              (node-agent-session-service-risk-v2-p session)
+                              (member "service-risk-v2"
                                       (slot-value hello 'gr8s.node.v1::capabilities)
                                       :test #'equal))
                         session)))
@@ -2118,3 +2127,45 @@ candidates; agents still require their transactional handshake/probe gates."
 that session has not acknowledged its current projection."
   (bt:with-lock-held ((node-grpc-server-lock server))
     (gethash node-name (node-grpc-server-acknowledged-revisions server) 0)))
+
+(defun cluster-service-risk-published-p (server)
+  "True when every registered node's active v2-capable session has ACKed its
+current snapshot with exactly the cluster's current discovery projection.
+The v2 agent withholds that ACK until its pinned risk map was read back. This
+is a volatile publication check; a future activation fence must also revoke
+readiness on discovery changes, disconnects, and owner replacement."
+  (let* ((store (node-grpc-server-store server))
+         (revision-before (pod-store-resource-revision store))
+         (projection (gr8s.kubelet::service-discovery-projection store))
+         (identities
+           (mapcar (lambda (node)
+                     (cons (node-record-name node) (node-record-id node)))
+                   (gr8s.controllers::list-nodes store)))
+         (published
+           (and identities
+                (bt:with-lock-held ((node-grpc-server-lock server))
+                  (every
+                   (lambda (identity)
+                     (let* ((name (car identity))
+                            (session (gethash name (node-grpc-server-sessions server)))
+                            (snapshot (gethash name (node-grpc-server-snapshots server)))
+                            (revision (and snapshot
+                                           (slot-value snapshot 'gr8s.node.v1::revision))))
+                       (and session
+                            (equal (node-agent-session-node-id session) (cdr identity))
+                            (not (node-agent-session-evicted-p session))
+                            (node-agent-session-service-risk-v2-p session)
+                            snapshot (integerp revision) (plusp revision)
+                            (equalp projection
+                                    (slot-value snapshot
+                                                'gr8s.node.v1::service-discovery-objects-json))
+                            (= revision
+                               (gethash name
+                                        (node-grpc-server-acknowledged-revisions server) 0)))))
+                   identities)))))
+    (and published
+         (= revision-before (pod-store-resource-revision store))
+         (equal identities
+                (mapcar (lambda (node)
+                          (cons (node-record-name node) (node-record-id node)))
+                        (gr8s.controllers::list-nodes store))))))

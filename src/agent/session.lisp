@@ -652,7 +652,7 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
      one-shot-p control stop-predicate underlay-address status-provider
      ca-certificate-path certificate-path private-key-path &optional snapshot-observer (kubelet-port 0)
                                                                      runtime-health credential-token-function-setter
-                                                                     wireguard-public-key wireguard-endpoints)
+                                                                     wireguard-public-key wireguard-endpoints capabilities)
   "Run one agent session to the control plane at HOST:PORT from connect to close:
    dial (TLS when a CA path is given), send the hello and first heartbeat, perform
    the ServerHello handshake, then apply the initial and subsequent snapshots in
@@ -731,7 +731,9 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
                               :agent-version "gr8s"
                               :underlay-address
                               (or underlay-address (node-channel-underlay-address channel))
-                              :capabilities (list +desired-state-delta-capability+)
+                              :capabilities (remove-duplicates
+                                             (cons +desired-state-delta-capability+ capabilities)
+                                             :test #'equal)
                               :capacity (node-reported-capacity-entries)
                               :kubelet-port kubelet-port
                               :wireguard-public-key (or wireguard-public-key #())
@@ -850,6 +852,7 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
                            credential-token-function-setter
                            wireguard-public-key
                            wireguard-endpoints
+                           capabilities
                            (stop-predicate (constantly nil)))
   "Maintain the agent's session to the control plane, reconnecting on loss. With
    ENDPOINTS (a list of (host port)) the agent rotates through the control-plane
@@ -873,7 +876,7 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
                                                  ca-certificate-path certificate-path private-key-path
                                                  snapshot-observer kubelet-port runtime-health
                                                  credential-token-function-setter
-                                                 wireguard-public-key wireguard-endpoints))
+                                                 wireguard-public-key wireguard-endpoints capabilities))
                        (unless (or (node-session-cancelled-p control) (funcall stop-predicate))
                          (format *error-output* "gr8s node session to ~A:~A ended; reconnecting~%"
                                  try-host try-port))
