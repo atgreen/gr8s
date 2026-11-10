@@ -119,6 +119,57 @@ The snapshot worker retries NODE-SNAPSHOT-INCOMPLETE without losing Pod work."
           (error 'node-snapshot-incomplete
                  :message "v2 Service owner inventory is not published for the current snapshot"))))))
 
+(defun snapshot-service-receiver-pairs (snapshot)
+  (mapcar (lambda (proof)
+            (cons (slot-value proof 'gr8s.node.v1::pod-uid)
+                  (slot-value proof 'gr8s.node.v1::incarnation)))
+          (slot-value snapshot 'gr8s.node.v1::service-receivers)))
+
+(defun publish-node-snapshot-service-receivers (node-runtime snapshot)
+  "Converge remote receiver bits before this snapshot may enable selectors.
+Local receiver bits belong to CNI attachment and are never set here."
+  (let* ((dataplane (node-runtime-service-lb node-runtime))
+         (owners (and dataplane (service-lb-map dataplane "gr8s_nat_id_v2")))
+         (network (node-runtime-network node-runtime)))
+    (when (and (slot-value snapshot 'gr8s.node.v1::service-receivers)
+               (null owners))
+      (error 'node-snapshot-incomplete
+             :message "v2 Service receiver map is unavailable"))
+    (when owners
+      (unless network
+        (error 'node-snapshot-incomplete :message "v2 Service owner assignment is unavailable"))
+      (handler-case
+          (bt:with-lock-held (gr8s.network::*service-nat-owner-lifecycle-lock*)
+            (gr8s.network::publish-service-nat-receiver-readiness
+             owners (gethash "serviceTranslations" network #())
+             (snapshot-service-receiver-pairs snapshot)
+             (node-runtime-node-id node-runtime)))
+        (error (condition)
+          (error 'node-snapshot-incomplete
+                 :message (format nil "v2 Service receiver publication failed: ~A" condition)))))))
+
+(defun ensure-node-snapshot-service-receivers-ready
+    (node-runtime snapshot &key (lookup #'whistler/loader:map-lookup))
+  "Withhold ACK and selection until the snapshot's remote receiver bits are
+read back, including exact local CNI readiness for any listed local owner."
+  (let* ((dataplane (node-runtime-service-lb node-runtime))
+         (owners (and dataplane (service-lb-map dataplane "gr8s_nat_id_v2")))
+         (network (node-runtime-network node-runtime)))
+    (when (and (slot-value snapshot 'gr8s.node.v1::service-receivers)
+               (null owners))
+      (error 'node-snapshot-incomplete
+             :message "v2 Service receiver map is unavailable"))
+    (when owners
+      (unless (and network
+                   (handler-case
+                       (gr8s.network::service-nat-receiver-readiness-published-p
+                        owners (gethash "serviceTranslations" network #())
+                        (snapshot-service-receiver-pairs snapshot)
+                        (node-runtime-node-id node-runtime) :lookup lookup)
+                     (error () nil)))
+        (error 'node-snapshot-incomplete
+               :message "v2 Service receiver inventory is not published for the current snapshot")))))
+
 (defun node-snapshot-service-risk-granted-p (snapshot)
   "Validate a nonempty grant against this snapshot's exact discovery bytes."
   (let ((grant (slot-value snapshot 'gr8s.node.v1::service-risk-grant-digest)))
@@ -1508,6 +1559,32 @@ exists."
                                 1000)
                                0)))))
 
+(defun node-runtime-service-receiver-report
+    (node-runtime &key (lookup #'whistler/loader:map-lookup))
+  "Report only current local v2 receivers proven by both pinned owner rows.
+The revision is zero when risk inventory or owner readback is unavailable."
+  (handler-case
+      (let* ((revision (node-runtime-received-revision node-runtime))
+             (network (node-runtime-network node-runtime))
+             (dataplane (node-runtime-service-lb node-runtime))
+             (owners (and dataplane (service-lb-map dataplane "gr8s_nat_id_v2"))))
+        (unless (and network owners (node-runtime-local-risk-ready-p node-runtime))
+          (return-from node-runtime-service-receiver-report (values nil 0)))
+        (let ((receivers
+                (loop for record in
+                      (gr8s.network::service-nat-ready-local-receivers
+                       owners (gethash "serviceTranslations" network #())
+                       (node-runtime-node-id node-runtime) :lookup lookup)
+                      for rows = (gr8s.network::service-nat-identity-rows record)
+                      collect (make-instance 'gr8s.node.v1::service-receiver-proof
+                                             :pod-uid (gethash "podUID" record)
+                                             :incarnation (subseq (cdar rows) 8 24)))))
+          (if (and (= revision (node-runtime-received-revision node-runtime))
+                   (node-runtime-local-risk-ready-p node-runtime))
+              (values receivers revision)
+              (values nil 0))))
+    (error () (values nil 0))))
+
 (defun node-runtime-status (node-runtime &key (counter-reader #'read-cni-policy-counters))
   "Build the node's NODE-STATUS heartbeat: observation timestamp, pending podCertificate
 claims, registered CSI drivers (rescanned here, on this thread, so a slow driver can't
@@ -1515,9 +1592,14 @@ delay the heartbeat), the observed status of each assigned Pod, and endpoint tel
 Prunes cache entries for UIDs no longer assigned, never reports a status for an older
 resource version than the one assigned, and retains a final \"Deleted\" acknowledgement
 while the server still assigns that UID at that version."
-  (let ((pods (list-pods (node-runtime-store node-runtime))))
+  (let ((pods (list-pods (node-runtime-store node-runtime)))
+        (receiver-report (multiple-value-list
+                          (node-runtime-service-receiver-report node-runtime))))
     (make-instance
      'gr8s.node.v1::node-status
+     :service-receivers (first receiver-report)
+     :service-receiver-revision (second receiver-report)
+     :service-receiver-report-present t
      :observed-at-unix-nanos (* (- (get-universal-time) 2208988800) 1000000000)
      :resource-capacity (gr8s.kubelet::node-resource-capacity-entries (node-runtime-resource-manager node-runtime))
      :resource-allocatable (gr8s.kubelet::node-resource-capacity-entries (node-runtime-resource-manager node-runtime) :allocatable t)
@@ -1769,6 +1851,8 @@ so the revision is retried."
       (setf (node-runtime-service-risk-ready-revision node-runtime) nil
             (node-runtime-service-selection-ready-revision node-runtime) nil))
     (apply-node-runtime-network node-runtime snapshot)
+    (publish-node-snapshot-service-receivers node-runtime snapshot)
+    (ensure-node-snapshot-service-receivers-ready node-runtime snapshot)
     (let ((assignments (slot-value snapshot 'gr8s.node.v1::pods))
           (failed nil))
       (bt:with-lock-held ((node-runtime-observed-lock node-runtime))
@@ -1896,6 +1980,7 @@ so the revision is retried."
                  :message (format nil "~D Pod assignment~:P not applied"
                                   (+ (length failed) (count nil parsed)))))
         (ensure-node-snapshot-service-risk-ready node-runtime)
+        (ensure-node-snapshot-service-receivers-ready node-runtime snapshot)
         (ensure-node-snapshot-service-selection-ready node-runtime snapshot)
         statuses))))
 

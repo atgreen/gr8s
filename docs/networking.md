@@ -433,8 +433,17 @@ opted-in v2 endpoint after the local risk inventory and exact owner pair are
 published. The native build embeds the graph, and CNI validates shared map
 schemas before attachment. After both TCX guards attach, CNI marks the exact
 local owner pair receiver-ready; DEL disables that pair before removing links.
-Cluster-wide receiver proof, retained-flow migration, and Service traffic
-activation remain in progress.
+The node's periodic status reports the complete set of locally ready owner
+incarnations for its current risk revision. The server validates each report
+against its authenticated node session and ACKed owner assignment, retaining
+the report separately from short Pod status updates. The cluster grant is
+withheld unless every trusted owner in the current projection appears in its
+node's complete ready report; withdrawal revokes the grant on reconciliation.
+The server distributes the validated receiver set in desired snapshots. Each
+agent publishes remote receiver bits for those exact owner incarnations and
+reads the map back before ACKing. The server requires ACKs of those snapshots
+before minting the cluster grant. Retained-flow migration and live Service
+traffic activation remain in progress.
 `make test-service-nat` runs its synthetic packet interpreter tests. The same
 fixture passed 42 packet cases and seven capacity/contention cases using real
 BPF programs in a disposable VM; see
