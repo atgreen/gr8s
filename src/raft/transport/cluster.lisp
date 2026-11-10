@@ -25,15 +25,17 @@
 (in-package #:gr8s.raft.transport)
 
 (defun raft-member-open-link (member id host port)
-  "Open and register a per-peer delivery link + sender thread (caller holds the
-   member lock). Idempotent: a member that already has a link is left alone."
-  (unless (gethash id (raft-member-links member))
-    (let ((link (make-raft-peer-link :id id :host host :port port)))
-      (setf (gethash id (raft-member-links member)) link
-            (raft-peer-link-thread link)
-            (bt:make-thread (lambda () (raft-link-sender-loop member link))
-                            :name (format nil "gr8s raft link ~A->~A"
-                                          (raft-node-id (raft-member-node member)) id))))))
+  "Open a peer link under the member lock, retaining its role during departure."
+  (let* ((node (raft-member-node member))
+         (role (or (gethash id (raft-node-roles node)) (gethash id (raft-node-pending-members node))))
+         (existing (gethash id (raft-member-links member))))
+    (if existing
+        (when role (setf (raft-peer-link-role existing) role))
+        (let ((link (make-raft-peer-link :id id :host host :port port :role (or role :voter))))
+          (setf (gethash id (raft-member-links member)) link
+                (raft-peer-link-thread link)
+                (bt:make-thread (lambda () (raft-link-sender-loop member link))
+                                :name (format nil "gr8s raft link ~A->~A" (raft-node-id node) id)))))))
 
 (defun raft-member-reconcile-links (member)
   "Open a link to every member in the address book we can reach but do not yet

@@ -266,3 +266,50 @@
       (let ((invalid (copy-list message)))
         (setf (getf invalid :data) (make-array 65537 :element-type '(unsigned-byte 8) :initial-element 0))
         (signals error (gr8s.raft.transport::raft-message->octets invalid))))))
+
+(test store-artifact-witness-catchup-needs-no-retainer-and-preserves-departure-role
+  (with-temporary-store (unused root)
+    (declare (ignore unused))
+    (let* ((sender (gr8s::start-raft-member "source"))
+           (wal (merge-pathnames "raft/witness.log" root))
+           (receiver nil)
+           (reference (gr8s.resources::store-snapshot-artifact-reference 42 7 (make-string 64 :initial-element #\a)))
+           (message (artifact-wire-test-message reference)))
+      (setf (getf (cddr (getf message :state)) :members) '(("source" . :voter) ("sink" . :witness)))
+      (unwind-protect
+           (progn
+             (setf receiver (gr8s::start-raft-member "sink" :initial-role :witness :storage-path wal))
+             (bt:with-lock-held ((gr8s::raft-member-lock sender))
+               (gr8s::raft-configure (gr8s::raft-member-node sender) '(("source" . :voter) ("sink" . :witness)))
+               (setf (gethash "sink" (gr8s::raft-node-peer-addresses (gr8s::raft-member-node sender)))
+                     (list "127.0.0.1" (gr8s::raft-member-port receiver)))
+               (gr8s::raft-member-enable-dynamic-membership sender)
+               (gr8s::raft-member-reconcile-links sender))
+             ;; There is intentionally no source artifact file/callback and no
+             ;; receiver retainer. Only the small configuration image can pass.
+             (let ((link (gethash "sink" (gr8s::raft-member-links sender))))
+               (gr8s.raft.transport::raft-link-enqueue link message)
+               (is (poll-until (lambda () (= 42 (gr8s::raft-node-snapshot-index (gr8s::raft-member-node receiver)))) :timeout 10))
+               (is (null (getf (cddr (gr8s::raft-node-snapshot-state (gr8s::raft-member-node receiver))) :application)))
+               (is (equal reference (getf (cddr (getf message :state)) :application)))
+               ;; Departing witnesses still need a metadata snapshot telling them
+               ;; they were removed; their role is no longer in the live map.
+               (bt:with-lock-held ((gr8s::raft-member-lock sender))
+                 (gr8s::raft-configure (gr8s::raft-member-node sender) '(("source" . :voter)))
+                 (gr8s::raft-member-reconcile-links sender))
+               (is (eq :witness (gr8s.raft.transport::raft-peer-link-role link)))
+               (let ((removed (copy-tree message)))
+                 (setf (getf removed :last-index) 43
+                       (getf (cddr (getf removed :state)) :members) '(("source" . :voter))
+                       (getf (cddr (getf removed :state)) :application)
+                       (gr8s.resources::store-snapshot-artifact-reference 43 7 (make-string 64 :initial-element #\b)))
+                 (gr8s.raft.transport::raft-link-enqueue link removed)
+                 (is (poll-until (lambda () (= 43 (gr8s::raft-node-snapshot-index (gr8s::raft-member-node receiver)))) :timeout 10))
+                 (is-true (gr8s::raft-node-removed (gr8s::raft-member-node receiver)))))
+             (gr8s::stop-raft-member receiver)
+             (setf receiver (gr8s::start-raft-member "sink" :initial-role :witness :storage-path wal))
+             (is (= 43 (gr8s::raft-node-last-applied (gr8s::raft-member-node receiver))))
+             (is-true (gr8s::raft-node-removed (gr8s::raft-member-node receiver)))
+             (is (not (probe-file (merge-pathnames "application-generations/" root)))))
+        (gr8s::stop-raft-member sender)
+        (when receiver (gr8s::stop-raft-member receiver))))))

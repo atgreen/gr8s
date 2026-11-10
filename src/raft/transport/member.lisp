@@ -107,7 +107,7 @@
 ;;; Per-peer delivery link: its own queue, thread, channel and stub.
 
 (defstruct raft-peer-link
-  id (host "") (port 0)
+  id (host "") (port 0) (role :voter)
   (lock (bt:make-lock "gr8s raft link"))
   (changed (bt:make-condition-variable :name "gr8s raft link changed"))
   (items '())
@@ -208,7 +208,7 @@
         (when stub
           (handler-case
               (if (eq :install-snapshot (getf message :type))
-                  (raft-link-send-snapshot member stub message)
+                  (raft-link-send-snapshot member stub message :recipient-role (raft-peer-link-role link))
                   (raft-link-deliver-message stub message))
             (error () (raft-link-drop link))))))))
 

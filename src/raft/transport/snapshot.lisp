@@ -229,9 +229,18 @@ Unknown files, directories, symlinks, hard links or permissions preserve the roo
           (incf offset count))
         (unless (= offset total) (error "Snapshot source size changed during transfer"))))))
 
-(defun raft-link-send-snapshot (member stub message)
-  "Send at most 64 KiB of file data per RPC. Store artifacts travel as raw bytes,
-with a bounded configuration/reference header, never as an opaque Lisp payload."
+(defun raft-link-send-snapshot (member stub message &key (recipient-role :voter))
+  "Send bounded snapshot chunks. Store artifacts travel as raw bytes; witnesses
+receive the exact configuration envelope with no application payload/reference."
+  (when (and (eq recipient-role :witness) (raft-message-artifact-reference message))
+    ;; A witness has no application restore/retention callback. Its complete
+    ;; state is the committed configuration, represented as a stateless image.
+    ;; Copy the envelope: voter and learner deliveries still need the artifact.
+    (let ((state (copy-list (getf message :state))))
+      (setf message (copy-list message)
+            (getf (cddr state) :application) nil
+            (getf (cddr state) :application-present) t
+            (getf message :state) state)))
   (let ((reference (raft-message-artifact-reference message)))
     (when reference
       (let ((source (raft-member-artifact-source-fn member))
