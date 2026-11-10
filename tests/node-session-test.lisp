@@ -463,6 +463,19 @@
                       (slot-value response 'gr8s.node.v1::payload-case)))))
       (ignore-errors (ag-grpc:channel-close channel)))))
 
+(test snapshot-ack-from-replaced-node-session-is-ignored
+  (let* ((server (gr8s::%make-node-grpc-server))
+         (old (gr8s::make-node-agent-session nil))
+         (current (gr8s::make-node-agent-session nil))
+         (ack (make-instance 'gr8s.node.v1::snapshot-ack
+                             :revision 3 :applied t)))
+    (setf (gethash "worker" (gr8s::node-grpc-server-revisions server)) 3
+          (gethash "worker" (gr8s::node-grpc-server-sessions server)) current)
+    (gr8s::note-node-snapshot-ack server "worker" ack old)
+    (is (= 0 (gr8s:node-session-acknowledged-revision server "worker")))
+    (gr8s::note-node-snapshot-ack server "worker" ack current)
+    (is (= 3 (gr8s:node-session-acknowledged-revision server "worker")))))
+
 (test revisioned-node-session-reconnects-acknowledges-and-expires-heartbeats
   (with-temporary-store (store path)
     (gr8s:register-node
@@ -472,7 +485,8 @@
            (server (gr8s:start-node-grpc-server
                     store :host "127.0.0.1" :port 0
                     :heartbeat-timeout-seconds 1))
-           (applied nil))
+           (applied nil)
+           (ack-before-replay nil))
       (unwind-protect
            (progn
              (is (= 1 (gr8s:publish-node-desired-state
@@ -493,7 +507,7 @@
 
              (send-stale-node-ack
               (gr8s:node-grpc-server-port server) "worker-a" 1)
-             (is (= 1 (gr8s:node-session-acknowledged-revision
+             (is (= 0 (gr8s:node-session-acknowledged-revision
                        server "worker-a")))
 
              (is (= 2 (gr8s:publish-node-desired-state
@@ -513,8 +527,13 @@
              ;; A bad stream must not poison the listener or a later session.
              (gr8s:run-node-session
               "127.0.0.1" (gr8s:node-grpc-server-port server)
-              "worker-a" identity-path (lambda (snapshot) (declare (ignore snapshot)))
+              "worker-a" identity-path
+              (lambda (snapshot)
+                (declare (ignore snapshot))
+                (setf ack-before-replay
+                      (gr8s:node-session-acknowledged-revision server "worker-a")))
               :max-sessions 1 :reconnect-delay 0.01)
+             (is (= 0 ack-before-replay))
 
              (is-true
               (wait-until

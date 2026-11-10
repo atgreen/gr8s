@@ -36,6 +36,7 @@
    #:make-control-plane-runtime
    #:make-gateway-controller
    #:make-service-lb-controller
+   #:service-lb-risk-published-p
    #:reconcile-certificates
    #:reconcile-cronjobs
    #:reconcile-daemonset

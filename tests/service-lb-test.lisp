@@ -239,9 +239,135 @@
                  "sandboxID" "sandbox-1" "interfaceName" "eth0")))
     (is (= 2 (gr8s.network::publish-service-nat-identities
               :map (vector record)
+              :lookup (lambda (map key)
+                        (declare (ignore map key)) nil)
               :update (lambda (map key value)
                         (is (eq :map map)) (push (cons key value) writes)))))
     (is (= 2 (length writes)))))
+
+(test v2-owner-republish-preserves-readiness-only-for-the-same-pair
+  (let* ((record (gr8s::json-object
+                  "podIP" "10.88.1.2" "address" "10.88.1.9"
+                  "nodeID" "node-1" "podUID" "pod-1"
+                  "sandboxID" "sandbox-1" "interfaceName" "eth0"))
+         (values (make-hash-table :test #'equalp)))
+    (labels ((publish ()
+               (gr8s.network::publish-service-nat-identities
+                :map (vector record)
+                :lookup (lambda (map key)
+                          (declare (ignore map)) (gethash key values))
+                :update (lambda (map key value)
+                          (declare (ignore map))
+                          (setf (gethash key values) (copy-seq value)))))
+             (flags (key)
+               (gr8s::netlink-read-integer (gethash key values) 4 4)))
+      (let* ((rows (gr8s.network::service-nat-identity-rows record))
+             (primary (caar rows)) (alias (caadr rows)))
+        (is (= 2 (publish)))
+        (is (= #x20001 (flags primary)))
+        (dolist (key (list primary alias))
+          (replace (gethash key values) (gr8s::service-lb-bytes #x20007 4) :start1 4))
+        (is (= 2 (publish)))
+        (is (= #x20007 (flags primary)))
+        (is (= #x20007 (flags alias)))
+        (remhash alias values)
+        (is (= 2 (publish)))
+        (is (= #x20001 (flags primary)))
+        (is (= #x20001 (flags alias)))
+        (dolist (key (list primary alias))
+          (replace (gethash key values) (gr8s::service-lb-bytes #x20007 4) :start1 4))
+        (setf (gethash "sandboxID" record) "sandbox-2")
+        (is (= 2 (publish)))
+        (is (= #x20001 (flags primary)))
+        (is (= #x20001 (flags alias)))))))
+
+(test v2-owner-startup-clears-readiness-across-retained-map
+  (let* ((rows (gr8s.network::service-nat-identity-pair
+                "node-1" "sandbox-1" "eth0" "10.88.1.2" "10.88.1.9"))
+         (primary (caar rows)) (alias (caadr rows))
+         (values (make-hash-table :test #'equalp)))
+    (dolist (row rows)
+      (let ((value (copy-seq (cdr row))))
+        (replace value (gr8s::service-lb-bytes #x20007 4) :start1 4)
+        (setf (gethash (car row) values) value)))
+    (is (= 2 (gr8s.network::clear-service-nat-owner-readiness
+              :map
+              :next-key (lambda (map previous)
+                          (is (eq :map map))
+                          (cond ((null previous) primary)
+                                ((equalp previous primary) alias)))
+              :lookup (lambda (map key)
+                        (is (eq :map map)) (gethash key values))
+              :update (lambda (map key value)
+                        (is (eq :map map))
+                        (setf (gethash key values) (copy-seq value))))))
+    (dolist (key (list primary alias))
+      (is (= #x20001 (gr8s::netlink-read-integer (gethash key values) 4 4))))))
+
+(test cni-v2-owner-publication-writes-the-replicated-pair-before-attachment
+  (let* ((configuration (gr8s::make-cni-configuration
+                         :service-packet-root "/pins/shared/" :service-packet-profile :v2
+                         :service-node-id "node-1"))
+         (context (gr8s::make-cni-context :container-id "sandbox-1" :interface-name "eth0"))
+         (record (gr8s::json-object
+                  "podIP" "10.88.1.2" "address" "10.88.1.9"
+                  "nodeID" "node-1" "podUID" "pod-1"
+                  "sandboxID" "sandbox-1" "interfaceName" "eth0"))
+         (expected (gr8s.network::service-nat-identity-rows record))
+         (writes nil) (closed nil))
+    (is (equalp expected
+                (gr8s.network::publish-cni-service-nat-owner
+                 configuration context '("10.88.1.2") "10.88.1.9"
+                 :open (lambda (path)
+                         (is (equal "/pins/shared/gr8s_nat_id_v2" path)) 7)
+                 :map-info (lambda (fd name &key profile)
+                             (is (= 7 fd)) (is (equal "gr8s_nat_id_v2" name))
+                             (is (eq :v2 profile)) :map)
+                 :lookup (lambda (map key)
+                           (declare (ignore map key)) nil)
+                 :update (lambda (map key value)
+                           (is (eq :map map)) (push (cons key value) writes))
+                 :close (lambda (fd) (setf closed fd)))))
+    (is (= 7 closed))
+    (is (equalp (reverse expected) (reverse writes)))
+    (signals error
+      (gr8s.network::publish-cni-service-nat-owner
+       (gr8s::make-cni-configuration :service-packet-root "/pins/shared/")
+       context '("10.88.1.2") "10.88.1.9"
+       :open (lambda (&rest ignored)
+               (declare (ignore ignored)) (error "must reject v1 before map open"))))))
+
+(test cni-v2-owner-check-rejects-missing-and-stale-incarnations
+  (let* ((configuration (gr8s::make-cni-configuration
+                         :service-packet-root "/pins/shared/" :service-packet-profile :v2
+                         :service-node-id "node-1"))
+         (context (gr8s::make-cni-context :container-id "sandbox-1" :interface-name "eth0"))
+         (rows (gr8s.network::service-nat-identity-pair
+                "node-1" "sandbox-1" "eth0" "10.88.1.2" "10.88.1.9"))
+         (values (make-hash-table :test #'equalp))
+         (closed 0))
+    (dolist (row rows)
+      (let ((value (copy-seq (cdr row))))
+        (replace value (gr8s::service-lb-bytes #x20007 4) :start1 4)
+        (setf (gethash (car row) values) value)))
+    (labels ((check ()
+               (gr8s.network::check-cni-service-nat-owner
+                configuration context '("10.88.1.2") "10.88.1.9"
+                :open (lambda (path)
+                        (is (equal "/pins/shared/gr8s_nat_id_v2" path)) 7)
+                :map-info (lambda (fd name &key profile)
+                            (is (= 7 fd)) (is (equal "gr8s_nat_id_v2" name))
+                            (is (eq :v2 profile)) :map)
+                :lookup (lambda (map key) (is (eq :map map)) (gethash key values))
+                :close (lambda (fd) (is (= 7 fd)) (incf closed)))))
+      (is (null (check)))
+      (remhash (car (second rows)) values)
+      (signals gr8s::cni-error (check))
+      (setf (gethash (car (second rows)) values) (copy-seq (cdr (second rows))))
+      (let ((stale (gethash (car (first rows)) values)))
+        (setf (aref stale 8) (logxor 1 (aref stale 8))))
+      (signals gr8s::cni-error (check))
+      (is (= 3 closed)))))
 
 (test service-lb-plan-publishes-each-cluster-ip-to-same-family-backends
   (let* ((service (fake-lb-service "10.96.0.10"))
@@ -876,6 +1002,22 @@
                  "gr8s_backend_v4" "gr8s_backend_index_v4" "gr8s_service_v4")
                (nreverse writes)))
     (is (= 2 (length (gr8s::service-lb-controller-applied-risk-keys controller))))
+    (flet ((published (backends)
+             (gr8s.controllers:service-lb-risk-published-p
+              controller :list-services (constantly (list service))
+              :risk-backends-of (lambda (ignored-service ignored-port)
+                                  (declare (ignore ignored-service ignored-port))
+                                  backends)
+              :lookup (lambda (map key)
+                        (gethash (list (whistler/loader:map-info-name map) key) entries)))))
+      (is-true (published '(("10.88.1.5" 8080) ("10.88.1.6" 8080))))
+      (remhash (list "gr8s_nat_risk_v2"
+                     (gr8s::service-lb-risk-key "10.88.1.6" 8080 "TCP")) entries)
+      (is-false (published '(("10.88.1.5" 8080) ("10.88.1.6" 8080))))
+      (setf (gethash (list "gr8s_nat_risk_v2"
+                           (gr8s::service-lb-risk-key "10.88.1.6" 8080 "TCP")) entries)
+            (gr8s::service-lb-bytes 1 4))
+      (is-false (published '(("10.88.1.5" 8080) ("10.88.1.7" 8080)))))
     (setf writes nil)
     (gr8s::converge-service-lb-controller
      controller :list-services (constantly nil) :endpoints-of (constantly nil)
@@ -893,6 +1035,29 @@
        :update update :delete delete)
       (is (not (member "gr8s_nat_risk_v2" writes :test #'equal)))
       (is (= 2 (length (gr8s::service-lb-controller-applied-risk-keys reopened)))))))
+
+(test v2-local-risk-readiness-is-fenced-by-received-revision
+  (let* ((dataplane (gr8s::%make-service-lb-dataplane
+                     :maps (list (fake-lb-map "gr8s_nat_risk_v2" 4))))
+         (runtime (gr8s.agent::%make-node-runtime
+                   :service-lb dataplane :received-revision 4
+                   :service-risk-ready-revision 4)))
+    (is-true (gr8s.agent::node-runtime-local-risk-ready-p runtime))
+    (is (null (gr8s.agent::ensure-node-snapshot-service-risk-ready runtime)))
+    (setf (gr8s.agent::node-runtime-received-revision runtime) 5)
+    (is-false (gr8s.agent::node-runtime-local-risk-ready-p runtime))
+    (signals gr8s::node-snapshot-incomplete
+      (gr8s.agent::ensure-node-snapshot-service-risk-ready runtime))
+    (setf (gr8s.agent::node-runtime-service-risk-ready-revision runtime) 5)
+    (is-true (gr8s.agent::node-runtime-local-risk-ready-p runtime))
+    (is (null (gr8s.agent::ensure-node-snapshot-service-risk-ready runtime)))
+    (setf (gr8s.agent::node-runtime-service-lb runtime) nil)
+    (is-false (gr8s.agent::node-runtime-local-risk-ready-p runtime))
+    (is (null (gr8s.agent::ensure-node-snapshot-service-risk-ready runtime)))
+    (setf (gr8s.agent::node-runtime-service-lb runtime)
+          (gr8s::%make-service-lb-dataplane
+           :maps (list (fake-lb-map "gr8s_service_v4" 1))))
+    (is (null (gr8s.agent::ensure-node-snapshot-service-risk-ready runtime)))))
 
 (test service-risk-publication-failure-does-not-expose-service
   (let* ((dataplane (gr8s::%make-service-lb-dataplane

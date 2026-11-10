@@ -1236,10 +1236,10 @@ candidates; agents still require their transactional handshake/probe gates."
     (or (gethash node-name (node-grpc-server-snapshots server))
         (make-instance 'gr8s.node.v1::desired-state-snapshot))))
 
-(defun note-node-snapshot-ack (server node-name ack)
+(defun note-node-snapshot-ack (server node-name ack &optional session)
   "Record NODE-NAME's acknowledged revision from ACK when it advances convergence:
-   only when ACK is applied, its revision exceeds the last ack, and does not run
-   ahead of what the server has published. Old or impossible acks are ignored."
+   only when ACK is applied, SESSION still owns the node, its revision exceeds
+   the last ack, and it does not run ahead of the published revision."
   (let ((revision (slot-value ack 'gr8s.node.v1::revision)))
     (when (slot-value ack 'gr8s.node.v1::applied)
       (bt:with-lock-held ((node-grpc-server-lock server))
@@ -1250,7 +1250,10 @@ candidates; agents still require their transactional handshake/probe gates."
                          (node-grpc-server-acknowledged-revisions server) 0)))
           ;; Old acks cannot move convergence backwards, and an agent cannot
           ;; acknowledge a revision the server has never published.
-          (when (and (> revision acknowledged) (<= revision published))
+          (when (and (or (null session)
+                         (eq session (gethash node-name
+                                              (node-grpc-server-sessions server))))
+                     (> revision acknowledged) (<= revision published))
             (setf (gethash node-name
                            (node-grpc-server-acknowledged-revisions server))
                   revision)))))))
@@ -1307,7 +1310,7 @@ candidates; agents still require their transactional handshake/probe gates."
                 (vector (json-object "ip" primary)))))))
   object)
 
-(defun handle-node-agent-envelope (server node-name envelope)
+(defun handle-node-agent-envelope (server node-name envelope &optional session)
   "Dispatch one inbound envelope from NODE-NAME's agent after checking its protocol
    version. A heartbeat renews the node's readiness and lease and records runtime
    health; a snapshot-ack advances the acked revision; a status report updates CSI
@@ -1342,7 +1345,7 @@ candidates; agents still require their transactional handshake/probe gates."
     (:snapshot-ack
      (note-node-snapshot-ack
       server node-name
-      (slot-value envelope 'gr8s.node.v1::snapshot-ack)))
+      (slot-value envelope 'gr8s.node.v1::snapshot-ack) session))
     (:status
      (let ((status (slot-value envelope 'gr8s.node.v1::status)))
        (when (slot-value status 'gr8s.node.v1::resource-capacity)
@@ -1550,6 +1553,9 @@ candidates; agents still require their transactional handshake/probe gates."
                    (setf (gethash node-name (node-grpc-server-sessions server)) session
                          snapshot (gethash node-name (node-grpc-server-snapshots server) snapshot)
                          operations (gethash node-name (node-grpc-server-operation-queues server)))
+                   ;; A previous session's ACK cannot prove this incarnation
+                   ;; has rebuilt its local v2 risk map after a restart.
+                   (remhash node-name (node-grpc-server-acknowledged-revisions server))
                    (remhash node-name (node-grpc-server-operation-queues server)))
                  (ag-grpc:stream-send
                   stream (make-server-envelope
@@ -1580,7 +1586,7 @@ candidates; agents still require their transactional handshake/probe gates."
              (loop for envelope = (ag-grpc:stream-recv stream)
                    while envelope
                    do (setf (node-agent-session-last-envelope-time session) (get-universal-time))
-                      (handle-node-agent-envelope server node-name envelope)
+                      (handle-node-agent-envelope server node-name envelope session)
                       (setf (node-agent-session-last-envelope-time session) (get-universal-time))))
         (bt:with-lock-held ((node-grpc-server-lock server))
           (when (eq session (gethash node-name (node-grpc-server-sessions server)))
@@ -2108,6 +2114,7 @@ candidates; agents still require their transactional handshake/probe gates."
     revision))
 
 (defun node-session-acknowledged-revision (server node-name)
-  "The highest desired-state revision NODE-NAME has acknowledged applying, or 0."
+  "The latest authenticated session's highest applied revision, or 0 while
+that session has not acknowledged its current projection."
   (bt:with-lock-held ((node-grpc-server-lock server))
     (gethash node-name (node-grpc-server-acknowledged-revisions server) 0)))

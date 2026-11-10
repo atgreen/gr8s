@@ -92,6 +92,36 @@ def read_pinned_values(path, keys, value_size):
         os.close(fd)
 
 
+def write_pinned_values(path, entries, value_size):
+    """Update a disposable VM's pinned map after checking its kernel schema."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    number = {"x86_64": 321, "aarch64": 280}[platform.machine()]
+
+    def bpf(command, attr):
+        buffer = ctypes.create_string_buffer(attr)
+        result = libc.syscall(number, command, ctypes.byref(buffer), len(attr))
+        if result < 0:
+            raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))
+        return result
+
+    name = ctypes.create_string_buffer(os.fsencode(path))
+    fd = bpf(7, struct.pack("<QII", ctypes.addressof(name), 0, 0))
+    try:
+        info = ctypes.create_string_buffer(256)
+        bpf(15, struct.pack("<IIQ", fd, 256, ctypes.addressof(info)))
+        key_size, actual_value_size = struct.unpack_from("<II", info.raw, 8)
+        if actual_value_size != value_size or any(
+                len(key) != key_size or len(value) != value_size for key, value in entries):
+            raise ValueError("pinned map schema does not match writer buffers")
+        for encoded_key, encoded_value in entries:
+            key = ctypes.create_string_buffer(encoded_key)
+            value = ctypes.create_string_buffer(encoded_value)
+            bpf(2, struct.pack("<IIQQQ", fd, 0, ctypes.addressof(key),
+                               ctypes.addressof(value), 0))
+    finally:
+        os.close(fd)
+
+
 def read_packet_counters(path):
     return [struct.unpack("<Q", value)[0] for value in
             read_pinned_values(path, [struct.pack("<I", index) for index in range(7)], 8)]
