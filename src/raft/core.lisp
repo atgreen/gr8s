@@ -620,12 +620,15 @@ alone so existing persisted commands remain deliverable."
 ;;; ---------------------------------------------------------------------------
 ;;; Client proposal (leader only).
 
+(defun raft-capacity-exempt-command-p (command)
+  (or (member command '((:raft-barrier) (:store-recovery-barrier)) :test #'equal)
+      (and (consp command) (eq :raft-config (car command)))))
+
 (defun raft-proposal-capacity-reason (node command)
   "Check admission before append using the node's configured command estimator."
   (let ((limit (raft-node-uncommitted-byte-limit node))
         (retained-limit (raft-node-retained-byte-limit node)))
-    (when (and (or limit retained-limit) (not (member command '((:raft-barrier) (:store-recovery-barrier)) :test #'equal))
-               (not (and (consp command) (eq :raft-config (car command)))))
+    (when (and (or limit retained-limit) (not (raft-capacity-exempt-command-p command)))
       (let* ((bytes (+ 128 (funcall (raft-node-uncommitted-weight-fn node) command)))
              (retained bytes)
              (pending-start (max 0 (- (raft-node-commit-index node) (raft-node-snapshot-index node)))))
@@ -859,6 +862,29 @@ following leadership changes; old peers without applied receipts cannot qualify.
     (when (>= (hash-table-count (raft-node-pre-votes node)) (raft-majority node))
       (raft-become-candidate node))))
 
+(defun raft-replication-capacity-index (node prev-index entries)
+  "Return the first new index if a replicated suffix exceeds the retention budget.
+Matching duplicates cost nothing; a conflicting suffix replaces the old one.
+Protocol-only traffic remains available to establish a recovery commit."
+  (let ((limit (raft-node-retained-byte-limit node)))
+    (when limit
+      (loop for remaining on entries for index from (1+ prev-index)
+            for entry = (car remaining)
+            when (or (> index (raft-last-log-index node))
+                     (/= (raft-log-term node index) (raft-entry-term entry)))
+              do (when (<= index (raft-node-commit-index node))
+                   (error "Replication cannot overwrite the committed prefix"))
+                 (when (some (lambda (entry) (not (raft-capacity-exempt-command-p (raft-entry-command entry))))
+                             remaining)
+                   (let ((bytes 0) (weight (raft-node-uncommitted-weight-fn node)))
+                     (loop for old across (raft-node-log node)
+                           while (< (raft-entry-index old) index)
+                           do (incf bytes (+ 128 (funcall weight (raft-entry-command old)))))
+                     (dolist (new remaining)
+                       (incf bytes (+ 128 (funcall weight (raft-entry-command new)))))
+                     (when (> bytes limit) (return-from raft-replication-capacity-index index))))
+                 (return nil)))))
+
 (defun raft-handle-append-entries (node msg)
   "Handle an AppendEntries from a leader: reject (success nil) when MSG's term is
    stale or the previous-entry log-match check fails; otherwise accept leadership
@@ -894,6 +920,18 @@ following leadership changes; old peers without applied receipts cannot qualify.
                                           :term (raft-node-current-term node) :from (raft-node-id node)
                                           :success nil :match-index 0))
              (progn
+               (let ((next (raft-replication-capacity-index node prev-index (getf msg :entries))))
+                 (when next
+                   ;; PREV-INDEX matched: that prefix can become committed even
+                   ;; though we cannot retain this new batch yet. Otherwise a
+                   ;; full uncommitted tail could never become compactable.
+                   (when (> (min (getf msg :leader-commit) prev-index) (raft-node-commit-index node))
+                     (raft-set-commit-index node (min (getf msg :leader-commit) prev-index)))
+                   (raft-apply-committed node)
+                   (raft-send node leader (list :type :append-entries-reply
+                                               :term (raft-node-current-term node) :from (raft-node-id node)
+                                               :success nil :match-index 0 :next-index next))
+                   (return-from raft-handle-append-entries nil)))
                ;; Append/overwrite, skipping entries we already agree on.
                (loop for entry in (getf msg :entries)
                      for i from (1+ prev-index)

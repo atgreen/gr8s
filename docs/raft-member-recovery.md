@@ -465,6 +465,14 @@ trigger); an existing stricter budget is preserved. Capacity refusals return
 503 before append and release as checkpoints catch up. Recovery barriers and
 membership changes remain available. Stopping the worker restores its previous
 admission policy. The separate 16 MiB uncommitted-proposal limit still applies.
+Followers also check the retained budget before adding a replicated application
+suffix. Matching retransmissions consume no additional budget, and conflicting
+uncommitted tails reuse the space they replace. A capacity refusal can still
+commit the matching previous prefix, making it eligible for compaction; it
+returns a retry index without acknowledging the refused entries. Recovery-only
+traffic remains available. The cluster probe holds one follower's capture while
+the other two voters continue, verifies actual replication refusals and the
+follower's budget, then releases it for catch-up and restart validation.
 A capture failure with healthy storage reopens only the worker's own gate;
 uncertain WAL failure leaves application access blocked. Shutdown wakes and
 joins the worker before stopping Raft. Internal counters record successful
@@ -556,8 +564,8 @@ partial evidence, not the full retained-history memory acceptance.
 Build this internal harness with
 `sbcl --noinform --non-interactive --load scripts/build-compaction-cluster-native-harness.lisp`.
 Run `python3 scripts/test-compaction-cluster-native.py` for 2,048 rounds and
-full-history checks, or add `--smoke --rounds 64` for the explicitly partial
-probe. The full run checks each member's history budget before shutdown and
+full-history checks, or add `--smoke --rounds 128` for the explicitly partial
+probe, including asymmetric follower retention. The full run checks each member's history budget before shutdown and
 cold-loads that history before startup establishes a new watch epoch. This
 harness uses the store-member/HCP-worker APIs; it does not run `serve` or certify
 node enrollment, VM execution or conformance.

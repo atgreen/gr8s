@@ -20,9 +20,10 @@
                (response-path (merge-pathnames "response.json" control))
                (store (gr8s:open-store root)) (member nil) (ha nil) (producer nil)
                (original (symbol-function 'gr8s.resources::capture-frozen-store-snapshot))
+               (original-capacity (symbol-function 'gr8s.raft::raft-replication-capacity-index))
                (lock (bt:make-lock "compaction probe state"))
                (armed nil) (held nil) (held-index nil) (stopping nil)
-               (completed 0) (finished nil) (failure nil)
+               (completed 0) (finished nil) (failure nil) (refusals 0)
                (loaded-history (reduce #'+ (gr8s::pod-store-template-history store)
                                        :key #'gr8s.resources::template-history-entry-bytes)))
           (labels
@@ -52,6 +53,11 @@
                                 "applied" (gr8s::raft-node-last-applied node)
                                 "snapshot" (gr8s::raft-node-snapshot-index node)
                                 "quorumMembers" (gr8s::raft-cluster-size node)
+                                "retainedBudgetBytes" (or (gr8s.raft::raft-node-retained-byte-limit node) 0)
+                                "retainedEstimatedBytes"
+                                (loop for entry across (gr8s.raft:raft-node-log node)
+                                      sum (+ 128 (gr8s.ha::store-raft-command-retention-weight
+                                                  (gr8s.raft:raft-entry-command entry))))
                                 "historyEstimatedBytes" (reduce #'+ (gr8s::pod-store-template-history store)
                                                          :key #'gr8s.resources::template-history-entry-bytes)
                                 "loadedHistoryEstimatedBytes" loaded-history
@@ -67,6 +73,7 @@
                            (gethash "heldIndex" object) held-index
                            (gethash "completedRounds" object) completed
                            (gethash "churnFinished" object) (if finished t nil)
+                           (gethash "replicationCapacityRefusals" object) refusals
                            (gethash "churnError" object) failure))
                    object))
                (churn ()
@@ -103,6 +110,11 @@
                              (when armed (setf armed nil held t held-index (gr8s.resources::frozen-store-snapshot-index view))))
                            (loop while (bt:with-lock-held (lock) (and held (not stopping))) do (sleep 0.02))
                            (funcall original view path)))
+                   (setf (symbol-function 'gr8s.raft::raft-replication-capacity-index)
+                         (lambda (node previous entries)
+                           (let ((denied (funcall original-capacity node previous entries)))
+                             (when denied (bt:with-lock-held (lock) (incf refusals)))
+                             denied)))
                    (gr8s.ha::start-ha-compaction-worker ha)
                    (learner-native-write-json (merge-pathnames "ready.json" control) (gr8s::core-object "ready" t))
                    (loop
@@ -148,5 +160,6 @@
               (when producer (bt:join-thread producer))
               (when ha (gr8s::stop-ha-control-plane ha))
               (when (and member (null ha)) (gr8s::stop-raft-member member))
-              (setf (symbol-function 'gr8s.resources::capture-frozen-store-snapshot) original)))))
+              (setf (symbol-function 'gr8s.resources::capture-frozen-store-snapshot) original
+                    (symbol-function 'gr8s.raft::raft-replication-capacity-index) original-capacity)))))
     (error (condition) (format *error-output* "Compaction cluster probe failed: ~A~%" condition) (uiop:quit 1))))

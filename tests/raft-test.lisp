@@ -427,6 +427,76 @@
              (is (= 4 (gr8s.raft:raft-node-commit-index node))))
         (gr8s::close-file-raft-storage storage)))))
 
+(test replicated-retention-refusal-commits-certified-prefix-and-retries-after-compaction
+  (with-temporary-store (store root)
+    (declare (ignore store))
+    (let* ((path (merge-pathnames "follower-retained.log" root))
+           (storage (gr8s::open-file-raft-storage path))
+           (replies nil)
+           (node (gr8s.raft::make-raft-node
+                  :id "follower" :current-term 1 :storage storage :retained-byte-limit 512
+                  :uncommitted-weight-fn (constantly 128)
+                  :send-fn (lambda (target message) (declare (ignore target)) (push message replies)))))
+      (flet ((send (previous entries committed)
+               (gr8s.raft::raft-handle-append-entries
+                node (list :term 1 :from "leader" :prev-log-index previous
+                           :prev-log-term (if (zerop previous) 0 1)
+                           :leader-commit committed :entries entries)))
+             (entry (command) (gr8s.raft::make-raft-entry :term 1 :command command)))
+        (unwind-protect
+             (progn
+               (gr8s::raft-persist-hard-state node)
+               (send 0 (list (entry '(:first)) (entry '(:second))) 0)
+               (is (getf (first replies) :success))
+               (is (= 2 (length (gr8s.raft:raft-node-log node))))
+               (is (zerop (gr8s.raft:raft-node-commit-index node)))
+               (send 2 (list (entry '(:third))) 2)
+               (is (not (getf (first replies) :success)))
+               (is (= 3 (getf (first replies) :next-index)))
+               (is (= 2 (gr8s.raft:raft-node-commit-index node)))
+               (is (= 2 (gr8s.raft:raft-node-last-applied node)))
+               (is (= 2 (length (gr8s.raft:raft-node-log node))))
+               (let ((durable (gr8s.raft::load-raft-log path)))
+                 (is (= 2 (gr8s.raft::raft-recovered-commit-index durable)))
+                 (is (= 2 (length (gr8s.raft::raft-recovered-entries durable)))))
+               (let ((bytes (sb-posix:stat-size (sb-posix:stat path))))
+                 (send 2 (list (entry '(:third))) 3)
+                 (is (= bytes (sb-posix:stat-size (sb-posix:stat path)))))
+               (gr8s.raft:raft-compact node 2)
+               (send 2 (list (entry '(:third))) 3)
+               (is (getf (first replies) :success))
+               (is (= 3 (gr8s.raft:raft-node-commit-index node)))
+               ;; Matching retransmissions do not consume the budget twice.
+               (setf (gr8s.raft::raft-node-retained-byte-limit node) 1)
+               (send 2 (list (entry '(:third))) 3)
+               (is (getf (first replies) :success))
+               (is (= 1 (length (gr8s.raft:raft-node-log node))))
+               ;; Recovery traffic may establish a commit even over budget.
+               (send 3 (list (entry '(:raft-barrier))) 4)
+               (is (getf (first replies) :success))
+               (is (= 4 (gr8s.raft:raft-node-last-applied node))))
+          (gr8s::close-file-raft-storage storage))))))
+
+(test replicated-retention-replacement-reuses-uncommitted-tail-budget
+  (let ((node (gr8s.raft::make-raft-node :id "follower" :current-term 1
+                :retained-byte-limit 512 :uncommitted-weight-fn (constantly 128)
+                :send-fn (lambda (&rest arguments) (declare (ignore arguments))))))
+    (gr8s.raft::raft-handle-append-entries
+     node (list :term 1 :from "leader" :prev-log-index 0 :prev-log-term 0 :leader-commit 0
+                :entries (list (gr8s.raft::make-raft-entry :term 1 :command '(:first))
+                               (gr8s.raft::make-raft-entry :term 1 :command '(:old-tail)))))
+    (gr8s.raft::raft-handle-append-entries
+     node (list :term 2 :from "new-leader" :prev-log-index 1 :prev-log-term 1 :leader-commit 1
+                :entries (list (gr8s.raft::make-raft-entry :term 2 :command '(:replacement)))))
+    (is (= 2 (length (gr8s.raft:raft-node-log node))))
+    (is (= 2 (gr8s.raft::raft-log-term node 2)))
+    (is (= 1 (gr8s.raft:raft-node-commit-index node)))
+    (signals error
+      (gr8s.raft::raft-handle-append-entries
+       node (list :term 3 :from "bad-leader" :prev-log-index 0 :prev-log-term 0 :leader-commit 2
+                  :entries (list (gr8s.raft::make-raft-entry :term 3 :command '(:overwrite))))))
+    (is (= 1 (gr8s.raft::raft-log-term node 1)))))
+
 (test uncommitted-byte-admission-rejects-before-persisting-and-recovers-after-commit
   (with-temporary-store (store root)
     (declare (ignore store))

@@ -32,8 +32,8 @@ def main():
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--timeout", type=float, default=2400)
     args = parser.parse_args()
-    if args.rounds < 64 or (args.rounds < 2048 and not args.smoke) or args.timeout <= 0:
-        parser.error("require at least 2048 rounds, or --smoke with at least 64, and a positive timeout")
+    if args.rounds < 128 or (args.rounds < 2048 and not args.smoke) or args.timeout <= 0:
+        parser.error("require at least 2048 rounds, or --smoke with at least 128, and a positive timeout")
     binary = args.binary.resolve(strict=True)
     base = Path(tempfile.mkdtemp(prefix="gr8s-compaction-cluster-native-"))
     nodes = [probe.Node(binary, base, name, args.rounds, 0, tls=True) for name in ("cp-a", "cp-b", "cp-c")]
@@ -43,6 +43,7 @@ def main():
                   rounds=args.rounds, payloadBytes=args.rounds * 65536,
                   historyByteBudget=96 * 1024 * 1024, historyClock=4000000000,
                   fullChurnAcceptance=False, fullChurnRequested=not args.smoke, timeoutSeconds=args.timeout)
+    result["asymmetricCaptureAcceptance"] = False
     started = time.monotonic()
     print(f"Evidence: {base}", flush=True)
 
@@ -115,8 +116,26 @@ def main():
         assert during[current.name]["role"] == "leader"
         assert all(value["heldIndex"] < target and not value["blocked"] for value in during.values())
         result.update(heldBefore=before, heldAfterMarker=during, heldMarkerCommit=target)
+        # Keep one follower's writer held while leader + other voter continue.
+        # Its own compactor cannot rescue it; replication must respect the limit.
+        slow = next(node for node in nodes if node is not current)
+        start_round = current.rpc("status")["completedRounds"]
         for node in nodes:
-            node.rpc("release-capture")
+            if node is not slow:
+                node.rpc("release-capture")
+
+        def asymmetric_progress():
+            values = states()
+            return values if values[current.name]["completedRounds"] >= start_round + 32 else None
+
+        asymmetric = probe.await_value(asymmetric_progress, timeout=240)
+        assert asymmetric[slow.name]["captureHeld"]
+        assert asymmetric[slow.name]["replicationCapacityRefusals"] > 0
+        assert asymmetric[slow.name]["retainedEstimatedBytes"] <= asymmetric[slow.name]["retainedBudgetBytes"]
+        assert {name: value["term"] for name, value in asymmetric.items()} == terms
+        result.update(asymmetricHeldFollower=slow.name, asymmetricCapture=asymmetric,
+                      asymmetricCaptureAcceptance=True)
+        slow.rpc("release-capture")
 
         deadline = time.monotonic() + args.timeout
         samples = 0
@@ -133,7 +152,8 @@ def main():
                 time.sleep(1)
         final_commit = current.rpc("status")["commit"]
         final = probe.await_value(lambda: (lambda values: values if all(
-            value["applied"] >= final_commit and value["checkpoints"] >= (1 if args.smoke else 2)
+            value["applied"] >= final_commit and not value["blocked"] and
+            value["checkpoints"] >= (1 if args.smoke else 2)
             for value in values.values()) else None)(states()), timeout=240)
         if not args.smoke:
             assert all(value["historyEstimatedBytes"] >= 96 * 1024 * 1024 - 2 * 65536 for value in final.values())
