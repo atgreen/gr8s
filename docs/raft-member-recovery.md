@@ -84,8 +84,7 @@ without applying it. The six Raft/recovery suites pass 4,772 checks, including
 repeated process kills and confirmed application replay before listener creation.
 The rebuilt interrupted native 64 MiB learner probe also passes at 384 MiB per
 process. Source hashes, the standalone reproducer and measurements are in
-`raft-commit-recovery-validation-2026-11-10.json`. These checks do not enable the
-production voter startup path described below.
+`raft-commit-recovery-validation-2026-11-10.json`. Production integration and its separate native acceptance are described below.
 
 The internal `gr8s.resources::start-store-member-from-wal` function recovers a
 store from a WAL with a retained application artifact. It drains application
@@ -156,15 +155,14 @@ standalone state to HA. Once HA intent is recorded, restart with the appropriate
 Raft options; omitting them is refused, including after failed HA initialization.
 Existing Raft WAL, bootstrap or PKI evidence also prevents standalone fallback.
 A witness WAL is rejected by `serve`. These guards do not yet establish shared
-ownership across every administrative command or enable production voter WAL
-recovery.
+ownership across every administrative command.
 
 HA startup also persists `metadata/server-ha-endpoint.json`, binding member ID,
 Raft host/port and API URL to the state directory before startup patch evaluation.
 The production Raft default is port 7000; internal transport callers may still
 request an ephemeral port for isolated tests. Restart with the original endpoints.
 Changes and malformed or nonprivate descriptors are refused before application
-initialization. Endpoint publication does not enable production WAL recovery.
+initialization.
 
 A learner-to-voter configuration change now requires an applied-progress receipt.
 Successful AppendEntries replies report `:applied-index` only after application
@@ -188,8 +186,29 @@ After leader handoff, a current-term entry establishes a committed barrier befor
 promotion. The driver appends a protocol barrier only when no current-term entry
 already exists, so a disconnected quorum cannot cause one new entry per tick.
 The protocol barrier does not enter the application state machine. Native slow
-snapshot/interrupted-join acceptance remains under `podster-ucm.2.9`; production
-durable voter recovery remains disabled pending complete startup integration.
+snapshot/interrupted-join acceptance remains under `podster-ucm.2.9`.
+
+Production `serve` now starts HA members through the durable store recovery
+adapter. Fresh founders and learners publish bootstrap journals; published
+members recover committed membership and application state without founding a
+new quorum. A recovered voter uses its durable peer address book instead of
+repeating Join. The Raft listener remains available during recovery, while the
+API and application services wait until a current-term committed boundary has
+been applied. Shutdown keeps the store gated and its stopped consensus hook
+attached, preventing accidental standalone writes.
+
+Fresh HA startup atomically records serve-mode version 2 before publishing its
+endpoint or initializing credentials. This distinguishes an interrupted durable
+genesis from older in-memory HA state. A legacy HA directory without a bootstrap
+journal is refused and requires explicit cluster migration; restarting it with
+`--raft-init` must not silently create a one-voter quorum. Older binaries that
+only understand mode version 1 also refuse this descriptor.
+
+Snapshot capture is registered under the outer store barriers before member
+locking. Automatic compaction remains disabled. Witness peers receive a durable
+configuration-only projection of store snapshots, without application artifacts
+or an application artifact retainer. Voters and learners retain the full
+application snapshot path.
 
 Internal admission callers can propose a learner with `:promotion-role :voter`
 to record its requested eventual role. The intent becomes effective with the
@@ -333,3 +352,13 @@ the regression failure, test runner and measurements. This completes the retired
 stream-metadata follow-up (`podster-ucm.2.10`) and construction-race fix
 (`podster-ucm.2.10.2`), with production durable HA startup, authenticated native
 recovery/leader handoff and VM acceptance remaining separate requirements.
+
+Production native acceptance is recorded in
+`production-ha-recovery-validation-2026-11-10.json`. Three actual `serve`
+processes use mutually authenticated Raft and 384 MiB heaps, with agents
+disabled and the fake runtime. The run verifies leader SIGKILL and rejoin,
+complete voter shutdown/restart, a lone founder remaining application-gated
+with its recovered three-voter membership, preserved data and key identities,
+witness SIGKILL/restart, and a committed write requiring two surviving voters
+plus the witness. All final shutdowns return zero. This is loopback native
+acceptance; VM dataplane and Kubernetes conformance acceptance remain open.
