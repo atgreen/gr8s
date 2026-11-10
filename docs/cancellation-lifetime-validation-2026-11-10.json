@@ -109,5 +109,15 @@
     "Production durable HA startup",
     "Authenticated native recovery and leader handoff during catch-up",
     "VM acceptance"
-  ]
+  ],
+  "subsequentMerge": {
+    "commit": "4d9bb04120c0b012a92476d912e93420d37f9851",
+    "upstream": "193eb811958638979c46d7057c76115b742828bb",
+    "scope": "Independent Whistler SSA optimization; all recorded cancellation/transport source hashes unchanged.",
+    "regression": "phi-threading-preserves-values-after-validation",
+    "exitCode": 0,
+    "checks": 64,
+    "failures": 0,
+    "logSha256": "81538934ef79e81da509a45e95f123e1d0f6d7dd357382314933ab673f4c311a"
+  }
 }
