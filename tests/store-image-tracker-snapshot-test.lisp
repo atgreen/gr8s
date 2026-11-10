@@ -28,6 +28,72 @@
     (sort records #'string< :key (lambda (row) (format nil "~A/~A/~A" (gethash "kind" row)
                                                        (gethash "digest" row) (gethash "node" row))))))
 
+(test tracker-snapshot-consumer-runs-outside-live-lock-at-one-boundary
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (let* ((tracker (populate-snapshot-tracker store))
+           (expected (snapshot-tracker-records tracker))
+           (records nil))
+      (gr8s.image-distribution::map-image-tracker-records
+       tracker
+       (lambda (row)
+         (is (not (sb-thread:holding-mutex-p
+                   (gr8s.image-distribution::image-tracker-lock tracker))))
+         ;; A real live-state mutation from the consumer would deadlock if the
+         ;; mapper retained the live mutex. Frozen origins/swarms must survive.
+         (unless records
+           (gr8s.image-distribution::clear-image-tracker-state tracker))
+         (push row records)))
+      (is (equalp expected
+                  (sort records #'string<
+                        :key (lambda (row)
+                               (format nil "~A/~A/~A" (gethash "kind" row)
+                                       (gethash "digest" row) (gethash "node" row))))))
+      (is (= 1 (length (snapshot-tracker-records tracker))))
+      (signals error
+        (gr8s.image-distribution::map-image-tracker-records
+         tracker (lambda (row) (declare (ignore row)) (error "consumer failed"))))
+      (is (= 1 (length (snapshot-tracker-records tracker)))))))
+
+(test frozen-tracker-copies-mutable-state-and-shares-owned-payloads
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (let* ((tracker (populate-snapshot-tracker store))
+           (frozen (gr8s.image-distribution::freeze-image-tracker tracker))
+           (expected (snapshot-tracker-records frozen)))
+      (is (not (eq (gr8s.image-distribution::image-tracker-lock tracker)
+                   (gr8s.image-distribution::image-tracker-lock frozen))))
+      (maphash
+       (lambda (digest lease)
+         (let ((copy (gethash digest (gr8s.image-distribution::image-tracker-origins frozen))))
+           (is (not (eq lease copy)))
+           (is (not (eq (gr8s.image-distribution::origin-lease-token lease)
+                        (gr8s.image-distribution::origin-lease-token copy))))
+           (incf (gr8s.image-distribution::origin-lease-expires-at lease))
+           (let ((token (gr8s.image-distribution::origin-lease-token lease)))
+             (setf (aref token 0) (logxor 1 (aref token 0))))))
+       (gr8s.image-distribution::image-tracker-origins tracker))
+      (maphash
+       (lambda (digest swarm)
+         (let ((copy (gethash digest (gr8s.image-distribution::image-tracker-swarms frozen))))
+           (is (not (eq swarm copy)))
+           (is (eq (gr8s.image-distribution::tracker-swarm-metainfo swarm)
+                   (gr8s.image-distribution::tracker-swarm-metainfo copy)))
+           (is (eq (gr8s.image-distribution::tracker-swarm-infohash swarm)
+                   (gr8s.image-distribution::tracker-swarm-infohash copy)))
+           (maphash
+            (lambda (node peer)
+              (let ((peer-copy (gethash node (gr8s.image-distribution::tracker-swarm-peers copy))))
+                (is (not (eq peer peer-copy)))
+                (is (not (eq (gr8s.image-distribution::tracker-peer-peer-id peer)
+                             (gr8s.image-distribution::tracker-peer-peer-id peer-copy))))
+                (setf (gr8s.image-distribution::tracker-peer-last-seen peer) 99999)))
+            (gr8s.image-distribution::tracker-swarm-peers swarm))
+           (clrhash (gr8s.image-distribution::tracker-swarm-peers swarm))))
+       (gr8s.image-distribution::image-tracker-swarms tracker))
+      (setf (gr8s.image-distribution::image-tracker-peer-ttl-seconds tracker) 1)
+      (is (equalp expected (snapshot-tracker-records frozen))))))
+
 (test tracker-snapshot-restores-complete-state-with-existing-handle
   (with-temporary-store (store root)
     (let* ((tracker (populate-snapshot-tracker store))

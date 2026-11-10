@@ -13,7 +13,39 @@
     (loop for (key value) on pairs by #'cddr do (setf (gethash key object) value))
     object))
 
+(defun freeze-image-tracker (tracker)
+  "Copy mutable tracker containers without encoding or copying torrent payloads.
+Published swarm metainfo/infohash are owned by the tracker and never modified;
+public views return copies. Lease tokens may originate with a caller, so copy
+those small vectors as well as peer identities. The result owns its own mutex."
+  (bt:with-lock-held ((image-tracker-lock tracker))
+    (let ((frozen (make-image-tracker
+                   :origin-lease-seconds (image-tracker-origin-lease-seconds tracker)
+                   :peer-ttl-seconds (image-tracker-peer-ttl-seconds tracker))))
+      (maphash
+       (lambda (digest lease)
+         (let ((copy (copy-origin-lease lease)))
+           (setf (origin-lease-token copy) (copy-seq (origin-lease-token lease))
+                 (gethash digest (image-tracker-origins frozen)) copy)))
+       (image-tracker-origins tracker))
+      (maphash
+       (lambda (digest swarm)
+         (let ((copy (copy-tracker-swarm swarm))
+               (peers (make-hash-table :test #'equal)))
+           (maphash (lambda (node peer)
+                      (setf (gethash node peers) (copy-tracker-peer-for-view peer)))
+                    (tracker-swarm-peers swarm))
+           (setf (tracker-swarm-peers copy) peers
+                 (gethash digest (image-tracker-swarms frozen)) copy)))
+       (image-tracker-swarms tracker))
+      frozen)))
+
 (defun map-image-tracker-records (tracker function)
+  ;; Neither base64 encoding nor a potentially slow consumer holds the live
+  ;; tracker mutex. All records describe the same frozen boundary.
+  (map-frozen-image-tracker-records (freeze-image-tracker tracker) function))
+
+(defun map-frozen-image-tracker-records (tracker function)
   (bt:with-lock-held ((image-tracker-lock tracker))
     (funcall function (image-tracker-object "kind" "imageTrackerConfig"
                                           "originLeaseSeconds" (image-tracker-origin-lease-seconds tracker)

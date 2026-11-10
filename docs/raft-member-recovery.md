@@ -479,6 +479,13 @@ causes publication to return `nil`; the caller still owns artifact retention
 and cleanup. This foundation does not yet move the worker's application capture
 outside the member lock or enable automatic compaction by default.
 
+Image-tracker snapshot iteration freezes policy, leases, swarms and peers under
+the tracker mutex, then encodes records and invokes the writer after releasing
+that live mutex. Immutable tracker-owned torrent payloads are shared with the
+frozen view rather than copied. Live lease renewal, peer replacement or tracker
+reset cannot change the captured records. This reduces tracker contention;
+the application snapshot still needs the member-lock changes described above.
+
 Build the internal native retention probe with
 `scripts/build-compaction-native-harness.lisp`, then run the resulting
 `build/gr8s-compaction-acceptance --dynamic-space-size 384 PRIVATE_ROOT 2048`.
