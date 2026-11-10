@@ -99,15 +99,24 @@ v2 backend risk map. Remote node acknowledgement is a separate requirement."
            (integerp ready) (>= ready 0)
            (= ready (node-runtime-received-revision node-runtime))))))
 
-(defun ensure-node-snapshot-service-risk-ready (node-runtime)
-  "Withhold a v2 snapshot ACK until its local risk map has been read back.
+(defun ensure-node-snapshot-service-risk-ready
+    (node-runtime &key (owner-lookup #'whistler/loader:map-lookup))
+  "Withhold a v2 snapshot ACK until risk and trusted owner rows are read back.
 The snapshot worker retries NODE-SNAPSHOT-INCOMPLETE without losing Pod work."
-  (when (and (node-runtime-service-lb node-runtime)
-             (service-lb-map (node-runtime-service-lb node-runtime)
-                             "gr8s_nat_risk_v2")
-             (not (node-runtime-local-risk-ready-p node-runtime)))
-    (error 'node-snapshot-incomplete
-           :message "v2 Service risk inventory is not published for the current snapshot")))
+  (let* ((dataplane (node-runtime-service-lb node-runtime))
+         (risk (and dataplane (service-lb-map dataplane "gr8s_nat_risk_v2"))))
+    (when risk
+      (unless (node-runtime-local-risk-ready-p node-runtime)
+        (error 'node-snapshot-incomplete
+               :message "v2 Service risk inventory is not published for the current snapshot"))
+      (let ((owners (service-lb-map dataplane "gr8s_nat_id_v2"))
+            (network (node-runtime-network node-runtime)))
+        (unless (and network
+                     (gr8s.network::service-nat-identities-published-p
+                      owners (gethash "serviceTranslations" network #())
+                      :lookup owner-lookup))
+          (error 'node-snapshot-incomplete
+                 :message "v2 Service owner inventory is not published for the current snapshot"))))))
 
 (defun node-snapshot-service-risk-granted-p (snapshot)
   "Validate a nonempty grant against this snapshot's exact discovery bytes."

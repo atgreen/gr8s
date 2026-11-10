@@ -350,9 +350,10 @@ cannot forward traffic between healthy nodes."
   (snapshots (make-hash-table :test #'equal))
   (statuses (make-hash-table :test #'equal))
   (acknowledged-revisions (make-hash-table :test #'equal))
-  ;; A grant is tied to one discovery digest and the exact authenticated node
-  ;; sessions that acknowledged its risk-only phase. NIL means risk-only.
+  ;; A grant is tied to discovery, trusted owner inventory, and the exact
+  ;; authenticated sessions that acknowledged the risk-only phase.
   service-risk-grant-digest
+  service-risk-grant-owner-projection
   service-risk-grant-identities
   service-risk-grant-sessions
   (operations (make-hash-table :test #'equal))
@@ -374,6 +375,13 @@ cannot forward traffic between healthy nodes."
   monitor-thread
   (stopping-p nil))
 
+(defun clear-service-risk-grant-locked (server)
+  "Forget a grant while holding the node-session lock."
+  (setf (node-grpc-server-service-risk-grant-digest server) nil
+        (node-grpc-server-service-risk-grant-owner-projection server) nil
+        (node-grpc-server-service-risk-grant-identities server) nil
+        (node-grpc-server-service-risk-grant-sessions server) nil))
+
 (defstruct (node-agent-session
              (:constructor make-node-agent-session (stream)))
   stream
@@ -382,7 +390,7 @@ cannot forward traffic between healthy nodes."
   (last-envelope-time (get-universal-time))
   (evicted-p nil)
   ;; The agent opened the pinned v2 risk map before this authenticated hello.
-  ;; Its snapshot ACK is withheld until local risk readback succeeds.
+  ;; Its snapshot ACK is withheld until local risk and owner readback succeed.
   (service-risk-v2-p nil)
   ;; Whether the agent applies desired-state deltas, and the last snapshot this
   ;; session delivered, which the next delta changes (podster-uqb.139).
@@ -1543,9 +1551,7 @@ candidates; agents still require their transactional handshake/probe gates."
                (bt:with-lock-held ((node-grpc-server-lock server))
                  (remhash node-name (node-grpc-server-sessions server))
                  (remhash node-name (node-grpc-server-acknowledged-revisions server))
-                 (setf (node-grpc-server-service-risk-grant-digest server) nil
-                       (node-grpc-server-service-risk-grant-identities server) nil
-                       (node-grpc-server-service-risk-grant-sessions server) nil))
+                 (clear-service-risk-grant-locked server))
                (prepare-node-connect-snapshot
                 server node-name
                 (slot-value hello 'gr8s.node.v1::last-applied-revision))))
@@ -1579,9 +1585,7 @@ candidates; agents still require their transactional handshake/probe gates."
                    (setf (gethash node-name (node-grpc-server-sessions server)) session
                          snapshot (gethash node-name (node-grpc-server-snapshots server) snapshot)
                          operations (gethash node-name (node-grpc-server-operation-queues server)))
-                   (setf (node-grpc-server-service-risk-grant-digest server) nil
-                         (node-grpc-server-service-risk-grant-identities server) nil
-                         (node-grpc-server-service-risk-grant-sessions server) nil)
+                   (clear-service-risk-grant-locked server)
                    ;; A previous session's ACK cannot prove this incarnation
                    ;; has rebuilt its local v2 risk map after a restart.
                    (remhash node-name (node-grpc-server-acknowledged-revisions server))
@@ -1620,9 +1624,7 @@ candidates; agents still require their transactional handshake/probe gates."
         (bt:with-lock-held ((node-grpc-server-lock server))
           (when (eq session (gethash node-name (node-grpc-server-sessions server)))
             (remhash node-name (node-grpc-server-sessions server))
-            (setf (node-grpc-server-service-risk-grant-digest server) nil
-                  (node-grpc-server-service-risk-grant-identities server) nil
-                  (node-grpc-server-service-risk-grant-sessions server) nil)))
+            (clear-service-risk-grant-locked server)))
         (fail-node-session-operations server session)))))
 
 (defun handle-node-connect (server context stream)
@@ -2124,8 +2126,18 @@ candidates; agents still require their transactional handshake/probe gates."
   (mapcar (lambda (node) (cons (node-record-name node) (node-record-id node)))
           (gr8s.controllers::list-nodes store)))
 
+(defun service-risk-owner-projection (store)
+  (mapcar #'ag-proto:serialize-to-bytes
+          (gr8s.network::service-translation-identity-messages store)))
+
+(defun service-risk-snapshot-owner-projection (snapshot)
+  (let ((network (slot-value snapshot 'gr8s.node.v1::network)))
+    (when network
+      (mapcar #'ag-proto:serialize-to-bytes
+              (slot-value network 'gr8s.node.v1::service-translations)))))
+
 (defun service-risk-grant-for-snapshot-locked (server node-name snapshot)
-  "Return this session's grant only for the exact projection it covers.
+  "Return this session's grant only for its discovery and owner projections.
 The caller holds the server lock; a newly joined or replaced session gets none."
   (let* ((digest (node-grpc-server-service-risk-grant-digest server))
          (identities (node-grpc-server-service-risk-grant-identities server))
@@ -2137,6 +2149,9 @@ The caller holds the server lock; a newly joined or replaced session gets none."
                (not (node-agent-session-evicted-p session))
                (eq session (nth position
                                 (node-grpc-server-service-risk-grant-sessions server)))
+               (slot-value snapshot 'gr8s.node.v1::network)
+               (equalp (node-grpc-server-service-risk-grant-owner-projection server)
+                       (service-risk-snapshot-owner-projection snapshot))
                (equalp digest
                        (gr8s.protocol::service-risk-projection-digest
                         (slot-value snapshot
@@ -2179,8 +2194,9 @@ that session has not acknowledged its current projection."
   (bt:with-lock-held ((node-grpc-server-lock server))
     (gethash node-name (node-grpc-server-acknowledged-revisions server) 0)))
 
-(defun service-risk-projection-published-locked-p (server projection identities)
-  "Check the exact risk-only ACK state while holding SERVER's lock."
+(defun service-risk-projection-published-locked-p
+    (server projection owner-projection identities)
+  "Check exact risk and owner-inventory ACK state under SERVER's lock."
   (and identities
        (every
         (lambda (identity)
@@ -2197,30 +2213,36 @@ that session has not acknowledged its current projection."
                  (equalp projection
                          (slot-value snapshot
                                      'gr8s.node.v1::service-discovery-objects-json))
+                 (slot-value snapshot 'gr8s.node.v1::network)
+                 (equalp owner-projection
+                         (service-risk-snapshot-owner-projection snapshot))
                  (= revision
                     (gethash name
                              (node-grpc-server-acknowledged-revisions server) 0)))))
         identities)))
 
 (defun cluster-service-risk-published-p (server)
-  "True when every registered v2 node ACKed this exact discovery projection."
+  "True when every registered v2 node ACKed current discovery and owners."
   (let* ((store (node-grpc-server-store server))
          (revision-before (pod-store-resource-revision store))
          (projection (gr8s.kubelet::service-discovery-projection store))
+         (owner-projection (service-risk-owner-projection store))
          (identities (service-risk-node-identities store))
          (published (bt:with-lock-held ((node-grpc-server-lock server))
                       (service-risk-projection-published-locked-p
-                       server projection identities))))
+                       server projection owner-projection identities))))
     (and published
          (= revision-before (pod-store-resource-revision store))
+         (equalp owner-projection (service-risk-owner-projection store))
          (equal identities (service-risk-node-identities store)))))
 
 (defun refresh-cluster-service-risk-grant (server)
   "Mint after a complete risk-only ACK; retain only for the same node sessions
-and discovery digest. The next snapshot publication carries or revokes it."
+and discovery/owner projections. The next snapshot carries or revokes it."
   (let* ((store (node-grpc-server-store server))
          (revision-before (pod-store-resource-revision store))
          (projection (gr8s.kubelet::service-discovery-projection store))
+         (owner-projection (service-risk-owner-projection store))
          (identities (service-risk-node-identities store))
          (digest (gr8s.protocol::service-risk-projection-digest projection)))
     (bt:with-lock-held ((node-grpc-server-lock server))
@@ -2231,6 +2253,8 @@ and discovery digest. The next snapshot publication carries or revokes it."
              (retained
                (and (node-grpc-server-service-risk-grant-digest server)
                     (equalp digest (node-grpc-server-service-risk-grant-digest server))
+                    (equalp owner-projection
+                            (node-grpc-server-service-risk-grant-owner-projection server))
                     (equal identities (node-grpc-server-service-risk-grant-identities server))
                     (equal sessions (node-grpc-server-service-risk-grant-sessions server))
                     (every (lambda (session)
@@ -2238,22 +2262,21 @@ and discovery digest. The next snapshot publication carries or revokes it."
                                   (node-agent-session-service-risk-v2-p session)))
                            sessions))))
         (unless retained
-          (setf (node-grpc-server-service-risk-grant-digest server) nil
-                (node-grpc-server-service-risk-grant-identities server) nil
-                (node-grpc-server-service-risk-grant-sessions server) nil)
+          (clear-service-risk-grant-locked server)
           (when (service-risk-projection-published-locked-p
-                 server projection identities)
+                 server projection owner-projection identities)
             (setf (node-grpc-server-service-risk-grant-digest server) digest
+                  (node-grpc-server-service-risk-grant-owner-projection server)
+                  owner-projection
                   (node-grpc-server-service-risk-grant-identities server) identities
                   (node-grpc-server-service-risk-grant-sessions server) sessions)))))
     ;; The store is independent of the session lock. If it changed while the
     ;; decision was made, discard this candidate and retry on the next tick.
     (unless (and (= revision-before (pod-store-resource-revision store))
+                 (equalp owner-projection (service-risk-owner-projection store))
                  (equal identities (service-risk-node-identities store)))
       (bt:with-lock-held ((node-grpc-server-lock server))
         (when (equalp digest (node-grpc-server-service-risk-grant-digest server))
-          (setf (node-grpc-server-service-risk-grant-digest server) nil
-                (node-grpc-server-service-risk-grant-identities server) nil
-                (node-grpc-server-service-risk-grant-sessions server) nil))))
+          (clear-service-risk-grant-locked server))))
     (bt:with-lock-held ((node-grpc-server-lock server))
       (node-grpc-server-service-risk-grant-digest server))))

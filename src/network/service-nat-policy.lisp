@@ -186,6 +186,18 @@ Retirement and complete-history/receiver bits are left to the activation fence."
                    :preserve-readiness preserve-readiness)))
     count))
 
+(defun service-nat-identities-published-p
+    (map records &key (lookup #'whistler/loader:map-lookup))
+  "Read back every trusted owner pair after publication. A missing half, an
+old incarnation, or a disabled row withholds the node's snapshot ACK."
+  (and map (vectorp records) (not (stringp records))
+       (bt:with-lock-held (*service-nat-owner-publication-lock*)
+         (loop for record across records
+               always (every (lambda (row)
+                               (service-nat-owner-row-matches-p
+                                (funcall lookup map (car row)) (cdr row)))
+                             (service-nat-identity-rows record))))))
+
 (defparameter *service-nat-policy-key-form*
   '(whistler::defstruct whistler::netpol-flow-key-v2
      (whistler::peer whistler::u32) (whistler::pod-port whistler::u16)

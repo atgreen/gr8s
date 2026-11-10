@@ -471,22 +471,38 @@
       (gr8s:register-node
        store (gr8s:make-node-record :id (first entry) :name (first entry)
                                     :pod-cidr (second entry))))
-    (let* ((server (gr8s::%make-node-grpc-server :store store))
+    (let* ((server (gr8s::%make-node-grpc-server
+                    :store store :cluster-pod-cidr "10.88.0.0/16"))
            (projection (gr8s.kubelet::service-discovery-projection store))
            (sessions (gr8s::node-grpc-server-sessions server))
            (snapshots (gr8s::node-grpc-server-snapshots server))
            (acks (gr8s::node-grpc-server-acknowledged-revisions server)))
       (is-false (gr8s.apiserver::cluster-service-risk-published-p server))
       (dolist (name '("worker-a" "worker-b"))
-        (let ((session (gr8s::make-node-agent-session nil)))
+        (let ((session (gr8s::make-node-agent-session nil))
+              (snapshot (make-instance 'gr8s.node.v1::desired-state-snapshot
+                                       :revision 1
+                                       :service-discovery-objects-json projection)))
+          (gr8s::attach-node-topology server name snapshot)
           (setf (gr8s::node-agent-session-node-id session) name
                 (gr8s::node-agent-session-service-risk-v2-p session) t
                 (gethash name sessions) session
-                (gethash name snapshots)
-                (make-instance 'gr8s.node.v1::desired-state-snapshot
-                               :revision 1 :service-discovery-objects-json projection)
+                (gethash name snapshots) snapshot
                 (gethash name acks) 1)))
       (is-true (gr8s.apiserver::cluster-service-risk-published-p server))
+      (let ((network (slot-value (gethash "worker-b" snapshots)
+                                 'gr8s.node.v1::network)))
+        (setf (slot-value (gethash "worker-b" snapshots)
+                          'gr8s.node.v1::network) nil)
+        (is-false (gr8s.apiserver::cluster-service-risk-published-p server))
+        (setf (slot-value (gethash "worker-b" snapshots)
+                          'gr8s.node.v1::network) network)
+        (let ((owners (slot-value network 'gr8s.node.v1::service-translations)))
+          (setf (slot-value network 'gr8s.node.v1::service-translations)
+                (list (make-instance 'gr8s.node.v1::service-translation-identity
+                                     :pod-uid "unexpected")))
+          (is-false (gr8s.apiserver::cluster-service-risk-published-p server))
+          (setf (slot-value network 'gr8s.node.v1::service-translations) owners)))
       (setf (gr8s::node-agent-session-node-id
              (gethash "worker-b" sessions)) "replaced-node-id")
       (is-false (gr8s.apiserver::cluster-service-risk-published-p server))
@@ -549,6 +565,16 @@
             (is (= 2 (slot-value snapshot 'gr8s.node.v1::revision)))
             (is (equalp digest
                         (slot-value snapshot 'gr8s.node.v1::service-risk-grant-digest)))))
+        (let* ((snapshot (gr8s::current-node-snapshot server "worker-a"))
+               (network (slot-value snapshot 'gr8s.node.v1::network))
+               (owners (slot-value network 'gr8s.node.v1::service-translations)))
+          (setf (slot-value network 'gr8s.node.v1::service-translations)
+                (list (make-instance 'gr8s.node.v1::service-translation-identity
+                                     :pod-uid "unexpected")))
+          (bt:with-lock-held ((gr8s::node-grpc-server-lock server))
+            (is-false (gr8s.apiserver::service-risk-grant-for-snapshot-locked
+                       server "worker-a" snapshot)))
+          (setf (slot-value network 'gr8s.node.v1::service-translations) owners))
         ;; A grant revision leaves the old ACK behind; the grant remains valid
         ;; for the same digest and authenticated sessions.
         (gr8s::publish-service-discovery-snapshots runtime)
