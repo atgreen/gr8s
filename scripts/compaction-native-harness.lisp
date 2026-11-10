@@ -50,6 +50,9 @@
                      "historyClockFrozen" t
                      "historyByteBudget" gr8s.resources::*resource-watch-history-bytes*
                      "heapLimitMiB" (/ (sb-ext:dynamic-space-size) (* 1024 1024)))))
+      ;; Observe the collector's normal decisions, including fragmentation and
+      ;; old-generation retention, without forcing collections or tuning policy.
+      (setf (sb-ext:gc-logfile) (namestring (merge-pathnames "gc.log" root)))
       (labels ((ready () (gr8s::ha-control-plane-leader-p ha))
                (sample ()
                  (let ((member (gr8s::ha-control-plane-member ha)))
