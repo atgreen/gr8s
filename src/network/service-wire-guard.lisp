@@ -415,13 +415,15 @@ opaque wire macro calls are expanded afterwards and use physical frame offsets."
   "Only plain direct reverse rows retain legacy reply handling. Typed Service
 replies are dispatched before selection, so a Service row cannot suppress the
 refresh of an independent direct outbound connection on the same node."
-  (labels ((walk (form)
+  (let ((rewrites 0))
+   (labels ((walk (form)
              (cond ((atom form) form)
-                   ((and (eq (car form) 'when-let)
+                   ((and (eq (car form) 'whistler::when-let)
                          (equal (second form)
                                 '((whistler::entry (whistler::map-lookup-ptr whistler::gr8s-nat-rev-v2 whistler::flow)))))
+                    (incf rewrites)
                     (let ((body (butlast (cddr form))))
-                      `(when-let ,(second form)
+                      `(whistler::when-let ,(second form)
                          ,@(butlast body)
                          (let ((whistler::held
                                  (whistler::map-lookup-ptr whistler::gr8s-nat-fwd-v2 whistler::original)))
@@ -431,8 +433,9 @@ refresh of an independent direct outbound connection on the same node."
                                (whistler::wire-release-forward)
                                (progn ,@(cddddr (car (last body))) (whistler::nat-pass)))))))
                    (t (mapcar #'walk form)))))
-    (subst 'whistler::wire-reserve-candidates 'whistler::nat-reserve-candidates
-           (walk (service-nat-select-form)))))
+    (let ((body (walk (service-nat-select-form))))
+      (unless (= rewrites 1) (error "Expected one typed Service return boundary, got ~D" rewrites))
+      (subst 'whistler::wire-reserve-candidates 'whistler::nat-reserve-candidates body)))))
 
 (defun service-wire-guard-forms ()
   (let* ((*service-nat-local-identity-p* t)

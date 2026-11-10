@@ -211,7 +211,17 @@ def denied_and_stale(factory, protocol, shared):
         assert client.lookup(n.FWD, n.key(original))[39] == 0
         assert not client.keys(RX) and not client.keys(RI)
         graph.mode(client, 0, 0)
+        # Alias-ready v2 receivers are not necessarily wire-compatible. A stale
+        # sender view must not turn a withdrawn receiver into a UDP6081 target.
+        n.owner(client, p.BACKEND, n.BACK_ALIAS, 2, flags=7)
+        run(client, 0, original, p.SHOT)
+        for endpoint in (client, backend):
+            n.owner(endpoint, p.BACKEND, n.BACK_ALIAS, 2, flags=15)
         encoded = run(client, 0, original)
+        n.owner(backend, p.BACKEND, n.BACK_ALIAS, 2, flags=7)
+        run(backend, 1, encoded, p.SHOT)
+        for endpoint in (client, backend):
+            n.owner(endpoint, p.BACKEND, n.BACK_ALIAS, 2, flags=15)
         graph.mode(backend, 1, 1)
         graph.mode(backend, 0, 1)
         run(backend, 1, encoded, p.SHOT)
