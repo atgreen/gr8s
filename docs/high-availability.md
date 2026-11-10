@@ -71,8 +71,20 @@ gr8s serve --raft-join 10.0.0.1:7000 --raft-id cp2 --raft-port 7000 \
 gr8s witness --join 10.0.0.1:7000 --node-name arb --token "$TOKEN" --ca-pin "$CA_PIN"
 ```
 
-HA is **opt-in**: with no `--raft-*` flag, `gr8s serve` runs exactly as the
-single-node path always has — no Raft member starts. An HA acceptance smoke test
+HA is **opt-in** for a fresh state directory. Once HA intent is persisted,
+restart with the appropriate `--raft-init` or `--raft-join` options; omitting them
+is refused before application initialization.
+
+The production Raft port defaults to **7000**. Use `--raft-port` to select another
+port, and `--raft-listen` to select the reachable member address. The address
+must not be a wildcard bind address. Each HA state directory records its member
+ID, Raft address and port, and API URL in `metadata/server-ha-endpoint.json`
+before startup patches or application files are opened. Restarts must use the
+same identity and endpoints, including after an interrupted first startup. A
+changed configuration fails before startup instead of publishing a new address
+that other members cannot reach. This release has no endpoint migration command.
+
+An HA acceptance smoke test
 stands up a three-member cluster over HTTP, creates a resource through the leader,
 kills the leader, and requires the survivors to keep serving the committed data
 and accept new writes.

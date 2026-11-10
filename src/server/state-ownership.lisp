@@ -18,7 +18,7 @@
       (error "Serve must own its state directory before opening application files"))
     lease))
 
-(defun write-serve-state-mode (path mode)
+(defun write-serve-state-record (path record)
   (let ((temporary (gr8s.security::private-temporary-path path)))
     (unwind-protect
          (progn
@@ -26,12 +26,51 @@
             temporary
             (lambda (stream)
               (com.inuoe.jzon:stringify
-               (gr8s.resources::core-object "format" "gr8s-serve-mode" "version" 1 "mode" mode) :stream stream)
+               record :stream stream)
               (finish-output stream)
               (sb-posix:fsync (sb-sys:fd-stream-fd stream))))
            (sb-posix:rename (namestring temporary) (namestring path))
            (gr8s.store::sync-store-generation-directory (uiop:pathname-directory-pathname path)))
       (when (gr8s.store::store-generation-stat temporary) (sb-posix:unlink (namestring temporary))))))
+
+(defun write-serve-state-mode (path mode)
+  (write-serve-state-record path
+    (gr8s.resources::core-object "format" "gr8s-serve-mode" "version" 1 "mode" mode)))
+
+(defconstant +serve-raft-default-port+ 7000)
+
+(defun serve-ha-endpoint-record (options)
+  "Describe exactly the endpoint production will advertise, without binding it."
+  (let* ((id (or (getf options :raft-id) (getf options :node-name) "gr8s-local"))
+         (host (or (getf options :raft-listen) "127.0.0.1"))
+         (port (or (getf options :raft-port) +serve-raft-default-port+))
+         (api-host (getf options :listen "127.0.0.1"))
+         (api-port (getf options :port 8080)))
+    (unless (and (every (lambda (value) (and (stringp value) (<= 1 (length value) 256)
+                                            (notany (lambda (char) (or (<= (char-code char) 32)
+                                                                      (= (char-code char) 127))) value)))
+                        (list id host api-host))
+                 (not (member host '("0.0.0.0" "::" "[::]") :test #'equal))
+                 (typep port '(integer 1 65535)) (typep api-port '(integer 1 65535)))
+      (error "HA requires a member ID and a stable, non-wildcard Raft endpoint"))
+    (let ((url (format nil "http://~A:~D" api-host api-port)))
+      (unless (<= (length url) 256) (error "HA API URL is too long"))
+      (gr8s.resources::core-object "format" "gr8s-serve-ha-endpoint" "version" 1
+                                   "memberId" id "host" host "port" port "apiUrl" url))))
+
+(defun check-serve-ha-endpoint (root options)
+  "Persist endpoint intent before opening application files or accepting RPCs."
+  (let* ((directory (merge-pathnames "metadata/" root))
+         (path (merge-pathnames "server-ha-endpoint.json" directory))
+         (requested (serve-ha-endpoint-record options)))
+    (gr8s.store::ensure-store-generation-directory directory root :metadata t)
+    (if (gr8s.store::store-generation-stat path)
+        (let ((existing (gr8s.store::read-private-generation-json path)))
+          (unless (and (hash-table-p existing) (= 6 (hash-table-count existing))
+                       (loop for key being the hash-keys of requested using (hash-value value)
+                             always (equal value (gethash key existing))))
+            (error "Persisted HA identity or endpoint differs from startup options; restart with the original configuration")))
+        (write-serve-state-record path requested))))
 
 (defun check-serve-state-mode (root options)
   "Never silently open a Raft application's files as standalone state."
@@ -43,14 +82,15 @@
   (let* ((directory (merge-pathnames "metadata/" root))
          (path (merge-pathnames "server-mode.json" directory))
          (requested (if (or (getf options :raft-init) (getf options :raft-join)) "ha" "standalone"))
+         (existing-present (gr8s.store::store-generation-stat path))
          (existing (progn
                      (when (gr8s.store::store-generation-stat directory)
                        (gr8s.store::check-store-generation-directory directory :metadata t))
-                     (when (gr8s.store::store-generation-stat path)
+                     (when existing-present
                        (gr8s.store::read-private-generation-json path))))
          (legacy-ha (some (lambda (name) (gr8s.store::store-generation-stat (merge-pathnames name root)))
-                          '("raft/control-plane.log" "raft/bootstrap.json" "pki/raft/"))))
-    (when existing
+                          '("raft/control-plane.log" "raft/bootstrap.json" "pki/raft/" "metadata/server-ha-endpoint.json"))))
+    (when existing-present
       (unless (and (hash-table-p existing) (= 3 (hash-table-count existing))
                    (equal "gr8s-serve-mode" (gethash "format" existing))
                    (eql 1 (gethash "version" existing))
@@ -59,6 +99,7 @@
     (when (and (equal requested "standalone")
                (or legacy-ha (and existing (equal "ha" (gethash "mode" existing)))))
       (error "HA state requires its Raft startup options; standalone fallback is refused"))
+    (when (equal requested "ha") (check-serve-ha-endpoint root options))
     ;; An explicit HA request can found a cluster from existing standalone data.
     ;; Persist intent before opening files, so interrupted HA startup cannot later
     ;; fall through to standalone merely because its flags were omitted.

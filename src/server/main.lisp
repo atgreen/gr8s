@@ -1599,7 +1599,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
          store
          :id id
          :host (or (getf options :raft-listen) "127.0.0.1")
-         :port (or (getf options :raft-port) 0)
+         :port (or (getf options :raft-port) +serve-raft-default-port+)
          :init (getf options :raft-init)
          :join-host join-host :join-port join-port
          :node-name (getf options :raft-node-name)

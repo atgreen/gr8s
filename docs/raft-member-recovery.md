@@ -126,3 +126,10 @@ Existing Raft WAL, bootstrap or PKI evidence also prevents standalone fallback.
 A witness WAL is rejected by `serve`. These guards do not yet establish shared
 ownership across every administrative command or enable production voter WAL
 recovery.
+
+HA startup also persists `metadata/server-ha-endpoint.json`, binding member ID,
+Raft host/port and API URL to the state directory before startup patch evaluation.
+The production Raft default is port 7000; internal transport callers may still
+request an ephemeral port for isolated tests. Restart with the original endpoints.
+Changes and malformed or nonprivate descriptors are refused before application
+initialization. Endpoint publication does not enable production WAL recovery.

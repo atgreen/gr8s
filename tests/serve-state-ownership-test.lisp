@@ -149,3 +149,73 @@
                (is (equal '(:shutdown :serve :patches) events))
                (is (eq :released (gr8s.server::call-with-serve-state-ownership options (lambda () :released)))))
           (loop for symbol in symbols for original in originals do (setf (symbol-function symbol) original)))))))
+
+(test ha-endpoint-is-stable-before-application-or-patch-initialization
+  (with-temporary-store (store root)
+    (declare (ignore store))
+    (let* ((options (list :state-directory root :raft-init t :raft-id "cp1"))
+           (path (merge-pathnames "metadata/server-ha-endpoint.json" root))
+           (open-original (symbol-function 'gr8s:open-store))
+           (patch-original (symbol-function 'gr8s.server::bootstrap-patches))
+           (opened 0) (patched 0))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s:open-store)
+                   (lambda (ignored)
+                     (declare (ignore ignored))
+                     (incf opened)
+                     (let ((record (gr8s.store::read-private-generation-json path)))
+                       (is (= 7000 (gethash "port" record)))
+                       (is (equal "cp1" (gethash "memberId" record))))
+                     (error "interrupted application initialization"))
+                   (symbol-function 'gr8s.server::bootstrap-patches)
+                   (lambda (ignored) (declare (ignore ignored)) (incf patched)))
+             (signals error (gr8s::serve options))
+             (is (= 1 opened))
+             (let ((before (uiop:read-file-string path)))
+               ;; A retry reuses the same descriptor, including after failure.
+               (signals error (gr8s::serve options))
+               (is (= 2 opened))
+               (dolist (change '((:raft-id "cp2") (:raft-port 7001) (:raft-listen "127.0.0.2")
+                                 (:listen "127.0.0.2") (:port 8081)))
+                 (let ((changed (copy-list options)))
+                   (setf (getf changed (first change)) (second change))
+                   (signals error (gr8s.server::run-serve-command changed))))
+               (is (= 2 opened))
+               (is (= 0 patched))
+               (is (equal before (uiop:read-file-string path))))
+             ;; Join/founder flags are startup intent, not a new member identity.
+             (is (eq :same (gr8s.server::call-with-serve-state-ownership
+                            (list :state-directory root :raft-join "127.0.0.1:7000" :raft-id "cp1")
+                            (lambda () :same)))))
+        (setf (symbol-function 'gr8s:open-store) open-original
+              (symbol-function 'gr8s.server::bootstrap-patches) patch-original)))))
+
+(test ha-endpoint-rejects-unsafe-or-invalid-descriptors
+  (dolist (failure '(:symlink :hardlink :permissions :null :extra :zero :wildcard))
+    (with-temporary-store (store root)
+      (declare (ignore store))
+      (let* ((options (list :state-directory root :raft-init t))
+             (path (merge-pathnames "metadata/server-ha-endpoint.json" root)))
+        (gr8s.server::call-with-serve-state-ownership options (lambda () nil))
+        (ecase failure
+          (:symlink (delete-file path) (sb-posix:symlink "missing" (namestring path)))
+          (:hardlink (sb-posix:link (namestring path) (namestring (merge-pathnames "linked.json" root))))
+          (:permissions (sb-posix:chmod (namestring path) #o644))
+          (:null (with-open-file (out path :direction :output :if-exists :supersede) (write-string "null" out)))
+          (:extra (let ((record (gr8s.store::read-private-generation-json path)))
+                    (setf (gethash "extra" record) t) (gr8s.server::write-serve-state-record path record)))
+          (:zero (setf (getf options :raft-port) 0))
+          (:wildcard (setf (getf options :raft-listen) "0.0.0.0")))
+        (signals error (gr8s.server::call-with-serve-state-ownership
+                        options (lambda () (fail "invalid endpoint entered startup"))))))))
+
+(test null-serve-mode-cannot-be-overwritten-as-uninitialized-state
+  (with-temporary-store (store root)
+    (declare (ignore store))
+    (let ((options (list :state-directory root)))
+      (gr8s.server::call-with-serve-state-ownership options (lambda () nil))
+      (let ((path (merge-pathnames "metadata/server-mode.json" root)))
+        (with-open-file (out path :direction :output :if-exists :supersede) (write-string "null" out))
+        (signals error (gr8s.server::call-with-serve-state-ownership options (lambda () (fail "null mode accepted"))))
+        (is (equal "null" (uiop:read-file-string path)))))))
