@@ -97,15 +97,16 @@ def main():
         vip_bytes = ipaddress.ip_address(vip).packed
         selection_keys = [struct.pack("!H", port) + vip_bytes + bytes((proto, 0))
                           for port, proto in ((80, 6), (81, 17))]
-        for key in selection_keys:
+        def selections_published():
             try:
-                guest.read_pinned_values(selection, [key], 16)
+                return len(guest.read_pinned_values(selection, selection_keys, 16)) == 2
             except OSError as error:
-                if error.errno != errno.ENOENT:
-                    raise
-            else:
-                raise RuntimeError("v2 risk phase exposed a Service selector before cluster activation")
-        report["serviceSelectionWithheld"] = True
+                if error.errno == errno.ENOENT:
+                    return False
+                raise
+
+        traffic.wait_for("v2 granted Service selectors", 120, selections_published)
+        report["serviceSelectionGrantedAfterRisk"] = True
         # A disposable network namespace lets CNI ADD exercise the agent's
         # snapshot-revision risk fence without enabling the still-gated graph.
         netns_name = "gr8s-v2-risk-proof"
