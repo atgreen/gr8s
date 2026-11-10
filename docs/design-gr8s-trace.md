@@ -3,11 +3,11 @@
 ## Goal
 
 `gr8s trace` runs an ephemeral bpftrace program against Pods selected through
-the Kubernetes API, fans the request out to every node that hosts a match, and
-streams node-labelled output until the requested duration expires or the client
-disconnects.  The node agent compiles, loads, attaches, and tears down the BPF
-program in-process through Whistler; no bpftrace binary, compiler toolchain, or
-DaemonSet is required.
+the Kubernetes API. It sends the request to every node that hosts a match and
+streams node-labelled output. The stream ends when its duration expires or the
+client disconnects. The node agent uses Whistler to compile, load, attach, and
+remove the BPF program in-process. It needs no bpftrace binary, compiler
+toolchain, or DaemonSet.
 
 The first supported command shape is:
 
@@ -18,13 +18,13 @@ gr8s trace --server URL --namespace default --selector app=api \
 
 ## Client and authorization boundary
 
-The CLI opens an authenticated WebSocket request to the API server rather than
-requiring access to a control-plane process.  The endpoint is exposed as the
-namespaced `traces.gr8s.io` virtual resource.  The WebSocket upgrade is a GET
+The CLI opens an authenticated WebSocket request to the API server. It does not
+need direct access to a control-plane process. The endpoint is the namespaced
+`traces.gr8s.io` virtual resource. The WebSocket upgrade is a GET
 on the wire but is authorized as `create`, like Kubernetes exec and port-forward.
-The request body (including source) is the first client WebSocket frame rather
-than URL data.  API authentication is the same
-certificate or bearer-token authentication used by the Kubernetes listener;
+The first client WebSocket frame carries the request body and source, not the URL.
+The API uses the same certificate or bearer-token authentication as the
+Kubernetes listener. Authorization
 authorization requires the `create` verb on `traces` in the requested
 namespace.  Trace requests are ephemeral and are never stored as API objects.
 The CLI accepts a bearer token and CA file directly in the first cut; kubeconfig

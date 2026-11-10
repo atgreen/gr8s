@@ -405,10 +405,10 @@
     (when ctx-vreg
       (dolist (block (ir-program-blocks prog))
         (dolist (insn (basic-block-insns block))
-          (when (member (ir-insn-op insn) '(:call :tail-call :get-stackid))
-            ;; All three argument layouts include ctx-vreg somewhere
-            ;; in the list of args (after a leading :helper/:map tag).
-            (dolist (arg (rest (ir-insn-args insn)))
+          (when (call-like-op-p (ir-insn-op insn))
+            ;; Map and other specialized helper ops obey the same ABI as
+            ;; explicit calls. Argument setup may itself overwrite R1.
+            (dolist (arg (ir-insn-vreg-uses insn))
               (when (and (integerp arg) (eql arg ctx-vreg))
                 (return-from ctx-loads-early-p nil)))))))
     ;; Strategy: check if all ctx-loads are in the entry block before barriers
@@ -417,14 +417,18 @@
           (entry-ok t))
       ;; Check entry block
       (dolist (insn (basic-block-insns entry-block))
-        (when (and seen-barrier (member (ir-insn-op insn) '(:ctx-load :ctx-store)))
+        (when (and seen-barrier
+                   (or (member (ir-insn-op insn) '(:ctx-load :ctx-store))
+                       (and ctx-vreg (member ctx-vreg (ir-insn-vreg-uses insn)))))
           (setf entry-ok nil))
-        (when (ir-insn-side-effect-p insn)
+        ;; A lookup is logically pure but its helper still clobbers R1-R5.
+        (when (or (ir-insn-side-effect-p insn) (call-like-op-p (ir-insn-op insn)))
           (setf seen-barrier t)))
       ;; Check non-entry blocks: any ctx-load/ctx-store disqualifies
       (dolist (block (rest (ir-program-blocks prog)))
         (dolist (insn (basic-block-insns block))
-          (when (member (ir-insn-op insn) '(:ctx-load :ctx-store))
+          (when (or (member (ir-insn-op insn) '(:ctx-load :ctx-store))
+                    (and ctx-vreg (member ctx-vreg (ir-insn-vreg-uses insn))))
             (return-from ctx-loads-early-p nil))))
       entry-ok)))
 

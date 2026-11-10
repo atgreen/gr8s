@@ -1,14 +1,13 @@
 # High availability (pure-Lisp Raft)
 
-The control plane can run multi-master on a Raft consensus layer written from
-scratch in Common Lisp — **no etcd, no external database**. Members talk over the
-same ag-gRPC transport as everything else. The Raft core (leader election, log
-replication, the §5.4.2 commit rule, apply-once-in-order) runs under a
-deterministic in-process simulator for failover/partition tests *and* under real
-gRPC, from one implementation. The core provides a durable write-ahead-log backend
-and snapshot/recovery primitives. Wiring durable recovery into every production
-role, and automatic snapshot compaction/catch-up, remain active work; see the
-scope below.
+The control plane can run with multiple masters on a Raft consensus layer written
+from scratch in Common Lisp. It needs **no etcd or external database**. Members
+use the same ag-gRPC transport as the rest of gr8s. One Raft implementation runs
+under real gRPC and a deterministic in-process simulator. The simulator tests
+leader election, log replication, the §5.4.2 commit rule, ordered application,
+failover, and partitions. The core includes a durable write-ahead log and
+snapshot recovery. Some production roles still need durable recovery, automatic
+snapshot compaction, and catch-up. See the scope below.
 
 ## The consistency plane
 
@@ -26,20 +25,20 @@ PodCIDR. Events are deliberately local.
 
 ## Around the datastore
 
-- **Controllers are leader-gated** — reconciliation runs only on the leader; a
-  follower idles until promoted.
-- **Leader-aware HTTP** — a follower answers a mutating API request with a 307 to
-  the current leader (preserving path and query), or 503 when no leader is known;
-  reads are served locally.
-- **Agents reconnect across failover** — given more than one control-plane
+- **Controllers are leader-gated.** Reconciliation runs only on the leader. A
+  follower idles until promotion.
+- **Leader-aware HTTP.** A follower answers a mutating API request with a 307 to
+  the current leader and preserves the path and query. It returns 503 when it
+  does not know the leader. Followers serve reads locally.
+- **Agents reconnect across failover.** Given more than one control-plane
   endpoint, a node agent rotates through them on reconnect and resumes against the
   new leader.
-- **Membership is dynamic** — single-member, effective-on-commit changes grow or
-  shrink the cluster; a **witness** votes for quorum but never leads, so a
+- **Membership is dynamic.** Single-member, effective-on-commit changes grow or
+  shrink the cluster. A **witness** votes for quorum but never leads, so a
   two-node + witness topology survives one node loss. New members enroll with a
   one-time token, then join with the certificate they receive (a follower
   redirects to the leader).
-- **Members use mutual TLS** — replication carries every Secret, so each member
+- **Members use mutual TLS.** Replication carries every Secret, so each member
   needs a certificate from the cluster's own Raft CA, and a message must come from
   the member it names. Worker certificates and tokens aren't accepted, because
   they come from a separate CA and token store. A joiner checks the CA against its
@@ -49,7 +48,7 @@ PodCIDR. Events are deliberately local.
   last a year and renew themselves in their last 30 days: a voter signs its own,
   and a witness asks a voter, so a witness that stays offline past expiry has to
   enroll again.
-- **Voters share the node CA** — a joining control plane receives the cluster's
+- **Voters share the node CA.** A joining control plane receives the cluster's
   node CA when it enrolls, so agents and API clients keep working after a failover.
   Join with a new state directory, because one that already has a different CA is
   refused rather than orphaning the certificates it issued.

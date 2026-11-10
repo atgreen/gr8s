@@ -1,14 +1,14 @@
 # Kubernetes API surface
 
-This is the detailed, evidence-backed account of what gr8s implements today, and
-the known gaps. Each area links to a committed validation record where one exists.
+This guide lists what gr8s implements today and its known gaps. Each area links
+to a committed validation record where one exists.
 Networking (Services, Gateway API, NetworkPolicy, DNS) lives in
 [networking.md](networking.md); the container runtime lives in
 [runtime.md](runtime.md); high availability lives in
 [high-availability.md](high-availability.md).
 
 > **gr8s has not passed Kubernetes conformance.** The focused and native
-> validation records below demonstrate specific behaviors; they do not establish
+> validation records below demonstrate specific behaviors. They do not establish
 > certification. See [CONFORMANCE.md](CONFORMANCE.md).
 
 ## Pods & lifecycle
@@ -20,7 +20,7 @@ and `delete` work, with durable desired state and optimistic resource-version
 checks, plus periodic, idempotent reconciliation with transient-failure retry.
 
 Pod creation supports `metadata.generateName` with bounded generated names and
-collision retries; an explicit `metadata.name` takes precedence. Pod names accept
+collision retries. An explicit `metadata.name` takes precedence. Pod names accept
 DNS subdomains up to 253 characters, while runtime hostnames are limited to 63.
 Runtime admission validates the supported Pod feature set and rejects unsupported
 fields with HTTP 422. See the
@@ -29,20 +29,20 @@ fields with HTTP 422. See the
 Pods support finalizers that retain API objects after actual runtime cleanup,
 including zero-grace deletion. Native validation covers real exit codes 0 and 137,
 restart recovery, UID reuse, unrelated execution during finalizer retention, and
-cancellation of a blocked Exec probe — see the
+cancellation of a blocked Exec probe. See the
 [finalizer evidence](pod-finalizers-native-2026-11-04.json).
 
 **Conditions & probes.** Pods report PodScheduled, Initialized, ContainersReady,
 and Ready conditions. Readiness requires actual running, ready observations for
-every declared application container; terminal Pods report false readiness, and
+every declared application container. Terminal Pods report false readiness, and
 unavailable node/runtime observations report unknown readiness. Startup, readiness,
 and liveness probes execute real exec, HTTP(S), TCP, and standard gRPC Health
-checks. Startup success gates readiness/liveness; consecutive thresholds control
+checks. Startup success gates readiness and liveness. Consecutive thresholds control
 readiness and exact-container restart, preserving healthy siblings. See the
 [readiness record](pod-readiness-validation-2026-11-03.json) and the upstream and
 native [probe records](container-probes-upstream-2026-11-04.json).
 
-**Init, sidecars & hooks.** Ordinary init containers execute in declaration order;
+**Init, sidecars & hooks.** Ordinary init containers execute in declaration order.
 restartable init sidecars start before later containers, restart per the Pod's
 policy, and stop last in reverse order. postStart and preStop hooks run against the
 exact attempt; termination messages come from a per-attempt file with optional log

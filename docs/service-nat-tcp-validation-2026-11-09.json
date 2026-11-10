@@ -1,0 +1,135 @@
+{
+  "date": "2026-11-09",
+  "issue": "podster-p9c.10",
+  "implementationCommit": "dee1b91",
+  "testRefinementCommit": "b8e5332",
+  "scope": "Standalone staged ABI-v2 IPv4 NAT with incarnation-keyed TCP generations, lifecycle and options. Not installed by the agent.",
+  "fixtureSHA256": "73a7a795099b0137d052d2b98d25f23f9563ff371193ad57ebf76cd359590bee",
+  "sourceSHA256": "2f022fc04c0dbfc3566c3dfc45fba2619b578c119036a862d081d4ca2298d902",
+  "runnerSHA256": {
+    "scripts/test-service-nat.py": "53a8dac2e2592089ea4ad7bec7a895254f58f4f0363c2011c639df3b17c14b82",
+    "scripts/test-service-nat-tcp.py": "28cce7a162f29651d09346f580c2d9670b7b96456b786a03dfbaa24a13d8a120",
+    "scripts/test-service-tcp-state.py": "3e712b1b350e4008c3c8c996007af89eb411705964b89cd44da6305deb3890bd",
+    "scripts/test-service-packet-program.py": "523353c7b0a5428f7ae1066df13eb5c27be63d29012ef358e60b33d06af0e406",
+    "scripts/test-endpoint-policy.py": "0faf5bfb53675fe7f8f5a38bf3725af430d9db6737ef1005cb30e36d22561655"
+  },
+  "programs": {
+    "gr8s_nat_generation": 1516,
+    "gr8s_nat_select": 7916,
+    "gr8s_nat_commit": 2271,
+    "gr8s_nat_prepare": 1036,
+    "gr8s_nat_restore": 2429
+  },
+  "maps": {
+    "total": 11,
+    "tcp": "gr8s_nat_tcp_v2: hash key32/value64, max65536, no preallocation. Key originaltuple16 + source incarnation16. Value reuses proven v1 sequence/window/timestamp state ABI."
+  },
+  "interpreter": {
+    "packet": {
+      "passed": true,
+      "kernel": false,
+      "cases": 42,
+      "capacityCases": [
+        "fullReverseMapPreservesActiveOwner",
+        "reverseCapacityRecovery",
+        "fullForwardMapCannotAuthorizeOrphanReply",
+        "otherServiceCannotStealInterruptedClaim",
+        "interruptedClaimAdoptedOnlyByOriginalOwner",
+        "flContentionDoesNotReleaseForeignReservation",
+        "rlContentionDoesNotReleaseForeignReservation"
+      ]
+    },
+    "tcp": {
+      "passed": true,
+      "kernel": false,
+      "cases": {
+        "exercise": 59,
+        "closure": 120,
+        "early_data_refusal": 63,
+        "early_data_handshake": 81,
+        "reordered_closure": 36,
+        "option_exercise": 51,
+        "simultaneous_open": 38,
+        "retained_option_compatibility": 4,
+        "translated_streams": 22,
+        "metadata_capacity": 6
+      }
+    },
+    "tcpCases": 480
+  },
+  "kernel": {
+    "environment": "Disposable Fedora 44 VM22291, kernel6.19.10-300.fc44.x86_64. BPF_PROG_TEST_RUN, FD-only maps/programs. All five programs verified; owned run directory removed.",
+    "packet": {
+      "passed": true,
+      "kernel": true,
+      "cases": 42,
+      "capacityCases": [
+        "fullReverseMapPreservesActiveOwner",
+        "reverseCapacityRecovery",
+        "fullForwardMapCannotAuthorizeOrphanReply",
+        "otherServiceCannotStealInterruptedClaim",
+        "interruptedClaimAdoptedOnlyByOriginalOwner",
+        "flContentionDoesNotReleaseForeignReservation",
+        "rlContentionDoesNotReleaseForeignReservation"
+      ]
+    },
+    "tcp": {
+      "passed": true,
+      "kernel": true,
+      "cases": {
+        "exercise": 58,
+        "closure": 120,
+        "early_data_refusal": 63,
+        "early_data_handshake": 81,
+        "reordered_closure": 36,
+        "option_exercise": 50,
+        "simultaneous_open": 38,
+        "retained_option_compatibility": 4,
+        "translated_streams": 22,
+        "metadata_capacity": 6
+      }
+    },
+    "tcpCases": 478,
+    "difference": "Two nonlinear-skb cases are interpreter-only. Kernel tests otherwise run the same functions."
+  },
+  "logSHA256": {
+    "compile": "72d94044db64b1afee6b4ca809e0e958c0000c0407230affadffdb6926cacf27",
+    "interpreter": "2c9e2d975e273227e0ace8a7d178654946d2d37258889620615f6bb6f6e000cc",
+    "kernel": "c0921782765b5a82dc9d79c23d1da6eb5a9d0ef59eee52b67a55baa406867ce4",
+    "networking": "2dca596795cfe2012358a219e919efb55db777e755c615214c4f665d8dde870b",
+    "v1TCP": "f76af1e13eebbda31030f2645d1d231c35aad05c3f87e14d751283f668a7b4ac",
+    "firstCompileFailure": "820a2ced623b0d3c334c571b0c0557e7eb230cb34f947d5f0d5d127e751483d8",
+    "initialKernelTCPExpectation": "7588379eb63f80d57d9c5ca8201bb765a7d52e1732fff4a3a61ef8a2ee750cc3",
+    "kernelBytearrayHarnessFailure": "0366496266cd666b2f87e6201b8f9cacf3319c5509295ff09629d442549f7e31"
+  },
+  "regression": {
+    "networkingPassed": 1534,
+    "networkingFailed": 0,
+    "networkingScope": "Networking suite after initial TCP port; subsequent source change only reuses NAT compiler scratch, covered by final bytecode/kernel tests.",
+    "v1TCPCases": 456,
+    "v1TCPFailed": 0,
+    "v1Scope": "Existing v1 fixture, existing expected drop behavior remains the default in the shared TCP suite."
+  },
+  "behavior": [
+    "Preflight a pure SYN under both tuple reservations before selecting a new backend. Safe generation replacement reuses existing ISN/timestamp evidence and removes only its paired return claim and TCP state.",
+    "TCP state is observed at commit/restore after caller policy approval. Active/time writes use a forward map pointer while both reservations are held.",
+    "Pending NAT claims remain inactive when TCP metadata publication fails; replies cannot use them. Existing metadata owner remains intact.",
+    "SYN-only lifetime120s, established2h, closed120s, reset10s. Invalid/stale controls do not refresh tombstones. Pending policy claim lifetime remains5s and UDP180s.",
+    "Existing sequence, ACK/window, timestamps, option parsing, simultaneous open, early-data handshake/refusal and reordered closure checks run through staged v2.",
+    "Four interleaved TCP streams share one client port: two VIPs, direct backend and self-backend hairpin. They retain independent ISN/timestamp state; replacing one alias-backed stream preserves the other three."
+  ],
+  "retiredReplySemantics": "Once an old return claim is removed, traffic to an ordinary primary address passes unchanged without touching the new TCP state. The adapter explicitly checks absent ownership and unchanged packet/state. Unclaimed private-alias replies fail closed. A stale SYN-ACK through the current claimed tuple is rejected by TCP generation checks. No claim is made that arbitrary unmatched primary traffic is universally dropped.",
+  "developmentCorrections": [
+    "Initial compiler exceeded stack limit at520bytes (260struct/248spill/12key). Reusing32-byte epoch-key/return scratch and forward map pointers made all five programs compile and verify. Compiler output did not identify the failing stage.",
+    "The existing TCP fixture originally expected a drop for a removed old return claim. The staged adapter now requests and verifies unchanged pass-through only for this unclaimed primary-address case; v1 default expectations remain unchanged.",
+    "The root harness initially rejected a Python bytearray in ctypes before running the malformed-packet case. Converting input to bytes fixed the harness; final kernel suite passed."
+  ],
+  "limits": [
+    "Synthetic packets, not live TCP sockets or actual CNI/native/Kata translation.",
+    "Policy approval is modeled by stage selection; actual alias-aware NetworkPolicy enforcement and peer-generation reply state remain outstanding.",
+    "Identity/readiness rows are supplied by the fixture; distributed receiving-node installation acknowledgment remains outstanding.",
+    "No bounded v2 GC/scanner or retained-flow migration/upgrade integration yet. Capacity recovery in the packet fixture manually frees map entries.",
+    "Agent attachment, live guest/native TCP/UDP hairpin/collision/restart proof, IPv6 packet NAT, packet NodePort and broader parent Service semantics remain required."
+  ],
+  "remaining": "Parent podster-p9c and child podster-p9c.10 remain in progress."
+}

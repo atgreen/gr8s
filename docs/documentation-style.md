@@ -4,14 +4,14 @@ SPDX-License-Identifier: Apache-2.0
 -->
 # Source documentation style
 
-How gr8s documents its Common Lisp source. The codebase already follows this
-closely; this file states the convention so humans and the agents that edit the
-repo keep it consistent. When in doubt, read `src/host-firewall.lisp` — its
-header and docstrings are the reference.
+This guide defines how gr8s documents its Common Lisp source. The codebase
+already follows it closely. Humans and agents should use the same conventions.
+When in doubt, read `src/host-firewall.lisp`. Its header and docstrings are the
+reference.
 
-The one rule behind every other: **document what the reader cannot recover from
-the code** — the contract, the invariant, the reason, the tradeoff — and never
-restate what the code already says.
+The main rule is simple: **document what the reader cannot recover from the
+code**. Explain the contract, invariant, reason, or tradeoff. Do not restate what
+the code already says.
 
 ## File headers (`;;;;`)
 
@@ -32,7 +32,7 @@ comments that answers *what this file is and why it exists*:
 - Explain the *why*, not a table of contents of its functions (that rots).
 - Name the design decision a maintainer would otherwise have to reverse-engineer
   (host-firewall.lisp explains *why kernel-route, not eBPF-redirect, for
-  cross-node* — the thing you can't read off the code).
+  cross-node*, which is the detail you cannot read from the code).
 - One authoritative reference URL is welcome when the file implements an external
   contract (see **References** below); more than one is usually noise.
 
@@ -78,7 +78,7 @@ non-obvious *why* — why this order, why this guard, what breaks without it:
 Never echo the code (`(incf n) ; increment n`). A comment that restates the line
 is worse than none because it's one more thing to keep true.
 
-## ASCII diagrams — sparingly, for stable shapes
+## ASCII diagrams for stable shapes
 
 Draw one only when **the shape is the point and the shape is a contract**: a
 byte/packet layout, a wire/protocol frame, a fixed topology, a state machine.

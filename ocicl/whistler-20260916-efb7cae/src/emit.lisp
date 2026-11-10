@@ -1489,7 +1489,7 @@
            (setf pending (remove safe pending :test #'eq))
            (destructuring-bind (dst . src) safe
              (ecase (car src)
-               (:imm (ectx-emit ctx (whistler/bpf:emit-mov64-imm dst (cadr src))))
+               (:imm (emit-vreg-to-reg ctx (list :imm (cadr src)) dst))
                (:stack (ectx-emit ctx (whistler/bpf:emit-ldx-mem
                                        whistler/bpf:+bpf-dw+ dst
                                        whistler/bpf:+bpf-reg-10+ (cadr src))))

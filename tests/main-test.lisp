@@ -131,16 +131,84 @@
              ("serve" "--node-port" "0")))
     (signals error (parse-cli-options arguments))))
 
-(test help-documents-every-node-role-option
+(test top-level-help-lists-node-role-commands
   (let ((help (with-output-to-string (*standard-output*)
                 (gr8s::print-help))))
-    ;; #161 lists commands in sections ("  serve  ..."), not as "gr8s serve" lines.
-    (dolist (word '("  serve " "  agent " "--node-port"
-                    "--overlay-backend"
-                    "wireguard rotate-key"
-                    "--disable-agent" "--server" "--token" "--ca-pin"
-                    "--node-name" "--state-directory"))
+    (dolist (word '("NAME:" "USAGE:" "COMMANDS:" "serve" "agent"
+                    "witness" "join-token" "--help, -h" "--version, -v"))
       (is (search word help)))))
+
+(test cli-help-dispatches-before-command-validation
+  (dolist (arguments '(("agent" "--help")
+                       ("agent" "-h")
+                       ("help" "agent")
+                       ("h" "agent")
+                       ("runtime" "--help")
+                       ("runtime" "install" "--help")
+                       ("help" "runtime" "install")))
+    (let ((options (parse-cli-options arguments)))
+      (is (eq :help (getf options :command)))
+      (is (equal (remove-if (lambda (argument)
+                              (member argument '("help" "h" "--help" "-h")
+                                      :test #'string=))
+                            arguments)
+                 (getf options :help-path))))))
+
+(test every-top-level-command-has-contextual-help
+  (dolist (command '("serve" "agent" "witness" "join-token" "runtime"
+                     "patch" "kubeconfig" "doctor" "trace" "wireguard"
+                     "network" "certificate" "secrets-encrypt" "version"
+                     "notices"))
+    (let* ((arguments (list command "--help"))
+           (output (with-output-to-string (*standard-output*)
+                     (is (= 0 (gr8s::main-with-environment
+                               arguments (constantly nil) (constantly 99)))))))
+      (is (search "NAME:" output))
+      (is (search (format nil "gr8s ~A" command) output))
+      (is (search "USAGE:" output)))))
+
+(test agent-help-is-concise-and-specific
+  (let ((help (with-output-to-string (*standard-output*)
+                (gr8s::print-help '("agent")))))
+    (dolist (text '("NAME:" "gr8s agent - Run a node agent"
+                    "USAGE:" "gr8s agent [OPTIONS]"
+                    "OPTIONS:" "--server HOST:PORT" "--token TOKEN"
+                    "--ca-pin SHA256" "--node-name NAME"
+                    "--state-directory DIR" "--help, -h"))
+      (is (search text help)))
+    (is-false (search "serve options:" help))))
+
+(test runtime-help-describes-its-subcommands
+  (let ((help (with-output-to-string (*standard-output*)
+                (gr8s::print-help '("runtime")))))
+    (is (search "COMMANDS:" help))
+    (is (search "install" help))
+    (is (search "list" help)))
+  (let ((help (with-output-to-string (*standard-output*)
+                (gr8s::print-help '("runtime" "install")))))
+    (is (search "gr8s runtime install <gvisor|kata> [OPTIONS]" help))
+    (is (search "--hypervisor" help))))
+
+(test bare-command-groups-show-contextual-help
+  (dolist (command '("runtime" "patch" "wireguard" "network"
+                     "certificate" "secrets-encrypt"))
+    (let ((output (with-output-to-string (*standard-output*)
+                    (is (= 0 (gr8s::main-with-environment
+                              (list command) (constantly nil) (constantly 99)))))))
+      (is (search (format nil "gr8s ~A" command) output))
+      (is (search "COMMANDS:" output)))))
+
+(test secrets-encrypt-help-explains-each-stage
+  (let ((help (with-output-to-string (*standard-output*)
+                (gr8s::print-help '("secrets-encrypt")))))
+    (dolist (description '("Show encryption status"
+                           "Enable encryption and rewrite existing Secrets"
+                           "Rewrite Secrets as plaintext and discard keys"
+                           "Create a new encryption key"
+                           "Make the prepared key active for new writes"
+                           "Rewrite all Secrets with the active key"
+                           "Discard superseded encryption keys"))
+      (is (search description help)))))
 
 (test cni-environment-dispatches-before-command-line-parsing
   (let ((called nil))

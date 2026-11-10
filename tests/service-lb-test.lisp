@@ -1054,6 +1054,96 @@
                 :run (lambda (&rest ignored) (declare (ignore ignored)) (setf called t)))))
     (is-false called)))
 
+(defun service-nat-gc-fixture ()
+  (let ((keys (make-hash-table :test #'equal))
+        (names '("gr8s_nat_fwd_v2" "gr8s_nat_rev_v2" "gr8s_nat_tcp_v2")))
+    (loop for name in names for count in '(4 3 5) for width in '(16 16 32)
+          do (setf (gethash name keys)
+                   (loop for i from 1 to count
+                         collect (let ((key (make-array width :element-type '(unsigned-byte 8)
+                                                             :initial-element i)))
+                                   (setf (aref key 12) 6 (aref key 13) 0
+                                         (aref key 14) 0 (aref key 15) 0) key))))
+    (values
+     (gr8s::%make-service-lb-dataplane
+      :programs (list (cons "gr8s_nat_gc" (fake-lb-program 900101)))
+      :maps (loop for name in names for fd from 900102 collect (fake-lb-map name fd)))
+     keys
+     (lambda (map previous)
+       (let ((entries (gethash (whistler/loader:map-info-name map) keys)))
+         (if previous (second (member previous entries :test #'equalp)) (first entries)))))))
+
+(test service-nat-gc-bounds-all-three-maps-and-retains-full-incarnation-keys
+  (multiple-value-bind (dataplane keys next-key) (service-nat-gc-fixture)
+    (let ((seen nil))
+      (dotimes (tick 6)
+        (declare (ignore tick))
+        (multiple-value-bind (scanned reclaimed deferred)
+            (gr8s.network::sweep-service-nat-state
+             dataplane :budget 1 :next-key next-key
+             :run (lambda (fd direction key)
+                    (is (= fd 900101))
+                    (is (= (length key) (if (= direction 2) 32 16)))
+                    (when (= direction 2)
+                      (is (= (aref key 31) (aref key 0))))
+                    (push (list direction (aref key 0)) seen)
+                    (let ((name (nth direction '("gr8s_nat_fwd_v2" "gr8s_nat_rev_v2" "gr8s_nat_tcp_v2"))))
+                      (setf (gethash name keys) (remove key (gethash name keys) :test #'equalp)))
+                    1))
+          (is (<= scanned 3))
+          (is (= scanned reclaimed))
+          (is (zerop deferred))))
+      (is (equal '((0 1) (1 1) (2 1) (0 2) (1 2) (2 2)
+                   (0 3) (1 3) (2 3) (0 4) (2 4) (2 5)) (nreverse seen)))
+      (is (= 12 (gr8s::service-lb-dataplane-gc-scanned dataplane)))
+      (is (= 12 (gr8s::service-lb-dataplane-gc-reclaimed dataplane)))
+      (is (every #'null (loop for value being the hash-values of keys collect value))))))
+
+(test service-nat-gc-defers-contention-and-advances-failing-cursors
+  (multiple-value-bind (dataplane keys next-key) (service-nat-gc-fixture)
+    (declare (ignore keys))
+    (let ((seen nil))
+      (signals simple-error
+        (gr8s.network::sweep-service-nat-state
+         dataplane :budget 1 :next-key next-key
+         :run (lambda (&rest ignored) (declare (ignore ignored)) (error "collector syscall failed"))))
+      (is (= 1 (gr8s::service-lb-dataplane-gc-failures dataplane)))
+      (multiple-value-bind (scanned reclaimed deferred)
+          (gr8s.network::sweep-service-nat-state
+           dataplane :budget 1 :next-key next-key
+           :run (lambda (fd direction key)
+                  (declare (ignore fd)) (push (list direction (aref key 0)) seen) 2))
+        (is (= scanned 3))
+        (is (= reclaimed 0))
+        (is (= deferred 3)))
+      (is (equal '((2 1) (1 1) (0 2)) seen))
+      (is (= 3 (gr8s::service-lb-dataplane-gc-deferred dataplane)))
+      (signals type-error (gr8s.network::sweep-service-nat-state dataplane :budget 0)))))
+
+(test service-nat-gc-does-not-use-the-v1-maintenance-program
+  (multiple-value-bind (dataplane keys next-key) (service-packet-gc-fixture)
+    (declare (ignore keys next-key))
+    (let ((called nil))
+      (is (zerop (gr8s.network::sweep-service-nat-state
+                  dataplane :next-key (lambda (&rest ignored) (declare (ignore ignored)) (setf called t))
+                  :run (lambda (&rest ignored) (declare (ignore ignored)) (setf called t)))))
+      (is-false called))))
+
+(test service-nat-gc-envelope-preserves-epochs-and-rejects-the-wrong-abi
+  (dolist (direction '(0 1 2))
+    (let* ((width (if (= direction 2) 32 16))
+           (key (make-array width :element-type '(unsigned-byte 8) :initial-element 0)))
+      (dotimes (i width) (setf (aref key i) i))
+      (let ((packet (gr8s.network::service-gc-envelope direction key)))
+        (is (= (+ 36 width) (length packet)))
+        (is (= (aref packet 17) (- (length packet) 14)))
+        (is (= direction (aref packet 34)))
+        (is (equalp key (subseq packet 36))))))
+  (signals type-error (gr8s.network::run-service-nat-gc-key 0 3 #()))
+  (signals simple-error (gr8s.network::run-service-nat-gc-key 0 2 (make-array 16)))
+  (signals simple-error (gr8s.network::run-service-nat-gc-key 0 0 (make-array 32)))
+  (signals type-error (gr8s.network:run-service-packet-gc-key 0 2 (make-array 32))))
+
 
 (test service-packet-gc-defers-uncoordinated-retained-endpoints
   (multiple-value-bind (dataplane keys next-key) (service-packet-gc-fixture)
@@ -1152,3 +1242,25 @@
         (is (= 1 verified))
         (is (= 0 (hash-table-count (gr8s::service-lb-dataplane-upgrade-warnings dataplane))))
         (is (null (gr8s::service-lb-dataplane-gc-warning dataplane)))))))
+
+(test service-nat-policy-schema-is-separate-from-legacy-policy-state
+  (let* ((legacy (copy-tree gr8s.network::*egress-guard-map-forms*))
+         (forms (gr8s.network::service-nat-policy-map-forms)))
+    (flet ((spec (name) (find name forms :key #'second)))
+      (is (= 48 (getf (cddr (spec 'whistler::endpoint-identity)) :value-size)))
+      (is (= 32 (getf (cddr (spec 'whistler::netpol-flows-v2)) :key-size)))
+      (is (= 8 (getf (cddr (spec 'whistler::netpol-flows-v2)) :value-size)))
+      (is (= 128 (getf (cddr (spec 'whistler::gr8s-nat-id-v2)) :map-flags)))
+      (is (= 129 (getf (cddr (spec 'whistler::gr8s-nat-pod-v2)) :map-flags)))
+      (is-false (spec 'whistler::netpol-flows)))
+    (is (equal legacy gr8s.network::*egress-guard-map-forms*))
+    (is (= 32 (getf (cddr (find 'whistler::endpoint-identity legacy :key #'second)) :value-size)))
+    (is (= 12 (getf (cddr (find 'whistler::netpol-flows legacy :key #'second)) :key-size)))))
+
+(test legacy-policy-adoption-rejects-the-v2-local-identity-width
+  (let ((info (make-array 256 :element-type '(unsigned-byte 8) :initial-element 0)))
+    (loop for (offset value) in '((0 2) (8 4) (12 48) (16 1) (20 128))
+          do (replace info (gr8s::netlink-integer value 4) :start1 offset))
+    (signals gr8s::cni-error
+      (gr8s::cni-policy-map-info 42 "endpoint_identity"
+                               :object-info (lambda (fd) (declare (ignore fd)) info)))))

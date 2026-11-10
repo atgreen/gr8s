@@ -71,7 +71,7 @@ The smoke has been verified with kubectl 1.37.1. Override
 smoke against a native build. `GR8S_CORE_API_PORT` overrides its default port,
 18189; `GR8S_CORE_API_KEEP_WORKDIR=1` preserves diagnostics.
 
-The unit and HTTP suites additionally cover version conflicts, delete
+The unit and HTTP suites also cover version conflicts, delete
 preconditions, immutable data, input validation, full-size binary Secrets,
 pagination expiry, and malformed/truncated protobuf requests. The request field
 numbers follow the Kubernetes v0.37.1

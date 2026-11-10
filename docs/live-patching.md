@@ -2,7 +2,7 @@
 
 gr8s can load ordered Lisp patch levels into a running process through ASDF.
 Successful patches preserve the PID and running containers. Each patch belongs to
-an exact base build and extends an immutable history; a cumulative signed OCI
+an exact base build and extends an immutable history. A cumulative signed OCI
 artifact contains every level through its published target.
 
 ## Operator workflow
@@ -39,7 +39,7 @@ the health observation interval after each process update (default 60 seconds).
 Planning preflights the signed index against every participant's trust policy,
 build, installed prefix, and available patch domains. Changes in membership,
 process boot identity, or health pause the rollout. A paused plan still reserves
-its unresolved grants; timeout does not imply that remote execution stopped.
+its unresolved grants. Timeout does not imply that remote execution stopped.
 
 Apply stages all content, patches a worker first, then witnesses/control-plane
 followers, and finally the leader. Processes update serially, and the cluster

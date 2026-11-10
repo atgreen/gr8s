@@ -2,7 +2,7 @@
 
 gr8s has **no kube-proxy and no iptables**. Packet handling lives in the kernel,
 programmed from Common Lisp through **Whistler**, which compiles s-expressions
-directly to eBPF bytecode — no LLVM, no clang, no `.c`, no hand-written ELF. The
+directly to eBPF bytecode. It needs no LLVM, clang, `.c` file, or hand-written ELF. The
 eBPF compiler and loader live *inside* the agent. Native builds prepare the
 fixed endpoint bytecode templates before saving the executable; the agent loads
 a relocated copy for each Pod. Other dataplane programs compile in the running
@@ -52,13 +52,13 @@ interpreter and the Linux BPF test-run facility. The privileged native smoke
 injects a spoofed source into a live Pod namespace and requires the rejection
 counter to appear through agent telemetry.
 
-## NetworkPolicy — a compiled eBPF firewall
+## NetworkPolicy: a compiled eBPF firewall
 
 `networking.k8s.io/v1` NetworkPolicy is enforced as a compiled eBPF firewall on
 real Pods. Rather than recompiling a program per policy change, gr8s folds
 enforcement into the per-Pod egress classifier at the host veth and drives it
-from BPF maps: the resolved policy — allowed destination CIDRs in an LPM trie and
-permitted `(group, protocol, port)` tuples in a hash — is written as *data* into
+from BPF maps. The resolved policy contains allowed destination CIDRs in an LPM
+trie and permitted `(group, protocol, port)` tuples in a hash. gr8s writes it as *data* into
 pinned maps, so a policy change is a map update, not a recompile or a re-attach.
 
 Egress to a destination no rule permits is dropped (default-deny), and the drops
@@ -219,7 +219,7 @@ SYN/SYN-ACK packets, partial early-data acceptance, retransmission and closure.
 A refusal may acknowledge the SYN without all its payload; only ACKs within the
 observed SYN sequence range can shorten its lifetime. See
 [the early-data and abrupt-restart evidence](service-tcp-early-data-validation-2026-11-09.json).
-Kernel packet tests additionally cover program lifetime. Source NAT/hairpin,
+Kernel packet tests also cover program lifetime. Source NAT/hairpin,
 return-tuple collision resolution, IPv6 packet translation and external Service
 replacement remain in development. Hairpin and conflicting return tuples
 currently drop safely. See [the engine validation scope](service-packet-engine-validation-2026-11-09.json)
@@ -324,7 +324,7 @@ a port therefore removes the proxy listener, sockhash entry, and firewall rule.
 `scripts/test-ingress-native.py` proves HTTP and HTTPS through every advertised
 node in a three-node cluster and cleans up the fixture afterward.
 
-## Gateway API — the agent is the gateway
+## Gateway API: the agent is the gateway
 
 gr8s implements the Kubernetes Gateway API as a capability of the in-image
 agent — **no Envoy, no sidecars, no kube-proxy, no iptables**. `GatewayClass`,
@@ -406,13 +406,36 @@ A separate ABI-v2 packet component registers direct and Service tuples, reserves
 return ownership, and uses private source addresses and ports for hairpin or
 colliding connections. Its four stages put translation around egress and ingress
 policy boundaries. Source and backend incarnation checks prevent tuple reuse by
-a replacement endpoint. It is not installed by the node agent yet: TCP lifecycle
-tracking, garbage collection, alias-aware policy, retained-flow migration and
-receiver installation acknowledgments must be integrated before activation.
+a replacement endpoint. It is not installed by the node agent yet: retained-map/program validation,
+alias-aware policy, retained-flow migration and receiver installation
+acknowledgments must be integrated before activation.
 `make test-service-nat` runs its synthetic packet interpreter tests. The same
 fixture passed 42 packet cases and seven capacity/contention cases using real
 BPF programs in a disposable VM; see
 [the component validation evidence](service-nat-component-validation-2026-11-09.json).
+
+The component also has a SYN generation preflight and incarnation-keyed TCP
+metadata, with sequence/window checks, timestamps, handshake and closure
+lifetimes. TCP observation runs in the policy-approved commit/restore stages.
+The same check target exercises interleaved Service, direct and hairpin streams;
+480 interpreter and 478 real-kernel TCP cases passed (two nonlinear-skb checks
+are interpreter-only). After a return claim is removed, unmatched traffic to a
+primary address passes unchanged without altering the new TCP state; unmatched
+private-alias replies are dropped. This remains synthetic component evidence,
+with no live workload or agent activation claim. See
+[the TCP validation evidence](service-nat-tcp-validation-2026-11-09.json).
+
+A separate maintenance program collects expired forward/return pairs and
+incarnation-keyed TCP orphans under the same tuple reservations. It preserves
+replacement and foreign owners; active TCP claims with missing or mismatched
+metadata fail closed. The userspace v2 scanner is bounded to 128 keys per map
+per tick by default (384 across three maps), with resumable cursors. Its profile
+remains uncalled by the agent pending retained-writer and map validation. The
+component passed 56 collection checks in both engines, capacity recovery using
+actual one-entry kernel maps, and six concurrent calling threads. The latter
+observed no natural contention; deterministic reservation cases test contention
+separately. See
+[the collector validation evidence](service-nat-gc-validation-2026-11-09.json).
 
 Use `--cni-mode external --cni-conf-dir /etc/cni/net.d` to give ownership of
 Pod links, addresses, routes, IPAM, and cross-node transport to operator-supplied

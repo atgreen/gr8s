@@ -1,7 +1,7 @@
 # KubeVirt on gr8s
 
 KubeVirt v1.9.1 installs on the native containerd runtime. gr8s provides the
-Kubernetes APIs and kubelet services; KubeVirt's unmodified operator, controllers,
+Kubernetes APIs and kubelet services. KubeVirt's unmodified operator, controllers,
 handler and launcher provide the virtualization stack. QEMU uses the node's KVM
 support through containerd's CRI device mappings.
 
@@ -42,7 +42,7 @@ kubectl -n kubevirt wait kubevirt/kubevirt --for=condition=Available --timeout=9
 
 The single infrastructure replica keeps this smoke within a small test node's
 memory budget. The operator itself retains its upstream two replicas. Software
-emulation is disabled; the validation requires an actual `kvm` domain.
+emulation is disabled. The validation requires an actual `kvm` domain.
 
 If images cannot be pulled through the registry proxy, pre-stage OCI archives
 **before starting gr8s**, using the existing image preload mechanism:

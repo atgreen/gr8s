@@ -35,7 +35,7 @@ execution.
 **Current best: round 4 — 64/446 (14.3%).** Trend: monotonic, no regressions
 across rounds 1→4.
 
-## Failure taxonomy (current — round 4)
+## Failure taxonomy for round 4
 
 Failing cases by SIG, from `countsBySIG` in the round-4 evidence. This is the
 hit-list: biggest buckets first.
@@ -54,7 +54,7 @@ hit-list: biggest buckets first.
 | sig-instrumentation | 4 | 0 ✅ | 0 → 0 → 4 → 4 |
 | **Total** | **64** | **382** | |
 
-### Where the leverage is
+### Highest-impact gaps
 
 - **sig-apps (60 failing, 0 passing)** — the whole group is unimplemented:
   Deployment, ReplicaSet, StatefulSet, DaemonSet, Job, CronJob controllers.

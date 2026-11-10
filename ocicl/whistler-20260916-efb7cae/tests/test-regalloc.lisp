@@ -356,3 +356,68 @@
                   (bytes (whistler/bpf:insn-bytes (whistler/compiler:cu-insns cu))))
              (is (= 42 (interpret-scalar-bpf bytes '(42)))))
         (sb-int:unencapsulate 'whistler/ir::linear-scan-alloc 'force-buffer-spill)))))
+
+(test context-entry-loads-after-map-helpers-require-a-saved-context
+  "Pure map lookups still clobber the register carrying the entry context."
+  (dolist (op '(:map-lookup :map-lookup-ptr :map-update :map-delete :call
+                :tail-call :get-stackid :kfunc-call :ringbuf-reserve))
+    (dolist (access '(:ctx-load :ctx-store :load :store))
+      (let ((prog (spill-compaction-test-program
+                   `((:arg0 1 ()) (,op 2 ()) (,access 3 (1 (:imm 48))) (:ret nil (3))))))
+        (is-false (whistler/ir::ctx-loads-early-p prog)))))
+  (dolist (op '(:map-lookup :map-lookup-ptr))
+    (let ((prog (spill-compaction-test-program
+                 `((:arg0 1 ()) (:ctx-load 2 (1 (:imm 76))) (,op 3 ()) (:ret nil (2))))))
+      (is-true (whistler/ir::ctx-loads-early-p prog)))))
+
+(defun compile-context-helper-regression (body)
+  (let* ((maps '((whistler::ctx-test :type :array :key-size 4 :value-size 8 :max-entries 1)))
+         (whistler::*maps* maps)
+         (cu (whistler::compile-program "classifier" "GPL" maps
+                                        (read-whistler-forms body) :prog-type :tc)))
+    (whistler/bpf:insn-bytes (whistler/compiler:cu-insns cu))))
+
+(test emitted-context-load-after-map-lookup-survives-helper-clobber
+  "Execute the map-first context read with the full R1-R5 helper poison model."
+  (let ((bytes (compile-context-helper-regression
+                "(let ((hit (map-lookup ctx-test 0))
+                       (data (ctx u32 76)) (end (ctx u32 80)))
+                   (return (+ data (+ end (if (/= hit 0) 7 9)))))")))
+    (is (= 7 (interpret-scalar-bpf bytes '(42))))
+    (is (= 9 (interpret-scalar-bpf bytes '(0))))))
+
+(test emitted-raw-context-store-after-map-lookup-survives-helper-clobber
+  "Raw ctx-ptr use is also live across the helper, even without a ctx-load op."
+  (let ((bytes (compile-context-helper-regression
+                "(let ((hit (map-lookup ctx-test 0)))
+                   (when (/= hit 0) (store u32 (ctx-ptr) 48 123))
+                   (return 2))")))
+    (is (= 2 (interpret-scalar-bpf bytes '(42))))
+    (is (= 2 (interpret-scalar-bpf bytes '(0))))))
+
+(test helper-and-kfunc-immediates-preserve-full-width
+  "Observe every argument register at the call boundary, including constants
+propagated into a helper/kfunc and values whose low32 sign bit is set."
+  (dolist (kind '(:helper :kfunc))
+    (dolist (propagated '(nil t))
+      (dolist (value '(0 #x7fffffff #x80000000 #xffffffff #x100000000
+                      #x0e00000000000053 #x8000000000000000 #xffffffffffffffff
+                      -102 -2147483648 #xffffffff80000000))
+        (loop for target from 1 to 5 do
+          (let* ((ctx (whistler/ir::make-emit-ctx))
+                 (arguments
+                   (loop for reg from 1 to 5
+                         for constant = (if (= reg target) value (+ reg 10))
+                         collect (if propagated
+                                     (progn (setf (gethash reg (whistler/ir::emit-ctx-const-values ctx)) constant) reg)
+                                     (list :imm constant)))))
+            (if (eq kind :helper)
+                (whistler/ir::emit-call-insn ctx nil (cons '(:helper 7) arguments))
+                (whistler/ir::emit-kfunc-call-insn ctx nil (cons '(:kfunc "test") arguments)))
+            ;; Replace CALL with an observation of its argument. Setup is the
+            ;; real emitter path; the scalar oracle would otherwise poison R1-R5.
+            (pop (whistler/ir::emit-ctx-insns ctx))
+            (whistler/ir::ectx-emit ctx (whistler/bpf:emit-mov64-reg 0 target))
+            (whistler/ir::ectx-emit ctx (whistler/bpf:emit-exit))
+            (let ((bytes (whistler/bpf:insn-bytes (reverse (whistler/ir::emit-ctx-insns ctx)))))
+              (is (= (ldb (byte 64 0) value) (interpret-scalar-bpf bytes nil))))))))))

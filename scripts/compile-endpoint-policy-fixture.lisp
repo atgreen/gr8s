@@ -7,7 +7,7 @@
 ;;;; the map descriptors they share.  scripts/test-endpoint-policy.py reads this in place of
 ;;;; parsing an ELF object.
 ;;;;
-;;;; Usage: sbcl --script scripts/compile-endpoint-policy-fixture.lisp OUTPUT [service-lb|service-packet-lb|service-packet-guard|service-packet-gc|service-nat]
+;;;; Usage: sbcl --script scripts/compile-endpoint-policy-fixture.lisp OUTPUT [service-lb|service-packet-lb|service-packet-guard|service-packet-gc|service-nat|service-nat-policy|service-nat-guard|service-wire]
 ;;;; The optional selector emits the Service socket or packet programs instead of endpoint guards.
 
 (require :asdf)
@@ -23,10 +23,13 @@
 (let ((arguments (uiop:command-line-arguments)))
   (unless (and (<= 1 (length arguments) 2)
                (or (= 1 (length arguments))
-                   (member (second arguments) '("service-lb" "service-packet-lb" "service-packet-guard" "service-packet-gc" "service-nat") :test #'equal)))
-    (error "usage: sbcl --script compile-endpoint-policy-fixture.lisp OUTPUT [service-lb|service-packet-lb|service-packet-guard|service-packet-gc|service-nat]"))
+                   (member (second arguments) '("service-lb" "service-packet-lb" "service-packet-guard" "service-packet-gc" "service-nat" "service-nat-policy" "service-nat-guard" "service-wire") :test #'equal)))
+    (error "usage: sbcl --script compile-endpoint-policy-fixture.lisp OUTPUT [service-lb|service-packet-lb|service-packet-guard|service-packet-gc|service-nat|service-nat-policy|service-nat-guard|service-wire]"))
   (multiple-value-bind (map-specs program-specs)
-      (cond ((equal "service-nat" (second arguments)) (gr8s.network::compile-service-nat))
+      (cond ((equal "service-wire" (second arguments)) (gr8s.network::compile-service-wire-codec))
+            ((equal "service-nat-guard" (second arguments)) (gr8s.network::compile-service-nat-guard))
+            ((equal "service-nat-policy" (second arguments)) (gr8s.network::compile-service-nat-policy))
+            ((equal "service-nat" (second arguments)) (gr8s.network::compile-service-nat))
             ((equal "service-packet-gc" (second arguments))
              (gr8s.network::compile-service-packet-gc))
             ((equal "service-packet-guard" (second arguments))
