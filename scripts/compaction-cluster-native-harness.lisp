@@ -46,6 +46,48 @@
                            (t (error condition)))))
                      (when (> (get-internal-real-time) deadline) (error "Probe write timed out"))
                      (sleep 0.02))))
+               (find-owned (name value &optional uid)
+                 (handler-case
+                     (let* ((object (gr8s::get-core-resource store "configmaps" "default" name))
+                            (actual (gethash "uid" (gethash "metadata" object))))
+                       (unless (and (stringp actual) (plusp (length actual))
+                                    (or (null uid) (equal uid actual))
+                                    (equal value (gethash "value" (gethash "data" object))))
+                         (error "Probe object identity/content changed: ~A" name))
+                       actual)
+                   (gr8s:kubernetes-error (condition)
+                     (if (= 404 (gr8s::kubernetes-error-status-code condition)) nil
+                         (error condition)))))
+               (create-owned (name value)
+                 ;; A lost reply can follow a committed create. Only this
+                 ;; operation's private key and exact payload prove success.
+                 (let ((uid nil))
+                   (retry-write
+                    (lambda ()
+                      (handler-case
+                          (gr8s::create-core-resource store "configmaps" (input name value) "default")
+                        (gr8s:kubernetes-error (condition)
+                          (unless (and (= 409 (gr8s::kubernetes-error-status-code condition))
+                                       (equal "AlreadyExists" (gr8s::kubernetes-error-reason condition)))
+                            (error condition))))
+                      (setf uid (find-owned name value))
+                      (unless uid (error "Created probe object disappeared: ~A" name))))
+                   uid))
+               (delete-owned (name value uid)
+                 (retry-write (lambda ()
+                                (unless (find-owned name value uid)
+                                  (error "Probe object absent before its first delete: ~A" name))))
+                 (retry-write
+                  (lambda ()
+                    ;; Absence is success only after our own delete attempt,
+                    ;; following a confirmed create of this unique round key.
+                    (handler-case
+                        (gr8s::delete-core-resource store "configmaps" "default" name :uid uid)
+                      (gr8s:kubernetes-error (condition)
+                        (unless (= 404 (gr8s::kubernetes-error-status-code condition))
+                          (error condition))))
+                    (when (find-owned name value uid)
+                      (error "Deleted probe object remains: ~A" name)))))
                (input (name value)
                  (gr8s::core-object "apiVersion" "v1" "kind" "ConfigMap"
                    "metadata" (gr8s::core-object "name" name)
@@ -63,6 +105,18 @@
                                 "applied" (gr8s::raft-node-last-applied node)
                                 "snapshot" (gr8s::raft-node-snapshot-index node)
                                 "quorumMembers" (gr8s::raft-cluster-size node)
+                                "configMaps"
+                                (coerce
+                                 (sort
+                                  (loop for key being the hash-keys of (gr8s::pod-store-resources store)
+                                        using (hash-value object)
+                                        when (and (equal "configmaps" (first key))
+                                                  (equal "default" (second key)))
+                                          collect (vector (third key)
+                                                          (gethash "uid" (gethash "metadata" object))
+                                                          (gethash "value" (gethash "data" object))))
+                                  #'string< :key (lambda (row) (aref row 0)))
+                                 'vector)
                                 "catchupCacheBytes" (gr8s.raft::raft-storage-catchup-usage (gr8s.raft:raft-node-storage node))
                                 "catchupCacheSegments" (nth-value 1 (gr8s.raft::raft-storage-catchup-usage (gr8s.raft:raft-node-storage node)))
                                 "retainedBudgetBytes" (or (gr8s.raft::raft-node-retained-byte-limit node) 0)
@@ -97,9 +151,10 @@
                          ;; Deliberately pause the producer between transactions
                          ;; while held captures leave room for a marker write.
                          (loop while (bt:with-lock-held (lock) (and held (not stopping))) do (sleep 0.02))
-                         (retry-write (lambda () (gr8s::create-core-resource store "configmaps"
-                                                   (input "churn" (make-string 65536 :initial-element #\x)) "default")))
-                         (retry-write (lambda () (gr8s::delete-core-resource store "configmaps" "default" "churn")))
+                         (let* ((name (format nil "churn-~D" i))
+                                (value (make-string 65536 :initial-element #\x))
+                                (uid (create-owned name value)))
+                           (delete-owned name value uid))
                          (bt:with-lock-held (lock) (setf completed (1+ i))))
                        (bt:with-lock-held (lock) (setf finished t)))
                    (error (condition) (bt:with-lock-held (lock) (setf failure (princ-to-string condition)))))))

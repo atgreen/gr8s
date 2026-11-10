@@ -161,6 +161,10 @@ def main():
             value["checkpoints"] >= (1 if args.smoke else 2)
             for value in values.values()) else None)(states()), timeout=240)
         result.update(beforeRestart=final, samples=samples)
+        expected_maps = final[current.name]["configMaps"]
+        assert [row[0] for row in expected_maps] == ["sentinel", "while-held"], expected_maps
+        assert all(value["configMaps"] == expected_maps for value in final.values()), final
+
         result["diskCatchupAcceptance"] = any(value["catchupCacheBatches"] > 0 for value in final.values())
         assert result["diskCatchupAcceptance"], "No archived-prefix batch was read for replication"
         result["catchupHistoryContinuous"] = (final[slow.name]["historyEstimatedBytes"] >=
@@ -184,6 +188,8 @@ def main():
         probe.await_value(lambda: established(nodes), timeout=240)
         probe.await_value(lambda: leader(nodes), timeout=240)
         recovered = states()
+        assert all(value["configMaps"] == expected_maps for value in recovered.values()), recovered
+
         if not args.smoke:
             histories = {name: value["loadedHistoryEstimatedBytes"] for name, value in recovered.items()}
             assert all(value >= 96 * 1024 * 1024 - 2 * 65536 for value in histories.values()), \
