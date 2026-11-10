@@ -292,7 +292,7 @@ Normal replication continues while the barrier drains outstanding application wr
 ;;; Lifecycle.
 
 (defun start-raft-member (id &key (host "127.0.0.1") (port 0) apply-fn storage storage-path initial-role
-                                  snapshot-fn restore-fn snapshot-directory prepare-fn validate-recovery-fn
+                                  snapshot-fn restore-fn snapshot-directory prepare-fn validate-recovery-fn after-recovery-fn
                                   ;; election timeout ~1-2s at a 50ms tick; well above gRPC call latency
                                   (timeout-fn (lambda () (+ 20 (random 20))))
                                   (heartbeat-ticks 2)
@@ -303,11 +303,14 @@ Normal replication continues while the barrier drains outstanding application wr
    them); ticking starts with RAFT-MEMBER-START. STORAGE-PATH recovers a file WAL
    before opening the RPC listener and makes the member own/close that storage.
    PREPARE-FN installs callbacks on the new member before recovery; VALIDATE-RECOVERY-FN
-   must approve its recovered WAL before node mutation. Both run before listening.
+   must approve its recovered WAL before node mutation. AFTER-RECOVERY-FN runs
+   under the member mutex with the recovered owned WAL, before listening.
    INITIAL-ROLE keeps an unconfigured witness/learner from campaigning before join."
   (when (and storage storage-path) (error "Supply either storage or storage-path"))
-  (dolist (callback (list prepare-fn validate-recovery-fn))
+  (dolist (callback (list prepare-fn validate-recovery-fn after-recovery-fn))
     (when (and callback (not (functionp callback))) (error "Invalid member startup callback")))
+  (when (and after-recovery-fn (null storage-path))
+    (error "After-recovery callback requires an owned WAL path"))
   (unless (member initial-role '(nil :voter :witness :learner)) (error "Invalid initial Raft role"))
   (let* ((member (make-raft-member :host host :port port :credentials credentials
                                   :snapshot-directory snapshot-directory))
@@ -331,6 +334,9 @@ Normal replication continues while the barrier drains outstanding application wr
                        (setf (raft-member-owned-storage member) (gr8s.raft:raft-node-storage node))))
                    (handler-case
                        (progn
+                         (when after-recovery-fn
+                           (bt:with-lock-held ((raft-member-lock member))
+                             (funcall after-recovery-fn member)))
                          (raft-member-reap-snapshot-orphans member)
                          (apply #'ag-grpc:make-grpc-server port :host host
                                 (gr8s::raft-server-tls-options credentials)))

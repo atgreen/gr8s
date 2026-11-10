@@ -154,7 +154,7 @@ application ingress/writer barriers. This function neither persists nor adopts R
 
 (defun start-ha-control-plane (store &key id (host "127.0.0.1") (port 0)
                                           init join-host join-port
-                                          node-name token ca-pin pki api-url
+                                          node-name token ca-pin pki api-url after-recovery-fn
                                           (compaction-bytes (* 16 1024 1024))
                                           (compaction-entries 256) (compaction-interval nil))
   "Start an artifact-backed durable Raft member before application ingress.
@@ -183,6 +183,7 @@ the cluster. Access stays gated until a current-term committed boundary applies.
                  (apply #'gr8s.resources::start-store-member-from-wal
                         store id (merge-pathnames "raft/control-plane.log" (gr8s::pod-store-path store))
                         :host host :port port :credentials credentials
+                        :after-recovery-fn after-recovery-fn
                         :snapshot-directory (merge-pathnames "raft/transfers/" (gr8s::pod-store-path store))
                         (when bootstrap-role
                           (list :bootstrap-role bootstrap-role :bootstrap-api-url api-url))))

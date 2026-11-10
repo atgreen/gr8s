@@ -184,3 +184,56 @@ unpublished pinned artifacts and queued/sender-owned snapshots. Unsafe files sta
                     (incf removed))))))
         (when (plusp removed) (gr8s.store::sync-store-generation-directory directory)))
       removed)))
+
+
+(defun store-snapshot-startup-temporary-name-p (name registry-p)
+  "Recognize only our UUID publication/capture names, including pre-rename scratch."
+  (labels ((uuid (start end) (gr8s.store::store-generation-id-p (subseq name start end))))
+    (if registry-p
+        (and (= 41 (length name)) (string= ".part" name :start2 36) (uuid 0 36))
+        (or (and (= 50 (length name)) (string= "capture-" name :end2 8)
+                 (uuid 8 44) (string= ".jsonl" name :start2 44))
+            (and (= 74 (length name)) (string= ".capture-" name :end2 9)
+                 (uuid 9 45) (char= #\- (char name 45))
+                 (every (lambda (char) (digit-char-p char 16)) (subseq name 46 70))
+                 (string= ".tmp" name :start2 70))))))
+
+(defun reap-store-snapshot-startup-temporaries-unlocked (member store)
+  "Remove recognized abandoned private scratch only before application listening.
+Production caller also holds/verifies its state-directory lease. Application
+barriers and the recovered WAL lease exclude legitimate live publishers."
+  (let* ((root (pod-store-path store))
+         (storage (gr8s.raft.transport::raft-member-owned-storage member)))
+    (unless (and (sb-thread:holding-mutex-p (gr8s.raft.transport:raft-member-lock member))
+                 (gr8s.store::store-application-barriers-owned-p store)
+                 (gr8s.store::store-access-blocked-p store)
+                 (not (gr8s.raft.transport::raft-member-running member))
+                 (null (gr8s.raft.transport::raft-member-grpc-server member))
+                 (typep storage 'gr8s.raft::file-raft-storage)
+                 (eq storage (gr8s.raft:raft-node-storage (gr8s.raft.transport:raft-member-node member)))
+                 (gr8s.raft::file-raft-storage-ownership-fd storage)
+                 (gr8s.raft::file-raft-storage-stream storage)
+                 (open-stream-p (gr8s.raft::file-raft-storage-stream storage))
+                 (equal (merge-pathnames "raft/control-plane.log" root)
+                        (merge-pathnames (gr8s.raft::file-raft-storage-path storage))))
+      (error "Startup scratch reclamation requires pre-listener recovered WAL and application ownership"))
+    (gr8s.store::check-store-generation-directory root :metadata t)
+    (let ((removed 0))
+      (dolist (spec '(("snapshot-artifacts/" . t) ("raft/" . nil)))
+        (let ((directory (merge-pathnames (car spec) root)) (changed nil))
+          (when (gr8s.store::store-generation-stat directory)
+            ;; Never follow a substituted directory or traverse children.
+            (gr8s.store::check-store-generation-directory directory :metadata (not (cdr spec)))
+            (unwind-protect
+                 (gr8s.raft.transport::raft-snapshot-map-directory
+                  directory
+                  (lambda (name)
+                    (when (store-snapshot-startup-temporary-name-p name (cdr spec))
+                      (let* ((path (merge-pathnames name directory))
+                             (stat (sb-posix:lstat (namestring path))))
+                        (when (gr8s.raft.transport::raft-snapshot-private-stat-p stat nil)
+                          (sb-posix:unlink (namestring path))
+                          (setf changed t)
+                          (incf removed))))))
+              (when changed (gr8s.store::sync-store-generation-directory directory))))))
+      removed)))

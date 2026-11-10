@@ -251,3 +251,67 @@
       (is (eq :resumed (gr8s.server::call-with-serve-state-ownership options (lambda () :resumed))))
       (is (eql 2 (gethash "version" (gr8s.store::read-private-generation-json
                                     (merge-pathnames "metadata/server-mode.json" root))))))))
+
+(test recovered-serve-reclaims-only-private-recognized-snapshot-scratch-before-listening
+  (with-temporary-store (store root)
+    (let* ((options (gr8s::parse-serve-options '("--raft-init" "--node-name" "scratch-cp")))
+           (registry (gr8s.resources::store-snapshot-registry-directory root))
+           (raft (merge-pathnames "raft/" root))
+           (id (gr8s.store:generate-uid))
+           (capture (merge-pathnames (format nil "capture-~A.jsonl" id) raft))
+           (partial (gr8s.security::private-temporary-path capture))
+           (part (merge-pathnames (format nil "~A.part" id) registry))
+           (unsafe (merge-pathnames (format nil "~A.part" (gr8s.store:generate-uid)) registry))
+           (linked (merge-pathnames (format nil "~A.part" (gr8s.store:generate-uid)) registry))
+           (symbolic (merge-pathnames (format nil "~A.part" (gr8s.store:generate-uid)) registry))
+           (unknown (merge-pathnames "not-a-uuid.part" registry))
+           (protected (merge-pathnames "protected" root))
+           (ha nil))
+      (setf (getf options :state-directory) root)
+      (let ((listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t)))
+        (unwind-protect (setf (getf options :raft-port) (usocket:get-local-port listener))
+          (usocket:socket-close listener)))
+      (ensure-directories-exist capture)
+      (sb-posix:chmod (namestring raft) #o700)
+      (dolist (path (list capture partial part unsafe unknown protected))
+        (gr8s.security::write-private-text-exclusively path "scratch"))
+      (sb-posix:chmod (namestring unsafe) #o644)
+      (sb-posix:link (namestring protected) (namestring linked))
+      (sb-posix:symlink (namestring protected) (namestring symbolic))
+      (unwind-protect
+           (gr8s.server::call-with-serve-state-ownership
+            options
+            (lambda ()
+              (setf ha (gr8s.server::maybe-start-ha-control-plane store nil options))
+              (dolist (path (list capture partial part))
+                (is (null (gr8s.store::store-generation-stat path))))
+              (dolist (path (list unsafe linked symbolic unknown protected))
+                (is (not (null (gr8s.store::store-generation-stat path)))))
+              (is (equal "scratch" (uiop:read-file-string protected)))
+              ;; The same entry point cannot reap a running member's live files.
+              (gr8s.security::write-private-text-exclusively part "live")
+              (let ((member (gr8s.ha::ha-control-plane-member ha)))
+                (bt:with-lock-held ((gr8s::raft-member-lock member))
+                  (signals error (gr8s.resources::reap-store-snapshot-startup-temporaries-unlocked member store))))
+              (is (not (null (probe-file part))))
+              (gr8s::stop-ha-control-plane ha)
+              (setf ha nil)))
+        (when ha (gr8s::stop-ha-control-plane ha))))))
+
+(test after-recovery-hook-runs-before-listener-and-failure-releases-wal
+  (with-temporary-store (store root)
+    (declare (ignore store))
+    (let ((path (merge-pathnames "hook.log" root)) (called nil))
+      (signals error
+        (gr8s.raft.transport::start-raft-member "hook" :storage-path path
+          :after-recovery-fn
+          (lambda (member)
+            (setf called t)
+            (is (sb-thread:holding-mutex-p (gr8s::raft-member-lock member)))
+            (is (null (gr8s.raft.transport::raft-member-grpc-server member)))
+            (is (not (gr8s.raft.transport::raft-member-running member)))
+            (is (not (null (gr8s.raft.transport::raft-member-owned-storage member))))
+            (error "Injected pre-listener cleanup failure"))))
+      (is (eq t called))
+      (let ((storage (gr8s::open-file-raft-storage path)))
+        (gr8s::close-file-raft-storage storage)))))

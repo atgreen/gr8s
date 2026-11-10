@@ -1,0 +1,79 @@
+{
+  "scope": "Production startup hook under real state/WAL ownership; source-level actual publisher SIGKILL and recovery, not complete serve/runtime/VM acceptance",
+  "passed": true,
+  "sourceSuiteChecks": {
+    "raft-transport": 52,
+    "store-snapshot-registry": 108,
+    "serve-state-ownership": 100,
+    "ha-control-plane": 195
+  },
+  "sourceLog": "/tmp/gr8s-snapshot-startup-scratch-integration.log",
+  "focusedChecks": 17,
+  "focusedLog": "/tmp/gr8s-snapshot-startup-scratch-case-tests.log",
+  "crashResult": {
+    "passed": true,
+    "evidence": "/tmp/gr8s-snapshot-startup-scratch-cyuawdl_",
+    "productionServe": false,
+    "vmAcceptance": false,
+    "cycles": [
+      {
+        "iteration": 1,
+        "passed": true,
+        "liveOwnerProtected": true,
+        "killedExitCode": -9,
+        "recovery": {
+          "recovered": true,
+          "orphansRemoved": 3,
+          "sentinelPreserved": true
+        },
+        "publishedArtifactsPreserved": true,
+        "orphanPaths": [
+          "/tmp/gr8s-snapshot-startup-scratch-cyuawdl_/state/raft/.capture-3ac8009e-03dc-40a5-9e61-e3879ded39eb-C32E849F53C15AED5F28DDB4.tmp",
+          "/tmp/gr8s-snapshot-startup-scratch-cyuawdl_/state/snapshot-artifacts/0429e38e-f9fc-4f62-93fc-130eddda1897.part",
+          "/tmp/gr8s-snapshot-startup-scratch-cyuawdl_/state/raft/capture-a9774742-a437-4f7a-b68a-78698628a667.jsonl"
+        ]
+      },
+      {
+        "iteration": 2,
+        "passed": true,
+        "liveOwnerProtected": true,
+        "killedExitCode": -9,
+        "recovery": {
+          "recovered": true,
+          "orphansRemoved": 3,
+          "sentinelPreserved": true
+        },
+        "publishedArtifactsPreserved": true,
+        "orphanPaths": [
+          "/tmp/gr8s-snapshot-startup-scratch-cyuawdl_/state/raft/.capture-727fee56-e661-4bf2-9db6-9f735b074ba5-1471495AD3890DAB7E201A52.tmp",
+          "/tmp/gr8s-snapshot-startup-scratch-cyuawdl_/state/snapshot-artifacts/8b933cff-099e-4036-8713-5b746e3265c7.part",
+          "/tmp/gr8s-snapshot-startup-scratch-cyuawdl_/state/raft/capture-03dbe897-7dab-41f0-a200-5db19b1b352b.jsonl"
+        ]
+      },
+      {
+        "iteration": 3,
+        "passed": true,
+        "liveOwnerProtected": true,
+        "killedExitCode": -9,
+        "recovery": {
+          "recovered": true,
+          "orphansRemoved": 3,
+          "sentinelPreserved": true
+        },
+        "publishedArtifactsPreserved": true,
+        "orphanPaths": [
+          "/tmp/gr8s-snapshot-startup-scratch-cyuawdl_/state/raft/.capture-b5c3ffd2-a9dd-4faa-99e0-2f33d4961b3a-9139C3234B3138ECFF2134A3.tmp",
+          "/tmp/gr8s-snapshot-startup-scratch-cyuawdl_/state/snapshot-artifacts/e7798d70-1095-4f3d-87f7-c35a160e1c63.part",
+          "/tmp/gr8s-snapshot-startup-scratch-cyuawdl_/state/raft/capture-0391e85a-d0d5-4e29-b96a-04b32ab865d1.jsonl"
+        ]
+      }
+    ]
+  },
+  "safetyContract": [
+    "Only pre-listener recovered startup with state lease, member mutex and application barriers",
+    "Only exact UUID.part, capture-UUID.jsonl and corresponding private capture .tmp names",
+    "Only owned0600 single-link regular files; preserve unknown names, symlinks, hardlinks, non-private files and directories",
+    "Shallow directory enumeration and fsync after deletion",
+    "Invalid WAL recovery or active ownership prevents cleanup"
+  ]
+}

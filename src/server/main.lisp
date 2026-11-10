@@ -2079,6 +2079,11 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
          :port (or (getf options :raft-port) +serve-raft-default-port+)
          :init (getf options :raft-init)
          :compaction-interval (when (getf options :raft-compaction) 1)
+         :after-recovery-fn
+         (when *serve-state-lease*
+           (lambda (member)
+             (require-serve-state-ownership options)
+             (gr8s.resources::reap-store-snapshot-startup-temporaries-unlocked member store)))
          :join-host join-host :join-port join-port
          :node-name (getf options :raft-node-name)
          :token (getf options :raft-token)

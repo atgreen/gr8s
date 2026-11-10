@@ -608,13 +608,21 @@ Missing or legacy frame metadata uses the original serializer. The archive
 reader still verifies framing and checksums before replication. This removes
 repeated payload printing from cache creation; it does not by itself establish
 a bound on checkpoint pauses or prove leadership stability.
-The disk window passed full three-member churn and cold-recovery acceptance
-under `podster-ucm.11.3.9.10.1`. The frame-copy optimization subsequently passed
-source integration and a 128-round native timing/recovery run; its
-[diagnostic record](compaction-phase-diagnostics-2026-11-10.json) records cache
-writes falling from seconds to milliseconds. Sustained leadership stability
-remains open under `podster-ucm.11.3.9.11`; automatic compaction remains disabled
+The disk window and frame-copy optimization passed full three-member churn,
+stable-leadership, and cold-recovery acceptance: all 2,048 rounds completed in
+the original term with 96 MiB retained history per member and 384 MiB heaps.
+The [validation record](async-compaction-validation-2026-11-10.json) preserves
+the full result; the [diagnostic record](compaction-phase-diagnostics-2026-11-10.json)
+records the earlier failures and the reduction from seconds to milliseconds.
+Production/VM acceptance remains separate; automatic compaction stays disabled
 by default.
+
+Production HA startup reclaims recognized abandoned snapshot publication and
+capture scratch after validated WAL recovery and before listening. Cleanup
+requires state/WAL ownership and application barriers; unsafe or unknown files
+and all published artifacts are preserved. A
+[three-cycle SIGKILL validation](snapshot-startup-scratch-validation-2026-11-10.json)
+checks live-owner protection, restart cleanup, and retained data/artifacts.
 
 Operators can opt in on each HA server by adding `--raft-compaction` to the
 existing `gr8s serve` command, alongside `--raft-init` or `--raft-join HOST:PORT`.
