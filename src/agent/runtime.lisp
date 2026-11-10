@@ -586,7 +586,8 @@ Returns NETWORK; signals INVALID-CNI on any violation."
   network)
 
 (defun publish-node-runtime-service-nat-inventory
-    (node-runtime &optional (network (node-runtime-network node-runtime)))
+    (node-runtime &optional (network (node-runtime-network node-runtime))
+     &key reset-readiness)
   "Seed the shared v2 managed-address and identity tables from the network assignment.
 Called after a new assignment and after a retained Service LB map is opened on
 restart, since the network may be restored before the dataplane starts."
@@ -596,9 +597,12 @@ restart, since the network may be restored before the dataplane starts."
     (when (and managed network)
       (gr8s.network::publish-service-nat-managed-cidrs
        managed (persisted-node-network-cidrs network "clusterPodCIDRs" "clusterPodCIDR")))
+    (when (and identities reset-readiness)
+      (gr8s.network::clear-service-nat-owner-readiness identities))
     (when (and identities network)
       (gr8s.network::publish-service-nat-identities
-       identities (gethash "serviceTranslations" network #())))))
+       identities (gethash "serviceTranslations" network #())
+       :preserve-readiness (not reset-readiness)))))
 
 (defun configure-node-runtime-network (node-runtime network &key (persist t))
   "Apply NETWORK as this node's overlay configuration and record it on the runtime.
@@ -1031,7 +1035,8 @@ the node from starting."
                                         (lambda (endpoints)
                                           (steer-service-endpoints
                                            node-runtime endpoints))))
-      (publish-node-runtime-service-nat-inventory node-runtime))
+      (publish-node-runtime-service-nat-inventory
+       node-runtime (node-runtime-network node-runtime) :reset-readiness t))
     (handler-case
         (setf (node-runtime-gateway-steering node-runtime) (start-gateway-steering))
       (error (condition)

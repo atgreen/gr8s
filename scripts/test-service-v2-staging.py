@@ -123,8 +123,22 @@ def main():
                     and [struct.unpack_from("<I", value, 28)[0] for value in values] == [1, 2])
 
         traffic.wait_for("v2 restored identity pair", 120, identities_published)
+        keys = [primary.packed, alias.packed]
+        values = guest.read_pinned_values(identity_map, keys, 32)
+        ready_values = []
+        for value in values:
+            marked = bytearray(value)
+            struct.pack_into("<I", marked, 4, 0x20007)
+            ready_values.append(bytes(marked))
+        guest.write_pinned_values(identity_map, list(zip(keys, ready_values)), 32)
+        cluster.stop()
+        if guest.read_pinned_values(identity_map, keys, 32) != ready_values:
+            raise RuntimeError("retained owner map lost readiness test values before restart")
+        cluster.start()
+        traffic.wait_for("v2 readiness cleared after restart", 120, identities_published)
         report.update({"restoredIdentityMap": str(identity_map),
-                       "restoredPrimary": str(primary), "restoredAlias": str(alias)})
+                       "restoredPrimary": str(primary), "restoredAlias": str(alias),
+                       "readinessClearedAfterRestart": True})
         print(json.dumps(report, indent=2))
     finally:
         cluster.stop()
