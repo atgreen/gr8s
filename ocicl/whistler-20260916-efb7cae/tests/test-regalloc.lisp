@@ -356,3 +356,41 @@
                   (bytes (whistler/bpf:insn-bytes (whistler/compiler:cu-insns cu))))
              (is (= 42 (interpret-scalar-bpf bytes '(42)))))
         (sb-int:unencapsulate 'whistler/ir::linear-scan-alloc 'force-buffer-spill)))))
+
+(test context-entry-loads-after-map-helpers-require-a-saved-context
+  "Pure map lookups still clobber the register carrying the entry context."
+  (dolist (op '(:map-lookup :map-lookup-ptr :map-update :map-delete :call
+                :tail-call :get-stackid :kfunc-call :ringbuf-reserve))
+    (dolist (access '(:ctx-load :ctx-store :load :store))
+      (let ((prog (spill-compaction-test-program
+                   `((:arg0 1 ()) (,op 2 ()) (,access 3 (1 (:imm 48))) (:ret nil (3))))))
+        (is-false (whistler/ir::ctx-loads-early-p prog)))))
+  (dolist (op '(:map-lookup :map-lookup-ptr))
+    (let ((prog (spill-compaction-test-program
+                 `((:arg0 1 ()) (:ctx-load 2 (1 (:imm 76))) (,op 3 ()) (:ret nil (2))))))
+      (is-true (whistler/ir::ctx-loads-early-p prog)))))
+
+(defun compile-context-helper-regression (body)
+  (let* ((maps '((whistler::ctx-test :type :array :key-size 4 :value-size 8 :max-entries 1)))
+         (whistler::*maps* maps)
+         (cu (whistler::compile-program "classifier" "GPL" maps
+                                        (read-whistler-forms body) :prog-type :tc)))
+    (whistler/bpf:insn-bytes (whistler/compiler:cu-insns cu))))
+
+(test emitted-context-load-after-map-lookup-survives-helper-clobber
+  "Execute the map-first context read with the full R1-R5 helper poison model."
+  (let ((bytes (compile-context-helper-regression
+                "(let ((hit (map-lookup ctx-test 0))
+                       (data (ctx u32 76)) (end (ctx u32 80)))
+                   (return (+ data (+ end (if (/= hit 0) 7 9)))))")))
+    (is (= 7 (interpret-scalar-bpf bytes '(42))))
+    (is (= 9 (interpret-scalar-bpf bytes '(0))))))
+
+(test emitted-raw-context-store-after-map-lookup-survives-helper-clobber
+  "Raw ctx-ptr use is also live across the helper, even without a ctx-load op."
+  (let ((bytes (compile-context-helper-regression
+                "(let ((hit (map-lookup ctx-test 0)))
+                   (when (/= hit 0) (store u32 (ctx-ptr) 48 123))
+                   (return 2))")))
+    (is (= 2 (interpret-scalar-bpf bytes '(42))))
+    (is (= 2 (interpret-scalar-bpf bytes '(0))))))
