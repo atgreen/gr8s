@@ -34,12 +34,42 @@
                           (t 16))))))
       (walk root))))
 
+(defun compaction-native-cold-recovery (root-text port-text clock-text)
+  (let* ((root (uiop:ensure-directory-pathname root-text)) (store nil) (ha nil)
+         (result (gr8s::core-object "passed" nil "phase" "cold-recovery"
+                   "heapLimitMiB" (/ (sb-ext:dynamic-space-size) (* 1024 1024)))))
+    (setf gr8s.store::*podtemplate-clock* (constantly (parse-integer clock-text)))
+    (unwind-protect
+         (handler-case
+             (progn
+               (assert (= 384 (gethash "heapLimitMiB" result)))
+               (setf (sb-ext:gc-logfile) (namestring (merge-pathnames "cold-gc.log" root))
+                     store (gr8s:open-store root :defer-restore-completion t)
+                     ha (gr8s::start-ha-control-plane store :id "compact-native" :init t
+                          :port (parse-integer port-text)))
+               (compaction-native-await (lambda () (gr8s::ha-control-plane-leader-p ha)))
+               (assert (equal "preserved" (gethash "value" (gethash "data"
+                         (gr8s::get-core-resource store "configmaps" "default" "sentinel")))))
+               (let ((history-bytes (reduce #'+ (gr8s::pod-store-template-history store)
+                                           :key #'gr8s.resources::template-history-entry-bytes)))
+                 (assert (>= history-bytes (- gr8s.resources::*resource-watch-history-bytes* (* 2 65536))))
+                 (setf (gethash "historyEstimatedBytes" result) history-bytes))
+               (setf (gethash "passed" result) t (gethash "coldRecovery" result) t
+                     (gethash "sentinelRecovered" result) t))
+           (error (condition) (setf (gethash "error" result) (princ-to-string condition))))
+      (when ha (gr8s::stop-ha-control-plane ha)))
+    (write-line (com.inuoe.jzon:stringify result))
+    (uiop:quit (if (gethash "passed" result) 0 1))))
+
 (defun compaction-native-main ()
   (gr8s.server::install-memory-hooks)
   ;; Host speed must not make this retention probe easier by aging history out.
   ;; Set the process-wide default so the Raft application thread sees it too.
   (setf gr8s.store::*podtemplate-clock* (constantly (get-universal-time)))
-  (destructuring-bind (root-text rounds-text) (uiop:command-line-arguments)
+  (destructuring-bind (root-text rounds-text &optional recovery-port recovery-clock) (uiop:command-line-arguments)
+    (when (equal rounds-text "--recover-only")
+      (return-from compaction-native-main
+        (compaction-native-cold-recovery root-text recovery-port recovery-clock)))
     (let* ((root (uiop:ensure-directory-pathname root-text)) (rounds (parse-integer rounds-text))
            (store (gr8s:open-store root)) (ha nil) (port nil)
            (max-wal 0) (max-artifacts 0) (max-history 0) (checkpoints 0) (samples 0)
@@ -48,6 +78,7 @@
                      "rounds" rounds "payloadBytesWritten" (* rounds 65536)
                      "walTriggerBytes" (* 16 1024 1024)
                      "historyClockFrozen" t
+                     "historyClock" (funcall gr8s.store::*podtemplate-clock*)
                      "historyByteBudget" gr8s.resources::*resource-watch-history-bytes*
                      "heapLimitMiB" (/ (sb-ext:dynamic-space-size) (* 1024 1024)))))
       ;; Observe the collector's normal decisions, including fragmentation and
@@ -114,8 +145,10 @@
                    (assert (>= max-history (- gr8s.resources::*resource-watch-history-bytes* (* 2 65536))))
                    (gr8s::stop-ha-control-plane ha)
                    (assert (null (gr8s.ha::ha-control-plane-compaction-thread ha)))
-                   (setf store (gr8s:open-store root :defer-restore-completion t)
-                         ha (gr8s::start-ha-control-plane store :id "compact-native" :init t :port port))
+                   ;; Recover the existing quiesced store through production's
+                   ;; in-place restore barriers. Cold OPEN-STORE is checked by
+                   ;; the runner in a fresh process, with the same frozen clock.
+                   (setf ha (gr8s::start-ha-control-plane store :id "compact-native" :init t :port port))
                    (compaction-native-await #'ready)
                    (assert (equal "preserved" (gethash "value" (gethash "data"
                              (gr8s::get-core-resource store "configmaps" "default" "sentinel")))))
@@ -125,6 +158,8 @@
                          (gethash "sampledMaxArtifactCount" result) max-artifacts
                          (gethash "sampledMaxHistoryEstimatedBytes" result) max-history
                          (gethash "samples" result) samples
+                         (gethash "memberPort" result) port
+                         (gethash "inPlaceMemberRecovery" result) t
                          (gethash "sentinelRecovered" result) t))
                (error (condition) (setf (gethash "error" result) (princ-to-string condition))))
           (when ha (gr8s::stop-ha-control-plane ha)))

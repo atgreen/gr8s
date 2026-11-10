@@ -48,9 +48,33 @@ def main():
             result["passed"] = (process.returncode == 0 and report.get("passed") is True
                                 and report.get("heapLimitMiB") == 384
                                 and report.get("historyClockFrozen") is True
-                                and report.get("sentinelRecovered") is True)
+                                and report.get("sentinelRecovered") is True
+                                and report.get("inPlaceMemberRecovery") is True)
         except (ValueError, UnicodeError) as error:
             result["error"] = f"Invalid or absent native report: {error}"
+        if result["passed"]:
+            result["passed"] = False
+            remaining = args.timeout - (time.monotonic() - started)
+            with binary.open("rb") as executable:
+                if hashlib.file_digest(executable, "sha256").hexdigest() != digest:
+                    raise OSError("Native executable changed before cold recovery")
+            with (root / "cold-stdout.log").open("w") as out, (root / "cold-stderr.log").open("w") as err:
+                cold = subprocess.run(
+                    [str(binary), "--dynamic-space-size", "384", str(state), "--recover-only",
+                     str(report["memberPort"]), str(report["historyClock"])],
+                    stdout=out, stderr=err, timeout=max(0.001, remaining), check=False)
+            result["coldExitCode"] = cold.returncode
+            try:
+                cold_report = json.loads((root / "cold-stdout.log").read_text())
+                if not isinstance(cold_report, dict):
+                    raise ValueError("cold recovery report is not an object")
+                result["coldRecoveryReport"] = cold_report
+                result["passed"] = (cold.returncode == 0 and cold_report.get("passed") is True
+                                    and cold_report.get("coldRecovery") is True
+                                    and cold_report.get("sentinelRecovered") is True
+                                    and cold_report.get("heapLimitMiB") == 384)
+            except (ValueError, UnicodeError) as error:
+                result["error"] = f"Invalid or absent cold recovery report: {error}"
     except subprocess.TimeoutExpired:
         # subprocess.run kills and joins the child. Timeout is inconclusive for
         # heap correctness; retain its progress/diagnostics rather than restarting.
