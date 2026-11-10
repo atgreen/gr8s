@@ -15,7 +15,7 @@ and activation epochs below remain proposed extensions.
 
 The normal successful path preserves the PID, running containers, and node
 identity. A patch may briefly pause a controller or request handler at a declared
-safe point. A failed patch may require process restart for recovery; arbitrary
+safe point. A failed patch may require process restart for recovery. Arbitrary
 Lisp side effects cannot be rolled back transactionally.
 
 ## Core decisions
@@ -26,14 +26,14 @@ Lisp side effects cannot be rolled back transactionally.
    levels retain their original bytes and digests. An installed prefix must
    match before gr8s accepts the suffix.
 3. Code loading, durable data migration, and feature activation have separate
-   records and lifetimes. Code is reconstructed on every process start; committed
+   records and lifetimes. Code is reconstructed on every process start. Committed
    migration effects are not repeated blindly.
 4. ASDF supplies dependency-aware compilation and loading. gr8s supplies safe
    points, durable migration records, health checks, and rollout coordination.
 5. Rollouts are rolling operations, not distributed transactions. Mixed levels
    must be compatible. Behavior that needs cluster-wide agreement stays disabled
    until a durable activation barrier has been crossed.
-6. Roll forward by default. A compensating patch is a new level; dropping the
+6. Roll forward by default. A compensating patch is a new level. Dropping the
    desired level does not undo code or data.
 
 ## Release and patch identity

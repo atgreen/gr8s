@@ -1,8 +1,8 @@
 # Building, running & testing
 
-A quick single-node start is in the [README](../README.md#getting-started); this
-document covers the full picture — requirements, multi-node clusters, the native
-payload, the test matrix, and debugging a live process.
+The [README](../README.md#getting-started) shows a quick single-node start. This
+guide covers requirements, multi-node clusters, the native payload, tests, and
+live-process debugging.
 
 ## Requirements
 
@@ -30,7 +30,7 @@ sudo build/gr8s serve \
 Without `--kubeconfig`, `serve` writes an owner-only `kubeconfig` in the state
 directory and prints its path. `gr8s kubeconfig [--server URL]` prints a
 kubeconfig to standard output, or writes it with `--output FILE`. No system
-containerd or host glibc is used by the embedded payload; root is still required
+containerd or host glibc is used by the embedded payload. Root is still required
 for mounts, namespaces, cgroups, and the overlay snapshotter.
 
 Then, from another terminal:
@@ -47,7 +47,7 @@ kubectl --kubeconfig /tmp/gr8s.kubeconfig delete pod POD_NAME
 - `gr8s serve` runs the HTTP control plane and a loopback gRPC node endpoint, and
   optionally joins a Raft cluster with `--raft-init`/`--raft-join` (see
   [high availability](high-availability.md)). It starts a local agent named
-  `gr8s-local` by default; `--disable-agent` runs a control-plane-only process.
+  `gr8s-local` by default. `--disable-agent` runs a control-plane-only process.
 - `gr8s agent` enrolls with a one-time token, persists its node key and
   certificate, and maintains the revisioned desired-state session.
 - `gr8s witness` runs a headless Raft voting member (a quorum tie-breaker).
@@ -55,7 +55,7 @@ kubectl --kubeconfig /tmp/gr8s.kubeconfig delete pod POD_NAME
   when `CNI_COMMAND` is present.
 
 The node endpoint defaults to loopback port 7443. Set `--node-listen` and
-`--node-port` for a node-facing address; the Kubernetes HTTP API stays on
+`--node-port` for a node-facing address. The Kubernetes HTTP API stays on
 loopback. Agents advertise the source IPv4 address of their control connection for
 VXLAN, or use an explicit `--node-address` on multi-interface hosts.
 
@@ -85,7 +85,7 @@ sudo build/gr8s agent --server 192.0.2.10:7443 --node-name worker-b \
 ```
 
 The two nodes need underlay connectivity for the node endpoint and VXLAN UDP port
-4789. Each agent receives its own Pod CIDR and the peer route set; no bridge or
+4789. Each agent receives its own Pod CIDR and the peer route set. No bridge or
 host-local CNI configuration is required. Enrollment verifies the server
 certificate against `--ca-pin` before sending the token, generates the private key
 on the node, and stores `node.key`, `node.crt`, `ca.crt`, the assigned Pod CIDR,
@@ -131,7 +131,7 @@ make check
 ```
 
 **Routed-veth backend** (no sudo on hosts allowing unprivileged user/network
-namespaces) — creates two isolated Pod namespaces and verifies host-to-Pod and
+namespaces) creates two isolated Pod namespaces. It verifies host-to-Pod and
 routed Pod-to-Pod connectivity, repeated setup/deletion, and namespace restoration
 on a worker thread:
 
@@ -146,7 +146,7 @@ namespace and CIDR:
 make test-vxlan-network
 ```
 
-**Agent CNI integration** — the real Unix-socket client, durable IPAM restoration
+**Agent CNI integration** tests the real Unix-socket client, durable IPAM restoration
 across an agent restart, and Pod DNS over UDP and TCP (BPF policy ops are
 substituted, since unprivileged user namespaces can't load those programs):
 
@@ -154,7 +154,7 @@ substituted, since unprivileged user namespaces can't load those programs):
 make test-agent-network
 ```
 
-**Live node topology** — real gRPC agent sessions in separate node network
+**Live node topology** uses real gRPC agent sessions in separate node network
 namespaces: source-address discovery, snapshot publication, bidirectional VXLAN,
 tunnel restoration before reconnect, a peer underlay change, and route withdrawal:
 
@@ -162,7 +162,7 @@ tunnel restoration before reconnect, a peer underlay change, and route withdrawa
 make test-node-topology
 ```
 
-**Self-contained native smoke** — build the payload unprivileged, then `sudo` only
+**Self-contained native smoke** builds the payload without privileges, then uses `sudo` only
 to start the local agent's managed containerd and exercise a real Pod. Checks DNS,
 logs, exec success/failure, source-spoof rejection, exported policy counters, and
 namespace/pin/shim cleanup:
@@ -171,8 +171,8 @@ namespace/pin/shim cleanup:
 make smoke
 ```
 
-**Two-node smoke** — a control plane and two containerd agents with persistent,
-separate mount/network namespaces; routed underlay veths carry VXLAN without a
+**Two-node smoke** runs a control plane and two containerd agents with persistent,
+separate mount/network namespaces. Routed underlay veths carry VXLAN without a
 bridge. Verifies Pod connectivity, DNS, logs, exec, tunnel dependency/repair,
 traffic while one agent is stopped, certificate-based restart, unchanged Pod
 identities/IPs, fresh telemetry, live CNI CHECK, and cleanup:
@@ -181,11 +181,11 @@ identities/IPs, fresh telemetry, live CNI CHECK, and cleanup:
 make smoke-two-node
 ```
 
-Set `GR8S_SMOKE_KEEP_WORKDIR=1` to keep harness logs;
+Set `GR8S_SMOKE_KEEP_WORKDIR=1` to keep harness logs.
 `GR8S_TWO_NODE_FAIL_AFTER_CREATE=1` exercises failure cleanup after both Pods reach
 Running.
 
-**Service map restart recovery** — in a disposable root VM, copy
+**Service map restart recovery** runs in a disposable root VM. Copy
 `scripts/test-service-restart.py`, `scripts/test-service-traffic.py` and
 `scripts/smoke-two-node.py` together with the native binary. The regression stops
 one agent while retaining its Pods, deletes a Service while it is offline, seeds
@@ -200,7 +200,7 @@ python3 test-service-restart.py --gr8s ./gr8s --report-directory ./restart-evide
 Optional `--ctr /path/to/ctr` preloads the test image through the managed
 containerd socket when testing independently of the image mirror.
 
-**Packet Service state collection** — unprivileged bytecode tests cover expiry,
+**Packet Service state collection** uses unprivileged bytecode tests for expiry,
 paired ownership, reservation contention and capacity recovery:
 
 ```sh

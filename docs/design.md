@@ -40,9 +40,9 @@ ag-gRPC. A deterministic fake implementation supports unit and API tests.
 
 The native image contains containerd, its runc-v2 shim, runc, the bridge,
 host-local, and loopback CNI plugins, and a Whistler-generated eBPF object. The
-chained CNI executable name is a symlink to the dumped gr8s image rather than a
-separate program. Managed mode materializes these artifacts on a
-private tmpfs, configures all mutable containerd and IPAM data under the gr8s
+chained CNI executable name is a symlink to the dumped gr8s image. It is not a
+separate program. Managed mode materializes these artifacts on a private tmpfs.
+It configures all mutable containerd and IPAM data under the gr8s
 state directory, supervises the daemon, and removes the tmpfs after shutdown.
 A private bpffs mounted at `containerd/bpf` keeps policy maps observable for
 exactly the managed-runtime lifetime. External mode can instead connect to an

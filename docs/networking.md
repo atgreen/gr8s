@@ -2,7 +2,7 @@
 
 gr8s has **no kube-proxy and no iptables**. Packet handling lives in the kernel,
 programmed from Common Lisp through **Whistler**, which compiles s-expressions
-directly to eBPF bytecode — no LLVM, no clang, no `.c`, no hand-written ELF. The
+directly to eBPF bytecode. It needs no LLVM, clang, `.c` file, or hand-written ELF. The
 eBPF compiler and loader live *inside* the agent. Native builds prepare the
 fixed endpoint bytecode templates before saving the executable; the agent loads
 a relocated copy for each Pod. Other dataplane programs compile in the running
@@ -52,13 +52,13 @@ interpreter and the Linux BPF test-run facility. The privileged native smoke
 injects a spoofed source into a live Pod namespace and requires the rejection
 counter to appear through agent telemetry.
 
-## NetworkPolicy — a compiled eBPF firewall
+## NetworkPolicy: a compiled eBPF firewall
 
 `networking.k8s.io/v1` NetworkPolicy is enforced as a compiled eBPF firewall on
 real Pods. Rather than recompiling a program per policy change, gr8s folds
 enforcement into the per-Pod egress classifier at the host veth and drives it
-from BPF maps: the resolved policy — allowed destination CIDRs in an LPM trie and
-permitted `(group, protocol, port)` tuples in a hash — is written as *data* into
+from BPF maps. The resolved policy contains allowed destination CIDRs in an LPM
+trie and permitted `(group, protocol, port)` tuples in a hash. gr8s writes it as *data* into
 pinned maps, so a policy change is a map update, not a recompile or a re-attach.
 
 Egress to a destination no rule permits is dropped (default-deny), and the drops
@@ -219,7 +219,7 @@ SYN/SYN-ACK packets, partial early-data acceptance, retransmission and closure.
 A refusal may acknowledge the SYN without all its payload; only ACKs within the
 observed SYN sequence range can shorten its lifetime. See
 [the early-data and abrupt-restart evidence](service-tcp-early-data-validation-2026-11-09.json).
-Kernel packet tests additionally cover program lifetime. Source NAT/hairpin,
+Kernel packet tests also cover program lifetime. Source NAT/hairpin,
 return-tuple collision resolution, IPv6 packet translation and external Service
 replacement remain in development. Hairpin and conflicting return tuples
 currently drop safely. See [the engine validation scope](service-packet-engine-validation-2026-11-09.json)
@@ -324,7 +324,7 @@ a port therefore removes the proxy listener, sockhash entry, and firewall rule.
 `scripts/test-ingress-native.py` proves HTTP and HTTPS through every advertised
 node in a three-node cluster and cleans up the fixture afterward.
 
-## Gateway API — the agent is the gateway
+## Gateway API: the agent is the gateway
 
 gr8s implements the Kubernetes Gateway API as a capability of the in-image
 agent — **no Envoy, no sidecars, no kube-proxy, no iptables**. `GatewayClass`,

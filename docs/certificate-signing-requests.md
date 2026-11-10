@@ -23,7 +23,7 @@ cannot be removed, Approved and Denied are exclusive, and an issued certificate
 cannot be replaced or cleared. Metadata changes use optimistic resource
 versions, including upstream unconditional-update behavior when RV is omitted.
 
-The authenticated TLS listener additionally requires signer-specific `approve`
+The authenticated TLS listener also requires signer-specific `approve`
 or `sign` RBAC where appropriate, including the `example.com/*` signer name
 form. The existing administrative HTTP listener retains its existing trust
 boundary. Forged impersonation headers never supply CSR actor identity.

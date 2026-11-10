@@ -13,7 +13,7 @@ run as root and requires `install.sh`, `gr8s-killall.sh`, and
 The installer writes the binary and lifecycle tools to `/usr/local/bin`, the
 selected role's arguments to `/etc/gr8s/server.env` or `/etc/gr8s/agent.env`,
 and its unit to `/etc/systemd/system`. Runtime and cluster data belong under
-`/var/lib/gr8s`; uninstall preserves that directory unless purge is explicit.
+`/var/lib/gr8s`. Uninstall preserves that directory unless purge is explicit.
 
 ## Install from a local binary
 
