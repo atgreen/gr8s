@@ -1,0 +1,25 @@
+{
+  "scope": "State-filesystem capacity and inode telemetry only; broader operational telemetry remains open",
+  "testedProductCommit": "62a2a64",
+  "passed": true,
+  "suite": "apiserver-metrics",
+  "checks": 62,
+  "realHttpListener": true,
+  "rootPrivilegesRequired": false,
+  "fixedFilesystemMetricFamilies": 7,
+  "covers": [
+    "real statvfs measurements",
+    "collection while application access is gated",
+    "unchanged application revision",
+    "no path/resource labels",
+    "measurement error produces availability zero and omits capacity",
+    "no-store collection omitted"
+  ],
+  "command": "sbcl --noinform --non-interactive --eval (require :asdf) --eval (asdf:load-asd (truename gr8s.asd)) --eval (asdf:load-system gr8s/tests) --eval (fiveam:run! gr8s/tests::apiserver-metrics)",
+  "logSha256": "b2f060987e4f89b443304a49b105fddb124a06a81473256a505a234bb4307dc8",
+  "sourceSha256": {
+    "src/server/memory-monitor.lisp": "d19e98cc104bec2a04ba1def4109574bb4c98616b8047435f2830e708d364907",
+    "src/apiserver/http.lisp": "aca1b4aa17142fda6b926234183531e8f5e6039b95818d8ffcb1c108885a3081",
+    "tests/apiserver-metrics-test.lisp": "3ca6e0545447155af620fd35bf9c554105803841a9e82e633ffacc17704b0b33"
+  }
+}

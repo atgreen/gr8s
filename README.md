@@ -116,7 +116,7 @@ The implemented API surface includes:
 | Configuration and identity | ConfigMaps, Secrets, ServiceAccounts, bound tokens, RBAC, certificate issuance, admission webhooks, CEL admission policies |
 | Networking | ClusterIP, NodePort and LoadBalancer Services, EndpointSlices, NetworkPolicy, Gateway API, cluster DNS |
 | Storage | PersistentVolumes and Claims, StorageClasses, local-path provisioning, NFS, CSI drivers |
-| Observability | Metrics endpoints, [Lisp heap/GC and watch retention](docs/control-plane-metrics.md), cAdvisor and API server/scheduler series, resource metrics for `kubectl top` |
+| Observability | Metrics endpoints, [Lisp heap/GC, Raft and filesystem metrics](docs/control-plane-metrics.md), cAdvisor and API server/scheduler series, resource metrics for `kubectl top` |
 | Extensibility | Schema-backed custom resources, defaulting, pruning, validation, finalizers |
 
 Support varies by feature. This overview does not imply complete upstream
