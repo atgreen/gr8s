@@ -418,7 +418,9 @@
       (funcall cancel-later))))
 
 (test parent-cancel-racing-with-deadline-registration-leaves-no-timers
-  (multiple-value-bind (parent cancel-parent) (cl-cancel:with-cancel (cl-cancel:background))
+  (dotimes (round 20)
+    (declare (ignore round))
+    (multiple-value-bind (parent cancel-parent) (cl-cancel:with-cancel (cl-cancel:background))
     (let* ((started (bt:make-semaphore :name "deadline registration started"))
            (creator (bt:make-thread
                      (lambda ()
@@ -432,7 +434,7 @@
              (let ((children (bt:join-thread creator)))
                (is (every #'cl-cancel:cancelled-p children))
                (is (every (lambda (child) (null (cl-cancel::cancellable-timer-entry child))) children))))
-        (funcall cancel-parent)))))
+        (funcall cancel-parent))))))
 
 (test grpc-fractional-wire-timeouts-retain-epoch-deadline-precision
   (with-http2-close-connection (connection socket peer listener)
@@ -458,3 +460,64 @@
                    (deadline (cl-cancel:deadline (ag-grpc::context-cancel-context context))))
               (is (rationalp deadline))
               (is (<= (+ before duration) deadline (+ after duration))))))))))
+
+(test direct-channel-cancel-releases-stream-and-runs-cleanup-once
+  (with-http2-close-connection (connection socket peer listener)
+    (let* ((channel (make-instance 'ag-grpc::grpc-channel :connection connection))
+           (mux (ag-http2:connection-multiplexer connection))
+           (stream (ag-http2::connection-new-stream connection))
+           (id (ag-http2:stream-id stream)) (cleanups 0))
+      (setf (ag-http2:stream-state stream) :open
+            (ag-http2:stream-cleanup-callback stream)
+            (lambda (ignored) (declare (ignore ignored)) (incf cleanups)))
+      (ag-http2::stream-append-data stream #(1 2 3))
+      (ag-grpc:channel-cancel-stream channel id)
+      (ag-grpc:channel-cancel-stream channel id)
+      (is (= 1 cleanups))
+      (is (eq :closed (ag-http2:stream-state stream)))
+      (is (zerop (hash-table-count (ag-http2::multiplexer-streams mux))))
+      (sb-sys:with-deadline (:seconds 2)
+        (is (typep (ag-http2::read-frame (usocket:socket-stream peer)) 'ag-http2::rst-stream-frame)))
+      (is (null (usocket:wait-for-input (list peer) :timeout 0.05 :ready-only t))))))
+
+(test direct-channel-cancel-cleans-up-after-real-write-failure
+  (with-http2-close-connection (connection socket peer listener)
+    (let* ((channel (make-instance 'ag-grpc::grpc-channel :connection connection))
+           (mux (ag-http2:connection-multiplexer connection))
+           (stream (ag-http2::connection-new-stream connection)) (cleanups 0))
+      (setf (ag-http2:stream-state stream) :open
+            (ag-http2:stream-cleanup-callback stream)
+            (lambda (ignored) (declare (ignore ignored)) (incf cleanups)))
+      (close (ag-http2::connection-stream connection))
+      (signals error (ag-grpc:channel-cancel-stream channel (ag-http2:stream-id stream)))
+      (is (= 1 cleanups))
+      (is (eq :closed (ag-http2:stream-state stream)))
+      (is (zerop (hash-table-count (ag-http2::multiplexer-streams mux)))))))
+
+(test bidi-scope-preserves-normal-half-close-and-cancels-abnormal-exits
+  (with-http2-close-connection (connection socket peer listener)
+    (setf (ag-http2:connection-state connection) :open)
+    (let* ((channel (make-instance 'ag-grpc::grpc-channel :host "127.0.0.1" :port 1
+                                                        :connection connection :default-timeout nil))
+           (mux (ag-http2:connection-multiplexer connection)))
+      (multiple-value-bind (stream marker)
+          (ag-grpc:with-bidi-stream (stream channel "/scope") (values stream :normal))
+        (is (eq :normal marker))
+        (is (eq :half-closed-local
+                (ag-http2:stream-state (ag-http2::multiplexer-get-stream mux (ag-grpc::bidi-stream-id stream)))))
+        (is (= 1 (hash-table-count (ag-http2::multiplexer-streams mux))))
+        (ag-grpc:channel-cancel-stream channel (ag-grpc::bidi-stream-id stream)))
+      (is (eq :early (catch 'bidi-exit
+                       (ag-grpc:with-bidi-stream (stream channel "/scope")
+                         (throw 'bidi-exit :early)))))
+      (is (zerop (hash-table-count (ag-http2::multiplexer-streams mux))))
+      (let ((original (make-condition 'simple-error :format-control "bidi body failed")))
+        (is (eq original (handler-case
+                             (ag-grpc:with-bidi-stream (stream channel "/scope") (error original))
+                           (error (condition) condition)))))
+      (is (zerop (hash-table-count (ag-http2::multiplexer-streams mux))))
+      ;; Normal BODY return followed by a failed half-close must also retire.
+      (signals error
+        (ag-grpc:with-bidi-stream (stream channel "/scope")
+          (close (ag-http2::connection-stream connection))))
+      (is (zerop (hash-table-count (ag-http2::multiplexer-streams mux)))))))

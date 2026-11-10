@@ -340,8 +340,7 @@ The cancel function is a lambda accepting an optional error parameter."
                               (min requested-deadline parent-deadline)
                               requested-deadline)))
     (multiple-value-bind (ctx cancel-func)
-        (with-cancel parent)
-      (change-class ctx 'deadline-context :deadline actual-deadline)
+        (make-child-cancellable parent 'deadline-context :deadline actual-deadline)
 
       ;; Register with centralized timer if cancellable is not already cancelled and deadline hasn't passed
       (let ((seconds-until-deadline (- actual-deadline (get-current-time))))

@@ -41,6 +41,17 @@
            ;; Warm caches before comparing live bytes after full GC. Keep both
            ;; sides connected through all samples; teardown cannot hide retention.
            (dotimes (batch 6)
+             ;; Exercise both explicit cancellation and nonlocal scope exits
+             ;; over this same connection, without sending request messages.
+             (dotimes (i 50)
+               (let ((stream (ag-grpc:call-bidirectional-streaming channel "/lifetime.Probe/Echo")))
+                 (ag-grpc:channel-cancel-stream channel (ag-grpc::bidi-stream-id stream))))
+             (dotimes (i 50)
+               (assert (eq :aborted
+                           (catch 'lifetime-abort
+                             (ag-grpc:with-bidi-stream (stream channel "/lifetime.Probe/Echo")
+                               (throw 'lifetime-abort :aborted))))))
+             ;; A successful reply also drains earlier reset frames on this connection.
              (dotimes (i 1000)
                (ag-grpc:call-unary channel "/lifetime.Probe/Echo"
                                    (make-instance 'gr8s.node.v1::raft-ack)
@@ -66,6 +77,7 @@
                               "heapLimitMiB" (/ (sb-ext:dynamic-space-size) (* 1024 1024))
                               "calls" calls "connections" 1 "peakServerStreams" peak
                               "rpcTimeoutSeconds" 0.75
+                              "directCancellations" 300 "abortedBidiScopes" 300
                               "growthAllowanceBytes" allowance "samples" (coerce (nreverse samples) 'vector)))
       (when channel (ignore-errors (ag-grpc:channel-close channel)))
       (ag-grpc:server-stop server)

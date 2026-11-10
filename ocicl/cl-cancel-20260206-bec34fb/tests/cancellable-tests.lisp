@@ -411,3 +411,30 @@
       (with-deadline-context (ctx (1- (get-current-time)))
         (setf entered t)))
     (is (null entered))))
+
+(test deadline-children-are-initialized-before-parent-publication
+  (multiple-value-bind (parent cancel-parent) (with-cancel (background))
+    (let ((creator nil) (valid t) (seen 0))
+      (labels ((observe ()
+                 (bt2:with-lock-held ((cl-cancel::cancellable-lock parent))
+                   (let ((children (cl-cancel::cancellable-children parent)))
+                     (setf seen (max seen (length children))
+                           valid (and valid
+                                      (every (lambda (child)
+                                               (and (typep child 'deadline-context)
+                                                    (slot-boundp child 'cl-cancel::deadline)
+                                                    (slot-boundp child 'cl-cancel::timer-entry)))
+                                             children)))))))
+        (unwind-protect
+             (progn
+               (setf creator
+                     (bt2:make-thread
+                      (lambda () (dotimes (i 1000) (with-timeout parent 60)))))
+               (loop repeat 1000 while (bt2:thread-alive-p creator)
+                     do (observe) (sleep 0))
+               (bt2:join-thread creator)
+               (observe)
+               (is (eq t valid))
+               (is (= 1000 seen)))
+          (when creator (bt2:join-thread creator))
+          (funcall cancel-parent))))))

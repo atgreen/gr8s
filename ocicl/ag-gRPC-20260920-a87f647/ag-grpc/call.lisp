@@ -1047,7 +1047,8 @@ Example:
 (defmacro with-bidi-stream ((var channel method &rest args
                              &key metadata timeout response-type) &body body)
   "Execute BODY with VAR bound to a bidirectional stream.
-Automatically closes the send side when BODY exits.
+Automatically closes the send side after BODY returns normally.
+Cancels and releases the stream if BODY or send-side closure exits abnormally.
 
 Example:
   (with-bidi-stream (stream ch \"/pkg.Svc/Chat\" :response-type 'msg)
@@ -1057,11 +1058,16 @@ Example:
     (do-bidi-recv (reply stream)
       (process reply)))"
   (declare (ignore metadata timeout response-type))
-  `(let ((,var (call-bidirectional-streaming ,channel ,method ,@args)))
-     (unwind-protect
-          (progn ,@body)
-       (unless (bidi-stream-send-closed-p ,var)
-         (stream-close-send ,var)))))
+  (let ((completed (gensym "COMPLETED")))
+    `(let ((,var (call-bidirectional-streaming ,channel ,method ,@args))
+           (,completed nil))
+       (unwind-protect
+            (multiple-value-prog1 (progn ,@body)
+              (unless (bidi-stream-send-closed-p ,var)
+                (stream-close-send ,var))
+              (setf ,completed t))
+         (unless ,completed
+           (ignore-errors (finalize-client-stream ,var)))))))
 
 (defmacro with-server-stream ((var channel method request &rest args
                                &key metadata timeout response-type) &body body)
