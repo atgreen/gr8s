@@ -226,6 +226,25 @@ Retirement and complete-history/receiver bits are left to the activation fence."
                    :preserve-readiness preserve-readiness)))
     count))
 
+(defun retire-service-nat-withdrawn-identities
+    (map previous-networks current-records local-rows
+     &key (lookup #'whistler/loader:map-lookup)
+          (update #'whistler/loader:map-update))
+  "Disable owners removed from a previous or pending network assignment, retaining their
+rows as tombstones. A current trusted claim or live local IPAM lease protects its
+exact incarnation. Never retire an unrelated row that reused the same address."
+  (let ((current (append
+                  (loop for record across current-records
+                        append (service-nat-identity-rows record))
+                  local-rows))
+        (retired 0))
+    (dolist (network previous-networks retired)
+      (loop for record across (gethash "serviceTranslations" network #())
+            for rows = (service-nat-identity-rows record)
+            unless (every (lambda (row) (member row current :test #'equalp)) rows)
+              do (incf retired (withdraw-service-nat-owner-pair
+                                map rows :lookup lookup :update update))))))
+
 (defun service-nat-identities-published-p
     (map records &key (lookup #'whistler/loader:map-lookup)
                       (next-key #'whistler/loader:map-get-next-key))

@@ -658,7 +658,7 @@ Returns NETWORK; signals INVALID-CNI on any violation."
 
 (defun publish-node-runtime-service-nat-inventory
     (node-runtime &optional (network (node-runtime-network node-runtime))
-     &key reset-readiness)
+     &key reset-readiness previous-networks (ipam (node-runtime-ipam node-runtime)))
   "Seed the shared v2 managed-address and identity tables from the network assignment.
 Called after a new assignment and after a retained Service LB map is opened on
 restart, since the network may be restored before the dataplane starts."
@@ -673,7 +673,25 @@ restart, since the network may be restored before the dataplane starts."
     (when (and identities network)
       (gr8s.network::publish-service-nat-identities
        identities (gethash "serviceTranslations" network #())
-       :preserve-readiness (not reset-readiness)))))
+       :preserve-readiness (not reset-readiness))
+      (when previous-networks
+        ;; CNI leases are allocated before owner rows are written. Hold IPAM
+        ;; through retirement so a concurrent ADD cannot be mistaken for a
+        ;; withdrawn replicated claim in this agent process.
+        (if ipam
+            (bt:with-lock-held ((node-ipam-lock ipam))
+              (gr8s.network::retire-service-nat-withdrawn-identities
+               identities previous-networks (gethash "serviceTranslations" network #())
+               (loop for key being the hash-keys of (node-ipam-service-snat-allocations ipam)
+                       using (hash-value alias)
+                     for addresses = (gethash key (node-ipam-allocations ipam))
+                     for primary = (find-if-not (lambda (address) (find #\: address)) addresses)
+                     when (and primary alias)
+                       append (gr8s.network::service-nat-identity-pair
+                               (node-runtime-node-id node-runtime) (car key) (cdr key)
+                               primary alias))))
+            (gr8s.network::retire-service-nat-withdrawn-identities
+             identities previous-networks (gethash "serviceTranslations" network #()) nil))))))
 
 (defun configure-node-runtime-network (node-runtime network &key (persist t))
   "Apply NETWORK as this node's overlay configuration and record it on the runtime.
@@ -724,6 +742,11 @@ conflicting network."
         ;; would drop the forwarded/encapsulated packets without a scoped ACCEPT.
         ;; No-op without firewalld; fail-soft. Only meaningful for a managed node.
         (ignore-errors (ensure-node-runtime-overlay-firewall node-runtime network))
+        ;; Retire withdrawn owner incarnations while the previous applied
+        ;; network is still durable. A crash after promotion must not strand
+        ;; enabled rows that the new assignment no longer names.
+        (publish-node-runtime-service-nat-inventory
+         node-runtime network :previous-networks previous :ipam ipam)
         (when persist
           (write-private-text-atomically
            (node-runtime-network-path node-runtime)
@@ -739,7 +762,6 @@ conflicting network."
                   (lambda () (node-runtime-local-risk-ready-p node-runtime))
                   :mtu (gethash "mtu" network)
                   :dns-address (gethash "dnsAddress" network)))))
-  (publish-node-runtime-service-nat-inventory node-runtime network)
   node-runtime)
 
 (defun node-network-overlay-firewall-identity (network)
