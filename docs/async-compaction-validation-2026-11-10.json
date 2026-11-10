@@ -2870,5 +2870,19 @@
     },
     "checks": 6057,
     "scope": "Source integration only; native full workload uses frozen earlier binary; does not establish real BPF or production serve acceptance"
+  },
+  "currentMainTlsIntegrationRerun": {
+    "testedSourceCommit": "b6ab76d",
+    "passed": true,
+    "exitCode": 0,
+    "log": "/tmp/gr8s-current-main-tls-integration.log",
+    "suiteChecks": {
+      "ha-control-plane": 176,
+      "apiserver-metrics": 44,
+      "raft-tls": 103,
+      "service-accounts": 173
+    },
+    "checks": 496,
+    "scope": "Rerun in original failing suite order; passing does not explain or resolve the earlier intermittent invalid-UTF8 staging failure tracked by podster-ucm.11.9"
   }
 }
