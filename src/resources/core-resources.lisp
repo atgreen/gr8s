@@ -23,6 +23,9 @@
 
 (in-package #:gr8s.resources)
 
+(defconstant +resource-history-bytes-version+ 2
+  "Version of cached history weights; version 2 includes large-string GC pages.")
+
 (defvar *core-resource-view-version* nil)
 
 (defvar *typed-api-status-write* nil
@@ -275,7 +278,8 @@ iterator instead of a list; its final values are returned after STATE."
                                 (list (core-object "revision" revision "time" time "resource" (first key)
                                                    "namespace" (second key) "name" (third key)
                                                    "old" (or old 'null) "new" (or new 'null)
-                                                   "bytes" (template-history-old-bytes old)))))
+                                                   "bytes" (template-history-old-bytes old)
+                                                   "bytesVersion" +resource-history-bytes-version+))))
                    (if new (setf (gethash key index) new) (remhash key index)))
           (maphash (lambda (uid expiry) (setf (gethash uid expirations) expiry))
                    (gethash "eventExpirations" record (core-object)))

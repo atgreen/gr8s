@@ -30,7 +30,11 @@ That is OLD: the store or the next change of the same object holds the new one."
 (defun template-history-entry-bytes (entry)
   "Return the memory ENTRY alone keeps alive. Entries are never changed once published,
 since watches read them unlocked, so one written by an older version is measured each time."
-  (or (gethash "bytes" entry) (template-history-old-bytes (gethash "old" entry))))
+  (let ((bytes (gethash "bytes" entry)))
+    (if (and (eql +resource-history-bytes-version+ (gethash "bytesVersion" entry))
+             (typep bytes '(integer 512 *)))
+        bytes
+        (template-history-old-bytes (gethash "old" entry)))))
 
 (defun trim-template-history (history floor now seconds limit &optional byte-limit)
   "Drop entries older than SECONDS, beyond the newest LIMIT, or beyond the newest BYTE-LIMIT
@@ -65,7 +69,8 @@ Also returns this commit's new entries, newest first."
                    (let ((entry (core-object "revision" revision "time" now "resource" (first key)
                                              "namespace" (second key) "name" (third key)
                                              "old" (or old 'null) "new" (or new 'null)
-                                             "bytes" (template-history-old-bytes old))))
+                                             "bytes" (template-history-old-bytes old)
+                                             "bytesVersion" +resource-history-bytes-version+)))
                      (push entry added)
                      (setf history (nconc history (list entry))))))) keys)
     (multiple-value-bind (history floor)

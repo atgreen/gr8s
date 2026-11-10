@@ -496,3 +496,11 @@ and the exact Raft/store recovery barriers remain available when the application
 budget is full, so an old-term tail can recover after quorum returns. Generic
 Raft library users retain their existing default unless they explicitly set
 `raft-node-uncommitted-byte-limit`.
+
+History's byte estimate includes array headers and whole GC pages occupied by
+large strings. On this SBCL build, a 64 KiB base string occupies three 32 KiB
+pages, so payload length alone substantially understates its cost. The 96 MiB
+history budget therefore retains fewer objects when allocation overhead is
+large. Cached weights from older checkpoints are remeasured under the current
+policy without mutating published entries. This bounds retained history; live
+objects themselves still require memory proportional to the current cluster.

@@ -28,6 +28,15 @@
 (defparameter *podtemplate-clock* #'get-universal-time
   "Clock shared by resource and Pod watch retention.")
 
+(defun approximate-string-heap-bytes (value)
+  "Include whole GC pages occupied by large normalized JSON string arrays.
+A 64 KiB base string needs three 32 KiB pages, including its array header.
+Counting just the payload substantially understates retained physical heap."
+  (let* ((bytes (if (simple-string-p value) (sb-ext:primitive-object-size value)
+                    (+ 32 (* (if (typep value 'base-string) 1 4) (array-total-size value)))))
+         (page sb-vm:gencgc-page-bytes))
+    (if (>= bytes page) (* page (ceiling bytes page)) bytes)))
+
 (defun approximate-heap-bytes (value)
   "Estimate the memory a parsed JSON VALUE occupies, erring high, without allocating."
   (labels ((walk (value)
@@ -38,8 +47,7 @@
                              (incf bytes (+ (walk key) (walk item))))
                            value)
                   bytes))
-               (string (+ 16 (* (if (typep value 'base-string) 1 4)
-                                (length value))))
+               (string (approximate-string-heap-bytes value))
                (cons (+ 16 (walk (car value)) (walk (cdr value))))
                (vector (+ 16 (* 8 (length value))
                           (reduce #'+ value :key #'walk)))
