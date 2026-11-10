@@ -198,7 +198,11 @@ checkpoint on every write.
 The streamed path avoids constructing a complete serialized application in the
 Lisp heap. It preserves durable application generations and bounds retained
 catch-up data. A returning member can require artifact installation after older
-log entries have been compacted. Do not delete WALs, selected generations,
+log entries have been compacted. When an updated receiver reports that cached
+log replay has filled its retention budget, the leader prefers a newer checkpoint
+instead of continuing the replay. Keep members on a version that supports this
+capacity hint; it does not raise the memory budget or bypass the recovery gate.
+Do not delete WALs, selected generations,
 metadata, credentials or snapshot artifacts to reclaim space by hand.
 
 [Constrained-heap validation](async-compaction-validation-2026-11-10.json) covers
