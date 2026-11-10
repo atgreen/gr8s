@@ -20,28 +20,56 @@
 
 (defclass file-raft-storage ()
   ((path :initarg :path :reader file-raft-storage-path)
-   (stream :initarg :stream :accessor file-raft-storage-stream)))
+   (stream :initarg :stream :initform nil :accessor file-raft-storage-stream)
+   (ownership-fd :initarg :ownership-fd :initform nil :accessor file-raft-storage-ownership-fd)))
 
 (defun open-file-raft-storage (path)
-  "Open (creating) an append-only Raft WAL at PATH for continued writes.
-It holds replicated state including Secrets, so only its owner may read it."
+  "Own and open an append-only WAL. A stable sidecar lease survives checkpoint
+replacement. Never unlink the lease file: that would allow competing owners."
   (ensure-directories-exist path)
-  (let ((fd (sb-posix:open (namestring path) (logior sb-posix:o-wronly sb-posix:o-creat) #o600)))
+  (let* ((absolute (merge-pathnames path))
+         (target (merge-pathnames (file-namestring absolute)
+                                 (truename (uiop:pathname-directory-pathname absolute))))
+         (lease (concatenate 'string (namestring target) ".lock"))
+         (ownership-fd nil) (stream nil) (completed nil))
     (unwind-protect
          (progn
-           (sb-posix:fchmod fd #o600)
-           (sb-posix:fsync fd))
-      (sb-posix:close fd)))
-  ;; A fsynced hard-state record is not durable if a newly created WAL's
-  ;; directory entry can disappear. Publish that entry before serving peers.
-  (let ((fd (sb-posix:open
-             (namestring (uiop:pathname-directory-pathname (merge-pathnames path)))
-             (logior sb-posix:o-rdonly sb-posix:o-directory) 0)))
-    (unwind-protect (sb-posix:fsync fd) (sb-posix:close fd)))
-  (make-instance 'file-raft-storage
-                 :path path
-                 :stream (open path :direction :output :element-type 'character
-                                    :if-exists :append :if-does-not-exist :create)))
+           (setf ownership-fd
+                 (sb-posix:open lease (logior sb-posix:o-rdwr sb-posix:o-creat sb-posix:o-nofollow) #o600))
+           (unless (zerop (cffi:foreign-funcall "fcntl" :int ownership-fd :int 2 :int 1 :int))
+             (error "Cannot protect Raft WAL lease across exec"))
+           (let ((stat (sb-posix:fstat ownership-fd)))
+             (unless (and (sb-posix:s-isreg (sb-posix:stat-mode stat))
+                          (= 1 (sb-posix:stat-nlink stat))
+                          (= (sb-posix:geteuid) (sb-posix:stat-uid stat)))
+               (error "Unsafe Raft WAL lease file")))
+           (unless (zerop (cffi:foreign-funcall "flock" :int ownership-fd :int 6 :int))
+             (error "Another owner holds Raft WAL ~A" target)) ; LOCK_EX | LOCK_NB
+           (sb-posix:fchmod ownership-fd #o600)
+           (let ((fd (sb-posix:open (namestring target)
+                                   (logior sb-posix:o-wronly sb-posix:o-creat
+                                           sb-posix:o-append sb-posix:o-nofollow) #o600)))
+             (handler-case
+                 (progn
+                   (let ((stat (sb-posix:fstat fd)))
+                     (unless (and (sb-posix:s-isreg (sb-posix:stat-mode stat))
+                                  (= 1 (sb-posix:stat-nlink stat)))
+                       (error "Unsafe Raft WAL file")))
+                   (sb-posix:fchmod fd #o600)
+                   (sb-posix:fsync fd)
+                   (setf stream (sb-sys:make-fd-stream fd :output t :element-type 'character
+                                                     :external-format :utf-8 :auto-close t)))
+               (error (condition) (sb-posix:close fd) (error condition))))
+           ;; Publish newly created WAL/lease names before serving peers.
+           (let ((fd (sb-posix:open (namestring (uiop:pathname-directory-pathname target))
+                                    (logior sb-posix:o-rdonly sb-posix:o-directory) 0)))
+             (unwind-protect (sb-posix:fsync fd) (sb-posix:close fd)))
+           (prog1 (make-instance 'file-raft-storage :path target :stream stream
+                                                  :ownership-fd ownership-fd)
+             (setf completed t)))
+      (unless completed
+        (when stream (ignore-errors (close stream :abort t)))
+        (when ownership-fd (sb-posix:close ownership-fd))))))
 
 (defun file-raft-write (storage form)
   "Append FORM to STORAGE's WAL as one compact, single-line record (printer
@@ -128,10 +156,13 @@ both streams: its durable outcome is uncertain and requires recovery before use.
       (when (and created (probe-file temporary)) (delete-file temporary)))))
 
 (defun close-file-raft-storage (storage)
-  "Close STORAGE's WAL stream, ignoring any error."
+  "Close the WAL and release its ownership lease. Safe to call repeatedly."
   (when (file-raft-storage-stream storage)
     (ignore-errors (close (file-raft-storage-stream storage))))
-  (setf (file-raft-storage-stream storage) nil))
+  (setf (file-raft-storage-stream storage) nil)
+  (when (file-raft-storage-ownership-fd storage)
+    (sb-posix:close (file-raft-storage-ownership-fd storage))
+    (setf (file-raft-storage-ownership-fd storage) nil)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Recovery: replay the WAL into the persisted Raft fields.
@@ -176,20 +207,25 @@ both streams: its durable outcome is uncertain and requires recovery before use.
    the state machine from the snapshot image via the node's restore-fn, and
    attach an append-only storage for continued operation. VALIDATE-FN, when given,
    must return T for the recovered state before NODE is changed. Returns NODE."
-  (let ((recovered (load-raft-log path)))
-    (when (and validate-fn (not (eq t (funcall validate-fn recovered))))
-      (error "Recovered Raft state validation did not succeed"))
-    (setf (raft-node-current-term node) (raft-recovered-term recovered)
-          (raft-node-voted-for node) (raft-recovered-vote recovered)
-          (raft-node-snapshot-index node) (raft-recovered-snapshot-index recovered)
-          (raft-node-snapshot-term node) (raft-recovered-snapshot-term recovered)
-          (raft-node-snapshot-state node) (raft-recovered-snapshot-state recovered)
-          (raft-node-last-applied node) (raft-recovered-snapshot-index recovered)
-          (raft-node-commit-index node) (raft-recovered-snapshot-index recovered))
-    (when (raft-recovered-snapshot-state recovered)
-      (raft-restore-snapshot-contents node (raft-recovered-snapshot-state recovered)))
-    (let ((v (raft-node-log node)))
-      (setf (fill-pointer v) 0)
-      (dolist (entry (raft-recovered-entries recovered)) (vector-push-extend entry v)))
-    (setf (raft-node-storage node) (open-file-raft-storage path))
-    node))
+  (when (raft-node-storage node)
+    (error "Close and detach existing Raft storage before recovery"))
+  (let ((storage (open-file-raft-storage path)) (completed nil))
+    (unwind-protect
+         (let ((recovered (load-raft-log (file-raft-storage-path storage))))
+           (when (and validate-fn (not (eq t (funcall validate-fn recovered))))
+             (error "Recovered Raft state validation did not succeed"))
+           (setf (raft-node-current-term node) (raft-recovered-term recovered)
+                 (raft-node-voted-for node) (raft-recovered-vote recovered)
+                 (raft-node-snapshot-index node) (raft-recovered-snapshot-index recovered)
+                 (raft-node-snapshot-term node) (raft-recovered-snapshot-term recovered)
+                 (raft-node-snapshot-state node) (raft-recovered-snapshot-state recovered)
+                 (raft-node-last-applied node) (raft-recovered-snapshot-index recovered)
+                 (raft-node-commit-index node) (raft-recovered-snapshot-index recovered))
+           (when (raft-recovered-snapshot-state recovered)
+             (raft-restore-snapshot-contents node (raft-recovered-snapshot-state recovered)))
+           (let ((v (raft-node-log node)))
+             (setf (fill-pointer v) 0)
+             (dolist (entry (raft-recovered-entries recovered)) (vector-push-extend entry v)))
+           (setf (raft-node-storage node) storage completed t)
+           node)
+      (unless completed (close-file-raft-storage storage)))))

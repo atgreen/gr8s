@@ -554,6 +554,9 @@
                (signals error (gr8s::raft-compact node 3))
                (is (equal before (uiop:read-file-string path))))
              (is (null (directory (format nil "~A.checkpoint-*" path))))
+             ;; An uncertain checkpoint keeps the lease until explicit close.
+             (signals error (gr8s::open-file-raft-storage path))
+             (gr8s::close-file-raft-storage storage)
              (multiple-value-bind (node2 kv2) (make-standalone-node :snapshot/restore t)
                (unwind-protect
                     (progn
@@ -593,5 +596,111 @@
     (let ((*raft-wal-reader-evaluated* nil) (*read-eval* t))
       (signals reader-error (gr8s::load-raft-log path))
       (is (null *raft-wal-reader-evaluated*)))))
+
+(in-suite gr8s)
+
+(in-suite raft)
+
+(test raft-wal-owner-excludes-second-open-before-recovery-or-restore
+  (with-raft-temp-dir (path)
+    (let ((owner (gr8s::open-file-raft-storage path)))
+      (unwind-protect
+           (progn
+             (gr8s.raft:raft-storage-save-hard-state owner 7 "first")
+             (let ((before (uiop:read-file-string path)) (validated nil) (restored nil)
+                   (node (gr8s::make-raft-node :id "second")))
+               (setf (gr8s::raft-node-restore-fn node) (lambda (state) (declare (ignore state)) (setf restored t)))
+               (signals error (gr8s::open-file-raft-storage path))
+               (signals error (gr8s::recover-raft-node node path :validate-fn
+                                (lambda (state) (declare (ignore state)) (setf validated t))))
+               (is (null validated))
+               (is (null restored))
+               (is (= 0 (gr8s::raft-node-current-term node)))
+               (is (equal before (uiop:read-file-string path)))
+               (is (= 7 (gr8s::raft-recovered-term (gr8s::load-raft-log path))))))
+        (gr8s::close-file-raft-storage owner))
+      (gr8s::close-file-raft-storage owner)
+      (let ((next (gr8s::open-file-raft-storage path)))
+        (unwind-protect
+             (progn (gr8s.raft:raft-storage-save-hard-state next 8 "next")
+                    (is (= 8 (gr8s::raft-recovered-term (gr8s::load-raft-log path)))))
+          (gr8s::close-file-raft-storage next))))))
+
+(test raft-wal-owner-survives-checkpoint-inode-replacement
+  (with-raft-temp-dir (path)
+    (let* ((owner (gr8s::open-file-raft-storage path))
+           (node (make-standalone-node :storage owner :snapshot/restore t)))
+      (unwind-protect
+           (progn
+             (dotimes (i 3)
+               (gr8s::raft-log-append node (gr8s::make-raft-entry :term 1 :command (list :set "x" i))))
+             (setf (gr8s::raft-node-commit-index node) 3)
+             (gr8s::raft-apply-committed node)
+             (let ((inode (sb-posix:stat-ino (sb-posix:stat path))))
+               (gr8s::raft-compact node 3)
+               (is (/= inode (sb-posix:stat-ino (sb-posix:stat path)))))
+             (signals error (gr8s::open-file-raft-storage path))
+             (is (= 3 (gr8s::raft-recovered-snapshot-index (gr8s::load-raft-log path)))))
+        (gr8s::close-file-raft-storage owner)))))
+
+(test raft-wal-recovery-failures-release-ownership
+  (with-raft-temp-dir (path)
+    (let ((owner (gr8s::open-file-raft-storage path)))
+      (gr8s.raft:raft-storage-save-snapshot owner 3 1 '(:state))
+      (gr8s::close-file-raft-storage owner))
+    (dolist (phase '(:validation :restore))
+      (let ((node (gr8s::make-raft-node :id "failed")))
+        (setf (gr8s::raft-node-restore-fn node)
+              (lambda (state) (declare (ignore state)) (error "Injected restore failure")))
+        (signals error (gr8s::recover-raft-node node path :validate-fn
+                         (lambda (state) (declare (ignore state)) (if (eq phase :validation) nil t))))
+        (is (null (gr8s::raft-node-storage node)))
+        (let ((next (gr8s::open-file-raft-storage path)))
+          (is (not (null next)))
+          (gr8s::close-file-raft-storage next))))))
+
+(test raft-wal-process-lease-is-released-by-sigkill
+  (with-raft-temp-dir (path)
+    (ensure-directories-exist path)
+    (let* ((ready (concatenate 'string (namestring path) ".ready"))
+           (log (concatenate 'string (namestring path) ".child.log"))
+           (script (namestring (merge-pathnames "scripts/raft-wal-owner-test-child.lisp"
+                                                (asdf:system-source-directory :gr8s))))
+           (process (sb-ext:run-program "sbcl"
+                     (list "--dynamic-space-size" "384" "--noinform" "--non-interactive"
+                           "--load" script "--" (namestring path) ready)
+                     :search t :wait nil :input nil :output log :error :output)))
+      (unwind-protect
+           (progn
+             (poll-until (lambda () (or (probe-file ready) (not (sb-ext:process-alive-p process)))) :timeout 60)
+             (unless (probe-file ready) (error "WAL ownership child failed: ~A" (uiop:read-file-string log)))
+             (signals error (gr8s::open-file-raft-storage path))
+             (is (= 17 (gr8s::raft-recovered-term (gr8s::load-raft-log path))))
+             (sb-ext:process-kill process sb-posix:sigkill)
+             (sb-ext:process-wait process)
+             (is (eq :signaled (sb-ext:process-status process)))
+             (let ((owner (gr8s::open-file-raft-storage path)))
+               (unwind-protect
+                    (progn (gr8s.raft:raft-storage-save-hard-state owner 18 "parent")
+                           (is (= 18 (gr8s::raft-recovered-term (gr8s::load-raft-log path)))))
+                 (gr8s::close-file-raft-storage owner))))
+        (when (sb-ext:process-alive-p process)
+          (sb-ext:process-kill process sb-posix:sigkill)
+          (sb-ext:process-wait process))
+        (sb-ext:process-close process)))))
+
+(test raft-member-leaves-external-storage-owned-by-caller
+  (with-raft-temp-dir (path)
+    (let* ((storage (gr8s::open-file-raft-storage path))
+           (member (gr8s::start-raft-member "external" :storage storage :initial-role :witness)))
+      (unwind-protect
+           (progn
+             (gr8s::stop-raft-member member)
+             (is (open-stream-p (gr8s.raft::file-raft-storage-stream storage)))
+             (signals error (gr8s::open-file-raft-storage path))
+             (gr8s.raft:raft-storage-save-hard-state storage 3 "caller")
+             (is (= 3 (gr8s::raft-recovered-term (gr8s::load-raft-log path)))))
+        (gr8s::stop-raft-member member)
+        (gr8s::close-file-raft-storage storage)))))
 
 (in-suite gr8s)

@@ -1,0 +1,36 @@
+{
+  "date": "2026-11-10",
+  "issue": "podster-ucm.2.1.2",
+  "change": "Hold a stable sidecar flock before reading/recovering a writable WAL; keep ownership across checkpoint inode replacement and uncertain checkpoint failure. Release on failed recovery, explicit close, member-owned storage shutdown or process death. Externally supplied storage remains caller-owned.",
+  "sourceSHA256": {
+    "src/raft/log.lisp": "ecbe1864a62453d51c3fa08ab2f05e37a82825d18bdc7cc47081ab724d0544d2",
+    "src/raft/transport/member.lisp": "b9c6e0037ce9d7c23aa5ac315f60149a483fab81f232177c072ccd056835b6be",
+    "tests/raft-test.lisp": "16e5ce5633dbdbe04322bf1ea9032c289745def176b9934a606c072dca9ed7cb",
+    "tests/witness-command-test.lisp": "d7eef66a30bef89045e8b7ac2d2291673bf0cd055b3d59d4c44945ddc5953671",
+    "tests/store-member-restore-test.lisp": "5d444ea4a9139ab2c7757f0886b9f9bad6b7bc722efd64e2576f6f07c053827a",
+    "scripts/raft-wal-owner-test-child.lisp": "448510b9a9afee69aa62e02dfbd86b2d55d8b973354ec55f0f8443cc83860561"
+  },
+  "productionStartupEnabled": false,
+  "fullGoalComplete": false,
+  "scope": "Linux source-process and loopback tests. No privileged container runtime or native certification. Whole-state-directory ownership, torn terminal-record recovery, genesis bootstrap and production HA startup remain separate work.",
+  "validation": {
+    "checks": 454,
+    "suites": {
+      "raft": 237,
+      "store-member-restore": 167,
+      "witness-command": 50
+    },
+    "failed": 0,
+    "skipped": 0,
+    "logSHA256": "37edf9639a061cb5f1e54d5dc66e751dc382bd924a2bc8ffbd8025ecdb028751",
+    "coverage": [
+      "Second same-process and separate-process opener rejection before recovery callbacks or node mutation",
+      "Stable ownership across checkpoint inode replacement and uncertain checkpoint failure",
+      "Recovery validation and restore failure cleanup",
+      "SIGKILL releases ownership; next owner persists a newer term",
+      "Member-owned shutdown releases ownership; external storage remains caller-owned",
+      "Application baseline/suffix replay, repeated/interrupted SIGKILL restore and witness term/vote preservation"
+    ],
+    "supersededRuns": "Initial tests identified a checkpoint fixture lifecycle assumption, misplaced suite selector and direct-stream member shutdown; corrected before this successful fresh-process run."
+  }
+}

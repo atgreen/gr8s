@@ -21,6 +21,15 @@ externally supplied `:storage` are mutually exclusive. Only storage opened via
 `:storage-path` is closed by member shutdown; callers retain ownership of storage
 they explicitly supply. A malformed WAL aborts startup before the listener opens.
 
+Each writable WAL holds a nonblocking exclusive process lock on a stable
+`WAL.lock` sidecar. A second opener is rejected before WAL recovery or application
+restore, including a second opener in the same process. The lock survives atomic
+checkpoint replacement. Read-only `load-raft-log` inspection remains available.
+Explicit storage close or process death releases ownership; leave the sidecar in
+place. An uncertain checkpoint failure retains ownership until explicit close.
+Validation and restore failures release the newly acquired lease. This protects
+the WAL lifecycle; callers must still coordinate the rest of the state directory.
+
 The internal `gr8s.resources::start-store-member-from-wal` function recovers a
 store from a WAL with a retained application artifact. It drains application
 access, acquires the outer writer barriers and installs callbacks before the
@@ -52,5 +61,4 @@ can supply the corresponding `:validate-fn` callback.
 Production `start-ha-control-plane` does not invoke this recovery helper yet.
 Genesis/bootstrap needs to establish a durable baseline, and production callers
 must coordinate state-directory ownership, torn-terminal-record recovery and
-membership readiness before enabling automatic compaction. The recovery tests
-assume exclusive ownership of the member's state directory.
+membership readiness before enabling automatic compaction.

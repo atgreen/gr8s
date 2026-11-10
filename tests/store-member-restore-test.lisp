@@ -283,7 +283,7 @@
                 storage 42 7 state 9 (if single-voter "sink" "source")
                 (coerce (append (list (gr8s::make-raft-entry :index 43 :term 9 :command b))
                                 (unless single-voter (list (gr8s::make-raft-entry :index 44 :term 9 :command c)))) 'vector))
-            (close (gr8s.raft::file-raft-storage-stream storage))))
+            (gr8s.raft:close-file-raft-storage storage)))
         (values wal reference retained)))))
 
 (test startup-restores-baseline-before-listening-and-applies-only-confirmed-suffix
