@@ -439,3 +439,39 @@ without a restore callback. Making that fixture stateless restored snapshot
 catch-up and verified that removed members cannot renew their certificates;
 the product's application-restore requirement remains enforced. These checks
 do not establish native automatic-compaction or VM acceptance.
+
+An internal compaction worker is available through
+`start-ha-control-plane` with an explicit positive `:compaction-interval`.
+The production default remains `nil`, so ordinary `serve` does not start it.
+Its policy triggers when either the retained WAL or a conservative estimate of
+retained command memory reaches `:compaction-bytes` (16 MiB by default), or the
+applied prefix reaches `:compaction-entries` (256 by default). The WAL check uses
+the open descriptor; the memory check scans retained commands until the budget
+is reached. This accounts for Lisp strings occupying more memory than their
+UTF-8 representation on disk without scanning resource watch history.
+
+The separate worker drains ingress while the Raft clock continues, acquires
+outer application barriers before the member mutex, rechecks eligibility,
+captures exactly last-applied, replaces the WAL, and reclaims obsolete artifacts.
+A capture failure with healthy storage reopens only the worker's own gate;
+uncertain WAL failure leaves application access blocked. Shutdown wakes and
+joins the worker before stopping Raft. Internal counters record successful
+cycles, reclaimed artifacts and the most recent error.
+
+The opt-in worker's HA tests cover repeated byte-triggered checkpoints and
+recovery, capture failure, uncertain storage failure and waking a long-interval
+worker at shutdown. Production activation still requires capture-pause and
+multi-member availability validation (`podster-ucm.11.3.9`). Retained watch
+history remains part of the snapshot: a tiny live resource set does not imply a
+tiny snapshot, and an overly aggressive trigger can repeatedly serialize that
+history. Uncommitted proposals also need separate admission backpressure
+(`podster-ucm.11.4`), since compaction cannot discard them safely.
+
+Build the internal native retention probe with
+`scripts/build-compaction-native-harness.lisp`, then run the resulting
+`build/gr8s-compaction-acceptance --dynamic-space-size 384 PRIVATE_ROOT 2048`.
+Use a new private directory for `PRIVATE_ROOT`. The probe creates/deletes 2,048
+64 KiB objects (128 MiB of payload), retains the normal bounded watch history,
+uses the 16 MiB disk/command-memory trigger, samples retained WAL/artifact counts and recovers a
+sentinel after restart. This is an internal single-member native probe rather
+than production CLI, multi-member or VM acceptance.
