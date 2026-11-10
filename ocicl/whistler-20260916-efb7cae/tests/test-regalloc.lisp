@@ -421,3 +421,35 @@ propagated into a helper/kfunc and values whose low32 sign bit is set."
             (whistler/ir::ectx-emit ctx (whistler/bpf:emit-exit))
             (let ((bytes (whistler/bpf:insn-bytes (reverse (whistler/ir::emit-ctx-insns ctx)))))
               (is (= (ldb (byte 64 0) value) (interpret-scalar-bpf bytes nil))))))))))
+
+(test phi-threading-preserves-values-after-validation
+  "A merged value remains live after a later conditional early return."
+  (dolist (initial '(0 7))
+    (dolist (selected '(1 102))
+      (dolist (nested '(nil t))
+        (let* ((source
+                 (format nil
+                         "(let ((offset u32 ~D))
+                            (when (= (get-prandom-u32) 1) (setf offset ~D))
+                            (when (/= offset 0)
+                              ~A)
+                            (return offset))"
+                         initial selected
+                         (if nested
+                             "(let ((local u32 0))
+                                (unless (= (get-prandom-u32) 1) (return 2))
+                                (if (= (get-prandom-u32) 1)
+                                    (setf local 10) (setf local 20))
+                                (unless (= local 10) (return 3)))"
+                             "(unless (= (get-prandom-u32) 1) (return 2))")))
+               (bytes (compile-insn-bytes (read-whistler-forms source))))
+          (dolist (choose '(0 1))
+            (dolist (allow '(0 1))
+              (dolist (inner '(0 1))
+                (let* ((value (if (= choose 1) selected initial))
+                       (expected (cond ((zerop value) value)
+                                       ((zerop allow) 2)
+                                       ((and nested (zerop inner)) 3)
+                                       (t value))))
+                  (is (= expected (interpret-scalar-bpf bytes (list choose allow inner)))
+                      "~A inputs ~S" source (list choose allow inner)))))))))))

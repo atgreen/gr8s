@@ -1,0 +1,31 @@
+{
+  "date": "2026-11-10",
+  "issue": "podster-p9c.16",
+  "scope": "Whistler branch threading correctness. Does not establish integrated Service graph correctness or CNI activation.",
+  "sourceSHA256": {
+    "ocicl/whistler-20260916-efb7cae/src/ssa-opt.lisp": "3606ee63d52bebc63cbf5e4992393098690b5f7ca90e957384e01c0c9f7076c0",
+    "ocicl/whistler-20260916-efb7cae/tests/test-regalloc.lisp": "d43cb8811f7dc23048214ef2af3212c09e5fd466087fc47f912abe0eaec1b5ce"
+  },
+  "regression": {
+    "name": "phi-threading-preserves-values-after-validation",
+    "before": {
+      "checks": 64,
+      "passed": 52,
+      "failed": 12
+    },
+    "after": {
+      "checks": 64,
+      "passed": 64,
+      "failed": 0
+    },
+    "coverage": "Merged values 1/102, initial 0/7, simple/nested validation, all combinations of selecting branch, validation success and nested check."
+  },
+  "compilerSuite": {
+    "checks": 1487,
+    "passed": 1487,
+    "failed": 0,
+    "skipped": 0
+  },
+  "rootCause": "phi-branch-threading bypassed the definition of a merged value still used after its conditional validation. Later PHI pruning substituted only the other predecessor value.",
+  "fix": "Thread only when the bypassed block contains the branch and its PHI alone, and that PHI has no other users."
+}
