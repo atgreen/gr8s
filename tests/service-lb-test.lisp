@@ -1043,12 +1043,21 @@
                    :service-lb dataplane :received-revision 4
                    :service-risk-ready-revision 4)))
     (is-true (gr8s.agent::node-runtime-local-risk-ready-p runtime))
+    (is (null (gr8s.agent::ensure-node-snapshot-service-risk-ready runtime)))
     (setf (gr8s.agent::node-runtime-received-revision runtime) 5)
     (is-false (gr8s.agent::node-runtime-local-risk-ready-p runtime))
+    (signals gr8s::node-snapshot-incomplete
+      (gr8s.agent::ensure-node-snapshot-service-risk-ready runtime))
     (setf (gr8s.agent::node-runtime-service-risk-ready-revision runtime) 5)
     (is-true (gr8s.agent::node-runtime-local-risk-ready-p runtime))
+    (is (null (gr8s.agent::ensure-node-snapshot-service-risk-ready runtime)))
     (setf (gr8s.agent::node-runtime-service-lb runtime) nil)
-    (is-false (gr8s.agent::node-runtime-local-risk-ready-p runtime))))
+    (is-false (gr8s.agent::node-runtime-local-risk-ready-p runtime))
+    (is (null (gr8s.agent::ensure-node-snapshot-service-risk-ready runtime)))
+    (setf (gr8s.agent::node-runtime-service-lb runtime)
+          (gr8s::%make-service-lb-dataplane
+           :maps (list (fake-lb-map "gr8s_service_v4" 1))))
+    (is (null (gr8s.agent::ensure-node-snapshot-service-risk-ready runtime)))))
 
 (test service-risk-publication-failure-does-not-expose-service
   (let* ((dataplane (gr8s::%make-service-lb-dataplane
