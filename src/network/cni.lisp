@@ -99,7 +99,7 @@ All privileged plugin work is dispatched to this agent through its CNI socket.")
 (defvar *cni-service-packets* nil
   "True while compiling an endpoint guard bound to the node's shared Service maps.")
 
-(defvar *cni-policy-profile* nil
+(defvar *cni-policy-profile* :v1
   "Strict expected map profile while CNI ADD or CHECK validates pinned maps.")
 
 (defun cni-service-profile (configuration)

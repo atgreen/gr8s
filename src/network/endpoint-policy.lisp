@@ -46,10 +46,9 @@
          (legacy (append +cni-policy-map-specs+
                          '(("gr8s_pkt_stages" 3 4 4 8 0))
                          (service-packet-map-specs)))
-         (candidates (case profile
+         (candidates (ecase profile
                        (:v1 legacy)
-                       (:v2 (service-nat-map-specs))
-                       (otherwise (append legacy (service-nat-map-specs)))))
+                       (:v2 (service-nat-map-specs))))
          (spec (find-if
                 (lambda (candidate)
                   (and (string= name (first candidate))
