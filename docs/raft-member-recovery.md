@@ -144,9 +144,20 @@ commit can make an older receipt insufficient. Missing receipts from older
 binaries, failed application, stale terms and invalid applied indices cannot
 establish readiness; rejected promotions return `:learner-not-ready`.
 
-This guard does not yet make Join admit requested voters as learners. Automatic promotion after catch-up and native interrupted-join acceptance remain
-under `podster-ucm.2.9`. Production durable voter recovery
-remains disabled until the complete admission and startup paths are integrated.
+Join and transport admission add requested voters as learners with committed
+promotion intent. The member clock promotes them only after current-term applied
+progress qualifies. A successful Join accepts admission; it does not establish
+that the joining member already votes. Repeated joins preserve an existing voter
+and reject conflicting endpoints or role changes. An unrelated admission is
+refused while another configuration change is unapplied, including retained
+prior-term configuration entries and removals.
+
+After leader handoff, a current-term entry establishes a committed barrier before
+promotion. The driver appends a protocol barrier only when no current-term entry
+already exists, so a disconnected quorum cannot cause one new entry per tick.
+The protocol barrier does not enter the application state machine. Native slow
+snapshot/interrupted-join acceptance remains under `podster-ucm.2.9`; production
+durable voter recovery remains disabled pending complete startup integration.
 
 Internal admission callers can propose a learner with `:promotion-role :voter`
 to record its requested eventual role. The intent becomes effective with the
@@ -160,4 +171,5 @@ Intent validation requires distinct learner IDs and voter targets and runs befor
 configuration mutation or snapshot application restore. Recovery does not restore
 applied-progress receipts: a new leader must obtain fresh current-term evidence
 before proposing promotion. Join admission and the automatic promotion driver
-are not connected to this metadata yet.
+use this metadata to resume outstanding work. Learners without applied-progress
+receipts remain learners.

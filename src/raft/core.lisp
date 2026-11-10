@@ -526,7 +526,8 @@ alone so existing persisted commands remain deliverable."
                                                   (getf (cdr command) :api-urls)
                                                   (getf (cdr command) :promotions))
                                :configured)
-                        (and (raft-node-apply-fn node) (funcall (raft-node-apply-fn node) command))))
+                        (if (equal command '(:raft-barrier)) :barrier
+                            (and (raft-node-apply-fn node) (funcall (raft-node-apply-fn node) command)))))
                   (callback (gethash index (raft-node-pending node))))
              ;; A failed application must be retried at this exact log position.
              ;; Callback failures, in contrast, must never apply the command twice.
@@ -597,6 +598,14 @@ alone so existing persisted commands remain deliverable."
   (when (raft-node-on-configured node)
     (funcall (raft-node-on-configured node) node)))
 
+(defun raft-config-change-in-flight-p (node)
+  "Find retained, unapplied configuration entries, including after leader change."
+  (or (plusp (hash-table-count (raft-node-pending-members node)))
+      (loop for index from (1+ (raft-node-last-applied node)) to (raft-last-log-index node)
+            for entry = (raft-log-entry node index)
+            for command = (and entry (raft-entry-command entry))
+            thereis (and (consp command) (eq :raft-config (first command))))))
+
 (defun raft-peer-ready-for-promotion-p (node id)
   "A learner must acknowledge application of this leader's current-term commit.
 Caller serializes access to NODE. Receipt evidence is volatile and reacquired
@@ -606,7 +615,7 @@ following leadership changes; old peers without applied receipts cannot qualify.
     (and (eq :leader (raft-node-role node))
          (eq :learner (gethash id (raft-node-roles node)))
          (not (raft-node-removed node))
-         (zerop (hash-table-count (raft-node-pending-members node)))
+         (not (raft-config-change-in-flight-p node))
          (plusp boundary)
          (= (raft-node-current-term node) (raft-log-term node boundary))
          (= boundary (raft-node-last-applied node))
@@ -625,7 +634,7 @@ following leadership changes; old peers without applied receipts cannot qualify.
     (error "Promotion intent requires adding a learner with voter intent"))
   (cond
     ((not (eq (raft-node-role node) :leader)) (values nil :not-leader))
-    ((plusp (hash-table-count (raft-node-pending-members node))) (values nil :change-in-flight))
+    ((raft-config-change-in-flight-p node) (values nil :change-in-flight))
     ((and add (eq role :voter) (eq :learner (gethash add (raft-node-roles node)))
           (not (raft-peer-ready-for-promotion-p node add)))
      (values nil :learner-not-ready))

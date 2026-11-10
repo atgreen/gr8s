@@ -220,6 +220,7 @@
     (when (raft-member-running member)
       (bt:with-lock-held ((raft-member-lock member))
         (raft-tick (raft-member-node member))
+        (ignore-errors (raft-member-promote-learners member))
         (raft-member-expire-snapshot-receiver member))
       ;; Store startup checks may acquire outer application barriers. They must
       ;; run after releasing the member mutex, and never kill the tick clock.

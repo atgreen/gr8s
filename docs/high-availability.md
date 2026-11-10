@@ -71,6 +71,13 @@ gr8s serve --raft-join 10.0.0.1:7000 --raft-id cp2 --raft-port 7000 \
 gr8s witness --join 10.0.0.1:7000 --node-name arb --token "$TOKEN" --ca-pin "$CA_PIN"
 ```
 
+Requested voters first join as learners. Existing voters keep their quorum while
+the learner installs application state and catches up. The leader automatically
+promotes the learner after it acknowledges application through a current-term
+committed boundary. Join success means admission was accepted; promotion follows
+asynchronously. Repeating the same Join preserves an already promoted voter;
+conflicting endpoints are refused.
+
 HA is **opt-in** for a fresh state directory. Once HA intent is persisted,
 restart with the appropriate `--raft-init` or `--raft-join` options; omitting them
 is refused before application initialization.

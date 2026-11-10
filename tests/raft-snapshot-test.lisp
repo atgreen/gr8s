@@ -286,7 +286,7 @@
                                  :timeout 30))
                  (is (= (* 256 1024) (length (gethash "blob" b-kv))))
                  (is (= boundary (gr8s::raft-node-snapshot-index (gr8s::raft-member-node b))))
-                 (is (eq :voter (gr8s::raft-node-self-role (gr8s::raft-member-node b))))
+                 (is (poll-until (lambda () (eq :voter (gr8s::raft-node-self-role (gr8s::raft-member-node b)))) :timeout 15))
                  (bt:with-lock-held (observation-lock)
                    (is-true injected)
                    (is (> (length chunks) 4))

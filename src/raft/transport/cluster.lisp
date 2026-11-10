@@ -87,21 +87,66 @@
   (bt:with-lock-held ((raft-member-lock member))
     (raft-member-enable-dynamic-membership member :pki pki)
     (let ((node (raft-member-node member)))
-      (setf (raft-node-self-role node) :learner
-            (raft-node-removed node) nil)
+      (unless (member (gethash (raft-node-id node) (raft-node-roles node)) '(:voter :witness))
+        (setf (raft-node-self-role node) :learner))
+      (setf (raft-node-removed node) nil)
       (dolist (a seed-addresses)
         (setf (gethash (car a) (raft-node-peer-addresses node)) (cdr a)))
       (raft-member-reconcile-links member))))
 
+(defun raft-cluster-admit-member (node id host port role &optional api-url)
+  "Admit a requested voter as a learner. Caller holds the member lock."
+  (unless (and (stringp id) (plusp (length id)) (stringp host) (plusp (length host))
+               (typep port '(integer 1 65535)) (member role '(:voter :witness :learner)))
+    (error "Invalid Raft admission endpoint or role"))
+  (unless (raft-leader-p node) (return-from raft-cluster-admit-member (values nil :not-leader)))
+  (let* ((existing (cdr (assoc id (raft-current-config node) :test #'equal)))
+         (pending (gethash id (raft-node-pending-members node)))
+         (address (gethash id (raft-node-peer-addresses node)))
+         (target (if (eq role :voter) :learner role)))
+    (when (or existing pending)
+      (unless (and (equal address (list host port))
+                   (or (null api-url) (equal api-url (gethash id (raft-node-api-urls node)))))
+        (return-from raft-cluster-admit-member (values nil :identity-conflict)))
+      (when (and existing
+                 (or (eq existing role)
+                     (and (eq role :voter) (eq existing :learner)
+                          (eq :voter (gethash id (raft-node-promotion-intents node))))))
+        (return-from raft-cluster-admit-member (values (raft-node-last-applied node) t)))
+      (when pending
+        (let* ((entry (loop for index from (1+ (raft-node-last-applied node)) to (raft-last-log-index node)
+                            for command = (raft-entry-command (raft-log-entry node index))
+                            when (and (consp command) (eq :raft-config (first command))) return command))
+               (intent (cdr (assoc id (getf (cdr entry) :promotions) :test #'equal))))
+          (return-from raft-cluster-admit-member
+            (if (and (eq pending target) (eq intent (and (eq role :voter) :voter)))
+                (values (raft-last-log-index node) t) (values nil :role-conflict)))))
+      (unless (and (eq existing :learner) (eq role :voter))
+        (return-from raft-cluster-admit-member (values nil :role-conflict))))
+    (raft-propose-config node :add id :role target :address (list host port) :api-url api-url
+                             :promotion-role (and (eq role :voter) :voter))))
+
 (defun raft-cluster-add-member (member id host port &key (role :voter))
-  "Leader-side admission of a new member ID at HOST:PORT (a voter or a witness).
-   Records its address, opens a link to it, and proposes the single-member config
-   change. Returns (values index t) once proposed, or (values nil reason) if this
-   member is not the leader or a change is already in flight."
+  "Admit a member; voters first catch up as learners without changing quorum."
   (bt:with-lock-held ((raft-member-lock member))
-    (let ((node (raft-member-node member)))
-      (setf (gethash id (raft-node-peer-addresses node)) (list host port))
-      (raft-propose-config node :add id :role role :address (list host port)))))
+    (raft-cluster-admit-member (raft-member-node member) id host port role)))
+
+(defun raft-member-promote-learners (member)
+  "Drive one bounded promotion step under the member lock, without blocking."
+  (let ((node (raft-member-node member)))
+    (when (and (raft-leader-p node)
+               (or (plusp (hash-table-count (raft-node-promotion-intents node)))
+                   (raft-config-change-in-flight-p node)))
+      (cond
+        ((/= (raft-node-current-term node) (raft-log-term node (raft-node-commit-index node)))
+         ;; A retained current-term entry already supplies the barrier. Retrying
+         ;; a disconnected quorum must not append another on each clock tick.
+         (unless (= (raft-node-current-term node) (raft-last-log-term node))
+           (raft-propose node '(:raft-barrier))))
+        ((not (raft-config-change-in-flight-p node))
+         (let ((id (first (sort (loop for id being the hash-keys of (raft-node-promotion-intents node)
+                                     when (raft-peer-ready-for-promotion-p node id) collect id) #'string<))))
+           (when id (raft-propose-config node :add id :role :voter))))))))
 
 (defun raft-cluster-remove-member (member id)
   "Leader-side removal of member ID. Returns (values index t) once proposed, or
@@ -163,11 +208,11 @@
                            :leader-id (or leader "")
                            :leader-host (if addr (first addr) "")
                            :leader-port (if addr (second addr) 0)))
-          (progn
-            (raft-propose-config node :add id :role role :address (list host port)
-                                      :api-url (and (plusp (length api-url)) api-url))
+          (multiple-value-bind (index accepted)
+              (raft-cluster-admit-member node id host port role (and (plusp (length api-url)) api-url))
+            (declare (ignore index))
             (make-instance 'gr8s.node.v1::join-response
-                           :accepted t
+                           :accepted (eq t accepted)
                            :leader-id (raft-node-id node)
                            :members (raft-cluster-address-book-members node)))))))
 
@@ -176,7 +221,7 @@
   (loop for mid being the hash-keys of (raft-node-peer-addresses node) using (hash-value addr)
         collect (make-instance 'gr8s.node.v1::raft-member
                                :id mid :host (first addr) :port (second addr)
-                               :role (string-downcase (symbol-name (raft-member-role node mid))))))
+                               :role (string-downcase (symbol-name (or (gethash mid (raft-node-pending-members node)) (raft-member-role node mid)))))))
 
 (defun raft-cluster-call-join (member host port &key node-name token (role :voter) api-url (timeout 5))
   "Dial HOST:PORT and send one Join request for MEMBER. Returns the JoinResponse."
@@ -207,7 +252,9 @@
   ;; rival single-node term before the leader admits us.
   (bt:with-lock-held ((raft-member-lock member))
     (raft-member-enable-dynamic-membership member :pki pki)
-    (setf (raft-node-self-role (raft-member-node member)) :learner))
+    (let ((node (raft-member-node member)))
+      (unless (member (gethash (raft-node-id node) (raft-node-roles node)) '(:voter :witness))
+        (setf (raft-node-self-role node) :learner))))
   (loop with h = host and p = port
         for attempt from 0 to max-redirects
         for response = (raft-cluster-call-join member h p :node-name node-name

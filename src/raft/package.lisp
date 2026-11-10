@@ -30,6 +30,7 @@
    #:raft-broadcast-append
    #:raft-cluster-size
    #:raft-compact
+   #:raft-config-change-in-flight-p
    #:raft-config-addresses
    #:raft-config-api-urls
    #:raft-configure

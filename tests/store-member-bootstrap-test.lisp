@@ -84,7 +84,7 @@
                (is (poll-until (lambda () (not (gr8s.store::store-access-blocked-p sink))) :timeout 20))
                (is (equal "A" (startup-store-raw-value sink)))
                (is (= 1 (gr8s::raft-node-snapshot-index (gr8s::raft-member-node learner))))
-               (is (eq :voter (gr8s::raft-node-self-role (gr8s::raft-member-node learner))))
+               (is (poll-until (lambda () (eq :voter (gr8s::raft-node-self-role (gr8s::raft-member-node learner)))) :timeout 15))
                (gr8s::create-core-resource source "configmaps" (configmap-input "after" "k" "replicated") "default")
                (is (poll-until (lambda () (equal "replicated" (configmap-value sink "after" "k"))) :timeout 15)))
           (when learner (gr8s::stop-raft-member learner))
