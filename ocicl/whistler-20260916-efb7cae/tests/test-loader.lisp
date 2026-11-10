@@ -91,6 +91,87 @@
   (is (equal (format nil "BPF verifier rejected program~%legacy")
              (princ-to-string (make-condition 'whistler/loader:bpf-verifier-error :log "legacy")))))
 
+(defun simulated-program-load-sequence (results &key (attempts 3))
+  (let ((remaining (copy-list results)) (phases nil)
+        (*trace-output* (make-string-output-stream)))
+    (values
+     (handler-case
+         (whistler/loader::load-program
+          (make-array 16 :element-type '(unsigned-byte 8) :initial-element 0)
+          3 "GPL" :attempts attempts :log-buf-size 32 :expected-attach-type 46 :attach-btf-id 17
+          :bpf (lambda (command attribute size context)
+                 (is (= 5 command))
+                 (is (= 256 size))
+                 (is (= 46 (whistler/loader::get-u32 attribute 68)))
+                 (is (= 17 (whistler/loader::get-u32 attribute 108)))
+                 (push (whistler/loader::get-u32 attribute 24) phases)
+                 (when (plusp (whistler/loader::get-u32 attribute 28))
+                   (let ((sap (sb-sys:int-sap
+                               (+ (whistler/loader::get-u32 attribute 32)
+                                  (ash (whistler/loader::get-u32 attribute 36) 32)))))
+                     (setf (sb-sys:sap-ref-8 sap 0) (char-code #\X))))
+                 (unless remaining (error "Program load exceeded the test's syscall budget"))
+                 (let ((result (pop remaining)))
+                   (if (minusp result)
+                       (error 'whistler/loader:bpf-error :context context :errno (- result))
+                       result))))
+       (whistler/loader:bpf-error (error) error))
+     (nreverse phases)
+     (get-output-stream-string *trace-output*))))
+
+(test program-load-eagain-recovers-before-allocating-the-diagnostic-log
+  (multiple-value-bind (fd phases trace) (simulated-program-load-sequence '(-11 -11 93))
+    (is (= 93 fd))
+    (is (equal '(0 0 0) phases))
+    (is (search "2 EAGAIN retries (initial phase)" trace))))
+
+(test program-load-eagain-can-recover-during-the-logging-phase
+  (multiple-value-bind (fd phases trace) (simulated-program-load-sequence '(-13 -11 -11 94))
+    (is (= 94 fd))
+    (is (equal '(0 6 6 6) phases))
+    (is (search "2 EAGAIN retries (logging phase)" trace))))
+
+(test program-load-eagain-exhaustion-preserves-every-failure-and-bounds-both-phases
+  (multiple-value-bind (error phases trace)
+      (simulated-program-load-sequence (make-list 10 :initial-element -11) :attempts 5)
+    (is (typep error 'whistler/loader:bpf-program-load-error))
+    (is-false (typep error 'whistler/loader:bpf-verifier-error))
+    (is (equal '(0 0 0 0 0 6 6 6 6 6) phases))
+    (is (= 11 (whistler/loader::bpf-error-errno error)))
+    (is (= 11 (whistler/loader::bpf-error-errno
+               (whistler/loader:bpf-program-load-error-initial-error error))))
+    (is (equal (make-list 10 :initial-element 11)
+               (mapcar #'whistler/loader::bpf-error-errno
+                       (whistler/loader:bpf-program-load-error-attempt-errors error))))
+    (is (equal "X" (whistler/loader:bpf-program-load-error-log error)))
+    (is-false (search "recovered" trace))))
+
+(test program-load-eagain-stops-at-a-permanent-error-and-preserves-the-first-one
+  (dolist (permanent '(1 13 22 28))
+    (multiple-value-bind (error phases trace)
+        (simulated-program-load-sequence (list -11 (- permanent) -28))
+      (is (equal '(0 0 6) phases))
+      (is (equal (list 11 permanent 28)
+                 (mapcar #'whistler/loader::bpf-error-errno
+                         (whistler/loader:bpf-program-load-error-attempt-errors error))))
+      (is (eql (= permanent 13) (typep error 'whistler/loader:bpf-verifier-error)))
+      (is (= 11 (whistler/loader::bpf-error-errno
+                 (whistler/loader:bpf-program-load-error-initial-error error))))
+      (is (= 28 (whistler/loader::bpf-error-errno error)))
+      (is-false (search "recovered" trace)))))
+
+(test program-load-attempt-budget-is-validated-before-any-syscall
+  (dolist (attempts '(0 17 -1 1/2))
+    (signals type-error
+      (whistler/loader::load-program
+       #() 3 "GPL" :attempts attempts
+       :bpf (lambda (&rest ignored) (declare (ignore ignored)) (error "must not load")))))
+  (multiple-value-bind (error phases trace)
+      (simulated-program-load-sequence '(-11 -11) :attempts 1)
+    (is (equal '(0 6) phases))
+    (is (typep error 'whistler/loader:bpf-program-load-error))
+    (is-false (search "recovered" trace))))
+
 (test libbpf-classifier-sections-are-sched-cls-programs
   (dolist (section '("classifier" "action" "tc" "tc/egress"))
     (is (= whistler/loader::+bpf-prog-type-sched-cls+

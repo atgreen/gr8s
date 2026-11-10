@@ -19,15 +19,17 @@
 
 (define-condition bpf-program-load-error (bpf-error)
   ((initial-error :initarg :initial-error :reader bpf-program-load-error-initial-error)
+   (attempt-errors :initarg :attempt-errors :initform nil :reader bpf-program-load-error-attempt-errors)
    (log :initarg :log :reader bpf-program-load-error-log :reader bpf-verifier-error-log)
    (log-buf-size :initarg :log-buf-size :reader bpf-program-load-error-log-buf-size))
   (:report (lambda (c s)
              (if (slot-boundp c 'initial-error)
-                 (format s "BPF program load failed: initial ~a; logging retry errno ~d (~a); verifier log ~d/~d bytes~%~a"
+                 (format s "BPF program load failed: initial ~a; logging retry errno ~d (~a); verifier log ~d/~d bytes; attempt errnos ~S~%~a"
                          (bpf-program-load-error-initial-error c)
                          (bpf-error-errno c) (sb-int:strerror (bpf-error-errno c))
                          (length (bpf-program-load-error-log c))
                          (bpf-program-load-error-log-buf-size c)
+                         (mapcar #'bpf-error-errno (bpf-program-load-error-attempt-errors c))
                          (bpf-program-load-error-log c))
                  ;; Keep explicitly constructed legacy verifier conditions
                  ;; printable when callers provide only the original :LOG.
