@@ -2853,5 +2853,22 @@
     "log": "/tmp/gr8s-worker-populated-cache-tests.log",
     "test": "stopping-compaction-worker-releases-its-populated-disk-cache",
     "scope": "Joined worker restores default cache policy, releases populated anonymous descriptor and cache bytes/count, leaves durable WAL open"
+  },
+  "currentMainSourceIntegration": {
+    "testedSourceCommit": "f7422e3",
+    "mergedMainCommit": "a5e3bd1",
+    "passed": true,
+    "exitCode": 0,
+    "log": "/tmp/gr8s-current-main-disk-catchup-tests.log",
+    "suiteChecks": {
+      "raft": 5006,
+      "raft-membership": 96,
+      "raft-transport": 52,
+      "raft-snapshot": 177,
+      "ha-control-plane": 176,
+      "service-lb": 550
+    },
+    "checks": 6057,
+    "scope": "Source integration only; native full workload uses frozen earlier binary; does not establish real BPF or production serve acceptance"
   }
 }
