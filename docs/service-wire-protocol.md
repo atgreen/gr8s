@@ -100,3 +100,14 @@ flag4 alone does not identify a compatible receiver. Local typed stages require
 enabled1, alias-ready4 and wire-ready8 together; complete-history2 remains a
 separate source-selection property. This is an enforcement check in the graph,
 not a claim that the node agent publishes or acknowledges these flags yet.
+
+The graph has explicit packet-format boundaries. Generation, selection, NAT
+commit, request wrapping, initial reply classification and maintenance accept
+plain packets only and reject reserved envelopes before changing flow state.
+The egress root also rejects Pod-originated envelopes. Reply classification can
+wrap a backend response before egress policy; reply-commit validates that
+envelope and sends it directly to delivery, bypassing ordinary NAT commit.
+Ingress preparation, policy, restoration and request reception retain the
+envelope until the authorized translation or reply reservation is complete.
+These boundaries avoid unnecessary parsing and stack use in plain stages while
+preserving the metadata across both policy checks.

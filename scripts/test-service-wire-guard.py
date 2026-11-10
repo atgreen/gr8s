@@ -262,6 +262,30 @@ def denied_and_stale(factory, protocol, shared):
         client.close()
 
 
+def plain_stage_contract(factory):
+    client, backend = factory(), factory()
+    try:
+        setup(client, backend)
+        p.publish(client, 17)
+        encoded = run(client, 0, graph.packet(protocol=17, sport=45017))
+        tables = (n.FWD, n.REV, RX, RI, WL)
+        before = {name: {key: client.lookup(name, key) for key in client.keys(name)}
+                  for name in tables}
+        stages = ("gr8s_nat_generation", "gr8s_nat_select", "gr8s_nat_commit",
+                  "gr8s_wire_request", "gr8s_wire_reply", "gr8s_nat_gc")
+        for stage in stages:
+            verdict, output = client.run(stage, encoded)
+            assert verdict == p.SHOT, stage
+            assert output == encoded, stage
+            n.unlocked(client)
+            assert {name: {key: client.lookup(name, key) for key in client.keys(name)}
+                    for name in tables} == before, stage
+        return {"case": "plainStageEnvelopeRejection", "stages": list(stages)}
+    finally:
+        backend.close()
+        client.close()
+
+
 def capacity(factory, table):
     client, backend = factory(), factory()
     try:
@@ -299,8 +323,9 @@ def main():
     programs, ids, descriptors = p.read_fixture(args.fixture, names=graph.ROOTS + graph.STAGES + EXTRA + ("gr8s_nat_gc",))
     cls = Kernel if args.kernel else Interpreter
     factory = lambda shared=None: cls(programs, ids, descriptors, shared)
-    cases = [crossed(factory, protocol, shared, simultaneous)
-             for protocol in (6, 17) for shared in (True, False) for simultaneous in (False, True)]
+    cases = [plain_stage_contract(factory)]
+    cases.extend(crossed(factory, protocol, shared, simultaneous)
+                 for protocol in (6, 17) for shared in (True, False) for simultaneous in (False, True))
     cases.extend(direct_collision(factory, protocol, shared)
                  for protocol in (6, 17) for shared in (True, False))
     cases.extend(denied_and_stale(factory, protocol, shared)

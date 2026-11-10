@@ -390,20 +390,31 @@ opaque wire macro calls are expanded afterwards and use physical frame offsets."
                     (let ((result (mapcar #'walk node)))
                       (setf (third result) `(+ whistler::wire-offset ,(third result))) result))
                    (t (mapcar #'walk node)))))
-    (let ((result (walk (expand-service-nat-form form))))
+    (let ((result (walk (expand-service-nat-form form)))
+          ;; Egress roots reject Pod-originated envelopes. Reply classification
+          ;; wraps before policy, and reply-commit sends those packets directly
+          ;; to delivery, bypassing generation/selection/NAT commit. These stages
+          ;; therefore accept only plain packets, including when called directly.
+          (plain-only
+            (member (second form)
+                    '(whistler::gr8s-nat-generation whistler::gr8s-nat-select
+                      whistler::gr8s-nat-commit whistler::gr8s-wire-request
+                      whistler::gr8s-wire-reply whistler::gr8s-nat-gc))))
       (setf (fourth result) (expand-service-wire-form (fourth result) :transaction transaction))
       (setf (fourth result)
             `(let ((whistler::wire-offset whistler::u32 0)
                    (whistler::wire-held whistler::u32 0)
                    (whistler::wire-locked whistler::u64 0))
                ,@(unless (eq (second form) 'whistler::gr8s-nat-gc) '((whistler::wire-local-capable)))
-               (when (whistler::wire-candidate-p)
-                 (whistler::wire-check-envelope ,addresses)
-                 (setf whistler::wire-offset 102))
-               (whistler::wire-current-frame
-                ,(not (null (member (second form)
-                                    '(whistler::gr8s-nat-prepare whistler::gr8s-nat-restore
-                                      whistler::gr8s-wire-receive whistler::gr8s-v2-in-policy)))))
+               ,@(if plain-only
+                     '((when (whistler::wire-candidate-p) (return whistler::TC_ACT_SHOT)))
+                     `((when (whistler::wire-candidate-p)
+                         (whistler::wire-check-envelope ,addresses)
+                         (setf whistler::wire-offset 102))
+                       (whistler::wire-current-frame
+                        ,(not (null (member (second form)
+                                            '(whistler::gr8s-nat-prepare whistler::gr8s-nat-restore
+                                              whistler::gr8s-wire-receive whistler::gr8s-v2-in-policy)))))))
                ,(fourth result)))
       (expand-service-wire-form result :transaction nil))))
 
