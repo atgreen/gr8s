@@ -68,6 +68,37 @@
   (is (equalp #(#x00 #x02 #x01 #x00 #xD2 #x04 #x00 #x00 #x10 #x0E #x00 #x00 #x00 #x00 #x00 #x00)
               (gr8s::service-lb-service-value 512 1234 :affinity-timeout 3600))))
 
+(test service-lb-retain-plan-only-for-additive-backends
+  (flet ((plan (backends &key (timeout 10800))
+           (multiple-value-bind (key value slots indices)
+               (gr8s::service-lb-entries
+                "10.96.0.10" 80 0 backends :affinity-timeout timeout)
+             (declare (ignore indices))
+             (values (list (cons key value)) slots))))
+    (multiple-value-bind (old-services old-backends)
+        (plan '(("10.88.1.5" . 8080) ("10.88.1.6" . 8080)))
+      (multiple-value-bind (new-services new-backends)
+          (plan '(("10.88.1.5" . 8080) ("10.88.1.6" . 8080) ("10.88.1.7" . 8080)))
+        (is-true (gr8s::service-lb-plan-retains-selection-p
+                  old-services old-backends new-services new-backends))
+        (is-false (gr8s::service-lb-plan-retains-selection-p
+                   old-services old-backends new-services
+                   (remove-if (lambda (entry)
+                                (equalp (cdr entry)
+                                        (gr8s::service-lb-backend-value "10.88.1.6" 8080)))
+                              new-backends))))
+      (multiple-value-bind (new-services new-backends)
+          (plan '(("10.88.1.5" . 8080) ("10.88.1.7" . 8080)))
+        (is-false (gr8s::service-lb-plan-retains-selection-p
+                   old-services old-backends new-services new-backends)))
+      (multiple-value-bind (new-services new-backends)
+          (plan '(("10.88.1.5" . 8080) ("10.88.1.6" . 8080) ("10.88.1.7" . 8080))
+                :timeout 3600)
+        (is-false (gr8s::service-lb-plan-retains-selection-p
+                   old-services old-backends new-services new-backends)))
+      (is-false (gr8s::service-lb-plan-retains-selection-p
+                 nil nil old-services old-backends)))))
+
 (test service-lb-plan-keys-by-protocol-and-carries-affinity
   ;; The same port over two protocols gets two VIP entries, and ClientIP affinity
   ;; reaches the program with its timeout.
