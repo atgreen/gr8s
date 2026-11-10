@@ -597,20 +597,27 @@ PID reuse. Return true when an owned live process was reclaimed."
 (defun managed-containerd-cni-config-text (manager)
   "Render the gr8s CNI conflist (JSON) naming the agent's CNI socket and the
    bpffs map-pin root, with egress direction. Because the egress guard is
-   JIT-compiled in-process, the conflist carries no ELF program path."
+   JIT-compiled in-process, the conflist carries no ELF program path. An
+   explicit native v2 opt-in requires the staged v2 packet maps as well."
   ;; The egress guard is JIT-compiled in-process by the agent; the conflist
   ;; carries no ELF "program" path.
-  (let ((map-pin-root (managed-containerd-bpf-directory manager)))
+  (let* ((map-pin-root (managed-containerd-bpf-directory manager))
+         (packet-services-p (equal "1" (uiop:getenv "GR8S_ENABLE_PACKET_SERVICES")))
+         (prepare-v2-p (equal "1" (uiop:getenv "GR8S_PREPARE_PACKET_SERVICES_V2")))
+         (native-v2-p (equal "1" (uiop:getenv "GR8S_ENABLE_NATIVE_SERVICE_V2"))))
+    (when (and native-v2-p (not (and packet-services-p prepare-v2-p)))
+      (error "Native v2 Service profile requires packet Services and v2 map preparation"))
     (format
      nil
      "{\"cniVersion\":\"1.0.0\",\"name\":\"gr8s\",\"plugins\":[{\"type\":\"gr8s\",\"socket\":~A,\"direction\":\"egress\",\"mapPinRoot\":~A~A}]}~%"
      (com.inuoe.jzon:stringify
       (managed-containerd-agent-cni-socket-path manager))
      (com.inuoe.jzon:stringify (namestring map-pin-root))
-     (if (equal "1" (uiop:getenv "GR8S_ENABLE_PACKET_SERVICES"))
-         (format nil ",\"servicePacketRoot\":~A"
+     (if packet-services-p
+         (format nil ",\"servicePacketRoot\":~A~A"
                  (com.inuoe.jzon:stringify
-                  (namestring (merge-pathnames "service-lb/" map-pin-root))))
+                  (namestring (merge-pathnames "service-lb/" map-pin-root)))
+                 (if native-v2-p ",\"servicePacketProfile\":\"v2\"" ""))
          ""))))
 
 (defun managed-containerd-cni-config-path (manager)
