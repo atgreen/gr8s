@@ -92,47 +92,26 @@
   "Derive allowed route/link identities from this agent's durable local journal."
   (let* ((root (uiop:ensure-directory-pathname state-directory))
          (ipam-path (merge-pathnames "ipam/allocations.json" root))
-         (ipam (when (probe-file ipam-path) (com.inuoe.jzon:parse ipam-path)))
+         (ipam (probe-file ipam-path))
          (result nil))
     (dolist (file '("network.json" "network-pending.json"))
       (let ((network (read-node-network-file (merge-pathnames file root))))
         (when network
           (validate-node-network-object network)
           (when ipam
-            (let* ((version (gethash "version" ipam))
-                   (ipam-cidrs
-                     (cond ((eql version 1) (list (gethash "cidr" ipam "")))
-                           ((eql version 2)
-                            (let ((value (gethash "cidrs" ipam)))
-                              (and (vectorp value) (coerce value 'list))))))
-                   (network-cidrs
-                     (persisted-node-network-cidrs
-                      network "nodePodCIDRs" "nodePodCIDR")))
-              (unless (equal ipam-cidrs network-cidrs)
-                (invalid-cni "durable IPAM does not match the node network journal"))
-              (loop for allocation across (gethash "allocations" ipam #())
-                    for context = (make-cni-context
-                                   :container-id (required-cni-string allocation "sandboxID")
-                                   :interface-name (required-cni-string allocation "interfaceName"))
-                    for addresses = (if (eql 1 (gethash "version" ipam))
-                                        (list (required-cni-string allocation "address"))
-                                        (let ((value (gethash "addresses" allocation)))
-                                          (unless (and (vectorp value)
-                                                       (every #'stringp value))
-                                            (invalid-cni "invalid durable Pod allocation"))
-                                          (coerce value 'list)))
+            ;; Restore through the central schema validator, including private
+            ;; Service leases. Do not maintain a second list of IPAM versions.
+            (let* ((network-cidrs (persisted-node-network-cidrs
+                                   network "nodePodCIDRs" "nodePodCIDR"))
+                   (restored (open-node-ipam (merge-pathnames "ipam/" root) network-cidrs)))
+              (loop for key being the hash-keys of (node-ipam-allocations restored)
+                      using (hash-value addresses)
+                    for context = (make-cni-context :container-id (car key) :interface-name (cdr key))
                     for owner = (routed-cni-owner context)
-                    do (unless (and
-                                (safe-cni-container-id-p (cni-context-container-id context))
-                                (= (length addresses) (length network-cidrs))
-                                (every (lambda (address cidr)
-                                         (pod-cidrs-overlap-p
-                                          (format nil "~A/~D" address
-                                                  (if (find #\: address) 128 32))
-                                          cidr))
-                                       addresses network-cidrs))
-                         (invalid-cni "invalid durable Pod allocation in route ownership journal"))
-                       (dolist (address addresses)
+                    for alias = (gethash key (gr8s.network::node-ipam-service-snat-allocations restored))
+                    do (unless (safe-cni-container-id-p (cni-context-container-id context))
+                         (invalid-cni "invalid durable Pod owner in route ownership journal"))
+                       (dolist (address (append addresses (when alias (list alias))))
                          (push (list :cidr (format nil "~A/~D" address
                                                   (if (find #\: address) 128 32))
                                      :name (routed-cni-host-name context)
