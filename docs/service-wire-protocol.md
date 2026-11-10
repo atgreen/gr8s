@@ -77,6 +77,17 @@ identity. Client reply restoration must require explicit reply metadata and
 matching ownership. Reservation, capacity, expiry, restart and retained-map
 handling apply to this additional state too.
 
+Backend ownership must also account for application-visible direct tuples. An
+incoming Service request can overlap an existing direct outbound connection on
+the receiving Pod. Preserving its source unchanged in that case would make a
+server reply indistinguishable from traffic on the direct connection. A backend
+implementation therefore needs to reserve both its visible reply tuple and the
+original wire tuple. On a collision it can expose the validated client's private
+alias (and a reserved port if necessary) to the server, then restore the original
+wire destination before emitting the typed reply. This additional translation
+is a collision case; noncolliding requests keep their source. The envelope does
+not itself implement this ownership or reverse mapping.
+
 Native socket steering must preserve enough original destination identity to
 participate in the same protocol. An ambiguous socket reverse row must never be
 overwritten. CNI readiness must gate compatible receivers and retained writer

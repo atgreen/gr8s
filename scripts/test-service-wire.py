@@ -134,6 +134,16 @@ def exercise(runner):
                 verdict, restored = runner.run(UNWRAP, routed)
                 assert verdict == p.OK and restored == routed[:14] + original[14:]
                 cases.append(f"protocol{protocol}kind{kind}options{len(options)}")
+            # Exercise nonzero UDP checksums, transport options and larger
+            # payloads independently of the small framing fault vectors.
+            large = p.packet(destination=p.BACKEND, protocol=protocol, payload=bytes(range(256)) * 8,
+                             tcp_options=bytes.fromhex("0101080a0000000100000000") if protocol == 6 else b"")
+            verdict, encoded = runner.run(WRAP, large)
+            assert verdict == p.OK and encoded == expected(large, meta)
+            verdict, restored = runner.run(UNWRAP, encoded)
+            assert verdict == p.OK and restored == large
+            p.check_checksums(restored)
+            cases.append(f"protocol{protocol}kind{kind}largePayloadAndTransportOptions")
     meta = metadata(17)
     runner.update(MAP, bytes(4), meta)
     original = p.packet(destination=p.BACKEND, protocol=17)
