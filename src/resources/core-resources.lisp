@@ -287,6 +287,13 @@ iterator instead of a list; its final values are returned after STATE."
                                                    "old" (or old 'null) "new" (or new 'null)
                                                    "bytes" (template-history-old-bytes old)
                                                    "bytesVersion" +resource-history-bytes-version+))))
+                   ;; Deleted/replaced Events must not retain their expiry UID
+                   ;; until EOF of an arbitrarily long journal. Same-UID updates
+                   ;; keep their previous expiry if a legacy record omits it.
+                   (when (and old (equal "events" (first key)))
+                     (let ((uid (gethash "uid" (gethash "metadata" old))))
+                       (unless (and new (equal uid (gethash "uid" (gethash "metadata" new))))
+                         (remhash uid expirations))))
                    (if new (setf (gethash key index) new) (remhash key index)))
           (maphash (lambda (uid expiry) (setf (gethash uid expirations) expiry))
                    (gethash "eventExpirations" record (core-object)))
