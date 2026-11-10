@@ -106,6 +106,10 @@ application ingress/writer barriers. This function neither persists nor adopts R
          (gr8s.image-distribution::tracker-apply-command (gr8s::pod-store-image-tracker store) (second command)))
         (:node-enrollment (apply #'gr8s::install-node-enrollment-command store (second command)))))))
 
+(defun store-raft-command-retention-weight (command)
+  "Reserve allocator pages and waiter metadata in addition to command contents."
+  (+ (* 2 sb-vm:gencgc-page-bytes) (gr8s.raft::raft-command-memory-weight command)))
+
 (defun make-store-raft-commit-function (member)
   (lambda (tag json)
     (multiple-value-bind (result committed)
@@ -180,7 +184,9 @@ the cluster. Access stays gated until a current-term committed boundary applies.
                         (when bootstrap-role
                           (list :bootstrap-role bootstrap-role :bootstrap-api-url api-url))))
            (bt:with-lock-held ((raft-member-lock member))
-             (setf (gr8s.raft::raft-node-uncommitted-byte-limit (raft-member-node member)) (* 16 1024 1024))
+             (setf (gr8s.raft::raft-node-uncommitted-byte-limit (raft-member-node member)) (* 16 1024 1024)
+                   (gr8s.raft::raft-node-uncommitted-weight-fn (raft-member-node member))
+                   #'store-raft-command-retention-weight)
              (raft-member-enable-dynamic-membership member :pki pki))
            ;; Only a learner still awaiting admission needs Join. Recovered voters
            ;; reconnect using the durable address book, without enrollment tokens

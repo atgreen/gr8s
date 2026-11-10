@@ -49,6 +49,7 @@ def main():
             result["nativeReport"] = report
             result["passed"] = (process.returncode == 0 and report.get("passed") is True
                                 and report.get("heapLimitMiB") == 384
+                                and report.get("largeSecretBoundary") is True
                                 and report.get("capacityRefusals", 0) > 1000
                                 and report.get("timedOutProposals", 0) > 0
                                 and report.get("forwardedCapacityRefusal") is True

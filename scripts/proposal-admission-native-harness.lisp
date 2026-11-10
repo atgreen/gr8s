@@ -13,6 +13,35 @@
   (gr8s::core-object "apiVersion" "v1" "kind" "ConfigMap"
     "metadata" (gr8s::core-object "name" name) "data" (gr8s::core-object "value" value)))
 
+(defun admission-native-secret-boundary (root encrypted)
+  "Exercise the supported decoded Secret limit, including durable recovery."
+  (let* ((path (merge-pathnames (if encrypted "size-encrypted/" "size-plain/") root))
+         (store (gr8s:open-store path)) (ha nil) (port nil)
+         (bytes (make-array (* 1024 1024) :element-type '(unsigned-byte 8) :initial-element 17))
+         (one (ag-grpc:base64-encode bytes)) (two nil))
+    (unwind-protect
+         (progn
+           (when encrypted (gr8s::ensure-cluster-pki path))
+           (setf ha (gr8s::start-ha-control-plane store :id "size-boundary" :init t)
+                 port (gr8s::raft-member-port (gr8s::ha-control-plane-member ha)))
+           (admission-native-await (lambda () (gr8s::ha-control-plane-leader-p ha)))
+           (when encrypted (gr8s::enable-secret-encryption store))
+           (gr8s::create-core-resource store "secrets"
+             (gr8s::core-object "apiVersion" "v1" "kind" "Secret"
+               "metadata" (gr8s::core-object "name" "large") "data" (gr8s::core-object "value" one)) "default")
+           (setf (aref bytes 0) 18 two (ag-grpc:base64-encode bytes))
+           (gr8s::update-core-resource store "secrets" "default" "large"
+             (lambda (object) (setf (gethash "value" (gethash "data" object)) two) object))
+           (assert (equal two (gethash "value" (gethash "data"
+                              (gr8s::get-core-resource store "secrets" "default" "large")))))
+           (gr8s::stop-ha-control-plane ha)
+           (setf ha nil store (gr8s:open-store path :defer-restore-completion t)
+                 ha (gr8s::start-ha-control-plane store :id "size-boundary" :init t :port port))
+           (admission-native-await (lambda () (gr8s::ha-control-plane-leader-p ha)))
+           (assert (equal two (gethash "value" (gethash "data"
+                              (gr8s::get-core-resource store "secrets" "default" "large"))))))
+      (when ha (gr8s::stop-ha-control-plane ha)))))
+
 (defun admission-native-main ()
   (gr8s.server::install-memory-hooks)
   (destructuring-bind (root-text rounds-text) (uiop:command-line-arguments)
@@ -26,7 +55,9 @@
                      "vmAcceptance" nil "mutualTls" nil "processes" 1 "members" 4 "voters" 3
                      "heapLimitMiB" (/ (sb-ext:dynamic-space-size) (* 1024 1024))
                      "rounds" rounds "attemptedPayloadBytes" (* rounds 65536)
-                     "admissionBudgetBytes" limit "productionProposalTimeoutSeconds" 10)))
+                     "admissionBudgetBytes" limit "productionProposalTimeoutSeconds" 10
+                     "admissionEstimator" "four-byte-characters-plus-allocator-reserve"
+                     "allocatorReserveBytes" (* 2 sb-vm:gencgc-page-bytes))))
       (labels ((member-at (i) (gr8s::ha-control-plane-member (aref planes i)))
                (note-phase (name)
                  (setf (gethash "phase" report) name)
@@ -45,7 +76,9 @@
                                              :bootstrap-role (when fresh :learner) :port (aref ports i))))
                                 (bt:with-lock-held ((gr8s::raft-member-lock member))
                                   (setf (gr8s.raft::raft-node-uncommitted-byte-limit
-                                         (gr8s::raft-member-node member)) limit)
+                                         (gr8s::raft-member-node member)) limit
+                                        (gr8s.raft::raft-node-uncommitted-weight-fn (gr8s::raft-member-node member))
+                                        #'gr8s.ha::store-raft-command-retention-weight)
                                   (gr8s::raft-member-enable-dynamic-membership member))
                                 (gr8s::raft-member-start member)
                                 (when fresh
@@ -84,7 +117,8 @@
                          "uncommittedWeightBytes"
                          (loop for entry across (gr8s.raft:raft-node-log node)
                                when (> (gr8s.raft:raft-entry-index entry) (gr8s::raft-node-commit-index node))
-                                 sum (+ 128 (gr8s.raft::raft-command-wire-weight (gr8s.raft:raft-entry-command entry))))
+                                 sum (+ 128 (funcall (gr8s.raft::raft-node-uncommitted-weight-fn node)
+                                                     (gr8s.raft:raft-entry-command entry))))
                          "walBytes" (sb-posix:stat-size
                            (sb-posix:fstat (sb-sys:fd-stream-fd (gr8s.raft::file-raft-storage-stream storage)))))))))
                (pending-resources (i)
@@ -95,6 +129,11 @@
                  (progn
                    (assert (= 384 (gethash "heapLimitMiB" report)))
                    (assert (>= rounds 2048))
+                   (note-phase "large-secret-boundary")
+                   (admission-native-secret-boundary root nil)
+                   (admission-native-secret-boundary root t)
+                   (setf (gethash "largeSecretBoundary" report) t
+                         (gethash "largeSecretDecodedBytes" report) (* 1024 1024))
                    (note-phase "bootstrap")
                    (start-at 0 t)
                    (admission-native-await (lambda () (gr8s::ha-control-plane-leader-p (aref planes 0))))

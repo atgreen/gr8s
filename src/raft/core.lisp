@@ -38,6 +38,7 @@
   ;; existing command-size contract. Protocol/configuration traffic can recover
   ;; quorum even when the application budget is full.
   (uncommitted-byte-limit nil :type (or null (integer 1 *)))
+  (uncommitted-weight-fn #'raft-command-wire-weight :type function)
   ;; compaction: entries <= snapshot-index are discarded; snapshot-term is the
   ;; term of the last entry the snapshot includes. log[0] is index snapshot-index+1.
   (snapshot-index 0 :type fixnum)
@@ -463,6 +464,21 @@ materializing its encoded string. Strings dominate gr8s's JSON-bearing commands.
     (integer (+ 4 (integer-length command)))
     (t 128)))
 
+(defun raft-command-memory-weight (command)
+  "Conservative ordinary-command heap weight before a producer's allocator reserve.
+Use four bytes per character even if this instance is narrow: decoding a WAL or
+RPC can widen the same string. This is distinct from printed-wire expansion."
+  (typecase command
+    (null 0)
+    (string (+ 32 (* 4 (length command))))
+    (cons (+ 16 (raft-command-memory-weight (car command))
+                (raft-command-memory-weight (cdr command))))
+    (vector (+ 32 (* 8 (length command))
+               (loop for value across command sum (raft-command-memory-weight value))))
+    (symbol 0)
+    (integer (if (typep command 'fixnum) 0 (+ 32 (ceiling (integer-length command) 8))))
+    (t 128)))
+
 (defun raft-append-message (node peer)
   "Build a bounded AppendEntries batch beginning at PEER's next-index.
 Retries never encode the entire retained suffix. One oversized command travels
@@ -559,17 +575,17 @@ alone so existing persisted commands remain deliverable."
 ;;; Client proposal (leader only).
 
 (defun raft-proposal-capacity-reason (node command)
-  "Check application admission before append, using conservative JSON command weight."
+  "Check admission before append using the node's configured command estimator."
   (let ((limit (raft-node-uncommitted-byte-limit node)))
     (when (and limit (not (member command '((:raft-barrier) (:store-recovery-barrier)) :test #'equal))
                (not (and (consp command) (eq :raft-config (car command)))))
-      (let ((bytes (+ 128 (raft-command-wire-weight command))))
+      (let ((bytes (+ 128 (funcall (raft-node-uncommitted-weight-fn node) command))))
         (when (> bytes limit)
           (return-from raft-proposal-capacity-reason :proposal-too-large))
         (loop for offset from (max 0 (- (raft-node-commit-index node) (raft-node-snapshot-index node)))
                 below (length (raft-node-log node))
               for entry = (aref (raft-node-log node) offset)
-              do (incf bytes (+ 128 (raft-command-wire-weight (raft-entry-command entry))))
+              do (incf bytes (+ 128 (funcall (raft-node-uncommitted-weight-fn node) (raft-entry-command entry))))
                  (when (> bytes limit) (return-from raft-proposal-capacity-reason :capacity)))))))
 
 (defun raft-propose (node command &optional callback)

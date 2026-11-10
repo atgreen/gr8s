@@ -736,7 +736,7 @@ The command's revision span is rebased on this replica's committed revision;
 unrelated keys are preserved; version 2 conditions reject stale same-key writes
 before any state is published."
   (bt:with-lock-held ((pod-store-lock store))
-    (let* ((delta (com.inuoe.jzon:parse json))
+    (let* ((delta (com.inuoe.jzon:parse json :max-string-length (* 2 1024 1024)))
            (resources (copy-core-resource-index store))
            (revision (+ (pod-store-resource-revision store)
                         (gethash "revisionSpan" delta 1)))
