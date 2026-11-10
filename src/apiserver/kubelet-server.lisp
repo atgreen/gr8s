@@ -114,7 +114,7 @@ An initial interrupted key-first creation is retryable; a certificate without it
                  (when server
                    (list (pure-tls/acme::encode-extension pure-tls/acme::*oid-subject-alt-name*
                                                           (kubelet-san-extension addresses dns-names)))))
-                (cluster-pki-ca-private-key pki)))
+                (cluster-pki-ca-private-key pki) :issuer-certificate (cluster-pki-ca-certificate pki)))
            (key-pem (and new-key-p (pure-tls/acme::encode-ec-private-key-pem private)))
            (certificate-pem
              (concatenate 'string (pure-tls/acme::wrap-pem "CERTIFICATE" der)

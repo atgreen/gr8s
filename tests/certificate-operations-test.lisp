@@ -182,17 +182,17 @@
            (old-fingerprint (gr8s::cluster-pki-ca-fingerprint pki))
            (api (gr8s::ensure-kubernetes-api-credentials pki))
            (admin (gr8s::ensure-admin-client-credentials pki)))
-      (gr8s.server::prepare-cluster-ca-rotation directory)
+      (gr8s.server::prepare-cluster-ca-rotation pki-root)
       (is (equal "prepared"
                  (gethash "stage"
-                          (gr8s.server::read-cluster-ca-transition-manifest directory))))
+                          (gr8s.server::read-cluster-ca-transition-manifest pki-root))))
       (let ((prepared (gr8s:ensure-cluster-pki pki-root)))
         (is (equal old-fingerprint (gr8s::cluster-pki-ca-fingerprint prepared)))
         (is (= 2 (length (gr8s::cluster-pki-trust-certificates prepared)))))
-      (gr8s.server::promote-cluster-ca-rotation directory)
+      (gr8s.server::promote-cluster-ca-rotation pki-root)
       (is (equal "promoted"
                  (gethash "stage"
-                          (gr8s.server::read-cluster-ca-transition-manifest directory))))
+                          (gr8s.server::read-cluster-ca-transition-manifest pki-root))))
       (let ((promoted (gr8s:ensure-cluster-pki pki-root)))
         (is (not (equal old-fingerprint (gr8s::cluster-pki-ca-fingerprint promoted))))
         (is (= 2 (length (gr8s::cluster-pki-trust-certificates promoted))))
@@ -201,13 +201,13 @@
                     (gr8s::certificate-api-identity
                      (pure-tls:load-certificate-chain admin)
                      (gr8s::cluster-pki-trust-certificates promoted)))))
-        (signals error (gr8s.server::finalize-cluster-ca-rotation directory))
+        (signals error (gr8s.server::finalize-cluster-ca-rotation pki-root :store-directory directory))
         (gr8s::ensure-kubernetes-api-credentials promoted :renew-within most-positive-fixnum)
         (gr8s::ensure-admin-client-credentials promoted :renew-within most-positive-fixnum)
-        (gr8s.server::finalize-cluster-ca-rotation directory)
+        (gr8s.server::finalize-cluster-ca-rotation pki-root :store-directory directory)
         (is (equal "idle"
                    (gethash "stage"
-                            (gr8s.server::read-cluster-ca-transition-manifest directory))))
+                            (gr8s.server::read-cluster-ca-transition-manifest pki-root))))
         (let ((final (gr8s:ensure-cluster-pki pki-root)))
           (is (= 1 (length (gr8s::cluster-pki-trust-certificates final))))
           (is (not (probe-file (merge-pathnames "pki/pki/cluster-ca-retiring.crt"
@@ -219,7 +219,7 @@
     (declare (ignore store))
     (let ((pki-root (merge-pathnames "pki/" directory)))
       (gr8s:ensure-cluster-pki pki-root)
-    (gr8s.server::prepare-cluster-ca-rotation directory)
+    (gr8s.server::prepare-cluster-ca-rotation pki-root)
     (let* ((active-key (merge-pathnames "pki/pki/cluster-ca.key" directory))
            (original (symbol-function 'gr8s::write-private-text-atomically))
            (injected nil))
@@ -231,15 +231,15 @@
                        (setf injected t)
                        (error "injected promotion interruption"))
                      (funcall original path text)))
-             (signals error (gr8s.server::promote-cluster-ca-rotation directory)))
+             (signals error (gr8s.server::promote-cluster-ca-rotation pki-root)))
         (setf (symbol-function 'gr8s::write-private-text-atomically) original))
       (is (equal "promoting"
                  (gethash "stage"
-                          (gr8s.server::read-cluster-ca-transition-manifest directory))))
-      (is (stringp (gr8s.server::promote-cluster-ca-rotation directory)))
+                          (gr8s.server::read-cluster-ca-transition-manifest pki-root))))
+      (is (stringp (gr8s.server::promote-cluster-ca-rotation pki-root)))
       (is (equal "promoted"
                  (gethash "stage"
-                          (gr8s.server::read-cluster-ca-transition-manifest directory))))
+                          (gr8s.server::read-cluster-ca-transition-manifest pki-root))))
       (let ((pki (gr8s:ensure-cluster-pki pki-root)))
         (is (= 2 (length (gr8s::cluster-pki-trust-certificates pki)))))))))
 
@@ -261,17 +261,17 @@
         (unwind-protect
              (progn
                (interrupt-next-active-write)
-               (signals error (gr8s.server::prepare-cluster-ca-rotation directory))
+               (signals error (gr8s.server::prepare-cluster-ca-rotation (merge-pathnames "pki/" directory)))
                (setf (symbol-function 'gr8s::write-private-text-atomically) original)
-               (is (stringp (gr8s.server::prepare-cluster-ca-rotation directory)))
-               (gr8s.server::promote-cluster-ca-rotation directory)
+               (is (stringp (gr8s.server::prepare-cluster-ca-rotation (merge-pathnames "pki/" directory))))
+               (gr8s.server::promote-cluster-ca-rotation (merge-pathnames "pki/" directory))
                (interrupt-next-active-write)
-               (signals error (gr8s.server::finalize-cluster-ca-rotation directory)))
+               (signals error (gr8s.server::finalize-cluster-ca-rotation (merge-pathnames "pki/" directory) :store-directory directory)))
           (setf (symbol-function 'gr8s::write-private-text-atomically) original)))
-      (is-true (gr8s.server::finalize-cluster-ca-rotation directory))
+      (is-true (gr8s.server::finalize-cluster-ca-rotation (merge-pathnames "pki/" directory) :store-directory directory))
       (is (equal "idle"
                  (gethash "stage"
-                          (gr8s.server::read-cluster-ca-transition-manifest directory)))))))
+                          (gr8s.server::read-cluster-ca-transition-manifest (merge-pathnames "pki/" directory))))))))
 
 (test authenticated-node-session-rolls-dual-trust-without-stranding-old-leaves
   (with-temporary-store (store directory)
@@ -287,7 +287,7 @@
        pki agent-cert agent-key "system:node:worker-a" "system:nodes")
       (gr8s::write-private-text-atomically
        agent-ca (uiop:read-file-string (gr8s::cluster-pki-ca-certificate-path pki)))
-      (gr8s.server::prepare-cluster-ca-rotation directory)
+      (gr8s.server::prepare-cluster-ca-rotation pki-root)
       (flet ((hello (text)
                (make-instance 'gr8s.node.v1::server-hello
                               :cluster-ca-bundle
@@ -296,7 +296,7 @@
          (hello (uiop:read-file-string (gr8s::cluster-pki-ca-certificate-path pki)))
          agent-ca agent-cert)
         (is (= 2 (length (pure-tls:load-certificate-chain agent-ca))))
-        (gr8s.server::promote-cluster-ca-rotation directory)
+        (gr8s.server::promote-cluster-ca-rotation pki-root)
         (let* ((promoted (gr8s:ensure-cluster-pki pki-root))
                (new-only (gr8s.server::certificate-pem
                           (gr8s::cluster-pki-ca-certificate promoted)))
@@ -333,8 +333,8 @@
              pki (pure-tls/acme::encode-subject "worker-a") spki))))
         (gr8s::write-private-text-atomically
          agent-ca (uiop:read-file-string (gr8s::cluster-pki-ca-certificate-path pki)))
-        (gr8s.server::prepare-cluster-ca-rotation directory)
-        (gr8s.server::promote-cluster-ca-rotation directory)
+        (gr8s.server::prepare-cluster-ca-rotation pki-root)
+        (gr8s.server::promote-cluster-ca-rotation pki-root)
         (let* ((promoted (gr8s:ensure-cluster-pki pki-root))
                (old-leaf (gr8s.security::certificate-from-pem
                           (uiop:read-file-string agent-cert)))
@@ -366,7 +366,7 @@
             (gr8s.security::certificate-from-pem
              (uiop:read-file-string agent-cert))))
           (is (= 2 (length (pure-tls:load-certificate-chain agent-ca))))
-          (gr8s.server::finalize-cluster-ca-rotation directory)
+          (gr8s.server::finalize-cluster-ca-rotation pki-root :store-directory directory)
           (is-false
            (gr8s.agent::install-agent-session-credentials
             (make-instance
@@ -456,15 +456,15 @@
        store (gr8s.model:make-node-record
               :id "worker-a-id" :name "worker-a" :pod-cidr "10.80.1.0/24"))
       (gr8s::record-node-certificate-issuer store "worker-a" old-fingerprint)
-      (gr8s.server::prepare-cluster-ca-rotation directory)
-      (gr8s.server::promote-cluster-ca-rotation directory)
+      (gr8s.server::prepare-cluster-ca-rotation pki-root)
+      (gr8s.server::promote-cluster-ca-rotation pki-root)
       (let ((promoted (gr8s:ensure-cluster-pki pki-root)))
         (gr8s::ensure-kubernetes-api-credentials promoted :renew-within most-positive-fixnum)
         (gr8s::ensure-admin-client-credentials promoted :renew-within most-positive-fixnum)
-        (signals error (gr8s.server::finalize-cluster-ca-rotation directory))
+        (signals error (gr8s.server::finalize-cluster-ca-rotation pki-root :store-directory directory))
         (gr8s::record-node-certificate-issuer
          store "worker-a" (gr8s::cluster-pki-ca-fingerprint promoted))
-        (is-true (gr8s.server::finalize-cluster-ca-rotation directory))))))
+        (is-true (gr8s.server::finalize-cluster-ca-rotation pki-root :store-directory directory))))))
 
 (test ca-rotation-cli-uses-explicit-stages
   (dolist (stage '("prepare" "promote" "finalize"))

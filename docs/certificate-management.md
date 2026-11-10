@@ -124,3 +124,17 @@ revocation lists, and automatic custom signer controllers are not implemented.
 Kubernetes CertificateSigningRequests and API client-certificate profiles are
 documented separately in [CertificateSigningRequests](certificate-signing-requests.md)
 and [Kubernetes API client certificates](api-client-certificates.md).
+
+## Strict TLS interoperability
+
+Generated CA and leaf certificates include subject and authority key identifiers.
+Issued leaves use the issuer certificate's actual subject identifier, including
+non-default identifiers on imported CAs. These identifiers support certificate
+path construction as described in [RFC 5280 section 4.2.1.1](https://www.rfc-editor.org/rfc/rfc5280#section-4.2.1.1)
+and [section 4.2.1.2](https://www.rfc-editor.org/rfc/rfc5280#section-4.2.1.2).
+
+Loading existing state preserves its CA certificate, private key, and pinned
+fingerprint. If a persisted CA lacks key identifiers and a strict TLS client
+rejects that chain, use the staged CA rotation above and renew the affected
+leaves under the active CA. Update client trust and kubeconfigs through that
+workflow. Adding identifiers to the CA requires a deliberate CA transition.

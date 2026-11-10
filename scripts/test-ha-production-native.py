@@ -10,6 +10,8 @@ import hashlib
 import json
 import signal
 import socket
+import ssl
+import traceback
 import subprocess
 import tempfile
 import time
@@ -54,8 +56,9 @@ HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()
 
 
 class Node:
-    def __init__(self, binary, base, name, heap):
+    def __init__(self, binary, base, name, heap, compaction=False):
         self.binary, self.name, self.heap = binary, name, heap
+        self.compaction, self.http = compaction, None
         self.root = base / name
         self.root.mkdir(mode=0o700)
         self.api, self.grpc, self.raft = port(), port(), port()
@@ -82,19 +85,27 @@ class Node:
         if enrollment:
             args += ["--raft-node-name", self.name, "--raft-token", enrollment["token"],
                      "--raft-ca-pin", enrollment["caPin"]]
+        if self.compaction:
+            args += ["--raft-compaction"]
+        self.http = None
         self.process = subprocess.Popen(args, cwd=REPO, stdout=self.log, stderr=subprocess.STDOUT)
 
     def live(self):
         if self.process is None or self.process.poll() is not None:
             raise RuntimeError(f"{self.name} exited; see {self.log_path}")
 
-    def request(self, path, body=None):
+    def request(self, path, body=None, method=None):
         self.live()
         data = None if body is None else json.dumps(body).encode()
-        req = urllib.request.Request(f"http://127.0.0.1:{self.api}{path}", data=data,
+        if self.http is None:
+            context = ssl.create_default_context(cafile=str(self.root / "pki/pki/cluster-ca.crt"))
+            context.load_cert_chain(str(self.root / "pki/admin.crt"), str(self.root / "pki/admin.key"))
+            self.http = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect(),
+                                                   urllib.request.HTTPSHandler(context=context))
+        req = urllib.request.Request(f"https://127.0.0.1:{self.api}{path}", data=data, method=method,
                                      headers={"Content-Type": "application/json"})
         try:
-            response = HTTP.open(req, timeout=3)
+            response = self.http.open(req, timeout=5)
         except urllib.error.HTTPError as error:
             response = error
         with response:
@@ -103,6 +114,13 @@ class Node:
 
     def ready(self):
         return self.request("/readyz")[0] == 200
+
+    def metrics(self):
+        status, body = self.request("/metrics")
+        assert status == 200 and isinstance(body, str), f"{self.name} metrics unavailable: {status}"
+        return {parts[0]: float(parts[1]) for line in body.splitlines()
+                if line and not line.startswith("#") and "{" not in line
+                and len(parts := line.split()) == 2}
 
     def stop(self, kill=False):
         if self.process and self.process.poll() is None:
@@ -163,6 +181,13 @@ def voters_ready(nodes):
                          and len(s["members"]) == len(expected) for s in states) else None
 
 
+def current_leader(nodes):
+    samples = [(node, node.metrics()) for node in nodes]
+    leaders = [node for node, values in samples if values.get("gr8s_raft_is_leader") == 1]
+    terms = {values.get("gr8s_raft_term") for _, values in samples}
+    return leaders[0] if len(leaders) == 1 and len(terms) == 1 and None not in terms else None
+
+
 def post(nodes, path, body):
     for node in nodes:
         status, _ = node.request(path, body)
@@ -186,22 +211,132 @@ def value_on_all(nodes, name, value):
     return True
 
 
+def compaction_churn(nodes, result, rounds):
+    """Exercise the real authenticated API, with one voter offline past checkpoints."""
+    path = "/api/v1/namespaces/ha-native/configmaps"
+    baseline = inspect(nodes)
+    leader = wait_for(lambda: post(nodes, path, configmap("compaction-sentinel", "preserved")))
+    leader = wait_for(lambda: current_leader(nodes))
+    delayed = next(node for node in nodes if node is not leader)
+    assert delayed.stop(kill=True) == -signal.SIGKILL
+    offline = inspect([delayed])[0]
+    result["compactionOfflineState"] = offline
+    active = [node for node in nodes if node is not delayed]
+    result["compactionDelayedVoter"] = delayed.name
+    result["compactionBeforeDisconnect"] = baseline
+    result["compactionCompletedRounds"] = 0
+    with (nodes[0].root.parent / "compaction-progress.jsonl").open("w") as progress:
+        for index in range(rounds):
+            name = f"compaction-{index:05d}"
+            value = "x" * 65536
+            item = f"{path}/{name}"
+
+            def created():
+                for node in active:
+                    status, _ = node.request(path, configmap(name, value))
+                    if status in (307, 503):
+                        continue
+                    assert status in (201, 409), (name, status)
+                    status, body = node.request(item)
+                    if status in (404, 503, 307):
+                        continue  # retry the create, not an indefinitely missing read
+                    assert status == 200, (name, status)
+                    assert body.get("data", {}).get("value") == value, f"Unexpected contents: {name}"
+                    uid = body.get("metadata", {}).get("uid")
+                    assert uid, f"Missing UID: {name}"
+                    return node, uid
+                return None
+
+            actor, uid = wait_for(created)
+            attempted = set()
+
+            def deleted():
+                for node in [actor, *[n for n in active if n is not actor]]:
+                    status, body = node.request(item)
+                    if status == 404:
+                        if node.name in attempted:
+                            return True
+                        continue  # an unconfirmed follower may still lack the create
+                    if status in (307, 503):
+                        continue
+                    assert status == 200, (name, status)
+                    assert body.get("metadata", {}).get("uid") == uid, f"Object identity changed: {name}"
+                    assert body.get("data", {}).get("value") == value, f"Object contents changed: {name}"
+                    attempted.add(node.name)
+                    status, _ = node.request(item, {"apiVersion": "v1", "kind": "DeleteOptions",
+                                                   "preconditions": {"uid": uid}}, method="DELETE")
+                    assert status in (200, 202, 307, 404, 409, 503), (name, status)
+                    if status != 307:
+                        status, body = node.request(item)
+                        if status == 404:
+                            return True
+                return False
+
+            wait_for(deleted)
+            result["compactionCompletedRounds"] = index + 1
+            if index % 32 == 0 or index + 1 == rounds:
+                sample = {"completedRounds": index + 1,
+                          "walBytes": {node.name: node.wal.stat().st_size for node in active}}
+                result["compactionLastSample"] = sample
+                progress.write(json.dumps(sample) + "\n")
+                progress.flush()
+    offline_commit = offline["commit"]
+    def advanced():
+        states = inspect(active)
+        return states if all(state["snapshotIndex"] > offline_commit for state in states) else None
+    result["compactionWhileDisconnected"] = wait_for(advanced, timeout=240)
+    delayed.start()
+    wait_for(delayed.ready, timeout=240)
+    wait_for(lambda: value_on_all(nodes, "compaction-sentinel", "preserved"), timeout=240)
+    assert wait_for(lambda: post(nodes, path, configmap("compaction-after-catchup", "preserved")))
+    wait_for(lambda: value_on_all(nodes, "compaction-after-catchup", "preserved"))
+    result["compactionAfterCatchup"] = inspect(nodes)
+    result["compactionMetrics"] = {
+        node.name: {name: value for name, value in node.metrics().items()
+                    if name.startswith(("gr8s_raft_", "gr8s_compaction_"))} for node in nodes}
+    assert all(result["compactionMetrics"][node.name]["gr8s_compaction_completed_total"] >= 1 for node in active)
+    assert all(values["gr8s_compaction_error"] == 0 for values in result["compactionMetrics"].values())
+    fingerprints = []
+    for node in nodes:
+        status, body = node.request(path)
+        assert status == 200
+        rows = sorted((item["metadata"]["name"], item["metadata"]["uid"], item.get("data", {}))
+                      for item in body["items"])
+        assert not any(name.startswith("compaction-") and name not in
+                       ("compaction-sentinel", "compaction-after-catchup") for name, _, _ in rows), "Leaked churn object"
+        fingerprints.append(rows)
+        assert node.wal.stat().st_size <= 32 * 1024 * 1024, "WAL exceeded checkpoint acceptance bound"
+    assert all(rows == fingerprints[0] for rows in fingerprints), "ConfigMaps diverged after catch-up"
+    result.update(compactionAcceptance=True, compactionPayloadBytes=rounds * 65536,
+                  compactionUsesNaturalHistoryClock=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=REPO / "build/gr8s")
     parser.add_argument("--heap-mib", type=int, default=384)
+    parser.add_argument("--compaction", action="store_true", help="Enable production checkpoints and disconnected-voter churn")
+    parser.add_argument("--compaction-rounds", type=int, default=2048)
+    parser.add_argument("--smoke", action="store_true", help="Allow 128-round partial compaction integration evidence")
     parser.add_argument("--witness", action="store_true", help="Also validate witness catch-up, restart and quorum participation")
     args = parser.parse_args()
+    if args.compaction and (args.compaction_rounds < 128 or (args.compaction_rounds < 2048 and not args.smoke)):
+        parser.error("compaction requires 2048 rounds, or --smoke with at least 128")
     binary = args.binary.resolve()
     base = Path(tempfile.mkdtemp(prefix="gr8s-ha-production-"))
-    nodes = [Node(binary, base, f"cp{i}", args.heap_mib) for i in range(1, 4)]
+    nodes = [Node(binary, base, f"cp{i}", args.heap_mib, compaction=args.compaction) for i in range(1, 4)]
     witness = Witness(binary, base, "w1", args.heap_mib) if args.witness else None
     cleanup_nodes = [*nodes, witness] if witness else nodes
     result = {"passed": False, "productionServe": True, "nativeBinary": True,
               "mutualTlsRaft": True, "agentsDisabled": True, "vmAcceptance": False,
               "conformanceAcceptance": False, "witnessAcceptance": args.witness,
               "heapLimitMiB": args.heap_mib,
-              "binarySha256": hashlib.sha256(binary.read_bytes()).hexdigest(), "evidence": str(base)}
+              "binarySha256": hashlib.sha256(binary.read_bytes()).hexdigest(), "evidence": str(base),
+              "compactionRequested": args.compaction, "compactionAcceptance": False,
+              "fullCompactionWorkloadRequested": args.compaction and not args.smoke,
+              "fullCompactionAcceptance": False,
+              "compactionRounds": args.compaction_rounds if args.compaction else 0}
+    print(f"Evidence: {base}", flush=True)
     try:
         nodes[0].start()
         wait_for(nodes[0].ready)
@@ -220,6 +355,13 @@ def main():
         wait_for(lambda: value_on_all(nodes, "before-loss", "A"))
         identities = {n.name: n.identities() for n in nodes}
         assert all(identities.values())
+        if args.compaction:
+            compaction_churn(nodes, result, args.compaction_rounds)
+            leader = wait_for(lambda: post(nodes, path, configmap("after-compaction", "D")))
+        leader = wait_for(lambda: current_leader(nodes))
+        result["metricsBeforeLeaderLoss"] = {node.name: {key: value for key, value in node.metrics().items()
+                                                       if key in ("gr8s_raft_term", "gr8s_raft_is_leader")}
+                                              for node in nodes}
         result["killedLeader"] = leader.name
         assert leader.stop(kill=True) == -signal.SIGKILL
         survivors = [n for n in nodes if n is not leader]
@@ -259,6 +401,9 @@ def main():
         final_leader = wait_for(lambda: post(nodes, path, configmap("after-restart", "C")))
         result["leaderAfterFullRestart"] = final_leader.name
         wait_for(lambda: value_on_all(nodes, "after-restart", "C"))
+        if args.compaction:
+            wait_for(lambda: value_on_all(nodes, "compaction-sentinel", "preserved"))
+            wait_for(lambda: value_on_all(nodes, "compaction-after-catchup", "preserved"))
         if witness:
             token = subprocess.run([str(binary), "join-token", "--role", "witness",
                                     "--node-name", witness.name, "--state-directory", str(final_leader.root)],
@@ -295,9 +440,11 @@ def main():
         result["identitiesPreserved"] = identities
         result["finalShutdown"] = {n.name: n.stop() for n in nodes}
         assert all(code == 0 for code in result["finalShutdown"].values())
+        result["fullCompactionAcceptance"] = bool(args.compaction and not args.smoke and result["compactionAcceptance"])
         result["passed"] = True
     except Exception as error:
-        result["error"] = str(error)
+        result["error"] = f"{type(error).__name__}: {error}"
+        result["traceback"] = traceback.format_exc()
     finally:
         for node in cleanup_nodes:
             try:
@@ -308,6 +455,7 @@ def main():
                     node.process.kill()
                     node.process.wait(timeout=10)
                 result["passed"] = False
+        (base / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))
     return 0 if result["passed"] else 1
 

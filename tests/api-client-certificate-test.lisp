@@ -330,3 +330,75 @@
              (is (= 403 (certificate-api-test-request pki certificate key collection :method "POST"
                          :object (csr-fixture (pure-tls::read-file-bytes (merge-pathnames "ec-request.pem" directory)) :name "forbidden-client")))))
         (when server (stop-server server))))))
+
+(test generated-api-and-admin-certificates-pass-strict-openssl-validation
+  (with-temporary-pki (pki root)
+    (values root)
+    (multiple-value-bind (server server-key)
+        (gr8s::ensure-kubernetes-api-credentials pki :addresses '("127.0.0.1"))
+      (declare (ignore server-key))
+      (multiple-value-bind (admin admin-key) (gr8s::ensure-admin-client-credentials pki)
+        (declare (ignore admin-key))
+        (loop for certificate in (list server admin)
+              for purpose in '("sslserver" "sslclient")
+              do (multiple-value-bind (out err status)
+                     (uiop:run-program (list "openssl" "verify" "-x509_strict" "-purpose" purpose
+                                            "-CAfile" (namestring (gr8s:cluster-pki-ca-certificate-path pki))
+                                            (namestring certificate))
+                                       :output :string :error-output :string :ignore-error-status t)
+                   (is (zerop status) "Strict certificate validation failed: ~A ~A" out err)))
+        (let* ((ca (gr8s::cluster-pki-ca-certificate pki))
+               (leaf (first (pure-tls:load-certificate-chain server)))
+               (identifier (gr8s.security::certificate-issuer-key-identifier ca))
+               (authority (find :authority-key-identifier (pure-tls::x509-certificate-extensions leaf)
+                                :key #'pure-tls::x509-extension-oid))
+               (node (pure-tls::parse-der (pure-tls::x509-extension-value authority))))
+          (is (= 20 (length identifier)))
+          (is (equalp identifier (pure-tls::asn1-node-value (first (pure-tls::asn1-children node))))))))))
+
+(test strict-python-tls-client-authenticates-to-the-real-api
+  (with-temporary-store (store root)
+    (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "strict-pki/" root)))
+           (runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime))
+           (server nil) (*tls-api-port* nil))
+      (unwind-protect
+           (progn
+             (setf server (start-test-tls-api store runtime reconciler pki))
+             (multiple-value-bind (certificate key) (gr8s::ensure-admin-client-credentials pki)
+               (let ((code (format nil "import ssl,sys,urllib.request~%c=ssl.create_default_context(cafile=sys.argv[1])~%c.verify_flags |= ssl.VERIFY_X509_STRICT~%c.load_cert_chain(sys.argv[2],sys.argv[3])~%o=urllib.request.build_opener(urllib.request.ProxyHandler({}),urllib.request.HTTPSHandler(context=c))~%with o.open('https://127.0.0.1:'+sys.argv[4]+'/version',timeout=10) as r: print(r.status)~%")))
+                 (multiple-value-bind (out err status)
+                     (uiop:run-program (list "python3" "-c" code
+                                            (namestring (gr8s:cluster-pki-ca-certificate-path pki))
+                                            (namestring certificate) (namestring key) (princ-to-string *tls-api-port*))
+                                       :output :string :error-output :string :ignore-error-status t)
+                   (is (zerop status) "Strict Python TLS handshake failed: ~A" err)
+                   (is (search "200" out))))))
+        (when server (stop-server server))))))
+
+
+(test issued-leaf-uses-an-imported-issuers-actual-subject-key-identifier
+  (with-temporary-pki (pki root)
+    (let* ((ca-path (merge-pathnames "custom-ca.crt" root))
+           (leaf (merge-pathnames "custom-leaf.crt" root))
+           (key (merge-pathnames "custom-leaf.key" root))
+           (copy (gr8s.security::copy-cluster-pki pki)))
+      (uiop:run-program
+       (list "openssl" "req" "-new" "-x509" "-config" "/dev/null" "-sha256" "-days" "1"
+             "-key" (namestring (gr8s::cluster-pki-ca-private-key-path pki))
+             "-subj" (format nil "/CN=~A" gr8s::+pki-ca-common-name+)
+             "-addext" "basicConstraints=critical,CA:TRUE,pathlen:0"
+             "-addext" "keyUsage=critical,keyCertSign,cRLSign"
+             "-addext" "subjectKeyIdentifier=01:23:45:67:89:AB"
+             "-addext" "authorityKeyIdentifier=keyid:always" "-out" (namestring ca-path))
+       :output :string :error-output :string)
+      (setf (gr8s::cluster-pki-ca-certificate copy) (first (pure-tls:load-certificate-chain ca-path))
+            (gr8s::cluster-pki-ca-certificate-path copy) ca-path)
+      (is (equalp #(1 35 69 103 137 171)
+                  (gr8s.security::certificate-issuer-key-identifier (gr8s::cluster-pki-ca-certificate copy))))
+      (gr8s.apiserver::issue-cluster-certificate copy leaf key "strict-test" nil
+                                                :server t :addresses '("127.0.0.1"))
+      (multiple-value-bind (out err status)
+          (uiop:run-program (list "openssl" "verify" "-x509_strict" "-purpose" "sslserver"
+                                 "-CAfile" (namestring ca-path) (namestring leaf))
+                            :output :string :error-output :string :ignore-error-status t)
+        (is (zerop status) "Issuer-linked key identifier did not verify: ~A ~A" out err)))))

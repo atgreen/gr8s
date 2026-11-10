@@ -40,7 +40,7 @@
      certificate-path
      (pure-tls/acme::wrap-pem "CERTIFICATE" (ca-certificate-der private public :common-name "gr8s-front-proxy-ca")))))
 
-(defun write-front-proxy-client (ca-private-key certificate-path key-path)
+(defun write-front-proxy-client (ca-private-key certificate-path key-path &key issuer-certificate)
   "Sign the aggregator's client certificate under the front-proxy CA."
   (multiple-value-bind (private public) (ironclad:generate-key-pair :secp256r1)
     (let ((der (certificate-der
@@ -52,7 +52,7 @@
                       (pure-tls/acme::encode-extension
                        +oid-extended-key-usage+
                        (pure-tls/acme::encode-sequence (pure-tls/acme::encode-oid '(1 3 6 1 5 5 7 3 2)))))
-                ca-private-key)))
+                ca-private-key :issuer-certificate issuer-certificate)))
       (write-private-text-exclusively key-path (pure-tls/acme::encode-ec-private-key-pem private))
       (write-public-text-exclusively certificate-path (pure-tls/acme::wrap-pem "CERTIFICATE" der)))))
 
@@ -71,7 +71,8 @@
       (unless (and (probe-file certificate) (probe-file key))
         (when (or (probe-file certificate) (probe-file key))
           (pki-fail "incomplete-front-proxy" "Front-proxy client certificate and key must both exist"))
-        (write-front-proxy-client (pure-tls:load-private-key ca-key) certificate key)))
+        (write-front-proxy-client (pure-tls:load-private-key ca-key) certificate key
+                                  :issuer-certificate (first (pure-tls:load-certificate-chain ca)))))
     (values ca certificate key)))
 
 (defun extension-apiserver-authentication-data (client-ca request-header-ca)

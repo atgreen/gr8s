@@ -158,7 +158,32 @@ TEXT is a string, or a function that writes the text to the stream it is given."
    (ironclad:sign-message private-key
                           (ironclad:digest-sequence :sha256 bytes))))
 
-(defun certificate-der (issuer subject subject-public-key extensions signer)
+(defun subject-public-key-identifier (subject-public-key)
+  "RFC5280 method1 identifier: SHA-1 over the public-key BIT STRING value."
+  (ironclad:digest-sequence :sha1
+    (getf (pure-tls::parse-subject-public-key-info (pure-tls::parse-der subject-public-key)) :public-key)))
+
+(defun certificate-issuer-key-identifier (certificate)
+  "Use the issuer's actual SKI, including non-default identifiers; derive for legacy CAs."
+  (let ((extension (find :subject-key-identifier (pure-tls::x509-certificate-extensions certificate)
+                         :key #'pure-tls::x509-extension-oid)))
+    (if extension
+        (let ((node (pure-tls::parse-der (pure-tls::x509-extension-value extension))))
+          (unless (and (= 0 (pure-tls::asn1-node-class node))
+                       (not (pure-tls::asn1-node-constructed node))
+                       (= 4 (pure-tls::asn1-node-tag node))
+                       (plusp (length (pure-tls::asn1-node-value node))))
+            (pki-fail "invalid-ca-key-identifier" "Issuer subject key identifier is malformed"))
+          (pure-tls::asn1-node-value node))
+        (ironclad:digest-sequence :sha1
+          (getf (pure-tls::x509-certificate-subject-public-key-info certificate) :public-key)))))
+
+(defun certificate-key-identifier-extensions (subject-id authority-id)
+  (list (pure-tls/acme::encode-extension '(2 5 29 14) (pure-tls/acme::encode-octet-string subject-id))
+        (pure-tls/acme::encode-extension '(2 5 29 35)
+          (pure-tls/acme::encode-sequence (pure-tls/acme::encode-der #x80 authority-id)))))
+
+(defun certificate-der (issuer subject subject-public-key extensions signer &key issuer-certificate)
   "Sign a direct leaf with the supplied issuer, subject, public key and policy extensions."
   (let* ((algorithm
            (pure-tls/acme::encode-sequence
@@ -175,7 +200,15 @@ TEXT is a string, or a function that writes the text to the stream it is given."
              (- now 300) (+ now (* 365 24 60 60)))
             subject
             subject-public-key
-            (pure-tls/acme::encode-x509-extensions extensions))))
+            (pure-tls/acme::encode-x509-extensions
+             (append extensions
+                     (certificate-key-identifier-extensions
+                      (subject-public-key-identifier subject-public-key)
+                      (if issuer-certificate
+                          (certificate-issuer-key-identifier issuer-certificate)
+                          (let ((point (getf (ironclad:destructure-private-key signer) :y)))
+                            (unless point (pki-fail "invalid-ca-key" "Certificate issuer requires an EC key"))
+                            (ironclad:digest-sequence :sha1 point)))))))))
     (pure-tls/acme::encode-sequence
      tbs algorithm
      (pure-tls/acme::encode-bit-string (ecdsa-sign-der signer tbs)))))
@@ -208,7 +241,9 @@ TEXT is a string, or a function that writes the text to the stream it is given."
               name
               (pure-tls/acme::encode-ec-public-key public-key)
               (pure-tls/acme::encode-x509-extensions
-               (list basic-constraints key-usage)))))
+               (append (list basic-constraints key-usage)
+                       (let ((identifier (subject-public-key-identifier (pure-tls/acme::encode-ec-public-key public-key))))
+                         (certificate-key-identifier-extensions identifier identifier)))))))
       (pure-tls/acme::encode-sequence
        tbs algorithm
        (pure-tls/acme::encode-bit-string (ecdsa-sign-der private-key tbs))))))
@@ -444,7 +479,8 @@ TEXT is a string, or a function that writes the text to the stream it is given."
      (pure-tls/acme::encode-subject +pki-ca-common-name+)
      subject subject-public-key
      (list key-usage extended-key-usage)
-     (cluster-pki-ca-private-key pki))))
+     (cluster-pki-ca-private-key pki)
+     :issuer-certificate (cluster-pki-ca-certificate pki))))
 
 (defun enroll-node-csr (pki node-name token ca-fingerprint csr)
   "Issue only the validated internal node name and key; requested subject attributes cannot grant API user groups."

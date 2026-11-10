@@ -71,7 +71,7 @@ NODE-PKI is the control plane's own, whose CA is shared with voters it enrolls."
     (pure-tls/acme::encode-extension
      pure-tls/acme::*oid-subject-alt-name*
      (pure-tls/acme::encode-san-extension (list +node-server-common-name+))))
-   (cluster-pki-ca-private-key pki)))
+   (cluster-pki-ca-private-key pki) :issuer-certificate (cluster-pki-ca-certificate pki)))
 
 (defun issue-raft-member-certificate (pki member-id csr)
   "Return a certificate chain PEM for MEMBER-ID from its verified signing request."

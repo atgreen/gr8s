@@ -162,3 +162,21 @@
         (gr8s::reconcile-certificates store nil)
         (let ((after (gethash "renewalTime" (gethash "status" (gr8s::get-core-resource store "certificates" "certs" "web")))))
           (is (not (equal before after))))))))
+
+
+(test managed-ca-leaf-passes-strict-openssl-chain-validation
+  (with-temporary-pki (pki root)
+    (multiple-value-bind (subject signer issuer)
+        (gr8s.controllers::cm-issuer-signer pki (gr8s::core-object "ca" (gr8s::core-object)))
+      (multiple-value-bind (certificate key before after)
+          (gr8s.controllers::cm-issue-leaf :common-name "strict.test" :dns-names '("strict.test")
+                                          :duration-seconds 3600 :issuer-subject-der subject
+                                          :signer-key signer :issuer-certificate issuer)
+        (declare (ignore key before after))
+        (let ((path (merge-pathnames "managed-strict.crt" root)))
+          (with-open-file (out path :direction :output :if-exists :error) (write-string certificate out))
+          (multiple-value-bind (out err status)
+              (uiop:run-program (list "openssl" "verify" "-x509_strict" "-purpose" "sslserver"
+                                     "-CAfile" (namestring (gr8s:cluster-pki-ca-certificate-path pki))
+                                     (namestring path)) :output :string :error-output :string :ignore-error-status t)
+            (is (zerop status) "Managed leaf strict validation failed: ~A ~A" out err)))))))
