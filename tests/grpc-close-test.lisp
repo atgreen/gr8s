@@ -303,3 +303,61 @@
       (when channel (ignore-errors (ag-grpc:channel-close channel)))
       (ag-grpc:server-stop server)
       (when thread (bt:join-thread thread)))))
+
+(test failed-stream-setup-and-early-server-stream-exit-release-transport
+  (with-http2-close-connection (connection socket peer listener)
+    (setf (ag-http2:connection-state connection) :open)
+    (let* ((channel (make-instance 'ag-grpc::grpc-channel :host "127.0.0.1" :port 1
+                                                        :connection connection :default-timeout nil))
+           (mux (ag-http2:connection-multiplexer connection)))
+      ;; Malformed metadata fails after allocation, before a stream is returned.
+      (dolist (setup (list (lambda () (ag-grpc:call-server-stream channel "/bad" #() :metadata '(42)))
+                          (lambda () (ag-grpc:call-client-streaming channel "/bad" :metadata '(42)))
+                          (lambda () (ag-grpc:call-bidirectional-streaming channel "/bad" :metadata '(42)))
+                          ;; Serialization fails after request headers have gone out.
+                          (lambda () (ag-grpc:call-server-stream channel "/bad" 42))))
+        (signals error (funcall setup))
+        (is (zerop (hash-table-count (ag-http2::multiplexer-streams mux)))))
+      (is (eq :early
+              (catch 'exit-stream
+                (ag-grpc:with-server-stream (stream channel "/early" #())
+                  (throw 'exit-stream :early)))))
+      (is (zerop (hash-table-count (ag-http2::multiplexer-streams mux)))))))
+
+(test rejected-unary-call-retires-without-registered-handler-state
+  (with-http2-close-connection (connection socket peer listener)
+    (let* ((server (ag-grpc:make-grpc-server 0 :host "127.0.0.1"))
+           (stream (ag-http2::connection-new-stream connection))
+           (id (ag-http2:stream-id stream)))
+      (setf (ag-http2:stream-state stream) :half-closed-remote
+            (ag-http2:stream-headers stream) '((:path . "/missing")))
+      (ag-grpc::server-handle-headers server connection
+                                     (ag-http2::make-headers-frame id #() :end-headers t) "test")
+      (is (eq :closed (ag-http2:stream-state stream)))
+      (is (zerop (hash-table-count (ag-http2::multiplexer-streams
+                                    (ag-http2:connection-multiplexer connection)))))
+      (is (zerop (ag-http2:connection-active-streams connection))))))
+
+(test streaming-decoder-releases-consumed-capacity-and-preserves-partial-message
+  (with-http2-close-connection (connection socket peer listener)
+    (let* ((stream (ag-http2::connection-new-stream connection))
+           (id (ag-http2:stream-id stream))
+           (ctx (make-instance 'ag-grpc::grpc-call-context :connection connection :stream-id id))
+           (handler (make-instance 'ag-grpc::grpc-handler :request-type 'gr8s.node.v1::raft-ack))
+           (buffer (ag-grpc::make-stream-message-buffer))
+           (frame (ag-grpc::encode-grpc-message #())))
+      (ag-grpc::connection-set-stream-context connection stream ctx)
+      (ag-grpc::connection-set-stream-handler connection stream handler)
+      (setf (gethash id (ag-http2:connection-stream-buffers connection)) buffer
+            (ag-http2:stream-data-buffer stream)
+            (make-array 65536 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
+      (ag-http2::stream-append-data stream (concatenate '(vector (unsigned-byte 8)) frame frame (subseq frame 0 3)))
+      (ag-grpc::server-handle-data nil connection (ag-http2::make-data-frame id #()))
+      (is (= 2 (length (ag-grpc::stream-message-buffer-messages buffer))))
+      (is (equalp (subseq frame 0 3) (ag-http2:stream-data-buffer stream)))
+      (is (= 3 (array-total-size (ag-http2:stream-data-buffer stream))))
+      (ag-http2::stream-append-data stream (subseq frame 3))
+      (ag-grpc::server-handle-data nil connection (ag-http2::make-data-frame id #() :end-stream t))
+      (is (= 3 (length (ag-grpc::stream-message-buffer-messages buffer))))
+      (is (zerop (array-total-size (ag-http2:stream-data-buffer stream))))
+      (is-true (ag-grpc::stream-message-buffer-closed-p buffer)))))

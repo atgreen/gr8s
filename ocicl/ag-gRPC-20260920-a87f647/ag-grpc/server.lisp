@@ -521,6 +521,12 @@ by a single NIL."
          (handler (server-get-handler server method-path)))
     (when (eq :closed (ag-http2:stream-state h2-stream))
       (return-from server-handle-headers))
+    ;; Even rejected calls need transport retirement. The full handler cleanup
+    ;; replaces this callback once application state has been registered.
+    (setf (ag-http2:stream-cleanup-callback h2-stream)
+          (lambda (stream)
+            (ag-http2::multiplexer-forget-stream
+             (ag-http2:connection-multiplexer conn) (ag-http2:stream-id stream))))
     (unless handler
       ;; No handler registered - send UNIMPLEMENTED
       (server-send-error conn stream-id +grpc-status-unimplemented+
@@ -641,10 +647,15 @@ by a single NIL."
                         (message (ag-proto:deserialize-from-bytes
                                   request-type msg-data)))
                    (buffer-push-message msg-buffer message))
-                 (let ((remaining (subseq byte-buffer consumed)))
-                   (setf (fill-pointer byte-buffer) 0)
-                   (loop for byte across remaining
-                         do (vector-push-extend byte byte-buffer))))))
+                 (let* ((remaining (subseq byte-buffer consumed))
+                        (length (length remaining)))
+                   ;; Keep only the incomplete next message, releasing the
+                   ;; capacity of already decoded streaming requests.
+                   (setf byte-buffer
+                         (make-array length :element-type '(unsigned-byte 8)
+                                            :initial-contents remaining
+                                            :adjustable t :fill-pointer length)
+                         (ag-http2:stream-data-buffer h2-stream) byte-buffer)))))
            (when (plusp (logand (ag-http2:frame-flags frame) ag-http2:+flag-end-stream+))
              (buffer-close msg-buffer)))
           (t

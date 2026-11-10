@@ -69,6 +69,15 @@ Preserves original condition in :cause slot (grpc-status-error-cause) for debugg
 ;;;; Helper Functions
 ;;;; ========================================================================
 
+(defmacro with-client-stream-setup ((channel stream-id) &body body)
+  "Release an allocated transport stream if setup exits before returning it."
+  (let ((complete (gensym "COMPLETE")))
+    `(let ((,complete nil))
+       (unwind-protect
+            (multiple-value-prog1 (progn ,@body) (setf ,complete t))
+         (unless ,complete
+           (ignore-errors (channel-retire-stream ,channel ,stream-id)))))))
+
 (defun get-response-encoding (headers)
   "Extract the grpc-encoding value from response headers.
 Returns the encoding string (e.g., \"gzip\") or NIL if not present/identity."
@@ -373,37 +382,38 @@ Returns a grpc-server-stream object. Use stream-receive-message to get responses
   (let* ((h2-stream (channel-new-stream channel))
          (stream-id (ag-http2:stream-id h2-stream))
          (effective-timeout (or timeout (channel-default-timeout channel))))
-    ;; Create cl-cancel context for this stream
-    (multiple-value-bind (ctx cancel-fn)
-        (if effective-timeout
-            (cl-cancel:with-timeout (cl-cancel:ensure-cancellable) effective-timeout)
-            (values (cl-cancel:ensure-cancellable) nil))
-      (let ((server-stream (make-instance 'grpc-server-stream
-                                          :channel channel
-                                          :stream-id stream-id
-                                          :method method
-                                          :response-type response-type
-                                          :cancel-context ctx
-                                          :cancel-fn cancel-fn)))
-        ;; Register cleanup callback on HTTP/2 stream
-        (setf (ag-http2:stream-cleanup-callback h2-stream)
-              (lambda (stream)
-                (declare (ignore stream))
-                ;; Idempotent cleanup - check before calling
-                (let ((fn (stream-cancel-fn server-stream)))
-                  (when fn
-                    (funcall fn)
-                    (setf (stream-cancel-fn server-stream) nil)))))
-        ;; Send request headers
-        (channel-send-headers channel stream-id method
-                              :metadata metadata
-                              :timeout effective-timeout)
-        ;; Send request message with END_STREAM (single request for server streaming)
-        (let ((request-bytes (if (typep request 'vector)
-                                 request
-                                 (ag-proto:serialize-to-bytes request))))
-          (channel-send-message channel stream-id request-bytes :end-stream t))
-        server-stream))))
+    (with-client-stream-setup (channel stream-id)
+      ;; Create cl-cancel context for this stream
+      (multiple-value-bind (ctx cancel-fn)
+          (if effective-timeout
+              (cl-cancel:with-timeout (cl-cancel:ensure-cancellable) effective-timeout)
+              (values (cl-cancel:ensure-cancellable) nil))
+        (let ((server-stream (make-instance 'grpc-server-stream
+                                            :channel channel
+                                            :stream-id stream-id
+                                            :method method
+                                            :response-type response-type
+                                            :cancel-context ctx
+                                            :cancel-fn cancel-fn)))
+          ;; Register cleanup callback on HTTP/2 stream
+          (setf (ag-http2:stream-cleanup-callback h2-stream)
+                (lambda (stream)
+                  (declare (ignore stream))
+                  ;; Idempotent cleanup - check before calling
+                  (let ((fn (stream-cancel-fn server-stream)))
+                    (when fn
+                      (funcall fn)
+                      (setf (stream-cancel-fn server-stream) nil)))))
+          ;; Send request headers
+          (channel-send-headers channel stream-id method
+                                :metadata metadata
+                                :timeout effective-timeout)
+          ;; Send request message with END_STREAM (single request for server streaming)
+          (let ((request-bytes (if (typep request 'vector)
+                                   request
+                                   (ag-proto:serialize-to-bytes request))))
+            (channel-send-message channel stream-id request-bytes :end-stream t))
+          server-stream)))))
 
 (defun stream-receive-headers (server-stream)
   "Receive and return response headers with timeout enforcement."
@@ -605,34 +615,35 @@ then stream-close-and-recv to finish and get the response."
                               :method method
                               :stream-id stream-id
                               :request-metadata metadata)))
-    ;; Create cl-cancel context for this stream
-    (multiple-value-bind (ctx cancel-fn)
-        (if effective-timeout
-            (cl-cancel:with-timeout (cl-cancel:ensure-cancellable) effective-timeout)
-            (values (cl-cancel:ensure-cancellable) nil))
-      (let ((client-stream (make-instance 'grpc-client-stream
-                                          :call call
-                                          :channel channel
-                                          :stream-id stream-id
-                                          :response-type response-type
-                                          :cancel-context ctx
-                                          :cancel-fn cancel-fn)))
-        ;; Register cleanup callback on HTTP/2 stream
-        (setf (ag-http2:stream-cleanup-callback h2-stream)
-              (lambda (stream)
-                (declare (ignore stream))
-                ;; Idempotent cleanup - check before calling
-                (let ((fn (stream-cancel-fn client-stream)))
-                  (when fn
-                    (funcall fn)
-                    (setf (stream-cancel-fn client-stream) nil)))))
-        ;; Send request headers (NOT end-stream, we're going to send data)
-        (channel-send-headers channel stream-id method
-                              :metadata metadata
-                              :timeout effective-timeout
-                              :end-stream nil)
-        ;; Return the client stream object
-        client-stream))))
+    (with-client-stream-setup (channel stream-id)
+      ;; Create cl-cancel context for this stream
+      (multiple-value-bind (ctx cancel-fn)
+          (if effective-timeout
+              (cl-cancel:with-timeout (cl-cancel:ensure-cancellable) effective-timeout)
+              (values (cl-cancel:ensure-cancellable) nil))
+        (let ((client-stream (make-instance 'grpc-client-stream
+                                            :call call
+                                            :channel channel
+                                            :stream-id stream-id
+                                            :response-type response-type
+                                            :cancel-context ctx
+                                            :cancel-fn cancel-fn)))
+          ;; Register cleanup callback on HTTP/2 stream
+          (setf (ag-http2:stream-cleanup-callback h2-stream)
+                (lambda (stream)
+                  (declare (ignore stream))
+                  ;; Idempotent cleanup - check before calling
+                  (let ((fn (stream-cancel-fn client-stream)))
+                    (when fn
+                      (funcall fn)
+                      (setf (stream-cancel-fn client-stream) nil)))))
+          ;; Send request headers (NOT end-stream, we're going to send data)
+          (channel-send-headers channel stream-id method
+                                :metadata metadata
+                                :timeout effective-timeout
+                                :end-stream nil)
+          ;; Return the client stream object
+          client-stream)))))
 
 (defgeneric stream-send (stream message)
   (:documentation "Send a message on a streaming RPC.
@@ -817,34 +828,35 @@ stream-read-message to receive messages, and stream-close-send when done sending
                               :method method
                               :stream-id stream-id
                               :request-metadata metadata)))
-    ;; Create cl-cancel context for this stream
-    (multiple-value-bind (ctx cancel-fn)
-        (if effective-timeout
-            (cl-cancel:with-timeout (cl-cancel:ensure-cancellable) effective-timeout)
-            (values (cl-cancel:ensure-cancellable) nil))
-      (let ((bidi-stream (make-instance 'grpc-bidi-stream
-                                        :call call
-                                        :channel channel
-                                        :stream-id stream-id
-                                        :response-type response-type
-                                        :cancel-context ctx
-                                        :cancel-fn cancel-fn)))
-        ;; Register cleanup callback on HTTP/2 stream
-        (setf (ag-http2:stream-cleanup-callback h2-stream)
-              (lambda (stream)
-                (declare (ignore stream))
-                ;; Idempotent cleanup - check before calling
-                (let ((fn (stream-cancel-fn bidi-stream)))
-                  (when fn
-                    (funcall fn)
-                    (setf (stream-cancel-fn bidi-stream) nil)))))
-        ;; Send request headers (NOT end-stream, we're going to send data)
-        (channel-send-headers channel stream-id method
-                              :metadata metadata
-                              :timeout effective-timeout
-                              :end-stream nil)
-        ;; Return the bidi stream object
-        bidi-stream))))
+    (with-client-stream-setup (channel stream-id)
+      ;; Create cl-cancel context for this stream
+      (multiple-value-bind (ctx cancel-fn)
+          (if effective-timeout
+              (cl-cancel:with-timeout (cl-cancel:ensure-cancellable) effective-timeout)
+              (values (cl-cancel:ensure-cancellable) nil))
+        (let ((bidi-stream (make-instance 'grpc-bidi-stream
+                                          :call call
+                                          :channel channel
+                                          :stream-id stream-id
+                                          :response-type response-type
+                                          :cancel-context ctx
+                                          :cancel-fn cancel-fn)))
+          ;; Register cleanup callback on HTTP/2 stream
+          (setf (ag-http2:stream-cleanup-callback h2-stream)
+                (lambda (stream)
+                  (declare (ignore stream))
+                  ;; Idempotent cleanup - check before calling
+                  (let ((fn (stream-cancel-fn bidi-stream)))
+                    (when fn
+                      (funcall fn)
+                      (setf (stream-cancel-fn bidi-stream) nil)))))
+          ;; Send request headers (NOT end-stream, we're going to send data)
+          (channel-send-headers channel stream-id method
+                                :metadata metadata
+                                :timeout effective-timeout
+                                :end-stream nil)
+          ;; Return the bidi stream object
+          bidi-stream)))))
 
 (defmethod stream-send ((bidi-stream grpc-bidi-stream) message)
   "Send a message on a bidirectional stream.
@@ -1055,6 +1067,7 @@ Example:
                                &key metadata timeout response-type) &body body)
   "Execute BODY with VAR bound to a server streaming response.
 Provides convenient iteration over server stream responses.
+Cancels and releases the stream when BODY exits, including early exits.
 
 Example:
   (with-server-stream (stream ch \"/pkg.Svc/List\" request :response-type 'item)
@@ -1062,4 +1075,5 @@ Example:
       (process item)))"
   (declare (ignore metadata timeout response-type))
   `(let ((,var (call-server-stream ,channel ,method ,request ,@args)))
-     ,@body))
+     (unwind-protect (progn ,@body)
+       (finalize-client-stream ,var))))
