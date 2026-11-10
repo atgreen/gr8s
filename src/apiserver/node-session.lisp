@@ -350,6 +350,8 @@ cannot forward traffic between healthy nodes."
   (snapshots (make-hash-table :test #'equal))
   (statuses (make-hash-table :test #'equal))
   (acknowledged-revisions (make-hash-table :test #'equal))
+  ;; Latest validated complete local receiver report: (session revision proofs).
+  (service-receiver-reports (make-hash-table :test #'equal))
   ;; A grant is tied to discovery, trusted owner inventory, and the exact
   ;; authenticated sessions that acknowledged the risk-only phase.
   service-risk-grant-digest
@@ -1277,6 +1279,82 @@ candidates; agents still require their transactional handshake/probe gates."
                            (node-grpc-server-acknowledged-revisions server))
                   revision)))))))
 
+(defun canonical-node-service-receiver-proofs (server node-name status &optional session)
+  "Accept only complete receiver reports for the current ACKed assignment.
+Each proof must name an exact owner incarnation belonging to the authenticated
+node; stale, duplicate, or foreign proofs clear the entire report."
+  (let ((revision (slot-value status 'gr8s.node.v1::service-receiver-revision))
+        (proofs (slot-value status 'gr8s.node.v1::service-receivers)))
+    (bt:with-lock-held ((node-grpc-server-lock server))
+      (let* ((current (gethash node-name (node-grpc-server-sessions server)))
+             (snapshot (gethash node-name (node-grpc-server-snapshots server)))
+             (network (and snapshot (slot-value snapshot 'gr8s.node.v1::network)))
+             (records (and network (slot-value network 'gr8s.node.v1::service-translations)))
+             (expected (make-hash-table :test #'equal))
+             (seen (make-hash-table :test #'equal)))
+        (unless (and (integerp revision) (plusp revision) current
+                     (or (null session) (eq session current))
+                     (not (node-agent-session-evicted-p current))
+                     snapshot (= revision (slot-value snapshot 'gr8s.node.v1::revision))
+                     (= revision (gethash node-name
+                                          (node-grpc-server-acknowledged-revisions server) 0)))
+          (return-from canonical-node-service-receiver-proofs nil))
+        (dolist (record records)
+          (when (and (string= node-name (slot-value record 'gr8s.node.v1::node-name))
+                     (string= (node-agent-session-node-id current)
+                              (slot-value record 'gr8s.node.v1::node-id)))
+            (setf (gethash (slot-value record 'gr8s.node.v1::pod-uid) expected)
+                  (gr8s.network::service-translation-incarnation-token
+                   (slot-value record 'gr8s.node.v1::node-id)
+                   (slot-value record 'gr8s.node.v1::sandbox-id)
+                   (slot-value record 'gr8s.node.v1::interface-name)
+                   (slot-value record 'gr8s.node.v1::pod-ip)
+                   (slot-value record 'gr8s.node.v1::translation-ip)))))
+        (let ((canonical nil))
+          (dolist (proof proofs)
+            (unless (typep proof 'gr8s.node.v1::service-receiver-proof)
+              (return-from canonical-node-service-receiver-proofs nil))
+            (let* ((uid (slot-value proof 'gr8s.node.v1::pod-uid))
+                   (epoch (slot-value proof 'gr8s.node.v1::incarnation))
+                   (wanted (gethash uid expected)))
+              (unless (and wanted (not (gethash uid seen))
+                           (= 16 (length epoch)) (equalp epoch wanted))
+                (return-from canonical-node-service-receiver-proofs nil))
+              (setf (gethash uid seen) t)
+              (push (make-instance 'gr8s.node.v1::service-receiver-proof
+                                   :pod-uid uid :incarnation (copy-seq epoch)) canonical)))
+          (values (sort canonical #'string<
+                        :key (lambda (proof) (slot-value proof 'gr8s.node.v1::pod-uid)))
+                  t))))))
+
+(defun note-node-service-receiver-status (server node-name status &optional session)
+  "Store an explicit complete receiver report for this current session and
+ACKed revision. Sparse Pod status messages leave the last report alone.
+An explicit unready or malformed current report withdraws its prior proof."
+  (let ((revision (slot-value status 'gr8s.node.v1::service-receiver-revision)))
+    (when (slot-value status 'gr8s.node.v1::service-receiver-report-present)
+      (unless (and (integerp revision) (plusp revision))
+        (bt:with-lock-held ((node-grpc-server-lock server))
+          (when (or (null session)
+                    (eq session (gethash node-name (node-grpc-server-sessions server))))
+            (remhash node-name (node-grpc-server-service-receiver-reports server))))
+        (return-from note-node-service-receiver-status (values nil nil)))
+      (multiple-value-bind (proofs valid-p)
+          (canonical-node-service-receiver-proofs server node-name status session)
+        (bt:with-lock-held ((node-grpc-server-lock server))
+          (let ((current (gethash node-name (node-grpc-server-sessions server)))
+                (snapshot (gethash node-name (node-grpc-server-snapshots server))))
+            (when (and current snapshot
+                       (or (null session) (eq session current))
+                       (= revision (slot-value snapshot 'gr8s.node.v1::revision)))
+              (if valid-p
+                  (setf (gethash node-name
+                                 (node-grpc-server-service-receiver-reports server))
+                        (list current revision proofs))
+                  (remhash node-name
+                           (node-grpc-server-service-receiver-reports server))))))
+        (values proofs valid-p)))))
+
 (defun credential-token-response (store node-name request)
   "Mint the credential-provider token REQUEST after binding it to NODE-NAME's exact Pod."
   (let* ((namespace (slot-value request 'gr8s.node.v1::namespace))
@@ -1367,6 +1445,13 @@ candidates; agents still require their transactional handshake/probe gates."
       (slot-value envelope 'gr8s.node.v1::snapshot-ack) session))
     (:status
      (let ((status (slot-value envelope 'gr8s.node.v1::status)))
+       (multiple-value-bind (receivers valid-p)
+           (note-node-service-receiver-status server node-name status session)
+         (setf (slot-value status 'gr8s.node.v1::service-receivers) receivers
+               (slot-value status 'gr8s.node.v1::service-receiver-revision)
+               (if valid-p
+                   (slot-value status 'gr8s.node.v1::service-receiver-revision)
+                   0)))
        (when (slot-value status 'gr8s.node.v1::resource-capacity)
          (update-node-capacity
           (node-grpc-server-store server) node-name

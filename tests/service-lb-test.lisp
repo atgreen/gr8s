@@ -521,6 +521,30 @@
                      (gethash (car (first rows)) values) 4 4))
         "A failed primary update must never advertise a backend as ready")))
 
+(test v2-local-receiver-report-requires-both-current-ready-owner-rows
+  (let* ((local (gr8s::json-object
+                 "nodeID" "node-a" "podUID" "pod-a" "sandboxID" "sandbox-a"
+                 "interfaceName" "eth0" "podIP" "10.88.1.2" "address" "10.88.1.9"))
+         (remote (gr8s::json-object
+                  "nodeID" "node-b" "podUID" "pod-b" "sandboxID" "sandbox-b"
+                  "interfaceName" "eth0" "podIP" "10.88.2.2" "address" "10.88.2.9"))
+         (rows (gr8s.network::service-nat-identity-rows local))
+         (values (make-hash-table :test #'equalp))
+         (lookup (lambda (map key) (declare (ignore map)) (gethash key values))))
+    (dolist (row rows)
+      (let ((ready (copy-seq (cdr row))))
+        (replace ready (gr8s::service-lb-bytes #x20005 4) :start1 4)
+        (setf (gethash (car row) values) ready)))
+    (is (equal (list local)
+               (gr8s.network::service-nat-ready-local-receivers
+                :map (vector local remote) "node-a" :lookup lookup)))
+    (replace (gethash (car (second rows)) values)
+             (gr8s::service-lb-bytes #x20001 4) :start1 4)
+    (is (null (gr8s.network::service-nat-ready-local-receivers
+               :map (vector local remote) "node-a" :lookup lookup)))
+    (is (null (gr8s.network::service-nat-ready-local-receivers
+               :map (vector local remote) "node-b" :lookup lookup)))))
+
 (test service-lb-plan-publishes-each-cluster-ip-to-same-family-backends
   (let* ((service (fake-lb-service "10.96.0.10"))
          (spec (gethash "spec" service)))

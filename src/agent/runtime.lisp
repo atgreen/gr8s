@@ -1508,6 +1508,32 @@ exists."
                                 1000)
                                0)))))
 
+(defun node-runtime-service-receiver-report
+    (node-runtime &key (lookup #'whistler/loader:map-lookup))
+  "Report only current local v2 receivers proven by both pinned owner rows.
+The revision is zero when risk inventory or owner readback is unavailable."
+  (handler-case
+      (let* ((revision (node-runtime-received-revision node-runtime))
+             (network (node-runtime-network node-runtime))
+             (dataplane (node-runtime-service-lb node-runtime))
+             (owners (and dataplane (service-lb-map dataplane "gr8s_nat_id_v2"))))
+        (unless (and network owners (node-runtime-local-risk-ready-p node-runtime))
+          (return-from node-runtime-service-receiver-report (values nil 0)))
+        (let ((receivers
+                (loop for record in
+                      (gr8s.network::service-nat-ready-local-receivers
+                       owners (gethash "serviceTranslations" network #())
+                       (node-runtime-node-id node-runtime) :lookup lookup)
+                      for rows = (gr8s.network::service-nat-identity-rows record)
+                      collect (make-instance 'gr8s.node.v1::service-receiver-proof
+                                             :pod-uid (gethash "podUID" record)
+                                             :incarnation (subseq (cdar rows) 8 24)))))
+          (if (and (= revision (node-runtime-received-revision node-runtime))
+                   (node-runtime-local-risk-ready-p node-runtime))
+              (values receivers revision)
+              (values nil 0))))
+    (error () (values nil 0))))
+
 (defun node-runtime-status (node-runtime &key (counter-reader #'read-cni-policy-counters))
   "Build the node's NODE-STATUS heartbeat: observation timestamp, pending podCertificate
 claims, registered CSI drivers (rescanned here, on this thread, so a slow driver can't
@@ -1515,9 +1541,14 @@ delay the heartbeat), the observed status of each assigned Pod, and endpoint tel
 Prunes cache entries for UIDs no longer assigned, never reports a status for an older
 resource version than the one assigned, and retains a final \"Deleted\" acknowledgement
 while the server still assigns that UID at that version."
-  (let ((pods (list-pods (node-runtime-store node-runtime))))
+  (let ((pods (list-pods (node-runtime-store node-runtime)))
+        (receiver-report (multiple-value-list
+                          (node-runtime-service-receiver-report node-runtime))))
     (make-instance
      'gr8s.node.v1::node-status
+     :service-receivers (first receiver-report)
+     :service-receiver-revision (second receiver-report)
+     :service-receiver-report-present t
      :observed-at-unix-nanos (* (- (get-universal-time) 2208988800) 1000000000)
      :resource-capacity (gr8s.kubelet::node-resource-capacity-entries (node-runtime-resource-manager node-runtime))
      :resource-allocatable (gr8s.kubelet::node-resource-capacity-entries (node-runtime-resource-manager node-runtime) :allocatable t)

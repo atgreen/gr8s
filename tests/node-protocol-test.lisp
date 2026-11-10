@@ -68,6 +68,27 @@
                                             :gr8s.node.v1))
                    payload-type))))))
 
+(test service-receiver-status-roundtrips-complete-and-empty-reports
+  (let* ((proof (make-instance 'gr8s.node.v1::service-receiver-proof
+                               :pod-uid "pod-a"
+                               :incarnation (make-array 16 :element-type '(unsigned-byte 8)
+                                                        :initial-element 7)))
+         (status (make-instance 'gr8s.node.v1::node-status
+                                :service-receiver-report-present t
+                                :service-receiver-revision 9
+                                :service-receivers (list proof)))
+         (restored (roundtrip-node-message status 'gr8s.node.v1::node-status)))
+    (is-true (slot-value restored 'gr8s.node.v1::service-receiver-report-present))
+    (is (= 9 (slot-value restored 'gr8s.node.v1::service-receiver-revision)))
+    (is (equalp (slot-value proof 'gr8s.node.v1::incarnation)
+                (slot-value (first (slot-value restored 'gr8s.node.v1::service-receivers))
+                            'gr8s.node.v1::incarnation)))
+    (setf (slot-value status 'gr8s.node.v1::service-receivers) nil
+          (slot-value status 'gr8s.node.v1::service-receiver-revision) 0)
+    (let ((empty (roundtrip-node-message status 'gr8s.node.v1::node-status)))
+      (is-true (slot-value empty 'gr8s.node.v1::service-receiver-report-present))
+      (is (null (slot-value empty 'gr8s.node.v1::service-receivers))))))
+
 (test every-server-envelope-variant-roundtrips
   (dolist (spec '((:hello gr8s.node.v1::server-hello)
                   (:desired-state gr8s.node.v1::desired-state-snapshot)
