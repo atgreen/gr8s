@@ -91,6 +91,21 @@ def main():
                 raise
 
         traffic.wait_for("v2 backend risk publication", 120, published)
+        selection = cluster.root / "state/agent/containerd/bpf/service-lb/gr8s_service_v4"
+        if not selection.exists():
+            raise RuntimeError("v2 Service selector map is not pinned")
+        vip_bytes = ipaddress.ip_address(vip).packed
+        selection_keys = [struct.pack("!H", port) + vip_bytes + bytes((proto, 0))
+                          for port, proto in ((80, 6), (81, 17))]
+        for key in selection_keys:
+            try:
+                guest.read_pinned_values(selection, [key], 16)
+            except OSError as error:
+                if error.errno != errno.ENOENT:
+                    raise
+            else:
+                raise RuntimeError("v2 risk phase exposed a Service selector before cluster activation")
+        report["serviceSelectionWithheld"] = True
         # A disposable network namespace lets CNI ADD exercise the agent's
         # snapshot-revision risk fence without enabling the still-gated graph.
         netns_name = "gr8s-v2-risk-proof"
