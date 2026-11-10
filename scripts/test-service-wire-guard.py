@@ -9,6 +9,7 @@ import argparse
 import json
 from pathlib import Path
 import struct
+import sys
 
 import importlib.util
 
@@ -323,16 +324,23 @@ def main():
     programs, ids, descriptors = p.read_fixture(args.fixture, names=graph.ROOTS + graph.STAGES + EXTRA + ("gr8s_nat_gc",))
     cls = Kernel if args.kernel else Interpreter
     factory = lambda shared=None: cls(programs, ids, descriptors, shared)
-    cases = [plain_stage_contract(factory)]
-    cases.extend(crossed(factory, protocol, shared, simultaneous)
+
+    def checked(operation, *parameters):
+        print(f"Running {operation.__name__}{parameters[1:]}", file=sys.stderr, flush=True)
+        result = operation(*parameters)
+        print(f"Passed {operation.__name__}{parameters[1:]}", file=sys.stderr, flush=True)
+        return result
+
+    cases = [checked(plain_stage_contract, factory)]
+    cases.extend(checked(crossed, factory, protocol, shared, simultaneous)
                  for protocol in (6, 17) for shared in (True, False) for simultaneous in (False, True))
-    cases.extend(direct_collision(factory, protocol, shared)
+    cases.extend(checked(direct_collision, factory, protocol, shared)
                  for protocol in (6, 17) for shared in (True, False))
-    cases.extend(denied_and_stale(factory, protocol, shared)
+    cases.extend(checked(denied_and_stale, factory, protocol, shared)
                  for protocol in (6, 17) for shared in (True, False))
     small = {key: value[:3] + (1, value[4]) if key in (RX, RI, WL) else value
              for key, value in descriptors.items()}
-    cases.extend(capacity(lambda: cls(programs, ids, small), table) for table in (RX, RI, WL))
+    cases.extend(checked(capacity, lambda: cls(programs, ids, small), table) for table in (RX, RI, WL))
     print(json.dumps({"passed": True, "kernel": args.kernel, "cases": cases}))
 
 
