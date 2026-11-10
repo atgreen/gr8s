@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Verify private Service translation identities with two real managed agents.
 
-Root disposable VM only. Provisions a private IPAM lease while its agent is
-stopped; no packet source-NAT claim. Requires smoke-two-node.py and
+Root disposable VM only. Exercises actual CNI allocation and private return
+route/neighbor lifecycle; no packet source-NAT claim. Requires smoke-two-node.py and
 test-service-traffic.py alongside this file.
 """
 import argparse
@@ -25,38 +25,26 @@ def module(name, filename):
     return result
 
 
-def provision_lease(path, primary, remove=False):
-    """Model the validated allocator's file format only with the owner stopped."""
-    state = json.loads(path.read_text())
-    cidrs = state.get("cidrs", [state.get("cidr")])
-    rows = state["allocations"]
-    for row in rows:
-        if "addresses" not in row:
-            row["addresses"] = [row.pop("address")]
-    owners = [row for row in rows if primary in row["addresses"]]
-    if len(owners) != 1:
-        raise RuntimeError("expected one durable lease for the observed client IP")
-    owner = owners[0]
-    aliases = state.setdefault("serviceSNATAllocations", [])
-    if remove:
-        state["serviceSNATAllocations"] = [x for x in aliases if
-            (x["sandboxID"], x["interfaceName"]) != (owner["sandboxID"], owner["interfaceName"])]
-        alias = None
-    else:
-        used = {ip for row in rows for ip in row["addresses"]} | {x["address"] for x in aliases}
-        pool = next(ipaddress.ip_network(c) for c in cidrs if ipaddress.ip_network(c).version == 4)
-        alias = next(str(ip) for ip in pool.hosts() if str(ip) not in used)
-        aliases.append({"sandboxID": owner["sandboxID"], "interfaceName": owner["interfaceName"],
-                        "address": alias})
-    state["version"] = 3
-    state["cidrs"] = cidrs
-    state.pop("cidr", None)
-    temporary = path.with_suffix(".identity-test.tmp")
-    temporary.write_text(json.dumps(state) + "\n")
-    temporary.chmod(0o600)
-    temporary.replace(path)
-    return {"podIP": primary, "address": alias, "sandboxID": owner["sandboxID"],
-            "interfaceName": owner["interfaceName"]}
+ENDPOINT_IDENTITY_PROBE = """
+import ctypes,json,os,platform,struct,sys
+libc=ctypes.CDLL(None,use_errno=True)
+number={"x86_64":321,"aarch64":280}[platform.machine()]
+def bpf(command,data):
+    attr=ctypes.create_string_buffer(data,len(data))
+    result=libc.syscall(number,command,ctypes.byref(attr),len(data))
+    if result<0:
+        e=ctypes.get_errno();raise OSError(e,os.strerror(e))
+    return result
+name=ctypes.create_string_buffer(os.fsencode(sys.argv[1]))
+fd=bpf(7,struct.pack("<QII",ctypes.addressof(name),0,0))
+try:
+    key=ctypes.create_string_buffer(struct.pack("<I",0))
+    value=ctypes.create_string_buffer(32)
+    bpf(1,struct.pack("<IIQQQ",fd,0,ctypes.addressof(key),ctypes.addressof(value),0))
+    print(json.dumps({"ipv4":struct.unpack_from("<I",value.raw)[0],"bytes":value.raw.hex()}))
+finally:
+    os.close(fd)
+"""
 
 
 def main():
@@ -103,6 +91,64 @@ def main():
         smoke.agents[0].wait(timeout=180)
         smoke.agents[0] = None
 
+    def ipam_state(i):
+        return json.loads((smoke.root / f"agent-{i}/runtime/ipam/allocations.json").read_text())
+
+    def lease_for(i, primary):
+        state = ipam_state(i)
+        owner = next(x for x in state["allocations"] if primary in x.get("addresses", [x.get("address")]))
+        alias = next(x for x in state["serviceSNATAllocations"] if
+                     (x["sandboxID"], x["interfaceName"]) == (owner["sandboxID"], owner["interfaceName"]))
+        return {**alias, "podIP": primary}
+
+    def sandbox_netns(i):
+        state = smoke.root / f"agent-{i}/containerd"
+        namespaces = smoke.in_node(i, "find", state / "run/io.containerd.grpc.v1.cri/netns",
+                                   "-mindepth", "1", "-maxdepth", "1").stdout.splitlines()
+        if len(namespaces) != 1:
+            raise RuntimeError("expected one actual sandbox namespace")
+        return namespaces[0]
+
+    def cni(i, command):
+        state = smoke.root / f"agent-{i}/containerd"
+        config = json.loads((state / "cni/net.d/10-gr8s.conflist").read_text())
+        plugin = {**config["plugins"][0], "name": config["name"], "cniVersion": config["cniVersion"]}
+        lease = lease_for(i, smoke.pod(i)["status"]["podIP"])
+        return smoke.in_node(i, "env", f"CNI_COMMAND={command}", f"CNI_CONTAINERID={lease['sandboxID']}",
+                             f"CNI_NETNS={sandbox_netns(i)}", "CNI_IFNAME=eth0", args.gr8s,
+                             input=json.dumps(plugin), check=False, timeout=60)
+
+    def return_path(i, lease):
+        routes = json.loads(smoke.in_node(i, "ip", "-j", "-4", "route", "show", "exact",
+                                          f"{lease['address']}/32").stdout)
+        if len(routes) != 1:
+            raise RuntimeError(f"expected one private return route: {routes}")
+        host = routes[0]["dev"]
+        links = json.loads(smoke.in_node(i, "ip", "-j", "link", "show", "dev", host).stdout)
+        neighbors = json.loads(smoke.in_node(i, "ip", "-j", "neigh", "show", "to", lease["address"],
+                                            "dev", host).stdout)
+        public_addresses = json.loads(smoke.in_node(i, "nsenter", f"--net={sandbox_netns(i)}", "--",
+                                                   "ip", "-j", "address", "show", "dev", lease["interfaceName"]).stdout)
+        identity = json.loads(smoke.in_node(i, "python3", "-c", ENDPOINT_IDENTITY_PROBE,
+                                           smoke.root / f"agent-{i}/containerd/bpf/{lease['sandboxID']}/endpoint_identity").stdout)
+        return {"route": routes[0], "link": links[0], "neighbors": neighbors,
+                "podAddresses": [x["local"] for link in public_addresses for x in link.get("addr_info", [])],
+                "peerMAC": public_addresses[0]["address"],
+                "endpointIdentity": identity}
+
+    def healthy_path(lease, path):
+        return (path["route"].get("prefsrc") == "169.254.1.1" and
+                path["link"].get("ifalias") == f"gr8s:{lease['sandboxID']}/{lease['interfaceName']}" and
+                len(path["neighbors"]) == 1 and "PERMANENT" in path["neighbors"][0].get("state", []) and
+                path["neighbors"][0].get("lladdr") == path["peerMAC"] and
+                lease["address"] not in path["podAddresses"] and lease["podIP"] in path["podAddresses"] and
+                path["endpointIdentity"]["ipv4"] == int(ipaddress.ip_address(lease["podIP"])))
+
+    def native_traffic():
+        current = identities()
+        return [smoke.kubectl("exec", f"two-node-{i}", "--", "curl", "-fsS", "--max-time", "5",
+                              f"http://{current[1-i]['ip']}:8080/hostname").stdout.strip() for i in range(2)]
+
     try:
         smoke.setup()
         for i in range(2):
@@ -119,21 +165,50 @@ def main():
             smoke.kubectl("apply", "-f", "-", input=json.dumps(pod))
         overlay.wait_for("native workloads", smoke.check_pods, timeout=300)
         before = identities()
-        check("noPrivateIdentitiesBeforeLease", all_inventory(0), [inventory(i) for i in range(2)])
-        primary = before[0]["ip"]
-        stop_client()
-        lease = provision_lease(smoke.root / "agent-0/runtime/ipam/allocations.json", primary)
-        report["lease"] = lease
-        smoke.start_agent(0)
-        rows = overlay.wait_for("private identity on both nodes", lambda: all_inventory(1), timeout=120)
-        check("authenticatedIdentityProjected", all(
-            row[0]["address"] == lease["address"] and row[0]["podIP"] == primary and
-            row[0]["podUID"] == before[0]["uid"] and row[0]["sandboxID"] == lease["sandboxID"] and
-            row[0]["nodeName"] == "worker-0" and bool(row[0]["nodeID"]) for row in rows), rows)
-        public = smoke.pod(0)
-        check("privateIdentityHiddenFromPodStatus", "gr8sServiceTranslation" not in public["status"] and
-              lease["address"] not in [x["ip"] for x in public["status"]["podIPs"]], public["status"])
-        check("workloadsUnchangedAfterLease", identities() == before, identities())
+        leases = [lease_for(i, before[i]["ip"]) for i in range(2)]
+        lease = leases[0]
+        report["leases"] = leases
+        rows = overlay.wait_for("automatic CNI identity on both nodes", lambda: all_inventory(2), timeout=120)
+        check("authenticatedAutomaticIdentitiesProjected", all(
+            any(record["address"] == leases[i]["address"] and record["podIP"] == before[i]["ip"] and
+                record["podUID"] == before[i]["uid"] and record["sandboxID"] == leases[i]["sandboxID"] and
+                record["nodeName"] == f"worker-{i}" and bool(record["nodeID"]) for record in row)
+            for row in rows for i in range(2)), rows)
+        check("privateIdentitiesHiddenFromPodStatus", all(
+            "gr8sServiceTranslation" not in smoke.pod(i)["status"] and
+            leases[i]["address"] not in [x["ip"] for x in smoke.pod(i)["status"]["podIPs"]] for i in range(2)),
+            [smoke.pod(i)["status"] for i in range(2)])
+        paths = [return_path(i, leases[i]) for i in range(2)]
+        check("privateKernelReturnPathsAndPrimaryOnlyGuardIdentity", all(
+            healthy_path(leases[i], paths[i]) for i in range(2)), paths)
+        answers = [cni(i, "CHECK") for i in range(2)]
+        check("cniCheckBothEndpoints", all(x.returncode == 0 for x in answers), [x.stdout + x.stderr for x in answers])
+        host = paths[0]["route"]["dev"]
+        smoke.in_node(0, "ip", "neigh", "del", lease["address"], "dev", host)
+        answer = cni(0, "CHECK")
+        check("missingNeighborFailsCheck", answer.returncode != 0, answer.stdout + answer.stderr)
+        answer = cni(0, "ADD")
+        check("addRepairsNeighbor", answer.returncode == 0 and healthy_path(lease, return_path(0, lease)),
+              answer.stdout + answer.stderr)
+        result = json.loads(answer.stdout)
+        check("cniResultExcludesPrivateAddress", all(
+            str(ipaddress.ip_interface(x["address"]).ip) != lease["address"] for x in result["ips"]), result)
+        smoke.in_node(0, "ip", "route", "del", f"{lease['address']}/32", "dev", host)
+        answer = cni(0, "CHECK")
+        check("missingRouteFailsCheck", answer.returncode != 0, answer.stdout + answer.stderr)
+        answer = cni(0, "ADD")
+        check("addRepairsRoute", answer.returncode == 0 and healthy_path(lease, return_path(0, lease)), answer.stdout)
+        smoke.in_node(0, "ip", "route", "replace", f"{lease['address']}/32", "dev", "lo")
+        answer = cni(0, "ADD")
+        conflict = json.loads(smoke.in_node(0, "ip", "-j", "-4", "route", "show", "exact",
+                                           f"{lease['address']}/32").stdout)
+        check("conflictingRouteAddFailsWithoutStealing", answer.returncode != 0 and
+              len(conflict) == 1 and conflict[0]["dev"] == "lo" and lease_for(0, lease["podIP"]) == lease,
+              {"result": answer.stdout + answer.stderr, "route": conflict})
+        smoke.in_node(0, "ip", "route", "del", f"{lease['address']}/32", "dev", "lo")
+        answer = cni(0, "ADD")
+        check("addRecoversAfterConflictRemoval", answer.returncode == 0 and healthy_path(lease, return_path(0, lease)),
+              answer.stdout + answer.stderr)
         checkpoint = list((smoke.root / "control").rglob(f"observations/{before[0]['uid']}.json"))
         if len(checkpoint) != 1:
             raise RuntimeError("expected one private observation checkpoint")
@@ -142,18 +217,41 @@ def main():
               private["podUID"] == before[0]["uid"], private)
         stop_client()
         smoke.start_agent(0)
-        restored = overlay.wait_for("identity after owner restart", lambda: all_inventory(1), timeout=120)
+        restored = overlay.wait_for("identity after owner restart", lambda: all_inventory(2), timeout=120)
         check("identityRetainedAcrossOwnerRestart", restored == rows and identities() == before, restored)
-        stop_client()
-        provision_lease(smoke.root / "agent-0/runtime/ipam/allocations.json", primary, remove=True)
-        smoke.start_agent(0)
-        withdrawn = overlay.wait_for("identity withdrawal on both nodes", lambda: all_inventory(0), timeout=120)
-        check("identityWithdrawnOnBothNodes", bool(withdrawn) and identities() == before, withdrawn)
-        check("publicStatusStillPrivate", "gr8sServiceTranslation" not in smoke.pod(0)["status"], smoke.pod(0)["status"])
-        responses = [smoke.kubectl("exec", f"two-node-{i}", "--", "curl", "-fsS", "--max-time", "5",
-                                  f"http://{before[1-i]['ip']}:8080/hostname").stdout.strip()
-                     for i in range(2)]
-        check("nativeTrafficAfterWithdrawal", responses == ["two-node-1", "two-node-0"], responses)
+        path = return_path(0, lease)
+        check("returnPathSurvivesOwnerRestart", healthy_path(lease, path), path)
+        responses = native_traffic()
+        check("nativeTrafficAfterRepairsAndRestart", responses == ["two-node-1", "two-node-0"], responses)
+        smoke.kubectl("delete", "pod", "two-node-0", "--wait=false")
+        withdrawn = overlay.wait_for("CNI identity withdrawal on both nodes", lambda: all_inventory(1), timeout=180)
+        check("identityWithdrawnOnBothNodes", all(all(x["podUID"] != before[0]["uid"] for x in row)
+                                                  for row in withdrawn), withdrawn)
+        overlay.wait_for("Pod deletion", lambda: not smoke.kubectl("get", "pod", "two-node-0",
+                         "--ignore-not-found", "-o", "json").stdout.strip(), timeout=180)
+        def released():
+            state = ipam_state(0)
+            gone = smoke.in_node(0, "ip", "link", "show", "dev", host, check=False)
+            routes = json.loads(smoke.in_node(0, "ip", "-j", "-4", "route", "show", "exact",
+                                             f"{lease['address']}/32").stdout)
+            return state if (gone.returncode != 0 and not routes and
+                not any(x["sandboxID"] == lease["sandboxID"] for x in state.get("serviceSNATAllocations", [])) and
+                not any(x["sandboxID"] == lease["sandboxID"] for x in state["allocations"])) else None
+        state = overlay.wait_for("private lease and owned return-link deletion", released, timeout=180)
+        check("deleteReleasesPrivateLeaseAndOwnedReturnLink", True, state)
+        pod = traffic.server_pod("two-node-0")
+        pod["spec"]["nodeName"] = "worker-0"
+        smoke.kubectl("apply", "-f", "-", input=json.dumps(pod))
+        overlay.wait_for("replacement native workload", smoke.check_pods, timeout=180)
+        current = identities()
+        replacement = lease_for(0, current[0]["ip"])
+        path = return_path(0, replacement)
+        check("releasedAliasReusedByNewEndpointOwner", current[0]["uid"] != before[0]["uid"] and
+              replacement["sandboxID"] != lease["sandboxID"] and replacement["address"] == lease["address"] and
+              path["route"]["dev"] != host and healthy_path(replacement, path), {"lease": replacement, "path": path})
+        overlay.wait_for("replacement identity on both nodes", lambda: all_inventory(2), timeout=120)
+        responses = native_traffic()
+        check("nativeTrafficAfterAliasReuse", responses == ["two-node-1", "two-node-0"], responses)
         report["passed"] = True
     except Exception as error:
         report["passed"] = False

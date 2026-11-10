@@ -1,0 +1,663 @@
+{
+  "date": "2026-11-09",
+  "issue": "podster-p9c.10",
+  "implementationCommit": "b5feadc",
+  "scope": "Actual routed CNI private IPv4 lease allocation and owned host return route/neighbor lifecycle. No packet source NAT or alias policy normalization is activated.",
+  "behavior": "Packet-enabled IPv4 ADD reserves the auxiliary lease, installs normal primary link and policy, then publishes permanent peer-MAC neighbor and exclusive /32 return route. Alias is absent from Pod-namespace addresses, CNI result IPs and primary source-validation identity. CHECK verifies retained state; DEL removes owned link before jointly releasing primary/private leases. Exact retained routes can be adopted, conflicting routes cannot be overwritten.",
+  "compatibility": "Ordinary and IPv6-only ADD do not allocate auxiliary addresses. Existing private leases keep handling if new allocation is disabled. CHECK does not allocate leases on older endpoints. Each participating endpoint consumes one additional IPv4 pool address.",
+  "focused": {
+    "passed": 695,
+    "failed": 0,
+    "logSHA256": "93d00d2996facabef8cf6678ccbfc3ab4ebf8cf90e7a074ac70db6230139f46d"
+  },
+  "broaderNetworking": {
+    "passed": 1534,
+    "failed": 0,
+    "logSHA256": "6c4330edd75be26616ef9d8c615c339714db07d4c93cac34ca3e26d7e7738967"
+  },
+  "unitCoverage": "IPAM, CNI, rtnetlink, trusted identity and Pod-pool suites plus all Service/networking/policy/egress-guard checks. New cases cover both-link ownership and malformed MAC refusal, neighbor-before-route publication, exclusive route conflict and concurrent exact-route adoption, missing-neighbor CHECK, primary/dual-stack CNI address separation, partial policy/return-route failures, failed teardown retaining both leases, default/IPv6-only/retained-lease behavior.",
+  "native": {
+    "version": "gr8s 1.37.2-gb5feadc, patch level 0",
+    "sha256": "b8aa589bcb76085f73daaf86d7b6741bc3ca3cbde13c92f66f9e67e9affdf187",
+    "buildLogSHA256": "2269a11fcf9dc3e6ae1c48cc1dbe174617e23b2d3a8e4c1d41006b433ed6dd4f",
+    "environment": "Disposable Fedora44 VM22291, two native containerd agents in separate namespaces over VXLAN, one control plane, normal binary with no debug server. Actual CNI allocator used, no offline lease edits.",
+    "reportSHA256": "a101cec16991ba73a789a1cabe6a8a4b6bf0b1885306b77aef04ebc44f1d5336",
+    "report": {
+      "root": "/var/tmp/gr8s-two-node.wdhwua00",
+      "checks": [
+        {
+          "name": "authenticatedAutomaticIdentitiesProjected",
+          "passed": true,
+          "observed": [
+            [
+              {
+                "podUID": "9eb30cc6-81a2-41a8-a108-5b0dd85ee2a8",
+                "nodeID": "ccc7d92e-968d-46a0-8505-3eaca98ee420",
+                "nodeName": "worker-1",
+                "podIP": "10.80.16.1",
+                "address": "10.80.16.2",
+                "sandboxID": "1766d5b7531970fe4f0612255716d3ede562e6ceb33ef2785def13bdb347e9d4",
+                "interfaceName": "eth0"
+              },
+              {
+                "podUID": "bf3f6b88-1009-4d20-aec5-fb7065677688",
+                "nodeID": "eadb4173-a91a-43ec-8a0c-794b4685b0fc",
+                "nodeName": "worker-0",
+                "podIP": "10.80.0.1",
+                "address": "10.80.0.2",
+                "sandboxID": "233b42416736cd9a931dfad7f104d23b68f93907a0b955e0de429bfa6d13c328",
+                "interfaceName": "eth0"
+              }
+            ],
+            [
+              {
+                "podUID": "9eb30cc6-81a2-41a8-a108-5b0dd85ee2a8",
+                "nodeID": "ccc7d92e-968d-46a0-8505-3eaca98ee420",
+                "nodeName": "worker-1",
+                "podIP": "10.80.16.1",
+                "address": "10.80.16.2",
+                "sandboxID": "1766d5b7531970fe4f0612255716d3ede562e6ceb33ef2785def13bdb347e9d4",
+                "interfaceName": "eth0"
+              },
+              {
+                "podUID": "bf3f6b88-1009-4d20-aec5-fb7065677688",
+                "nodeID": "eadb4173-a91a-43ec-8a0c-794b4685b0fc",
+                "nodeName": "worker-0",
+                "podIP": "10.80.0.1",
+                "address": "10.80.0.2",
+                "sandboxID": "233b42416736cd9a931dfad7f104d23b68f93907a0b955e0de429bfa6d13c328",
+                "interfaceName": "eth0"
+              }
+            ]
+          ]
+        },
+        {
+          "name": "privateIdentitiesHiddenFromPodStatus",
+          "passed": true,
+          "observed": [
+            {
+              "conditions": [
+                {
+                  "lastTransitionTime": "2026-11-10T01:19:05Z",
+                  "observedGeneration": 1,
+                  "status": "True",
+                  "type": "PodScheduled"
+                },
+                {
+                  "lastTransitionTime": "2026-11-10T01:19:05Z",
+                  "observedGeneration": 1,
+                  "status": "True",
+                  "type": "Initialized"
+                },
+                {
+                  "lastTransitionTime": "2026-11-10T01:19:11Z",
+                  "observedGeneration": 1,
+                  "status": "True",
+                  "type": "ContainersReady"
+                },
+                {
+                  "lastTransitionTime": "2026-11-10T01:19:11Z",
+                  "observedGeneration": 1,
+                  "status": "True",
+                  "type": "Ready"
+                }
+              ],
+              "containerStatuses": [
+                {
+                  "containerID": "containerd://a7ef6e9947c0017adaeea17ec5074eac32f915ce1c70d00fe2d3fd04e5c88e5a",
+                  "image": "registry.k8s.io/e2e-test-images/agnhost:2.66.1",
+                  "imageID": "sha256:2f0df2a116185c62076f0ecf923662cb00ac107da66d057c8d514313dc8f38d5",
+                  "name": "netexec",
+                  "ready": true,
+                  "resources": {},
+                  "restartCount": 0,
+                  "started": true,
+                  "state": {
+                    "running": {
+                      "startedAt": "2026-11-10T01:19:10Z"
+                    }
+                  }
+                }
+              ],
+              "hostIP": "198.18.253.2",
+              "hostIPs": [
+                {
+                  "ip": "198.18.253.2"
+                }
+              ],
+              "observedGeneration": 1,
+              "phase": "Running",
+              "podIP": "10.80.0.1",
+              "podIPs": [
+                {
+                  "ip": "10.80.0.1"
+                }
+              ],
+              "qosClass": "BestEffort",
+              "startTime": "2026-11-10T01:19:05Z"
+            },
+            {
+              "conditions": [
+                {
+                  "lastTransitionTime": "2026-11-10T01:19:16Z",
+                  "observedGeneration": 1,
+                  "status": "True",
+                  "type": "PodScheduled"
+                },
+                {
+                  "lastTransitionTime": "2026-11-10T01:19:16Z",
+                  "observedGeneration": 1,
+                  "status": "True",
+                  "type": "Initialized"
+                },
+                {
+                  "lastTransitionTime": "2026-11-10T01:19:19Z",
+                  "observedGeneration": 1,
+                  "status": "True",
+                  "type": "ContainersReady"
+                },
+                {
+                  "lastTransitionTime": "2026-11-10T01:19:19Z",
+                  "observedGeneration": 1,
+                  "status": "True",
+                  "type": "Ready"
+                }
+              ],
+              "containerStatuses": [
+                {
+                  "containerID": "containerd://8e02cc85687f3e8174a8f038868ee5b84638eb14a8066f8aba25ea48a3832b22",
+                  "image": "registry.k8s.io/e2e-test-images/agnhost:2.66.1",
+                  "imageID": "sha256:2f0df2a116185c62076f0ecf923662cb00ac107da66d057c8d514313dc8f38d5",
+                  "name": "netexec",
+                  "ready": true,
+                  "resources": {},
+                  "restartCount": 0,
+                  "started": true,
+                  "state": {
+                    "running": {
+                      "startedAt": "2026-11-10T01:19:18Z"
+                    }
+                  }
+                }
+              ],
+              "hostIP": "198.18.253.6",
+              "hostIPs": [
+                {
+                  "ip": "198.18.253.6"
+                }
+              ],
+              "observedGeneration": 1,
+              "phase": "Running",
+              "podIP": "10.80.16.1",
+              "podIPs": [
+                {
+                  "ip": "10.80.16.1"
+                }
+              ],
+              "qosClass": "BestEffort",
+              "startTime": "2026-11-10T01:19:16Z"
+            }
+          ]
+        },
+        {
+          "name": "privateKernelReturnPathsAndPrimaryOnlyGuardIdentity",
+          "passed": true,
+          "observed": [
+            {
+              "route": {
+                "dst": "10.80.0.2",
+                "dev": "gr80dc10a45d647",
+                "protocol": "static",
+                "scope": "link",
+                "prefsrc": "169.254.1.1",
+                "flags": []
+              },
+              "link": {
+                "ifindex": 4,
+                "link_index": 2,
+                "ifname": "gr80dc10a45d647",
+                "flags": [
+                  "BROADCAST",
+                  "MULTICAST",
+                  "UP",
+                  "LOWER_UP"
+                ],
+                "mtu": 1450,
+                "qdisc": "noqueue",
+                "operstate": "UP",
+                "linkmode": "DEFAULT",
+                "group": "default",
+                "txqlen": 1000,
+                "link_type": "ether",
+                "address": "02:13:de:70:4d:80",
+                "broadcast": "ff:ff:ff:ff:ff:ff",
+                "link_netnsid": 1,
+                "ifalias": "gr8s:233b42416736cd9a931dfad7f104d23b68f93907a0b955e0de429bfa6d13c328/eth0"
+              },
+              "neighbors": [
+                {
+                  "dst": "10.80.0.2",
+                  "lladdr": "02:ea:39:7b:6e:2e",
+                  "state": [
+                    "PERMANENT"
+                  ]
+                }
+              ],
+              "podAddresses": [
+                "10.80.0.1",
+                "fe80::ea:39ff:fe7b:6e2e"
+              ],
+              "peerMAC": "02:ea:39:7b:6e:2e",
+              "endpointIdentity": {
+                "ipv4": 173015041,
+                "bytes": "0100500a7b39ea022e6e00000100000000000000000000000000000000000000"
+              }
+            },
+            {
+              "route": {
+                "dst": "10.80.16.2",
+                "dev": "gr08d39c6d04af2",
+                "protocol": "static",
+                "scope": "link",
+                "prefsrc": "169.254.1.1",
+                "flags": []
+              },
+              "link": {
+                "ifindex": 4,
+                "link_index": 2,
+                "ifname": "gr08d39c6d04af2",
+                "flags": [
+                  "BROADCAST",
+                  "MULTICAST",
+                  "UP",
+                  "LOWER_UP"
+                ],
+                "mtu": 1450,
+                "qdisc": "noqueue",
+                "operstate": "UP",
+                "linkmode": "DEFAULT",
+                "group": "default",
+                "txqlen": 1000,
+                "link_type": "ether",
+                "address": "02:c2:3a:28:25:29",
+                "broadcast": "ff:ff:ff:ff:ff:ff",
+                "link_netnsid": 1,
+                "ifalias": "gr8s:1766d5b7531970fe4f0612255716d3ede562e6ceb33ef2785def13bdb347e9d4/eth0"
+              },
+              "neighbors": [
+                {
+                  "dst": "10.80.16.2",
+                  "lladdr": "02:cf:e5:24:d0:fe",
+                  "state": [
+                    "PERMANENT"
+                  ]
+                }
+              ],
+              "podAddresses": [
+                "10.80.16.1",
+                "fe80::cf:e5ff:fe24:d0fe"
+              ],
+              "peerMAC": "02:cf:e5:24:d0:fe",
+              "endpointIdentity": {
+                "ipv4": 173019137,
+                "bytes": "0110500a24e5cf02fed000000100000000000000000000000000000000000000"
+              }
+            }
+          ]
+        },
+        {
+          "name": "cniCheckBothEndpoints",
+          "passed": true,
+          "observed": [
+            "",
+            ""
+          ]
+        },
+        {
+          "name": "missingNeighborFailsCheck",
+          "passed": true,
+          "observed": "{\"cniVersion\":\"1.1.0\",\"code\":100,\"msg\":\"Service return route or permanent neighbor is missing or misconfigured\",\"details\":\"\"}\n"
+        },
+        {
+          "name": "addRepairsNeighbor",
+          "passed": true,
+          "observed": "{\"cniVersion\":\"1.0.0\",\"interfaces\":[{\"name\":\"gr80dc10a45d647\"},{\"name\":\"eth0\",\"sandbox\":\"/var/tmp/gr8s-two-node.wdhwua00/agent-0/containerd/run/io.containerd.grpc.v1.cri/netns/cni-697f0e34-adc3-9c64-d565-aa2c98414296\"}],\"ips\":[{\"interface\":1,\"address\":\"10.80.0.1/32\",\"gateway\":\"169.254.1.1\"}],\"routes\":[{\"dst\":\"0.0.0.0/0\",\"gw\":\"169.254.1.1\"}],\"dns\":{\"nameservers\":[\"169.254.1.1\"]}}\n"
+        },
+        {
+          "name": "cniResultExcludesPrivateAddress",
+          "passed": true,
+          "observed": {
+            "cniVersion": "1.0.0",
+            "interfaces": [
+              {
+                "name": "gr80dc10a45d647"
+              },
+              {
+                "name": "eth0",
+                "sandbox": "/var/tmp/gr8s-two-node.wdhwua00/agent-0/containerd/run/io.containerd.grpc.v1.cri/netns/cni-697f0e34-adc3-9c64-d565-aa2c98414296"
+              }
+            ],
+            "ips": [
+              {
+                "interface": 1,
+                "address": "10.80.0.1/32",
+                "gateway": "169.254.1.1"
+              }
+            ],
+            "routes": [
+              {
+                "dst": "0.0.0.0/0",
+                "gw": "169.254.1.1"
+              }
+            ],
+            "dns": {
+              "nameservers": [
+                "169.254.1.1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "missingRouteFailsCheck",
+          "passed": true,
+          "observed": "{\"cniVersion\":\"1.1.0\",\"code\":100,\"msg\":\"Service return route or permanent neighbor is missing or misconfigured\",\"details\":\"\"}\n"
+        },
+        {
+          "name": "addRepairsRoute",
+          "passed": true,
+          "observed": "{\"cniVersion\":\"1.0.0\",\"interfaces\":[{\"name\":\"gr80dc10a45d647\"},{\"name\":\"eth0\",\"sandbox\":\"/var/tmp/gr8s-two-node.wdhwua00/agent-0/containerd/run/io.containerd.grpc.v1.cri/netns/cni-697f0e34-adc3-9c64-d565-aa2c98414296\"}],\"ips\":[{\"interface\":1,\"address\":\"10.80.0.1/32\",\"gateway\":\"169.254.1.1\"}],\"routes\":[{\"dst\":\"0.0.0.0/0\",\"gw\":\"169.254.1.1\"}],\"dns\":{\"nameservers\":[\"169.254.1.1\"]}}\n"
+        },
+        {
+          "name": "conflictingRouteAddFailsWithoutStealing",
+          "passed": true,
+          "observed": {
+            "result": "{\"cniVersion\":\"1.1.0\",\"code\":100,\"msg\":\"rtnetlink request: File exists\",\"details\":\"\"}\n",
+            "route": [
+              {
+                "dst": "10.80.0.2",
+                "dev": "lo",
+                "scope": "link",
+                "flags": []
+              }
+            ]
+          }
+        },
+        {
+          "name": "addRecoversAfterConflictRemoval",
+          "passed": true,
+          "observed": "{\"cniVersion\":\"1.0.0\",\"interfaces\":[{\"name\":\"gr80dc10a45d647\"},{\"name\":\"eth0\",\"sandbox\":\"/var/tmp/gr8s-two-node.wdhwua00/agent-0/containerd/run/io.containerd.grpc.v1.cri/netns/cni-697f0e34-adc3-9c64-d565-aa2c98414296\"}],\"ips\":[{\"interface\":1,\"address\":\"10.80.0.1/32\",\"gateway\":\"169.254.1.1\"}],\"routes\":[{\"dst\":\"0.0.0.0/0\",\"gw\":\"169.254.1.1\"}],\"dns\":{\"nameservers\":[\"169.254.1.1\"]}}\n"
+        },
+        {
+          "name": "privateIdentityCheckpointed",
+          "passed": true,
+          "observed": {
+            "address": "10.80.0.2",
+            "podIP": "10.80.0.1",
+            "sandboxID": "233b42416736cd9a931dfad7f104d23b68f93907a0b955e0de429bfa6d13c328",
+            "interfaceName": "eth0",
+            "podUID": "bf3f6b88-1009-4d20-aec5-fb7065677688",
+            "nodeName": "worker-0",
+            "nodeID": "eadb4173-a91a-43ec-8a0c-794b4685b0fc"
+          }
+        },
+        {
+          "name": "identityRetainedAcrossOwnerRestart",
+          "passed": true,
+          "observed": [
+            [
+              {
+                "podUID": "9eb30cc6-81a2-41a8-a108-5b0dd85ee2a8",
+                "nodeID": "ccc7d92e-968d-46a0-8505-3eaca98ee420",
+                "nodeName": "worker-1",
+                "podIP": "10.80.16.1",
+                "address": "10.80.16.2",
+                "sandboxID": "1766d5b7531970fe4f0612255716d3ede562e6ceb33ef2785def13bdb347e9d4",
+                "interfaceName": "eth0"
+              },
+              {
+                "podUID": "bf3f6b88-1009-4d20-aec5-fb7065677688",
+                "nodeID": "eadb4173-a91a-43ec-8a0c-794b4685b0fc",
+                "nodeName": "worker-0",
+                "podIP": "10.80.0.1",
+                "address": "10.80.0.2",
+                "sandboxID": "233b42416736cd9a931dfad7f104d23b68f93907a0b955e0de429bfa6d13c328",
+                "interfaceName": "eth0"
+              }
+            ],
+            [
+              {
+                "podUID": "9eb30cc6-81a2-41a8-a108-5b0dd85ee2a8",
+                "nodeID": "ccc7d92e-968d-46a0-8505-3eaca98ee420",
+                "nodeName": "worker-1",
+                "podIP": "10.80.16.1",
+                "address": "10.80.16.2",
+                "sandboxID": "1766d5b7531970fe4f0612255716d3ede562e6ceb33ef2785def13bdb347e9d4",
+                "interfaceName": "eth0"
+              },
+              {
+                "podUID": "bf3f6b88-1009-4d20-aec5-fb7065677688",
+                "nodeID": "eadb4173-a91a-43ec-8a0c-794b4685b0fc",
+                "nodeName": "worker-0",
+                "podIP": "10.80.0.1",
+                "address": "10.80.0.2",
+                "sandboxID": "233b42416736cd9a931dfad7f104d23b68f93907a0b955e0de429bfa6d13c328",
+                "interfaceName": "eth0"
+              }
+            ]
+          ]
+        },
+        {
+          "name": "returnPathSurvivesOwnerRestart",
+          "passed": true,
+          "observed": {
+            "route": {
+              "dst": "10.80.0.2",
+              "dev": "gr80dc10a45d647",
+              "protocol": "static",
+              "scope": "link",
+              "prefsrc": "169.254.1.1",
+              "flags": []
+            },
+            "link": {
+              "ifindex": 4,
+              "link_index": 2,
+              "ifname": "gr80dc10a45d647",
+              "flags": [
+                "BROADCAST",
+                "MULTICAST",
+                "UP",
+                "LOWER_UP"
+              ],
+              "mtu": 1450,
+              "qdisc": "noqueue",
+              "operstate": "UP",
+              "linkmode": "DEFAULT",
+              "group": "default",
+              "txqlen": 1000,
+              "link_type": "ether",
+              "address": "02:13:de:70:4d:80",
+              "broadcast": "ff:ff:ff:ff:ff:ff",
+              "link_netnsid": 1,
+              "ifalias": "gr8s:233b42416736cd9a931dfad7f104d23b68f93907a0b955e0de429bfa6d13c328/eth0"
+            },
+            "neighbors": [
+              {
+                "dst": "10.80.0.2",
+                "lladdr": "02:ea:39:7b:6e:2e",
+                "state": [
+                  "PERMANENT"
+                ]
+              }
+            ],
+            "podAddresses": [
+              "10.80.0.1",
+              "fe80::ea:39ff:fe7b:6e2e"
+            ],
+            "peerMAC": "02:ea:39:7b:6e:2e",
+            "endpointIdentity": {
+              "ipv4": 173015041,
+              "bytes": "0100500a7b39ea022e6e00000100000000000000000000000000000000000000"
+            }
+          }
+        },
+        {
+          "name": "nativeTrafficAfterRepairsAndRestart",
+          "passed": true,
+          "observed": [
+            "two-node-1",
+            "two-node-0"
+          ]
+        },
+        {
+          "name": "identityWithdrawnOnBothNodes",
+          "passed": true,
+          "observed": [
+            [
+              {
+                "podUID": "9eb30cc6-81a2-41a8-a108-5b0dd85ee2a8",
+                "nodeID": "ccc7d92e-968d-46a0-8505-3eaca98ee420",
+                "nodeName": "worker-1",
+                "podIP": "10.80.16.1",
+                "address": "10.80.16.2",
+                "sandboxID": "1766d5b7531970fe4f0612255716d3ede562e6ceb33ef2785def13bdb347e9d4",
+                "interfaceName": "eth0"
+              }
+            ],
+            [
+              {
+                "podUID": "9eb30cc6-81a2-41a8-a108-5b0dd85ee2a8",
+                "nodeID": "ccc7d92e-968d-46a0-8505-3eaca98ee420",
+                "nodeName": "worker-1",
+                "podIP": "10.80.16.1",
+                "address": "10.80.16.2",
+                "sandboxID": "1766d5b7531970fe4f0612255716d3ede562e6ceb33ef2785def13bdb347e9d4",
+                "interfaceName": "eth0"
+              }
+            ]
+          ]
+        },
+        {
+          "name": "deleteReleasesPrivateLeaseAndOwnedReturnLink",
+          "passed": true,
+          "observed": {
+            "version": 1,
+            "cidr": "10.80.0.0/20",
+            "allocations": []
+          }
+        },
+        {
+          "name": "releasedAliasReusedByNewEndpointOwner",
+          "passed": true,
+          "observed": {
+            "lease": {
+              "sandboxID": "768d2b1b95b12dbf03377627589106fedd38e26382a7bbe2421149a6c146e6f1",
+              "interfaceName": "eth0",
+              "address": "10.80.0.2",
+              "podIP": "10.80.0.1"
+            },
+            "path": {
+              "route": {
+                "dst": "10.80.0.2",
+                "dev": "gr986c705d9e73e",
+                "protocol": "static",
+                "scope": "link",
+                "prefsrc": "169.254.1.1",
+                "flags": []
+              },
+              "link": {
+                "ifindex": 6,
+                "link_index": 2,
+                "ifname": "gr986c705d9e73e",
+                "flags": [
+                  "BROADCAST",
+                  "MULTICAST",
+                  "UP",
+                  "LOWER_UP"
+                ],
+                "mtu": 1450,
+                "qdisc": "noqueue",
+                "operstate": "UP",
+                "linkmode": "DEFAULT",
+                "group": "default",
+                "txqlen": 1000,
+                "link_type": "ether",
+                "address": "02:06:fe:5b:83:61",
+                "broadcast": "ff:ff:ff:ff:ff:ff",
+                "link_netnsid": 1,
+                "ifalias": "gr8s:768d2b1b95b12dbf03377627589106fedd38e26382a7bbe2421149a6c146e6f1/eth0"
+              },
+              "neighbors": [
+                {
+                  "dst": "10.80.0.2",
+                  "lladdr": "02:ef:a8:a5:20:00",
+                  "state": [
+                    "PERMANENT"
+                  ]
+                }
+              ],
+              "podAddresses": [
+                "10.80.0.1",
+                "fe80::ef:a8ff:fea5:2000"
+              ],
+              "peerMAC": "02:ef:a8:a5:20:00",
+              "endpointIdentity": {
+                "ipv4": 173015041,
+                "bytes": "0100500aa5a8ef02002000000100000000000000000000000000000000000000"
+              }
+            }
+          }
+        },
+        {
+          "name": "nativeTrafficAfterAliasReuse",
+          "passed": true,
+          "observed": [
+            "two-node-1",
+            "two-node-0"
+          ]
+        }
+      ],
+      "leases": [
+        {
+          "sandboxID": "233b42416736cd9a931dfad7f104d23b68f93907a0b955e0de429bfa6d13c328",
+          "interfaceName": "eth0",
+          "address": "10.80.0.2",
+          "podIP": "10.80.0.1"
+        },
+        {
+          "sandboxID": "1766d5b7531970fe4f0612255716d3ede562e6ceb33ef2785def13bdb347e9d4",
+          "interfaceName": "eth0",
+          "address": "10.80.16.2",
+          "podIP": "10.80.16.1"
+        }
+      ],
+      "passed": true,
+      "cleanupCompleted": true
+    },
+    "logs": {
+      "agent-0.log": {
+        "sha256": "cf75f41496cc71c181ff98bf6ef53dcf8bad68b53827d1fc1c7eeef7e9d7eba7",
+        "diagnostics": [
+          ";; BPF load recovered after 1 EAGAIN retries (initial phase)",
+          "gr8s: Service flow GC verified 1 retained endpoint pipelines"
+        ],
+        "cniAddTimeouts": 0
+      },
+      "agent-1.log": {
+        "sha256": "027675b3c9c07b0d971cd18bf9d4a51b0a63eaf53540a942806e4acba62d24ce",
+        "diagnostics": [
+          ";; BPF load recovered after 1 EAGAIN retries (initial phase)"
+        ],
+        "cniAddTimeouts": 0
+      },
+      "control.log": {
+        "sha256": "8bfc1f16abc4f157c0c6d4ce3ff4a86df0381e36a8f897307f608af1fc24810e",
+        "diagnostics": [],
+        "cniAddTimeouts": 0
+      }
+    }
+  },
+  "nativeCoverage": "Automatic lease/inventory for both actual sandboxes, public status filtering, actual /32 route/permanent peer-MAC neighbor/namespace address inspection and pinned endpoint_identity primary IPv4 read. CNI CHECK on both endpoints; intentional neighbor/route deletion fails CHECK, ADD repairs them; conflicting /32 through lo makes ADD fail without stealing it or releasing lease; removing conflict permits ADD recovery. Private checkpoint and unchanged workload identities across graceful owner restart; kernel return path survives restart route validation; native cross-node HTTP after repairs/restart. Actual Pod DEL withdraws identity on both nodes and releases both leases after route/veth deletion. Replacement Pod/sandbox reuses alias with a different owned veth; cross-node HTTP still passes.",
+  "diagnostics": "Both agents logged successful recovery after one EAGAIN retry during the passing run. Agent0 verified1 retained endpoint pipeline. No CNI ADD timeout or failed-load/GC-deferral line in the captured logs; deliberate CNI CHECK/ADD error responses are part of the report and must not be treated as unexpected failures.",
+  "limits": "Native-container return routing proof only; no new Kata guest or physical multi-host translation proof, packet-SNAT/hairpin/collision traffic, policy alias canonicalization or receiver activation acknowledgment. Failed DEL lease retention is a unit failure-injection proof, while native DEL covers successful kernel cleanup and alias reuse.",
+  "remaining": "Child10 remains active for versioned NAT/direct-flow ownership, endpoint-generation fencing, policy identity normalization/order, receiving-node installed-program/inventory readiness, reservation/GC/upgrades and actual guest/native TCP/UDP hairpin/collision traffic. Parent also retains IPv6 packet NAT, packet NodePort policies/source/health checks and broader live Service semantics."
+}
