@@ -1424,6 +1424,12 @@ The new identity takes effect when the node agent next starts."
                     (setf (containerd-runtime-credential-provider-token-function runtime) function)))
                 :wireguard-public-key wireguard-public-key
                 :wireguard-endpoints (getf options :wireguard-endpoints)
+                :capabilities
+                (when (and (gr8s.agent::node-runtime-service-lb node-runtime)
+                           (service-lb-map
+                            (gr8s.agent::node-runtime-service-lb node-runtime)
+                            "gr8s_nat_risk_v2"))
+                  (list "service-risk-v2"))
                 :ca-certificate-path ca-certificate
                 :certificate-path certificate :private-key-path private-key
                 :underlay-address (getf options :node-address)
