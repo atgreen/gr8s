@@ -168,6 +168,7 @@ build/gr8s-service-nat-guard-test.json: src/network/service-nat-guard.lisp src/n
 .PHONY: test-service-nat-guard
 test-service-nat-guard: build/gr8s-service-nat-guard-test.json
 	python3 scripts/test-service-nat-guard.py $<
+	python3 scripts/probe-service-passive-ownership.py $< --risk
 
 build/gr8s-service-wire-test.json: src/network/service-wire.lisp scripts/compile-endpoint-policy-fixture.lisp
 	$(SBCL) --noinform --script scripts/compile-endpoint-policy-fixture.lisp $@ service-wire
