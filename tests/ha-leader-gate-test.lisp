@@ -28,10 +28,13 @@
              ;; As a follower, the worker spins but reconciles nothing.
              (sleep 0.2)
              (is (zerop passes) "a follower runs no reconciliation passes")
+             (is (zerop (gr8s.server::reconciliation-worker-metrics-attempts worker)))
              ;; Promote: controllers start driving.
              (setf leader t)
              (is (poll-until (lambda () (plusp passes)) :timeout 5)
                  "a promoted leader starts reconciling")
+             (is (poll-until
+                  (lambda () (plusp (gr8s.server::reconciliation-worker-metrics-completed worker))) :timeout 5))
              ;; Demote: passes stop advancing again.
              (setf leader nil)
              (sleep 0.1)

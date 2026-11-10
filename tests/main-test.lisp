@@ -2,6 +2,56 @@
 
 (in-suite gr8s)
 
+(test reconciliation-metrics-preserve-values-errors-and-nonlocal-exits
+  (with-temporary-store (store path)
+    (values path)
+    (let ((worker (gr8s.server::make-reconciliation-worker
+                   :reconciler (make-reconciler store (make-fake-runtime)))))
+      (is-false (search "last_success_age_seconds" (gr8s.server::reconciliation-worker-metrics-text worker)))
+      (is (equal '(7 9) (multiple-value-list
+                         (gr8s.server::call-with-reconciliation-metrics worker (lambda () (values 7 9))))))
+      (let ((success (gr8s.server::reconciliation-worker-metrics-last-success worker)))
+        (signals simple-error
+          (gr8s.server::call-with-reconciliation-metrics worker (lambda () (error "fixture failure"))))
+        (is (eq :escaped
+                (catch 'pass-abort
+                  (gr8s.server::call-with-reconciliation-metrics worker
+                    (lambda () (throw 'pass-abort :escaped))))))
+        (is (eql success (gr8s.server::reconciliation-worker-metrics-last-success worker))))
+      (is (= 3 (gr8s.server::reconciliation-worker-metrics-attempts worker)))
+      (is (= 1 (gr8s.server::reconciliation-worker-metrics-completed worker)))
+      (is (= 2 (gr8s.server::reconciliation-worker-metrics-failures worker)))
+      (is (zerop (gr8s.server::reconciliation-worker-metrics-in-flight worker)))
+      (let ((text (gr8s.server::reconciliation-worker-metrics-text worker)))
+        (is (search "gr8s_reconciliation_last_success_age_seconds " text))
+        (is (search "gr8s_reconciliation_worker_running 0" text))
+        (is-false (search (namestring path) text)))
+      (is (equal "" (gr8s.server::reconciliation-worker-metrics-text nil))))))
+
+(test reconciliation-metrics-observe-real-worker-failure-and-recovery
+  (with-temporary-store (store path)
+    (values path)
+    (let ((attempts 0) (worker nil))
+      (unwind-protect
+           (progn
+             (setf worker (start-reconciliation-worker
+                           (make-reconciler store (make-fake-runtime)) :interval 0.01
+                           :before-reconcile (lambda ()
+                                               (when (<= (incf attempts) 2)
+                                                 (error "transient pass fixture")))))
+             (is (poll-until
+                  (lambda ()
+                    (bt:with-lock-held ((gr8s.server::reconciliation-worker-lock worker))
+                      (plusp (gr8s.server::reconciliation-worker-metrics-completed worker)))) :timeout 5))
+             (is (search "gr8s_reconciliation_worker_running 1"
+                         (gr8s.server::reconciliation-worker-metrics-text worker))))
+        (when worker (stop-reconciliation-worker worker)))
+      (is (= 2 (gr8s.server::reconciliation-worker-metrics-failures worker)))
+      (is (plusp (gr8s.server::reconciliation-worker-metrics-completed worker)))
+      (is (zerop (gr8s.server::reconciliation-worker-metrics-in-flight worker)))
+      (is (search "gr8s_reconciliation_worker_running 0"
+                  (gr8s.server::reconciliation-worker-metrics-text worker))))))
+
 (test cli-options-default-to-containerd
   (let ((options (parse-cli-options '("serve"))))
     (is (string= "containerd" (getf options :runtime)))

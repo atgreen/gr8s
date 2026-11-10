@@ -1648,6 +1648,14 @@ handler and never gets here. A busy host makes this race likely."
   (stop-requested nil)
   (interval 1.0)
   (shutdown-timeout 5.0)
+  (metrics-attempts 0)
+  (metrics-completed 0)
+  (metrics-failures 0)
+  (metrics-in-flight 0)
+  (metrics-duration-total 0)
+  (metrics-duration-last 0)
+  (metrics-duration-max 0)
+  metrics-last-success
   (lock (bt:make-lock "gr8s reconciliation worker"))
   (wake-up (bt:make-condition-variable :name "gr8s reconciliation wake-up")))
 
@@ -1669,9 +1677,12 @@ handler and never gets here. A busy host makes this race likely."
                ;; reconciles nothing and simply waits to be promoted.
                (when (let ((gate (reconciliation-worker-leader-gate worker)))
                        (or (null gate) (funcall gate)))
-                 (gr8s.patch:call-in-domain
-                  "controller-pass"
-                  (lambda () (funcall (symbol-function 'run-controller-pass) worker))))
+                 (call-with-reconciliation-metrics
+                  worker
+                  (lambda ()
+                    (gr8s.patch:call-in-domain
+                     "controller-pass"
+                     (lambda () (funcall (symbol-function 'run-controller-pass) worker))))))
              ;; Timeouts are serious conditions, not errors, and a late one can land here.
              ((or error sb-ext:timeout bt2:timeout) (error)
                (format *error-output* "gr8s reconciliation error: ~A~%" error)))
@@ -1966,7 +1977,11 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                            (list (serve-api-advertise-address options))
                            :debug-state-directory state-directory
                            :debug-member-resolver (make-debug-member-resolver ha)
-                           :control-plane-metrics-fn (when ha (lambda () (gr8s.ha::ha-metrics-text ha)))
+                           :control-plane-metrics-fn
+                           (lambda ()
+                             (concatenate 'string
+                                          (if ha (gr8s.ha::ha-metrics-text ha) "")
+                                          (reconciliation-worker-metrics-text worker)))
                            :leader-status-fn (when ha (lambda () (ha-control-plane-leader-status ha)))))
                     (setf worker (start-reconciliation-worker reconciler
                                   :leader-gate (when ha (lambda () (ha-control-plane-leader-p ha)))

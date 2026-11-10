@@ -418,6 +418,7 @@
                                            (:file "secret-encryption-operations")
                                            (:file "state-ownership")
                                            (:file "main")
+                                           (:file "reconciliation-metrics")
                                            (:file "patch-integration")
                                            (:file "compat"))))))
   :in-order-to ((test-op (test-op "gr8s/tests"))))
