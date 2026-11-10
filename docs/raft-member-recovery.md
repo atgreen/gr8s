@@ -485,6 +485,18 @@ creates a new private evidence directory and allows 30 minutes by default;
 `--timeout SECONDS` changes only the observation deadline. A timeout leaves
 acceptance unproven and preserves the last progress samples.
 
+The Python runner requires both in-place member recovery and cold recovery in
+a separate 384 MiB process. Before the in-place recovery advances the watch
+epoch, the probe preserves a quiescent disk copy with full retained history.
+Cold recovery loads that copy using the same frozen clock and checks the full
+history budget before HA establishes its new watch epoch. The in-place fixture
+owns shutdown's drained gate and releases it through the checked access API so
+startup can acquire its own gate; the stopped consensus hook remains attached
+throughout the handoff. The fixture neither clears application payloads nor
+invokes GC itself. Production recovery retains its normal pressure collection
+and application-replacement collection policies. Running the native executable
+directly covers only the first phase.
+
 History's byte estimate includes array headers and whole GC pages occupied by
 large strings. On this SBCL build, a 64 KiB base string occupies three 32 KiB
 pages, so payload length alone substantially understates its cost. The 96 MiB

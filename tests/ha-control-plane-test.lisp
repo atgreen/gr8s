@@ -317,6 +317,34 @@
           (gr8s::stop-ha-control-plane h2)
           (gr8s::stop-ha-control-plane h1))))))
 
+(test stopped-control-plane-gate-can-be-handed-to-same-store-recovery
+  (with-temporary-store (store root)
+    (let ((ha nil) (port nil))
+      (unwind-protect
+           (progn
+             (setf ha (gr8s::start-ha-control-plane store :id "same-store" :init t))
+             (is (poll-until (lambda () (gr8s::ha-control-plane-leader-p ha)) :timeout 15))
+             (setf port (gr8s::raft-member-port (gr8s::ha-control-plane-member ha)))
+             (gr8s::create-core-resource store "configmaps" (configmap-input "sentinel" "k" "preserved") "default")
+             (gr8s::stop-ha-control-plane ha)
+             (is (gr8s.store::store-access-blocked-p store))
+             ;; Only the owner of this stopped, drained fixture hands off its
+             ;; gate. No requests or controllers enter during the transition.
+             (gr8s.store::resume-store-access store)
+             (let* ((node (gr8s::raft-member-node (gr8s::ha-control-plane-member ha)))
+                    (index (gr8s::raft-last-log-index node))
+                    (wal (merge-pathnames "raft/control-plane.log" root))
+                    (bytes (sb-posix:stat-size (sb-posix:stat (namestring wal)))))
+               ;; Reopening the application gate cannot silently turn the
+               ;; stopped member's consensus hook into a local-only writer.
+               (signals error (funcall (gr8s::pod-store-consensus-commit-fn store) :core-delta "{}"))
+               (is (= index (gr8s::raft-last-log-index node)))
+               (is (= bytes (sb-posix:stat-size (sb-posix:stat (namestring wal))))))
+             (setf ha (gr8s::start-ha-control-plane store :id "same-store" :init t :port port))
+             (is (poll-until (lambda () (gr8s::ha-control-plane-leader-p ha)) :timeout 15))
+             (is (equal "preserved" (configmap-value store "sentinel" "k"))))
+        (gr8s::stop-ha-control-plane ha)))))
+
 (test durable-control-plane-restarts-preserve-voters-and-do-not-rejoin
   (with-temporary-store (s1 p1)
     (with-temporary-store (s2 p2)

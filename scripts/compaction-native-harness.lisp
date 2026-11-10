@@ -160,6 +160,11 @@
                    ;; Recover the existing quiesced store through production's
                    ;; in-place restore barriers. Cold OPEN-STORE is checked by
                    ;; the runner in a fresh process, with the same frozen clock.
+                   ;; This fixture owns shutdown's gate and has no external
+                   ;; ingress. Release it through the checked lifecycle API so
+                   ;; startup can acquire its own gate; the stopped consensus
+                   ;; hook remains attached throughout this handoff.
+                   (gr8s.store::resume-store-access store)
                    (setf ha (gr8s::start-ha-control-plane store :id "compact-native" :init t :port port))
                    (compaction-native-await #'ready)
                    (assert (equal "preserved" (gethash "value" (gethash "data"
