@@ -23,9 +23,10 @@ previous CIDRs while old endpoints may still have live flows."
         (funcall update map (netpol-cidr-lpm-key cidr) present)
         (incf count)))))
 
-(defun service-nat-identity-rows (record)
-  "Encode the trusted primary/return-address pair for one Pod incarnation.
-The 128-bit token changes with the authenticated node or sandbox owner.
+(defun service-nat-identity-pair
+    (node-id sandbox-id interface-name primary alias)
+  "Encode both owner rows from one Pod incarnation. The local agent uses its
+trusted IPAM lease; the replicated inventory uses an authenticated Pod claim.
 Only the enabled bit is staged: complete history and receiver readiness need
 separate cluster-wide publication fences before the v2 graph is attached."
   (flet ((address-key (address)
@@ -34,12 +35,7 @@ separate cluster-wide publication fences before the v2 graph is attached."
                          :initial-contents
                          (list (ldb (byte 8 24) number) (ldb (byte 8 16) number)
                                (ldb (byte 8 8) number) (ldb (byte 8 0) number))))))
-   (let* ((primary (service-translation-string record "podIP"))
-         (alias (service-translation-string record "address"))
-         (node-id (service-translation-string record "nodeID"))
-         (sandbox-id (service-translation-string record "sandboxID"))
-         (interface-name (service-translation-string record "interfaceName"))
-         (primary-key (address-key primary))
+   (let* ((primary-key (address-key primary))
          (alias-key (address-key alias))
          (epoch (service-translation-incarnation-token
                  node-id sandbox-id interface-name primary alias))
@@ -51,6 +47,45 @@ separate cluster-wide publication fences before the v2 graph is attached."
              (concatenate '(vector (unsigned-byte 8))
                           alias-key flags epoch primary-key (service-lb-bytes role 4))))
       (list (cons primary-key (value 1)) (cons alias-key (value 2)))))))
+
+(defun service-nat-identity-rows (record)
+  "Encode the authenticated primary/alias pair from replicated inventory."
+  (service-nat-identity-pair
+   (service-translation-string record "nodeID")
+   (service-translation-string record "sandboxID")
+   (service-translation-string record "interfaceName")
+   (service-translation-string record "podIP")
+   (service-translation-string record "address")))
+
+(defun publish-cni-service-nat-owner
+    (configuration context addresses alias
+     &key (open #'whistler/loader:open-pinned-object)
+          (map-info #'cni-policy-map-info)
+          (update #'whistler/loader:map-update)
+          (close #'sb-posix:close))
+  "Stage this node's paired owner rows in the schema-checked shared v2 map.
+The return route must already exist. A failed or partial update stops CNI ADD;
+the attachment fence keeps incomplete owner state out of the live datapath."
+  (unless (eq (cni-service-profile configuration) :v2)
+    (invalid-cni "local v2 Service owner publication requires the v2 profile"))
+  (let* ((primary (find-if-not (lambda (address) (find #\: address)) addresses))
+         (rows (service-nat-identity-pair
+                (cni-configuration-service-node-id configuration)
+                (cni-context-container-id context) (cni-context-interface-name context)
+                primary alias))
+         (path (namestring (merge-pathnames
+                            "gr8s_nat_id_v2"
+                            (uiop:ensure-directory-pathname
+                             (cni-configuration-service-packet-root configuration)))))
+         (fd (funcall open path)))
+    (unwind-protect
+         (let ((map (funcall map-info fd "gr8s_nat_id_v2" :profile :v2)))
+           ;; The alias row is written first; until the primary is present with
+           ;; the same epoch, the graph rejects the pair rather than guessing.
+           (dolist (row (reverse rows))
+             (funcall update map (car row) (cdr row)))
+           rows)
+      (funcall close fd))))
 
 (defun publish-service-nat-identities
     (map records &key (update #'whistler/loader:map-update))
