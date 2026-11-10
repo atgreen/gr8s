@@ -243,6 +243,37 @@
                         (is (eq :map map)) (push (cons key value) writes)))))
     (is (= 2 (length writes)))))
 
+(test cni-v2-owner-publication-writes-the-replicated-pair-before-attachment
+  (let* ((configuration (gr8s::make-cni-configuration
+                         :service-packet-root "/pins/shared/" :service-packet-profile :v2
+                         :service-node-id "node-1"))
+         (context (gr8s::make-cni-context :container-id "sandbox-1" :interface-name "eth0"))
+         (record (gr8s::json-object
+                  "podIP" "10.88.1.2" "address" "10.88.1.9"
+                  "nodeID" "node-1" "podUID" "pod-1"
+                  "sandboxID" "sandbox-1" "interfaceName" "eth0"))
+         (expected (gr8s.network::service-nat-identity-rows record))
+         (writes nil) (closed nil))
+    (is (equalp expected
+                (gr8s.network::publish-cni-service-nat-owner
+                 configuration context '("10.88.1.2") "10.88.1.9"
+                 :open (lambda (path)
+                         (is (equal "/pins/shared/gr8s_nat_id_v2" path)) 7)
+                 :map-info (lambda (fd name &key profile)
+                             (is (= 7 fd)) (is (equal "gr8s_nat_id_v2" name))
+                             (is (eq :v2 profile)) :map)
+                 :update (lambda (map key value)
+                           (is (eq :map map)) (push (cons key value) writes))
+                 :close (lambda (fd) (setf closed fd)))))
+    (is (= 7 closed))
+    (is (equalp (reverse expected) (reverse writes)))
+    (signals error
+      (gr8s.network::publish-cni-service-nat-owner
+       (gr8s::make-cni-configuration :service-packet-root "/pins/shared/")
+       context '("10.88.1.2") "10.88.1.9"
+       :open (lambda (&rest ignored)
+               (declare (ignore ignored)) (error "must reject v1 before map open"))))))
+
 (test service-lb-plan-publishes-each-cluster-ip-to-same-family-backends
   (let* ((service (fake-lb-service "10.96.0.10"))
          (spec (gethash "spec" service)))

@@ -187,6 +187,7 @@ partial failure retains the IPAM lease until DEL removes the endpoint."
             (remove-link #'remove-routed-cni-link)
             (install-service-return #'install-routed-service-return-path)
             (check-service-return #'check-routed-service-return-path)
+            (publish-service-owner #'publish-cni-service-nat-owner)
             (policy (make-cni-operations)))
   "Bind a CNI lifecycle to agent-owned IPAM; never trust client IPAM settings."
   (make-cni-operations
@@ -216,9 +217,18 @@ partial failure retains the IPAM lease until DEL removes the endpoint."
              (cni-configuration-endpoint-addresses configuration) addresses
              (cni-configuration-service-node-id configuration) node-id
              (cni-configuration-service-return-address configuration) return-address)
-       (funcall (cni-operations-add policy)
-                configuration context map-path link-path)
-       (when return-address (funcall install-service-return context return-address))
+       (if (eq (cni-service-profile configuration) :v2)
+           (progn
+             (unless return-address
+               (invalid-cni "v2 Service endpoint has no private return address"))
+             (funcall install-service-return context return-address)
+             (funcall publish-service-owner configuration context addresses return-address)
+             (funcall (cni-operations-add policy)
+                      configuration context map-path link-path))
+           (progn
+             (funcall (cni-operations-add policy)
+                      configuration context map-path link-path)
+             (when return-address (funcall install-service-return context return-address))))
        (setf (cni-configuration-previous-result configuration)
              (routed-cni-result configuration context host addresses dns-address))))
    :check

@@ -321,6 +321,43 @@
         (is (equal '(:policy-delete :delete-link) (reverse events)))
         (is (null (retained)))))))
 
+(test v2-routed-cni-publishes-route-and-owner-before-policy-attachment
+  (with-temporary-store (store directory)
+    (declare (ignore store))
+    (let* ((ipam (gr8s::open-node-ipam directory '("10.42.0.0/29")))
+           (context (gr8s::make-cni-context
+                     :container-id "sandbox-1" :interface-name "eth0" :netns "/fake/ns"))
+           (configuration (gr8s::make-cni-configuration
+                           :service-packet-root "/pins/shared/" :service-packet-profile :v2))
+           (events nil)
+           (operations
+             (gr8s::make-routed-cni-operations
+              ipam :node-id "node-1"
+              :install-link (lambda (ctx addresses)
+                              (declare (ignore ctx addresses)) "gr-test")
+              :install-service-return
+              (lambda (ctx address)
+                (is (eq context ctx)) (is (equal "10.42.0.2" address))
+                (push :route events))
+              :publish-service-owner
+              (lambda (config ctx addresses alias)
+                (is (eq configuration config)) (is (eq context ctx))
+                (is (equal '("10.42.0.1") addresses))
+                (is (equal "10.42.0.2" alias))
+                (is (equal "node-1" (gr8s::cni-configuration-service-node-id config)))
+                (push :owner events))
+              :policy (gr8s::make-cni-operations
+                       :add (lambda (&rest ignored)
+                              (declare (ignore ignored))
+                              (push :policy events)
+                              (error "attachment remains gated"))))))
+      (funcall (gr8s::cni-operations-prepare operations) configuration context)
+      (signals error
+        (funcall (gr8s::cni-operations-add operations)
+                 configuration context "/pins/local/endpoint_identity" "/pins/local/tcx-ingress"))
+      (is (equal '(:route :owner :policy) (reverse events)))
+      (is (equal "10.42.0.2" (gr8s::service-snat-address ipam "sandbox-1" "eth0"))))))
+
 (test cni-return-path-keeps-default-and-ipv6-only-allocation-behavior
   (dolist (scenario '(("10.42.0.0/29" nil nil) ("fd42::/125" t nil) ("10.42.0.0/29" nil t)))
     (destructuring-bind (cidr packet-p retained-p) scenario
