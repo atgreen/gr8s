@@ -14,7 +14,7 @@
 (test ha-admission-preserves-full-size-secret-create-and-update
   (dolist (encrypted '(nil t))
     (with-temporary-store (store root)
-      (let ((ha nil))
+      (let ((ha nil) (port nil))
         (unwind-protect
              (progn
                (when encrypted (gr8s::ensure-cluster-pki root))
@@ -30,6 +30,13 @@
                  (let ((two (ag-grpc:base64-encode bytes)))
                    (gr8s::update-core-resource store "secrets" "default" "large"
                      (lambda (object) (setf (gethash "value" (gethash "data" object)) two) object))
+                   (is (equal two (gethash "value" (gethash "data"
+                                    (gr8s::get-core-resource store "secrets" "default" "large")))))
+                   (setf port (gr8s::raft-member-port (gr8s::ha-control-plane-member ha)))
+                   (gr8s::stop-ha-control-plane ha)
+                   (setf ha nil store (gr8s:open-store root :defer-restore-completion t)
+                         ha (gr8s::start-ha-control-plane store :id "large-secret" :init t :port port))
+                   (is (poll-until (lambda () (gr8s::ha-control-plane-leader-p ha)) :timeout 15))
                    (is (equal two (gethash "value" (gethash "data"
                                     (gr8s::get-core-resource store "secrets" "default" "large"))))))))
           (gr8s::stop-ha-control-plane ha))))))
