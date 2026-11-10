@@ -572,10 +572,13 @@ a gate that was already blocked by another operation before it arrived.
 
 The memory probe supports `GR8S_SNAPSHOT_LIVE_TRANSFER=1`: it starts a separate
 receiver process with a 384 MiB heap and checks that its live store loads the
-complete payload and publishes the applied boundary. For example:
+complete payload and publishes the applied boundary. Add
+`GR8S_SNAPSHOT_RECOVER_RECEIVER=1` to restart that receiver from its retained WAL
+artifact and confirm catch-up without retransmitting the artifact. For example:
 
 ```sh
-GR8S_SNAPSHOT_LIVE_TRANSFER=1 GR8S_SNAPSHOT_RELOAD=1 \
+GR8S_SNAPSHOT_LIVE_TRANSFER=1 GR8S_SNAPSHOT_RECOVER_RECEIVER=1 \
+  GR8S_SNAPSHOT_RELOAD=1 \
   sbcl --dynamic-space-size 384 --noinform --non-interactive \
   --load scripts/test-store-snapshot-memory.lisp
 ```

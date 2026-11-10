@@ -4,17 +4,19 @@
 (require :asdf)
 (asdf:load-asd (truename "gr8s.asd"))
 (asdf:load-system "gr8s")
-(destructuring-bind (root-string count-string ready-string report-string stop-string)
+(destructuring-bind (root-string count-string ready-string report-string stop-string &optional (mode "live"))
     (let ((args (uiop:command-line-arguments)))
       (if (equal "--" (first args)) (rest args) args))
   (let* ((root (uiop:ensure-directory-pathname root-string))
          (count (parse-integer count-string))
          (store (gr8s:open-store root))
-         (member (gr8s::start-raft-member "sink" :storage-path (merge-pathnames "raft/wal" root)))
+         (member (if (equal mode "recover")
+                     (gr8s.resources::start-store-member-from-wal store "sink" (merge-pathnames "raft/wal" root))
+                     (gr8s::start-raft-member "sink" :storage-path (merge-pathnames "raft/wal" root))))
          (reported nil))
     (unwind-protect
          (progn
-           (gr8s.resources::configure-member-store-restore member store)
+           (unless (equal mode "recover") (gr8s.resources::configure-member-store-restore member store))
            (gr8s::write-private-text-atomically ready-string (write-to-string (gr8s::raft-member-port member)))
            (loop until (probe-file stop-string) do
              (when (and (not reported)
@@ -28,7 +30,7 @@
                  (gr8s::write-private-text-atomically
                   report-string
                   (com.inuoe.jzon:stringify
-                   (gr8s::core-object "passed" t "liveApplicationRestore" t "records" count
+                   (gr8s::core-object "passed" t "liveApplicationRestore" t "startupRecovered" (equal mode "recover") "records" count
                                      "payloadBytes" (* count 65536) "appliedIndex" 1
                                      "resourceRevision" (gr8s::pod-store-resource-revision store))))
                  (setf reported t)))

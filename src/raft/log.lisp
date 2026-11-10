@@ -171,11 +171,14 @@ both streams: its durable outcome is uncertain and requires recovery before use.
                            :snapshot-index snapshot-index :snapshot-term snapshot-term
                            :snapshot-state snapshot-state))))
 
-(defun recover-raft-node (node path)
+(defun recover-raft-node (node path &key validate-fn)
   "Load the WAL at PATH into NODE (currentTerm/votedFor/log/snapshot), restore
    the state machine from the snapshot image via the node's restore-fn, and
-   attach an append-only storage for continued operation. Returns NODE."
+   attach an append-only storage for continued operation. VALIDATE-FN, when given,
+   must return T for the recovered state before NODE is changed. Returns NODE."
   (let ((recovered (load-raft-log path)))
+    (when (and validate-fn (not (eq t (funcall validate-fn recovered))))
+      (error "Recovered Raft state validation did not succeed"))
     (setf (raft-node-current-term node) (raft-recovered-term recovered)
           (raft-node-voted-for node) (raft-recovered-vote recovered)
           (raft-node-snapshot-index node) (raft-recovered-snapshot-index recovered)
