@@ -32,7 +32,7 @@
 (defmacro wire-owner-matches-p (address epoch)
   `(let ((wire-owner (map-lookup-ptr gr8s-nat-id-v2 ,address)))
      (and (/= wire-owner 0)
-          (= (logand (load u32 wire-owner 4) #xffff0001) #x20001)
+          (= (logand (load u32 wire-owner 4) #xffff0009) #x20009)
           (or (= (load u32 wire-owner 28) 1) (= (load u32 wire-owner 28) 2))
           (= (load u64 wire-owner 8) (load u64 ,epoch 0))
           (= (load u64 wire-owner 16) (load u64 ,epoch 8))
@@ -72,6 +72,17 @@
            (unless (and (wire-owner-matches-p (+ wire-raw 128) (+ wire-raw 86))
                         (wire-owner-matches-p (+ wire-raw 132) (+ wire-raw 70)))
              (return TC_ACT_SHOT))))))
+
+(defmacro wire-local-capable ()
+  `(let ((wire-local (map-lookup endpoint-identity 0)))
+     (when (= wire-local 0) (return TC_ACT_SHOT))
+     (let ((wire-primary u32 (ntohl (load u32 wire-local 0))))
+       (let ((wire-owner (map-lookup gr8s-nat-id-v2 wire-primary)))
+         (unless (and (nat-owner-p wire-owner wire-primary 1)
+                      (= (logand (load u32 wire-owner 4) 13) 13)
+                      (= (load u64 wire-owner 8) (load u64 wire-local 32))
+                      (= (load u64 wire-owner 16) (load u64 wire-local 40)))
+           (return TC_ACT_SHOT))))))
 
 (defmacro wire-prepare-entry ()
   `(when (/= wire-offset 0)
@@ -153,7 +164,8 @@
   (labels ((walk (form)
              (cond ((atom form) form)
                    ((equal form `(pkt-lock :reverse ,probe))
-                    `(progn ,form (wire-invert wire-locked ,probe) (wire-take-candidate)))
+                    `(progn ,form (setf wire-locked target)
+                            (wire-invert wire-locked ,probe) (wire-take-candidate)))
                    ((equal form `(or (= existing 0) (nat-return-owned-p existing ,original ,state)))
                     `(and (= (map-lookup-ptr gr8s-nat-rx-v2 wire-locked) 0) ,form))
                    ((and (eq (car form) 'let)
@@ -209,7 +221,7 @@
                      (= (load u16 flow 10) (load u16 state 4))
                      (= (load u8 flow 12) (load u8 original 12))) (pkt-drop failed))
         (let ((receiver (map-lookup-ptr gr8s-nat-id-v2 state)))
-          (unless (and (/= receiver 0) (/= (logand (load u32 receiver 4) 4) 0))
+          (unless (and (/= receiver 0) (= (logand (load u32 receiver 4) 12) 12))
             (pkt-drop failed)))
         (nat-pair-required original state probe)
         (wire-metadata-from-state metadata original state)
@@ -263,7 +275,7 @@
 (defmacro wire-rx-publish-candidate (entry candidate)
   `(progn
      (pkt-lock :forward ,candidate)
-     (nat-copy wire-locked ,candidate 16)
+     (setf wire-locked ,candidate)
      (wire-take-candidate)
      (wire-invert (+ ,entry 64) ,candidate)
      (let ((other (map-lookup-ptr gr8s-nat-rx-v2 ,candidate)))
@@ -301,7 +313,7 @@
         (when (/= index 0)
           (nat-copy candidate index 16)
           (pkt-lock :forward candidate)
-          (nat-copy wire-locked candidate 16)
+          (setf wire-locked candidate)
           (wire-take-candidate)
           (let ((old (map-lookup-ptr gr8s-nat-rx-v2 candidate)))
             (unless (and (/= old 0) (wire-metadata-equal-p old entry)
@@ -383,7 +395,8 @@ opaque wire macro calls are expanded afterwards and use physical frame offsets."
       (setf (fourth result)
             `(let ((whistler::wire-offset whistler::u32 0)
                    (whistler::wire-held whistler::u32 0)
-                   (whistler::wire-locked (whistler::make-gr8s-pkt-flow)))
+                   (whistler::wire-locked whistler::u64 0))
+               ,@(unless (eq (second form) 'whistler::gr8s-nat-gc) '((whistler::wire-local-capable)))
                (when (whistler::wire-candidate-p)
                  (whistler::wire-check-envelope ,addresses)
                  (setf whistler::wire-offset 102))
@@ -398,6 +411,29 @@ opaque wire macro calls are expanded afterwards and use physical frame offsets."
   (reduce (lambda (tree pair) (subst (cdr pair) (car pair) tree :test #'equal))
           replacements :initial-value body))
 
+(defun service-wire-select-body ()
+  "Only plain direct reverse rows retain legacy reply handling. Typed Service
+replies are dispatched before selection, so a Service row cannot suppress the
+refresh of an independent direct outbound connection on the same node."
+  (labels ((walk (form)
+             (cond ((atom form) form)
+                   ((and (eq (car form) 'when-let)
+                         (equal (second form)
+                                '((whistler::entry (whistler::map-lookup-ptr whistler::gr8s-nat-rev-v2 whistler::flow)))))
+                    (let ((body (butlast (cddr form))))
+                      `(when-let ,(second form)
+                         ,@(butlast body)
+                         (let ((whistler::held
+                                 (whistler::map-lookup-ptr whistler::gr8s-nat-fwd-v2 whistler::original)))
+                           (when (= whistler::held 0) (whistler::pkt-drop whistler::failed))
+                           (whistler::nat-copy whistler::state whistler::held 64)
+                           (if (/= (logand (whistler::load whistler::u8 whistler::state 38) 1) 0)
+                               (whistler::wire-release-forward)
+                               (progn ,@(cddddr (car (last body))) (whistler::nat-pass)))))))
+                   (t (mapcar #'walk form)))))
+    (subst 'whistler::wire-reserve-candidates 'whistler::nat-reserve-candidates
+           (walk (service-nat-select-form)))))
+
 (defun service-wire-guard-forms ()
   (let* ((*service-nat-local-identity-p* t)
          (*service-wire-locks-p* t)
@@ -409,22 +445,24 @@ opaque wire macro calls are expanded afterwards and use physical frame offsets."
          (in-policy (copy-tree (third policy))))
     (setf egress (subst (service-nat-tail-form 9) (service-nat-tail-form 0) egress :test #'equal))
     (setf (fourth egress)
-          `(progn (when (whistler::wire-candidate-p) (return whistler::TC_ACT_SHOT)) ,(fourth egress)))
+          `(progn (whistler::wire-local-capable)
+                  (when (whistler::wire-candidate-p) (return whistler::TC_ACT_SHOT)) ,(fourth egress)))
     (setf (second eg-policy) 'whistler::gr8s-v2-eg-policy
           (second in-policy) 'whistler::gr8s-v2-in-policy)
     (append
      *service-packet-struct-forms* *service-nat-struct-forms*
      (service-wire-struct-forms) *service-wire-rx-structs*
      (list *service-nat-policy-key-form* (expand-service-wire-form egress :transaction nil)
-           (find 'whistler::gr8s-ingress-guard programs :key #'second)
+           (let ((ingress (copy-tree (find 'whistler::gr8s-ingress-guard programs :key #'second))))
+             (setf (fourth ingress) `(progn (whistler::wire-local-capable) ,(fourth ingress)))
+             (expand-service-wire-form ingress :transaction nil))
            (service-nat-stage-continue (service-wire-inner-program eg-policy :transaction nil) 11)
            (service-nat-stage-continue (service-wire-inner-program in-policy :transaction nil) 7)
            (service-wire-inner-program (find 'whistler::gr8s-nat-generation programs :key #'second))
            (service-nat-stage-continue
             (service-wire-inner-program
              (service-nat-program-form 'whistler::gr8s-nat-select
-              (subst 'whistler::wire-reserve-candidates 'whistler::nat-reserve-candidates
-                     (service-nat-select-form)))) 2))
+              (service-wire-select-body))) 2))
      (loop for (name body next full-parser addresses) in
        (list
         (list 'whistler::gr8s-nat-commit
@@ -449,7 +487,9 @@ opaque wire macro calls are expanded afterwards and use physical frame offsets."
               (cons '(whistler::wire-before-restore)
                     (service-wire-rewrite-body
                      (service-nat-restore-form)
-                     '(((whistler::nat-clear-context) . (whistler::wire-after-restore))
+                     '(((whistler::original (whistler::make-gr8s-pkt-flow))
+                        . (whistler::original whistler::u64 whistler::target))
+                       ((whistler::nat-clear-context) . (whistler::wire-after-restore))
                        ((whistler::nat-pair-required whistler::original whistler::state whistler::probe)
                         . (progn (when (/= whistler::wire-offset 0)
                                    (whistler::wire-validate-reply whistler::state whistler::original))
@@ -467,6 +507,20 @@ opaque wire macro calls are expanded afterwards and use physical frame offsets."
            (service-wire-inner-program (find 'whistler::gr8s-nat-gc programs :key #'second))))))
 
 (defun compile-service-wire-guard ()
-  (compile-whistler-program
-   (append (service-nat-guard-map-forms) *service-wire-rx-maps*)
-   (service-wire-guard-forms)))
+  (let* ((forms (service-wire-guard-forms))
+         (structs (remove-if (lambda (f) (eq (first f) 'whistler::defprog)) forms))
+         (programs (remove-if-not (lambda (f) (eq (first f) 'whistler::defprog)) forms))
+         (maps (append (service-nat-guard-map-forms) *service-wire-rx-maps*))
+         (map-specs nil) (program-specs nil))
+    ;; Compile the expensive selector last so a stack/parser error in another
+    ;; stage is reported before spending minutes compiling selection.
+    (dolist (program (append (remove 'whistler::gr8s-nat-select programs :key #'second)
+                             (remove-if-not (lambda (p) (eq (second p) 'whistler::gr8s-nat-select)) programs)))
+      (format *error-output* "~&Compiling Service wire stage ~A~%" (second program))
+      (finish-output *error-output*)
+      (multiple-value-bind (one-map-specs one-program-specs)
+          (compile-whistler-program maps (append structs (list program)))
+        (when map-specs (assert (equal map-specs one-map-specs)))
+        (setf map-specs one-map-specs
+              program-specs (append program-specs one-program-specs))))
+    (values map-specs program-specs)))

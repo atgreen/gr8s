@@ -97,6 +97,9 @@ def setup(client, backend):
         n.owner(endpoint, p.BACKEND, n.BACK_ALIAS, 2)
     graph.configure(client, p.CLIENT, n.ALIAS, 1, graph.CLIENT_MAC)
     graph.configure(backend, p.BACKEND, n.BACK_ALIAS, 2, graph.BACK_MAC)
+    for endpoint in (client, backend):
+        n.owner(endpoint, p.CLIENT, n.ALIAS, 1, flags=15)
+        n.owner(endpoint, p.BACKEND, n.BACK_ALIAS, 2, flags=15)
 
 
 def crossed(factory, protocol, shared, simultaneous):
@@ -158,6 +161,18 @@ def direct_collision(factory, protocol, shared):
         direct = graph.packet(p.BACKEND, p.CLIENT, 8080, 48000 + protocol, protocol,
                               seq=9000, mac=graph.BACK_MAC)
         assert run(backend, 0, direct) == direct
+        active_direct = direct
+        if protocol == 6:
+            assert run(client, 1, direct) == direct
+            syn_ack = graph.packet(p.CLIENT, p.BACKEND, 48006, 8080, 6,
+                                   seq=20000, ack=9001, flags=0x12)
+            assert run(backend, 1, run(client, 0, syn_ack)) == syn_ack
+            ack = graph.packet(p.BACKEND, p.CLIENT, 8080, 48006, 6,
+                               seq=9001, ack=20001, flags=0x10, mac=graph.BACK_MAC)
+            assert run(client, 1, run(backend, 0, ack)) == ack
+            active_direct = p.packet(p.BACKEND, p.CLIENT, 8080, 48006, 6,
+                                     tcp_flags=0x18, seq=9001, ack=20001, payload=b"still-direct")
+            active_direct = active_direct[:6] + graph.BACK_MAC + active_direct[12:]
         held = backend.lookup(n.FWD, n.key(direct))
         p.publish(client, protocol)
         original = graph.packet(protocol=protocol, sport=48000 + protocol)
@@ -171,9 +186,12 @@ def direct_collision(factory, protocol, shared):
         assert p.endpoints(restored) == (p.VIP, p.CLIENT, 80, 48000 + protocol)
         # Plain traffic on the original direct connection must keep its source;
         # it cannot borrow the Service's frontend or mutate its TCP generation.
-        plain = run(backend, 0, direct)
-        assert plain == direct
-        assert run(client, 1, plain) == direct
+        backend.advance(1)
+        seen = struct.unpack_from("<Q", backend.lookup(n.FWD, n.key(direct)), 8)[0]
+        plain = run(backend, 0, active_direct)
+        assert plain == active_direct
+        assert run(client, 1, plain) == active_direct
+        assert struct.unpack_from("<Q", backend.lookup(n.FWD, n.key(direct)), 8)[0] > seen
         return {"case": "receiverDirectCollision", "protocol": protocol, "shared": shared}
     finally:
         if backend:
