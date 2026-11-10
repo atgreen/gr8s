@@ -68,11 +68,14 @@
                                                  s3 :id "cp3" :join-host "127.0.0.1" :join-port lp :api-url url)))))
                  (is (poll-until
                       (lambda ()
-                        (let ((l (smoke-leader nodes)))
-                          (and l (= 3 (length (gr8s::raft-cluster-members
-                                               (gr8s::ha-control-plane-member (smoke-node-hcp l))))))))
+                        (every (lambda (n)
+                                 (let ((members (gr8s::raft-cluster-members
+                                                 (gr8s::ha-control-plane-member (smoke-node-hcp n)))))
+                                   (and (= 3 (length members))
+                                        (every (lambda (entry) (eq :voter (cdr entry))) members))))
+                               nodes))
                       :timeout 15)
-                     "all three members are in the configuration")
+                     "all three members have applied the voter promotions")
 
                  ;; Create a ConfigMap through the leader's HTTP API.
                  (let ((leader (smoke-leader nodes)))

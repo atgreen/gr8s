@@ -198,3 +198,16 @@
           (is (equal issuer-before (uiop:read-file-string issuer-path)))
           (is (null (probe-file (merge-pathnames "pki/" (gr8s.store:store-data-path reopened)))))
           (is (null (probe-file (merge-pathnames "credentials/" (gr8s.store:store-data-path reopened))))))))))
+
+(test ha-store-open-preserves-restore-intent-until-wal-validation
+  (with-temporary-store (legacy root)
+    (declare (ignore legacy))
+    (make-test-generation-store root)
+    (finish-test-generation root)
+    (let* ((intent (gr8s.store::begin-store-restore root *test-store-generation-id*))
+           (opened (gr8s:open-store root :defer-restore-completion t)))
+      (is-true (gr8s.store::read-store-restore-intent root))
+      (is (equal (gr8s.store::store-generation-root root *test-store-generation-id*)
+                 (gr8s.store:store-data-path opened)))
+      (gr8s.store::finish-store-restore opened intent)
+      (is (null (gr8s.store::read-store-restore-intent root))))))

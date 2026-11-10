@@ -258,3 +258,83 @@
           (when s2 (gr8s::stop-server s2))
           (gr8s::stop-ha-control-plane h2)
           (gr8s::stop-ha-control-plane h1))))))
+
+(test durable-control-plane-restarts-preserve-voters-and-do-not-rejoin
+  (with-temporary-store (s1 p1)
+    (with-temporary-store (s2 p2)
+      (let ((h1 nil) (h2 nil) (port1 nil) (port2 nil) (journal nil)
+            (key (merge-pathnames "pki/restart-sentinel.key" p1)))
+        (gr8s.security::write-private-text-exclusively key "identity-must-survive")
+        (unwind-protect
+             (progn
+               (setf h1 (gr8s::start-ha-control-plane s1 :id "durable-one" :init t))
+               (is (poll-until (lambda () (gr8s::ha-control-plane-leader-p h1)) :timeout 15))
+               (setf port1 (gr8s::raft-member-port (gr8s::ha-control-plane-member h1))
+                     h2 (gr8s::start-ha-control-plane s2 :id "durable-two" :join-host "127.0.0.1" :join-port port1)
+                     port2 (gr8s::raft-member-port (gr8s::ha-control-plane-member h2)))
+               (is (poll-until (lambda ()
+                                (and (eq :voter (gr8s::raft-node-self-role (gr8s::raft-member-node (gr8s::ha-control-plane-member h2))))
+                                     (not (gr8s.store::store-access-blocked-p s2)))) :timeout 20))
+               (gr8s::create-core-resource s1 "configmaps" (configmap-input "durable" "k" "A") "default")
+               (is (poll-until (lambda () (equal "A" (ignore-errors (configmap-value s2 "durable" "k")))) :timeout 15))
+               (setf journal (uiop:read-file-string (merge-pathnames "raft/bootstrap.json" p1)))
+               (is (null (gr8s.ha::control-plane-store-bootstrap-role s1 "durable-one" nil nil)))
+               (gr8s::stop-ha-control-plane h2)
+               (gr8s::stop-ha-control-plane h1)
+               (is (= 503 (core-resource-status
+                           (lambda () (gr8s::create-core-resource s1 "configmaps" (configmap-input "after-stop" "k" "unsafe") "default")))))
+               (setf s1 (gr8s:open-store p1 :defer-restore-completion t)
+                     s2 (gr8s:open-store p2 :defer-restore-completion t)
+                     h1 (gr8s::start-ha-control-plane s1 :id "durable-one" :init t :port port1))
+               ;; The founder must keep its two-voter quorum and remain gated
+               ;; while its only peer is still down, rather than re-found alone.
+               (is (= 2 (gr8s::raft-majority (gr8s::raft-member-node (gr8s::ha-control-plane-member h1)))))
+               (is-true (gr8s.store::store-access-blocked-p s1))
+               (is (not (gr8s::ha-control-plane-leader-p h1)))
+               ;; A recovered voter must use the durable address book. An invalid
+               ;; enrollment seed proves startup did not repeat Join.
+               (setf h2 (gr8s::start-ha-control-plane s2 :id "durable-two" :port port2
+                                                     :join-host "127.0.0.1" :join-port 1))
+               (is (eq :voter (gr8s::raft-node-self-role (gr8s::raft-member-node (gr8s::ha-control-plane-member h2)))))
+               (is (poll-until (lambda () (and (not (gr8s.store::store-access-blocked-p s1))
+                                               (not (gr8s.store::store-access-blocked-p s2)))) :timeout 20))
+               (is (equal "A" (configmap-value s1 "durable" "k")))
+               (is (equal "A" (configmap-value s2 "durable" "k")))
+               (is (equal journal (uiop:read-file-string (merge-pathnames "raft/bootstrap.json" p1))))
+               (is (equal "identity-must-survive" (uiop:read-file-string key)))
+               (let ((leader (if (gr8s::ha-control-plane-leader-p h1) s1 s2)))
+                 (gr8s::create-core-resource leader "configmaps" (configmap-input "durable-after" "k" "B") "default"))
+               (is (poll-until (lambda () (and (equal "B" (ignore-errors (configmap-value s1 "durable-after" "k")))
+                                               (equal "B" (ignore-errors (configmap-value s2 "durable-after" "k"))))) :timeout 15)))
+          (gr8s::stop-ha-control-plane h2)
+          (gr8s::stop-ha-control-plane h1))))))
+
+(test durable-control-plane-capture-requires-barriers-and-survives-restart
+  (with-temporary-store (store root)
+    (let ((ha nil) (port nil) (boundary nil))
+      (unwind-protect
+           (progn
+             (setf ha (gr8s::start-ha-control-plane store :id "capture" :init t))
+             (is (poll-until (lambda () (gr8s::ha-control-plane-leader-p ha)) :timeout 15))
+             (gr8s::create-core-resource store "configmaps" (configmap-input "captured" "k" "exact") "default")
+             (let* ((member (gr8s::ha-control-plane-member ha)) (node (gr8s::raft-member-node member)))
+               (setf port (gr8s::raft-member-port member))
+               (bt:with-lock-held ((gr8s::raft-member-lock member))
+                 (signals error (funcall (gr8s.raft:raft-node-snapshot-fn node))))
+               (call-with-bootstrap-barriers
+                store
+                (lambda ()
+                  (bt:with-lock-held ((gr8s::raft-member-lock member))
+                    (setf boundary (gr8s::raft-node-last-applied node))
+                    (gr8s::raft-compact node boundary)
+                    (is (= boundary (gr8s::raft-node-snapshot-index node)))
+                    (is-true (probe-file
+                              (gr8s.resources::checked-store-snapshot-artifact-path
+                               root (getf (cddr (gr8s::raft-node-snapshot-state node)) :application))))))))
+             (gr8s::stop-ha-control-plane ha)
+             (setf store (gr8s:open-store root :defer-restore-completion t)
+                   ha (gr8s::start-ha-control-plane store :id "capture" :init t :port port))
+             (is (= boundary (gr8s::raft-node-snapshot-index (gr8s::raft-member-node (gr8s::ha-control-plane-member ha)))))
+             (is (poll-until (lambda () (gr8s::ha-control-plane-leader-p ha)) :timeout 15))
+             (is (equal "exact" (configmap-value store "captured" "k"))))
+        (gr8s::stop-ha-control-plane ha)))))

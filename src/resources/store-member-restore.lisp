@@ -63,9 +63,30 @@
              (equal (getf message :from) (gr8s.raft:raft-node-leader-id node))
              (member-store-current-term-applied-p node (getf message :leader-commit))))))
 
+(defun capture-member-store-artifact (member store)
+  "Capture exactly last-applied under drained outer barriers and the member lock."
+  (unless (and (gr8s.store::store-application-barriers-owned-p store)
+               (sb-thread:holding-mutex-p (gr8s.raft.transport:raft-member-lock member)))
+    (error "Application capture requires outer barriers before the member lock"))
+  (bt:with-lock-held ((pod-store-lock store)) (gr8s.store::require-store-reload-quiescence store))
+  (let* ((node (gr8s.raft.transport:raft-member-node member))
+         (index (gr8s.raft:raft-node-last-applied node))
+         (term (gr8s.raft::raft-log-term node index))
+         (root (pod-store-path store))
+         (temporary (merge-pathnames (format nil "raft/capture-~A.jsonl" (generate-uid)) root)))
+    (when (or (gr8s.raft:raft-node-snapshot-pending node)
+              (> index (gr8s.raft:raft-node-commit-index node)))
+      (error "Cannot capture an unfinished application boundary"))
+    (unwind-protect
+         (progn
+           (capture-store-snapshot store temporary index term)
+           (let ((digest (ironclad:byte-array-to-hex-string (ironclad:digest-file :sha256 temporary))))
+             (nth-value 1 (retain-store-snapshot-artifact root temporary index term digest))))
+      (when (probe-file temporary) (delete-file temporary)))))
+
 (defun configure-member-store-restore (member store &key (drain-timeout 30) startup)
-  "Install live or pre-listener artifact restore barriers.
-Production control-plane integration and compaction remain separate.
+  "Install live/pre-listener artifact restore barriers and guarded capture.
+Automatic compaction is controlled separately.
 A closure owns only gates it successfully quiesces. Failed durable installs keep
 that gate blocked for a later ordinary RPC to retry under the same outer barriers."
   (unless (member startup '(nil t)) (error "Invalid store startup mode"))
@@ -85,7 +106,9 @@ that gate blocked for a later ordinary RPC to retry under the same outer barrier
       (when (gr8s.raft.transport::raft-member-snapshot-barrier-pending member)
         (error "Cannot replace an unfinished application restore barrier"))
       (install-store-artifact-transport-unlocked member (pod-store-path store))
-      (setf (gr8s.raft:raft-node-restore-fn (gr8s.raft.transport:raft-member-node member))
+      (setf (gr8s.raft:raft-node-snapshot-fn (gr8s.raft.transport:raft-member-node member))
+            (lambda () (capture-member-store-artifact member store))
+            (gr8s.raft:raft-node-restore-fn (gr8s.raft.transport:raft-member-node member))
             (lambda (reference)
               (restore-member-store-artifact member store reference
                :recover (and startup-sync-required (not (gr8s.raft.transport:raft-member-running member)))))
@@ -170,7 +193,7 @@ that gate blocked for a later ordinary RPC to retry under the same outer barrier
 current-term committed catch-up. Durable writes use the shared HA dispatcher;
 the caller starts ticking and publishes its application endpoints.
 Use :BOOTSTRAP-ROLE :FOUNDER or :LEARNER only for fresh/journaled bootstrap.
-Production control-plane integration remains separate."
+The HA coordinator owns production startup intent and endpoint publication."
   (unless (or (pathnamep wal) (stringp wal)) (error "Invalid application WAL pathname"))
   (unless (evenp (length options)) (error "Invalid store member startup options"))
   (loop for key in options by #'cddr

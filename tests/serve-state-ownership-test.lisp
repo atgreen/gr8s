@@ -12,7 +12,8 @@
          (progn
            (signals error (gr8s.server::serve-owned options))
            (setf (symbol-function 'gr8s:open-store)
-                 (lambda (path)
+                 (lambda (path &key defer-restore-completion)
+                   (is (null defer-restore-completion))
                    (incf opened)
                    (is (equal root (truename path)))
                    (is (not (null (gr8s.server::require-serve-state-ownership options))))
@@ -161,8 +162,9 @@
       (unwind-protect
            (progn
              (setf (symbol-function 'gr8s:open-store)
-                   (lambda (ignored)
+                   (lambda (ignored &key defer-restore-completion)
                      (declare (ignore ignored))
+                     (is (eq t defer-restore-completion))
                      (incf opened)
                      (let ((record (gr8s.store::read-private-generation-json path)))
                        (is (= 7000 (gethash "port" record)))
@@ -219,3 +221,33 @@
         (with-open-file (out path :direction :output :if-exists :supersede) (write-string "null" out))
         (signals error (gr8s.server::call-with-serve-state-ownership options (lambda () (fail "null mode accepted"))))
         (is (equal "null" (uiop:read-file-string path)))))))
+
+(test legacy-in-memory-ha-cannot-silently-bootstrap-a-new-quorum
+  (dolist (evidence '(:mode :credentials :endpoint))
+    (with-temporary-store (store root)
+      (declare (ignore store))
+      (let* ((metadata (merge-pathnames "metadata/" root))
+             (mode (merge-pathnames "server-mode.json" metadata))
+             (options (list :state-directory root :raft-init t)))
+        (gr8s.store::ensure-store-generation-directory metadata root :metadata t)
+        (ecase evidence
+          (:mode (gr8s.server::write-serve-state-record mode
+                   (gr8s.resources::core-object "format" "gr8s-serve-mode" "version" 1 "mode" "ha")))
+          (:credentials (ensure-directories-exist (merge-pathnames "pki/raft/" root)))
+          (:endpoint (gr8s.server::check-serve-ha-endpoint root options)))
+        (let ((before (and (probe-file mode) (uiop:read-file-string mode))))
+          (signals error (gr8s.server::call-with-serve-state-ownership
+                          options (lambda () (fail "legacy HA was treated as fresh"))))
+          (is (equal before (and (probe-file mode) (uiop:read-file-string mode)))))
+        (is (not (probe-file (merge-pathnames "raft/control-plane.log" root))))))))
+
+(test fresh-ha-genesis-intent-survives-interruption-before-endpoint-publication
+  (with-temporary-store (store root)
+    (declare (ignore store))
+    (let ((options (list :state-directory root :raft-init t)))
+      (gr8s.server::call-with-serve-state-ownership options (lambda () nil))
+      (delete-file (merge-pathnames "metadata/server-ha-endpoint.json" root))
+      (ensure-directories-exist (merge-pathnames "pki/raft/" root))
+      (is (eq :resumed (gr8s.server::call-with-serve-state-ownership options (lambda () :resumed))))
+      (is (eql 2 (gethash "version" (gr8s.store::read-private-generation-json
+                                    (merge-pathnames "metadata/server-mode.json" root))))))))

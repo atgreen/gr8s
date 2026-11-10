@@ -112,64 +112,86 @@ application ingress/writer barriers. This function neither persists nor adopts R
         (gr8s::core-resource-error 503 "ServiceUnavailable" "This control-plane member is not the Raft leader"))
       result)))
 
+(defun control-plane-store-bootstrap-role (store id init api-url)
+  "Choose fresh/journaled bootstrap without resetting a published member WAL."
+  (let* ((root (gr8s::pod-store-path store))
+         (wal (merge-pathnames "raft/control-plane.log" root))
+         (journal (merge-pathnames "raft/bootstrap.json" root))
+         (role (if init :founder :learner))
+         (wal-stat (gr8s.store::store-generation-stat wal)))
+    (if (gr8s.store::store-generation-stat journal)
+        (let* ((record (gr8s.store::read-private-generation-json journal))
+               (published (equal "published" (gethash "phase" record)))
+               (stored-role (gethash "role" record)))
+          (unless (member stored-role '("founder" "learner") :test #'equal)
+            (error "Invalid control-plane bootstrap role"))
+          (gr8s.resources::validate-store-member-bootstrap
+           record id (if published stored-role (if init "founder" "learner")) (or api-url ""))
+          (if published
+              (progn
+                (unless wal-stat (error "Published control-plane WAL is missing"))
+                nil)
+              role))
+        (progn
+          (when wal-stat (error "Control-plane WAL has no bootstrap journal"))
+          role))))
+
 (defun start-ha-control-plane (store &key id (host "127.0.0.1") (port 0)
                                           init join-host join-port
                                           node-name token ca-pin pki api-url)
-  "Start the control plane's Raft member bound to STORE and either found a new
-   cluster (INIT) or join an existing one (JOIN-HOST/JOIN-PORT). Routes STORE's
-   durable writes through the member and returns an HA-CONTROL-PLANE. Signals an
-   error if a join does not succeed. With PKI, which 'gr8s serve' always supplies,
-   members use mutual TLS under its Raft directory; a joiner enrolls with TOKEN,
-   trusting CA-PIN. Without it they use plain gRPC, which only in-process tests do."
-  ;; Enrollment can happen before any Pod needs a token. Founders must therefore
-  ;; create the cluster key now so the first voter receives it with the other
-  ;; shared private credentials.
-  (when (and pki init) (gr8s::load-service-account-signing-key store))
-  (let* ((member nil)
+  "Start an artifact-backed durable Raft member before application ingress.
+Fresh founders bootstrap one voter; fresh joiners bootstrap a learner. Restart
+restores the durable membership and application baseline, without reinitializing
+the cluster. Access stays gated until a current-term committed boundary applies."
+  (unless (and (or init join-host) (not (and init join-host)))
+    (error "start-ha-control-plane requires exactly one of :init or :join-host"))
+  (let* ((bootstrap-role (control-plane-store-bootstrap-role store id init api-url))
+         (member nil) (completed nil)
          (credentials
            (when pki
+             (when (and init bootstrap-role) (gr8s::load-service-account-signing-key store))
              (let ((root (gr8s::raft-tls-root pki)))
                (if init
                    (gr8s::ensure-raft-founder-credentials root id)
                    (gr8s::ensure-raft-joiner-credentials
                     root id join-host join-port
                     :node-name node-name :token token :ca-pin ca-pin
-                    :node-root (gr8s::cluster-pki-root pki))))))
-         (apply-fn (make-store-raft-apply-function store)))
+                    :node-root (gr8s::cluster-pki-root pki)))))))
     (when credentials (setf (gr8s::raft-credentials-node-pki credentials) pki))
-    (setf member (start-raft-member id :host host :port port :apply-fn apply-fn :credentials credentials
-                                     :snapshot-directory (merge-pathnames "raft/transfers/" (gr8s::pod-store-path store))))
-    (cond
-      (init
-       (raft-cluster-init member :api-url api-url)
-       (raft-member-start member))
-      (join-host
-       ;; The member's server is already accepting appends; join (as a learner)
-       ;; before driving the clock so it never self-elects a rival term.
-       (unless (raft-cluster-join member join-host join-port
-                                  :node-name node-name :token token :api-url api-url)
-         (stop-raft-member member)
-         (error "control plane ~A could not join the cluster at ~A:~D" id join-host join-port))
-       (raft-member-start member))
-      (t (stop-raft-member member)
-         (error "start-ha-control-plane requires :init or :join-host")))
-    ;; Durable writes now go through Raft: the leader proposes and commits; a
-    ;; follower proposals are forwarded to the leader. TAG identifies a durable
-    ;; resource delta or a deterministic image-tracker command; each committed
-    ;; command applies on every replica.
-    (setf (gr8s::pod-store-consensus-commit-fn store) (make-store-raft-commit-function member))
-    (make-ha-control-plane :member member :store store)))
+    (unwind-protect
+         (progn
+           (setf member
+                 (apply #'gr8s.resources::start-store-member-from-wal
+                        store id (merge-pathnames "raft/control-plane.log" (gr8s::pod-store-path store))
+                        :host host :port port :credentials credentials
+                        :snapshot-directory (merge-pathnames "raft/transfers/" (gr8s::pod-store-path store))
+                        (when bootstrap-role
+                          (list :bootstrap-role bootstrap-role :bootstrap-api-url api-url))))
+           (bt:with-lock-held ((raft-member-lock member))
+             (raft-member-enable-dynamic-membership member :pki pki))
+           ;; Only a learner still awaiting admission needs Join. Recovered voters
+           ;; reconnect using the durable address book, without enrollment tokens
+           ;; or an accidental single-member configuration reset.
+           (when (and join-host (eq :learner (gr8s.raft::raft-node-self-role (raft-member-node member))))
+             (unless (raft-cluster-join member join-host join-port
+                                       :node-name node-name :token token :api-url api-url)
+               (error "control plane ~A could not join the cluster at ~A:~D" id join-host join-port)))
+           (raft-member-start member)
+           (setf completed t)
+           (make-ha-control-plane :member member :store store))
+      (unless completed (when member (stop-raft-member member))))))
 
 (defun ha-control-plane-leader-p (hcp)
-  "True when this control-plane member currently holds Raft leadership."
-  (and hcp (raft-member-leader-p (ha-control-plane-member hcp))))
+  "True only for an elected leader whose recovered application is ready."
+  (and hcp (not (gr8s.store::store-access-blocked-p (ha-control-plane-store hcp)))
+       (raft-member-leader-p (ha-control-plane-member hcp))))
 
 (defun ha-control-plane-leader-status (hcp)
-  "Return (values self-leader-p leader-api-url) for the HTTP leader-aware layer."
-  (if hcp
-      (values (raft-member-leader-p (ha-control-plane-member hcp))
-              (raft-member-leader-api-url (ha-control-plane-member hcp)))
-      (values t nil)))
+  "Return leader routing only after this member's application recovery gate opens."
+  (cond ((null hcp) (values t nil))
+        ((gr8s.store::store-access-blocked-p (ha-control-plane-store hcp)) (values nil nil))
+        (t (values (raft-member-leader-p (ha-control-plane-member hcp))
+                   (raft-member-leader-api-url (ha-control-plane-member hcp))))))
 
 (defun ha-control-plane-node-endpoints (hcp node-port)
   "Return every known control-plane node endpoint as (HOST PORT), with this
@@ -215,9 +237,11 @@ API and controllers. Remaining members retain reconnect failover coverage."
                     members))))))
 
 (defun stop-ha-control-plane (hcp)
-  "Tear down the HA control plane: detach the store's consensus commit hook so no
-further writes are proposed to Raft, then stop the member. A no-op when HCP is NIL."
+  "Stop Raft and block application access, retaining the fail-closed commit hook."
   (when hcp
-    (setf (gr8s::pod-store-consensus-commit-fn
-           (ha-control-plane-store hcp)) nil)
-    (stop-raft-member (ha-control-plane-member hcp))))
+    (let ((store (ha-control-plane-store hcp)))
+      ;; The hook stays attached to the stopped member. Even if another owner
+      ;; later resumes access, shutdown cannot become local-only mutation.
+      (stop-raft-member (ha-control-plane-member hcp))
+      (unless (gr8s.store::store-access-blocked-p store)
+        (gr8s.store::quiesce-store-access store)))))

@@ -645,8 +645,8 @@ renewals use the same compact one-key delta without changing resourceVersion."
     (load-pod-publications store)
   store)
 
-(defun open-store (path)
-  "Open or create a durable store at PATH and rebuild its in-memory indexes."
+(defun open-store (path &key defer-restore-completion)
+  "Load the selected application. HA defers intent completion to WAL validation."
   (let* ((directory (uiop:ensure-directory-pathname path))
          (store (make-pod-store directory))
          (restore nil))
@@ -654,7 +654,7 @@ renewals use the same compact one-key delta without changing resourceVersion."
     (setf restore (resume-store-restore-selection directory))
     (setf (pod-store-data-root store) (selected-store-generation-root directory))
     (load-store-application-files store)
-    (when restore (finish-store-restore store restore))
+    (when (and restore (not defer-restore-completion)) (finish-store-restore store restore))
     store))
 
 (defun get-pod-unlocked (store namespace name)

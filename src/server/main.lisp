@@ -1363,6 +1363,20 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
       (and local-agent (equal "containerd" (getf options :runtime))
            (equal "managed" (getf options :containerd-mode)))))
 
+(defun wait-for-ha-application (ha)
+  "Keep Raft listening while application-dependent services wait for catch-up."
+  (when ha
+    (let ((store (ha-control-plane-store ha)) (member (ha-control-plane-member ha)))
+      (when (gr8s.store::store-access-blocked-p store)
+        (format t "gr8s HA: waiting for committed application recovery~%")
+        (finish-output))
+      (loop while (and (not *shutdown-requested*) (gr8s.store::store-access-blocked-p store))
+            do (unless (and (gr8s.raft.transport::raft-member-running member)
+                            (bt:thread-alive-p (gr8s.raft.transport::raft-member-tick-thread member)))
+                 (error "Raft clock stopped before application recovery completed"))
+               (sleep 0.05))))
+  (not *shutdown-requested*))
+
 (defun serve (options)
   "Own state before any application/PKI initialization, through final teardown."
   (call-with-serve-state-ownership options (lambda () (serve-owned options))))
@@ -1394,7 +1408,9 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                   (when (or (getf options :raft-init) (getf options :raft-join))
                     (gr8s.raft.transport::raft-reap-snapshot-directory
                      (merge-pathnames "raft/transfers/" state-directory)))
-                  (open-store state-directory)))
+                  (open-store state-directory
+                              :defer-restore-completion
+                              (and (or (getf options :raft-init) (getf options :raft-join)) t))))
          (patch-policy-checked
            (when gr8s.patch:*manager*
              (validate-patch-admission store (gr8s.patch::octets
@@ -1418,6 +1434,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
          (progn
            (setf memory-monitor (start-memory-monitor store))
            (setf ha (maybe-start-ha-control-plane store pki options))
+           (unless (wait-for-ha-application ha) (return-from serve-owned 0))
            (multiple-value-bind (certificate key) (ensure-apiserver-kubelet-client-credentials pki)
              (setf *kubelet-proxy-credentials* (list (cluster-pki-ca-certificate pki) certificate key)))
            (setf node-server

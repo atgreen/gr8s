@@ -531,8 +531,9 @@
       (unwind-protect
            (progn
              (setf (symbol-function 'gr8s:open-store)
-                   (lambda (directory)
+                   (lambda (directory &key defer-restore-completion)
                      (declare (ignore directory))
+                     (is (eq t defer-restore-completion))
                      (setf opened t)
                      (is (not (probe-file root)))
                      (throw 'snapshot-store-opened :opened)))

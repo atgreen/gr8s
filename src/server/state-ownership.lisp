@@ -35,7 +35,7 @@
 
 (defun write-serve-state-mode (path mode)
   (write-serve-state-record path
-    (gr8s.resources::core-object "format" "gr8s-serve-mode" "version" 1 "mode" mode)))
+    (gr8s.resources::core-object "format" "gr8s-serve-mode" "version" (if (equal mode "ha") 2 1) "mode" mode)))
 
 (defconstant +serve-raft-default-port+ 7000)
 
@@ -58,7 +58,7 @@
       (gr8s.resources::core-object "format" "gr8s-serve-ha-endpoint" "version" 1
                                    "memberId" id "host" host "port" port "apiUrl" url))))
 
-(defun check-serve-ha-endpoint (root options)
+(defun check-serve-ha-endpoint (root options &key (publish t))
   "Persist endpoint intent before opening application files or accepting RPCs."
   (let* ((directory (merge-pathnames "metadata/" root))
          (path (merge-pathnames "server-ha-endpoint.json" directory))
@@ -70,7 +70,7 @@
                        (loop for key being the hash-keys of requested using (hash-value value)
                              always (equal value (gethash key existing))))
             (error "Persisted HA identity or endpoint differs from startup options; restart with the original configuration")))
-        (write-serve-state-record path requested))))
+        (when publish (write-serve-state-record path requested)))))
 
 (defun check-serve-state-mode (root options)
   "Never silently open a Raft application's files as standalone state."
@@ -93,19 +93,31 @@
     (when existing-present
       (unless (and (hash-table-p existing) (= 3 (hash-table-count existing))
                    (equal "gr8s-serve-mode" (gethash "format" existing))
-                   (eql 1 (gethash "version" existing))
+                   (or (eql 1 (gethash "version" existing))
+                       (and (eql 2 (gethash "version" existing))
+                            (equal "ha" (gethash "mode" existing))))
                    (member (gethash "mode" existing) '("ha" "standalone") :test #'equal))
         (error "Invalid persisted serve mode")))
     (when (and (equal requested "standalone")
                (or legacy-ha (and existing (equal "ha" (gethash "mode" existing)))))
       (error "HA state requires its Raft startup options; standalone fallback is refused"))
-    (when (equal requested "ha") (check-serve-ha-endpoint root options))
+    ;; Version 2 records durable genesis intent before any credentials or
+    ;; bootstrap journal are created. Version 1 HA roots may have belonged to
+    ;; an in-memory multi-voter cluster: absence of a WAL is not fresh genesis.
+    (when (and (equal requested "ha")
+               (not (and existing (eql 2 (gethash "version" existing))))
+               (or legacy-ha (and existing (equal "ha" (gethash "mode" existing))))
+               (not (gr8s.store::store-generation-stat (merge-pathnames "raft/bootstrap.json" root))))
+      (error "Legacy HA state has no durable bootstrap journal; explicit cluster migration is required"))
+    (when (equal requested "ha") (check-serve-ha-endpoint root options :publish nil))
     ;; An explicit HA request can found a cluster from existing standalone data.
     ;; Persist intent before opening files, so interrupted HA startup cannot later
     ;; fall through to standalone merely because its flags were omitted.
-    (unless (and existing (equal requested (gethash "mode" existing)))
+    (unless (and existing (equal requested (gethash "mode" existing))
+                 (or (equal requested "standalone") (eql 2 (gethash "version" existing))))
       (gr8s.store::ensure-store-generation-directory directory root :metadata t)
-      (write-serve-state-mode path requested))))
+      (write-serve-state-mode path requested))
+    (when (equal requested "ha") (check-serve-ha-endpoint root options))))
 
 (defun call-with-serve-state-ownership (options function)
   "Own the canonical state directory across all initialization and teardown.
