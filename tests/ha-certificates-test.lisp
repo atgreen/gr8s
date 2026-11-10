@@ -42,8 +42,7 @@
   "Run BODY with WITNESS a member of FOUNDER's cluster, its credentials under the directory STATE."
   `(let* ((raft-pki (member-raft-pki ,founder))
           (,witness (gr8s::start-raft-member
-                     "w1" :apply-fn (lambda (c) (declare (ignore c)) nil)
-                          :credentials (gr8s::ensure-raft-joiner-credentials
+                     "w1" :credentials (gr8s::ensure-raft-joiner-credentials
                                         (merge-pathnames "raft/" (uiop:ensure-directory-pathname ,state))
                                         "w1" "127.0.0.1" (control-plane-port ,founder)
                                         :role :witness :node-name "w1"
