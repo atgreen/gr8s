@@ -262,6 +262,62 @@ is a borrowed sequence; retain only entries after INDEX. Caller holds the node l
       (raft-publish-snapshot node index term state entries)
       (setf (raft-node-snapshot-pending node) nil))))
 
+(defstruct (raft-prepared-compaction
+             (:constructor %make-raft-prepared-compaction (owner index term state)))
+  (owner nil :read-only t)
+  (index 0 :type fixnum :read-only t)
+  (term 0 :type fixnum :read-only t)
+  (state nil :read-only t))
+
+(defun raft-prepare-compaction (node)
+  "Freeze an exact applied boundary and configuration without application I/O.
+The caller holds the node lock and freezes its application view in the same
+critical section. It must retain that view until publication or abandonment.
+Returns NIL if no newer boundary is available or an installation is pending."
+  (let ((index (raft-node-last-applied node)))
+    (when (or (raft-node-snapshot-pending node) (<= index (raft-node-snapshot-index node)))
+      (return-from raft-prepare-compaction nil))
+    (unless (and (<= index (raft-node-commit-index node))
+                 (or (raft-node-snapshot-fn node) (null (raft-node-apply-fn node))))
+      (error "Prepared compaction requires an exact committed application boundary"))
+    (%make-raft-prepared-compaction node index (raft-log-term node index)
+                                    (raft-capture-snapshot node nil index))))
+
+(defun raft-persist-compaction (node upto term state)
+  "Persist a checked boundary before changing the live log. Caller owns the node lock."
+  (let ((drop (- upto (raft-node-snapshot-index node))))
+    (raft-storage-replace-snapshot
+     (raft-node-storage node) upto term state
+     (raft-node-current-term node) (raft-node-voted-for node) (raft-node-log node)
+     :commit-index (raft-node-commit-index node))
+    (let* ((log (raft-node-log node)) (end (fill-pointer log)) (remaining (- end drop)))
+      (loop for i from drop below end do (setf (aref log (- i drop)) (aref log i)))
+      ;; A fill pointer does not hide array slots from the garbage collector.
+      (loop for i from remaining below end do (setf (aref log i) nil))
+      (setf (fill-pointer log) remaining))
+    (setf (raft-node-snapshot-index node) upto
+          (raft-node-snapshot-term node) term
+          (raft-node-snapshot-state node) state)))
+
+(defun raft-commit-prepared-compaction (node prepared application)
+  "Publish APPLICATION from PREPARED's frozen view, under the node lock.
+The caller serializes/retains the application outside the lock. Newer applied
+entries and configuration remain live and survive in the durable suffix. Returns
+NIL if a newer snapshot or pending installation superseded this preparation."
+  (check-type prepared raft-prepared-compaction)
+  (unless (eq node (raft-prepared-compaction-owner prepared))
+    (error "Prepared compaction belongs to another node"))
+  (let ((index (raft-prepared-compaction-index prepared)))
+    (when (or (<= index (raft-node-snapshot-index node)) (raft-node-snapshot-pending node))
+      (return-from raft-commit-prepared-compaction nil))
+    (unless (and (<= index (raft-node-last-applied node) (raft-node-commit-index node))
+                 (eql (raft-prepared-compaction-term prepared) (raft-log-term node index)))
+      (error "Prepared compaction no longer matches the committed prefix"))
+    (let ((state (copy-list (raft-prepared-compaction-state prepared))))
+      (setf (getf (cddr state) :application) application)
+      (raft-persist-compaction node index (raft-prepared-compaction-term prepared) state)
+      t)))
+
 (defun raft-compact (node upto)
   "Persist a snapshot before releasing its committed prefix. When SNAPSHOT-FN
 captures current application state, UPTO must equal LAST-APPLIED: that callback
@@ -271,23 +327,11 @@ cannot reconstruct an arbitrary older application revision."
       (error "A Raft application snapshot must cover exactly last-applied ~D, not ~D"
              (raft-node-last-applied node) upto))
     (let* ((term (raft-log-term node upto))
-           (drop (- upto (raft-node-snapshot-index node)))
            (state (raft-capture-snapshot
                    node (and (raft-node-snapshot-fn node) (funcall (raft-node-snapshot-fn node))) upto)))
       ;; Snapshot construction or persistence may fail; keep the complete old log
       ;; and boundary until the durable replacement succeeds.
-      (raft-storage-replace-snapshot
-       (raft-node-storage node) upto term state
-       (raft-node-current-term node) (raft-node-voted-for node) (raft-node-log node)
-       :commit-index (raft-node-commit-index node))
-      (let* ((log (raft-node-log node)) (end (fill-pointer log)) (remaining (- end drop)))
-        (loop for i from drop below end do (setf (aref log (- i drop)) (aref log i)))
-        ;; A fill pointer does not hide array slots from the garbage collector.
-        (loop for i from remaining below end do (setf (aref log i) nil))
-        (setf (fill-pointer log) remaining))
-      (setf (raft-node-snapshot-index node) upto
-            (raft-node-snapshot-term node) term
-            (raft-node-snapshot-state node) state))))
+      (raft-persist-compaction node upto term state))))
 
 (defun raft-restore-snapshot (node index term state)
   "Restore a newer snapshot into memory; the caller owns durable installation.

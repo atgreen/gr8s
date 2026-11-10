@@ -467,6 +467,18 @@ tiny snapshot, and an overly aggressive trigger can repeatedly serialize that
 history. Uncommitted proposals also need separate admission backpressure
 (`podster-ucm.11.4`), since compaction cannot discard them safely.
 
+The internal Raft core also supports preparing a compaction boundary before
+application I/O. Under the member lock, `raft-prepare-compaction` captures the
+applied index, its term and membership metadata without invoking the snapshot
+callback. The caller must freeze its application view at that same boundary.
+After serializing and retaining the artifact, `raft-commit-prepared-compaction`
+revalidates the prefix under the lock and publishes the frozen metadata with
+the artifact. It preserves newer committed and uncommitted log entries, current
+term/vote, and live membership. A superseding snapshot or pending installation
+causes publication to return `nil`; the caller still owns artifact retention
+and cleanup. This foundation does not yet move the worker's application capture
+outside the member lock or enable automatic compaction by default.
+
 Build the internal native retention probe with
 `scripts/build-compaction-native-harness.lisp`, then run the resulting
 `build/gr8s-compaction-acceptance --dynamic-space-size 384 PRIVATE_ROOT 2048`.
