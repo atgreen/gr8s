@@ -361,3 +361,75 @@
       (is (= 3 (length (ag-grpc::stream-message-buffer-messages buffer))))
       (is (zerop (array-total-size (ag-http2:stream-data-buffer stream))))
       (is-true (ag-grpc::stream-message-buffer-closed-p buffer)))))
+
+(test deadline-heap-removes-arbitrary-entries-and-clears-backing-slots
+  (let* ((heap (cl-cancel::make-heap))
+         (entries (loop for deadline in '(9 2 7 1 8 3 6 4 5 0)
+                        collect (cl-cancel::make-deadline-entry :deadline deadline))))
+    (dolist (entry entries) (cl-cancel::heap-insert heap entry))
+    ;; Remove both interior and leaf entries; replacement may bubble either way.
+    (dolist (entry (subseq entries 0 5))
+      (is (eq entry (cl-cancel::heap-remove-entry heap entry)))
+      (is (null (cl-cancel::heap-remove-entry heap entry))))
+    (is (equal '(0 3 4 5 6)
+               (loop until (cl-cancel::heap-empty-p heap)
+                     collect (cl-cancel::deadline-entry-deadline (cl-cancel::heap-pop heap)))))
+    (let ((data (cl-cancel::heap-data heap)))
+      (is (loop for i below (length entries) always (null (row-major-aref data i)))))
+    (is (every (lambda (entry) (null (cl-cancel::deadline-entry-heap-index entry))) entries))))
+
+(test cancelled-deadlines-release-timer-registration-including-parent-cancel
+  (multiple-value-bind (parent cancel-parent) (cl-cancel:with-cancel (cl-cancel:background))
+    (unwind-protect
+         (progn
+           (multiple-value-bind (child cancel-child) (cl-cancel:with-timeout parent 60)
+             (is-true (cl-cancel::cancellable-timer-entry child))
+             (funcall cancel-child)
+             (funcall cancel-child)
+             (is (null (cl-cancel::cancellable-timer-entry child))))
+           (multiple-value-bind (child cancel-child) (cl-cancel:with-timeout parent 60)
+             (declare (ignore cancel-child))
+             (funcall cancel-parent)
+             (is (null (cl-cancel::cancellable-timer-entry child)))))
+      (funcall cancel-parent))))
+
+(test concurrent-deadline-setup-and-cancel-leaves-no-registrations
+  (let ((threads
+          (loop repeat 4 collect
+            (bt:make-thread
+             (lambda ()
+               (loop repeat 200 always
+                 (multiple-value-bind (ctx cancel) (cl-cancel:with-timeout (cl-cancel:background) 60)
+                   (funcall cancel)
+                   (null (cl-cancel::cancellable-timer-entry ctx)))))))))
+    (is (every #'identity (mapcar #'bt:join-thread threads)))))
+
+(test deadline-timer-still-fires-after-arbitrary-cancellation
+  (multiple-value-bind (later cancel-later) (cl-cancel:with-timeout (cl-cancel:background) 60)
+    (unwind-protect
+         (multiple-value-bind (soon cancel-soon) (cl-cancel:with-timeout (cl-cancel:background) 1/5)
+           (unwind-protect
+                (progn
+                  (funcall cancel-later)
+                  (is (not (cl-cancel:cancelled-p soon)))
+                  (is (poll-until (lambda () (cl-cancel:cancelled-p soon))))
+                  (is (typep (cl-cancel:err soon) 'cl-cancel:deadline-exceeded)))
+             (funcall cancel-soon)))
+      (funcall cancel-later))))
+
+(test parent-cancel-racing-with-deadline-registration-leaves-no-timers
+  (multiple-value-bind (parent cancel-parent) (cl-cancel:with-cancel (cl-cancel:background))
+    (let* ((started (bt:make-semaphore :name "deadline registration started"))
+           (creator (bt:make-thread
+                     (lambda ()
+                       (bt:signal-semaphore started)
+                       (loop repeat 1000 collect
+                         (nth-value 0 (cl-cancel:with-timeout parent 60)))))))
+      (unwind-protect
+           (progn
+             (bt:wait-on-semaphore started)
+             (funcall cancel-parent)
+             (let ((children (bt:join-thread creator)))
+               (is (every #'cl-cancel:cancelled-p children))
+               (is (every (lambda (child) (null (cl-cancel::cancellable-timer-entry child))) children))))
+        (funcall cancel-parent)))))

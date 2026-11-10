@@ -37,7 +37,8 @@
   "Entry in the deadline heap"
   (deadline 0 :type rational)
   (cancellable nil)
-  (cancel-func nil))
+  (cancel-func nil)
+  (heap-index nil :type (or null fixnum)))
 
 ;;; Min-heap implementation for deadline management
 
@@ -60,7 +61,9 @@
 (defun heap-swap (heap i j)
   "Swap heap elements at indices I and J"
   (let ((data (heap-data heap)))
-    (rotatef (aref data i) (aref data j))))
+    (rotatef (aref data i) (aref data j))
+    (setf (deadline-entry-heap-index (aref data i)) i
+          (deadline-entry-heap-index (aref data j)) j)))
 
 (defun heap-bubble-up (heap i)
   "Move heap element at index I upward to maintain min-heap property"
@@ -94,6 +97,7 @@
 
 (defun heap-insert (heap entry)
   "Insert deadline entry into heap"
+  (setf (deadline-entry-heap-index entry) (length (heap-data heap)))
   (vector-push-extend entry (heap-data heap))
   (heap-bubble-up heap (1- (length (heap-data heap)))))
 
@@ -102,16 +106,29 @@
   (when (plusp (length (heap-data heap)))
     (aref (heap-data heap) 0)))
 
+(defun heap-remove-entry (heap entry)
+  "Remove ENTRY in logarithmic time and release its vacated backing slot."
+  (let* ((data (heap-data heap)) (index (deadline-entry-heap-index entry))
+         (last (1- (length data))))
+    (when (and index (<= index last) (eq entry (aref data index)))
+      (setf (deadline-entry-heap-index entry) nil)
+      (unless (= index last)
+        (setf (aref data index) (aref data last)
+              (deadline-entry-heap-index (aref data index)) index))
+      ;; A fill pointer does not hide references from the garbage collector.
+      (setf (aref data last) nil (fill-pointer data) last)
+      (when (< index last)
+        (if (and (plusp index)
+                 (< (deadline-entry-deadline (aref data index))
+                    (deadline-entry-deadline (aref data (heap-parent index)))))
+            (heap-bubble-up heap index)
+            (heap-bubble-down heap index)))
+      entry)))
+
 (defun heap-pop (heap)
-  "Remove and return earliest deadline entry"
-  (let ((data (heap-data heap)))
-    (when (plusp (length data))
-      (let ((result (aref data 0)))
-        (setf (aref data 0) (aref data (1- (length data))))
-        (decf (fill-pointer data))
-        (when (plusp (length data))
-          (heap-bubble-down heap 0))
-        result))))
+  "Remove and return the earliest deadline, releasing its backing reference."
+  (let ((entry (heap-peek heap)))
+    (when entry (heap-remove-entry heap entry))))
 
 (defun heap-empty-p (heap)
   "Return T if heap is empty"
@@ -250,25 +267,38 @@
   (ensure-timer-initialized)
   (ensure-timer-thread)
   (bt2:with-lock-held (*timer-lock*)
-    (let ((was-soonest (or (heap-empty-p *deadline-heap*)
-                           (< deadline (deadline-entry-deadline (heap-peek *deadline-heap*))))))
-      (heap-insert *deadline-heap*
-                   (make-deadline-entry :deadline deadline
-                                       :cancellable cancellable
-                                       :cancel-func cancel-func))
-      ;; Wake timer thread if this is now the soonest deadline
-      (when was-soonest
-        (bt2:condition-notify *timer-condition*)))))
+    ;; CANCEL releases the context lock before its :AFTER method acquires the
+    ;; timer lock. Checking here closes cancellation-before-registration races.
+    (unless (cancelled-p cancellable)
+      (let* ((was-soonest (or (heap-empty-p *deadline-heap*)
+                             (< deadline (deadline-entry-deadline (heap-peek *deadline-heap*)))))
+             (entry (make-deadline-entry :deadline deadline :cancellable cancellable
+                                        :cancel-func cancel-func)))
+        (setf (cancellable-timer-entry cancellable) entry)
+        (heap-insert *deadline-heap* entry)
+        (when was-soonest (bt2:condition-notify *timer-condition*))))))
 
 ;;; Deadline cancellable
 
 (defclass deadline-context (cancellable-context)
-  ((deadline :initarg :deadline
+  ((timer-entry :initform nil :accessor cancellable-timer-entry)
+   (deadline :initarg :deadline
              :reader cancellable-deadline
              :documentation
              "Fractional seconds since epoch when this cancellable expires
              (rational number with nanosecond precision)"))
   (:documentation "A cancellable with a deadline"))
+
+(defmethod cancel :after ((cancellable deadline-context) &optional error)
+  (declare (ignore error))
+  (when *timer-lock*
+    (bt2:with-lock-held (*timer-lock*)
+      (let ((entry (cancellable-timer-entry cancellable)))
+        (when entry
+          (heap-remove-entry *deadline-heap* entry)
+          (setf (cancellable-timer-entry cancellable) nil)
+          ;; Recompute the timer wait if its former root was removed.
+          (bt2:condition-notify *timer-condition*))))))
 
 (defmethod deadline ((cancellable deadline-context))
   (cancellable-deadline cancellable))
