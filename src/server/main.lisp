@@ -1021,6 +1021,9 @@ The new identity takes effect when the node agent next starts."
            (error "version accepts --state-directory DIR"))
          (setf (getf options :state-directory) (second tail)))
        options))
+    ((string= "skill" (first arguments))
+     (when (rest arguments) (error "skill accepts no arguments"))
+     (list :command :skill))
     ((string= "notices" (first arguments))
      (list :command :notices))
     ((string= "serve" (first arguments))
@@ -1947,6 +1950,142 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                  (url (gethash id (gr8s.raft:raft-node-api-urls node))))
             (values (equal id (gr8s.raft:raft-node-id node)) url (not (null role)))))))))
 
+(defun print-skill (&optional (stream *standard-output*))
+  "Print embedded operator guidance without accessing cluster state."
+  (write-string "# gr8s operator and agent guide
+
+## Orient yourself
+
+gr8s is a self-contained Kubernetes-compatible cluster written in Common Lisp.
+`gr8s serve` runs a control plane and local agent; `gr8s agent` runs a worker;
+`gr8s witness` participates in HA quorum. The default runtime is managed
+containerd. The same executable also acts as its CNI plugin. Use kubectl for
+Kubernetes resources and gr8s commands for host/runtime administration.
+
+This command prints static guidance to stdout, needs no cluster or root access,
+and changes no state. Save it with `gr8s skill > gr8s-guide.md` for an agent.
+Use `gr8s help` and `gr8s help COMMAND` for command discovery.
+
+## First-time setup and inventory
+
+Real workloads need Linux 6.6+ with TCX eBPF support, root, cgroup v2, and
+registry connectivity (or preloaded images). Start in a disposable VM.
+
+    sudo gr8s serve --state-directory /var/lib/gr8s --kubeconfig /root/gr8s.yaml
+
+Keep this process running. In another terminal:
+
+    sudo kubectl --kubeconfig /root/gr8s.yaml get nodes -o wide
+    sudo kubectl --kubeconfig /root/gr8s.yaml get pods -A -o wide
+
+The kubeconfig is owner-only. Use the actual installation's state directory,
+kubeconfig, namespace, and endpoints in all examples. Without an explicit state
+directory, gr8s uses $XDG_STATE_HOME/gr8s or ~/.local/state/gr8s; sudo can change
+that home. The default API is loopback port 8080; the agent supervisor uses 7443.
+An agent's --server HOST:PORT is the supervisor, not the Kubernetes API URL.
+`--runtime fake` is for development and does not prove real container/BPF health.
+
+Record the launch arguments, service unit, runtime mode, overlay backend,
+node names, and state/log paths before changing a cluster. Check version and
+live patch level with `gr8s version --state-directory /var/lib/gr8s`.
+
+## First response to a failure
+
+1. Check host prerequisites with `sudo gr8s doctor --state-directory /var/lib/gr8s`.
+   It diagnoses kernel, cgroups, bpffs, Pod route overlap, and firewall/DNS issues.
+2. Inspect Kubernetes state with your kubeconfig:
+
+       kubectl get nodes -o wide
+       kubectl get pods -A -o wide
+       kubectl -n NAMESPACE describe pod POD
+       kubectl -n NAMESPACE get events --sort-by=.metadata.creationTimestamp
+       kubectl -n NAMESPACE logs POD -c CONTAINER --tail=200
+       kubectl -n NAMESPACE logs POD -c CONTAINER --previous --tail=200
+
+3. Read the gr8s process/service logs as well as container logs. For networking,
+   inspect Services, EndpointSlices, NetworkPolicies, DNS, host routes, and
+   firewall rules. `gr8s network explain NODE PEER` explains a selected WireGuard
+   path; it is not a general packet capture. See its help for connection options.
+4. For resource pressure, use `kubectl top nodes` and `kubectl top pods -A`.
+   Inspect certificate expiry with `gr8s certificate status --help` and encryption
+   state with `gr8s secrets-encrypt status --help` before planning maintenance.
+
+Capture timestamps, affected namespace/Pod UID/node, exact commands, exit codes,
+and relevant logs. Redact tokens, keys, kubeconfigs, and Secret values. Distinguish
+observations from hypotheses; verify recovery against the original symptom.
+
+## Live Lisp inspection with Slynk
+
+You can inspect a running process without restarting it or installing a debug
+DaemonSet. Open an authenticated, lifetime-bound tunnel using API credentials:
+
+    gr8s debug slynk --node NODE --kubeconfig /root/gr8s.yaml --local-port 4005
+
+Alternatively use --selector LABELS (must match exactly one Ready node) or
+--member ID (an exact HA control-plane member). Connect a SLY client to the
+printed loopback endpoint while the tunnel command remains running. This path
+does not require starting gr8s with --debug-slynk-port.
+
+In the GR8S package, useful forms include (debug-threads), (debug-backtraces),
+(debug-pod \"default\" \"web\"), and (debug-journal 20). These helpers inspect the
+target process's local context; choose the node/member relevant to the failure.
+Slynk evaluates Lisp with the process's privileges: inspect first and obtain
+operator authorization before evaluating forms that mutate live state.
+
+For direct local control-plane debugging, start serve with --debug-slynk-port 4017.
+The listener is loopback-only and requires the fresh private session secret at
+<state>/debug/slynk.secret. In a source checkout, use:
+
+    python3 scripts/gr8s-debug.py --port 4017 --state-directory /var/lib/gr8s '(debug-threads)'
+
+Do not publish the secret or expose the listener. SIGUSR1 also dumps thread
+backtraces to the process diagnostic output; SIGTERM/Ctrl-C requests cooperative
+shutdown so runtime work can finish.
+
+## Selector-scoped kernel tracing
+
+`gr8s trace` sends an ephemeral bpftrace program to nodes hosting matching Pods.
+Whistler compiles and attaches it in-process: no bpftrace binary, compiler
+installation, or DaemonSet is needed. Kernel probes are constrained to the
+selected Pods' container/sandbox cgroups.
+
+    gr8s trace --server https://API_HOST:PORT --ca-file /path/to/ca.crt --token TOKEN --namespace default --selector app=api --duration 10s 'kprobe:tcp_sendmsg { @[comm] = count(); }'
+
+Use your actual API endpoint and credentials. Unlike debug slynk, trace currently
+accepts --token and --ca-file directly, not --kubeconfig. HTTPS requires the CA
+file. Avoid putting a real token into shared transcripts or shell history.
+Authorization requires create on traces.gr8s.io in the requested namespace.
+Kernel probe availability depends on the node kernel; verifier/attach failures
+are returned to the client.
+
+Output identifies nodes; aggregation maps remain per node. Default duration is
+30s, maximum 300s; limits include one session per node and eight cluster-wide.
+Membership is fixed at trace start: restart the trace after a container restart.
+Completion or client disconnect cleans up attachments. Output is ephemeral, so
+save relevant evidence securely. Begin with a narrow selector and short duration.
+
+## Maintenance and agent working practices
+
+Persistent state contains cluster identity and data. Preserve it across restarts;
+back it up using the deployment's recovery procedure before upgrades. Do not
+remove state, BPF pins, namespaces, or runtime files as a first troubleshooting
+step. Stop gr8s cooperatively before offline maintenance.
+
+Discover signed live patch inspection, planning, status, and history with
+`gr8s patch --help`; runtime inventory with `gr8s runtime list`; and node enrollment
+with `gr8s join-token --help`. Join tokens and CA pins belong to the existing
+cluster: do not bootstrap a replacement state directory to repair enrollment.
+
+For an AI agent: confirm the target/context, gather read-only evidence first,
+explain a proposed change and its rollback, and ask before destructive actions.
+Do not assume Kubernetes compatibility means every upstream feature is supported.
+
+In a source checkout, README.md and docs/building-and-testing.md cover setup;
+docs/installing.md covers systemd, upgrades, rollback, and cleanup;
+docs/runtime.md covers runtime payloads and air-gapped images;
+docs/design-gr8s-trace.md describes tracing limits and authorization.
+" stream))
+
 (defparameter +cli-commands+
   '(("serve" "Run the control plane and local node agent")
     ("agent" "Run a node agent") ("witness" "Run an HA quorum witness")
@@ -1958,6 +2097,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
     ("trace" "Trace Pods with bpftrace") ("wireguard" "Manage WireGuard identity")
     ("network" "Inspect cluster networking") ("certificate" "Manage certificates")
     ("secrets-encrypt" "Manage secrets encryption")
+    ("skill" "Print guidance for operators and AI agents")
     ("version" "Print version information") ("notices" "Print license notices")))
 
 (defun print-help-rows (rows)
@@ -1971,6 +2111,8 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
            (simple (description &optional (usage "[OPTIONS]"))
              (page description usage :options '(("--help, -h" "show help")))))
     (cond
+      ((equal path '("skill"))
+       (simple "Print offline Markdown guidance for operators and AI agents" ""))
       ((equal path '("serve"))
        (page "Run the control plane and local node agent" "[OPTIONS]"
              :options '(("--state-directory DIR" "Folder holding cluster state")
@@ -2124,6 +2266,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                       (journal (merge-pathnames "patches/journal.json" root))
                       (level (if (probe-file journal) (gethash "level" (gr8s.patch::read-json journal) 0) 0)))
                  (format t "gr8s ~A, patch level ~D~%" +gr8s-version+ level)) 0)
+              (:skill (print-skill) 0)
               (:notices (print-notices) 0)
               (:kubeconfig
                (if (getf options :output)

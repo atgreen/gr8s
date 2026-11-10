@@ -624,3 +624,19 @@
              (loop repeat 100 until (> calls 2) do (sleep 0.05))
              (is (> calls 2)))
         (gr8s::stop-reconciliation-worker worker)))))
+
+(test skill-command-prints-offline-guidance
+  (is (eq :skill (getf (parse-cli-options '("skill")) :command)))
+  (signals error (parse-cli-options '("skill" "unexpected")))
+  (let ((output (with-output-to-string (*standard-output*)
+                  (is (= 0 (gr8s::main-with-environment
+                            '("skill") (constantly nil) (constantly 99)))))))
+    (is (search "# gr8s operator and agent guide" output))
+    (is (search "gr8s debug slynk" output))
+    (is (search "gr8s trace --server" output))
+    (is (search "gr8s doctor" output)))
+  (dolist (arguments '(("help") ("skill" "--help") ("help" "skill")))
+    (let ((output (with-output-to-string (*standard-output*)
+                    (is (= 0 (gr8s::main-with-environment
+                              arguments (constantly nil) (constantly 99)))))))
+      (is (search "skill" output)))))
