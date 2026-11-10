@@ -215,8 +215,8 @@ passes at the same heap limit with this change. The retirement, late-frame,
 shutdown, snapshot and node-session checks total 392 passing assertions; evidence
 is in `http2-stream-retirement-validation-2026-11-10.json`.
 
-The broader streaming error-path audit and long-running native memory plateau
-remain under `podster-ucm.2.10`. Native leader handoff, authenticated transport,
+The streaming error-path and native memory follow-up is recorded under
+`podster-ucm.2.10`; see cancellation validation below. Native leader handoff, authenticated transport,
 VM execution and production voter startup remain separate work; these runs do
 not establish their completion.
 
@@ -233,8 +233,10 @@ build/gr8s-http2-lifetime --dynamic-space-size 384
 It keeps one client/server connection open for 6,000 RPCs using 750 ms deadlines,
 samples live heap after
 full GC every 1,000 calls, and checks that growth after the warm-up sample stays
-within 1 MiB. Its JSON includes retained stream counts and pending deadline timer
-entries. TCP_NODELAY is enabled on the probe's sockets to avoid packet-coalescing
+within 1 MiB. It also runs 300 direct cancellations and 300 aborted bidirectional
+scopes over that connection. Successful RPCs after each cancellation batch ensure
+its reset frames have been processed before sampling. Its JSON includes retained
+stream counts and pending deadline timer entries. TCP_NODELAY is enabled on the probe's sockets to avoid packet-coalescing
 delays; it does not change production socket configuration.
 
 This probe found retention outside HTTP/2: canceled deadline contexts remained
@@ -249,8 +251,8 @@ learner probe also passes at 384 MiB per process.
 gRPC/Raft/node-session integration checks, and 22 focused timer checks. It also
 records seven failures in the bundled cancellation library's 316-check suite;
 the same failures reproduced against the unchanged library. They are resolved
-under `podster-ucm.2.11`, as described below. Direct channel
-cancellation and abnormal bidirectional scope exits remain in the lifetime audit
+under `podster-ucm.2.11`, as described below. Direct channel cancellation and
+abnormal bidirectional scope exits are covered by the final lifetime validation
 under `podster-ucm.2.10`. These probes do not establish production HA or VM
 acceptance.
 
@@ -272,5 +274,30 @@ node-session run pass, including the cancellation library's 336 checks. The
 rebuilt native 6,000-RPC probe also passes at 384 MiB with 750 ms deadlines,
 zero retained stream records and zero pending deadline entries at each sample.
 See `deadline-precision-validation-2026-11-10.json` for source and binary hashes,
-the test runner and native measurements. Production HA integration and the
-remaining stream-lifetime audit are still separate work.
+the test runner and native measurements. Production HA integration remains
+separate work.
+
+
+### Cancellation and stream lifetime
+
+Direct channel cancellation releases local state even if writing the reset frame
+fails. Repeated cancellation is harmless. Bidirectional stream scopes cancel on
+body errors, nonlocal exits and failed half-close writes; normal returns preserve
+multiple values and the existing send-side half-close behavior. Unread responses
+remain available until a call is consumed or explicitly canceled.
+
+The concurrent cancellation regression exposed a deadline-construction race:
+children became visible to their parents before their timer slots were fully
+initialized. Deadline children are now constructed in their final class before
+parent registration. The regression runs 20 rounds of 1,000 concurrent creations,
+and a separate test observes parent-visible children under the parent lock.
+
+All 839 integration checks pass. The rebuilt native probe passes 6,000 successful
+RPCs, 300 direct cancellations and 300 aborted scopes on one connection at the
+384 MiB heap limit. Every post-GC sample has zero retained stream records and
+zero pending timers; live heap varies by 33,968 bytes across the samples.
+`cancellation-lifetime-validation-2026-11-10.json` records source/binary hashes,
+the regression failure, test runner and measurements. This completes the retired
+stream-metadata follow-up (`podster-ucm.2.10`) and construction-race fix
+(`podster-ucm.2.10.2`), with production durable HA startup, authenticated native
+recovery/leader handoff and VM acceptance remaining separate requirements.

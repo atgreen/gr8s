@@ -1,0 +1,113 @@
+{
+  "date": "2026-11-10",
+  "beads": [
+    "podster-ucm.2.10",
+    "podster-ucm.2.10.2"
+  ],
+  "implementationCommit": "9042da1ec37d1fd830f4e3305ab611f72d2b8bde",
+  "sourceSha256": {
+    "ocicl/ag-gRPC-20260920-a87f647/ag-grpc/call.lisp": "53e602f61b313a12d0a81c1a1bf5207d204eec6dc469c3b56e37d42b04e5716f",
+    "ocicl/ag-gRPC-20260920-a87f647/ag-grpc/channel.lisp": "9b72a015cbe9310ce683e987666e2de0e22a386a7dab1d7c982f987667def573",
+    "ocicl/cl-cancel-20260206-bec34fb/cancellable.lisp": "b445000d09a6dff80f106c48df52b4160a0ba2658278087b214170ba3a716ea7",
+    "ocicl/cl-cancel-20260206-bec34fb/deadline.lisp": "f4156252805009b5c89343509879241dd95affad89427b4b98c609b27136ab0d",
+    "ocicl/cl-cancel-20260206-bec34fb/tests/cancellable-tests.lisp": "bb92ff7aeac77edc6627f35810b88d43cbc7d41de09a8b46a213200fa69da384",
+    "scripts/http2-lifetime-harness.lisp": "2665c329d133e937e9ae8bd83bd7b107d233a5bd6ca543f13cae10ce8bbe8c01",
+    "tests/grpc-close-test.lisp": "60ae9043d311fe7240740dbab59945eb6b1c4540d4cfbe21d60723616bbb41bd"
+  },
+  "changes": [
+    "Direct cancellation releases state even when reset writes fail and repeated cancellation does not emit another reset",
+    "Abnormal bidi scope exits retire transport while normal returns preserve half-close and multiple values",
+    "Construct deadline children in their final class before publishing to parents, avoiding partially initialized timer slots"
+  ],
+  "raceFailureBeforeFix": {
+    "condition": "UNBOUND-SLOT TIMER-ENTRY during concurrent parent cancellation and deadline registration",
+    "deadlineImplementationCommit": "7124428",
+    "logSha256": "d63833a91e89d6377271c776fd9b7cc6811f0f28a1d68eeba59a0c41bfe34e33"
+  },
+  "integration": {
+    "exitCode": 0,
+    "selectors": 18,
+    "checks": 839,
+    "failures": 0,
+    "upstreamCancellationChecks": 338,
+    "parentCancellationRaceRounds": 20,
+    "deadlineCreationsPerRaceRound": 1000,
+    "logSha256": "532b8fb5f2a4587f4a2185697899e618ce5f43418a948a29b2c32a75235a15b0",
+    "runner": "(require :asdf)\n(asdf:load-asd (truename \"gr8s.asd\"))\n(asdf:load-system \"gr8s/tests\")\n(asdf:load-system \"cl-cancel/tests\")\n(in-package :gr8s/tests)\n(let ((ok t))\n  (dolist (target '(grpc-close ag-grpc-channel-connects-over-a-unix-socket raft-transport raft-cluster raft-join raft-snapshot grpc-inflate device-plugins revisioned-node-session-reconnects-acknowledges-and-expires-heartbeats persistent-node-session-renews-its-heartbeat-lease blocked-status-provider-does-not-stop-node-heartbeats blocked-heartbeat-send-reconnects-the-session closing-a-session-leaves-the-reading-thread-a-closed-connection-to-find cancelling-persistent-node-session-wakes-blocked-read cancelling-agent-during-server-hello-wait-unwinds-the-session local-agent-starts-through-grpc-and-stops-cleanly persistent-agent-applies-deltas-and-resyncs-after-reconnecting :cl-cancel))\n    (assert (fiveam:get-test target))\n    (unless (fiveam:run! target) (setf ok nil)))\n  (uiop:quit (if ok 0 1)))\n"
+  },
+  "nativeRun": {
+    "exitCode": 0,
+    "command": "build/gr8s-http2-lifetime --dynamic-space-size 384",
+    "binarySha256": "75216e80324202a14197d397f731730f2911ad7c91d6bd65ed9956b714ec830b",
+    "reportSha256": "261dd6e0df6daa18153f8742aa4707897d69bc8ae441557685063eb371c73665",
+    "liveSampleRangeBytes": 33968,
+    "report": {
+      "passed": true,
+      "nativeHarness": true,
+      "productionServe": false,
+      "vmAcceptance": false,
+      "heapLimitMiB": 384,
+      "calls": 6000,
+      "connections": 1,
+      "peakServerStreams": 1,
+      "rpcTimeoutSeconds": 0.75,
+      "directCancellations": 300,
+      "abortedBidiScopes": 300,
+      "growthAllowanceBytes": 1048576,
+      "samples": [
+        {
+          "calls": 1000,
+          "liveBytesAfterFullGc": 57023072,
+          "pendingDeadlineEntries": 0,
+          "clientStreams": 0,
+          "serverStreams": 0
+        },
+        {
+          "calls": 2000,
+          "liveBytesAfterFullGc": 57025408,
+          "pendingDeadlineEntries": 0,
+          "clientStreams": 0,
+          "serverStreams": 0
+        },
+        {
+          "calls": 3000,
+          "liveBytesAfterFullGc": 57025856,
+          "pendingDeadlineEntries": 0,
+          "clientStreams": 0,
+          "serverStreams": 0
+        },
+        {
+          "calls": 4000,
+          "liveBytesAfterFullGc": 56993152,
+          "pendingDeadlineEntries": 0,
+          "clientStreams": 0,
+          "serverStreams": 0
+        },
+        {
+          "calls": 5000,
+          "liveBytesAfterFullGc": 57026384,
+          "pendingDeadlineEntries": 0,
+          "clientStreams": 0,
+          "serverStreams": 0
+        },
+        {
+          "calls": 6000,
+          "liveBytesAfterFullGc": 57027120,
+          "pendingDeadlineEntries": 0,
+          "clientStreams": 0,
+          "serverStreams": 0
+        }
+      ]
+    }
+  },
+  "priorEvidence": [
+    "http2-stream-retirement-validation-2026-11-10.json",
+    "deadline-retention-validation-2026-11-10.json",
+    "deadline-precision-validation-2026-11-10.json"
+  ],
+  "remaining": [
+    "Production durable HA startup",
+    "Authenticated native recovery and leader handoff during catch-up",
+    "VM acceptance"
+  ]
+}
