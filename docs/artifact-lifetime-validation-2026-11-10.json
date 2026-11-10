@@ -1,0 +1,50 @@
+{
+  "validationDate": "2026-11-10",
+  "implementationCommits": [
+    "392cf27",
+    "4986e9a"
+  ],
+  "fixtureFixCommit": "bdce8da",
+  "scope": "Source-loaded focused and real loopback snapshot/TLS/HA integration; no new native or VM acceptance in this report.",
+  "nativeAcceptance": false,
+  "vmAcceptance": false,
+  "automaticCompactionEnabled": false,
+  "reclamationScheduled": false,
+  "checks": {
+    "raftTransport": 52,
+    "artifactRegistry": 85,
+    "raftSnapshot": 143,
+    "raftTls": 96,
+    "haControlPlane": 59,
+    "total": 435
+  },
+  "passed": true,
+  "invariants": [
+    "sender batch roots published atomically before dequeue and released on success or failure",
+    "member-then-link lock order",
+    "owned open application WAL required",
+    "preserve current snapshot, unfinished install, bootstrap baseline, queued and active snapshots",
+    "malformed bootstrap metadata prevents all deletion",
+    "only unreferenced canonical private owned single-link regular artifacts removed",
+    "preserve symlinks, hard links, unexpected permissions and unknown filenames",
+    "fsync directory after unlink"
+  ],
+  "initialIntegrationFailure": {
+    "checksFailed": 2,
+    "test": "renewal-needs-a-current-member-and-its-own-name",
+    "cause": "Test witness declared a no-op application callback without a restore callback; durable baseline correctly rejected snapshot installation.",
+    "resolution": "Use stateless witness fixture; product application restore guard unchanged; complete TLS suite rerun passes."
+  },
+  "remaining": [
+    "automatic byte-bounded compaction worker and lifecycle integration under podster-ucm.11.3",
+    "recognized abandoned publication/capture temporary cleanup under podster-ucm.11.3.7",
+    "constrained-heap native repeated-compaction retention acceptance"
+  ],
+  "sourceSha256": {
+    "src/raft/transport/member.lisp": "4f5e79d48a0cc66d671e4a737351c53c4c10cb10a988aac02f111709492da1eb",
+    "src/resources/store-snapshot-registry.lisp": "71280ebd416c781e1d5682b825088990266da3b188cee6073e3a00534ce61c82",
+    "tests/raft-transport-test.lisp": "eab71cf2a5eead58aedf5cdbd507bcbfe2ddbc1a8dc8681015cc5015e72b4b18",
+    "tests/store-snapshot-registry-test.lisp": "4059b9c9758da34f7c27625133f606e8c9530f9824ad79c7ef8bdec394690a23",
+    "tests/ha-certificates-test.lisp": "0dc3c056531b1914fa2e629de4bd6070500a61284861ca094e0588a8c3d619d6"
+  }
+}

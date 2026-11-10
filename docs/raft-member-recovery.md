@@ -413,3 +413,29 @@ retained the write, all credential hashes were preserved, and all shutdowns
 returned zero. The existing plaintext interrupted-transfer probe also passed
 with a 4 MiB compatibility fixture. Authenticated large-transfer handoff is
 therefore verified in the instrumented harness; VM acceptance remains open.
+
+Artifact reclamation now has an explicit internal entry point,
+`gr8s.resources::reap-store-snapshot-artifacts-unlocked`. It requires the
+member mutex and that member's open, owned application WAL. It preserves the
+current snapshot, unfinished snapshot install, original bootstrap baseline,
+and every queued or active outbound snapshot. A sender publishes ownership
+under its link lock before dequeuing, closing the gap before source lookup;
+normal delivery and failures both release ownership after the batch finishes.
+Reclamation acquires locks in member-then-link order.
+
+Only unreferenced canonical digest filenames that are private, owned,
+single-link regular files are unlinked. Directory changes are fsynced. Invalid
+bootstrap metadata prevents deletion; symlinks, hard links, unexpected modes
+and unknown filenames are preserved. Publication `.part` files and abandoned
+capture temporaries require the separate orphan-cleanup work in
+`podster-ucm.11.3.7`. This helper does not schedule reclamation or enable
+automatic compaction; that integration remains under `podster-ucm.11.3`.
+
+Reclamation validation is recorded in
+`artifact-lifetime-validation-2026-11-10.json`: 137 focused transport/registry
+checks and 298 snapshot, TLS and HA integration checks pass. The broader run
+exposed a certificate-test witness that declared a no-op application callback
+without a restore callback. Making that fixture stateless restored snapshot
+catch-up and verified that removed members cannot renew their certificates;
+the product's application-restore requirement remains enforced. These checks
+do not establish native automatic-compaction or VM acceptance.
