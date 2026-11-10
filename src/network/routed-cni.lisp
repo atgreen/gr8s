@@ -93,6 +93,61 @@
     (rtnetlink-error (condition)
       (unless (= 19 (rtnetlink-error-errno condition)) (error condition)))))
 
+(defun routed-service-return-mac
+    (context &key (link-owned #'network-link-owned-p)
+                  (call-in-netns #'call-with-cni-network-namespace)
+                  (link-attributes #'network-link-attributes))
+  "Read the peer MAC only after checking both links' durable endpoint owner."
+  (let ((owner (routed-cni-owner context)))
+    (unless (funcall link-owned (routed-cni-host-name context) owner)
+      (invalid-cni "Service return path host link belongs to another endpoint"))
+    (funcall call-in-netns
+     (cni-context-netns context)
+     (lambda ()
+       (let ((peer (cni-context-interface-name context)))
+         (unless (funcall link-owned peer owner)
+           (invalid-cni "Service return path peer belongs to another endpoint"))
+         (let ((mac (gethash 1 (funcall link-attributes peer))))
+           (unless (and (vectorp mac) (= 6 (length mac)))
+             (invalid-cni "Service return path peer has no Ethernet identity"))
+           (copy-seq mac)))))))
+
+(defun install-routed-service-return-path
+    (context address &key (endpoint-mac #'routed-service-return-mac)
+                          (route-present #'network-route-present-p)
+                          (install-route #'replace-network-route)
+                          (install-neighbor #'replace-permanent-network-neighbor))
+  "Publish a private IPv4 return route to the owned veth, never a Pod address.
+An exact retained route may be adopted. EXCL prevents stealing another route;
+partial failure retains the IPAM lease until DEL removes the endpoint."
+  (canonical-service-translation-ipv4 address)
+  (let ((host (routed-cni-host-name context))
+        (mac (funcall endpoint-mac context)))
+    ;; The Pod does not own this IP and cannot answer ARP for it. The neighbor
+    ;; must be present before publishing a route that can deliver return frames.
+    (funcall install-neighbor host address mac)
+    (unless (funcall route-present address 32 host :source +node-gateway-address+)
+      (handler-case
+          (funcall install-route address 32 host :source +node-gateway-address+ :exclusive t)
+        (rtnetlink-error (condition)
+          (unless (and (= 17 (rtnetlink-error-errno condition))
+                       (funcall route-present address 32 host :source +node-gateway-address+))
+            (error condition)))))
+    address))
+
+(defun check-routed-service-return-path
+    (context address &key (endpoint-mac #'routed-service-return-mac)
+                          (route-present #'network-route-present-p)
+                          (neighbor-present #'permanent-network-neighbor-p))
+  "Verify the private host route and permanent neighbor without repairing them."
+  (canonical-service-translation-ipv4 address)
+  (let ((host (routed-cni-host-name context))
+        (mac (funcall endpoint-mac context)))
+    (unless (and (funcall route-present address 32 host :source +node-gateway-address+)
+                 (funcall neighbor-present host address mac))
+      (invalid-cni "Service return route or permanent neighbor is missing or misconfigured")))
+  t)
+
 (defun routed-cni-result (configuration context host addresses dns-address)
   "Build the CNI ADD result object: the HOST and Pod interfaces, the Pod's
    addresses as /32 or /128 host routes with family-specific link-local gateways
@@ -130,6 +185,8 @@
                             (configure-routed-veth context address :mtu mtu)))
             (check-link #'check-routed-cni-link)
             (remove-link #'remove-routed-cni-link)
+            (install-service-return #'install-routed-service-return-path)
+            (check-service-return #'check-routed-service-return-path)
             (policy (make-cni-operations)))
   "Bind a CNI lifecycle to agent-owned IPAM; never trust client IPAM settings."
   (make-cni-operations
@@ -145,6 +202,13 @@
      (let* ((addresses (allocate-pod-addresses ipam
                          (cni-context-container-id context)
                          (cni-context-interface-name context)))
+            (return-address
+              (or (service-snat-address ipam (cni-context-container-id context)
+                                             (cni-context-interface-name context))
+                  (when (and (cni-configuration-service-packet-root configuration)
+                             (some (lambda (address) (not (find #\: address))) addresses))
+                    (allocate-service-snat-address ipam (cni-context-container-id context)
+                                                      (cni-context-interface-name context)))))
             (host (funcall install-link context addresses)))
        ;; Keep the durable lease on failure. DEL must remove links and policy
        ;; before releasing an address, including after a crash during ADD.
@@ -152,6 +216,7 @@
              (cni-configuration-endpoint-addresses configuration) addresses)
        (funcall (cni-operations-add policy)
                 configuration context map-path link-path)
+       (when return-address (funcall install-service-return context return-address))
        (setf (cni-configuration-previous-result configuration)
              (routed-cni-result configuration context host addresses dns-address))))
    :check
@@ -162,7 +227,12 @@
              (cni-configuration-endpoint-addresses configuration) addresses)
        (funcall check-link context addresses))
      (funcall (cni-operations-check policy)
-              configuration context map-path link-path))
+              configuration context map-path link-path)
+     ;; CHECK does not invent leases for retained endpoints from older versions.
+     ;; Such endpoints are not ready for future source translation until ADD.
+     (let ((address (service-snat-address ipam (cni-context-container-id context)
+                                             (cni-context-interface-name context))))
+       (when address (funcall check-service-return context address))))
    :delete
    (lambda (configuration context map-path link-path directory)
      (funcall (cni-operations-delete policy)

@@ -377,7 +377,13 @@ reconciliation. containerd invokes only the `gr8s` CNI plugin, which sends typed
 requests to the agent's private Unix socket. CNI ADD retains its durable lease
 through partial failures; DEL releases it only after removing policy and links.
 
-IPAM can also reserve a private IPv4 Service translation address for an endpoint.
+For packet-Service endpoints with IPv4, CNI ADD reserves a private IPv4 Service
+translation address from the node's pool in addition to the ordinary Pod lease.
+After policy installation succeeds, ADD installs a `/32` host return route and
+a permanent neighbor to the owned peer MAC. It creates routes exclusively and
+refuses to overwrite a conflicting route. The private address is not assigned in
+the Pod, included in CNI result IPs, or permitted as an endpoint source address.
+It consumes one additional IPv4 pool address per participating endpoint.
 The agent reports it only for the Pod's current sandbox and observed IPv4 address.
 The control plane binds the record to the assigned Pod and durable Node ID,
 checks address ownership, and checkpoints it with the private observation.
@@ -386,7 +392,15 @@ restarts. Public Pod status and watches exclude the private record, and client
 status writes cannot set it. The route ownership journal recognizes validated
 private leases under the endpoint's existing veth owner. See
 [the identity validation evidence](service-translation-identity-validation-2026-11-09.json).
-Packet source NAT and installation of alias return routes remain in progress.
+CHECK verifies retained return routes and neighbors. Repeating ADD can restore
+missing state; partial ADD failures retain both leases, and DEL releases them
+after removing the owned link and its routes/neighbors. Existing private leases
+retain this handling if new allocation is disabled. Ordinary and IPv6-only
+endpoints keep their previous allocation behavior; CHECK does not invent leases
+for endpoints from older versions. See
+[the return-path validation evidence](service-return-path-validation-2026-11-09.json).
+Packet source NAT, versioned flow ownership, policy identity normalization and
+receiving-node installation/readiness gating remain in progress.
 
 Use `--cni-mode external --cni-conf-dir /etc/cni/net.d` to give ownership of
 Pod links, addresses, routes, IPAM, and cross-node transport to operator-supplied
