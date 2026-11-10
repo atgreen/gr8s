@@ -127,19 +127,20 @@ has already selected the receiver's link, and the saved inner MACs may be stale.
   "Strip only after framing, identities and flow ownership have been checked.
 Used after authorized NAT changes make inner and outer addresses differ."
   `(progn
-     (let ((wire-data u64 (tc-data))
-           (wire-tos (make-wire-byte)))
+     (let ((wire-data u64 (tc-data)))
        (when (> (+ wire-data 128) (tc-data-end)) (return TC_ACT_SHOT))
        ;; RFC6040: CE is propagated only to an ECN-capable inner packet.
        (when (= (logand (load u8 wire-data 15) 3) 3)
          (when (= (logand (load u8 wire-data 117) 3) 0) (return TC_ACT_SHOT))
          (let ((wire-old u16 (load u16 wire-data 116))
                (wire-new u16 (logior (load u16 wire-data 116) #x0300)))
-           (store u8 wire-tos 0 (logior (load u8 wire-data 117) 3))
            (when (/= (l3-csum-replace (ctx-ptr) 126 wire-old wire-new 2) 0)
              (return TC_ACT_SHOT))
-           (when (/= (skb-store-bytes (ctx-ptr) 117 wire-tos 1 0) 0)
-             (return TC_ACT_SHOT)))))
+           ;; Reload and bound the packet after the checksum helper. No extra
+           ;; stack byte (or live pointer to it) is needed just to set CE.
+           (let ((wire-fresh u64 (tc-data)))
+             (when (> (+ wire-fresh 118) (tc-data-end)) (return TC_ACT_SHOT))
+             (store u8 wire-fresh 117 (logior (load u8 wire-fresh 117) 3))))))
      (when (/= (skb-adjust-room (ctx-ptr) -102 1 1) 0) (return TC_ACT_SHOT))))
 
 (in-package #:gr8s.network)
