@@ -453,3 +453,46 @@ propagated into a helper/kfunc and values whose low32 sign bit is set."
                                        (t value))))
                   (is (= expected (interpret-scalar-bpf bytes (list choose allow inner)))
                       "~A inputs ~S" source (list choose allow inner)))))))))))
+
+(test peephole-map-relocations-retain-surviving-identities
+  "Deleting unreachable map references cannot relabel a later program array."
+  (dolist (dead-count '(1 2 3))
+    (dolist (live-count '(1 2 3))
+      (let* ((maps '((dead-map :type :hash :key-size 4 :value-size 8 :max-entries 1)
+                     (live-map :type :hash :key-size 4 :value-size 8 :max-entries 1)
+                     (stages :type :prog-array :key-size 4 :value-size 4 :max-entries 4)))
+             (source (format nil
+                             "(when (= (get-prandom-u32) 1) (return 0) ~{~A~})
+                              ~{~A~} (tail-call stages 3) (return 2)"
+                             (make-list dead-count :initial-element "(map-delete dead-map 0) ")
+                             (make-list live-count :initial-element "(map-delete live-map 0) ")))
+             (cu (compile-single (read-whistler-forms source) :maps maps))
+             (relocs (whistler/compiler:cu-map-relocs cu))
+             (indices (mapcar #'second relocs))
+             (bytes (whistler/bpf:insn-bytes (whistler/compiler:cu-insns cu))))
+        (is (not (null (member 1 indices))))
+        (is (not (null (member 2 indices))))
+        (is (not (member 0 indices)))
+        (is (= 2 (car (last indices))))
+        (dolist (reloc relocs)
+          (is (= #x18 (aref bytes (first reloc))))
+          (is (= 1 (ash (aref bytes (1+ (first reloc))) -4))))))))
+
+(test peephole-kfunc-relocations-retain-surviving-identities
+  "Deleting an unreachable kfunc cannot replace the names of surviving calls."
+  (let ((whistler/compiler:*builtin-kfuncs* whistler/compiler:*builtin-kfuncs*))
+    (dolist (name '("dead-probe" "first-probe" "second-probe"))
+      (whistler/compiler:register-kfunc name (substitute #\_ #\- name) nil 'whistler::u64 nil))
+    (dolist (dead-count '(1 2 3))
+      (let* ((source (format nil
+                             "(when (= (get-prandom-u32) 1) (return 0) ~{~A~})
+                              (first-probe) (second-probe) (return 2)"
+                             (make-list dead-count :initial-element "(dead-probe) ")))
+             (cu (compile-single (read-whistler-forms source)))
+             (relocs (whistler/compiler:cu-kfunc-relocs cu))
+             (bytes (whistler/bpf:insn-bytes (whistler/compiler:cu-insns cu))))
+        (is (equal '("first_probe" "second_probe") (mapcar #'second relocs)))
+        (dolist (reloc relocs)
+          (is (= #x85 (aref bytes (first reloc))))
+          (is (= whistler/bpf:+bpf-pseudo-kfunc-call+
+                 (ash (aref bytes (1+ (first reloc))) -4))))))))
