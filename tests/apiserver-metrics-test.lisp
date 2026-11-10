@@ -11,6 +11,22 @@
 (def-suite apiserver-metrics :in gr8s)
 (in-suite apiserver-metrics)
 
+(test optional-control-plane-metrics-provider-is-exposed-by-the-real-listener
+  (with-temporary-store (store path)
+    (values path)
+    (let ((server nil) (calls 0))
+      (unwind-protect
+           (progn
+             (setf server (start-http-test-server
+                           :store store :runtime (make-fake-runtime)
+                           :control-plane-metrics-fn
+                           (lambda () (incf calls) (format nil "gr8s_raft_term 42~%"))))
+             (multiple-value-bind (body code) (apiserver-metrics-request "/metrics")
+               (is (= 200 code))
+               (is (search "gr8s_raft_term 42" body))
+               (is (= 1 calls))))
+        (when server (stop-server server))))))
+
 (test lisp-memory-metrics-report-real-counters-and-omit-unobserved-gc
   (let ((gr8s.server::*heap-after-gc* 0)
         (sb-ext:*gc-run-time* (* 5 internal-time-units-per-second)))

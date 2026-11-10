@@ -11,6 +11,43 @@
 (def-suite ha-control-plane :in gr8s)
 (in-suite ha-control-plane)
 
+(test ha-health-metrics-report-prefix-and-peer-pressure-without-payloads
+  (let* ((node (gr8s::make-raft-node :id "metrics" :role :leader :current-term 3
+                                    :snapshot-index 5 :commit-index 11 :last-applied 10
+                                    :retained-byte-limit 4096 :uncommitted-weight-fn (constantly 100)
+                                    :log (make-array 7 :adjustable t :fill-pointer 7
+                                                     :initial-contents
+                                                     (loop for index from 6 to 12 collect
+                                                       (gr8s::make-raft-entry :term 3 :index index
+                                                                             :command "PRIVATE-PAYLOAD")))))
+         (member (gr8s.raft.transport::make-raft-member :node node))
+         (link (gr8s.raft.transport::make-raft-peer-link :id "peer\"one"
+                                                       :items (list '(:type :append-entries))
+                                                       :active-items (list '(:type :install-snapshot))))
+         (ha (gr8s.ha::make-ha-control-plane :member member :compaction-count 7
+                                            :compaction-in-flight t :compaction-error "PRIVATE-ERROR")))
+    (setf (gethash "peer\"one" (gr8s.raft.transport::raft-member-links member)) link
+          (gethash "peer\"one" (gr8s::raft-node-match-index node)) 8)
+    (let ((text (gr8s.ha::ha-metrics-text ha)))
+      (dolist (sample '("gr8s_raft_term 3" "gr8s_raft_is_leader 1" "gr8s_raft_commit_index 11"
+                         "gr8s_raft_applied_index 10" "gr8s_raft_snapshot_index 5"
+                         "gr8s_raft_apply_lag_entries 1" "gr8s_raft_retained_entries 7"
+                         "gr8s_raft_uncommitted_entries 1" "gr8s_raft_retained_bytes 1596"
+                         "gr8s_raft_retained_limit_bytes 4096" "gr8s_compaction_completed_total 7"
+                         "gr8s_compaction_in_flight 1" "gr8s_compaction_error 1"
+                         "gr8s_raft_peer_replication_lag_entries{peer=\"peer\\\"one\"} 4"
+                         "gr8s_raft_peer_outbox_messages{peer=\"peer\\\"one\"} 2"))
+        (is (search sample text)))
+      (is-false (search "PRIVATE" text))
+      (is (= 11 (gr8s::raft-node-commit-index node)))
+      (is (= 7 (length (gr8s::raft-node-log node)))))
+    (setf (gr8s::raft-node-role node) :follower
+          (gr8s.raft::raft-node-retained-byte-limit node) nil)
+    (let ((text (gr8s.ha::ha-metrics-text ha)))
+      (is (search "gr8s_raft_is_leader 0" text))
+      (is-false (search "gr8s_raft_peer_replication_lag_entries" text))
+      (is-false (search "gr8s_raft_retained_limit_bytes" text)))))
+
 (test ha-admission-preserves-full-size-secret-create-and-update
   (dolist (encrypted '(nil t))
     (with-temporary-store (store root)

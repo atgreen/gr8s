@@ -40,3 +40,43 @@ These metrics complement API server, scheduler, dataplane, and process metrics.
 Raft health, disk/inode capacity, and reconciliation convergence are tracked
 separately under `podster-ucm.6`; these memory families do not establish that
 broader telemetry work as complete.
+
+## Raft and checkpoint worker
+
+HA API listeners additionally expose these local families. Single-node listeners
+omit them. A scrape reads local state; it does not contact peers or establish
+quorum. A leader gauge of one alone is not proof that writes can commit.
+
+| Metric | Meaning |
+|---|---|
+| `gr8s_raft_term` | Current local Raft term |
+| `gr8s_raft_is_leader` | One while this member believes it is leader |
+| `gr8s_raft_commit_index` | Local committed index |
+| `gr8s_raft_applied_index` | Local applied index |
+| `gr8s_raft_snapshot_index` | Durable snapshot index |
+| `gr8s_raft_apply_lag_entries` | Committed entries not yet applied |
+| `gr8s_raft_retained_entries` | Entries retained in the local log |
+| `gr8s_raft_uncommitted_entries` | Entries beyond the local commit index |
+| `gr8s_raft_retained_bytes` | Retained command estimate using the same estimator as admission |
+| `gr8s_raft_retained_limit_bytes` | Retained-log admission budget; omitted when no policy is configured |
+| `gr8s_raft_peer_replication_lag_entries{peer=...}` | Leader's last index minus peer acknowledged match index; omitted on followers |
+| `gr8s_raft_peer_outbox_messages{peer=...}` | Queued plus sender-owned messages on each configured peer link |
+| `gr8s_compaction_completed_total` | Successful checkpoints through the local worker/manual worker API |
+| `gr8s_compaction_in_flight` | One while worker capture or publication is running |
+| `gr8s_compaction_error` | One while the worker retains an error since its last successful checkpoint |
+
+All these families are gauges except `gr8s_compaction_completed_total`, which is
+a counter scoped to the control-plane instance. Peer labels use configured peer
+IDs; no command payloads or error messages are exposed. Peer series disappear
+when their links are removed. Replication lag reflects acknowledged log
+positions, not confirmed application convergence on that peer. An empty outbox
+can mean either a healthy idle peer or an unreachable peer whose latest attempt
+finished; it is not a connectivity test.
+
+The collector copies Raft scalars and outbox lengths under member-then-link
+locks, reads worker counters under the worker lock, and formats text after
+releasing those locks. Worker and Raft samples can represent slightly different
+instants. Comparing retained bytes with the configured budget helps identify
+write backpressure; sustained apply or peer replication lag needs investigation.
+Disk/inode capacity, heartbeat freshness, and reconciliation convergence remain
+separate telemetry work under `podster-ucm.6`.

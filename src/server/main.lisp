@@ -1838,6 +1838,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                            :reconciler reconciler
                            :debug-state-directory state-directory
                            :debug-member-resolver (make-debug-member-resolver ha)
+                           :control-plane-metrics-fn (when ha (lambda () (gr8s.ha::ha-metrics-text ha)))
                            :leader-status-fn (when ha (lambda () (ha-control-plane-leader-status ha)))))
                     (setf worker (start-reconciliation-worker reconciler
                                   :leader-gate (when ha (lambda () (ha-control-plane-leader-p ha)))
