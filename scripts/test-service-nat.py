@@ -271,6 +271,123 @@ def exercise(runner):
     return cases
 
 
+def exercise_capacity(factory):
+    "Use real one-entry maps in kernel mode, not simulated helper results."
+    cases = []
+
+    def setup(forward_capacity, reverse_capacity):
+        runner = factory(forward_capacity, reverse_capacity)
+        owner(runner, CLIENT, ALIAS, 1)
+        owner(runner, BACKEND, BACK_ALIAS, 2)
+        packet.publish(runner)
+        return runner
+
+    def forward(runner, original, expected=packet.OK):
+        result, selected, context = runner.stage(NAMES[0], original)
+        assert result == expected, ("capacity select", result, expected)
+        unlocked(runner)
+        if expected != packet.OK:
+            assert selected == original and context == ZERO
+            return None
+        result, wire, context = runner.stage(NAMES[1], selected, context)
+        assert result == packet.OK and context == ZERO
+        packet.check_checksums(wire)
+        unlocked(runner)
+        return wire
+
+    def reply(runner, wire, vip, sport):
+        source, destination, wire_sport, wire_dport = packet.endpoints(wire)
+        response = packet.packet(destination, source, wire_dport, wire_sport)
+        result, prepared, context = runner.stage(NAMES[2], response)
+        assert result == packet.OK
+        result, restored, context = runner.stage(NAMES[3], prepared, context)
+        assert result == packet.OK and context == ZERO
+        assert packet.endpoints(restored) == (vip, CLIENT, 80, sport)
+        packet.check_checksums(restored)
+        unlocked(runner)
+
+    def return_key(wire):
+        source, destination, sport, dport = packet.endpoints(wire)
+        return key(packet.packet(destination, source, dport, sport))
+
+    runner = setup(4, 1)
+    try:
+        original = packet.packet(sport=50000)
+        wire = forward(runner, original)
+        binding = runner.lookup(FWD, key(original))
+        packet.publish(runner, vip="10.96.2.1")
+        second = packet.packet(destination="10.96.2.1", sport=50001)
+        forward(runner, second, packet.SHOT)
+        assert runner.lookup(FWD, key(second)) is None
+        assert runner.lookup(FWD, key(original)) == binding
+        reply(runner, wire, packet.VIP, 50000)
+        cases.append("fullReverseMapPreservesActiveOwner")
+        runner.delete(FWD, key(original))
+        runner.delete(REV, return_key(wire))
+        wire = forward(runner, second)
+        reply(runner, wire, "10.96.2.1", 50001)
+        cases.append("reverseCapacityRecovery")
+    finally:
+        runner.close()
+
+    runner = setup(1, 8)
+    try:
+        original = packet.packet(sport=51000)
+        first_wire = forward(runner, original)
+        packet.publish(runner, vip="10.96.2.2")
+        second = packet.packet(destination="10.96.2.2", sport=51001)
+        forward(runner, second, packet.SHOT)
+        primary_return = key(packet.packet(BACKEND, CLIENT, 8080, 51001))
+        orphan = runner.lookup(REV, primary_return)
+        assert orphan is not None and orphan[:16] == key(second)
+        assert runner.lookup(FWD, key(second)) is None
+        result, _, _ = runner.stage(NAMES[2], packet.packet(BACKEND, CLIENT, 8080, 51001))
+        assert result == packet.SHOT
+        unlocked(runner)
+        reply(runner, first_wire, packet.VIP, 51000)
+        cases.append("fullForwardMapCannotAuthorizeOrphanReply")
+        packet.publish(runner, vip="10.96.2.3")
+        third = packet.packet(destination="10.96.2.3", sport=51001)
+        forward(runner, third, packet.SHOT)
+        assert runner.lookup(REV, primary_return) == orphan
+        cases.append("otherServiceCannotStealInterruptedClaim")
+        runner.delete(FWD, key(original))
+        runner.delete(REV, return_key(first_wire))
+        third_wire = forward(runner, third)
+        assert packet.endpoints(third_wire)[0] == ALIAS
+        reply(runner, third_wire, "10.96.2.3", 51001)
+        assert runner.lookup(REV, primary_return) == orphan
+        runner.delete(FWD, key(third))
+        runner.delete(REV, return_key(third_wire))
+        second_wire = forward(runner, second)
+        assert packet.endpoints(second_wire)[0] == CLIENT
+        reply(runner, second_wire, "10.96.2.2", 51001)
+        cases.append("interruptedClaimAdoptedOnlyByOriginalOwner")
+    finally:
+        runner.close()
+
+    for direction in ("fl", "rl"):
+        runner = setup(4, 4)
+        try:
+            original = packet.packet(sport=52000)
+            lock_name = f"gr8s_nat_{direction}_v2"
+            lock_key = key(original) if direction == "fl" else key(packet.packet(BACKEND, CLIENT, 8080, 52000))
+            marker = bytes.fromhex("0102030405060708")
+            runner.update(lock_name, lock_key, marker)
+            result, output, context = runner.stage(NAMES[0], original)
+            assert result == packet.SHOT and output == original and context == ZERO
+            assert runner.lookup(lock_name, lock_key) == marker, "foreign reservation was deleted"
+            assert runner.lookup(FWD, key(original)) is None
+            runner.delete(lock_name, lock_key)
+            unlocked(runner)
+            wire = forward(runner, original)
+            reply(runner, wire, packet.VIP, 52000)
+            cases.append(f"{direction}ContentionDoesNotReleaseForeignReservation")
+        finally:
+            runner.close()
+    return cases
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("fixture", type=Path)
@@ -282,9 +399,20 @@ def main():
     runner = (Kernel if args.kernel else Interpreter)(programs, ids, descriptors)
     try:
         cases = exercise(runner)
-        print(json.dumps({"passed": True, "kernel": args.kernel, "cases": cases}))
     finally:
         runner.close()
+
+    def factory(forward_capacity, reverse_capacity):
+        limited = dict(descriptors)
+        for name, capacity in ((FWD, forward_capacity), (REV, reverse_capacity)):
+            values = list(limited[name])
+            values[3] = capacity
+            limited[name] = tuple(values)
+        return (Kernel if args.kernel else Interpreter)(programs, ids, limited)
+
+    capacity_cases = exercise_capacity(factory)
+    print(json.dumps({"passed": True, "kernel": args.kernel, "cases": cases,
+                      "capacityCases": capacity_cases}))
 
 
 if __name__ == "__main__":
