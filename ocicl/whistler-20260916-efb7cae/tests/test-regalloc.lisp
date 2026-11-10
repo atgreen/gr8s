@@ -496,3 +496,37 @@ propagated into a helper/kfunc and values whose low32 sign bit is set."
           (is (= #x85 (aref bytes (first reloc))))
           (is (= whistler/bpf:+bpf-pseudo-kfunc-call+
                  (ash (aref bytes (1+ (first reloc))) -4))))))))
+
+(test call-spanning-packet-bounds-retain-the-checked-pointer
+  "Register pressure must not replace a bounded packet pointer after a helper."
+  (let* ((maps '((pointer-state :type :hash :key-size 4 :value-size 8 :max-entries 3)))
+         (bytes (compile-insn-bytes
+                 (read-whistler-forms
+                  "(let ((data u64 (ctx u32 76)) (end u64 (ctx u32 80)))
+                     (when (> (+ data 34) end) (return 2))
+                     (let ((row (map-lookup pointer-state 0))
+                           (row1 (map-lookup pointer-state 1))
+                           (row2 (map-lookup pointer-state 2)))
+                       (when (or (= row 0) (= row1 0) (= row2 0)) (return 2))
+                       (get-prandom-u32)
+                       (when (< (ctx u32 0) 34) (return 2))
+                       (return (+ (load u8 data 26) (load u64 row 0)
+                                  (load u64 row1 0) (load u64 row2 0)))))")
+                 :maps maps)))
+    (is (= 1 (loop for offset from 0 below (length bytes) by 8
+                   count (and (= (aref bytes offset) #x61)
+                              (= (nth-insn-off bytes (/ offset 8)) 76)))))))
+
+(test context-loads-are-not-rematerialized-after-helpers
+  "Context reloads require explicit source bounds, even after pure helpers."
+  (let ((spanning (make-hash-table)) (definitions (make-hash-table)))
+    (setf (gethash 1 spanning) t)
+    (dolist (offset '(0 4 76 80 140))
+      (let ((load (whistler/ir::make-ir-insn :op :ctx-load :dst 2
+                                          :args (list 1 (list :imm offset)) :type :u32)))
+        (is-false (whistler/ir::reloadable-insn-p load spanning definitions))
+        (is-false (whistler/ir::reloadable-insn-p load spanning))
+        (dolist (helper '(1 2 3 5 7 26 50))
+          (is-false (whistler/ir::reloadable-after-call-p
+                     load (whistler/ir::make-ir-insn :op :call :args (list (list :helper helper)))
+                     spanning definitions)))))))
