@@ -40,6 +40,7 @@ class Interpreter(packet.Interpreter):
 
 class Kernel(packet.Kernel):
     def stage(self, name, data, context=ZERO):
+        data = bytes(data)
         if name == NAMES[0]:
             result, output, context = self.stage(NAMES[4], data, context)
             if result != packet.OK:

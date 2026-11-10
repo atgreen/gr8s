@@ -32,7 +32,7 @@ def translate_reply(runner, data, port):
     p.check_checksums(output)
 
 
-def exercise(runner):
+def exercise(runner, *, unclaimed_reply_verdict=p.SHOT):
     cases = 0
     for index, start in enumerate((1000, 0xfffffff0, 0)):
         port = 50010 + index
@@ -75,7 +75,13 @@ def exercise(runner):
         assert result == p.SHOT and unchanged == syn
         old_reply = reply(port, server_start, next_client)
         result, unchanged = runner.run("gr8s_packet_reverse", old_reply)
-        assert result == p.SHOT and unchanged == old_reply
+        assert result == unclaimed_reply_verdict and unchanged == old_reply
+        if unclaimed_reply_verdict == p.OK:
+            # A staged engine may retire the old reverse claim immediately.
+            # Ordinary primary-address traffic then passes through unchanged;
+            # it must have no claim and cannot alter the new TCP generation.
+            old_key = p.flow_key(p.BACKEND, p.CLIENT, 8080, port, 6)
+            assert runner.lookup("gr8s_pkt_reverse", old_key) is None
         assert runner.lookup("gr8s_pkt_tcp", key) == current
         # A stale SYN-ACK from the selected backend has the wrong generation ACK.
         stale = reply(port, 7000, next_client, backend=replacement)

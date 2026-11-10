@@ -173,8 +173,11 @@ def main():
                  "retained_option_compatibility", "translated_streams"):
         runner = cls(programs, ids, descriptors)
         try:
-            results[name] = (translated_streams if name == "translated_streams"
-                             else getattr(tcp, name))(runner)
+            if name == "exercise":
+                results[name] = tcp.exercise(runner, unclaimed_reply_verdict=nat.packet.OK)
+            else:
+                results[name] = (translated_streams if name == "translated_streams"
+                                 else getattr(tcp, name))(runner)
         finally:
             runner.close()
     limited = dict(descriptors)
