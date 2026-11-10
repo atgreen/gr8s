@@ -336,6 +336,44 @@ and affinity maps retain their kernel state across the restart."
                                           (if (= 16 (length old)) :ipv4 :ipv6) :index)))
           (when map (service-lb-delete-if-present delete map old)))))))
 
+(defun service-lb-plan-retains-selection-p
+    (old-services old-backends new-services new-backends)
+  "True when every old VIP can still select only backends in the new plan.
+An additive update may hold the old approved map while new receiver proof is
+staged. A removed backend or changed Service policy must withdraw it instead.
+This checks the plan only; the caller must separately validate the old cluster
+grant and exact owner/receiver incarnations."
+  (when (null old-services)
+    (return-from service-lb-plan-retains-selection-p nil))
+  (labels ((backend-values (service backends)
+             (let* ((value (cdr service))
+                    (count (netlink-read-integer value 0 2))
+                    (base (netlink-read-integer value 4 4)))
+               (loop for slot from base below (+ base count)
+                     for entry = (find slot backends :test #'=
+                                       :key (lambda (row)
+                                              (netlink-read-integer (car row) 0 4)))
+                     unless entry do (return-from service-lb-plan-retains-selection-p nil)
+                     collect (cdr entry))))
+           (multiset-subset-p (old new)
+             (let ((remaining (copy-list new)))
+               (dolist (value old t)
+                 (let ((position (position value remaining :test #'equalp)))
+                   (unless position (return-from multiset-subset-p nil))
+                   (setf remaining (remove value remaining :count 1 :test #'equalp)))))))
+    (every (lambda (old)
+             (let ((new (assoc (car old) new-services :test #'equalp)))
+               (and new
+                    (every (lambda (offset)
+                             (= (netlink-read-integer (cdr old) offset
+                                                      (if (= offset 2) 2 4))
+                                (netlink-read-integer (cdr new) offset
+                                                      (if (= offset 2) 2 4))))
+                           '(2 8 12))
+                    (multiset-subset-p (backend-values old old-backends)
+                                       (backend-values new new-backends)))))
+           old-services)))
+
 (defun converge-service-lb-controller
     (controller
      &key (publish-services-p t)
