@@ -28,14 +28,19 @@ It accepts and ignores the arguments gr8s-upstream passes, so that tool can run 
 """
 
 import argparse
+import ctypes
+import ipaddress
 import json
 import os
+import platform
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -155,6 +160,37 @@ def http_get(address, port, path, timeout=3):
         return None, str(error)
 
 
+def pinned_service_value(path, address, port):
+    """Read one IPv4 Service selector from a pinned BPF map for VM diagnostics."""
+    octets = ipaddress.IPv4Address(address).packed
+    vip = int.from_bytes(octets, "little")
+    key_bytes = struct.pack("<Q", (6 << 48) | (vip << 16) | socket.htons(port))
+    libc = ctypes.CDLL(None, use_errno=True)
+    number = {"x86_64": 321, "aarch64": 280}[platform.machine()]
+
+    def bpf(command, attr):
+        buffer = ctypes.create_string_buffer(attr)
+        result = libc.syscall(number, command, ctypes.byref(buffer), len(attr))
+        if result < 0:
+            raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))
+        return result
+
+    name = ctypes.create_string_buffer(os.fsencode(path))
+    fd = bpf(7, struct.pack("<QII", ctypes.addressof(name), 0, 0))
+    try:
+        key = ctypes.create_string_buffer(key_bytes)
+        value = ctypes.create_string_buffer(16)
+        try:
+            bpf(1, struct.pack("<IIQQQ", fd, 0, ctypes.addressof(key), ctypes.addressof(value), 0))
+        except OSError as error:
+            if error.errno == 2:
+                return None
+            raise
+        return value.raw.hex()
+    finally:
+        os.close(fd)
+
+
 def server_pod(name):
     """Return an agnhost netexec Pod serving HTTP on 8080 and UDP on 8081."""
     return {"apiVersion": "v1", "kind": "Pod",
@@ -217,6 +253,8 @@ def main():
                         help="OCI archive to import into managed containerd before Pod startup")
     parser.add_argument("--pause-after-pod-client", type=int, default=0,
                         help="seconds to pause after Pod client probes for live VM inspection")
+    parser.add_argument("--trace-affinity-selector", action="store_true",
+                        help="sample the pinned sticky Service selector while a backend joins")
     # gr8s-upstream passes these to every runner; this test has no use for them.
     for ignored in ("--sonobuoy", "--timeout", "--expected-specs", "--focus", "--kubernetes-version"):
         parser.add_argument(ignored)
@@ -352,12 +390,39 @@ def main():
         wait_for("affinity ClusterIP answers", 60, lambda: http_get(sticky_ip, 80, "/hostname")[0] == 200)
         held = {http_get(sticky_ip, 80, "/hostname")[1] for _ in range(10)}
         check("affinityHoldsAClient", len(held) == 1, sorted(held))
-        cluster.apply(server_pod("web-2"))
-        wait_for("third backend in the slice", 300, lambda: len([
-            endpoint for slice_ in cluster.get("endpointslices", "-l", "kubernetes.io/service-name=sticky")["items"]
-            for endpoint in slice_.get("endpoints") or [] if endpoint.get("conditions", {}).get("ready")]) == 3)
-        time.sleep(3)
-        after = {http_get(sticky_ip, 80, "/hostname")[1] for _ in range(10)}
+        selector_samples = []
+        stop_sampling = threading.Event()
+        selector_thread = None
+        if arguments.trace_affinity_selector:
+            selector_map = cluster.root / "state/agent/containerd/bpf/service-lb/gr8s_service_v4"
+
+            def sample_selector():
+                previous = object()
+                while not stop_sampling.is_set():
+                    try:
+                        value = pinned_service_value(selector_map, sticky_ip, 80)
+                    except OSError as error:
+                        value = f"error:{error.errno}"
+                    if value != previous:
+                        selector_samples.append({"time": time.time(), "value": value})
+                        previous = value
+                    stop_sampling.wait(0.05)
+
+            selector_thread = threading.Thread(target=sample_selector, daemon=True)
+            selector_thread.start()
+        try:
+            cluster.apply(server_pod("web-2"))
+            wait_for("third backend in the slice", 300, lambda: len([
+                endpoint for slice_ in cluster.get("endpointslices", "-l", "kubernetes.io/service-name=sticky")["items"]
+                for endpoint in slice_.get("endpoints") or [] if endpoint.get("conditions", {}).get("ready")]) == 3)
+            time.sleep(3)
+            after = {http_get(sticky_ip, 80, "/hostname")[1] for _ in range(10)}
+        finally:
+            stop_sampling.set()
+            if selector_thread:
+                selector_thread.join(timeout=1)
+        if arguments.trace_affinity_selector:
+            report["affinitySelectorTransitions"] = selector_samples
         check("affinitySurvivesANewBackend", after == held, {"before": sorted(held), "after": sorted(after)})
 
         # internalTrafficPolicy Local over a slice listing a remote, unreachable endpoint.
