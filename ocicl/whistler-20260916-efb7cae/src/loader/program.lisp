@@ -171,14 +171,35 @@
 
 ;;; ========== Program loading ==========
 
+(defun load-program-attempts (bpf buf attempts record-error phase)
+  "Retry only EAGAIN, with a fixed syscall budget and no userspace delay.
+Linux libbpf's sys_bpf_prog_load uses the same bounded EAGAIN retry rule."
+  (loop for attempt from 1 to attempts
+        do (handler-case
+               (let ((fd (funcall bpf +bpf-prog-load+ buf 256 "prog-load")))
+                 (when (> attempt 1)
+                   ;; A diagnostic stream failure must not lose the new FD.
+                   (ignore-errors
+                     (format *trace-output* ";; BPF load recovered after ~D EAGAIN retries (~A phase)~%"
+                             (1- attempt) phase)))
+                 (return fd))
+             (bpf-error (error)
+               (funcall record-error error)
+               (unless (and (= 11 (bpf-error-errno error)) (< attempt attempts))
+                 (error error))))))
+
 (defun load-program (insns prog-type license &key (log-level 0) (log-buf-size (ash 1 20))
-                                                   expected-attach-type attach-btf-id (bpf #'%bpf))
+                                                   expected-attach-type attach-btf-id (bpf #'%bpf)
+                                                   (attempts 5))
   "Load a BPF program into the kernel. Returns the prog FD.
    EXPECTED-ATTACH-TYPE is required for cgroup program types.
    On failure, retries with logging. A failed retry preserves the original
    condition, retry errno and log in bpf-program-load-error (or its
-   bpf-verifier-error subtype when either attempt returns EACCES)."
+   bpf-verifier-error subtype when any attempt returns EACCES).
+   Each phase makes at most ATTEMPTS syscalls, retrying only EAGAIN."
+  (check-type attempts (integer 1 16))
   (let* ((buf (make-attr-buf))
+         (errors nil)
          (insn-count (/ (length insns) 8))
          ;; SYSCALL programs require BPF_F_SLEEPABLE; nothing else
          ;; needs special flags at load time.
@@ -203,8 +224,9 @@
                     prog-type expected-attach-type attach-btf-id))
           ;; Try without log first
           (handler-case
-              (funcall bpf +bpf-prog-load+ buf 256 "prog-load")
+              (load-program-attempts bpf buf attempts (lambda (error) (push error errors)) "initial")
             (bpf-error (initial-error)
+              (setf initial-error (car (last errors)))
               ;; Retry with verifier log
               (let ((log-buf (make-array log-buf-size
                                          :element-type '(unsigned-byte 8)
@@ -224,7 +246,7 @@
                   (when attach-btf-id
                     (put-u32 buf 108 attach-btf-id))
                   (handler-case
-                      (funcall bpf +bpf-prog-load+ buf 256 "prog-load")
+                      (load-program-attempts bpf buf attempts (lambda (error) (push error errors)) "logging")
                     (bpf-error (e)
                       (let* ((end (or (position 0 log-buf) (length log-buf)))
                              (log-str (sb-ext:octets-to-string
@@ -235,10 +257,11 @@
                         ;; whatever trace the kernel wrote for every failure.
                         ;; Decode bytes losslessly even if a full buffer ends
                         ;; in the middle of a UTF-8 sequence.
-                        (error (if (or (= errno 13) (= (bpf-error-errno initial-error) 13))
+                        (error (if (some (lambda (error) (= 13 (bpf-error-errno error))) errors)
                                    'bpf-verifier-error 'bpf-program-load-error)
                                :context "prog-load" :errno errno
                                :initial-error initial-error :log log-str
+                               :attempt-errors (nreverse errors)
                                :log-buf-size log-buf-size)))))))))))))
 
 (defun prog-test-run (prog-fd)
