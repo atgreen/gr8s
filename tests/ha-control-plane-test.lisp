@@ -338,3 +338,103 @@
              (is (poll-until (lambda () (gr8s::ha-control-plane-leader-p ha)) :timeout 15))
              (is (equal "exact" (configmap-value store "captured" "k"))))
         (gr8s::stop-ha-control-plane ha)))))
+
+(in-suite ha-control-plane)
+(test automatic-compaction-uses-bytes-reclaims-history-and-recovers
+  (with-temporary-store (store root)
+    (let ((ha nil) (port nil) (boundary nil))
+      (labels ((count-checkpoints ()
+                 (bt:with-lock-held ((gr8s.ha::ha-control-plane-compaction-lock ha))
+                   (gr8s.ha::ha-control-plane-compaction-count ha)))
+               (write-when-ready (name value)
+                 (poll-until
+                  (lambda ()
+                    (handler-case
+                        (progn (gr8s::create-core-resource store "configmaps"
+                                 (configmap-input name "k" value) "default") t)
+                      (gr8s:kubernetes-error () nil))) :timeout 15)))
+        (unwind-protect
+             (progn
+               (setf ha (gr8s::start-ha-control-plane store :id "compact" :init t
+                         :compaction-bytes 4096 :compaction-entries 100000 :compaction-interval 0.02))
+               (is (poll-until (lambda () (gr8s::ha-control-plane-leader-p ha)) :timeout 15))
+               (setf port (gr8s::raft-member-port (gr8s::ha-control-plane-member ha)))
+               (dotimes (i 3)
+                 (let ((before (count-checkpoints)) (name (format nil "round-~D" i)))
+                   (is (write-when-ready name (make-string 8192 :initial-element #\x)))
+                   (is (poll-until (lambda () (> (count-checkpoints) before)) :timeout 15))
+                   (is (poll-until (lambda () (not (gr8s.store::store-access-blocked-p store))) :timeout 15))))
+               (let* ((member (gr8s::ha-control-plane-member ha)) (node (gr8s::raft-member-node member)))
+                 (bt:with-lock-held ((gr8s::raft-member-lock member))
+                   (setf boundary (gr8s::raft-node-snapshot-index node))
+                   (is (= boundary (gr8s::raft-node-last-applied node)))
+                   (is (< (sb-posix:stat-size (sb-posix:stat (merge-pathnames "raft/control-plane.log" root))) 4096)))
+                 (is (<= (length (uiop:directory-files (merge-pathnames "snapshot-artifacts/" root))) 2)))
+               (gr8s::stop-ha-control-plane ha)
+               (is (null (gr8s.ha::ha-control-plane-compaction-thread ha)))
+               (setf store (gr8s:open-store root :defer-restore-completion t)
+                     ha (gr8s::start-ha-control-plane store :id "compact" :init t :port port))
+               (is (= boundary (gr8s::raft-node-snapshot-index (gr8s::raft-member-node (gr8s::ha-control-plane-member ha)))))
+               (is (poll-until (lambda () (gr8s::ha-control-plane-leader-p ha)) :timeout 15))
+               (is (= 8192 (length (configmap-value store "round-2" "k")))))
+          (gr8s::stop-ha-control-plane ha))))))
+
+(test compaction-capture-failure-reopens-only-its-own-gate
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (let ((ha nil))
+      (unwind-protect
+           (progn
+             (setf ha (gr8s::start-ha-control-plane store :id "failure" :init t
+                       :compaction-entries 1 :compaction-interval nil))
+             (is (poll-until (lambda () (gr8s::ha-control-plane-leader-p ha)) :timeout 15))
+             (let* ((member (gr8s::ha-control-plane-member ha)) (node (gr8s::raft-member-node member))
+                    (capture (gr8s.raft:raft-node-snapshot-fn node)) (boundary (gr8s::raft-node-snapshot-index node)))
+               (setf (gr8s.raft:raft-node-snapshot-fn node) (lambda () (error "Injected capture failure")))
+               (signals error (gr8s.ha::compact-ha-store-once ha))
+               (is (not (gr8s.store::store-access-blocked-p store)))
+               (is (= boundary (gr8s::raft-node-snapshot-index node)))
+               (setf (gr8s.raft:raft-node-snapshot-fn node) capture)
+               (gr8s.store::quiesce-store-access store)
+               (is (null (gr8s.ha::compact-ha-store-once ha)))
+               (is (gr8s.store::store-access-blocked-p store))
+               (gr8s.store::resume-store-access store)
+               (is (gr8s.ha::compact-ha-store-once ha))))
+        (gr8s::stop-ha-control-plane ha)))))
+
+(test uncertain-checkpoint-storage-failure-keeps-application-gated
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (let ((ha nil) (original (symbol-function 'gr8s.raft::raft-storage-replace-snapshot)))
+      (unwind-protect
+           (progn
+             (setf ha (gr8s::start-ha-control-plane store :id "uncertain" :init t
+                       :compaction-entries 1 :compaction-interval nil))
+             (is (poll-until (lambda () (gr8s::ha-control-plane-leader-p ha)) :timeout 15))
+             (let ((storage (gr8s.raft:raft-node-storage
+                             (gr8s::raft-member-node (gr8s::ha-control-plane-member ha)))))
+               (setf (symbol-function 'gr8s.raft::raft-storage-replace-snapshot)
+                     (lambda (&rest arguments)
+                       (declare (ignore arguments))
+                       (gr8s.raft:close-file-raft-storage storage)
+                       (error "Injected uncertain checkpoint durability")))
+               (signals error (gr8s.ha::compact-ha-store-once ha))
+               (is (gr8s.store::store-access-blocked-p store))
+               (signals gr8s:kubernetes-error
+                 (gr8s::create-core-resource store "configmaps" (configmap-input "blocked" "k" "v") "default"))))
+        (setf (symbol-function 'gr8s.raft::raft-storage-replace-snapshot) original)
+        (gr8s::stop-ha-control-plane ha)))))
+
+(test compaction-worker-shutdown-wakes-its-long-interval
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (let ((ha nil))
+      (unwind-protect
+           (progn
+             (setf ha (gr8s::start-ha-control-plane store :id "worker-stop" :init t :compaction-interval 3600))
+             (is (bt:thread-alive-p (gr8s.ha::ha-control-plane-compaction-thread ha)))
+             (let ((started (get-internal-real-time)))
+               (gr8s.ha::stop-ha-compaction-worker ha)
+               (is (< (- (get-internal-real-time) started) (* 5 internal-time-units-per-second))))
+             (is (null (gr8s.ha::ha-control-plane-compaction-thread ha))))
+        (gr8s::stop-ha-control-plane ha)))))

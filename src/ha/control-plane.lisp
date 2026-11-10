@@ -19,8 +19,12 @@
 (in-package #:gr8s.ha)
 
 (defstruct ha-control-plane
-  member
-  store)
+  member store
+  compaction-thread compaction-running
+  (compaction-lock (bt:make-lock "gr8s HA compaction"))
+  (compaction-changed (bt:make-condition-variable :name "gr8s HA compaction"))
+  (compaction-bytes (* 16 1024 1024)) (compaction-entries 256) (compaction-interval 1)
+  (compaction-count 0) (compaction-reaped 0) compaction-error)
 
 (defun member-snapshot-artifact-matches-p (state index term digest)
   (and (gr8s.raft::raft-snapshot-envelope-p state)
@@ -138,15 +142,18 @@ application ingress/writer barriers. This function neither persists nor adopts R
 
 (defun start-ha-control-plane (store &key id (host "127.0.0.1") (port 0)
                                           init join-host join-port
-                                          node-name token ca-pin pki api-url)
+                                          node-name token ca-pin pki api-url
+                                          (compaction-bytes (* 16 1024 1024))
+                                          (compaction-entries 256) (compaction-interval nil))
   "Start an artifact-backed durable Raft member before application ingress.
 Fresh founders bootstrap one voter; fresh joiners bootstrap a learner. Restart
 restores the durable membership and application baseline, without reinitializing
 the cluster. Access stays gated until a current-term committed boundary applies."
   (unless (and (or init join-host) (not (and init join-host)))
     (error "start-ha-control-plane requires exactly one of :init or :join-host"))
+  (validate-ha-compaction-options compaction-bytes compaction-entries compaction-interval)
   (let* ((bootstrap-role (control-plane-store-bootstrap-role store id init api-url))
-         (member nil) (completed nil)
+         (member nil) (hcp nil) (completed nil)
          (credentials
            (when pki
              (when (and init bootstrap-role) (gr8s::load-service-account-signing-key store))
@@ -177,9 +184,16 @@ the cluster. Access stays gated until a current-term committed boundary applies.
                                        :node-name node-name :token token :api-url api-url)
                (error "control plane ~A could not join the cluster at ~A:~D" id join-host join-port)))
            (raft-member-start member)
+           (setf hcp (make-ha-control-plane :member member :store store
+                                           :compaction-bytes compaction-bytes
+                                           :compaction-entries compaction-entries
+                                           :compaction-interval compaction-interval))
+           (when compaction-interval (start-ha-compaction-worker hcp))
            (setf completed t)
-           (make-ha-control-plane :member member :store store))
-      (unless completed (when member (stop-raft-member member))))))
+           hcp)
+      (unless completed
+        (when hcp (stop-ha-compaction-worker hcp))
+        (when member (stop-raft-member member))))))
 
 (defun ha-control-plane-leader-p (hcp)
   "True only for an elected leader whose recovered application is ready."
@@ -242,6 +256,7 @@ API and controllers. Remaining members retain reconnect failover coverage."
     (let ((store (ha-control-plane-store hcp)))
       ;; The hook stays attached to the stopped member. Even if another owner
       ;; later resumes access, shutdown cannot become local-only mutation.
+      (stop-ha-compaction-worker hcp)
       (stop-raft-member (ha-control-plane-member hcp))
       (unless (gr8s.store::store-access-blocked-p store)
         (gr8s.store::quiesce-store-access store)))))
