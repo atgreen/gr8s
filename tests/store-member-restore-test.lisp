@@ -404,11 +404,13 @@
                       (api-port (gethash "apiPort" startup))
                       (remote (gr8s::make-raft-member :port (gethash "raftPort" startup)))
                       (sender (gr8s::make-raft-member)))
-                 (is (equal "A" (gethash "baseline" startup)))
+                 ;; The first startup has no proven suffix. Later kills retain
+                 ;; the leader-confirmed boundary and replay B before listening.
+                 (is (equal (if (zerop cycle) "A" "B") (gethash "baseline" startup)))
                  (is (> (gethash "resourceRevision" startup) previous-version))
                  (is (= 9 (gethash "term" startup)))
                  (is (equal "source" (gethash "vote" startup)))
-                 (is (= 42 (gethash "appliedIndex" startup)))
+                 (is (= (if (zerop cycle) 42 43) (gethash "appliedIndex" startup)))
                  (is (= 503 (nth-value 1 (api api-port "/readyz"))))
                  (is (= 503 (nth-value 1 (api api-port "/api/v1/namespaces/default/configmaps/recover"))))
                  (send-member-restore-message sender remote
@@ -570,3 +572,32 @@
                 (sb-ext:process-kill process 9)
                 (sb-ext:process-wait process))
               (sb-ext:process-close process))))))))
+
+(test startup-replays-a-durably-proven-application-suffix-before-listening
+  (with-temporary-store (store root)
+    (let* ((wal (make-startup-store-wal store root))
+           (storage (gr8s::open-file-raft-storage wal))
+           (member nil) (observed nil)
+           (original (symbol-function 'ag-grpc:make-grpc-server)))
+      (gr8s.raft:raft-storage-save-commit-index storage 43)
+      (gr8s::close-file-raft-storage storage)
+      (unwind-protect
+           (progn
+             (unwind-protect
+                  (progn
+                    (setf (symbol-function 'ag-grpc:make-grpc-server)
+                          (lambda (&rest args)
+                            (setf observed (list (startup-store-raw-value store)
+                                                 (gr8s.store::store-access-blocked-p store)
+                                                 (gr8s.store::store-application-barriers-owned-p store)))
+                            (apply original args)))
+                    (setf member (gr8s.resources::start-store-member-from-wal store "sink" wal)))
+               (setf (symbol-function 'ag-grpc:make-grpc-server) original))
+             (is (equal '("B" t t) observed))
+             (is (= 43 (gr8s::raft-node-commit-index (gr8s::raft-member-node member))
+                       (gr8s::raft-node-last-applied (gr8s::raft-member-node member))))
+             (is (= 44 (gr8s::raft-last-log-index (gr8s::raft-member-node member))))
+             (is (equal "B" (startup-store-raw-value store))))
+        (setf (symbol-function 'ag-grpc:make-grpc-server) original)
+        (gr8s::close-file-raft-storage storage)
+        (when member (gr8s::stop-raft-member member))))))

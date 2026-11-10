@@ -14,6 +14,7 @@
 ;;;; Record forms:
 ;;;;   (:hard term vote)
 ;;;;   (:entry index term command)
+;;;;   (:commit index)               ; proven durable commit watermark
 ;;;;   (:truncate index)             ; drop entries at/after INDEX
 ;;;;   (:snapshot index term state)  ; compaction boundary + state-machine image
 
@@ -167,7 +168,7 @@ Scan with bounded overlap, including candidates that cross a read-buffer edge."
 (defun raft-wal-require-record-form (form)
   "Reject malformed records, including atoms that resemble reader status values."
   (let* ((arity (and (consp form) (list-length form)))
-         (expected (and arity (case (first form) (:hard 3) (:entry 4) (:truncate 2) (:snapshot 4)))))
+         (expected (and arity (case (first form) (:hard 3) (:entry 4) (:truncate 2) (:commit 2) (:snapshot 4)))))
     (unless (and expected (= arity expected)
                  (integerp (second form)) (<= 0 (second form))
                  (or (not (eq (first form) :entry)) (plusp (second form)))
@@ -263,6 +264,9 @@ Legacy forms are read strictly; only explicit frame boundaries can be repaired."
 (defmethod raft-storage-truncate ((storage file-raft-storage) index)
   (file-raft-write storage (list :truncate index)))
 
+(defmethod raft-storage-save-commit-index ((storage file-raft-storage) index)
+  (file-raft-write storage (list :commit index)))
+
 (defmethod raft-storage-save-snapshot ((storage file-raft-storage) index term state)
   (file-raft-write storage (list :snapshot index term state)))
 
@@ -273,7 +277,7 @@ Legacy forms are read strictly; only explicit frame boundaries can be repaired."
     (sb-posix:fsync fd)))
 
 (defmethod raft-storage-replace-snapshot
-    ((storage file-raft-storage) index term state hard-term vote entries)
+    ((storage file-raft-storage) index term state hard-term vote entries &key (commit-index index))
   "Replace the WAL without reading or retaining discarded historical records.
 The old WAL remains usable on a pre-rename failure. A post-rename failure closes
 both streams: its durable outcome is uncertain and requires recovery before use."
@@ -282,6 +286,10 @@ both streams: its durable outcome is uncertain and requires recovery before use.
   (unless (and (file-raft-storage-stream storage)
                (open-stream-p (file-raft-storage-stream storage)))
     (error "Raft WAL is closed; recover it before checkpointing"))
+  (unless (and (typep commit-index '(integer 0 *))
+               (<= index commit-index
+                   (reduce #'max entries :key #'raft-entry-index :initial-value index)))
+    (error "Checkpoint commit boundary is outside its retained log"))
   (let* ((target (namestring (merge-pathnames (file-raft-storage-path storage))))
          (temporary (format nil "~A.checkpoint-~36R" target (random (expt 36 20))))
          (old (file-raft-storage-stream storage))
@@ -304,7 +312,8 @@ both streams: its durable outcome is uncertain and requires recovery before use.
                           (when (> (raft-entry-index entry) index)
                             (record (list :entry (raft-entry-index entry)
                                           (raft-entry-term entry) (raft-entry-command entry)))))
-                    entries)))
+                    entries)
+               (record (list :commit commit-index))))
            (finish-output stream)
            (file-raft-checkpoint-sync storage :file (sb-sys:fd-stream-fd stream))
            ;; RENAME takes exact path strings, including extensionless WAL names.
@@ -337,7 +346,7 @@ both streams: its durable outcome is uncertain and requires recovery before use.
 ;;; Recovery: replay the WAL into the persisted Raft fields.
 
 (defstruct raft-recovered
-  (term 0) (vote nil)
+  (term 0) (vote nil) (commit-index 0) (commit-marker-p nil)
   (entries '())                         ; ordered RAFT-ENTRYs with index > snapshot-index
   (snapshot-index 0) (snapshot-term 0) (snapshot-state nil))
 
@@ -346,7 +355,7 @@ both streams: its durable outcome is uncertain and requires recovery before use.
    A missing file recovers empty state. REPAIR-STORAGE is internal: the caller
    must own its writable lease. Read-only calls never truncate incomplete frames."
   (let ((*read-eval* nil)
-        (term 0) (vote nil)
+        (term 0) (vote nil) (commit-index 0) (commit-marker-p nil)
         (by-index (make-hash-table))    ; index -> (term . command)
         (snapshot-index 0) (snapshot-term 0) (snapshot-state nil))
     (when (probe-file path)
@@ -364,19 +373,30 @@ both streams: its durable outcome is uncertain and requires recovery before use.
                 (return))
               (ecase (first form)
                      (:hard (setf term (second form) vote (third form)))
-                     (:entry (setf (gethash (second form) by-index)
-                                   (cons (third form) (fourth form))))
-                     (:truncate (loop for k being the hash-keys of by-index
-                                      when (>= k (second form)) do (remhash k by-index)))
+                     (:entry
+                      (when (<= (second form) commit-index) (error "WAL overwrites a committed entry"))
+                      (setf (gethash (second form) by-index) (cons (third form) (fourth form))))
+                     (:commit
+                      (unless (and (>= (second form) commit-index snapshot-index)
+                                   (loop for index from (1+ snapshot-index) to (second form)
+                                         always (gethash index by-index)))
+                        (error "Invalid or regressing WAL commit boundary"))
+                      (setf commit-index (second form) commit-marker-p t))
+                     (:truncate
+                      (when (<= (second form) commit-index) (error "WAL truncates committed entries"))
+                      (loop for k being the hash-keys of by-index
+                            when (>= k (second form)) do (remhash k by-index)))
                      (:snapshot
+                      (when (< (second form) snapshot-index) (error "WAL snapshot boundary regresses"))
                       (setf snapshot-index (second form) snapshot-term (third form)
-                            snapshot-state (fourth form))
+                            snapshot-state (fourth form) commit-index (max commit-index snapshot-index))
                       (loop for k being the hash-keys of by-index
                             when (<= k snapshot-index) do (remhash k by-index)))))))))
     (let ((entries (loop for index in (sort (loop for k being the hash-keys of by-index collect k) #'<)
                          for cell = (gethash index by-index)
                          collect (make-raft-entry :index index :term (car cell) :command (cdr cell)))))
       (make-raft-recovered :term term :vote vote :entries entries
+                           :commit-index commit-index :commit-marker-p commit-marker-p
                            :snapshot-index snapshot-index :snapshot-term snapshot-term
                            :snapshot-state snapshot-state))))
 
@@ -392,6 +412,12 @@ both streams: its durable outcome is uncertain and requires recovery before use.
          (let ((recovered (load-raft-log (file-raft-storage-path storage) :repair-storage storage)))
            (when (and validate-fn (not (eq t (funcall validate-fn recovered))))
              (error "Recovered Raft state validation did not succeed"))
+           (when (and (not (raft-recovered-commit-marker-p recovered))
+                      (some (lambda (entry)
+                              (let ((command (raft-entry-command entry)))
+                                (and (consp command) (eq :raft-config (car command)))))
+                            (raft-recovered-entries recovered)))
+             (error "Legacy configuration tail lacks a proven commit boundary; restore a trusted snapshot"))
            (setf (raft-node-current-term node) (raft-recovered-term recovered)
                  (raft-node-voted-for node) (raft-recovered-vote recovered)
                  (raft-node-snapshot-index node) (raft-recovered-snapshot-index recovered)
@@ -404,6 +430,12 @@ both streams: its durable outcome is uncertain and requires recovery before use.
            (let ((v (raft-node-log node)))
              (setf (fill-pointer v) 0)
              (dolist (entry (raft-recovered-entries recovered)) (vector-push-extend entry v)))
-           (setf (raft-node-storage node) storage completed t)
+           (setf (raft-node-storage node) storage
+                 (raft-node-commit-index node) (raft-recovered-commit-index recovered))
+           ;; Proven committed entries, including membership, must be restored
+           ;; before campaigning or accepting traffic. Uncommitted entries stay
+           ;; in the log without changing application or quorum state.
+           (raft-apply-committed node)
+           (setf completed t)
            node)
       (unless completed (close-file-raft-storage storage)))))

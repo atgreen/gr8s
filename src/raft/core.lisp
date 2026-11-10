@@ -115,14 +115,17 @@
   (:method ((storage null) entry) (declare (ignore entry)) nil))
 (defgeneric raft-storage-truncate (storage index)
   (:method ((storage null) index) (declare (ignore index)) nil))
+(defgeneric raft-storage-save-commit-index (storage index)
+  (:method ((storage null) index) (declare (ignore index)) nil))
 (defgeneric raft-storage-save-snapshot (storage index term state)
   (:method ((storage null) index term state) (declare (ignore index term state)) nil))
-(defgeneric raft-storage-replace-snapshot (storage index term state hard-term vote entries)
+(defgeneric raft-storage-replace-snapshot (storage index term state hard-term vote entries &key commit-index)
   (:documentation "Persist a snapshot with exact hard state and log tail. ENTRIES
 is a borrowed sequence; retain only entries after INDEX. Caller holds the node lock.")
-  (:method (storage index term state hard-term vote entries)
+  (:method (storage index term state hard-term vote entries &key (commit-index index))
     (declare (ignore hard-term vote entries))
-    (raft-storage-save-snapshot storage index term state)))
+    (raft-storage-save-snapshot storage index term state)
+    (raft-storage-save-commit-index storage commit-index)))
 
 (defun raft-persist-hard-state (node)
   "Persist NODE's current term and vote to durable storage so they survive a
@@ -137,6 +140,12 @@ is a borrowed sequence; retain only entries after INDEX. Caller holds the node l
         (raft-node-voted-for node) vote))
 
 ;;; ---------------------------------------------------------------------------
+(defun raft-set-commit-index (node index)
+  "Persist a proven advancing commit boundary before publishing or applying it."
+  (when (> index (raft-node-commit-index node))
+    (raft-storage-save-commit-index (raft-node-storage node) index)
+    (setf (raft-node-commit-index node) index)))
+
 ;;; Log helpers (1-based, offset by snapshot-index for compaction).
 
 (defun raft-log-length (node)
@@ -181,6 +190,11 @@ is a borrowed sequence; retain only entries after INDEX. Caller holds the node l
 (defun raft-log-append (node entry)
   "Persist ENTRY before publishing it in NODE's log."
   (setf (raft-entry-index entry) (1+ (raft-last-log-index node)))
+  ;; Certify the old boundary even if this first configuration never commits.
+  ;; Recovery can then distinguish an uncommitted tail from a legacy WAL whose
+  ;; committed configuration boundary was never recorded.
+  (when (and (consp (raft-entry-command entry)) (eq :raft-config (car (raft-entry-command entry))))
+    (raft-storage-save-commit-index (raft-node-storage node) (raft-node-commit-index node)))
   (raft-storage-append-entry (raft-node-storage node) entry)
   (vector-push-extend entry (raft-node-log node))
   entry)
@@ -259,7 +273,8 @@ cannot reconstruct an arbitrary older application revision."
       ;; and boundary until the durable replacement succeeds.
       (raft-storage-replace-snapshot
        (raft-node-storage node) upto term state
-       (raft-node-current-term node) (raft-node-voted-for node) (raft-node-log node))
+       (raft-node-current-term node) (raft-node-voted-for node) (raft-node-log node)
+       :commit-index (raft-node-commit-index node))
       (let* ((log (raft-node-log node)) (end (fill-pointer log)) (remaining (- end drop)))
         (loop for i from drop below end do (setf (aref log (- i drop)) (aref log i)))
         ;; A fill pointer does not hide array slots from the garbage collector.
@@ -501,7 +516,7 @@ alone so existing persisted commands remain deliverable."
                   (>= (1+ (loop for peer in (raft-node-peers node)
                                 count (>= (gethash peer (raft-node-match-index node) 0) n)))
                       (raft-majority node)))
-          do (setf (raft-node-commit-index node) n)
+          do (raft-set-commit-index node n)
              (return)))
 
 ;;; ---------------------------------------------------------------------------
@@ -798,8 +813,7 @@ following leadership changes; old peers without applied receipts cannot qualify.
                                (raft-log-append node (copy-raft-entry entry)))))
                (let ((last-new (+ prev-index (length (getf msg :entries)))))
                  (when (> (getf msg :leader-commit) (raft-node-commit-index node))
-                   (setf (raft-node-commit-index node)
-                         (min (getf msg :leader-commit) last-new)))
+                   (raft-set-commit-index node (min (getf msg :leader-commit) last-new)))
                  (raft-apply-committed node)
                  (raft-send node leader (list :type :append-entries-reply
                                               :term (raft-node-current-term node)
@@ -882,7 +896,8 @@ following leadership changes; old peers without applied receipts cannot qualify.
         (error "Application snapshots require a restore callback"))
       (let ((tail (if (= last-term (raft-log-term node index)) (raft-node-log node) #())))
         (raft-storage-replace-snapshot (raft-node-storage node) index last-term state
-                                      (raft-node-current-term node) (raft-node-voted-for node) tail)
+                                      (raft-node-current-term node) (raft-node-voted-for node) tail
+                                      :commit-index index)
         (setf (raft-node-snapshot-pending node) (list index last-term state tail))
         (raft-resume-snapshot-install node)))
     (raft-send node leader (list :type :install-snapshot-reply :term (raft-node-current-term node)

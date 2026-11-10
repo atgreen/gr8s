@@ -104,6 +104,8 @@
    #:raft-propose
    #:raft-propose-config
    #:raft-recovered
+   #:raft-recovered-commit-index
+   #:raft-recovered-commit-marker-p
    #:raft-recovered-entries
    #:raft-recovered-snapshot-index
    #:raft-recovered-snapshot-state
@@ -116,6 +118,7 @@
    #:raft-send
    #:raft-step-down-if-stale
    #:raft-storage-append-entry
+   #:raft-storage-save-commit-index
    #:raft-storage-save-hard-state
    #:raft-storage-save-snapshot
    #:raft-storage-replace-snapshot

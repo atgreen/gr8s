@@ -967,3 +967,109 @@
       (is-true (getf (first replies) :success)))))
 
 (in-suite gr8s)
+
+(in-suite raft)
+
+(defmethod gr8s.raft:raft-storage-save-commit-index ((storage failing-raft-storage) index)
+  (declare (ignore index))
+  (when (eq :commit (failing-raft-operation storage)) (error "Injected commit boundary failure")))
+
+(test raft-recovery-restores-committed-membership-without-applying-uncommitted-removal
+  (with-raft-temp-dir (path)
+    (let* ((storage (gr8s::open-file-raft-storage path))
+           (node (gr8s::make-raft-node :id "one" :storage storage :current-term 1 :role :leader
+                                    :send-fn (lambda (&rest args) (declare (ignore args)))))
+           (recovered (gr8s::make-raft-node :id "one")))
+      (unwind-protect
+           (progn
+             (gr8s::raft-configure node '(("one" . :voter)))
+             (gr8s.raft:raft-storage-save-hard-state storage 1 "one")
+             (gr8s::raft-propose node '(:raft-config :members (("one" . :voter) ("two" . :voter))
+                                                  :addresses (("one" "127.0.0.1" 7101) ("two" "127.0.0.1" 7102))))
+             (is (= 1 (gr8s::raft-node-commit-index node)))
+             (gr8s::raft-propose node '(:raft-config :members (("one" . :voter))))
+             (is (= 1 (gr8s::raft-node-commit-index node)))
+             (gr8s::close-file-raft-storage storage)
+             (gr8s::recover-raft-node recovered path)
+             (is (= 2 (gr8s::raft-majority recovered)))
+             (is (= 1 (gr8s::raft-node-commit-index recovered) (gr8s::raft-node-last-applied recovered)))
+             (is (= 2 (gr8s::raft-last-log-index recovered)))
+             (is (eq :voter (gethash "two" (gr8s::raft-node-roles recovered))))
+             (is (equal '("127.0.0.1" 7102) (gethash "two" (gr8s::raft-node-peer-addresses recovered)))))
+        (gr8s::close-file-raft-storage storage)
+        (when (gr8s::raft-node-storage recovered)
+          (gr8s::close-file-raft-storage (gr8s::raft-node-storage recovered)))))))
+
+(test raft-failed-commit-persistence-does-not-publish-apply-or-acknowledge
+  (let* ((storage (make-instance 'failing-raft-storage :operation :commit))
+         (applies 0) (callbacks 0)
+         (node (gr8s::make-raft-node :id "solo" :storage storage :current-term 1 :role :leader
+                                   :apply-fn (lambda (command) (declare (ignore command)) (incf applies)))))
+    (signals error (gr8s::raft-propose node :value (lambda (value) (declare (ignore value)) (incf callbacks))))
+    (is (= 0 (gr8s::raft-node-commit-index node) (gr8s::raft-node-last-applied node) applies callbacks))
+    (is (= 1 (gr8s::raft-last-log-index node)))
+    (setf (failing-raft-operation storage) nil)
+    (gr8s::raft-advance-commit node)
+    (gr8s::raft-apply-committed node)
+    (gr8s::raft-apply-committed node)
+    (is (= 1 (gr8s::raft-node-commit-index node) (gr8s::raft-node-last-applied node) applies callbacks))))
+
+(test raft-wal-rejects-commit-regression-missing-prefix-and-committed-overwrite
+  (dolist (records '(((:entry 1 1 :a) (:commit 1) (:commit 0))
+                     ((:entry 1 1 :a) (:commit 2))
+                     ((:entry 1 1 :a) (:commit 1) (:truncate 1))
+                     ((:entry 1 1 :a) (:commit 1) (:entry 1 2 :b))))
+    (with-raft-temp-dir (path)
+      (let ((storage (gr8s::open-file-raft-storage path)))
+        (unwind-protect (dolist (record records) (gr8s.raft::file-raft-write storage record))
+          (gr8s::close-file-raft-storage storage)))
+      (signals error (gr8s::load-raft-log path)))))
+
+(test raft-checkpoint-preserves-proven-commit-beyond-the-snapshot
+  (with-raft-temp-dir (path)
+    (let* ((storage (gr8s::open-file-raft-storage path))
+           (node (gr8s::make-raft-node :id "solo" :storage storage :current-term 1 :role :leader))
+           (recovered (gr8s::make-raft-node :id "solo")))
+      (unwind-protect
+           (progn
+             (dotimes (i 3)
+               (gr8s::raft-log-append node (gr8s::make-raft-entry :term 1 :command (list :value i))))
+             (gr8s.raft::raft-set-commit-index node 3)
+             ;; Model a committed suffix awaiting application after boundary1.
+             ;; This fixture has no application state, so its snapshot is exact.
+             (setf (gr8s::raft-node-last-applied node) 1)
+             (gr8s::raft-compact node 1)
+             (gr8s::close-file-raft-storage storage)
+             (let ((saved (gr8s::load-raft-log path)))
+               (is (= 1 (gr8s::raft-recovered-snapshot-index saved)))
+               (is (= 3 (gr8s.raft:raft-recovered-commit-index saved))))
+             (gr8s::recover-raft-node recovered path)
+             (is (= 3 (gr8s::raft-node-commit-index recovered) (gr8s::raft-node-last-applied recovered)))
+             (is (= 3 (gr8s::raft-last-log-index recovered))))
+        (gr8s::close-file-raft-storage storage)
+        (when (gr8s::raft-node-storage recovered)
+          (gr8s::close-file-raft-storage (gr8s::raft-node-storage recovered)))))))
+
+(test raft-recovery-refuses-ambiguous-legacy-configuration-tails
+  (with-raft-temp-dir (path)
+    (let ((storage (gr8s::open-file-raft-storage path)) (node (gr8s::make-raft-node :id "one")))
+      (unwind-protect
+           (progn
+             (gr8s.raft::file-raft-write storage '(:hard 1 "one"))
+             (gr8s.raft::file-raft-write storage '(:entry 1 1 (:raft-config :members (("one" . :voter) ("two" . :voter)))))
+             (gr8s::close-file-raft-storage storage)
+             (signals error (gr8s::recover-raft-node node path))
+             (is (zerop (gr8s::raft-last-log-index node))))
+        (gr8s::close-file-raft-storage storage)))))
+
+(test raft-old-matching-heartbeat-cannot-regress-the-commit-boundary
+  (let ((node (gr8s::make-raft-node :id "follower" :current-term 1
+                                   :send-fn (lambda (&rest args) (declare (ignore args))))))
+    (dotimes (i 2) (gr8s::raft-log-append node (gr8s::make-raft-entry :term 1 :command i)))
+    (setf (gr8s::raft-node-commit-index node) 2 (gr8s::raft-node-last-applied node) 2)
+    (gr8s::raft-handle-append-entries node
+      '(:term 1 :from "leader" :prev-log-index 0 :prev-log-term 0 :entries nil :leader-commit 3))
+    (is (= 2 (gr8s::raft-node-commit-index node) (gr8s::raft-node-last-applied node)))
+    (is (= 2 (gr8s::raft-last-log-index node)))))
+
+(in-suite gr8s)
