@@ -451,6 +451,9 @@ def peer_churn(factory):
                         assert pending is not None and pending[39] == 0
                         pending_reverse = backend.lookup(n.REV, reverse_key)
                         backend.advance(1)
+                        # Kernel time simulation ages the retained timestamp;
+                        # compare against that harness-adjusted row.
+                        pending = backend.lookup(n.FWD, key)
                         run(backend, 1, incoming, p.SHOT)
                         assert backend.lookup(n.FWD, key) == pending
                         assert backend.lookup(n.REV, reverse_key) == pending_reverse
