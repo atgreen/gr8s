@@ -56,7 +56,7 @@ messages idempotently and acknowledge the highest fully persisted revision.
 After reconnect, the agent registers its last acknowledged revisions and the
 server resends current snapshots when necessary.
 
-The Kubernetes HTTP API remains the user-facing compatibility surface. The
+The authenticated Kubernetes HTTPS API remains the user-facing compatibility surface. The
 private agent protocol is not presented as a Kubernetes kubelet API.
 
 ## Enrollment and identity
@@ -69,8 +69,15 @@ gRPC connections then use mutual TLS; the token is not a reconnect credential.
 
 The server rejects duplicate live node identities and records certificate
 serials so a node can be revoked. Node private keys never leave their node.
-Automated certificate rotation and external CA integration are deferred, but
-the protocol carries certificate expiry so rotation can be added compatibly.
+Leaf certificates renew automatically before expiry while retaining their keys;
+an explicit `gr8s certificate rotate` replaces both certificate and key. Cluster
+CA and ServiceAccount signing-key changes use prepare, promote, and finalize
+stages. In HA clusters, run those stages online with `--kubeconfig`: the leader
+stores an authenticated encrypted authority record in Raft, every voter extracts
+the same active/prepared/retiring material before serving, and follower requests
+are routed to the leader. After CA promotion, restart control-plane members one
+at a time, then let agents reconnect and renew before finalizing the retiring CA.
+External CA integration remains deferred.
 
 The CNI Unix socket uses filesystem permissions and Linux peer credentials,
 not cluster certificates.

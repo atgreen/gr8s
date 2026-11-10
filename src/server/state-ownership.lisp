@@ -5,6 +5,34 @@
 (defstruct serve-state-lease root fd device inode thread)
 (defvar *serve-state-lease* nil)
 
+(defun call-with-offline-state-ownership (state-directory function)
+  "Run FUNCTION only while no serve process owns STATE-DIRECTORY.
+The stable serve lock is shared with startup so offline maintenance cannot
+rewrite credentials or other state underneath a running control plane."
+  (unless (and (functionp function) (or (stringp state-directory) (pathnamep state-directory)))
+    (error "Invalid offline state ownership arguments"))
+  (let* ((requested (uiop:ensure-directory-pathname state-directory))
+         (root (progn (ensure-directories-exist (merge-pathnames ".gr8s-serve.lock" requested))
+                      (truename requested)))
+         (path (merge-pathnames ".gr8s-serve.lock" root))
+         (fd nil))
+    (unwind-protect
+         (progn
+           (setf fd (sb-posix:open (namestring path)
+                                   (logior sb-posix:o-rdwr sb-posix:o-creat
+                                           sb-posix:o-nofollow sb-posix:o-nonblock)
+                                   #o600))
+           (let ((stat (sb-posix:fstat fd)))
+             (unless (and (sb-posix:s-isreg (sb-posix:stat-mode stat))
+                          (= 1 (sb-posix:stat-nlink stat))
+                          (= (sb-posix:geteuid) (sb-posix:stat-uid stat))
+                          (= #o600 (logand #o777 (sb-posix:stat-mode stat))))
+               (error "Unsafe serve ownership file")))
+           (unless (zerop (cffi:foreign-funcall "flock" :int fd :int 6 :int))
+             (error "State directory ~A is in use; stop gr8s before rotating certificates" root))
+           (funcall function))
+      (when fd (sb-posix:close fd)))))
+
 (defun require-serve-state-ownership (options)
   "Require this thread's live serve lease before opening application state."
   (let* ((lease *serve-state-lease*)
@@ -39,13 +67,22 @@
 
 (defconstant +serve-raft-default-port+ 7000)
 
+(defun serve-api-advertise-address (options)
+  "Return the stable address clients should use for this API listener."
+  (let ((listen (getf options :listen "0.0.0.0")))
+    (or (getf options :node-address)
+        (unless (member listen '("0.0.0.0" "::" "[::]") :test #'equal) listen)
+        (find-if-not (lambda (address) (uiop:string-prefix-p "127." address))
+                     (ignore-errors (gr8s::host-ipv4-addresses)))
+        "127.0.0.1")))
+
 (defun serve-ha-endpoint-record (options)
   "Describe exactly the endpoint production will advertise, without binding it."
   (let* ((id (or (getf options :raft-id) (getf options :node-name) "gr8s-local"))
          (host (or (getf options :raft-listen) "127.0.0.1"))
          (port (or (getf options :raft-port) +serve-raft-default-port+))
-         (api-host (getf options :listen "127.0.0.1"))
-         (api-port (getf options :port 8080)))
+         (api-host (serve-api-advertise-address options))
+         (api-port (getf options :port 6443)))
     (unless (and (every (lambda (value) (and (stringp value) (<= 1 (length value) 256)
                                             (notany (lambda (char) (or (<= (char-code char) 32)
                                                                       (= (char-code char) 127))) value)))
@@ -53,7 +90,7 @@
                  (not (member host '("0.0.0.0" "::" "[::]") :test #'equal))
                  (typep port '(integer 1 65535)) (typep api-port '(integer 1 65535)))
       (error "HA requires a member ID and a stable, non-wildcard Raft endpoint"))
-    (let ((url (format nil "http://~A:~D" api-host api-port)))
+    (let ((url (format nil "https://~A:~D" api-host api-port)))
       (unless (<= (length url) 256) (error "HA API URL is too long"))
       (gr8s.resources::core-object "format" "gr8s-serve-ha-endpoint" "version" 1
                                    "memberId" id "host" host "port" port "apiUrl" url))))

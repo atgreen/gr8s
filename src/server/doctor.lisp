@@ -104,6 +104,37 @@ program is missing.  Used for optional host tools like firewall-cmd."
   (let ((network (doctor-node-network state-directory)))
     (and network (gethash "nodePodCIDR" network))))
 
+(defparameter +kubelet-host-endpoints+
+  '(#P"/var/lib/kubelet/device-plugins/kubelet.sock"
+    #P"/var/lib/kubelet/pod-resources/kubelet.sock")
+  "Standard host-wide kubelet endpoints owned by a managed gr8s node.")
+
+(defun doctor-check-kubelet-endpoints
+    (&optional (probe #'gr8s.kubelet::kubelet-endpoint-status))
+  "Report whether another kubelet owns a host-wide endpoint; return FAIL count."
+  (loop with fails = 0
+        for path in +kubelet-host-endpoints+
+        for status = (funcall probe path)
+        do (ecase status
+             (:absent
+              (doctor-report :ok "kubelet endpoint" (format nil "~A is available" path)))
+             (:stale
+              (doctor-report :ok "kubelet endpoint"
+                             (format nil "~A is stale and will be replaced" path)))
+             (:active
+              (incf fails)
+              (doctor-report
+               :fail "kubelet endpoint"
+               (format nil "another kubelet is listening on ~A" path)
+               "stop the other kubelet (for example, 'sudo systemctl stop k3s') or run 'gr8s serve --disable-agent'"))
+             (:non-socket
+              (incf fails)
+              (doctor-report
+               :fail "kubelet endpoint"
+               (format nil "~A exists and is not a Unix socket" path)
+               "move the conflicting file out of the standard kubelet endpoint path")))
+        finally (return fails)))
+
 (defun run-doctor (&key (cluster-pod-cidr +default-cluster-pod-cidr+)
                         (state-directory (namestring (default-state-directory)))
                         (firewall #'doctor-firewall-state))
@@ -112,6 +143,8 @@ program is missing.  Used for optional host tools like firewall-cmd."
     (flet ((note (status label &optional detail hint)
              (when (eq (doctor-report status label detail hint) :fail) (incf fails))))
       (format t "~&gr8s doctor — host environment checks~%~%")
+
+      (incf fails (doctor-check-kubelet-endpoints))
 
       ;; Kernel: TCX and cgroup/connect4 need a recent kernel.
       (handler-case

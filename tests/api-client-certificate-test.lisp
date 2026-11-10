@@ -110,6 +110,19 @@
         (signals kubernetes-error
           (gr8s::certificate-api-identity (pure-tls:load-certificate-chain server-certificate) ca))))))
 
+(test kubernetes-api-serving-certificate-covers-host-and-service-addresses
+  (with-temporary-store (store directory)
+    (declare (ignore store))
+    (let ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory))))
+      (multiple-value-bind (certificate key)
+          (gr8s::ensure-kubernetes-api-credentials
+           pki :addresses '("127.0.0.1" "192.0.2.10" "10.96.0.1"))
+        (declare (ignore key))
+        (let ((leaf (first (pure-tls:load-certificate-chain certificate))))
+          (dolist (address '("127.0.0.1" "192.0.2.10" "10.96.0.1"
+                             "kubernetes.default.svc"))
+            (finishes (pure-tls::verify-hostname leaf address))))))))
+
 (test certificate-authentication-errors-allow-live-token-alternatives-at-http
   (with-temporary-store (store directory)
     (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory)))

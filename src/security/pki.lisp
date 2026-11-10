@@ -32,6 +32,10 @@
 (defparameter +oid-extended-key-usage+ '(2 5 29 37))
 (defparameter +oid-client-auth+ '(1 3 6 1 5 5 7 3 2))
 
+(defun cluster-pki-trust-certificates (pki)
+  "Return every CA in the current transition bundle, active signer first."
+  (pure-tls:load-certificate-chain (cluster-pki-ca-certificate-path pki)))
+
 (defun pki-fail (reason control &rest arguments)
   "Signal a structured PKI failure with a stable reason and formatted message."
   (error 'pki-error
@@ -462,6 +466,44 @@ TEXT is a string, or a function that writes the text to the stream it is given."
          "CERTIFICATE"
          (node-certificate-der pki (pure-tls/acme::encode-subject node-name) subject-public-key))))))
 
+(defun renew-authenticated-node-csr (pki node-name authenticated-certificate csr)
+  "Renew the exact identity proven by an authenticated node session and CSR."
+  (verify-node-certificate
+   pki
+   (pure-tls/acme::wrap-pem
+    "CERTIFICATE" (pure-tls::x509-certificate-raw-der authenticated-certificate))
+   node-name)
+  (multiple-value-bind (requested-subject subject-public-key)
+      (parse-and-verify-node-csr csr node-name)
+    (declare (ignore requested-subject))
+    (pure-tls/acme::wrap-pem
+     "CERTIFICATE"
+     (node-certificate-der
+      pki (pure-tls/acme::encode-subject node-name) subject-public-key))))
+
+(defun node-certificate-needs-active-ca-renewal-p (pki certificate)
+  "Whether trusted CERTIFICATE is not directly issued by PKI's active CA."
+  (not (handler-case
+           (progn
+             (require-internal-certificate-profile
+              certificate (cluster-pki-ca-certificate pki))
+             t)
+         (error () nil))))
+
+(defun node-certificate-issuer-fingerprint (pki certificate)
+  "Return the trusted direct issuer fingerprint for internal node CERTIFICATE."
+  (let ((issuer
+          (find-if
+           (lambda (candidate)
+             (handler-case
+                 (progn (require-internal-certificate-profile certificate candidate) t)
+               (error () nil)))
+           (cluster-pki-trust-certificates pki))))
+    (unless issuer
+      (pki-fail "invalid-enrollment-issuer"
+                "Node certificate is not signed by a trusted enrollment root"))
+    (octets-to-hex (pure-tls:certificate-fingerprint issuer))))
+
 (defun certificate-from-pem (pem)
   "Parse a real node certificate PEM or return a structured certificate failure."
   (handler-case
@@ -475,69 +517,79 @@ TEXT is a string, or a function that writes the text to the stream it is given."
   "Require a trusted internal-profile client certificate with exactly the expected node CN."
   (ensure-valid-node-name expected-node-name)
   (let ((certificate (certificate-from-pem certificate-pem)))
-    (require-internal-certificate-profile certificate (cluster-pki-ca-certificate pki))
-    (handler-case
-        (pure-tls::verify-certificate-chain
-         (list certificate)
-         (list (cluster-pki-ca-certificate pki))
-         :purpose :client-auth
-         :trust-anchor-mode :replace)
-      (error (condition)
-        (pki-fail "untrusted-certificate"
-                  "Node certificate is not trusted by this cluster: ~A" condition)))
-    (unless (equal (list expected-node-name)
-                   (pure-tls:certificate-subject-common-names certificate))
-      (pki-fail "certificate-name-mismatch"
-                "Node certificate does not belong to ~A" expected-node-name))
-    t))
+    (when (api-csr-profile-certificate-p certificate)
+      (pki-fail "certificate-purpose-mismatch"
+                "API-issued credentials cannot authenticate an internal node or control server"))
+    (let* ((trust (cluster-pki-trust-certificates pki))
+           (issuer (find-if (lambda (ca)
+                              (handler-case
+                                  (progn (require-internal-certificate-profile certificate ca) t)
+                                (error () nil)))
+                            trust)))
+      (unless issuer
+        (pki-fail "invalid-enrollment-issuer" "Internal credential is not signed by a trusted enrollment root"))
+      (handler-case
+          (pure-tls::verify-certificate-chain
+           (list certificate) trust :purpose :client-auth :trust-anchor-mode :replace)
+        (error (condition)
+          (pki-fail "untrusted-certificate"
+                    "Node certificate is not trusted by this cluster: ~A" condition)))
+      (unless (equal (list expected-node-name)
+                     (pure-tls:certificate-subject-common-names certificate))
+        (pki-fail "certificate-name-mismatch"
+                  "Node certificate does not belong to ~A" expected-node-name))
+      t)))
 
 
 (defparameter +node-server-common-name+ "gr8s-control")
 
 (defun verify-node-server-certificate (certificate ca)
   "Require the trusted internal control-server profile, server purpose and hostname."
-  (require-internal-certificate-profile certificate ca)
+  (when (api-csr-profile-certificate-p certificate)
+    (pki-fail "certificate-purpose-mismatch"
+              "API-issued credentials cannot authenticate an internal node or control server"))
+  (let* ((trust (if (listp ca) ca (list ca)))
+         (issuer (find-if (lambda (candidate)
+                            (handler-case
+                                (progn (require-internal-certificate-profile certificate candidate) t)
+                              (error () nil)))
+                          trust)))
+    (unless issuer
+      (pki-fail "invalid-enrollment-issuer" "Control-server certificate is not signed by a trusted root")))
   (pure-tls::verify-certificate-chain
-   (list certificate) (list ca) :purpose :server-auth :trust-anchor-mode :replace)
+   (list certificate) (if (listp ca) ca (list ca))
+   :purpose :server-auth :trust-anchor-mode :replace)
   (pure-tls::verify-hostname certificate +node-server-common-name+)
   t)
 
-(defun ensure-node-server-credentials (pki)
+(defun ensure-node-server-credentials
+    (pki &key (renew-within (* 90 86400)) rotate-key)
   "Reuse trusted internal server credentials or create a new persisted identity."
   (let ((certificate-path (merge-pathnames "pki/server.crt" (cluster-pki-root pki)))
         (key-path (merge-pathnames "pki/server.key" (cluster-pki-root pki))))
     (bt:with-lock-held ((cluster-pki-lock pki))
+      (gr8s.apiserver::finish-pending-leaf-rotation certificate-path key-path)
       (cond
         ((and (probe-file certificate-path) (probe-file key-path))
-         (verify-node-server-certificate
-          (first (pure-tls:load-certificate-chain certificate-path))
-          (cluster-pki-ca-certificate pki)))
-        ((or (probe-file certificate-path) (probe-file key-path))
-         (pki-fail "incomplete-server-identity" "Control-plane TLS certificate/key pair is incomplete"))
+         (let ((leaf (first (pure-tls:load-certificate-chain certificate-path))))
+           (verify-node-server-certificate leaf (cluster-pki-trust-certificates pki))
+           (when (or (gr8s.apiserver::certificate-renewal-due-p
+                      certificate-path renew-within)
+                     (node-certificate-needs-active-ca-renewal-p pki leaf))
+             (gr8s.apiserver::issue-cluster-certificate
+              pki certificate-path key-path +node-server-common-name+ nil
+              :server t :dns-names (list +node-server-common-name+)
+              :rotate-key rotate-key))))
+        ((not (eql (not (null (probe-file certificate-path)))
+                   (not (null (probe-file key-path)))))
+         (if (probe-file certificate-path)
+             (pki-fail "incomplete-server-identity" "Control-plane TLS certificate exists without its key")
+             (gr8s.apiserver::issue-cluster-certificate
+              pki certificate-path key-path +node-server-common-name+ nil
+              :server t :dns-names (list +node-server-common-name+))))
         (t
-         (multiple-value-bind (private-key public-key) (ironclad:generate-key-pair :secp256r1)
-           (let* ((der
-                    (certificate-der
-                     (pure-tls/acme::encode-subject +pki-ca-common-name+)
-                     (pure-tls/acme::encode-subject +node-server-common-name+)
-                     (pure-tls/acme::encode-ec-public-key public-key)
-                     (list
-                      (pure-tls/acme::encode-critical-extension
-                       +oid-key-usage+ (pure-tls/acme::encode-bit-string #(#x80) 7))
-                      (pure-tls/acme::encode-extension
-                       +oid-extended-key-usage+
-                       (pure-tls/acme::encode-sequence
-                        (pure-tls/acme::encode-oid '(1 3 6 1 5 5 7 3 1))))
-                      (pure-tls/acme::encode-extension
-                       pure-tls/acme::*oid-subject-alt-name*
-                       (pure-tls/acme::encode-san-extension (list +node-server-common-name+))))
-                     (cluster-pki-ca-private-key pki)))
-                  (chain (concatenate 'string (pure-tls/acme::wrap-pem "CERTIFICATE" der)
-                                      (uiop:read-file-string (cluster-pki-ca-certificate-path pki)))))
-             (write-private-text-exclusively key-path
-                                            (pure-tls/acme::encode-ec-private-key-pem private-key))
-             (handler-case (write-private-text-exclusively certificate-path chain)
-               (error (condition)
-                 (ignore-errors (delete-file key-path))
-                 (error condition))))))))
-    (values certificate-path key-path)))
+         (gr8s.apiserver::issue-cluster-certificate
+          pki certificate-path key-path +node-server-common-name+ nil
+          :server t :dns-names (list +node-server-common-name+)
+          :rotate-key rotate-key)))
+    (values certificate-path key-path))))

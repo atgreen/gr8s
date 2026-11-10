@@ -130,3 +130,24 @@
                (gr8s::cluster-pki-ca-certificate pki)))
           (gr8s::ensure-node-server-credentials (gr8s:ensure-cluster-pki path))
           (is (string= original (uiop:read-file-string certificate))))))))
+
+(test control-plane-tls-identity-renews-under-the-promoted-ca
+  (with-temporary-store (store path)
+    (declare (ignore store))
+    (let* ((pki (gr8s:ensure-cluster-pki path))
+           (certificate (gr8s::ensure-node-server-credentials pki))
+           (old-leaf (first (pure-tls:load-certificate-chain certificate))))
+      (gr8s.server::prepare-cluster-ca-rotation path)
+      (gr8s.server::promote-cluster-ca-rotation path)
+      (let ((promoted (gr8s:ensure-cluster-pki path)))
+        (is-true
+         (gr8s.security::node-certificate-needs-active-ca-renewal-p promoted old-leaf))
+        (gr8s::ensure-node-server-credentials promoted)
+        (let* ((chain (pure-tls:load-certificate-chain certificate))
+               (renewed (first chain)))
+          (is (= 2 (length chain)))
+          (is-false
+           (gr8s.security::node-certificate-needs-active-ca-renewal-p promoted renewed))
+          (is-true
+           (gr8s::verify-node-server-certificate
+            renewed (gr8s::cluster-pki-trust-certificates promoted))))))))

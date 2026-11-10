@@ -1501,6 +1501,20 @@ candidates; agents still require their transactional handshake/probe gates."
     (let* ((hello (node-envelope-payload first :hello))
            (node-name (slot-value hello 'gr8s.node.v1::node-name))
            (authenticated (authenticate-node-peer (node-grpc-server-pki server) context node-name))
+           (certificate-request (slot-value hello 'gr8s.node.v1::certificate-request))
+           (renewed-node-certificate
+             (if (and authenticated
+                      (node-certificate-needs-active-ca-renewal-p
+                       (node-grpc-server-pki server) authenticated))
+                 (progn
+                   (unless (plusp (length certificate-request))
+                     (error "Node ~A must provide a certificate request to renew its retired-CA credential"
+                            node-name))
+                   (babel:string-to-octets
+                    (renew-authenticated-node-csr
+                     (node-grpc-server-pki server) node-name authenticated certificate-request)
+                    :encoding :utf-8))
+                 #()))
            (wireguard-public-key
              (slot-value hello 'gr8s.node.v1::wireguard-public-key))
            (wireguard-endpoints
@@ -1573,7 +1587,12 @@ candidates; agents still require their transactional handshake/probe gates."
                         session)))
            (heartbeat-interval
              (max 1 (floor (node-grpc-server-heartbeat-timeout-seconds server) 2))))
-      (declare (ignore authenticated ready-node))
+      (declare (ignore ready-node))
+      (when authenticated
+        (record-node-certificate-issuer
+         (node-grpc-server-store server) node-name
+         (node-certificate-issuer-fingerprint
+          (node-grpc-server-pki server) authenticated)))
       (unwind-protect
            (progn
              ;; Register and drain queued work atomically; hold the send lock
@@ -1597,7 +1616,17 @@ candidates; agents still require their transactional handshake/probe gates."
                                                 :heartbeat-interval-seconds heartbeat-interval
                                                :assigned-pod-cidr (node-record-pod-cidr node)
                                                :assigned-pod-cidrs
-                                               (coerce (node-record-all-pod-cidrs node) 'list))
+                                               (coerce (node-record-all-pod-cidrs node) 'list)
+                                               :cluster-ca-bundle
+                                               (if (node-grpc-server-pki server)
+                                                   (babel:string-to-octets
+                                                    (uiop:read-file-string
+                                                     (cluster-pki-ca-certificate-path
+                                                      (node-grpc-server-pki server)))
+                                                    :encoding :utf-8)
+                                                   #())
+                                               :renewed-node-certificate
+                                               renewed-node-certificate)
                           :sequence 1))
                  ;; Every session starts from a complete snapshot.
                  (ag-grpc:stream-send
@@ -2084,6 +2113,17 @@ candidates; agents still require their transactional handshake/probe gates."
         (ignore-errors (ag-grpc:server-stop grpc-server))
         (when relay-server
           (gr8s.network::stop-wireguard-relay-server relay-server)))))))
+
+(defun refresh-node-grpc-server-pki (server pki)
+  "Use PKI for new node TLS connections and authenticated session handling."
+  (ensure-node-server-credentials pki)
+  (let ((trust (pure-tls::make-trust-store
+                :certificates (cluster-pki-trust-certificates pki))))
+    (bt:with-lock-held ((node-grpc-server-lock server))
+      (setf (node-grpc-server-pki server) pki
+            (ag-grpc::server-tls-ca-certificate
+             (node-grpc-server-grpc-server server)) trust)))
+  server)
 
 (defun stop-node-grpc-server (server)
   "Stop SERVER: signal its loops to stop, stop the gRPC server, and join its monitor

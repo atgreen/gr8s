@@ -1410,6 +1410,8 @@ Watches are long-running requests, which that filter leaves alone."
         (cond
           ((equal path "/apis/gr8s.io/v1/patchrollouts")
            (serve-patch-request store method))
+          ((cl-ppcre:scan "^/apis/gr8s[.]io/v1/pkiauthorities/cluster(/.*)?$" path)
+           (gr8s.server::serve-pki-authority-request store path method))
           ((and store (eq method :get)
                 (cl-ppcre:scan "^/apis/gr8s[.]io/v1/namespaces/[^/]+/traces$" path))
            (serve-trace-websocket store reconciler

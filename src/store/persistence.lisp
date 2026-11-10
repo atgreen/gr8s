@@ -110,6 +110,9 @@
       (setf (gethash "readySince" object) (node-record-ready-since node)))
     (when (node-record-labels node) (setf (gethash "labels" object) (node-record-labels node)))
     (when (node-record-annotations node) (setf (gethash "annotations" object) (node-record-annotations node)))
+    (when (node-record-certificate-issuer-fingerprint node)
+      (setf (gethash "certificateIssuerFingerprint" object)
+            (node-record-certificate-issuer-fingerprint node)))
     (setf (gethash "resourceVersion" object) (node-record-resource-version node))
     (when (node-record-capacity node)
       (setf (gethash "capacity" object) (node-record-capacity node)))
@@ -178,6 +181,8 @@
                                      ready-since)
                       :labels (gethash "labels" object)
                       :annotations (gethash "annotations" object)
+                      :certificate-issuer-fingerprint
+                      (gethash "certificateIssuerFingerprint" object)
                       :resource-version (gethash "resourceVersion" object "1")
                       :capacity (gethash "capacity" object)
                       :allocatable (gethash "allocatable" object)
