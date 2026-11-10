@@ -1920,6 +1920,12 @@ unsupported kind, becomes a single failed response."
   (lock (bt:make-lock "gr8s interactive exec operation"))
   (output-window (bt:make-condition-variable :name "gr8s exec output window")))
 
+(defgeneric cleanup-node-operation (operation)
+  (:documentation "Release operation-kind-specific resources after its socket closes."))
+
+(defmethod cleanup-node-operation ((operation node-exec-operation))
+  (values))
+
 (defun find-node-exec-operation (node-runtime operation-id)
   "Return the live node operation registered under OPERATION-ID, or NIL. Holds the
 operations lock."
@@ -1976,6 +1982,7 @@ failed response carrying ERROR. Idempotent; a second call does nothing."
         (usocket:socket-shutdown (node-exec-operation-socket operation) :io))
       (ignore-errors
         (usocket:socket-close (node-exec-operation-socket operation)))
+      (cleanup-node-operation operation)
       (when emit-p
         (if error
             (emit-node-exec-response
@@ -2232,6 +2239,9 @@ errors becomes a failed response; an error on any other variant is re-signaled."
                gr8s.node.v1::+operationkind-operation_kind_port_forward+)
             (start-node-port-forward-operation node-runtime payload emit))
            ((= (slot-value payload 'gr8s.node.v1::kind)
+               gr8s.node.v1::+operationkind-operation_kind_slynk+)
+            (start-node-slynk-operation node-runtime payload emit))
+           ((= (slot-value payload 'gr8s.node.v1::kind)
                gr8s.node.v1::+operationkind-operation_kind_trace+)
             (start-node-trace-operation node-runtime payload emit))
            ;; Every exec streams through the runtime's streaming server, as kubelet's do: a
@@ -2261,6 +2271,10 @@ errors becomes a failed response; an error on any other variant is re-signaled."
                 :exit-code 1 :message "Interactive operation was not found")))
              ((typep operation 'node-port-forward-operation)
               (handler-case (write-node-port-forward-input operation payload)
+                (error (condition)
+                  (finish-node-exec-operation operation :error (princ-to-string condition)))))
+             ((typep operation 'node-slynk-operation)
+              (handler-case (write-node-slynk-input operation payload)
                 (error (condition)
                   (finish-node-exec-operation operation :error (princ-to-string condition)))))
              ((node-exec-operation-trace-p operation)
