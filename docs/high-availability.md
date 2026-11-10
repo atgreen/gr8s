@@ -58,18 +58,30 @@ PodCIDR. Events are deliberately local.
 
 ```sh
 # Found a cluster.
-gr8s serve --raft-init --raft-id cp1 --raft-port 7000 ...
+gr8s serve --raft-init --raft-id cp1 --raft-listen 10.0.0.1 --raft-port 7000 ...
 
 # On cp1, create a token for each new member. This prints its token and caPin.
 gr8s join-token --role control-plane --node-name cp2
 
 # Join through the member that created the token.
-gr8s serve --raft-join 10.0.0.1:7000 --raft-id cp2 --raft-port 7000 \
+gr8s serve --raft-join 10.0.0.1:7000 --raft-id cp2 \
+  --raft-listen 10.0.0.2 --raft-port 7000 \
   --raft-node-name cp2 --raft-token "$TOKEN" --raft-ca-pin "$CA_PIN" ...
 
-# A headless quorum tie-breaker (no API, no workloads).
-gr8s witness --join 10.0.0.1:7000 --node-name arb --token "$TOKEN" --ca-pin "$CA_PIN"
+# On cp1, create a separate witness token. Use its token and caPin below.
+gr8s join-token --role witness --node-name arb
+
+# On arb, run a headless quorum tie-breaker (no API, no workloads).
+gr8s witness --join 10.0.0.1:7000 --node-name arb \
+  --listen 10.0.0.3 --port 7000 --state-directory /var/lib/gr8s-witness \
+  --token "$WITNESS_TOKEN" --ca-pin "$CA_PIN"
 ```
+
+The addresses above are examples; use each machine's reachable address and allow
+member-to-member traffic on the chosen Raft ports. Run token creation against the
+same state directory as the issuing member (add `--state-directory PATH` if it
+uses a nondefault directory). Each token is bound to its role and node name and
+can be used only once.
 
 Requested voters first join as learners. Existing voters keep their quorum while
 the learner installs application state and catches up. The leader automatically
@@ -82,7 +94,9 @@ HA is **opt-in** for a fresh state directory. Once HA intent is persisted,
 restart with the appropriate `--raft-init` or `--raft-join` options; omitting them
 is refused before application initialization.
 
-The production Raft port defaults to **7000**. Use `--raft-port` to select another
+The production Raft port defaults to **7000** and the listening address defaults
+to loopback. Set `--raft-listen` for a cluster spanning machines.
+Use `--raft-port` to select another
 port, and `--raft-listen` to select the reachable member address. The address
 must not be a wildcard bind address. Each HA state directory records its member
 ID, Raft address and port, and API URL in `metadata/server-ha-endpoint.json`
@@ -122,7 +136,7 @@ restores voting state without replicating application payloads. State ownership,
 endpoint checks and legacy-state refusal are described in
 [Raft member recovery](raft-member-recovery.md).
 
-Node writes now stage private records, defer file changes, and restore committed
+Node writes stage private records, defer file changes, and restore committed
 pointers, revisions and watch journals before proposing to Raft. Committed deltas
 publish Node watch transitions on every replica; lease-only renewals do not create
 client events. Runtime-down reports also replicate. Enrollment retries finish a
@@ -143,8 +157,9 @@ These transactions do not provide cross-resource atomicity.
 The Raft core preserves its vote when stepping down within the same term, and
 persists new terms and votes before publishing them in memory. A failed storage
 write leaves the preceding term, vote and role intact and sends no vote grant or
-election request. This primitive guarantee does not supply the missing production
-recovery integration.
+election request. Production startup also restores durable state before serving,
+as described above; these primitive checks complement the production recovery
+validation.
 
 Replication retries use bounded batches: at most 64 entries and a conservative
 1 MiB command-weight budget. A single oversized existing command travels alone.
