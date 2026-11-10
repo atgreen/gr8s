@@ -23,9 +23,10 @@ previous CIDRs while old endpoints may still have live flows."
         (funcall update map (netpol-cidr-lpm-key cidr) present)
         (incf count)))))
 
-(defun service-nat-identity-rows (record)
-  "Encode the trusted primary/return-address pair for one Pod incarnation.
-The 128-bit token changes with the authenticated node or sandbox owner.
+(defun service-nat-identity-pair
+    (node-id sandbox-id interface-name primary alias)
+  "Encode both owner rows from one Pod incarnation. The local agent uses its
+trusted IPAM lease; the replicated inventory uses an authenticated Pod claim.
 Only the enabled bit is staged: complete history and receiver readiness need
 separate cluster-wide publication fences before the v2 graph is attached."
   (flet ((address-key (address)
@@ -34,12 +35,7 @@ separate cluster-wide publication fences before the v2 graph is attached."
                          :initial-contents
                          (list (ldb (byte 8 24) number) (ldb (byte 8 16) number)
                                (ldb (byte 8 8) number) (ldb (byte 8 0) number))))))
-   (let* ((primary (service-translation-string record "podIP"))
-         (alias (service-translation-string record "address"))
-         (node-id (service-translation-string record "nodeID"))
-         (sandbox-id (service-translation-string record "sandboxID"))
-         (interface-name (service-translation-string record "interfaceName"))
-         (primary-key (address-key primary))
+   (let* ((primary-key (address-key primary))
          (alias-key (address-key alias))
          (epoch (service-translation-incarnation-token
                  node-id sandbox-id interface-name primary alias))
@@ -52,15 +48,142 @@ separate cluster-wide publication fences before the v2 graph is attached."
                           alias-key flags epoch primary-key (service-lb-bytes role 4))))
       (list (cons primary-key (value 1)) (cons alias-key (value 2)))))))
 
+(defun service-nat-identity-rows (record)
+  "Encode the authenticated primary/alias pair from replicated inventory."
+  (service-nat-identity-pair
+   (service-translation-string record "nodeID")
+   (service-translation-string record "sandboxID")
+   (service-translation-string record "interfaceName")
+   (service-translation-string record "podIP")
+   (service-translation-string record "address")))
+
+(defun cni-service-nat-owner-map-path (configuration)
+  (unless (eq (cni-service-profile configuration) :v2)
+    (invalid-cni "local v2 Service owner map requires the v2 profile"))
+  (namestring (merge-pathnames
+               "gr8s_nat_id_v2"
+               (uiop:ensure-directory-pathname
+                (cni-configuration-service-packet-root configuration)))))
+
+(defun service-nat-owner-row-matches-p (actual expected)
+  "Accept the two readiness bits added after publication, but require the
+same enabled ABI-v2 owner, address pair, epoch, and role."
+  (and (typep actual '(simple-array (unsigned-byte 8) (*)))
+       (= 32 (length actual))
+       (= #x20001 (logand (netlink-read-integer actual 4 4) #xfffffff9))
+       (equalp (subseq actual 0 4) (subseq expected 0 4))
+       (equalp (subseq actual 8 32) (subseq expected 8 32))))
+
+(defvar *service-nat-owner-publication-lock*
+  (bt:make-lock "gr8s v2 Service owner publication")
+  "Serialize local and replicated owner updates with future readiness fences.")
+
+(defun publish-service-nat-owner-pair
+    (map rows &key (lookup #'whistler/loader:map-lookup)
+                   (update #'whistler/loader:map-update)
+                   (preserve-readiness t))
+  "Preserve readiness only when both pinned rows still name this incarnation.
+Replacement, a missing half, or an invalid ABI clears readiness on both rows.
+All publishers and future readiness-bit writers must hold this lock."
+  (bt:with-lock-held (*service-nat-owner-publication-lock*)
+    (let* ((old (mapcar (lambda (row) (funcall lookup map (car row))) rows))
+           (same-pair (and preserve-readiness
+                           (every #'service-nat-owner-row-matches-p old
+                                  (mapcar #'cdr rows)))))
+      ;; Publish alias first so a newly visible primary cannot rely on an old
+      ;; alias row. A transient mismatch drops packets in the v2 graph.
+      (dolist (row (reverse rows))
+        (let* ((index (if (equalp (car row) (caar rows)) 0 1))
+               (old-value (nth index old))
+               (value (copy-seq (cdr row)))
+               (readiness (if same-pair
+                              (logand (netlink-read-integer old-value 4 4) #x6)
+                              0)))
+          (replace value (service-lb-bytes (logior #x20001 readiness) 4) :start1 4)
+          (funcall update map (car row) value)))
+      2)))
+
+(defun clear-service-nat-owner-readiness
+    (map &key (next-key #'whistler/loader:map-get-next-key)
+              (lookup #'whistler/loader:map-lookup)
+              (update #'whistler/loader:map-update))
+  "Clear readiness on every retained owner row before a restarted node serves
+traffic. The owner map may survive while a history or receiver map is lost."
+  (bt:with-lock-held (*service-nat-owner-publication-lock*)
+    (let ((count 0) (keys nil))
+      (loop for key = (funcall next-key map nil) then (funcall next-key map key)
+            while key do (push (copy-seq key) keys))
+      (dolist (key keys)
+        (let ((value (funcall lookup map key)))
+          (when (and (typep value '(simple-array (unsigned-byte 8) (32)))
+                     (/= (logand (netlink-read-integer value 4 4) #x6) 0))
+            (let ((cleared (copy-seq value)))
+              (replace cleared
+                       (service-lb-bytes
+                        (logand (netlink-read-integer value 4 4) #xfffffff9) 4)
+                       :start1 4)
+              (funcall update map key cleared)
+              (incf count)))))
+      count)))
+
+(defun publish-cni-service-nat-owner
+    (configuration context addresses alias
+     &key (open #'whistler/loader:open-pinned-object)
+          (map-info #'cni-policy-map-info)
+          (lookup #'whistler/loader:map-lookup)
+          (update #'whistler/loader:map-update)
+          (close #'sb-posix:close))
+  "Stage this node's paired owner rows in the schema-checked shared v2 map.
+The return route must already exist. A failed or partial update stops CNI ADD;
+the attachment fence keeps incomplete owner state out of the live datapath."
+  (let* ((primary (find-if-not (lambda (address) (find #\: address)) addresses))
+         (rows (service-nat-identity-pair
+                (cni-configuration-service-node-id configuration)
+                (cni-context-container-id context) (cni-context-interface-name context)
+                primary alias))
+         (path (cni-service-nat-owner-map-path configuration))
+         (fd (funcall open path)))
+    (unwind-protect
+         (let ((map (funcall map-info fd "gr8s_nat_id_v2" :profile :v2)))
+           (publish-service-nat-owner-pair map rows :lookup lookup :update update)
+           rows)
+      (funcall close fd))))
+
+(defun check-cni-service-nat-owner
+    (configuration context addresses alias
+     &key (open #'whistler/loader:open-pinned-object)
+          (map-info #'cni-policy-map-info)
+          (lookup #'whistler/loader:map-lookup)
+          (close #'sb-posix:close))
+  "CHECK rejects a missing, disabled, mismatched, or stale owner pair before
+reporting the retained v2 endpoint healthy. It never creates owner rows."
+  (let* ((primary (find-if-not (lambda (address) (find #\: address)) addresses))
+         (rows (service-nat-identity-pair
+                (cni-configuration-service-node-id configuration)
+                (cni-context-container-id context) (cni-context-interface-name context)
+                primary alias))
+         (fd (funcall open (cni-service-nat-owner-map-path configuration))))
+    (unwind-protect
+         (let ((map (funcall map-info fd "gr8s_nat_id_v2" :profile :v2)))
+           (dolist (row rows)
+             (unless (service-nat-owner-row-matches-p
+                      (funcall lookup map (car row)) (cdr row))
+               (invalid-cni "v2 Service endpoint owner pair is missing or stale"))))
+      (funcall close fd)))
+  nil)
+
 (defun publish-service-nat-identities
-    (map records &key (update #'whistler/loader:map-update))
+    (map records &key (lookup #'whistler/loader:map-lookup)
+                      (update #'whistler/loader:map-update)
+                      (preserve-readiness t))
   "Stage paired v2 identity rows from the validated replicated inventory.
 Retirement and complete-history/receiver bits are left to the activation fence."
   (let ((count 0))
     (loop for record across records do
-      (dolist (row (service-nat-identity-rows record))
-        (funcall update map (car row) (cdr row))
-        (incf count)))
+      (incf count (publish-service-nat-owner-pair
+                   map (service-nat-identity-rows record)
+                   :lookup lookup :update update
+                   :preserve-readiness preserve-readiness)))
     count))
 
 (defparameter *service-nat-policy-key-form*

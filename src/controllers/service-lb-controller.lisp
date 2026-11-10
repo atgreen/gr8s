@@ -408,3 +408,30 @@ withdrawn VIPs.  A plan identical to the last applied one writes nothing."
                   (service-lb-controller-applied-slot-count controller) slot-count
                   (service-lb-controller-applied-signature controller) signature)))))))
   nil)
+
+(defun service-lb-risk-published-p
+    (controller &key (lookup #'whistler/loader:map-lookup)
+                     (list-services
+                      (lambda () (list-core-resources
+                                  (service-lb-controller-store controller) "services")))
+                     (risk-backends-of
+                      (lambda (service port)
+                        (service-risk-raw-backends
+                         (service-lb-controller-store controller) service port))))
+  "Prove the current local discovery projection's risk keys exist in the
+pinned v2 map after a successful convergence. This is a node-local proof;
+cluster-wide receiver acknowledgement is a separate activation requirement."
+  (bt:with-lock-held ((gr8s.network:service-lb-dataplane-lock
+                       (service-lb-controller-dataplane controller)))
+    (let* ((map (service-lb-map (service-lb-controller-dataplane controller)
+                                "gr8s_nat_risk_v2"))
+           (signature (service-lb-controller-applied-signature controller))
+           (required (and map signature
+                          (service-risk-keys (funcall list-services) risk-backends-of))))
+      (and map signature
+           (equalp required (fourth signature))
+           (every (lambda (key)
+                    (let ((value (funcall lookup map key)))
+                      (and (typep value '(simple-array (unsigned-byte 8) (4)))
+                           (plusp (netlink-read-integer value 0 4)))))
+                  required)))))

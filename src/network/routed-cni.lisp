@@ -180,13 +180,16 @@ partial failure retains the IPAM lease until DEL removes the endpoint."
      "dns" (json-object "nameservers" (vector dns-address)))))
 
 (defun make-routed-cni-operations
-    (ipam &key node-id (mtu 1450) (dns-address +dns-pod-server-address+)
+    (ipam &key node-id (service-risk-ready-p (constantly nil))
+            (mtu 1450) (dns-address +dns-pod-server-address+)
             (install-link (lambda (context address)
                             (configure-routed-veth context address :mtu mtu)))
             (check-link #'check-routed-cni-link)
             (remove-link #'remove-routed-cni-link)
             (install-service-return #'install-routed-service-return-path)
             (check-service-return #'check-routed-service-return-path)
+            (publish-service-owner #'publish-cni-service-nat-owner)
+            (check-service-owner #'check-cni-service-nat-owner)
             (policy (make-cni-operations)))
   "Bind a CNI lifecycle to agent-owned IPAM; never trust client IPAM settings."
   (make-cni-operations
@@ -216,9 +219,20 @@ partial failure retains the IPAM lease until DEL removes the endpoint."
              (cni-configuration-endpoint-addresses configuration) addresses
              (cni-configuration-service-node-id configuration) node-id
              (cni-configuration-service-return-address configuration) return-address)
-       (funcall (cni-operations-add policy)
-                configuration context map-path link-path)
-       (when return-address (funcall install-service-return context return-address))
+       (if (eq (cni-service-profile configuration) :v2)
+           (progn
+             (unless (funcall service-risk-ready-p)
+               (invalid-cni "v2 Service risk inventory is not published for the current snapshot"))
+             (unless return-address
+               (invalid-cni "v2 Service endpoint has no private return address"))
+             (funcall install-service-return context return-address)
+             (funcall publish-service-owner configuration context addresses return-address)
+             (funcall (cni-operations-add policy)
+                      configuration context map-path link-path))
+           (progn
+             (funcall (cni-operations-add policy)
+                      configuration context map-path link-path)
+             (when return-address (funcall install-service-return context return-address))))
        (setf (cni-configuration-previous-result configuration)
              (routed-cni-result configuration context host addresses dns-address))))
    :check
@@ -232,13 +246,25 @@ partial failure retains the IPAM lease until DEL removes the endpoint."
              (service-snat-address ipam (cni-context-container-id context)
                                    (cni-context-interface-name context)))
        (funcall check-link context addresses))
-     (funcall (cni-operations-check policy)
-              configuration context map-path link-path)
      ;; CHECK does not invent leases for retained endpoints from older versions.
      ;; Such endpoints are not ready for future source translation until ADD.
      (let ((address (service-snat-address ipam (cni-context-container-id context)
                                              (cni-context-interface-name context))))
-       (when address (funcall check-service-return context address))))
+       (if (eq (cni-service-profile configuration) :v2)
+           (progn
+             (unless (funcall service-risk-ready-p)
+               (invalid-cni "v2 Service risk inventory is not published for the current snapshot"))
+             (unless address
+               (invalid-cni "v2 Service endpoint has no private return address"))
+             (funcall check-service-return context address)
+             (funcall check-service-owner configuration context
+                      (cni-configuration-endpoint-addresses configuration) address)
+             (funcall (cni-operations-check policy)
+                      configuration context map-path link-path))
+           (progn
+             (funcall (cni-operations-check policy)
+                      configuration context map-path link-path)
+             (when address (funcall check-service-return context address))))))
    :delete
    (lambda (configuration context map-path link-path directory)
      (funcall (cni-operations-delete policy)
