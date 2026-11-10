@@ -509,6 +509,14 @@ invokes GC itself. Production recovery retains its normal pressure collection
 and application-replacement collection policies. Running the native executable
 directly covers only the first phase.
 
+The [native retention validation](compaction-native-validation-2026-11-10.json)
+passes this workload and both recovery phases at a 384 MiB dynamic heap limit:
+93 checkpoints, sampled WAL below 3 MiB, at most two retained artifacts, and
+full watch-history retention before recovery. The cold input includes a
+130 MB checkpoint followed by a 59 MB journal. This proves the recorded
+single-member memory/recovery path; multi-member capture availability remains
+unverified, and automatic compaction remains disabled by default.
+
 History's byte estimate includes array headers and whole GC pages occupied by
 large strings. On this SBCL build, a 64 KiB base string occupies three 32 KiB
 pages, so payload length alone substantially understates its cost. The 96 MiB
