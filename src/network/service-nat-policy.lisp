@@ -103,6 +103,21 @@ All publishers and future readiness-bit writers must hold this lock."
           (funcall update map (car row) value)))
       2)))
 
+(defun withdraw-service-nat-owner-pair
+    (map rows &key (lookup #'whistler/loader:map-lookup)
+                   (update #'whistler/loader:map-update))
+  "Disable this incarnation's rows before its Pod lease and link are removed.
+Keep tombstones for future flow-aware GC; never alter a replacement owner."
+  (bt:with-lock-held (*service-nat-owner-publication-lock*)
+    (let ((count 0))
+      (dolist (row rows count)
+        (let ((actual (funcall lookup map (car row))))
+          (when (service-nat-owner-row-matches-p actual (cdr row))
+            (let ((disabled (copy-seq actual)))
+              (replace disabled (service-lb-bytes #x20000 4) :start1 4)
+              (funcall update map (car row) disabled)
+              (incf count))))))))
+
 (defun clear-service-nat-owner-readiness
     (map &key (next-key #'whistler/loader:map-get-next-key)
               (lookup #'whistler/loader:map-lookup)
@@ -149,6 +164,31 @@ the attachment fence keeps incomplete owner state out of the live datapath."
            rows)
       (funcall close fd))))
 
+(defun withdraw-cni-service-nat-owner
+    (configuration context addresses alias
+     &key (path-exists-p #'probe-file)
+          (open #'whistler/loader:open-pinned-object)
+          (map-info #'cni-policy-map-info)
+          (lookup #'whistler/loader:map-lookup)
+          (update #'whistler/loader:map-update)
+          (close #'sb-posix:close))
+  "Disable a CNI-owned v2 pair on DEL, including a partially failed ADD.
+Missing pins are harmless; matching rows are left as disabled tombstones."
+  (let ((path (cni-service-nat-owner-map-path configuration)))
+    (when (funcall path-exists-p path)
+      (let ((rows (service-nat-identity-pair
+                   (cni-configuration-service-node-id configuration)
+                   (cni-context-container-id context) (cni-context-interface-name context)
+                   (find-if-not (lambda (address) (find #\: address)) addresses)
+                   alias))
+            (fd (funcall open path)))
+        (unwind-protect
+             (withdraw-service-nat-owner-pair
+              (funcall map-info fd "gr8s_nat_id_v2" :profile :v2) rows
+              :lookup lookup :update update)
+          (funcall close fd)))))
+  nil)
+
 (defun check-cni-service-nat-owner
     (configuration context addresses alias
      &key (open #'whistler/loader:open-pinned-object)
@@ -187,16 +227,35 @@ Retirement and complete-history/receiver bits are left to the activation fence."
     count))
 
 (defun service-nat-identities-published-p
-    (map records &key (lookup #'whistler/loader:map-lookup))
-  "Read back every trusted owner pair after publication. A missing half, an
-old incarnation, or a disabled row withholds the node's snapshot ACK."
+    (map records &key (lookup #'whistler/loader:map-lookup)
+                      (next-key #'whistler/loader:map-get-next-key))
+  "Read back exactly the trusted owner inventory before a snapshot ACK.
+Missing, stale, disabled expected rows or extra enabled rows keep the receiver
+unready. Disabled tombstones remain until flow-aware reclamation."
   (and map (vectorp records) (not (stringp records))
        (bt:with-lock-held (*service-nat-owner-publication-lock*)
-         (loop for record across records
-               always (every (lambda (row)
-                               (service-nat-owner-row-matches-p
-                                (funcall lookup map (car row)) (cdr row)))
-                             (service-nat-identity-rows record))))))
+         ;; This lock serializes agent writers. A separate cross-process fence
+         ;; is required before CNI can publish receiver readiness to live Pods.
+         (let* ((rows (loop for record across records
+                            append (service-nat-identity-rows record)))
+                (expected (make-hash-table :test #'equalp))
+                (seen (make-hash-table :test #'equalp)))
+           (dolist (row rows) (setf (gethash (car row) expected) t))
+           (and (= (length rows) (hash-table-count expected))
+                (every (lambda (row)
+                         (service-nat-owner-row-matches-p
+                          (funcall lookup map (car row)) (cdr row)))
+                       rows)
+                (loop for key = (funcall next-key map nil)
+                        then (funcall next-key map key)
+                      while key
+                      always (if (gethash key expected)
+                                 (and (not (gethash key seen))
+                                      (setf (gethash key seen) t))
+                                 (let ((value (funcall lookup map key)))
+                                   (and (typep value '(simple-array (unsigned-byte 8) (32)))
+                                        (= #x20000 (netlink-read-integer value 4 4))))))
+                (= (hash-table-count seen) (hash-table-count expected)))))))
 
 (defparameter *service-nat-policy-key-form*
   '(whistler::defstruct whistler::netpol-flow-key-v2

@@ -190,6 +190,7 @@ partial failure retains the IPAM lease until DEL removes the endpoint."
             (check-service-return #'check-routed-service-return-path)
             (publish-service-owner #'publish-cni-service-nat-owner)
             (check-service-owner #'check-cni-service-nat-owner)
+            (withdraw-service-owner #'withdraw-cni-service-nat-owner)
             (policy (make-cni-operations)))
   "Bind a CNI lifecycle to agent-owned IPAM; never trust client IPAM settings."
   (make-cni-operations
@@ -269,6 +270,16 @@ partial failure retains the IPAM lease until DEL removes the endpoint."
    (lambda (configuration context map-path link-path directory)
      (funcall (cni-operations-delete policy)
               configuration context map-path link-path directory)
+     (when (eq (cni-service-profile configuration) :v2)
+       (let ((addresses (handler-case
+                            (check-pod-addresses ipam (cni-context-container-id context)
+                                                 (cni-context-interface-name context))
+                          (cni-error () nil)))
+             (alias (service-snat-address ipam (cni-context-container-id context)
+                                          (cni-context-interface-name context))))
+         (when (and addresses alias)
+           (setf (cni-configuration-service-node-id configuration) node-id)
+           (funcall withdraw-service-owner configuration context addresses alias))))
      (funcall remove-link context)
      (release-pod-address ipam (cni-context-container-id context)
                           (cni-context-interface-name context)))

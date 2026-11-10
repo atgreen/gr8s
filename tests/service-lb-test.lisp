@@ -313,6 +313,13 @@
          (values (make-hash-table :test #'equalp))
          (lookup (lambda (map key)
                    (declare (ignore map)) (gethash key values)))
+         (next-key (lambda (map previous)
+                     (declare (ignore map))
+                     (let ((keys (loop for key being the hash-keys of values
+                                       collect key)))
+                       (if previous
+                           (second (member previous keys :test #'equalp))
+                           (first keys)))))
          (runtime (gr8s.agent::%make-node-runtime
                    :service-lb
                    (gr8s::%make-service-lb-dataplane
@@ -321,27 +328,68 @@
                    :network (gr8s::json-object "serviceTranslations" (vector record))
                    :received-revision 4 :service-risk-ready-revision 4)))
     (is-false (gr8s.network::service-nat-identities-published-p
-               :map (vector record) :lookup lookup))
+               :map (vector record) :lookup lookup :next-key next-key))
     (signals gr8s::node-snapshot-incomplete
       (gr8s.agent::ensure-node-snapshot-service-risk-ready
-       runtime :owner-lookup lookup))
+       runtime :owner-lookup lookup :owner-next-key next-key))
     (dolist (row rows)
       (setf (gethash (car row) values) (copy-seq (cdr row))))
     (is-true (gr8s.network::service-nat-identities-published-p
-              :map (vector record) :lookup lookup))
+              :map (vector record) :lookup lookup :next-key next-key))
     (is (null (gr8s.agent::ensure-node-snapshot-service-risk-ready
-               runtime :owner-lookup lookup)))
+               runtime :owner-lookup lookup :owner-next-key next-key)))
     (remhash (caar (last rows)) values)
     (is-false (gr8s.network::service-nat-identities-published-p
-               :map (vector record) :lookup lookup))
+               :map (vector record) :lookup lookup :next-key next-key))
     (signals gr8s::node-snapshot-incomplete
       (gr8s.agent::ensure-node-snapshot-service-risk-ready
-       runtime :owner-lookup lookup))
+       runtime :owner-lookup lookup :owner-next-key next-key))
     (setf (gethash (caar (last rows)) values) (copy-seq (cdar (last rows))))
     (let ((stale (gethash (caar rows) values)))
       (setf (aref stale 8) (logxor (aref stale 8) 1)))
     (is-false (gr8s.network::service-nat-identities-published-p
-               :map (vector record) :lookup lookup))))
+               :map (vector record) :lookup lookup :next-key next-key))
+    (setf (gethash (caar rows) values) (copy-seq (cdar rows)))
+    (let ((extra (make-array 4 :element-type '(unsigned-byte 8)
+                             :initial-contents '(10 88 1 3))))
+      (setf (gethash extra values)
+          (make-array 32 :element-type '(unsigned-byte 8) :initial-element 0))
+      (is-false (gr8s.network::service-nat-identities-published-p
+                 :map (vector record) :lookup lookup :next-key next-key))
+      (let ((tombstone (copy-seq (cdr (first rows)))))
+        (replace tombstone (gr8s::service-lb-bytes #x20000 4) :start1 4)
+        (setf (gethash extra values) tombstone)
+        (is-true (gr8s.network::service-nat-identities-published-p
+                  :map (vector record) :lookup lookup :next-key next-key)))
+      (clrhash values)
+      (setf (gethash extra values)
+            (make-array 32 :element-type '(unsigned-byte 8) :initial-element 0))
+      (is-false (gr8s.network::service-nat-identities-published-p
+                 :map #() :lookup lookup :next-key next-key))
+      (clrhash values)
+      (is-true (gr8s.network::service-nat-identities-published-p
+                :map #() :lookup lookup :next-key next-key)))))
+
+(test v2-owner-withdraw-disables-only-the-matching-incarnation
+  (let* ((rows (gr8s.network::service-nat-identity-pair
+                "node-1" "sandbox-1" "eth0" "10.88.1.2" "10.88.1.9"))
+         (other (gr8s.network::service-nat-identity-pair
+                 "node-1" "sandbox-2" "eth0" "10.88.1.2" "10.88.1.9"))
+         (values (make-hash-table :test #'equalp))
+         (lookup (lambda (map key) (declare (ignore map)) (gethash key values)))
+         (update (lambda (map key value) (declare (ignore map))
+                   (setf (gethash key values) value))))
+    (dolist (row rows) (setf (gethash (car row) values) (copy-seq (cdr row))))
+    (is (= 2 (gr8s.network::withdraw-service-nat-owner-pair
+               :map rows :lookup lookup :update update)))
+    (is (every (lambda (row) (= #x20000 (gr8s::netlink-read-integer
+                                         (gethash (car row) values) 4 4))) rows))
+    (is (= 0 (gr8s.network::withdraw-service-nat-owner-pair
+               :map rows :lookup lookup :update update)))
+    (dolist (row other) (setf (gethash (car row) values) (copy-seq (cdr row))))
+    (is (= 0 (gr8s.network::withdraw-service-nat-owner-pair
+               :map rows :lookup lookup :update update)))
+    (is (every (lambda (row) (equalp (cdr row) (gethash (car row) values))) other))))
 
 (test cni-v2-owner-publication-writes-the-replicated-pair-before-attachment
   (let* ((configuration (gr8s::make-cni-configuration
@@ -1142,14 +1190,16 @@
                    :network (gr8s::json-object "serviceTranslations" #())
                    :service-risk-ready-revision 4)))
     (is-true (gr8s.agent::node-runtime-local-risk-ready-p runtime))
-    (is (null (gr8s.agent::ensure-node-snapshot-service-risk-ready runtime)))
+    (is (null (gr8s.agent::ensure-node-snapshot-service-risk-ready
+               runtime :owner-next-key (constantly nil))))
     (setf (gr8s.agent::node-runtime-received-revision runtime) 5)
     (is-false (gr8s.agent::node-runtime-local-risk-ready-p runtime))
     (signals gr8s::node-snapshot-incomplete
       (gr8s.agent::ensure-node-snapshot-service-risk-ready runtime))
     (setf (gr8s.agent::node-runtime-service-risk-ready-revision runtime) 5)
     (is-true (gr8s.agent::node-runtime-local-risk-ready-p runtime))
-    (is (null (gr8s.agent::ensure-node-snapshot-service-risk-ready runtime)))
+    (is (null (gr8s.agent::ensure-node-snapshot-service-risk-ready
+               runtime :owner-next-key (constantly nil))))
     (setf (gr8s.agent::node-runtime-service-lb runtime)
           (gr8s::%make-service-lb-dataplane
            :maps (list (fake-lb-map "gr8s_nat_risk_v2" 4))))

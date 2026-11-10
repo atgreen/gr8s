@@ -113,6 +113,7 @@ def main():
         netns_path = f"/var/run/netns/{netns_name}"
         subprocess.run(["ip", "netns", "add", netns_name], check=True)
         plugin = environment = None
+        delete_answer = None
         try:
             conflist = json.loads((cluster.root /
                                    "state/agent/containerd/cni/net.d/10-gr8s.conflist").read_text())
@@ -135,9 +136,19 @@ def main():
         finally:
             if plugin is not None and environment is not None:
                 environment["CNI_COMMAND"] = "DEL"
-                subprocess.run([str(args.gr8s)], input=json.dumps(plugin), env=environment,
-                               capture_output=True, text=True, check=False)
+                delete_answer = subprocess.run([str(args.gr8s)], input=json.dumps(plugin),
+                                               env=environment, capture_output=True,
+                                               text=True, check=False)
             subprocess.run(["ip", "netns", "del", netns_name], check=False)
+        if delete_answer is None or delete_answer.returncode != 0:
+            raise RuntimeError("v2 CNI DEL failed after partial ADD: "
+                               + (delete_answer.stdout + delete_answer.stderr if delete_answer else "not run"))
+        cni_owner = cluster.root / "state/agent/containerd/bpf/service-lb/gr8s_nat_id_v2"
+        cni_keys = [probes[0].packed, (probes[0] + 1).packed]
+        cni_rows = guest.read_pinned_values(cni_owner, cni_keys, 32)
+        if [struct.unpack_from("<I", row, 4)[0] for row in cni_rows] != [0x20000] * 2:
+            raise RuntimeError("v2 CNI DEL left an enabled owner after partial ADD")
+        report["partialAddOwnerRetiredOnDel"] = True
         report.update({"backend": backend, "service": vip, "riskKeys": [key.hex() for key in keys],
                        "riskMap": str(risk), "managedPodCIDRs": cidrs,
                        "managedPodMap": str(managed), "source": "unready manual EndpointSlice"})
@@ -185,9 +196,32 @@ def main():
             raise RuntimeError("retained owner map lost readiness test values before restart")
         cluster.start()
         traffic.wait_for("v2 readiness cleared after restart", 120, identities_published)
+        def selectors_withheld():
+            for key in selection_keys:
+                try:
+                    guest.read_pinned_values(selection, [key], 16)
+                except OSError as error:
+                    if error.errno == errno.ENOENT:
+                        continue
+                    raise
+                return False
+            return True
+
+        # The restored synthetic owner is absent from the server's trusted
+        # inventory. Exact readback must keep the restarted node risk-only.
+        traffic.wait_for("v2 selectors withheld for extra owner", 120, selectors_withheld)
+        time.sleep(3)
+        if not selectors_withheld():
+            raise RuntimeError("v2 grant reappeared with an untrusted retained owner")
+        report["ownerKeysBeforeRetirement"] = [key.hex() for key in guest.list_pinned_keys(identity_map)]
+        guest.delete_pinned_keys(identity_map, keys)
+        traffic.wait_for("v2 selectors restored after stale owner retirement",
+                         60, selections_published)
         report.update({"restoredIdentityMap": str(identity_map),
                        "restoredPrimary": str(primary), "restoredAlias": str(alias),
-                       "readinessClearedAfterRestart": True})
+                       "readinessClearedAfterRestart": True,
+                       "extraOwnerWithheldGrant": True,
+                       "grantRestoredAfterOwnerRetirement": True})
         print(json.dumps(report, indent=2))
     finally:
         cluster.stop()
