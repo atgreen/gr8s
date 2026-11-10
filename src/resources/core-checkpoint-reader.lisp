@@ -38,6 +38,47 @@
              (return))
             (t (error "Incomplete core checkpoint object"))))))))
 
+(defun copy-core-checkpoint-value (parser writer)
+  "Copy one JSON value with bounded token/depth state, without collecting containers."
+  (loop with depth = 0 do
+    (maybe-collect-core-recovery-garbage)
+    (multiple-value-bind (token value) (com.inuoe.jzon:parse-next parser)
+      (case token
+        ((:begin-array :begin-object)
+         (when (> (incf depth) 127) (error "Core checkpoint nesting exceeds limit"))
+         (if (eq token :begin-array) (com.inuoe.jzon:begin-array writer)
+             (com.inuoe.jzon:begin-object writer)))
+        (:object-key (com.inuoe.jzon:write-key writer value))
+        (:value
+         (com.inuoe.jzon:write-value writer value)
+         (when (zerop depth) (return)))
+        ((:end-array :end-object)
+         (when (zerop depth) (error "Invalid core checkpoint value boundary"))
+         (if (eq token :end-array) (com.inuoe.jzon:end-array writer)
+             (com.inuoe.jzon:end-object writer))
+         (when (zerop (decf depth)) (return)))
+        (t (error "Truncated core checkpoint value"))))))
+
+(defun write-core-checkpoint-encryption-metadata (input output config)
+  "Replace only encryption metadata, preserving all collections and unknown fields.
+Duplicate known fields, malformed JSON and trailing content abort publication."
+  (com.inuoe.jzon:with-writer (writer :stream output)
+    (let ((seen nil))
+      (com.inuoe.jzon:begin-object writer)
+      (map-core-checkpoint-fields
+       input
+       (lambda (parser key)
+         (com.inuoe.jzon:write-key writer key)
+         (if (equal key "secretsEncryption")
+             (progn (skip-core-checkpoint-value parser)
+                    (com.inuoe.jzon:write-value writer config)
+                    (setf seen t))
+             (copy-core-checkpoint-value parser writer))))
+      (unless seen
+        (com.inuoe.jzon:write-key writer "secretsEncryption")
+        (com.inuoe.jzon:write-value writer config))
+      (com.inuoe.jzon:end-object writer))))
+
 (defun map-core-checkpoint-array (parser visitor)
   (unless (eq :begin-array (com.inuoe.jzon:parse-next parser))
     (error "Core checkpoint collection must be an array"))

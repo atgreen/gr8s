@@ -168,30 +168,36 @@ Do not retain a second transformed vector of payloads during checkpoint load."
                                          "salt" (ag-grpc:base64-encode salt))))))
 
 (defun rewrite-secret-encryption-checkpoint-unlocked (store config)
-  (setf (pod-store-secret-encryption-config store) config)
   (let ((token-key (or (pod-store-template-token-key store)
-                       (secure-random-octets 32))))
+                       (secure-random-octets 32)))
+        (crypto-store (gr8s.store::copy-pod-store store)))
+    (setf (pod-store-secret-encryption-config crypto-store) config)
     (write-core-checkpoint
      store
      (core-checkpoint-writer
-      store (pod-store-resources store) (pod-store-resource-revision store)
+      crypto-store (pod-store-resources store) (pod-store-resource-revision store)
       (pod-store-workload-deletions store)
       (pod-store-job-controller-states store)
       (pod-store-template-history store)
       (pod-store-template-history-floor store)
       token-key (pod-store-event-expirations store)))
-    (setf (pod-store-template-token-key store) token-key)))
+    (setf (pod-store-secret-encryption-config store) config
+          (pod-store-template-token-key store) token-key)))
 
 (defun persist-secret-encryption-metadata-unlocked (store config)
   "Atomically update checkpoint metadata without consuming its following journal."
-  (setf (pod-store-secret-encryption-config store) config)
   (let ((path (core-resource-state-path store)))
     (if (probe-file path)
-        (let ((state (com.inuoe.jzon:parse path :max-string-length (* 2 1024 1024))))
-          (setf (gethash "secretsEncryption" state) config)
-          (gr8s.security::write-private-text-atomically
-           path (lambda (stream) (com.inuoe.jzon:stringify state :stream stream)))
-          (setf (pod-store-core-checkpoint-bytes store)
+        (progn
+          (with-open-file (input path :external-format :utf-8)
+            (gr8s.security::write-private-text-atomically
+             path (lambda (output)
+                    (write-core-checkpoint-encryption-metadata input output config)
+                    (finish-output output)
+                    (sb-posix:fsync (sb-sys:fd-stream-fd output)))))
+          (gr8s.store::sync-store-generation-directory (uiop:pathname-directory-pathname path))
+          (setf (pod-store-secret-encryption-config store) config
+                (pod-store-core-checkpoint-bytes store)
                 (sb-posix:stat-size (sb-posix:stat (namestring path)))))
         (rewrite-secret-encryption-checkpoint-unlocked store config))))
 
