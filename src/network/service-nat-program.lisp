@@ -6,6 +6,10 @@
 ;;;; integrated. Existing attached v1 programs and their maps remain unchanged.
 (in-package #:gr8s.network)
 
+(defvar *service-nat-local-identity-p* nil
+  "Bind while composing CNI guards to fence state against endpoint_identity48.
+The standalone tuple engine has no local endpoint map and leaves this disabled.")
+
 (defparameter *service-nat-map-forms*
   '((whistler::defmap whistler::gr8s-nat-fwd-v2 :type :hash
       :key-size 16 :value-size 64 :max-entries 65536 :map-flags 1)
@@ -174,6 +178,19 @@ Expand only PKT macros: ordinary Lisp/Whistler control forms must stay source."
           (= (load u64 owner 8) (load u64 ,state 16))
           (= (load u64 owner 16) (load u64 ,state 24)))))
 
+(defmacro nat-local-profile-p ()
+  (if gr8s.network::*service-nat-local-identity-p* 1 0))
+
+(defmacro nat-local-source-p (original state)
+  (if gr8s.network::*service-nat-local-identity-p*
+      `(let ((local (map-lookup endpoint-identity 0)))
+         (and (/= local 0)
+              (or (= (load u32 local 12) 1) (= (load u32 local 12) 2))
+              (= (ntohl (load u32 local 0)) (gr8s-pkt-flow-source ,original))
+              (= (load u64 local 32) (load u64 ,state 16))
+              (= (load u64 local 40) (load u64 ,state 24))))
+      1))
+
 (defmacro nat-retire (original state probe)
   `(progn
      (nat-return-key ,probe ,original ,state)
@@ -311,11 +328,13 @@ alias ports. Only an identical original tuple/incarnation may adopt a claim."
         (let ((owner (map-lookup-ptr gr8s-nat-id-v2 flow)))
           (unless (and (nat-owner-p owner (gr8s-pkt-flow-source flow) 1)
                        (/= (logand (load u32 owner 4) 1) 0))
-            (when (or (/= (gr8s-nat-state-kind state) 0) (/= owner 0)) (pkt-drop membership))
+            (when (or (/= (nat-local-profile-p) 0)
+                      (/= (gr8s-nat-state-kind state) 0) (/= owner 0)) (pkt-drop membership))
             (nat-pass))
           (setf (gr8s-nat-state-epoch0 state) (load u64 owner 8)
                 (gr8s-nat-state-epoch1 state) (load u64 owner 16)
                 alias (load u32 owner 0) owner-flags (load u32 owner 4)))
+        (unless (nat-local-source-p flow state) (pkt-drop failed))
         (let ((backend (map-lookup-ptr gr8s-nat-id-v2 state)))
           (when (nat-owner-p backend (cast u32 (gr8s-nat-state-backend state)) 1)
             (setf (gr8s-nat-state-backend-tracked state) 1
@@ -327,6 +346,7 @@ alias ports. Only an identical original tuple/incarnation may adopt a claim."
           (setf (gr8s-nat-state-kind state) 3 (gr8s-nat-state-wire-source state) alias))
         (nat-reserve-candidates flow state probe alias)
         (when (/= (map-update-ptr gr8s-nat-fwd-v2 flow state 1) 0) (pkt-drop failed)))
+      (unless (nat-local-source-p flow state) (pkt-drop failed))
       (when (= (logand held-locks 2) 0) (nat-pair-required flow state probe))
       (when (/= (logand (gr8s-nat-state-kind state) 1) 0)
         (pkt-write-address flow state meta nil)
@@ -344,6 +364,9 @@ alias ports. Only an identical original tuple/incarnation may adopt a claim."
     (let ((binding (map-lookup-ptr gr8s-nat-fwd-v2 flow))
           (tcp-key (make-gr8s-nat-return)) (probe (make-gr8s-pkt-flow)))
       (when (= binding 0) (nat-pass))
+      ;; A suspended old endpoint must not retire a replacement's generation.
+      ;; A new endpoint can leave its predecessor for select's safe retirement.
+      (unless (nat-local-source-p flow binding) (nat-pass))
       ;; Old source epochs and expired pairs are retired by selection. For the
       ;; same source owner, only proven sequence/timestamp evidence can replace.
       (unless (and (nat-same-source-incarnation binding flow)
@@ -369,6 +392,7 @@ alias ports. Only an identical original tuple/incarnation may adopt a claim."
       (pkt-lock :forward original)
       (let ((held (map-lookup-ptr gr8s-nat-fwd-v2 original)))
         (when (= held 0) (pkt-drop failed)) (setf state held))
+      (unless (nat-local-source-p original state) (pkt-drop failed))
       (unless (and (nat-live-p state original probe) (/= (nat-valid-state state original probe) 0)
                    (= (gr8s-pkt-flow-source flow) (gr8s-pkt-flow-source original))
                    (= (gr8s-pkt-flow-sport flow) (gr8s-pkt-flow-sport original))
@@ -401,6 +425,7 @@ alias ports. Only an identical original tuple/incarnation may adopt a claim."
         (pkt-lock :forward original)
         (let ((held (map-lookup-ptr gr8s-nat-fwd-v2 original)))
           (when (= held 0) (pkt-drop failed)) (nat-copy state held 64))
+        (unless (nat-local-source-p original state) (pkt-drop failed))
         (unless (and (nat-return-owned-p entry original state)
                      (nat-live-p state original probe) (= (gr8s-nat-state-active state) 1)
                      (/= (nat-valid-state state original probe) 0)) (pkt-drop failed))
@@ -422,6 +447,7 @@ alias ports. Only an identical original tuple/incarnation may adopt a claim."
       (pkt-lock :forward original)
       (let ((held (map-lookup-ptr gr8s-nat-fwd-v2 original)))
         (when (= held 0) (pkt-drop failed)) (setf state held))
+      (unless (nat-local-source-p original state) (pkt-drop failed))
       (unless (and (nat-live-p state original probe) (= (gr8s-nat-state-active state) 1)
                    (/= (nat-valid-state state original probe) 0)
                    (= (gr8s-pkt-flow-source flow) (cast u32 (gr8s-nat-state-backend state)))

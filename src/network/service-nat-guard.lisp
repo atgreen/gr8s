@@ -116,7 +116,8 @@ Missing continuations fail closed. This runs after NAT macros have expanded."
    :key #'second :test #'eq :from-end t))
 
 (defun service-nat-guard-forms ()
-  (let* ((policy (service-nat-policy-forms))
+  (let* ((*service-nat-local-identity-p* t)
+         (policy (service-nat-policy-forms))
          (egress (copy-tree (second policy)))
          (ingress (copy-tree (third policy))))
     (setf (second egress) 'whistler::gr8s-v2-eg-policy
