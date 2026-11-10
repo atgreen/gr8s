@@ -36,8 +36,9 @@ back from the generation being checked. Invoke under MEMBER's lock, after outer
 application ingress/writer barriers. This function neither persists nor adopts Raft state."
   (unless (and (member recover '(nil t))
                (typep transfer-term '(integer 0 #.most-positive-fixnum))
-               (typep expected-index '(integer 1 #.most-positive-fixnum))
+               (typep expected-index (if recover '(integer 0 #.most-positive-fixnum) '(integer 1 #.most-positive-fixnum)))
                (typep expected-term '(integer 0 #.most-positive-fixnum))
+               (or (plusp expected-index) (zerop expected-term))
                (<= expected-term transfer-term)
                (stringp expected-digest) (= 64 (length expected-digest))
                (every (lambda (char) (find char "0123456789abcdef")) expected-digest))

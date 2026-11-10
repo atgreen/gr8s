@@ -65,6 +65,24 @@ remaining log. Selected application files can contain later updates; restoring
 the retained baseline provides the starting state for deterministic suffix replay.
 Member identity and private keys stay at their existing root paths.
 
+For a fresh member, the same internal startup helper accepts
+`:bootstrap-role :founder` or `:bootstrap-role :learner`, with the WAL at
+`raft/control-plane.log`. Bootstrap requires drained application access and outer
+writer barriers. It fsyncs `raft/bootstrap.json` under the WAL ownership lease
+before creating the data file, retains an exact application artifact, records
+that reference in the journal, and publishes the initial WAL through atomic
+checkpoint replacement. It then marks publication durable. A restart can resume
+at each boundary without recapturing an already retained baseline from later files.
+Published WALs that disappear, become empty or gain later hard/log state are never
+reinitialized. Bootstrap identity and API URL changes are refused.
+
+The founder baseline is index1/term0 with one voter. A learner starts at
+index0/term0 and cannot campaign. Its local zero-index artifact supports restart;
+live snapshot installation still requires a positive index. Catch-up must install
+the founder's baseline before applying later entries, preserving application state
+that existed before founding. The internal bootstrap helper does not publish API
+endpoints, acquire process-wide application ownership or enable compaction.
+
 API access remains blocked after the listener starts. An authenticated leader's
 AppendEntries must confirm a current-term committed boundary that this member
 has fully applied. Vote requests and stale-term heartbeats cannot open access.
@@ -82,9 +100,51 @@ Startup failures leave application access blocked.
 `start-raft-member` supports `:prepare-fn` for callback installation before WAL
 recovery and `:validate-recovery-fn` for checking recovered state before it mutates
 the node. The latter must return exactly T. Direct `recover-raft-node` callers
-can supply the corresponding `:validate-fn` callback.
+can supply the corresponding `:validate-fn` callback. `open-file-raft-storage`
+also accepts `:prepare-fn` for journal publication under its lease before data-file
+creation; errors release that newly acquired lease.
 
 Production `start-ha-control-plane` does not invoke this recovery helper yet.
-Genesis/bootstrap needs to establish a durable baseline, and production callers
-must coordinate state-directory ownership and membership readiness before
-enabling automatic compaction.
+Production callers must acquire state-directory ownership before opening the
+application, use the durable bootstrap/recovery path, and admit new voters as
+learners until they catch up. Capture registration, native multi-voter acceptance
+and automatic compaction remain unfinished.
+
+`serve` acquires exclusive ownership of its canonical state directory before
+opening the application store, pool or PKI. The CLI acquires that ownership
+before evaluating startup patches and retains it through patch shutdown and
+server teardown. Initialization failures release ownership; process death also
+releases the kernel lock. A second process or an alias of the same directory
+cannot acquire ownership. The stable `.gr8s-serve.lock` file remains in place:
+do not delete it to bypass an active owner.
+
+`metadata/server-mode.json` records standalone or HA intent atomically before
+application initialization. Explicit `--raft-init` or `--raft-join` can transition
+standalone state to HA. Once HA intent is recorded, restart with the appropriate
+Raft options; omitting them is refused, including after failed HA initialization.
+Existing Raft WAL, bootstrap or PKI evidence also prevents standalone fallback.
+A witness WAL is rejected by `serve`. These guards do not yet establish shared
+ownership across every administrative command or enable production voter WAL
+recovery.
+
+HA startup also persists `metadata/server-ha-endpoint.json`, binding member ID,
+Raft host/port and API URL to the state directory before startup patch evaluation.
+The production Raft default is port 7000; internal transport callers may still
+request an ephemeral port for isolated tests. Restart with the original endpoints.
+Changes and malformed or nonprivate descriptors are refused before application
+initialization. Endpoint publication does not enable production WAL recovery.
+
+A learner-to-voter configuration change now requires an applied-progress receipt.
+Successful AppendEntries replies report `:applied-index` only after application
+succeeds, bounded by the acknowledged log match. The leader tracks receipts for
+its current term and clears them when assuming leadership. Promotion requires
+that the leader has applied a current-term committed boundary and the learner
+has both replicated and acknowledged application through that boundary. A new
+commit can make an older receipt insufficient. Missing receipts from older
+binaries, failed application, stale terms and invalid applied indices cannot
+establish readiness; rejected promotions return `:learner-not-ready`.
+
+This guard does not yet make Join admit requested voters as learners. Durable
+promotion intent, automatic promotion after catch-up and native interrupted-join
+acceptance remain under `podster-ucm.2.9`. Production durable voter recovery
+remains disabled until the complete admission and startup paths are integrated.

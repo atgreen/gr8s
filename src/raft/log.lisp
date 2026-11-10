@@ -24,9 +24,11 @@
    (stream :initarg :stream :initform nil :accessor file-raft-storage-stream)
    (ownership-fd :initarg :ownership-fd :initform nil :accessor file-raft-storage-ownership-fd)))
 
-(defun open-file-raft-storage (path)
+(defun open-file-raft-storage (path &key prepare-fn)
   "Own and open an append-only WAL. A stable sidecar lease survives checkpoint
-replacement. Never unlink the lease file: that would allow competing owners."
+replacement. Never unlink the lease file: that would allow competing owners.
+PREPARE-FN receives the canonical path under its lease, before data-file creation."
+  (when (and prepare-fn (not (functionp prepare-fn))) (error "Invalid WAL preparation callback"))
   (ensure-directories-exist path)
   (let* ((absolute (merge-pathnames path))
          (target (merge-pathnames (file-namestring absolute)
@@ -47,6 +49,7 @@ replacement. Never unlink the lease file: that would allow competing owners."
            (unless (zerop (cffi:foreign-funcall "flock" :int ownership-fd :int 6 :int))
              (error "Another owner holds Raft WAL ~A" target)) ; LOCK_EX | LOCK_NB
            (sb-posix:fchmod ownership-fd #o600)
+           (when prepare-fn (funcall prepare-fn target))
            (let ((fd (sb-posix:open (namestring target)
                                    (logior sb-posix:o-wronly sb-posix:o-creat
                                            sb-posix:o-append sb-posix:o-nofollow) #o600)))

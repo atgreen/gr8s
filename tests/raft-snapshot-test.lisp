@@ -538,7 +538,7 @@
                      (throw 'snapshot-store-opened :opened)))
              (is (eq :opened
                      (catch 'snapshot-store-opened
-                       (gr8s.server::serve (list :state-directory base :listen "127.0.0.1" :port 0 :raft-init t)))))
+                       (gr8s.server::serve (list :state-directory base :listen "127.0.0.1" :port 8080 :raft-init t)))))
              (is-true opened))
         (setf (symbol-function 'gr8s:open-store) original)))))
 

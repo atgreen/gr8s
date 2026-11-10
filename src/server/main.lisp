@@ -1346,6 +1346,19 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
            (equal "managed" (getf options :containerd-mode)))))
 
 (defun serve (options)
+  "Own state before any application/PKI initialization, through final teardown."
+  (call-with-serve-state-ownership options (lambda () (serve-owned options))))
+
+(defun run-serve-command (options)
+  "Own state before evaluating startup patches, through patch shutdown."
+  (call-with-serve-state-ownership
+   options
+   (lambda ()
+     (unwind-protect
+          (progn (bootstrap-patches options) (serve-owned options))
+       (shutdown-patches)))))
+
+(defun serve-owned (options)
   "Run the gr8s control plane until shutdown, returning 0. Opens the store and
    PKI, starts the memory monitor, optional HA/Raft, and the node gRPC server
    (opening its firewalld port when it listens off loopback); unless
@@ -1354,6 +1367,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
    Service network. Writes a kubeconfig, serves the HTTP API, and runs the
    reconciliation worker. On *SHUTDOWN-REQUESTED* it tears every component down in
    reverse, withdrawing the firewalld port it opened."
+  (require-serve-state-ownership options)
   (let* ((address (getf options :listen))
          (port (getf options :port))
          (state-directory
@@ -1585,7 +1599,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
          store
          :id id
          :host (or (getf options :raft-listen) "127.0.0.1")
-         :port (or (getf options :raft-port) 0)
+         :port (or (getf options :raft-port) +serve-raft-default-port+)
          :init (getf options :raft-init)
          :join-host join-host :join-port join-port
          :node-name (getf options :raft-node-name)
@@ -1741,7 +1755,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                                   (when (getf options :cluster-pod-cidr)
                                     (list :cluster-pod-cidr (getf options :cluster-pod-cidr))))))
                    1 0))
-              (:serve (unwind-protect (progn (bootstrap-patches options) (serve options)) (shutdown-patches)))
+              (:serve (run-serve-command options))
               (:agent
                (setf *shutdown-requested* nil)
                (install-shutdown-handlers)

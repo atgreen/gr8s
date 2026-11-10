@@ -942,3 +942,28 @@
           (is (= (length bytes) (raft-wal-size path))))))))
 
 (in-suite gr8s)
+
+(in-suite raft)
+
+(test raft-missing-term-zero-prefix-never-matches-an-absent-entry
+  (let ((replies nil))
+    (multiple-value-bind (node kv) (make-standalone-node)
+      (setf (gr8s::raft-node-send-fn node) (lambda (to message) (declare (ignore to)) (push message replies)))
+      (gr8s::raft-handle-append-entries node
+       (list :term 1 :from "leader" :prev-log-index 1 :prev-log-term 0 :leader-commit 2
+             :entries (list (gr8s::make-raft-entry :index 2 :term 1 :command '(:set "x" "gap")))))
+      (is (= 0 (gr8s::raft-last-log-index node)))
+      (is (= 0 (gr8s::raft-node-commit-index node)))
+      (is (= 0 (gr8s::raft-node-last-applied node)))
+      (is (null (gethash "x" kv)))
+      (is (null (getf (first replies) :success)))
+      (gr8s::raft-handle-append-entries node
+       (list :term 1 :from "leader" :prev-log-index 0 :prev-log-term 0 :leader-commit 1
+             :entries (list (gr8s::make-raft-entry :index 1 :term 1 :command '(:set "x" "contiguous")))))
+      (is (= 1 (gr8s::raft-last-log-index node)))
+      (is (= 1 (gr8s::raft-node-commit-index node)))
+      (is (= 1 (gr8s::raft-node-last-applied node)))
+      (is (equal "contiguous" (gethash "x" kv)))
+      (is-true (getf (first replies) :success)))))
+
+(in-suite gr8s)

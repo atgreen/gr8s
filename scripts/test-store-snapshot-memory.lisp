@@ -102,6 +102,25 @@
         (when sender (gr8s::stop-raft-member sender))
         (stop-receiver completed)))))
 
+(defun populate-memory-test-store (store count bytes)
+  "Keep construction temporaries off the caller's stack across later reload GCs."
+  (dotimes (i count)
+    (let ((name (format nil "config-~D" i)))
+      (setf (gethash (list "configmaps" "default" name) (gr8s::pod-store-resources store))
+            (gr8s::core-object
+             "apiVersion" "v1" "kind" "ConfigMap"
+             "metadata" (gr8s::core-object "name" name "namespace" "default" "resourceVersion" "1")
+             "data" (gr8s::core-object "payload" (make-string bytes :element-type 'base-char :initial-element #\x))))))
+  (setf (gr8s::pod-store-resource-revision store) 1)
+  store)
+
+(defun assert-memory-test-store (store count bytes)
+  "Verify the complete count and final payload without retaining an old table."
+  (assert (= count (hash-table-count (gr8s::pod-store-resources store))))
+  (let ((object (gr8s::get-core-resource store "configmaps" "default" (format nil "config-~D" (1- count)))))
+    (assert (= bytes (length (gethash "payload" (gethash "data" object))))))
+  t)
+
 (let* ((directory (merge-pathnames (format nil "gr8s-artifact-memory-~A/" (gr8s::generate-uid))
                                   (uiop:temporary-directory)))
        (count (parse-integer (or (uiop:getenv "GR8S_SNAPSHOT_RECORDS") "1024")))
@@ -111,6 +130,8 @@
        (reload-descriptor nil)
        (reloaded nil)
        (retained nil) (retained-reference nil) (transferred nil) (receiver-report nil)
+       (bootstrap-report nil)
+       (bootstrap (equal "1" (uiop:getenv "GR8S_SNAPSHOT_BOOTSTRAP")))
        (live-transfer (equal "1" (uiop:getenv "GR8S_SNAPSHOT_LIVE_TRANSFER")))
        (transfer (or live-transfer (equal "1" (uiop:getenv "GR8S_SNAPSHOT_TRANSFER"))))
        (retain (or transfer (equal "1" (uiop:getenv "GR8S_SNAPSHOT_RETAIN"))))
@@ -121,14 +142,7 @@
   (unwind-protect
        (let* ((store (gr8s:open-store directory))
               (target (merge-pathnames "artifact.jsonl" directory)))
-         (dotimes (i count)
-           (let ((name (format nil "config-~D" i)))
-             (setf (gethash (list "configmaps" "default" name) (gr8s::pod-store-resources store))
-                   (gr8s::core-object
-                    "apiVersion" "v1" "kind" "ConfigMap"
-                    "metadata" (gr8s::core-object "name" name "namespace" "default" "resourceVersion" "1")
-                    "data" (gr8s::core-object "payload" (make-string bytes :element-type 'base-char :initial-element #\x))))))
-         (setf (gr8s::pod-store-resource-revision store) 1)
+         (populate-memory-test-store store count bytes)
          (sb-ext:gc :full t)
          (if legacy
              (let ((json (gr8s.resources::core-state-json
@@ -168,14 +182,36 @@
            (setf reloaded (eq store (gr8s.store::reload-store-application
                                      store (gethash "generation" reload-descriptor))))
            (gr8s.store::resume-store-access store)
-           (assert (= count (hash-table-count (gr8s::pod-store-resources store))))
-           (let ((object (gr8s::get-core-resource store "configmaps" "default" (format nil "config-~D" (1- count)))))
-             (assert (= bytes (length (gethash "payload" (gethash "data" object)))))))
+           (assert-memory-test-store store count bytes))
+         (when (and bootstrap (not legacy))
+           (let ((member nil))
+             (unwind-protect
+                  (progn
+                    (setf member
+                          (gr8s.resources::start-store-member-from-wal
+                           store "memory-founder" (merge-pathnames "raft/control-plane.log" directory)
+                           :bootstrap-role :founder))
+                    (assert (gr8s.store::store-access-blocked-p store))
+                    (gr8s::raft-member-start member)
+                    (loop repeat 600 until (not (gr8s.store::store-access-blocked-p store))
+                          do (sleep 0.05)
+                          finally (assert (not (gr8s.store::store-access-blocked-p store))))
+                    (assert-memory-test-store store count bytes)
+                    (let ((node (gr8s::raft-member-node member)))
+                      (assert (= 1 (gr8s::raft-node-snapshot-index node)))
+                      (assert (= 0 (gr8s::raft-node-snapshot-term node)))
+                      (setf bootstrap-report
+                            (gr8s::core-object "passed" t "records" count
+                                               "appliedIndex" (gr8s::raft-node-last-applied node)
+                                               "resourceRevision" (gr8s::pod-store-resource-revision store)))))
+               (when member
+                 (gr8s::stop-raft-member member)
+                 (setf (gr8s::pod-store-consensus-commit-fn store) nil)))))
          (let ((result (gr8s::core-object
                         "passed" t "legacy" legacy "records" count
                         "validatedRecords" validated-count "materializedRecords" materialized-count
                         "residentResourcesAfterOperation" (hash-table-count (gr8s::pod-store-resources store))
-                        "reloadedSameStore" reloaded "retainedArtifactAfterTransferCleanup" retained "transferredArtifact" transferred "liveReceiver" receiver-report "payloadBytes" (* count bytes)
+                        "reloadedSameStore" reloaded "retainedArtifactAfterTransferCleanup" retained "transferredArtifact" transferred "liveReceiver" receiver-report "bootstrapFounder" bootstrap-report "payloadBytes" (* count bytes)
                         "artifactBytes" (sb-posix:stat-size (sb-posix:stat (namestring target))))))
            (unless reloaded
              (setf (gethash "residentSourceResources" result) (hash-table-count (gr8s::pod-store-resources store))))

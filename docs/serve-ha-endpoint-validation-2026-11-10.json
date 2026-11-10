@@ -1,0 +1,79 @@
+{
+  "date": "2026-11-10",
+  "bead": "podster-ucm.2.1.4.3",
+  "validation": {
+    "exitCode": 0,
+    "selectors": [
+      "serve-state-ownership",
+      "store-member-bootstrap",
+      "ha-control-plane",
+      "ha-store",
+      "cli-options-default-to-containerd",
+      "serve-selects-the-cluster-overlay-backend",
+      "wireguard-rotate-key-command-replaces-only-the-persisted-private-identity",
+      "network-explain-command-requires-node-and-peer",
+      "external-cni-options-are-explicit-and-validated",
+      "cli-options-dispatch-one-image-into-serve-and-agent-roles",
+      "cli-doctor-parses-state-directory-flag-positional-and-cidr",
+      "agent-role-rejects-incomplete-or-invalid-option-combinations",
+      "help-documents-every-node-role-option",
+      "cni-environment-dispatches-before-command-line-parsing",
+      "cli-treats-a-closed-output-pipe-as-success",
+      "runtime-list-command-reports-the-dumped-payload",
+      "trace-command-parses-auth-scope-duration-and-source",
+      "cli-options-describe-a-loopback-containerd-server",
+      "managed-containerd-options-build-an-owned-runtime",
+      "managed-containerd-uses-runtime-assets-from-the-dumped-image",
+      "external-containerd-options-do-not-create-a-supervisor",
+      "kubeconfig-points-kubectl-at-gr8s",
+      "kubeconfig-without-output-prints-to-stdout",
+      "serve-defaults-its-kubeconfig-into-the-state-directory",
+      "server-api-refuses-non-loopback-listeners",
+      "reconciliation-worker-retries-transient-runtime-failures",
+      "reconciliation-worker-stops-without-waiting-for-its-cadence",
+      "node-listener-and-underlay-options-are-explicit-and-validated",
+      "wireguard-endpoint-options-are-named-repeatable-and-validated",
+      "wireguard-relay-options-are-explicit-and-bounded",
+      "dns-forward-options-apply-to-serve-and-standalone-agents",
+      "join-token-command-uses-the-running-clusters-persisted-pki",
+      "join-token-command-does-not-bootstrap-a-new-cluster",
+      "enrolled-agent-restarts-without-a-bootstrap-token",
+      "a-late-timeout-interrupt-cannot-end-a-thread-holding-a-lock",
+      "the-guard-only-continues-timeouts",
+      "the-worker-loop-survives-a-timeout"
+    ],
+    "checks": 414,
+    "failures": 0,
+    "ownershipAndEndpointChecks": 69,
+    "logSha256": "30de0d92c2b490df39953f94f339674813d7c1ce90629d2a4901fb346eb144a2",
+    "invocation": "Fresh SBCL; load gr8s/tests; assert fiveam:get-test for every selector; run each with fiveam:run!; exit nonzero on any failed selector",
+    "scope": "Source tests, injected application initialization and patch lifecycle, loopback Raft, SIGKILL ownership/bootstrap children; no container or BPF operations"
+  },
+  "behavior": {
+    "productionRaftDefaultPort": 7000,
+    "descriptor": "metadata/server-ha-endpoint.json",
+    "fields": [
+      "format",
+      "version",
+      "memberId",
+      "host",
+      "port",
+      "apiUrl"
+    ],
+    "publication": "Private exclusive temporary file, fsync, atomic rename, parent fsync, under state lease before patch evaluation/application initialization",
+    "restart": "Exact identity and endpoint match required, including after failed initialization",
+    "rejected": [
+      "Changed member ID, Raft host/port or API URL",
+      "Wildcard or zero-port Raft endpoint",
+      "Symlink, hardlink, nonprivate, null or extra-field endpoint descriptor",
+      "Null server-mode descriptor"
+    ]
+  },
+  "limitations": [
+    "Production durable voter startup remains unwired",
+    "No endpoint migration command",
+    "No native multi-voter acceptance claimed"
+  ],
+  "productionVoterRecoveryEnabled": false,
+  "fullGoalComplete": false
+}
