@@ -28,6 +28,10 @@
                      "rounds" rounds "attemptedPayloadBytes" (* rounds 65536)
                      "admissionBudgetBytes" limit "productionProposalTimeoutSeconds" 10)))
       (labels ((member-at (i) (gr8s::ha-control-plane-member (aref planes i)))
+               (note-phase (name)
+                 (setf (gethash "phase" report) name)
+                 (format *error-output* "~&admission phase: ~A~%" name)
+                 (finish-output *error-output*))
                (start-at (i fresh)
                  (let* ((path (merge-pathnames (format nil "~A/" (aref ids i)) root))
                         (store (gr8s:open-store path :defer-restore-completion (not fresh)))
@@ -59,7 +63,8 @@
                       (loop for i below 4 always
                         (bt:with-lock-held ((gr8s::raft-member-lock (member-at i)))
                           (let ((node (gr8s::raft-member-node (member-at i))))
-                            (and (= 3 (gr8s::raft-cluster-size node))
+                            (and (= 3 (count-if (lambda (entry) (member (cdr entry) '(:voter :witness)))
+                                                 (gr8s::raft-current-config node)))
                                  (eq (if (= i 3) :learner :voter) (gr8s::raft-node-self-role node))))))))
                (value-at (i name)
                  (handler-case
@@ -90,6 +95,7 @@
                  (progn
                    (assert (= 384 (gethash "heapLimitMiB" report)))
                    (assert (>= rounds 2048))
+                   (note-phase "bootstrap")
                    (start-at 0 t)
                    (admission-native-await (lambda () (gr8s::ha-control-plane-leader-p (aref planes 0))))
                    (start-at 1 t)
@@ -106,6 +112,7 @@
                    (assert (and leader-index (< leader-index 3)))
                    ;; Leave one voter and a non-voting forwarder connected. They
                    ;; cannot form quorum; the learner exercises the real RPC path.
+                   (note-phase "quorum-loss")
                    (dotimes (i 3) (unless (= i leader-index) (stop-at i)))
                    (let ((baseline (sample)))
                      (dotimes (i rounds)
@@ -135,6 +142,7 @@
                      (assert (<= (- (gethash "walBytes" full) (gethash "walBytes" baseline)) limit)))
                    ;; A follower's capacity refusal must survive RPC encoding and
                    ;; return without appending or retaining another callback.
+                   (note-phase "forwarding")
                    (handler-case
                        (progn
                          (gr8s::create-core-resource (aref stores 3) "configmaps"
@@ -145,6 +153,7 @@
                        (assert (search "capacity" (gr8s::kubernetes-error-message condition)))))
                    (assert (equalp full (sample)))
                    (setf (gethash "fullTail" report) full)
+                   (note-phase "quorum-return")
                    (dotimes (i 3) (unless (= i leader-index) (start-at i nil)))
                    (admission-native-await #'ready)
                    (admission-native-await (lambda () (zerop (gethash "uncommittedWeightBytes" (sample nil)))))
@@ -156,6 +165,7 @@
                    ;; Full durable reopen, including the member that held the
                    ;; unknown-outcome tail. Unacknowledged writes may commit or
                    ;; be discarded; acknowledged sentinel/new data must survive.
+                   (note-phase "durable-reopen")
                    (dotimes (i 4) (stop-at i))
                    (dotimes (i 4) (start-at i nil))
                    (admission-native-await #'ready)
@@ -164,6 +174,7 @@
                    (let ((pending (pending-resources 0)))
                      (assert (loop for i below 4 always (= pending (pending-resources i))))
                      (setf (gethash "unknownOutcomeWritesPresent" report) pending))
+                   (note-phase "complete")
                    (setf (gethash "passed" report) t (gethash "capacityRefusals" report) capacity-count
                          (gethash "timedOutProposals" report) timeout-count
                          (gethash "forwardedCapacityRefusal" report) t
