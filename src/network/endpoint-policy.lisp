@@ -36,24 +36,33 @@
       (whistler/loader::%bpf 15 attribute 16 "gr8s object-info"))
     info))
 
-(defun cni-policy-map-info (fd name &key (object-info #'bpf-object-kernel-info))
+(defun cni-policy-map-info (fd name &key (object-info #'bpf-object-kernel-info)
+                                        (profile *cni-policy-profile*))
   "Return a Whistler MAP-INFO for the pinned map FD named NAME, after verifying
    its kernel type, key and value sizes, capacity and flags against the expected
    spec in +CNI-POLICY-MAP-SPECS+. Signals INVALID-CNI on any schema mismatch.
    OBJECT-INFO is the info query, injectable for tests."
-  (let* ((spec (or (assoc name +cni-policy-map-specs+ :test #'string=)
-                   (when (equal name "gr8s_pkt_stages") '("gr8s_pkt_stages" 3 4 4 8 0))
-                   (assoc name (service-packet-map-specs) :test #'string=)))
-         (info (funcall object-info fd)))
+  (let* ((info (funcall object-info fd))
+         (legacy (append +cni-policy-map-specs+
+                         '(("gr8s_pkt_stages" 3 4 4 8 0))
+                         (service-packet-map-specs)))
+         (candidates (ecase profile
+                       (:v1 legacy)
+                       (:v2 (service-nat-map-specs))))
+         (spec (find-if
+                (lambda (candidate)
+                  (and (string= name (first candidate))
+                       (>= (length info) 24)
+                       (= (second candidate) (netlink-read-integer info 0 4))
+                       (= (third candidate) (netlink-read-integer info 8 4))
+                       (= (fourth candidate) (netlink-read-integer info 12 4))
+                       (= (fifth candidate) (netlink-read-integer info 16 4))
+                       (= (sixth candidate) (netlink-read-integer info 20 4))))
+                candidates)))
+    (unless spec
+      (invalid-cni "pinned Whistler map ~A has an incompatible schema" name))
     (destructuring-bind (&optional sname type key-size value-size max-entries flags) spec
       (declare (ignore sname))
-      (unless (and spec (>= (length info) 24)
-                   (= type (netlink-read-integer info 0 4))
-                   (= key-size (netlink-read-integer info 8 4))
-                   (= value-size (netlink-read-integer info 12 4))
-                   (= max-entries (netlink-read-integer info 16 4))
-                   (= flags (netlink-read-integer info 20 4)))
-        (invalid-cni "pinned Whistler map ~A has an incompatible schema" name))
       (whistler/loader::make-map-info
        :name name :type type :key-size key-size :value-size value-size
        :max-entries max-entries :flags flags :fd fd))))

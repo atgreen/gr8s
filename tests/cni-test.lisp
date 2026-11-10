@@ -45,6 +45,138 @@
     (signals gr8s::cni-error
       (gr8s::parse-cni-configuration (com.inuoe.jzon:stringify object)))))
 
+(test cni-v2-service-profile-has-separate-shared-and-local-schemas
+  (let ((object (com.inuoe.jzon:parse *valid-cni-config*)))
+    (setf (gethash "servicePacketProfile" object) "v2")
+    (signals gr8s::cni-error
+      (gr8s::parse-cni-configuration (com.inuoe.jzon:stringify object)))
+    (setf (gethash "servicePacketRoot" object) "/pins/service-lb/")
+    (let* ((configuration (gr8s::parse-cni-configuration (com.inuoe.jzon:stringify object)))
+           (local (gr8s.network::cni-local-policy-map-specs configuration))
+           (shared (gr8s.network::cni-shared-service-map-specs configuration)))
+      (is (eq :v2 (gr8s::cni-configuration-service-packet-profile configuration)))
+      (is (= 17 (length local)))
+      (is (= 13 (length shared)))
+      (is (= 48 (fourth (assoc "endpoint_identity" local :test #'equal))))
+      (is (= 32 (third (assoc "netpol_flows_v2" local :test #'equal))))
+      (is (equal '("gr8s_nat_stages" 3 4 4 16 0)
+                 (assoc "gr8s_nat_stages" local :test #'equal)))
+      (is (assoc "gr8s_nat_risk_v2" shared :test #'equal))
+      (is (not (assoc "gr8s_nat_risk_v2" local :test #'equal)))
+      (is (not (assoc "gr8s_pkt_stages" local :test #'equal))))
+    (setf (gethash "servicePacketProfile" object) "v3")
+    (signals gr8s::cni-error
+      (gr8s::parse-cni-configuration (com.inuoe.jzon:stringify object)))))
+
+(test cni-v2-map-schema-rejects-legacy-endpoint-identity
+  (let ((info (make-array 256 :element-type '(unsigned-byte 8) :initial-element 0)))
+    (flet ((put (offset value)
+             (replace info (gr8s::netlink-integer value 4) :start1 offset)))
+      (put 0 2) (put 8 4) (put 12 48) (put 16 1) (put 20 128)
+      (is (= 48 (whistler/loader::map-info-value-size
+                 (gr8s::cni-policy-map-info 42 "endpoint_identity" :profile :v2
+                                            :object-info (lambda (fd) (declare (ignore fd)) info)))))
+      (signals gr8s::cni-error
+        (gr8s::cni-policy-map-info 42 "endpoint_identity" :profile :v1
+                                   :object-info (lambda (fd) (declare (ignore fd)) info)))
+      (put 12 32)
+      (signals gr8s::cni-error
+        (gr8s::cni-policy-map-info 42 "endpoint_identity" :profile :v2
+                                   :object-info (lambda (fd) (declare (ignore fd)) info))))))
+
+(test cni-v2-attachment-waits-for-local-identity-and-publication-fence
+  (let ((object (com.inuoe.jzon:parse *valid-cni-config*))
+        (mutations nil))
+    (setf (gethash "servicePacketRoot" object) "/pins/service-lb/"
+          (gethash "servicePacketProfile" object) "v2")
+    (signals gr8s::cni-error
+      (gr8s::install-cni-policy
+       (gr8s::parse-cni-configuration (com.inuoe.jzon:stringify object))
+       (gr8s::make-cni-context) "/pins/rejected_spoofs" "/pins/tcx-ingress"
+       :ensure-directory (lambda (&rest ignored) (declare (ignore ignored)) (push :ensure mutations))
+       :open-pinned (lambda (&rest ignored) (declare (ignore ignored)) (push :open mutations))))
+    (is (null mutations))))
+
+(test cni-v2-stage-publication-requires-all-eight-programs
+  (let* ((object (gr8s::%make-egress-policy-object nil nil))
+         (map (whistler/loader::make-map-info :name "gr8s_nat_stages" :fd 500))
+         (programs
+           (loop for (index . name) in gr8s.network::*service-nat-stage-programs*
+                 collect (cons name (whistler/loader::make-prog-info
+                                     :name name :section-name "classifier"
+                                     :type 3 :insns #() :fd (+ 700 index)))))
+         (writes nil))
+    (setf (gr8s::egress-policy-object-maps object) (list (cons "gr8s_nat_stages" map))
+          (gr8s::egress-policy-object-programs object) programs)
+    (gr8s::publish-egress-policy-stages
+     object :update (lambda (target key value) (is (eq target map)) (push (cons key value) writes)))
+    (is (= 8 (length writes)))
+    (is (equalp (loop for index below 8 collect (gr8s::service-lb-bytes index 4))
+                (mapcar #'car (nreverse writes))))
+    (setf (gr8s::egress-policy-object-programs object) (butlast programs)
+          writes nil)
+    (signals gr8s::cni-error
+      (gr8s::publish-egress-policy-stages
+       object :update (lambda (&rest arguments) (push arguments writes))))
+    (is (null writes))))
+
+(test cni-v2-loader-reuses-node-maps-and-publishes-complete-graph
+  ;; The standalone graph suite compiles and executes the bytecode. Exercise
+  ;; CNI map reuse/publication here without recompiling that graph for every
+  ;; ordinary make test run (the full compiler costs several minutes).
+  (let* ((forms (gr8s.network::service-nat-guard-map-forms))
+         (map-specs
+           (mapcar (lambda (form)
+                     (let ((options (cddr form)))
+                       (list :name (substitute #\_ #\-
+                                               (string-downcase (symbol-name (second form))))
+                             :type (getf options :type)
+                             :key-size (getf options :key-size)
+                             :value-size (getf options :value-size)
+                             :max-entries (getf options :max-entries)
+                             :flags (or (getf options :map-flags) 0))))
+                   forms))
+         (program-specs
+           (loop for name in (append '("gr8s_egress_guard" "gr8s_ingress_guard")
+                                     (mapcar #'cdr gr8s.network::*service-nat-stage-programs*)
+                                     '("gr8s_nat_gc"))
+                 collect (list :name name :section "classifier")))
+         (object (gr8s::%make-egress-policy-object map-specs program-specs))
+         (shared (gr8s.network::service-nat-shared-map-specs))
+         (replacements (loop for spec in shared for fd from 1000
+                             collect (cons (first spec) fd)))
+         (created nil) (writes nil))
+    (unwind-protect
+         (progn
+           (is (= 30 (length (gr8s::egress-policy-object-map-specs object))))
+           (is (= 11 (length (gr8s::egress-policy-object-program-specs object))))
+           (signals gr8s::cni-error
+             (gr8s::load-egress-policy-object object (rest replacements)
+                                               :create-map (constantly nil)))
+           (gr8s::load-egress-policy-object
+            object replacements
+            :create-map (lambda (map)
+                          (push (whistler/loader:map-info-name map) created)
+                          (setf (whistler/loader:map-info-fd map) (+ 2000 (length created)))
+                          map)
+            :load-programs
+            (lambda (specs maps)
+              (is (= 30 (length maps)))
+              (loop for spec in specs for fd from 3000
+                    for name = (getf spec :name)
+                    collect (cons name (whistler/loader::make-prog-info
+                                        :name name :section-name (getf spec :section)
+                                        :type 3 :insns #() :fd fd))))
+            :update (lambda (map key value)
+                      (is (equal "gr8s_nat_stages" (whistler/loader:map-info-name map)))
+                      (push (cons key value) writes)))
+           (is (= 17 (length created)))
+           (is (notany (lambda (name) (assoc name replacements :test #'equal)) created))
+           (is (= 8 (length writes)))
+           (is (equalp (loop for index below 8 collect (gr8s::service-lb-bytes index 4))
+                       (mapcar #'car (nreverse writes)))))
+      (gr8s::close-egress-policy-object object :close-fd (constantly nil)))))
+
 (test cni-enabled-service-guard-never-creates-private-service-tables
   (let* ((configuration (gr8s::parse-cni-configuration *valid-cni-config*))
          (opened nil) (closed nil) (loaded nil))

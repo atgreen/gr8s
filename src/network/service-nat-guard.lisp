@@ -15,6 +15,34 @@
     (4 . "gr8s_nat_deliver") (5 . "gr8s_nat_prepare")
     (6 . "gr8s_v2_in_policy") (7 . "gr8s_nat_restore")))
 
+(defparameter +service-nat-shared-map-names+
+  '("gr8s_service_v4" "gr8s_backend_v4" "gr8s_backend_index_v4"
+    "gr8s_pkt_affinity" "gr8s_nat_fwd_v2" "gr8s_nat_rev_v2"
+    "gr8s_nat_fl_v2" "gr8s_nat_rl_v2" "gr8s_nat_tcp_v2"
+    "gr8s_nat_id_v2" "gr8s_nat_risk_v2" "gr8s_nat_st_v2"
+    "gr8s_nat_pod_v2")
+  "Maps pinned once by the node and shared with every v2 endpoint guard.")
+
+(defun service-nat-map-specs ()
+  "CNI schemas derived from the exact forms used to compile the v2 graph."
+  (mapcar (lambda (form)
+            (let ((options (cddr form)))
+              (list (substitute #\_ #\- (string-downcase (symbol-name (second form))))
+                    (whistler/compiler:resolve-map-type (getf options :type))
+                    (getf options :key-size) (getf options :value-size)
+                    (getf options :max-entries) (or (getf options :map-flags) 0))))
+          (service-nat-guard-map-forms)))
+
+(defun service-nat-shared-map-specs ()
+  (loop for spec in (service-nat-map-specs)
+        when (member (first spec) +service-nat-shared-map-names+ :test #'equal)
+          collect spec))
+
+(defun service-nat-local-map-specs ()
+  (loop for spec in (service-nat-map-specs)
+        unless (member (first spec) +service-nat-shared-map-names+ :test #'equal)
+          collect spec))
+
 (defun service-nat-tail-form (index)
   `(progn (whistler::tail-call whistler::gr8s-nat-stages ,index)
           whistler::TC_ACT_SHOT))
