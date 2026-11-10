@@ -136,6 +136,9 @@
   operation-server
   ;; Filesystem-only callbacks; retention runs under the member lock before WAL adoption.
   artifact-source-fn artifact-retain-fn snapshot-barrier-fn startup-check-fn (snapshot-barrier-pending nil)
+  ;; Scoped, unpublished application-artifact roots. Protected by LOCK; each
+  ;; owner has a distinct cell so identical concurrent references stay pinned.
+  artifact-pins
   snapshot-directory snapshot-root snapshot-owner-fd snapshot-receiver
   (snapshot-max-bytes (* 16 1024 1024 1024))
   ;; This member's RAFT-CREDENTIALS. Only in-process tests run without any.

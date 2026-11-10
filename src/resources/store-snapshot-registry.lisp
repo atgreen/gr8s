@@ -12,6 +12,31 @@
     (error "Invalid store snapshot artifact identity"))
   (list :gr8s-store-artifact 1 :index index :term term :sha256 (copy-seq digest)))
 
+(defun copy-store-snapshot-artifact-reference (reference)
+  "Validate a portable identity and return a privately owned canonical copy."
+  (unless (and (alexandria:proper-list-p reference) (= 8 (length reference)))
+    (error "Invalid store snapshot artifact reference"))
+  (let ((copy (store-snapshot-artifact-reference
+               (fourth reference) (sixth reference) (eighth reference))))
+    (unless (equal reference copy) (error "Invalid store snapshot artifact reference"))
+    copy))
+
+(defun call-with-store-artifact-pin (member reference function)
+  "Protect REFERENCE before publishing its file, through adoption or abandonment.
+FUNCTION runs outside the member mutex. Its owner must publish the durable Raft
+reference before returning; failed/abandoned files become reclaimable on unwind.
+Nested or concurrent owners of the same digest retain independent pins."
+  (when (sb-thread:holding-mutex-p (gr8s.raft.transport:raft-member-lock member))
+    (error "Artifact pin scope must start outside the member mutex"))
+  (let ((pin (list (copy-store-snapshot-artifact-reference reference))))
+    (bt:with-lock-held ((gr8s.raft.transport:raft-member-lock member))
+      (push pin (gr8s.raft.transport::raft-member-artifact-pins member)))
+    (unwind-protect (funcall function)
+      (bt:with-lock-held ((gr8s.raft.transport:raft-member-lock member))
+        (setf (gr8s.raft.transport::raft-member-artifact-pins member)
+              (delete pin (gr8s.raft.transport::raft-member-artifact-pins member)
+                      :test #'eq :count 1))))))
+
 (defun store-snapshot-registry-directory (root)
   (let* ((root (uiop:ensure-directory-pathname root))
          (path (merge-pathnames "snapshot-artifacts/" root)))
@@ -22,11 +47,7 @@
   "Resolve a canonical reference, checking permissions and hashing bytes on every use.
 Published artifacts are immutable by contract. The private member root must not be
 modified concurrently by another process. Semantic validation occurs at publication."
-  (unless (and (listp reference) (= 8 (length reference))
-               (equal reference
-                      (store-snapshot-artifact-reference
-                       (fourth reference) (sixth reference) (eighth reference))))
-    (error "Invalid store snapshot artifact reference"))
+  (copy-store-snapshot-artifact-reference reference)
   (let* ((digest (eighth reference))
          (path (merge-pathnames (format nil "~A.jsonl" digest)
                                (store-snapshot-registry-directory root)))
@@ -109,8 +130,8 @@ This does not install application restore callbacks or enable compaction."
 
 (defun reap-store-snapshot-artifacts-unlocked (member root)
   "Reclaim superseded immutable artifacts under exclusive WAL/member ownership.
-Keep the durable snapshot, unfinished installation, original bootstrap baseline
-and every queued/sender-owned snapshot. Unknown or unsafe files are untouched."
+Keep the durable snapshot, unfinished installation, original bootstrap baseline,
+unpublished pinned artifacts and queued/sender-owned snapshots. Unsafe files stay."
   (unless (and (sb-thread:holding-mutex-p (gr8s.raft.transport:raft-member-lock member))
                (let ((storage (gr8s.raft.transport::raft-member-owned-storage member)))
                  (and (typep storage 'gr8s.raft::file-raft-storage)
@@ -122,19 +143,20 @@ and every queued/sender-owned snapshot. Unknown or unsafe files are untouched."
   (let* ((node (gr8s.raft.transport:raft-member-node member))
          (directory (store-snapshot-registry-directory root))
          (keep (make-hash-table :test 'equal)) (removed 0))
-    (labels ((keep-state (state)
+    (labels ((keep-reference (reference)
+               (let ((copy (copy-store-snapshot-artifact-reference reference)))
+                 (setf (gethash (eighth copy) keep) t)))
+             (keep-state (state)
                (when (gr8s.raft::raft-snapshot-envelope-p state)
                  (let ((reference (getf (cddr state) :application)))
                    (when reference
-                     (unless (and (listp reference) (= 8 (length reference))
-                                  (equal reference (store-snapshot-artifact-reference
-                                                    (fourth reference) (sixth reference) (eighth reference))))
-                       (error "Cannot reclaim artifacts with an unknown snapshot reference"))
-                     (setf (gethash (eighth reference) keep) t))))))
+                     (keep-reference reference))))))
       (unless (keep-state (gr8s.raft:raft-node-snapshot-state node))
         (error "Artifact reclamation requires a durable application snapshot baseline"))
       (when (gr8s.raft:raft-node-snapshot-pending node)
         (keep-state (third (gr8s.raft:raft-node-snapshot-pending node))))
+      (dolist (pin (gr8s.raft.transport::raft-member-artifact-pins member))
+        (keep-reference (first pin)))
       (dolist (message (gr8s.raft.transport::raft-member-snapshot-messages-unlocked member))
         (keep-state (getf message :state)))
       (let ((journal (merge-pathnames "raft/bootstrap.json" root)))
