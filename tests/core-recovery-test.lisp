@@ -153,6 +153,29 @@
       (gr8s::load-core-resources store)
       (is (every (lambda (entry) (member entry (gr8s::pod-store-template-history store) :test #'eq))
                  (gr8s::pod-store-template-history-recent store))))))
+(test oversized-core-transaction-retires-its-entire-recent-history
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (let ((gr8s::*resource-watch-history-bytes* (* 4 sb-vm:gencgc-page-bytes)))
+      (dotimes (i 3)
+        (gr8s::create-core-resource store "configmaps"
+          (configmap-input (format nil "large-~D" i) "key"
+            (make-array 65536 :element-type 'base-char :initial-element #\x)) "default"))
+      (let ((revision (1+ (gr8s::pod-store-resource-revision store))))
+        ;; Commit three deletions at one boundary, exceeding the history byte
+        ;; budget even though only three entries are added to the recent cache.
+        (gr8s::with-core-write (store)
+          (let ((resources (gr8s::copy-core-resource-index store)))
+            (dotimes (i 3)
+              (remhash (gr8s::core-resource-key "configmaps" "default" (format nil "large-~D" i)) resources))
+            (gr8s::commit-core-resources store resources revision)))
+        (is (= revision (gr8s::pod-store-template-history-floor store)))
+        (is (null (gr8s::pod-store-template-history store)))
+        (is (null (gr8s::pod-store-template-history-recent store)))
+        (gr8s::create-core-resource store "configmaps" (configmap-input "after" "key" "small") "default")
+        (is (= 1 (length (gr8s::pod-store-template-history-recent store))))
+        (is (> (gethash "revision" (first (gr8s::pod-store-template-history-recent store))) revision))))))
+
 (test durable-history-obeys-byte-budget
   (let* ((gr8s::*podtemplate-clock* (constantly 10))
          (gr8s::*resource-watch-history-bytes* 1024)
