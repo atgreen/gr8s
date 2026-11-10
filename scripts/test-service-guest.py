@@ -214,7 +214,9 @@ def read_service_flow(path, key):
 
 
 def packet_counters(cluster):
-    return read_packet_counters(cluster.root / "state/agent/containerd/bpf/service-lb/gr8s_pkt_stats")
+    map_name = ("gr8s_nat_st_v2" if os.environ.get("GR8S_ENABLE_NATIVE_SERVICE_V2") == "1"
+                else "gr8s_pkt_stats")
+    return read_packet_counters(cluster.root / "state/agent/containerd/bpf/service-lb" / map_name)
 
 
 def dial(address, destination, port, protocol, request):
@@ -254,6 +256,8 @@ def main():
     parser.add_argument("--report-directory", required=True, type=Path)
     parser.add_argument("--state-parent", type=Path, default=Path("/var/tmp"))
     parser.add_argument("--ctr", type=Path)
+    parser.add_argument("--image-archive", type=Path,
+                        help="offline OCI archive to import into managed containerd")
     parser.add_argument("--kata-agent-timeout-ms", type=int, default=120000,
                         help="test-only agent connection budget for slow nested KVM boots")
     parser.add_argument("--expect-v2-staging", action="store_true",
@@ -284,6 +288,10 @@ def main():
                             "--sha256", args.kata_sha256], stdout=log,
                            stderr=subprocess.STDOUT, check=True, timeout=600)
         configure_test_kata(cluster, args.kata_agent_timeout_ms)
+        if args.image_archive:
+            destination = cluster.root / "state/agent/images/agnhost.tar"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(args.image_archive, destination)
         cluster.start()
         # Node registration precedes managed-containerd startup. Do not race
         # the image preload against creation of its gRPC socket.
