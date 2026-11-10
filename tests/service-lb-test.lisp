@@ -1036,6 +1036,64 @@
       (is (not (member "gr8s_nat_risk_v2" writes :test #'equal)))
       (is (= 2 (length (gr8s::service-lb-controller-applied-risk-keys reopened)))))))
 
+(test v2-risk-phase-withholds-and-withdraws-service-selection
+  (let* ((entries (make-hash-table :test #'equalp))
+         (dataplane (gr8s::%make-service-lb-dataplane
+                     :maps (list (fake-lb-map "gr8s_service_v4" 1)
+                                 (fake-lb-map "gr8s_backend_v4" 2)
+                                 (fake-lb-map "gr8s_backend_index_v4" 3)
+                                 (fake-lb-map "gr8s_nat_risk_v2" 4))))
+         (controller (gr8s::make-service-lb-controller nil dataplane))
+         (service (fake-lb-service "10.96.0.10"))
+         (writes nil)
+         (fail-risk nil)
+         (risk-rows '(("10.88.1.5" 8080)))
+         (update (lambda (map key value)
+                   (let ((name (whistler/loader:map-info-name map)))
+                     (when (and fail-risk (equal name "gr8s_nat_risk_v2"))
+                       (error 'whistler/loader:bpf-error :context "map-update" :errno 28))
+                     (push name writes)
+                     (setf (gethash (list name (copy-seq key)) entries)
+                           (copy-seq value)))))
+         (delete (lambda (map key)
+                   (remhash (list (whistler/loader:map-info-name map) key) entries)))
+         (services (constantly (list service)))
+         (risk-backends (lambda (&rest ignored)
+                          (declare (ignore ignored)) risk-rows)))
+    (flet ((converge (publish-services-p endpoints)
+             (gr8s::converge-service-lb-controller
+              controller :publish-services-p publish-services-p
+              :list-services services :risk-backends-of risk-backends
+              :endpoints-of endpoints :update update :delete delete)))
+      (converge nil (lambda (&rest ignored)
+                      (declare (ignore ignored))
+                      (error "risk phase selected a backend")))
+      (is (equal '("gr8s_nat_risk_v2") writes))
+      (is (= 1 (hash-table-count entries)))
+      (is (null (first (gr8s::service-lb-controller-applied-signature controller))))
+      (setf writes nil)
+      (converge nil (constantly nil))
+      (is (null writes))
+      (converge t (constantly '(("10.88.1.5" 8080))))
+      (is (not (member "gr8s_nat_risk_v2" writes :test #'equal)))
+      (is (gethash (list "gr8s_service_v4"
+                         (gr8s::service-lb-vip-key "10.96.0.10" 80)) entries))
+      (setf writes nil)
+      (setf risk-rows '(("10.88.1.5" 8080) ("10.88.1.6" 8080))
+            fail-risk t)
+      (signals whistler/loader:bpf-error
+        (converge nil (constantly nil)))
+      (is (null (gethash (list "gr8s_service_v4"
+                               (gr8s::service-lb-vip-key "10.96.0.10" 80))
+                         entries)))
+      (setf fail-risk nil)
+      (converge nil (constantly nil))
+      (is (equal '("gr8s_nat_risk_v2") writes))
+      (is (= 2 (hash-table-count entries)))
+      (is (gethash (list "gr8s_nat_risk_v2"
+                         (gr8s::service-lb-risk-key "10.88.1.5" 8080 "TCP"))
+                   entries)))))
+
 (test v2-local-risk-readiness-is-fenced-by-received-revision
   (let* ((dataplane (gr8s::%make-service-lb-dataplane
                      :maps (list (fake-lb-map "gr8s_nat_risk_v2" 4))))

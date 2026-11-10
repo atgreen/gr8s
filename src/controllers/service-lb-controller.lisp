@@ -317,9 +317,30 @@ and affinity maps retain their kernel state across the restart."
             (service-lb-controller-applied-risk-keys controller) risks
             (service-lb-controller-map-state-adopted-p controller) t))))
 
+(defun service-lb-withdraw-unused-selection
+    (controller new-service-keys new-backend-keys new-index-keys delete)
+  "Remove stale selectors and slots, retrying safely after a partial delete."
+  (let ((dataplane (service-lb-controller-dataplane controller)))
+    (dolist (old (service-lb-controller-applied-service-keys controller))
+      (unless (member old new-service-keys :test #'equalp)
+        (service-lb-delete-if-present delete
+         (service-lb-family-map dataplane
+                                (if (= 8 (length old)) :ipv4 :ipv6) :service)
+         old)))
+    (dolist (old (service-lb-controller-applied-backend-keys controller))
+      (unless (member old new-backend-keys :test #'equalp)
+        (let ((map (service-lb-family-map dataplane (car old) :backend)))
+          (when map (service-lb-delete-if-present delete map (cdr old))))))
+    (dolist (old (service-lb-controller-applied-index-keys controller))
+      (unless (member old new-index-keys :test #'equalp)
+        (let ((map (service-lb-family-map dataplane
+                                          (if (= 16 (length old)) :ipv4 :ipv6) :index)))
+          (when map (service-lb-delete-if-present delete map old)))))))
+
 (defun converge-service-lb-controller
     (controller
-     &key (update #'whistler/loader:map-update)
+     &key (publish-services-p t)
+          (update #'whistler/loader:map-update)
           (delete #'whistler/loader:map-delete)
           (next-key #'whistler/loader:map-get-next-key)
           (list-services
@@ -342,7 +363,9 @@ and affinity maps retain their kernel state across the restart."
   "Recompute the desired LB table and apply the difference to the maps.
 Writes every backend before the service that references it (so the program never
 reads a VIP whose slots are missing), then removes freed backend slots and
-withdrawn VIPs.  A plan identical to the last applied one writes nothing."
+withdrawn VIPs. When PUBLISH-SERVICES-P is false, publish the full risk inventory
+but withdraw Service selection tables; this is the first phase of v2 activation.
+A plan identical to the last applied one writes nothing."
   (bt:with-lock-held ((gr8s.network:service-lb-dataplane-lock
                        (service-lb-controller-dataplane controller)))
     (service-lb-adopt-map-state controller next-key)
@@ -350,7 +373,9 @@ withdrawn VIPs.  A plan identical to the last applied one writes nothing."
            (risk-map (service-lb-map dataplane "gr8s_nat_risk_v2"))
            (services (funcall list-services)))
      (multiple-value-bind (service-entries backend-entries slot-count index-entries)
-      (service-lb-plan services endpoints-of)
+      (if publish-services-p
+          (service-lb-plan services endpoints-of)
+          (values nil nil 0 nil))
       (let* ((risk-keys (when risk-map (service-risk-keys services risk-backends-of)))
              (signature (list service-entries backend-entries index-entries risk-keys)))
         (unless (equalp signature (service-lb-controller-applied-signature controller))
@@ -360,6 +385,12 @@ withdrawn VIPs.  A plan identical to the last applied one writes nothing."
                    (mapcar (lambda (entry)
                              (cons (service-lb-entry-family entry :backend) (car entry)))
                            backend-entries)))
+            ;; A retained selector must be removed even when risk publication
+            ;; subsequently fails. Otherwise restart could serve through an old
+            ;; VIP while its new/empty risk map is still incomplete.
+            (unless publish-services-p
+              (service-lb-withdraw-unused-selection
+               controller new-keys new-backend-keys new-index-keys delete))
             ;; Publish risk before exposing a new Service/backend tuple. Retain
             ;; withdrawn risk keys until live v2 flows can be proved drained;
             ;; an early delete could reintroduce an inverse-request collision.
@@ -383,22 +414,11 @@ withdrawn VIPs.  A plan identical to the last applied one writes nothing."
               (funcall update
                        (service-lb-family-map dataplane (service-lb-entry-family entry :service) :service)
                        (car entry) (cdr entry)))
-            ;; Remove withdrawn VIPs and freed backend slots.
-            (dolist (old (service-lb-controller-applied-service-keys controller))
-              (unless (member old new-keys :test #'equalp)
-                (service-lb-delete-if-present delete
-                         (service-lb-family-map dataplane
-                                                (if (= 8 (length old)) :ipv4 :ipv6) :service)
-                         old)))
-            (dolist (old (service-lb-controller-applied-backend-keys controller))
-              (unless (member old new-backend-keys :test #'equalp)
-                (let ((map (service-lb-family-map dataplane (car old) :backend)))
-                  (when map (service-lb-delete-if-present delete map (cdr old))))))
-            (dolist (old (service-lb-controller-applied-index-keys controller))
-              (unless (member old new-index-keys :test #'equalp)
-                (let ((map (service-lb-family-map dataplane
-                                                  (if (= 16 (length old)) :ipv4 :ipv6) :index)))
-                  (when map (service-lb-delete-if-present delete map old)))))
+            ;; The normal path retains its risk-before-exposure order, then
+            ;; withdraws old selectors after new ones are fully published.
+            (when publish-services-p
+              (service-lb-withdraw-unused-selection
+               controller new-keys new-backend-keys new-index-keys delete))
             (setf (service-lb-controller-applied-backend-keys controller) new-backend-keys
                   (service-lb-controller-applied-index-keys controller) new-index-keys
                   (service-lb-controller-applied-risk-keys controller)
