@@ -83,7 +83,8 @@
 
 (defstruct cni-configuration
   version name type direction program map-pin-root previous-result endpoint-address
-  endpoint-addresses policy-interface-name service-packet-root)
+  endpoint-addresses policy-interface-name service-packet-root service-packet-profile
+  service-node-id service-return-address)
 
 (defvar *cni-policy-update-lock* (bt:make-lock "gr8s endpoint policy updates")
   "Serialize agent CNI ADD/DEL with retained endpoint program migration.
@@ -99,15 +100,32 @@ All privileged plugin work is dispatched to this agent through its CNI socket.")
 (defvar *cni-service-packets* nil
   "True while compiling an endpoint guard bound to the node's shared Service maps.")
 
+(defvar *cni-policy-profile* :v1
+  "Strict expected map profile while CNI ADD or CHECK validates pinned maps.")
+
+(defun cni-service-profile (configuration)
+  (when (cni-configuration-service-packet-root configuration)
+    (or (cni-configuration-service-packet-profile configuration) :v1)))
+
+(defun cni-shared-service-map-specs (configuration)
+  (case (cni-service-profile configuration)
+    (:v1 (service-packet-map-specs))
+    (:v2 (service-nat-shared-map-specs))))
+
 (defun cni-local-policy-map-specs (configuration)
   "Per-endpoint maps, including the pinned program table for Service stages."
-  (append +cni-policy-map-specs+
-          (when (cni-configuration-service-packet-root configuration)
-            '(("gr8s_pkt_stages" 3 4 4 8 0)))))
+  (if (eq (cni-service-profile configuration) :v2)
+      (service-nat-local-map-specs)
+      (append +cni-policy-map-specs+
+              (when (cni-configuration-service-packet-root configuration)
+                '(("gr8s_pkt_stages" 3 4 4 8 0))))))
 
 (defun check-cni-service-stages (map &key (lookup #'whistler/loader:map-lookup))
   "Require every policy/NAT continuation before reporting a healthy endpoint."
-  (loop for name in '("Service forward" "egress policy" "Service reverse")
+  (loop for name in (if (equal "gr8s_nat_stages"
+                              (ignore-errors (whistler/loader:map-info-name map)))
+                        (mapcar #'cdr *service-nat-stage-programs*)
+                        '("Service forward" "egress policy" "Service reverse"))
         for index from 0
         for value = (funcall lookup map (service-lb-bytes index 4))
         do (unless (and value (some #'plusp value))
@@ -160,6 +178,11 @@ All privileged plugin work is dispatched to this agent through its CNI socket.")
         (invalid-cni "unsupported direction ~S" direction))
       (when (and require-previous (not (hash-table-p previous)))
         (invalid-cni "gr8s must be used as a chained CNI plugin"))
+      (let ((profile (gethash "servicePacketProfile" object "v1")))
+        (unless (member profile '("v1" "v2") :test #'equal)
+          (invalid-cni "unsupported Service packet profile ~S" profile))
+        (when (and (equal profile "v2") (not (gethash "servicePacketRoot" object)))
+          (invalid-cni "v2 Service packet profile requires shared maps"))
       (make-cni-configuration
        :version (required-cni-string object "cniVersion")
        :name (gethash "name" object "gr8s")
@@ -171,7 +194,8 @@ All privileged plugin work is dispatched to this agent through its CNI socket.")
        :map-pin-root (absolute-cni-path object "mapPinRoot")
        :service-packet-root (when (gethash "servicePacketRoot" object)
                               (absolute-cni-path object "servicePacketRoot"))
-       :previous-result previous))))
+       :service-packet-profile (when (equal profile "v2") :v2)
+       :previous-result previous)))))
 
 (defun safe-cni-container-id-p (container-id)
   "True when CONTAINER-ID is safe to use as a BPF pin directory name: a non-empty
@@ -422,9 +446,15 @@ prevResult and only installs, checks, or removes its policy datapath."
   (let ((directory (namestring (uiop:pathname-directory-pathname map-path)))
         (opened nil) (object nil) (new-pins nil) (link-fd nil)
         (packet-root (cni-configuration-service-packet-root configuration))
+        (*cni-policy-profile* (or (cni-service-profile configuration) :v1))
         ;; A link pinned but not yet renamed into place.
         (staging nil)
         (committed nil))
+    ;; The graph loader is wired separately from activation. A v2 endpoint
+    ;; requires a 48-byte local incarnation and an acknowledged receiver map;
+    ;; the ordinary CNI identity writer still emits the legacy 32-byte value.
+    (when (eq (cni-service-profile configuration) :v2)
+      (invalid-cni "v2 Service endpoint attachment is waiting for local identity and publication fencing"))
     (funcall ensure-directory directory)
     (unwind-protect
          (progn
@@ -432,7 +462,7 @@ prevResult and only installs, checks, or removes its policy datapath."
            ;; an endpoint. An explicitly enabled but unavailable dataplane makes
            ;; ADD fail visibly instead of installing disconnected empty tables.
            (when packet-root
-             (dolist (spec (service-packet-map-specs))
+             (dolist (spec (cni-shared-service-map-specs configuration))
                (let* ((name (first spec))
                       (fd (funcall open-pinned
                                    (namestring (merge-pathnames name (uiop:ensure-directory-pathname packet-root))))))
@@ -444,7 +474,7 @@ prevResult and only installs, checks, or removes its policy datapath."
                  (let ((fd (funcall open-pinned path)))
                    (push (cons name fd) opened)
                    (funcall validate-map fd name)))))
-           (let ((*cni-service-packets* (not (null packet-root))))
+           (let ((*cni-service-packets* (cni-service-profile configuration)))
              (setf object (funcall open-object (cni-configuration-program configuration))))
            (funcall load-object object opened)
            (dolist (spec (cni-local-policy-map-specs configuration))
@@ -486,7 +516,7 @@ prevResult and only installs, checks, or removes its policy datapath."
       (when link-fd (funcall close-fd link-fd))
       (let ((owned (when object
                      (loop for spec in (append (cni-local-policy-map-specs configuration)
-                                              (when packet-root (service-packet-map-specs)))
+                                              (cni-shared-service-map-specs configuration))
                            for map = (ignore-errors (funcall object-map object (first spec)))
                            when map collect (funcall map-fd map)))))
         (when object (funcall close-object object))
@@ -514,6 +544,7 @@ prevResult and only installs, checks, or removes its policy datapath."
    guard's TCX link is attached on the expected interface in the expected
    direction. Signals through its check/validate operations on any discrepancy;
    returns NIL when consistent."
+  (let ((*cni-policy-profile* (or (cni-service-profile configuration) :v1)))
   (dolist (path (cni-upgrade-block-paths map-path))
     (when (or (funcall path-exists-p path) (funcall staged-links path))
       (invalid-cni "endpoint packet program upgrade is incomplete")))
@@ -524,10 +555,11 @@ prevResult and only installs, checks, or removes its policy datapath."
            (let ((map (funcall validate-map fd name)))
              (when (string= name "endpoint_identity")
                (funcall check-identity map configuration context))
-             (when (string= name "gr8s_pkt_stages") (funcall check-stages map)))
+             (when (member name '("gr8s_pkt_stages" "gr8s_nat_stages") :test #'equal)
+               (funcall check-stages map)))
         (funcall close-fd fd))))
   (when (cni-configuration-service-packet-root configuration)
-    (dolist (spec (service-packet-map-specs))
+    (dolist (spec (cni-shared-service-map-specs configuration))
       (let* ((name (first spec))
              (fd (funcall open-pinned
                           (namestring (merge-pathnames
@@ -545,7 +577,7 @@ prevResult and only installs, checks, or removes its policy datapath."
                      (lambda (index) (funcall check-link fd index link-direction))
                      call-in-netns interface-index)
                  (funcall close-fd fd)))))
-  nil)
+  nil))
 
 (defun remove-cni-policy (&rest arguments)
   "Delete policy while excluding CNI installation and retained program upgrades."
@@ -574,8 +606,11 @@ prevResult and only installs, checks, or removes its policy datapath."
       (funcall remove-path path))
     (when (funcall path-exists-p link) (funcall retire-link link))
     (funcall remove-path link))
-  (dolist (name (append (mapcar #'first +cni-policy-map-specs+)
-                        '("gr8s_pkt_stages") +cni-legacy-policy-maps+))
+  (dolist (name (remove-duplicates
+                 (append (mapcar #'first +cni-policy-map-specs+)
+                         (mapcar #'first (service-nat-local-map-specs))
+                         '("gr8s_pkt_stages") +cni-legacy-policy-maps+)
+                 :test #'equal))
     (funcall remove-path (cni-policy-map-path map-path name)))
   ;; Keep blockers until all ordinary policy/map pins have been retired.
   (dolist (path (cni-upgrade-block-paths map-path))

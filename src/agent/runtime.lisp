@@ -585,6 +585,21 @@ Returns NETWORK; signals INVALID-CNI on any violation."
       (invalid-cni "invalid WireGuard listen port")))
   network)
 
+(defun publish-node-runtime-service-nat-inventory
+    (node-runtime &optional (network (node-runtime-network node-runtime)))
+  "Seed the shared v2 managed-address and identity tables from the network assignment.
+Called after a new assignment and after a retained Service LB map is opened on
+restart, since the network may be restored before the dataplane starts."
+  (let* ((dataplane (node-runtime-service-lb node-runtime))
+         (managed (and dataplane (service-lb-map dataplane "gr8s_nat_pod_v2")))
+         (identities (and dataplane (service-lb-map dataplane "gr8s_nat_id_v2"))))
+    (when (and managed network)
+      (gr8s.network::publish-service-nat-managed-cidrs
+       managed (persisted-node-network-cidrs network "clusterPodCIDRs" "clusterPodCIDR")))
+    (when (and identities network)
+      (gr8s.network::publish-service-nat-identities
+       identities (gethash "serviceTranslations" network #())))))
+
 (defun configure-node-runtime-network (node-runtime network &key (persist t))
   "Apply NETWORK as this node's overlay configuration and record it on the runtime.
 Validates NETWORK, opens IPAM if needed and -- under the network lock -- refuses to change
@@ -644,8 +659,10 @@ conflicting network."
             (node-runtime-ipam node-runtime) ipam
             (node-runtime-cni-operations node-runtime)
             (make-routed-cni-operations
-             ipam :mtu (gethash "mtu" network)
+             ipam :node-id (node-runtime-node-id node-runtime)
+                  :mtu (gethash "mtu" network)
                   :dns-address (gethash "dnsAddress" network)))))
+  (publish-node-runtime-service-nat-inventory node-runtime network)
   node-runtime)
 
 (defun node-network-overlay-firewall-identity (network)
@@ -1001,7 +1018,10 @@ the node from starting."
                 ;; The node cgroup2 root whose subtree holds the Pod processes.
                 (try-start-service-lb-dataplane
                  "/sys/fs/cgroup" pin-directory
-                 :packet-services (equal "1" (uiop:getenv "GR8S_ENABLE_PACKET_SERVICES"))))))
+                 :packet-services
+                 (when (equal "1" (uiop:getenv "GR8S_ENABLE_PACKET_SERVICES"))
+                   (if (equal "1" (uiop:getenv "GR8S_PREPARE_PACKET_SERVICES_V2"))
+                       :v2 t))))))
     (when dataplane
       (setf (node-runtime-service-lb node-runtime) dataplane
             (node-runtime-service-lb-controller node-runtime)
@@ -1010,7 +1030,8 @@ the node from starting."
                                         :endpoint-steerer
                                         (lambda (endpoints)
                                           (steer-service-endpoints
-                                           node-runtime endpoints)))))
+                                           node-runtime endpoints))))
+      (publish-node-runtime-service-nat-inventory node-runtime))
     (handler-case
         (setf (node-runtime-gateway-steering node-runtime) (start-gateway-steering))
       (error (condition)

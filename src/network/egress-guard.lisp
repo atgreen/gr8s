@@ -13,6 +13,8 @@
 (defun compile-egress-guard (&key service-packets)
   "JIT-compile the per-endpoint egress guard. Returns (values map-specs
 prog-specs), the same shape as compile-service-lb."
+  (when (eq service-packets :v2)
+    (return-from compile-egress-guard (compile-service-nat-guard)))
   (compile-whistler-program
    (append *egress-guard-map-forms*
            (when service-packets
@@ -41,19 +43,28 @@ and per-Pod state lives in its maps, so every Pod loads the same program.")
 (defvar *service-egress-guard-specs* nil
   "The separately cached guard variant that binds to shared Service maps.")
 
+(defvar *service-nat-guard-specs* nil
+  "The separately cached ABI-v2 Service graph and its shared map relocations.")
+
+(defvar *service-nat-stage-programs* nil
+  "Defined with the standalone v2 graph; declared here for the CNI publisher.")
+
 (defvar *egress-guard-specs-lock* (bt:make-lock "gr8s egress guard compile"))
 
 (defun egress-guard-specs (&key service-packets)
   "Return shared relocatable specs. Native builds prepare both variants before
 dumping the image; source-based runs compile lazily on first use."
   (bt:with-lock-held (*egress-guard-specs-lock*)
-    (if service-packets
-        (or *service-egress-guard-specs*
-            (setf *service-egress-guard-specs*
-                  (multiple-value-call #'cons (compile-egress-guard :service-packets t))))
-        (or *egress-guard-specs*
-            (setf *egress-guard-specs*
-                  (multiple-value-call #'cons (compile-egress-guard)))))))
+    (case service-packets
+      (:v2 (or *service-nat-guard-specs*
+               (setf *service-nat-guard-specs*
+                     (multiple-value-call #'cons (compile-egress-guard :service-packets :v2)))))
+      ((nil) (or *egress-guard-specs*
+                 (setf *egress-guard-specs*
+                       (multiple-value-call #'cons (compile-egress-guard)))))
+      (otherwise (or *service-egress-guard-specs*
+                     (setf *service-egress-guard-specs*
+                           (multiple-value-call #'cons (compile-egress-guard :service-packets t))))))))
 
 (defun compile-egress-policy-object (&rest ignored)
   "Make a policy object for the compiled egress guard. The specs are shared: loading
@@ -76,9 +87,12 @@ counters persist, and only the remaining maps are created fresh.  CREATE-MAP and
 LOAD-PROGRAMS are injected so the orchestration is testable without CAP_BPF.
 With PUBLISH-STAGES NIL, loading does not change the live continuation table;
 the upgrade path publishes only after both directions are quiescent."
-  (when (find "gr8s_pkt_forward" (egress-policy-object-map-specs object)
-              :key (lambda (spec) (getf spec :name)) :test #'equal)
-    (dolist (spec (service-packet-map-specs))
+  (let ((names (mapcar (lambda (spec) (getf spec :name))
+                       (egress-policy-object-map-specs object))))
+    (dolist (spec (cond ((member "gr8s_nat_stages" names :test #'equal)
+                         (service-nat-shared-map-specs))
+                        ((member "gr8s_pkt_forward" names :test #'equal)
+                         (service-packet-map-specs))))
       (unless (assoc (first spec) replacements :test #'equal)
         (invalid-cni "shared Service map ~A is unavailable" (first spec)))))
   (let ((maps (loop for spec in (egress-policy-object-map-specs object)
@@ -115,7 +129,17 @@ retained legacy writers before updating a table already used by live programs."
                     collect program)))
         (loop for program in programs for index from 0
               do (funcall update stages (service-lb-bytes index 4)
-                          (service-lb-bytes (whistler/loader:prog-info-fd program) 4)))))))
+                          (service-lb-bytes (whistler/loader:prog-info-fd program) 4))))))
+  (let ((stages (cdr (assoc "gr8s_nat_stages" (egress-policy-object-maps object) :test #'equal))))
+    (when stages
+      (let ((programs
+              (loop for (index . name) in *service-nat-stage-programs*
+                    for program = (cdr (assoc name (egress-policy-object-programs object) :test #'equal))
+                    do (unless program (invalid-cni "v2 Service guard stage ~A is missing" name))
+                    collect (cons index program))))
+        (dolist (stage programs)
+          (funcall update stages (service-lb-bytes (car stage) 4)
+                   (service-lb-bytes (whistler/loader:prog-info-fd (cdr stage)) 4)))))))
 
 (defun egress-policy-object-find-map (object name)
   "Return the map-info named NAME, or NIL."

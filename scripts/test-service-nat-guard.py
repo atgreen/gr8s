@@ -32,7 +32,7 @@ STAGES = ("gr8s_nat_generation", "gr8s_nat_select", "gr8s_v2_eg_policy",
           "gr8s_v2_in_policy", "gr8s_nat_restore")
 TABLE = "gr8s_nat_stages"
 GLOBAL = {"gr8s_service_v4", "gr8s_backend_v4", "gr8s_backend_index_v4", "gr8s_pkt_affinity",
-          n.FWD, n.REV, n.IDENT, "gr8s_nat_fl_v2", "gr8s_nat_rl_v2", "gr8s_nat_tcp_v2",
+          n.FWD, n.REV, n.IDENT, "gr8s_nat_risk_v2", "gr8s_nat_fl_v2", "gr8s_nat_rl_v2", "gr8s_nat_tcp_v2",
           "gr8s_nat_st_v2", "gr8s_nat_pod_v2"}
 CLIENT_MAC, BACK_MAC = bytes.fromhex("020000000002"), bytes.fromhex("020000000003")
 
@@ -484,7 +484,7 @@ def main():
     parser.add_argument("--kernel", action="store_true")
     args = parser.parse_args()
     programs, ids, descriptors = p.read_fixture(args.fixture, names=ROOTS + STAGES + ("gr8s_nat_gc",))
-    assert len(descriptors) == 29
+    assert len(descriptors) == 30
     assert descriptors[TABLE] == (3, 4, 4, 16, 0)
     results = {}
     cls = Kernel if args.kernel else Interpreter

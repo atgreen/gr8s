@@ -75,6 +75,9 @@
              (progn
                ;; Found the cluster on member 1.
                (setf h1 (gr8s::start-ha-control-plane s1 :id "cp1" :init t))
+               (is (= (* 16 1024 1024)
+                      (gr8s.raft::raft-node-uncommitted-byte-limit
+                       (gr8s::raft-member-node (gr8s::ha-control-plane-member h1)))))
                (is (poll-until (lambda () (gr8s::ha-control-plane-leader-p h1)))
                    "the founding control plane becomes leader")
                ;; Member 2 joins, learning member 1's address from its member.

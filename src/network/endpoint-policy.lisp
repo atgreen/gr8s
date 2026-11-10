@@ -36,24 +36,33 @@
       (whistler/loader::%bpf 15 attribute 16 "gr8s object-info"))
     info))
 
-(defun cni-policy-map-info (fd name &key (object-info #'bpf-object-kernel-info))
+(defun cni-policy-map-info (fd name &key (object-info #'bpf-object-kernel-info)
+                                        (profile *cni-policy-profile*))
   "Return a Whistler MAP-INFO for the pinned map FD named NAME, after verifying
    its kernel type, key and value sizes, capacity and flags against the expected
    spec in +CNI-POLICY-MAP-SPECS+. Signals INVALID-CNI on any schema mismatch.
    OBJECT-INFO is the info query, injectable for tests."
-  (let* ((spec (or (assoc name +cni-policy-map-specs+ :test #'string=)
-                   (when (equal name "gr8s_pkt_stages") '("gr8s_pkt_stages" 3 4 4 8 0))
-                   (assoc name (service-packet-map-specs) :test #'string=)))
-         (info (funcall object-info fd)))
+  (let* ((info (funcall object-info fd))
+         (legacy (append +cni-policy-map-specs+
+                         '(("gr8s_pkt_stages" 3 4 4 8 0))
+                         (service-packet-map-specs)))
+         (candidates (ecase profile
+                       (:v1 legacy)
+                       (:v2 (service-nat-map-specs))))
+         (spec (find-if
+                (lambda (candidate)
+                  (and (string= name (first candidate))
+                       (>= (length info) 24)
+                       (= (second candidate) (netlink-read-integer info 0 4))
+                       (= (third candidate) (netlink-read-integer info 8 4))
+                       (= (fourth candidate) (netlink-read-integer info 12 4))
+                       (= (fifth candidate) (netlink-read-integer info 16 4))
+                       (= (sixth candidate) (netlink-read-integer info 20 4))))
+                candidates)))
+    (unless spec
+      (invalid-cni "pinned Whistler map ~A has an incompatible schema" name))
     (destructuring-bind (&optional sname type key-size value-size max-entries flags) spec
       (declare (ignore sname))
-      (unless (and spec (>= (length info) 24)
-                   (= type (netlink-read-integer info 0 4))
-                   (= key-size (netlink-read-integer info 8 4))
-                   (= value-size (netlink-read-integer info 12 4))
-                   (= max-entries (netlink-read-integer info 16 4))
-                   (= flags (netlink-read-integer info 20 4)))
-        (invalid-cni "pinned Whistler map ~A has an incompatible schema" name))
       (whistler/loader::make-map-info
        :name name :type type :key-size key-size :value-size value-size
        :max-entries max-entries :flags flags :fd fd))))
@@ -85,6 +94,19 @@
      (if ipv6 (0conf:parse-ipv6 ipv6)
          (make-array 16 :element-type '(unsigned-byte 8) :initial-element 0)))))
 
+(defun encode-cni-endpoint-identity-v2
+    (addresses mac node-id sandbox-id interface-name alias)
+  "Append the trusted local incarnation to the v1 wire layout. The result is
+exactly the 48 bytes expected by the v2 endpoint_identity map."
+  (let* ((items (if (stringp addresses) (list addresses) addresses))
+         (primary (find-if-not (lambda (address) (find #\: address)) items)))
+    (unless (and primary alias node-id sandbox-id interface-name)
+      (invalid-cni "v2 Service endpoint lacks trusted native incarnation fields"))
+    (concatenate '(vector (unsigned-byte 8))
+                 (encode-cni-endpoint-identity items mac +cni-policy-native-attachment+)
+                 (service-translation-incarnation-token
+                  node-id sandbox-id interface-name primary alias))))
+
 (defun cni-endpoint-identity (configuration context)
   "Build the endpoint-identity value for the Pod described by CONFIGURATION and
    CONTEXT, reading the Pod interface's MAC from inside its network namespace.
@@ -93,12 +115,21 @@
                        (let ((address (cni-configuration-endpoint-address configuration)))
                          (and address (list address))))))
     (unless addresses (invalid-cni "the agent has not assigned an endpoint address"))
-    (encode-cni-endpoint-identity
-     addresses
-     (call-with-cni-network-namespace
-      (cni-context-netns context)
-      (lambda () (gethash 1 (network-link-attributes (cni-context-interface-name context)))))
-     (cni-policy-attachment-mode configuration))))
+    (let ((mac (call-with-cni-network-namespace
+                (cni-context-netns context)
+                (lambda () (gethash 1 (network-link-attributes
+                                       (cni-context-interface-name context)))))))
+      (if (eq (cni-service-profile configuration) :v2)
+          (progn
+            (unless (= +cni-policy-native-attachment+
+                       (cni-policy-attachment-mode configuration))
+              (invalid-cni "v2 Service endpoint requires a native attachment"))
+            (encode-cni-endpoint-identity-v2
+             addresses mac (cni-configuration-service-node-id configuration)
+             (cni-context-container-id context) (cni-context-interface-name context)
+             (cni-configuration-service-return-address configuration)))
+          (encode-cni-endpoint-identity addresses mac
+                                        (cni-policy-attachment-mode configuration))))))
 
 (defun initialize-cni-identity (map configuration context)
   "Write the Pod's endpoint identity into MAP at key 0, the entry the datapath

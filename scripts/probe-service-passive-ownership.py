@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Anthony Green
 # SPDX-License-Identifier: Apache-2.0
-"""Reproduce podster-p9c.14 against the standalone v2 graph.
+"""Probe inverse Service requests against the standalone v2 graph.
 
 Two endpoints initiate independent Services from opposite ports. Each request
 must reach the other endpoint as a request, rather than acquiring the source
 VIP of its unrelated outbound Service. Test both arrival orders and node-map
-topologies. This is a known failing regression, not part of make check yet.
+topologies. Default mode is the historical failing regression; --risk seeds
+advertised backend source tuples to test the no-envelope mitigation.
 --kernel is for a disposable root VM only; no live CNI or socket claim.
 """
 import argparse
 import importlib.util
+import ipaddress
 import json
 from pathlib import Path
 import struct
@@ -22,7 +24,12 @@ spec.loader.exec_module(graph)
 p, n = graph.p, graph.n
 
 
-def probe(factory, protocol, shared, crossed):
+def risk_key(address, port, protocol):
+    return (ipaddress.ip_address(address).packed +
+            struct.pack("!H", port) + bytes([protocol, 0]))
+
+
+def probe(factory, protocol, shared, crossed, risk=False):
     client = factory()
     backend = None
     try:
@@ -33,6 +40,9 @@ def probe(factory, protocol, shared, crossed):
         graph.configure(client, p.CLIENT, n.ALIAS, 1, graph.CLIENT_MAC)
         graph.configure(backend, p.BACKEND, n.BACK_ALIAS, 2, graph.BACK_MAC)
         p.publish(client, protocol)
+        if risk:
+            client.update("gr8s_nat_risk_v2", risk_key(p.CLIENT, 49000 + protocol, protocol), struct.pack("<I", 1))
+            backend.update("gr8s_nat_risk_v2", risk_key(p.BACKEND, 8080, protocol), struct.pack("<I", 1))
         original = graph.packet(protocol=protocol, sport=49000 + protocol)
         wire = graph.run(client, 0, original)
         incoming = None if crossed else graph.run(backend, 1, wire)
@@ -51,6 +61,7 @@ def probe(factory, protocol, shared, crossed):
         other_incoming = graph.run(client, 1, other_wire)
         return {
             "protocol": protocol, "sharedNodeMaps": shared,
+            "riskPublished": risk,
             "order": "bothEmittedBeforeIngress" if crossed else "firstAdmittedBeforeSecondEmitted",
             "firstRequest": p.endpoints(original), "firstWire": p.endpoints(wire),
             "secondRequest": p.endpoints(other), "secondWire": p.endpoints(other_wire),
@@ -69,12 +80,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("fixture", type=Path)
     parser.add_argument("--kernel", action="store_true")
+    parser.add_argument("--risk", action="store_true")
     args = parser.parse_args()
     programs, ids, descriptors = p.read_fixture(
         args.fixture, names=graph.ROOTS + graph.STAGES + ("gr8s_nat_gc",))
     cls = graph.Kernel if args.kernel else graph.Interpreter
     factory = lambda shared=None: cls(programs, ids, descriptors, shared)
-    cases = [probe(factory, protocol, shared, crossed)
+    cases = [probe(factory, protocol, shared, crossed, args.risk)
              for protocol in (6, 17) for shared in (True, False) for crossed in (False, True)]
     passed = not any(case["misdelivered"] for case in cases)
     print(json.dumps({"passed": passed, "kernel": args.kernel, "cases": cases}))

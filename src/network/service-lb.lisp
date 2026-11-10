@@ -58,10 +58,19 @@ loader's map-creation and program-loading steps.  No ELF is produced."
 (defvar *service-packet-gc-program-forms* nil
   "Maintenance program forms loaded only when packet Services are enabled.")
 
+(defvar *service-nat-map-forms* nil
+  "Shared v2 Service NAT maps staged before the v2 endpoint profile is installed.")
+
+(defvar *service-nat-pod-map-form* nil
+  "The shared v2 managed-Pod inventory used for alias-aware policy checks.")
+
 (defun compile-service-lb (&key packet-services)
   "JIT-compile the ClusterIP socket load balancer. See compile-whistler-program."
   (compile-whistler-program (append *service-lb-map-forms*
-                                   (when packet-services *service-packet-extra-map-forms*))
+                                   (when packet-services *service-packet-extra-map-forms*)
+                                   (when (eq packet-services :v2)
+                                     (append *service-nat-map-forms*
+                                             (list *service-nat-pod-map-form*))))
                             (append *service-lb-program-forms*
                                     (when packet-services *service-packet-gc-program-forms*))))
 
@@ -136,6 +145,16 @@ program to refuse connections, for a Service with no endpoints at all."
     (setf (aref buffer address-size) (ldb (byte 8 8) port)
           (aref buffer (1+ address-size)) (ldb (byte 8 0) port))
     buffer))
+
+(defun service-lb-risk-key (address port protocol)
+  "Encode an IPv4 Service backend as the v2 source-risk map's 8-octet key.
+The packet program loads the first six octets verbatim from the source tuple."
+  (let ((backend (service-lb-backend-value address port)))
+    (unless (= (length backend) 8)
+      (error "The v2 Service risk map only supports IPv4 backends"))
+    (concatenate '(vector (unsigned-byte 8))
+                 (subseq backend 0 6)
+                 (vector (service-lb-protocol-number protocol) 0))))
 
 (defun service-lb-index-key (vip-key backend-value)
   "Return the 16-octet gr8s_backend_index_v4 key: the service key, then the backend value

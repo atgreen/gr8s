@@ -11,6 +11,7 @@ Evidence remains in --report-directory; the cluster is stopped and removed.
 
 import argparse
 import ctypes
+import errno
 import hashlib
 import importlib.util
 import ipaddress
@@ -160,10 +161,14 @@ def main():
     parser.add_argument("--ctr", type=Path)
     parser.add_argument("--kata-agent-timeout-ms", type=int, default=120000,
                         help="test-only agent connection budget for slow nested KVM boots")
+    parser.add_argument("--expect-v2-staging", action="store_true",
+                        help="stage v2 shared maps and check backend risk publication")
     args = parser.parse_args()
     if os.geteuid() != 0 or not Path("/dev/kvm").exists():
         sys.exit("run as root in a disposable VM with nested KVM")
     os.environ["GR8S_ENABLE_PACKET_SERVICES"] = "1"
+    if args.expect_v2_staging:
+        os.environ["GR8S_PREPARE_PACKET_SERVICES_V2"] = "1"
     args.report_directory.mkdir(parents=True, exist_ok=True)
     cluster = traffic.Cluster(args.gr8s.resolve(), args.state_parent, 18194, 17451)
     report = {"clusterRoot": str(cluster.root), "checks": [], "kataSHA256": args.kata_sha256}
@@ -211,7 +216,28 @@ def main():
                 for c in cluster.get("pod", name).get("status", {}).get("conditions", []))
             for name in ("guest", "backend")))
         guest_ip = cluster.get("pod", "guest")["status"]["podIP"]
+        backend_ip = cluster.get("pod", "backend")["status"]["podIP"]
         vip = cluster.get("service", "packet-web")["spec"]["clusterIP"]
+        if args.expect_v2_staging:
+            risk_map = cluster.root / "state/agent/containerd/bpf/service-lb/gr8s_nat_risk_v2"
+            risk_keys = [ipaddress.ip_address(backend_ip).packed +
+                         struct.pack("!H", port) + bytes([protocol, 0])
+                         for port, protocol in ((8080, 6), (8081, 17))]
+            def risk_published():
+                if not risk_map.exists():
+                    return False
+                try:
+                    values = read_pinned_values(risk_map, risk_keys, 4)
+                except OSError as error:
+                    if error.errno == errno.ENOENT:
+                        return False
+                    raise
+                return all(value == struct.pack("<I", 1) for value in values)
+
+            traffic.wait_for("v2 backend risk publication", 120, risk_published)
+            check("v2RiskMapPublishedBeforeGuestTraffic", True,
+                  {"path": str(risk_map), "backend": backend_ip,
+                   "keys": [key.hex() for key in risk_keys]})
         guest_kernel = cluster.kubectl("exec", "guest", "--", "uname", "-r").strip()
         qemus = []
         for cmdline in Path("/proc").glob("[0-9]*/cmdline"):
