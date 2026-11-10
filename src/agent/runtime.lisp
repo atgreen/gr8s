@@ -1001,7 +1001,10 @@ the node from starting."
                 ;; The node cgroup2 root whose subtree holds the Pod processes.
                 (try-start-service-lb-dataplane
                  "/sys/fs/cgroup" pin-directory
-                 :packet-services (equal "1" (uiop:getenv "GR8S_ENABLE_PACKET_SERVICES"))))))
+                 :packet-services
+                 (when (equal "1" (uiop:getenv "GR8S_ENABLE_PACKET_SERVICES"))
+                   (if (equal "1" (uiop:getenv "GR8S_PREPARE_PACKET_SERVICES_V2"))
+                       :v2 t))))))
     (when dataplane
       (setf (node-runtime-service-lb node-runtime) dataplane
             (node-runtime-service-lb-controller node-runtime)

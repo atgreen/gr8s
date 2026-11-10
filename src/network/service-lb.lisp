@@ -58,10 +58,19 @@ loader's map-creation and program-loading steps.  No ELF is produced."
 (defvar *service-packet-gc-program-forms* nil
   "Maintenance program forms loaded only when packet Services are enabled.")
 
+(defvar *service-nat-map-forms* nil
+  "Shared v2 Service NAT maps staged before the v2 endpoint profile is installed.")
+
+(defvar *service-nat-pod-map-form* nil
+  "The shared v2 managed-Pod inventory used for alias-aware policy checks.")
+
 (defun compile-service-lb (&key packet-services)
   "JIT-compile the ClusterIP socket load balancer. See compile-whistler-program."
   (compile-whistler-program (append *service-lb-map-forms*
-                                   (when packet-services *service-packet-extra-map-forms*))
+                                   (when packet-services *service-packet-extra-map-forms*)
+                                   (when (eq packet-services :v2)
+                                     (append *service-nat-map-forms*
+                                             (list *service-nat-pod-map-form*))))
                             (append *service-lb-program-forms*
                                     (when packet-services *service-packet-gc-program-forms*))))
 

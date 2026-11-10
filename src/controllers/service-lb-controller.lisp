@@ -364,10 +364,12 @@ withdrawn VIPs.  A plan identical to the last applied one writes nothing."
             ;; withdrawn risk keys until live v2 flows can be proved drained;
             ;; an early delete could reintroduce an inverse-request collision.
             (when risk-map
-              (dolist (key risk-keys)
-                (unless (member key (service-lb-controller-applied-risk-keys controller)
-                                :test #'equalp)
-                  (funcall update risk-map key #(1 0 0 0)))))
+              (let ((present (make-array 4 :element-type '(unsigned-byte 8)
+                                           :initial-contents '(1 0 0 0))))
+                (dolist (key risk-keys)
+                  (unless (member key (service-lb-controller-applied-risk-keys controller)
+                                  :test #'equalp)
+                    (funcall update risk-map key present)))))
             ;; Add/update first: backends and where each now sits, then the services that point at them.
             (dolist (entry backend-entries)
               (funcall update
