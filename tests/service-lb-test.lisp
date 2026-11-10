@@ -274,6 +274,38 @@
        :open (lambda (&rest ignored)
                (declare (ignore ignored)) (error "must reject v1 before map open"))))))
 
+(test cni-v2-owner-check-rejects-missing-and-stale-incarnations
+  (let* ((configuration (gr8s::make-cni-configuration
+                         :service-packet-root "/pins/shared/" :service-packet-profile :v2
+                         :service-node-id "node-1"))
+         (context (gr8s::make-cni-context :container-id "sandbox-1" :interface-name "eth0"))
+         (rows (gr8s.network::service-nat-identity-pair
+                "node-1" "sandbox-1" "eth0" "10.88.1.2" "10.88.1.9"))
+         (values (make-hash-table :test #'equalp))
+         (closed 0))
+    (dolist (row rows)
+      (let ((value (copy-seq (cdr row))))
+        (replace value (gr8s::service-lb-bytes #x20007 4) :start1 4)
+        (setf (gethash (car row) values) value)))
+    (labels ((check ()
+               (gr8s.network::check-cni-service-nat-owner
+                configuration context '("10.88.1.2") "10.88.1.9"
+                :open (lambda (path)
+                        (is (equal "/pins/shared/gr8s_nat_id_v2" path)) 7)
+                :map-info (lambda (fd name &key profile)
+                            (is (= 7 fd)) (is (equal "gr8s_nat_id_v2" name))
+                            (is (eq :v2 profile)) :map)
+                :lookup (lambda (map key) (is (eq :map map)) (gethash key values))
+                :close (lambda (fd) (is (= 7 fd)) (incf closed)))))
+      (is (null (check)))
+      (remhash (car (second rows)) values)
+      (signals gr8s::cni-error (check))
+      (setf (gethash (car (second rows)) values) (copy-seq (cdr (second rows))))
+      (let ((stale (gethash (car (first rows)) values)))
+        (setf (aref stale 8) (logxor 1 (aref stale 8))))
+      (signals gr8s::cni-error (check))
+      (is (= 3 closed)))))
+
 (test service-lb-plan-publishes-each-cluster-ip-to-same-family-backends
   (let* ((service (fake-lb-service "10.96.0.10"))
          (spec (gethash "spec" service)))

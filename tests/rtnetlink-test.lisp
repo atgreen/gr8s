@@ -335,10 +335,16 @@
               ipam :node-id "node-1"
               :install-link (lambda (ctx addresses)
                               (declare (ignore ctx addresses)) "gr-test")
+              :check-link (lambda (ctx addresses)
+                            (declare (ignore ctx addresses)) (push :link-check events))
               :install-service-return
               (lambda (ctx address)
                 (is (eq context ctx)) (is (equal "10.42.0.2" address))
                 (push :route events))
+              :check-service-return
+              (lambda (ctx address)
+                (is (eq context ctx)) (is (equal "10.42.0.2" address))
+                (push :route-check events))
               :publish-service-owner
               (lambda (config ctx addresses alias)
                 (is (eq configuration config)) (is (eq context ctx))
@@ -346,16 +352,28 @@
                 (is (equal "10.42.0.2" alias))
                 (is (equal "node-1" (gr8s::cni-configuration-service-node-id config)))
                 (push :owner events))
+              :check-service-owner
+              (lambda (config ctx addresses alias)
+                (is (eq configuration config)) (is (eq context ctx))
+                (is (equal '("10.42.0.1") addresses))
+                (is (equal "10.42.0.2" alias))
+                (push :owner-check events))
               :policy (gr8s::make-cni-operations
                        :add (lambda (&rest ignored)
                               (declare (ignore ignored))
                               (push :policy events)
-                              (error "attachment remains gated"))))))
+                              (error "attachment remains gated"))
+                       :check (lambda (&rest ignored)
+                                (declare (ignore ignored)) (push :policy-check events))))))
       (funcall (gr8s::cni-operations-prepare operations) configuration context)
       (signals error
         (funcall (gr8s::cni-operations-add operations)
                  configuration context "/pins/local/endpoint_identity" "/pins/local/tcx-ingress"))
       (is (equal '(:route :owner :policy) (reverse events)))
+      (setf events nil)
+      (funcall (gr8s::cni-operations-check operations)
+               configuration context "/pins/local/endpoint_identity" "/pins/local/tcx-ingress")
+      (is (equal '(:link-check :route-check :owner-check :policy-check) (reverse events)))
       (is (equal "10.42.0.2" (gr8s::service-snat-address ipam "sandbox-1" "eth0"))))))
 
 (test cni-return-path-keeps-default-and-ipv6-only-allocation-behavior
