@@ -30,6 +30,7 @@ It accepts and ignores the arguments gr8s-upstream passes, so that tool can run 
 import argparse
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -212,6 +213,10 @@ def main():
                         help="also attach the experimental TC Service guard pipeline")
     parser.add_argument("--ctr", type=Path,
                         help="preload agnhost directly, independently of the OCI mirror")
+    parser.add_argument("--image-archive", type=Path,
+                        help="OCI archive to import into managed containerd before Pod startup")
+    parser.add_argument("--pause-after-pod-client", type=int, default=0,
+                        help="seconds to pause after Pod client probes for live VM inspection")
     # gr8s-upstream passes these to every runner; this test has no use for them.
     for ignored in ("--sonobuoy", "--timeout", "--expected-specs", "--focus", "--kubernetes-version"):
         parser.add_argument(ignored)
@@ -223,7 +228,8 @@ def main():
 
     cluster = Cluster(arguments.gr8s, arguments.state_parent, arguments.api_port, arguments.node_port)
     report = {"root": str(cluster.root), "packetServices": arguments.packet_services,
-              "directImagePreload": arguments.ctr is not None}
+              "directImagePreload": arguments.ctr is not None,
+              "archivePreload": arguments.image_archive is not None}
     failures = []
 
     def check(name, passed, observed):
@@ -233,6 +239,10 @@ def main():
             failures.append(name)
 
     try:
+        if arguments.image_archive:
+            destination = cluster.root / "state/agent/images/agnhost.tar"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(arguments.image_archive, destination)
         cluster.start()
         if arguments.ctr:
             runtime_socket = cluster.root / "state/agent/containerd/run/containerd.sock"
@@ -268,6 +278,10 @@ def main():
         denied = wait_for("same-node ingress policy denial", 60, same_node_denied)
         check("sameNodeRedirectHonorsIngressPolicy", denied.returncode != 0,
               {"returncode": denied.returncode, "output": denied.stdout + denied.stderr})
+        source_direct = pod_connect(cluster, "web-0", addresses["web-1"], 8080)
+        check("sourcePodDirectToPeer", source_direct.returncode == 0,
+              {"returncode": source_direct.returncode,
+               "output": source_direct.stdout + source_direct.stderr})
 
         # A ClusterIP and its external IP, both through the socket hook.
         cluster.apply(service("web", [HTTP, UDP], selector={"app": "web"}, externalIPs=[EXTERNAL_IP]))
@@ -281,10 +295,25 @@ def main():
         # make this dataplane check probabilistic.
         cluster.apply(service("pod-client", [HTTP], selector={"test.gr8s.io/pod": "web-1"}))
         pod_client_ip = cluster.get("service", "pod-client")["spec"]["clusterIP"]
-        pod_client = pod_connect(cluster, "web-0", pod_client_ip, 80)
+        pod_client_attempts = []
+
+        def pod_client_ready():
+            result = pod_connect(cluster, "web-0", pod_client_ip, 80)
+            pod_client_attempts.append(result)
+            return result if result.returncode == 0 else None
+
+        try:
+            pod_client = wait_for("Pod ClusterIP answers", 60, pod_client_ready)
+        except RuntimeError:
+            pod_client = pod_client_attempts[-1]
         check("podReachesClusterIP", pod_client.returncode == 0,
               {"returncode": pod_client.returncode,
-               "output": pod_client.stdout + pod_client.stderr})
+               "output": pod_client.stdout + pod_client.stderr,
+               "attempts": len(pod_client_attempts)})
+        if arguments.pause_after_pod_client:
+            print(f"Pausing {arguments.pause_after_pod_client}s after Pod client probes: "
+                  f"direct={source_direct.returncode} service={pod_client.returncode}", flush=True)
+            time.sleep(arguments.pause_after_pod_client)
 
         external = wait_for("external IP answers", 60,
                             lambda: (lambda result: result if result[0] == 200 else None)(
