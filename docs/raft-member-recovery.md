@@ -603,8 +603,13 @@ Missing or legacy frame metadata uses the original serializer. The archive
 reader still verifies framing and checksums before replication. This removes
 repeated payload printing from cache creation; it does not by itself establish
 a bound on checkpoint pauses or prove leadership stability.
-This implementation still needs fresh native cluster acceptance under
-`podster-ucm.11.3.9.10.1`; automatic compaction remains disabled by default.
+The disk window passed full three-member churn and cold-recovery acceptance
+under `podster-ucm.11.3.9.10.1`. The frame-copy optimization subsequently passed
+source integration and a 128-round native timing/recovery run; its
+[diagnostic record](compaction-phase-diagnostics-2026-11-10.json) records cache
+writes falling from seconds to milliseconds. Sustained leadership stability
+remains open under `podster-ucm.11.3.9.11`; automatic compaction remains disabled
+by default.
 
 Build this internal harness with
 `sbcl --noinform --non-interactive --load scripts/build-compaction-cluster-native-harness.lisp`.

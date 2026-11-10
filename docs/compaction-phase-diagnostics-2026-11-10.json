@@ -556,5 +556,195 @@
       }
     }
   },
-  "nextAction": "Cache-prefix serialization dominates the observed member-lock publication time. Implement bounded copying of already checksummed canonical entry frames from the owned WAL, preserving certified prefix/term selection, budgets, fallback and recovery semantics. This timing evidence does not itself prove election causation or leadership stability."
+  "nextAction": "Cache-prefix serialization dominates the observed member-lock publication time. Implement bounded copying of already checksummed canonical entry frames from the owned WAL, preserving certified prefix/term selection, budgets, fallback and recovery semantics. This timing evidence does not itself prove election causation or leadership stability.",
+  "walFrameCopy": {
+    "testedSourceCommit": "a047d54",
+    "scope": "5024 Raft plus520 integration checks;128-round native cache timing/recovery comparison; full sustained leadership acceptance remains pending",
+    "sourceChecks": {
+      "raft": 5024,
+      "membership": 96,
+      "transport": 52,
+      "snapshot": 177,
+      "ha": 195
+    },
+    "sourceLogs": [
+      "/tmp/gr8s-wal-frame-copy-regressions-final.log",
+      "/tmp/gr8s-wal-frame-copy-ha-integration.log"
+    ],
+    "result": {
+      "passed": true,
+      "evidence": "/tmp/gr8s-compaction-cluster-native-fql7ntni",
+      "binarySha256": "59cd34375a8a42159facd49817d1b5f27c29e495186a55ea7c28361d5b6fb4f7",
+      "elapsedSeconds": 81.48794130911119,
+      "asymmetricCaptureAcceptance": true,
+      "diskCatchupAcceptance": true,
+      "catchupHistoryContinuous": true,
+      "identitiesPreserved": true,
+      "stopExitCodes": {
+        "cp-a": 0,
+        "cp-b": 0,
+        "cp-c": 0
+      },
+      "cleanupExitCodes": {
+        "cp-a": 0,
+        "cp-b": 0,
+        "cp-c": 0
+      }
+    },
+    "beforeRestart": {
+      "cp-a": {
+        "term": 1,
+        "applied": 265,
+        "completedRounds": 128,
+        "compactionPhases": [
+          {
+            "phase": "freeze",
+            "attempts": 5,
+            "totalSeconds": 0.0,
+            "maxSeconds": 0.0,
+            "lastSeconds": 0.0
+          },
+          {
+            "phase": "capture",
+            "attempts": 5,
+            "totalSeconds": 3.831975,
+            "maxSeconds": 2.604983,
+            "lastSeconds": 0.540996
+          },
+          {
+            "phase": "retain",
+            "attempts": 5,
+            "totalSeconds": 3.814974,
+            "maxSeconds": 1.55299,
+            "lastSeconds": 1.55299
+          },
+          {
+            "phase": "publish",
+            "attempts": 5,
+            "totalSeconds": 1.170992,
+            "maxSeconds": 0.410998,
+            "lastSeconds": 0.410998
+          }
+        ],
+        "storageStages": [
+          {
+            "stage": "cache-prefix",
+            "attempts": 5,
+            "totalSeconds": 0.038999,
+            "maxSeconds": 0.018,
+            "lastSeconds": 0.018
+          },
+          {
+            "stage": "replace-wal",
+            "attempts": 5,
+            "totalSeconds": 1.131993,
+            "maxSeconds": 0.392998,
+            "lastSeconds": 0.392998
+          }
+        ]
+      },
+      "cp-b": {
+        "term": 1,
+        "applied": 265,
+        "completedRounds": 0,
+        "compactionPhases": [
+          {
+            "phase": "freeze",
+            "attempts": 5,
+            "totalSeconds": 0.0,
+            "maxSeconds": 0.0,
+            "lastSeconds": 0.0
+          },
+          {
+            "phase": "capture",
+            "attempts": 5,
+            "totalSeconds": 17.086882,
+            "maxSeconds": 15.917891,
+            "lastSeconds": 0.362998
+          },
+          {
+            "phase": "retain",
+            "attempts": 5,
+            "totalSeconds": 3.721975,
+            "maxSeconds": 1.331991,
+            "lastSeconds": 1.331991
+          },
+          {
+            "phase": "publish",
+            "attempts": 5,
+            "totalSeconds": 2.641982,
+            "maxSeconds": 1.532989,
+            "lastSeconds": 0.552996
+          }
+        ],
+        "storageStages": [
+          {
+            "stage": "cache-prefix",
+            "attempts": 5,
+            "totalSeconds": 0.032,
+            "maxSeconds": 0.015,
+            "lastSeconds": 0.015
+          },
+          {
+            "stage": "replace-wal",
+            "attempts": 6,
+            "totalSeconds": 2.619981,
+            "maxSeconds": 1.528989,
+            "lastSeconds": 0.537996
+          }
+        ]
+      },
+      "cp-c": {
+        "term": 1,
+        "applied": 265,
+        "completedRounds": 0,
+        "compactionPhases": [
+          {
+            "phase": "freeze",
+            "attempts": 6,
+            "totalSeconds": 0.001,
+            "maxSeconds": 0.001,
+            "lastSeconds": 0.0
+          },
+          {
+            "phase": "capture",
+            "attempts": 6,
+            "totalSeconds": 4.132972,
+            "maxSeconds": 2.639983,
+            "lastSeconds": 0.411997
+          },
+          {
+            "phase": "retain",
+            "attempts": 6,
+            "totalSeconds": 4.103972,
+            "maxSeconds": 1.182992,
+            "lastSeconds": 1.182992
+          },
+          {
+            "phase": "publish",
+            "attempts": 6,
+            "totalSeconds": 1.139991,
+            "maxSeconds": 0.287999,
+            "lastSeconds": 0.124999
+          }
+        ],
+        "storageStages": [
+          {
+            "stage": "cache-prefix",
+            "attempts": 6,
+            "totalSeconds": 0.03900100000000001,
+            "maxSeconds": 0.019001,
+            "lastSeconds": 0.004
+          },
+          {
+            "stage": "replace-wal",
+            "attempts": 7,
+            "totalSeconds": 1.110989,
+            "maxSeconds": 0.268998,
+            "lastSeconds": 0.120999
+          }
+        ]
+      }
+    }
+  }
 }
