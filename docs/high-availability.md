@@ -207,9 +207,13 @@ metadata, credentials or snapshot artifacts to reclaim space by hand.
 
 [Constrained-heap validation](async-compaction-validation-2026-11-10.json) covers
 large churn, bounded retention, catch-up and cold recovery in an internal
-three-process harness. Full production CLI compaction acceptance and VM validation
-remain in progress. The opt-in is not a claim that these remaining gates passed.
-With checkpointing disabled, the production WAL can continue growing.
+three-process harness. The [production CLI validation](production-compaction-validation-2026-11-11.json)
+passed 2,048 churn rounds (128 MiB of payload) with three 384 MiB heaps,
+disconnected-voter catch-up, exact ConfigMap UIDs and contents across full
+restart, leader loss and witness quorum operation. That run disables agents and
+uses the fake runtime. VM, container/BPF and conformance validation are separate;
+automatic checkpointing remains an explicit opt-in. With checkpointing disabled,
+the production WAL can continue growing.
 
 The native binary defaults to a 2 GiB Lisp dynamic heap. Override it by placing
 `--dynamic-space-size SIZE` before `serve`, with SIZE in MiB. The 384 MiB limits

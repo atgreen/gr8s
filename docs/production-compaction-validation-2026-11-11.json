@@ -1,0 +1,942 @@
+{
+  "passed": true,
+  "productionServe": true,
+  "nativeBinary": true,
+  "mutualTlsRaft": true,
+  "agentsDisabled": true,
+  "vmAcceptance": false,
+  "conformanceAcceptance": false,
+  "witnessAcceptance": true,
+  "heapLimitMiB": 384,
+  "binarySha256": "402773de3b33e668c1b9e73d4debfa0f65de00d59a1efa388b207744c5d8e481",
+  "evidence": "/tmp/gr8s-ha-production-f2r8n8kq",
+  "runnerSha256": "289c5e6ac13f67eba2f58b109e77540cf9621b7d821ea00d78dc6940d88953b5",
+  "compactionRequested": true,
+  "compactionAcceptance": true,
+  "fullCompactionWorkloadRequested": true,
+  "fullCompactionAcceptance": true,
+  "compactionRounds": 2048,
+  "initialMembership": [
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp1/raft/control-plane.log",
+      "term": 1,
+      "commit": 15,
+      "snapshotIndex": 1,
+      "members": [
+        {
+          "id": "cp3",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp1",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp2/raft/control-plane.log",
+      "term": 1,
+      "commit": 15,
+      "snapshotIndex": 1,
+      "members": [
+        {
+          "id": "cp3",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp1",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp3/raft/control-plane.log",
+      "term": 1,
+      "commit": 15,
+      "snapshotIndex": 1,
+      "members": [
+        {
+          "id": "cp3",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp1",
+          "role": "voter"
+        }
+      ]
+    }
+  ],
+  "compactionOfflineState": {
+    "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp2/raft/control-plane.log",
+    "term": 1,
+    "commit": 17,
+    "snapshotIndex": 1,
+    "members": [
+      {
+        "id": "cp3",
+        "role": "voter"
+      },
+      {
+        "id": "cp2",
+        "role": "voter"
+      },
+      {
+        "id": "cp1",
+        "role": "voter"
+      }
+    ]
+  },
+  "compactionDelayedVoter": "cp2",
+  "compactionBeforeDisconnect": [
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp1/raft/control-plane.log",
+      "term": 1,
+      "commit": 16,
+      "snapshotIndex": 1,
+      "members": [
+        {
+          "id": "cp3",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp1",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp2/raft/control-plane.log",
+      "term": 1,
+      "commit": 16,
+      "snapshotIndex": 1,
+      "members": [
+        {
+          "id": "cp3",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp1",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp3/raft/control-plane.log",
+      "term": 1,
+      "commit": 16,
+      "snapshotIndex": 1,
+      "members": [
+        {
+          "id": "cp3",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp1",
+          "role": "voter"
+        }
+      ]
+    }
+  ],
+  "compactionCompletedRounds": 2048,
+  "compactionLastSample": {
+    "completedRounds": 2048,
+    "walBytes": {
+      "cp1": 5991662,
+      "cp3": 4193692
+    }
+  },
+  "compactionWhileDisconnected": [
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp1/raft/control-plane.log",
+      "term": 1,
+      "commit": 4113,
+      "snapshotIndex": 4073,
+      "members": [
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp3/raft/control-plane.log",
+      "term": 1,
+      "commit": 4113,
+      "snapshotIndex": 4050,
+      "members": [
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    }
+  ],
+  "compactionAfterCatchup": [
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp1/raft/control-plane.log",
+      "term": 1,
+      "commit": 4114,
+      "snapshotIndex": 4073,
+      "members": [
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp2/raft/control-plane.log",
+      "term": 1,
+      "commit": 4114,
+      "snapshotIndex": 4073,
+      "members": [
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp3/raft/control-plane.log",
+      "term": 1,
+      "commit": 4114,
+      "snapshotIndex": 4092,
+      "members": [
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    }
+  ],
+  "compactionMetrics": {
+    "cp1": {
+      "gr8s_compaction_completed_total": 92.0,
+      "gr8s_compaction_error": 0.0,
+      "gr8s_compaction_in_flight": 0.0,
+      "gr8s_raft_applied_index": 4114.0,
+      "gr8s_raft_apply_lag_entries": 0.0,
+      "gr8s_raft_catchup_cache_bytes": 132320638.0,
+      "gr8s_raft_catchup_cache_error": 0.0,
+      "gr8s_raft_catchup_cache_limit_bytes": 134217728.0,
+      "gr8s_raft_catchup_cache_segments": 44.0,
+      "gr8s_raft_commit_index": 4114.0,
+      "gr8s_raft_is_leader": 1.0,
+      "gr8s_raft_retained_bytes": 13289768.0,
+      "gr8s_raft_retained_entries": 41.0,
+      "gr8s_raft_retained_limit_bytes": 33554432.0,
+      "gr8s_raft_snapshot_index": 4073.0,
+      "gr8s_raft_term": 1.0,
+      "gr8s_raft_uncommitted_entries": 0.0
+    },
+    "cp2": {
+      "gr8s_compaction_completed_total": 0.0,
+      "gr8s_compaction_error": 0.0,
+      "gr8s_compaction_in_flight": 0.0,
+      "gr8s_raft_applied_index": 4114.0,
+      "gr8s_raft_apply_lag_entries": 0.0,
+      "gr8s_raft_catchup_cache_bytes": 0.0,
+      "gr8s_raft_catchup_cache_error": 0.0,
+      "gr8s_raft_catchup_cache_limit_bytes": 134217728.0,
+      "gr8s_raft_catchup_cache_segments": 0.0,
+      "gr8s_raft_commit_index": 4114.0,
+      "gr8s_raft_is_leader": 0.0,
+      "gr8s_raft_retained_bytes": 13289768.0,
+      "gr8s_raft_retained_entries": 41.0,
+      "gr8s_raft_retained_limit_bytes": 33554432.0,
+      "gr8s_raft_snapshot_index": 4073.0,
+      "gr8s_raft_term": 1.0,
+      "gr8s_raft_uncommitted_entries": 0.0
+    },
+    "cp3": {
+      "gr8s_compaction_completed_total": 97.0,
+      "gr8s_compaction_error": 0.0,
+      "gr8s_compaction_in_flight": 0.0,
+      "gr8s_raft_applied_index": 4114.0,
+      "gr8s_raft_apply_lag_entries": 0.0,
+      "gr8s_raft_catchup_cache_bytes": 134050656.0,
+      "gr8s_raft_catchup_cache_error": 0.0,
+      "gr8s_raft_catchup_cache_limit_bytes": 134217728.0,
+      "gr8s_raft_catchup_cache_segments": 48.0,
+      "gr8s_raft_commit_index": 4114.0,
+      "gr8s_raft_is_leader": 0.0,
+      "gr8s_raft_retained_bytes": 7009660.0,
+      "gr8s_raft_retained_entries": 22.0,
+      "gr8s_raft_retained_limit_bytes": 33554432.0,
+      "gr8s_raft_snapshot_index": 4092.0,
+      "gr8s_raft_term": 1.0,
+      "gr8s_raft_uncommitted_entries": 0.0
+    }
+  },
+  "compactionPayloadBytes": 134217728,
+  "compactionUsesNaturalHistoryClock": true,
+  "metricsBeforeLeaderLoss": {
+    "cp1": {
+      "gr8s_raft_is_leader": 1.0,
+      "gr8s_raft_term": 1.0
+    },
+    "cp2": {
+      "gr8s_raft_is_leader": 0.0,
+      "gr8s_raft_term": 1.0
+    },
+    "cp3": {
+      "gr8s_raft_is_leader": 0.0,
+      "gr8s_raft_term": 1.0
+    }
+  },
+  "killedLeader": "cp1",
+  "replacementLeader": "cp3",
+  "membershipAfterRejoin": [
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp1/raft/control-plane.log",
+      "term": 2,
+      "commit": 4117,
+      "snapshotIndex": 4073,
+      "members": [
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp2/raft/control-plane.log",
+      "term": 2,
+      "commit": 4117,
+      "snapshotIndex": 4073,
+      "members": [
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp3/raft/control-plane.log",
+      "term": 2,
+      "commit": 4117,
+      "snapshotIndex": 4092,
+      "members": [
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    }
+  ],
+  "configMapsBeforeFullRestart": [
+    [
+      "after-compaction",
+      "53cf7a67-5eea-4f25-8f17-e2fbe0be8fda",
+      {
+        "value": "D"
+      }
+    ],
+    [
+      "after-loss",
+      "b2a75fa3-0785-4aa1-a3e4-3fbef51b3937",
+      {
+        "value": "B"
+      }
+    ],
+    [
+      "before-loss",
+      "f545f20c-75be-4ee8-bad7-23c086b7e4a5",
+      {
+        "value": "A"
+      }
+    ],
+    [
+      "compaction-after-catchup",
+      "0c85af28-c271-4f1c-8565-08ff64c69348",
+      {
+        "value": "preserved"
+      }
+    ],
+    [
+      "compaction-sentinel",
+      "3267220c-662f-4460-8581-186c576d4250",
+      {
+        "value": "preserved"
+      }
+    ]
+  ],
+  "firstShutdown": {
+    "cp1": 0,
+    "cp2": 0,
+    "cp3": 0
+  },
+  "founderAloneMembership": {
+    "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp1/raft/control-plane.log",
+    "term": 2,
+    "commit": 4118,
+    "snapshotIndex": 4073,
+    "members": [
+      {
+        "id": "cp1",
+        "role": "voter"
+      },
+      {
+        "id": "cp2",
+        "role": "voter"
+      },
+      {
+        "id": "cp3",
+        "role": "voter"
+      }
+    ]
+  },
+  "founderAloneApplicationBlocked": true,
+  "membershipAfterFullRestart": [
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp1/raft/control-plane.log",
+      "term": 4,
+      "commit": 4119,
+      "snapshotIndex": 4073,
+      "members": [
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp2/raft/control-plane.log",
+      "term": 4,
+      "commit": 4119,
+      "snapshotIndex": 4073,
+      "members": [
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp3/raft/control-plane.log",
+      "term": 4,
+      "commit": 4119,
+      "snapshotIndex": 4092,
+      "members": [
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    }
+  ],
+  "configMapsAfterFullRestart": [
+    [
+      "after-compaction",
+      "53cf7a67-5eea-4f25-8f17-e2fbe0be8fda",
+      {
+        "value": "D"
+      }
+    ],
+    [
+      "after-loss",
+      "b2a75fa3-0785-4aa1-a3e4-3fbef51b3937",
+      {
+        "value": "B"
+      }
+    ],
+    [
+      "before-loss",
+      "f545f20c-75be-4ee8-bad7-23c086b7e4a5",
+      {
+        "value": "A"
+      }
+    ],
+    [
+      "compaction-after-catchup",
+      "0c85af28-c271-4f1c-8565-08ff64c69348",
+      {
+        "value": "preserved"
+      }
+    ],
+    [
+      "compaction-sentinel",
+      "3267220c-662f-4460-8581-186c576d4250",
+      {
+        "value": "preserved"
+      }
+    ]
+  ],
+  "leaderAfterFullRestart": "cp1",
+  "membershipWithWitness": [
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp1/raft/control-plane.log",
+      "term": 4,
+      "commit": 4121,
+      "snapshotIndex": 4073,
+      "members": [
+        {
+          "id": "w1",
+          "role": "witness"
+        },
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp2/raft/control-plane.log",
+      "term": 4,
+      "commit": 4121,
+      "snapshotIndex": 4073,
+      "members": [
+        {
+          "id": "w1",
+          "role": "witness"
+        },
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp3/raft/control-plane.log",
+      "term": 4,
+      "commit": 4121,
+      "snapshotIndex": 4092,
+      "members": [
+        {
+          "id": "w1",
+          "role": "witness"
+        },
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/w1/raft/witness.log",
+      "term": 4,
+      "commit": 4121,
+      "snapshotIndex": 4073,
+      "members": [
+        {
+          "id": "w1",
+          "role": "witness"
+        },
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    }
+  ],
+  "membershipAfterWitnessRestart": [
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp1/raft/control-plane.log",
+      "term": 4,
+      "commit": 4122,
+      "snapshotIndex": 4073,
+      "members": [
+        {
+          "id": "w1",
+          "role": "witness"
+        },
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp2/raft/control-plane.log",
+      "term": 4,
+      "commit": 4122,
+      "snapshotIndex": 4073,
+      "members": [
+        {
+          "id": "w1",
+          "role": "witness"
+        },
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp3/raft/control-plane.log",
+      "term": 4,
+      "commit": 4122,
+      "snapshotIndex": 4092,
+      "members": [
+        {
+          "id": "w1",
+          "role": "witness"
+        },
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/w1/raft/witness.log",
+      "term": 4,
+      "commit": 4122,
+      "snapshotIndex": 4073,
+      "members": [
+        {
+          "id": "w1",
+          "role": "witness"
+        },
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    }
+  ],
+  "witnessIdentitiesPreserved": {
+    "raft/member.crt": "aeb99952e6de0a94854f007b3d3e0e2137c376458bb46d8b2255e1d5ee5f8f26",
+    "raft/member.key": "f50fff1deb5377d926fb6ee2d76168cd10e4944b34d18288944748fbd317a48b",
+    "raft/pki/cluster-ca.crt": "60afbfdbc05a26e7404f16d433f01fb04acbf000161365eb6cdced66f4042519"
+  },
+  "leaderWithWitnessQuorum": "cp3",
+  "finalWitnessMembership": [
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp1/raft/control-plane.log",
+      "term": 5,
+      "commit": 4123,
+      "snapshotIndex": 4073,
+      "members": [
+        {
+          "id": "w1",
+          "role": "witness"
+        },
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp2/raft/control-plane.log",
+      "term": 5,
+      "commit": 4123,
+      "snapshotIndex": 4073,
+      "members": [
+        {
+          "id": "w1",
+          "role": "witness"
+        },
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/cp3/raft/control-plane.log",
+      "term": 5,
+      "commit": 4123,
+      "snapshotIndex": 4092,
+      "members": [
+        {
+          "id": "w1",
+          "role": "witness"
+        },
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-f2r8n8kq/w1/raft/witness.log",
+      "term": 5,
+      "commit": 4123,
+      "snapshotIndex": 4073,
+      "members": [
+        {
+          "id": "w1",
+          "role": "witness"
+        },
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    }
+  ],
+  "witnessShutdown": 0,
+  "identitiesPreserved": {
+    "cp1": {
+      "pki/admin.crt": "e6c5733427e112c28a2333c3c52aab0b75497daacb9396c67d284d891bb775b8",
+      "pki/admin.key": "d4938a96c931c012834c0abc8320617c1618e78a53efa5e8ceaeef2cf136bf5c",
+      "pki/kubernetes-api.crt": "738667220c5d0f630c74098c406fa9c214634bf098c6f56e60a3c4a1b4c7bda0",
+      "pki/kubernetes-api.key": "9d68b959c256ae989dbda0b8ec4aae0b0ffac61c51218e6b52063bbf4383402a",
+      "pki/apiserver-kubelet-client.crt": "166993e1005aea497ff15a6661a138d0a919f7a4eceacb6ccff60668115ad8a2",
+      "pki/apiserver-kubelet-client.key": "eed20944332e42c5cef6ca692af23c3dd6c0dfbad8d03e97f3c5b4e2447c32cd",
+      "pki/raft/member.crt": "db8258b90fb6deaff2d679af6ba78741e4f77d117b213a4f117a6d018ca9497c",
+      "pki/raft/member.key": "e01a1a778cc58980ff553a2b2d79639a6716d68d083762f7612209d8b5d41ce5",
+      "pki/pki/server.crt": "a90801a204dea9ecaca508c103d3f24385e09ec9b7f230055b6e8cd5925c14ec",
+      "pki/pki/server.key": "0ddd467c1f140035f124eb2edec72fc0f323d314b3122207f4f46f451b5730f1",
+      "pki/pki/cluster-ca.key": "b6b0782bd85dc2e5a5a14070bb4b024a12c59fa71ac7fbe1409694e16f2a2637",
+      "pki/pki/cluster-ca.crt": "f3feb87c55b88e4daaba6f96869acf2b710d30fcb8bf469a627268ba9737ef13",
+      "pki/raft/pki/cluster-ca.crt": "60afbfdbc05a26e7404f16d433f01fb04acbf000161365eb6cdced66f4042519",
+      "pki/raft/pki/cluster-ca.key": "804f132265dd1b02cca3470e167f5668d218189b544c87b274bc910e3030aed4"
+    },
+    "cp2": {
+      "pki/admin.crt": "65f73dd1a72d38a407359be85a3cb7422240c4f399da143b8dbb6997172706fe",
+      "pki/admin.key": "4c55b79feb0b7973ecf906f87be5f2d1843e4e235eaaf949e4fcd5e8ccd21b35",
+      "pki/kubernetes-api.crt": "cbd0aa2fe668cef4423c44d760ed309cf42e73e30610a986ed52a0872f79db7e",
+      "pki/kubernetes-api.key": "50d1313f38c4b552cbfb8fb045bd33e87ee43c7b6afb6045f6afaa56332eb38b",
+      "pki/apiserver-kubelet-client.crt": "d25ee54f075292a2c6a388caa86c3bf4871d961c5ca082a08c8886c1fe5760b9",
+      "pki/apiserver-kubelet-client.key": "1485a4743dde5700a494695394954d8548741f530bad058a26b76e901114a780",
+      "pki/pki/server.crt": "5a57703baa75d3f2a422dc324ed01d325a5ebec6017af733615fbac174a23a4a",
+      "pki/pki/server.key": "2679e3a513c48c8b8f33b359cf01f514a192a84c38a934dd0e3f044b26d8a4e8",
+      "pki/pki/cluster-ca.key": "b6b0782bd85dc2e5a5a14070bb4b024a12c59fa71ac7fbe1409694e16f2a2637",
+      "pki/pki/cluster-ca.crt": "f3feb87c55b88e4daaba6f96869acf2b710d30fcb8bf469a627268ba9737ef13",
+      "pki/raft/member.crt": "39e13948339feda7b9308e5c06b22a775af8dc18e40e45b285c03f472b3b0172",
+      "pki/raft/member.key": "8cb3707f6621877367e59e5b4e5e22ed5804f67f32304cb8e09e236a38bf40b3",
+      "pki/raft/pki/cluster-ca.key": "804f132265dd1b02cca3470e167f5668d218189b544c87b274bc910e3030aed4",
+      "pki/raft/pki/cluster-ca.crt": "60afbfdbc05a26e7404f16d433f01fb04acbf000161365eb6cdced66f4042519"
+    },
+    "cp3": {
+      "pki/admin.crt": "9c679c563c492cc618e38af64b56ab915a35e0a3982529be99080f8d453bc0fa",
+      "pki/admin.key": "156e42ee27ea1d102e523590e18ef33b484ef88678cf4eae7fee8182609c32d0",
+      "pki/kubernetes-api.crt": "1291286982e7e5dc8c27bb2e5cdf458a7614e62f95758bb766faf0ce1c0ae481",
+      "pki/kubernetes-api.key": "30f15252b3e51c49f598632efd299b9a5d200e8455d6ba340695d23edc64a355",
+      "pki/apiserver-kubelet-client.crt": "ad3820169cfe84a2c2d735349a5f7b22ad1f02a4db3a20094cbfde4aec46132e",
+      "pki/apiserver-kubelet-client.key": "718e76b05971a6b307835fd24fdd785a4c1199b845984af72b5935eb6f03c4de",
+      "pki/pki/server.crt": "dd306bc1912db23a756acd80c785fbbfc3789429e3b0b275871ffc9898806acf",
+      "pki/pki/server.key": "15eb8a575c8218e197cdeb6c58e7475e2b609a06d8f971706ba932f8e1524edf",
+      "pki/pki/cluster-ca.key": "b6b0782bd85dc2e5a5a14070bb4b024a12c59fa71ac7fbe1409694e16f2a2637",
+      "pki/pki/cluster-ca.crt": "f3feb87c55b88e4daaba6f96869acf2b710d30fcb8bf469a627268ba9737ef13",
+      "pki/raft/member.crt": "9e398b64d08f9f1a22c13d8d728e21afc960c88fb33f08699f96f47d30c2e852",
+      "pki/raft/member.key": "69919b7524da1a3b63b9ddfd4d2ff078e51349015b2c042ec6c86c9ebed956a5",
+      "pki/raft/pki/cluster-ca.key": "804f132265dd1b02cca3470e167f5668d218189b544c87b274bc910e3030aed4",
+      "pki/raft/pki/cluster-ca.crt": "60afbfdbc05a26e7404f16d433f01fb04acbf000161365eb6cdced66f4042519"
+    }
+  },
+  "finalShutdown": {
+    "cp1": 0,
+    "cp2": 0,
+    "cp3": 0
+  },
+  "testedProductCommit": "2e406d1",
+  "testedRunnerCommit": "1d19004",
+  "scope": "Full standard-native production CLI compaction, disconnected-voter recovery, exact cold ConfigMap identity/content, failover and witness acceptance. Fake runtime, agents disabled; not VM/container/BPF/conformance acceptance.",
+  "productionDefaultEnabled": false,
+  "sampledMaxWalBytes": {
+    "cp1": 6458089,
+    "cp3": 5394206
+  }
+}
