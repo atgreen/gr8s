@@ -42,41 +42,65 @@
                      until (or (probe-file path) (not (sb-ext:process-alive-p process))
                                (>= (get-internal-real-time) deadline)) do (sleep 0.05))
                (unless (probe-file path)
-                 (error "Live restore receiver did not produce ~A:~%~A" path (uiop:read-file-string log)))))
+                 (error "Live restore receiver did not produce ~A:~%~A" path (uiop:read-file-string log))))
+             (close-channel ()
+               (when channel (ag-grpc:channel-close channel) (setf channel nil)))
+             (stop-receiver (successful)
+               (when process
+                 (ignore-errors (gr8s::write-private-text-atomically stop "stop"))
+                 (loop repeat 200 while (sb-ext:process-alive-p process) do (sleep 0.05))
+                 (when (sb-ext:process-alive-p process) (sb-ext:process-kill process 9))
+                 (sb-ext:process-wait process)
+                 (let ((exit-code (sb-ext:process-exit-code process)))
+                   (sb-ext:process-close process)
+                   (setf process nil)
+                   (when (and successful (not (eql 0 exit-code)))
+                     (error "Live restore receiver failed during shutdown:~%~A" (uiop:read-file-string log))))))
+             (launch (mode)
+               (dolist (path (list ready report stop log)) (when (probe-file path) (delete-file path)))
+               (setf process
+                     (sb-ext:run-program "sbcl"
+                      (list "--dynamic-space-size" "384" "--noinform" "--non-interactive" "--load"
+                            (namestring (truename "scripts/store-restore-memory-receiver.lisp")) "--"
+                            (namestring sink-root) (write-to-string count) (namestring ready)
+                            (namestring report) (namestring stop) mode)
+                      :search t :wait nil :input nil :output log :error :output))
+               (await-file ready 120)
+               (setf channel (gr8s::make-raft-channel nil "127.0.0.1" (parse-integer (uiop:read-file-string ready)) 2)))
+             (collect-report ()
+               (await-file report 60)
+               (let ((result (com.inuoe.jzon:parse (uiop:read-file-string report))))
+                 (assert (eq t (gethash "passed" result)))
+                 (assert (= count (gethash "records" result)))
+                 result)))
       (unwind-protect
            (progn
-             (setf process
-                   (sb-ext:run-program "sbcl"
-                    (list "--dynamic-space-size" "384" "--noinform" "--non-interactive" "--load"
-                          (namestring (truename "scripts/store-restore-memory-receiver.lisp")) "--"
-                          (namestring sink-root) (write-to-string count) (namestring ready) (namestring report) (namestring stop))
-                    :search t :wait nil :input nil :output log :error :output))
-             (await-file ready 120)
              (setf sender (gr8s::start-raft-member "source"))
              (gr8s.resources::configure-store-artifact-transport sender root)
-             (setf channel (gr8s::make-raft-channel nil "127.0.0.1" (parse-integer (uiop:read-file-string ready)) 2))
+             (launch "live")
              (gr8s.raft.transport::raft-link-send-snapshot
               sender (gr8s.node.v1::make-raft-transport-stub channel)
               (list :type :install-snapshot :term 1 :from "source" :last-index 1 :last-term 1
                     :state (list :gr8s-raft-snapshot 1 :application reference :application-present t
                                  :members '(("source" . :voter) ("sink" . :learner)) :addresses nil :api-urls nil)))
-             (await-file report 60)
-             (let ((result (com.inuoe.jzon:parse (uiop:read-file-string report))))
-               (assert (eq t (gethash "passed" result)))
-               (assert (= count (gethash "records" result)))
+             (let ((result (collect-report)))
+               (when (equal "1" (uiop:getenv "GR8S_SNAPSHOT_RECOVER_RECEIVER"))
+                 (close-channel)
+                 (stop-receiver t)
+                 (launch "recover")
+                 ;; Confirm the already-retained current-term boundary. No raw
+                 ;; artifact is retransmitted to the restarted receiver.
+                 (gr8s.raft.transport::raft-link-deliver-message
+                  (gr8s.node.v1::make-raft-transport-stub channel)
+                  (list :type :append-entries :term 1 :from "source" :prev-log-index 1 :prev-log-term 1
+                        :entries nil :leader-commit 1))
+                 (setf result (collect-report))
+                 (assert (eq t (gethash "startupRecovered" result))))
                (setf completed t)
                (values (gr8s.resources::checked-store-snapshot-artifact-path sink-root reference) result)))
-        (when channel (ag-grpc:channel-close channel))
+        (close-channel)
         (when sender (gr8s::stop-raft-member sender))
-        (when process
-          (ignore-errors (gr8s::write-private-text-atomically stop "stop"))
-          (loop repeat 200 while (sb-ext:process-alive-p process) do (sleep 0.05))
-          (when (sb-ext:process-alive-p process) (sb-ext:process-kill process 9))
-          (sb-ext:process-wait process)
-          (let ((exit-code (sb-ext:process-exit-code process)))
-            (sb-ext:process-close process)
-            (when (and completed (not (eql 0 exit-code)))
-              (error "Live restore receiver failed during shutdown:~%~A" (uiop:read-file-string log)))))))))
+        (stop-receiver completed)))))
 
 (let* ((directory (merge-pathnames (format nil "gr8s-artifact-memory-~A/" (gr8s::generate-uid))
                                   (uiop:temporary-directory)))

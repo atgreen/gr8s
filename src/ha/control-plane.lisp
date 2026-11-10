@@ -10,9 +10,9 @@
 ;;;;
 ;;;;   * The member's state machine installs replicated core-state blobs on the
 ;;;;     local store, so every member converges on the same desired state.
-;;;;   * The store's consensus-commit-fn proposes each durable write through the
-;;;;     member; on a follower the propose fails fast, which the HTTP layer turns
-;;;;     into a redirect to the leader (c2d.7.3).
+;;;;   * The store's consensus-commit-fn proposes durable writes through the member,
+;;;;     forwarding follower-authored internal writes to the leader. The HTTP
+;;;;     layer redirects ordinary follower mutation requests (c2d.7.3).
 ;;;;   * HA-CONTROL-PLANE-LEADER-P is the reconciliation worker's leader gate, so
 ;;;;     controllers run only on the leader (c2d.7.1).
 
@@ -84,6 +84,33 @@ application ingress/writer barriers. This function neither persists nor adopts R
              (error "Application snapshot does not advance the committed/applied boundary")))))
       t)))
 
+(defun make-store-raft-apply-function (store)
+  "Use the same deterministic application dispatcher for new and recovered members."
+  (lambda (command)
+    (when (consp command)
+      (case (car command)
+        (:store-recovery-barrier :recovered)
+        (:core-state (gr8s::install-core-state-blob store (second command)))
+        (:core-delta (gr8s::install-core-state-delta store (second command)))
+        (:secrets-encryption (gr8s::install-secret-encryption-command store (second command)))
+        (:pod-state (gr8s::install-pod-state-blob store (second command)))
+        (:pod-delta (gr8s::install-pod-state-delta store (second command)))
+        (:node-state (gr8s::install-node-state-blob store (second command)))
+        (:node-delta (gr8s::install-node-state-delta store (second command)))
+        (:image-tracker
+         (gr8s.image-distribution::tracker-apply-command (gr8s::pod-store-image-tracker store) (second command)))
+        (:node-enrollment (apply #'gr8s::install-node-enrollment-command store (second command)))))))
+
+(defun make-store-raft-commit-function (member)
+  (lambda (tag json)
+    (multiple-value-bind (result committed)
+        (if (raft-member-leader-p member)
+            (raft-member-propose-sync member (list tag json) :timeout 10)
+            (raft-member-forward-propose-sync member (list tag json) :timeout 10))
+      (unless (eq committed t)
+        (gr8s::core-resource-error 503 "ServiceUnavailable" "This control-plane member is not the Raft leader"))
+      result)))
+
 (defun start-ha-control-plane (store &key id (host "127.0.0.1") (port 0)
                                           init join-host join-port
                                           node-name token ca-pin pki api-url)
@@ -107,29 +134,7 @@ application ingress/writer barriers. This function neither persists nor adopts R
                     root id join-host join-port
                     :node-name node-name :token token :ca-pin ca-pin
                     :node-root (gr8s::cluster-pki-root pki))))))
-         (apply-fn (lambda (command)
-                     (when (consp command)
-                       (case (car command)
-                         (:core-state (gr8s::install-core-state-blob store (second command)))
-                         (:core-delta (gr8s::install-core-state-delta store (second command)))
-                         (:secrets-encryption
-                          (gr8s::install-secret-encryption-command store (second command)))
-                         ;; Install every committed state on every member. This is
-                         ;; idempotent for a leader-local write and necessary when
-                         ;; the leader committed a proposal forwarded by a follower.
-                         (:pod-state (gr8s::install-pod-state-blob store (second command)))
-                         (:pod-delta (gr8s::install-pod-state-delta store (second command)))
-                         (:node-state (gr8s::install-node-state-blob store (second command)))
-                         (:node-delta (gr8s::install-node-state-delta store (second command)))
-                         (:image-tracker
-                          (gr8s.image-distribution::tracker-apply-command
-                           (gr8s::pod-store-image-tracker store) (second command)))
-                         ;; Enrollment is an operation rather than a follower-authored
-                         ;; whole-index snapshot: allocation occurs at this exact log
-                         ;; position against the same preceding state on every replica.
-                         (:node-enrollment
-                          (apply #'gr8s::install-node-enrollment-command
-                                 store (second command))))))))
+         (apply-fn (make-store-raft-apply-function store)))
     (when credentials (setf (gr8s::raft-credentials-node-pki credentials) pki))
     (setf member (start-raft-member id :host host :port port :apply-fn apply-fn :credentials credentials
                                      :snapshot-directory (merge-pathnames "raft/transfers/" (gr8s::pod-store-path store))))
@@ -151,19 +156,7 @@ application ingress/writer barriers. This function neither persists nor adopts R
     ;; follower proposals are forwarded to the leader. TAG identifies a durable
     ;; resource delta or a deterministic image-tracker command; each committed
     ;; command applies on every replica.
-    (setf (gr8s::pod-store-consensus-commit-fn store)
-          (lambda (tag json)
-            (multiple-value-bind (result committed)
-                (if (raft-member-leader-p member)
-                    (raft-member-propose-sync member (list tag json) :timeout 10)
-                    (raft-member-forward-propose-sync member (list tag json) :timeout 10))
-              ;; PROPOSE-SYNC returns T only on commit; a reason keyword
-              ;; (:not-leader / :timeout) otherwise -- both truthy, so test for T.
-              (unless (eq committed t)
-                (gr8s::core-resource-error
-                 503 "ServiceUnavailable"
-                 "This control-plane member is not the Raft leader"))
-              result)))
+    (setf (gr8s::pod-store-consensus-commit-fn store) (make-store-raft-commit-function member))
     (make-ha-control-plane :member member :store store)))
 
 (defun ha-control-plane-leader-p (hcp)

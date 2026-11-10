@@ -132,7 +132,7 @@
   ;; incoming frames here; NIL on witnesses and transport-only tests.
   operation-server
   ;; Filesystem-only callbacks; retention runs under the member lock before WAL adoption.
-  artifact-source-fn artifact-retain-fn snapshot-barrier-fn (snapshot-barrier-pending nil)
+  artifact-source-fn artifact-retain-fn snapshot-barrier-fn startup-check-fn (snapshot-barrier-pending nil)
   snapshot-directory snapshot-root snapshot-owner-fd snapshot-receiver
   (snapshot-max-bytes (* 16 1024 1024 1024))
   ;; This member's RAFT-CREDENTIALS. Only in-process tests run without any.
@@ -221,7 +221,11 @@
     (when (raft-member-running member)
       (bt:with-lock-held ((raft-member-lock member))
         (raft-tick (raft-member-node member))
-        (raft-member-expire-snapshot-receiver member)))))
+        (raft-member-expire-snapshot-receiver member))
+      ;; Store startup checks may acquire outer application barriers. They must
+      ;; run after releasing the member mutex, and never kill the tick clock.
+      (let ((check (raft-member-startup-check-fn member)))
+        (when check (ignore-errors (funcall check member)))))))
 
 (defun raft-member-dispatch-message-unlocked (member message)
   (case (getf message :type)
@@ -258,7 +262,7 @@ Normal replication continues while the barrier drains outstanding application wr
 ;;; Lifecycle.
 
 (defun start-raft-member (id &key (host "127.0.0.1") (port 0) apply-fn storage storage-path initial-role
-                                  snapshot-fn restore-fn snapshot-directory
+                                  snapshot-fn restore-fn snapshot-directory prepare-fn validate-recovery-fn
                                   ;; election timeout ~1-2s at a 50ms tick; well above gRPC call latency
                                   (timeout-fn (lambda () (+ 20 (random 20))))
                                   (heartbeat-ticks 2)
@@ -268,8 +272,12 @@ Normal replication continues while the barrier drains outstanding application wr
    RAFT-MEMBER-SET-PEERS (so a fresh member cannot self-elect before it knows
    them); ticking starts with RAFT-MEMBER-START. STORAGE-PATH recovers a file WAL
    before opening the RPC listener and makes the member own/close that storage.
+   PREPARE-FN installs callbacks on the new member before recovery; VALIDATE-RECOVERY-FN
+   must approve its recovered WAL before node mutation. Both run before listening.
    INITIAL-ROLE keeps an unconfigured witness/learner from campaigning before join."
   (when (and storage storage-path) (error "Supply either storage or storage-path"))
+  (dolist (callback (list prepare-fn validate-recovery-fn))
+    (when (and callback (not (functionp callback))) (error "Invalid member startup callback")))
   (unless (member initial-role '(nil :voter :witness :learner)) (error "Invalid initial Raft role"))
   (let* ((member (make-raft-member :host host :port port :credentials credentials
                                   :snapshot-directory snapshot-directory))
@@ -284,9 +292,12 @@ Normal replication continues while the barrier drains outstanding application wr
          (server (progn
                    (setf (raft-member-node member) node)
                    (when initial-role (setf (raft-node-self-role node) initial-role))
+                   (when prepare-fn (funcall prepare-fn member))
                    (bt:with-lock-held ((raft-member-lock member))
                      (when storage-path
-                       (recover-raft-node node storage-path)
+                       (recover-raft-node node storage-path
+                         :validate-fn (when validate-recovery-fn
+                                        (lambda (recovered) (funcall validate-recovery-fn member recovered))))
                        (setf (raft-member-owned-storage member) (gr8s.raft:raft-node-storage node))))
                    (handler-case
                        (progn
