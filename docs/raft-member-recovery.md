@@ -540,6 +540,21 @@ The first asynchronous-worker churn run exhausted its heap as the committed log
 grew during I/O; whole-log admission addresses that separate retention source
 and requires a fresh full churn/recovery run before acceptance.
 
+The [three-voter smoke validation](compaction-cluster-smoke-validation-2026-11-10.json)
+uses three separate 384 MiB processes and offline mTLS fixtures. It holds all
+three capture writers for two seconds, commits a new marker while they remain
+held, verifies unchanged election terms, then releases capture and restarts all
+processes with the marker and credential hashes preserved. Its 64 rounds are
+partial evidence, not the full retained-history memory acceptance.
+Build this internal harness with
+`sbcl --noinform --non-interactive --load scripts/build-compaction-cluster-native-harness.lisp`.
+Run `python3 scripts/test-compaction-cluster-native.py` for 2,048 rounds and
+full-history checks, or add `--smoke --rounds 64` for the explicitly partial
+probe. The full run checks each member's history budget before shutdown and
+cold-loads that history before startup establishes a new watch epoch. This
+harness uses the store-member/HCP-worker APIs; it does not run `serve` or certify
+node enrollment, VM execution or conformance.
+
 Build the internal native retention probe with
 `scripts/build-compaction-native-harness.lisp`, then run the resulting
 `build/gr8s-compaction-acceptance --dynamic-space-size 384 PRIVATE_ROOT 2048`.

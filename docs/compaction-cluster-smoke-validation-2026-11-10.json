@@ -1,0 +1,213 @@
+{
+  "passed": true,
+  "binarySha256": "25f78158d1e4153a97211022a6fccb154283b310c460aac0a92f30aaad404e68",
+  "nativeHarness": true,
+  "productionServe": false,
+  "vmAcceptance": false,
+  "mutualTls": true,
+  "processes": 3,
+  "heapLimitMiB": 384,
+  "rounds": 64,
+  "payloadBytes": 4194304,
+  "historyByteBudget": 100663296,
+  "historyClock": 4000000000,
+  "fullChurnAcceptance": false,
+  "elapsedSeconds": 44.91361291683279,
+  "heldMarkerCommit": 53,
+  "identitiesPreserved": true,
+  "stopExitCodes": {
+    "cp-a": 0,
+    "cp-b": 0,
+    "cp-c": 0
+  },
+  "cleanupExitCodes": {
+    "cp-a": 0,
+    "cp-b": 0,
+    "cp-c": 0
+  },
+  "date": "2026-11-10",
+  "productionSourceCommit": "20aa6a1",
+  "evidence": "/tmp/gr8s-compaction-cluster-native-8o2i2c6v",
+  "scope": "Three-voter held-capture availability and restart smoke only; full churn pending",
+  "heldSeconds": 2,
+  "sourceFilesSha256": {
+    "scripts/compaction-cluster-native-harness.lisp": "2b45389938df03b040e31ab65defa1b321db884d9854ee50e026c9f2c7567a6c",
+    "scripts/build-compaction-cluster-native-harness.lisp": "75d3f5abf689e48608d1b64b629a0e44b1273c362afecfd5325acbc757b89df0",
+    "scripts/test-compaction-cluster-native.py": "6125304e753fbb6dfa1a1d9e5fb428aa17c064aeb44660dd3f34ac995b4e229a",
+    "scripts/learner-native-harness.lisp": "023b264ed1118122ef8a847d5b48396f5688780fa14ec0b0e20a984666f59e40",
+    "scripts/test-learner-native.py": "40845b90a51d130b488ac562f17019f4ba8f88e57c02946ed9205c3732056898"
+  },
+  "heldBefore": {
+    "cp-a": {
+      "role": "leader",
+      "term": 1,
+      "commit": 51,
+      "applied": 51,
+      "snapshot": 1,
+      "captureHeld": true,
+      "heldIndex": 51,
+      "blocked": false,
+      "checkpoints": 0,
+      "historyEstimatedBytes": 2138832,
+      "loadedHistoryEstimatedBytes": 0
+    },
+    "cp-b": {
+      "role": "follower",
+      "term": 1,
+      "commit": 51,
+      "applied": 51,
+      "snapshot": 1,
+      "captureHeld": true,
+      "heldIndex": 50,
+      "blocked": false,
+      "checkpoints": 0,
+      "historyEstimatedBytes": 2138832,
+      "loadedHistoryEstimatedBytes": 0
+    },
+    "cp-c": {
+      "role": "follower",
+      "term": 1,
+      "commit": 51,
+      "applied": 51,
+      "snapshot": 1,
+      "captureHeld": true,
+      "heldIndex": 50,
+      "blocked": false,
+      "checkpoints": 0,
+      "historyEstimatedBytes": 2138832,
+      "loadedHistoryEstimatedBytes": 0
+    }
+  },
+  "heldAfterMarker": {
+    "cp-a": {
+      "role": "leader",
+      "term": 1,
+      "commit": 53,
+      "applied": 53,
+      "snapshot": 1,
+      "captureHeld": true,
+      "heldIndex": 51,
+      "blocked": false,
+      "checkpoints": 0,
+      "historyEstimatedBytes": 2240608,
+      "loadedHistoryEstimatedBytes": 0
+    },
+    "cp-b": {
+      "role": "follower",
+      "term": 1,
+      "commit": 53,
+      "applied": 53,
+      "snapshot": 1,
+      "captureHeld": true,
+      "heldIndex": 50,
+      "blocked": false,
+      "checkpoints": 0,
+      "historyEstimatedBytes": 2240608,
+      "loadedHistoryEstimatedBytes": 0
+    },
+    "cp-c": {
+      "role": "follower",
+      "term": 1,
+      "commit": 53,
+      "applied": 53,
+      "snapshot": 1,
+      "captureHeld": true,
+      "heldIndex": 50,
+      "blocked": false,
+      "checkpoints": 0,
+      "historyEstimatedBytes": 2240608,
+      "loadedHistoryEstimatedBytes": 0
+    }
+  },
+  "beforeRestart": {
+    "cp-a": {
+      "role": "leader",
+      "term": 1,
+      "commit": 137,
+      "applied": 137,
+      "snapshot": 95,
+      "captureHeld": false,
+      "heldIndex": 51,
+      "blocked": false,
+      "checkpoints": 2,
+      "historyEstimatedBytes": 6515200,
+      "loadedHistoryEstimatedBytes": 0
+    },
+    "cp-b": {
+      "role": "follower",
+      "term": 1,
+      "commit": 137,
+      "applied": 137,
+      "snapshot": 93,
+      "captureHeld": false,
+      "heldIndex": 50,
+      "blocked": false,
+      "checkpoints": 2,
+      "historyEstimatedBytes": 6515200,
+      "loadedHistoryEstimatedBytes": 0
+    },
+    "cp-c": {
+      "role": "follower",
+      "term": 1,
+      "commit": 137,
+      "applied": 137,
+      "snapshot": 93,
+      "captureHeld": false,
+      "heldIndex": 50,
+      "blocked": false,
+      "checkpoints": 2,
+      "historyEstimatedBytes": 6515200,
+      "loadedHistoryEstimatedBytes": 0
+    }
+  },
+  "afterRestart": {
+    "cp-a": {
+      "role": "leader",
+      "term": 3,
+      "commit": 138,
+      "applied": 138,
+      "snapshot": 95,
+      "captureHeld": false,
+      "heldIndex": false,
+      "blocked": false,
+      "checkpoints": 0,
+      "historyEstimatedBytes": 2137296,
+      "loadedHistoryEstimatedBytes": 6515200
+    },
+    "cp-b": {
+      "role": "follower",
+      "term": 3,
+      "commit": 138,
+      "applied": 138,
+      "snapshot": 135,
+      "captureHeld": false,
+      "heldIndex": false,
+      "blocked": false,
+      "checkpoints": 0,
+      "historyEstimatedBytes": 101776,
+      "loadedHistoryEstimatedBytes": 6515200
+    },
+    "cp-c": {
+      "role": "follower",
+      "term": 3,
+      "commit": 138,
+      "applied": 138,
+      "snapshot": 135,
+      "captureHeld": false,
+      "heldIndex": false,
+      "blocked": false,
+      "checkpoints": 0,
+      "historyEstimatedBytes": 101776,
+      "loadedHistoryEstimatedBytes": 6515200
+    }
+  },
+  "earlierFailure": {
+    "evidence": "/tmp/gr8s-compaction-cluster-native-r5g_lyev/result.json",
+    "reason": "Read crossed brief publication gate; fixture now retries only status503, matching its existing write handling. Product source unchanged."
+  },
+  "remaining": [
+    "Full2048-round three-process heap/history acceptance",
+    "Production serve and VM/conformance acceptance",
+    "Other full ten-gap requirements"
+  ]
+}
