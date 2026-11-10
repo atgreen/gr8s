@@ -111,6 +111,9 @@
   (lock (bt:make-lock "gr8s raft link"))
   (changed (bt:make-condition-variable :name "gr8s raft link changed"))
   (items '())
+  ;; Published under LOCK before dequeue: registry GC must see sender-owned
+  ;; snapshots even while their source callback has not opened the artifact.
+  (active-items '())
   channel stub thread
   ;; Operation relay is synchronous and ordered per peer, independently of the
   ;; Raft replication outbox. A distinct HTTP/2 connection prevents a long exec
@@ -169,8 +172,28 @@
                      (null (raft-peer-link-items link)))
           do (bt:condition-wait (raft-peer-link-changed link)
                                 (raft-peer-link-lock link)))
-    (prog1 (raft-peer-link-items link)
-      (setf (raft-peer-link-items link) '()))))
+    (when (raft-peer-link-active-items link)
+      (error "Snapshot sender still owns its previous batch"))
+    (setf (raft-peer-link-active-items link) (raft-peer-link-items link)
+          (raft-peer-link-items link) nil)
+    (raft-peer-link-active-items link)))
+
+(defun raft-member-snapshot-messages-unlocked (member)
+  "List queued and sender-owned snapshot roots while the caller owns MEMBER.
+Lock order is member then link. Senders publish ownership before dequeue and
+release it only after source lookup and delivery finish, including failures."
+  (unless (sb-thread:holding-mutex-p (raft-member-lock member))
+    (error "Snapshot root enumeration requires the member lock"))
+  (let ((messages nil))
+    (maphash (lambda (id link)
+               (declare (ignore id))
+               (bt:with-lock-held ((raft-peer-link-lock link))
+                 (dolist (message (append (raft-peer-link-active-items link)
+                                          (raft-peer-link-items link)))
+                   (when (eq :install-snapshot (getf message :type))
+                     (push message messages)))))
+             (raft-member-links member))
+    messages))
 
 (defun raft-link-drop (link)
   "Tear down LINK's cached channel and stub (closing the channel, errors ignored) so
@@ -203,14 +226,18 @@
    to the peer, dropping the link (to be reopened) on any send error. A missing stub
    or failed delivery is simply dropped -- Raft retries recover it."
   (loop while (raft-member-running member) do
-    (dolist (message (raft-link-wait-batch member link))
-      (let ((stub (raft-link-stub member link)))
-        (when stub
-          (handler-case
-              (if (eq :install-snapshot (getf message :type))
-                  (raft-link-send-snapshot member stub message :recipient-role (raft-peer-link-role link))
-                  (raft-link-deliver-message stub message))
-            (error () (raft-link-drop link))))))))
+    (let ((batch (raft-link-wait-batch member link)))
+      (unwind-protect
+           (dolist (message batch)
+             (let ((stub (raft-link-stub member link)))
+               (when stub
+                 (handler-case
+                     (if (eq :install-snapshot (getf message :type))
+                         (raft-link-send-snapshot member stub message :recipient-role (raft-peer-link-role link))
+                         (raft-link-deliver-message stub message))
+                   (error () (raft-link-drop link))))))
+        (bt:with-lock-held ((raft-peer-link-lock link))
+          (setf (raft-peer-link-active-items link) nil))))))
 
 (defun raft-member-tick-loop (member tick-seconds)
   "MEMBER's clock thread: every TICK-SECONDS, drive RAFT-TICK under the member lock to
