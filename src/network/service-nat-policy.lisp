@@ -1,7 +1,7 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
 ;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
-;;;; Standalone IPv4 alias-aware policy profile. It is not installed by CNI yet.
+;;;; IPv4 alias-aware policy forms compose into the opted-in v2 TC graph.
 ;;;; Preserve canonical rule compilation, but keep wire tuples and peer epochs
 ;;;; in a separate reply table. The 48-byte local identity rejects old adopters.
 (in-package #:gr8s.network)
@@ -417,5 +417,5 @@ The eventual NAT pipeline must commit translation before a delivery stage."
         (cons *service-nat-policy-key-form* forms)))))
 
 (defun compile-service-nat-policy ()
-  "Standalone IPv4 alias-aware policy profile; not yet installed by CNI."
+  "Compile the standalone IPv4 alias-aware policy profile."
   (compile-whistler-program (service-nat-policy-map-forms) (service-nat-policy-forms)))

@@ -1,8 +1,9 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
 ;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
-;;;; Complete, standalone v2 TC graph. CNI/agent publication is still gated on
-;;;; inventory/readiness, migration and pinned-map validation integration.
+;;;; Complete v2 TC graph. Native routed CNI can attach it for explicitly
+;;;; opted-in endpoints after risk and owner publication. Service activation
+;;;; still requires receiver readiness and retained-flow migration fencing.
 (in-package #:gr8s.network)
 
 (defparameter *service-nat-stage-map-form*
@@ -174,5 +175,5 @@ Missing continuations fail closed. This runs after NAT macros have expanded."
            (expand-service-nat-form (service-nat-gc-program-form))))))
 
 (defun compile-service-nat-guard ()
-  "Standalone v2 roots and trusted tail-call graph. Not yet installed by CNI."
+  "Compile the v2 roots and trusted tail-call graph for opted-in native CNI."
   (compile-whistler-program (service-nat-guard-map-forms) (service-nat-guard-forms)))
