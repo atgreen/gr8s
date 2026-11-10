@@ -433,6 +433,11 @@ opted-in v2 endpoint after the local risk inventory and exact owner pair are
 published. The native build embeds the graph, and CNI validates shared map
 schemas before attachment. After both TCX guards attach, CNI marks the exact
 local owner pair receiver-ready; DEL disables that pair before removing links.
+For disposable validation, managed native Pods can opt into the v2 CNI profile
+with `GR8S_ENABLE_PACKET_SERVICES=1`,
+`GR8S_PREPARE_PACKET_SERVICES_V2=1`, and
+`GR8S_ENABLE_NATIVE_SERVICE_V2=1`. The last flag requires the first two; the
+default managed profile remains v1 while live Service traffic is being tested.
 The node's periodic status reports the complete set of locally ready owner
 incarnations for its current risk revision. The server validates each report
 against its authenticated node session and ACKed owner assignment, retaining

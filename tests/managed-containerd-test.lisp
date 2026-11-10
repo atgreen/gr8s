@@ -30,6 +30,34 @@
   (is (getf (gr8s::parse-cli-options '("serve" "--containerd-no-sync" "--port" "18080")) :containerd-no-sync))
   (is (not (getf (gr8s::parse-cli-options '("serve" "--port" "18080")) :containerd-no-sync))))
 
+(test native-v2-cni-profile-requires-explicit-staged-opt-in
+  (let* ((manager (gr8s::make-managed-containerd
+                   :state-directory "/var/lib/gr8s/"
+                   :executable "/opt/gr8s/bin/containerd"
+                   :oci-runtime "/opt/gr8s/bin/runc"
+                   :cni-bin-directory "/opt/gr8s/bin/cni/"
+                   :platform "linux/amd64"))
+         (names '("GR8S_ENABLE_PACKET_SERVICES"
+                  "GR8S_PREPARE_PACKET_SERVICES_V2"
+                  "GR8S_ENABLE_NATIVE_SERVICE_V2"))
+         (prior (mapcar #'uiop:getenv names)))
+    (unwind-protect
+         (progn
+           (dolist (name names) (sb-posix:unsetenv name))
+           (is-false (search "servicePacketProfile"
+                             (gr8s::managed-containerd-cni-config-text manager)))
+           (sb-posix:setenv (third names) "1" 1)
+           (signals error (gr8s::managed-containerd-cni-config-text manager))
+           (sb-posix:setenv (first names) "1" 1)
+           (signals error (gr8s::managed-containerd-cni-config-text manager))
+           (sb-posix:setenv (second names) "1" 1)
+           (is (search "\"servicePacketProfile\":\"v2\""
+                       (gr8s::managed-containerd-cni-config-text manager))))
+      (loop for name in names
+            for value in prior
+            do (if value (sb-posix:setenv name value 1)
+                   (sb-posix:unsetenv name))))))
+
 (test managed-containerd-appends-extra-runtime-handlers
   ;; podster-mgw: optional runtime payloads (e.g. a gVisor runsc addon) register
   ;; as additional CRI handlers after the built-in runc, without disturbing it.

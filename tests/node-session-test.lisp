@@ -757,6 +757,69 @@
             (gr8s::make-node-agent-session nil))
       (is-false (published)))))
 
+(test two-node-service-receiver-set-must-reach-both-snapshots
+  (let* ((server (gr8s::%make-node-grpc-server))
+         (identities '(("worker-a" . "node-a") ("worker-b" . "node-b")))
+         (owners (loop for (name . id) in identities
+                       for index from 1
+                       collect (make-instance 'gr8s.node.v1::service-translation-identity
+                                              :pod-uid (format nil "pod-~D" index)
+                                              :node-name name :node-id id
+                                              :sandbox-id (format nil "sandbox-~D" index)
+                                              :interface-name "eth0"
+                                              :pod-ip (format nil "10.88.~D.2" index)
+                                              :translation-ip (format nil "10.88.~D.9" index))))
+         (projection (mapcar #'ag-proto:serialize-to-bytes owners))
+         (proofs (mapcar (lambda (owner)
+                           (make-instance 'gr8s.node.v1::service-receiver-proof
+                                          :pod-uid (slot-value owner 'gr8s.node.v1::pod-uid)
+                                          :incarnation
+                                          (gr8s.network::service-translation-incarnation-token
+                                           (slot-value owner 'gr8s.node.v1::node-id)
+                                           (slot-value owner 'gr8s.node.v1::sandbox-id)
+                                           (slot-value owner 'gr8s.node.v1::interface-name)
+                                           (slot-value owner 'gr8s.node.v1::pod-ip)
+                                           (slot-value owner 'gr8s.node.v1::translation-ip))))
+                         owners))
+         (reports (gr8s::node-grpc-server-service-receiver-reports server))
+         (snapshots (gr8s::node-grpc-server-snapshots server)))
+    (loop for (name . id) in identities
+          for proof in proofs
+          do (let ((session (gr8s::make-node-agent-session nil)))
+               (setf (gr8s::node-agent-session-node-id session) id
+                     (gethash name (gr8s::node-grpc-server-sessions server)) session
+                     (gethash name (gr8s::node-grpc-server-acknowledged-revisions server)) 3
+                     (gethash name snapshots)
+                     (make-instance 'gr8s.node.v1::desired-state-snapshot
+                                    :revision 3
+                                    :network (make-instance 'gr8s.node.v1::node-network-config
+                                                            :service-translations owners)))
+               (when (string= name "worker-a")
+                 (setf (gethash name reports) (list session 3 (list proof) projection)))))
+    (labels ((ready ()
+               (bt:with-lock-held ((gr8s::node-grpc-server-lock server))
+                 (gr8s.apiserver::cluster-service-ready-receivers-locked
+                  server projection identities)))
+             (distributed (receiver-projection)
+               (bt:with-lock-held ((gr8s::node-grpc-server-lock server))
+                 (gr8s.apiserver::service-risk-receiver-projection-published-locked-p
+                  server receiver-projection identities))))
+      (is-false (ready) "One node's proof cannot release a partial set")
+      (let ((session (gethash "worker-b" (gr8s::node-grpc-server-sessions server))))
+        (setf (gethash "worker-b" reports) (list session 3 (list (second proofs)) projection)))
+      (let* ((ready (ready))
+             (receiver-projection (mapcar #'ag-proto:serialize-to-bytes ready)))
+        (is (= 2 (length ready)))
+        (setf (slot-value (gethash "worker-a" snapshots) 'gr8s.node.v1::service-receivers)
+              ready)
+        (is-false (distributed receiver-projection)
+                  "The second node must receive the same complete projection")
+        (setf (slot-value (gethash "worker-b" snapshots) 'gr8s.node.v1::service-receivers)
+              ready)
+        (is-true (distributed receiver-projection))
+        (setf (third (gethash "worker-b" reports)) nil)
+        (is-false (ready) "Withdrawal invalidates the complete set")))))
+
 (test snapshot-ack-from-replaced-node-session-is-ignored
   (let* ((server (gr8s::%make-node-grpc-server))
          (old (gr8s::make-node-agent-session nil))
