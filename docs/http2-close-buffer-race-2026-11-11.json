@@ -1,0 +1,21 @@
+{
+  "date": "2026-11-11",
+  "productCommit": "e52d85c",
+  "issue": "podster-ucm.11.9",
+  "diagnostic": "scripts/probe-http2-close-buffer.lisp",
+  "diagnosticSha256": "fccf6f0a25e510f22b1eeb7a83c5031f12f4b2035cd63f128d1735d783326e2c",
+  "command": "sbcl --noinform --non-interactive --load scripts/probe-http2-close-buffer.lisp",
+  "exitCode": 0,
+  "observed": {
+    "bufferTailBefore": 1,
+    "bufferTailAfter": 0,
+    "writerLockHeldThroughoutObservation": true,
+    "upstreamFinalizerPausedBeforeSocketClose": true
+  },
+  "conclusion": "Close mutates the output buffer without owning the connection write lock.",
+  "limits": [
+    "Thread-local mock pauses upstream finalization; this does not reproduce descriptor reuse or buffer recycling.",
+    "The original invalid-UTF8 snapshot corruption remains unexplained.",
+    "This records a reproduced defect, not a product fix or passing safety acceptance."
+  ]
+}
