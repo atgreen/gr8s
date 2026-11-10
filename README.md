@@ -100,6 +100,11 @@ To manage a persistent server or agent with systemd, see
 [Installing and operating gr8s with systemd](docs/installing.md).
 It covers verified upgrades, rollback, scoped cleanup, and uninstall.
 
+For multi-member operation, recovery, optional compaction and heap sizing, see
+[High availability](docs/high-availability.md).
+[In-process patching](docs/live-patching.md) covers the operator CLI, publisher
+trust, OCI distribution and patch authoring.
+
 ## Kubernetes capabilities
 
 The implemented API surface includes:

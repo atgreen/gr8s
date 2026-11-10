@@ -6,8 +6,9 @@ use the same ag-gRPC transport as the rest of gr8s. One Raft implementation runs
 under real gRPC and a deterministic in-process simulator. The simulator tests
 leader election, log replication, the §5.4.2 commit rule, ordered application,
 failover, and partitions. The core includes a durable write-ahead log and
-snapshot recovery. Some production roles still need durable recovery, automatic
-snapshot compaction, and catch-up. See the scope below.
+snapshot recovery. Production voters and witnesses recover their durable state
+before serving. Automatic application checkpoints are available through an explicit
+opt-in; their production acceptance and current limits are described below.
 
 ## The consistency plane
 
@@ -90,10 +91,11 @@ same identity and endpoints, including after an interrupted first startup. A
 changed configuration fails before startup instead of publishing a new address
 that other members cannot reach. This release has no endpoint migration command.
 
-An HA acceptance smoke test
-stands up a three-member cluster over HTTP, creates a resource through the leader,
-kills the leader, and requires the survivors to keep serving the committed data
-and accept new writes.
+The [production recovery validation](production-ha-recovery-validation-2026-11-10.json)
+uses three real CLI processes and a witness with authenticated Raft. It verifies
+leader loss, rejoin, full restart, preserved credentials and writes with a witness
+participating in quorum. That run disables agents and uses the fake runtime; it
+does not establish container, VM or conformance acceptance.
 
 ## Current limits
 
@@ -112,14 +114,13 @@ Forwarded writes carry the application conflict result separately from consensus
 commit. A single store operation can still propose core, Pod, and Node changes
 separately; this is not a general transaction across all resource families.
 Focused failover tests do not prove arbitrary crash/restart safety.
-Node mutations still need the same staging guarantees, tracked separately under
-`podster-ucm.2.3`.
-
-The production voter startup does not yet attach/recover the core's durable Raft
-backend. Witnesses write a private WAL but do not yet recover its previous hard
-state and log on startup. These are active correctness gaps under
-`podster-ucm.2.1`, not established crash-safety guarantees. The core's tested WAL
-and snapshot helpers alone do not close those integration gaps.
+Production startup restores the persisted application baseline and committed WAL
+suffix before opening application services. Raft remains available while a member
+waits for committed current-term recovery. A lone member of a saved three-voter
+cluster cannot become a new one-voter cluster by restarting. Witness recovery
+restores voting state without replicating application payloads. State ownership,
+endpoint checks and legacy-state refusal are described in
+[Raft member recovery](raft-member-recovery.md).
 
 Node writes now stage private records, defer file changes, and restore committed
 pointers, revisions and watch journals before proposing to Raft. Committed deltas
@@ -185,12 +186,43 @@ The [snapshot-transfer validation record](raft-snapshot-transfer-validation-2026
 covers interrupted mTLS transfer, voter/learner catch-up and leadership handoff
 with a witness. Run `make test-raft-snapshots` for the focused suite.
 
-Production store snapshot capture/restore integration and automatic compaction remain
-under `podster-ucm.11`. An internal [streamed artifact writer](store-snapshot-artifacts.md)
-now captures and validates application records without whole-store materialization; transport,
-durable restore and generation ownership are still pending. The generic callback path reconstructs an opaque Lisp application
-snapshot on receipt: bounded RPC chunks alone do not bound that reconstruction's
-heap usage. Large production stores need streamed application artifacts before
-automatic compaction can be enabled. The retained production log is therefore not yet bounded over
-the lifetime of a cluster. Operator backup/restore is separate work under
-`podster-ucm.3`. gr8s has not passed Kubernetes conformance.
+## Automatic checkpoints and heap sizing
+
+Automatic checkpointing is disabled by default. Add `--raft-compaction` to each
+member's existing `gr8s serve` command to opt in. The flag requires `--raft-init`
+or `--raft-join`; retain the member's original state directory, identity and
+endpoints. The worker periodically checks size and entry thresholds, captures a
+streamed application artifact, and publishes a durable checkpoint. It does not
+checkpoint on every write.
+
+The streamed path avoids constructing a complete serialized application in the
+Lisp heap. It preserves durable application generations and bounds retained
+catch-up data. A returning member can require artifact installation after older
+log entries have been compacted. Do not delete WALs, selected generations,
+metadata, credentials or snapshot artifacts to reclaim space by hand.
+
+[Constrained-heap validation](async-compaction-validation-2026-11-10.json) covers
+large churn, bounded retention, catch-up and cold recovery in an internal
+three-process harness. Full production CLI compaction acceptance and VM validation
+remain in progress. The opt-in is not a claim that these remaining gates passed.
+With checkpointing disabled, the production WAL can continue growing.
+
+The native binary defaults to a 2 GiB Lisp dynamic heap. Override it by placing
+`--dynamic-space-size SIZE` before `serve`, with SIZE in MiB. The 384 MiB limits
+used in validation are stress-test settings, not a recommended production size.
+Size the machine for the Lisp heap plus native allocations, thread stacks,
+containerd and workload memory; the Lisp limit is not a total process or host
+memory limit.
+
+Scrape each member's authenticated `/metrics` endpoint. Compare
+`gr8s_lisp_heap_after_gc_bytes` with `gr8s_lisp_heap_limit_bytes` to distinguish
+retained memory pressure from transient allocation. Also watch
+`gr8s_raft_retained_bytes`, replication lag, and `gr8s_compaction_error`.
+[Control-plane metrics](control-plane-metrics.md) documents their meanings and
+sampling limits. Preserve logs and state when recovery remains blocked; repeatedly
+restarting or removing files does not establish a safe recovery boundary.
+
+Application snapshots support Raft recovery; they are not an operator backup of
+cluster identity, signing/encryption keys or patch state. A complete operator
+backup/restore workflow remains separate work. gr8s has not passed Kubernetes
+conformance.
