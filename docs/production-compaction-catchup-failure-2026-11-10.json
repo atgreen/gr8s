@@ -1,0 +1,278 @@
+{
+  "passed": false,
+  "productionServe": true,
+  "nativeBinary": true,
+  "mutualTlsRaft": true,
+  "agentsDisabled": true,
+  "vmAcceptance": false,
+  "conformanceAcceptance": false,
+  "witnessAcceptance": true,
+  "heapLimitMiB": 384,
+  "binarySha256": "61f45eb9907902894ca09b1fc6f53c4b614d1ea4cd04df8bee17ce4d9813b704",
+  "evidence": "/tmp/gr8s-ha-production-xl_v82h9",
+  "compactionRequested": true,
+  "compactionAcceptance": false,
+  "fullCompactionWorkloadRequested": false,
+  "fullCompactionAcceptance": false,
+  "compactionRounds": 128,
+  "initialMembership": [
+    {
+      "path": "/tmp/gr8s-ha-production-xl_v82h9/cp1/raft/control-plane.log",
+      "term": 1,
+      "commit": 15,
+      "snapshotIndex": 1,
+      "members": [
+        {
+          "id": "cp3",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp1",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-xl_v82h9/cp2/raft/control-plane.log",
+      "term": 1,
+      "commit": 15,
+      "snapshotIndex": 1,
+      "members": [
+        {
+          "id": "cp3",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp1",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-xl_v82h9/cp3/raft/control-plane.log",
+      "term": 1,
+      "commit": 15,
+      "snapshotIndex": 1,
+      "members": [
+        {
+          "id": "cp3",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp1",
+          "role": "voter"
+        }
+      ]
+    }
+  ],
+  "compactionOfflineState": {
+    "path": "/tmp/gr8s-ha-production-xl_v82h9/cp2/raft/control-plane.log",
+    "term": 1,
+    "commit": 17,
+    "snapshotIndex": 1,
+    "members": [
+      {
+        "id": "cp3",
+        "role": "voter"
+      },
+      {
+        "id": "cp2",
+        "role": "voter"
+      },
+      {
+        "id": "cp1",
+        "role": "voter"
+      }
+    ]
+  },
+  "compactionDelayedVoter": "cp2",
+  "compactionBeforeDisconnect": [
+    {
+      "path": "/tmp/gr8s-ha-production-xl_v82h9/cp1/raft/control-plane.log",
+      "term": 1,
+      "commit": 16,
+      "snapshotIndex": 1,
+      "members": [
+        {
+          "id": "cp3",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp1",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-xl_v82h9/cp2/raft/control-plane.log",
+      "term": 1,
+      "commit": 16,
+      "snapshotIndex": 1,
+      "members": [
+        {
+          "id": "cp3",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp1",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-xl_v82h9/cp3/raft/control-plane.log",
+      "term": 1,
+      "commit": 16,
+      "snapshotIndex": 1,
+      "members": [
+        {
+          "id": "cp3",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp1",
+          "role": "voter"
+        }
+      ]
+    }
+  ],
+  "compactionCompletedRounds": 128,
+  "compactionLastSample": {
+    "completedRounds": 128,
+    "walBytes": {
+      "cp1": 2732876,
+      "cp3": 3066189
+    }
+  },
+  "compactionWhileDisconnected": [
+    {
+      "path": "/tmp/gr8s-ha-production-xl_v82h9/cp1/raft/control-plane.log",
+      "term": 1,
+      "commit": 273,
+      "snapshotIndex": 232,
+      "members": [
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-xl_v82h9/cp3/raft/control-plane.log",
+      "term": 1,
+      "commit": 273,
+      "snapshotIndex": 269,
+      "members": [
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    }
+  ],
+  "error": "TimeoutError: native HA condition did not become true: <urlopen error [Errno 111] Connection refused>",
+  "traceback": "Traceback (most recent call last):\n  File \"/home/green/orca/workspaces/gr8s/lanternfish/scripts/test-ha-production-native.py\", line 359, in main\n    compaction_churn(nodes, result, args.compaction_rounds)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/green/orca/workspaces/gr8s/lanternfish/scripts/test-ha-production-native.py\", line 289, in compaction_churn\n    wait_for(delayed.ready, timeout=240)\n    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/green/orca/workspaces/gr8s/lanternfish/scripts/test-ha-production-native.py\", line 47, in wait_for\n    raise TimeoutError(f\"native HA condition did not become true: {last}\")\nTimeoutError: native HA condition did not become true: <urlopen error [Errno 111] Connection refused>\n",
+  "scope": "Failed real production CLI partial compaction acceptance; TLS startup and128round churn succeeded, returning voter readiness timed out. Not a full compaction or witness pass.",
+  "liveWalObservation": [
+    {
+      "path": "/tmp/gr8s-ha-production-xl_v82h9/cp1/raft/control-plane.log",
+      "term": 1,
+      "commit": 273,
+      "snapshotIndex": 232,
+      "members": [
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-xl_v82h9/cp2/raft/control-plane.log",
+      "term": 1,
+      "commit": 115,
+      "snapshotIndex": 1,
+      "members": [
+        {
+          "id": "cp3",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp1",
+          "role": "voter"
+        }
+      ]
+    },
+    {
+      "path": "/tmp/gr8s-ha-production-xl_v82h9/cp3/raft/control-plane.log",
+      "term": 1,
+      "commit": 273,
+      "snapshotIndex": 269,
+      "members": [
+        {
+          "id": "cp1",
+          "role": "voter"
+        },
+        {
+          "id": "cp2",
+          "role": "voter"
+        },
+        {
+          "id": "cp3",
+          "role": "voter"
+        }
+      ]
+    }
+  ]
+}
