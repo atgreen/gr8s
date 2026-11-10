@@ -2846,5 +2846,12 @@
         "cacheBytes": 0
       }
     }
+  },
+  "diskCatchupWorkerStop": {
+    "passed": true,
+    "checks": 6,
+    "log": "/tmp/gr8s-worker-populated-cache-tests.log",
+    "test": "stopping-compaction-worker-releases-its-populated-disk-cache",
+    "scope": "Joined worker restores default cache policy, releases populated anonymous descriptor and cache bytes/count, leaves durable WAL open"
   }
 }

@@ -652,3 +652,29 @@
                (gr8s.ha::stop-ha-compaction-worker ha)
                (is (= 2048 (gr8s.raft::raft-node-catchup-byte-limit node))))
           (gr8s.ha::stop-ha-compaction-worker ha))))))
+
+(test stopping-compaction-worker-releases-its-populated-disk-cache
+  (with-temporary-store (store root)
+    (let* ((storage (gr8s::open-file-raft-storage (merge-pathnames "cache.log" root)))
+           (node (make-disk-catchup-test-node storage))
+           (member (gr8s.raft.transport::make-raft-member :node node))
+           (ha (gr8s.ha::make-ha-control-plane :member member :store store :compaction-interval 3600)))
+      (setf (gr8s.raft::raft-node-catchup-byte-limit node) nil)
+      (unwind-protect
+           (progn
+             (gr8s.ha::start-ha-compaction-worker ha)
+             (let ((fd
+                     (bt:with-lock-held ((gr8s::raft-member-lock member))
+                       (gr8s.raft:raft-compact node 3)
+                       (is (= 1 (nth-value 1 (gr8s.raft::raft-storage-catchup-usage storage))))
+                       (gr8s.raft::raft-catchup-segment-fd
+                        (first (gr8s.raft::file-raft-storage-catchup-segments storage))))))
+               (gr8s.ha::stop-ha-compaction-worker ha)
+               (is (null (gr8s.raft::raft-node-catchup-byte-limit node)))
+               (is (zerop (gr8s.raft::raft-storage-catchup-usage storage)))
+               (is (zerop (nth-value 1 (gr8s.raft::raft-storage-catchup-usage storage))))
+               (signals sb-posix:syscall-error (sb-posix:fstat fd))
+               ;; Worker stop releases the optional cache, leaving the WAL open.
+               (is (open-stream-p (gr8s.raft::file-raft-storage-stream storage)))))
+        (gr8s.ha::stop-ha-compaction-worker ha)
+        (gr8s::close-file-raft-storage storage)))))
