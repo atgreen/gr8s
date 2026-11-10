@@ -5,8 +5,9 @@
 ;;;; Durable, crash-recoverable persistence for the Raft core (podster-c2d.2).
 ;;;; Raft must persist currentTerm, votedFor and the log before acting on them,
 ;;;; or a crashed-then-recovered member can violate safety. This is a Clobber-
-;;;; style append-only write-ahead log: each mutation is one readable Lisp record
-;;;; flushed (and fsync'd) to a per-member file; recovery replays the records.
+;;;; style append-only write-ahead log: each mutation is one checksummed frame
+;;;; containing a readable Lisp record, flushed and fsync'd to a per-member file.
+;;;; Recovery also reads legacy unframed records, but never repairs their tails.
 ;;;; Snapshot records fold a committed prefix into compacted state so the log
 ;;;; does not grow without bound.
 ;;;;
@@ -71,18 +72,171 @@ replacement. Never unlink the lease file: that would allow competing owners."
         (when stream (ignore-errors (close stream :abort t)))
         (when ownership-fd (sb-posix:close ownership-fd))))))
 
+;;; Framing protects record boundaries without building a whole printed record.
+;;; A counting SHA-256 sink is the first printer pass; the second writes the WAL.
+(defclass raft-wal-digest-stream (sb-gray:fundamental-binary-output-stream)
+  ((digest :initform (ironclad:make-digest :sha256) :reader wal-stream-digest)
+   (count :initform 0 :accessor wal-stream-count)
+   (buffer :initform (make-array 4096 :element-type '(unsigned-byte 8)) :reader wal-stream-buffer)
+   (used :initform 0 :accessor wal-stream-used)))
+
+(defmethod stream-element-type ((stream raft-wal-digest-stream)) '(unsigned-byte 8))
+
+(defun wal-stream-flush (stream)
+  (when (plusp (wal-stream-used stream))
+    (ironclad:update-digest (wal-stream-digest stream) (wal-stream-buffer stream)
+                            :end (wal-stream-used stream))
+    (setf (wal-stream-used stream) 0)))
+
+(defmethod sb-gray:stream-write-byte ((stream raft-wal-digest-stream) byte)
+  (setf (aref (wal-stream-buffer stream) (wal-stream-used stream)) byte)
+  (incf (wal-stream-used stream))
+  (incf (wal-stream-count stream))
+  (when (= (wal-stream-used stream) (length (wal-stream-buffer stream))) (wal-stream-flush stream))
+  byte)
+
+(defmethod sb-gray:stream-write-sequence ((stream raft-wal-digest-stream) sequence &optional (start 0) end)
+  (wal-stream-flush stream)
+  (let ((end (or end (length sequence))))
+    (ironclad:update-digest (wal-stream-digest stream) sequence :start start :end end)
+    (incf (wal-stream-count stream) (- end start)))
+  sequence)
+
+(defun raft-wal-form-metrics (form &optional output)
+  (let ((sink (make-instance 'raft-wal-digest-stream)))
+    (with-open-stream (text (flexi-streams:make-flexi-stream sink :external-format :utf-8))
+      (let ((printer (if output (make-broadcast-stream output text) text)))
+        (prin1 form printer)
+        (terpri printer))
+      (finish-output text)
+      (wal-stream-flush sink)
+      (values (wal-stream-count sink)
+              (ironclad:byte-array-to-hex-string (ironclad:produce-digest (wal-stream-digest sink)))))))
+
+(defun raft-wal-text-sha256 (text)
+  (ironclad:byte-array-to-hex-string
+   (ironclad:digest-sequence :sha256 (trivial-utf-8:string-to-utf-8-bytes text))))
+
+(defconstant +raft-wal-header-length+ 157)
+
+(defun raft-wal-write-frame (form stream)
+  (let ((*print-readably* t) (*print-circle* nil) (*print-pretty* nil)
+        (*print-base* 10) (*print-radix* nil) (*print-case* :upcase)
+        (*package* (find-package :gr8s.raft)))
+    (multiple-value-bind (length digest) (raft-wal-form-metrics form)
+      (unless (< 0 length (expt 16 16)) (error "Raft WAL record length is out of range"))
+      (let ((prefix (format nil "@GR8SWAL1 ~16,'0X ~A " length digest)))
+        (write-string prefix stream)
+        (write-string (raft-wal-text-sha256 prefix) stream)
+        (terpri stream))
+      (multiple-value-bind (actual-length actual-digest) (raft-wal-form-metrics form stream)
+        (unless (and (= length actual-length) (equal digest actual-digest))
+          (error "Raft WAL record changed during serialization"))))))
+
+(defun raft-wal-header-character-p (character position)
+  (cond ((< position 10) (char= character (char "@GR8SWAL1 " position)))
+        ((member position '(26 91)) (char= character #\Space))
+        ((= position 156) (char= character #\Newline))
+        (t (not (null (digit-char-p character 16))))))
+
+(defun raft-wal-valid-header-p (header)
+  (and (= (length header) +raft-wal-header-length+)
+       (loop for character across header for i from 0
+             always (raft-wal-header-character-p character i))
+       (string-equal (raft-wal-text-sha256 (subseq header 0 92)) (subseq header 92 156))))
+
+(defun raft-wal-later-header-p (binary start)
+  "A short payload containing another valid header is ambiguous, not repairable.
+Scan with bounded overlap, including candidates that cross a read-buffer edge."
+  (file-position binary start)
+  (let ((buffer (make-array (+ 65536 (1- +raft-wal-header-length+)) :element-type '(unsigned-byte 8)))
+        (carry 0) (magic "@GR8SWAL1 "))
+    (loop for end = (read-sequence buffer binary :start carry)
+          do (loop for i from 0 to (- end +raft-wal-header-length+)
+                   when (loop for j below (length magic)
+                              always (= (aref buffer (+ i j)) (char-code (char magic j))))
+                     do (let ((header (map 'string #'code-char (subseq buffer i (+ i +raft-wal-header-length+)))))
+                          (when (raft-wal-valid-header-p header) (return-from raft-wal-later-header-p t))))
+             (when (= end carry) (return nil))
+             (setf carry (min end (1- +raft-wal-header-length+)))
+             (replace buffer buffer :start1 0 :start2 (- end carry) :end2 end))))
+
+(defun raft-wal-read-record (input binary)
+  "Return FORM, or :EOF, or :TORN with its frame boundary as a second value.
+Legacy forms are read strictly; only explicit frame boundaries can be repaired."
+  (let ((first (peek-char t input nil :eof)))
+    (when (eq first :eof) (return-from raft-wal-read-record :eof))
+    (unless (eql first #\@) (return-from raft-wal-read-record (read input)))
+    (let ((start (file-position input))
+          (header (make-string +raft-wal-header-length+)))
+      (dotimes (i +raft-wal-header-length+)
+        (let ((character (read-char input nil :eof)))
+          (when (eq character :eof) (return-from raft-wal-read-record (values :torn start)))
+          (unless (raft-wal-header-character-p character i) (error "Invalid Raft WAL frame header"))
+          (setf (char header i) character)))
+      (unless (raft-wal-valid-header-p header)
+        (error "Raft WAL frame header checksum mismatch"))
+      (let* ((length (parse-integer header :start 10 :end 26 :radix 16))
+             (body-start (file-position input))
+             (remaining length)
+             (digest (ironclad:make-digest :sha256))
+             (buffer (make-array 65536 :element-type '(unsigned-byte 8))))
+        (unless (plusp length) (error "Empty Raft WAL frame"))
+        (file-position binary body-start)
+        (loop while (plusp remaining)
+              for n = (read-sequence buffer binary :end (min remaining (length buffer)))
+              do (when (zerop n)
+                   (when (raft-wal-later-header-p binary body-start)
+                     (error "Ambiguous short Raft WAL payload contains a later frame"))
+                   (return-from raft-wal-read-record (values :torn start)))
+                 (ironclad:update-digest digest buffer :end n)
+                 (decf remaining n))
+        (unless (string-equal (ironclad:byte-array-to-hex-string (ironclad:produce-digest digest))
+                              (subseq header 27 91))
+          (error "Raft WAL frame payload checksum mismatch"))
+        ;; Parse only after the complete payload has passed byte-level integrity.
+        ;; FILE-POSITION on this UTF-8 fd stream is the logical octet position.
+        (let* ((*package* (find-package :gr8s.raft)) (*read-base* 10)
+               (form (read-preserving-whitespace input)))
+          (unless (and (eql #\Newline (read-char input nil nil))
+                       (= (file-position input) (+ body-start length)))
+            (error "Raft WAL frame does not contain exactly one record"))
+          form)))))
+
+(defgeneric file-raft-tail-sync (storage fd)
+  (:documentation "Synchronize a repaired terminal frame before any append or listener startup.")
+  (:method ((storage file-raft-storage) fd) (sb-posix:fsync fd)))
+
+(defun raft-wal-repair-tail (storage boundary)
+  "Discard a provably short framed tail while holding exclusive WAL ownership."
+  (unless (and (file-raft-storage-ownership-fd storage)
+               (file-raft-storage-stream storage)
+               (open-stream-p (file-raft-storage-stream storage)))
+    (error "Raft WAL tail repair requires an owned writable storage"))
+  (let ((fd (sb-sys:fd-stream-fd (file-raft-storage-stream storage))))
+    (handler-case
+        (progn (sb-posix:ftruncate fd boundary) (file-raft-tail-sync storage fd))
+      (error (condition)
+        (ignore-errors (close (file-raft-storage-stream storage) :abort t))
+        (setf (file-raft-storage-stream storage) nil)
+        (error condition)))))
+
 (defun file-raft-write (storage form)
-  "Append FORM to STORAGE's WAL as one compact, single-line record (printer
-   specials bound off), then terminate the line, flush, and fsync so a
-   committed record survives a crash."
-  (let ((stream (file-raft-storage-stream storage))
-        (*print-readably* nil) (*print-circle* nil) (*print-pretty* nil))
+  "Append one checksummed frame and fsync it before acknowledging persistence."
+  (let ((stream (file-raft-storage-stream storage)))
     (unless (and stream (open-stream-p stream))
       (error "Raft WAL is closed; recover it before writing"))
-    (prin1 form stream)
-    (terpri stream)
-    (finish-output stream)
-    (sb-posix:fsync (sb-sys:fd-stream-fd stream))))
+    (handler-case
+        (progn
+          (raft-wal-write-frame form stream)
+          (finish-output stream)
+          (sb-posix:fsync (sb-sys:fd-stream-fd stream)))
+      (error (condition)
+        ;; An uncertain partial append must not be followed by another append.
+        ;; Retain the ownership lease until explicit close and recovery.
+        (ignore-errors (close stream :abort t))
+        (setf (file-raft-storage-stream storage) nil)
+        (error condition)))))
 
 (defmethod raft-storage-save-hard-state ((storage file-raft-storage) term vote)
   (file-raft-write storage (list :hard term vote)))
@@ -128,7 +282,7 @@ both streams: its durable outcome is uncertain and requires recovery before use.
                (error (condition) (sb-posix:close fd) (error condition))))
            (let ((*print-readably* t) (*print-circle* nil) (*print-pretty* nil)
                  (*read-eval* nil))
-             (flet ((record (form) (prin1 form stream) (terpri stream)))
+             (flet ((record (form) (raft-wal-write-frame form stream)))
                (record (list :hard hard-term vote))
                (record (list :snapshot index term state))
                (map nil (lambda (entry)
@@ -172,19 +326,28 @@ both streams: its durable outcome is uncertain and requires recovery before use.
   (entries '())                         ; ordered RAFT-ENTRYs with index > snapshot-index
   (snapshot-index 0) (snapshot-term 0) (snapshot-state nil))
 
-(defun load-raft-log (path)
+(defun load-raft-log (path &key repair-storage)
   "Replay the WAL at PATH and return a RAFT-RECOVERED with the durable state.
-   A missing file recovers empty state."
+   A missing file recovers empty state. REPAIR-STORAGE is internal: the caller
+   must own its writable lease. Read-only calls never truncate incomplete frames."
   (let ((*read-eval* nil)
         (term 0) (vote nil)
         (by-index (make-hash-table))    ; index -> (term . command)
         (snapshot-index 0) (snapshot-term 0) (snapshot-state nil))
     (when (probe-file path)
-      (with-open-file (in path :direction :input :element-type 'character :if-does-not-exist nil)
-        (when in
-          (loop for form = (read in nil :eof)
-                until (eq form :eof)
-                do (ecase (first form)
+      (when repair-storage
+        (unless (equal (truename path) (truename (file-raft-storage-path repair-storage)))
+          (error "Raft WAL repair storage does not own this path")))
+      (with-open-file (in path :direction :input :element-type 'character :external-format :utf-8 :if-does-not-exist nil)
+        (with-open-file (binary path :direction :input :element-type '(unsigned-byte 8))
+          (loop
+            (multiple-value-bind (form boundary) (raft-wal-read-record in binary)
+              (when (eq form :eof) (return))
+              (when (eq form :torn)
+                (unless repair-storage (error "Incomplete terminal Raft WAL frame"))
+                (raft-wal-repair-tail repair-storage boundary)
+                (return))
+              (ecase (first form)
                      (:hard (setf term (second form) vote (third form)))
                      (:entry (setf (gethash (second form) by-index)
                                    (cons (third form) (fourth form))))
@@ -194,7 +357,7 @@ both streams: its durable outcome is uncertain and requires recovery before use.
                       (setf snapshot-index (second form) snapshot-term (third form)
                             snapshot-state (fourth form))
                       (loop for k being the hash-keys of by-index
-                            when (<= k snapshot-index) do (remhash k by-index))))))))
+                            when (<= k snapshot-index) do (remhash k by-index)))))))))
     (let ((entries (loop for index in (sort (loop for k being the hash-keys of by-index collect k) #'<)
                          for cell = (gethash index by-index)
                          collect (make-raft-entry :index index :term (car cell) :command (cdr cell)))))
@@ -211,7 +374,7 @@ both streams: its durable outcome is uncertain and requires recovery before use.
     (error "Close and detach existing Raft storage before recovery"))
   (let ((storage (open-file-raft-storage path)) (completed nil))
     (unwind-protect
-         (let ((recovered (load-raft-log (file-raft-storage-path storage))))
+         (let ((recovered (load-raft-log (file-raft-storage-path storage) :repair-storage storage)))
            (when (and validate-fn (not (eq t (funcall validate-fn recovered))))
              (error "Recovered Raft state validation did not succeed"))
            (setf (raft-node-current-term node) (raft-recovered-term recovered)

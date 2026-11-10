@@ -30,6 +30,30 @@ place. An uncertain checkpoint failure retains ownership until explicit close.
 Validation and restore failures release the newly acquired lease. This protects
 the WAL lifecycle; callers must still coordinate the rest of the state directory.
 
+New writes and checkpoints use `@GR8SWAL1` frames: a fixed 157-byte ASCII header
+contains a 16-digit hexadecimal UTF-8 payload length, a SHA-256 payload checksum
+and a SHA-256 checksum of the header fields. The payload is one readable Lisp
+record followed by a newline. Printing uses a bounded counting/digest sink before
+writing, then verifies the actual output against that first pass before fsync.
+Payload validation uses a 64 KiB read buffer before parsing; it does not allocate
+a second whole-record string.
+
+Writable recovery holds the WAL lease before scanning. It can discard a final
+partial frame header whose bytes match the header grammar, or a short payload
+with a complete valid header. Truncation is fsynced before the member can append
+or construct its listener. Read-only inspection reports an incomplete frame
+without changing it. Complete header/payload corruption, invalid Lisp records
+and ambiguous short payloads containing another valid frame header fail closed.
+A repair sync failure seals the writable stream and aborts recovery.
+
+Existing unframed Lisp WAL records remain readable and can precede new frames.
+Their incomplete tails cannot be distinguished safely from interior corruption,
+so recovery refuses to truncate them. A successful checkpoint replaces retained
+history with framed records. Binaries that predate framing cannot read newly
+written frames; binary downgrade requires an appropriate operator recovery path.
+These checks protect against interrupted append writes and detected corruption;
+they do not reconstruct acknowledged data lost to arbitrary storage failure.
+
 The internal `gr8s.resources::start-store-member-from-wal` function recovers a
 store from a WAL with a retained application artifact. It drains application
 access, acquires the outer writer barriers and installs callbacks before the
@@ -60,5 +84,5 @@ can supply the corresponding `:validate-fn` callback.
 
 Production `start-ha-control-plane` does not invoke this recovery helper yet.
 Genesis/bootstrap needs to establish a durable baseline, and production callers
-must coordinate state-directory ownership, torn-terminal-record recovery and
+must coordinate state-directory ownership and
 membership readiness before enabling automatic compaction.

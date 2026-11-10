@@ -704,3 +704,221 @@
         (gr8s::close-file-raft-storage storage)))))
 
 (in-suite gr8s)
+
+(in-suite raft)
+
+(defun raft-test-record-octets (form)
+  (trivial-utf-8:string-to-utf-8-bytes
+   (with-output-to-string (out) (gr8s.raft::raft-wal-write-frame form out))))
+
+(defun raft-test-write-octets (path octets &optional (end (length octets)))
+  (ensure-directories-exist path)
+  (with-open-file (out path :direction :output :element-type '(unsigned-byte 8)
+                           :if-exists :supersede :if-does-not-exist :create)
+    (write-sequence octets out :end end)))
+
+(test raft-framed-wal-recovers-every-short-tail-byte-boundary
+  (with-raft-temp-dir (path)
+    (let* ((baseline (concatenate '(vector (unsigned-byte 8))
+                      (raft-test-record-octets '(:hard 17 "acknowledged"))
+                      (raft-test-record-octets '(:entry 1 17 (:set "x" "kept"))))))
+      (dolist (pending (list '(:hard 18 "unacknowledged")
+                            (list :entry 2 18 (list :set "x" (format nil "éλ😀~%payload")))
+                            '(:truncate 1)))
+        (let* ((tail (raft-test-record-octets pending))
+               (complete (concatenate '(vector (unsigned-byte 8)) baseline tail)))
+          (loop for cut from 1 below (length tail)
+                do (raft-test-write-octets path complete (+ (length baseline) cut))
+                   (let ((size (raft-wal-size path)))
+                     (signals error (gr8s::load-raft-log path))
+                     (is (= size (raft-wal-size path))))
+                   (let ((node (gr8s::make-raft-node :id "recover")))
+                     (unwind-protect
+                          (progn
+                            (gr8s::recover-raft-node node path)
+                            (is (= 17 (gr8s::raft-node-current-term node)))
+                            (is (= 1 (gr8s::raft-last-log-index node)))
+                            (is (equal '(:set "x" "kept")
+                                       (gr8s::raft-entry-command (gr8s::raft-log-entry node 1))))
+                            (is (= (length baseline) (raft-wal-size path)))
+                            (gr8s.raft:raft-storage-save-hard-state (gr8s::raft-node-storage node) 19 "after-repair")
+                            (is (= 19 (gr8s::raft-recovered-term (gr8s::load-raft-log path)))))
+                       (when (gr8s::raft-node-storage node)
+                         (gr8s::close-file-raft-storage (gr8s::raft-node-storage node)))))))))))
+
+(test raft-framed-wal-rejects-complete-corruption-without-truncation
+  (with-raft-temp-dir (path)
+    (let* ((first (raft-test-record-octets '(:hard 17 "first")))
+           (second (raft-test-record-octets '(:entry 1 17 (:set "x" "second")))))
+      (dolist (position '(0 10 27 92 157 164))
+        (let ((damaged (concatenate '(vector (unsigned-byte 8)) first second)))
+          (setf (aref damaged position) (if (= (aref damaged position) (char-code #\0)) (char-code #\1) (char-code #\0)))
+          (raft-test-write-octets path damaged)
+          (signals error (gr8s::load-raft-log path))
+          (let ((node (gr8s::make-raft-node :id "bad")))
+            (signals error (gr8s::recover-raft-node node path))
+            (is (null (gr8s::raft-node-storage node))))
+          (is (= (length damaged) (raft-wal-size path)))
+          (with-open-file (in path :element-type '(unsigned-byte 8))
+            (let ((after (make-array (length damaged) :element-type '(unsigned-byte 8))))
+              (read-sequence after in)
+              (is (equalp damaged after)))))))))
+
+(test raft-framed-wal-supports-legacy-prefix-and-fails-closed-on-legacy-torn-tail
+  (with-raft-temp-dir (path)
+    (ensure-directories-exist path)
+    (with-open-file (out path :direction :output :if-does-not-exist :create)
+      (write-line "(:hard 7 \"legacy\")" out))
+    (let ((storage (gr8s::open-file-raft-storage path)))
+      (unwind-protect
+           (gr8s.raft:raft-storage-append-entry storage
+             (gr8s::make-raft-entry :index 1 :term 7 :command (list :set "x" (format nil "éλ😀~%kept"))))
+        (gr8s::close-file-raft-storage storage)))
+    (let ((recovered (gr8s::load-raft-log path)))
+      (is (= 7 (gr8s::raft-recovered-term recovered)))
+      (is (equal (list :set "x" (format nil "éλ😀~%kept"))
+                 (gr8s::raft-entry-command (first (gr8s::raft-recovered-entries recovered))))))
+    (with-open-file (out path :direction :output :if-exists :append)
+      (write-string "(:hard 8 \"partial" out))
+    (let ((before (raft-wal-size path)) (node (gr8s::make-raft-node :id "legacy")))
+      (signals end-of-file (gr8s::recover-raft-node node path))
+      (is (= before (raft-wal-size path)))
+      (is (null (gr8s::raft-node-storage node))))))
+
+(in-suite gr8s)
+
+(in-suite raft)
+
+(test raft-short-payload-with-later-valid-frame-fails-closed
+  (with-raft-temp-dir (path)
+    (let* ((first (raft-test-record-octets (list :entry 1 1 (make-string 1000 :initial-element #\x))))
+           (later (raft-test-record-octets '(:hard 2 "acknowledged-later")))
+           (damaged (concatenate '(vector (unsigned-byte 8)) (subseq first 0 180) later)))
+      (raft-test-write-octets path damaged)
+      (let ((node (gr8s::make-raft-node :id "interior")))
+        (signals error (gr8s::recover-raft-node node path))
+        (is (null (gr8s::raft-node-storage node))))
+      (is (= (length damaged) (raft-wal-size path))))))
+
+(defclass repair-observing-raft-storage (gr8s.raft:file-raft-storage)
+  ((failure :initarg :failure :initform nil :reader repair-sync-failure)
+   (sizes :initform nil :accessor repair-sync-sizes)))
+
+(defmethod gr8s.raft::file-raft-tail-sync ((storage repair-observing-raft-storage) fd)
+  (push (sb-posix:stat-size (sb-posix:fstat fd)) (repair-sync-sizes storage))
+  (when (repair-sync-failure storage) (error "Injected tail repair fsync failure"))
+  (call-next-method))
+
+(test raft-tail-repair-syncs-truncation-and-seals-on-sync-failure
+  (with-raft-temp-dir (path)
+    (let* ((baseline (raft-test-record-octets '(:hard 17 "kept")))
+           (tail (raft-test-record-octets '(:hard 18 "pending")))
+           (damaged (concatenate '(vector (unsigned-byte 8)) baseline (subseq tail 0 170))))
+      (dolist (failure '(nil t))
+        (raft-test-write-octets path damaged)
+        (let ((storage (change-class (gr8s::open-file-raft-storage path)
+                                    'repair-observing-raft-storage :failure failure)))
+          (unwind-protect
+               (progn
+                 (if failure
+                     (progn
+                       (signals error (gr8s::load-raft-log path :repair-storage storage))
+                       (is (null (gr8s.raft::file-raft-storage-stream storage)))
+                       (signals error (gr8s.raft:raft-storage-save-hard-state storage 19 "blocked")))
+                     (progn
+                       (is (= 17 (gr8s::raft-recovered-term (gr8s::load-raft-log path :repair-storage storage))))
+                       (gr8s.raft:raft-storage-save-hard-state storage 19 "after-sync")
+                       (is (= 19 (gr8s::raft-recovered-term (gr8s::load-raft-log path))))))
+                 (is (equal (list (length baseline)) (repair-sync-sizes storage)))
+                 (signals error (gr8s::open-file-raft-storage path)))
+            (gr8s::close-file-raft-storage storage)))))))
+
+(test raft-torn-write-survives-repeated-sigkill-and-repair
+  (with-raft-temp-dir (path)
+    (raft-test-write-octets path (raft-test-record-octets '(:hard 17 "acknowledged")))
+    (let* ((script (namestring (merge-pathnames "scripts/raft-wal-torn-test-child.lisp"
+                                                (asdf:system-source-directory :gr8s))))
+           (ready (concatenate 'string (namestring path) ".ready"))
+           (log (concatenate 'string (namestring path) ".child.log"))
+           (process nil) (expected 17))
+      (unwind-protect
+           (dotimes (cycle 3)
+             (when (probe-file ready) (delete-file ready))
+             (let ((before (raft-wal-size path)))
+               (setf process (sb-ext:run-program "sbcl"
+                              (list "--dynamic-space-size" "384" "--noinform" "--non-interactive"
+                                    "--load" script "--" (namestring path) ready)
+                              :search t :wait nil :input nil :output log :if-output-exists :supersede :error :output))
+               (poll-until (lambda () (or (probe-file ready) (not (sb-ext:process-alive-p process)))) :timeout 60)
+               (unless (probe-file ready) (error "Torn-write child failed:~%~A" (uiop:read-file-string log)))
+               (is (sb-ext:process-alive-p process))
+               (signals error (gr8s::open-file-raft-storage path))
+               (signals error (gr8s::load-raft-log path))
+               (sb-ext:process-kill process sb-posix:sigkill)
+               (sb-ext:process-wait process)
+               (is (eq :signaled (sb-ext:process-status process)))
+               (sb-ext:process-close process)
+               (setf process nil)
+               (let ((node (gr8s::make-raft-node :id "after-crash")))
+                 (unwind-protect
+                      (progn
+                        (gr8s::recover-raft-node node path)
+                        (is (= expected (gr8s::raft-node-current-term node)))
+                        (is (= before (raft-wal-size path)))
+                        (setf expected (+ 20 cycle))
+                        (gr8s.raft:raft-storage-save-hard-state (gr8s::raft-node-storage node) expected "new-acknowledgment")
+                        (is (= expected (gr8s::raft-recovered-term (gr8s::load-raft-log path)))))
+                   (when (gr8s::raft-node-storage node)
+                     (gr8s::close-file-raft-storage (gr8s::raft-node-storage node)))))))
+        (when process
+          (when (sb-ext:process-alive-p process)
+            (sb-ext:process-kill process sb-posix:sigkill)
+            (sb-ext:process-wait process))
+          (sb-ext:process-close process))))))
+
+(in-suite gr8s)
+
+(in-suite raft)
+
+(defclass unstable-wal-print-object () ((calls :initform 0 :accessor unstable-wal-print-calls)))
+(defmethod print-object ((object unstable-wal-print-object) stream)
+  (write-string (if (= 1 (incf (unstable-wal-print-calls object))) ":FIRST" ":OTHER") stream))
+
+(test raft-wal-seals-an-append-if-the-record-changes-between-printer-passes
+  (with-raft-temp-dir (path)
+    (let ((storage (gr8s::open-file-raft-storage path)))
+      (unwind-protect
+           (progn
+             (signals error (gr8s.raft:raft-storage-append-entry storage
+                              (gr8s::make-raft-entry :index 1 :term 1 :command (make-instance 'unstable-wal-print-object))))
+             (is (null (gr8s.raft::file-raft-storage-stream storage)))
+             (signals error (gr8s.raft:raft-storage-save-hard-state storage 2 "blocked"))
+             (signals error (gr8s::open-file-raft-storage path)))
+        (gr8s::close-file-raft-storage storage)))))
+
+(test raft-wal-framing-binds-the-printer-and-reader-radix-and-package
+  (with-raft-temp-dir (path)
+    (let ((*print-base* 16) (*read-base* 16) (*print-case* :downcase)
+          (storage (gr8s::open-file-raft-storage path)))
+      (unwind-protect
+           (progn
+             (gr8s.raft:raft-storage-save-hard-state storage 26 "base")
+             (gr8s.raft:raft-storage-append-entry storage
+               (gr8s::make-raft-entry :index 1 :term 26 :command 'gr8s.raft::wal-test-symbol))
+             (let ((recovered (gr8s::load-raft-log path)))
+               (is (= 26 (gr8s::raft-recovered-term recovered)))
+               (is (eq 'gr8s.raft::wal-test-symbol
+                       (gr8s::raft-entry-command (first (gr8s::raft-recovered-entries recovered)))))))
+        (gr8s::close-file-raft-storage storage)))))
+
+(test raft-wal-later-frame-detection-spans-the-read-buffer-boundary
+  (with-raft-temp-dir (path)
+    (let* ((first (raft-test-record-octets (list :entry 1 1 (make-string 80000 :initial-element #\x))))
+           (later (raft-test-record-octets '(:hard 2 "later")))
+           (cut (+ gr8s.raft::+raft-wal-header-length+ 65530))
+           (damaged (concatenate '(vector (unsigned-byte 8)) (subseq first 0 cut) later)))
+      (raft-test-write-octets path damaged)
+      (signals error (gr8s::recover-raft-node (gr8s::make-raft-node :id "cross-boundary") path))
+      (is (= (length damaged) (raft-wal-size path))))))
+
+(in-suite gr8s)

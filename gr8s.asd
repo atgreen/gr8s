@@ -16,7 +16,7 @@
   ;; surfaced through VERSION-STRING as +GR8S-VERSION+ (see src/version.lisp).
   :version "1.37.2"
   :depends-on ("0conf/dns-wire" "ag-grpc" "bordeaux-threads" "cffi" "chipz" "cl-cancel"
-               "com.inuoe.jzon" "hunchentoot" "cl-ppcre"
+               "com.inuoe.jzon" "flexi-streams" "hunchentoot" "cl-ppcre"
                "pure-tls/acme" "drakma" "ironclad"
                "sb-posix" "slynk" "trivial-utf-8" "usocket" "version-string"
                "whistler/loader" "whistler/bpftrace")
