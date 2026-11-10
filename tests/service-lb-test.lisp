@@ -391,6 +391,36 @@
                :map rows :lookup lookup :update update)))
     (is (every (lambda (row) (equalp (cdr row) (gethash (car row) values))) other))))
 
+(test v2-withdrawn-network-owners-retire-without-changing-local-or-reused-rows
+  (let* ((retired (gr8s::json-object "podIP" "10.88.1.2" "address" "10.88.1.9"
+                                      "nodeID" "node-1" "sandboxID" "sandbox-old"
+                                      "interfaceName" "eth0"))
+         (kept (gr8s::json-object "podIP" "10.88.2.2" "address" "10.88.2.9"
+                                   "nodeID" "node-2" "sandboxID" "sandbox-kept"
+                                   "interfaceName" "eth0"))
+         (previous (list (gr8s::json-object "serviceTranslations" (vector retired kept))))
+         (old-rows (gr8s.network::service-nat-identity-rows retired))
+         (kept-rows (gr8s.network::service-nat-identity-rows kept))
+         (replacement (gr8s.network::service-nat-identity-pair
+                       "node-1" "sandbox-new" "eth0" "10.88.1.2" "10.88.1.9"))
+         (values (make-hash-table :test #'equalp))
+         (lookup (lambda (map key) (declare (ignore map)) (gethash key values)))
+         (update (lambda (map key value) (declare (ignore map))
+                   (setf (gethash key values) value))))
+    (dolist (row (append old-rows kept-rows))
+      (setf (gethash (car row) values) (copy-seq (cdr row))))
+    (is (= 0 (gr8s.network::retire-service-nat-withdrawn-identities
+               :map previous (vector kept) old-rows :lookup lookup :update update)))
+    (is (= 2 (gr8s.network::retire-service-nat-withdrawn-identities
+               :map previous (vector kept) nil :lookup lookup :update update)))
+    (is (every (lambda (row) (= #x20000 (gr8s::netlink-read-integer
+                                         (gethash (car row) values) 4 4))) old-rows))
+    (is (every (lambda (row) (equalp (cdr row) (gethash (car row) values))) kept-rows))
+    (dolist (row replacement) (setf (gethash (car row) values) (copy-seq (cdr row))))
+    (is (= 0 (gr8s.network::retire-service-nat-withdrawn-identities
+               :map previous (vector kept) nil :lookup lookup :update update)))
+    (is (every (lambda (row) (equalp (cdr row) (gethash (car row) values))) replacement))))
+
 (test cni-v2-owner-publication-writes-the-replicated-pair-before-attachment
   (let* ((configuration (gr8s::make-cni-configuration
                          :service-packet-root "/pins/shared/" :service-packet-profile :v2

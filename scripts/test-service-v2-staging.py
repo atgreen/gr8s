@@ -152,9 +152,9 @@ def main():
         report.update({"backend": backend, "service": vip, "riskKeys": [key.hex() for key in keys],
                        "riskMap": str(risk), "managedPodCIDRs": cidrs,
                        "managedPodMap": str(managed), "source": "unready manual EndpointSlice"})
-        # Restore a synthetic, validated identity from durable node state. This
-        # proves the node's startup path writes both rows to the real BPF map;
-        # it does not claim a Pod or enable the v2 TC graph.
+        # Restore a synthetic, validated identity from durable node state.
+        # The server's next trusted assignment omits it, so the agent must
+        # disable both rows before promoting that assignment on disk.
         cluster.stop()
         primary, alias = probes[0] + 10, probes[0] + 11
         network["serviceTranslations"] = [{
@@ -168,7 +168,7 @@ def main():
         cluster.start()
         identity_map = cluster.root / "state/agent/containerd/bpf/service-lb/gr8s_nat_id_v2"
 
-        def identities_published():
+        def identities_retired():
             if not identity_map.exists():
                 return False
             try:
@@ -178,49 +178,24 @@ def main():
                     return False
                 raise
             return (all(value[:4] == alias.packed and value[24:28] == primary.packed and
-                        struct.unpack_from("<I", value, 4)[0] == 0x20001 for value in values)
+                        struct.unpack_from("<I", value, 4)[0] == 0x20000 for value in values)
                     and values[0][8:24] == values[1][8:24] == expected_epoch
                     and [struct.unpack_from("<I", value, 28)[0] for value in values] == [1, 2])
 
-        traffic.wait_for("v2 restored identity pair", 120, identities_published)
+        traffic.wait_for("v2 withdrawn identity tombstones", 120, identities_retired)
         keys = [primary.packed, alias.packed]
-        values = guest.read_pinned_values(identity_map, keys, 32)
-        ready_values = []
-        for value in values:
-            marked = bytearray(value)
-            struct.pack_into("<I", marked, 4, 0x20007)
-            ready_values.append(bytes(marked))
-        guest.write_pinned_values(identity_map, list(zip(keys, ready_values)), 32)
+        retired_values = guest.read_pinned_values(identity_map, keys, 32)
+        traffic.wait_for("v2 selectors restored after withdrawn owner retirement",
+                         120, selections_published)
         cluster.stop()
-        if guest.read_pinned_values(identity_map, keys, 32) != ready_values:
-            raise RuntimeError("retained owner map lost readiness test values before restart")
+        if guest.read_pinned_values(identity_map, keys, 32) != retired_values:
+            raise RuntimeError("retained owner map lost tombstones before restart")
         cluster.start()
-        traffic.wait_for("v2 readiness cleared after restart", 120, identities_published)
-        def selectors_withheld():
-            for key in selection_keys:
-                try:
-                    guest.read_pinned_values(selection, [key], 16)
-                except OSError as error:
-                    if error.errno == errno.ENOENT:
-                        continue
-                    raise
-                return False
-            return True
-
-        # The restored synthetic owner is absent from the server's trusted
-        # inventory. Exact readback must keep the restarted node risk-only.
-        traffic.wait_for("v2 selectors withheld for extra owner", 120, selectors_withheld)
-        time.sleep(3)
-        if not selectors_withheld():
-            raise RuntimeError("v2 grant reappeared with an untrusted retained owner")
-        report["ownerKeysBeforeRetirement"] = [key.hex() for key in guest.list_pinned_keys(identity_map)]
-        guest.delete_pinned_keys(identity_map, keys)
-        traffic.wait_for("v2 selectors restored after stale owner retirement",
-                         60, selections_published)
+        traffic.wait_for("v2 withdrawn identity retained across restart", 120, identities_retired)
+        traffic.wait_for("v2 selectors restored after restart", 120, selections_published)
         report.update({"restoredIdentityMap": str(identity_map),
                        "restoredPrimary": str(primary), "restoredAlias": str(alias),
-                       "readinessClearedAfterRestart": True,
-                       "extraOwnerWithheldGrant": True,
+                       "withdrawnOwnerTombstoneRetainedAcrossRestart": True,
                        "grantRestoredAfterOwnerRetirement": True})
         print(json.dumps(report, indent=2))
     finally:
