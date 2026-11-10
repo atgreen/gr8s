@@ -486,6 +486,41 @@
       (signals gr8s::cni-error (check))
       (is (= 3 closed)))))
 
+(test v2-receiver-readiness-requires-exact-owner-pair-and-primary-last
+  (let* ((rows (gr8s.network::service-nat-identity-pair
+                "node-1" "sandbox-1" "eth0" "10.88.1.2" "10.88.1.9"))
+         (values (make-hash-table :test #'equalp))
+         (writes nil)
+         (lookup (lambda (map key) (declare (ignore map)) (gethash key values)))
+         (update (lambda (map key value) (declare (ignore map))
+                   (push key writes) (setf (gethash key values) value))))
+    (dolist (row rows) (setf (gethash (car row) values) (copy-seq (cdr row))))
+    (is (= 2 (gr8s.network::mark-service-nat-owner-receiver-ready
+              :map rows :lookup lookup :update update)))
+    (is (equalp (mapcar #'car (reverse rows)) (reverse writes)))
+    (is (every (lambda (row)
+                 (= #x20005 (gr8s::netlink-read-integer
+                              (gethash (car row) values) 4 4))) rows))
+    (setf writes nil)
+    (let ((stale (gethash (car (second rows)) values)))
+      (setf (aref stale 8) (logxor 1 (aref stale 8))))
+    (signals gr8s::cni-error
+      (gr8s.network::mark-service-nat-owner-receiver-ready
+       :map rows :lookup lookup :update update))
+    (is (null writes))
+    (dolist (row rows) (setf (gethash (car row) values) (copy-seq (cdr row))))
+    (signals error
+      (gr8s.network::mark-service-nat-owner-receiver-ready
+       :map rows :lookup lookup
+       :update (lambda (map key value)
+                 (declare (ignore map))
+                 (when (equalp key (car (first rows)))
+                   (error "primary update failed"))
+                 (setf (gethash key values) value))))
+    (is (= #x20001 (gr8s::netlink-read-integer
+                     (gethash (car (first rows)) values) 4 4))
+        "A failed primary update must never advertise a backend as ready")))
+
 (test service-lb-plan-publishes-each-cluster-ip-to-same-family-backends
   (let* ((service (fake-lb-service "10.96.0.10"))
          (spec (gethash "spec" service)))
