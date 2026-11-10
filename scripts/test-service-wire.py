@@ -66,7 +66,7 @@ class Machine(p.PacketMachine):
                 data = (data[:14] + bytearray(delta) + data[14:] if delta > 0
                         else data[:14] + data[14 - delta:])
                 del self.memory[self.packet_address]
-                self.packet_address += 0x400000  # Invalidate every old packet pointer.
+                self.packet_address += 0x10000000  # Outside the shared map-value arena.
                 self.memory[self.packet_address] = data
                 struct.pack_into("<I", self.memory[0x200000], 0, len(data))
                 struct.pack_into("<II", self.memory[0x200000], 76,

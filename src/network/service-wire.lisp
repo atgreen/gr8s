@@ -86,7 +86,7 @@ No state update or endpoint authority is supplied by this codec."
        (return TC_ACT_SHOT))
      (when (/= (skb-store-bytes (ctx-ptr) 14 wire-header 102 0) 0) (return TC_ACT_SHOT))))
 
-(defmacro wire-check-envelope ()
+(defmacro wire-check-envelope (&optional (addresses t))
   "Validate framing only. Callers must separately validate all identity/flow
 ownership before accepting metadata or changing any NAT/policy state."
   `(let ((wire-data u64 (tc-data)) (wire-end u64 (tc-data-end))
@@ -111,8 +111,9 @@ ownership before accepting metadata or changing any NAT/policy state."
        (return TC_ACT_SHOT))
      (wire-check-inner (+ wire-data 102) wire-end (- wire-size 102))
      (unless (and (= (load u8 wire-data 125) (load u8 wire-data 68))
-                  (= (load u32 wire-data 26) (load u32 wire-data 128))
-                  (= (load u32 wire-data 30) (load u32 wire-data 132)))
+                  ,@(when addresses
+                      '((= (load u32 wire-data 26) (load u32 wire-data 128))
+                        (= (load u32 wire-data 30) (load u32 wire-data 132)))))
        (return TC_ACT_SHOT))))
 
 (defmacro wire-decapsulate ()
@@ -120,6 +121,12 @@ ownership before accepting metadata or changing any NAT/policy state."
 has already selected the receiver's link, and the saved inner MACs may be stale."
   `(progn
      (wire-check-envelope)
+     (wire-strip-authorized)))
+
+(defmacro wire-strip-authorized ()
+  "Strip only after framing, identities and flow ownership have been checked.
+Used after authorized NAT changes make inner and outer addresses differ."
+  `(progn
      (let ((wire-data u64 (tc-data))
            (wire-tos (make-wire-byte)))
        (when (> (+ wire-data 128) (tc-data-end)) (return TC_ACT_SHOT))

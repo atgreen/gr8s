@@ -9,6 +9,8 @@
 
 (in-package #:whistler)
 
+(defvar gr8s.network::*service-wire-locks-p* nil)
+
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (dolist (helper '(("SKB-STORE-BYTES" . 9) ("L3-CSUM-REPLACE" . 10)
                     ("L4-CSUM-REPLACE" . 11)))
@@ -60,6 +62,10 @@
   ;; Try-locks are transient map reservations, never persistent flow state.
   ;; Always release both on every success/drop path; no packet waits on a lock.
   `(progn
+     ,@(when gr8s.network::*service-wire-locks-p*
+         '((when (/= wire-held 0)
+             (map-delete-ptr gr8s-nat-wl-v2 wire-locked)
+             (setf wire-held 0))))
      (when (/= (logand held-locks 2) 0)
        (map-delete-ptr gr8s-pkt-rev-lock locked-reverse))
      (when (/= (logand held-locks 1) 0)
