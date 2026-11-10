@@ -69,9 +69,28 @@ quorum. A leader gauge of one alone is not proof that writes can commit.
 | `gr8s_compaction_in_flight` | One while worker capture or publication is running |
 | `gr8s_compaction_error` | One while the worker retains an error since its last successful checkpoint |
 
-All these families are gauges except `gr8s_compaction_completed_total`, which is
-a counter scoped to the control-plane instance. Peer labels use configured peer
-IDs; no command payloads or error messages are exposed. Peer series disappear
+Checkpoint phase measurements use the four fixed `phase` labels `freeze`,
+`capture`, `retain`, and `publish`:
+
+| Metric | Meaning |
+|---|---|
+| `gr8s_compaction_phase_observations_total{phase=...}` | Executed attempts, including failures and superseded publications |
+| `gr8s_compaction_phase_duration_seconds_total{phase=...}` | Cumulative monotonic execution time |
+| `gr8s_compaction_phase_duration_seconds_max{phase=...}` | Longest execution since control-plane startup |
+| `gr8s_compaction_phase_duration_seconds_last{phase=...}` | Latest execution time |
+
+`freeze` measures the application-view copy under the member lock; `capture`
+measures artifact serialization; `retain` measures registry retention and
+validation; `publish` measures prepared Raft publication, including disk cache
+and WAL persistence, under the member lock. Gate draining, waiting to acquire
+locks, digest calculation, artifact reaping, and cleanup are outside these phase
+timings. They are execution durations, not a complete measure of request latency
+or heartbeat interruption. GC pauses during a phase contribute to its elapsed
+time. All four labels are emitted with zero values before observation.
+
+All these families are gauges except the phase observation/time totals and
+`gr8s_compaction_completed_total`, which are counters scoped to the control-plane instance. Peer labels use
+configured peer IDs; no command payloads or error messages are exposed. Peer series disappear
 when their links are removed. Replication lag reflects acknowledged log
 positions, not confirmed application convergence on that peer. An empty outbox
 can mean either a healthy idle peer or an unreachable peer whose latest attempt

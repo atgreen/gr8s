@@ -24,7 +24,8 @@
   (compaction-lock (bt:make-lock "gr8s HA compaction"))
   (compaction-changed (bt:make-condition-variable :name "gr8s HA compaction"))
   (compaction-bytes (* 16 1024 1024)) (compaction-entries 256) (compaction-interval 1)
-  (compaction-count 0) (compaction-reaped 0) compaction-error)
+  (compaction-count 0) (compaction-reaped 0) compaction-error
+  (compaction-phase-times (make-array 4 :initial-element nil)))
 
 (defun member-snapshot-artifact-matches-p (state index term digest)
   (and (gr8s.raft::raft-snapshot-envelope-p state)

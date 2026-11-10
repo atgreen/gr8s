@@ -133,7 +133,17 @@
                    (setf (gethash "blocked" object) (if (gr8s.store::store-access-blocked-p store) t nil))
                    (bt:with-lock-held ((gr8s.ha::ha-control-plane-compaction-lock ha))
                      (setf (gethash "checkpoints" object) (gr8s.ha::ha-control-plane-compaction-count ha)
-                           (gethash "compactionError" object) (gr8s.ha::ha-control-plane-compaction-error ha)))
+                           (gethash "compactionError" object) (gr8s.ha::ha-control-plane-compaction-error ha)
+                           (gethash "compactionPhases" object)
+                           (coerce
+                            (loop for name in '("freeze" "capture" "retain" "publish")
+                                  for row across (gr8s.ha::ha-control-plane-compaction-phase-times ha)
+                                  collect (gr8s::core-object
+                                           "phase" name "attempts" (if row (aref row 0) 0)
+                                           "totalSeconds" (/ (if row (aref row 1) 0) (float internal-time-units-per-second 1d0))
+                                           "maxSeconds" (/ (if row (aref row 2) 0) (float internal-time-units-per-second 1d0))
+                                           "lastSeconds" (/ (if row (aref row 3) 0) (float internal-time-units-per-second 1d0))))
+                            'vector)))
                    (bt:with-lock-held (lock)
                      (setf (gethash "captureHeld" object) (if held t nil)
                            (gethash "heldIndex" object) held-index

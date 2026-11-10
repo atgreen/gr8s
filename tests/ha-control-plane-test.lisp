@@ -497,6 +497,9 @@
                  (is (<= (length (uiop:directory-files (merge-pathnames "snapshot-artifacts/" root))) 2)))
                (gr8s::stop-ha-control-plane ha)
                (is (null (gr8s.ha::ha-control-plane-compaction-thread ha)))
+               (loop for row across (gr8s.ha::ha-control-plane-compaction-phase-times ha) do
+                 (is (and row (plusp (aref row 0))))
+                 (is (<= 0 (aref row 3) (aref row 2) (aref row 1))))
                (setf store (gr8s:open-store root :defer-restore-completion t)
                      ha (gr8s::start-ha-control-plane store :id "compact" :init t :port port))
                (is (= boundary (gr8s::raft-node-snapshot-index (gr8s::raft-member-node (gr8s::ha-control-plane-member ha)))))
@@ -678,3 +681,22 @@
                (is (open-stream-p (gr8s.raft::file-raft-storage-stream storage)))))
         (gr8s.ha::stop-ha-compaction-worker ha)
         (gr8s::close-file-raft-storage storage)))))
+
+
+(test compaction-phase-measurements-preserve-results-errors-and-nonlocal-exits
+  (let* ((member (gr8s.raft.transport::make-raft-member :node (gr8s::make-raft-node)))
+         (ha (gr8s.ha::make-ha-control-plane :member member)))
+    (is (equal '(1 2) (multiple-value-list
+                       (gr8s.ha::with-ha-compaction-phase (ha :capture) (values 1 2)))))
+    (signals simple-error (gr8s.ha::with-ha-compaction-phase (ha :capture) (error "expected")))
+    (is (eq :escaped (catch 'phase-exit
+                      (gr8s.ha::with-ha-compaction-phase (ha :capture) (throw 'phase-exit :escaped)))))
+    (let ((row (aref (gr8s.ha::ha-control-plane-compaction-phase-times ha) 1)))
+      (is (= 3 (aref row 0)))
+      (is (<= 0 (aref row 3) (aref row 2) (aref row 1))))
+    (signals simple-error (gr8s.ha::with-ha-compaction-phase (ha :unknown) (fail "Invalid phase ran")))
+    (let ((text (gr8s.ha::ha-metrics-text ha)))
+      (is (search "gr8s_compaction_phase_observations_total{phase=\"capture\"} 3" text))
+      (is (search "gr8s_compaction_phase_observations_total{phase=\"publish\"} 0" text))
+      (dolist (suffix '("duration_seconds_total" "duration_seconds_max" "duration_seconds_last"))
+        (is (search (concatenate 'string "gr8s_compaction_phase_" suffix "{phase=\"capture\"}") text))))))

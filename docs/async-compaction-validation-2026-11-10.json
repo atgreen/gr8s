@@ -2884,5 +2884,12 @@
     },
     "checks": 496,
     "scope": "Rerun in original failing suite order; passing does not explain or resolve the earlier intermittent invalid-UTF8 staging failure tracked by podster-ucm.11.9"
+  },
+  "compactionPhaseTimingSource": {
+    "passed": true,
+    "checks": 195,
+    "log": "/tmp/gr8s-compaction-phase-timing-tests.log",
+    "scope": "HA suite with actual checkpoint/recovery phase observations and result/error/nonlocal-exit preservation; current full native binary predates timing instrumentation",
+    "leadershipStabilityProven": false
   }
 }

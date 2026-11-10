@@ -31,6 +31,26 @@
                   (sb-posix:fstat (sb-sys:fd-stream-fd (gr8s.raft::file-raft-storage-stream storage))))
                  (ha-control-plane-compaction-bytes hcp))))))
 
+(defun call-with-ha-compaction-phase (hcp phase function)
+  "Measure an executed phase, including errors/nonlocal exits, in monotonic ticks.
+Rows hold count, total, maximum and latest duration. There are four fixed phases."
+  (let ((index (or (position phase '(:freeze :capture :retain :publish))
+                   (error "Unknown compaction phase: ~S" phase)))
+        (started (get-internal-real-time)))
+    (unwind-protect (funcall function)
+      (let ((elapsed (max 0 (- (get-internal-real-time) started))))
+        (bt:with-lock-held ((ha-control-plane-compaction-lock hcp))
+          (let ((row (or (aref (ha-control-plane-compaction-phase-times hcp) index)
+                         (setf (aref (ha-control-plane-compaction-phase-times hcp) index)
+                               (make-array 4 :initial-element 0)))))
+            (incf (aref row 0))
+            (incf (aref row 1) elapsed)
+            (setf (aref row 2) (max (aref row 2) elapsed)
+                  (aref row 3) elapsed)))))))
+
+(defmacro with-ha-compaction-phase ((hcp phase) &body body)
+  `(call-with-ha-compaction-phase ,hcp ,phase (lambda () ,@body)))
+
 (defun compact-ha-store-once (hcp)
   "Allow only one frozen view per control plane, including manual callers."
   (bt:with-lock-held ((ha-control-plane-compaction-lock hcp))
@@ -61,9 +81,10 @@ Drain again before WAL replacement so uncertain durability remains fail-closed."
                 (when (ha-compaction-due-unlocked-p hcp)
                   (setf prepared (gr8s.raft::raft-prepare-compaction (raft-member-node member)))
                   (when prepared
-                    (setf view (gr8s.resources::freeze-store-snapshot
-                                store (gr8s.raft::raft-prepared-compaction-index prepared)
-                                (gr8s.raft::raft-prepared-compaction-term prepared)))))
+                    (setf view (with-ha-compaction-phase (hcp :freeze)
+                                (gr8s.resources::freeze-store-snapshot
+                                 store (gr8s.raft::raft-prepared-compaction-index prepared)
+                                 (gr8s.raft::raft-prepared-compaction-term prepared))))))
                 (when (gr8s.resources::member-store-restore-may-resume-p member)
                   (gr8s.store::resume-store-access store)
                   (setf owns-gate nil)))))
@@ -74,7 +95,8 @@ Drain again before WAL replacement so uncertain durability remains fail-closed."
                   (root (gr8s::pod-store-path store)))
              (setf temporary (merge-pathnames
                               (format nil "raft/capture-~A.jsonl" (gr8s.store:generate-uid)) root))
-             (gr8s.resources::capture-frozen-store-snapshot view temporary)
+             (with-ha-compaction-phase (hcp :capture)
+               (gr8s.resources::capture-frozen-store-snapshot view temporary))
              ;; Drop the private view before copying/validating the artifact.
              (setf view nil)
              (let* ((digest (ironclad:byte-array-to-hex-string (ironclad:digest-file :sha256 temporary)))
@@ -82,7 +104,8 @@ Drain again before WAL replacement so uncertain durability remains fail-closed."
                (gr8s.resources::call-with-store-artifact-pin
                 member reference
                 (lambda ()
-                  (gr8s.resources::retain-store-snapshot-artifact root temporary index term digest)
+                  (with-ha-compaction-phase (hcp :retain)
+                    (gr8s.resources::retain-store-snapshot-artifact root temporary index term digest))
                   (when (gr8s.store::store-access-blocked-p store)
                     (return-from compact-ha-store-once-exclusive nil))
                   (gr8s.store::quiesce-store-access store)
@@ -93,8 +116,9 @@ Drain again before WAL replacement so uncertain durability remains fail-closed."
                      (bt:with-lock-held ((raft-member-lock member))
                        (when (and (gr8s.raft.transport::raft-member-running member)
                                   (gr8s.resources::member-store-restore-may-resume-p member)
-                                  (gr8s.raft::raft-commit-prepared-compaction
-                                   (raft-member-node member) prepared reference))
+                                  (with-ha-compaction-phase (hcp :publish)
+                                    (gr8s.raft::raft-commit-prepared-compaction
+                                     (raft-member-node member) prepared reference)))
                          (let ((reaped (gr8s.resources::reap-store-snapshot-artifacts-unlocked member root)))
                            (bt:with-lock-held ((ha-control-plane-compaction-lock hcp))
                              (incf (ha-control-plane-compaction-count hcp))
