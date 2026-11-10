@@ -62,10 +62,13 @@ An internal [streamed store artifact writer and reader](store-snapshot-artifacts
 now covers three voters and a witness, including leader loss and a full restart
 with data and credentials preserved. The opt-in asynchronous compaction worker
 releases live locks during artifact I/O. Its
-[validation record](async-compaction-validation-2026-11-10.json) includes full
-single-member churn and partial three-member acceptance; full sustained
-three-member churn and recovery remain required before enabling it by default
-and closing the retained-log gap.
+[validation record](async-compaction-validation-2026-11-10.json) covers full
+single-member and three-member churn and recovery under constrained heaps.
+The three-member run completed 128 MiB of churn, caught up its delayed voter,
+and cold-loaded full retained history with data and credentials preserved.
+Frequent leader changes under sustained load remain an availability follow-up;
+automatic compaction stays disabled by default. Production serve/VM acceptance
+and bounded heartbeat disruption remain required before closing the broader gap.
 
 Pod desired state and checkpoints now use per-key staged transactions instead of
 complete Pod-index serialization. Desired UID/version preconditions are checked at
