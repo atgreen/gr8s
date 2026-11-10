@@ -438,3 +438,20 @@
                (is (< (- (get-internal-real-time) started) (* 5 internal-time-units-per-second))))
              (is (null (gr8s.ha::ha-control-plane-compaction-thread ha))))
         (gr8s::stop-ha-control-plane ha)))))
+
+(test compaction-budget-includes-retained-command-weight-before-wal-threshold
+  (with-temporary-store (store root)
+    (let ((ha nil))
+      (unwind-protect
+           (progn
+             (setf ha (gr8s::start-ha-control-plane store :id "heap-budget" :init t
+                       :compaction-bytes 65536 :compaction-entries 100000 :compaction-interval nil))
+             (is (poll-until (lambda () (gr8s::ha-control-plane-leader-p ha)) :timeout 15))
+             (gr8s::create-core-resource store "configmaps"
+               (configmap-input "wide" "k" (make-string 16384 :initial-element #\x)) "default")
+             (is (< (sb-posix:stat-size (sb-posix:stat (merge-pathnames "raft/control-plane.log" root))) 65536))
+             (bt:with-lock-held ((gr8s::raft-member-lock (gr8s::ha-control-plane-member ha)))
+               (is (gr8s.ha::ha-compaction-due-unlocked-p ha)))
+             (is (gr8s.ha::compact-ha-store-once ha))
+             (is (not (gr8s.store::store-access-blocked-p store))))
+        (gr8s::stop-ha-control-plane ha)))))

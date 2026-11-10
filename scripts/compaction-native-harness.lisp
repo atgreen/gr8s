@@ -17,7 +17,25 @@
                   (unless (= 503 (gr8s::kubernetes-error-status-code condition)) (error condition))
                   nil)))))
 
+(defun compaction-native-root-bytes (root)
+  "Diagnostic estimate with identity deduplication, without copying payloads."
+  (let ((seen (make-hash-table :test 'eq)))
+    (labels ((walk (value)
+               (cond ((or (null value) (numberp value) (symbolp value) (characterp value)) 0)
+                     ((gethash value seen) 0)
+                     (t (setf (gethash value seen) t)
+                        (typecase value
+                          (string (+ 16 (* (if (typep value 'base-string) 1 4) (length value))))
+                          (hash-table (let ((bytes (+ 480 (* 40 (hash-table-count value)))))
+                                        (maphash (lambda (key item) (incf bytes (+ (walk key) (walk item)))) value)
+                                        bytes))
+                          (cons (+ 16 (walk (car value)) (walk (cdr value))))
+                          (vector (+ 16 (* 8 (length value)) (loop for item across value sum (walk item))))
+                          (t 16))))))
+      (walk root))))
+
 (defun compaction-native-main ()
+  (gr8s.server::install-memory-hooks)
   (destructuring-bind (root-text rounds-text) (uiop:command-line-arguments)
     (let* ((root (uiop:ensure-directory-pathname root-text)) (rounds (parse-integer rounds-text))
            (store (gr8s:open-store root)) (ha nil) (port nil)
@@ -35,6 +53,20 @@
                                                 (sb-posix:stat (merge-pathnames "raft/control-plane.log" root))))
                            max-artifacts (max max-artifacts (length (uiop:directory-files
                                                                      (merge-pathnames "snapshot-artifacts/" root))))))
+                   (bt:with-lock-held ((gr8s::raft-member-lock member))
+                     (bt:with-lock-held ((gr8s::pod-store-lock store))
+                       (let* ((node (gr8s::raft-member-node member))
+                              (history (gr8s::pod-store-template-history store))
+                              (metrics (gr8s::core-object
+                                        "resourceRevision" (gr8s::pod-store-resource-revision store)
+                                        "heapAfterGcBytes" gr8s.server::*heap-after-gc*
+                                        "historyEstimatedBytes" (reduce #'+ history :key #'gr8s.resources::template-history-entry-bytes)
+                                        "historyUniqueBytes" (compaction-native-root-bytes history)
+                                        "logRetainedEntries" (length (gr8s.raft:raft-node-log node))
+                                        "logCommandHeapBytes" (loop for entry across (gr8s.raft:raft-node-log node)
+                                                                   sum (compaction-native-root-bytes (gr8s.raft:raft-entry-command entry))))))
+                         (format *error-output* "~&compaction progress: ~A~%" (com.inuoe.jzon:stringify metrics))
+                         (finish-output *error-output*))))
                    (incf samples))))
         (unwind-protect
              (handler-case

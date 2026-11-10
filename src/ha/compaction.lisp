@@ -8,7 +8,7 @@
     (error "Invalid HA compaction thresholds or interval")))
 
 (defun ha-compaction-due-unlocked-p (hcp)
-  "O(1) retained-history trigger; caller owns the member mutex."
+  "Check disk bytes and conservative retained-command weight under the member mutex."
   (let* ((member (ha-control-plane-member hcp)) (node (raft-member-node member))
          (storage (gr8s.raft.transport::raft-member-owned-storage member)))
     (unless (sb-thread:holding-mutex-p (raft-member-lock member))
@@ -19,6 +19,14 @@
          (<= (raft-node-last-applied node) (raft-node-commit-index node))
          (or (>= (- (raft-node-last-applied node) (raft-node-snapshot-index node))
                  (ha-control-plane-compaction-entries hcp))
+             ;; JSON-bearing Lisp strings may use four bytes per character even
+             ;; when their UTF-8 WAL uses one. Stop scanning once the budget is
+             ;; met; the existing wire weight also bounds those string payloads.
+             (loop with bytes = 0
+                   for entry across (gr8s.raft:raft-node-log node)
+                   do (incf bytes (+ 128 (gr8s.raft::raft-command-wire-weight
+                                         (gr8s.raft:raft-entry-command entry))))
+                   when (>= bytes (ha-control-plane-compaction-bytes hcp)) return t)
              (>= (sb-posix:stat-size
                   (sb-posix:fstat (sb-sys:fd-stream-fd (gr8s.raft::file-raft-storage-stream storage))))
                  (ha-control-plane-compaction-bytes hcp))))))
