@@ -2185,11 +2185,14 @@
                  :pod-json (trivial-utf-8:string-to-utf-8-bytes (format nil "{\"name\":\"~A\",\"body\":\"~A\"}" name body))
                  :resource-objects-json (mapcar #'trivial-utf-8:string-to-utf-8-bytes objects)))
 
-(defun delta-test-snapshot (revision pods &optional (discovery '("svc-a")))
+(defun delta-test-snapshot
+    (revision pods &optional (discovery '("svc-a"))
+                            (grant (make-array 0 :element-type '(unsigned-byte 8))))
   (make-instance 'gr8s.node.v1::desired-state-snapshot
                  :revision revision
                  :network (make-instance 'gr8s.node.v1::node-network-config :node-pod-cidr "10.88.3.0/24")
                  :service-discovery-objects-json (mapcar #'trivial-utf-8:string-to-utf-8-bytes discovery)
+                 :service-risk-grant-digest grant
                  :pods (sort (copy-list pods) #'string< :key #'gr8s::pod-assignment-sort-key)))
 
 ;; podster-uqb.139: a change sends what changed, and the agent rebuilds exactly
@@ -2203,7 +2206,10 @@
                                             (delta-test-assignment "changed" :version "2" :body "b")
                                             (delta-test-assignment "objects" :objects '("{\"cm\":2}"))
                                             (delta-test-assignment "added")
-                                            (delta-test-assignment "aardvark" :deleting t))))
+                                            (delta-test-assignment "aardvark" :deleting t))
+                                    '("svc-a")
+                                    (make-array 32 :element-type '(unsigned-byte 8)
+                                                :initial-element 7)))
          (later (delta-test-snapshot 6 (slot-value next 'gr8s.node.v1::pods) '("svc-a" "svc-b")))
          (delta (gr8s::node-snapshot-delta base next))
          (agent (gr8s::make-agent-node-session nil)))
@@ -2213,6 +2219,8 @@
                      #'string<)))
     (is (equal '("uid-removed") (slot-value delta 'gr8s.node.v1::removed-pod-uids)))
     (is-false (slot-value delta 'gr8s.node.v1::service-discovery-changed))
+    (is (equalp (slot-value next 'gr8s.node.v1::service-risk-grant-digest)
+                (slot-value delta 'gr8s.node.v1::service-risk-grant-digest)))
     (is (null (slot-value delta 'gr8s.node.v1::service-discovery-objects-json)))
     ;; Over the wire, as the agent receives them.
     (flet ((wire (snapshot)
@@ -2229,6 +2237,16 @@
       ;; A delta that does not follow what this session received is refused.
       (signals error (gr8s::assemble-node-snapshot agent (wire delta)))
       (signals error (gr8s::assemble-node-snapshot (gr8s::make-agent-node-session nil) (wire delta))))))
+
+(test service-grant-alone-changes-snapshot-revision-content
+  (let* ((base (delta-test-snapshot 4 nil))
+         (grant (make-array 32 :element-type '(unsigned-byte 8)
+                            :initial-element 9))
+         (granted (delta-test-snapshot 5 nil '("svc-a") grant))
+         (delta (gr8s::node-snapshot-delta base granted)))
+    (is-false (gr8s::same-node-desired-content-p base granted))
+    (is-false (slot-value delta 'gr8s.node.v1::service-discovery-changed))
+    (is (equalp grant (slot-value delta 'gr8s.node.v1::service-risk-grant-digest)))))
 
 (test persistent-agent-applies-deltas-and-resyncs-after-reconnecting
   (with-temporary-store (store path)
