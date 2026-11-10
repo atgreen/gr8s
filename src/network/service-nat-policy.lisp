@@ -165,15 +165,19 @@ the attachment fence keeps incomplete owner state out of the live datapath."
          (fd (funcall open path)))
     (unwind-protect
          (let ((map (funcall map-info fd "gr8s_nat_id_v2" :profile :v2)))
-           (publish-service-nat-owner-pair map rows :lookup lookup :update update)
+           ;; An ADD may be a retry after a guard or map was lost. Withdraw
+           ;; both readiness bits before attaching replacement guards.
+           (publish-service-nat-owner-pair map rows :lookup lookup :update update
+                                           :preserve-readiness nil)
            rows)
       (funcall close fd))))
 
 (defun mark-service-nat-owner-receiver-ready
     (map rows &key (lookup #'whistler/loader:map-lookup)
-                   (update #'whistler/loader:map-update))
-  "Publish receiver readiness only for the exact enabled owner pair. The
-  primary row is written last, so a partial update cannot advertise a ready
+                   (update #'whistler/loader:map-update)
+                   complete-history-p)
+  "Publish receiver readiness and, only for a fresh guarded lease, history.
+  The primary row is written last, so a partial update cannot advertise a ready
   backend before its matching alias row is ready."
   (bt:with-lock-held (*service-nat-owner-publication-lock*)
     (let ((actual (mapcar (lambda (row) (funcall lookup map (car row))) rows)))
@@ -186,6 +190,11 @@ the attachment fence keeps incomplete owner state out of the live datapath."
                           (service-lb-bytes
                            (logior (netlink-read-integer ready 4 4) #x4) 4)
                           :start1 4)
+                 (when complete-history-p
+                   (replace ready
+                            (service-lb-bytes
+                             (logior (netlink-read-integer ready 4 4) #x2) 4)
+                            :start1 4))
                  (funcall update map (car row) ready)))
       2)))
 
@@ -206,7 +215,10 @@ the attachment fence keeps incomplete owner state out of the live datapath."
     (unwind-protect
          (mark-service-nat-owner-receiver-ready
           (funcall map-info fd "gr8s_nat_id_v2" :profile :v2) rows
-          :lookup lookup :update update)
+          :lookup lookup :update update
+          :complete-history-p
+          (and (cni-configuration-service-complete-history-p configuration)
+               (cni-configuration-service-incarnation configuration)))
       (funcall close fd))))
 
 (defun withdraw-cni-service-nat-owner

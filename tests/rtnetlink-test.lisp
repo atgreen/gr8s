@@ -396,6 +396,52 @@
       (is (equal '(:owner-withdraw :policy-delete :link-delete) (reverse events)))
       (is (null (gr8s::service-snat-address ipam "sandbox-1" "eth0"))))))
 
+(test v2-history-proof-requires-a-new-lease-and-no-old-host-link
+  (with-temporary-store (store directory)
+    (declare (ignore store))
+    (let* ((ipam (gr8s::open-node-ipam directory "10.42.0.0/29"))
+           (context (gr8s::make-cni-context
+                     :container-id "sandbox-1" :interface-name "eth0" :netns "/fake/ns"))
+           (configuration (gr8s::make-cni-configuration
+                           :service-packet-root "/pins/shared/" :service-packet-profile :v2))
+           (old-host-p nil)
+           (proofs nil)
+           (operations
+             (gr8s::make-routed-cni-operations
+              ipam :node-id "node-1" :service-risk-ready-p (constantly t)
+                   :host-index (lambda (name)
+                                 (declare (ignore name)) (if old-host-p 9 0))
+                   :install-link (lambda (ctx addresses)
+                                   (declare (ignore ctx addresses)) "host-veth")
+                   :install-service-return (lambda (ctx alias)
+                                             (declare (ignore ctx alias)))
+                   :publish-service-owner (lambda (&rest ignored)
+                                            (declare (ignore ignored)))
+                   :withdraw-service-owner (lambda (&rest ignored)
+                                             (declare (ignore ignored)))
+                   :remove-link (lambda (ctx) (declare (ignore ctx)))
+                   :policy (gr8s::make-cni-operations
+                            :add (lambda (config &rest ignored)
+                                   (declare (ignore ignored))
+                                   (push (gr8s::cni-configuration-service-complete-history-p
+                                          config) proofs))
+                            :delete (lambda (&rest ignored)
+                                      (declare (ignore ignored)))))))
+      (funcall (gr8s::cni-operations-prepare operations) configuration context)
+      (funcall (gr8s::cni-operations-add operations)
+               configuration context "/pins/local/endpoint_identity" "/pins/local/tcx-ingress")
+      (is (stringp (first proofs)))
+      (funcall (gr8s::cni-operations-add operations)
+               configuration context "/pins/local/endpoint_identity" "/pins/local/tcx-ingress")
+      (is (null (first proofs)))
+      (funcall (gr8s::cni-operations-delete operations)
+               configuration context "/pins/local/endpoint_identity" "/pins/local/tcx-ingress"
+               "/pins/local/")
+      (setf old-host-p t)
+      (funcall (gr8s::cni-operations-add operations)
+               configuration context "/pins/local/endpoint_identity" "/pins/local/tcx-ingress")
+      (is (null (first proofs))))))
+
 (test cni-return-path-keeps-default-and-ipv6-only-allocation-behavior
   (dolist (scenario '(("10.42.0.0/29" nil nil) ("fd42::/125" t nil) ("10.42.0.0/29" nil t)))
     (destructuring-bind (cidr packet-p retained-p) scenario

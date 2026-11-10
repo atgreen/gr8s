@@ -485,6 +485,31 @@
        :open (lambda (&rest ignored)
                (declare (ignore ignored)) (error "must reject v1 before map open"))))))
 
+(test cni-v2-add-clears-old-readiness-before-guard-replacement
+  (let* ((configuration (gr8s::make-cni-configuration
+                         :service-packet-root "/pins/shared/" :service-packet-profile :v2
+                         :service-node-id "node-1"))
+         (context (gr8s::make-cni-context :container-id "sandbox-1" :interface-name "eth0"))
+         (rows (gr8s.network::service-nat-identity-pair
+                "node-1" "sandbox-1" "eth0" "10.88.1.2" "10.88.1.9"))
+         (values (make-hash-table :test #'equalp)))
+    (dolist (row rows)
+      (let ((ready (copy-seq (cdr row))))
+        (replace ready (gr8s::service-lb-bytes #x20007 4) :start1 4)
+        (setf (gethash (car row) values) ready)))
+    (gr8s.network::publish-cni-service-nat-owner
+     configuration context '("10.88.1.2") "10.88.1.9"
+     :open (lambda (path) (declare (ignore path)) 7)
+     :map-info (lambda (fd name &key profile)
+                 (declare (ignore fd name profile)) :map)
+     :lookup (lambda (map key) (declare (ignore map)) (gethash key values))
+     :update (lambda (map key value)
+               (declare (ignore map)) (setf (gethash key values) value))
+     :close (lambda (fd) (declare (ignore fd))))
+    (is (every (lambda (row)
+                 (= #x20001 (gr8s::netlink-read-integer
+                              (gethash (car row) values) 4 4))) rows))))
+
 (test cni-v2-owner-check-rejects-missing-and-stale-incarnations
   (let* ((configuration (gr8s::make-cni-configuration
                          :service-packet-root "/pins/shared/" :service-packet-profile :v2
@@ -531,6 +556,13 @@
     (is (equalp (mapcar #'car (reverse rows)) (reverse writes)))
     (is (every (lambda (row)
                  (= #x20005 (gr8s::netlink-read-integer
+                              (gethash (car row) values) 4 4))) rows))
+    (setf writes nil)
+    (is (= 2 (gr8s.network::mark-service-nat-owner-receiver-ready
+              :map rows :lookup lookup :update update :complete-history-p t)))
+    (is (equalp (mapcar #'car (reverse rows)) (reverse writes)))
+    (is (every (lambda (row)
+                 (= #x20007 (gr8s::netlink-read-integer
                               (gethash (car row) values) 4 4))) rows))
     (setf writes nil)
     (let ((stale (gethash (car (second rows)) values)))

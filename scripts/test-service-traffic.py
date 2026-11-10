@@ -303,6 +303,14 @@ def main():
                 for c in cluster.get("pod", name).get("status", {}).get("conditions", []))
             for name in ("web-0", "web-1")))
         addresses = {name: cluster.get("pod", name)["status"]["podIP"] for name in ("web-0", "web-1")}
+        if os.environ.get("GR8S_ENABLE_NATIVE_SERVICE_V2") == "1":
+            owner_map = cluster.root / "state/agent/containerd/bpf/service-lb/gr8s_nat_id_v2"
+            flags = {}
+            for name, address in addresses.items():
+                value = pinned_map_value(owner_map, ipaddress.IPv4Address(address).packed, 32)
+                flags[name] = struct.unpack_from("<I", value, 4)[0] if value else None
+            check("freshV2OwnersHaveCompleteHistory",
+                  all(value is not None and value & 7 == 7 for value in flags.values()), flags)
 
         # Direct same-node Pod delivery uses local_pod_v4, but must still cross
         # web-0's host-veth egress hook where its ingress guard is attached.
