@@ -184,6 +184,7 @@ partial failure retains the IPAM lease until DEL removes the endpoint."
             (mtu 1450) (dns-address +dns-pod-server-address+)
             (install-link (lambda (context address)
                             (configure-routed-veth context address :mtu mtu)))
+            (host-index #'native-interface-index)
             (check-link #'check-routed-cni-link)
             (remove-link #'remove-routed-cni-link)
             (install-service-return #'install-routed-service-return-path)
@@ -203,9 +204,16 @@ partial failure retains the IPAM lease until DEL removes the endpoint."
            (routed-cni-host-name context)))
    :add
    (lambda (configuration context map-path link-path)
-     (let* ((addresses (allocate-pod-addresses ipam
-                         (cni-context-container-id context)
-                         (cni-context-interface-name context)))
+     (let* ((allocation (multiple-value-list
+                         (allocate-pod-addresses ipam
+                           (cni-context-container-id context)
+                           (cni-context-interface-name context))))
+            (addresses (first allocation))
+            (fresh-lease-p (second allocation))
+            ;; A new lease does not prove a new endpoint if an old link survived
+            ;; lost IPAM state. Inspect the host link before INSTALL-LINK can adopt it.
+            (fresh-link-p (and (eq (cni-service-profile configuration) :v2)
+                               (zerop (funcall host-index (routed-cni-host-name context)))))
             (return-address
               (or (service-snat-address ipam (cni-context-container-id context)
                                              (cni-context-interface-name context))
@@ -223,6 +231,10 @@ partial failure retains the IPAM lease until DEL removes the endpoint."
              (cni-configuration-service-incarnation configuration)
              (pod-address-incarnation ipam (cni-context-container-id context)
                                       (cni-context-interface-name context)))
+       (setf (cni-configuration-service-complete-history-p configuration)
+             (and (eq (cni-service-profile configuration) :v2)
+                  fresh-lease-p fresh-link-p
+                  (cni-configuration-service-incarnation configuration)))
        (if (eq (cni-service-profile configuration) :v2)
            (progn
              (unless (funcall service-risk-ready-p)

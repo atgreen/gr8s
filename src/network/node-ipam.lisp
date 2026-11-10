@@ -356,12 +356,13 @@ It is not configured in the Pod or exposed through the CNI IP result."
              (node-ipam-service-snat-allocations ipam))))
 
 (defun allocate-pod-addresses (ipam sandbox-id interface-name)
-  "Allocate or return the stable ordered address list for a Pod interface."
+  "Allocate or return the stable ordered address list for a Pod interface.
+The second value is true only for a lease committed by this call."
   (bt:with-lock-held ((node-ipam-lock ipam))
     (let* ((key (pod-address-key sandbox-id interface-name))
            (existing (gethash key (node-ipam-allocations ipam))))
       (when existing
-        (return-from allocate-pod-addresses (copy-list existing)))
+        (return-from allocate-pod-addresses (values (copy-list existing) nil)))
       (let* ((used (node-ipam-used-addresses ipam))
              (allocated
               (loop for cidr in (node-ipam-cidrs ipam)
@@ -387,7 +388,7 @@ It is not configured in the Pod or exposed through the CNI IP result."
             (remhash key (node-ipam-allocations ipam))
             (remhash key (node-ipam-incarnations ipam))
             (error condition)))
-        (copy-list allocated)))))
+        (values (copy-list allocated) t)))))
 
 (defun allocate-pod-address (ipam sandbox-id interface-name)
   "Allocate, or return the existing, Pod address for SANDBOX-ID/INTERFACE-NAME in
