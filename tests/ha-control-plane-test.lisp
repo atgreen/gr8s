@@ -11,6 +11,31 @@
 (def-suite ha-control-plane :in gr8s)
 (in-suite ha-control-plane)
 
+(test proposal-capacity-refusals-propagate-through-sync-forwarding-and-store-hook
+  (let* ((node (gr8s::make-raft-node :id "a" :role :leader :peers '("b" "c")
+                 :current-term 1 :uncommitted-byte-limit 4096
+                 :send-fn (lambda (&rest args) (declare (ignore args)))))
+         (member (gr8s.raft.transport::make-raft-member :node node))
+         (payload (make-string 500 :initial-element #\x))
+         (commit (gr8s.ha::make-store-raft-commit-function member)))
+    (gr8s::raft-member-propose member (list :core-delta payload))
+    (multiple-value-bind (result reason index)
+        (gr8s::raft-member-propose-sync member (list :core-delta payload))
+      (is (null result)) (is (eq :capacity reason)) (is (null index)))
+    (multiple-value-bind (result reason)
+        (gr8s::raft-member-forward-propose-sync member (list :core-delta payload))
+      (is (null result)) (is (eq :capacity reason)))
+    (handler-case
+        (progn (funcall commit :core-delta payload) (fail "Expected capacity refusal"))
+      (gr8s:kubernetes-error (condition)
+        (is (= 503 (gr8s::kubernetes-error-status-code condition)))))
+    (handler-case
+        (progn (funcall commit :core-delta (make-string 2000)) (fail "Expected size refusal"))
+      (gr8s:kubernetes-error (condition)
+        (is (= 413 (gr8s::kubernetes-error-status-code condition)))))
+    (is (= 1 (gr8s::raft-last-log-index node)))
+    (is (zerop (hash-table-count (gr8s.raft::raft-node-pending node))))))
+
 (test ha-control-plane-founds-joins-gates-and-replicates
   (with-temporary-store (s1 p1)
     (with-temporary-store (s2 p2)
@@ -446,6 +471,9 @@
            (progn
              (setf ha (gr8s::start-ha-control-plane store :id "heap-budget" :init t
                        :compaction-bytes 65536 :compaction-entries 100000 :compaction-interval nil))
+             (is (= (* 16 1024 1024)
+                    (gr8s.raft::raft-node-uncommitted-byte-limit
+                     (gr8s::raft-member-node (gr8s::ha-control-plane-member ha)))))
              (is (poll-until (lambda () (gr8s::ha-control-plane-leader-p ha)) :timeout 15))
              (gr8s::create-core-resource store "configmaps"
                (configmap-input "wide" "k" (make-string 16384 :initial-element #\x)) "default")

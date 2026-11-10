@@ -34,6 +34,10 @@
   ;; A single legacy large command may exceed the budget and is sent alone.
   (append-entry-limit 64 :type (integer 1 *))
   (append-byte-budget (* 1024 1024) :type (integer 1 *))
+  ;; Application coordinators opt in; generic/legacy Raft callers keep their
+  ;; existing command-size contract. Protocol/configuration traffic can recover
+  ;; quorum even when the application budget is full.
+  (uncommitted-byte-limit nil :type (or null (integer 1 *)))
   ;; compaction: entries <= snapshot-index are discarded; snapshot-term is the
   ;; term of the last entry the snapshot includes. log[0] is index snapshot-index+1.
   (snapshot-index 0 :type fixnum)
@@ -554,10 +558,28 @@ alone so existing persisted commands remain deliverable."
 ;;; ---------------------------------------------------------------------------
 ;;; Client proposal (leader only).
 
+(defun raft-proposal-capacity-reason (node command)
+  "Check application admission before append, using conservative JSON command weight."
+  (let ((limit (raft-node-uncommitted-byte-limit node)))
+    (when (and limit (not (member command '((:raft-barrier) (:store-recovery-barrier)) :test #'equal))
+               (not (and (consp command) (eq :raft-config (car command)))))
+      (let ((bytes (+ 128 (raft-command-wire-weight command))))
+        (when (> bytes limit)
+          (return-from raft-proposal-capacity-reason :proposal-too-large))
+        (loop for offset from (max 0 (- (raft-node-commit-index node) (raft-node-snapshot-index node)))
+                below (length (raft-node-log node))
+              for entry = (aref (raft-node-log node) offset)
+              do (incf bytes (+ 128 (raft-command-wire-weight (raft-entry-command entry))))
+                 (when (> bytes limit) (return-from raft-proposal-capacity-reason :capacity)))))))
+
 (defun raft-propose (node command &optional callback)
   "Leader appends COMMAND and replicates it. CALLBACK (if given) is invoked with
    the state-machine result once the entry commits. Returns (values index t) on
-   the leader, or (values nil nil) otherwise so the caller can redirect."
+   the leader, or (values nil nil reason) on refusal. Capacity refusal does not
+   append, persist, send, or retain CALLBACK."
+  (when (and (eq (raft-node-role node) :leader) (not (raft-node-snapshot-pending node)))
+    (let ((reason (raft-proposal-capacity-reason node command)))
+      (when reason (return-from raft-propose (values nil nil reason)))))
   (if (and (eq (raft-node-role node) :leader) (not (raft-node-snapshot-pending node)))
       (let ((entry (raft-log-append node (make-raft-entry :term (raft-node-current-term node)
                                                           :command command))))
@@ -567,7 +589,7 @@ alone so existing persisted commands remain deliverable."
         (raft-advance-commit node)
         (raft-apply-committed node)
         (values (raft-entry-index entry) t))
-      (values nil nil)))
+      (values nil nil :not-leader)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Membership change (single-member, effective on commit).

@@ -484,3 +484,15 @@ timeout, run `python3 scripts/test-compaction-native.py` after building. It
 creates a new private evidence directory and allows 30 minutes by default;
 `--timeout SECONDS` changes only the observation deadline. A timeout leaves
 acceptance unproven and preserves the last progress samples.
+
+Production HA members also apply a 16 MiB admission budget to uncommitted
+application commands. The budget uses conservative command weight rather than
+WAL file size, accounting for JSON strings taking more memory than their UTF-8
+encoding. When pending writes fill it, additional writes return HTTP 503 before
+appending to the WAL or retaining a callback. A single command exceeding the
+budget returns HTTP 413. Committing the pending tail releases admission capacity;
+reclaiming the committed log still requires compaction. Raft membership changes
+and the exact Raft/store recovery barriers remain available when the application
+budget is full, so an old-term tail can recover after quorum returns. Generic
+Raft library users retain their existing default unless they explicitly set
+`raft-node-uncommitted-byte-limit`.
