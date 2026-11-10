@@ -159,6 +159,23 @@
                  "cgroup/connect6" "cgroup/sendmsg6" "cgroup/recvmsg6")
                (mapcar (lambda (spec) (getf spec :section)) programs)))))
 
+(test service-lb-v2-staging-pins-shared-maps-without-changing-socket-hooks
+  (multiple-value-bind (maps programs)
+      (gr8s::compile-service-lb :packet-services :v2)
+    (let ((names (mapcar (lambda (spec) (getf spec :name)) maps)))
+      (is (= (length names) (length (remove-duplicates names :test #'equal))))
+      (dolist (name '("gr8s_nat_fwd_v2" "gr8s_nat_rev_v2"
+                      "gr8s_nat_id_v2" "gr8s_nat_risk_v2" "gr8s_nat_pod_v2"))
+        (is (member name names :test #'equal)))
+      (is (not (member "gr8s_nat_stages" names :test #'equal)))
+      (let ((risk (find "gr8s_nat_risk_v2" maps :key (lambda (spec) (getf spec :name))
+                        :test #'equal)))
+        (is (= 8 (getf risk :key-size)))
+        (is (= 4 (getf risk :value-size)))
+        (is (= 65536 (getf risk :max-entries)))))
+    (is (= 7 (length programs)))
+    (is (= 6 (count-if (lambda (spec) (search "cgroup/" (getf spec :section))) programs)))))
+
 (test service-lb-plan-publishes-each-cluster-ip-to-same-family-backends
   (let* ((service (fake-lb-service "10.96.0.10"))
          (spec (gethash "spec" service)))
@@ -271,6 +288,25 @@
       (is (equal '(:attachment) (gr8s::service-lb-dataplane-attachment dataplane)))
       (is (not (null (gr8s::service-lb-service-table dataplane))))
       (is (not (null (gr8s::service-lb-backend-table dataplane)))))))
+
+(test service-lb-dataplane-staging-mode-reaches-compiler
+  (let ((profile nil))
+    (gr8s::start-service-lb-dataplane
+     "/sys/fs/cgroup/gr8s" "/run/gr8s/bpf/service-lb"
+     :packet-services :v2
+     :compile (lambda (&key packet-services)
+                (setf profile packet-services)
+                (values (list '(:name "gr8s_nat_risk_v2")) :program-specs))
+     :create-maps (lambda (specs)
+                    (declare (ignore specs))
+                    (list (fake-lb-map "gr8s_nat_risk_v2" 900021)))
+     :ensure-directory (lambda (path) (declare (ignore path)) t)
+     :pin-map (lambda (map path) (declare (ignore map path)) t)
+     :load-programs (lambda (specs maps)
+                      (declare (ignore specs maps))
+                      (list (cons "gr8s_service_lb" (fake-lb-program 900022))))
+     :attach (lambda (&rest ignored) (declare (ignore ignored)) :attachment))
+    (is (eq :v2 profile))))
 
 (test service-lb-dataplane-start-reuses-compatible-pinned-maps
   (let ((created nil) (pinned nil) (opened nil) (validated nil)
@@ -753,6 +789,8 @@
          (service (fake-lb-service "10.96.0.10"))
          (writes nil)
          (update (lambda (map key value)
+                   (when (equal "gr8s_nat_risk_v2" (whistler/loader:map-info-name map))
+                     (is (typep value '(simple-array (unsigned-byte 8) (4)))))
                    (push (whistler/loader:map-info-name map) writes)
                    (setf (gethash (list (whistler/loader:map-info-name map) (copy-seq key)) entries)
                          (copy-seq value))))

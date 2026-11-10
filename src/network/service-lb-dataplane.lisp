@@ -158,7 +158,7 @@ node's Pod cgroup root).  PIN-DIRECTORY is a bpffs directory for the map pins.
 Returns a SERVICE-LB-DATAPLANE.  Signals through any kernel error; the caller
 decides whether a dataplane failure is fatal to the node."
   (multiple-value-bind (map-specs program-specs)
-      (if packet-services (funcall compile :packet-services t) (funcall compile))
+      (if packet-services (funcall compile :packet-services packet-services) (funcall compile))
     (let ((maps nil) (opened nil) (pinned nil))
       (handler-case
           (progn
