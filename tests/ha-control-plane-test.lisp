@@ -564,10 +564,15 @@
            (progn
              (setf ha (gr8s::start-ha-control-plane store :id "worker-stop" :init t :compaction-interval 3600))
              (is (bt:thread-alive-p (gr8s.ha::ha-control-plane-compaction-thread ha)))
+             (is (= (* 32 1024 1024)
+                    (gr8s.raft::raft-node-retained-byte-limit
+                     (gr8s::raft-member-node (gr8s::ha-control-plane-member ha)))))
              (let ((started (get-internal-real-time)))
                (gr8s.ha::stop-ha-compaction-worker ha)
                (is (< (- (get-internal-real-time) started) (* 5 internal-time-units-per-second))))
-             (is (null (gr8s.ha::ha-control-plane-compaction-thread ha))))
+             (is (null (gr8s.ha::ha-control-plane-compaction-thread ha)))
+             (is (null (gr8s.raft::raft-node-retained-byte-limit
+                        (gr8s::raft-member-node (gr8s::ha-control-plane-member ha))))))
         (gr8s::stop-ha-control-plane ha)))))
 
 (test compaction-budget-includes-retained-command-weight-before-wal-threshold

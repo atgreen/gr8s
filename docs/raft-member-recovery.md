@@ -458,6 +458,13 @@ validation. It pins the artifact, drains again, and publishes the prepared
 boundary while preserving newer committed/uncommitted suffix entries. Finally
 it reclaims obsolete artifacts. Only one capture per control plane can run,
 including manual invocations, so overlapping workers cannot retain extra views.
+While the automatic worker runs, application admission also bounds the complete
+retained log, including committed entries awaiting compaction. Its conservative
+budget is twice `:compaction-bytes`, with a 32 MiB minimum (32 MiB at the default
+trigger); an existing stricter budget is preserved. Capacity refusals return
+503 before append and release as checkpoints catch up. Recovery barriers and
+membership changes remain available. Stopping the worker restores its previous
+admission policy. The separate 16 MiB uncommitted-proposal limit still applies.
 A capture failure with healthy storage reopens only the worker's own gate;
 uncertain WAL failure leaves application access blocked. Shutdown wakes and
 joins the worker before stopping Raft. Internal counters record successful
@@ -528,6 +535,10 @@ The [frozen-view validation](snapshot-freeze-validation-2026-11-10.json) retaine
 the full 100,656,464-byte history estimate at a 384 MiB dynamic heap, streamed and
 validated 1,978 history records, and excluded a later live write. The standalone
 probe passed in 29.86 seconds, including store load and artifact validation.
+That standalone probe does not cover concurrent writes during worker capture.
+The first asynchronous-worker churn run exhausted its heap as the committed log
+grew during I/O; whole-log admission addresses that separate retention source
+and requires a fresh full churn/recovery run before acceptance.
 
 Build the internal native retention probe with
 `scripts/build-compaction-native-harness.lisp`, then run the resulting

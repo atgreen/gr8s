@@ -399,6 +399,34 @@
     (is-true (nth-value 1 (gr8s::raft-propose node command)))
     (is (eq :capacity (nth-value 2 (gr8s::raft-propose node command))))))
 
+(test retained-byte-admission-counts-committed-prefix-and-recovers-after-compaction
+  (with-temporary-store (store root)
+    (declare (ignore store))
+    (let* ((path (merge-pathnames "retained.log" root))
+           (storage (gr8s::open-file-raft-storage path))
+           (node (gr8s.raft::make-raft-node :id "retained" :role :leader :current-term 1 :storage storage
+                   :uncommitted-byte-limit 4096 :retained-byte-limit 512
+                   :uncommitted-weight-fn (constantly 128)))
+           (callback nil))
+      (unwind-protect
+           (progn
+             (is-true (nth-value 1 (gr8s.raft:raft-propose node '(:first))))
+             (is-true (nth-value 1 (gr8s.raft:raft-propose node '(:second))))
+             (is (= 2 (gr8s.raft:raft-node-commit-index node)))
+             (let ((before (length (gr8s.raft:raft-node-log node)))
+                   (bytes (sb-posix:stat-size (sb-posix:stat path))))
+               (is (eq :capacity (nth-value 2 (gr8s.raft:raft-propose node '(:third)
+                                              (lambda (value) (declare (ignore value)) (setf callback t))))))
+               (is (= before (length (gr8s.raft:raft-node-log node))))
+               (is (= bytes (sb-posix:stat-size (sb-posix:stat path))))
+               (is (null callback))
+               (is (zerop (hash-table-count (gr8s.raft::raft-node-pending node)))))
+             (is-true (nth-value 1 (gr8s.raft:raft-propose node '(:raft-barrier))))
+             (gr8s.raft:raft-compact node (gr8s.raft:raft-node-last-applied node))
+             (is-true (nth-value 1 (gr8s.raft:raft-propose node '(:third))))
+             (is (= 4 (gr8s.raft:raft-node-commit-index node))))
+        (gr8s::close-file-raft-storage storage)))))
+
 (test uncommitted-byte-admission-rejects-before-persisting-and-recovers-after-commit
   (with-temporary-store (store root)
     (declare (ignore store))

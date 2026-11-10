@@ -38,6 +38,8 @@
   ;; existing command-size contract. Protocol/configuration traffic can recover
   ;; quorum even when the application budget is full.
   (uncommitted-byte-limit nil :type (or null (integer 1 *)))
+  ;; Optional coordinator backpressure while checkpoints lag committed writes.
+  (retained-byte-limit nil :type (or null (integer 1 *)))
   (uncommitted-weight-fn #'raft-command-wire-weight :type function)
   ;; compaction: entries <= snapshot-index are discarded; snapshot-term is the
   ;; term of the last entry the snapshot includes. log[0] is index snapshot-index+1.
@@ -620,17 +622,23 @@ alone so existing persisted commands remain deliverable."
 
 (defun raft-proposal-capacity-reason (node command)
   "Check admission before append using the node's configured command estimator."
-  (let ((limit (raft-node-uncommitted-byte-limit node)))
-    (when (and limit (not (member command '((:raft-barrier) (:store-recovery-barrier)) :test #'equal))
+  (let ((limit (raft-node-uncommitted-byte-limit node))
+        (retained-limit (raft-node-retained-byte-limit node)))
+    (when (and (or limit retained-limit) (not (member command '((:raft-barrier) (:store-recovery-barrier)) :test #'equal))
                (not (and (consp command) (eq :raft-config (car command)))))
-      (let ((bytes (+ 128 (funcall (raft-node-uncommitted-weight-fn node) command))))
-        (when (> bytes limit)
+      (let* ((bytes (+ 128 (funcall (raft-node-uncommitted-weight-fn node) command)))
+             (retained bytes)
+             (pending-start (max 0 (- (raft-node-commit-index node) (raft-node-snapshot-index node)))))
+        (when (or (and limit (> bytes limit)) (and retained-limit (> bytes retained-limit)))
           (return-from raft-proposal-capacity-reason :proposal-too-large))
-        (loop for offset from (max 0 (- (raft-node-commit-index node) (raft-node-snapshot-index node)))
+        (loop for offset from (if retained-limit 0 pending-start)
                 below (length (raft-node-log node))
               for entry = (aref (raft-node-log node) offset)
-              do (incf bytes (+ 128 (funcall (raft-node-uncommitted-weight-fn node) (raft-entry-command entry))))
-                 (when (> bytes limit) (return-from raft-proposal-capacity-reason :capacity)))))))
+              for weight = (+ 128 (funcall (raft-node-uncommitted-weight-fn node) (raft-entry-command entry)))
+              do (incf retained weight)
+                 (when (>= offset pending-start) (incf bytes weight))
+                 (when (or (and limit (> bytes limit)) (and retained-limit (> retained retained-limit)))
+                   (return-from raft-proposal-capacity-reason :capacity)))))))
 
 (defun raft-propose (node command &optional callback)
   "Leader appends COMMAND and replicates it. CALLBACK (if given) is invoked with

@@ -117,8 +117,16 @@ Drain again before WAL replacement so uncertain durability remains fail-closed."
   (validate-ha-compaction-options (ha-control-plane-compaction-bytes hcp)
                                   (ha-control-plane-compaction-entries hcp)
                                   (ha-control-plane-compaction-interval hcp))
-  (bt:with-lock-held ((ha-control-plane-compaction-lock hcp))
+  ;; Member before compaction lock, matching publication's counter updates.
+  (bt:with-lock-held ((raft-member-lock (ha-control-plane-member hcp)))
+   (bt:with-lock-held ((ha-control-plane-compaction-lock hcp))
     (when (ha-control-plane-compaction-thread hcp) (error "Compaction worker already exists"))
+    (let* ((node (raft-member-node (ha-control-plane-member hcp)))
+           (previous (gr8s.raft::raft-node-retained-byte-limit node))
+           (budget (max (* 32 1024 1024) (* 2 (ha-control-plane-compaction-bytes hcp))))
+           (installed (if previous (min previous budget) budget)))
+      (setf (ha-control-plane-compaction-retention-policy hcp) (cons previous installed)
+            (gr8s.raft::raft-node-retained-byte-limit node) installed))
     (setf (ha-control-plane-compaction-running hcp) t
           (ha-control-plane-compaction-thread hcp)
           (bt:make-thread
@@ -135,7 +143,7 @@ Drain again before WAL replacement so uncertain durability remains fail-closed."
                    (bt:with-lock-held ((ha-control-plane-compaction-lock hcp))
                      (setf (ha-control-plane-compaction-error hcp) (princ-to-string condition)))
                    (format *error-output* "~&gr8s HA compaction failed: ~A~%" condition)))))
-           :name "gr8s HA compaction")))
+           :name "gr8s HA compaction"))))
   hcp)
 
 (defun stop-ha-compaction-worker (hcp)
@@ -146,5 +154,12 @@ Drain again before WAL replacement so uncertain durability remains fail-closed."
             thread (ha-control-plane-compaction-thread hcp))
       (bt:condition-notify (ha-control-plane-compaction-changed hcp)))
     (when thread (bt:join-thread thread))
+    (bt:with-lock-held ((raft-member-lock (ha-control-plane-member hcp)))
+      (let ((policy (ha-control-plane-compaction-retention-policy hcp))
+            (node (raft-member-node (ha-control-plane-member hcp))))
+        (when policy
+          (when (eql (gr8s.raft::raft-node-retained-byte-limit node) (cdr policy))
+            (setf (gr8s.raft::raft-node-retained-byte-limit node) (car policy)))
+          (setf (ha-control-plane-compaction-retention-policy hcp) nil))))
     (setf (ha-control-plane-compaction-thread hcp) nil))
   hcp)

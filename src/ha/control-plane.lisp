@@ -20,7 +20,7 @@
 
 (defstruct ha-control-plane
   member store
-  compaction-thread compaction-running compaction-in-flight
+  compaction-thread compaction-running compaction-in-flight compaction-retention-policy
   (compaction-lock (bt:make-lock "gr8s HA compaction"))
   (compaction-changed (bt:make-condition-variable :name "gr8s HA compaction"))
   (compaction-bytes (* 16 1024 1024)) (compaction-entries 256) (compaction-interval 1)
