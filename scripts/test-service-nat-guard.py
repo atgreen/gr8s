@@ -484,7 +484,7 @@ def main():
     parser.add_argument("--kernel", action="store_true")
     args = parser.parse_args()
     programs, ids, descriptors = p.read_fixture(args.fixture, names=ROOTS + STAGES + ("gr8s_nat_gc",))
-    assert len(descriptors) == 29
+    assert len(descriptors) == 30
     assert descriptors[TABLE] == (3, 4, 4, 16, 0)
     results = {}
     cls = Kernel if args.kernel else Interpreter
