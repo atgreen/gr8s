@@ -26,6 +26,7 @@ wire = load("wire_codec", "test-service-wire.py")
 p, n = graph.p, graph.n
 EXTRA = ("gr8s_wire_request", "gr8s_wire_reply", "gr8s_wire_receive", "gr8s_wire_reply_commit")
 RX, RI, WL = "gr8s_nat_rx_v2", "gr8s_nat_ri_v2", "gr8s_nat_wl_v2"
+WIRE_GC = "gr8s_wire_gc"
 graph.GLOBAL.update((RX, RI, WL))
 
 
@@ -263,6 +264,91 @@ def denied_and_stale(factory, protocol, shared):
         client.close()
 
 
+def receiver_collection(factory, protocol, direction):
+    client, backend = factory(), factory()
+    try:
+        setup(client, backend)
+        p.publish(client, protocol)
+        original = graph.packet(protocol=protocol, sport=44000 + protocol)
+        encoded = run(client, 0, original)
+        visible = run(backend, 1, encoded)
+
+        def collect():
+            assert len(backend.keys(RX)) == len(backend.keys(RI)) == 1
+            key = backend.keys((RX, RI)[direction])[0]
+            control = bytearray(52)
+            control[:14] = bytes.fromhex("0200000000010200000000020800")
+            control[14], control[22], control[23], control[34] = 0x45, 64, 253, direction
+            struct.pack_into("!H", control, 16, 38)
+            struct.pack_into("!H", control, 24, p.checksum(bytes(control[14:34])))
+            control[36:] = key
+            verdict, output = backend.run(WIRE_GC, control)
+            assert verdict == 1 and output == control
+            n.unlocked(backend)
+            assert not backend.keys(RX) and not backend.keys(RI) and not backend.keys(WL)
+
+        def age(seconds):
+            key = backend.keys(RX)[0]
+            row = bytearray(backend.lookup(RX, key))
+            stamp = struct.unpack_from("<Q", row, 80)[0]
+            struct.pack_into("<Q", row, 80, (stamp - seconds * 1_000_000_000) & p.endpoint.MASK)
+            backend.update(RX, key, row)
+
+        # Reclaim actual policy-approved state, then recreate it with a retry.
+        age(7201 if protocol == 6 else 181)
+        collect()
+        assert p.endpoints(run(backend, 1, encoded)) == p.endpoints(visible)
+        source, destination, sport, dport = p.endpoints(visible)
+        response = graph.packet(destination, source, dport, sport, protocol,
+                                seq=50000, ack=1001, flags=0x12, mac=graph.BACK_MAC)
+        old_reply = run(backend, 0, response)
+        assert p.endpoints(run(client, 1, old_reply)) == (p.VIP, p.CLIENT, 80, 44000 + protocol)
+
+        # Interrupted publication can leave either half behind.
+        if direction == 0:
+            backend.delete(RI, backend.keys(RI)[0])
+            age(6)
+            # The orphan has no index, so collect its remaining receiver key.
+            assert len(backend.keys(RX)) == 1
+        else:
+            backend.delete(RX, backend.keys(RX)[0])
+        # Use the same ABI with the key of the surviving half.
+        key = backend.keys((RX, RI)[direction])[0]
+        control = bytearray(52)
+        control[12:14], control[14], control[23], control[34] = b"\x08\x00", 0x45, 253, direction
+        control[36:] = key
+        verdict, output = backend.run(WIRE_GC, control)
+        assert verdict == 1 and output == control
+        assert not backend.keys(RX) and not backend.keys(RI)
+        assert p.endpoints(run(backend, 1, encoded)) == p.endpoints(visible)
+
+        # A new endpoint incarnation fences old packets before cleanup. Its
+        # first new Service flow can reuse the tuple after owned collection.
+        for endpoint in (client, backend):
+            n.owner(endpoint, p.CLIENT, n.ALIAS, 7, flags=15)
+        identity = bytearray(client.lookup("endpoint_identity", bytes(4)))
+        struct.pack_into("<QQ", identity, 32, 7, 107)
+        client.update("endpoint_identity", bytes(4), identity)
+        run(backend, 1, encoded, p.SHOT)
+        run(client, 1, old_reply, p.SHOT)
+        collect()
+        fresh = graph.packet(protocol=protocol, sport=44000 + protocol, seq=20000)
+        fresh_wire = run(client, 0, fresh)
+        assert fresh_wire[70:86] == struct.pack("<QQ", 7, 107)
+        delivered = run(backend, 1, fresh_wire)
+        source, destination, sport, dport = p.endpoints(delivered)
+        response = graph.packet(destination, source, dport, sport, protocol,
+                                seq=60000, ack=20001, flags=0x12, mac=graph.BACK_MAC)
+        assert p.endpoints(run(client, 1, run(backend, 0, response))) == (p.VIP, p.CLIENT, 80, 44000 + protocol)
+        held = {key: backend.lookup(RX, key) for key in backend.keys(RX)}
+        run(backend, 1, encoded, p.SHOT)
+        assert {key: backend.lookup(RX, key) for key in backend.keys(RX)} == held
+        return {"case": "receiverCollectionAndIncarnation", "protocol": protocol, "direction": direction}
+    finally:
+        backend.close()
+        client.close()
+
+
 def plain_stage_contract(factory):
     client, backend = factory(), factory()
     try:
@@ -321,7 +407,7 @@ def main():
     parser.add_argument("fixture", type=Path)
     parser.add_argument("--kernel", action="store_true")
     args = parser.parse_args()
-    programs, ids, descriptors = p.read_fixture(args.fixture, names=graph.ROOTS + graph.STAGES + EXTRA + ("gr8s_nat_gc",))
+    programs, ids, descriptors = p.read_fixture(args.fixture, names=graph.ROOTS + graph.STAGES + EXTRA + ("gr8s_nat_gc", WIRE_GC))
     cls = Kernel if args.kernel else Interpreter
     factory = lambda shared=None: cls(programs, ids, descriptors, shared)
 
@@ -338,6 +424,8 @@ def main():
                  for protocol in (6, 17) for shared in (True, False))
     cases.extend(checked(denied_and_stale, factory, protocol, shared)
                  for protocol in (6, 17) for shared in (True, False))
+    cases.extend(checked(receiver_collection, factory, protocol, direction)
+                 for protocol in (6, 17) for direction in (0, 1))
     small = {key: value[:3] + (1, value[4]) if key in (RX, RI, WL) else value
              for key, value in descriptors.items()}
     cases.extend(checked(capacity, lambda: cls(programs, ids, small), table) for table in (RX, RI, WL))

@@ -22,6 +22,10 @@
 
 (in-package #:whistler)
 
+(defmacro wire-raw-data ()
+  ;; Keep physical envelope access opaque until legacy inner offsets are applied.
+  '(tc-data))
+
 (defmacro wire-candidate-p ()
   `(let ((wire-raw u64 (tc-data)) (wire-end u64 (tc-data-end)))
      (and (<= (+ wire-raw 50) wire-end)
@@ -251,7 +255,7 @@
 (defun gr8s.network::service-wire-reply-commit-body ()
   '((when (= wire-offset 0)
       (pkt-unlock) (tail-call gr8s-nat-stages 3) (return TC_ACT_SHOT))
-    (let ((raw u64 (tc-data)) (incoming (make-gr8s-pkt-flow)))
+    (let ((raw u64 (wire-raw-data)) (incoming (make-gr8s-pkt-flow)))
       (when (> (+ raw 102) (tc-data-end)) (pkt-drop failed))
       (unless (= (load u8 raw 59) 2) (pkt-drop failed))
       (wire-invert incoming flow)
@@ -300,7 +304,7 @@
 
 (defun gr8s.network::service-wire-receive-body ()
   '((unless (/= wire-offset 0) (pkt-drop failed))
-    (let ((raw u64 (tc-data)) (entry (make-wire-rx-state))
+    (let ((raw u64 (wire-raw-data)) (entry (make-wire-rx-state))
           (candidate (make-gr8s-pkt-flow)) (chosen u32 0) (alias u32 0))
       (when (> (+ raw 102) (tc-data-end)) (pkt-drop failed))
       (unless (= (load u8 raw 59) 1) (pkt-drop failed))
@@ -518,7 +522,8 @@ refresh of an independent direct outbound connection on the same node."
                        (service-nat-program-form name body)) :addresses addresses)
        collect (if next (service-nat-stage-continue form next) form))
      (list (service-nat-delivery-form)
-           (service-wire-inner-program (find 'whistler::gr8s-nat-gc programs :key #'second))))))
+           (service-wire-inner-program (find 'whistler::gr8s-nat-gc programs :key #'second))
+           (expand-service-wire-form (service-wire-gc-program-form))))))
 
 (defun compile-service-wire-guard ()
   (let* ((forms (service-wire-guard-forms))

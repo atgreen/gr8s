@@ -176,12 +176,19 @@ build/gr8s-service-wire-test.json: src/network/service-wire.lisp scripts/compile
 test-service-wire: build/gr8s-service-wire-test.json
 	python3 scripts/test-service-wire.py $<
 
-build/gr8s-service-wire-guard-test.json: src/network/service-wire-guard.lisp src/network/service-wire.lisp src/network/service-nat-guard.lisp src/network/service-nat-policy.lisp src/network/service-nat-program.lisp src/network/service-packet-program.lisp scripts/compile-endpoint-policy-fixture.lisp
+build/gr8s-service-wire-guard-test.json: src/network/service-wire-guard.lisp src/network/service-wire-state.lisp src/network/service-wire.lisp src/network/service-nat-guard.lisp src/network/service-nat-policy.lisp src/network/service-nat-program.lisp src/network/service-packet-program.lisp scripts/compile-endpoint-policy-fixture.lisp
 	$(SBCL) --noinform --script scripts/compile-endpoint-policy-fixture.lisp $@ service-wire-guard
 
 .PHONY: test-service-wire-guard
 test-service-wire-guard: build/gr8s-service-wire-guard-test.json
 	python3 scripts/test-service-wire-guard.py $<
+
+build/gr8s-service-wire-state-test.json: src/network/service-wire-state.lisp src/network/service-wire-guard.lisp src/network/service-wire.lisp src/network/service-packet-state.lisp scripts/compile-endpoint-policy-fixture.lisp
+	$(SBCL) --noinform --script scripts/compile-endpoint-policy-fixture.lisp $@ service-wire-state
+
+.PHONY: test-service-wire-state
+test-service-wire-state: build/gr8s-service-wire-state-test.json
+	python3 scripts/test-service-wire-state.py $<
 
 build/gr8s-legacy-service-packet-guard-test.json: scripts/compile-legacy-service-packet-guard-fixture.lisp scripts/compile-endpoint-policy-fixture.lisp tests/fixtures/service-packet-pre-reservation.lisp $(wildcard src/network/*.lisp) gr8s.asd $(WHISTLER_FIXTURE_SOURCES)
 	sbcl --noinform --script scripts/compile-legacy-service-packet-guard-fixture.lisp $@ service-packet-guard
