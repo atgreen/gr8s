@@ -45,7 +45,9 @@
    #:open-ring-consumer #:ring-poll #:ring-consume #:close-ring-consumer
    #:open-decoding-ring-consumer #:with-decoding-ring-consumer
    ;; Conditions
-   #:bpf-error #:bpf-verifier-error))
+   #:bpf-error #:bpf-program-load-error #:bpf-verifier-error
+   #:bpf-program-load-error-initial-error #:bpf-program-load-error-log
+   #:bpf-program-load-error-log-buf-size))
 
 (defpackage #:whistler-loader-user
   (:use #:cl #:whistler #:whistler/loader)

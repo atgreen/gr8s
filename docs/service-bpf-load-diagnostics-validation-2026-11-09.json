@@ -1,0 +1,363 @@
+{
+  "date": "2026-11-09",
+  "issue": "podster-p9c.9",
+  "implementationCommit": "1638e6dfd03d897e59b28fd2b4bd759631eff607",
+  "additionalTestCommit": "3327a12",
+  "scope": "Preserve initial BPF load condition, retry errno and verifier log/buffer size without changing program acceptance, FD ownership, pipeline verification or GC gating.",
+  "loaderSuite": {
+    "passed": 183,
+    "failed": 0,
+    "logSHA256": "2d10c50dea23bbab8d39fc77f52e95c1b01dab6fa1ed8cb5ad17afb487ec27df"
+  },
+  "networkingAndCNI": {
+    "passed": 1087,
+    "failed": 0,
+    "logSHA256": "3241672bf37423a9136fe5b584cd3e4d3c0cf9a4838acb5cbc7f3ba538945999"
+  },
+  "networkingCoverage": "Service/socket/packet map schemas, flow state, retained upgrades, new diagnostic failure through actual refresh/GC approval gate, Networking, egress guard, NetworkPolicy resolution and CNI. Prior GC approval clears on diagnostic failure; repeated errors deduplicate; recovery rechecks required map identities through injected readers before approval.",
+  "native": {
+    "version": "gr8s 1.37.2-g1638e6d, patch level 0",
+    "sha256": "e82b4d525a1dcf9242065ceb1659e31ee77e4685818c963de70046db66f62f09",
+    "buildLogSHA256": "acd0dfb52e9e106701f5935092d462adb2660f5e0c1a7fb36ce4180ed27a944a",
+    "environment": "Disposable Fedora44 VM22291; two real native containerd agents over VXLAN in separate namespaces, one control plane, no debug server. Private leases provisioned/withdrawn offline as described by the identity fixture; no packet SNAT claim.",
+    "reportSHA256": "b279282922f1fbd64d278378bcca98fd8a509dfd6b7e1f29132692c4574bc4ba",
+    "report": {
+      "root": "/var/tmp/gr8s-two-node.gdt8ajay",
+      "checks": [
+        {
+          "name": "noPrivateIdentitiesBeforeLease",
+          "passed": true,
+          "observed": [
+            [],
+            []
+          ]
+        },
+        {
+          "name": "authenticatedIdentityProjected",
+          "passed": true,
+          "observed": [
+            [
+              {
+                "podUID": "5ea90688-a9b7-49b6-8bad-fd3145150123",
+                "nodeID": "ed1cbc57-0f21-4eb0-8665-e4ee8ce9676a",
+                "nodeName": "worker-0",
+                "podIP": "10.80.0.1",
+                "address": "10.80.0.2",
+                "sandboxID": "71053acfb2d35fdea37bbdf32b79b25de8eb12f500d20e10b48e915df470c0b2",
+                "interfaceName": "eth0"
+              }
+            ],
+            [
+              {
+                "podUID": "5ea90688-a9b7-49b6-8bad-fd3145150123",
+                "nodeID": "ed1cbc57-0f21-4eb0-8665-e4ee8ce9676a",
+                "nodeName": "worker-0",
+                "podIP": "10.80.0.1",
+                "address": "10.80.0.2",
+                "sandboxID": "71053acfb2d35fdea37bbdf32b79b25de8eb12f500d20e10b48e915df470c0b2",
+                "interfaceName": "eth0"
+              }
+            ]
+          ]
+        },
+        {
+          "name": "privateIdentityHiddenFromPodStatus",
+          "passed": true,
+          "observed": {
+            "conditions": [
+              {
+                "lastTransitionTime": "2026-11-10T00:45:20Z",
+                "observedGeneration": 1,
+                "status": "True",
+                "type": "PodScheduled"
+              },
+              {
+                "lastTransitionTime": "2026-11-10T00:45:20Z",
+                "observedGeneration": 1,
+                "status": "True",
+                "type": "Initialized"
+              },
+              {
+                "lastTransitionTime": "2026-11-10T00:45:53Z",
+                "observedGeneration": 1,
+                "status": "True",
+                "type": "ContainersReady"
+              },
+              {
+                "lastTransitionTime": "2026-11-10T00:45:53Z",
+                "observedGeneration": 1,
+                "status": "True",
+                "type": "Ready"
+              }
+            ],
+            "containerStatuses": [
+              {
+                "containerID": "containerd://5db97ac682a106843b36ac0cfb8a7d129fbfc6691b1733683b21f4aceba59425",
+                "image": "registry.k8s.io/e2e-test-images/agnhost:2.66.1",
+                "imageID": "sha256:2f0df2a116185c62076f0ecf923662cb00ac107da66d057c8d514313dc8f38d5",
+                "name": "netexec",
+                "ready": true,
+                "resources": {},
+                "restartCount": 0,
+                "started": true,
+                "state": {
+                  "running": {
+                    "startedAt": "2026-11-10T00:45:25Z"
+                  }
+                }
+              }
+            ],
+            "hostIP": "198.18.253.2",
+            "hostIPs": [
+              {
+                "ip": "198.18.253.2"
+              }
+            ],
+            "observedGeneration": 1,
+            "phase": "Running",
+            "podIP": "10.80.0.1",
+            "podIPs": [
+              {
+                "ip": "10.80.0.1"
+              }
+            ],
+            "qosClass": "BestEffort",
+            "startTime": "2026-11-10T00:45:20Z"
+          }
+        },
+        {
+          "name": "workloadsUnchangedAfterLease",
+          "passed": true,
+          "observed": [
+            {
+              "uid": "5ea90688-a9b7-49b6-8bad-fd3145150123",
+              "ip": "10.80.0.1",
+              "containers": [
+                "containerd://5db97ac682a106843b36ac0cfb8a7d129fbfc6691b1733683b21f4aceba59425"
+              ]
+            },
+            {
+              "uid": "9a30bee6-96f9-413c-96d2-caf14bcdccd9",
+              "ip": "10.80.16.1",
+              "containers": [
+                "containerd://db66c324e19b5ad1141f035bab359edff6dc3e61e675207c1401b950b8feb2b8"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "privateIdentityCheckpointed",
+          "passed": true,
+          "observed": {
+            "address": "10.80.0.2",
+            "podIP": "10.80.0.1",
+            "sandboxID": "71053acfb2d35fdea37bbdf32b79b25de8eb12f500d20e10b48e915df470c0b2",
+            "interfaceName": "eth0",
+            "podUID": "5ea90688-a9b7-49b6-8bad-fd3145150123",
+            "nodeName": "worker-0",
+            "nodeID": "ed1cbc57-0f21-4eb0-8665-e4ee8ce9676a"
+          }
+        },
+        {
+          "name": "identityRetainedAcrossOwnerRestart",
+          "passed": true,
+          "observed": [
+            [
+              {
+                "podUID": "5ea90688-a9b7-49b6-8bad-fd3145150123",
+                "nodeID": "ed1cbc57-0f21-4eb0-8665-e4ee8ce9676a",
+                "nodeName": "worker-0",
+                "podIP": "10.80.0.1",
+                "address": "10.80.0.2",
+                "sandboxID": "71053acfb2d35fdea37bbdf32b79b25de8eb12f500d20e10b48e915df470c0b2",
+                "interfaceName": "eth0"
+              }
+            ],
+            [
+              {
+                "podUID": "5ea90688-a9b7-49b6-8bad-fd3145150123",
+                "nodeID": "ed1cbc57-0f21-4eb0-8665-e4ee8ce9676a",
+                "nodeName": "worker-0",
+                "podIP": "10.80.0.1",
+                "address": "10.80.0.2",
+                "sandboxID": "71053acfb2d35fdea37bbdf32b79b25de8eb12f500d20e10b48e915df470c0b2",
+                "interfaceName": "eth0"
+              }
+            ]
+          ]
+        },
+        {
+          "name": "identityWithdrawnOnBothNodes",
+          "passed": true,
+          "observed": [
+            [],
+            []
+          ]
+        },
+        {
+          "name": "publicStatusStillPrivate",
+          "passed": true,
+          "observed": {
+            "conditions": [
+              {
+                "lastTransitionTime": "2026-11-10T00:45:20Z",
+                "observedGeneration": 1,
+                "status": "True",
+                "type": "PodScheduled"
+              },
+              {
+                "lastTransitionTime": "2026-11-10T00:45:20Z",
+                "observedGeneration": 1,
+                "status": "True",
+                "type": "Initialized"
+              },
+              {
+                "lastTransitionTime": "2026-11-10T00:45:53Z",
+                "observedGeneration": 1,
+                "status": "True",
+                "type": "ContainersReady"
+              },
+              {
+                "lastTransitionTime": "2026-11-10T00:45:53Z",
+                "observedGeneration": 1,
+                "status": "True",
+                "type": "Ready"
+              }
+            ],
+            "containerStatuses": [
+              {
+                "containerID": "containerd://5db97ac682a106843b36ac0cfb8a7d129fbfc6691b1733683b21f4aceba59425",
+                "image": "registry.k8s.io/e2e-test-images/agnhost:2.66.1",
+                "imageID": "sha256:2f0df2a116185c62076f0ecf923662cb00ac107da66d057c8d514313dc8f38d5",
+                "name": "netexec",
+                "ready": true,
+                "resources": {},
+                "restartCount": 0,
+                "started": true,
+                "state": {
+                  "running": {
+                    "startedAt": "2026-11-10T00:45:25Z"
+                  }
+                }
+              }
+            ],
+            "hostIP": "198.18.253.2",
+            "hostIPs": [
+              {
+                "ip": "198.18.253.2"
+              }
+            ],
+            "observedGeneration": 1,
+            "phase": "Running",
+            "podIP": "10.80.0.1",
+            "podIPs": [
+              {
+                "ip": "10.80.0.1"
+              }
+            ],
+            "qosClass": "BestEffort",
+            "startTime": "2026-11-10T00:45:20Z"
+          }
+        },
+        {
+          "name": "nativeTrafficAfterWithdrawal",
+          "passed": true,
+          "observed": [
+            "two-node-1",
+            "two-node-0"
+          ]
+        }
+      ],
+      "lease": {
+        "podIP": "10.80.0.1",
+        "address": "10.80.0.2",
+        "sandboxID": "71053acfb2d35fdea37bbdf32b79b25de8eb12f500d20e10b48e915df470c0b2",
+        "interfaceName": "eth0"
+      },
+      "passed": true,
+      "cleanupCompleted": true
+    },
+    "logs": {
+      "agent-0.log": {
+        "sha256": "30fbf59c8ad10044a0971b512903e43f66cf4e4846766b3e15f608114267a047",
+        "events": [
+          "gr8s: Service flow GC verified 1 retained endpoint pipelines",
+          "gr8s: Service flow GC verified 1 retained endpoint pipelines",
+          "gr8s: Service packet upgrade deferred for /var/tmp/gr8s-two-node.gdt8ajay/agent-0/containerd/bpf/71053acfb2d35fdea37bbdf32b79b25de8eb12f500d20e10b48e915df470c0b2/: BPF program load failed: initial BPF error in prog-load: errno 11 (Resource temporarily unavailable); logging retry errno 28 (No space left on device); verifier log 1048575/1048576 bytes",
+          "gr8s: Service flow GC deferred: packet pipeline upgrades are pending",
+          "gr8s: Service flow GC verified 1 retained endpoint pipelines"
+        ],
+        "gcVerifiedAfterLastDeferral": true,
+        "cniAddTimeouts": 0
+      },
+      "agent-1.log": {
+        "sha256": "dfb139ec668c34be38a031d864bed4ff6444487750e765439f9ed9737ca97353",
+        "events": [],
+        "gcVerifiedAfterLastDeferral": true,
+        "cniAddTimeouts": 0
+      },
+      "control.log": {
+        "sha256": "bfd8b3ad4c971ae2953cbd053cd8584bf270edee4fcaa4b94b1ca2451ad9b405",
+        "events": [],
+        "gcVerifiedAfterLastDeferral": true,
+        "cniAddTimeouts": 0
+      }
+    }
+  },
+  "observedRetainedLoadFailure": {
+    "initialErrno": 11,
+    "loggingRetryErrno": 28,
+    "verifierBytes": 1048575,
+    "verifierBufferSize": 1048576,
+    "diagnosticSHA256": "d877a5f29f53b06262fa87f2ebd597311a044be3561af3a84128761854e764ac",
+    "verificationSummary": [
+      "2765: safe",
+      "verification time 538246 usec",
+      "stack depth 472",
+      "processed 26455 insns (limit 1000000) max_states_per_insn 23 total_states 1219 peak_states 732 mark_read 0",
+      ""
+    ],
+    "outcome": "GC deferred while the endpoint upgrade was pending, then verified1 retained endpoint pipeline. Nine workload/identity/restart/withdrawal/native HTTP checks and cleanup passed.",
+    "limits": "This captures the actual initial EAGAIN hidden by the retry ENOSPC. The source of the initial EAGAIN is unproven. The retry trace reached verification statistics but exceeded its buffer; it is not proof of an invalid program or physical disk exhaustion."
+  },
+  "kernelDiagnosticProbe": {
+    "buildScript": "scripts/build-bpf-load-diagnostics-test.lisp",
+    "binarySHA256": "5cc3594fede7b890427c2399baa2f3e5aa5dba00ee73e4bb4c877137bd08aacf",
+    "buildLogSHA256": "128c1ede908c5fc5b8b8cf14fd90e1dd757dd66b81c9018fcc244f9b4ca2f6af",
+    "reportSHA256": "736189639352dacd024c6ce41e4e66422c2a09deb3dcfdb71c334e1d39c8d61f",
+    "report": {
+      "passed": true,
+      "checks": [
+        {
+          "name": "validProgramLoads",
+          "passed": true
+        },
+        {
+          "name": "validProgramFDClosed",
+          "passed": true
+        },
+        {
+          "name": "shortLogPreservesInitialAndRetryErrors",
+          "passed": true,
+          "initialErrno": 13,
+          "retryErrno": 28,
+          "logBufferSize": 8,
+          "log": "read 0\n",
+          "reported": "BPF program load failed: initial BPF error in prog-load: errno 13 (Permission denied); logging retry errno 28 (No space left on device); verifier log 7/8 bytes\nread 0\n"
+        },
+        {
+          "name": "fullLogPreservesVerifierRejection",
+          "passed": true,
+          "initialErrno": 13,
+          "retryErrno": 13,
+          "logBufferSize": 65536,
+          "log": "func#0 @0\nLive regs before insn:\n      0: 0......... (95) exit\n0: R1=ctx() R10=fp0\n0: (95) exit\nR0 !read_ok\nverification time 23 usec\nstack depth 0\nprocessed 1 insns (limit 1000000) max_states_per_insn 0 total_states 0 peak_states 0 mark_read 0\n",
+          "reported": "BPF program load failed: initial BPF error in prog-load: errno 13 (Permission denied); logging retry errno 13 (Permission denied); verifier log 245/65536 bytes\nfunc#0 @0\nLive regs before insn:\n      0: 0......... (95) exit\n0: R1=ctx() R10=fp0\n0: (95) exit\nR0 !read_ok\nverification time 23 usec\nstack depth 0\nprocessed 1 insns (limit 1000000) max_states_per_insn 0 total_states 0 peak_states 0 mark_read 0\n"
+        }
+      ]
+    },
+    "scope": "Real socket-filter BPF_PROG_LOAD with an uninitialized return register. An8-byte log reproduces originalEACCES13 then retryENOSPC28 with preserved bytes;64KiB log retains EACCES and verifier message. A valid program loads and its FD closes. Root only inside disposable VM; no map/attachment changes."
+  },
+  "followup": "podster-p9c.11 tracks bounded immediate EAGAIN retries, with exhaustion/permanent-error and real retained-pipeline tests. This diagnostic patch preserves provenance only; initial signal/resource origin remains unproven.",
+  "remainingParent": "Source-NAT/hairpin/collision child10, IPv6 packet NAT, packet NodePort policies/source/health checks and broader live Service semantics remain active."
+}

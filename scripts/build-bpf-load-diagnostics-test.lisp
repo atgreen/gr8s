@@ -1,0 +1,55 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;; Build unprivileged, then run build/bpf-load-diagnostics-test as root in a
+;;;; disposable VM. No maps, attachments, containers or retained state are changed.
+(require :asdf)
+(asdf:load-asd (truename "gr8s.asd"))
+(asdf:load-system "whistler/loader")
+(asdf:load-system "com.inuoe.jzon")
+
+(defun bpf-load-diagnostics-main ()
+  (unless (zerop (sb-posix:geteuid))
+    (error "Run this kernel probe as root in a disposable VM"))
+  (let ((checks nil)
+        (bad (make-array 8 :element-type '(unsigned-byte 8)
+                          :initial-contents '(#x95 0 0 0 0 0 0 0)))
+        (good (make-array 16 :element-type '(unsigned-byte 8)
+                            :initial-contents '(#xb7 0 0 0 0 0 0 0 #x95 0 0 0 0 0 0 0))))
+    (labels ((record (name passed &rest fields)
+               (let ((row (make-hash-table :test #'equal)))
+                 (setf (gethash "name" row) name (gethash "passed" row) (if passed t :false))
+                 (loop for (key value) on fields by #'cddr do (setf (gethash key row) value))
+                 (push row checks)
+                 (unless passed (error "Kernel diagnostic assertion failed: ~A" name))))
+             (failure (size expected-retry)
+               (handler-case
+                   (let ((fd (whistler/loader::load-program bad 1 "GPL" :log-buf-size size)))
+                     (sb-posix:close fd)
+                     (record "invalidProgramRejected" nil))
+                 (whistler/loader:bpf-program-load-error (condition)
+                   (let* ((initial (whistler/loader:bpf-program-load-error-initial-error condition))
+                          (first-errno (whistler/loader::bpf-error-errno initial))
+                          (retry-errno (whistler/loader::bpf-error-errno condition))
+                          (log (whistler/loader:bpf-program-load-error-log condition)))
+                     (record (if (= size 8) "shortLogPreservesInitialAndRetryErrors" "fullLogPreservesVerifierRejection")
+                             (and (= first-errno 13) (= retry-errno expected-retry)
+                                  (typep condition 'whistler/loader:bpf-verifier-error)
+                                  (= size (whistler/loader:bpf-program-load-error-log-buf-size condition))
+                                  (plusp (length log)))
+                             "initialErrno" first-errno "retryErrno" retry-errno
+                             "logBufferSize" size "log" log "reported" (princ-to-string condition)))))))
+      (let ((fd (whistler/loader::load-program good 1 "GPL")))
+        (unwind-protect (record "validProgramLoads" (>= fd 0))
+          (sb-posix:close fd))
+        (record "validProgramFDClosed"
+                (handler-case (progn (sb-posix:fcntl fd sb-posix:f-getfd) nil)
+                  (sb-posix:syscall-error (error) (= sb-posix:ebadf (sb-posix:syscall-errno error))))))
+      (failure 8 28)
+      (failure 65536 13)
+      (let ((report (make-hash-table :test #'equal)))
+        (setf (gethash "passed" report) t (gethash "checks" report) (coerce (nreverse checks) 'vector))
+        (write-line (com.inuoe.jzon:stringify report))))))
+
+(ensure-directories-exist #P"build/")
+(sb-ext:save-lisp-and-die #P"build/bpf-load-diagnostics-test"
+                        :toplevel #'bpf-load-diagnostics-main :executable t :compression t)

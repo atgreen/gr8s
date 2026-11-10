@@ -1108,3 +1108,47 @@
                  :map-id (lambda (map) (declare (ignore map)) (error "must defer before map checks"))))
       (is-false (gr8s::service-lb-dataplane-gc-compatible-p dataplane))
       (is (search "packet pipeline upgrades are pending" (get-output-stream-string *error-output*))))))
+
+(test service-packet-load-diagnostics-retain-gc-gating-until-verified-recovery
+  (multiple-value-bind (dataplane keys next-key) (service-packet-gc-fixture)
+    (declare (ignore keys next-key))
+    (dolist (entry '(("gr8s_pkt_fwd_lock" . 900034) ("gr8s_pkt_rev_lock" . 900035)
+                     ("gr8s_pkt_tcp" . 900036)))
+      (push (fake-lb-map (car entry) (cdr entry)) (gr8s::service-lb-dataplane-maps dataplane)))
+    (setf (gr8s::service-lb-dataplane-gc-compatible-p dataplane) t)
+    (let ((failed t) (verified 0) (*error-output* (make-string-output-stream)))
+      (labels ((refresh-endpoint (directory shared cache allow-load)
+                 (declare (ignore directory shared cache allow-load))
+                 (if failed
+                     (error 'whistler/loader:bpf-verifier-error
+                            :context "prog-load" :errno 28 :log "retained-program trace"
+                            :log-buf-size 32
+                            :initial-error (make-condition 'whistler/loader:bpf-error
+                                                           :context "prog-load" :errno 13))
+                     :current))
+               (verify ()
+                 (gr8s.network:service-packet-gc-compatible-p
+                  dataplane :paths (constantly '("endpoint/gr8s_pkt_stages"))
+                  :refresh (lambda (plane paths)
+                             (gr8s.network::refresh-service-packet-pipelines
+                              plane paths :refresh #'refresh-endpoint))
+                  :map-id #'whistler/loader:map-info-fd
+                  :stage-map-ids (lambda (path)
+                                   (declare (ignore path)) (incf verified)
+                                   (list '(900032 900033 900034 900035 900036)
+                                         '(900032 900033 900034 900035 900036))))))
+        (is-false (verify))
+        (is-false (gr8s::service-lb-dataplane-gc-compatible-p dataplane))
+        (is (= 0 verified))
+        (let ((diagnostic (get-output-stream-string *error-output*)))
+          (is (search "errno 13" diagnostic))
+          (is (search "errno 28" diagnostic))
+          (is (search "retained-program trace" diagnostic))
+          (is (search "Service flow GC deferred" diagnostic)))
+        (is-false (verify))
+        (is (equal "" (get-output-stream-string *error-output*)))
+        (setf failed nil)
+        (is-true (verify))
+        (is (= 1 verified))
+        (is (= 0 (hash-table-count (gr8s::service-lb-dataplane-upgrade-warnings dataplane))))
+        (is (null (gr8s::service-lb-dataplane-gc-warning dataplane)))))))

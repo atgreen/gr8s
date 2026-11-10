@@ -6,6 +6,91 @@
 
 (in-suite loader-suite)
 
+(defun simulated-program-load (initial-errno retry-result log-bytes)
+  "Exercise the real attribute/retry/error path without loading host BPF."
+  (let ((calls 0))
+    (values
+     (handler-case
+         (whistler/loader::load-program
+          (make-array 16 :element-type '(unsigned-byte 8) :initial-element 0)
+          3 "GPL" :log-buf-size 32 :expected-attach-type 46 :attach-btf-id 17
+          :bpf (lambda (command attribute size context)
+                 (is (= 5 command))
+                 (is (= 256 size))
+                 (is (= 46 (whistler/loader::get-u32 attribute 68)))
+                 (is (= 17 (whistler/loader::get-u32 attribute 108)))
+                 (incf calls)
+                 (when (= calls 1)
+                   (is (= 0 (whistler/loader::get-u32 attribute 28)))
+                   (error 'whistler/loader:bpf-error :context context :errno initial-errno))
+                 (is (= 2 calls))
+                 (is (= 6 (whistler/loader::get-u32 attribute 24)))
+                 (is (= 32 (whistler/loader::get-u32 attribute 28)))
+                 (let* ((pointer (+ (whistler/loader::get-u32 attribute 32)
+                                    (ash (whistler/loader::get-u32 attribute 36) 32)))
+                        (sap (sb-sys:int-sap pointer)))
+                   (loop for byte across log-bytes for index from 0
+                         do (setf (sb-sys:sap-ref-8 sap index) byte)))
+                 (if (minusp retry-result)
+                     (error 'whistler/loader:bpf-error :context context :errno (- retry-result))
+                     retry-result)))
+       (whistler/loader:bpf-error (error) error))
+     calls)))
+
+(test program-load-preserves-original-rejection-when-log-retry-runs-out-of-space
+  (multiple-value-bind (error calls)
+      (simulated-program-load 13 -28 (sb-ext:string-to-octets "invalid access"))
+    (is (= 2 calls))
+    (is (typep error 'whistler/loader:bpf-verifier-error))
+    (is (= 13 (whistler/loader::bpf-error-errno
+               (whistler/loader:bpf-program-load-error-initial-error error))))
+    (is (= 28 (whistler/loader::bpf-error-errno error)))
+    (is (equal "invalid access" (whistler/loader:bpf-program-load-error-log error)))
+    (is (= 32 (whistler/loader:bpf-program-load-error-log-buf-size error)))
+    (let ((report (princ-to-string error)))
+      (is (search "errno 13" report))
+      (is (search "errno 28" report))
+      (is (search "invalid access" report)))))
+
+(test program-load-preserves-non-eacces-diagnostics-and-empty-permission-errors
+  (dolist (errno '(1 22 28))
+    (multiple-value-bind (error calls)
+        (simulated-program-load errno (- errno) #())
+      (is (= 2 calls))
+      (is (typep error 'whistler/loader:bpf-program-load-error))
+      (is-false (typep error 'whistler/loader:bpf-verifier-error))
+      (is (= errno (whistler/loader::bpf-error-errno error)))
+      (is (equal "" (whistler/loader:bpf-program-load-error-log error)))
+      (is (search "0/32 bytes" (princ-to-string error))))))
+
+(test program-load-full-log-and-arbitrary-bytes-cannot-mask-original-error
+  (multiple-value-bind (error calls)
+      (simulated-program-load 22 -28 (make-array 32 :initial-element 255))
+    (is (= 2 calls))
+    (is (typep error 'whistler/loader:bpf-program-load-error))
+    (is (= 32 (length (whistler/loader:bpf-program-load-error-log error))))
+    (is (search "32/32 bytes" (princ-to-string error)))))
+
+(test program-load-logging-retry-success-returns-the-live-fd
+  (multiple-value-bind (fd calls) (simulated-program-load 13 91 #())
+    (is (= 2 calls))
+    (is (= 91 fd))))
+
+(test program-load-first-success-does-not-retry-or-allocate-a-log
+  (let ((calls 0))
+    (is (= 92 (whistler/loader::load-program
+               (make-array 16 :element-type '(unsigned-byte 8) :initial-element 0)
+               3 "GPL" :bpf (lambda (command attribute size context)
+                             (declare (ignore command size context))
+                             (incf calls)
+                             (is (= 0 (whistler/loader::get-u32 attribute 28)))
+                             92))))
+    (is (= 1 calls))))
+
+(test legacy-verifier-conditions-remain-printable
+  (is (equal (format nil "BPF verifier rejected program~%legacy")
+             (princ-to-string (make-condition 'whistler/loader:bpf-verifier-error :log "legacy")))))
+
 (test libbpf-classifier-sections-are-sched-cls-programs
   (dolist (section '("classifier" "action" "tc" "tc/egress"))
     (is (= whistler/loader::+bpf-prog-type-sched-cls+
