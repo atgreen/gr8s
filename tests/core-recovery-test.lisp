@@ -59,6 +59,51 @@
                  (is (equal "15" (gethash "key" (gethash "data" object)))))))
         (setf (symbol-function 'gr8s::read-core-journal-records) original)))))
 
+(test replay-retires-event-expirations-before-the-next-record
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (let* ((expirations (gr8s::core-object "initial" 10000))
+           (records nil) (revision 1) (reads 0) (maximum 0))
+      (labels ((event (uid)
+                 (gr8s::core-object "apiVersion" "v1" "kind" "Event"
+                   "metadata" (gr8s::core-object "name" "sample" "namespace" "default" "uid" uid)))
+               (record (object &optional uid expiry)
+                 (push (gr8s::core-object "revision" (incf revision) "time" 10
+                         "changes" (vector (gr8s::core-object "resource" "events"
+                                             "namespace" "default" "name" "sample" "object" object))
+                         "eventExpirations" (if uid (gr8s::core-object uid expiry) (gr8s::core-object)))
+                       records)))
+        ;; Preserve legacy same-UID updates without an explicit expiry delta,
+        ;; then remove the replaced UID and the replacement's deletion.
+        (record (event "initial"))
+        (record (event "replacement") "replacement" 20000)
+        (record 'null)
+        (dotimes (i 32)
+          (let ((uid (format nil "churn-~D" i)))
+            (record (event uid) uid (+ 30000 i))
+            (record 'null)))
+        (setf records (nreverse records))
+        (let* ((state (gr8s::core-object "version" 2 "revision" 1 "templateHistoryFloor" 1
+                        "items" (vector (event "initial")) "templateHistory" #()
+                        "eventExpirations" expirations))
+               (recovered
+                 (gr8s::replay-core-journal
+                  store state
+                  (lambda ()
+                    ;; Observe the map while replay still owns it, rather than
+                    ;; accepting the existing final EOF-only filtering.
+                    (setf maximum (max maximum (hash-table-count expirations)))
+                    (case reads
+                      (1 (is (= 10000 (gethash "initial" expirations))))
+                      (2 (is-false (gethash "initial" expirations))
+                         (is (= 20000 (gethash "replacement" expirations))))
+                      (3 (is (= 0 (hash-table-count expirations)))))
+                    (incf reads)
+                    (pop records)))))
+          (is (= 1 maximum))
+          (is (= 68 reads))
+          (is (= 0 (hash-table-count (gethash "eventExpirations" recovered)))))))))
+
 (test journal-reader-empty-and-complete-eof
   (with-temporary-store (store path)
     (declare (ignore path))
