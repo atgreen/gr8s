@@ -36,14 +36,19 @@
 
 (defun compaction-native-main ()
   (gr8s.server::install-memory-hooks)
+  ;; Host speed must not make this retention probe easier by aging history out.
+  ;; Set the process-wide default so the Raft application thread sees it too.
+  (setf gr8s.store::*podtemplate-clock* (constantly (get-universal-time)))
   (destructuring-bind (root-text rounds-text) (uiop:command-line-arguments)
     (let* ((root (uiop:ensure-directory-pathname root-text)) (rounds (parse-integer rounds-text))
            (store (gr8s:open-store root)) (ha nil) (port nil)
-           (max-wal 0) (max-artifacts 0) (checkpoints 0) (samples 0)
+           (max-wal 0) (max-artifacts 0) (max-history 0) (checkpoints 0) (samples 0)
            (result (gr8s::core-object "passed" nil "nativeHarness" t "productionServe" nil
                      "vmAcceptance" nil "automaticWorker" t "productionDefaultEnabled" nil
                      "rounds" rounds "payloadBytesWritten" (* rounds 65536)
                      "walTriggerBytes" (* 16 1024 1024)
+                     "historyClockFrozen" t
+                     "historyByteBudget" gr8s.resources::*resource-watch-history-bytes*
                      "heapLimitMiB" (/ (sb-ext:dynamic-space-size) (* 1024 1024)))))
       (labels ((ready () (gr8s::ha-control-plane-leader-p ha))
                (sample ()
@@ -65,6 +70,7 @@
                                         "logRetainedEntries" (length (gr8s.raft:raft-node-log node))
                                         "logCommandHeapBytes" (loop for entry across (gr8s.raft:raft-node-log node)
                                                                    sum (compaction-native-root-bytes (gr8s.raft:raft-entry-command entry))))))
+                         (setf max-history (max max-history (gethash "historyEstimatedBytes" metrics)))
                          (format *error-output* "~&compaction progress: ~A~%" (com.inuoe.jzon:stringify metrics))
                          (finish-output *error-output*))))
                    (incf samples))))
@@ -72,6 +78,7 @@
              (handler-case
                  (progn
                    (assert (= 384 (gethash "heapLimitMiB" result)))
+                   (assert (>= rounds 2048))
                    (setf ha (gr8s::start-ha-control-plane store :id "compact-native" :init t
                              :compaction-bytes (* 16 1024 1024) :compaction-entries 100000 :compaction-interval 0.01)
                          port (gr8s::raft-member-port (gr8s::ha-control-plane-member ha)))
@@ -101,6 +108,7 @@
                    (assert (>= checkpoints 2))
                    (assert (< max-wal (* 32 1024 1024)))
                    (assert (<= max-artifacts 2))
+                   (assert (>= max-history (- gr8s.resources::*resource-watch-history-bytes* (* 2 65536))))
                    (gr8s::stop-ha-control-plane ha)
                    (assert (null (gr8s.ha::ha-control-plane-compaction-thread ha)))
                    (setf store (gr8s:open-store root :defer-restore-completion t)
@@ -112,6 +120,7 @@
                          (gethash "checkpoints" result) checkpoints
                          (gethash "sampledMaxWalBytes" result) max-wal
                          (gethash "sampledMaxArtifactCount" result) max-artifacts
+                         (gethash "sampledMaxHistoryEstimatedBytes" result) max-history
                          (gethash "samples" result) samples
                          (gethash "sentinelRecovered" result) t))
                (error (condition) (setf (gethash "error" result) (princ-to-string condition))))

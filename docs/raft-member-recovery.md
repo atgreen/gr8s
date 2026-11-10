@@ -471,7 +471,10 @@ Build the internal native retention probe with
 `scripts/build-compaction-native-harness.lisp`, then run the resulting
 `build/gr8s-compaction-acceptance --dynamic-space-size 384 PRIVATE_ROOT 2048`.
 Use a new private directory for `PRIVATE_ROOT`. The probe creates/deletes 2,048
-64 KiB objects (128 MiB of payload), retains the normal bounded watch history,
-uses the 16 MiB disk/command-memory trigger, samples retained WAL/artifact counts and recovers a
-sentinel after restart. This is an internal single-member native probe rather
+64 KiB objects (128 MiB of payload), retains the normal 96 MiB watch-history
+byte budget, uses the 16 MiB disk/command-memory trigger, samples retained
+WAL/artifact counts and recovers a sentinel after restart. Its process-local
+history clock is frozen so a slow host cannot make history expire before the
+byte cap is exercised; a pass requires sampled history within 128 KiB of that
+cap. This is an internal single-member native probe rather
 than production CLI, multi-member or VM acceptance.
