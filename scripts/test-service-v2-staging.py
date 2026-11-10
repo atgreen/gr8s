@@ -13,6 +13,7 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import socket
 import struct
 import subprocess
 import sys
@@ -107,8 +108,8 @@ def main():
 
         traffic.wait_for("v2 granted Service selectors", 120, selections_published)
         report["serviceSelectionGrantedAfterRisk"] = True
-        # A disposable network namespace lets CNI ADD exercise the agent's
-        # snapshot-revision risk fence without enabling the still-gated graph.
+        # A disposable network namespace exercises real v2 graph loading,
+        # TCX attachment and CHECK after the snapshot-revision risk fence.
         netns_name = "gr8s-v2-risk-proof"
         netns_path = f"/var/run/netns/{netns_name}"
         subprocess.run(["ip", "netns", "add", netns_name], check=True)
@@ -123,16 +124,80 @@ def main():
                            "CNI_NETNS": netns_path, "CNI_IFNAME": "eth0"}
             deadline = time.monotonic() + 120
             while True:
+                add_started = time.monotonic()
                 answer = subprocess.run([str(args.gr8s)], input=json.dumps(plugin),
                                         env=environment, capture_output=True, text=True)
-                if answer.returncode != 0 and "v2 Service endpoint attachment is waiting" in answer.stdout:
+                if answer.returncode == 0:
                     break
-                if (time.monotonic() >= deadline or answer.returncode == 0 or
+                if (time.monotonic() >= deadline or
                         "v2 Service risk inventory is not published" not in answer.stdout):
-                    raise RuntimeError("v2 CNI did not reach the gated attachment after risk publication: "
+                    raise RuntimeError("v2 CNI ADD failed after risk publication: "
                                        + answer.stdout + answer.stderr)
                 time.sleep(1)
-            report["localRiskFenceReached"] = True
+            report["v2CniAttached"] = True
+            report["v2CniAddSeconds"] = round(time.monotonic() - add_started, 3)
+            environment["CNI_COMMAND"] = "CHECK"
+            checked = subprocess.run([str(args.gr8s)], input=json.dumps(plugin),
+                                     env=environment, capture_output=True, text=True)
+            if checked.returncode != 0:
+                raise RuntimeError("v2 CNI CHECK failed: " + checked.stdout + checked.stderr)
+            report["v2CniChecked"] = True
+            pod_address = json.loads(answer.stdout)["ips"][0]["address"].split("/", 1)[0]
+            source_port = 40000 + os.getpid() % 10000
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as host:
+                host.bind(("0.0.0.0", 0))
+                host.settimeout(10)
+                code = ("import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); "
+                        f"s.bind(('0.0.0.0',{source_port})); s.settimeout(10); "
+                        f"s.sendto(b'v2-direct',('169.254.1.1',{host.getsockname()[1]})); "
+                        "assert s.recvfrom(64)[0] == b'v2-reply'")
+                child = subprocess.Popen(["ip", "netns", "exec", netns_name,
+                                          "python3", "-c", code],
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                         text=True)
+                try:
+                    payload, peer = host.recvfrom(64)
+                    if (payload, peer) != (b"v2-direct", (pod_address, source_port)):
+                        raise RuntimeError(f"v2 direct UDP changed source tuple: {peer!r}")
+                    host.sendto(b"v2-reply", peer)
+                    stdout, stderr = child.communicate(timeout=12)
+                    if child.returncode != 0:
+                        raise RuntimeError("v2 direct UDP reply failed: " + stdout + stderr)
+                finally:
+                    if child.poll() is None:
+                        child.kill()
+                        child.communicate()
+            report["v2DirectUdpPreservedSource"] = True
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+                listener.bind(("0.0.0.0", 0))
+                listener.listen(1)
+                listener.settimeout(10)
+                tcp_port = source_port + 1
+                code = ("import socket; s=socket.socket(socket.AF_INET,socket.SOCK_STREAM); "
+                        f"s.bind(('0.0.0.0',{tcp_port})); s.settimeout(10); "
+                        f"s.connect(('169.254.1.1',{listener.getsockname()[1]})); "
+                        "s.sendall(b'v2-tcp'); assert s.recv(64) == b'v2-reply'")
+                child = subprocess.Popen(["ip", "netns", "exec", netns_name,
+                                          "python3", "-c", code],
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                         text=True)
+                try:
+                    connection, peer = listener.accept()
+                    with connection:
+                        connection.settimeout(10)
+                        if peer != (pod_address, tcp_port):
+                            raise RuntimeError(f"v2 direct TCP changed source tuple: {peer!r}")
+                        if connection.recv(64) != b"v2-tcp":
+                            raise RuntimeError("v2 direct TCP payload was changed")
+                        connection.sendall(b"v2-reply")
+                    stdout, stderr = child.communicate(timeout=12)
+                    if child.returncode != 0:
+                        raise RuntimeError("v2 direct TCP reply failed: " + stdout + stderr)
+                finally:
+                    if child.poll() is None:
+                        child.kill()
+                        child.communicate()
+            report["v2DirectTcpPreservedSource"] = True
         finally:
             if plugin is not None and environment is not None:
                 environment["CNI_COMMAND"] = "DEL"

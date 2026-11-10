@@ -426,6 +426,7 @@ prevResult and only installs, checks, or removes its policy datapath."
        (map-fd #'whistler/loader:map-info-fd)
        (program-fd #'whistler/loader:prog-info-fd)
        (initialize-identity #'initialize-cni-identity)
+       (check-owner #'check-cni-service-nat-owner)
        (pin-object #'whistler/loader:pin-bpf-object)
        (rename-pin #'uiop:rename-file-overwriting-target)
        (staged-links #'cni-policy-staged-links)
@@ -450,11 +451,20 @@ prevResult and only installs, checks, or removes its policy datapath."
         ;; A link pinned but not yet renamed into place.
         (staging nil)
         (committed nil))
-    ;; The graph loader is wired separately from activation. A v2 endpoint
-    ;; requires a 48-byte local incarnation and an acknowledged receiver map;
-    ;; the ordinary CNI identity writer still emits the legacy 32-byte value.
+    ;; A v2 endpoint is explicitly opted in by the CNI profile. Only native
+    ;; routed ADD can supply the trusted node ID and private return lease;
+    ;; the external chained CNI path has no v2 owner publication yet.
     (when (eq (cni-service-profile configuration) :v2)
-      (invalid-cni "v2 Service endpoint attachment is waiting for local identity and publication fencing"))
+      (unless (and (stringp (cni-configuration-service-node-id configuration))
+                   (plusp (length (cni-configuration-service-node-id configuration)))
+                   (stringp (cni-configuration-service-return-address configuration))
+                   (plusp (length (cni-configuration-service-return-address configuration)))
+                   (find-if-not (lambda (address) (find #\: address))
+                                (cni-configuration-endpoint-addresses configuration)))
+        (invalid-cni "v2 Service endpoint requires a trusted native owner and return lease"))
+      (funcall check-owner configuration context
+               (cni-configuration-endpoint-addresses configuration)
+               (cni-configuration-service-return-address configuration)))
     (funcall ensure-directory directory)
     (unwind-protect
          (progn
