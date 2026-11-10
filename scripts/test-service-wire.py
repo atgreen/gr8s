@@ -84,11 +84,12 @@ class Machine(p.PacketMachine):
                     self.write(r[3] + offset, 1, value)
                 r[0] = 0
         else:
-            assert r[5] == 2
+            size = r[5]
+            assert size in (2, 4)
             old, = struct.unpack_from("!H", data, r[2])
-            before = int.from_bytes((r[3] & 0xffff).to_bytes(2, "little"), "big")
-            after = int.from_bytes((r[4] & 0xffff).to_bytes(2, "little"), "big")
-            value = (~old & 0xffff) + (~before & 0xffff) + after
+            before = struct.unpack(f"!{size // 2}H", (r[3] & ((1 << (8 * size)) - 1)).to_bytes(size, "little"))
+            after = struct.unpack(f"!{size // 2}H", (r[4] & ((1 << (8 * size)) - 1)).to_bytes(size, "little"))
+            value = (~old & 0xffff) + sum(~word & 0xffff for word in before) + sum(after)
             while value >> 16:
                 value = (value & 0xffff) + (value >> 16)
             struct.pack_into("!H", data, r[2], ~value & 0xffff)

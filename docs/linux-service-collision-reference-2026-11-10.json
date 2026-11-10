@@ -1,0 +1,137 @@
+{
+  "kernel": "6.19.10-300.fc44.x86_64",
+  "nft": "nftables v1.1.6 (Commodore Bullmoose #7)",
+  "cases": [
+    {
+      "simultaneous": false,
+      "masquerade": false,
+      "wireQueueLengthsBeforeReceive": [],
+      "bothQueuedBeforeDelivery": null,
+      "firstSend": {
+        "sent": true
+      },
+      "secondSend": {
+        "sent": true
+      },
+      "firstReceive": {
+        "body": "request-from-A",
+        "peer": [
+          "10.88.0.2",
+          5000
+        ]
+      },
+      "secondReceive": {
+        "body": "request-from-B",
+        "peer": [
+          "10.88.1.3",
+          14286
+        ]
+      },
+      "firstLooksLikeServiceReply": false,
+      "secondLooksLikeServiceReply": false
+    },
+    {
+      "simultaneous": true,
+      "masquerade": false,
+      "wireQueueLengthsBeforeReceive": [
+        1,
+        1
+      ],
+      "bothQueuedBeforeDelivery": true,
+      "firstSend": {
+        "sent": true
+      },
+      "secondSend": {
+        "sent": true
+      },
+      "firstReceive": {
+        "body": "request-from-A",
+        "peer": [
+          "10.96.0.99",
+          80
+        ]
+      },
+      "secondReceive": {
+        "body": "request-from-B",
+        "peer": [
+          "10.96.0.10",
+          80
+        ]
+      },
+      "firstLooksLikeServiceReply": true,
+      "secondLooksLikeServiceReply": true
+    },
+    {
+      "simultaneous": false,
+      "masquerade": true,
+      "wireQueueLengthsBeforeReceive": [],
+      "bothQueuedBeforeDelivery": null,
+      "firstSend": {
+        "sent": true
+      },
+      "secondSend": {
+        "sent": true
+      },
+      "firstReceive": {
+        "body": "request-from-A",
+        "peer": [
+          "192.0.2.1",
+          5000
+        ]
+      },
+      "secondReceive": {
+        "body": "request-from-B",
+        "peer": [
+          "192.0.2.2",
+          8080
+        ]
+      },
+      "firstLooksLikeServiceReply": false,
+      "secondLooksLikeServiceReply": false
+    },
+    {
+      "simultaneous": true,
+      "masquerade": true,
+      "wireQueueLengthsBeforeReceive": [
+        1,
+        2
+      ],
+      "bothQueuedBeforeDelivery": true,
+      "firstSend": {
+        "sent": true
+      },
+      "secondSend": {
+        "sent": true
+      },
+      "firstReceive": {
+        "body": "request-from-A",
+        "peer": [
+          "192.0.2.1",
+          5000
+        ]
+      },
+      "secondReceive": {
+        "body": "request-from-B",
+        "peer": [
+          "192.0.2.2",
+          8080
+        ]
+      },
+      "firstLooksLikeServiceReply": false,
+      "secondLooksLikeServiceReply": false
+    }
+  ],
+  "scope": "Linux nftables reference experiment using real bound UDP sockets, not kube-proxy, Cilium or Calico conformance.",
+  "probe": "scripts/probe-linux-service-collisions.py",
+  "probeSHA256": "138ee544ad988692025e066013ac313a6e6225e3dcd1d7e820cd53854f4760f9",
+  "observations": [
+    "Ordered unmasqueraded traffic preserved source IP but Linux changed the second source port.",
+    "Simultaneous unmasqueraded traffic arrived with the opposite Service VIP as source; both node queues were observed nonempty before receive.",
+    "Masquerading avoided wrong Service identity in these four cases while changing source IP to node IP."
+  ],
+  "limitations": [
+    "IPv4 UDP only, one observed run per case.",
+    "No actual CNI or kube-proxy process.",
+    "No source-preservation or TCP conformance claim."
+  ]
+}

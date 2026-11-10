@@ -41,6 +41,9 @@ class Machine(wire.Machine):
 
 
 class Interpreter(graph.Interpreter):
+    def keys(self, name):
+        return list(self.maps.entries[name])
+
     def __init__(self, programs, ids, descriptors, shared=None):
         super().__init__(programs, ids, descriptors, shared)
         for index, name in enumerate(EXTRA, 8):
@@ -133,7 +136,11 @@ def crossed(factory, protocol, shared, simultaneous):
                                     seq=server_seq, ack=(1001 if server is backend else 9001),
                                     flags=0x12, mac=mac)
             response_wire = run(server, 0, response)
-            assert response_wire[59] == 2
+            assert len(response_wire) >= 102 and response_wire[59] == 2, {
+                "response": p.endpoints(response), "output": p.endpoints(response_wire),
+                "path": getattr(server, "visited", None),
+                "rx": {key.hex(): server.lookup(RX, key).hex() for key in server.keys(RX)},
+                "ri": {key.hex(): server.lookup(RI, key).hex() for key in server.keys(RI)}}
             restored = run(receiver, 1, response_wire)
             origin, frontend, origin_port, frontend_port = p.endpoints(original)
             assert p.endpoints(restored) == (frontend, origin, frontend_port, origin_port)
