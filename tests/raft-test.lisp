@@ -1522,3 +1522,66 @@
                           (mapcar #'gr8s.raft:raft-entry-command
                                   (cdr (gr8s.raft::raft-storage-read-catchup storage node next)))))))
         (gr8s::close-file-raft-storage storage)))))
+
+(test capacity-limited-cached-peer-installs-checkpoint-without-growing-budget
+  (with-temporary-store (store root)
+    (values store)
+    (let* ((storage (gr8s::open-file-raft-storage (merge-pathnames "capacity-cache.log" root)))
+           (leader (make-disk-catchup-test-node storage))
+           (replies nil)
+           (follower (gr8s.raft::make-raft-node
+                      :id "follower" :current-term 2 :retained-byte-limit 512
+                      :uncommitted-weight-fn (constantly 128)
+                      :send-fn (lambda (target message) (declare (ignore target))
+                                 (push message replies)))))
+      (unwind-protect
+           (progn
+             (gr8s.raft::raft-configure leader '(("leader" . :voter) ("follower" . :voter)))
+             (gr8s.raft:raft-compact leader 3)
+             (setf (gethash "follower" (gr8s.raft:raft-node-next-index leader)) 1)
+             (dotimes (i 2)
+               (values i)
+               (gr8s.raft:raft-handle-message follower
+                 (gr8s.raft::raft-append-message leader "follower"))
+               (is (getf (first replies) :success))
+               (gr8s.raft:raft-handle-message leader (first replies)))
+             (is (= 2 (gr8s.raft:raft-node-last-applied follower)))
+             (gr8s.raft:raft-handle-message follower
+               (gr8s.raft::raft-append-message leader "follower"))
+             (is (not (getf (first replies) :success)))
+             (is (getf (first replies) :capacity-limited))
+             (is (= 2 (gr8s.raft:raft-node-last-applied follower)))
+             (gr8s.raft:raft-handle-message leader (first replies))
+             (let ((message (gr8s.raft::raft-append-message leader "follower")))
+               (is (eq :install-snapshot (getf message :type)))
+               ;; Heartbeat retries must retain the snapshot preference.
+               (is (eq :install-snapshot
+                       (getf (gr8s.raft::raft-append-message leader "follower") :type)))
+               (gr8s.raft:raft-handle-message follower message))
+             (is (= 3 (gr8s.raft:raft-node-last-applied follower)))
+             (is (= 512 (gr8s.raft::raft-node-retained-byte-limit follower)))
+             (is (zerop (length (gr8s.raft:raft-node-log follower))))
+             (gr8s.raft:raft-handle-message leader (first replies))
+             (is (not (gethash "follower" (gr8s.raft::raft-node-peer-snapshot-required leader))))
+             (is (= 4 (gethash "follower" (gr8s.raft:raft-node-next-index leader)))))
+        (gr8s::close-file-raft-storage storage)))))
+
+(test snapshot-capacity-hints-are-current-term-member-scoped-and-reset
+  (let ((node (gr8s.raft::make-raft-node
+               :id "leader" :peers '("peer") :role :leader :current-term 2
+               :snapshot-index 4 :snapshot-term 2 :commit-index 4 :last-applied 4)))
+    (flet ((reply (peer term &optional (capacity t))
+             (gr8s.raft::raft-handle-append-entries-reply node
+               (list :from peer :term term :success nil :next-index 2 :capacity-limited capacity))))
+      (reply "peer" 1)
+      (reply "outsider" 2)
+      (reply "peer" 2 nil)
+      (is (zerop (hash-table-count (gr8s.raft::raft-node-peer-snapshot-required node))))
+      (reply "peer" 2)
+      (is (= 1 (hash-table-count (gr8s.raft::raft-node-peer-snapshot-required node))))
+      (gr8s.raft::raft-configure node '(("leader" . :voter) ("peer" . :voter)))
+      (is (zerop (hash-table-count (gr8s.raft::raft-node-peer-snapshot-required node))))
+      (reply "peer" 2)
+      (setf (gr8s.raft:raft-node-peers node) nil)
+      (gr8s.raft::raft-become-leader node)
+      (is (zerop (hash-table-count (gr8s.raft::raft-node-peer-snapshot-required node)))))))
