@@ -92,3 +92,41 @@
           (is (equal "recovered" (configmap-value again "sample" "key")))
           (is (equal "committed" (configmap-value again "next" "key"))))))))
 (in-suite gr8s)
+
+(in-suite core-recovery)
+(test checkpoint-writer-streams-transforms-and-preserves-the-checkpoint-schema
+  (with-temporary-store (store root)
+    (gr8s::create-core-resource store "configmaps" (configmap-input "stream-a" "k" "a") "default")
+    (gr8s::create-core-resource store "configmaps" (configmap-input "stream-b" "k" "b") "default")
+    (let* ((arguments (list store (gr8s::pod-store-resources store) (gr8s::pod-store-resource-revision store)
+                            (gr8s::pod-store-workload-deletions store) (gr8s::pod-store-job-controller-states store)
+                            (gr8s::pod-store-template-history store) (gr8s::pod-store-template-history-floor store)
+                            (gr8s::pod-store-template-token-key store) (gr8s::pod-store-event-expirations store)))
+           (expected (apply #'gr8s::core-checkpoint-object arguments))
+           (writer (apply #'gr8s.resources::core-checkpoint-writer arguments))
+           (path (merge-pathnames "streamed-checkpoint.json" root))
+           (original (symbol-function 'gr8s.resources::encrypt-secret-history-entry))
+           (positions nil))
+      (unwind-protect
+           (with-open-file (stream path :direction :output :if-exists :supersede)
+             (setf (symbol-function 'gr8s.resources::encrypt-secret-history-entry)
+                   (lambda (incoming entry)
+                     (push (file-position stream) positions)
+                     (funcall original incoming entry)))
+             (funcall writer stream))
+        (setf (symbol-function 'gr8s.resources::encrypt-secret-history-entry) original))
+      (is (gr8s.store::json-value-equal-p expected (com.inuoe.jzon:parse path)))
+      (is (>= (length positions) 2))
+      (is (every #'< (reverse positions) (rest (reverse positions)))))))
+
+(test ordinary-checkpoints-do-not-build-the-whole-state-object
+  (with-temporary-store (store root)
+    (let ((original (symbol-function 'gr8s::core-checkpoint-object)))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s::core-checkpoint-object)
+                   (lambda (&rest args) (declare (ignore args)) (error "Aggregate checkpoint object forbidden"))
+                   (gr8s::pod-store-core-checkpoint-needed store) t)
+             (gr8s::create-core-resource store "configmaps" (configmap-input "stream-only" "k" "persisted") "default")
+             (is (equal "persisted" (configmap-value (gr8s:open-store root) "stream-only" "k"))))
+        (setf (symbol-function 'gr8s::core-checkpoint-object) original)))))

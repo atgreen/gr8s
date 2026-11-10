@@ -423,6 +423,59 @@ whether the journal must be rewritten (a torn record) and its complete bytes."
                                                         collect (core-object "resource" (first key) "object"
                                                                              (encrypt-secret-object store (first key) object))) 'vector)))))
 
+(defun core-checkpoint-writer (store resources revision workload-deletions job-controller-states
+                                history floor token-key event-expirations &key omit-local-plane)
+  "Return a synchronous writer that transforms and emits one object at a time.
+Caller keeps the same store barriers as checkpoint publication. No complete
+transformed history, resource vector or JSON string is constructed."
+  (lambda (stream)
+    (multiple-value-bind (durable durable-floor) (durable-template-history history floor)
+      (let ((first-field t))
+        (labels ((prefix (name)
+                   (unless first-field (write-char #\, stream))
+                   (setf first-field nil)
+                   (com.inuoe.jzon:stringify name :stream stream)
+                   (write-char #\: stream))
+                 (field (name value)
+                   (prefix name) (com.inuoe.jzon:stringify value :stream stream))
+                 (array-field (name producer)
+                   (prefix name) (write-char #\[ stream)
+                   (let ((first-item t))
+                     (funcall producer
+                              (lambda (value)
+                                (unless first-item (write-char #\, stream))
+                                (setf first-item nil)
+                                (com.inuoe.jzon:stringify value :stream stream))))
+                   (write-char #\] stream)))
+          (write-char #\{ stream)
+          (field "version" 2) (field "revision" revision)
+          (field "workloadDeletions" workload-deletions)
+          (field "jobControllerStates" job-controller-states)
+          (array-field "templateHistory"
+                       (lambda (emit)
+                         (dolist (entry durable)
+                           (funcall emit (encrypt-secret-history-entry store entry)))))
+          (field "templateHistoryFloor" durable-floor)
+          (field "templateTokenKey" (ag-grpc:base64-encode token-key))
+          (field "secretsEncryption" (or (pod-store-secret-encryption-config store) 'null))
+          (field "resourceHistoryStart" (pod-store-resource-history-start store))
+          (field "eventExpirations" event-expirations)
+          (array-field "items"
+                       (lambda (emit)
+                         (maphash (lambda (key object)
+                                    (unless (or (custom-resource-key-p (first key))
+                                                (and omit-local-plane (local-plane-resource-p (first key))))
+                                      (funcall emit (encrypt-secret-object store (first key) object))))
+                                  resources)))
+          (array-field "customResourceItems"
+                       (lambda (emit)
+                         (maphash (lambda (key object)
+                                    (when (custom-resource-key-p (first key))
+                                      (funcall emit (core-object "resource" (first key) "object"
+                                                                (encrypt-secret-object store (first key) object)))))
+                                  resources)))
+          (write-char #\} stream))))))
+
 (defun core-state-json (store resources revision workload-deletions job-controller-states
                         &key omit-local-plane)
   "Serialize the complete durable core-resource state, as a checkpoint is written.
@@ -565,7 +618,7 @@ so that only a crash can leave a torn record, and only at the end."
   "Replace STORE's checkpoint with STATE, a JSON string or object, and start an empty journal after it.
 An object is streamed to the file, never held as one string as large as the store."
   (write-private-text-atomically (core-resource-state-path store)
-                                 (if (stringp state)
+                                 (if (or (stringp state) (functionp state))
                                      state
                                      (lambda (stream) (com.inuoe.jzon:stringify state :stream stream))))
   ;; The checkpoint holds everything the journal did. Should deleting the journal
@@ -613,7 +666,7 @@ An object is streamed to the file, never held as one string as large as the stor
        (let ((token-key (or (pod-store-template-token-key store) (secure-random-octets 32)))
              (event-expirations (next-event-expirations store resources)))
          (if (core-checkpoint-due-p store)
-             (write-core-checkpoint store (core-checkpoint-object store resources revision workload-deletions
+             (write-core-checkpoint store (core-checkpoint-writer store resources revision workload-deletions
                                                                   job-controller-states history floor
                                                                   token-key event-expirations))
              (append-core-journal-record

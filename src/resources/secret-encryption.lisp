@@ -178,7 +178,7 @@
                        (secure-random-octets 32))))
     (write-core-checkpoint
      store
-     (core-checkpoint-object
+     (core-checkpoint-writer
       store (pod-store-resources store) (pod-store-resource-revision store)
       (pod-store-workload-deletions store)
       (pod-store-job-controller-states store)
