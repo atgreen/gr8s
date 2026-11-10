@@ -1,0 +1,39 @@
+{
+  "scope": "Core checkpoint/journal and production Raft WAL apparent-length telemetry; not total disk usage or complete operational telemetry",
+  "testedProductCommit": "2f5e37f534772f38be8841b4c20d07e385a18057",
+  "passed": true,
+  "checks": 82,
+  "suite": "apiserver-metrics",
+  "fixedFileLabels": [
+    "core_checkpoint",
+    "core_journal",
+    "raft_wal"
+  ],
+  "covers": [
+    "real journal growth and checkpoint replacement",
+    "completed generation selection/reopen",
+    "stable member-root WAL path",
+    "read-only collection while ingress is gated",
+    "missing versus non-regular files",
+    "API metrics listener"
+  ],
+  "logSha256": "a10252e44da4ee4759c9906df4346f3f1d06551c385c21b7c5fb1c48219861f6",
+  "sourceSha256": {
+    "src/server/memory-monitor.lisp": "7e6e12ffa0c1e256a1ea3d40cf86dce331a6190478cdb26716fce6183d3b2de5",
+    "src/apiserver/http.lisp": "2fd2a1778a9f186df9b925216fcdff0d955354e69cddf69d288c9ed7fff542c2",
+    "tests/apiserver-metrics-test.lisp": "744a58f85e606cdfd6ba5a9d144dd6cd5c3f4f5fac3060896f13140355ceba91"
+  },
+  "command": [
+    "sbcl",
+    "--noinform",
+    "--non-interactive",
+    "--eval",
+    "(require :asdf)",
+    "--eval",
+    "(asdf:load-asd (truename \"gr8s.asd\"))",
+    "--eval",
+    "(asdf:load-system \"gr8s/tests\")",
+    "--eval",
+    "(unless (fiveam:run! (quote gr8s/tests::apiserver-metrics)) (uiop:quit 1))"
+  ]
+}
