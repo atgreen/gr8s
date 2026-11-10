@@ -22,13 +22,26 @@
                (original (symbol-function 'gr8s.resources::capture-frozen-store-snapshot))
                (original-capacity (symbol-function 'gr8s.raft::raft-replication-capacity-index))
                (original-catchup (symbol-function 'gr8s.raft::raft-storage-read-catchup))
+               (original-cache-prefix (symbol-function 'gr8s.raft::raft-storage-cache-prefix))
+               (original-replace-wal (symbol-function 'gr8s.raft::raft-storage-replace-snapshot))
+               (storage-stages (make-hash-table :test #'equal))
                (lock (bt:make-lock "compaction probe state"))
                (armed nil) (held nil) (held-index nil) (stopping nil)
                (completed 0) (finished nil) (failure nil) (refusals 0) (conflict-retries 0) (cache-batches 0)
                (loaded-history (reduce #'+ (gr8s::pod-store-template-history store)
                                        :key #'gr8s.resources::template-history-entry-bytes)))
           (labels
-              ((retry-write (function)
+              ((timed-storage-stage (name function)
+                 (let ((started (get-internal-real-time)))
+                   (unwind-protect (funcall function)
+                     (let ((elapsed (/ (- (get-internal-real-time) started)
+                                       (float internal-time-units-per-second 1d0))))
+                       (bt:with-lock-held (lock)
+                         (let ((row (or (gethash name storage-stages)
+                                        (setf (gethash name storage-stages) (vector 0 0d0 0d0 0d0)))))
+                           (incf (aref row 0)) (incf (aref row 1) elapsed)
+                           (setf (aref row 2) (max (aref row 2) elapsed) (aref row 3) elapsed)))))))
+               (retry-write (function)
                  (let ((deadline (+ (get-internal-real-time) (* 120 internal-time-units-per-second))))
                    (loop
                      (when (bt:with-lock-held (lock) stopping) (error "Probe stopping"))
@@ -152,6 +165,13 @@
                            (gethash "replicationCapacityRefusals" object) refusals
                            (gethash "committedConflictRetries" object) conflict-retries
                            (gethash "catchupCacheBatches" object) cache-batches
+                           (gethash "storageStages" object)
+                           (coerce (loop for name in '("cache-prefix" "replace-wal")
+                                         for row = (gethash name storage-stages)
+                                         when row collect
+                                           (gr8s::core-object "stage" name "attempts" (aref row 0)
+                                             "totalSeconds" (aref row 1) "maxSeconds" (aref row 2)
+                                             "lastSeconds" (aref row 3))) 'vector)
                            (gethash "churnError" object) failure))
                    object))
                (churn ()
@@ -199,6 +219,12 @@
                            (let ((result (funcall original-catchup storage node next)))
                              (when result (bt:with-lock-held (lock) (incf cache-batches)))
                              result)))
+                   (setf (symbol-function 'gr8s.raft::raft-storage-cache-prefix)
+                         (lambda (&rest arguments)
+                           (timed-storage-stage "cache-prefix" (lambda () (apply original-cache-prefix arguments))))
+                         (symbol-function 'gr8s.raft::raft-storage-replace-snapshot)
+                         (lambda (&rest arguments)
+                           (timed-storage-stage "replace-wal" (lambda () (apply original-replace-wal arguments)))))
                    (gr8s.ha::start-ha-compaction-worker ha)
                    (learner-native-write-json (merge-pathnames "ready.json" control) (gr8s::core-object "ready" t))
                    (loop
@@ -246,5 +272,7 @@
               (when (and member (null ha)) (gr8s::stop-raft-member member))
               (setf (symbol-function 'gr8s.resources::capture-frozen-store-snapshot) original
                     (symbol-function 'gr8s.raft::raft-replication-capacity-index) original-capacity
-                    (symbol-function 'gr8s.raft::raft-storage-read-catchup) original-catchup)))))
+                    (symbol-function 'gr8s.raft::raft-storage-read-catchup) original-catchup
+                    (symbol-function 'gr8s.raft::raft-storage-cache-prefix) original-cache-prefix
+                    (symbol-function 'gr8s.raft::raft-storage-replace-snapshot) original-replace-wal)))))
     (error (condition) (format *error-output* "Compaction cluster probe failed: ~A~%" condition) (uiop:quit 1))))

@@ -249,5 +249,136 @@
         }
       ]
     }
-  }
+  },
+  "diagnosticRerun": {
+    "passed": true,
+    "evidence": "/tmp/gr8s-compaction-cluster-native-gsljn4oo",
+    "binarySha256": "26167df5e6f40f6795cb7aaed53ffa58c43aba43bbec03c4439cc0dbc0d6557e",
+    "elapsedSeconds": 94.22887216298841,
+    "asymmetricCaptureAcceptance": true,
+    "diskCatchupAcceptance": true,
+    "catchupHistoryContinuous": true,
+    "identitiesPreserved": true,
+    "stopExitCodes": {
+      "cp-a": 0,
+      "cp-b": 0,
+      "cp-c": 0
+    },
+    "cleanupExitCodes": {
+      "cp-a": 0,
+      "cp-b": 0,
+      "cp-c": 0
+    },
+    "beforeRestart": {
+      "cp-a": {
+        "term": 1,
+        "applied": 265,
+        "completedRounds": 128,
+        "compactionPhases": [
+          {
+            "phase": "freeze",
+            "attempts": 5,
+            "totalSeconds": 0.0,
+            "maxSeconds": 0.0,
+            "lastSeconds": 0.0
+          },
+          {
+            "phase": "capture",
+            "attempts": 5,
+            "totalSeconds": 3.693974,
+            "maxSeconds": 2.750981,
+            "lastSeconds": 0.372996
+          },
+          {
+            "phase": "retain",
+            "attempts": 5,
+            "totalSeconds": 3.216978,
+            "maxSeconds": 0.977993,
+            "lastSeconds": 0.977993
+          },
+          {
+            "phase": "publish",
+            "attempts": 5,
+            "totalSeconds": 9.603935,
+            "maxSeconds": 1.977986,
+            "lastSeconds": 1.930987
+          }
+        ],
+        "historyEstimatedBytes": 13028864
+      },
+      "cp-b": {
+        "term": 1,
+        "applied": 265,
+        "completedRounds": 0,
+        "compactionPhases": [
+          {
+            "phase": "freeze",
+            "attempts": 5,
+            "totalSeconds": 0.001,
+            "maxSeconds": 0.001,
+            "lastSeconds": 0.001
+          },
+          {
+            "phase": "capture",
+            "attempts": 5,
+            "totalSeconds": 23.864838,
+            "maxSeconds": 22.912844,
+            "lastSeconds": 0.354997
+          },
+          {
+            "phase": "retain",
+            "attempts": 5,
+            "totalSeconds": 3.26498,
+            "maxSeconds": 1.078993,
+            "lastSeconds": 1.078993
+          },
+          {
+            "phase": "publish",
+            "attempts": 5,
+            "totalSeconds": 11.91192,
+            "maxSeconds": 3.483975,
+            "lastSeconds": 2.246985
+          }
+        ],
+        "historyEstimatedBytes": 13028864
+      },
+      "cp-c": {
+        "term": 1,
+        "applied": 265,
+        "completedRounds": 0,
+        "compactionPhases": [
+          {
+            "phase": "freeze",
+            "attempts": 6,
+            "totalSeconds": 0.0,
+            "maxSeconds": 0.0,
+            "lastSeconds": 0.0
+          },
+          {
+            "phase": "capture",
+            "attempts": 6,
+            "totalSeconds": 3.976971,
+            "maxSeconds": 2.844981,
+            "lastSeconds": 0.314998
+          },
+          {
+            "phase": "retain",
+            "attempts": 6,
+            "totalSeconds": 4.048973,
+            "maxSeconds": 1.057993,
+            "lastSeconds": 1.057993
+          },
+          {
+            "phase": "publish",
+            "attempts": 6,
+            "totalSeconds": 11.108925,
+            "maxSeconds": 2.006986,
+            "lastSeconds": 1.670988
+          }
+        ],
+        "historyEstimatedBytes": 13028864
+      }
+    }
+  },
+  "interpretation": "Successful128-round run shows publication holding the member lock for about1.7-3.5seconds per checkpoint. Long capture times include deliberate fixture pauses. This identifies a publication-duration problem, not yet a proven cause of elections. Separate cache-prefix and WAL-replacement timing is next; full workload acceptance remains the earlier separate run."
 }
