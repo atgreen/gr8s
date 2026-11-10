@@ -363,6 +363,8 @@ cannot forward traffic between healthy nodes."
   ;; (VARIANT TARGET-MEMBER NODE-NAME PAYLOAD) -> accepting member id or NIL.
   ;; HA installs this peer relay; single-node servers leave it NIL.
   operation-router
+  ;; Handles @control-plane/ID operation frames addressed to this process.
+  member-operation-handler
   (lock (bt:make-lock "gr8s node sessions"))
   monitor-thread
   (stopping-p nil))
@@ -618,11 +620,33 @@ outside SERVER's lock because a peer RPC may take seconds."
            (start-node-operation-route-retry server operation)))))
     operation))
 
+(defun queue-member-operation (server member-id request)
+  "Register REQUEST and route it to one exact control-plane MEMBER-ID over member mTLS."
+  (let* ((node-name (format nil "@control-plane/~A" member-id))
+         (operation (make-pending-node-operation node-name request))
+         (operation-id (operation-request-id request))
+         (router (node-grpc-server-operation-router server)))
+    (unless router (error "control-plane member routing is unavailable"))
+    (bt:with-lock-held ((node-grpc-server-lock server))
+      (when (gethash operation-id (node-grpc-server-operations server))
+        (error "Member operation ~A already exists" operation-id))
+      (setf (gethash operation-id (node-grpc-server-operations server)) operation))
+    (let ((owner (funcall router :operation-request member-id node-name request)))
+      (unless owner
+        (release-node-operation server operation)
+        (error "control-plane member ~A did not accept the debug operation" member-id))
+      (setf (pending-node-operation-remote-member operation) owner))
+    operation))
+
 (defun accept-routed-node-operation (server origin-member node-name variant payload)
   "Accept a peer's routed operation frame when this member owns NODE-NAME's live
 agent session. REQUEST creates a shadow operation bound to ORIGIN-MEMBER; INPUT
 and CANCEL follow that operation's local agent session. Returns true only when
 the frame was accepted here."
+  (when (uiop:string-prefix-p "@control-plane/" node-name)
+    (let ((handler (node-grpc-server-member-operation-handler server)))
+      (return-from accept-routed-node-operation
+        (and handler (funcall handler origin-member variant payload)))))
   (ecase variant
     (:operation-request
      (let* ((operation-id (operation-request-id payload))

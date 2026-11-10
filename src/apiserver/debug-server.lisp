@@ -13,6 +13,21 @@
 (defvar *debug-store* nil "The live store of the process running a debug server.")
 (defvar *debug-reconciler* nil "The live reconciler of the process running a debug server.")
 
+(define-condition debug-session-conflict (error) ()
+  (:report (lambda (condition stream)
+             (declare (ignore condition))
+             (write-string "another on-demand Slynk debug session is already active" stream))))
+
+(defstruct (on-demand-debug-session
+            (:constructor %make-on-demand-debug-session
+                (&key port secret previous-secret-function)))
+  port
+  secret
+  previous-secret-function)
+
+(defvar *on-demand-debug-session-lock* (bt:make-lock "gr8s on-demand Slynk session"))
+(defvar *on-demand-debug-session* nil)
+
 (defun debug-secret-path (state-directory)
   "Return the private file a local client reads the session secret from.
 It needs a file type, since atomic renames merge a missing one from the temporary file."
@@ -69,6 +84,76 @@ anyone able to connect could otherwise stop the server by sending a wrong secret
   "Stop the debug server and forget the live objects it exposed."
   (slynk:stop-server port)
   (setf *debug-store* nil *debug-reconciler* nil))
+
+(defun start-on-demand-debug-session (state-directory &key store reconciler)
+  "Own and start this process's sole temporary Slynk session.
+The caller must arrange to call STOP-ON-DEMAND-DEBUG-SESSION when its tunnel
+disconnects. A single session avoids races in Slynk's process-global secret and
+in the live gr8s objects exposed to debugging."
+  (bt:with-lock-held (*on-demand-debug-session-lock*)
+    (when *on-demand-debug-session*
+      (error 'debug-session-conflict))
+    (let ((previous-secret-function (symbol-function 'slynk::sly-secret))
+          (port nil))
+      (handler-case
+          (let* ((secret (install-debug-secret state-directory))
+                 (session nil))
+            (guard-slynk-connections)
+            (setf slynk:*global-debugger* nil
+                  *debug-store* store
+                  *debug-reconciler* reconciler
+                  port (slynk:create-server :port 0 :interface "127.0.0.1"
+                                             :style :spawn :dont-close t)
+                  session (%make-on-demand-debug-session
+                           :port port :secret secret
+                           :previous-secret-function previous-secret-function)
+                  *on-demand-debug-session* session)
+            session)
+        (error (condition)
+          (when port (ignore-errors (slynk:stop-server port)))
+          (setf (symbol-function 'slynk::sly-secret) previous-secret-function
+                *debug-store* nil
+                *debug-reconciler* nil)
+          (error condition))))))
+
+(defun stop-on-demand-debug-session (session)
+  "Stop SESSION if it still owns this process's on-demand debug slot."
+  (bt:with-lock-held (*on-demand-debug-session-lock*)
+    (when (eq session *on-demand-debug-session*)
+      (unwind-protect
+           (ignore-errors (slynk:stop-server (on-demand-debug-session-port session)))
+        (setf (symbol-function 'slynk::sly-secret)
+              (on-demand-debug-session-previous-secret-function session)
+              *debug-store* nil
+              *debug-reconciler* nil
+              *on-demand-debug-session* nil))))
+  (values))
+
+(defun write-slynk-authentication-frame (stream secret)
+  "Send SECRET as one Slynk length-prefixed protocol frame."
+  (let ((payload (trivial-utf-8:string-to-utf-8-bytes secret)))
+    (write-sequence
+     (trivial-utf-8:string-to-utf-8-bytes (format nil "~(~6,'0X~)" (length payload)))
+     stream)
+    (write-sequence payload stream)
+    (finish-output stream)))
+
+(defun open-on-demand-debug-stream (session)
+  "Connect to SESSION's private loopback listener and authenticate it.
+Return the binary stream and its owning usocket. Bytes after this handshake are
+ordinary Slynk protocol bytes suitable for an opaque tunnel."
+  (let* ((socket (usocket:socket-connect
+                  "127.0.0.1" (on-demand-debug-session-port session)
+                  :element-type '(unsigned-byte 8)))
+         (stream (usocket:socket-stream socket)))
+    (handler-case
+        (progn
+          (write-slynk-authentication-frame
+           stream (on-demand-debug-session-secret session))
+          (values stream socket))
+      (error (condition)
+        (ignore-errors (usocket:socket-close socket))
+        (error condition)))))
 
 (defun debug-eval (text)
   "Evaluate one form from TEXT in this package, returning its printed output and value.
