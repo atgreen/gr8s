@@ -619,7 +619,9 @@ by default.
 Build this internal harness with
 `sbcl --noinform --non-interactive --load scripts/build-compaction-cluster-native-harness.lisp`.
 Run `python3 scripts/test-compaction-cluster-native.py` for 2,048 rounds and
-full-history checks, or add `--smoke --rounds 128` for the explicitly partial
+full-history checks. Add `--require-stable-leadership` to fail on an unforced
+term change during workload execution and final convergence; elections during
+cold restart remain allowed. Use `--smoke --rounds 128` for the explicitly partial
 probe, including asymmetric follower retention. The full run checks each member's history budget before shutdown and
 cold-loads that history before startup establishes a new watch epoch. This
 harness uses the store-member/HCP-worker APIs; it does not run `serve` or certify

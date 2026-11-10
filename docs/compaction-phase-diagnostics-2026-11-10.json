@@ -827,5 +827,189 @@
     "raftChecks": 5028,
     "log": "/tmp/gr8s-wal-suffix-copy-bounded-batch-tests.log",
     "scope": "Checksummed retained-suffix raw copying, mixed Unicode serialized/copied records, subsequent append and bounded batch recovery; source only, native timing/recovery pending"
+  },
+  "walSuffixCopyNative": {
+    "testedSourceCommit": "bfba297",
+    "scope": "5028 Raft+520 integration checks and128-round native timing/recovery. Full sustained leadership acceptance pending.",
+    "sourceLogs": [
+      "/tmp/gr8s-wal-suffix-copy-bounded-batch-tests.log",
+      "/tmp/gr8s-wal-suffix-copy-ha-integration.log"
+    ],
+    "sourceChecks": 5548,
+    "result": {
+      "passed": true,
+      "evidence": "/tmp/gr8s-compaction-cluster-native-p2ebzu7o",
+      "binarySha256": "5548d97aa2e7e43e6925d497489ccf69cacb6788d5d8d4d05354a7249ca26418",
+      "elapsedSeconds": 78.35977577487938,
+      "asymmetricCaptureAcceptance": true,
+      "diskCatchupAcceptance": true,
+      "catchupHistoryContinuous": true,
+      "identitiesPreserved": true,
+      "stopExitCodes": {
+        "cp-a": 0,
+        "cp-b": 0,
+        "cp-c": 0
+      },
+      "cleanupExitCodes": {
+        "cp-a": 0,
+        "cp-b": 0,
+        "cp-c": 0
+      }
+    },
+    "beforeRestart": {
+      "cp-a": {
+        "term": 1,
+        "applied": 265,
+        "completedRounds": 128,
+        "compactionPhases": [
+          {
+            "phase": "freeze",
+            "attempts": 5,
+            "totalSeconds": 0.0,
+            "maxSeconds": 0.0,
+            "lastSeconds": 0.0
+          },
+          {
+            "phase": "capture",
+            "attempts": 5,
+            "totalSeconds": 3.693975,
+            "maxSeconds": 2.554983,
+            "lastSeconds": 0.378997
+          },
+          {
+            "phase": "retain",
+            "attempts": 5,
+            "totalSeconds": 3.608974,
+            "maxSeconds": 1.190992,
+            "lastSeconds": 1.190992
+          },
+          {
+            "phase": "publish",
+            "attempts": 5,
+            "totalSeconds": 0.069,
+            "maxSeconds": 0.033,
+            "lastSeconds": 0.007
+          }
+        ],
+        "storageStages": [
+          {
+            "stage": "cache-prefix",
+            "attempts": 5,
+            "totalSeconds": 0.032999999999999995,
+            "maxSeconds": 0.013,
+            "lastSeconds": 0.005
+          },
+          {
+            "stage": "replace-wal",
+            "attempts": 5,
+            "totalSeconds": 0.036000000000000004,
+            "maxSeconds": 0.027,
+            "lastSeconds": 0.002
+          }
+        ]
+      },
+      "cp-b": {
+        "term": 1,
+        "applied": 265,
+        "completedRounds": 0,
+        "compactionPhases": [
+          {
+            "phase": "freeze",
+            "attempts": 5,
+            "totalSeconds": 0.0,
+            "maxSeconds": 0.0,
+            "lastSeconds": 0.0
+          },
+          {
+            "phase": "capture",
+            "attempts": 5,
+            "totalSeconds": 17.116883,
+            "maxSeconds": 16.15689,
+            "lastSeconds": 0.364998
+          },
+          {
+            "phase": "retain",
+            "attempts": 5,
+            "totalSeconds": 3.229977,
+            "maxSeconds": 1.145992,
+            "lastSeconds": 1.145992
+          },
+          {
+            "phase": "publish",
+            "attempts": 5,
+            "totalSeconds": 0.04,
+            "maxSeconds": 0.013,
+            "lastSeconds": 0.007
+          }
+        ],
+        "storageStages": [
+          {
+            "stage": "cache-prefix",
+            "attempts": 5,
+            "totalSeconds": 0.02,
+            "maxSeconds": 0.005,
+            "lastSeconds": 0.004
+          },
+          {
+            "stage": "replace-wal",
+            "attempts": 6,
+            "totalSeconds": 0.028999999999999998,
+            "maxSeconds": 0.01,
+            "lastSeconds": 0.003
+          }
+        ]
+      },
+      "cp-c": {
+        "term": 1,
+        "applied": 265,
+        "completedRounds": 0,
+        "compactionPhases": [
+          {
+            "phase": "freeze",
+            "attempts": 6,
+            "totalSeconds": 0.0,
+            "maxSeconds": 0.0,
+            "lastSeconds": 0.0
+          },
+          {
+            "phase": "capture",
+            "attempts": 6,
+            "totalSeconds": 3.734975,
+            "maxSeconds": 2.565981,
+            "lastSeconds": 0.365999
+          },
+          {
+            "phase": "retain",
+            "attempts": 6,
+            "totalSeconds": 4.277972,
+            "maxSeconds": 1.303991,
+            "lastSeconds": 1.303991
+          },
+          {
+            "phase": "publish",
+            "attempts": 6,
+            "totalSeconds": 0.039,
+            "maxSeconds": 0.007,
+            "lastSeconds": 0.006
+          }
+        ],
+        "storageStages": [
+          {
+            "stage": "cache-prefix",
+            "attempts": 6,
+            "totalSeconds": 0.027,
+            "maxSeconds": 0.005,
+            "lastSeconds": 0.004
+          },
+          {
+            "stage": "replace-wal",
+            "attempts": 7,
+            "totalSeconds": 0.022000000000000006,
+            "maxSeconds": 0.01,
+            "lastSeconds": 0.002
+          }
+        ]
+      }
+    }
   }
 }

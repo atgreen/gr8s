@@ -31,6 +31,8 @@ def main():
     parser.add_argument("--binary", type=Path, default=Path("build/gr8s-compaction-cluster-acceptance"))
     parser.add_argument("--rounds", type=int, default=2048)
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--require-stable-leadership", action="store_true",
+                        help="Fail on any unforced term change during churn; restart elections remain allowed")
     parser.add_argument("--timeout", type=float, default=2400)
     args = parser.parse_args()
     if args.rounds < 128 or (args.rounds < 2048 and not args.smoke) or args.timeout <= 0:
@@ -43,7 +45,9 @@ def main():
                   mutualTls=True, processes=3, heapLimitMiB=384,
                   rounds=args.rounds, payloadBytes=args.rounds * 65536,
                   historyByteBudget=96 * 1024 * 1024, historyClock=4000000000,
-                  fullChurnAcceptance=False, fullChurnRequested=not args.smoke, timeoutSeconds=args.timeout)
+                  fullChurnAcceptance=False, fullChurnRequested=not args.smoke, timeoutSeconds=args.timeout,
+                  requireStableLeadership=args.require_stable_leadership,
+                  leadershipStabilityAcceptance=False)
     result["asymmetricCaptureAcceptance"] = False
     started = time.monotonic()
     print(f"Evidence: {base}", flush=True)
@@ -102,6 +106,14 @@ def main():
 
         before = probe.await_value(held, timeout=240)
         terms = {name: value["term"] for name, value in before.items()}
+
+        def check_churn_leadership(values):
+            actual = {name: value["term"] for name, value in values.items()}
+            stable = actual == terms
+            if args.require_stable_leadership and not stable:
+                raise AssertionError(f"Unforced leadership term changed during churn: {terms} -> {actual}")
+            return stable
+
         # All three snapshot writers are stopped beyond an election timeout.
         # Neither producers nor background captures can fake the marker commit.
         time.sleep(2)
@@ -128,6 +140,7 @@ def main():
         def asymmetric_progress():
             values = states()
             result["lastAsymmetricSample"] = values
+            check_churn_leadership(values)
             # Advance the leader checkpoint past the stalled follower so release
             # must exercise archived-prefix replication, not only the live tail.
             return values if (values[current.name]["completedRounds"] >= start_round + 32 and
@@ -153,6 +166,7 @@ def main():
                 out.write(json.dumps(values) + "\n")
                 out.flush()
                 samples += 1
+                check_churn_leadership(values)
                 if values[current.name]["churnFinished"]:
                     result["churnCompleted"] = True
                     break
@@ -165,6 +179,7 @@ def main():
             value["checkpoints"] >= (1 if args.smoke else 2)
             for value in values.values()) else None)(states()), timeout=240)
         result.update(beforeRestart=final, samples=samples)
+        result["leadershipStabilityAcceptance"] = check_churn_leadership(final)
         expected_maps = final[current.name]["configMaps"]
         assert [row[0] for row in expected_maps] == ["sentinel", "while-held"], expected_maps
         assert all(value["configMaps"] == expected_maps for value in final.values()), final
