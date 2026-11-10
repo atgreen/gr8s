@@ -18,7 +18,7 @@ import struct
 spec = importlib.util.spec_from_file_location("packet_test", Path(__file__).with_name("test-service-packet-program.py"))
 packet = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(packet)
-NAMES = ("gr8s_nat_select", "gr8s_nat_commit", "gr8s_nat_prepare", "gr8s_nat_restore")
+NAMES = ("gr8s_nat_select", "gr8s_nat_commit", "gr8s_nat_prepare", "gr8s_nat_restore", "gr8s_nat_generation")
 FWD, REV, IDENT = "gr8s_nat_fwd_v2", "gr8s_nat_rev_v2", "gr8s_nat_id_v2"
 CLIENT, ALIAS, BACKEND, BACK_ALIAS = packet.CLIENT, "10.88.0.9", packet.BACKEND, "10.88.1.9"
 ZERO = bytes(20)
@@ -26,7 +26,13 @@ ZERO = bytes(20)
 
 class Interpreter(packet.Interpreter):
     def stage(self, name, data, context=ZERO):
+        if name == NAMES[0]:
+            result, output, context = self.stage(NAMES[4], data, context)
+            if result != packet.OK:
+                return result, output, context
         machine = packet.PacketMachine(self.programs[name], self.maps, data, self.clock)
+        if getattr(self, "linear_length", None) is not None:
+            struct.pack_into("<I", machine.memory[0x200000], 80, 0x100000 + self.linear_length)
         machine.memory[0x200000][48:68] = context
         verdict = machine.run()
         return verdict, bytes(machine.memory[0x100000]), bytes(machine.memory[0x200000][48:68])
@@ -34,6 +40,10 @@ class Interpreter(packet.Interpreter):
 
 class Kernel(packet.Kernel):
     def stage(self, name, data, context=ZERO):
+        if name == NAMES[0]:
+            result, output, context = self.stage(NAMES[4], data, context)
+            if result != packet.OK:
+                return result, output, context
         incoming, outgoing = ctypes.create_string_buffer(data), ctypes.create_string_buffer(len(data) + 256)
         ctx_in, ctx_out = ctypes.create_string_buffer(192), ctypes.create_string_buffer(192)
         ctypes.memmove(ctypes.addressof(ctx_in) + 48, context, 20)
