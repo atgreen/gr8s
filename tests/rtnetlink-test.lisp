@@ -329,10 +329,11 @@
                      :container-id "sandbox-1" :interface-name "eth0" :netns "/fake/ns"))
            (configuration (gr8s::make-cni-configuration
                            :service-packet-root "/pins/shared/" :service-packet-profile :v2))
-           (events nil)
+           (events nil) (risk-ready t)
            (operations
              (gr8s::make-routed-cni-operations
               ipam :node-id "node-1"
+                   :service-risk-ready-p (lambda () risk-ready)
               :install-link (lambda (ctx addresses)
                               (declare (ignore ctx addresses)) "gr-test")
               :check-link (lambda (ctx addresses)
@@ -374,6 +375,11 @@
       (funcall (gr8s::cni-operations-check operations)
                configuration context "/pins/local/endpoint_identity" "/pins/local/tcx-ingress")
       (is (equal '(:link-check :route-check :owner-check :policy-check) (reverse events)))
+      (setf risk-ready nil events nil)
+      (signals gr8s::cni-error
+        (funcall (gr8s::cni-operations-check operations)
+                 configuration context "/pins/local/endpoint_identity" "/pins/local/tcx-ingress"))
+      (is (equal '(:link-check) (reverse events)))
       (is (equal "10.42.0.2" (gr8s::service-snat-address ipam "sandbox-1" "eth0"))))))
 
 (test cni-return-path-keeps-default-and-ipv6-only-allocation-behavior

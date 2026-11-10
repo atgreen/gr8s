@@ -75,6 +75,7 @@
   ;; control-plane userspace proxy).
   service-lb
   service-lb-controller
+  (service-risk-ready-revision nil) ; current snapshot's local v2 risk map was read back
   ;; Listening host ports by (ip . port); see pod-host-ports.lisp.
   (host-port-forwarders (make-hash-table :test #'equal))
   ;; Listening Service node ports by (protocol ip . port), likewise.
@@ -86,6 +87,16 @@
   ;; sk_lookup attachment that exposes loopback Gateway/Ingress listeners on
   ;; their destination ports without opening host-wide listening sockets.
   gateway-steering)
+
+(defun node-runtime-local-risk-ready-p (node-runtime)
+  "True only while the latest received snapshot has a read-back-complete local
+v2 backend risk map. Remote node acknowledgement is a separate requirement."
+  (bt:with-lock-held ((node-runtime-arrival-lock node-runtime))
+    (let ((ready (node-runtime-service-risk-ready-revision node-runtime)))
+      (and (node-runtime-service-lb node-runtime)
+           (service-lb-map (node-runtime-service-lb node-runtime) "gr8s_nat_risk_v2")
+           (integerp ready) (>= ready 0)
+           (= ready (node-runtime-received-revision node-runtime))))))
 
 (defun node-runtime-external-cni-endpoints-path (node-runtime)
   "Return the durable external-CNI endpoint registry path for NODE-RUNTIME."
@@ -664,6 +675,8 @@ conflicting network."
             (node-runtime-cni-operations node-runtime)
             (make-routed-cni-operations
              ipam :node-id (node-runtime-node-id node-runtime)
+                  :service-risk-ready-p
+                  (lambda () (node-runtime-local-risk-ready-p node-runtime))
                   :mtu (gethash "mtu" network)
                   :dns-address (gethash "dnsAddress" network)))))
   (publish-node-runtime-service-nat-inventory node-runtime network)
@@ -1027,6 +1040,8 @@ the node from starting."
                    (if (equal "1" (uiop:getenv "GR8S_PREPARE_PACKET_SERVICES_V2"))
                        :v2 t))))))
     (when dataplane
+      (bt:with-lock-held ((node-runtime-arrival-lock node-runtime))
+        (setf (node-runtime-service-risk-ready-revision node-runtime) nil))
       (setf (node-runtime-service-lb node-runtime) dataplane
             (node-runtime-service-lb-controller node-runtime)
             (make-service-lb-controller (node-runtime-store node-runtime) dataplane
@@ -1050,6 +1065,8 @@ the node from starting."
         (ignore-errors (stop-gateway-steering (node-runtime-gateway-steering node-runtime)))
         (setf (node-runtime-gateway-steering node-runtime) nil))
       (when (node-runtime-service-lb node-runtime)
+        (bt:with-lock-held ((node-runtime-arrival-lock node-runtime))
+          (setf (node-runtime-service-risk-ready-revision node-runtime) nil))
         ;; Endpoint guards hold these same maps. Keep the canonical pins so a
         ;; clean agent restart reopens them rather than creating disconnected
         ;; Service tables while existing endpoint links still use the old ones.
@@ -1664,6 +1681,8 @@ so the revision is retried."
                                   (or (runtime-unavailable-message runtime) "container runtime is down")))))))
   (bt:with-lock-held ((node-runtime-apply-lock node-runtime))
     (ensure-node-snapshot-current node-runtime snapshot)
+    (bt:with-lock-held ((node-runtime-arrival-lock node-runtime))
+      (setf (node-runtime-service-risk-ready-revision node-runtime) nil))
     (apply-node-runtime-network node-runtime snapshot)
     (let ((assignments (slot-value snapshot 'gr8s.node.v1::pods))
           (failed nil))
@@ -1692,7 +1711,14 @@ so the revision is retried."
       ;; discovery data. A transient map error must not abort snapshot application.
       (when (node-runtime-service-lb-controller node-runtime)
         (handler-case
-            (converge-service-lb-controller (node-runtime-service-lb-controller node-runtime))
+            (let ((controller (node-runtime-service-lb-controller node-runtime)))
+              (converge-service-lb-controller controller)
+              (when (gr8s.controllers:service-lb-risk-published-p controller)
+                (bt:with-lock-held ((node-runtime-arrival-lock node-runtime))
+                  (when (= (node-runtime-received-revision node-runtime)
+                           (slot-value snapshot 'gr8s.node.v1::revision))
+                    (setf (node-runtime-service-risk-ready-revision node-runtime)
+                          (slot-value snapshot 'gr8s.node.v1::revision))))))
           (error (condition)
             (format *error-output* "gr8s: Service LB convergence failed: ~A~%" condition))))
       (handler-case

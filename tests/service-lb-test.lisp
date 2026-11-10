@@ -1002,6 +1002,22 @@
                  "gr8s_backend_v4" "gr8s_backend_index_v4" "gr8s_service_v4")
                (nreverse writes)))
     (is (= 2 (length (gr8s::service-lb-controller-applied-risk-keys controller))))
+    (flet ((published (backends)
+             (gr8s.controllers:service-lb-risk-published-p
+              controller :list-services (constantly (list service))
+              :risk-backends-of (lambda (ignored-service ignored-port)
+                                  (declare (ignore ignored-service ignored-port))
+                                  backends)
+              :lookup (lambda (map key)
+                        (gethash (list (whistler/loader:map-info-name map) key) entries)))))
+      (is-true (published '(("10.88.1.5" 8080) ("10.88.1.6" 8080))))
+      (remhash (list "gr8s_nat_risk_v2"
+                     (gr8s::service-lb-risk-key "10.88.1.6" 8080 "TCP")) entries)
+      (is-false (published '(("10.88.1.5" 8080) ("10.88.1.6" 8080))))
+      (setf (gethash (list "gr8s_nat_risk_v2"
+                           (gr8s::service-lb-risk-key "10.88.1.6" 8080 "TCP")) entries)
+            (gr8s::service-lb-bytes 1 4))
+      (is-false (published '(("10.88.1.5" 8080) ("10.88.1.7" 8080)))))
     (setf writes nil)
     (gr8s::converge-service-lb-controller
      controller :list-services (constantly nil) :endpoints-of (constantly nil)
@@ -1019,6 +1035,20 @@
        :update update :delete delete)
       (is (not (member "gr8s_nat_risk_v2" writes :test #'equal)))
       (is (= 2 (length (gr8s::service-lb-controller-applied-risk-keys reopened)))))))
+
+(test v2-local-risk-readiness-is-fenced-by-received-revision
+  (let* ((dataplane (gr8s::%make-service-lb-dataplane
+                     :maps (list (fake-lb-map "gr8s_nat_risk_v2" 4))))
+         (runtime (gr8s.agent::%make-node-runtime
+                   :service-lb dataplane :received-revision 4
+                   :service-risk-ready-revision 4)))
+    (is-true (gr8s.agent::node-runtime-local-risk-ready-p runtime))
+    (setf (gr8s.agent::node-runtime-received-revision runtime) 5)
+    (is-false (gr8s.agent::node-runtime-local-risk-ready-p runtime))
+    (setf (gr8s.agent::node-runtime-service-risk-ready-revision runtime) 5)
+    (is-true (gr8s.agent::node-runtime-local-risk-ready-p runtime))
+    (setf (gr8s.agent::node-runtime-service-lb runtime) nil)
+    (is-false (gr8s.agent::node-runtime-local-risk-ready-p runtime))))
 
 (test service-risk-publication-failure-does-not-expose-service
   (let* ((dataplane (gr8s::%make-service-lb-dataplane

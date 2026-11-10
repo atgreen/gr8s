@@ -14,7 +14,9 @@ import json
 import os
 from pathlib import Path
 import struct
+import subprocess
 import sys
+import time
 
 
 def load(name, filename):
@@ -89,6 +91,37 @@ def main():
                 raise
 
         traffic.wait_for("v2 backend risk publication", 120, published)
+        # A disposable network namespace lets CNI ADD exercise the agent's
+        # snapshot-revision risk fence without enabling the still-gated graph.
+        netns_name = "gr8s-v2-risk-proof"
+        netns_path = f"/var/run/netns/{netns_name}"
+        subprocess.run(["ip", "netns", "add", netns_name], check=True)
+        plugin = environment = None
+        try:
+            conflist = json.loads((cluster.root /
+                                   "state/agent/containerd/cni/net.d/10-gr8s.conflist").read_text())
+            plugin = {**conflist["plugins"][0], "name": conflist["name"],
+                      "cniVersion": conflist["cniVersion"], "servicePacketProfile": "v2"}
+            environment = {**os.environ, "CNI_COMMAND": "ADD", "CNI_CONTAINERID": "risk-proof",
+                           "CNI_NETNS": netns_path, "CNI_IFNAME": "eth0"}
+            deadline = time.monotonic() + 120
+            while True:
+                answer = subprocess.run([str(args.gr8s)], input=json.dumps(plugin),
+                                        env=environment, capture_output=True, text=True)
+                if answer.returncode != 0 and "v2 Service endpoint attachment is waiting" in answer.stdout:
+                    break
+                if (time.monotonic() >= deadline or answer.returncode == 0 or
+                        "v2 Service risk inventory is not published" not in answer.stdout):
+                    raise RuntimeError("v2 CNI did not reach the gated attachment after risk publication: "
+                                       + answer.stdout + answer.stderr)
+                time.sleep(1)
+            report["localRiskFenceReached"] = True
+        finally:
+            if plugin is not None and environment is not None:
+                environment["CNI_COMMAND"] = "DEL"
+                subprocess.run([str(args.gr8s)], input=json.dumps(plugin), env=environment,
+                               capture_output=True, text=True, check=False)
+            subprocess.run(["ip", "netns", "del", netns_name], check=False)
         report.update({"backend": backend, "service": vip, "riskKeys": [key.hex() for key in keys],
                        "riskMap": str(risk), "managedPodCIDRs": cidrs,
                        "managedPodMap": str(managed), "source": "unready manual EndpointSlice"})
