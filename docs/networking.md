@@ -436,9 +436,11 @@ local owner pair receiver-ready; DEL disables that pair before removing links.
 The node's periodic status reports the complete set of locally ready owner
 incarnations for its current risk revision. The server validates each report
 against its authenticated node session and ACKed owner assignment, retaining
-the report separately from short Pod status updates. Grant decisions do not
-yet consume these reports. Cluster-wide receiver publication, retained-flow
-migration, and Service traffic activation remain in progress.
+the report separately from short Pod status updates. The cluster grant is
+withheld unless every trusted owner in the current projection appears in its
+node's complete ready report; withdrawal revokes the grant on reconciliation.
+Ready receiver bits still need publication and readback on other nodes before
+live Service traffic activation. Retained-flow migration remains in progress.
 `make test-service-nat` runs its synthetic packet interpreter tests. The same
 fixture passed 42 packet cases and seven capacity/contention cases using real
 BPF programs in a disposable VM; see
