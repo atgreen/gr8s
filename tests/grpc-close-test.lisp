@@ -170,3 +170,38 @@
         (is (>= (length received) 9))
         (is (= 7 (aref received 3)))
         (is (= (length received) (+ 9 (+ (ash (aref received 0) 16) (ash (aref received 1) 8) (aref received 2)))))))))
+
+(test consumed-http2-data-releases-capacity-without-altering-returned-payload
+  (let ((stream (ag-http2::make-http2-stream 1))
+        (payload (make-array 65536 :element-type '(unsigned-byte 8) :initial-element 42)))
+    (ag-http2::stream-append-data stream payload)
+    (let ((consumed (ag-http2::stream-consume-data stream)))
+      (is (equalp payload consumed))
+      (is (zerop (array-total-size (ag-http2::stream-data-buffer stream))))
+      ;; Reuse does not alter the caller's already-consumed data.
+      (ag-http2::stream-append-data stream #(1 2 3))
+      (is (equalp #(1 2 3) (ag-http2::stream-consume-data stream)))
+      (is (equalp payload consumed))
+      (is (zerop (array-total-size (ag-http2::stream-data-buffer stream)))))))
+
+(test unary-dispatch-does-not-retain-request-body-in-http2-stream
+  (with-http2-close-connection (connection socket peer listener)
+    (let* ((stream (ag-http2::connection-new-stream connection))
+           (id (ag-http2::stream-id stream))
+           (payload (make-array 65536 :element-type '(unsigned-byte 8) :initial-element 7))
+           (original (symbol-function 'ag-grpc::server-dispatch-handler))
+           (dispatched nil))
+      (ag-grpc::connection-set-stream-context connection stream :test-context)
+      (ag-grpc::connection-set-stream-handler connection stream :test-handler)
+      (ag-http2::stream-append-data stream payload)
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'ag-grpc::server-dispatch-handler)
+                   (lambda (server conn ctx handler body)
+                     (declare (ignore server conn ctx handler))
+                     (setf dispatched t)
+                     (is (equalp payload body))
+                     (is (zerop (array-total-size (ag-http2::stream-data-buffer stream))))))
+             (ag-grpc::server-handle-data nil connection (ag-http2::make-data-frame id #() :end-stream t))
+             (is-true dispatched))
+        (setf (symbol-function 'ag-grpc::server-dispatch-handler) original)))))

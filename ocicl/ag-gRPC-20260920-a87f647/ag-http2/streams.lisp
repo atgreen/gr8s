@@ -140,7 +140,10 @@ connection."
 (defun stream-consume-data (stream)
   "Consume and return all buffered data"
   (let ((data (copy-seq (stream-data-buffer stream))))
-    (setf (fill-pointer (stream-data-buffer stream)) 0)
+    ;; Closed stream records remain in the multiplexer. A zero fill pointer
+    ;; still retains the entire request allocation on a long-lived connection.
+    (setf (stream-data-buffer stream)
+          (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
     data))
 
 ;;;; ========================================================================

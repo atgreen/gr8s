@@ -646,7 +646,9 @@ by a single NIL."
              (buffer-close msg-buffer)))
           (t
            (when (plusp (logand (ag-http2:frame-flags frame) ag-http2:+flag-end-stream+))
-             (let ((buffer (ag-http2:stream-data-buffer h2-stream)))
+             ;; Transfer the complete unary body out of the retained stream.
+             ;; Closed HTTP/2 records must not pin every historical request.
+             (let ((buffer (ag-http2:stream-consume-data h2-stream)))
                (server-dispatch-handler
                 server conn ctx handler buffer)))))))
 
