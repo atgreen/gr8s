@@ -122,6 +122,31 @@
                (is (null (gr8s::pod-store-secret-encryption-config store))))
           (setf (symbol-function 'uiop:rename-file-overwriting-target) rename))))))
 
+(test checkpoint-metadata-directory-sync-failure-does-not-acknowledge-new-config
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (let* ((path (gr8s::core-resource-state-path store))
+           (journal (gr8s::core-journal-path store))
+           (old (gr8s::core-object "enabled" nil))
+           (next (gr8s::core-object "enabled" nil "phase" "next"))
+           (sync (symbol-function 'gr8s.store::sync-store-generation-directory)))
+      (ensure-directories-exist path)
+      (write-checkpoint-reader-fixture path (checkpoint-reader-state 0 #() #()) nil)
+      (with-open-file (out journal :direction :output :if-exists :supersede) (write-string "journal-sentinel" out))
+      (setf (gr8s::pod-store-secret-encryption-config store) old)
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s.store::sync-store-generation-directory)
+                   (lambda (&rest args) (declare (ignore args)) (error "Injected directory sync failure")))
+             (signals error (gr8s.resources::persist-secret-encryption-metadata-unlocked store next))
+             (is (eq old (gr8s::pod-store-secret-encryption-config store)))
+             ;; Rename has already published a complete file; failed directory
+             ;; durability cannot promise rollback. Do not acknowledge success
+             ;; or publish the new config in RAM, and keep the journal intact.
+             (is (gr8s.store::json-value-equal-p next (gethash "secretsEncryption" (com.inuoe.jzon:parse path))))
+             (is (equal "journal-sentinel" (uiop:read-file-string journal))))
+        (setf (symbol-function 'gr8s.store::sync-store-generation-directory) sync)))))
+
 (test checkpoint-reader-preserves-schema-order-independent-sharing-and-metadata
   (with-temporary-store (store root)
     (dolist (version '(1 2))

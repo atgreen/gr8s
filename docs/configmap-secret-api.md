@@ -1,12 +1,14 @@
 # ConfigMap and Secret APIs
 
 gr8s serves namespace-scoped `v1/ConfigMap` and `v1/Secret` resources independently
-of the node runtime. The HTTP API supports create, get, list, replace, patch, and
-delete, with resource discovery and OpenAPI schemas for kubectl. Responses use
-JSON. Create, replace, and DeleteOptions requests accept JSON or Kubernetes
+of the node runtime. The HTTP API supports create, get, list, watch, replace,
+patch, server-side apply, delete, and collection deletion, with discovery and
+OpenAPI schemas for kubectl. JSON requests and responses are supported.
+Create, replace, and DeleteOptions requests accept JSON or Kubernetes
 protobuf, including the `k8s\0` envelope used by kubectl's typed clients.
 
 ```sh
+kubectl create namespace demo
 kubectl -n demo create configmap settings --from-literal=mode=development
 kubectl -n demo create secret generic credentials --from-literal=password=example
 kubectl -n demo get configmaps,secrets
@@ -45,23 +47,32 @@ updates. Standard Secret types such as TLS, SSH, basic-auth, and Docker credenti
 receive their required-field checks; custom Secret types are accepted. Secret
 `type` cannot change after creation.
 
-The resource store uses a single atomic state file at `objects/state.json` under
-the server state directory. It records monotonic resource versions and survives
-server restarts. The file is created with mode `0600`. Secret values are stored as
-base64, without encryption at rest.
+The resource store checkpoints data to `objects/state.json` and records following
+commits in `objects/journal.jsonl`, beneath the selected application generation
+of the state directory. It records monotonic resource versions and survives
+server restarts. These files use mode `0600`. Without encryption enabled, Secret
+values are stored as base64. `gr8s secrets-encrypt` manages authenticated
+encryption at rest and key rotation. Encrypted data depends on the cluster CA
+private key, so backups must retain cluster identity as well as application data.
 
-## Current limits
+## Runtime integration
 
-Namespace scoping isolates objects by the namespace in the request URL. gr8s does
-not yet provide Namespace lifecycle APIs or require a Namespace object to exist.
-These resources are not yet consumed through Pod environment references or
-volumes. Watch, server-side apply and field ownership, collection deletion,
-owner-reference garbage collection, and finalizers are unsupported. Discovery
-omits their verbs, and unsupported operations return errors. Creating a
-service-account-token Secret does not create a token controller or generate a
-token.
+Objects are scoped by the namespace in the request URL. Pods can consume
+ConfigMaps and Secrets through environment references and volume projections.
+Namespace lifecycle, owner-reference garbage collection, field ownership and
+finalizers are handled by the corresponding API and controllers.
 
 ## Verification
+
+The [metadata rotation validation](secret-metadata-validation-2026-11-10.json)
+records prepare, promote, re-encrypt, finalize and cold reopening with a 1 MiB
+Secret and full retained history inside a 384 MiB Lisp heap. Metadata-only phases
+preserve the following journal. Build this internal probe with
+`sbcl --noinform --non-interactive --load scripts/build-secret-metadata-native-harness.lisp`;
+`python3 scripts/test-secret-metadata-native.py --help` describes its quiescent
+checkpoint/journal inputs and matching history clock. It copies only application
+files into a private standalone store. This is memory and persistence evidence;
+production serve, HA and VM acceptance have separate scope.
 
 `make test-core-api` runs a non-root kubectl smoke with the fake runtime and no
 node agent. It exercises create/get, labels, selectors, merge/JSON patch, replace,
