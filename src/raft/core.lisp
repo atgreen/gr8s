@@ -716,8 +716,9 @@ alone so existing persisted commands remain deliverable."
                                        :success nil :match-index 0
                                        :next-index (1+ (raft-node-snapshot-index node))))
            (return-from raft-handle-append-entries nil))
-         (if (and (> prev-index 0)
-                  (/= (raft-log-term node prev-index) prev-term))
+         (if (or (> prev-index (raft-last-log-index node))
+                 (and (> prev-index 0)
+                      (/= (raft-log-term node prev-index) prev-term)))
              ;; Log mismatch: reject so the leader backs up.
              (raft-send node leader (list :type :append-entries-reply
                                           :term (raft-node-current-term node) :from (raft-node-id node)
