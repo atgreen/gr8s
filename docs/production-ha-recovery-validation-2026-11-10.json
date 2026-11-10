@@ -599,6 +599,20 @@
     "priorRestoreSnapshotIntegration": {
       "checks": 314,
       "passed": 314
+    },
+    "mergedProductionHaIntegration": {
+      "checks": 437,
+      "passed": 437,
+      "selectors": 14
+    },
+    "mergedCompilerOptimization": {
+      "checks": 581,
+      "passed": 581
+    },
+    "mergedRestoreSnapshotIntegration": {
+      "checks": 314,
+      "passed": 314,
+      "selectors": 2
     }
   }
 }
