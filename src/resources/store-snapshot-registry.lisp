@@ -63,13 +63,21 @@ is performed: WAL snapshots, retained suffixes and transfers may still depend on
     (unwind-protect
          (progn
            (copy-snapshot-generation-source (pathname source) temporary digest)
+           (unless (gr8s.raft.transport::raft-snapshot-private-stat-p
+                    (sb-posix:lstat (namestring temporary)) nil)
+             (error "Unsafe private store snapshot artifact"))
            (validate-store-snapshot temporary :expected-index index :expected-term term)
            ;; LINK is atomic and refuses overwrite. Concurrent identical retainers
            ;; can share the winner, but an invalid existing file is never replaced.
            (handler-case (sb-posix:link (namestring temporary) (namestring target))
              (sb-posix:syscall-error (condition)
-               (unless (= sb-posix:eexist (sb-posix:syscall-errno condition)) (error condition))))
-           (checked-store-snapshot-artifact-path root reference)
+               (unless (= sb-posix:eexist (sb-posix:syscall-errno condition)) (error condition))
+               ;; A pre-existing winner is not our verified inode. Authenticate
+               ;; and validate it fully, including a retry after failed fsync.
+               (checked-store-snapshot-artifact-path root reference)))
+           ;; Successful LINK published the already hashed, validated private
+           ;; inode. Re-reading it here doubles a potentially large semantic
+           ;; scan while the caller holds its consensus/application barriers.
            (gr8s.store::sync-store-generation-directory directory)
            (values target reference))
       (when (probe-file temporary) (delete-file temporary)))))
