@@ -143,8 +143,7 @@
 (defun raft-member-close-owned-storage (member)
   (let ((storage (raft-member-owned-storage member)))
     (when storage
-      (let ((stream (gr8s.raft::file-raft-storage-stream storage)))
-        (when (and stream (open-stream-p stream)) (close stream)))
+      (gr8s.raft:close-file-raft-storage storage)
       (setf (raft-member-owned-storage member) nil))))
 
 (defun raft-link-enqueue (link message)

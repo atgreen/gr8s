@@ -90,7 +90,7 @@
     (let ((storage (gr8s::open-file-raft-storage path)))
       (gr8s.raft::raft-storage-save-hard-state storage 17 "candidate-a")
       (gr8s.raft::raft-storage-append-entry storage (gr8s::make-raft-entry :index 1 :term 17 :command '(:noop)))
-      (close (gr8s.raft::file-raft-storage-stream storage)))
+      (gr8s.raft:close-file-raft-storage storage))
     (let ((first (gr8s::start-raft-member "recovered-witness" :storage-path path :initial-role :witness))
           (stream nil))
       (unwind-protect
