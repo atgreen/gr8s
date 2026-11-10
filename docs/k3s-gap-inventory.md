@@ -47,9 +47,9 @@ and snapshot persistence precedes in-memory compaction. These primitive fixes do
 not enable production snapshotting by themselves. Explicit file-backed compaction
 now atomically replaces its WAL and reclaims discarded records. The
 [checkpoint validation](raft-checkpoint-validation-2026-11-09.json) covers repeated
-reclamation, failure boundaries and tail recovery. Production HA still retains its
-committed Raft log without automatic compaction
-or snapshot catch-up. That P0 work remains open. Live disconnected-peer acceptance
+reclamation, failure boundaries and tail recovery. Production HA has durable snapshot restore and committed-tail replay. Automatic
+compaction remains disabled by default, so sustained bounded-log operation still
+requires acceptance before the P0 gap can close. Live disconnected-peer acceptance
 and the other HA correctness items also remain open.
 
 The core and peer transport now support configured snapshot catch-up with bounded
@@ -58,8 +58,14 @@ covers an interrupted transfer, restored voter leadership and continued learner
 replication. Crash-abandoned transfer cleanup now preserves live owners, with
 [native startup and SIGKILL validation](raft-snapshot-scratch-validation-2026-11-09.json).
 An internal [streamed store artifact writer and reader](store-snapshot-artifacts.md) now exist.
-Production capture/transport/restore integration and automatic compaction remain
-required before this closes the retained-log gap.
+[Production durable recovery](production-ha-recovery-validation-2026-11-10.json)
+now covers three voters and a witness, including leader loss and a full restart
+with data and credentials preserved. The opt-in asynchronous compaction worker
+releases live locks during artifact I/O. Its
+[validation record](async-compaction-validation-2026-11-10.json) includes full
+single-member churn and partial three-member acceptance; full sustained
+three-member churn and recovery remain required before enabling it by default
+and closing the retained-log gap.
 
 Pod desired state and checkpoints now use per-key staged transactions instead of
 complete Pod-index serialization. Desired UID/version preconditions are checked at
