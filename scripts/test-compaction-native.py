@@ -60,7 +60,7 @@ def main():
                     raise OSError("Native executable changed before cold recovery")
             with (root / "cold-stdout.log").open("w") as out, (root / "cold-stderr.log").open("w") as err:
                 cold = subprocess.run(
-                    [str(binary), "--dynamic-space-size", "384", str(state), "--recover-only",
+                    [str(binary), "--dynamic-space-size", "384", str(root / "cold-state"), "--recover-only",
                      str(report["memberPort"]), str(report["historyClock"])],
                     stdout=out, stderr=err, timeout=max(0.001, remaining), check=False)
             result["coldExitCode"] = cold.returncode

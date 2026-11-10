@@ -44,15 +44,20 @@
              (progn
                (assert (= 384 (gethash "heapLimitMiB" result)))
                (setf (sb-ext:gc-logfile) (namestring (merge-pathnames "cold-gc.log" root))
-                     store (gr8s:open-store root :defer-restore-completion t)
-                     ha (gr8s::start-ha-control-plane store :id "compact-native" :init t
+                     store (gr8s:open-store root :defer-restore-completion t))
+               ;; Check the full checkpoint before HA deliberately establishes
+               ;; a new watch epoch during application snapshot recovery.
+               (let ((history-bytes (reduce #'+ (gr8s::pod-store-template-history store)
+                                           :key #'gr8s.resources::template-history-entry-bytes)))
+                 (setf (gethash "loadedHistoryEstimatedBytes" result) history-bytes)
+                 (assert (>= history-bytes (- gr8s.resources::*resource-watch-history-bytes* (* 2 65536)))))
+               (setf ha (gr8s::start-ha-control-plane store :id "compact-native" :init t
                           :port (parse-integer port-text)))
                (compaction-native-await (lambda () (gr8s::ha-control-plane-leader-p ha)))
                (assert (equal "preserved" (gethash "value" (gethash "data"
                          (gr8s::get-core-resource store "configmaps" "default" "sentinel")))))
                (let ((history-bytes (reduce #'+ (gr8s::pod-store-template-history store)
                                            :key #'gr8s.resources::template-history-entry-bytes)))
-                 (assert (>= history-bytes (- gr8s.resources::*resource-watch-history-bytes* (* 2 65536))))
                  (setf (gethash "historyEstimatedBytes" result) history-bytes))
                (setf (gethash "passed" result) t (gethash "coldRecovery" result) t
                      (gethash "sentinelRecovered" result) t))
@@ -145,6 +150,13 @@
                    (assert (>= max-history (- gr8s.resources::*resource-watch-history-bytes* (* 2 65536))))
                    (gr8s::stop-ha-control-plane ha)
                    (assert (null (gr8s.ha::ha-control-plane-compaction-thread ha)))
+                   ;; Preserve the full retained checkpoint and journal before
+                   ;; in-place HA recovery advances the watch epoch. The runner
+                   ;; cold-loads this independent disk copy in a fresh process.
+                   (uiop:run-program
+                    (list "cp" "-a" "--reflink=auto" (namestring root)
+                          (namestring (merge-pathnames "cold-state/"
+                                        (uiop:pathname-parent-directory-pathname root)))))
                    ;; Recover the existing quiesced store through production's
                    ;; in-place restore barriers. Cold OPEN-STORE is checked by
                    ;; the runner in a fresh process, with the same frozen clock.
