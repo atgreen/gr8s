@@ -630,13 +630,15 @@
          (record (make-instance 'gr8s.node.v1::service-translation-identity
                                 :pod-uid "pod-a" :node-name "worker-a" :node-id "node-a"
                                 :sandbox-id "sandbox-a" :interface-name "eth0"
-                                :pod-ip "10.88.1.2" :translation-ip "10.88.1.9"))
+                                :pod-ip "10.88.1.2" :translation-ip "10.88.1.9"
+                                :incarnation-generation "0123456789abcdef0123456789abcdef"))
          (network (make-instance 'gr8s.node.v1::node-network-config
                                  :service-translations (list record)))
          (snapshot (make-instance 'gr8s.node.v1::desired-state-snapshot
                                   :revision 3 :network network))
          (epoch (gr8s.network::service-translation-incarnation-token
-                 "node-a" "sandbox-a" "eth0" "10.88.1.2" "10.88.1.9"))
+                 "node-a" "sandbox-a" "eth0" "10.88.1.2" "10.88.1.9"
+                 "0123456789abcdef0123456789abcdef"))
          (proof (make-instance 'gr8s.node.v1::service-receiver-proof
                                :pod-uid "pod-a" :incarnation epoch))
          (status (make-instance 'gr8s.node.v1::node-status
@@ -704,7 +706,8 @@
          (record (make-instance 'gr8s.node.v1::service-translation-identity
                                 :pod-uid "pod-a" :node-name "worker-a" :node-id "node-a"
                                 :sandbox-id "sandbox-a" :interface-name "eth0"
-                                :pod-ip "10.88.1.2" :translation-ip "10.88.1.9"))
+                                :pod-ip "10.88.1.2" :translation-ip "10.88.1.9"
+                                :incarnation-generation "0123456789abcdef0123456789abcdef"))
          (projection (list (ag-proto:serialize-to-bytes record)))
          (snapshot (make-instance 'gr8s.node.v1::desired-state-snapshot
                                   :revision 3
@@ -714,7 +717,8 @@
                                :pod-uid "pod-a"
                                :incarnation (gr8s.network::service-translation-incarnation-token
                                              "node-a" "sandbox-a" "eth0"
-                                             "10.88.1.2" "10.88.1.9")))
+                                             "10.88.1.2" "10.88.1.9"
+                                             "0123456789abcdef0123456789abcdef")))
          (reports (gr8s::node-grpc-server-service-receiver-reports server)))
     (setf (gr8s::node-agent-session-node-id session) "node-a"
           (gethash "worker-a" (gr8s::node-grpc-server-sessions server)) session

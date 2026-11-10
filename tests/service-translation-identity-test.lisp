@@ -141,11 +141,52 @@
            (record (gr8s.agent::node-runtime-service-translation-record runtime pod status :sandbox-id "sandbox-a")))
       (is (equal alias (gethash "address" record)))
       (is (equal (pod-uid pod) (gethash "podUID" record)))
+      (is (equal (gr8s::pod-address-incarnation ipam "sandbox-a" "eth0")
+                 (gethash "incarnationGeneration" record)))
       (is-false (gr8s.agent::node-runtime-service-translation-record runtime pod status :sandbox-id "sandbox-b"))
       (is-false (gr8s.agent::node-runtime-service-translation-record
                  runtime pod (translation-fixture-status "10.88.1.99" nil) :sandbox-id "sandbox-a"))
       (gr8s::release-pod-address ipam "sandbox-a" "eth0")
       (is-false (gr8s.agent::node-runtime-service-translation-record runtime pod status :sandbox-id "sandbox-a")))))
+
+(test translation-generation-matches-local-and-replicated-owner-epochs
+  (with-temporary-store (store directory)
+    (let* ((server (translation-fixture-server store))
+           (ipam (gr8s::open-node-ipam (merge-pathnames "ipam/" directory) "10.88.1.0/24"))
+           (pod (translation-fixture-pod store "generated-client"))
+           (runtime (gr8s::%make-node-runtime :node-name "worker-a" :node-id "worker-a" :ipam ipam))
+           (primary (gr8s::allocate-pod-address ipam "sandbox-a" "eth0"))
+           (alias (gr8s.network::allocate-service-snat-address ipam "sandbox-a" "eth0"))
+           (status (translation-fixture-status primary nil))
+           (claim (gr8s.agent::node-runtime-service-translation-record
+                   runtime pod status :sandbox-id "sandbox-a"))
+           (generation (gethash "incarnationGeneration" claim)))
+      (setf (gethash "gr8sServiceTranslation" status) claim)
+      (translation-fixture-report server pod status)
+      (let* ((wire (gr8s::assigned-node-network server "worker-b"))
+             (roundtrip (ag-proto:deserialize-from-bytes
+                         'gr8s.node.v1::node-network-config
+                         (ag-proto:serialize-to-bytes wire)))
+             (object (gr8s::node-network-object roundtrip))
+             (record (aref (gethash "serviceTranslations" object) 0))
+             (local (gr8s.network::service-nat-identity-pair
+                     "worker-a" "sandbox-a" "eth0" primary alias generation))
+             (replicated (gr8s.network::service-nat-identity-rows record)))
+        (is (equal generation (gethash "incarnationGeneration" record)))
+        (is (every #'equalp (mapcar #'cdr local) (mapcar #'cdr replicated)))
+        (is (eq object (gr8s::validate-node-network-object object)))
+        (let ((bad (gr8s::copy-core-object object)))
+          (setf (gethash "incarnationGeneration"
+                         (aref (gethash "serviceTranslations" bad) 0)) "invalid")
+          (signals gr8s::cni-error (gr8s::validate-node-network-object bad))))
+      (gr8s::release-pod-address ipam "sandbox-a" "eth0")
+      (is (equal primary (gr8s::allocate-pod-address ipam "sandbox-a" "eth0")))
+      (is (not (equalp
+                (gr8s.network::service-translation-incarnation-token
+                 "worker-a" "sandbox-a" "eth0" primary alias generation)
+                (gr8s.network::service-translation-incarnation-token
+                 "worker-a" "sandbox-a" "eth0" primary alias
+                 (gr8s::pod-address-incarnation ipam "sandbox-a" "eth0"))))))))
 
 (test translation-inventory-retains-unready-peers-and-fences-replaced-node-records
   (with-temporary-store (store ignored)

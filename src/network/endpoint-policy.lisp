@@ -95,7 +95,7 @@
          (make-array 16 :element-type '(unsigned-byte 8) :initial-element 0)))))
 
 (defun encode-cni-endpoint-identity-v2
-    (addresses mac node-id sandbox-id interface-name alias)
+    (addresses mac node-id sandbox-id interface-name alias &optional generation)
   "Append the trusted local incarnation to the v1 wire layout. The result is
 exactly the 48 bytes expected by the v2 endpoint_identity map."
   (let* ((items (if (stringp addresses) (list addresses) addresses))
@@ -105,7 +105,7 @@ exactly the 48 bytes expected by the v2 endpoint_identity map."
     (concatenate '(vector (unsigned-byte 8))
                  (encode-cni-endpoint-identity items mac +cni-policy-native-attachment+)
                  (service-translation-incarnation-token
-                  node-id sandbox-id interface-name primary alias))))
+                  node-id sandbox-id interface-name primary alias generation))))
 
 (defun cni-endpoint-identity (configuration context)
   "Build the endpoint-identity value for the Pod described by CONFIGURATION and
@@ -127,7 +127,8 @@ exactly the 48 bytes expected by the v2 endpoint_identity map."
             (encode-cni-endpoint-identity-v2
              addresses mac (cni-configuration-service-node-id configuration)
              (cni-context-container-id context) (cni-context-interface-name context)
-             (cni-configuration-service-return-address configuration)))
+             (cni-configuration-service-return-address configuration)
+             (cni-configuration-service-incarnation configuration)))
           (encode-cni-endpoint-identity addresses mac
                                         (cni-policy-attachment-mode configuration))))))
 

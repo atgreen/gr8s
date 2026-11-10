@@ -219,7 +219,10 @@ partial failure retains the IPAM lease until DEL removes the endpoint."
        (setf (cni-configuration-endpoint-address configuration) (first addresses)
              (cni-configuration-endpoint-addresses configuration) addresses
              (cni-configuration-service-node-id configuration) node-id
-             (cni-configuration-service-return-address configuration) return-address)
+             (cni-configuration-service-return-address configuration) return-address
+             (cni-configuration-service-incarnation configuration)
+             (pod-address-incarnation ipam (cni-context-container-id context)
+                                      (cni-context-interface-name context)))
        (if (eq (cni-service-profile configuration) :v2)
            (progn
              (unless (funcall service-risk-ready-p)
@@ -243,6 +246,9 @@ partial failure retains the IPAM lease until DEL removes the endpoint."
        (setf (cni-configuration-endpoint-address configuration) (first addresses)
              (cni-configuration-endpoint-addresses configuration) addresses
              (cni-configuration-service-node-id configuration) node-id
+             (cni-configuration-service-incarnation configuration)
+             (pod-address-incarnation ipam (cni-context-container-id context)
+                                      (cni-context-interface-name context))
              (cni-configuration-service-return-address configuration)
              (service-snat-address ipam (cni-context-container-id context)
                                    (cni-context-interface-name context)))
@@ -277,7 +283,10 @@ partial failure retains the IPAM lease until DEL removes the endpoint."
                       (alias (service-snat-address ipam (cni-context-container-id context)
                                                    (cni-context-interface-name context))))
                   (when (and addresses alias)
-                    (setf (cni-configuration-service-node-id configuration) node-id)
+                    (setf (cni-configuration-service-node-id configuration) node-id
+                          (cni-configuration-service-incarnation configuration)
+                          (pod-address-incarnation ipam (cni-context-container-id context)
+                                                   (cni-context-interface-name context)))
                     (funcall withdraw-service-owner configuration context addresses alias))))
               (funcall (cni-operations-delete policy)
                        configuration context map-path link-path directory)

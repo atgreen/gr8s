@@ -1313,7 +1313,8 @@ node; stale, duplicate, or foreign proofs clear the entire report."
                    (slot-value record 'gr8s.node.v1::sandbox-id)
                    (slot-value record 'gr8s.node.v1::interface-name)
                    (slot-value record 'gr8s.node.v1::pod-ip)
-                   (slot-value record 'gr8s.node.v1::translation-ip)))))
+                   (slot-value record 'gr8s.node.v1::translation-ip)
+                   (slot-value record 'gr8s.node.v1::incarnation-generation)))))
         (let ((canonical nil))
           (dolist (proof proofs)
             (unless (typep proof 'gr8s.node.v1::service-receiver-proof)
@@ -2296,7 +2297,8 @@ cover this owner projection. The caller holds the server lock."
                                 (slot-value owner 'gr8s.node.v1::sandbox-id)
                                 (slot-value owner 'gr8s.node.v1::interface-name)
                                 (slot-value owner 'gr8s.node.v1::pod-ip)
-                                (slot-value owner 'gr8s.node.v1::translation-ip)))))
+                                (slot-value owner 'gr8s.node.v1::translation-ip)
+                                (slot-value owner 'gr8s.node.v1::incarnation-generation)))))
             owner-projection)))
 
 (defun service-risk-receivers-published-locked-p
@@ -2326,7 +2328,8 @@ owner projection stays byte-identical."
                (slot-value owner 'gr8s.node.v1::sandbox-id)
                (slot-value owner 'gr8s.node.v1::interface-name)
                (slot-value owner 'gr8s.node.v1::pod-ip)
-               (slot-value owner 'gr8s.node.v1::translation-ip)))))
+               (slot-value owner 'gr8s.node.v1::translation-ip)
+               (slot-value owner 'gr8s.node.v1::incarnation-generation)))))
     (every
      (lambda (identity)
        (let* ((name (car identity))
@@ -2392,7 +2395,8 @@ converge; every old receiver must still be proven by its original session."
                                 (slot-value owner 'gr8s.node.v1::sandbox-id)
                                 (slot-value owner 'gr8s.node.v1::interface-name)
                                 (slot-value owner 'gr8s.node.v1::pod-ip)
-                                (slot-value owner 'gr8s.node.v1::translation-ip))))
+                                (slot-value owner 'gr8s.node.v1::translation-ip)
+                                (slot-value owner 'gr8s.node.v1::incarnation-generation))))
                         (or (not (equal name (slot-value owner 'gr8s.node.v1::node-name)))
                             (and (member bytes reported-owners :test #'equalp)
                                  (= 1 (count uid proofs :test #'equal

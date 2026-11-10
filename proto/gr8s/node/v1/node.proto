@@ -350,6 +350,7 @@ message ServiceTranslationIdentity {
   string sandbox_id = 5;
   string interface_name = 6;
   string node_id = 7;
+  string incarnation_generation = 8;
 }
 
 message NodeRoute {
