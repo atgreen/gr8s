@@ -439,8 +439,11 @@ against its authenticated node session and ACKed owner assignment, retaining
 the report separately from short Pod status updates. The cluster grant is
 withheld unless every trusted owner in the current projection appears in its
 node's complete ready report; withdrawal revokes the grant on reconciliation.
-Ready receiver bits still need publication and readback on other nodes before
-live Service traffic activation. Retained-flow migration remains in progress.
+The server distributes the validated receiver set in desired snapshots. Each
+agent publishes remote receiver bits for those exact owner incarnations and
+reads the map back before ACKing. The server requires ACKs of those snapshots
+before minting the cluster grant. Retained-flow migration and live Service
+traffic activation remain in progress.
 `make test-service-nat` runs its synthetic packet interpreter tests. The same
 fixture passed 42 packet cases and seven capacity/contention cases using real
 BPF programs in a disposable VM; see

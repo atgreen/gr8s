@@ -311,6 +311,9 @@ message DesiredStateSnapshot {
   // risk publication only. The server grants a digest after all v2-capable
   // nodes ACK the same projection; the agent verifies it before selection.
   bytes service_risk_grant_digest = 9;
+  // Complete receiver set validated from authenticated node reports. A node
+  // publishes remote owner readiness from this set before ACKing the snapshot.
+  repeated ServiceReceiverProof service_receivers = 10;
 }
 
 message PodAssignment {

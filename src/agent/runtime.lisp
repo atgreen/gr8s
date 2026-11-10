@@ -119,6 +119,57 @@ The snapshot worker retries NODE-SNAPSHOT-INCOMPLETE without losing Pod work."
           (error 'node-snapshot-incomplete
                  :message "v2 Service owner inventory is not published for the current snapshot"))))))
 
+(defun snapshot-service-receiver-pairs (snapshot)
+  (mapcar (lambda (proof)
+            (cons (slot-value proof 'gr8s.node.v1::pod-uid)
+                  (slot-value proof 'gr8s.node.v1::incarnation)))
+          (slot-value snapshot 'gr8s.node.v1::service-receivers)))
+
+(defun publish-node-snapshot-service-receivers (node-runtime snapshot)
+  "Converge remote receiver bits before this snapshot may enable selectors.
+Local receiver bits belong to CNI attachment and are never set here."
+  (let* ((dataplane (node-runtime-service-lb node-runtime))
+         (owners (and dataplane (service-lb-map dataplane "gr8s_nat_id_v2")))
+         (network (node-runtime-network node-runtime)))
+    (when (and (slot-value snapshot 'gr8s.node.v1::service-receivers)
+               (null owners))
+      (error 'node-snapshot-incomplete
+             :message "v2 Service receiver map is unavailable"))
+    (when owners
+      (unless network
+        (error 'node-snapshot-incomplete :message "v2 Service owner assignment is unavailable"))
+      (handler-case
+          (bt:with-lock-held (gr8s.network::*service-nat-owner-lifecycle-lock*)
+            (gr8s.network::publish-service-nat-receiver-readiness
+             owners (gethash "serviceTranslations" network #())
+             (snapshot-service-receiver-pairs snapshot)
+             (node-runtime-node-id node-runtime)))
+        (error (condition)
+          (error 'node-snapshot-incomplete
+                 :message (format nil "v2 Service receiver publication failed: ~A" condition)))))))
+
+(defun ensure-node-snapshot-service-receivers-ready
+    (node-runtime snapshot &key (lookup #'whistler/loader:map-lookup))
+  "Withhold ACK and selection until the snapshot's remote receiver bits are
+read back, including exact local CNI readiness for any listed local owner."
+  (let* ((dataplane (node-runtime-service-lb node-runtime))
+         (owners (and dataplane (service-lb-map dataplane "gr8s_nat_id_v2")))
+         (network (node-runtime-network node-runtime)))
+    (when (and (slot-value snapshot 'gr8s.node.v1::service-receivers)
+               (null owners))
+      (error 'node-snapshot-incomplete
+             :message "v2 Service receiver map is unavailable"))
+    (when owners
+      (unless (and network
+                   (handler-case
+                       (gr8s.network::service-nat-receiver-readiness-published-p
+                        owners (gethash "serviceTranslations" network #())
+                        (snapshot-service-receiver-pairs snapshot)
+                        (node-runtime-node-id node-runtime) :lookup lookup)
+                     (error () nil)))
+        (error 'node-snapshot-incomplete
+               :message "v2 Service receiver inventory is not published for the current snapshot")))))
+
 (defun node-snapshot-service-risk-granted-p (snapshot)
   "Validate a nonempty grant against this snapshot's exact discovery bytes."
   (let ((grant (slot-value snapshot 'gr8s.node.v1::service-risk-grant-digest)))
@@ -1800,6 +1851,8 @@ so the revision is retried."
       (setf (node-runtime-service-risk-ready-revision node-runtime) nil
             (node-runtime-service-selection-ready-revision node-runtime) nil))
     (apply-node-runtime-network node-runtime snapshot)
+    (publish-node-snapshot-service-receivers node-runtime snapshot)
+    (ensure-node-snapshot-service-receivers-ready node-runtime snapshot)
     (let ((assignments (slot-value snapshot 'gr8s.node.v1::pods))
           (failed nil))
       (bt:with-lock-held ((node-runtime-observed-lock node-runtime))
@@ -1927,6 +1980,7 @@ so the revision is retried."
                  :message (format nil "~D Pod assignment~:P not applied"
                                   (+ (length failed) (count nil parsed)))))
         (ensure-node-snapshot-service-risk-ready node-runtime)
+        (ensure-node-snapshot-service-receivers-ready node-runtime snapshot)
         (ensure-node-snapshot-service-selection-ready node-runtime snapshot)
         statuses))))
 

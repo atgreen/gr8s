@@ -338,6 +338,84 @@ half is omitted; the status stream reports the complete resulting set."
                            rows))
             collect record)))
 
+(defun service-nat-receiver-proof-index (records proofs)
+  "Validate a complete snapshot receiver set against its trusted owner records.
+PROOFS are (Pod UID . 16-byte incarnation) pairs. Return a UID lookup table;
+reject unknown, duplicate, or stale claims before touching a pinned map."
+  (unless (and (vectorp records) (not (stringp records)) (listp proofs))
+    (invalid-cni "invalid v2 Service receiver projection"))
+  (let ((expected (make-hash-table :test #'equal))
+        (ready (make-hash-table :test #'equal)))
+    (loop for record across records
+          for uid = (service-translation-string record "podUID")
+          for rows = (service-nat-identity-rows record)
+          do (when (gethash uid expected)
+               (invalid-cni "duplicate v2 Service receiver owner"))
+             (setf (gethash uid expected) (subseq (cdar rows) 8 24)))
+    (dolist (proof proofs)
+      (let ((uid (car proof)) (epoch (cdr proof)))
+        (unless (and (stringp uid) (plusp (length uid))
+                     (typep epoch '(vector (unsigned-byte 8)))
+                     (= 16 (length epoch))
+                     (not (gethash uid ready))
+                     (equalp epoch (gethash uid expected)))
+          (invalid-cni "unknown or stale v2 Service receiver proof"))
+        (setf (gethash uid ready) t)))
+    ready))
+
+(defun publish-service-nat-receiver-readiness
+    (map records proofs local-node-id
+     &key (lookup #'whistler/loader:map-lookup)
+          (update #'whistler/loader:map-update))
+  "Converge remote owner receiver bits from a validated complete snapshot.
+Local bits remain CNI-owned. On enable write alias first; on disable write
+primary first, so a partial update never falsely advertises a backend."
+  (let ((ready (service-nat-receiver-proof-index records proofs))
+        (changes nil))
+    (bt:with-lock-held (*service-nat-owner-publication-lock*)
+      (loop for record across records
+            unless (string= local-node-id (service-translation-string record "nodeID"))
+              do (let* ((rows (service-nat-identity-rows record))
+                        (values (mapcar (lambda (row) (funcall lookup map (car row))) rows))
+                        (enabled (gethash (service-translation-string record "podUID") ready)))
+                   (unless (every #'service-nat-owner-row-matches-p
+                                  values (mapcar #'cdr rows))
+                     (invalid-cni "remote v2 Service owner pair is missing or stale"))
+                   (push (list rows values enabled) changes)))
+      (dolist (change (nreverse changes))
+        (destructuring-bind (rows values enabled) change
+          (loop for row in (if enabled (reverse rows) rows)
+                for value in (if enabled (reverse values) values)
+                for flags = (netlink-read-integer value 4 4)
+                for next = (if enabled (logior flags #x4) (logand flags #xfffffffb))
+                unless (= flags next)
+                  do (let ((updated (copy-seq value)))
+                       (replace updated (service-lb-bytes next 4) :start1 4)
+                       (funcall update map (car row) updated)))))
+      (length changes))))
+
+(defun service-nat-receiver-readiness-published-p
+    (map records proofs local-node-id &key (lookup #'whistler/loader:map-lookup))
+  "Read back exact remote receiver bits and required local CNI readiness."
+  (let ((ready (service-nat-receiver-proof-index records proofs)))
+    (and map
+         (bt:with-lock-held (*service-nat-owner-publication-lock*)
+           (loop for record across records
+                 for local-p = (string= local-node-id
+                                        (service-translation-string record "nodeID"))
+                 for required = (not (null (gethash
+                                            (service-translation-string record "podUID") ready)))
+                 for rows = (service-nat-identity-rows record)
+                 always (every (lambda (row)
+                                 (let ((value (funcall lookup map (car row))))
+                                   (and (service-nat-owner-row-matches-p value (cdr row))
+                                        (or (and local-p (not required))
+                                            (eq required
+                                                (not (zerop (logand
+                                                             (netlink-read-integer value 4 4)
+                                                             #x4))))))))
+                               rows))))))
+
 (defparameter *service-nat-policy-key-form*
   '(whistler::defstruct whistler::netpol-flow-key-v2
      (whistler::peer whistler::u32) (whistler::pod-port whistler::u16)
