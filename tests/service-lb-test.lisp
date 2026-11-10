@@ -194,6 +194,40 @@
      :map '("10.80.0.0/12")
      :update (lambda (&rest ignored) (declare (ignore ignored)) (error "map update failed")))))
 
+(test service-nat-identity-rows-bind-primary-alias-and-incarnation
+  (let* ((record (gr8s::json-object
+                  "podIP" "10.88.1.2" "address" "10.88.1.9"
+                  "nodeID" "node-1" "podUID" "pod-1"
+                  "sandboxID" "sandbox-1" "interfaceName" "eth0"))
+         (rows (gr8s.network::service-nat-identity-rows record))
+         (primary (first rows)) (alias (second rows)))
+    (is (= 2 (length rows)))
+    (is (equalp #(10 88 1 2) (car primary)))
+    (is (equalp #(10 88 1 9) (car alias)))
+    (dolist (row rows)
+      (is (typep (car row) '(simple-array (unsigned-byte 8) (4))))
+      (is (typep (cdr row) '(simple-array (unsigned-byte 8) (32))))
+      (is (equalp #(10 88 1 9) (subseq (cdr row) 0 4)))
+      (is (= #x20001 (gr8s::netlink-read-integer (cdr row) 4 4)))
+      (is (equalp #(10 88 1 2) (subseq (cdr row) 24 28))))
+    (is (= 1 (gr8s::netlink-read-integer (cdr primary) 28 4)))
+    (is (= 2 (gr8s::netlink-read-integer (cdr alias) 28 4)))
+    (is (equalp (subseq (cdr primary) 8 24) (subseq (cdr alias) 8 24)))
+    (is (equalp rows (gr8s.network::service-nat-identity-rows record)))
+    (setf (gethash "sandboxID" record) "sandbox-2")
+    (is (not (equalp (subseq (cdr primary) 8 24)
+                     (subseq (cdr (first (gr8s.network::service-nat-identity-rows record))) 8 24)))))
+  (let ((writes nil)
+        (record (gr8s::json-object
+                 "podIP" "10.88.1.2" "address" "10.88.1.9"
+                 "nodeID" "node-1" "podUID" "pod-1"
+                 "sandboxID" "sandbox-1" "interfaceName" "eth0")))
+    (is (= 2 (gr8s.network::publish-service-nat-identities
+              :map (vector record)
+              :update (lambda (map key value)
+                        (is (eq :map map)) (push (cons key value) writes)))))
+    (is (= 2 (length writes)))))
+
 (test service-lb-plan-publishes-each-cluster-ip-to-same-family-backends
   (let* ((service (fake-lb-service "10.96.0.10"))
          (spec (gethash "spec" service)))
