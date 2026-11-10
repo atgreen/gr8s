@@ -27,6 +27,25 @@
       (error "Service translation addresses must be canonical IPv4"))
     numeric))
 
+(defun service-translation-incarnation-token
+    (node-id sandbox-id interface-name primary alias)
+  "The same 128-bit owner token is computed at local CNI ADD and from the
+validated replicated claim. The sandbox ID identifies a fresh Pod incarnation;
+Pod UID is checked when accepting the claim, but is unavailable at CNI ADD."
+  (dolist (value (list node-id sandbox-id interface-name))
+    (unless (and (stringp value) (<= 1 (length value) 256)
+                 (not (find #\Null value)))
+      (error "Invalid Service translation incarnation field")))
+  (let* ((canonical-primary (format-pod-address :ipv4
+                                                (canonical-service-translation-ipv4 primary)))
+         (canonical-alias (format-pod-address :ipv4
+                                              (canonical-service-translation-ipv4 alias)))
+         (bytes (trivial-utf-8:string-to-utf-8-bytes
+                 (com.inuoe.jzon:stringify
+                  (vector node-id sandbox-id interface-name
+                          canonical-primary canonical-alias)))))
+    (subseq (ironclad:digest-sequence :sha256 bytes) 0 16)))
+
 (defun service-translation-address-key (address)
   (handler-case (node-ipam-address-identity address) (error () address)))
 

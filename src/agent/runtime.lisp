@@ -659,7 +659,8 @@ conflicting network."
             (node-runtime-ipam node-runtime) ipam
             (node-runtime-cni-operations node-runtime)
             (make-routed-cni-operations
-             ipam :mtu (gethash "mtu" network)
+             ipam :node-id (node-runtime-node-id node-runtime)
+                  :mtu (gethash "mtu" network)
                   :dns-address (gethash "dnsAddress" network)))))
   (publish-node-runtime-service-nat-inventory node-runtime network)
   node-runtime)
