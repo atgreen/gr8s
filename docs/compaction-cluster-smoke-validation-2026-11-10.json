@@ -209,5 +209,31 @@
     "Full2048-round three-process heap/history acceptance",
     "Production serve and VM/conformance acceptance",
     "Other full ten-gap requirements"
-  ]
+  ],
+  "pressurePolicyRerun": {
+    "passed": true,
+    "binarySha256": "51459424663ad03e3902f3ef03f2f8f9e27ebfa0418dc01d8482d726c0ed98e8",
+    "rounds": 64,
+    "payloadBytes": 4194304,
+    "fullChurnAcceptance": false,
+    "elapsedSeconds": 46.420257485006005,
+    "heldMarkerCommit": 53,
+    "identitiesPreserved": true,
+    "stopExitCodes": {
+      "cp-a": 0,
+      "cp-b": 0,
+      "cp-c": 0
+    },
+    "cleanupExitCodes": {
+      "cp-a": 0,
+      "cp-b": 0,
+      "cp-c": 0
+    },
+    "productionSourceCommit": "019f02c",
+    "evidence": "/tmp/gr8s-compaction-cluster-native-qp18r43t",
+    "sourceFilesSha256": {
+      "src/resources/core-resources.lisp": "d38da67460936f7d90d5ed51828e5960f94a381a009916bcc84061cecd603f0d",
+      "src/resources/store-snapshot.lisp": "463749d5a9d4202040aef0b5c69353913674fec628b987845142b75da54936c3"
+    }
+  }
 }
