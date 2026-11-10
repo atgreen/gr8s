@@ -162,7 +162,10 @@ def main():
             for value in values.values()) else None)(states()), timeout=240)
         result.update(beforeRestart=final, samples=samples)
         result["diskCatchupAcceptance"] = any(value["catchupCacheBatches"] > 0 for value in final.values())
-        assert result["diskCatchupAcceptance"], "No archived-prefix batch was replicated"
+        assert result["diskCatchupAcceptance"], "No archived-prefix batch was read for replication"
+        result["catchupHistoryContinuous"] = (final[slow.name]["historyEstimatedBytes"] >=
+                                              final[current.name]["historyEstimatedBytes"] - 2 * 65536)
+        assert result["catchupHistoryContinuous"], "Delayed follower reset history instead of replaying the missing prefix"
         assert all(value["catchupCacheBytes"] <= 128 * 1024 * 1024 and
                    value["catchupCacheSegments"] <= 128 for value in final.values()), final
         if not args.smoke:
