@@ -391,7 +391,10 @@ def capacity(factory, table):
         n.unlocked(backend)
         assert backend.lookup(table, foreign_key) == sentinel
         for other in (RX, RI, WL):
-            assert backend.keys(other) == ([foreign_key] if other == table else [])
+            actual = backend.keys(other)
+            expected = [foreign_key] if other == table else []
+            assert actual == expected, (table, other, [key.hex() for key in actual],
+                                        [key.hex() for key in expected])
         backend.delete(table, foreign_key)
         visible = run(backend, 1, encoded)
         assert p.endpoints(visible) == (p.CLIENT, p.BACKEND, 46017, 8080)

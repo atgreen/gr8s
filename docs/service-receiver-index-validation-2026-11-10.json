@@ -1,0 +1,49 @@
+{
+  "issue": "podster-p9c.19",
+  "scope": "Experimental typed Service graph and standalone receiver collector; no CNI or node-agent activation",
+  "change": {
+    "indexMap": "gr8s_nat_ri_v3",
+    "keyBytes": 64,
+    "keyLayout": "request metadata48 followed by original incoming wire tuple16",
+    "valueBytes": 16,
+    "behavior": "Different Service or endpoint incarnations sharing a wire tuple retain separate index claims and allocate distinct visible reply tuples"
+  },
+  "fixtures": {
+    "graphSha256": "6642d324f8a2c0a34b37cc49c33e3814c3418408ac10e147bcc8c6ce392d41d4",
+    "collectorSha256": "6a4a9879b6facd0938e15ab4da572426796d3319c461ede75fb1f6deee150e8e"
+  },
+  "validation": {
+    "graphInterpreterCases": 24,
+    "graphKernelCases": 24,
+    "receiverCollectorInterpreterCases": 102,
+    "receiverCollectorKernelCases": 100,
+    "receiverCollectorKernelConcurrency": {
+      "groups": 32,
+      "callersPerGroup": 6,
+      "unchanged": 155,
+      "reclaimed": 32,
+      "contended": 5
+    },
+    "reuseProbe": {
+      "before": "New Service request dropped with receiver row and index count1",
+      "afterInterpreter": "New Service request accepted with receiver row and index count2",
+      "afterKernel": "New Service request accepted with receiver row and index count2",
+      "oldReply": "Delayed old Service reply rejected at source",
+      "newReply": "New Service reply restored to the new VIP"
+    },
+    "focusedNetworkingChecks": 1670,
+    "diffCheck": "pass"
+  },
+  "logs": {
+    "graphInterpreter": "/tmp/flatback-wire-index-graph-interpreter.log",
+    "graphKernel": "/tmp/flatback-wire-index-graph-fixed-kernel.log",
+    "receiverCollectorKernel": "/tmp/flatback-wire-index-state-kernel.log",
+    "reuseKernel": "/tmp/flatback-wire-index-reuse-kernel.log",
+    "networking": "/tmp/flatback-wire-index-networking.log"
+  },
+  "limitations": [
+    "No live guest, native socket, NodePort, IPv6, or actual CNI/agent profile proof",
+    "Receiver collector is not called by the node agent",
+    "Native socket and packet paths do not yet share the full ownership protocol"
+  ]
+}
