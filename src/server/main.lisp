@@ -1088,6 +1088,8 @@ The new identity takes effect when the node agent next starts."
                :reserved-cpus (getf options :reserved-cpus)
                :topology-manager-policy (getf options :topology-manager-policy "none")))
         (setf (node-runtime-node-name node-runtime) node-name)
+        (setf (gr8s.agent::node-runtime-node-id node-runtime)
+              (gethash "nodeId" (load-agent-identity identity node-name) ""))
         (unwind-protect
              (progn
                (start-node-runtime node-runtime)
@@ -1100,6 +1102,8 @@ The new identity takes effect when the node agent next starts."
                (run-node-session
                 host port node-name identity
                 (lambda (snapshot)
+                  (setf (gr8s.agent::node-runtime-node-id node-runtime)
+                        (gethash "nodeId" (load-agent-identity identity node-name) ""))
                   (reconcile-node-snapshot node-runtime snapshot))
                 :endpoints session-endpoints
                 :snapshot-observer (lambda (snapshot) (receive-node-snapshot-intent node-runtime snapshot))

@@ -26,6 +26,7 @@
 (defstruct (node-runtime (:constructor %make-node-runtime))
   state-directory
   (node-name nil)   ; the Node this agent runs, for Service traffic policies
+  (node-id "")     ; accepted durable ServerHello identity, fences node replacement
   runtime
   manager
   dynamic-resource-manager
@@ -316,6 +317,17 @@ validates and reconciles against."
      "clusterPodCIDRs" (coerce cluster-cidrs 'vector)
      "nodePodCIDR" (first node-cidrs)
      "nodePodCIDRs" (coerce node-cidrs 'vector)
+     "serviceTranslations"
+     (coerce (mapcar
+              (lambda (identity)
+                (json-object "podUID" (slot-value identity 'gr8s.node.v1::pod-uid)
+                             "nodeID" (slot-value identity 'gr8s.node.v1::node-id)
+                             "nodeName" (slot-value identity 'gr8s.node.v1::node-name)
+                             "podIP" (slot-value identity 'gr8s.node.v1::pod-ip)
+                             "address" (slot-value identity 'gr8s.node.v1::translation-ip)
+                             "sandboxID" (slot-value identity 'gr8s.node.v1::sandbox-id)
+                             "interfaceName" (slot-value identity 'gr8s.node.v1::interface-name)))
+              (slot-value network 'gr8s.node.v1::service-translations)) 'vector)
      "dnsAddress" (slot-value network 'gr8s.node.v1::dns-address)
      "vni" (slot-value network 'gr8s.node.v1::vni)
      "mtu" (slot-value network 'gr8s.node.v1::mtu)
@@ -551,6 +563,7 @@ Returns NETWORK; signals INVALID-CNI on any violation."
   (unless (and (hash-table-p network) (eql 1 (gethash "version" network)))
     (invalid-cni "invalid persisted node network format"))
   (validate-node-network-cidr-pairs network)
+  (gr8s.network::validate-service-translation-network network)
   (let ((address (gethash "underlayAddress" network "")))
     (unless (equal address "")
       (handler-case (canonical-node-underlay-address address)
@@ -1213,8 +1226,44 @@ deletion deadline cannot postpone an earlier one. Holds the store lock."
      :status-json (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify wire-status))
      :runtime-deleted runtime-deleted)))
 
+(defun node-runtime-service-translation-record
+    (node-runtime pod status &key (sandbox-id nil sandbox-id-p))
+  "Report a lease only for this Pod's actual current sandbox and observed IPv4."
+  (let ((ipam (node-runtime-ipam node-runtime))
+        (runtime (node-runtime-runtime node-runtime)))
+    (when (or (null ipam) (pod-host-network-p pod))
+      (return-from node-runtime-service-translation-record nil))
+    ;; No CRI operation for ordinary endpoints without private leases.
+    (unless (bt:with-lock-held ((node-ipam-lock ipam))
+              (plusp (hash-table-count (gr8s.network::node-ipam-service-snat-allocations ipam))))
+      (return-from node-runtime-service-translation-record nil))
+    (unless sandbox-id-p
+      (unless (typep runtime 'containerd-runtime)
+        (return-from node-runtime-service-translation-record nil))
+      (let ((sandbox (containerd-owned-sandbox runtime (pod-uid pod))))
+        (setf sandbox-id (and sandbox (cri-pod-sandbox-info-id sandbox)))))
+    (when sandbox-id
+      (bt:with-lock-held ((node-ipam-lock ipam))
+        (loop for key being the hash-keys of (gr8s.network::node-ipam-service-snat-allocations ipam)
+                using (hash-value alias)
+              for addresses = (gethash key (node-ipam-allocations ipam))
+              for original = (find-if (lambda (value) (not (find #\: value))) addresses)
+              for primary = (and original (gr8s.network::node-ipam-address-identity original))
+              when (and (equal sandbox-id (car key)) primary
+                        (member primary (mapcar #'gr8s.network::service-translation-address-key
+                                                (gr8s.network::service-translation-status-addresses status))
+                                :test #'equal))
+                return (json-object "address" alias "podIP" primary "sandboxID" sandbox-id
+                                    "interfaceName" (cdr key) "podUID" (pod-uid pod)
+                                    "nodeID" (node-runtime-node-id node-runtime)
+                                    "nodeName" (node-runtime-node-name node-runtime)))))))
+
 (defun cache-node-observation (node-runtime pod status)
   "Persist actual status and transport Events without confusing runtime deletion with public phase."
+  (setf status (copy-core-object status))
+  (remhash "gr8sServiceTranslation" status)
+  (let ((translation (node-runtime-service-translation-record node-runtime pod status)))
+    (when translation (setf (gethash "gr8sServiceTranslation" status) translation)))
   (let* ((store (node-runtime-store node-runtime))
          (before (pod-observed-status store pod))
          (address (gethash "podIP" status)))

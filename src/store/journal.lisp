@@ -139,7 +139,7 @@ Internal controllers and replicated desired-state checks keep using canonical re
                     (let ((pending (make-hash-table :test #'equal)))
                       (setf (gethash "phase" pending) "Pending")
                       pending))))
-    (setf (gethash "status" object) status)
+    (setf (gethash "status" object) (public-pod-status-value status))
     (when (pod-status-revision pod)
       (setf (gethash "resourceVersion" (gethash "metadata" object))
             (write-to-string (pod-status-revision pod))))
@@ -229,6 +229,7 @@ Internal controllers and replicated desired-state checks keep using canonical re
 
 (defun publish-pod-status-unlocked (store pod status)
   "Journal STATUS when it differs from what clients last saw for the current Pod."
+  (setf status (public-pod-status-value status))
   (let ((current (gethash (pod-key (pod-namespace pod) (pod-name pod))
                           (pod-store-pods store)))
         (uid (pod-uid pod)))

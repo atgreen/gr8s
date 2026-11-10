@@ -949,6 +949,8 @@ operation. No-op when no operation matches MESSAGE's id."
                    :node-pod-cidr (node-record-pod-cidr node)
                    :cluster-pod-cidrs (copy-list (node-grpc-server-cluster-pod-cidrs server))
                    :node-pod-cidrs (coerce (node-record-all-pod-cidrs node) 'list)
+                   :service-translations
+                   (gr8s.network::service-translation-identity-messages (node-grpc-server-store server))
                    :dns-address +dns-pod-server-address+
                    :underlay-address (node-record-underlay-address node)
                    :overlay-backend (node-grpc-server-overlay-backend server)
@@ -1368,7 +1370,16 @@ candidates; agents still require their transactional handshake/probe gates."
                         (merge-node-pod-address-status object pod-status)
                         (let ((events (gethash "gr8sRuntimeEvents" object)))
                           (remhash "gr8sRuntimeEvents" object)
-                          (update-pod-observed-status (node-grpc-server-store server) pod object)
+                          (save-pod-observation
+                           (node-grpc-server-store server) pod object
+                           :validator
+                           (lambda (copy)
+                             (let ((translation (gr8s.network::normalize-node-service-translation
+                                                 (node-grpc-server-store server) node-name pod copy)))
+                               (if translation
+                                   (setf (gethash "gr8sServiceTranslation" copy) translation)
+                                   (remhash "gr8sServiceTranslation" copy)))
+                             (setf object copy)))
                           (record-node-runtime-events (node-grpc-server-store server) pod node-name events)
                           ;; Cleanup is distinct from phase and API finalizer retention.
                           ;; The authenticated peer still owns this exact UID/RV.

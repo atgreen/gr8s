@@ -203,6 +203,10 @@ class Smoke:
                                         f'--net=/run/netns/{self.namespaces[index]}', '--', *args],
                                        f'agent-{index}')
         def fresh_connection():
+            status = self.agents[index].poll()
+            if status is not None:
+                raise RuntimeError(f'worker-{index} agent exited with status {status} before a fresh report; '
+                                   f'see agent-{index}.log')
             metrics = self.metrics().splitlines()
             ready = f'gr8s_dataplane_node_ready{{node="worker-{index}"}} 1'
             prefix = f'gr8s_dataplane_observed_timestamp_seconds{{node="worker-{index}"}} '
