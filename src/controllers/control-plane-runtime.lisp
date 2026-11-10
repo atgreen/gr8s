@@ -85,7 +85,9 @@
    :deduplicate t))
 
 (defun publish-service-discovery-snapshots (runtime)
-  "Deliver public DNS changes even when every running Pod revision is unchanged."
+  "Deliver discovery and advance the two-phase v2 Service publication grant."
+  (gr8s.apiserver::refresh-cluster-service-risk-grant
+   (control-plane-runtime-node-server runtime))
   (dolist (node (list-nodes (control-plane-runtime-store runtime)))
     (publish-node-snapshot runtime (node-record-name node))))
 
