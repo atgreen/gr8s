@@ -33,6 +33,95 @@
         (maphash (lambda (key value) (unless (member key first-fields :test #'equal) (emit key value))) state))
       (write-char #\} out))))
 
+(test checkpoint-metadata-rewrite-streams-all-values-and-preserves-the-journal
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (let* ((path (gr8s::core-resource-state-path store))
+           (journal (gr8s::core-journal-path store))
+           (config (gr8s::core-object "enabled" nil "phase" "metadata-fixture"))
+           (payload (ag-grpc:base64-encode
+                     (make-array (* 1024 1024) :element-type '(unsigned-byte 8) :initial-element 17)))
+           (state (checkpoint-reader-state 2 #() (vector (checkpoint-reader-object 2 payload "Secret"))))
+           (parse (symbol-function 'com.inuoe.jzon:parse))
+           (parse-element (symbol-function 'com.inuoe.jzon:parse-next-element)))
+      (ensure-directories-exist path)
+      (setf (gethash "future" state)
+            (vector t nil 'null 1.25d0 #() (gr8s::core-object "escaped" (format nil "λ魚~%\"\\"))))
+      (with-open-file (out journal :direction :output :if-exists :supersede)
+        (write-line "{\"revision\":3,\"time\":10,\"changes\":[]}" out))
+      (let ((journal-bytes (pure-tls::read-file-bytes journal)))
+        (dolist (order '(("secretsEncryption" "items") ("items" "secretsEncryption") ("items")))
+          (when (= 1 (length order)) (remhash "secretsEncryption" state))
+          (write-checkpoint-reader-fixture path state order)
+          (unwind-protect
+               (progn
+                 (setf (symbol-function 'com.inuoe.jzon:parse)
+                       (lambda (&rest args) (declare (ignore args)) (error "Aggregate parse forbidden"))
+                       (symbol-function 'com.inuoe.jzon:parse-next-element)
+                       (lambda (&rest args) (declare (ignore args)) (error "Container parse forbidden")))
+                 (gr8s.resources::persist-secret-encryption-metadata-unlocked store config))
+            (setf (symbol-function 'com.inuoe.jzon:parse) parse
+                  (symbol-function 'com.inuoe.jzon:parse-next-element) parse-element))
+          (let ((parsed (com.inuoe.jzon:parse path :max-string-length (* 2 1024 1024))))
+            (is (gr8s.store::json-value-equal-p config (gethash "secretsEncryption" parsed)))
+            (remhash "secretsEncryption" parsed)
+            (let ((expected (gr8s::copy-core-object state)))
+              (remhash "secretsEncryption" expected)
+              (is (gr8s.store::json-value-equal-p expected parsed))))
+          (is (eq config (gr8s::pod-store-secret-encryption-config store)))
+          (is (equalp journal-bytes (pure-tls::read-file-bytes journal))))))))
+
+(test checkpoint-metadata-malformed-input-does-not-publish-or-change-config
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (let* ((path (gr8s::core-resource-state-path store))
+           (journal (gr8s::core-journal-path store))
+           (old (gr8s::core-object "enabled" nil))
+           (next (gr8s::core-object "enabled" nil "phase" "next")))
+      (ensure-directories-exist path)
+      (setf (gr8s::pod-store-secret-encryption-config store) old)
+      (with-open-file (out journal :direction :output :if-exists :supersede) (write-string "journal-sentinel" out))
+      (dolist (json '("[]" "{\"version\":2,\"version\":2}"
+                      "{\"secretsEncryption\":null,\"secretsEncryption\":{}}"
+                      "{\"items\":[{\"value\":\"truncated" "{\"items\":[true,]}" "{} {}"))
+        (with-open-file (out path :direction :output :if-exists :supersede) (write-string json out))
+        (let ((files (uiop:directory-files (uiop:pathname-directory-pathname path))))
+          (signals error (gr8s.resources::persist-secret-encryption-metadata-unlocked store next))
+          (is (equal json (uiop:read-file-string path)))
+          (is (eq old (gr8s::pod-store-secret-encryption-config store)))
+          (is (equal "journal-sentinel" (uiop:read-file-string journal)))
+          (is (equal (sort files #'string< :key #'namestring)
+                     (sort (uiop:directory-files (uiop:pathname-directory-pathname path)) #'string< :key #'namestring))))))))
+
+(test checkpoint-metadata-rename-failure-and-initial-rewrite-failure-keep-config
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (let* ((path (gr8s::core-resource-state-path store))
+           (config (gr8s::core-object "enabled" nil))
+           (rename (symbol-function 'uiop:rename-file-overwriting-target))
+           (checkpoint (symbol-function 'gr8s.resources::write-core-checkpoint)))
+      ;; No existing checkpoint: the encryption shadow must not leak its new
+      ;; config or token key when the initial checkpoint cannot be written.
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s.resources::write-core-checkpoint)
+                   (lambda (&rest args) (declare (ignore args)) (error "Injected checkpoint failure")))
+             (signals error (gr8s.resources::persist-secret-encryption-metadata-unlocked store config))
+             (is (null (gr8s::pod-store-secret-encryption-config store)))
+             (is (null (gr8s::pod-store-template-token-key store))))
+        (setf (symbol-function 'gr8s.resources::write-core-checkpoint) checkpoint))
+      (ensure-directories-exist path)
+      (write-checkpoint-reader-fixture path (checkpoint-reader-state 0 #() #()) nil)
+      (let ((before (pure-tls::read-file-bytes path)))
+        (unwind-protect
+             (progn
+               (setf (symbol-function 'uiop:rename-file-overwriting-target)
+                     (lambda (&rest args) (declare (ignore args)) (error "Injected publication failure")))
+               (signals error (gr8s.resources::persist-secret-encryption-metadata-unlocked store config))
+               (is (equalp before (pure-tls::read-file-bytes path)))
+               (is (null (gr8s::pod-store-secret-encryption-config store))))
+          (setf (symbol-function 'uiop:rename-file-overwriting-target) rename))))))
+
 (test checkpoint-reader-preserves-schema-order-independent-sharing-and-metadata
   (with-temporary-store (store root)
     (dolist (version '(1 2))
