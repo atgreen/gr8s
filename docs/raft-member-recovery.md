@@ -362,3 +362,33 @@ with its recovered three-voter membership, preserved data and key identities,
 witness SIGKILL/restart, and a committed write requiring two surviving voters
 plus the witness. All final shutdowns return zero. This is loopback native
 acceptance; VM dataplane and Kubernetes conformance acceptance remain open.
+
+To exercise leader loss during a large learner transfer, build the instrumented
+native harness and run:
+
+```sh
+sbcl --noinform --non-interactive --load scripts/build-learner-native-harness.lisp
+python3 scripts/test-learner-handoff-native.py
+```
+
+The probe establishes three voters with 64 MiB of application payload, admits a
+fourth member, verifies a partial artifact and gated learner, then kills the
+leader. It requires a higher-term replacement to retain the three-voter quorum,
+commit a write, finish the learner transfer without another Join, promote only
+after application readiness, and recover the old leader. Each process has a
+384 MiB heap. `--records` and `--chunk-delay` control payload size and transfer
+pacing; fewer than 1,024 records do not qualify as large-payload acceptance.
+The JSON report includes partial-transfer evidence, membership, application
+progress, binary digest and shutdown results. This harness uses internal
+plaintext transport; authenticated production startup is covered separately by
+`test-ha-production-native.py --witness`. VM acceptance remains separate.
+
+The 2026-11-10 default-size run passed; see
+`learner-handoff-native-validation-2026-11-10.json`. The killed leader had three
+voters and a pending learner; the learner held a partial snapshot and remained
+gated at applied index 0. The replacement advanced to term 2, committed the
+post-loss write, and completed catch-up without another Join. The learner
+finished at committed/applied index 10 with four voters and 1,026 application
+resources. The old leader recovered, all four nodes retained the write, and
+all shutdowns returned zero. This closes native plaintext handoff acceptance;
+the combined authenticated large-transfer scenario and VM execution remain open.

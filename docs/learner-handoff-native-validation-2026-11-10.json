@@ -1,0 +1,376 @@
+{
+  "passed": true,
+  "evidence": "/tmp/gr8s-learner-handoff-bufczg_0",
+  "nativeHarness": true,
+  "productionServe": false,
+  "mutualTls": false,
+  "vmAcceptance": false,
+  "heapLimitMiB": 384,
+  "records": 1024,
+  "payloadBytes": 67108864,
+  "binarySha256": "54b1e73d8711ddb224af6a442abb61abdf871f8b6a5c86efd532a7a0dd4a3e99",
+  "establishedVoters": {
+    "source": {
+      "role": "leader",
+      "selfRole": "voter",
+      "term": 1,
+      "quorumMembers": 3,
+      "commit": 6,
+      "applied": 6,
+      "lastIndex": 6,
+      "members": [
+        {
+          "id": "peer2",
+          "role": "voter"
+        },
+        {
+          "id": "peer1",
+          "role": "voter"
+        },
+        {
+          "id": "source",
+          "role": "voter"
+        }
+      ],
+      "blocked": false,
+      "heapLimitMiB": 384,
+      "resources": 1025,
+      "lastPayloadBytes": 65536,
+      "nonce": "d0497e3448c24c239335261892133a21"
+    },
+    "peer1": {
+      "role": "follower",
+      "selfRole": "voter",
+      "term": 1,
+      "quorumMembers": 3,
+      "commit": 6,
+      "applied": 6,
+      "lastIndex": 6,
+      "members": [
+        {
+          "id": "peer2",
+          "role": "voter"
+        },
+        {
+          "id": "peer1",
+          "role": "voter"
+        },
+        {
+          "id": "source",
+          "role": "voter"
+        }
+      ],
+      "blocked": false,
+      "heapLimitMiB": 384,
+      "resources": 1025,
+      "lastPayloadBytes": 65536,
+      "nonce": "ef5108c9f2904dcca2b59ff34a99ea65"
+    },
+    "peer2": {
+      "role": "follower",
+      "selfRole": "voter",
+      "term": 1,
+      "quorumMembers": 3,
+      "commit": 6,
+      "applied": 6,
+      "lastIndex": 6,
+      "members": [
+        {
+          "id": "peer2",
+          "role": "voter"
+        },
+        {
+          "id": "peer1",
+          "role": "voter"
+        },
+        {
+          "id": "source",
+          "role": "voter"
+        }
+      ],
+      "blocked": false,
+      "heapLimitMiB": 384,
+      "resources": 1025,
+      "lastPayloadBytes": 65536,
+      "nonce": "1c54d21d98f74c9480bc2447a1f896a3"
+    }
+  },
+  "killedLeader": "source",
+  "partialTransfer": {
+    "offset": 1048576,
+    "total": 67347866,
+    "token": "f36bedc7-e1e8-4f08-8262-83d4f4125fae"
+  },
+  "receiverAtLeaderLoss": {
+    "role": "follower",
+    "selfRole": "learner",
+    "term": 1,
+    "quorumMembers": 1,
+    "commit": 0,
+    "applied": 0,
+    "lastIndex": 0,
+    "members": [
+      {
+        "id": "sink",
+        "role": "learner"
+      }
+    ],
+    "blocked": true,
+    "heapLimitMiB": 384,
+    "nonce": "fa9695507511414d911e3a55e050652e"
+  },
+  "partialFilesAtLeaderLoss": [
+    {
+      "path": "raft/.gr8s-raft-transfers-v2-1002/.raft-transfer-v2-omN4q6/in-84d84bcd-9a4e-43f3-be09-8a6b19503638.snapshot",
+      "bytes": 1179648
+    }
+  ],
+  "membershipAtLeaderLoss": {
+    "role": "leader",
+    "selfRole": "voter",
+    "term": 1,
+    "quorumMembers": 3,
+    "commit": 7,
+    "applied": 7,
+    "lastIndex": 7,
+    "members": [
+      {
+        "id": "sink",
+        "role": "learner"
+      },
+      {
+        "id": "peer2",
+        "role": "voter"
+      },
+      {
+        "id": "peer1",
+        "role": "voter"
+      },
+      {
+        "id": "source",
+        "role": "voter"
+      }
+    ],
+    "blocked": false,
+    "heapLimitMiB": 384,
+    "resources": 1025,
+    "lastPayloadBytes": 65536,
+    "nonce": "af743fd6191e4e4bb75458a61aa1d080"
+  },
+  "replacementLeader": "peer1",
+  "membershipAfterElection": {
+    "role": "leader",
+    "selfRole": "voter",
+    "term": 2,
+    "quorumMembers": 3,
+    "commit": 8,
+    "applied": 8,
+    "lastIndex": 8,
+    "members": [
+      {
+        "id": "sink",
+        "role": "learner"
+      },
+      {
+        "id": "peer2",
+        "role": "voter"
+      },
+      {
+        "id": "peer1",
+        "role": "voter"
+      },
+      {
+        "id": "source",
+        "role": "voter"
+      }
+    ],
+    "blocked": false,
+    "heapLimitMiB": 384,
+    "resources": 1025,
+    "lastPayloadBytes": 65536,
+    "nonce": "b322aaba8824451290fc5a3c7d2358b6"
+  },
+  "replacementTransfer": {
+    "offset": 0,
+    "total": 67347866,
+    "token": "9fd13da3-5b07-4db8-8368-a7714fad7c2a"
+  },
+  "promotedLearner": {
+    "role": "follower",
+    "selfRole": "voter",
+    "term": 2,
+    "quorumMembers": 4,
+    "commit": 10,
+    "applied": 10,
+    "lastIndex": 10,
+    "members": [
+      {
+        "id": "sink",
+        "role": "voter"
+      },
+      {
+        "id": "peer2",
+        "role": "voter"
+      },
+      {
+        "id": "peer1",
+        "role": "voter"
+      },
+      {
+        "id": "source",
+        "role": "voter"
+      }
+    ],
+    "blocked": false,
+    "heapLimitMiB": 384,
+    "resources": 1026,
+    "lastPayloadBytes": 65536,
+    "nonce": "522d4f4ea9eb4ec8966e1989958c2b35"
+  },
+  "finalMembership": {
+    "source": {
+      "role": "follower",
+      "selfRole": "voter",
+      "term": 2,
+      "quorumMembers": 4,
+      "commit": 10,
+      "applied": 10,
+      "lastIndex": 10,
+      "members": [
+        {
+          "id": "sink",
+          "role": "voter"
+        },
+        {
+          "id": "peer2",
+          "role": "voter"
+        },
+        {
+          "id": "peer1",
+          "role": "voter"
+        },
+        {
+          "id": "source",
+          "role": "voter"
+        }
+      ],
+      "blocked": false,
+      "heapLimitMiB": 384,
+      "resources": 1026,
+      "lastPayloadBytes": 65536,
+      "nonce": "05d747c8564343bea59cd1ab34e376aa"
+    },
+    "peer1": {
+      "role": "leader",
+      "selfRole": "voter",
+      "term": 2,
+      "quorumMembers": 4,
+      "commit": 10,
+      "applied": 10,
+      "lastIndex": 10,
+      "members": [
+        {
+          "id": "sink",
+          "role": "voter"
+        },
+        {
+          "id": "peer2",
+          "role": "voter"
+        },
+        {
+          "id": "peer1",
+          "role": "voter"
+        },
+        {
+          "id": "source",
+          "role": "voter"
+        }
+      ],
+      "blocked": false,
+      "heapLimitMiB": 384,
+      "resources": 1026,
+      "lastPayloadBytes": 65536,
+      "nonce": "ed4a7e932fb3422d970bddffd7239234"
+    },
+    "peer2": {
+      "role": "follower",
+      "selfRole": "voter",
+      "term": 2,
+      "quorumMembers": 4,
+      "commit": 10,
+      "applied": 10,
+      "lastIndex": 10,
+      "members": [
+        {
+          "id": "sink",
+          "role": "voter"
+        },
+        {
+          "id": "peer2",
+          "role": "voter"
+        },
+        {
+          "id": "peer1",
+          "role": "voter"
+        },
+        {
+          "id": "source",
+          "role": "voter"
+        }
+      ],
+      "blocked": false,
+      "heapLimitMiB": 384,
+      "resources": 1026,
+      "lastPayloadBytes": 65536,
+      "nonce": "f8b429138b5640bb86a1d0950c5db8bf"
+    },
+    "sink": {
+      "role": "follower",
+      "selfRole": "voter",
+      "term": 2,
+      "quorumMembers": 4,
+      "commit": 10,
+      "applied": 10,
+      "lastIndex": 10,
+      "members": [
+        {
+          "id": "sink",
+          "role": "voter"
+        },
+        {
+          "id": "peer2",
+          "role": "voter"
+        },
+        {
+          "id": "peer1",
+          "role": "voter"
+        },
+        {
+          "id": "source",
+          "role": "voter"
+        }
+      ],
+      "blocked": false,
+      "heapLimitMiB": 384,
+      "resources": 1026,
+      "lastPayloadBytes": 65536,
+      "nonce": "5b8ae601b3c74f478a36ffa4f190e1fc"
+    }
+  },
+  "largePayloadAcceptance": true,
+  "noRejoinNeeded": true,
+  "shutdown": {
+    "sink": 0,
+    "peer2": 0,
+    "peer1": 0,
+    "source": 0
+  },
+  "validationDate": "2026-11-10",
+  "implementationCommit": "4c3d9c9",
+  "probeCommit": "0c7be70",
+  "sourceSha256": {
+    "scripts/test-learner-handoff-native.py": "765fdaff9d21339621f3c08ac76dca9253ff1eb7ae00575b3f1e34ee34edc75c",
+    "scripts/learner-native-harness.lisp": "765bd5ccdc04cfb7ab5211061183e21a407e17fb1da7c8d280fbdaa6bd1372f9",
+    "scripts/build-learner-native-harness.lisp": "da6830d1d1cd1755c481f8b581ada5f80077b52d56f9829ea32a56da63ac1968"
+  }
+}
