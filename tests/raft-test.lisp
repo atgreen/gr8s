@@ -1369,3 +1369,22 @@
              (setf (gr8s.raft::raft-node-catchup-byte-limit node) nil)
              (is (eq :install-snapshot (getf (gr8s.raft::raft-append-message node "follower") :type))))
         (gr8s::close-file-raft-storage storage)))))
+
+(test disk-catchup-reader-never-evaluates-reader-forms
+  (with-temporary-store (store root)
+    (values store)
+    (let* ((storage (gr8s::open-file-raft-storage (merge-pathnames "cache.log" root)))
+           (node (make-disk-catchup-test-node storage))
+           (*raft-wal-reader-evaluated* nil) (*read-eval* t))
+      (unwind-protect
+           (progn
+             (gr8s.raft:raft-compact node 3)
+             (let ((fd (gr8s.raft::raft-catchup-segment-fd
+                        (first (gr8s.raft::file-raft-storage-catchup-segments storage)))))
+               (with-open-file (out (format nil "/proc/self/fd/~D" fd) :direction :output :if-exists :overwrite)
+                 (write-string "#.(progn (setf gr8s/tests::*raft-wal-reader-evaluated* t) '(:snapshot 0 0 nil))" out)))
+             (setf (gethash "follower" (gr8s.raft:raft-node-next-index node)) 1)
+             (is (eq :install-snapshot (getf (gr8s.raft::raft-append-message node "follower") :type)))
+             (is-false *raft-wal-reader-evaluated*)
+             (is (zerop (gr8s.raft::raft-storage-catchup-usage storage))))
+        (gr8s::close-file-raft-storage storage)))))

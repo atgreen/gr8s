@@ -533,24 +533,30 @@ both streams: its durable outcome is uncertain and requires recovery before use.
       (setf (file-raft-storage-catchup-error storage) (princ-to-string condition))
       nil)))
 
+(defun raft-catchup-read-record (input binary)
+  ;; Unlike durable recovery, this process-local cache has no legacy format.
+  (unless (eql #\@ (peek-char t input nil nil)) (error "Unframed catch-up cache record"))
+  (raft-wal-read-record input binary))
+
 (defmethod raft-storage-read-catchup ((storage file-raft-storage) node next)
   "Decode at most one ordinary bounded AppendEntries batch; older forms are discarded."
   (handler-case
-      (let ((segment (find-if (lambda (segment)
+      (let ((*read-eval* nil)
+            (segment (find-if (lambda (segment)
                                (and (<= (raft-catchup-segment-first segment) next (raft-catchup-segment-last segment))
                                     (<= (raft-catchup-segment-last segment) (raft-node-snapshot-index node))))
                              (file-raft-storage-catchup-segments storage))))
         (when segment
           (with-open-stream (input (raft-catchup-open segment))
             (with-open-stream (binary (raft-catchup-open segment :binary t))
-              (unless (equal (raft-wal-read-record input binary)
+              (unless (equal (raft-catchup-read-record input binary)
                              (list :snapshot (1- (raft-catchup-segment-first segment))
                                    (raft-catchup-segment-previous-term segment) nil))
                 (error "Catch-up cache boundary mismatch"))
               (let ((previous (raft-catchup-segment-previous-term segment))
                     (entries nil) (bytes 0) (count 0))
                 (loop for expected from (raft-catchup-segment-first segment) to (raft-catchup-segment-last segment)
-                      for form = (raft-wal-read-record input binary)
+                      for form = (raft-catchup-read-record input binary)
                       do (unless (and (consp form) (eq :entry (first form)) (= expected (second form)))
                            (error "Catch-up cache is not contiguous"))
                          (if (< expected next)
