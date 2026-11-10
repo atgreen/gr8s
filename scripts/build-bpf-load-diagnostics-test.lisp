@@ -46,6 +46,43 @@
                   (sb-posix:syscall-error (error) (= sb-posix:ebadf (sb-posix:syscall-errno error))))))
       (failure 8 28)
       (failure 65536 13)
+      ;; Inject only the transient syscall boundary; the successful retry and
+      ;; its returned FD belong to an actual kernel program.
+      (let* ((calls 0) (*trace-output* (make-string-output-stream))
+             (fd (whistler/loader::load-program
+                  good 1 "GPL"
+                  :bpf (lambda (command attribute size context)
+                         (incf calls)
+                         (if (= calls 1)
+                             (error 'whistler/loader:bpf-error :context context :errno 11)
+                             (whistler/loader::%bpf command attribute size context))))))
+        (sb-posix:close fd)
+        (record "controlledEagainRetryReturnsAndClosesRealProgramFD"
+                (and (= calls 2)
+                     (handler-case (progn (sb-posix:fcntl fd sb-posix:f-getfd) nil)
+                       (sb-posix:syscall-error (error) (= sb-posix:ebadf (sb-posix:syscall-errno error)))))
+                "calls" calls "trace" (get-output-stream-string *trace-output*)))
+      (let ((injected nil) (calls 0))
+        (handler-case
+            (let ((fd (whistler/loader::load-program
+                       bad 1 "GPL" :log-buf-size 65536
+                       :bpf (lambda (command attribute size context)
+                              (incf calls)
+                              (when (and (not injected) (= 6 (whistler/loader::get-u32 attribute 24)))
+                                (setf injected t)
+                                (error 'whistler/loader:bpf-error :context context :errno 11))
+                              (whistler/loader::%bpf command attribute size context)))))
+              (sb-posix:close fd)
+              (record "invalidProgramStillRejectedAfterControlledEagain" nil))
+          (whistler/loader:bpf-program-load-error (condition)
+            (let ((errnos (mapcar #'whistler/loader::bpf-error-errno
+                                 (whistler/loader:bpf-program-load-error-attempt-errors condition))))
+              (record "controlledLoggingEagainPreservesRealVerifierFailure"
+                      (and (= calls 3) (equal '(13 11 13) errnos)
+                           (typep condition 'whistler/loader:bpf-verifier-error)
+                           (search "R0 !read_ok" (whistler/loader:bpf-program-load-error-log condition)))
+                      "calls" calls "attemptErrnos" (coerce errnos 'vector)
+                      "reported" (princ-to-string condition))))))
       (let ((report (make-hash-table :test #'equal)))
         (setf (gethash "passed" report) t (gethash "checks" report) (coerce (nreverse checks) 'vector))
         (write-line (com.inuoe.jzon:stringify report))))))
