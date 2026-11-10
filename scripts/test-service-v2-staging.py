@@ -7,6 +7,7 @@ test-service-guest.py alongside this script. No Kata bundle is required.
 
 import argparse
 import errno
+import hashlib
 import importlib.util
 import ipaddress
 import json
@@ -100,6 +101,9 @@ def main():
             "podIP": str(primary), "address": str(alias), "nodeID": "staging-node",
             "nodeName": "staging-node", "podUID": "staging-pod",
             "sandboxID": "staging-sandbox", "interfaceName": "eth0"}]
+        expected_epoch = hashlib.sha256(json.dumps(
+            ["staging-node", "staging-sandbox", "eth0", str(primary), str(alias)],
+            separators=(",", ":")).encode("utf-8")).digest()[:16]
         network_file.write_text(json.dumps(network))
         cluster.start()
         identity_map = cluster.root / "state/agent/containerd/bpf/service-lb/gr8s_nat_id_v2"
@@ -115,8 +119,7 @@ def main():
                 raise
             return (all(value[:4] == alias.packed and value[24:28] == primary.packed and
                         struct.unpack_from("<I", value, 4)[0] == 0x20001 for value in values)
-                    and values[0][8:24] == values[1][8:24]
-                    and any(values[0][8:24])
+                    and values[0][8:24] == values[1][8:24] == expected_epoch
                     and [struct.unpack_from("<I", value, 28)[0] for value in values] == [1, 2])
 
         traffic.wait_for("v2 restored identity pair", 120, identities_published)

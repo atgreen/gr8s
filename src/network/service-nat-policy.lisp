@@ -57,6 +57,14 @@ separate cluster-wide publication fences before the v2 graph is attached."
    (service-translation-string record "podIP")
    (service-translation-string record "address")))
 
+(defun cni-service-nat-owner-map-path (configuration)
+  (unless (eq (cni-service-profile configuration) :v2)
+    (invalid-cni "local v2 Service owner map requires the v2 profile"))
+  (namestring (merge-pathnames
+               "gr8s_nat_id_v2"
+               (uiop:ensure-directory-pathname
+                (cni-configuration-service-packet-root configuration)))))
+
 (defun publish-cni-service-nat-owner
     (configuration context addresses alias
      &key (open #'whistler/loader:open-pinned-object)
@@ -66,17 +74,12 @@ separate cluster-wide publication fences before the v2 graph is attached."
   "Stage this node's paired owner rows in the schema-checked shared v2 map.
 The return route must already exist. A failed or partial update stops CNI ADD;
 the attachment fence keeps incomplete owner state out of the live datapath."
-  (unless (eq (cni-service-profile configuration) :v2)
-    (invalid-cni "local v2 Service owner publication requires the v2 profile"))
   (let* ((primary (find-if-not (lambda (address) (find #\: address)) addresses))
          (rows (service-nat-identity-pair
                 (cni-configuration-service-node-id configuration)
                 (cni-context-container-id context) (cni-context-interface-name context)
                 primary alias))
-         (path (namestring (merge-pathnames
-                            "gr8s_nat_id_v2"
-                            (uiop:ensure-directory-pathname
-                             (cni-configuration-service-packet-root configuration)))))
+         (path (cni-service-nat-owner-map-path configuration))
          (fd (funcall open path)))
     (unwind-protect
          (let ((map (funcall map-info fd "gr8s_nat_id_v2" :profile :v2)))
@@ -86,6 +89,38 @@ the attachment fence keeps incomplete owner state out of the live datapath."
              (funcall update map (car row) (cdr row)))
            rows)
       (funcall close fd))))
+
+(defun service-nat-owner-row-matches-p (actual expected)
+  "Accept the two readiness bits added after publication, but require the
+same enabled ABI-v2 owner, address pair, epoch, and role."
+  (and (typep actual '(simple-array (unsigned-byte 8) (*)))
+       (= 32 (length actual))
+       (= #x20001 (logand (netlink-read-integer actual 4 4) #xfffffff9))
+       (equalp (subseq actual 0 4) (subseq expected 0 4))
+       (equalp (subseq actual 8 32) (subseq expected 8 32))))
+
+(defun check-cni-service-nat-owner
+    (configuration context addresses alias
+     &key (open #'whistler/loader:open-pinned-object)
+          (map-info #'cni-policy-map-info)
+          (lookup #'whistler/loader:map-lookup)
+          (close #'sb-posix:close))
+  "CHECK rejects a missing, disabled, mismatched, or stale owner pair before
+reporting the retained v2 endpoint healthy. It never creates owner rows."
+  (let* ((primary (find-if-not (lambda (address) (find #\: address)) addresses))
+         (rows (service-nat-identity-pair
+                (cni-configuration-service-node-id configuration)
+                (cni-context-container-id context) (cni-context-interface-name context)
+                primary alias))
+         (fd (funcall open (cni-service-nat-owner-map-path configuration))))
+    (unwind-protect
+         (let ((map (funcall map-info fd "gr8s_nat_id_v2" :profile :v2)))
+           (dolist (row rows)
+             (unless (service-nat-owner-row-matches-p
+                      (funcall lookup map (car row)) (cdr row))
+               (invalid-cni "v2 Service endpoint owner pair is missing or stale"))))
+      (funcall close fd)))
+  nil)
 
 (defun publish-service-nat-identities
     (map records &key (update #'whistler/loader:map-update))
