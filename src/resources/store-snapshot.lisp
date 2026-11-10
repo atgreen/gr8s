@@ -5,9 +5,13 @@
 
 (defparameter *store-snapshot-max-record-bytes* (* 16 1024 1024))
 
-(defun write-store-snapshot-records (store stream index term)
-  "Write the versioned application artifact under STORE's raw lock.
-The caller must hold the Raft member lock and supply its exact applied boundary.
+(defstruct (frozen-store-snapshot (:constructor %make-frozen-store-snapshot))
+  store index term pod-records node-records secret-keys)
+
+(defun write-store-snapshot-records (store stream index term &key frozen-view)
+  "Stream the versioned artifact from a locked live store or private frozen view.
+A live caller holds the raw store/member locks at the exact applied boundary;
+a frozen caller supplies the boundary captured earlier under those locks.
 This function neither compacts Raft nor captures member-local credentials."
   (let ((count 0))
     (labels ((emit-object (object)
@@ -41,17 +45,25 @@ This function neither compacts Raft nor captures member-local credentials."
       (dolist (entry (pod-store-template-history store))
         (unless (local-plane-resource-p (gethash "resource" entry))
           (emit "history" "entry" (encrypt-secret-history-entry store entry))))
-      (maphash (lambda (key pod)
-                 (declare (ignore key))
-                 (emit "pod" "object" (pod-to-object pod)
-                       "checkpoint" (gr8s.store::pod-checkpoint-object store pod)
-                       "publication" (gr8s.store::pod-publication-object store pod)))
-               (pod-store-pods store))
-      (maphash (lambda (name node)
-                 (declare (ignore name))
-                 (emit "node" "object" (gr8s.store::node-replicated-object node)))
-               (pod-store-nodes store))
-      (gr8s.image-distribution::map-image-tracker-records (pod-store-image-tracker store) #'emit-object)
+      (if frozen-view
+          (mapc #'emit-object (frozen-store-snapshot-pod-records frozen-view))
+          (maphash (lambda (key pod)
+                     (declare (ignore key))
+                     (emit "pod" "object" (pod-to-object pod)
+                           "checkpoint" (gr8s.store::pod-checkpoint-object store pod)
+                           "publication" (gr8s.store::pod-publication-object store pod)))
+                   (pod-store-pods store)))
+      (if frozen-view
+          (mapc #'emit-object (frozen-store-snapshot-node-records frozen-view))
+          (maphash (lambda (name node)
+                     (declare (ignore name))
+                     (emit "node" "object" (gr8s.store::node-replicated-object node)))
+                   (pod-store-nodes store)))
+      (if frozen-view
+          (gr8s.image-distribution::map-frozen-image-tracker-records
+           (pod-store-image-tracker store) #'emit-object)
+          (gr8s.image-distribution::map-image-tracker-records
+           (pod-store-image-tracker store) #'emit-object))
       (emit "end" "records" count)
       count)))
 
@@ -62,17 +74,23 @@ No existing artifact may be replaced. The source store is never modified."
     (error "Invalid store snapshot boundary"))
   (when (gr8s.store::pod-stage-active-p store)
     (error "Cannot snapshot a speculative store transaction"))
+  (publish-store-snapshot
+   path (lambda (stream)
+          (bt:with-lock-held ((pod-store-lock store))
+            (write-store-snapshot-records store stream index term)))))
+
+(defun publish-store-snapshot (path writer)
+  "Publish WRITER's streamed records with the same durable immutable-file protocol."
   (let* ((path (pathname path)) (temporary (gr8s.security::private-temporary-path path)) (count nil))
     (ensure-directories-exist path)
     (unwind-protect
          (progn
-           (bt:with-lock-held ((pod-store-lock store))
-             (gr8s.security::write-private-text-exclusively
+           (gr8s.security::write-private-text-exclusively
               temporary
               (lambda (stream)
-                (setf count (write-store-snapshot-records store stream index term))
+                (setf count (funcall writer stream))
                 (finish-output stream)
-                (sb-posix:fsync (sb-sys:fd-stream-fd stream)))))
+                (sb-posix:fsync (sb-sys:fd-stream-fd stream))))
            ;; Linux RENAME_NOREPLACE: immutable generations must never overwrite
            ;; an existing artifact, including a dangling symlink.
            (unless (zerop (cffi:foreign-funcall "renameat2" :int -100 :string (namestring temporary)

@@ -486,6 +486,34 @@ frozen view rather than copied. Live lease renewal, peer replacement or tracker
 reset cannot change the captured records. This reduces tracker contention;
 the application snapshot still needs the member-lock changes described above.
 
+The application layer also provides a private frozen view. With ingress drained,
+the caller holds the outer application barriers and member mutex, prepares the
+Raft boundary, and calls `freeze-store-snapshot` with that index and term. The
+freeze copies resource indexes and the history list while sharing their immutable
+payloads. It copies mutable Pod, Node and controller containers and freezes the
+tracker. Secret configuration and derived encryption keys are pinned before
+releasing the credential barrier; later serialization does not reread the CA key.
+`capture-frozen-store-snapshot` streams this view without live application locks,
+using the same immutable-file publication protocol as ordinary capture. Freezing
+still takes time proportional to the indexes and mutable containers. The worker
+does not yet use this interface: retaining an unpublished artifact safely and
+integrating prepared publication remain required before the availability proof.
+
+For a standalone full-history memory probe, build with
+`sbcl --noinform --non-interactive --load scripts/build-snapshot-freeze-native-harness.lisp`
+and run `python3 scripts/test-snapshot-freeze-native.py --checkpoint STATE_JSON
+--journal JOURNAL_JSONL --history-clock CLOCK`. Inputs must be a quiescent,
+unencrypted core store containing the probe's `sentinel` ConfigMap. The runner
+copies only these two files, retains input and executable hashes, and freezes,
+writes and validates an artifact with a 384 MiB dynamic heap. It checks that a
+post-freeze write remains live but absent from the artifact. This does not test
+multi-member heartbeat availability or production `serve` startup.
+
+The [frozen-view validation](snapshot-freeze-validation-2026-11-10.json) retained
+the full 100,656,464-byte history estimate at a 384 MiB dynamic heap, streamed and
+validated 1,978 history records, and excluded a later live write. The standalone
+probe passed in 29.86 seconds, including store load and artifact validation.
+
 Build the internal native retention probe with
 `scripts/build-compaction-native-harness.lisp`, then run the resulting
 `build/gr8s-compaction-acceptance --dynamic-space-size 384 PRIVATE_ROOT 2048`.
