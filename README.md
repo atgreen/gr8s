@@ -38,6 +38,10 @@ and includes a Raft datastore for high availability.
 - The API, controllers, agent, networking compiler, and datastore use Common
   Lisp. An optional Slynk endpoint lets you inspect a live development system.
 
+Run `gr8s skill` for built-in operator and AI agent guidance, including first-response
+checks, live Slynk inspection, and selector-scoped kernel tracing. It works offline
+and can be saved with `gr8s skill > gr8s-guide.md`.
+
 ## Getting started
 
 Build gr8s on Linux with **SBCL** and the project's ASDF dependencies. To run a
