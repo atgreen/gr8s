@@ -155,6 +155,16 @@ test-service-nat: build/gr8s-service-nat-test.json
 	python3 scripts/test-service-nat-tcp.py $<
 	python3 scripts/test-service-nat-gc.py $<
 
+build/gr8s-service-nat-policy-test.json: src/network/service-nat-policy.lisp src/network/service-nat-program.lisp src/network/egress-guard-program.lisp scripts/compile-endpoint-policy-fixture.lisp
+	$(SBCL) --noinform --script scripts/compile-endpoint-policy-fixture.lisp $@ service-nat-policy
+
+.PHONY: test-service-nat-policy
+test-service-nat-policy: build/gr8s-service-nat-policy-test.json
+	python3 scripts/test-service-nat-policy.py $<
+
+build/gr8s-service-nat-guard-test.json: src/network/service-nat-guard.lisp src/network/service-nat-policy.lisp src/network/service-nat-program.lisp src/network/service-packet-program.lisp src/network/egress-guard-program.lisp scripts/compile-endpoint-policy-fixture.lisp
+	$(SBCL) --noinform --script scripts/compile-endpoint-policy-fixture.lisp $@ service-nat-guard
+
 build/gr8s-legacy-service-packet-guard-test.json: scripts/compile-legacy-service-packet-guard-fixture.lisp scripts/compile-endpoint-policy-fixture.lisp tests/fixtures/service-packet-pre-reservation.lisp $(wildcard src/network/*.lisp) gr8s.asd $(WHISTLER_FIXTURE_SOURCES)
 	sbcl --noinform --script scripts/compile-legacy-service-packet-guard-fixture.lisp $@ service-packet-guard
 
@@ -207,7 +217,7 @@ test-install-lifecycle:
 
 test-whistler-cni: containerd-bundle test
 
-check: containerd-bundle test-protocol-generation test-whistler-cni test-endpoint-policy test-service-lb-program test-service-packet-program test-service-nat test-service-packet-guard test-service-packet-gc test-service-tcp-state test-install-lifecycle
+check: containerd-bundle test-protocol-generation test-whistler-cni test-endpoint-policy test-service-lb-program test-service-packet-program test-service-nat test-service-nat-policy test-service-packet-guard test-service-packet-gc test-service-tcp-state test-install-lifecycle
 	sh -n install.sh gr8s-killall.sh gr8s-uninstall.sh \
 	  scripts/gr8s scripts/install-containerd.sh scripts/collect-notices.sh \
 	  scripts/verify-static-runtime.sh scripts/smoke.sh scripts/test-core-api.sh
