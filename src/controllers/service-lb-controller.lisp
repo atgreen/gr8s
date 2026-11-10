@@ -209,6 +209,38 @@ order; a port's external addresses share its ClusterIP's slots when the backends
                                     external)))))))))))
     (values (nreverse service-entries) (nreverse backend-entries) slot (nreverse index-entries))))
 
+(defun service-risk-raw-backends (store service port)
+  "Return every advertised backend, including unready and topology-filtered ones.
+An inverse request may arrive while an old Service flow is still live, so the
+risk inventory must not inherit this node's backend-selection filters."
+  (multiple-value-bind (records found)
+      (service-slice-endpoint-records store service port :proxy t)
+    (if found
+        (loop for record in records
+              collect (list (getf record :address) (getf record :port)))
+        (service-pod-endpoints store service port))))
+
+(defun service-risk-key< (left right)
+  (loop for a across left for b across right
+        when (/= a b) do (return (< a b))
+        finally (return nil)))
+
+(defun service-risk-keys (services raw-backends-of)
+  "Project all IPv4 TCP/UDP backend tuples advertised by SERVICES.
+Deduplicate across VIPs and keep iteration deterministic for reconciliation."
+  (sort
+   (remove-duplicates
+    (loop for service in services when (service-lb-eligible-p service)
+          append (loop for port across (gethash "ports" (gethash "spec" service) #())
+                       for protocol = (gethash "protocol" port "TCP")
+                       when (member protocol '("TCP" "UDP") :test #'equal)
+                         append (loop for (address target-port) in (funcall raw-backends-of service port)
+                                      when (and (stringp address) (not (find #\: address))
+                                                (typep target-port '(integer 1 65535)))
+                                        collect (service-lb-risk-key address target-port protocol))))
+    :test #'equalp :from-end t)
+   #'service-risk-key<))
+
 (defstruct (service-lb-controller (:constructor %make-service-lb-controller
                                       (store dataplane node-name endpoint-steerer)))
   "Drives the socket LB maps from the durable store's Service/endpoint state."
@@ -221,6 +253,7 @@ order; a port's external addresses share its ClusterIP's slots when the backends
   (applied-backend-keys nil)   ; (family . slot-key) pairs, including sparse retained slots
   (applied-slot-count 0)       ; slot count in the last successfully applied plan
   (applied-index-keys nil)     ; affinity index keys currently in the index map
+  (applied-risk-keys nil)      ; retained source-risk keys; never withdrawn ahead of live flows
   (applied-signature nil))     ; last applied plan, for no-op skipping
 
 (defun make-service-lb-controller (store dataplane &optional node-name &key endpoint-steerer)
@@ -263,7 +296,7 @@ Caller holds the dataplane lock. Only control maps are read; established flow
 and affinity maps retain their kernel state across the restart."
   (unless (service-lb-controller-map-state-adopted-p controller)
     (let ((dataplane (service-lb-controller-dataplane controller))
-          (services nil) (backends nil) (indices nil))
+          (services nil) (backends nil) (indices nil) (risks nil))
       (dolist (family '(:ipv4 :ipv6))
         (dolist (kind '(:service :backend :index))
           (let ((map (service-lb-family-map dataplane family kind)))
@@ -274,9 +307,14 @@ and affinity maps retain their kernel state across the restart."
                          (:service (push (copy-seq key) services))
                          (:backend (push (cons family (copy-seq key)) backends))
                          (:index (push (copy-seq key) indices))))))))
+      (let ((risk-map (service-lb-map dataplane "gr8s_nat_risk_v2")))
+        (when risk-map
+          (loop for key = (funcall next-key risk-map nil) then (funcall next-key risk-map key)
+                while key do (push (copy-seq key) risks))))
       (setf (service-lb-controller-applied-service-keys controller) services
             (service-lb-controller-applied-backend-keys controller) backends
             (service-lb-controller-applied-index-keys controller) indices
+            (service-lb-controller-applied-risk-keys controller) risks
             (service-lb-controller-map-state-adopted-p controller) t))))
 
 (defun converge-service-lb-controller
@@ -286,6 +324,9 @@ and affinity maps retain their kernel state across the restart."
           (next-key #'whistler/loader:map-get-next-key)
           (list-services
            (lambda () (list-core-resources (service-lb-controller-store controller) "services")))
+          (risk-backends-of
+           (lambda (service port)
+             (service-risk-raw-backends (service-lb-controller-store controller) service port)))
           (endpoints-of
            (let* ((store (service-lb-controller-store controller))
                   (node-name (service-lb-controller-node-name controller))
@@ -305,17 +346,28 @@ withdrawn VIPs.  A plan identical to the last applied one writes nothing."
   (bt:with-lock-held ((gr8s.network:service-lb-dataplane-lock
                        (service-lb-controller-dataplane controller)))
     (service-lb-adopt-map-state controller next-key)
-    (multiple-value-bind (service-entries backend-entries slot-count index-entries)
-      (service-lb-plan (funcall list-services) endpoints-of)
-      (let ((signature (list service-entries backend-entries index-entries)))
+    (let* ((dataplane (service-lb-controller-dataplane controller))
+           (risk-map (service-lb-map dataplane "gr8s_nat_risk_v2"))
+           (services (funcall list-services)))
+     (multiple-value-bind (service-entries backend-entries slot-count index-entries)
+      (service-lb-plan services endpoints-of)
+      (let* ((risk-keys (when risk-map (service-risk-keys services risk-backends-of)))
+             (signature (list service-entries backend-entries index-entries risk-keys)))
         (unless (equalp signature (service-lb-controller-applied-signature controller))
-          (let* ((dataplane (service-lb-controller-dataplane controller))
-                 (new-keys (mapcar #'car service-entries))
+          (let* ((new-keys (mapcar #'car service-entries))
                  (new-index-keys (mapcar #'car index-entries))
                  (new-backend-keys
                    (mapcar (lambda (entry)
                              (cons (service-lb-entry-family entry :backend) (car entry)))
                            backend-entries)))
+            ;; Publish risk before exposing a new Service/backend tuple. Retain
+            ;; withdrawn risk keys until live v2 flows can be proved drained;
+            ;; an early delete could reintroduce an inverse-request collision.
+            (when risk-map
+              (dolist (key risk-keys)
+                (unless (member key (service-lb-controller-applied-risk-keys controller)
+                                :test #'equalp)
+                  (funcall update risk-map key #(1 0 0 0)))))
             ;; Add/update first: backends and where each now sits, then the services that point at them.
             (dolist (entry backend-entries)
               (funcall update
@@ -347,7 +399,10 @@ withdrawn VIPs.  A plan identical to the last applied one writes nothing."
                   (when map (service-lb-delete-if-present delete map old)))))
             (setf (service-lb-controller-applied-backend-keys controller) new-backend-keys
                   (service-lb-controller-applied-index-keys controller) new-index-keys
+                  (service-lb-controller-applied-risk-keys controller)
+                  (union risk-keys (service-lb-controller-applied-risk-keys controller)
+                         :test #'equalp)
                   (service-lb-controller-applied-service-keys controller) new-keys
                   (service-lb-controller-applied-slot-count controller) slot-count
-                  (service-lb-controller-applied-signature controller) signature))))))
+                  (service-lb-controller-applied-signature controller) signature)))))))
   nil)

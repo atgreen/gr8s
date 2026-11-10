@@ -54,6 +54,12 @@
                 #x1f #x90 #x00 #x00)
               (gr8s::service-lb-backend-value "fd88::5" 8080))))
 
+(test service-risk-key-byte-layout
+  (is (equalp #(#x0a #x58 #x01 #x05 #x1f #x90 #x06 #x00)
+              (gr8s::service-lb-risk-key "10.88.1.5" 8080 "TCP")))
+  (is (equalp #(#x0a #x58 #x01 #x05 #x1f #x90 #x11 #x00)
+              (gr8s::service-lb-risk-key "10.88.1.5" 8080 "UDP"))))
+
 (test service-lb-service-value-byte-layout
   ;; count u16 @0, affinity u16 @2, base slot u32 @4, timeout u32 @8, reserved u32 @12,
   ;; all little-endian (logical integers).
@@ -193,6 +199,23 @@
           (gr8s::service-slice-endpoints store service port)
         (is-true found)
         (is (equal '(("10.88.1.5" 8080) ("fd88::5" 8080)) endpoints))))))
+
+(test service-risk-inventory-includes-unready-advertised-backend
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (let* ((service (fake-lb-service "10.96.0.10"))
+           (port (aref (gethash "ports" (gethash "spec" service)) 0))
+           (slice (endpointslice-test-object "unready" "10.88.1.5" 8080))
+           (endpoint (aref (gethash "endpoints" slice) 0)))
+      (setf (gethash "kubernetes.io/service-name"
+                     (gethash "labels" (gethash "metadata" slice))) "svc"
+            (gethash "conditions" endpoint) (gr8s::core-object "ready" nil "serving" t))
+      (gr8s::create-core-resource store "endpointslices" slice "default")
+      (multiple-value-bind (selected)
+          (gr8s::service-port-backends store service port :node-name "here")
+        (is (null selected)))
+      (is (equal '(("10.88.1.5" 8080))
+                 (gr8s::service-risk-raw-backends store service port))))))
 
 ;;; Dataplane lifecycle.  Every kernel operation (map creation, pinning,
 ;;; program load, cgroup attach, detach) is injected, so the orchestration is
@@ -412,6 +435,25 @@
     (gr8s::core-object
      "metadata" (gr8s::core-object "name" "svc" "namespace" "default" "uid" cluster-ip)
      "spec" spec)))
+
+(test service-risk-plan-keeps-unready-and-topology-filtered-backends
+  (let* ((first (fake-lb-service "10.96.0.10"))
+         (second (fake-lb-service "10.96.0.11"))
+         (udp (aref (gethash "ports" (gethash "spec" second)) 0)))
+    (setf (gethash "protocol" udp) "UDP")
+    (let ((keys (gr8s::service-risk-keys
+                 (list second first)
+                 (lambda (service port)
+                   (declare (ignore service port))
+                   ;; These raw advertised endpoints include one that this
+                   ;; node's traffic-policy/topology plan would omit.
+                   '(("10.88.1.5" 8080) ("10.88.1.6" 8080)
+                     ("fd88::5" 8080))))))
+      (is (= 4 (length keys)))
+      (dolist (address '("10.88.1.5" "10.88.1.6"))
+        (dolist (protocol '("TCP" "UDP"))
+          (is (member (gr8s::service-lb-risk-key address 8080 protocol)
+                      keys :test #'equalp)))))))
 
 (test service-lb-status-advertises-ready-node-addresses
   (with-temporary-store (store directory)
@@ -699,6 +741,75 @@
       (if previous
           (second (member previous keys :test #'equalp))
           (first keys)))))
+
+(test service-risk-publication-precedes-services-and-survives-restart
+  (let* ((entries (make-hash-table :test #'equalp))
+         (maps (list (fake-lb-map "gr8s_service_v4" 1)
+                     (fake-lb-map "gr8s_backend_v4" 2)
+                     (fake-lb-map "gr8s_backend_index_v4" 3)
+                     (fake-lb-map "gr8s_nat_risk_v2" 4)))
+         (dataplane (gr8s::%make-service-lb-dataplane :maps maps))
+         (controller (gr8s::make-service-lb-controller nil dataplane))
+         (service (fake-lb-service "10.96.0.10"))
+         (writes nil)
+         (update (lambda (map key value)
+                   (push (whistler/loader:map-info-name map) writes)
+                   (setf (gethash (list (whistler/loader:map-info-name map) (copy-seq key)) entries)
+                         (copy-seq value))))
+         (delete (lambda (map key)
+                   (remhash (list (whistler/loader:map-info-name map) key) entries)))
+         (risk-backends (lambda (ignored-service ignored-port)
+                          (declare (ignore ignored-service ignored-port))
+                          '(("10.88.1.5" 8080) ("10.88.1.6" 8080)))))
+    ;; The socket plan selects only one endpoint. Both advertised backend
+    ;; tuples must be published to the risk map before any Service map write.
+    (gr8s::converge-service-lb-controller
+     controller :list-services (constantly (list service))
+     :endpoints-of (constantly '(("10.88.1.5" 8080)))
+     :risk-backends-of risk-backends :update update :delete delete)
+    (is (equal '("gr8s_nat_risk_v2" "gr8s_nat_risk_v2"
+                 "gr8s_backend_v4" "gr8s_backend_index_v4" "gr8s_service_v4")
+               (nreverse writes)))
+    (is (= 2 (length (gr8s::service-lb-controller-applied-risk-keys controller))))
+    (setf writes nil)
+    (gr8s::converge-service-lb-controller
+     controller :list-services (constantly nil) :endpoints-of (constantly nil)
+     :risk-backends-of (constantly nil) :update update :delete delete)
+    (is (null writes))
+    ;; Retain risk until old return-state owners can be proved drained.
+    (is (= 2 (hash-table-count entries)))
+    (setf (gr8s::service-lb-dataplane-reopened-p dataplane) t)
+    (let ((reopened (gr8s::make-service-lb-controller nil dataplane)))
+      (setf writes nil)
+      (gr8s::converge-service-lb-controller
+       reopened :list-services (constantly (list service))
+       :endpoints-of (constantly '(("10.88.1.5" 8080)))
+       :risk-backends-of risk-backends :next-key (service-lb-fixture-next-key entries)
+       :update update :delete delete)
+      (is (not (member "gr8s_nat_risk_v2" writes :test #'equal)))
+      (is (= 2 (length (gr8s::service-lb-controller-applied-risk-keys reopened)))))))
+
+(test service-risk-publication-failure-does-not-expose-service
+  (let* ((dataplane (gr8s::%make-service-lb-dataplane
+                     :maps (list (fake-lb-map "gr8s_service_v4" 1)
+                                 (fake-lb-map "gr8s_backend_v4" 2)
+                                 (fake-lb-map "gr8s_backend_index_v4" 3)
+                                 (fake-lb-map "gr8s_nat_risk_v2" 4))))
+         (controller (gr8s::make-service-lb-controller nil dataplane))
+         (other-writes nil))
+    (signals whistler/loader:bpf-error
+      (gr8s::converge-service-lb-controller
+       controller
+       :list-services (constantly (list (fake-lb-service "10.96.0.10")))
+       :endpoints-of (constantly '(("10.88.1.5" 8080)))
+       :risk-backends-of (constantly '(("10.88.1.5" 8080)))
+       :update (lambda (map key value)
+                 (declare (ignore key value))
+                 (if (equal "gr8s_nat_risk_v2" (whistler/loader:map-info-name map))
+                     (error 'whistler/loader:bpf-error :context "map-update" :errno 28)
+                     (push (whistler/loader:map-info-name map) other-writes)))))
+    (is (null other-writes))
+    (is-false (gr8s::service-lb-controller-applied-signature controller))))
 
 (test service-lb-restart-inventories-both-families-and-sparse-backends
   (multiple-value-bind (old entries update delete) (service-lb-cleanup-fixture)

@@ -137,6 +137,16 @@ program to refuse connections, for a Service with no endpoints at all."
           (aref buffer (1+ address-size)) (ldb (byte 8 0) port))
     buffer))
 
+(defun service-lb-risk-key (address port protocol)
+  "Encode an IPv4 Service backend as the v2 source-risk map's 8-octet key.
+The packet program loads the first six octets verbatim from the source tuple."
+  (let ((backend (service-lb-backend-value address port)))
+    (unless (= (length backend) 8)
+      (error "The v2 Service risk map only supports IPv4 backends"))
+    (concatenate '(vector (unsigned-byte 8))
+                 (subseq backend 0 6)
+                 (vector (service-lb-protocol-number protocol) 0))))
+
 (defun service-lb-index-key (vip-key backend-value)
   "Return the 16-octet gr8s_backend_index_v4 key: the service key, then the backend value
 that identifies the backend."
