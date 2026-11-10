@@ -266,12 +266,18 @@
               :add (lambda (config &rest rest)
                      (declare (ignore rest))
                      (is (equal '("fd42::1" "10.42.0.1") (gr8s::cni-configuration-endpoint-addresses config)))
+                     (is (equal "node-1" (gr8s::cni-configuration-service-node-id config)))
+                     (is (equal "10.42.0.2" (gr8s::cni-configuration-service-return-address config)))
                      (push :policy events) (when (eq failure :policy) (error "policy failed")))
-              :check (lambda (&rest rest) (declare (ignore rest)) (push :policy-check events))
+              :check (lambda (config &rest rest)
+                       (declare (ignore rest))
+                       (is (equal "node-1" (gr8s::cni-configuration-service-node-id config)))
+                       (is (equal "10.42.0.2" (gr8s::cni-configuration-service-return-address config)))
+                       (push :policy-check events))
               :delete (lambda (&rest rest) (declare (ignore rest)) (push :policy-delete events))))
            (operations
              (gr8s::make-routed-cni-operations
-              ipam :policy policy
+              ipam :node-id "node-1" :policy policy
               :install-link (lambda (ctx addresses)
                               (declare (ignore ctx)) (is (equal '("fd42::1" "10.42.0.1") addresses))
                               (push :link events) "gr-test")
