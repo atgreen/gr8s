@@ -83,5 +83,47 @@
       "evidence": "/tmp/gr8s-compaction-native-rlwbnuf9/result.json",
       "result": "Full write body passed; restart refused the already-blocked shutdown gate. Checked owned-gate handoff regression added before the passing run."
     }
-  ]
+  ],
+  "publicationValidation": {
+    "commit": "72add20a51f89b6aa138c803fdae69ddd367541f",
+    "upstreamMerged": "3b5f5b4",
+    "checks": 7225,
+    "selectors": 31,
+    "suiteCounts": [
+      4919,
+      96,
+      52,
+      121,
+      62,
+      69,
+      526,
+      149,
+      171,
+      143,
+      83,
+      89,
+      5,
+      21,
+      484,
+      3,
+      3,
+      3,
+      4,
+      7,
+      7,
+      2,
+      2,
+      5,
+      18,
+      12,
+      18,
+      80,
+      40,
+      19,
+      12
+    ],
+    "failures": 0,
+    "nativeComponentSourcesUnchanged": true,
+    "scope": "Raft,membership,transport,HA,checkpoint reader,recovery,watches,member restore,snapshot,state ownership,artifact registry,Secret replication/CLI,Service LB and all RTNetlink test selectors"
+  }
 }
