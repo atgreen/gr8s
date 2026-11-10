@@ -605,6 +605,70 @@
                      (slot-value (gr8s::current-node-snapshot server "worker-a")
                                  'gr8s.node.v1::service-risk-grant-digest)))))))))
 
+(test receiver-status-proofs-bind-to-current-acked-owner-and-session
+  (let* ((server (gr8s::%make-node-grpc-server))
+         (session (gr8s::make-node-agent-session nil))
+         (record (make-instance 'gr8s.node.v1::service-translation-identity
+                                :pod-uid "pod-a" :node-name "worker-a" :node-id "node-a"
+                                :sandbox-id "sandbox-a" :interface-name "eth0"
+                                :pod-ip "10.88.1.2" :translation-ip "10.88.1.9"))
+         (network (make-instance 'gr8s.node.v1::node-network-config
+                                 :service-translations (list record)))
+         (snapshot (make-instance 'gr8s.node.v1::desired-state-snapshot
+                                  :revision 3 :network network))
+         (epoch (gr8s.network::service-translation-incarnation-token
+                 "node-a" "sandbox-a" "eth0" "10.88.1.2" "10.88.1.9"))
+         (proof (make-instance 'gr8s.node.v1::service-receiver-proof
+                               :pod-uid "pod-a" :incarnation epoch))
+         (status (make-instance 'gr8s.node.v1::node-status
+                                :service-receiver-revision 3
+                                :service-receiver-report-present t
+                                :service-receivers (list proof))))
+    (setf (gr8s::node-agent-session-node-id session) "node-a"
+          (gethash "worker-a" (gr8s::node-grpc-server-sessions server)) session
+          (gethash "worker-a" (gr8s::node-grpc-server-snapshots server)) snapshot
+          (gethash "worker-a" (gr8s::node-grpc-server-acknowledged-revisions server)) 3)
+    (multiple-value-bind (accepted valid-p)
+        (gr8s.apiserver::canonical-node-service-receiver-proofs
+         server "worker-a" status session)
+      (is-true valid-p)
+      (is (= 1 (length accepted))))
+    (setf (slot-value status 'gr8s.node.v1::service-receivers) nil)
+    (multiple-value-bind (accepted valid-p)
+        (gr8s.apiserver::canonical-node-service-receiver-proofs
+         server "worker-a" status session)
+      (is-true valid-p)
+      (is (null accepted)))
+    (setf (slot-value status 'gr8s.node.v1::service-receivers) (list proof proof))
+    (is-false (nth-value 1 (gr8s.apiserver::canonical-node-service-receiver-proofs
+                            server "worker-a" status session)))
+    (setf (slot-value status 'gr8s.node.v1::service-receivers) (list proof))
+    (let ((stale (copy-seq epoch)))
+      (setf (aref stale 0) (logxor 1 (aref stale 0))
+            (slot-value proof 'gr8s.node.v1::incarnation) stale))
+    (is-false (nth-value 1 (gr8s.apiserver::canonical-node-service-receiver-proofs
+                            server "worker-a" status session)))
+    (setf (slot-value proof 'gr8s.node.v1::incarnation) epoch
+          (gethash "worker-a" (gr8s::node-grpc-server-acknowledged-revisions server)) 2)
+    (is-false (nth-value 1 (gr8s.apiserver::canonical-node-service-receiver-proofs
+                            server "worker-a" status session)))
+    (setf (gethash "worker-a" (gr8s::node-grpc-server-acknowledged-revisions server)) 3)
+    (gr8s.apiserver::note-node-service-receiver-status server "worker-a" status session)
+    (is (= 1 (length (third (gethash "worker-a"
+                                    (gr8s::node-grpc-server-service-receiver-reports server))))))
+    (gr8s.apiserver::note-node-service-receiver-status
+     server "worker-a" (make-instance 'gr8s.node.v1::node-status) session)
+    (is (= 1 (length (third (gethash "worker-a"
+                                    (gr8s::node-grpc-server-service-receiver-reports server))))))
+    (gr8s.apiserver::note-node-service-receiver-status
+     server "worker-a" (make-instance 'gr8s.node.v1::node-status
+                                       :service-receiver-report-present t) session)
+    (is-false (gethash "worker-a" (gr8s::node-grpc-server-service-receiver-reports server)))
+    (gr8s.apiserver::note-node-service-receiver-status server "worker-a" status session)
+    (setf (slot-value proof 'gr8s.node.v1::pod-uid) "foreign-pod")
+    (gr8s.apiserver::note-node-service-receiver-status server "worker-a" status session)
+    (is-false (gethash "worker-a" (gr8s::node-grpc-server-service-receiver-reports server)))))
+
 (test snapshot-ack-from-replaced-node-session-is-ignored
   (let* ((server (gr8s::%make-node-grpc-server))
          (old (gr8s::make-node-agent-session nil))

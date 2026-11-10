@@ -171,6 +171,18 @@ message NodeStatus {
   map<string, string> device_plugin_resources = 7;
   map<string, string> resource_capacity = 8;
   map<string, string> resource_allocatable = 9;
+  // Exact local v2 receivers observed after TCX attachment. The revision
+  // binds the report to the owner's current network assignment.
+  repeated ServiceReceiverProof service_receivers = 10;
+  uint64 service_receiver_revision = 11;
+  // True for the periodic complete report, including an empty/unready set.
+  // Short Pod status updates leave this false and do not alter the last report.
+  bool service_receiver_report_present = 12;
+}
+
+message ServiceReceiverProof {
+  string pod_uid = 1;
+  bytes incarnation = 2;
 }
 
 message WireguardPeerObservation {

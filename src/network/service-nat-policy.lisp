@@ -319,6 +319,25 @@ unready. Disabled tombstones remain until flow-aware reclamation."
                                         (= #x20000 (netlink-read-integer value 4 4))))))
                 (= (hash-table-count seen) (hash-table-count expected)))))))
 
+(defun service-nat-ready-local-receivers
+    (map records node-id &key (lookup #'whistler/loader:map-lookup))
+  "Return only this node's trusted owner records whose pinned primary and
+alias rows still match and both carry receiver readiness. A missing or stale
+half is omitted; the status stream reports the complete resulting set."
+  (unless (and map (vectorp records) (not (stringp records)))
+    (return-from service-nat-ready-local-receivers nil))
+  (bt:with-lock-held (*service-nat-owner-publication-lock*)
+    (loop for record across records
+          for local-p = (string= node-id (service-translation-string record "nodeID"))
+          for rows = (when local-p (service-nat-identity-rows record))
+          when (and local-p
+                    (every (lambda (row)
+                             (let ((actual (funcall lookup map (car row))))
+                               (and (service-nat-owner-row-matches-p actual (cdr row))
+                                    (/= (logand (netlink-read-integer actual 4 4) #x4) 0))))
+                           rows))
+            collect record)))
+
 (defparameter *service-nat-policy-key-form*
   '(whistler::defstruct whistler::netpol-flow-key-v2
      (whistler::peer whistler::u32) (whistler::pod-port whistler::u16)
