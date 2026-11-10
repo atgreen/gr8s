@@ -180,7 +180,8 @@ partial failure retains the IPAM lease until DEL removes the endpoint."
      "dns" (json-object "nameservers" (vector dns-address)))))
 
 (defun make-routed-cni-operations
-    (ipam &key node-id (mtu 1450) (dns-address +dns-pod-server-address+)
+    (ipam &key node-id (service-risk-ready-p (constantly nil))
+            (mtu 1450) (dns-address +dns-pod-server-address+)
             (install-link (lambda (context address)
                             (configure-routed-veth context address :mtu mtu)))
             (check-link #'check-routed-cni-link)
@@ -220,6 +221,8 @@ partial failure retains the IPAM lease until DEL removes the endpoint."
              (cni-configuration-service-return-address configuration) return-address)
        (if (eq (cni-service-profile configuration) :v2)
            (progn
+             (unless (funcall service-risk-ready-p)
+               (invalid-cni "v2 Service risk inventory is not published for the current snapshot"))
              (unless return-address
                (invalid-cni "v2 Service endpoint has no private return address"))
              (funcall install-service-return context return-address)
@@ -249,6 +252,8 @@ partial failure retains the IPAM lease until DEL removes the endpoint."
                                              (cni-context-interface-name context))))
        (if (eq (cni-service-profile configuration) :v2)
            (progn
+             (unless (funcall service-risk-ready-p)
+               (invalid-cni "v2 Service risk inventory is not published for the current snapshot"))
              (unless address
                (invalid-cni "v2 Service endpoint has no private return address"))
              (funcall check-service-return context address)
