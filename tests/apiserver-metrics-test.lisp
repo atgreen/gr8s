@@ -63,6 +63,8 @@
                (is (search "gr8s_datastore_filesystem_inodes_free " body))
                (is (search "gr8s_datastore_file_size_bytes{file=\"core_checkpoint\"} " body))
                (is (search "gr8s_datastore_file_present{file=\"raft_wal\"} 0" body))
+               (is (search "gr8s_workload_objects{kind=\"deployments\"} 0" body))
+               (is (search "gr8s_workload_generation_lag_objects{kind=\"deployments\"} 0" body))
                (is (search (format nil "gr8s_watch_history_bytes{kind=\"resources\"} ~D" bytes) body))
                (is (search "gr8s_watch_history_entries{kind=\"nodes\"} " body))
                (is (search "gr8s_watch_history_entries{kind=\"pods\"} " body))
@@ -189,6 +191,52 @@
       (is (= 0 (datastore-file-metric-value text "gr8s_datastore_file_present" "raft_wal")))
       (is (null (datastore-file-metric-value text "gr8s_datastore_file_size_bytes" "raft_wal")))))
   (is (equal "" (gr8s.server::datastore-file-metrics-text))))
+
+(test workload-generation-metrics-count-observation-lag-with-fixed-kinds
+  (with-temporary-store (store path)
+    (bt:with-lock-held ((gr8s::pod-store-lock store))
+      (flet ((put (kind name desired observed)
+               (setf (gethash (gr8s::core-resource-key kind "private-namespace" name)
+                              (gr8s::pod-store-resources store))
+                     (gr8s::core-object
+                      "metadata" (gr8s::core-object "name" name "generation" desired)
+                      "spec" (gr8s::core-object "payload" "private-payload")
+                      "status" (gr8s::core-object "observedGeneration" observed "readyReplicas" 0)))))
+        (put "deployments" "private-behind" 3 2)
+        (put "deployments" "private-observed-not-ready" 3 3)
+        (put "statefulsets" "private-unobserved" 2 'null)))
+    (let ((revision (gr8s::pod-store-resource-revision store)))
+      (gr8s.store::quiesce-store-access store)
+      (unwind-protect
+           (let ((text (gr8s.server::workload-generation-metrics-text store)))
+             (is (search "gr8s_workload_objects{kind=\"deployments\"} 2" text))
+             (is (search "gr8s_workload_generation_lag_objects{kind=\"deployments\"} 1" text))
+             (is (search "gr8s_workload_generation_lag_objects{kind=\"statefulsets\"} 1" text))
+             (is (search "gr8s_workload_objects{kind=\"daemonsets\"} 0" text))
+             (is-false (search "private-" text))
+             (is-false (search (namestring path) text))
+             (is (= revision (gr8s::pod-store-resource-revision store))))
+        (gr8s.store::resume-store-access store))))
+  (is (equal "" (gr8s.server::workload-generation-metrics-text))))
+
+(test real-api-exposes-controller-pass-provider
+  (with-temporary-store (store path)
+    (values path)
+    (let ((worker (gr8s.server::make-reconciliation-worker
+                   :reconciler (make-reconciler store (make-fake-runtime))))
+          (server nil))
+      (gr8s.server::call-with-reconciliation-metrics worker (lambda () :completed))
+      (unwind-protect
+           (progn
+             (setf server (start-http-test-server
+                           :store store :runtime (make-fake-runtime)
+                           :control-plane-metrics-fn
+                           (lambda () (gr8s.server::reconciliation-worker-metrics-text worker))))
+             (multiple-value-bind (body code) (apiserver-metrics-request "/metrics")
+               (is (= 200 code))
+               (is (search "gr8s_reconciliation_completed_total 1" body))
+               (is (search "gr8s_reconciliation_in_flight 0" body))))
+        (when server (stop-server server))))))
 
 (defun apiserver-metrics-request (path &rest options)
   "Call the real listener on its kernel-assigned port, returning the body as text and the status."

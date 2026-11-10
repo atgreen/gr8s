@@ -101,8 +101,7 @@ locks, reads worker counters under the worker lock, and formats text after
 releasing those locks. Worker and Raft samples can represent slightly different
 instants. Comparing retained bytes with the configured budget helps identify
 write backpressure; sustained apply or peer replication lag needs investigation.
-Heartbeat freshness and reconciliation convergence remain
-separate telemetry work under `podster-ucm.6`.
+Peer heartbeat freshness remains separate telemetry work under `podster-ucm.6`.
 
 ## State filesystem capacity
 
@@ -167,3 +166,52 @@ filesystem availability and Raft retention metrics. They exclude snapshot
 artifacts, catch-up cache files, temporary files, Pod/Node records and workload
 logs. Apparent length also differs from allocated disk blocks for sparse files.
 They are not total gr8s disk usage.
+
+## Reconciliation execution and generation progress
+
+Once `serve` attaches its reconciliation worker, its local API exposes these
+unlabelled families. Counters reset when the worker is recreated:
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `gr8s_reconciliation_attempts_total` | Counter | Pass attempts admitted by the leader gate |
+| `gr8s_reconciliation_completed_total` | Counter | Passes that returned normally |
+| `gr8s_reconciliation_failures_total` | Counter | Passes that raised an error or unwound abnormally |
+| `gr8s_reconciliation_in_flight` | Gauge | Passes currently executing, normally zero or one |
+| `gr8s_reconciliation_worker_running` | Gauge | One while the worker thread is alive and not stopping |
+| `gr8s_reconciliation_duration_seconds_total` | Counter | Cumulative elapsed pass time, including failed attempts |
+| `gr8s_reconciliation_duration_seconds_last` | Gauge | Latest elapsed pass duration |
+| `gr8s_reconciliation_duration_seconds_max` | Gauge | Longest pass duration since worker creation |
+| `gr8s_reconciliation_last_success_age_seconds` | Gauge | Monotonic time since the latest normally returned pass; absent before the first one |
+
+Duration and in-flight measurements include waiting for patch-domain admission.
+Followers normally keep a running worker but skip passes, so their counters can
+stay at zero and their last-success age can grow. Apply stale-pass alerts to the
+current leader; use Raft leadership metrics to interpret each member's sample.
+Single-node servers have no Raft leadership series.
+
+A completed pass does not establish readiness: per-Pod errors can be handled
+inside a pass, and an unavailable runtime can cause Pod synchronization to skip.
+Use Pod conditions and workload status to assess whether workloads are ready.
+
+Two additional gauges describe controller observation of desired specifications:
+
+| Metric | Meaning |
+|---|---|
+| `gr8s_workload_objects{kind=...}` | Number of locally stored workload objects of a fixed kind |
+| `gr8s_workload_generation_lag_objects{kind=...}` | Number whose `status.observedGeneration` is missing or older than `metadata.generation` |
+
+The five `kind` values are `deployments`, `replicasets`,
+`replicationcontrollers`, `statefulsets`, and `daemonsets`. All five are emitted,
+including zero counts. Jobs, CronJobs and custom controllers are outside these
+families. A controller can observe the latest generation while replicas remain
+unready; generation lag is not a ready-replica count.
+
+The generation collector reads existing scalar metadata under the raw store
+mutex. Its work scales with the local resource index; it neither encodes payloads
+nor opens a datastore transaction, including while application access is gated.
+Names, namespaces, payloads and UIDs are not labels. Followers report their local
+replicated view, which can lag the leader. Loop measurements use the worker mutex
+and are rendered after releasing it; the loop and generation samples are not an
+atomic application snapshot. Processes without the corresponding worker or store
+omit those families.

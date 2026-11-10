@@ -1454,6 +1454,7 @@ Watches are long-running requests, which that filter leaves alone."
                         (gr8s.server::memory-metrics-text store)
                         (gr8s.server::datastore-filesystem-metrics-text store)
                         (gr8s.server::datastore-file-metrics-text store)
+                        (gr8s.server::workload-generation-metrics-text store)
                         (let ((acceptor hunchentoot:*acceptor*))
                           (if (and (typep acceptor 'gr8s-acceptor)
                                    (acceptor-control-plane-metrics-fn acceptor))
