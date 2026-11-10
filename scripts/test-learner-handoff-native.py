@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: 2026 Anthony Green
 # SPDX-License-Identifier: Apache-2.0
 """Kill an established leader during native large-snapshot learner catch-up.
-Instrumented internal plaintext harness; no VM, containers, BPF or production serve.
+Instrumented internal harness, optionally mTLS; no VM, containers, BPF or production serve.
 """
 import argparse
 import hashlib
 import json
 from pathlib import Path
 import tempfile
+import subprocess
 
 from importlib.util import module_from_spec, spec_from_file_location
 
@@ -22,23 +23,25 @@ def main():
     parser.add_argument("--binary", default="build/gr8s-learner-acceptance")
     parser.add_argument("--records", type=int, default=1024)
     parser.add_argument("--chunk-delay", type=float, default=0.02)
+    parser.add_argument("--tls", action="store_true", help="require mutual TLS with offline per-member fixtures")
     args = parser.parse_args()
     if args.records < 64 or args.chunk_delay <= 0:
-        parser.error("at least64 records and a positive delay required")
+        parser.error("at least 64 records and a positive delay required")
     binary = Path(args.binary).resolve()
     base = Path(tempfile.mkdtemp(prefix="gr8s-learner-handoff-"))
-    voters = [probe.Node(binary, base, name, args.records, args.chunk_delay)
+    voters = [probe.Node(binary, base, name, args.records, args.chunk_delay, tls=args.tls)
               for name in ("source", "peer1", "peer2")]
-    sink = probe.Node(binary, base, "sink", args.records, 0)
+    sink = probe.Node(binary, base, "sink", args.records, 0, tls=args.tls)
     nodes = [*voters, sink]
     result = dict(passed=False, evidence=str(base), nativeHarness=True,
-                  productionServe=False, mutualTls=False, vmAcceptance=False,
+                  productionServe=False, mutualTls=args.tls, vmAcceptance=False,
                   heapLimitMiB=384, records=args.records, payloadBytes=args.records * 65536,
                   binarySha256=hashlib.sha256(binary.read_bytes()).hexdigest())
 
     def status(node):
         value = node.rpc("status")
         assert value["heapLimitMiB"] == 384, value
+        assert value["mutualTls"] == args.tls, value
         return value
 
     def leader(candidates):
@@ -55,6 +58,16 @@ def main():
                              for value in states.values()) else None
 
     try:
+        if args.tls:
+            setup = subprocess.run([str(binary), "--dynamic-space-size", "384", "--prepare-tls",
+                                    str(base), *[node.name for node in nodes]],
+                                   capture_output=True, text=True, timeout=120)
+            if setup.returncode:
+                raise RuntimeError("TLS fixture preparation failed: " + setup.stderr[-2000:])
+            assert not any((node.root / "tls/pki/cluster-ca.key").exists() for node in nodes[1:])
+            identities = {str(path.relative_to(base)): hashlib.sha256(path.read_bytes()).hexdigest()
+                          for node in nodes for path in (node.root / "tls").rglob("*")
+                          if path.is_file()}
         voters[0].launch("founder")
         current = probe.await_value(lambda: leader(voters[:1]))
         for peer in voters[1:]:
@@ -106,6 +119,10 @@ def main():
         result["finalMembership"] = probe.await_value(lambda: all_voters(nodes, 4), timeout=240)
         for node in nodes:
             assert node.rpc("read", name="after-leader-loss")["value"] == "committed"
+        if args.tls:
+            assert all(hashlib.sha256((base / path).read_bytes()).hexdigest() == digest
+                       for path, digest in identities.items())
+            result["identitiesPreserved"] = identities
         result.update(passed=True, largePayloadAcceptance=args.records >= 1024,
                       noRejoinNeeded=True)
     except Exception as error:

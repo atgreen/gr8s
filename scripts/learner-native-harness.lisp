@@ -25,6 +25,7 @@
             (let ((node (gr8s::raft-member-node member)))
               (gr8s::core-object "role" (string-downcase (symbol-name (gr8s::raft-node-role node)))
                 "selfRole" (string-downcase (symbol-name (gr8s::raft-node-self-role node)))
+                "mutualTls" (if (gr8s.raft.transport::raft-member-credentials member) t nil)
                 "term" (gr8s::raft-node-current-term node) "quorumMembers" (gr8s::raft-cluster-size node)
                 "commit" (gr8s::raft-node-commit-index node) "applied" (gr8s::raft-node-last-applied node)
                 "lastIndex" (gr8s::raft-last-log-index node)
@@ -38,14 +39,36 @@
               (gethash "lastPayloadBytes" status) (length (gethash "payload" (gethash "data" object))))))
     status))
 
+(defun learner-native-prepare-tls (base-text ids)
+  "Offline test fixtures: distinct identities, one CA; never enrolls live members."
+  (let* ((base (uiop:ensure-directory-pathname base-text))
+         (founder-root (merge-pathnames (format nil "~A/tls/" (first ids)) base))
+         (founder (gr8s::ensure-raft-founder-credentials founder-root (first ids))))
+    (dolist (id (rest ids))
+      (let* ((root (merge-pathnames (format nil "~A/tls/" id) base))
+             (key (gr8s.security::raft-member-key-path root)))
+        (gr8s::write-private-text-atomically
+         (gr8s.security::raft-ca-certificate-path root)
+         (uiop:read-file-string (gr8s::raft-credentials-ca-path founder)))
+        (gr8s::write-private-text-atomically
+         (gr8s.security::raft-member-certificate-path root)
+         (gr8s::issue-raft-member-certificate
+          (gr8s::raft-credentials-pki founder) id (gr8s::generate-node-key-and-csr id key)))))))
+
 (defun learner-native-main ()
+  (when (equal "--prepare-tls" (first (uiop:command-line-arguments)))
+    (let ((arguments (rest (uiop:command-line-arguments))))
+      (learner-native-prepare-tls (first arguments) (rest arguments))
+      (return-from learner-native-main)))
   (handler-case
-      (destructuring-bind (root-text id mode port-text records-text delay-text)
+      (destructuring-bind (root-text id mode port-text records-text delay-text &optional tls-flag)
           (uiop:command-line-arguments)
         (let* ((root (uiop:ensure-directory-pathname root-text))
                (count (parse-integer records-text)) (delay (read-from-string delay-text))
                (request-path (merge-pathnames "harness/request.json" root))
                (response-path (merge-pathnames "harness/response.json" root))
+               (credentials (when (equal tls-flag "--tls")
+                              (gr8s.security::load-raft-credentials (merge-pathnames "tls/" root))))
                (store (gr8s:open-store root)) (member nil) (last-request nil)
                (original (symbol-function 'gr8s.raft.transport::raft-link-deliver-message)))
           (when (equal mode "founder") (learner-native-seed store count))
@@ -64,7 +87,7 @@
                  (setf member (gr8s.resources::start-store-member-from-wal
                                 store id (merge-pathnames "raft/control-plane.log" root)
                                 :bootstrap-role (cond ((equal mode "founder") :founder) ((equal mode "learner") :learner))
-                                :host "127.0.0.1" :port (parse-integer port-text)))
+                                :credentials credentials :host "127.0.0.1" :port (parse-integer port-text)))
                  (gr8s::raft-member-start member)
                  (learner-native-write-json (merge-pathnames "harness/ready.json" root) (gr8s::core-object "port" (gr8s::raft-member-port member)))
                  (loop

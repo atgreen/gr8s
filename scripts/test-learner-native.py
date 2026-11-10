@@ -49,8 +49,9 @@ def await_value(check, timeout=120):
 
 
 class Node:
-    def __init__(self, binary, base, name, records, delay):
+    def __init__(self, binary, base, name, records, delay, tls=False):
         self.binary, self.name, self.records, self.delay = binary, name, records, delay
+        self.tls = tls
         self.root = base / name
         self.control = self.root / "harness"
         self.control.mkdir(parents=True, mode=0o700)
@@ -66,7 +67,8 @@ class Node:
         self.log = (self.root.parent / f"{self.name}-{self.cycle}.log").open("wb")
         self.process = subprocess.Popen([
             str(self.binary), "--dynamic-space-size", "384", str(self.root), self.name,
-            mode, str(self.port), str(self.records), str(self.delay)], stdout=self.log, stderr=subprocess.STDOUT)
+            mode, str(self.port), str(self.records), str(self.delay),
+            *(["--tls"] if self.tls else [])], stdout=self.log, stderr=subprocess.STDOUT)
         def ready():
             self.live()
             return read(self.control / "ready.json")

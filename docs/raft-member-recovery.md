@@ -392,3 +392,13 @@ finished at committed/applied index 10 with four voters and 1,026 application
 resources. The old leader recovered, all four nodes retained the write, and
 all shutdowns returned zero. This closes native plaintext handoff acceptance;
 the combined authenticated large-transfer scenario and VM execution remain open.
+
+Add `--tls` to the learner handoff probe to run the same scenario over mutually
+authenticated Raft connections. Before launching members, the instrumented
+binary prepares a private test CA and distinct member certificates. Only the
+fixture founder retains the CA private key; peers receive their own keys and
+certificates plus the CA certificate. Each status check requires TLS credentials
+on the member, and the report verifies certificate/key hashes across recovery.
+These offline fixtures exercise authenticated replication and Join, rather than
+production token enrollment. The existing production native probe covers token
+enrollment separately.
