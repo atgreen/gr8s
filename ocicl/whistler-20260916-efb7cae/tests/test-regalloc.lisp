@@ -394,3 +394,30 @@
                    (return 2))")))
     (is (= 2 (interpret-scalar-bpf bytes '(42))))
     (is (= 2 (interpret-scalar-bpf bytes '(0))))))
+
+(test helper-and-kfunc-immediates-preserve-full-width
+  "Observe every argument register at the call boundary, including constants
+propagated into a helper/kfunc and values whose low32 sign bit is set."
+  (dolist (kind '(:helper :kfunc))
+    (dolist (propagated '(nil t))
+      (dolist (value '(0 #x7fffffff #x80000000 #xffffffff #x100000000
+                      #x0e00000000000053 #x8000000000000000 #xffffffffffffffff
+                      -102 -2147483648 #xffffffff80000000))
+        (loop for target from 1 to 5 do
+          (let* ((ctx (whistler/ir::make-emit-ctx))
+                 (arguments
+                   (loop for reg from 1 to 5
+                         for constant = (if (= reg target) value (+ reg 10))
+                         collect (if propagated
+                                     (progn (setf (gethash reg (whistler/ir::emit-ctx-const-values ctx)) constant) reg)
+                                     (list :imm constant)))))
+            (if (eq kind :helper)
+                (whistler/ir::emit-call-insn ctx nil (cons '(:helper 7) arguments))
+                (whistler/ir::emit-kfunc-call-insn ctx nil (cons '(:kfunc "test") arguments)))
+            ;; Replace CALL with an observation of its argument. Setup is the
+            ;; real emitter path; the scalar oracle would otherwise poison R1-R5.
+            (pop (whistler/ir::emit-ctx-insns ctx))
+            (whistler/ir::ectx-emit ctx (whistler/bpf:emit-mov64-reg 0 target))
+            (whistler/ir::ectx-emit ctx (whistler/bpf:emit-exit))
+            (let ((bytes (whistler/bpf:insn-bytes (reverse (whistler/ir::emit-ctx-insns ctx)))))
+              (is (= (ldb (byte 64 0) value) (interpret-scalar-bpf bytes nil))))))))))
