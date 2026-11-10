@@ -439,3 +439,31 @@ without a restore callback. Making that fixture stateless restored snapshot
 catch-up and verified that removed members cannot renew their certificates;
 the product's application-restore requirement remains enforced. These checks
 do not establish native automatic-compaction or VM acceptance.
+
+Production HA members apply a 16 MiB retained-memory admission budget to
+uncommitted application commands. The estimator reserves four bytes per
+character for decoding plus allocator/waiter overhead. Wire escaping is a
+separate cost: a valid full-size Secret update remains supported. Pending
+capacity returns HTTP 503 before WAL append or callback retention; a single
+command above the budget returns HTTP 413. Committing the tail releases
+admission capacity; committed-log reclamation still needs compaction. Exact
+Raft/store recovery barriers and membership changes remain available at capacity.
+Generic Raft callers retain their defaults and may supply a command estimator.
+
+Build the native admission probe with
+`sbcl --noinform --non-interactive --load scripts/build-proposal-admission-native-harness.lisp`,
+then run `python3 scripts/test-proposal-admission-native.py`. In one 384 MiB
+process it first verifies plain/encrypted 1 MiB Secret create/update/reopen, then
+starts three voters and a non-voting learner over real loopback connections.
+With two voters stopped, 2,048 attempted 64 KiB writes must fail without further
+WAL/callback growth once the budget fills. A learner-forwarded capacity refusal,
+quorum return, new writes and durable reopening of all four members are checked.
+Production proposal timeouts remain unchanged. Private logs, binary identity
+and a JSON result are retained. This is internal plaintext store/transport
+acceptance; production serve, TLS and VM evidence have separate scope.
+
+The [native admission validation](proposal-admission-validation-2026-11-10.json)
+records the bounded minority-write tail, forwarded refusal, quorum recovery,
+full member reopening, and plain/encrypted 1 MiB Secret boundary. The test uses
+four loopback members in one 384 MiB process; it does not certify production
+serve, TLS, or VM execution.

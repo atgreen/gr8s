@@ -1,0 +1,96 @@
+{
+  "scope": "Pending application write admission, supported Secret size, and recovery root ownership",
+  "testedBaseCommit": "501f194756886876fcc5e1b50cd9f813c922e1e6",
+  "sourceSha256": {
+    "src/ha/control-plane.lisp": "60ee16b62c51cfa6af22c4cb5172469a99803b15b6bcd6675ae0643f34e7304c",
+    "src/raft/core.lisp": "bb4eaa27912e6cf907d4e4647bbbce455bf1591f8e95ff34699bfdf5971862d2",
+    "src/raft/transport/cluster.lisp": "fbe7cbbef3813c509dc1c0f2618f11012d2f1f213835cd5a62a919befc09fbba",
+    "src/raft/transport/member.lisp": "be11da4e4782582abbb7171e229eeb71fa8d050d3ef37554677678873148edc3",
+    "src/resources/core-resources.lisp": "e7d054a6bc6dde0815ff0de3109a05b62710d883d73f2d4c5916e722dfa59edc",
+    "src/resources/secret-encryption.lisp": "c77bbddb8c47f3a50d787b9c928120cb56197fcfe09b052c7d053e659f821bd9",
+    "tests/core-recovery-test.lisp": "a3219db2fa5a423aefb29f8d8e2343b40186fc3e59d80539c7888d552dcde8cb",
+    "tests/ha-control-plane-test.lisp": "c167edcd542fcb06f6a978504b84a2ecca3ce345dbd3930f70798704bb780a8f",
+    "tests/raft-test.lisp": "23be5635f5718f0073013ff5eaf321b603a6004e015f3c26b83fae39d7c1fe5b",
+    "scripts/proposal-admission-native-harness.lisp": "254c6be050735efedb72dbe9d1276108907f34d6a1ddfd7218caf0795995831c",
+    "scripts/build-proposal-admission-native-harness.lisp": "0444dfd35d505f8940565d31fbef476e1072bd2fc26870002255feb9276b886b",
+    "scripts/test-proposal-admission-native.py": "1724e9a6462a008aa86023a208f2142a07711218748f5667185c43eb5eeaa977"
+  },
+  "sourceChecks": {
+    "admission": {
+      "checks": 5144,
+      "suiteCounts": [
+        4919,
+        96,
+        52,
+        77
+      ],
+      "failures": 0
+    },
+    "recovery": {
+      "checks": 39,
+      "suiteCounts": [
+        39
+      ],
+      "failures": 0
+    }
+  },
+  "native": {
+    "passed": true,
+    "evidence": "/tmp/gr8s-proposal-admission-native-pzajynj4",
+    "binarySha256": "70709a86079ee20d8a759947dc49dc8953b8639f1f05dc9dea51126f6634c649",
+    "requestedRounds": 2048,
+    "timeoutSeconds": 1800,
+    "startedUtc": "2026-11-10T14:51:47.592276+00:00",
+    "exitCode": 0,
+    "nativeReport": {
+      "passed": true,
+      "nativeHarness": true,
+      "productionServe": false,
+      "vmAcceptance": false,
+      "mutualTls": false,
+      "processes": 1,
+      "members": 4,
+      "voters": 3,
+      "heapLimitMiB": 384,
+      "rounds": 2048,
+      "attemptedPayloadBytes": 134217728,
+      "admissionBudgetBytes": 16777216,
+      "productionProposalTimeoutSeconds": 10,
+      "admissionEstimator": "four-byte-characters-plus-allocator-reserve",
+      "allocatorReserveBytes": 65536,
+      "phase": "complete",
+      "largeSecretBoundary": true,
+      "largeSecretDecodedBytes": 1048576,
+      "fullTail": {
+        "lastIndex": 59,
+        "commitIndex": 9,
+        "pendingCallbacks": 50,
+        "uncommittedWeightBytes": 16486920,
+        "walBytes": 3319920
+      },
+      "unknownOutcomeWritesPresent": 50,
+      "capacityRefusals": 1998,
+      "timedOutProposals": 50,
+      "forwardedCapacityRefusal": true,
+      "sentinelRecovered": true,
+      "newWritesAfterRecovery": true,
+      "durableReopen": true
+    },
+    "elapsedSeconds": 526.9352659969591
+  },
+  "limitations": [
+    "Internal loopback members in one process; no production serve, TLS, containers, BPF or VM acceptance.",
+    "Automatic compaction and streaming checkpoint reader are outside this publication.",
+    "The 16 MiB pending-command estimate does not cap live object database size or total heap."
+  ],
+  "priorAttempts": [
+    {
+      "evidence": "/tmp/gr8s-proposal-admission-native-smzgmkgz/result.json",
+      "result": "Fixture bootstrap assertion failed: learner counts itself separately from three voting members; fixture now checks committed role configuration."
+    },
+    {
+      "evidence": "/tmp/gr8s-proposal-admission-native-2ut1ash0/result.json",
+      "result": "Passed older wire-weight estimator without full-size Secret coverage; superseded by the current native run."
+    }
+  ]
+}

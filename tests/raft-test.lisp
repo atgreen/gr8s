@@ -385,6 +385,63 @@
     (is (= 1 (gr8s::raft-node-last-applied node)))
     (gr8s::raft-apply-committed node)
     (is (= 1 effects))))
+(test uncommitted-admission-starts-at-the-commit-offset-after-compaction
+  (let* ((command (list :set "key" (make-string 500 :initial-element #\x)))
+         (node (gr8s::make-raft-node :id "a" :peers '("b" "c") :role :leader :current-term 1
+                 :snapshot-index 100 :snapshot-term 1 :commit-index 101 :last-applied 101
+                 :uncommitted-byte-limit 4096
+                 :log (make-array 2 :adjustable t :fill-pointer 2
+                         :initial-contents (list (gr8s::make-raft-entry :index 101 :term 1 :command command)
+                                                 (gr8s::make-raft-entry :index 102 :term 1 :command command)))
+                 :send-fn (lambda (&rest args) (declare (ignore args))))))
+    (is (eq :capacity (nth-value 2 (gr8s::raft-propose node command))))
+    (setf (gr8s::raft-node-commit-index node) 102 (gr8s::raft-node-last-applied node) 102)
+    (is-true (nth-value 1 (gr8s::raft-propose node command)))
+    (is (eq :capacity (nth-value 2 (gr8s::raft-propose node command))))))
+
+(test uncommitted-byte-admission-rejects-before-persisting-and-recovers-after-commit
+  (with-temporary-store (store root)
+    (declare (ignore store))
+    (let* ((path (merge-pathnames "admission.log" root))
+           (storage (gr8s::open-file-raft-storage path))
+           (callbacks 0)
+           (node (gr8s::make-raft-node :id "a" :peers '("b" "c") :role :leader
+                   :current-term 1 :storage storage :send-fn (lambda (&rest args) (declare (ignore args)))
+                   :apply-fn (lambda (command) (declare (ignore command)) :applied)
+                   :uncommitted-byte-limit 4096))
+           (command (list :set "key" (make-string 500 :initial-element #\x))))
+      (unwind-protect
+           (progn
+             (is-true (nth-value 1 (gr8s::raft-propose node command (lambda (value)
+                                                                   (declare (ignore value))
+                                                                   (incf callbacks)))))
+             (let ((bytes (sb-posix:stat-size (sb-posix:stat path))))
+               (dotimes (i 200)
+                 (multiple-value-bind (index accepted reason)
+                     (gr8s::raft-propose node command (lambda (value) (declare (ignore value)) (incf callbacks)))
+                   (is (null index)) (is (null accepted)) (is (eq :capacity reason))))
+               (is (= bytes (sb-posix:stat-size (sb-posix:stat path)))))
+             (is (= 1 (gr8s::raft-last-log-index node)))
+             (is (= 1 (hash-table-count (gr8s.raft::raft-node-pending node))))
+             (is (zerop callbacks))
+             (is (eq :proposal-too-large
+                     (nth-value 2 (gr8s::raft-propose node (list :set "key" (make-string 2000))))))
+             ;; The full application budget must not prevent protocol recovery.
+             ;; A recovered legacy tail can exceed the configured budget.
+             (setf (gr8s.raft::raft-node-uncommitted-byte-limit node) 1)
+             (is-true (nth-value 1 (gr8s::raft-propose-config node :add "d" :role :learner)))
+             (is-true (nth-value 1 (gr8s::raft-propose node '(:raft-barrier))))
+             (is-true (nth-value 1 (gr8s::raft-propose node '(:store-recovery-barrier))))
+             (setf (gethash "b" (gr8s::raft-node-match-index node)) (gr8s::raft-last-log-index node))
+             (gr8s::raft-advance-commit node)
+             (gr8s::raft-apply-committed node)
+             (is (= 1 callbacks))
+             (is (zerop (hash-table-count (gr8s.raft::raft-node-pending node))))
+             ;; Committed entries still in the log do not consume admission.
+             (setf (gr8s.raft::raft-node-uncommitted-byte-limit node) 4096)
+             (is-true (nth-value 1 (gr8s::raft-propose node command))))
+        (gr8s::close-file-raft-storage storage)))))
+
 (in-suite gr8s)
 
 (in-suite raft)

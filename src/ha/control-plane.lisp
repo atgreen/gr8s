@@ -102,6 +102,10 @@ application ingress/writer barriers. This function neither persists nor adopts R
          (gr8s.image-distribution::tracker-apply-command (gr8s::pod-store-image-tracker store) (second command)))
         (:node-enrollment (apply #'gr8s::install-node-enrollment-command store (second command)))))))
 
+(defun store-raft-command-retention-weight (command)
+  "Reserve allocator pages and waiter metadata in addition to command contents."
+  (+ (* 2 sb-vm:gencgc-page-bytes) (gr8s.raft::raft-command-memory-weight command)))
+
 (defun make-store-raft-commit-function (member)
   (lambda (tag json)
     (multiple-value-bind (result committed)
@@ -109,7 +113,12 @@ application ingress/writer barriers. This function neither persists nor adopts R
             (raft-member-propose-sync member (list tag json) :timeout 10)
             (raft-member-forward-propose-sync member (list tag json) :timeout 10))
       (unless (eq committed t)
-        (gr8s::core-resource-error 503 "ServiceUnavailable" "This control-plane member is not the Raft leader"))
+        (if (eq committed :proposal-too-large)
+            (gr8s::core-resource-error 413 "RequestEntityTooLarge" "Write exceeds the control-plane proposal byte limit")
+            (gr8s::core-resource-error 503 "ServiceUnavailable"
+                                      (if (eq committed :capacity)
+                                          "Control-plane pending write capacity is full; retry after quorum recovers"
+                                          "The control-plane write could not commit"))))
       result)))
 
 (defun control-plane-store-bootstrap-role (store id init api-url)
@@ -168,6 +177,9 @@ the cluster. Access stays gated until a current-term committed boundary applies.
                         (when bootstrap-role
                           (list :bootstrap-role bootstrap-role :bootstrap-api-url api-url))))
            (bt:with-lock-held ((raft-member-lock member))
+             (setf (gr8s.raft::raft-node-uncommitted-byte-limit (raft-member-node member)) (* 16 1024 1024)
+                   (gr8s.raft::raft-node-uncommitted-weight-fn (raft-member-node member))
+                   #'store-raft-command-retention-weight)
              (raft-member-enable-dynamic-membership member :pki pki))
            ;; Only a learner still awaiting admission needs Join. Recovered voters
            ;; reconnect using the durable address book, without enrollment tokens

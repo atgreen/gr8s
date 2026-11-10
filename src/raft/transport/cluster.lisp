@@ -283,19 +283,20 @@
    the proposing or a delivery thread) and hands the result to this waiter
    through a separate mailbox lock, so there is no lock-order hazard. Returns
    (values result t index) on commit, (values nil :not-leader nil) if MEMBER is
-   not the leader, or (values nil :timeout nil) if the entry does not commit in
-   time."
+   not the leader, (values nil :capacity nil) when pending command memory is
+   full, (values nil :proposal-too-large nil) for an oversized command, or
+   (values nil :timeout nil) if the entry does not commit in time."
   (let ((lock (bt:make-lock "gr8s raft propose-sync"))
         (cv (bt:make-condition-variable))
         (done nil) (result nil))
-    (multiple-value-bind (index ok)
+    (multiple-value-bind (index ok reason)
         (raft-member-propose member command
                              (lambda (r)
                                (bt:with-lock-held (lock)
                                  (setf result r done t)
                                  (bt:condition-notify cv))))
       (if (not ok)
-          (values nil :not-leader nil)
+          (values nil (or reason :not-leader) nil)
           (bt:with-lock-held (lock)
             (let ((deadline (+ (get-internal-real-time)
                                (* timeout internal-time-units-per-second))))

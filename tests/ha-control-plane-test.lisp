@@ -11,6 +11,62 @@
 (def-suite ha-control-plane :in gr8s)
 (in-suite ha-control-plane)
 
+(test ha-admission-preserves-full-size-secret-create-and-update
+  (dolist (encrypted '(nil t))
+    (with-temporary-store (store root)
+      (let ((ha nil) (port nil))
+        (unwind-protect
+             (progn
+               (when encrypted (gr8s::ensure-cluster-pki root))
+               (setf ha (gr8s::start-ha-control-plane store :id "large-secret" :init t))
+               (is (poll-until (lambda () (gr8s::ha-control-plane-leader-p ha)) :timeout 15))
+               (when encrypted (gr8s::enable-secret-encryption store))
+               (let* ((bytes (make-array (* 1024 1024) :element-type '(unsigned-byte 8) :initial-element 17))
+                      (one (ag-grpc:base64-encode bytes)))
+                 (gr8s::create-core-resource store "secrets"
+                   (gr8s::core-object "apiVersion" "v1" "kind" "Secret"
+                     "metadata" (gr8s::core-object "name" "large") "data" (gr8s::core-object "value" one)) "default")
+                 (setf (aref bytes 0) 18)
+                 (let ((two (ag-grpc:base64-encode bytes)))
+                   (gr8s::update-core-resource store "secrets" "default" "large"
+                     (lambda (object) (setf (gethash "value" (gethash "data" object)) two) object))
+                   (is (equal two (gethash "value" (gethash "data"
+                                    (gr8s::get-core-resource store "secrets" "default" "large")))))
+                   (setf port (gr8s::raft-member-port (gr8s::ha-control-plane-member ha)))
+                   (gr8s::stop-ha-control-plane ha)
+                   (setf ha nil store (gr8s:open-store root :defer-restore-completion t)
+                         ha (gr8s::start-ha-control-plane store :id "large-secret" :init t :port port))
+                   (is (poll-until (lambda () (gr8s::ha-control-plane-leader-p ha)) :timeout 15))
+                   (is (equal two (gethash "value" (gethash "data"
+                                    (gr8s::get-core-resource store "secrets" "default" "large"))))))))
+          (gr8s::stop-ha-control-plane ha))))))
+
+(test proposal-capacity-refusals-propagate-through-sync-forwarding-and-store-hook
+  (let* ((node (gr8s::make-raft-node :id "a" :role :leader :peers '("b" "c")
+                 :current-term 1 :uncommitted-byte-limit 4096
+                 :send-fn (lambda (&rest args) (declare (ignore args)))))
+         (member (gr8s.raft.transport::make-raft-member :node node))
+         (payload (make-string 500 :initial-element #\x))
+         (commit (gr8s.ha::make-store-raft-commit-function member)))
+    (gr8s::raft-member-propose member (list :core-delta payload))
+    (multiple-value-bind (result reason index)
+        (gr8s::raft-member-propose-sync member (list :core-delta payload))
+      (is (null result)) (is (eq :capacity reason)) (is (null index)))
+    (multiple-value-bind (result reason)
+        (gr8s::raft-member-forward-propose-sync member (list :core-delta payload))
+      (is (null result)) (is (eq :capacity reason)))
+    (handler-case
+        (progn (funcall commit :core-delta payload) (fail "Expected capacity refusal"))
+      (gr8s:kubernetes-error (condition)
+        (is (= 503 (gr8s::kubernetes-error-status-code condition)))))
+    (handler-case
+        (progn (funcall commit :core-delta (make-string 2000)) (fail "Expected size refusal"))
+      (gr8s:kubernetes-error (condition)
+        (is (= 413 (gr8s::kubernetes-error-status-code condition)))))
+    (is (= 1 (gr8s::raft-last-log-index node)))
+    (is (zerop (hash-table-count (gr8s.raft::raft-node-pending node))))))
+
+
 (test ha-control-plane-founds-joins-gates-and-replicates
   (with-temporary-store (s1 p1)
     (with-temporary-store (s2 p2)
@@ -20,6 +76,9 @@
              (progn
                ;; Found the cluster on member 1.
                (setf h1 (gr8s::start-ha-control-plane s1 :id "cp1" :init t))
+               (is (= (* 16 1024 1024)
+                      (gr8s.raft::raft-node-uncommitted-byte-limit
+                       (gr8s::raft-member-node (gr8s::ha-control-plane-member h1)))))
                (is (poll-until (lambda () (gr8s::ha-control-plane-leader-p h1)))
                    "the founding control plane becomes leader")
                ;; Member 2 joins, learning member 1's address from its member.

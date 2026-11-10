@@ -534,6 +534,8 @@ id, or NIL."
             (raft-member-propose-sync member command :timeout 2)
           (declare (ignore index))
           (when (eq committed t) (return (values result t)))
+          (when (member committed '(:capacity :proposal-too-large))
+            (return (values nil committed)))
           (setf last-reason committed)))
       (multiple-value-bind (leader address)
           (bt:with-lock-held ((raft-member-lock member))
@@ -569,6 +571,8 @@ id, or NIL."
                                      :not-leader))))
                   (ignore-errors (ag-grpc:channel-close channel))))
             (error () (setf last-reason :timeout)))))
+      (when (member last-reason '(:capacity :proposal-too-large))
+        (return (values nil last-reason)))
       (when (>= (get-internal-real-time) deadline)
         (return (values nil last-reason)))
       ;; Elections and the membership transition are expected transient states;

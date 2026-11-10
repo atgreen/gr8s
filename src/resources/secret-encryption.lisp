@@ -118,7 +118,8 @@
                   (ironclad:decrypt-message
                    mode ciphertext
                    :associated-data
-                   (secret-encryption-aad resource namespace name key-id)))))
+                   (secret-encryption-aad resource namespace name key-id)))
+                 :max-string-length (* 2 1024 1024)))
           (remhash +secret-encrypted-data-field+ copy)
           copy))))
 
