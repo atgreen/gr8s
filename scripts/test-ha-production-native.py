@@ -191,8 +191,17 @@ def current_leader(nodes):
 def post(nodes, path, body):
     for node in nodes:
         status, _ = node.request(path, body)
-        if status in (201, 409):
+        if status == 201:
             return node
+        if status == 409:
+            # A rejected committed precondition can leave the object absent.
+            # Confirm an existing matching object before treating a retry as done.
+            status, actual = node.request(f"{path}/{body['metadata']['name']}")
+            if (status == 200 and actual.get("kind") == body.get("kind")
+                    and actual.get("metadata", {}).get("name") == body["metadata"]["name"]
+                    and actual.get("data") == body.get("data")):
+                return node
+            continue
         if status not in (307, 503):
             raise ValueError(f"{node.name} unexpected write status {status}")
     return None
@@ -209,6 +218,22 @@ def value_on_all(nodes, name, value):
         if status != 200 or body.get("data", {}).get("value") != value:
             return False
     return True
+
+
+def matching_configmaps(nodes, path, expected=None):
+    """Require identical names, UIDs and contents, including across cold recovery."""
+    inventories = []
+    for node in nodes:
+        status, body = node.request(path)
+        if status != 200:
+            return None
+        rows = sorted(((item["metadata"]["name"], item["metadata"]["uid"], item.get("data", {}))
+                       for item in body["items"]), key=lambda row: row[0])
+        if not rows or any(not uid for _, uid, _ in rows):
+            return None
+        inventories.append(rows)
+    reference = inventories[0] if expected is None else expected
+    return reference if all(rows == reference for rows in inventories) else None
 
 
 def compaction_churn(nodes, result, rounds):
@@ -332,6 +357,7 @@ def main():
               "conformanceAcceptance": False, "witnessAcceptance": args.witness,
               "heapLimitMiB": args.heap_mib,
               "binarySha256": hashlib.sha256(binary.read_bytes()).hexdigest(), "evidence": str(base),
+              "runnerSha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               "compactionRequested": args.compaction, "compactionAcceptance": False,
               "fullCompactionWorkloadRequested": args.compaction and not args.smoke,
               "fullCompactionAcceptance": False,
@@ -358,6 +384,7 @@ def main():
         if args.compaction:
             compaction_churn(nodes, result, args.compaction_rounds)
             leader = wait_for(lambda: post(nodes, path, configmap("after-compaction", "D")))
+            wait_for(lambda: value_on_all(nodes, "after-compaction", "D"))
         leader = wait_for(lambda: current_leader(nodes))
         result["metricsBeforeLeaderLoss"] = {node.name: {key: value for key, value in node.metrics().items()
                                                        if key in ("gr8s_raft_term", "gr8s_raft_is_leader")}
@@ -373,6 +400,7 @@ def main():
         wait_for(leader.ready)
         wait_for(lambda: value_on_all(nodes, "after-loss", "B"))
         result["membershipAfterRejoin"] = wait_for(lambda: voters_ready(nodes))
+        result["configMapsBeforeFullRestart"] = wait_for(lambda: matching_configmaps(nodes, path))
         result["firstShutdown"] = {n.name: n.stop() for n in nodes}
         assert all(code == 0 for code in result["firstShutdown"].values())
         # Start only the founder first. Its Raft listener must stay available,
@@ -398,6 +426,8 @@ def main():
         result["membershipAfterFullRestart"] = wait_for(lambda: voters_ready(nodes))
         wait_for(lambda: value_on_all(nodes, "before-loss", "A"))
         wait_for(lambda: value_on_all(nodes, "after-loss", "B"))
+        result["configMapsAfterFullRestart"] = wait_for(
+            lambda: matching_configmaps(nodes, path, result["configMapsBeforeFullRestart"]))
         final_leader = wait_for(lambda: post(nodes, path, configmap("after-restart", "C")))
         result["leaderAfterFullRestart"] = final_leader.name
         wait_for(lambda: value_on_all(nodes, "after-restart", "C"))
