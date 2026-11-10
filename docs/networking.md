@@ -98,6 +98,25 @@ membership check refuses the attempt; later attempts recover after convergence.
 boundaries. The same fixture can be tested with actual attached socket hooks using
 `scripts/test-service-lb-program.py FIXTURE --kernel` inside a disposable root VM.
 Host socket hooks do not intercept connections initiated inside a guest kernel.
+The selected Service architecture follows Cilium's ordinary split: keep socket
+load balancing for native Pod connections and use the TC packet path for guest
+interfaces and traffic that bypasses socket hooks. Ordinary Service traffic does
+not require an additional identity envelope or Service-specific tunnel. This is
+an implementation direction, not a claim that the packet path below is enabled
+by default or that all kube-proxy Service modes are complete.
+
+The packet path currently keys return translation on transport tuples. If the
+same backend is exposed through multiple Service VIPs and independent flows
+produce indistinguishable tuples, Service identity can be ambiguous. This is a
+documented limitation of the chosen default, similar to the multiple-VIP
+collision noted in Cilium's [kube-proxy replacement documentation][cilium-lb].
+Workloads that need this exact pattern should avoid sharing the backend through
+multiple VIPs until a targeted solution is implemented and tested. The
+[experimental identity envelope](service-wire-protocol.md) is retained as
+research and is not part of the default dataplane.
+
+[cilium-lb]: https://docs.cilium.io/en/latest/network/kubernetes/kubeproxy-free/
+
 The experimental IPv4 TCP/UDP TC Service pipeline can be enabled with
 `GR8S_ENABLE_PACKET_SERVICES=1` on the node agent. The generated CNI configuration
 then binds each endpoint guard to the node's shared pinned Service maps.

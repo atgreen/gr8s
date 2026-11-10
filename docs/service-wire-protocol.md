@@ -1,8 +1,16 @@
 # Experimental Service identity envelope
 
-The standalone codec in `src/network/service-wire.lisp` is a prerequisite for
-`podster-p9c.14`. It is not installed by CNI or the node agent. The existing
-crossed-Service probe still reproduces the bug in the unmodified NAT graph.
+This is an archived experiment. The selected default Service design uses native
+socket load balancing and TC packet fallback without this envelope. It is not
+installed by the node agent. The stronger cross-Service collision guarantee
+described below is not a prerequisite for the default dataplane; see
+[networking](networking.md#services--load-balancing) for the current direction
+and its known limitation.
+
+The standalone codec in `src/network/service-wire.lisp` was built for the
+superseded `podster-p9c.14` experiment. It is not installed by CNI or the node
+agent. The existing crossed-Service probe still reproduces the bug in the
+unmodified NAT graph.
 
 Two independent Service requests can have inverse translated transport tuples.
 If both nodes emit before either request arrives, neither node's local history
