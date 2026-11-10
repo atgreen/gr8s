@@ -108,6 +108,16 @@ The snapshot worker retries NODE-SNAPSHOT-INCOMPLETE without losing Pod work."
     (error 'node-snapshot-incomplete
            :message "v2 Service risk inventory is not published for the current snapshot")))
 
+(defun converge-node-runtime-service-lb (node-runtime)
+  "Publish the v2 risk phase without exposing new Service/backend selection.
+The v1 socket LB remains active; a later cluster grant will release v2 tables."
+  (let ((controller (node-runtime-service-lb-controller node-runtime))
+        (dataplane (node-runtime-service-lb node-runtime)))
+    (when controller
+      (converge-service-lb-controller
+       controller :publish-services-p
+       (not (and dataplane (service-lb-map dataplane "gr8s_nat_risk_v2")))))))
+
 (defun node-runtime-external-cni-endpoints-path (node-runtime)
   "Return the durable external-CNI endpoint registry path for NODE-RUNTIME."
   (merge-pathnames "external-cni-endpoints.json"
@@ -821,8 +831,7 @@ without a network reconciler. Returns NIL."
             ;; Path evidence is runtime state, not a control-plane snapshot; make
             ;; Service choices follow it on the same reconciliation tick.
             (when (node-runtime-service-lb-controller node-runtime)
-              (converge-service-lb-controller
-               (node-runtime-service-lb-controller node-runtime))))
+              (converge-node-runtime-service-lb node-runtime)))
         (error (condition)
           (format *error-output* "gr8s: WireGuard path reconciliation failed: ~A~%"
                   condition)))))
@@ -1723,7 +1732,7 @@ so the revision is retried."
       (when (node-runtime-service-lb-controller node-runtime)
         (handler-case
             (let ((controller (node-runtime-service-lb-controller node-runtime)))
-              (converge-service-lb-controller controller)
+              (converge-node-runtime-service-lb node-runtime)
               (when (gr8s.controllers:service-lb-risk-published-p controller)
                 (bt:with-lock-held ((node-runtime-arrival-lock node-runtime))
                   (when (= (node-runtime-received-revision node-runtime)
