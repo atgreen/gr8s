@@ -56,6 +56,23 @@ def main():
             "endpoints": [{"addresses": [backend], "conditions": {"ready": False}}]})
         service = cluster.get("service", "staged")
         vip = service["spec"]["clusterIP"]
+        network_file = cluster.root / "state/agent/runtime/network.json"
+        traffic.wait_for("applied node network", 120, network_file.exists)
+        network = json.loads(network_file.read_text())
+        cidrs = network.get("clusterPodCIDRs") or [network["clusterPodCIDR"]]
+        managed = cluster.root / "state/agent/containerd/bpf/service-lb/gr8s_nat_pod_v2"
+        probes = [ipaddress.ip_network(cidr).network_address + 1
+                  for cidr in cidrs if isinstance(ipaddress.ip_network(cidr), ipaddress.IPv4Network)]
+        if not probes:
+            raise RuntimeError("staging test requires an IPv4 cluster Pod CIDR")
+
+        def managed_published():
+            if not managed.exists():
+                return False
+            keys = [struct.pack("<I", 32) + address.packed for address in probes]
+            return guest.read_pinned_values(managed, keys, 1) == [b"\x01"] * len(keys)
+
+        traffic.wait_for("v2 managed Pod CIDRs", 120, managed_published)
         risk = cluster.root / "state/agent/containerd/bpf/service-lb/gr8s_nat_risk_v2"
         keys = [ipaddress.ip_address(backend).packed + struct.pack("!HBB", port, proto, 0)
                 for port, proto in ((8080, 6), (8081, 17))]
@@ -72,7 +89,8 @@ def main():
 
         traffic.wait_for("v2 backend risk publication", 120, published)
         report.update({"backend": backend, "service": vip, "riskKeys": [key.hex() for key in keys],
-                       "riskMap": str(risk), "source": "unready manual EndpointSlice"})
+                       "riskMap": str(risk), "managedPodCIDRs": cidrs,
+                       "managedPodMap": str(managed), "source": "unready manual EndpointSlice"})
         print(json.dumps(report, indent=2))
     finally:
         cluster.stop()

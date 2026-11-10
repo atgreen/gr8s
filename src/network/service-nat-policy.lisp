@@ -10,6 +10,19 @@
   '(whistler::defmap whistler::gr8s-nat-pod-v2 :type :lpm-trie
      :key-size 8 :value-size 1 :max-entries 4096 :map-flags 129))
 
+(defun publish-service-nat-managed-cidrs
+    (map cidrs &key (update #'whistler/loader:map-update))
+  "Mark every IPv4 cluster Pod CIDR as managed before a v2 policy may use it.
+An identity-map miss for any address in these ranges must fail closed, including
+an alias whose owner is temporarily absent from a replicated snapshot. Retain
+previous CIDRs while old endpoints may still have live flows."
+  (let ((present (make-array 1 :element-type '(unsigned-byte 8) :initial-element 1))
+        (count 0))
+    (dolist (cidr cidrs count)
+      (unless (find #\: cidr)
+        (funcall update map (netpol-cidr-lpm-key cidr) present)
+        (incf count)))))
+
 (defparameter *service-nat-policy-key-form*
   '(whistler::defstruct whistler::netpol-flow-key-v2
      (whistler::peer whistler::u32) (whistler::pod-port whistler::u16)
