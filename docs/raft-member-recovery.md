@@ -504,3 +504,18 @@ history budget therefore retains fewer objects when allocation overhead is
 large. Cached weights from older checkpoints are remeasured under the current
 policy without mutating published entries. This bounds retained history; live
 objects themselves still require memory proportional to the current cluster.
+
+The pending-write native probe is built with
+`sbcl --noinform --non-interactive --load scripts/build-proposal-admission-native-harness.lisp`
+and run with `python3 scripts/test-proposal-admission-native.py`. It uses three
+voters and a non-voting learner over real loopback connections in one 384 MiB
+process. With two voters stopped, 2,048 attempted 64 KiB writes must receive
+HTTP-status errors through the store API; once admission fills, WAL bytes,
+retained command weight and callbacks must stop growing. The learner also
+forwards an overloaded write through the actual proposal RPC. After quorum
+returns, acknowledged data and new writes must replicate and survive stopping
+and reopening all four members. Unacknowledged writes may commit or disappear.
+The probe keeps production proposal timeouts, so filling the budget takes
+several minutes. Its private evidence directory retains logs, binary identity
+and the terminal JSON result. This covers internal plaintext store/transport
+behavior; production serve, TLS and VM validation remain separate.
