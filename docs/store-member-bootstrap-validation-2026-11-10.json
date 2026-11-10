@@ -105,9 +105,9 @@
     },
     "rootDiagnosis": {
       "diagnosticHeapMiB": 768,
-      "acceptanceResult": false,
       "finding": "Original probe-created resource table was directly pinned by the main-thread stack after reset. The later loaded/reset table was collectible. Seeding and assertions moved to separate functions; original payload/count/last-payload checks retained. No production reference leak is established by this fixture failure.",
-      "logSHA256": "5bad0ab34e1065a6dc40f5925f02870250c9a988a0a2f05a298fc4a473097ec1"
+      "logSHA256": "5bad0ab34e1065a6dc40f5925f02870250c9a988a0a2f05a298fc4a473097ec1",
+      "usedForAcceptance": false
     }
   },
   "sourceSHA256": {
