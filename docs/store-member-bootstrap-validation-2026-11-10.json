@@ -128,5 +128,15 @@
     "Production caller/capture registration and native multi-voter/witness interrupted startup/reference-drain acceptance: podster-ucm.2.1.4",
     "Compaction scheduling and retained-artifact lifecycle acceptance"
   ],
-  "scope": "Source SBCL processes, loopback Raft, file persistence and fake application runtime. BPF diagnostic integration uses injected calls. No native or privileged runtime certification."
+  "scope": "Source SBCL processes, loopback Raft, file persistence and fake application runtime. BPF diagnostic integration uses injected calls. No native or privileged runtime certification.",
+  "latestMainIntegration": {
+    "commit": "97dcc515ebfced6f3634d9175c5af5fa91a7c51d",
+    "upstreamMain": "f6f2e17",
+    "checks": 592,
+    "selectors": 61,
+    "failed": 0,
+    "skipped": 0,
+    "scope": "All CNI/node-IPAM/rtnetlink tests plus founder/learner catch-up, published-WAL refusal, canonical zero-boundary and absent term-zero prefix regressions. Injected route operations and unprivileged kernel-link reads; no privileged host network/BPF mutation. Bootstrap/serialization source unchanged by this merge.",
+    "logSHA256": "37a8bfdbbe8ec8dd9cbd98a16550f78c5f2d22c66b66320a3a286a0138a26b90"
+  }
 }
