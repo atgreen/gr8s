@@ -239,9 +239,70 @@
                  "sandboxID" "sandbox-1" "interfaceName" "eth0")))
     (is (= 2 (gr8s.network::publish-service-nat-identities
               :map (vector record)
+              :lookup (lambda (map key)
+                        (declare (ignore map key)) nil)
               :update (lambda (map key value)
                         (is (eq :map map)) (push (cons key value) writes)))))
     (is (= 2 (length writes)))))
+
+(test v2-owner-republish-preserves-readiness-only-for-the-same-pair
+  (let* ((record (gr8s::json-object
+                  "podIP" "10.88.1.2" "address" "10.88.1.9"
+                  "nodeID" "node-1" "podUID" "pod-1"
+                  "sandboxID" "sandbox-1" "interfaceName" "eth0"))
+         (values (make-hash-table :test #'equalp)))
+    (labels ((publish ()
+               (gr8s.network::publish-service-nat-identities
+                :map (vector record)
+                :lookup (lambda (map key)
+                          (declare (ignore map)) (gethash key values))
+                :update (lambda (map key value)
+                          (declare (ignore map))
+                          (setf (gethash key values) (copy-seq value)))))
+             (flags (key)
+               (gr8s::netlink-read-integer (gethash key values) 4 4)))
+      (let* ((rows (gr8s.network::service-nat-identity-rows record))
+             (primary (caar rows)) (alias (caadr rows)))
+        (is (= 2 (publish)))
+        (is (= #x20001 (flags primary)))
+        (dolist (key (list primary alias))
+          (replace (gethash key values) (gr8s::service-lb-bytes #x20007 4) :start1 4))
+        (is (= 2 (publish)))
+        (is (= #x20007 (flags primary)))
+        (is (= #x20007 (flags alias)))
+        (remhash alias values)
+        (is (= 2 (publish)))
+        (is (= #x20001 (flags primary)))
+        (is (= #x20001 (flags alias)))
+        (dolist (key (list primary alias))
+          (replace (gethash key values) (gr8s::service-lb-bytes #x20007 4) :start1 4))
+        (setf (gethash "sandboxID" record) "sandbox-2")
+        (is (= 2 (publish)))
+        (is (= #x20001 (flags primary)))
+        (is (= #x20001 (flags alias)))))))
+
+(test v2-owner-startup-clears-readiness-across-retained-map
+  (let* ((rows (gr8s.network::service-nat-identity-pair
+                "node-1" "sandbox-1" "eth0" "10.88.1.2" "10.88.1.9"))
+         (primary (caar rows)) (alias (caadr rows))
+         (values (make-hash-table :test #'equalp)))
+    (dolist (row rows)
+      (let ((value (copy-seq (cdr row))))
+        (replace value (gr8s::service-lb-bytes #x20007 4) :start1 4)
+        (setf (gethash (car row) values) value)))
+    (is (= 2 (gr8s.network::clear-service-nat-owner-readiness
+              :map
+              :next-key (lambda (map previous)
+                          (is (eq :map map))
+                          (cond ((null previous) primary)
+                                ((equalp previous primary) alias)))
+              :lookup (lambda (map key)
+                        (is (eq :map map)) (gethash key values))
+              :update (lambda (map key value)
+                        (is (eq :map map))
+                        (setf (gethash key values) (copy-seq value))))))
+    (dolist (key (list primary alias))
+      (is (= #x20001 (gr8s::netlink-read-integer (gethash key values) 4 4))))))
 
 (test cni-v2-owner-publication-writes-the-replicated-pair-before-attachment
   (let* ((configuration (gr8s::make-cni-configuration
@@ -262,6 +323,8 @@
                  :map-info (lambda (fd name &key profile)
                              (is (= 7 fd)) (is (equal "gr8s_nat_id_v2" name))
                              (is (eq :v2 profile)) :map)
+                 :lookup (lambda (map key)
+                           (declare (ignore map key)) nil)
                  :update (lambda (map key value)
                            (is (eq :map map)) (push (cons key value) writes))
                  :close (lambda (fd) (setf closed fd)))))
