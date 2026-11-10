@@ -378,7 +378,7 @@ alias ports. Only an identical original tuple/incarnation may adopt a claim."
                   (logior (cast u64 (gr8s-pkt-flow-source flow))
                           (<< (cast u64 (gr8s-pkt-flow-sport flow)) 32)
                           (<< (cast u64 (gr8s-pkt-flow-protocol flow)) 48))))
-            (when (/= (map-lookup-ptr gr8s-nat-risk-v2 risk-key) 0)
+            (when (/= (map-lookup gr8s-nat-risk-v2 risk-key) 0)
               (setf (gr8s-nat-state-kind state) 3
                     (gr8s-nat-state-wire-source state) alias))))
         (nat-reserve-candidates flow state probe alias)
