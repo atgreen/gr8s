@@ -380,5 +380,181 @@
       }
     }
   },
-  "interpretation": "Successful128-round run shows publication holding the member lock for about1.7-3.5seconds per checkpoint. Long capture times include deliberate fixture pauses. This identifies a publication-duration problem, not yet a proven cause of elections. Separate cache-prefix and WAL-replacement timing is next; full workload acceptance remains the earlier separate run."
+  "interpretation": "Successful128-round run shows publication holding the member lock for about1.7-3.5seconds per checkpoint. Long capture times include deliberate fixture pauses. This identifies a publication-duration problem, not yet a proven cause of elections. Separate cache-prefix and WAL-replacement timing is next; full workload acceptance remains the earlier separate run.",
+  "storageStageRerun": {
+    "passed": true,
+    "evidence": "/tmp/gr8s-compaction-cluster-native-fegmg133",
+    "binarySha256": "0643be27883cdd2ebd1b547a7c6cfa2983f918a3879242bbe44b81c172a1f4c2",
+    "elapsedSeconds": 103.40601056395099,
+    "asymmetricCaptureAcceptance": true,
+    "diskCatchupAcceptance": true,
+    "catchupHistoryContinuous": true,
+    "identitiesPreserved": true,
+    "stopExitCodes": {
+      "cp-a": 0,
+      "cp-b": 0,
+      "cp-c": 0
+    },
+    "cleanupExitCodes": {
+      "cp-a": 0,
+      "cp-b": 0,
+      "cp-c": 0
+    },
+    "beforeRestart": {
+      "cp-a": {
+        "term": 1,
+        "applied": 265,
+        "completedRounds": 128,
+        "compactionPhases": [
+          {
+            "phase": "freeze",
+            "attempts": 5,
+            "totalSeconds": 0.0,
+            "maxSeconds": 0.0,
+            "lastSeconds": 0.0
+          },
+          {
+            "phase": "capture",
+            "attempts": 5,
+            "totalSeconds": 3.771976,
+            "maxSeconds": 2.627983,
+            "lastSeconds": 0.540997
+          },
+          {
+            "phase": "retain",
+            "attempts": 5,
+            "totalSeconds": 3.587976,
+            "maxSeconds": 1.189992,
+            "lastSeconds": 1.189992
+          },
+          {
+            "phase": "publish",
+            "attempts": 5,
+            "totalSeconds": 9.804934,
+            "maxSeconds": 2.005986,
+            "lastSeconds": 1.958987
+          }
+        ],
+        "storageStages": [
+          {
+            "stage": "cache-prefix",
+            "attempts": 5,
+            "totalSeconds": 9.109938999999999,
+            "maxSeconds": 1.871986,
+            "lastSeconds": 1.806989
+          },
+          {
+            "stage": "replace-wal",
+            "attempts": 5,
+            "totalSeconds": 0.6949949999999999,
+            "maxSeconds": 0.155,
+            "lastSeconds": 0.151998
+          }
+        ]
+      },
+      "cp-b": {
+        "term": 1,
+        "applied": 265,
+        "completedRounds": 0,
+        "compactionPhases": [
+          {
+            "phase": "freeze",
+            "attempts": 5,
+            "totalSeconds": 0.0,
+            "maxSeconds": 0.0,
+            "lastSeconds": 0.0
+          },
+          {
+            "phase": "capture",
+            "attempts": 5,
+            "totalSeconds": 25.336828,
+            "maxSeconds": 24.338835,
+            "lastSeconds": 0.321998
+          },
+          {
+            "phase": "retain",
+            "attempts": 5,
+            "totalSeconds": 3.283974,
+            "maxSeconds": 0.998993,
+            "lastSeconds": 0.998993
+          },
+          {
+            "phase": "publish",
+            "attempts": 5,
+            "totalSeconds": 12.629913,
+            "maxSeconds": 3.459977,
+            "lastSeconds": 2.177985
+          }
+        ],
+        "storageStages": [
+          {
+            "stage": "cache-prefix",
+            "attempts": 5,
+            "totalSeconds": 9.930933,
+            "maxSeconds": 2.86698,
+            "lastSeconds": 1.735987
+          },
+          {
+            "stage": "replace-wal",
+            "attempts": 6,
+            "totalSeconds": 2.707979,
+            "maxSeconds": 1.808987,
+            "lastSeconds": 0.441998
+          }
+        ]
+      },
+      "cp-c": {
+        "term": 1,
+        "applied": 265,
+        "completedRounds": 0,
+        "compactionPhases": [
+          {
+            "phase": "freeze",
+            "attempts": 6,
+            "totalSeconds": 0.0,
+            "maxSeconds": 0.0,
+            "lastSeconds": 0.0
+          },
+          {
+            "phase": "capture",
+            "attempts": 6,
+            "totalSeconds": 3.941974,
+            "maxSeconds": 2.701981,
+            "lastSeconds": 0.364998
+          },
+          {
+            "phase": "retain",
+            "attempts": 6,
+            "totalSeconds": 4.41897,
+            "maxSeconds": 1.114993,
+            "lastSeconds": 1.114993
+          },
+          {
+            "phase": "publish",
+            "attempts": 6,
+            "totalSeconds": 11.908918,
+            "maxSeconds": 2.297984,
+            "lastSeconds": 1.870987
+          }
+        ],
+        "storageStages": [
+          {
+            "stage": "cache-prefix",
+            "attempts": 6,
+            "totalSeconds": 10.776926,
+            "maxSeconds": 2.018986,
+            "lastSeconds": 1.744988
+          },
+          {
+            "stage": "replace-wal",
+            "attempts": 7,
+            "totalSeconds": 1.150992,
+            "maxSeconds": 0.278998,
+            "lastSeconds": 0.125999
+          }
+        ]
+      }
+    }
+  },
+  "nextAction": "Cache-prefix serialization dominates the observed member-lock publication time. Implement bounded copying of already checksummed canonical entry frames from the owned WAL, preserving certified prefix/term selection, budgets, fallback and recovery semantics. This timing evidence does not itself prove election causation or leadership stability."
 }
