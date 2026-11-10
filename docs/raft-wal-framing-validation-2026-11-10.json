@@ -119,5 +119,25 @@
     "src/raft/log.lisp": "431ccb48a12bc937388c5b2ee0f8261692faf431baa45521ab5a85de9d9a1ded",
     "tests/raft-test.lisp": "96806f09f59db25e00843426af2f1afd1a2a5b576262605b51440c795a06730b",
     "scripts/raft-wal-torn-test-child.lisp": "10e03f4fc75f51881e18ff533148e0eb7eb1d0e6e33d695f2fb5888648d8c78b"
+  },
+  "latestMainIntegration": {
+    "commit": "31786841f305fd98f750530beb9dcdf41c175dc8",
+    "upstreamMain": "efc8c64",
+    "checks": 709,
+    "suiteChecks": [
+      265,
+      167,
+      168,
+      21,
+      54,
+      16,
+      14,
+      3,
+      1
+    ],
+    "failed": 0,
+    "skipped": 0,
+    "scope": "Service-LB265, application member restore167, application reload168, and all six newly added Whistler program-load diagnostic tests109. BPF calls injected; no host kernel BPF load. WAL source/tests unchanged from fbd4d67. Prior merged heap probe remains evidence for unchanged serialization/recovery paths.",
+    "logSHA256": "a7ca82b257baa204e8eedadc3502ae969526293e8c6f1bfb0a3ac1b73e18434b"
   }
 }

@@ -50,7 +50,9 @@ Existing unframed Lisp WAL records remain readable and can precede new frames.
 Their incomplete tails cannot be distinguished safely from interior corruption,
 so recovery refuses to truncate them. A successful checkpoint replaces retained
 history with framed records. Binaries that predate framing cannot read newly
-written frames; binary downgrade requires an appropriate operator recovery path.
+written frames. Do not point an older binary at a state directory containing
+frames. Automated persistent-format checks before upgrade/rollback remain tracked
+as `podster-ucm.7.1`.
 These checks protect against interrupted append writes and detected corruption;
 they do not reconstruct acknowledged data lost to arbitrary storage failure.
 
@@ -84,5 +86,5 @@ can supply the corresponding `:validate-fn` callback.
 
 Production `start-ha-control-plane` does not invoke this recovery helper yet.
 Genesis/bootstrap needs to establish a durable baseline, and production callers
-must coordinate state-directory ownership and
-membership readiness before enabling automatic compaction.
+must coordinate state-directory ownership and membership readiness before
+enabling automatic compaction.
