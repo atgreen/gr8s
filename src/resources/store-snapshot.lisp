@@ -15,6 +15,7 @@ a frozen caller supplies the boundary captured earlier under those locks.
 This function neither compacts Raft nor captures member-local credentials."
   (let ((count 0))
     (labels ((emit-object (object)
+               (maybe-collect-core-recovery-garbage)
                (let ((start (file-position stream)))
                  (com.inuoe.jzon:stringify object :stream stream)
                  (when (> (- (file-position stream) start) *store-snapshot-max-record-bytes*)
@@ -35,6 +36,7 @@ This function neither compacts Raft nor captures member-local credentials."
                                  (when key (ag-grpc:base64-encode key))))
       (maphash (lambda (key object)
                  (unless (local-plane-resource-p (first key))
+                   (maybe-collect-core-recovery-garbage)
                    (emit "resource" "resource" (first key)
                          "namespace" (or (second key) 'null) "name" (third key)
                          "object" (encrypt-secret-object store (first key) object))))
@@ -44,6 +46,7 @@ This function neither compacts Raft nor captures member-local credentials."
       ;; Retain the existing bounded watch history, without constructing a vector.
       (dolist (entry (pod-store-template-history store))
         (unless (local-plane-resource-p (gethash "resource" entry))
+          (maybe-collect-core-recovery-garbage)
           (emit "history" "entry" (encrypt-secret-history-entry store entry))))
       (if frozen-view
           (mapc #'emit-object (frozen-store-snapshot-pod-records frozen-view))
@@ -105,6 +108,10 @@ No existing artifact may be replaced. The source store is never modified."
 
 (defun read-store-snapshot-record (stream buffer max-bytes)
   "Read one newline-terminated JSON object, rejecting oversized or torn records."
+  ;; Concurrent writers can promote dead decoder buffers into old generations.
+  ;; Reuse the normal recovery policy before allocating another record, rather
+  ;; than exhausting allocator pages while newer generations keep collecting.
+  (maybe-collect-core-recovery-garbage)
   (setf (fill-pointer buffer) 0)
   (loop for byte = (read-byte stream nil nil) do
     (cond

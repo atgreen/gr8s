@@ -240,7 +240,7 @@ Startup instead passes the streaming iterator directly to REPLAY-CORE-JOURNAL."
           (push record records))))))
 
 (defun maybe-collect-core-recovery-garbage ()
-  "Reclaim older decoded buffers before another recovery record needs space."
+  "Reclaim old stream buffers before another encoded/decoded record needs space."
   (when (> (sb-kernel:dynamic-usage) (* 2/3 (sb-ext:dynamic-space-size)))
     (sb-ext:gc :full t)))
 
@@ -462,6 +462,7 @@ transformed history, resource vector or JSON string is constructed."
                    (let ((first-item t))
                      (funcall producer
                               (lambda (value)
+                                (maybe-collect-core-recovery-garbage)
                                 (unless first-item (write-char #\, stream))
                                 (setf first-item nil)
                                 (com.inuoe.jzon:stringify value :stream stream))))
@@ -473,6 +474,7 @@ transformed history, resource vector or JSON string is constructed."
           (array-field "templateHistory"
                        (lambda (emit)
                          (dolist (entry durable)
+                           (maybe-collect-core-recovery-garbage)
                            (funcall emit (encrypt-secret-history-entry store entry)))))
           (field "templateHistoryFloor" durable-floor)
           (field "templateTokenKey" (ag-grpc:base64-encode token-key))
@@ -484,12 +486,14 @@ transformed history, resource vector or JSON string is constructed."
                          (maphash (lambda (key object)
                                     (unless (or (custom-resource-key-p (first key))
                                                 (and omit-local-plane (local-plane-resource-p (first key))))
+                                      (maybe-collect-core-recovery-garbage)
                                       (funcall emit (encrypt-secret-object store (first key) object))))
                                   resources)))
           (array-field "customResourceItems"
                        (lambda (emit)
                          (maphash (lambda (key object)
                                     (when (custom-resource-key-p (first key))
+                                      (maybe-collect-core-recovery-garbage)
                                       (funcall emit (core-object "resource" (first key) "object"
                                                                 (encrypt-secret-object store (first key) object)))))
                                   resources)))
@@ -516,6 +520,7 @@ transformed history, resource vector or JSON string is constructed."
   "Serialize one HA core transaction as key-level effects against STORE's base.
 Effects carry encrypted prior-object conditions and are merged at Raft apply
 time. A stale author cannot replace a changed key or erase unrelated commits."
+  (maybe-collect-core-recovery-garbage)
   (let ((changes nil)
         (base (pod-store-resource-revision store))
         (keys (make-hash-table :test #'equal))

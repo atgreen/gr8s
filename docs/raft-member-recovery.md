@@ -539,6 +539,13 @@ That standalone probe does not cover concurrent writes during worker capture.
 The first asynchronous-worker churn run exhausted its heap as the committed log
 grew during I/O; whole-log admission addresses that separate retention source
 and requires a fresh full churn/recovery run before acceptance.
+The bounded-log attempt subsequently reached the full history budget but also
+exhausted its heap during concurrent encoding/validation. Snapshot streams, core
+checkpoint writing and live delta encoding now use the existing recovery memory
+pressure policy: above two-thirds of dynamic-space usage, collect older garbage
+before allocating the next streamed record. This changes production allocation
+handling, not the probe's heap, history, workload or WAL bounds; full acceptance
+must be rerun for this version.
 
 The [three-voter smoke validation](compaction-cluster-smoke-validation-2026-11-10.json)
 uses three separate 384 MiB processes and offline mTLS fixtures. It holds all
