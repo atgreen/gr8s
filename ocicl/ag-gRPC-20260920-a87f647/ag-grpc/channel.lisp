@@ -282,3 +282,14 @@ This immediately terminates the stream without waiting for a response."
    (channel-connection channel)
    stream-id
    ag-http2:+error-cancel+))
+
+(defun channel-retire-stream (channel stream-id)
+  "Release a completed call's transport state; cancel an unfinished call first."
+  (let ((conn (channel-connection channel)))
+    (when conn
+      (let* ((mux (ag-http2:connection-multiplexer conn))
+             (stream (ag-http2:multiplexer-get-stream mux stream-id)))
+        (unless (eq :closed (ag-http2:stream-state stream))
+          (ignore-errors (channel-cancel-stream channel stream-id))
+          (ag-http2:multiplexer-close-stream mux stream-id))
+        (ag-http2::multiplexer-forget-stream mux stream-id)))))

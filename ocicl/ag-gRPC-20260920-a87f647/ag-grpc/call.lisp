@@ -24,39 +24,46 @@ Does NOT map cancellation exceptions:
 Preserves original condition in :cause slot (grpc-status-error-cause) for debugging."
   (let ((ctx-var (gensym "CTX"))
         (deadline-var (gensym "DEADLINE"))
-        (remaining-var (gensym "REMAINING")))
-    `(let ((,ctx-var (stream-cancel-context ,stream)))
-       (cl-cancel:with-cancel-context (,ctx-var ,ctx-var)
-         (let* ((,deadline-var (cl-cancel:deadline ,ctx-var))
-                (,remaining-var (when ,deadline-var
-                                  (- ,deadline-var (cl-cancel:get-current-time)))))
-           (cond
-             ((and ,remaining-var (> ,remaining-var 0))
-              (handler-case
-                  (bt2:with-timeout ((coerce ,remaining-var 'double-float))
-                    ,@body)
-                (bt2:timeout (c)
-                  (error 'grpc-status-error
-                         :code +grpc-status-deadline-exceeded+
-                         :message "Deadline exceeded"
-                         :cause c))
-                (cl-cancel:deadline-exceeded (c)
-                  (error 'grpc-status-error
-                         :code +grpc-status-deadline-exceeded+
-                         :message (format nil "Deadline exceeded: ~A" c)
-                         :cause c))))
-             (,deadline-var
-              (handler-case
-                  (progn
-                    (cl-cancel:check-cancellation ,ctx-var)
-                    ,@body)
-                (cl-cancel:deadline-exceeded (c)
-                  (error 'grpc-status-error
-                         :code +grpc-status-deadline-exceeded+
-                         :message (format nil "Deadline exceeded: ~A" c)
-                         :cause c))))
-             (t
-              ,@body)))))))
+        (remaining-var (gensym "REMAINING"))
+        (completed-var (gensym "COMPLETED")))
+    `(let ((,completed-var nil))
+       (unwind-protect
+            (multiple-value-prog1
+             (let ((,ctx-var (stream-cancel-context ,stream)))
+              (cl-cancel:with-cancel-context (,ctx-var ,ctx-var)
+                (let* ((,deadline-var (cl-cancel:deadline ,ctx-var))
+                       (,remaining-var (when ,deadline-var
+                                         (- ,deadline-var (cl-cancel:get-current-time)))))
+                  (cond
+                    ((and ,remaining-var (> ,remaining-var 0))
+                     (handler-case
+                         (bt2:with-timeout ((coerce ,remaining-var 'double-float))
+                           ,@body)
+                       (bt2:timeout (c)
+                         (error 'grpc-status-error
+                                :code +grpc-status-deadline-exceeded+
+                                :message "Deadline exceeded"
+                                :cause c))
+                       (cl-cancel:deadline-exceeded (c)
+                         (error 'grpc-status-error
+                                :code +grpc-status-deadline-exceeded+
+                                :message (format nil "Deadline exceeded: ~A" c)
+                                :cause c))))
+                    (,deadline-var
+                     (handler-case
+                         (progn
+                           (cl-cancel:check-cancellation ,ctx-var)
+                           ,@body)
+                       (cl-cancel:deadline-exceeded (c)
+                         (error 'grpc-status-error
+                                :code +grpc-status-deadline-exceeded+
+                                :message (format nil "Deadline exceeded: ~A" c)
+                                :cause c))))
+                    (t
+                     ,@body)))))
+              (setf ,completed-var t))
+         (unless ,completed-var
+           (ignore-errors (finalize-client-stream ,stream)))))))
 
 ;;;; ========================================================================
 ;;;; Helper Functions
@@ -78,14 +85,19 @@ Safe to call multiple times (idempotent).
 
 Idempotency contract:
 - Check cancel-fn is non-nil before calling
-- Clear cancel-fn to nil after calling
-- Subsequent calls are no-ops"
-  (let ((cancel-fn (stream-cancel-fn stream)))
-    (when cancel-fn
-      ;; Call cancel function
-      (funcall cancel-fn)
-      ;; Clear to prevent double-cancel (CRITICAL)
-      (setf (stream-cancel-fn stream) nil))))
+- Clear cancel-fn to nil before calling
+- Retiring the transport more than once is harmless"
+  (unwind-protect
+       (let ((cancel-fn (stream-cancel-fn stream)))
+         (when cancel-fn
+           (setf (stream-cancel-fn stream) nil)
+           (funcall cancel-fn)))
+    (ignore-errors
+      (typecase stream
+        (grpc-server-stream (channel-retire-stream (stream-call-channel stream) (stream-call-stream-id stream)))
+        ((or grpc-client-stream grpc-bidi-stream)
+         (let ((call (stream-call stream)))
+           (channel-retire-stream (call-channel call) (call-stream-id call))))))))
 
 ;;;; ========================================================================
 ;;;; gRPC Call Object
@@ -204,7 +216,8 @@ The response is available via (call-response call)."
                             :cause c)))))
              call)
         ;; Always clean up context
-        (when cancel-fn (funcall cancel-fn))))))
+        (unwind-protect (when cancel-fn (funcall cancel-fn))
+          (ignore-errors (channel-retire-stream channel stream-id)))))))
 
 (defun call-unary-process-response (channel call stream-id response-type)
   "Process the response after headers are received.
@@ -451,8 +464,9 @@ After NIL is returned, use stream-call-status to check the final status."
 
 (defun stream-finish (server-stream)
   "Finish the stream by receiving trailers with timeout enforcement."
-  (with-stream-timeout (server-stream)
-    (stream-finish-internal server-stream)))
+  (unwind-protect
+       (with-stream-timeout (server-stream) (stream-finish-internal server-stream))
+    (finalize-client-stream server-stream)))
 
 (defun stream-finish-internal (server-stream)
   "Internal implementation - context already bound."
@@ -744,8 +758,9 @@ Example:
                                        :metadata ,metadata
                                        :timeout ,timeout
                                        :response-type ,response-type)))
-     ,@body
-     (stream-close-and-recv ,var)))
+     (unwind-protect
+          (progn ,@body (stream-close-and-recv ,var))
+       (finalize-client-stream ,var))))
 
 ;;;; ========================================================================
 ;;;; Bidirectional Streaming RPC
@@ -943,6 +958,7 @@ When the stream ends, also sets stream-status."
                     (percent-decode (rest message-trailer)))))
           ;; Mark stream as finished
           (setf (bidi-stream-recv-finished-p bidi-stream) t)
+          (finalize-client-stream bidi-stream)
           ;; Signal error if not OK
           (unless (grpc-status-ok-p (stream-status bidi-stream))
             (error 'grpc-status-error

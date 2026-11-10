@@ -519,6 +519,8 @@ by a single NIL."
          (headers (ag-http2:stream-headers h2-stream))
          (method-path (rest (assoc :path headers)))
          (handler (server-get-handler server method-path)))
+    (when (eq :closed (ag-http2:stream-state h2-stream))
+      (return-from server-handle-headers))
     (unless handler
       ;; No handler registered - send UNIMPLEMENTED
       (server-send-error conn stream-id +grpc-status-unimplemented+
@@ -588,7 +590,8 @@ by a single NIL."
                   (buffer-close buffer)))
               ;; Decrement active streams counter
               (bt:with-lock-held ((ag-http2:connection-stream-state-lock conn))
-                (decf (ag-http2:connection-active-streams conn)))))
+                (decf (ag-http2:connection-active-streams conn)))
+              (ag-http2::multiplexer-forget-stream (ag-http2:connection-multiplexer conn) stream-id)))
       ;; For streaming RPCs, create message buffer and spawn handler thread.
       ;; For unary RPCs, wait for END_STREAM.
       (let ((is-streaming (or (handler-client-streaming-p handler)
