@@ -448,10 +448,13 @@
   "Thread branches through PHI nodes to eliminate boolean materialization."
   (let ((def-map (make-hash-table))
         (const-map (make-hash-table))
+        (users (make-hash-table))
         (changed nil))
     ;; Build def map and constant map
     (dolist (block (ir-program-blocks prog))
       (dolist (insn (basic-block-insns block))
+        (dolist (vreg (ir-insn-all-vreg-uses insn))
+          (push insn (gethash vreg users)))
         (when (ir-insn-dst insn)
           (setf (gethash (ir-insn-dst insn) def-map) insn))
         (when (and (eq (ir-insn-op insn) :mov)
@@ -476,7 +479,17 @@
                                (basic-block-insns block)))
                     (then-label (fourth args))
                     (else-label (fifth args)))
-                (when phi-insn
+                ;; Bypassing this block also bypasses its definitions. A PHI
+                ;; used after the branch must still merge values on every
+                ;; incoming path; repairing successor PHI labels cannot repair
+                ;; ordinary downstream uses of that definition. Likewise, do
+                ;; not skip any other computation or side effect in the block.
+                (when (and phi-insn
+                           (every (lambda (user) (eq user terminator))
+                                  (gethash (ir-insn-dst phi-insn) users))
+                           (every (lambda (insn)
+                                    (or (eq insn phi-insn) (eq insn terminator)))
+                                  (basic-block-insns block)))
                   ;; Copy args list: threading mutates it via removal
                   (dolist (phi-arg (copy-list (ir-insn-args phi-insn)))
                     (when (and (consp phi-arg) (integerp (first phi-arg)))
