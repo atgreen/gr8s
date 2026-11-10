@@ -197,9 +197,16 @@ VM execution, authenticated native transport and leader handoff during catch-up
 remain separate acceptance requirements under `podster-ucm.2.9.4`. Production
 voter startup integration remains under `podster-ucm.2.1.4`.
 
-The 2026-11-10 native run passes the 4 MiB smoke case. The 64 MiB receiver
-exhausts its 384 MiB heap after interrupted transfer/rejoin, including with
-bounded control-file parsing. The root cause is tracked in
-`podster-ucm.2.9.4.1`; large-payload acceptance remains incomplete. The machine
-report `learner-native-validation-2026-11-10.json` retains both failure logs and
-the final smoke result. A larger diagnostic heap does not establish acceptance.
+The first 2026-11-10 native runs passed the 4 MiB smoke case but exhausted the
+64 MiB receiver's 384 MiB heap. Unary gRPC dispatch retained complete request
+bodies in closed HTTP/2 stream records. The fix consumes the body before dispatch
+and releases the consumed backing allocation. The interrupted 64 MiB case now
+passes at the same 384 MiB limit on both the fixed and rebuilt merged images,
+including committed writes during disconnection, recovery, promotion and repeat
+Join. Both processes exit cleanly.
+
+`learner-native-validation-2026-11-10.json` preserves the original failures;
+`http2-request-retention-validation-2026-11-10.json` records the fix and passing
+native runs. Retired stream metadata remains under `podster-ucm.2.10`. Native
+leader handoff, authenticated transport, VM execution and production voter startup
+remain separate work; these runs do not establish their completion.

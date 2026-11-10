@@ -1,0 +1,406 @@
+{
+  "date": "2026-11-10",
+  "bead": "podster-ucm.2.9.4.1",
+  "fixCommit": "7635a06",
+  "mergedCodeCommit": "74ed8fd7452ea16fd2ee6ba3cc2981775c82cb86",
+  "sourceSha256": {
+    "ocicl/ag-gRPC-20260920-a87f647/ag-grpc/server.lisp": "2fd1388b70efd999e0f0a2349839cbfedc0c2ff1d41d6cf3902b0ddfb84b39aa",
+    "ocicl/ag-gRPC-20260920-a87f647/ag-http2/streams.lisp": "6ce5dd1fb0dea7a0e15124ba53a0b94de05b4aecded5952b4339fa96580c90d9",
+    "tests/grpc-close-test.lisp": "aa09e2002a8ecca375d590a3f0fe9b7e09cfe2908cc6d2c60460eabb2aaae837",
+    "scripts/learner-native-harness.lisp": "765bd5ccdc04cfb7ab5211061183e21a407e17fb1da7c8d280fbdaa6bd1372f9",
+    "scripts/test-learner-native.py": "21fb86ca138f94e85155b78f0c3fcaa2c55c88da68521acb20d1a2f3bafc5dfa"
+  },
+  "rootCause": "Unary gRPC dispatch passed the HTTP2 stream backing array directly to the handler and never consumed it. Closed stream records retained every historical request body. Resetting a fill pointer alone also retains capacity.",
+  "change": [
+    "Consume complete unary requests before handler dispatch",
+    "Replace consumed stream backing arrays with empty adjustable byte buffers while returning intact simple byte-vector payloads"
+  ],
+  "targetedTests": [
+    {
+      "name": "transport",
+      "exitCode": 0,
+      "selectors": 6,
+      "checks": 274,
+      "failures": 0,
+      "logSha256": "630ab864d5119ede754cd711f31ff1d0b9b1923e0f6a48e27cb7fa3c6e2265fb"
+    },
+    {
+      "name": "merged-integration",
+      "exitCode": 0,
+      "selectors": 102,
+      "checks": 743,
+      "failures": 0,
+      "logSha256": "f21f93675c6e1b1282d527600119dfa6bfed36309590bd9c8c86bd4444a1d7c6"
+    }
+  ],
+  "nativeRuns": [
+    {
+      "name": "unary-fix",
+      "exitCode": 0,
+      "reportSha256": "f255358221fc718f413565745370682e94dff8f7553db046536f688facc98814",
+      "report": {
+        "passed": true,
+        "nativeHarness": true,
+        "productionServe": false,
+        "vmAcceptance": false,
+        "fullAcceptanceComplete": false,
+        "evidence": "/tmp/gr8s-learner-native-qv43890l",
+        "records": 1024,
+        "payloadBytes": 67108864,
+        "heapLimitMiB": 384,
+        "chunkDelay": 0.02,
+        "binarySha256": "3c442469c365ea0d2c8c44226ccae110b1e4d0b4cd83ac6d0bcf8d790c1320ac",
+        "partialTransfer": {
+          "offset": 1048576,
+          "total": 67347866,
+          "token": "b1085cc5-7c00-4a27-b901-a94567a4fa1d"
+        },
+        "beforeInterruption": {
+          "role": "leader",
+          "selfRole": "voter",
+          "term": 1,
+          "quorumMembers": 1,
+          "commit": 3,
+          "applied": 3,
+          "lastIndex": 3,
+          "members": [
+            {
+              "id": "sink",
+              "role": "learner"
+            },
+            {
+              "id": "source",
+              "role": "voter"
+            }
+          ],
+          "blocked": false,
+          "heapLimitMiB": 384,
+          "resources": 1025,
+          "lastPayloadBytes": 65536,
+          "nonce": "9c24a828d67446819a26069891005665"
+        },
+        "interruptedReceiver": {
+          "role": "follower",
+          "selfRole": "learner",
+          "term": 1,
+          "quorumMembers": 1,
+          "commit": 0,
+          "applied": 0,
+          "lastIndex": 0,
+          "members": [
+            {
+              "id": "sink",
+              "role": "learner"
+            }
+          ],
+          "blocked": true,
+          "heapLimitMiB": 384,
+          "nonce": "2426088c02cc4adf82c65ecdb22abf14"
+        },
+        "partialFilesBeforeSigkill": [
+          {
+            "path": "raft/.gr8s-raft-transfers-v2-1002/.raft-transfer-v2-5wzuOm/in-83302cbc-9b2c-4aa0-996c-ff1cda8fd526.snapshot",
+            "bytes": 1245184
+          }
+        ],
+        "disconnected": {
+          "role": "leader",
+          "selfRole": "voter",
+          "term": 1,
+          "quorumMembers": 1,
+          "commit": 5,
+          "applied": 5,
+          "lastIndex": 5,
+          "members": [
+            {
+              "id": "sink",
+              "role": "learner"
+            },
+            {
+              "id": "source",
+              "role": "voter"
+            }
+          ],
+          "blocked": false,
+          "heapLimitMiB": 384,
+          "resources": 1027,
+          "lastPayloadBytes": 65536,
+          "nonce": "348ce00194664ff5a68aa38f0b7d1b3c"
+        },
+        "sigkillExit": -9,
+        "promoted": {
+          "role": "leader",
+          "selfRole": "voter",
+          "term": 1,
+          "quorumMembers": 2,
+          "commit": 6,
+          "applied": 6,
+          "lastIndex": 6,
+          "members": [
+            {
+              "id": "sink",
+              "role": "voter"
+            },
+            {
+              "id": "source",
+              "role": "voter"
+            }
+          ],
+          "blocked": false,
+          "heapLimitMiB": 384,
+          "resources": 1027,
+          "lastPayloadBytes": 65536,
+          "nonce": "fcf3882c13b54a289bc832b80ea76cf6"
+        },
+        "restored": {
+          "role": "follower",
+          "selfRole": "voter",
+          "term": 1,
+          "quorumMembers": 2,
+          "commit": 6,
+          "applied": 6,
+          "lastIndex": 6,
+          "members": [
+            {
+              "id": "sink",
+              "role": "voter"
+            },
+            {
+              "id": "source",
+              "role": "voter"
+            }
+          ],
+          "blocked": false,
+          "heapLimitMiB": 384,
+          "resources": 1027,
+          "lastPayloadBytes": 65536,
+          "nonce": "ce0030a2568b4ad892f69389d6928414"
+        },
+        "repeatedJoin": {
+          "role": "leader",
+          "selfRole": "voter",
+          "term": 1,
+          "quorumMembers": 2,
+          "commit": 6,
+          "applied": 6,
+          "lastIndex": 6,
+          "members": [
+            {
+              "id": "sink",
+              "role": "voter"
+            },
+            {
+              "id": "source",
+              "role": "voter"
+            }
+          ],
+          "blocked": false,
+          "heapLimitMiB": 384,
+          "resources": 1027,
+          "lastPayloadBytes": 65536,
+          "nonce": "96880ff488084b92aea74b5ed5ad492a"
+        },
+        "largePayloadAcceptance": true,
+        "remaining": [
+          "VM execution",
+          "leader handoff during catch-up",
+          "production serve recovery integration"
+        ],
+        "sinkExit": 0,
+        "sourceExit": 0
+      }
+    },
+    {
+      "name": "unary-merged",
+      "exitCode": 0,
+      "reportSha256": "1a8f2f29ebe661d3f09cb29c4ad1deec25b3e4fedcfe4afcd90197da299d4485",
+      "report": {
+        "passed": true,
+        "nativeHarness": true,
+        "productionServe": false,
+        "vmAcceptance": false,
+        "fullAcceptanceComplete": false,
+        "evidence": "/tmp/gr8s-learner-native-8dys1mco",
+        "records": 1024,
+        "payloadBytes": 67108864,
+        "heapLimitMiB": 384,
+        "chunkDelay": 0.02,
+        "binarySha256": "d7f58f82ceb2ba47a74d82ab8ed4e4d864050035e3527abca6e384ca0ce42bb7",
+        "partialTransfer": {
+          "offset": 1048576,
+          "total": 67347866,
+          "token": "eda6348d-2247-413b-b5ef-97429bd1d868"
+        },
+        "beforeInterruption": {
+          "role": "leader",
+          "selfRole": "voter",
+          "term": 1,
+          "quorumMembers": 1,
+          "commit": 3,
+          "applied": 3,
+          "lastIndex": 3,
+          "members": [
+            {
+              "id": "sink",
+              "role": "learner"
+            },
+            {
+              "id": "source",
+              "role": "voter"
+            }
+          ],
+          "blocked": false,
+          "heapLimitMiB": 384,
+          "resources": 1025,
+          "lastPayloadBytes": 65536,
+          "nonce": "2de4773ad9bb4c558ff5bb678b3e2ab2"
+        },
+        "interruptedReceiver": {
+          "role": "follower",
+          "selfRole": "learner",
+          "term": 1,
+          "quorumMembers": 1,
+          "commit": 0,
+          "applied": 0,
+          "lastIndex": 0,
+          "members": [
+            {
+              "id": "sink",
+              "role": "learner"
+            }
+          ],
+          "blocked": true,
+          "heapLimitMiB": 384,
+          "nonce": "a42e9d98bdd545b0a450302052ca4682"
+        },
+        "partialFilesBeforeSigkill": [
+          {
+            "path": "raft/.gr8s-raft-transfers-v2-1002/.raft-transfer-v2-sL944A/in-65453ff1-1a31-45a8-b67a-b4b8d4c44c62.snapshot",
+            "bytes": 1245184
+          }
+        ],
+        "disconnected": {
+          "role": "leader",
+          "selfRole": "voter",
+          "term": 1,
+          "quorumMembers": 1,
+          "commit": 5,
+          "applied": 5,
+          "lastIndex": 5,
+          "members": [
+            {
+              "id": "sink",
+              "role": "learner"
+            },
+            {
+              "id": "source",
+              "role": "voter"
+            }
+          ],
+          "blocked": false,
+          "heapLimitMiB": 384,
+          "resources": 1027,
+          "lastPayloadBytes": 65536,
+          "nonce": "1535d68335a34ba18ec33397c624faae"
+        },
+        "sigkillExit": -9,
+        "promoted": {
+          "role": "leader",
+          "selfRole": "voter",
+          "term": 1,
+          "quorumMembers": 2,
+          "commit": 6,
+          "applied": 6,
+          "lastIndex": 6,
+          "members": [
+            {
+              "id": "sink",
+              "role": "voter"
+            },
+            {
+              "id": "source",
+              "role": "voter"
+            }
+          ],
+          "blocked": false,
+          "heapLimitMiB": 384,
+          "resources": 1027,
+          "lastPayloadBytes": 65536,
+          "nonce": "7e9658dd8a3e405ea12aefbacb7b9deb"
+        },
+        "restored": {
+          "role": "follower",
+          "selfRole": "voter",
+          "term": 1,
+          "quorumMembers": 2,
+          "commit": 6,
+          "applied": 6,
+          "lastIndex": 6,
+          "members": [
+            {
+              "id": "sink",
+              "role": "voter"
+            },
+            {
+              "id": "source",
+              "role": "voter"
+            }
+          ],
+          "blocked": false,
+          "heapLimitMiB": 384,
+          "resources": 1027,
+          "lastPayloadBytes": 65536,
+          "nonce": "1982f5c9cd4d46ff865b362bbba7cd80"
+        },
+        "repeatedJoin": {
+          "role": "leader",
+          "selfRole": "voter",
+          "term": 1,
+          "quorumMembers": 2,
+          "commit": 6,
+          "applied": 6,
+          "lastIndex": 6,
+          "members": [
+            {
+              "id": "sink",
+              "role": "voter"
+            },
+            {
+              "id": "source",
+              "role": "voter"
+            }
+          ],
+          "blocked": false,
+          "heapLimitMiB": 384,
+          "resources": 1027,
+          "lastPayloadBytes": 65536,
+          "nonce": "f96846b6a0a94cb4aede7c574ecf6677"
+        },
+        "largePayloadAcceptance": true,
+        "remaining": [
+          "VM execution",
+          "leader handoff during catch-up",
+          "production serve recovery integration"
+        ],
+        "sinkExit": 0,
+        "sourceExit": 0
+      }
+    }
+  ],
+  "scope": {
+    "nativeInstrumentedHarness": true,
+    "productionServe": false,
+    "heapLimitIncreased": false,
+    "transport": "unprivileged loopback plaintext",
+    "vmAcceptance": false
+  },
+  "remaining": [
+    "Retired HTTP2 stream metadata and streaming request capacity:podster-ucm.2.10",
+    "Native leader handoff and authenticated/VM acceptance:podster-ucm.2.9.4",
+    "Production durable voter startup:podster-ucm.2.1.4"
+  ],
+  "nativeHeapReproducerFixed": true,
+  "fullAdmissionAcceptanceComplete": false,
+  "productionVoterRecoveryEnabled": false,
+  "fullGoalComplete": false
+}
