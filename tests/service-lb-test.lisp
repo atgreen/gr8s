@@ -176,6 +176,24 @@
     (is (= 7 (length programs)))
     (is (= 6 (count-if (lambda (spec) (search "cgroup/" (getf spec :section))) programs)))))
 
+(test service-nat-managed-pod-cidrs-publish-as-v2-lpm-entries
+  (let ((writes nil))
+    (is (= 2 (gr8s.network::publish-service-nat-managed-cidrs
+              :map '("10.80.0.0/12" "fd80::/48" "10.96.0.0/16")
+              :update (lambda (map key value)
+                        (is (eq :map map))
+                        (is (typep key '(simple-array (unsigned-byte 8) (8))))
+                        (is (typep value '(simple-array (unsigned-byte 8) (1))))
+                        (push (cons key value) writes)))))
+    (is (equalp (mapcar #'gr8s.network::netpol-cidr-lpm-key
+                       '("10.80.0.0/12" "10.96.0.0/16"))
+                (mapcar #'car (nreverse writes))))
+    (is (every (lambda (write) (= 1 (aref (cdr write) 0))) writes)))
+  (signals error
+    (gr8s.network::publish-service-nat-managed-cidrs
+     :map '("10.80.0.0/12")
+     :update (lambda (&rest ignored) (declare (ignore ignored)) (error "map update failed")))))
+
 (test service-lb-plan-publishes-each-cluster-ip-to-same-family-backends
   (let* ((service (fake-lb-service "10.96.0.10"))
          (spec (gethash "spec" service)))

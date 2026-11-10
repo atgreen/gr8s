@@ -1,0 +1,25 @@
+{
+  "date": "2026-11-10",
+  "scope": "Staged v2 managed Pod CIDR publication from the durable node network assignment",
+  "host": {
+    "serviceLbChecks": 395,
+    "failures": 0,
+    "nativeBuild": "passed",
+    "pythonSyntax": "passed",
+    "diffCheck": "passed"
+  },
+  "vm": {
+    "image": "Fedora 44 under QEMU/KVM, real root",
+    "runner": "scripts/test-service-v2-staging.py",
+    "result": "passed",
+    "clusterPodCIDRs": ["10.80.0.0/12"],
+    "managedPodMap": "gr8s_nat_pod_v2",
+    "managedPodLookup": "a /32 address inside 10.80.0.0/12 returned 01",
+    "backendRiskMap": "gr8s_nat_risk_v2",
+    "backendRiskKeys": ["c00002321f900600", "c00002321f911100"]
+  },
+  "limitations": [
+    "The v2 TC endpoint graph is not installed; the staged managed-address inventory is not yet used by live policy.",
+    "Identity rows, complete publication fencing, and safe retirement of old CIDRs and risk keys remain to be implemented."
+  ]
+}
