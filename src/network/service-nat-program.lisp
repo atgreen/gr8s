@@ -178,6 +178,25 @@ Expand only PKT macros: ordinary Lisp/Whistler control forms must stay source."
           (= (load u64 owner 8) (load u64 ,state 16))
           (= (load u64 owner 16) (load u64 ,state 24)))))
 
+(defmacro nat-replaced-direct-peer-p (state original)
+  "Only a proven new primary peer may invalidate an old, untranslated direct
+claim. Service/alias claims, disabled identities and same-epoch metadata faults
+must retain their fail-closed behavior. Caller holds both tuple reservations."
+  `(let ((owner (map-lookup-ptr gr8s-nat-id-v2 ,original))
+         (peer (map-lookup-ptr gr8s-nat-id-v2 ,state)))
+     (and (= (load u32 ,state 40) 2) (= (load u8 ,state 38) 0)
+          (<= (load u8 ,state 39) 1) (= (load u32 ,state 44) 1)
+          (= (load u32 ,state 32) (gr8s-pkt-flow-source ,original))
+          (= (load u16 ,state 36) (gr8s-pkt-flow-sport ,original))
+          (nat-owner-p owner (gr8s-pkt-flow-source ,original) 1)
+          (/= (logand (load u32 owner 4) 1) 0)
+          (= (load u64 owner 8) (load u64 ,state 16))
+          (= (load u64 owner 16) (load u64 ,state 24))
+          (nat-owner-p peer (cast u32 (load u64 ,state 0)) 1)
+          (/= (logand (load u32 peer 4) 1) 0)
+          (or (/= (load u64 peer 8) (load u64 ,state 48))
+              (/= (load u64 peer 16) (load u64 ,state 56))))))
+
 (defmacro nat-local-profile-p ()
   (if gr8s.network::*service-nat-local-identity-p* 1 0))
 
@@ -426,12 +445,31 @@ alias ports. Only an identical original tuple/incarnation may adopt a claim."
         (let ((held (map-lookup-ptr gr8s-nat-fwd-v2 original)))
           (when (= held 0) (pkt-drop failed)) (nat-copy state held 64))
         (unless (nat-local-source-p original state) (pkt-drop failed))
-        (unless (and (nat-return-owned-p entry original state)
-                     (nat-live-p state original probe) (= (gr8s-nat-state-active state) 1)
-                     (/= (nat-valid-state state original probe) 0)) (pkt-drop failed))
+        (unless (nat-return-owned-p entry original state) (pkt-drop failed))
         (nat-return-key probe original state)
         (unless (and (= (load u64 probe 0) (load u64 flow 0))
                      (= (load u64 probe 8) (load u64 flow 8))) (pkt-drop collision))
+        ;; A backend on another node observes its replies as direct outbound
+        ;; traffic. After client IP reuse that direct claim belongs to a peer
+        ;; incarnation which is permanently gone. Remove only this owned pair
+        ;; before normal ingress policy, so a replacement SYN/datagram can reach
+        ;; the backend. Nothing here authorizes it or seeds a reply exception.
+        ;; Both reservations are already held: do not try to acquire them again.
+        (when (nat-replaced-direct-peer-p state original)
+          (when (/= (map-delete-ptr gr8s-nat-rev-v2 flow) 0) (pkt-drop failed))
+          (nat-tcp-key probe original state)
+          (pkt-tcp-forget probe)
+          (when (/= (map-delete-ptr gr8s-nat-fwd-v2 original) 0) (pkt-drop failed))
+          (nat-pass))
+        (unless (and (nat-live-p state original probe)
+                     (/= (nat-valid-state state original probe) 0)) (pkt-drop failed))
+        (when (= (gr8s-nat-state-active state) 0)
+          ;; An egress-denied direct packet may have reserved this plain tuple.
+          ;; It provides no translation or reply authorization. Let incoming
+          ;; traffic reach ingress policy without observing/refreshing the claim;
+          ;; pending Service/alias claims still cannot admit translated replies.
+          (unless (= (gr8s-nat-state-kind state) 0) (pkt-drop failed))
+          (nat-pass))
         (when (/= (logand (gr8s-nat-state-kind state) 2) 0)
           (setf (gr8s-pkt-pair-first target)
                 (logior (cast u64 (gr8s-pkt-flow-source original))

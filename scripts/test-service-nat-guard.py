@@ -373,6 +373,108 @@ def pinned_lifetime(runner):
         directory.rmdir()
 
 
+def peer_churn(factory):
+    """Separate nodes retain backend reply claims across client IP/port reuse."""
+    cases = []
+    for protocol in (6, 17):
+        for scenario in ("replacement", "policyDenied", "reverseContention", "forwardContention",
+                         "disabledPeer", "sameEpoch", "serviceClaim"):
+            client, backend = factory(), factory()
+            try:
+                for endpoint in (client, backend):
+                    n.owner(endpoint, p.CLIENT, n.ALIAS, 1)
+                    n.owner(endpoint, p.BACKEND, n.BACK_ALIAS, 2)
+                configure(client, p.CLIENT, n.ALIAS, 1, CLIENT_MAC)
+                configure(backend, p.BACKEND, n.BACK_ALIAS, 2, BACK_MAC)
+                p.publish(client, protocol)
+                first = packet(protocol=protocol, sport=49000 + protocol)
+                wire = exchange(client, backend, first)
+                source, destination, sport, dport = p.endpoints(wire)
+                reply = packet(destination, source, dport, sport, protocol, mac=BACK_MAC)
+                key = n.key(reply)
+                incoming = packet(source, destination, sport, dport, protocol, seq=50000)
+                if scenario == "serviceClaim":
+                    # A real outbound Service claim must never be converted to
+                    # direct traffic merely because its backend Pod changed.
+                    p.publish(backend, protocol, backend=p.CLIENT)
+                    request = packet(p.BACKEND, p.VIP, 49500 + protocol, 80,
+                                     protocol, mac=BACK_MAC)
+                    selected = run(backend, 0, request)
+                    target, peer, target_port, peer_port = p.endpoints(selected)
+                    key = n.key(request)
+                    incoming = packet(peer, target, peer_port, target_port, protocol)
+                retained = backend.lookup(n.FWD, key)
+                assert retained is not None
+                reverse_key = n.key(incoming)
+                reverse = backend.lookup(n.REV, reverse_key)
+                tcp_key = key + retained[16:32]
+                tcp = backend.lookup("gr8s_nat_tcp_v2", tcp_key)
+                configure(client, p.CLIENT, n.ALIAS, 9, CLIENT_MAC)
+                n.owner(backend, p.CLIENT, n.ALIAS, 1 if scenario == "sameEpoch" else 9,
+                        flags=6 if scenario == "disabledPeer" else 7)
+                if scenario in ("disabledPeer", "sameEpoch", "serviceClaim"):
+                    if scenario == "sameEpoch":
+                        # Invalid metadata, rather than peer replacement, must
+                        # not trigger retirement of a current direct claim.
+                        broken = bytearray(retained)
+                        broken[40:44] = bytes(4)
+                        backend.update(n.FWD, key, broken)
+                        retained = bytes(broken)
+                    run(backend, 1, incoming, p.SHOT)
+                    assert backend.lookup(n.FWD, key) == retained
+                    assert backend.lookup(n.REV, reverse_key) == reverse
+                    assert backend.lookup("gr8s_nat_tcp_v2", tcp_key) == tcp
+                else:
+                    if scenario.endswith("Contention"):
+                        lock, lock_key = (("gr8s_nat_rl_v2", reverse_key)
+                                          if scenario == "reverseContention"
+                                          else ("gr8s_nat_fl_v2", key))
+                        sentinel = bytes.fromhex("1122334455667788")
+                        backend.update(lock, lock_key, sentinel)
+                        verdict, _ = backend.run(ROOTS[1], incoming)
+                        assert verdict == p.SHOT
+                        assert backend.lookup(lock, lock_key) == sentinel
+                        assert backend.lookup(n.FWD, key) == retained
+                        assert backend.lookup(n.REV, reverse_key) == reverse
+                        assert backend.lookup("gr8s_nat_tcp_v2", tcp_key) == tcp
+                        backend.delete(lock, lock_key)
+                        n.unlocked(backend)
+                    if scenario == "policyDenied":
+                        mode(backend, 1, 1)
+                        mode(backend, 0, 1)
+                        run(backend, 1, incoming, p.SHOT)
+                        assert backend.lookup(n.FWD, key) is None
+                        assert backend.lookup(n.REV, reverse_key) is None
+                        assert backend.lookup("gr8s_nat_tcp_v2", tcp_key) is None
+                        run(backend, 0, reply, p.SHOT)
+                        pending = backend.lookup(n.FWD, key)
+                        assert pending is not None and pending[39] == 0
+                        pending_reverse = backend.lookup(n.REV, reverse_key)
+                        backend.advance(1)
+                        run(backend, 1, incoming, p.SHOT)
+                        assert backend.lookup(n.FWD, key) == pending
+                        assert backend.lookup(n.REV, reverse_key) == pending_reverse
+                        assert backend.lookup("gr8s_nat_tcp_v2", tcp_key) is None
+                        # Explicit new ingress permission enables the new peer;
+                        # an old established reply exception cannot do so.
+                        allow(backend, "ingress", p.CLIENT, protocol, 8080)
+                        assert run(backend, 1, incoming) == incoming
+                        assert backend.lookup(n.FWD, key) == pending
+                        assert backend.lookup(n.REV, reverse_key) == pending_reverse
+                        assert backend.lookup("gr8s_nat_tcp_v2", tcp_key) is None
+                    exchange(client, backend, packet(protocol=protocol, sport=49000 + protocol,
+                                                     seq=50000), server_seq=60000)
+                    fresh = backend.lookup(n.FWD, key)
+                    assert fresh is not None
+                    assert fresh[48:64] == struct.pack("<QQ", 9, 109)
+                    assert fresh != retained
+                cases.append(f"protocol{protocol}{scenario}")
+            finally:
+                backend.close()
+                client.close()
+    return cases
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("fixture", type=Path)
@@ -404,6 +506,7 @@ def main():
             if backend:
                 backend.close()
             client.close()
+    results["peerChurn"] = peer_churn(lambda: cls(programs, ids, descriptors))
     if args.kernel:
         runner = cls(programs, ids, descriptors)
         try:
