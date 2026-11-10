@@ -28,8 +28,9 @@ and includes a Raft datastore for high availability.
   [compatibility reference](docs/kubernetes-surface.md) lists the supported
   behavior and limitations.
 - The kernel handles Service load balancing, NetworkPolicy, same-node
-  forwarding, and Pod anti-spoofing. The agent uses Whistler to compile eBPF
-  directly from Lisp, without clang or LLVM.
+  forwarding, and Pod anti-spoofing. The agent uses
+  [Whistler](https://github.com/atgreen/Whistler) to compile eBPF directly from
+  Lisp, without clang or LLVM.
 - Raft replicates control-plane state without an external database. Certificates
   authenticate node enrollment and internal communication.
 - An adaptive WireGuard overlay selects paths between nodes. Authenticated
@@ -169,11 +170,12 @@ guarantees. See [Design](docs/design.md) for component boundaries.
 
 ## Networking and security
 
-Whistler is the embedded Lisp-to-eBPF compiler. The agent uses it to compile and
-load networking programs at runtime. A socket load balancer directs Pod
-connections to ready Service backends. Programs at Pod veths enforce
-NetworkPolicy and anti-spoofing. A same-node fast path sends traffic directly to
-local Pods. The agent also implements Gateway API routing.
+[Whistler](https://github.com/atgreen/Whistler) is the embedded Lisp-to-eBPF
+compiler. The agent uses it to compile and load networking programs at runtime.
+A socket load balancer directs Pod connections to ready Service backends.
+Programs at Pod veths enforce NetworkPolicy and anti-spoofing. A same-node fast
+path sends traffic directly to local Pods. The agent also implements Gateway
+API routing.
 
 For cross-node traffic, the WireGuard overlay uses authenticated endpoint
 advertisements, active path trials, and eBPF telemetry. It supports NAT
