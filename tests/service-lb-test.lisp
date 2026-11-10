@@ -545,6 +545,50 @@
     (is (null (gr8s.network::service-nat-ready-local-receivers
                :map (vector local remote) "node-b" :lookup lookup)))))
 
+(test v2-receiver-snapshot-publishes-remote-pair-with-safe-write-order
+  (let* ((local (gr8s::json-object
+                 "nodeID" "node-a" "podUID" "pod-a" "sandboxID" "sandbox-a"
+                 "interfaceName" "eth0" "podIP" "10.88.1.2" "address" "10.88.1.9"))
+         (remote (gr8s::json-object
+                  "nodeID" "node-b" "podUID" "pod-b" "sandboxID" "sandbox-b"
+                  "interfaceName" "eth0" "podIP" "10.88.2.2" "address" "10.88.2.9"))
+         (records (vector local remote))
+         (local-rows (gr8s.network::service-nat-identity-rows local))
+         (remote-rows (gr8s.network::service-nat-identity-rows remote))
+         (proof (cons "pod-b" (subseq (cdar remote-rows) 8 24)))
+         (values (make-hash-table :test #'equalp))
+         (writes nil)
+         (lookup (lambda (map key) (declare (ignore map)) (gethash key values)))
+         (update (lambda (map key value) (declare (ignore map))
+                   (push key writes) (setf (gethash key values) value))))
+    (dolist (row (append local-rows remote-rows))
+      (setf (gethash (car row) values) (copy-seq (cdr row))))
+    (dolist (row local-rows)
+      (replace (gethash (car row) values) (gr8s::service-lb-bytes #x20005 4)
+               :start1 4))
+    (is (= 1 (gr8s.network::publish-service-nat-receiver-readiness
+              :mock records (list proof) "node-a" :lookup lookup :update update)))
+    (is (equalp (mapcar #'car (reverse remote-rows)) (reverse writes)))
+    (is-true (gr8s.network::service-nat-receiver-readiness-published-p
+              :mock records (list proof) "node-a" :lookup lookup))
+    (setf writes nil)
+    (gr8s.network::publish-service-nat-receiver-readiness
+     :mock records nil "node-a" :lookup lookup :update update)
+    (is (equalp (mapcar #'car remote-rows) (reverse writes)))
+    (is-true (gr8s.network::service-nat-receiver-readiness-published-p
+              :mock records nil "node-a" :lookup lookup))
+    (is (= #x20005 (gr8s::netlink-read-integer
+                     (gethash (caar local-rows) values) 4 4))
+        "Snapshot publication leaves local CNI readiness intact")
+    (setf writes nil)
+    (let ((stale (copy-seq (cdr proof))))
+      (setf (aref stale 0) (logxor 1 (aref stale 0)))
+      (signals gr8s::cni-error
+        (gr8s.network::publish-service-nat-receiver-readiness
+         :mock records (list (cons "pod-b" stale)) "node-a"
+         :lookup lookup :update update)))
+    (is (null writes))))
+
 (test service-lb-plan-publishes-each-cluster-ip-to-same-family-backends
   (let* ((service (fake-lb-service "10.96.0.10"))
          (spec (gethash "spec" service)))

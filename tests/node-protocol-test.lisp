@@ -89,6 +89,20 @@
       (is-true (slot-value empty 'gr8s.node.v1::service-receiver-report-present))
       (is (null (slot-value empty 'gr8s.node.v1::service-receivers))))))
 
+(test desired-snapshot-roundtrips-distributed-service-receivers
+  (let* ((proof (make-instance 'gr8s.node.v1::service-receiver-proof
+                               :pod-uid "pod-a"
+                               :incarnation (make-array 16 :element-type '(unsigned-byte 8)
+                                                        :initial-element 9)))
+         (snapshot (make-instance 'gr8s.node.v1::desired-state-snapshot
+                                  :revision 4 :service-receivers (list proof)))
+         (restored (roundtrip-node-message
+                    snapshot 'gr8s.node.v1::desired-state-snapshot))
+         (received (first (slot-value restored 'gr8s.node.v1::service-receivers))))
+    (is (string= "pod-a" (slot-value received 'gr8s.node.v1::pod-uid)))
+    (is (equalp (slot-value proof 'gr8s.node.v1::incarnation)
+                (slot-value received 'gr8s.node.v1::incarnation)))))
+
 (test every-server-envelope-variant-roundtrips
   (dolist (spec '((:hello gr8s.node.v1::server-hello)
                   (:desired-state gr8s.node.v1::desired-state-snapshot)

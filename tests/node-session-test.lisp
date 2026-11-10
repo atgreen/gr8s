@@ -723,12 +723,31 @@
     (labels ((published ()
                (bt:with-lock-held ((gr8s::node-grpc-server-lock server))
                  (gr8s.apiserver::service-risk-receivers-published-locked-p
-                  server projection '(("worker-a" . "node-a"))))))
+                  server projection '(("worker-a" . "node-a")))))
+             (ready ()
+               (bt:with-lock-held ((gr8s::node-grpc-server-lock server))
+                 (gr8s.apiserver::cluster-service-ready-receivers-locked
+                  server projection '(("worker-a" . "node-a")))))
+             (distributed (receiver-projection)
+               (bt:with-lock-held ((gr8s::node-grpc-server-lock server))
+                 (gr8s.apiserver::service-risk-receiver-projection-published-locked-p
+                  server receiver-projection '(("worker-a" . "node-a"))))))
       (is-false (published))
+      (is-false (ready))
       (setf (gethash "worker-a" reports) (list session 3 (list proof) projection))
       (is-true (published))
+      (let* ((ready (ready))
+             (receiver-projection (mapcar #'ag-proto:serialize-to-bytes ready)))
+        (is (= 1 (length ready)))
+        (is (equalp (slot-value proof 'gr8s.node.v1::incarnation)
+                    (slot-value (first ready) 'gr8s.node.v1::incarnation)))
+        (is-false (distributed receiver-projection)
+                  "A local status cannot stand in for a distributed snapshot")
+        (setf (slot-value snapshot 'gr8s.node.v1::service-receivers) ready)
+        (is-true (distributed receiver-projection)))
       (setf (third (gethash "worker-a" reports)) nil)
       (is-false (published))
+      (is-false (ready))
       (setf (gethash "worker-a" reports)
             (list session 3 (list proof) (list (make-array 1 :element-type '(unsigned-byte 8)
                                                            :initial-element 0))))
@@ -2412,18 +2431,24 @@
 
 (defun delta-test-snapshot
     (revision pods &optional (discovery '("svc-a"))
-                            (grant (make-array 0 :element-type '(unsigned-byte 8))))
+                            (grant (make-array 0 :element-type '(unsigned-byte 8)))
+                            receivers)
   (make-instance 'gr8s.node.v1::desired-state-snapshot
                  :revision revision
                  :network (make-instance 'gr8s.node.v1::node-network-config :node-pod-cidr "10.88.3.0/24")
                  :service-discovery-objects-json (mapcar #'trivial-utf-8:string-to-utf-8-bytes discovery)
                  :service-risk-grant-digest grant
+                 :service-receivers receivers
                  :pods (sort (copy-list pods) #'string< :key #'gr8s::pod-assignment-sort-key)))
 
 ;; podster-uqb.139: a change sends what changed, and the agent rebuilds exactly
 ;; the snapshot the server holds.
 (test desired-state-deltas-rebuild-the-servers-snapshot
-  (let* ((base (delta-test-snapshot 4 (list (delta-test-assignment "kept")
+  (let* ((receiver (make-instance 'gr8s.node.v1::service-receiver-proof
+                                  :pod-uid "pod-a"
+                                  :incarnation (make-array 16 :element-type '(unsigned-byte 8)
+                                                           :initial-element 3)))
+         (base (delta-test-snapshot 4 (list (delta-test-assignment "kept")
                                             (delta-test-assignment "changed")
                                             (delta-test-assignment "objects" :objects '("{\"cm\":1}"))
                                             (delta-test-assignment "removed"))))
@@ -2434,8 +2459,12 @@
                                             (delta-test-assignment "aardvark" :deleting t))
                                     '("svc-a")
                                     (make-array 32 :element-type '(unsigned-byte 8)
-                                                :initial-element 7)))
-         (later (delta-test-snapshot 6 (slot-value next 'gr8s.node.v1::pods) '("svc-a" "svc-b")))
+                                                :initial-element 7)
+                                    (list receiver)))
+         (later (delta-test-snapshot 6 (slot-value next 'gr8s.node.v1::pods)
+                                     '("svc-a" "svc-b")
+                                     (make-array 0 :element-type '(unsigned-byte 8))
+                                     (list receiver)))
          (delta (gr8s::node-snapshot-delta base next))
          (agent (gr8s::make-agent-node-session nil)))
     (is (= 4 (slot-value delta 'gr8s.node.v1::base-revision)))
