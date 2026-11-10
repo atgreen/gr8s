@@ -166,6 +166,10 @@ enumeration/syscall failures; its dataplane tracks scanned, reclaimed, deferred
 and failed transactions. See
 [the expiry evidence](service-packet-expiry-validation-2026-11-09.json) and
 [the background collection evidence](service-packet-gc-validation-2026-11-09.json).
+BPF load diagnostics preserve the initial error, logging-retry errno and available
+verifier output. A real restart captured initial EAGAIN followed by a full-buffer
+ENOSPC; collection remained deferred until pipeline verification succeeded. See
+[the loader diagnostic evidence](service-bpf-load-diagnostics-validation-2026-11-09.json).
 See [the program-upgrade evidence](service-packet-upgrade-validation-2026-11-09.json)
 for kernel failure/recovery checks and actual guest connections across historical
 and interrupted pipeline upgrades.
