@@ -402,3 +402,14 @@ on the member, and the report verifies certificate/key hashes across recovery.
 These offline fixtures exercise authenticated replication and Join, rather than
 production token enrollment. The existing production native probe covers token
 enrollment separately.
+
+The default-size `--tls` run also passed on 2026-11-10; see
+`learner-handoff-tls-native-validation-2026-11-10.json`. Four native processes
+used 384 MiB heaps and per-member TLS credentials. After leader loss during
+the partial 64 MiB transfer, the replacement committed the write in term 2
+and completed catch-up without another Join. The learner applied through
+index 10 and became the fourth voter. The old leader recovered; all four
+retained the write, all credential hashes were preserved, and all shutdowns
+returned zero. The existing plaintext interrupted-transfer probe also passed
+with a 4 MiB compatibility fixture. Authenticated large-transfer handoff is
+therefore verified in the instrumented harness; VM acceptance remains open.
