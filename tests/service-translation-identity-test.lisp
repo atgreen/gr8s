@@ -167,4 +167,31 @@
       (is (null (gr8s.network::service-translation-identity-messages store)))
       (gr8s:register-node store (gr8s:make-node-record :id "new-incarnation" :name "worker-a"
                                                       :pod-cidr "10.88.1.0/24"))
-      (is (null (gr8s.network::service-translation-identity-messages store))))))
+      (is (null (gr8s.network::service-translation-identity-messages store)))
+      (let ((*error-output* (make-broadcast-stream)))
+        (translation-fixture-report server pod (translation-fixture-status)))
+      (is (null (gr8s.network::service-translation-identity-messages store)))
+      (let* ((status (translation-fixture-status))
+             (claim (gethash "gr8sServiceTranslation" status)))
+        (setf (gethash "nodeID" claim) "new-incarnation"
+              (gethash "sandboxID" claim) "replacement-sandbox")
+        (translation-fixture-report server pod status)
+        (let ((identity (first (gr8s.network::service-translation-identity-messages store))))
+          (is (equal "new-incarnation" (slot-value identity 'gr8s.node.v1::node-id)))
+          (is (equal "replacement-sandbox" (slot-value identity 'gr8s.node.v1::sandbox-id))))))))
+
+(test translation-agent-uses-ipv4-lease-when-the-primary-family-is-ipv6
+  (with-temporary-store (store directory)
+    (let* ((ipam (gr8s::open-node-ipam (merge-pathnames "dual-ipam/" directory)
+                                      '("fd88::/125" "10.88.1.0/29")))
+           (pod (translation-fixture-pod store "dual-client"))
+           (runtime (gr8s::%make-node-runtime :node-name "worker-a" :node-id "worker-a" :ipam ipam))
+           (addresses (gr8s::allocate-pod-addresses ipam "dual-sandbox" "eth0"))
+           (alias (gr8s.network::allocate-service-snat-address ipam "dual-sandbox" "eth0"))
+           (status (gr8s::core-object "phase" "Running" "podIP" (first addresses)
+                                     "podIPs" (map 'vector (lambda (ip) (gr8s::core-object "ip" ip)) addresses)))
+           (record (gr8s.agent::node-runtime-service-translation-record
+                    runtime pod status :sandbox-id "dual-sandbox")))
+      (is (equal "10.88.1.1" (gethash "podIP" record)))
+      (is (equal alias (gethash "address" record)))
+      (is (equal "fd88::1" (gethash "podIP" status))))))
