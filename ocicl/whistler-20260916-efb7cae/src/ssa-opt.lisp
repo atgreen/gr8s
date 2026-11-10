@@ -1059,7 +1059,9 @@
 ;;; A vreg is "reloadable" if its defining instruction can be cheaply
 ;;; re-executed after a call:
 ;;;   - mov (:imm N)            — constant, always reloadable
-;;;   - ctx-load TYPE OFF       — reloadable when ctx itself spans calls
+;;; Context loads must retain their original values across calls: a fresh
+;;; packet-pointer load loses the verifier's bounds provenance even when the
+;;; helper preserves the packet. Explicit source reloads can establish new bounds.
 ;;;   - load TYPE base OFF      — reloadable when base itself spans calls
 ;;;   - add base (:imm N)       — reloadable when base spans calls
 ;;;
@@ -1115,15 +1117,9 @@
        (and (= (length args) 1)
             (consp (first args))
             (eq (car (first args)) :imm))))
-    ;; ctx-load base off — safe when the ctx pointer itself spans calls and
-    ;; the specific helper does not invalidate packet pointers.
-    ;; This is mainly useful for reloading data/data_end after safe helpers.
-    (:ctx-load
-     (let ((args (ir-insn-args insn)))
-       (and (>= (length args) 2)
-            (integerp (first args))
-            (gethash (first args) call-spanning-vregs)
-            (not (helper-invalidates-p call-insn :invalidates-packet-ptrs)))))
+    ;; Preserving packet contents does not give a fresh skb->data load the
+    ;; range proven for the old pointer. Keep the bounded pointer itself live.
+    (:ctx-load nil)
     ;; load type base off — safe if base spans calls AND call
     ;; does not invalidate the base's pointer kind
     (:load
@@ -1170,10 +1166,7 @@
                 (and (= (length args) 1)
                      (consp (first args))
                      (eq (car (first args)) :imm))))
-        (:ctx-load (let ((args (ir-insn-args insn)))
-                     (and (>= (length args) 2)
-                          (integerp (first args))
-                          (gethash (first args) call-spanning-vregs))))
+        (:ctx-load nil)
         (:load (let ((args (ir-insn-args insn)))
                  (and (>= (length args) 2)
                       (integerp (first args))
@@ -1194,10 +1187,7 @@
                 (and (= (length args) 1)
                      (consp (first args))
                      (eq (car (first args)) :imm))))
-        (:ctx-load (let ((args (ir-insn-args insn)))
-                     (and (>= (length args) 2)
-                          (integerp (first args))
-                          (gethash (first args) call-spanning-vregs))))
+        (:ctx-load nil)
         (:load (let ((args (ir-insn-args insn)))
                  (and (>= (length args) 2)
                       (integerp (first args))
