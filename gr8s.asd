@@ -231,6 +231,7 @@
                                            (:file "egress-guard")
                                            (:file "service-lb-program")
                                            (:file "service-packet-program")
+                                           (:file "service-nat-program")
                                            (:file "service-lb-dataplane")
                                            (:file "service-packet-state")
                                            (:file "service-packet-upgrade")

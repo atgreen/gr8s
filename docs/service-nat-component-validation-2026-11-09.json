@@ -1,0 +1,104 @@
+{
+  "date": "2026-11-09",
+  "issue": "podster-p9c.10",
+  "scope": "Standalone staged IPv4 NAT component; not attached or activated by the node agent.",
+  "implementationCommit": "713d91c",
+  "capacityTestCommit": "229376d",
+  "integrationCommit": "573dfbe93a69329b5b3bec576db1558822a29632",
+  "integratedMain": "7e2f201",
+  "artifactSHA256": {
+    "fixture": "2aacdefe7277d8f21b36e65ba7517b6847dda0c903460760fa3ca6249dce254b",
+    "source": "c0343776a22dd448cab0c793ac4c1d20aaa74b629fb955ac257afa6644e8d23e",
+    "runner": "55d31823c5d543517631efc8cefb3a5511468894c77a2f7e0ee1980cb57e2eb8"
+  },
+  "logSHA256": {
+    "interpreter": "9887485a51d7ca7f68a5deee73e240c228ef4bc5df4aaf05cbe9cca9b3112799",
+    "kernel": "62e15f85439fa0a8dfa6111ec06a608e794341dd35b9921cc1131dd78a3e868d",
+    "networking": "156cd82e2b923f0bff980bd2abbc66defcedc72cb2976bc55172e18cfa69183d",
+    "integrated": "0a45db06e6fe485f119fc2b2e28f1b52d97d3c4807a2badf9294877b5b172638",
+    "legacy": "18d170119c0b437a9e0cde72e88f2926e333cf84b8900600fdd589a916c6cf57",
+    "compile": "c4a034de156d9859f8027ae1dcfe61ef9375567afde9d844df95b1002a6b93c1"
+  },
+  "packetInterpreter": {
+    "passed": true,
+    "kernel": false,
+    "cases": 42,
+    "capacityCases": [
+      "fullReverseMapPreservesActiveOwner",
+      "reverseCapacityRecovery",
+      "fullForwardMapCannotAuthorizeOrphanReply",
+      "otherServiceCannotStealInterruptedClaim",
+      "interruptedClaimAdoptedOnlyByOriginalOwner",
+      "flContentionDoesNotReleaseForeignReservation",
+      "rlContentionDoesNotReleaseForeignReservation"
+    ]
+  },
+  "kernel": {
+    "environment": "Disposable Fedora 44 VM on SSH port 22291; BPF_PROG_TEST_RUN with synthetic packets and skb context; FD-only maps/programs, no pins or attachments. Owned run directory removed.",
+    "result": {
+      "passed": true,
+      "kernel": true,
+      "cases": 42,
+      "capacityCases": [
+        "fullReverseMapPreservesActiveOwner",
+        "reverseCapacityRecovery",
+        "fullForwardMapCannotAuthorizeOrphanReply",
+        "otherServiceCannotStealInterruptedClaim",
+        "interruptedClaimAdoptedOnlyByOriginalOwner",
+        "flContentionDoesNotReleaseForeignReservation",
+        "rlContentionDoesNotReleaseForeignReservation"
+      ]
+    }
+  },
+  "networking": {
+    "passed": 1534,
+    "failed": 0
+  },
+  "integration": {
+    "passed": 6506,
+    "failed": 0,
+    "skipped": 0,
+    "scope": "Networking suites plus Raft, membership, snapshots, member restore/bootstrap, main and serve state ownership after integrating main."
+  },
+  "legacyRegression": "Existing v1 packet and IPv4/IPv6 TCP/UDP socket bytecode tests passed.",
+  "programs": {
+    "gr8s_nat_select": 7745,
+    "gr8s_nat_commit": 1018,
+    "gr8s_nat_prepare": 991,
+    "gr8s_nat_restore": 1031
+  },
+  "maps": {
+    "total": 10,
+    "new": 6,
+    "shared": 4,
+    "forward": "key16/value64",
+    "reverse": "key16/value32",
+    "forwardAndReverseReservations": "key16/value8",
+    "identity": "key4/value32; readonly from programs; primary and private alias share endpoint epoch",
+    "stats": "array7/value8"
+  },
+  "behavior": [
+    "Register direct and Service original tuples; reserve return tuple before forward publication.",
+    "Prefer source preservation when direct history is complete; use private aliases and bounded candidate ports for hairpin or collisions.",
+    "Fence source and backend incarnations; alias source requires enabled owner pair and receiving capability. Capability flags are supplied by the fixture, not actual distributed acknowledgments.",
+    "DNAT before egress policy; source rewrite at commit after policy; destination restoration before ingress policy; Service source restoration after policy.",
+    "Pending state expires after 5 seconds and cannot authorize replies before commit. Active UDP lifetime 180 seconds; TCP currently conservative 2 hours.",
+    "Do not retarget a live binding when backend incarnation or receiver capability changes.",
+    "Capacity/interruption tests preserve active owners and foreign reservations; only the original owner can adopt its interrupted claim."
+  ],
+  "coverage": [
+    "TCP/UDP source preservation, two Services sharing backend/client port, direct/Service collisions in both orders, self-backend hairpin and multiple alias ports",
+    "Per-stage checksum and backend identity order, missing commit, pending expiry, invalid context magic, IPv4 options and zero UDP checksum",
+    "Source/backend epoch changes, disabled alias, missing backend identity, receiver capability, sticky backend membership and slot repacking",
+    "16-candidate exhaustion plus 7 capacity/contention cases using one-entry kernel maps"
+  ],
+  "implementationNotes": "Initial full-parser compiles exceeded the BPF stack limit (516/520/528 bytes). Compact tuple parsing and scratch reuse allowed all four programs to compile and pass the real verifier.",
+  "limits": [
+    "Synthetic BPF packet tests, not live TCP sockets, native/Kata CNI traffic, NetworkPolicy enforcement or physical multi-host proof.",
+    "Test harness manually deletes state for capacity recovery; this does not prove background garbage collection.",
+    "Full TCP sequence/window/options, FIN/RST handling and safe new-generation tuple reuse are not yet implemented in v2.",
+    "Actual policy alias canonicalization, agent attachment, trusted receiver installation acknowledgments, legacy retained-flow migration, upgrade/rollback and bounded GC remain required.",
+    "Existing attached v1 map formats/programs are unchanged. IPv6 packet NAT, NodePort and broader Service semantics remain parent requirements."
+  ],
+  "remaining": "Child podster-p9c.10 and parent podster-p9c remain in progress."
+}
