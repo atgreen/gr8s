@@ -329,7 +329,7 @@ its journal replayed, or NIL when nothing was committed. Second and third values
 whether the journal must be rewritten (a torn record) and its complete bytes."
   (let ((path (core-resource-state-path store)) (journal (core-journal-path store)))
     (when (probe-file path)
-      (let ((state (com.inuoe.jzon:parse path :max-string-length (* 2 1024 1024))))
+      (let ((state (read-core-checkpoint store path)))
         (unless (and (member (gethash "version" state) '(1 2))
                      (typep (gethash "revision" state) '(integer 0 *)))
           (error "Invalid core resource state at ~A" path))
@@ -338,7 +338,6 @@ whether the journal must be rewritten (a torn record) and its complete bytes."
           (error "Invalid resource history start at ~A" path))
         (setf (pod-store-secret-encryption-config store)
               (gethash "secretsEncryption" state))
-        (decrypt-core-state-secrets store state)
         (if (probe-file journal)
             (with-open-file (stream journal :element-type '(unsigned-byte 8))
               (replay-core-journal store state (make-core-journal-reader stream journal)))

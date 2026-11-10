@@ -505,6 +505,15 @@ large. Cached weights from older checkpoints are remeasured under the current
 policy without mutating published entries. This bounds retained history; live
 objects themselves still require memory proportional to the current cluster.
 
+Checkpoint recovery reads encryption metadata first, then streams collections
+and history from the same open file. It restores sharing between identical
+versions, authenticates entries before discarding them, and applies history
+limits while reading. Schema 1/2 and root-field ordering remain supported.
+Duplicate known fields, truncated JSON and invalid encrypted data are rejected.
+An older checkpoint's understated history weights can advance the retained
+history floor during recovery; older watches then receive the usual expired
+resource-version response.
+
 The pending-write native probe is built with
 `sbcl --noinform --non-interactive --load scripts/build-proposal-admission-native-harness.lisp`
 and run with `python3 scripts/test-proposal-admission-native.py`. It uses three
