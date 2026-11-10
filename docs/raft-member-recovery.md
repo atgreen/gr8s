@@ -546,14 +546,22 @@ probe passed in 29.86 seconds, including store load and artifact validation.
 That standalone probe does not cover concurrent writes during worker capture.
 The first asynchronous-worker churn run exhausted its heap as the committed log
 grew during I/O; whole-log admission addresses that separate retention source
-and requires a fresh full churn/recovery run before acceptance.
+and was followed by a fresh full churn/recovery run.
 The bounded-log attempt subsequently reached the full history budget but also
 exhausted its heap during concurrent encoding/validation. Snapshot streams, core
 checkpoint writing and live delta encoding now use the existing recovery memory
 pressure policy: above two-thirds of dynamic-space usage, collect older garbage
 before allocating the next streamed record. This changes production allocation
-handling, not the probe's heap, history, workload or WAL bounds; full acceptance
-must be rerun for this version.
+handling without changing the probe's heap, history, workload or WAL bounds.
+The [async-worker validation](async-compaction-validation-2026-11-10.json)
+passes the complete single-member workload and both recovery phases: 128 MiB
+of churn, 79 checkpoints, sampled WAL below 6.4 MiB, and the full
+100,656,464-byte history estimate, all within a 384 MiB dynamic heap.
+A separate 128-round three-process mTLS smoke test keeps one follower's capture
+held while the other voters continue writing. The follower refuses replication
+above its 32 MiB retained-log budget, then catches up after release. All three
+processes restart with markers and credential hashes preserved. This partial
+cluster run does not establish full-history cluster memory acceptance.
 
 The [three-voter smoke validation](compaction-cluster-smoke-validation-2026-11-10.json)
 uses three separate 384 MiB processes and offline mTLS fixtures. It holds all
