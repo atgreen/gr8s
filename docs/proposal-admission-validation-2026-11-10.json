@@ -92,5 +92,21 @@
       "evidence": "/tmp/gr8s-proposal-admission-native-2ut1ash0/result.json",
       "result": "Passed older wire-weight estimator without full-size Secret coverage; superseded by the current native run."
     }
-  ]
+  ],
+  "postMergeValidation": {
+    "commit": "258ddc0e15440f1873e0ab81e8d6b1fe74249a89",
+    "upstreamMerged": "af28b5d",
+    "checks": 6126,
+    "suiteCounts": {
+      "raft": 4919,
+      "raft-membership": 96,
+      "raft-transport": 52,
+      "ha-control-plane": 77,
+      "core-recovery": 39,
+      "durable-resource-watches": 526,
+      "service-lb": 417
+    },
+    "failures": 0,
+    "nativeBuildSourcesUnchanged": true
+  }
 }
