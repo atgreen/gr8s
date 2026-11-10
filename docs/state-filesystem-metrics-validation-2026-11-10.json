@@ -15,7 +15,19 @@
     "measurement error produces availability zero and omits capacity",
     "no-store collection omitted"
   ],
-  "command": "sbcl --noinform --non-interactive --eval (require :asdf) --eval (asdf:load-asd (truename gr8s.asd)) --eval (asdf:load-system gr8s/tests) --eval (fiveam:run! gr8s/tests::apiserver-metrics)",
+  "command": [
+    "sbcl",
+    "--noinform",
+    "--non-interactive",
+    "--eval",
+    "(require :asdf)",
+    "--eval",
+    "(asdf:load-asd (truename \"gr8s.asd\"))",
+    "--eval",
+    "(asdf:load-system \"gr8s/tests\")",
+    "--eval",
+    "(unless (fiveam:run! (quote gr8s/tests::apiserver-metrics)) (uiop:quit 1))"
+  ],
   "logSha256": "b2f060987e4f89b443304a49b105fddb124a06a81473256a505a234bb4307dc8",
   "sourceSha256": {
     "src/server/memory-monitor.lisp": "d19e98cc104bec2a04ba1def4109574bb4c98616b8047435f2830e708d364907",
