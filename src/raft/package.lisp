@@ -80,6 +80,7 @@
    #:raft-node-peer-addresses
    #:raft-node-peers
    #:raft-node-pending
+   #:raft-node-promotion-intents
    #:raft-node-pending-members
    #:raft-node-pre-vote-term
    #:raft-node-pre-votes

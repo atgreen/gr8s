@@ -48,6 +48,8 @@
   ;; until the config entry commits. A witness votes and counts for quorum but
   ;; never starts an election; a learner neither votes-weight nor leads.
   (roles (make-hash-table :test 'equal))
+  ;; Committed intent for learners that requested eventual voter membership.
+  (promotion-intents (make-hash-table :test 'equal))
   (self-role :voter)
   (pending-members (make-hash-table :test 'equal))   ; id -> role
   ;; DEPARTING-MEMBERS are peers a committed config just dropped: the leader
@@ -200,12 +202,15 @@ is a borrowed sequence; retain only entries after INDEX. Caller holds the node l
           :members (if (plusp (hash-table-count (raft-node-roles node)))
                        (alist (raft-node-roles node)) (raft-current-config node))
           :addresses (alist (raft-node-peer-addresses node))
-          :api-urls (alist (raft-node-api-urls node)))))
+          :api-urls (alist (raft-node-api-urls node))
+          :promotions (alist (raft-node-promotion-intents node)))))
 
 (defun raft-restore-snapshot-contents (node state)
   "Restore application and configuration. Legacy local snapshots contain only application data."
   (when (and (raft-snapshot-envelope-p state) (not (getf (cddr state) :application-present)))
     (error "Snapshot lacks an exact application/configuration boundary; replay its complete log instead"))
+  (when (raft-snapshot-envelope-p state)
+    (raft-validate-promotion-intents (getf (cddr state) :members) (getf (cddr state) :promotions)))
   (when (raft-node-restore-fn node)
     (funcall (raft-node-restore-fn node)
              (if (raft-snapshot-envelope-p state) (getf (cddr state) :application) state)))
@@ -214,7 +219,8 @@ is a borrowed sequence; retain only entries after INDEX. Caller holds the node l
     (clrhash (raft-node-api-urls node))
     (raft-adopt-config node (getf (cddr state) :members)
                            (getf (cddr state) :addresses)
-                           (getf (cddr state) :api-urls))))
+                           (getf (cddr state) :api-urls)
+                           (getf (cddr state) :promotions))))
 
 (defun raft-publish-snapshot (node index term state entries)
   "Publish an already durable snapshot. Restore callbacks must support retries."
@@ -303,6 +309,7 @@ an atomic replacement, including its log-tail policy, before calling this helper
    the removed flag follow MEMBERS. Not required for an all-voter cluster that
    passed :peers to MAKE-RAFT-NODE -- it is for witnesses/learners/config change."
   (clrhash (raft-node-roles node))
+  (clrhash (raft-node-promotion-intents node))
   (dolist (m members) (setf (gethash (car m) (raft-node-roles node)) (cdr m)))
   (let ((self (assoc (raft-node-id node) members :test #'equal)))
     (setf (raft-node-self-role node) (if self (cdr self) default-self-role)
@@ -516,7 +523,8 @@ alone so existing persisted commands remain deliverable."
                         ;; order, so all converge on the same membership.
                         (progn (raft-adopt-config node (getf (cdr command) :members)
                                                   (getf (cdr command) :addresses)
-                                                  (getf (cdr command) :api-urls))
+                                                  (getf (cdr command) :api-urls)
+                                                  (getf (cdr command) :promotions))
                                :configured)
                         (and (raft-node-apply-fn node) (funcall (raft-node-apply-fn node) command))))
                   (callback (gethash index (raft-node-pending node))))
@@ -548,11 +556,23 @@ alone so existing persisted commands remain deliverable."
 ;;; ---------------------------------------------------------------------------
 ;;; Membership change (single-member, effective on commit).
 
-(defun raft-adopt-config (node members &optional addresses api-urls)
+(defun raft-validate-promotion-intents (members promotions)
+  "Promotion metadata must name distinct committed learners and request voters."
+  (let ((seen (make-hash-table :test 'equal)))
+    (dolist (entry promotions)
+      (unless (and (consp entry) (stringp (car entry)) (eq :voter (cdr entry))
+                   (eq :learner (cdr (assoc (car entry) members :test #'equal)))
+                   (not (gethash (car entry) seen)))
+        (error "Invalid learner promotion intent"))
+      (setf (gethash (car entry) seen) t)))
+  t)
+
+(defun raft-adopt-config (node members &optional addresses api-urls promotions)
   "Adopt a committed membership MEMBERS (alist id->role). Every member runs this
    in log order, so all converge. A member that finds itself gone steps down.
    ADDRESSES (alist id->(host port)) teaches the transport where to reach peers;
    API-URLS (alist id->url) teaches the HTTP layer where to redirect writes."
+  (raft-validate-promotion-intents members promotions)
   (dolist (a addresses)
     (setf (gethash (car a) (raft-node-peer-addresses node)) (cdr a)))
   (dolist (a api-urls)
@@ -560,6 +580,8 @@ alone so existing persisted commands remain deliverable."
   (let ((old-peers (raft-node-peers node))
         (leading (eq (raft-node-role node) :leader)))
     (raft-configure node members)
+    (dolist (entry promotions)
+      (setf (gethash (copy-seq (car entry)) (raft-node-promotion-intents node)) (cdr entry)))
     (clrhash (raft-node-pending-members node))  ; any added member is now a real peer
     ;; Keep delivering this commit to peers the change just dropped, so they
     ;; apply it, mark themselves removed, and stop holding elections. (Only the
@@ -592,13 +614,15 @@ following leadership changes; old peers without applied receipts cannot qualify.
          (>= (cdr receipt) boundary)
          (>= (gethash id (raft-node-match-index node) 0) boundary))))
 
-(defun raft-propose-config (node &key add remove (role :voter) address api-url callback)
+(defun raft-propose-config (node &key add remove (role :voter) address api-url callback promotion-role)
   "Leader-only single-member change. ADD = a member id to add with ROLE (:voter
    or :witness) and ADDRESS = its (host port) so every member can reach it;
    REMOVE = a member id to drop (not self). Only one change may be in flight. The
    new member is replicated to immediately but is not counted for quorum until
    the config entry commits (effective-on-commit). Returns (values index t) when
    the change is proposed, else (values nil reason)."
+  (unless (or (null promotion-role) (and add (eq role :learner) (eq promotion-role :voter)))
+    (error "Promotion intent requires adding a learner with voter intent"))
   (cond
     ((not (eq (raft-node-role node) :leader)) (values nil :not-leader))
     ((plusp (hash-table-count (raft-node-pending-members node))) (values nil :change-in-flight))
@@ -607,7 +631,12 @@ following leadership changes; old peers without applied receipts cannot qualify.
      (values nil :learner-not-ready))
     ((and remove (equal remove (raft-node-id node))) (values nil :cannot-remove-self))
     (t
-     (let ((members (raft-current-config node)))
+     (let ((members (raft-current-config node))
+           (promotions (loop for id being the hash-keys of (raft-node-promotion-intents node)
+                               using (hash-value desired)
+                             unless (or (and (equal id add) (or promotion-role (not (eq role :learner))))
+                                        (equal id remove))
+                               collect (cons id desired))))
        (cond
          (add (setf members (cons (cons add role)
                                   (remove add members :key #'car :test #'equal)))
@@ -622,11 +651,14 @@ following leadership changes; old peers without applied receipts cannot qualify.
               (when (raft-node-on-configured node)
                 (funcall (raft-node-on-configured node) node)))
          (remove (setf members (remove remove members :key #'car :test #'equal))))
+       (when promotion-role (push (cons add promotion-role) promotions))
+       (raft-validate-promotion-intents members promotions)
        ;; Carry the whole address book (and API URLs) so a just-joined member
        ;; (and every other) learns where to reach each peer when this commits.
        (raft-propose node (list :raft-config :members members
                                 :addresses (raft-config-addresses node)
-                                :api-urls (raft-config-api-urls node))
+                                :api-urls (raft-config-api-urls node)
+                                :promotions promotions)
                      callback)))))
 
 (defun raft-config-addresses (node)
@@ -802,6 +834,7 @@ following leadership changes; old peers without applied receipts cannot qualify.
 (defun raft-validate-snapshot-envelope (state)
   (unless (raft-snapshot-envelope-p state) (error "Unsupported snapshot envelope"))
   (unless (getf (cddr state) :application-present) (error "Snapshot lacks application state"))
+  (raft-validate-promotion-intents (getf (cddr state) :members) (getf (cddr state) :promotions))
   (let ((members (getf (cddr state) :members)) (seen (make-hash-table :test 'equal)))
     (unless (consp members) (error "Snapshot has no membership"))
     (dolist (member members)

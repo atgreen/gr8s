@@ -144,7 +144,20 @@ commit can make an older receipt insufficient. Missing receipts from older
 binaries, failed application, stale terms and invalid applied indices cannot
 establish readiness; rejected promotions return `:learner-not-ready`.
 
-This guard does not yet make Join admit requested voters as learners. Durable
-promotion intent, automatic promotion after catch-up and native interrupted-join
-acceptance remain under `podster-ucm.2.9`. Production durable voter recovery
+This guard does not yet make Join admit requested voters as learners. Automatic promotion after catch-up and native interrupted-join acceptance remain
+under `podster-ucm.2.9`. Production durable voter recovery
 remains disabled until the complete admission and startup paths are integrated.
+
+Internal admission callers can propose a learner with `:promotion-role :voter`
+to record its requested eventual role. The intent becomes effective with the
+committed `:raft-config` entry, alongside the learner membership. Subsequent
+configuration entries preserve outstanding intents; promotion or removal drops
+the affected intent. Snapshot envelopes carry the same `:promotions` metadata,
+so checkpoint recovery and later log replay retain pending work. Envelopes and
+legacy configuration entries without this metadata represent no promotion intent.
+
+Intent validation requires distinct learner IDs and voter targets and runs before
+configuration mutation or snapshot application restore. Recovery does not restore
+applied-progress receipts: a new leader must obtain fresh current-term evidence
+before proposing promotion. Join admission and the automatic promotion driver
+are not connected to this metadata yet.

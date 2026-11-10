@@ -143,3 +143,79 @@
       (gr8s::raft-propose leader '(:set "new-term" "barrier"))
       (rsim-run sim 3)
       (is-true (gr8s.raft:raft-peer-ready-for-promotion-p leader "l")))))
+
+(test learner-promotion-intent-is-committed-with-membership
+  (let ((sim (make-rsim '("a" "b" "c" "l") '(("a" . 3) ("b" . 7) ("c" . 9) ("l" . 11)))))
+    (dolist (id '("a" "b" "c"))
+      (gr8s::raft-configure (rsim-node sim id) '(("a" . :voter) ("b" . :voter) ("c" . :voter))))
+    (gr8s::raft-configure (rsim-node sim "l") '(("a" . :voter) ("b" . :voter) ("c" . :voter) ("l" . :learner)))
+    (rsim-run sim 8)
+    (let ((leader (rsim-node sim "a")))
+      (setf (rsim-groups sim) '(("a") ("b" "c" "l")))
+      (multiple-value-bind (index accepted)
+          (gr8s::raft-propose-config leader :add "l" :role :learner :promotion-role :voter)
+        (is (integerp index)) (is (eq t accepted)))
+      (rsim-drain sim)
+      (is (null (gethash "l" (gr8s.raft:raft-node-promotion-intents leader))))
+      (is (null (gethash "l" (gr8s::raft-node-roles leader))))
+      (setf (rsim-groups sim) nil)
+      (rsim-run sim 3)
+      (dolist (id '("a" "b" "c" "l"))
+        (is (eq :voter (gethash "l" (gr8s.raft:raft-node-promotion-intents (rsim-node sim id)))))
+        (is (eq :learner (gethash "l" (gr8s::raft-node-roles (rsim-node sim id))))))
+      ;; An unrelated membership entry must carry the outstanding intent.
+      (gr8s::raft-propose-config leader :add "b" :role :voter)
+      (rsim-run sim 3)
+      (is (eq :voter (gethash "l" (gr8s.raft:raft-node-promotion-intents leader))))
+      (is-true (gr8s.raft:raft-peer-ready-for-promotion-p leader "l"))
+      (gr8s::raft-propose-config leader :add "l" :role :voter)
+      (rsim-run sim 3)
+      (is (eq :voter (gr8s::raft-member-role leader "l")))
+      (is (null (gethash "l" (gr8s.raft:raft-node-promotion-intents leader)))))))
+
+(test learner-promotion-intent-survives-wal-replay-and-checkpoint
+  (dolist (checkpoint '(nil t))
+    (with-raft-temp-dir (path)
+      (let* ((storage (gr8s::open-file-raft-storage path))
+             (node (make-standalone-node :storage storage :snapshot/restore t)))
+        (unwind-protect
+             (progn
+               (gr8s::raft-become-candidate node)
+               (gr8s::raft-propose-config node :add "l" :role :learner :promotion-role :voter)
+               (gr8s::raft-propose node '(:set "k" "preserved"))
+               (is (eq :voter (gethash "l" (gr8s.raft:raft-node-promotion-intents node))))
+               (when checkpoint (gr8s::raft-compact node (gr8s::raft-node-last-applied node))))
+          (gr8s::close-file-raft-storage storage)))
+      (multiple-value-bind (restored kv) (make-standalone-node :snapshot/restore t)
+        (unwind-protect
+             (progn
+               (gr8s::recover-raft-node restored path)
+               (when checkpoint
+                 (is (eq :voter (gethash "l" (gr8s.raft:raft-node-promotion-intents restored)))))
+               ;; Recovered suffixes require a confirmed commit before application.
+               (setf (gr8s::raft-node-commit-index restored) (gr8s::raft-last-log-index restored))
+               (gr8s::raft-apply-committed restored)
+               (is (equal "preserved" (gethash "k" kv)))
+               (is (eq :learner (gr8s::raft-member-role restored "l")))
+               (is (eq :voter (gethash "l" (gr8s.raft:raft-node-promotion-intents restored))))
+               (is (zerop (hash-table-count (gr8s.raft::raft-node-peer-applied restored))))
+               (is (not (gr8s.raft:raft-peer-ready-for-promotion-p restored "l")))
+               (gr8s::raft-become-candidate restored)
+               (gr8s::raft-propose-config restored :remove "l")
+               (is (null (gethash "l" (gr8s.raft:raft-node-promotion-intents restored)))))
+          (when (gr8s::raft-node-storage restored)
+            (gr8s::close-file-raft-storage (gr8s::raft-node-storage restored))))))))
+
+(test invalid-promotion-intent-cannot-mutate-config-or-restore-application
+  (let ((node (make-standalone-node)) (restored nil))
+    (gr8s::raft-configure node '(("n1" . :voter) ("l" . :learner)))
+    (dolist (bad '((("n1" . :voter)) (("missing" . :voter)) (("l" . :witness)) (("l" . :voter) ("l" . :voter))))
+      (signals error (gr8s::raft-adopt-config node '(("n1" . :voter) ("l" . :learner))
+                                            '(("n1" "changed" 1234)) nil bad))
+      (is (null (gethash "n1" (gr8s::raft-node-peer-addresses node))))
+      (setf (gr8s::raft-node-restore-fn node) (lambda (state) (declare (ignore state)) (setf restored t)))
+      (signals error (gr8s.raft::raft-restore-snapshot-contents
+                      node (list :gr8s-raft-snapshot 1 :application-present t :application nil
+                                 :members '(("n1" . :voter) ("l" . :learner)) :promotions bad)))
+      (is (not restored)))
+    (signals error (gr8s::raft-propose-config node :add "l" :role :voter :promotion-role :voter))))
