@@ -32,14 +32,24 @@
                  (ha-control-plane-compaction-bytes hcp))))))
 
 (defun compact-ha-store-once (hcp)
-  "Drain ingress before outer barriers/member mutex; leave uncertain storage gated.
-The Raft clock remains running while requests waiting for consensus drain."
+  "Allow only one frozen view per control plane, including manual callers."
+  (bt:with-lock-held ((ha-control-plane-compaction-lock hcp))
+    (when (ha-control-plane-compaction-in-flight hcp)
+      (return-from compact-ha-store-once nil))
+    (setf (ha-control-plane-compaction-in-flight hcp) t))
+  (unwind-protect (compact-ha-store-once-exclusive hcp)
+    (bt:with-lock-held ((ha-control-plane-compaction-lock hcp))
+      (setf (ha-control-plane-compaction-in-flight hcp) nil))))
+
+(defun compact-ha-store-once-exclusive (hcp)
+  "Freeze under drained barriers; serialize/retain outside live locks and gates.
+Drain again before WAL replacement so uncertain durability remains fail-closed."
   (let ((member (ha-control-plane-member hcp)) (store (ha-control-plane-store hcp))
-        (owns-gate nil))
+        (owns-gate nil) (prepared nil) (view nil) (temporary nil))
     (when (or (gr8s.store::store-access-blocked-p store)
               (not (bt:with-lock-held ((raft-member-lock member))
                      (ha-compaction-due-unlocked-p hcp))))
-      (return-from compact-ha-store-once nil))
+      (return-from compact-ha-store-once-exclusive nil))
     (unwind-protect
          (progn
            (gr8s.store::quiesce-store-access store)
@@ -48,18 +58,52 @@ The Raft clock remains running while requests waiting for consensus drain."
             store
             (lambda ()
               (bt:with-lock-held ((raft-member-lock member))
-                ;; A concurrent install or checkpoint can invalidate the first check.
                 (when (ha-compaction-due-unlocked-p hcp)
-                  (gr8s.raft:raft-compact (raft-member-node member)
-                                        (raft-node-last-applied (raft-member-node member)))
-                  (let ((reaped (gr8s.resources::reap-store-snapshot-artifacts-unlocked
-                                 member (gr8s::pod-store-path store))))
-                    (bt:with-lock-held ((ha-control-plane-compaction-lock hcp))
-                      (incf (ha-control-plane-compaction-count hcp))
-                      (incf (ha-control-plane-compaction-reaped hcp) reaped)
-                      (setf (ha-control-plane-compaction-error hcp) nil)))
-                  t)))))
-      (when owns-gate
+                  (setf prepared (gr8s.raft::raft-prepare-compaction (raft-member-node member)))
+                  (when prepared
+                    (setf view (gr8s.resources::freeze-store-snapshot
+                                store (gr8s.raft::raft-prepared-compaction-index prepared)
+                                (gr8s.raft::raft-prepared-compaction-term prepared)))))
+                (when (gr8s.resources::member-store-restore-may-resume-p member)
+                  (gr8s.store::resume-store-access store)
+                  (setf owns-gate nil)))))
+           (unless (and prepared (not owns-gate))
+             (return-from compact-ha-store-once-exclusive nil))
+           (let* ((index (gr8s.raft::raft-prepared-compaction-index prepared))
+                  (term (gr8s.raft::raft-prepared-compaction-term prepared))
+                  (root (gr8s::pod-store-path store)))
+             (setf temporary (merge-pathnames
+                              (format nil "raft/capture-~A.jsonl" (gr8s.store:generate-uid)) root))
+             (gr8s.resources::capture-frozen-store-snapshot view temporary)
+             ;; Drop the private view before copying/validating the artifact.
+             (setf view nil)
+             (let* ((digest (ironclad:byte-array-to-hex-string (ironclad:digest-file :sha256 temporary)))
+                    (reference (gr8s.resources::store-snapshot-artifact-reference index term digest)))
+               (gr8s.resources::call-with-store-artifact-pin
+                member reference
+                (lambda ()
+                  (gr8s.resources::retain-store-snapshot-artifact root temporary index term digest)
+                  (when (gr8s.store::store-access-blocked-p store)
+                    (return-from compact-ha-store-once-exclusive nil))
+                  (gr8s.store::quiesce-store-access store)
+                  (setf owns-gate t)
+                  (gr8s.store::call-with-store-application-barriers
+                   store
+                   (lambda ()
+                     (bt:with-lock-held ((raft-member-lock member))
+                       (when (and (gr8s.raft.transport::raft-member-running member)
+                                  (gr8s.resources::member-store-restore-may-resume-p member)
+                                  (gr8s.raft::raft-commit-prepared-compaction
+                                   (raft-member-node member) prepared reference))
+                         (let ((reaped (gr8s.resources::reap-store-snapshot-artifacts-unlocked member root)))
+                           (bt:with-lock-held ((ha-control-plane-compaction-lock hcp))
+                             (incf (ha-control-plane-compaction-count hcp))
+                             (incf (ha-control-plane-compaction-reaped hcp) reaped)
+                             (setf (ha-control-plane-compaction-error hcp) nil)))
+                         t)))))))))
+      (unwind-protect
+           (when (and temporary (probe-file temporary)) (delete-file temporary))
+        (when owns-gate
         ;; Hold the same outer-before-member order through gate reopening, so a
         ;; failed WAL replacement cannot permit standalone/unconfirmed writes.
         (gr8s.store::call-with-store-application-barriers
@@ -67,7 +111,7 @@ The Raft clock remains running while requests waiting for consensus drain."
          (lambda ()
            (bt:with-lock-held ((raft-member-lock member))
              (when (gr8s.resources::member-store-restore-may-resume-p member)
-               (gr8s.store::resume-store-access store)))))))))
+               (gr8s.store::resume-store-access store))))))))))
 
 (defun start-ha-compaction-worker (hcp)
   (validate-ha-compaction-options (ha-control-plane-compaction-bytes hcp)

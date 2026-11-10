@@ -451,8 +451,13 @@ is reached. This accounts for Lisp strings occupying more memory than their
 UTF-8 representation on disk without scanning resource watch history.
 
 The separate worker drains ingress while the Raft clock continues, acquires
-outer application barriers before the member mutex, rechecks eligibility,
-captures exactly last-applied, replaces the WAL, and reclaims obsolete artifacts.
+outer application barriers before the member mutex, rechecks eligibility, and
+freezes exactly last-applied with its Raft metadata. It reopens its healthy gate
+and releases the live locks before serialization, hashing, registry copying and
+validation. It pins the artifact, drains again, and publishes the prepared
+boundary while preserving newer committed/uncommitted suffix entries. Finally
+it reclaims obsolete artifacts. Only one capture per control plane can run,
+including manual invocations, so overlapping workers cannot retain extra views.
 A capture failure with healthy storage reopens only the worker's own gate;
 uncertain WAL failure leaves application access blocked. Shutdown wakes and
 joins the worker before stopping Raft. Internal counters record successful
@@ -460,7 +465,8 @@ cycles, reclaimed artifacts and the most recent error.
 
 The opt-in worker's HA tests cover repeated byte-triggered checkpoints and
 recovery, capture failure, uncertain storage failure and waking a long-interval
-worker at shutdown. Production activation still requires capture-pause and
+worker at shutdown. They also cover live writes during capture and recovery of
+the newer committed suffix. Production activation still requires capture-pause and
 multi-member availability validation (`podster-ucm.11.3.9`). Retained watch
 history remains part of the snapshot: a tiny live resource set does not imply a
 tiny snapshot, and an overly aggressive trigger can repeatedly serialize that
@@ -476,15 +482,14 @@ revalidates the prefix under the lock and publishes the frozen metadata with
 the artifact. It preserves newer committed and uncommitted log entries, current
 term/vote, and live membership. A superseding snapshot or pending installation
 causes publication to return `nil`; the caller still owns artifact retention
-and cleanup. This foundation does not yet move the worker's application capture
-outside the member lock or enable automatic compaction by default.
+and cleanup. The opt-in worker uses these helpers; automatic compaction remains
+disabled by default pending sustained heap and multi-member availability proof.
 
 Image-tracker snapshot iteration freezes policy, leases, swarms and peers under
 the tracker mutex, then encodes records and invokes the writer after releasing
 that live mutex. Immutable tracker-owned torrent payloads are shared with the
 frozen view rather than copied. Live lease renewal, peer replacement or tracker
-reset cannot change the captured records. This reduces tracker contention;
-the application snapshot still needs the member-lock changes described above.
+reset cannot change the captured records.
 
 The application layer also provides a private frozen view. With ingress drained,
 the caller holds the outer application barriers and member mutex, prepares the
@@ -495,9 +500,9 @@ tracker. Secret configuration and derived encryption keys are pinned before
 releasing the credential barrier; later serialization does not reread the CA key.
 `capture-frozen-store-snapshot` streams this view without live application locks,
 using the same immutable-file publication protocol as ordinary capture. Freezing
-still takes time proportional to the indexes and mutable containers. The worker
-does not yet use this interface: retaining an unpublished artifact safely and
-integrating prepared publication remain required before the availability proof.
+still takes time proportional to the indexes and mutable containers. A frozen
+view can coexist with newer live history and log entries during capture; their
+combined retention must be included in the concurrent-churn memory validation.
 
 `call-with-store-artifact-pin` protects an unpublished portable artifact reference
 before its file appears in the registry. It registers a private reference under
@@ -506,8 +511,8 @@ and removes only its own pin on unwind. Cleanup preserves pinned files alongside
 the durable, pending, bootstrap and outbound roots. The callback must publish its
 durable Raft reference before returning; abandoned files become reclaimable.
 Pins are transient: after a crash, the WAL and other durable roots decide which
-artifacts remain necessary. The worker still needs to use this scope when it
-adopts frozen capture.
+artifacts remain necessary. The worker uses this scope across retention and
+prepared publication.
 
 For a standalone full-history memory probe, build with
 `sbcl --noinform --non-interactive --load scripts/build-snapshot-freeze-native-harness.lisp`

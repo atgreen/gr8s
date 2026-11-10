@@ -77,7 +77,7 @@
         (compaction-native-cold-recovery root-text recovery-port recovery-clock)))
     (let* ((root (uiop:ensure-directory-pathname root-text)) (rounds (parse-integer rounds-text))
            (store (gr8s:open-store root)) (ha nil) (port nil)
-           (max-wal 0) (max-artifacts 0) (max-history 0) (checkpoints 0) (samples 0)
+           (max-wal 0) (max-artifacts 0) (max-registry-files 0) (max-history 0) (checkpoints 0) (samples 0)
            (result (gr8s::core-object "passed" nil "nativeHarness" t "productionServe" nil
                      "vmAcceptance" nil "automaticWorker" t "productionDefaultEnabled" nil
                      "rounds" rounds "payloadBytesWritten" (* rounds 65536)
@@ -93,10 +93,17 @@
                (sample ()
                  (let ((member (gr8s::ha-control-plane-member ha)))
                    (bt:with-lock-held ((gr8s::raft-member-lock member))
-                     (setf max-wal (max max-wal (sb-posix:stat-size
-                                                (sb-posix:stat (merge-pathnames "raft/control-plane.log" root))))
-                           max-artifacts (max max-artifacts (length (uiop:directory-files
-                                                                     (merge-pathnames "snapshot-artifacts/" root))))))
+                     (let* ((files (uiop:directory-files (merge-pathnames "snapshot-artifacts/" root)))
+                            (artifacts (count "jsonl" files :test #'equal :key #'pathname-type))
+                            (pins (length (gr8s.raft.transport::raft-member-artifact-pins member))))
+                       ;; Bootstrap + current + one pinned candidate; LINK can
+                       ;; briefly expose both candidate and its private .part.
+                       (assert (<= artifacts (+ 2 pins)))
+                       (assert (<= (length files) (+ 2 (* 2 pins))))
+                       (setf max-wal (max max-wal (sb-posix:stat-size
+                                                  (sb-posix:stat (merge-pathnames "raft/control-plane.log" root))))
+                             max-artifacts (max max-artifacts artifacts)
+                             max-registry-files (max max-registry-files (length files)))))
                    (bt:with-lock-held ((gr8s::raft-member-lock member))
                      (bt:with-lock-held ((gr8s::pod-store-lock store))
                        (let* ((node (gr8s::raft-member-node member))
@@ -146,10 +153,13 @@
                      (assert (null (gr8s.ha::ha-control-plane-compaction-error ha))))
                    (assert (>= checkpoints 2))
                    (assert (< max-wal (* 32 1024 1024)))
-                   (assert (<= max-artifacts 2))
+                   (assert (<= max-artifacts 3))
                    (assert (>= max-history (- gr8s.resources::*resource-watch-history-bytes* (* 2 65536))))
                    (gr8s::stop-ha-control-plane ha)
                    (assert (null (gr8s.ha::ha-control-plane-compaction-thread ha)))
+                   (let ((count (length (uiop:directory-files (merge-pathnames "snapshot-artifacts/" root)))))
+                     (setf (gethash "quiescentArtifactCount" result) count)
+                     (assert (<= count 2)))
                    ;; Preserve the full retained checkpoint and journal before
                    ;; in-place HA recovery advances the watch epoch. The runner
                    ;; cold-loads this independent disk copy in a fresh process.
@@ -173,6 +183,7 @@
                          (gethash "checkpoints" result) checkpoints
                          (gethash "sampledMaxWalBytes" result) max-wal
                          (gethash "sampledMaxArtifactCount" result) max-artifacts
+                         (gethash "sampledMaxRegistryFileCount" result) max-registry-files
                          (gethash "sampledMaxHistoryEstimatedBytes" result) max-history
                          (gethash "samples" result) samples
                          (gethash "memberPort" result) port

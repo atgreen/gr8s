@@ -468,25 +468,70 @@
 (test compaction-capture-failure-reopens-only-its-own-gate
   (with-temporary-store (store root)
     (declare (ignore root))
-    (let ((ha nil))
+    (let ((ha nil) (capture (symbol-function 'gr8s.resources::capture-frozen-store-snapshot)))
       (unwind-protect
            (progn
              (setf ha (gr8s::start-ha-control-plane store :id "failure" :init t
                        :compaction-entries 1 :compaction-interval nil))
              (is (poll-until (lambda () (gr8s::ha-control-plane-leader-p ha)) :timeout 15))
              (let* ((member (gr8s::ha-control-plane-member ha)) (node (gr8s::raft-member-node member))
-                    (capture (gr8s.raft:raft-node-snapshot-fn node)) (boundary (gr8s::raft-node-snapshot-index node)))
-               (setf (gr8s.raft:raft-node-snapshot-fn node) (lambda () (error "Injected capture failure")))
+                    (boundary (gr8s::raft-node-snapshot-index node)))
+               (setf (symbol-function 'gr8s.resources::capture-frozen-store-snapshot)
+                     (lambda (&rest arguments) (declare (ignore arguments)) (error "Injected capture failure")))
                (signals error (gr8s.ha::compact-ha-store-once ha))
                (is (not (gr8s.store::store-access-blocked-p store)))
                (is (= boundary (gr8s::raft-node-snapshot-index node)))
-               (setf (gr8s.raft:raft-node-snapshot-fn node) capture)
+               (setf (symbol-function 'gr8s.resources::capture-frozen-store-snapshot) capture)
                (gr8s.store::quiesce-store-access store)
                (is (null (gr8s.ha::compact-ha-store-once ha)))
                (is (gr8s.store::store-access-blocked-p store))
                (gr8s.store::resume-store-access store)
                (is (gr8s.ha::compact-ha-store-once ha))))
+        (setf (symbol-function 'gr8s.resources::capture-frozen-store-snapshot) capture)
         (gr8s::stop-ha-control-plane ha)))))
+
+(test compaction-io-allows-live-writes-and-recovers-the-newer-suffix
+  (with-temporary-store (store root)
+    (let ((ha nil) (original (symbol-function 'gr8s.resources::capture-frozen-store-snapshot))
+          (frozen-index nil) (seen nil))
+      (unwind-protect
+           (progn
+             (setf ha (gr8s::start-ha-control-plane store :id "async-capture" :init t
+                       :compaction-entries 1 :compaction-interval nil))
+             (is (poll-until (lambda () (gr8s::ha-control-plane-leader-p ha)) :timeout 15))
+             (setf (symbol-function 'gr8s.resources::capture-frozen-store-snapshot)
+                   (lambda (view path)
+                     (setf seen t frozen-index (gr8s.resources::frozen-store-snapshot-index view))
+                     (is (not (gr8s.store::store-access-blocked-p store)))
+                     (dolist (lock (list (gr8s::raft-member-lock (gr8s::ha-control-plane-member ha))
+                                        (gr8s::pod-store-lock store)
+                                        (gr8s.store::pod-store-workload-lock store)
+                                        (gr8s.store::pod-store-credential-lock store)
+                                        (gr8s.store::pod-store-consensus-write-lock store)))
+                       (is (not (sb-thread:holding-mutex-p lock))))
+                     (is (null (gr8s.ha::compact-ha-store-once ha)))
+                     ;; A normal write commits after freezing, before encoding.
+                     (gr8s::create-core-resource store "configmaps" (configmap-input "during-capture" "k" "later") "default")
+                     (funcall original view path)))
+             (is (gr8s.ha::compact-ha-store-once ha))
+             (is (eq t seen))
+             (let ((member (gr8s::ha-control-plane-member ha)))
+               (bt:with-lock-held ((gr8s::raft-member-lock member))
+                 (is (= frozen-index (gr8s::raft-node-snapshot-index (gr8s::raft-member-node member))))
+                 (is (> (gr8s.raft:raft-node-last-applied (gr8s::raft-member-node member)) frozen-index))
+                 (is (null (gr8s.raft.transport::raft-member-artifact-pins member)))))
+             (is (not (gr8s.ha::ha-control-plane-compaction-in-flight ha)))
+             (setf (symbol-function 'gr8s.resources::capture-frozen-store-snapshot) original)
+             (gr8s::stop-ha-control-plane ha)
+             (setf ha nil)
+             (let ((reopened (gr8s::open-store root)))
+               (setf ha (gr8s::start-ha-control-plane reopened :id "async-capture" :init t
+                         :compaction-interval nil))
+               (is (poll-until (lambda () (gr8s::ha-control-plane-leader-p ha)) :timeout 15))
+               (is (equal "later" (gethash "k" (gethash "data"
+                      (gr8s::get-core-resource reopened "configmaps" "default" "during-capture")))))))
+        (setf (symbol-function 'gr8s.resources::capture-frozen-store-snapshot) original)
+        (when ha (gr8s::stop-ha-control-plane ha))))))
 
 (test uncertain-checkpoint-storage-failure-keeps-application-gated
   (with-temporary-store (store root)
