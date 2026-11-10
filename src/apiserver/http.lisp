@@ -1452,6 +1452,7 @@ Watches are long-running requests, which that filter leaves alone."
            (setf (hunchentoot:content-type*) "text/plain; version=0.0.4; charset=utf-8")
            (concatenate 'string (apiserver-request-metrics-text) (process-metrics-text)
                         (gr8s.server::memory-metrics-text store)
+                        (gr8s.server::datastore-filesystem-metrics-text store)
                         (let ((acceptor hunchentoot:*acceptor*))
                           (if (and (typep acceptor 'gr8s-acceptor)
                                    (acceptor-control-plane-metrics-fn acceptor))

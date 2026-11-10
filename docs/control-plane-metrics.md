@@ -1,4 +1,4 @@
-# Control-plane memory metrics
+# Control-plane metrics
 
 Scrape the authenticated API endpoint with `kubectl get --raw /metrics`, or use
 the same credentials and authorization as other non-resource API requests.
@@ -101,5 +101,34 @@ locks, reads worker counters under the worker lock, and formats text after
 releasing those locks. Worker and Raft samples can represent slightly different
 instants. Comparing retained bytes with the configured budget helps identify
 write backpressure; sustained apply or peer replication lag needs investigation.
-Disk/inode capacity, heartbeat freshness, and reconciliation convergence remain
+Heartbeat freshness, datastore file growth, and reconciliation convergence remain
 separate telemetry work under `podster-ucm.6`.
+
+## State filesystem capacity
+
+Each API process with a store reports the filesystem holding its stable state
+directory. These unlabelled gauges are local to the answering process:
+
+| Metric | Meaning |
+|---|---|
+| `gr8s_datastore_filesystem_stats_available` | One when the current filesystem sample succeeded, zero when it failed |
+| `gr8s_datastore_filesystem_capacity_bytes` | Total filesystem capacity |
+| `gr8s_datastore_filesystem_available_bytes` | Bytes available to unprivileged allocation, excluding reserved blocks |
+| `gr8s_datastore_filesystem_used_bytes` | Bytes used across the filesystem |
+| `gr8s_datastore_filesystem_inodes` | Total filesystem inodes |
+| `gr8s_datastore_filesystem_inodes_free` | Free filesystem inodes |
+| `gr8s_datastore_filesystem_inodes_used` | Used filesystem inodes |
+
+Sampling uses `statvfs`; it does not walk directories or enter a datastore
+transaction. On failure, capacity and inode series are omitted rather than
+reported as zero. A process without a store omits the entire set. Filesystems
+that report no inode accounting can return zero inode totals; avoid dividing by
+zero when building alerts.
+
+These values include other applications using the same filesystem. They are not
+the size of gr8s's data and do not account for separate filesystems mounted below
+the state directory. Scrape each member and monitor any additional mounts
+separately. Falling available bytes or free inodes can prevent WAL and snapshot
+publication even while the Lisp heap has space. Check
+`gr8s_datastore_filesystem_stats_available == 0` separately from low-capacity
+alerts so failed sampling cannot appear healthy.

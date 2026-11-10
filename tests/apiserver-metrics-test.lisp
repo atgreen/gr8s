@@ -58,6 +58,9 @@
              (multiple-value-bind (body code) (apiserver-metrics-request "/metrics")
                (is (= 200 code))
                (is (search "gr8s_lisp_heap_used_bytes " body))
+               (is (search "gr8s_datastore_filesystem_stats_available 1" body))
+               (is (search "gr8s_datastore_filesystem_capacity_bytes " body))
+               (is (search "gr8s_datastore_filesystem_inodes_free " body))
                (is (search (format nil "gr8s_watch_history_bytes{kind=\"resources\"} ~D" bytes) body))
                (is (search "gr8s_watch_history_entries{kind=\"nodes\"} " body))
                (is (search "gr8s_watch_history_entries{kind=\"pods\"} " body))
@@ -72,6 +75,47 @@
                     (is (= revision (gr8s::pod-store-resource-revision store))))
                (gr8s.store::resume-store-access store)))
         (when server (stop-server server))))))
+
+(test datastore-filesystem-metrics-measure-real-capacity-without-application-access
+  (with-temporary-store (store path)
+    (let ((revision (gr8s::pod-store-resource-revision store)))
+      (gr8s.store::quiesce-store-access store)
+      (unwind-protect
+           (let ((text (gr8s.server::datastore-filesystem-metrics-text store)))
+             (flet ((sample (suffix)
+                      (let* ((prefix (concatenate 'string "gr8s_datastore_filesystem_" suffix " "))
+                             (line (find-if (lambda (line) (uiop:string-prefix-p prefix line))
+                                            (uiop:split-string text :separator '(#\Newline))))
+                             (*read-eval* nil))
+                        (read-from-string (subseq line (length prefix))))))
+               (is (= 1 (sample "stats_available")))
+               (is (plusp (sample "capacity_bytes")))
+               (is (<= 0 (sample "available_bytes") (sample "capacity_bytes")))
+               (is (<= 0 (sample "used_bytes") (sample "capacity_bytes")))
+               (is (<= 0 (sample "inodes_free") (sample "inodes")))
+               (is (= (sample "inodes_used") (- (sample "inodes") (sample "inodes_free")))))
+             (is-false (search (namestring path) text))
+             (is-false (search "{" text))
+             (is (= revision (gr8s::pod-store-resource-revision store))))
+        (gr8s.store::resume-store-access store)))))
+
+(test datastore-filesystem-measurement-failure-is-not-zero-capacity
+  (with-temporary-store (store path)
+    (values path)
+    (let ((original (symbol-function 'gr8s.kubelet::filesystem-statistics)) (calls 0))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s.kubelet::filesystem-statistics)
+                   (lambda (path) (declare (ignore path))
+                     (incf calls) (error "injected-stat-failure")))
+             (let ((text (gr8s.server::datastore-filesystem-metrics-text store)))
+               (is (search "gr8s_datastore_filesystem_stats_available 0" text))
+               (is-false (search "capacity_bytes" text))
+               (is-false (search "inodes_free" text))
+               (is-false (search "injected-stat-failure" text)))
+             (is (equal "" (gr8s.server::datastore-filesystem-metrics-text)))
+             (is (= 1 calls)))
+        (setf (symbol-function 'gr8s.kubelet::filesystem-statistics) original)))))
 
 (defun apiserver-metrics-request (path &rest options)
   "Call the real listener on its kernel-assigned port, returning the body as text and the status."

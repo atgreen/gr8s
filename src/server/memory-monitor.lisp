@@ -2,7 +2,8 @@
 ;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Purpose:
-;;;; Make memory visible. A server logs its heap and what its watch histories hold
+;;;; Expose process memory and state-filesystem pressure without scanning data.
+;;;; A server logs its heap and what its watch histories hold
 ;;;; once a minute, warns when the heap nears its limit, and says plainly why it
 ;;;; stops when the heap runs out, rather than leaving only a raw backtrace.
 
@@ -61,6 +62,32 @@ because application access is temporarily gated during snapshot publication."
          out (first family) (second family) "gauge"
          (loop for history in histories
                collect (list (list (cons "kind" (first history))) (nth (third family) history))))))))
+
+(defun datastore-filesystem-metrics-text (&optional store)
+  "Measure the filesystem holding the stable state root, without scanning files.
+Sampling failure emits availability zero and omits sizes, rather than inventing
+zero capacity. These process-local families have no path or resource labels."
+  (if (null store) ""
+      (let ((statistics
+              (ignore-errors
+                (gr8s.kubelet::filesystem-statistics (namestring (pod-store-path store))))))
+        (with-output-to-string (out)
+          (flet ((emit (suffix help value)
+                   (gr8s.kubelet::write-prometheus-family
+                    out (concatenate 'string "gr8s_datastore_filesystem_" suffix)
+                    help "gauge" (list (list nil value)))))
+            (emit "stats_available" "One when state-filesystem statistics were measured successfully."
+                  (if statistics 1 0))
+            (when statistics
+              (loop for (suffix help) in
+                      '(("capacity_bytes" "Total bytes in the filesystem holding the state root.")
+                        ("available_bytes" "Filesystem bytes available to unprivileged allocation.")
+                        ("used_bytes" "Filesystem bytes in use, including other applications.")
+                        ("inodes" "Total inodes in the filesystem holding the state root.")
+                        ("inodes_free" "Free inodes in the filesystem holding the state root.")
+                        ("inodes_used" "Used filesystem inodes, including other applications."))
+                    for value in statistics
+                    do (emit suffix help value))))))))
 
 (defun heap-exhausted-message (condition)
   "Explain CONDITION, a heap exhaustion, in one line."
