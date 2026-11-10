@@ -180,7 +180,7 @@ partial failure retains the IPAM lease until DEL removes the endpoint."
      "dns" (json-object "nameservers" (vector dns-address)))))
 
 (defun make-routed-cni-operations
-    (ipam &key (mtu 1450) (dns-address +dns-pod-server-address+)
+    (ipam &key node-id (mtu 1450) (dns-address +dns-pod-server-address+)
             (install-link (lambda (context address)
                             (configure-routed-veth context address :mtu mtu)))
             (check-link #'check-routed-cni-link)
@@ -213,7 +213,9 @@ partial failure retains the IPAM lease until DEL removes the endpoint."
        ;; Keep the durable lease on failure. DEL must remove links and policy
        ;; before releasing an address, including after a crash during ADD.
        (setf (cni-configuration-endpoint-address configuration) (first addresses)
-             (cni-configuration-endpoint-addresses configuration) addresses)
+             (cni-configuration-endpoint-addresses configuration) addresses
+             (cni-configuration-service-node-id configuration) node-id
+             (cni-configuration-service-return-address configuration) return-address)
        (funcall (cni-operations-add policy)
                 configuration context map-path link-path)
        (when return-address (funcall install-service-return context return-address))
@@ -224,7 +226,11 @@ partial failure retains the IPAM lease until DEL removes the endpoint."
      (let ((addresses (check-pod-addresses ipam (cni-context-container-id context)
                                           (cni-context-interface-name context))))
        (setf (cni-configuration-endpoint-address configuration) (first addresses)
-             (cni-configuration-endpoint-addresses configuration) addresses)
+             (cni-configuration-endpoint-addresses configuration) addresses
+             (cni-configuration-service-node-id configuration) node-id
+             (cni-configuration-service-return-address configuration)
+             (service-snat-address ipam (cni-context-container-id context)
+                                   (cni-context-interface-name context)))
        (funcall check-link context addresses))
      (funcall (cni-operations-check policy)
               configuration context map-path link-path)

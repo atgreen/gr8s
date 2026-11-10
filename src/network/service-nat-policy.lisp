@@ -25,7 +25,7 @@ previous CIDRs while old endpoints may still have live flows."
 
 (defun service-nat-identity-rows (record)
   "Encode the trusted primary/return-address pair for one Pod incarnation.
-The 128-bit token changes with the authenticated Pod, node or sandbox owner.
+The 128-bit token changes with the authenticated node or sandbox owner.
 Only the enabled bit is staged: complete history and receiver readiness need
 separate cluster-wide publication fences before the v2 graph is attached."
   (flet ((address-key (address)
@@ -36,16 +36,13 @@ separate cluster-wide publication fences before the v2 graph is attached."
                                (ldb (byte 8 8) number) (ldb (byte 8 0) number))))))
    (let* ((primary (service-translation-string record "podIP"))
          (alias (service-translation-string record "address"))
-         (owner (mapcar (lambda (key) (service-translation-string record key))
-                        '("nodeID" "podUID" "sandboxID" "interfaceName")))
+         (node-id (service-translation-string record "nodeID"))
+         (sandbox-id (service-translation-string record "sandboxID"))
+         (interface-name (service-translation-string record "interfaceName"))
          (primary-key (address-key primary))
          (alias-key (address-key alias))
-         (epoch (subseq (ironclad:digest-sequence
-                         :sha256
-                         (trivial-utf-8:string-to-utf-8-bytes
-                          (com.inuoe.jzon:stringify
-                           (coerce (append owner (list primary alias)) 'vector))))
-                        0 16))
+         (epoch (service-translation-incarnation-token
+                 node-id sandbox-id interface-name primary alias))
          (flags (service-lb-bytes #x20001 4)))
     (unless (and (not (equalp primary-key alias-key))
                  (some #'plusp epoch))

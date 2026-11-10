@@ -214,6 +214,21 @@
     (is (= 2 (gr8s::netlink-read-integer (cdr alias) 28 4)))
     (is (equalp (subseq (cdr primary) 8 24) (subseq (cdr alias) 8 24)))
     (is (equalp rows (gr8s.network::service-nat-identity-rows record)))
+    (let ((local (gr8s::encode-cni-endpoint-identity-v2
+                  "10.88.1.2" #(2 17 34 51 68 85)
+                  "node-1" "sandbox-1" "eth0" "10.88.1.9")))
+      (is (= 48 (length local)))
+      (is (equalp (subseq (cdr primary) 8 24) (subseq local 32 48)))
+      (is (equalp (subseq (gr8s::encode-cni-endpoint-identity
+                          "10.88.1.2" #(2 17 34 51 68 85)) 0 32)
+                  (subseq local 0 32)))
+      (is (not (equalp (subseq local 32 48)
+                       (subseq (gr8s::encode-cni-endpoint-identity-v2
+                                "10.88.1.2" #(2 17 34 51 68 85)
+                                "node-1" "sandbox-2" "eth0" "10.88.1.9") 32 48)))))
+    (setf (gethash "podUID" record) "pod-2")
+    (is (equalp (subseq (cdr primary) 8 24)
+                (subseq (cdr (first (gr8s.network::service-nat-identity-rows record))) 8 24)))
     (setf (gethash "sandboxID" record) "sandbox-2")
     (is (not (equalp (subseq (cdr primary) 8 24)
                      (subseq (cdr (first (gr8s.network::service-nat-identity-rows record))) 8 24)))))
