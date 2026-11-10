@@ -25,6 +25,7 @@
            (result (gr8s::core-object "passed" nil "nativeHarness" t "productionServe" nil
                      "vmAcceptance" nil "automaticWorker" t "productionDefaultEnabled" nil
                      "rounds" rounds "payloadBytesWritten" (* rounds 65536)
+                     "walTriggerBytes" (* 16 1024 1024)
                      "heapLimitMiB" (/ (sb-ext:dynamic-space-size) (* 1024 1024)))))
       (labels ((ready () (gr8s::ha-control-plane-leader-p ha))
                (sample ()
@@ -40,7 +41,7 @@
                  (progn
                    (assert (= 384 (gethash "heapLimitMiB" result)))
                    (setf ha (gr8s::start-ha-control-plane store :id "compact-native" :init t
-                             :compaction-bytes 262144 :compaction-entries 100000 :compaction-interval 0.01)
+                             :compaction-bytes (* 16 1024 1024) :compaction-entries 100000 :compaction-interval 0.01)
                          port (gr8s::raft-member-port (gr8s::ha-control-plane-member ha)))
                    (compaction-native-await #'ready)
                    (compaction-native-write
@@ -66,7 +67,7 @@
                      (setf checkpoints (gr8s.ha::ha-control-plane-compaction-count ha))
                      (assert (null (gr8s.ha::ha-control-plane-compaction-error ha))))
                    (assert (>= checkpoints 2))
-                   (assert (< max-wal (* 8 262144)))
+                   (assert (< max-wal (* 32 1024 1024)))
                    (assert (<= max-artifacts 2))
                    (gr8s::stop-ha-control-plane ha)
                    (assert (null (gr8s.ha::ha-control-plane-compaction-thread ha)))
