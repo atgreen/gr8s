@@ -1,0 +1,146 @@
+{
+  "date": "2026-11-11",
+  "issue": "podster-ucm.11.3.13.2",
+  "sourceCommit": "2e5d52b",
+  "passed": true,
+  "scope": "Internal native test observation; production Raft and store behavior unchanged.",
+  "sourceSha256": {
+    "scripts/compaction-cluster-native-harness.lisp": "4daffccfc07d6549d897a632a181cd2ca1086f80d33ccf184dbe2cb7bb13dd13",
+    "scripts/test-compaction-cluster-native.py": "fe46a298c62ff549e2d82c6010803e04c40c42af4cfd7eb866a352790fa365dd",
+    "scripts/test-compaction-native-observation.lisp": "69a312f2592ec4f392d05d74153a29ddabfcd67046dfacd1a8bb0f68fd188ae7",
+    "scripts/test-compaction-observation.py": "2f4fca803db76f54c6c431f4b3a91e9a934372e191cc8be88ce2c3840f958cc5"
+  },
+  "heldMutexChecks": {
+    "exitCode": 0,
+    "checks": 22,
+    "log": "/home/green/.cache/gr8s-evidence/compaction-observation-tests.log"
+  },
+  "policyChecks": {
+    "exitCode": 0,
+    "checks": 12,
+    "command": "python3 scripts/test-compaction-observation.py"
+  },
+  "covered": [
+    "Nonblocking acquisition of member and raw store mutexes; held by real other threads in deterministic checks.",
+    "Busy observations contain busy/blocked and lock identity, with no term or applied progress; no cached progress is reused.",
+    "Sampler runs only with both mutexes held; errors and nonlocal exits release both.",
+    "Fresh partial samples remain subject to TLS, heap, error and warm-term checks while another member is busy.",
+    "Held-capture, asymmetric progress, final convergence, reclamation and cold-recovery gates require complete fresh samples.",
+    "Existing phase deadlines, RPC timeout, workload, heap/history/retention budgets and forced cold-election semantics remain unchanged."
+  ],
+  "limits": [
+    "Native128 smoke passed with166busy observations and fresh final gates. Isolated full2048 run pending separately; no concurrent builds or source suites from this workspace.",
+    "This removes an observer lock wait, not a proven product fix for the original full-history convergence stall."
+  ],
+  "nativeSmoke": {
+    "passed": true,
+    "evidence": "/home/green/.cache/gr8s-test-tmp/gr8s-compaction-cluster-native-hem4o_l0",
+    "binarySha256": "41ed234159efca4944dd594ebd1f96d2ba760ec048a1c4f5376096dfb9b1cf0d",
+    "nativeHarness": true,
+    "productionServe": false,
+    "vmAcceptance": false,
+    "mutualTls": true,
+    "processes": 3,
+    "heapLimitMiB": 384,
+    "rounds": 128,
+    "payloadBytes": 8388608,
+    "fullChurnAcceptance": false,
+    "statusBusyPolls": 166,
+    "leadershipStabilityAcceptance": true,
+    "asymmetricCaptureAcceptance": true,
+    "generationReclamationAcceptance": true,
+    "archivedPrefixReplayAcceptance": true,
+    "diskCatchupAcceptance": true,
+    "catchupHistoryContinuous": true,
+    "historyPreservedAcrossRestart": true,
+    "identitiesPreserved": true,
+    "stopExitCodes": {
+      "cp-a": 0,
+      "cp-b": 0,
+      "cp-c": 0
+    },
+    "cleanupExitCodes": {
+      "cp-a": 0,
+      "cp-b": 0,
+      "cp-c": 0
+    },
+    "elapsedSeconds": 147.33524113101885,
+    "lastBusyObservation": {
+      "cp-a": {
+        "busy": false,
+        "blocked": false,
+        "term": 1,
+        "applied": 339
+      },
+      "cp-b": {
+        "busy": true,
+        "busyLock": "member",
+        "blocked": true
+      },
+      "cp-c": {
+        "busy": false,
+        "blocked": false,
+        "term": 1,
+        "applied": 339
+      }
+    },
+    "beforeRestart": {
+      "cp-a": {
+        "busy": false,
+        "term": 1,
+        "applied": 339,
+        "historyEstimatedBytes": 16795168,
+        "applicationGenerationCount": 1,
+        "retiredGenerationCount": 0,
+        "generationTrashCount": 0
+      },
+      "cp-b": {
+        "busy": false,
+        "term": 1,
+        "applied": 339,
+        "historyEstimatedBytes": 16795168,
+        "applicationGenerationCount": 1,
+        "retiredGenerationCount": 0,
+        "generationTrashCount": 0
+      },
+      "cp-c": {
+        "busy": false,
+        "term": 1,
+        "applied": 339,
+        "historyEstimatedBytes": 16795168,
+        "applicationGenerationCount": 1,
+        "retiredGenerationCount": 0,
+        "generationTrashCount": 0
+      }
+    },
+    "afterRestart": {
+      "cp-a": {
+        "busy": false,
+        "term": 3,
+        "applied": 340,
+        "historyEstimatedBytes": 16795168,
+        "applicationGenerationCount": 1,
+        "retiredGenerationCount": 0,
+        "generationTrashCount": 0
+      },
+      "cp-b": {
+        "busy": false,
+        "term": 3,
+        "applied": 340,
+        "historyEstimatedBytes": 16795168,
+        "applicationGenerationCount": 1,
+        "retiredGenerationCount": 0,
+        "generationTrashCount": 0
+      },
+      "cp-c": {
+        "busy": false,
+        "term": 3,
+        "applied": 340,
+        "historyEstimatedBytes": 16795168,
+        "applicationGenerationCount": 1,
+        "retiredGenerationCount": 0,
+        "generationTrashCount": 0
+      }
+    }
+  }
+}
