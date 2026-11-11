@@ -1,17 +1,20 @@
 # Production store snapshot artifacts
 
 The internal artifact writer captures application records without constructing a
-whole-store JSON string, byte vector, or Lisp snapshot. It is a foundation for Raft
-snapshot integration. Production transport, durable restore, and automatic
-compaction are still tracked by `podster-ucm.11.3`. This is not an operator backup
-command.
+whole-store JSON string, byte vector, or Lisp snapshot. Production HA uses these
+artifacts for snapshot catch-up and durable recovery. Automatic checkpoints are
+available through `serve --raft-compaction`. Operator backups also need the stable
+member identity, signing/encryption keys and patch state; an application artifact
+alone does not include them.
 
 `gr8s.resources::capture-store-snapshot` takes a store, a new destination pathname,
 and the Raft applied index and term. Its caller must hold the member lock and
 supply the exact applied boundary. The writer takes the raw store lock, so it sees
 committed records rather than a speculative transaction. It rejects calls from
-inside a speculative store transaction. Holding these locks while writing is a
-current latency limitation to address in production capture scheduling.
+inside a speculative store transaction. Production checkpoint scheduling freezes
+an immutable application view under the verified barriers and streams that view
+after reopening ingress; the frozen-view path avoids holding the live member
+lock through serialization.
 
 The artifact is UTF-8 JSON Lines, version 1. Each line is serialized directly to
 the file stream. Extra serialization memory depends on the current record rather
@@ -395,8 +398,8 @@ target descriptor and store before intent or selection changes and must return
 `T`; a false return or error leaves the existing application selected. The final
 callback receives the target descriptor and reloaded store under the barriers; it must durably coordinate snapshot/applied-index/WAL
 recovery and must not reenter public store operations. The intent is removed only
-after that callback succeeds. These callbacks are integration contracts, not an
-implementation of production member recovery.
+after that callback succeeds. Production member recovery supplies these callbacks together with the outer
+writer and member barriers.
 
 Successful reload also leaves access blocked. The caller reopens it only after
 all recovery work succeeds. An explicit loaded-state flag prevents reopening
@@ -404,11 +407,11 @@ following a partial reload, including failures after the intent was removed but
 before its directory synchronization completed. Derived caches and journals reset
 before loading; member identity files remain at the stable root.
 
-Caller-owned node ingress and controller/external object references must still be
-quiesced before invoking this helper. Snapshot applied/revision boundaries and
-watch resynchronization must be coordinated by the production integration; the
-loader's captured clocks alone are insufficient for arbitrary rollback. There is
-no automatic live installer or operator restore command using this helper yet.
+Callers quiesce node ingress and controller/external object references before
+invoking this helper. Production artifact dispatch coordinates applied boundaries,
+revision minima, watch resynchronization and WAL publication. The helper also
+supports explicitly staged standalone generations, but does not provide an
+operator backup/restore command or infer a disaster-restore revision bump.
 
 Run `store-application-reload` for same-object state, cache/identity preservation,
 failure retry, HA callback requirements and post-reload consensus-write/reopen
@@ -509,9 +512,11 @@ five-minute timeout before a restore can acquire its barrier. A blocked socket
 write can still delay a request; the gate's drain timeout remains authoritative
 and leaves the application unchanged if requests cannot drain.
 
-This stream termination does not establish revision safety for a restored
-snapshot. Production restore still needs member/applied-boundary validation and
-a policy for monotonic resource versions before it can be exposed to operators.
+Stream termination releases request leases. Revision safety additionally depends
+on validation against the member's committed/applied boundary and
+fresh revision epochs. Production member recovery supplies those checks and
+barriers as described below. A standalone operator restore workflow must also
+choose an explicit revision bump when rolling back to an older backup.
 
 Secret encryption policy is application state and reloads from the selected
 checkpoint, including its active key identifier and public salts. The member's
@@ -530,15 +535,20 @@ member's current resource revision and its Pod revision reservation ceiling,
 respectively. The caller must quiesce all ingress before taking these values;
 if writes overtake a staged generation, rematerialize it with fresh minima.
 
-With a resource minimum, materialization gives every resource the new boundary
-revision and discards pre-restore history. Its history floors advance to that
-boundary so old watches and signed continuation pages expire instead of reading
-a different state under an old revision. With a Pod minimum, Nodes and Pod
-publications receive the new local boundary. Pod desired and observation revisions
-remain unchanged because replicated delta preconditions and agent acknowledgments
-use them across members. A durable local Pod epoch rejects pre-restore client
-versions while allowing newly published versions. The original artifact and its digest
-remain unchanged. Transformation happens one validated record at a time.
+A resource minimum places the retained history interval above the old local
+clock, shifting revisions upward when needed while preserving the interval's
+width and events. Current objects and history's old/new object versions use the
+same offset; versions preceding the interval clamp to the requested minimum.
+History byte estimates are invalidated after translation. Old watches and signed
+continuation pages expire at the fresh floor. Generic reload and member-boundary
+checks continue to require a fresh epoch; sharing a Raft log does not establish
+that public revision numbers are interchangeable between replicas.
+
+Pod minima advance local publication clocks when needed. Canonical Pod desired
+and observation revisions support replicated delta preconditions and agent
+acknowledgments, while the durable local Pod API epoch rejects pre-restore client
+versions. The source artifact and digest stay intact: materialization translates
+one validated record at a time, with checked revision arithmetic.
 
 A private `metadata/snapshot-boundary.json` records the materialized clocks and
 artifact index/term. Live reload checks it under the barriers before creating an
@@ -581,9 +591,10 @@ The application reference is a small, readable Lisp value suitable for the WAL:
 `(:gr8s-store-artifact 1 :index INDEX :term TERM :sha256 DIGEST)`. The reference
 binds the artifact identity; it does not contain the artifact bytes. Pending and
 published recovery also validate the enclosing Raft configuration envelope.
-Production wiring of artifact transport, durable placement and retention with
-application restore remains unfinished. Both preflight and post-load recovery callbacks run under the
-member and raw store barriers and must not reenter public store operations.
+Production startup wires artifact transport, durable placement, restore and WAL
+recovery together through `start-store-member-from-wal`. Both preflight and
+post-load callbacks run under the member and raw store barriers and must not
+reenter public store operations.
 
 Durable artifact storage is available through the internal
 `gr8s.resources::retain-store-snapshot-artifact` function. Supply the stable member
@@ -603,11 +614,12 @@ Published files are immutable; these APIs assume exclusive management of the
 member root by its process. Lookup rehashes and validates the artifact without
 assembling its complete payload in memory.
 
-Transfer scratch can be deleted after retention succeeds. Registry files have
-no automatic garbage collection: current or pending WAL snapshots, recoverable
-WAL history and in-flight transfers may depend on them. Interrupted staging files
-are ignored by reference lookup. The registry does not change application
-selection, write the WAL, transport artifact bytes, or enable automatic compaction.
+Transfer scratch can be deleted after retention succeeds. HA maintenance claims
+unreferenced registry artifacts under member/WAL ownership and removes recognized
+private trash outside the member lock. It protects current, pending, bootstrap,
+pinned, queued and active-transfer references, and runs independently of local
+checkpoint creation. Interrupted staging files are ignored by reference lookup.
+Artifact retention itself does not change application selection or write the WAL.
 Those production paths must call it before persisting an artifact reference.
 
 The internal `gr8s.resources::configure-store-artifact-transport` function binds
