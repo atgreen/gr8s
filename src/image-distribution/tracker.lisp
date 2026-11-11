@@ -110,7 +110,7 @@
   (unless (and (vectorp metainfo) (not (stringp metainfo)))
     (error "Tracker metainfo must contain octets"))
   (let ((octets (if (typep metainfo '(vector (unsigned-byte 8))) metainfo
-                    (bencode-octets metainfo))))
+                    (as-octets metainfo))))
     (with-open-stream (stream (flexi-streams:make-in-memory-input-stream octets))
       (nth-value 1 (validate-tracker-metainfo-stream stream (length octets) digest nil)))))
 
@@ -136,7 +136,7 @@
         (let* ((owned (if (typep metainfo '(vector (unsigned-byte 8)))
                           (copy-seq metainfo)
                           (if (and (vectorp metainfo) (not (stringp metainfo)))
-                              (bencode-octets metainfo)
+                              (as-octets metainfo)
                               (error "Tracker metainfo must contain octets"))))
                (infohash (validated-metainfo-infohash digest owned))
                (swarm (make-tracker-swarm :digest digest :metainfo owned :infohash infohash)))

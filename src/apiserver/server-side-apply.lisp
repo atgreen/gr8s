@@ -609,7 +609,7 @@ for a write to an object that serves status at its own endpoint."
 (defun apply-read-configuration (resource namespace name)
   "Decode and check the applied YAML, honoring Strict duplicate-key rejection."
   (multiple-value-bind (configuration duplicates)
-      (yaml-parse (hunchentoot:raw-post-data :force-text t))
+      (parse-yaml (hunchentoot:raw-post-data :force-text t))
     (when (and duplicates (equal "Strict" *crd-field-validation*))
       (core-resource-error 400 "BadRequest" "error strict decoding YAML: yaml: unmarshal errors:~%~{  ~A~^~%~}" duplicates))
     (unless (hash-table-p configuration)

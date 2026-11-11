@@ -33,8 +33,7 @@ The independent patch lock also excludes agent and witness patch managers."
                (error "Unsafe serve ownership file")))
            (unless (zerop (cffi:foreign-funcall "flock" :int fd :int 6 :int))
              (error "State directory ~A is in use; stop gr8s before offline maintenance" root))
-           (let ((patch-lock (gr8s.patch::open-process-lock (merge-pathnames "patches/" root))))
-             (unwind-protect (funcall function) (close patch-lock))))
+           (funcall function))
       (when fd (sb-posix:close fd)))))
 
 (defun require-serve-state-ownership (options)

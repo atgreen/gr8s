@@ -62,17 +62,12 @@
                 (root (ironclad:digest-sequence :sha256
                                                 (bt-concatenate leaf-0 leaf-1))))
            (is (= 16385 (gr8s.image-distribution::blob-torrent-length torrent)))
-           (is (= 16384 (gr8s.image-distribution::blob-torrent-piece-length torrent)))
-           (is (equalp root (gr8s.image-distribution::blob-torrent-pieces-root torrent)))
-           (is (equalp (vector leaf-0 leaf-1)
-                       (gr8s.image-distribution::blob-torrent-piece-hashes torrent)))
-           (is (equalp (ironclad:digest-sequence
-                        :sha256
-                        (gr8s.image-distribution::encode-bencode
-                         (gr8s.image-distribution::blob-torrent-info torrent)))
-                       (gr8s.image-distribution::blob-torrent-infohash torrent)))
+           (is (= 16384 (gr8s.image-distribution::torrent-piece-length torrent)))
+           (is (= 32 (length (gr8s.image-distribution::torrent-infohash torrent))))
+           ;; cl-torrent builds the BEP 52 metadata; gr8s only pins that the
+           ;; canonical piece layer matches the OCI blob's bytes.
            (let* ((metainfo (gr8s.image-distribution::decode-bencode
-                             (gr8s.image-distribution::blob-torrent-metainfo torrent)))
+                             (gr8s.image-distribution::torrent-metainfo torrent)))
                   (layers (gr8s.image-distribution::bencode-value metainfo "piece layers")))
              (is (equalp (bt-concatenate leaf-0 leaf-1)
                          (gr8s.image-distribution::bencode-value layers root)))))
@@ -102,10 +97,12 @@
          (let* ((built (gr8s.image-distribution::make-oci-blob-torrent
                         path digest 16384))
                 (parsed (gr8s.image-distribution::parse-oci-blob-torrent
-                         (gr8s.image-distribution::blob-torrent-metainfo built)
+                         (gr8s.image-distribution::torrent-metainfo built)
                          digest)))
-           (is (equalp (gr8s.image-distribution::blob-torrent-infohash built)
-                       (gr8s.image-distribution::blob-torrent-infohash parsed)))
-           (is (equalp (gr8s.image-distribution::blob-torrent-piece-hashes built)
-                       (gr8s.image-distribution::blob-torrent-piece-hashes parsed))))
+           (is (equalp (gr8s.image-distribution::torrent-infohash built)
+                       (gr8s.image-distribution::torrent-infohash parsed)))
+           ;; Parsing re-derives and verifies the download piece hashes; an
+           ;; exact metainfo round-trip is the observable proof.
+           (is (equalp (gr8s.image-distribution::torrent-metainfo built)
+                       (gr8s.image-distribution::torrent-metainfo parsed))))
       (ignore-errors (delete-file path)))))

@@ -246,10 +246,12 @@
   (signals gr8s::cel-evaluation-error (rule-cel "[dyn(1), dyn('a')].sortBy(x, x)")))
 
 (test cel-time-zone-names-read-the-zone-database
+  ;; CEL resolves named zones through cl-cel's own zone database, not the cron
+  ;; library's, so inject the synthetic zone there.
   (let* ((switch (cron-at 2026 3 1 0 0))
-         (zone (gr8s::parse-tzif (synthetic-tzif (- switch gr8s::+unix-epoch-universal+)) switch)))
-    (bt:with-lock-held (gr8s::*cron-zones-lock*)
-      (setf (gethash "Test/CelZone" gr8s::*cron-zones*) zone))
+         (zone (cl-cel::parse-tzif (synthetic-tzif (- switch cl-cel::+unix-epoch-universal+)) switch)))
+    (bt:with-lock-held (cl-cel::*time-zones-lock*)
+      (setf (gethash "Test/CelZone" cl-cel::*time-zones*) zone))
     ;; UTC+1 until 2026-03-01T00:00Z, UTC+2 after it.
     (is (= 0 (rule-cel "timestamp('2026-02-10T23:30:00Z').getHours('Test/CelZone')")))
     (is (= 11 (rule-cel "timestamp('2026-02-10T23:30:00Z').getDate('Test/CelZone')")))

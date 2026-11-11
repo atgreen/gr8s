@@ -212,7 +212,7 @@
                                          (template-schema (format nil "io.k8s.api.~A.HorizontalPodAutoscaler"
                                                                   (substitute #\. #\/ version)))))
               ((equal content-type "application/apply-patch+yaml")
-               (merge-json-object (copy-core-object view) (require-object (yaml-parse text) "patch")))
+               (merge-json-object (copy-core-object view) (require-object (parse-yaml text) "patch")))
               (t (core-resource-error 415 "UnsupportedMediaType" "Unsupported status patch type"))))))
 
 (defun dispatch-hpa-status-request (store path method)

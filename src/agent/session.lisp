@@ -763,8 +763,6 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
               session :hello
                (make-instance 'gr8s.node.v1::node-hello
                               :node-name node-name
-                              :patch-inventory-json (if gr8s.patch:*manager*
-                                                       (gr8s.patch::octets (com.inuoe.jzon:stringify (gr8s.patch:inventory gr8s.patch:*manager*))) #())
                               :certificate-request
                               (if private-key-path
                                   (generate-node-key-and-csr node-name private-key-path)

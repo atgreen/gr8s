@@ -7,10 +7,10 @@
 (destructuring-bind (wal ready)
     (let ((args (uiop:command-line-arguments))) (if (equal "--" (first args)) (rest args) args))
   (let ((storage (gr8s.raft:open-file-raft-storage wal))
-        (original (symbol-function 'gr8s.raft::raft-wal-write-frame)))
+        (original (symbol-function 'cl-raft::raft-wal-write-frame)))
     (unwind-protect
          (progn
-           (setf (symbol-function 'gr8s.raft::raft-wal-write-frame)
+           (setf (symbol-function 'cl-raft::raft-wal-write-frame)
                  (lambda (form stream)
                    (finish-output stream)
                    (let* ((bytes (trivial-utf-8:string-to-utf-8-bytes
@@ -24,5 +24,5 @@
                    (loop (sleep 1))))
            ;; This call never returns or acknowledges success before SIGKILL.
            (gr8s.raft:raft-storage-save-hard-state storage 99 "pending-éλ😀"))
-      (setf (symbol-function 'gr8s.raft::raft-wal-write-frame) original)
+      (setf (symbol-function 'cl-raft::raft-wal-write-frame) original)
       (gr8s.raft:close-file-raft-storage storage))))

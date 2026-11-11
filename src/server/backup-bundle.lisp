@@ -73,7 +73,7 @@
   (let ((writer (open-backup-writer output key)) (previous nil))
     (write-backup-bundle-json
      writer 0 (json-object "format" "gr8s-state-bundle" "version" 1
-                           "buildID" gr8s.patch:*build-id* "release" +gr8s-version+
+                           "release" +gr8s-version+
                            "createdAt" (get-universal-time) "exclusionPolicy" "gr8s-control-plane-v1"))
     (multiple-value-bind (count bytes excluded)
         (map-offline-backup-files
@@ -92,11 +92,10 @@ No success is returned until authenticated final EOF, counters and digests agree
   (let* ((reader (open-backup-reader input key))
          (record (or (read-backup-record reader) (error "Missing backup manifest")))
          (manifest (progn (unless (= 0 (aref record 0)) (error "Missing backup manifest"))
-                          (parse-backup-bundle-json record 6)))
+                          (parse-backup-bundle-json record 5)))
          (previous nil) (remaining nil) (hash nil) (count 0) (bytes 0))
     (unless (and (equal "gr8s-state-bundle" (gethash "format" manifest))
                  (eql 1 (gethash "version" manifest))
-                 (gr8s.patch::valid-digest-p (gethash "buildID" manifest))
                  (stringp (gethash "release" manifest))
                  (typep (gethash "createdAt" manifest) '(unsigned-byte 64))
                  (equal "gr8s-control-plane-v1" (gethash "exclusionPolicy" manifest)))

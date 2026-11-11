@@ -161,10 +161,6 @@ without input, and a client without WebSocket pings (any before v5.channel.k8s.i
           ((and (equal endpoint "readyz") store (gr8s.store::store-access-blocked-p store))
            (setf (hunchentoot:return-code*) 503)
            "application restore in progress")
-          ((and (equal endpoint "readyz") gr8s.patch:*manager*
-                (not (equal "healthy" (gethash "state" (gr8s.patch:inventory gr8s.patch:*manager*)))))
-           (setf (hunchentoot:return-code*) 503)
-           "patch recovery required")
           ((and check (plusp (length check)))
            (if (member check checks :test #'equal)
                "ok"

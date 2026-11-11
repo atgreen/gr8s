@@ -121,13 +121,13 @@ leaving cross-node P2P fetches silently unreachable.")
 (defun register-image-peer-swarm (server torrent pathname completed)
   "Publish a verified local blob through SERVER. Reject truncated-hash collisions."
   (let ((key (image-peer-swarm-key
-              (subseq (gr8s.image-distribution::blob-torrent-infohash torrent) 0 20))))
+              (subseq (gr8s.image-distribution::torrent-infohash torrent) 0 20))))
     (bt:with-lock-held ((image-peer-server-lock server))
       (let ((existing (gethash key (image-peer-server-swarms server))))
         (when (and existing
                    (not (and (equal pathname (image-peer-swarm-pathname existing))
-                             (equalp (gr8s.image-distribution::blob-torrent-infohash torrent)
-                                     (gr8s.image-distribution::blob-torrent-infohash
+                             (equalp (gr8s.image-distribution::torrent-infohash torrent)
+                                     (gr8s.image-distribution::torrent-infohash
                                       (image-peer-swarm-torrent existing))))))
           (error "A BitTorrent swarm with the same truncated infohash is already served"))
         (unless existing
@@ -140,7 +140,7 @@ leaving cross-node P2P fetches silently unreachable.")
   (bt:with-lock-held ((image-peer-server-lock server))
     (remhash
      (image-peer-swarm-key
-      (subseq (gr8s.image-distribution::blob-torrent-infohash torrent) 0 20))
+      (subseq (gr8s.image-distribution::torrent-infohash torrent) 0 20))
      (image-peer-server-swarms server))))
 
 (defun image-peer-server-client (server socket)
@@ -289,13 +289,13 @@ leaving cross-node P2P fetches silently unreachable.")
    peer-server torrent path
    (make-array (gr8s.image-distribution::torrent-piece-count torrent)
                :element-type 'bit :initial-element 1))
-  (let ((digest (gr8s.image-distribution::blob-torrent-oci-digest torrent))
+  (let ((digest (gr8s.image-distribution::blob-torrent-content-id torrent))
         (endpoint (image-peer-endpoint-arguments
                    peer-server peer-id advertise-address)))
     (labels ((publish (lease-token)
                (apply tracker-call :publish digest
                       :token lease-token
-                      :metainfo (gr8s.image-distribution::blob-torrent-metainfo torrent)
+                      :metainfo (gr8s.image-distribution::torrent-metainfo torrent)
                       endpoint)))
       (if token
           (publish token)
@@ -322,7 +322,7 @@ leaving cross-node P2P fetches silently unreachable.")
                (dolist (torrent torrents)
                  (ignore-errors
                    (apply tracker-call :announce
-                          (gr8s.image-distribution::blob-torrent-oci-digest torrent)
+                          (gr8s.image-distribution::blob-torrent-content-id torrent)
                           (image-peer-endpoint-arguments
                            peer-server peer-id advertise-address))))))))
 
@@ -340,7 +340,7 @@ leaving cross-node P2P fetches silently unreachable.")
            (lambda (temporary digest metainfo peers)
              (let* ((torrent (gr8s.image-distribution::parse-oci-blob-torrent
                               metainfo digest))
-                    (store (gr8s.image-distribution::make-piece-store
+                    (store (gr8s.image-distribution::open-blob-store
                             torrent temporary)))
                (download-image-from-peers
                 torrent store peer-id (mapcar #'tracker-plist-peer peers)
@@ -391,7 +391,7 @@ leaving cross-node P2P fetches silently unreachable.")
             (loop for swarm being the hash-values
                     of (image-peer-server-swarms
                         (node-image-distribution-peer-server distribution))
-                  collect (gr8s.image-distribution::blob-torrent-oci-digest
+                  collect (gr8s.image-distribution::blob-torrent-content-id
                            (image-peer-swarm-torrent swarm))))))
     (dolist (digest digests)
       (ignore-errors

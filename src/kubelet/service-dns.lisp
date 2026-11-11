@@ -311,6 +311,24 @@
             (resolve-store-service-ptr store question)
             (resolve-store-service-question store question #'rotate))))))
 
+(defun make-cluster-dns-resolver (store)
+  "Return a cl-dns-proxy resolver for STORE that answers cluster-authoritative
+names -- the reserved API service, and any name in the cluster zone, as NXDOMAIN
+when it does not resolve -- and declines everything else so the proxy forwards
+it upstream.  The proxy's resolver protocol is (ANSWERS HANDLED-P RCODE); gr8s's
+store resolver speaks (ANSWERS EXISTS REVERSE-AUTHORITY), which this adapts, so
+the cluster-DNS policy stays in gr8s while the forwarding proxy stays general."
+  (let ((service-resolver (store-service-dns-resolver store)))
+    (lambda (question)
+      (let ((name (0conf:question-name question)))
+        (if (string= (canonical-dns-name name) +dns-kubernetes-service+)
+            (values (kubernetes-service-answer question) t 0)
+            (multiple-value-bind (answers exists reverse-authority)
+                (funcall service-resolver question)
+              (if (or reverse-authority (dns-name-in-zone-p name +dns-cluster-zone+))
+                  (values answers t (if exists 0 +dns-name-error+))
+                  (values nil nil nil))))))))
+
 (defun service-dns-endpoint-unready-p (endpoint)
   "Exclude explicitly unready endpoints while retaining unspecified or null readiness."
   (let ((conditions (gethash "conditions" endpoint (core-object))))

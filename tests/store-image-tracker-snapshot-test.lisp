@@ -16,7 +16,7 @@
           (gr8s.image-distribution::tracker-acquire-origin tracker digest "seed")
         (declare (ignore status))
         (gr8s.image-distribution::tracker-publish-swarm
-         tracker digest "seed" token (gr8s.image-distribution::blob-torrent-metainfo torrent)
+         tracker digest "seed" token (gr8s.image-distribution::torrent-metainfo torrent)
          "10.0.0.1" 6881 (bt-octets "-GR8001-AAAAAAAAAAAA")))
       (gr8s.image-distribution::tracker-announce-peer
        tracker digest "downloader" "10.0.0.2" 6882 (bt-octets "-GR8001-BBBBBBBBBBBB") :complete-p nil))
@@ -197,7 +197,7 @@
       (multiple-value-bind (digest torrent) (tracker-test-torrent)
         (let* ((tracker (gr8s.store:pod-store-image-tracker store))
                (decoded (gr8s.image-distribution::decode-bencode
-                         (gr8s.image-distribution::blob-torrent-metainfo torrent)))
+                         (gr8s.image-distribution::torrent-metainfo torrent)))
                (metainfo
                  (gr8s.image-distribution::encode-bencode
                   (gr8s.image-distribution::bencode-dictionary
@@ -206,7 +206,7 @@
                           (gr8s.image-distribution::bencode-map-entries decoded)))))
                (expected (ironclad:digest-sequence :sha256 metainfo))
                (source (merge-pathnames "large-tracker.jsonl" root)))
-          (is (equalp (gr8s.image-distribution::blob-torrent-infohash torrent)
+          (is (equalp (gr8s.image-distribution::torrent-infohash torrent)
                       (gr8s.image-distribution::validated-metainfo-infohash digest metainfo)))
           (multiple-value-bind (status token)
               (gr8s.image-distribution::tracker-acquire-origin tracker digest "seed")
@@ -241,8 +241,8 @@
   (with-temporary-store (store root)
     (declare (ignore store))
     (multiple-value-bind (digest torrent) (tracker-test-torrent)
-      (let ((bytes (gr8s.image-distribution::blob-torrent-metainfo torrent))
-            (infohash (gr8s.image-distribution::blob-torrent-infohash torrent))
+      (let ((bytes (gr8s.image-distribution::torrent-metainfo torrent))
+            (infohash (gr8s.image-distribution::torrent-infohash torrent))
             (path (merge-pathnames "metainfo.bin" root)))
         (with-open-file (output path :direction :output :if-exists :error
                                     :element-type '(unsigned-byte 8))
@@ -265,7 +265,7 @@
   (multiple-value-bind (digest torrent) (tracker-test-torrent)
     (let* ((tracker (gr8s.store:pod-store-image-tracker store))
            (decoded (gr8s.image-distribution::decode-bencode
-                     (gr8s.image-distribution::blob-torrent-metainfo torrent)))
+                     (gr8s.image-distribution::torrent-metainfo torrent)))
            (metainfo (gr8s.image-distribution::encode-bencode
                       (gr8s.image-distribution::bencode-dictionary
                        (acons "comment" (make-array padding-size :element-type '(unsigned-byte 8) :initial-element 120)
@@ -345,8 +345,8 @@
   (with-temporary-store (store root)
     (declare (ignore store))
     (multiple-value-bind (digest torrent) (tracker-test-torrent)
-      (let ((original (gr8s.image-distribution::blob-torrent-metainfo torrent))
-            (infohash (gr8s.image-distribution::blob-torrent-infohash torrent))
+      (let ((original (gr8s.image-distribution::torrent-metainfo torrent))
+            (infohash (gr8s.image-distribution::torrent-infohash torrent))
             (path (merge-pathnames "canonical-metainfo.bin" root)))
         (labels ((check (prefix &optional trailing)
                    (let ((bytes (concatenate '(vector (unsigned-byte 8))
@@ -388,7 +388,7 @@
     (let ((tracker (gr8s.store:pod-store-image-tracker store))
           (validate (symbol-function 'gr8s.image-distribution::validated-metainfo-infohash)))
       (multiple-value-bind (digest torrent) (tracker-test-torrent)
-        (let* ((caller (copy-seq (gr8s.image-distribution::blob-torrent-metainfo torrent)))
+        (let* ((caller (copy-seq (gr8s.image-distribution::torrent-metainfo torrent)))
                (expected (copy-seq caller))
                (source (merge-pathnames "owned-tracker.jsonl" root)))
           (multiple-value-bind (status token)

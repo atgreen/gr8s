@@ -291,7 +291,7 @@ partial failure retains the IPAM lease until DEL removes the endpoint."
                 (let ((addresses (handler-case
                                      (check-pod-addresses ipam (cni-context-container-id context)
                                                           (cni-context-interface-name context))
-                                   (cni-error () nil)))
+                                   ((or cni-error rtnetlink-error) () nil)))
                       (alias (service-snat-address ipam (cni-context-container-id context)
                                                    (cni-context-interface-name context))))
                   (when (and addresses alias)

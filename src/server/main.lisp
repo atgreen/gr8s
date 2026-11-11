@@ -657,7 +657,7 @@
 (defun read-debug-kubeconfig (path)
   "Return server, token, CA, client certificate and key from PATH's current context."
   (let* ((file (truename path))
-         (root (gr8s.resources::yaml-parse (uiop:read-file-string file)))
+         (root (gr8s.resources:parse-yaml (uiop:read-file-string file)))
          (context-entry (kubeconfig-named-entry
                          (gethash "contexts" root #()) (gethash "current-context" root)))
          (context (gethash "context" context-entry))
@@ -1047,8 +1047,6 @@ The new identity takes effect when the node agent next starts."
      (parse-kubeconfig-options (rest arguments)))
     ((string= "runtime" (first arguments))
      (parse-runtime-options (rest arguments)))
-    ((string= "patch" (first arguments))
-     (gr8s.patch:parse-options (rest arguments)))
     ((string= "trace" (first arguments))
      (parse-trace-options (rest arguments)))
     ((string= "debug" (first arguments))
@@ -1716,10 +1714,7 @@ handler and never gets here. A busy host makes this race likely."
                        (or (null gate) (funcall gate)))
                  (call-with-reconciliation-metrics
                   worker
-                  (lambda ()
-                    (gr8s.patch:call-in-domain
-                     "controller-pass"
-                     (lambda () (funcall (symbol-function 'run-controller-pass) worker))))))
+                  (lambda () (run-controller-pass worker))))
              ;; Timeouts are serious conditions, not errors, and a late one can land here.
              ((or error sb-ext:timeout bt2:timeout) (error)
                (format *error-output* "gr8s reconciliation error: ~A~%" error)))
@@ -1806,9 +1801,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
        ;; top-level handler then emits one actionable line without a worker
        ;; thread backtrace.
        (ensure-kubelet-endpoints-available :command "serve"))
-     (unwind-protect
-          (progn (bootstrap-patches options) (serve-owned options))
-       (shutdown-patches)))))
+     (serve-owned options))))
 
 (defun serve-owned (options)
   "Run the gr8s control plane until shutdown, returning 0. Opens the store and
@@ -1839,10 +1832,6 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                   (open-store state-directory
                               :defer-restore-completion
                               (and (or (getf options :raft-init) (getf options :raft-join)) t))))
-         (patch-policy-checked
-           (when gr8s.patch:*manager*
-             (validate-patch-admission store (gr8s.patch::octets
-                                              (com.inuoe.jzon:stringify (gr8s.patch:inventory gr8s.patch:*manager*))))))
          (pool (ensure-controller-node-pool store state-directory options))
          (pki (ensure-control-plane-pki state-directory options))
          (server nil)
@@ -1964,7 +1953,6 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                   (reconciler (make-reconciler store runtime)))
              (when ha
                (install-member-slynk-handler node-server state-directory store reconciler))
-             (when gr8s.patch:*manager* (start-patch-coordinator store node-server ha))
              (unless (getf options :disable-agent)
                (setf local-agent
                      (start-local-node-agent
@@ -2094,7 +2082,6 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                (when (or api-server service-network-created)
                  (remove-in-cluster-network pki))
                (setf (pod-store-in-cluster-config store) nil))))
-      (stop-patch-coordinator)
       (when pki-authority-observer
         (gr8s.resources::remove-pki-authority-observer
          store pki-authority-observer))
@@ -2528,11 +2515,7 @@ No HA API may start from member-local certificate state before this converges."
               (install-memory-hooks))
             (case (getf options :command)
               (:help (print-help (getf options :help-path)) 0)
-              (:version
-               (let* ((root (uiop:ensure-directory-pathname (or (getf options :state-directory) (default-state-directory))))
-                      (journal (merge-pathnames "patches/journal.json" root))
-                      (level (if (probe-file journal) (gethash "level" (gr8s.patch::read-json journal) 0) 0)))
-                 (format t "gr8s ~A, patch level ~D~%" +gr8s-version+ level)) 0)
+              (:version (format t "gr8s ~A~%" +gr8s-version+) 0)
               (:skill (print-skill) 0)
               (:notices (print-notices) 0)
               (:kubeconfig
@@ -2553,7 +2536,6 @@ No HA API may start from member-local certificate state before this converges."
               (:runtime-list
                (print-runtime-list (getf options :state-directory))
                0)
-              (:patch (gr8s.patch:run-command options))
               (:trace (run-trace-command options))
               (:debug-slynk (run-debug-slynk-command options))
               (:wireguard-rotate-key
@@ -2587,11 +2569,11 @@ No HA API may start from member-local certificate state before this converges."
               (:agent
                (setf *shutdown-requested* nil)
                (install-shutdown-handlers)
-               (unwind-protect (progn (bootstrap-patches options) (agent options)) (shutdown-patches)))
+               (agent options))
               (:witness
                (setf *shutdown-requested* nil)
                (install-shutdown-handlers)
-               (unwind-protect (progn (bootstrap-patches options) (run-witness options)) (shutdown-patches)))))
+               (run-witness options))))
         (sb-int:broken-pipe ()
           (ignore-errors (close *standard-output* :abort t))
           0)

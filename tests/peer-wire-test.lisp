@@ -74,23 +74,23 @@
                                  (ironclad:digest-sequence :sha256 bytes))))
                 (torrent (gr8s.image-distribution::make-oci-blob-torrent
                           source digest 16384))
-                (store (gr8s.image-distribution::make-piece-store
+                (store (gr8s.image-distribution::open-blob-store
                         torrent destination)))
            (is (eq :complete
-                   (gr8s.image-distribution::piece-store-accept-block
+                   (gr8s.image-distribution::accept-block
                     store 0 0 (subseq bytes 0 16384))))
-           (is-true (aref (gr8s.image-distribution::piece-store-completed store) 0))
+           (is-true (aref (gr8s.image-distribution::completed-pieces store) 0))
            (let ((corrupt (copy-seq (subseq bytes 16384))))
              (setf (aref corrupt 0) (logxor #xff (aref corrupt 0)))
              (is (eq :corrupt
-                     (gr8s.image-distribution::piece-store-accept-block
+                     (gr8s.image-distribution::accept-block
                       store 1 0 corrupt))))
-           (is (zerop (aref (gr8s.image-distribution::piece-store-completed store) 1)))
+           (is (zerop (aref (gr8s.image-distribution::completed-pieces store) 1)))
            (is (eq :complete
-                   (gr8s.image-distribution::piece-store-accept-block
+                   (gr8s.image-distribution::accept-block
                     store 1 0 (subseq bytes 16384))))
            (is-true (gr8s.image-distribution::piece-store-complete-p store))
-           (let ((resumed (gr8s.image-distribution::make-piece-store
+           (let ((resumed (gr8s.image-distribution::open-blob-store
                            torrent destination :resume-p t)))
              (is-true (gr8s.image-distribution::piece-store-complete-p resumed)))
            (is (equalp bytes
@@ -116,10 +116,10 @@
                                  (ironclad:digest-sequence :sha256 bytes))))
                 (torrent (gr8s.image-distribution::make-oci-blob-torrent
                           source digest (* 1024 1024)))
-                (store (gr8s.image-distribution::make-piece-store
+                (store (gr8s.image-distribution::open-blob-store
                         torrent destination)))
            (is (eq :complete
-                   (gr8s.image-distribution::piece-store-accept-block
+                   (gr8s.image-distribution::accept-block
                     store 0 0 bytes)))
            (is-true (gr8s.image-distribution::piece-store-complete-p store)))
       (ignore-errors (delete-file source))
@@ -193,7 +193,7 @@
                                      (ironclad:digest-sequence :sha256 bytes))))
                     (torrent (gr8s.image-distribution::make-oci-blob-torrent
                               source digest 16384))
-                    (store (gr8s.image-distribution::make-piece-store
+                    (store (gr8s.image-distribution::open-blob-store
                             torrent destination))
                     (seed-id (bt-octets "-GR8001-SEEDSEEDSEED"))
                     (leech-id (bt-octets "-GR8001-LEECHLEECHLE")))
@@ -276,7 +276,7 @@
                                          (ironclad:digest-sequence :sha256 bytes))))
                         (torrent (gr8s.image-distribution::make-oci-blob-torrent
                                   source digest 16384))
-                        (store (gr8s.image-distribution::make-piece-store
+                        (store (gr8s.image-distribution::open-blob-store
                                 torrent destination))
                         (seed-id (bt-octets "-GR8001-SEEDSEEDSEED"))
                         (leech-id (bt-octets "-GR8001-LEECHLEECHLE"))

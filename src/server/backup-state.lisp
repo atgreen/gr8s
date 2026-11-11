@@ -5,7 +5,7 @@
 (defparameter +backup-runtime-prefixes+
   '("agent/containerd/" "agent/runtime/" "agent/pods/" "containerd/" "raft/transfers/"))
 (defparameter +backup-lock-paths+
-  '(".gr8s-serve.lock" "patches/process.lock" "raft/control-plane.log.lock" "raft/witness.log.lock"))
+  '(".gr8s-serve.lock" "raft/control-plane.log.lock" "raft/witness.log.lock"))
 
 (defun backup-excluded-path-p (relative)
   (or (member relative +backup-lock-paths+ :test #'equal)
