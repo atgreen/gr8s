@@ -24,7 +24,7 @@
       (multiple-value-bind (path descriptor)
           (gr8s.resources::materialize-store-snapshot
            root artifact (snapshot-test-digest artifact)
-           :expected-index 17 :expected-term 3)
+           :expected-index 17 :expected-term 3 :minimum-resource-revision 1)
         (declare (ignore path))
         (gr8s.store::publish-store-generation root (gethash "generation" descriptor))
         (let* ((restored (gr8s:open-store root))
@@ -199,25 +199,41 @@
                                 :generation-id id (list key (1- (expt 2 64)))))
           (is (null (probe-file (gr8s.store::store-generation-complete-path root id)))))))))
 
-(test snapshot-minimums-preserve-history-and-versions-unless-clock-must-advance
+(defun snapshot-history-event-content (entry)
+  (let ((copy (gr8s::copy-core-object entry)))
+    (dolist (field '("revision" "bytes" "bytesVersion")) (remhash field copy))
+    (dolist (field '("old" "new"))
+      (let ((object (gethash field copy)))
+        (when (hash-table-p object) (remhash "resourceVersion" (gethash "metadata" object)))))
+    copy))
+
+(test snapshot-history-rebases-into-fresh-epochs-without-dropping-events
   (with-temporary-store (store root)
     (let* ((artifact (merge-pathnames "minimums.jsonl" root))
            (pod (ha-make-pod store "minimum-preserved")))
-      (gr8s::create-core-resource store "configmaps" (configmap-input "first" "k" "one") "default")
-      (gr8s::create-core-resource store "configmaps" (configmap-input "second" "k" "two") "default")
+      (dolist (name '("first" "second" "third" "fourth"))
+        (gr8s::create-core-resource store "configmaps" (configmap-input name "k" name) "default"))
       (ha-make-pod store "later-pod")
+      ;; Keep an unchanged current object whose version predates retained history.
+      (let ((floor (parse-integer (gethash "resourceVersion" (gethash "metadata"
+                      (gr8s::get-core-resource store "configmaps" "default" "second"))))))
+        (setf (gr8s::pod-store-template-history-floor store) floor
+              (gr8s::pod-store-template-history store)
+              (remove-if (lambda (entry) (<= (gethash "revision" entry) floor))
+                         (gr8s::pod-store-template-history store))))
       (gr8s.resources::capture-store-snapshot store artifact 42 7)
       (let ((revision (gr8s::pod-store-resource-revision store))
+            (floor (gr8s::pod-store-template-history-floor store))
             (pod-revision (gr8s::pod-store-pod-revision store))
             (history (gr8s::pod-store-template-history store))
             (object (gr8s::get-core-resource store "configmaps" "default" "first"))
             (view (gr8s::pod-published-view store pod)))
         (is (plusp (length history)))
-        (dolist (case (list (list 0 0 nil nil)
-                           (list revision pod-revision nil nil)
-                           (list (+ revision 100) pod-revision t nil)
-                           (list revision (+ pod-revision 100) nil t)))
-          (destructuring-bind (minimum pod-minimum rebase-resource rebase-pod) case
+        (dolist (case (list (list 0 0 nil)
+                           (list revision pod-revision nil)
+                           (list (+ revision 100) pod-revision nil)
+                           (list revision (+ pod-revision 100) t)))
+          (destructuring-bind (minimum pod-minimum rebase-pod) case
             (multiple-value-bind (path descriptor)
                 (gr8s.resources::materialize-store-snapshot
                  root artifact (snapshot-test-digest artifact)
@@ -226,15 +242,20 @@
               (gr8s.store::publish-store-generation root (gethash "generation" descriptor))
               (let* ((restored (gr8s:open-store root))
                      (incoming (gr8s::get-core-resource restored "configmaps" "default" "first"))
-                     (restored-pod (gr8s:get-pod restored "default" "minimum-preserved")))
-                (is (= (max minimum revision) (gr8s::pod-store-resource-revision restored)))
-                (if rebase-resource
-                    (progn
-                      (is (null (gr8s::pod-store-template-history restored)))
-                      (is (equal (write-to-string minimum) (gethash "resourceVersion" (gethash "metadata" incoming)))))
-                    (progn
-                      (is (equalp history (gr8s::pod-store-template-history restored)))
-                      (is (equalp object incoming))))
+                     (restored-pod (gr8s:get-pod restored "default" "minimum-preserved"))
+                     (events (gr8s::pod-store-template-history restored)))
+                (is (= (+ revision (max 0 (- minimum floor))) (gr8s::pod-store-resource-revision restored)))
+                (is (= (length history) (length events)))
+                (is (equalp (mapcar #'snapshot-history-event-content history)
+                            (mapcar #'snapshot-history-event-content events)))
+                (is (gr8s.resources::core-replicated-state-equal-p object incoming))
+                (is (<= minimum (parse-integer (gethash "resourceVersion" (gethash "metadata" incoming)))))
+                (when (plusp minimum)
+                  (let ((failure (handler-case
+                                     (progn (gr8s.resources::check-template-revision-unlocked restored (1- minimum) "configmaps") nil)
+                                   (gr8s:kubernetes-error (condition) condition))))
+                    (is-true failure)
+                    (when failure (is (= 410 (gr8s::kubernetes-error-status-code failure))))))
                 (if rebase-pod
                     (is (equal (write-to-string pod-minimum)
                                (gethash "resourceVersion" (gethash "metadata" (gr8s::pod-published-view restored restored-pod)))))

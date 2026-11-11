@@ -211,15 +211,15 @@ configuration-only projection of store snapshots, without application artifacts
 or an application artifact retainer. Voters and learners retain the full
 application snapshot path.
 
-A validated same-log Raft artifact install preserves incoming resource watch
-history and object resource versions when its resource clock already satisfies
-the member's required minimum. A minimum revision is a lower bound; supplying
-one does not by itself require discarding history. This continuity path still
-requires a strictly newer resource clock and member-barrier, durable-boundary
-validation and recovery-commit callbacks. If the incoming clock needs an upward
-rebase, history starts a new epoch and public object versions are rebased.
-Generic application reloads continue to require a new resource-history epoch;
-Pod revision-ceiling and epoch checks remain in place for both paths.
+Snapshot installation retains the bounded resource history while translating
+its revision interval into a fresh local watch epoch. Public resource versions
+are member-local, so sharing a Raft log alone does not justify reusing another
+member's numbering. Existing watch cursors expire at the new epoch floor;
+history entries, their old/new object versions, and current objects are rebased
+consistently. Versions older than the retained interval clamp to the requested
+minimum. The interval width remains unchanged, and overflow is rejected before
+the generation is completed or selected. Generic application reloads retain
+their existing resource and Pod epoch fences.
 
 Internal admission callers can propose a learner with `:promotion-role :voter`
 to record its requested eventual role. The intent becomes effective with the

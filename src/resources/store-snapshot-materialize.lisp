@@ -55,6 +55,21 @@
       (setf (gethash "observedResourceVersion" result) (gethash "observedResourceVersion" checkpoint)))
     result))
 
+(defun rebase-snapshot-resource-object (object offset minimum maximum)
+  "Translate a freshly decoded object into the new local revision epoch.
+Versions older than the retained interval clamp to the minimum, so current and
+historical views agree without reusing pre-restore public versions. Secret AAD
+uses resource/namespace/name/key identity, not this public resourceVersion."
+  (when (hash-table-p object)
+    (let* ((metadata (gethash "metadata" object))
+           (version (and (hash-table-p metadata) (gethash "resourceVersion" metadata)))
+           (revision (and (stringp version) (parse-integer version :junk-allowed nil))))
+      (unless (and revision (<= 0 revision maximum))
+        (error "Invalid snapshot object revision during epoch rebase"))
+      (setf (gethash "resourceVersion" metadata)
+            (write-to-string (max minimum (+ revision offset))))))
+  object)
+
 (defun materialize-store-snapshot (root source expected-digest &key expected-index expected-term
                                                                 minimum-resource-revision minimum-pod-revision
                                                                 (generation-id (generate-uid)))
@@ -74,7 +89,7 @@ validated marker visible. This function never writes the live selector."
          (fields '("items" "customResourceItems" "workloadDeletions" "jobControllerStates" "templateHistory"))
          (spools nil) (tracker-output nil) (tracker-count 0) (counts (make-hash-table :test #'equal))
          (header nil) (clocks nil) (target-clocks nil) (record-count nil)
-         (resource-rebased nil) (pod-rebased nil))
+         (resource-offset 0) (source-resource-revision 0) (pod-rebased nil))
     (setf (gr8s.store::pod-store-data-root staged) path)
     (dolist (directory '("objects/" "nodes/" "observations/" "publications/" "metadata/" "image-tracker/"))
       (gr8s.store::ensure-store-generation-directory (merge-pathnames directory path) path))
@@ -101,16 +116,22 @@ validated marker visible. This function never writes the live selector."
                       ((equal kind "clocks")
                        ;; Keep the validator's source clocks untouched.
                        (setf target-clocks (alexandria:copy-hash-table record))
+                       (setf source-resource-revision (gethash "resourceRevision" record))
                        (when minimum-resource-revision
-                         (let ((revision (max minimum-resource-revision (gethash "resourceRevision" record))))
-                           (unless (< revision (1- (expt 2 64))) (error "No resource revision space remains after restore"))
-                           (setf resource-rebased (> minimum-resource-revision (gethash "resourceRevision" record))
-                                 (gethash "resourceRevision" target-clocks) revision)
-                           ;; A minimum is a bound, not a request to discard
-                           ;; valid incoming history or rewrite object versions.
-                           (when resource-rebased
-                             (setf (gethash "templateHistoryFloor" target-clocks) revision
-                                   (gethash "resourceHistoryStart" target-clocks) revision))))
+                         ;; Move the retained interval into a fresh epoch, not
+                         ;; merely its final clock. Keeping the interval width
+                         ;; avoids exponential revision growth on repeated restore.
+                         (setf resource-offset
+                               (max 0 (- minimum-resource-revision (gethash "templateHistoryFloor" record))))
+                         (let ((revision (+ source-resource-revision resource-offset)))
+                           (unless (< revision (1- (expt 2 64)))
+                             (error "No resource revision space remains after restore"))
+                           (setf (gethash "resourceRevision" target-clocks) revision
+                                 (gethash "templateHistoryFloor" target-clocks)
+                                 (+ (gethash "templateHistoryFloor" record) resource-offset)
+                                 (gethash "resourceHistoryStart" target-clocks)
+                                 (max minimum-resource-revision
+                                      (+ (gethash "resourceHistoryStart" record) resource-offset)))))
                        (when minimum-pod-revision
                          (setf pod-rebased (> minimum-pod-revision (gethash "podRevision" record))
                                (gethash "podRevision" target-clocks)
@@ -123,9 +144,9 @@ validated marker visible. This function never writes the live selector."
                        (terpri tracker-output)
                        (incf tracker-count))
                       ((equal kind "resource")
-                       (when resource-rebased
-                         (setf (gethash "resourceVersion" (gethash "metadata" object))
-                               (write-to-string (gethash "resourceRevision" target-clocks))))
+                       (when minimum-resource-revision
+                         (rebase-snapshot-resource-object object resource-offset
+                                                          minimum-resource-revision source-resource-revision))
                        (let ((resource (gethash "resource" record)))
                          (if (custom-resource-key-p resource)
                              (emit "customResourceItems" (core-object "resource" resource "object" object))
@@ -133,7 +154,16 @@ validated marker visible. This function never writes the live selector."
                       ((equal kind "workloadDeletion") (emit "workloadDeletions" (gethash "value" record) (gethash "key" record)))
                       ((equal kind "jobControllerState") (emit "jobControllerStates" (gethash "value" record) (gethash "key" record)))
                       ((equal kind "history")
-                       (unless resource-rebased (emit "templateHistory" (gethash "entry" record))))
+                       (let ((entry (gethash "entry" record)))
+                         (when minimum-resource-revision
+                           (incf (gethash "revision" entry) resource-offset)
+                           (dolist (field '("old" "new"))
+                             (rebase-snapshot-resource-object
+                              (gethash field entry) resource-offset minimum-resource-revision source-resource-revision))
+                           ;; Metadata strings changed; do not reuse stale heap estimates.
+                           (remhash "bytes" entry)
+                           (remhash "bytesVersion" entry))
+                         (emit "templateHistory" entry)))
                       ((equal kind "node")
                        (when pod-rebased
                          (setf (gethash "resourceVersion" object) (write-to-string (gethash "podRevision" target-clocks))))

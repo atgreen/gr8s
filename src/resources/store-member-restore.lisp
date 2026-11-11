@@ -34,9 +34,6 @@
             (setf descriptor incoming)))
       (gr8s.store::reload-store-application
        store (gethash "generation" descriptor) :call-with-member-lock #'funcall
-       ;; The durable Raft artifact belongs to this member's validated log, so
-       ;; its newer resource clock can retain the replicated watch history.
-       :resource-history-continuity t
        :validate-recovery validate
        ;; Live pending state follows a completed WAL replacement; startup state
        ;; comes from the validated WAL. Recheck it before intent removal. The

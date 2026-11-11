@@ -266,7 +266,11 @@
           (is (equal digest (snapshot-test-digest source)))
           (is (> (gr8s::pod-store-resource-revision store) old-core))
           (is (> (gr8s::pod-store-pod-revision store) old-ceiling))
-          (is (null (gr8s::pod-store-template-history store)))
+          (is (equal '("first" "second" "third")
+                     (sort (mapcar (lambda (entry) (gethash "name" entry))
+                                   (gr8s::pod-store-template-history store)) #'string<)))
+          (is (every (lambda (entry) (> (gethash "revision" entry) old-core))
+                     (gr8s::pod-store-template-history store)))
           (is (> (gr8s::pod-store-template-history-floor store) old-core))
           (dolist (read (list (lambda () (gr8s::template-watch-events store nil "" "" old-core :resource "configmaps"))
                              (lambda () (gr8s::pod-watch-events store nil "" "" old-pod))
@@ -576,38 +580,3 @@
       (is (funcall validate descriptor nil))
       (is (= 43 (gr8s.raft:raft-last-log-index node)))
       (is (= 10 (gr8s.raft:raft-node-last-applied node))))))
-
-(test history-continuity-reload-requires-validated-member-callbacks
-  (with-temporary-store (store root)
-    (declare (ignore root))
-    (dolist (case '((t "HA application reload requires")
-                    (:unknown "Invalid resource history continuity policy")))
-      (destructuring-bind (policy message) case
-        (let ((condition
-                (handler-case
-                    (progn
-                      (gr8s.store::reload-store-application
-                       store "01234567-89ab-4cde-8fab-0123456789ab"
-                       :resource-history-continuity policy)
-                      nil)
-                  (error (condition) condition))))
-          (is-true condition)
-          (when condition (is (search message (princ-to-string condition)))))))))
-
-(test generic-reload-still-requires-new-history-epoch-for-newer-snapshot-clock
-  (with-temporary-store (source source-root)
-    (with-temporary-store (sink sink-root)
-      (gr8s::create-core-resource source "configmaps" (configmap-input "one" "k" "one") "default")
-      (gr8s::create-core-resource source "configmaps" (configmap-input "two" "k" "two") "default")
-      (let ((artifact (merge-pathnames "generic-history.jsonl" source-root)))
-        (gr8s.resources::capture-store-snapshot source artifact 42 7)
-        (multiple-value-bind (path descriptor)
-            (gr8s.resources::materialize-store-snapshot
-             sink-root artifact (snapshot-test-digest artifact)
-             :minimum-resource-revision 1
-             :minimum-pod-revision (1+ (gr8s::pod-store-pod-revision-ceiling sink)))
-          (declare (ignore path))
-          (gr8s.store::quiesce-store-access sink :timeout 0)
-          (signals error (gr8s.store::reload-store-application sink (gethash "generation" descriptor)))
-          (is (null (gr8s.store::selected-store-generation-root sink-root)))
-          (is (null (gr8s.store::read-store-restore-intent sink-root))))))))
