@@ -39,5 +39,12 @@
     "offline-patch-ownership-fixed.log": "8135a97089c083fbb37ed9e9f14c4b817dd0449b1cc238c9b4c6f1191455a810",
     "offline-patch-ownership-integration.log": "74a56157149688267b9d3ad719d5c5a0ec685f1d7c34221d7c3f1cce73c9aa1f",
     "offline-state-ownership-before.lisp": "c57ab3c46dc7e3765b15761123ea226684388fb6b36902cbb65d7e6c2ad44125"
+  },
+  "combinedWithDefaultCheckpoints": {
+    "mergeCommit": "fa0be4a1d0571a0b6f6f294ef9443a704eccbd9f",
+    "checks": 142,
+    "ownershipChecksOverlapEarlierSuite": 126,
+    "processExit": 0,
+    "logSha256": "ec00fd5c3747eb1926961553b2d210635b8cc069e87bbf33428b7bd1df39be8c"
   }
 }
