@@ -265,3 +265,14 @@ replicated view, which can lag the leader. Loop measurements use the worker mute
 and are rendered after releasing it; the loop and generation samples are not an
 atomic application snapshot. Processes without the corresponding worker or store
 omit those families.
+
+Generation maintenance exposes `gr8s_generation_reaped_files_total` (application
+files reclaimed, excluding directory and retirement metadata cleanup),
+`gr8s_generation_reclamation_worker_up`, and
+`gr8s_generation_reclamation_error` (the last attempt failed). These series have
+no generation or path labels. The worker runs on HA members even with automatic
+compaction disabled; it handles retired application generations independently of
+local checkpoint creation. Unknown files and links remain protected and are not
+counted as reclaimed. A successful attempt clears the error gauge, including an
+idle attempt that finds no eligible generation. See
+[application generation maintenance](store-snapshot-artifacts.md#recovering-an-interrupted-application-selection).

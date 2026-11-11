@@ -107,6 +107,7 @@
                               :serial t
                               :components ((:file "types")
                                            (:file "generations")
+                                           (:file "generation-reclamation")
                                            (:file "policy")
                                            (:file "access-gate")
                                            (:file "observations")
@@ -128,6 +129,7 @@
                                            (:file "plane")
                                            (:file "control-plane")
                                            (:file "compaction")
+                                           (:file "maintenance")
                                            (:file "metrics")))
                              (:file "kubelet/pod-status-store")
                              (:file "kubelet/pod-finalizers")

@@ -20,6 +20,10 @@
 
 (defstruct ha-control-plane
   member store
+  maintenance-thread maintenance-running maintenance-error
+  (maintenance-lock (bt:make-lock "gr8s HA maintenance"))
+  (maintenance-changed (bt:make-condition-variable :name "gr8s HA maintenance"))
+  (generation-reaped-files 0)
   compaction-thread compaction-running compaction-in-flight compaction-retention-policy compaction-catchup-policy
   (compaction-lock (bt:make-lock "gr8s HA compaction"))
   (compaction-changed (bt:make-condition-variable :name "gr8s HA compaction"))
@@ -205,11 +209,14 @@ the cluster. Access stays gated until a current-term committed boundary applies.
                                            :compaction-bytes compaction-bytes
                                            :compaction-entries compaction-entries
                                            :compaction-interval compaction-interval))
+           (start-ha-maintenance-worker hcp)
            (when compaction-interval (start-ha-compaction-worker hcp))
            (setf completed t)
            hcp)
       (unless completed
-        (when hcp (stop-ha-compaction-worker hcp))
+        (when hcp
+          (stop-ha-maintenance-worker hcp)
+          (stop-ha-compaction-worker hcp))
         (when member (stop-raft-member member))))))
 
 (defun ha-control-plane-leader-p (hcp)
@@ -273,6 +280,7 @@ API and controllers. Remaining members retain reconnect failover coverage."
     (let ((store (ha-control-plane-store hcp)))
       ;; The hook stays attached to the stopped member. Even if another owner
       ;; later resumes access, shutdown cannot become local-only mutation.
+      (stop-ha-maintenance-worker hcp)
       (stop-ha-compaction-worker hcp)
       (stop-raft-member (ha-control-plane-member hcp))
       (unless (gr8s.store::store-access-blocked-p store)

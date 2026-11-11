@@ -9,6 +9,9 @@
   "Hold durable paths, in-memory indexes, observed status, and the store lock."
   path
   data-root
+  generation-reap-cursor
+  (generation-readers (make-hash-table :test #'equal))
+  (generation-reap-lock (bt:make-lock "gr8s generation reclamation"))
   access-blocked
   (application-loaded-p t)
   (active-requests 0)

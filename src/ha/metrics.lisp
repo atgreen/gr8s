@@ -67,6 +67,14 @@
                                 (if (ha-control-plane-compaction-in-flight hcp) 1 0))
                           (list "gr8s_compaction_error" "Whether the worker retains an error since its last successful checkpoint."
                                 (if (ha-control-plane-compaction-error hcp) 1 0))))))
+    (bt:with-lock-held ((ha-control-plane-maintenance-lock hcp))
+      (push (list "gr8s_generation_reaped_files_total" "Retired application data files reclaimed locally."
+                  (ha-control-plane-generation-reaped-files hcp) "counter") samples)
+      (push (list "gr8s_generation_reclamation_error" "Whether the last maintenance attempt failed."
+                  (if (ha-control-plane-maintenance-error hcp) 1 0)) samples)
+      (push (list "gr8s_generation_reclamation_worker_up" "Whether the local generation maintenance thread is alive."
+                  (if (and (ha-control-plane-maintenance-thread hcp)
+                           (bt:thread-alive-p (ha-control-plane-maintenance-thread hcp))) 1 0)) samples))
     (with-output-to-string (out)
       (dolist (sample (sort samples #'string< :key #'first))
         (destructuring-bind (name help value &optional (type "gauge")) sample

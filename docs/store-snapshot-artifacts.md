@@ -264,9 +264,39 @@ and unrelated staged generations do not create retirement records.
 
 A retirement record proves that a generation was previously selected; it does
 not by itself make that generation safe to delete. An interrupted transition
-can leave it selected or in use. Automatic reclamation of retired application
-generations is not yet implemented. Keep these records with the member state;
+can leave it selected or in use. HA generation maintenance uses the protected-root
+checks below before reclaiming retired application generations. Keep these records with the member state;
 do not remove generation directories based solely on their presence.
+
+The internal `reap-retired-store-generations` maintenance helper verifies the
+selected generation, live store root, pending restore and reader pins before
+atomically moving one retired generation to `.retired-<UUID>/` under the store
+mutex. It then prunes a batch outside the store and Raft locks. Each pass visits
+at most 64 application entries by default, plus fixed metadata and empty-directory
+cleanup. Metadata records are enumerated separately. Interrupted moves and partial
+deletions resume from the durable retirement descriptor. Unrecognized contents,
+links, files writable by others and executable files remain; older 0644 application
+files are eligible inside the verified private 0700 generation directories.
+
+Filesystem readers that outlive the raw store mutex must use
+`call-with-store-data-reader`, which pins the current generation until the reader
+returns or unwinds. Synchronous application loading and normal writes already use
+the raw mutex. Pins and reclamation coordination survive application reload. This
+helper requires exclusive member-root ownership and must run outside a Raft
+critical section.
+
+HA starts a joined generation maintenance worker independently of automatic
+compaction. It attempts one batch each second, including on receivers that never
+produce their own checkpoint. Shutdown joins this worker before stopping Raft or
+releasing member ownership. Maintenance does not enable compaction or change its
+retained-log budgets. A failed attempt retains an error and retries; a subsequent
+successful attempt clears the error. The local metrics are
+`gr8s_generation_reaped_files_total`, `gr8s_generation_reclamation_worker_up` and
+`gr8s_generation_reclamation_error`.
+
+Generations without retirement records, including generations superseded before
+this protocol was introduced, remain untouched. Snapshot-registry artifact cleanup
+and repeated native disk-bound acceptance remain separate work.
 
 `open-store` checks for an intent before loading any application files. It verifies
 that the target still has its matching completion marker, publishes the target

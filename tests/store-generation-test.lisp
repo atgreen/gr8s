@@ -293,3 +293,161 @@
         (is-false (gr8s.store::read-store-restore-intent root))
         (is (equal (gr8s.store::store-generation-root root old)
                    (gr8s.store::selected-store-generation-root root)))))))
+
+(defun set-test-generation-current (store id)
+  (gr8s.store::publish-store-generation (gr8s::pod-store-path store) id)
+  (setf (gr8s.store::pod-store-data-root store)
+        (gr8s.store::store-generation-root (gr8s::pod-store-path store) id)))
+
+(test retired-generation-reaper-protects-live-readers-and-cleans-after-release
+  (with-temporary-store (store root)
+    (destructuring-bind (old new staged) (make-retirement-test-generations root)
+      (setf (gr8s.store::pod-store-data-root store) (gr8s.store::store-generation-root root old))
+      (let ((data (merge-pathnames "pod-revision.ceiling" (gr8s.store:store-data-path store))))
+        (gr8s.security::write-private-text-exclusively data "17")
+        (gr8s.store::call-with-store-data-reader
+         store (lambda (path)
+                 (set-test-generation-current store new)
+                 (is (= 0 (gr8s.store::reap-retired-store-generations store)))
+                 (is (equal "17" (uiop:read-file-string (merge-pathnames "pod-revision.ceiling" path))))
+                 (is-true (probe-file (gr8s.store::store-generation-root root old)))))
+        (is (= 1 (gr8s.store::reap-retired-store-generations store)))
+        (is-false (probe-file (gr8s.store::store-generation-root root old)))
+        (is-false (probe-file (gr8s.store::store-generation-trash-path root old)))
+        (is-false (probe-file (gr8s.store::store-generation-retirement-path root old)))
+        (is-true (probe-file (gr8s.store::store-generation-root root new)))
+        (is-true (probe-file (gr8s.store::store-generation-root root staged)))))))
+
+(test retired-generation-pruning-is-batched-and-resumes-after-detachment
+  (with-temporary-store (store root)
+    (destructuring-bind (old new staged) (make-retirement-test-generations root)
+      (declare (ignore staged))
+      (let ((path (gr8s.store::store-generation-root root old)))
+        (dotimes (i 9)
+          (gr8s.security::write-private-text-exclusively
+           (merge-pathnames (format nil "~8,'0x-89ab-4cde-8fab-0123456789ab.json" i) path) "{}"))
+        (set-test-generation-current store new)
+        (let* ((descriptor (gr8s.store::read-store-generation-descriptor
+                            (gr8s.store::store-generation-retirement-path root old)))
+               (trash (gr8s.store::claim-retired-store-generation store descriptor)))
+          ;; Simulate interruption after durable rename; no in-memory task is needed.
+          (is-true (probe-file trash))
+          (is-false (probe-file path))
+          (let ((removed (gr8s.store::reap-retired-store-generations store :maximum-entries 2)))
+            (is (<= removed 2)) (is-true (probe-file trash)))
+          (dotimes (i 12)
+            (declare (ignore i))
+            (is (<= (gr8s.store::reap-retired-store-generations store :maximum-entries 2) 2)))
+          (is-false (probe-file trash)))))))
+
+(test retired-generation-reaper-preserves-unknown-files-links-and-pending-state
+  (with-temporary-store (store root)
+    (destructuring-bind (old new staged) (make-retirement-test-generations root)
+      (let* ((path (gr8s.store::store-generation-root root old))
+             (outside (merge-pathnames "sentinel.txt" root)))
+        (gr8s.security::write-private-text-exclusively outside "keep")
+        (gr8s.security::write-private-text-exclusively (merge-pathnames "unknown.txt" path) "unknown")
+        (sb-posix:symlink (namestring outside) (namestring (merge-pathnames "pod-revision.ceiling" path)))
+        (gr8s.store::begin-store-restore root new)
+        (setf (gr8s.store::pod-store-data-root store) path)
+        (is (= 0 (gr8s.store::reap-retired-store-generations store)))
+        (is-true (probe-file path))
+        (gr8s.store::resume-store-restore-selection root)
+        (setf (gr8s.store::pod-store-data-root store) (gr8s.store::store-generation-root root new))
+        ;; Pending intent still protects everything, even after selection.
+        (is (= 0 (gr8s.store::reap-retired-store-generations store)))
+        (gr8s.store::finish-store-restore store (gr8s.store::read-store-restore-intent root))
+        (gr8s.store::reap-retired-store-generations store)
+        (let ((trash (gr8s.store::store-generation-trash-path root old)))
+          (is (equal "unknown" (uiop:read-file-string (merge-pathnames "unknown.txt" trash))))
+          (is (sb-posix:s-islnk (sb-posix:stat-mode
+                                (gr8s.store::store-generation-stat (merge-pathnames "pod-revision.ceiling" trash))))))
+        (is (equal "keep" (uiop:read-file-string outside)))
+        (is-true (probe-file (gr8s.store::store-generation-root root staged)))))))
+
+(test generation-reader-pins-clean-up-on-errors-and-nonlocal-exits
+  (with-temporary-store (store root)
+    (destructuring-bind (old new staged) (make-retirement-test-generations root)
+      (declare (ignore new staged))
+      (setf (gr8s.store::pod-store-data-root store) (gr8s.store::store-generation-root root old))
+      (is (equal '(1 2) (multiple-value-list
+                        (gr8s.store::call-with-store-data-reader
+                         store (lambda (path) (declare (ignore path)) (values 1 2))))))
+      (signals simple-error
+        (gr8s.store::call-with-store-data-reader store (lambda (path) (declare (ignore path)) (error "reader error"))))
+      (is (eq :left (catch 'leave
+                      (gr8s.store::call-with-store-data-reader
+                       store (lambda (path) (declare (ignore path)) (throw 'leave :left))))))
+      (is (= 0 (hash-table-count (gr8s.store::pod-store-generation-readers store)))))))
+
+(test retired-generation-detach-sync-failure-is-restartable
+  (with-temporary-store (store root)
+    (destructuring-bind (old new staged) (make-retirement-test-generations root)
+      (declare (ignore staged))
+      (set-test-generation-current store new)
+      (let ((original (symbol-function 'gr8s.store::sync-store-generation-directory)))
+        (unwind-protect
+             (progn
+               (setf (symbol-function 'gr8s.store::sync-store-generation-directory)
+                     (lambda (path)
+                       (if (equal path (gr8s.store::store-generation-base root))
+                           (error "Injected detach sync uncertainty")
+                           (funcall original path))))
+               (signals error (gr8s.store::reap-retired-store-generations store)))
+          (setf (symbol-function 'gr8s.store::sync-store-generation-directory) original)))
+      (is-false (probe-file (gr8s.store::store-generation-root root old)))
+      (is-true (probe-file (gr8s.store::store-generation-trash-path root old)))
+      (is-true (probe-file (gr8s.store::store-generation-retirement-path root old)))
+      (finishes (gr8s.store::reap-retired-store-generations store))
+      (is-false (probe-file (gr8s.store::store-generation-trash-path root old))))))
+
+(test retired-generation-reaper-retains-hardlinks-and-unrecognized-subdirectories
+  (with-temporary-store (store root)
+    (destructuring-bind (old new staged) (make-retirement-test-generations root)
+      (declare (ignore staged))
+      (let* ((path (gr8s.store::store-generation-root root old))
+             (outside (merge-pathnames "outside.txt" root))
+             (unknown (merge-pathnames "unknown/" path)))
+        (gr8s.security::write-private-text-exclusively outside "keep")
+        (gr8s.store::ensure-store-generation-directory unknown path)
+        (gr8s.security::write-private-text-exclusively (merge-pathnames "inside.txt" unknown) "unknown")
+        (sb-posix:link (namestring outside) (namestring (merge-pathnames "pod-revision.ceiling" path)))
+        (set-test-generation-current store new)
+        (gr8s.store::reap-retired-store-generations store)
+        (let ((trash (gr8s.store::store-generation-trash-path root old)))
+          (is (equal "keep" (uiop:read-file-string (merge-pathnames "pod-revision.ceiling" trash))))
+          (is (equal "unknown" (uiop:read-file-string (merge-pathnames "unknown/inside.txt" trash)))))
+        (is (equal "keep" (uiop:read-file-string outside)))))))
+
+(test retired-generation-reaper-handles-older-pod-file-modes-inside-private-directories
+  (with-temporary-store (store root)
+    (destructuring-bind (old new staged) (make-retirement-test-generations root)
+      (declare (ignore staged))
+      (let ((pod (merge-pathnames "31234567-89ab-4cde-8fab-0123456789ab.json"
+                                  (gr8s.store::store-generation-root root old))))
+        (gr8s.security::write-private-text-exclusively pod "{}")
+        (sb-posix:chmod (namestring pod) #o644)
+        (set-test-generation-current store new)
+        (is (= 1 (gr8s.store::reap-retired-store-generations store)))
+        (is-false (probe-file (gr8s.store::store-generation-trash-path root old)))))))
+
+(test repeated-real-snapshot-reloads-reclaim-old-generations-and-preserve-data
+  (with-temporary-store (store root)
+    (let* ((descriptor (make-restore-intent-fixture store root))
+           (uid (gr8s:pod-uid (gr8s:get-pod store "default" "snapshot-pod")))
+           (key (progn (gr8s::load-service-account-signing-key store)
+                       (uiop:read-file-string (gr8s::service-account-signing-key-path store)))))
+      (dotimes (round 5)
+        (let ((previous (gr8s.store:store-data-path store)))
+          (gr8s.store::quiesce-store-access store)
+          (gr8s.store::reload-store-application store (gethash "generation" descriptor))
+          (gr8s.store::resume-store-access store)
+          (gr8s.store::reap-retired-store-generations store)
+          (when (plusp round) (is-false (probe-file previous)))
+          (is (equal uid (gr8s:pod-uid (gr8s:get-pod store "default" "snapshot-pod"))))
+          (is (hash-table-p (gr8s::get-core-resource store "configmaps" "default" "snapshot-config")))
+          (gr8s::load-service-account-signing-key store)
+          (is (equal key (uiop:read-file-string (gr8s::service-account-signing-key-path store))))
+          (let ((artifact (merge-pathnames (format nil "reload-~D.jsonl" round) root)))
+            (gr8s.resources::capture-store-snapshot store artifact (+ 43 round) 7)
+            (setf descriptor (nth-value 1 (materialize-live-test-snapshot store root artifact)))))))))
