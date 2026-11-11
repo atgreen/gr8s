@@ -367,3 +367,99 @@
              (gr8s::monitor-node-heartbeats server)
              (is (= 3 calls)))
         (setf (symbol-function 'gr8s::reconcile-node-heartbeats) original)))))
+
+(test committed-node-writes-reject-cross-node-underlay-collisions
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (seed-ha-readiness-nodes store)
+    (let ((a (capture-ha-node-write store
+               (lambda () (gr8s::update-node-underlay-address store "worker-a" "192.0.2.10"))))
+          (b (capture-ha-node-write store
+               (lambda () (gr8s::update-node-underlay-address store "worker-b" "192.0.2.10")))))
+      (is (eq :node-ok (first (gr8s::install-node-state-delta store a))))
+      (let ((revision (gr8s::pod-store-pod-revision store))
+            (events (gr8s::pod-store-node-watch-journal-length store)))
+        (is (equal '(:node-conflict) (gr8s::install-node-state-delta store b)))
+        (is (= revision (gr8s::pod-store-pod-revision store)))
+        (is (= events (gr8s::pod-store-node-watch-journal-length store)))
+        (is (equal "" (gr8s::node-record-underlay-address (gr8s:get-node store "worker-b"))))))))
+
+(test committed-node-registration-rejects-cross-node-identity-and-cidr-collisions
+  (dolist (collision '(:identity :cidr))
+    (with-temporary-store (store path)
+      (declare (ignore path))
+      (let ((a (capture-ha-node-write store
+                 (lambda () (gr8s:register-node store
+                              (gr8s:make-node-record :id "node-a" :name "worker-a" :pod-cidr "10.88.0.0/20")))))
+            (b (capture-ha-node-write store
+                 (lambda () (gr8s:register-node store
+                              (gr8s:make-node-record :id (if (eq collision :identity) "node-a" "node-b")
+                                                     :name "worker-b"
+                                                     :pod-cidr (if (eq collision :cidr) "10.88.0.0/20" "10.88.16.0/20")))))))
+        (is (eq :node-ok (first (gr8s::install-node-state-delta store a))))
+        (let ((revision (gr8s::pod-store-pod-revision store))
+              (events (gr8s::pod-store-node-watch-journal-length store)))
+          (is (equal '(:node-conflict) (gr8s::install-node-state-delta store b)))
+          (is (= revision (gr8s::pod-store-pod-revision store)))
+          (is (= events (gr8s::pod-store-node-watch-journal-length store)))
+          (is (null (gethash "worker-b" (gr8s::pod-store-nodes store)))))))))
+
+(test node-claim-conflicts-agree-on-replicas-and-survive-reopen
+  (with-temporary-store (left left-root)
+    (with-temporary-store (right right-root)
+      (let ((a (capture-ha-node-write left
+                 (lambda () (gr8s:register-node left
+                              (gr8s:make-node-record :id "a" :name "a" :pod-cidr "10.88.0.0/20"
+                                                     :underlay-address "192.0.2.20")))))
+            (b (capture-ha-node-write left
+                 (lambda () (gr8s:register-node left
+                              (gr8s:make-node-record :id "b" :name "b" :pod-cidr "10.88.16.0/20"
+                                                     :underlay-address "192.0.2.20"))))))
+        (dolist (store (list left right))
+          (is (eq :node-ok (first (gr8s::install-node-state-delta store a))))
+          (is (equal '(:node-conflict) (gr8s::install-node-state-delta store b))))
+        (dolist (root (list left-root right-root))
+          (let ((reopened (gr8s:open-store root)))
+            (is (equal "192.0.2.20" (gr8s::node-record-underlay-address (gr8s:get-node reopened "a"))))
+            (is (null (gethash "b" (gr8s::pod-store-nodes reopened))))))))))
+
+(test node-claim-transfer-validates-the-entire-final-delta-before-writing
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (seed-ha-readiness-nodes store)
+    (gr8s::update-node-underlay-address store "worker-a" "192.0.2.30")
+    (let* ((release (com.inuoe.jzon:parse
+                     (capture-ha-node-write store
+                       (lambda () (gr8s::update-node-underlay-address store "worker-a" "")))))
+           (claim (com.inuoe.jzon:parse
+                   (capture-ha-node-write store
+                     (lambda () (gr8s::update-node-underlay-address store "worker-b" "192.0.2.31")))))
+           (claim-change (aref (gethash "changes" claim) 0))
+           (release-change (aref (gethash "changes" release) 0)))
+      (setf (gethash "underlayAddress" (gethash "object" claim-change)) "192.0.2.30")
+      ;; A conflicting batch must not publish an earlier unrelated update.
+      (let ((bad (com.inuoe.jzon:parse (com.inuoe.jzon:stringify release-change))))
+        (setf (gethash "underlayAddress" (gethash "object" bad)) "192.0.2.30"
+              (gethash "kubeletPort" (gethash "object" bad)) 10250
+              (gethash "changes" claim) (vector bad claim-change))
+        (is (equal '(:node-conflict) (gr8s::install-node-state-delta store (com.inuoe.jzon:stringify claim))))
+        (is (= 0 (gr8s::node-record-kubelet-port (gr8s:get-node store "worker-a")))))
+      ;; Order the new claimant first: checking intermediate states would fail.
+      (setf (gethash "changes" claim) (vector claim-change release-change))
+      (is (eq :node-ok (first (gr8s::install-node-state-delta store (com.inuoe.jzon:stringify claim)))))
+      (is (equal "" (gr8s::node-record-underlay-address (gr8s:get-node store "worker-a"))))
+      (is (equal "192.0.2.30" (gr8s::node-record-underlay-address (gr8s:get-node store "worker-b")))))))
+
+(test committed-node-claims-include-secondary-pod-cidrs
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (let ((a (capture-ha-node-write store
+               (lambda () (gr8s:register-node store
+                            (gr8s:make-node-record :id "a" :name "a" :pod-cidr "10.88.0.0/20"
+                                                   :pod-cidrs #("10.88.0.0/20" "fd88::/64"))))))
+          (b (capture-ha-node-write store
+               (lambda () (gr8s:register-node store
+                            (gr8s:make-node-record :id "b" :name "b" :pod-cidr "10.88.16.0/20"
+                                                   :pod-cidrs #("10.88.16.0/20" "fd88::/64")))))))
+      (is (eq :node-ok (first (gr8s::install-node-state-delta store a))))
+      (is (equal '(:node-conflict) (gr8s::install-node-state-delta store b))))))

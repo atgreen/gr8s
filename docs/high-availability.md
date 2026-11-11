@@ -150,8 +150,12 @@ Lease parsing during apply preserves committed readiness independently of replic
 wall clocks; the heartbeat monitor retries conflicts and unavailable consensus.
 The [concurrency validation](node-conflicts-validation-2026-11-09.json) covers these
 paths. Legacy version-1 deltas remain readable; these guarantees require all
-members to run the updated implementation. Cross-Node identity and network-claim
-uniqueness at apply time remains under `podster-ucm.2.6`.
+members to run the updated implementation. Checked Node deltas also validate
+identity, underlay address and every assigned PodCIDR against the proposed final
+Node set before writing any record. A stale proposal for a different Node cannot
+reuse an existing claim. One delta can release and transfer a claim atomically;
+conflicts leave files, revision clocks and watch events unchanged. Legacy
+version-1 replay retains its original behavior.
 These transactions do not provide cross-resource atomicity.
 
 The Raft core preserves its vote when stepping down within the same term, and

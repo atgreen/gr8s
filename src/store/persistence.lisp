@@ -579,6 +579,37 @@ renewals use the same compact one-key delta without changing resourceVersion."
         (not (json-value-equal-p old copy)))
       (not (eq old new))))
 
+(defun node-delta-claims-available-p (store changes)
+  "Validate the final Node set before publishing any member of a delta."
+  (let ((nodes (make-hash-table :test #'equal))
+        (identities (make-hash-table :test #'equal))
+        (cidrs (make-hash-table :test #'equal))
+        (underlays (make-hash-table :test #'equal)))
+    (maphash (lambda (name node) (setf (gethash name nodes) node)) (pod-store-nodes store))
+    ;; Apply replacements and tombstones to the candidate index first, allowing
+    ;; one atomic delta to release a claim and assign it to another Node.
+    (loop for change across changes
+          for name = (gethash "name" change)
+          for object = (gethash "object" change)
+          do (if (eq object 'null) (remhash name nodes)
+                 (setf (gethash name nodes) (parse-node-record object :expire-leases nil))))
+    (block validate
+      (labels ((claim (table value name)
+                 (when (and (stringp value) (plusp (length value)))
+                   (let ((owner (gethash value table)))
+                     (when (and owner (not (equal owner name)))
+                       (return-from validate nil))
+                     (setf (gethash value table) name)))))
+        (maphash
+         (lambda (name node)
+           (unless (equal name (node-record-name node)) (return-from validate nil))
+           (claim identities (node-record-id node) name)
+           (claim underlays (node-record-underlay-address node) name)
+           (loop for cidr across (node-record-all-pod-cidrs node)
+                 do (claim cidrs cidr name)))
+         nodes)
+        t))))
+
 (defun install-node-state-delta (store json)
   "Validate all Node preconditions, then publish in committed revision order."
   (bt:with-lock-held ((pod-store-lock store))
@@ -594,6 +625,8 @@ renewals use the same compact one-key delta without changing resourceVersion."
               unless (or (node-object-same-state-p current (gethash "expected" change))
                          (node-object-same-state-p current (gethash "object" change)))
                 do (return-from install-node-state-delta (list :node-conflict))))
+      (when (and checked (not (node-delta-claims-available-p store changes)))
+        (return-from install-node-state-delta (list :node-conflict)))
       (loop for change across changes
             for name = (gethash "name" change)
             for object = (gethash "object" change)
