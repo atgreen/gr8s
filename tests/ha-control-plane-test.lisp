@@ -494,7 +494,11 @@
                    (setf boundary (gr8s::raft-node-snapshot-index node))
                    (is (= boundary (gr8s::raft-node-last-applied node)))
                    (is (< (sb-posix:stat-size (sb-posix:stat (merge-pathnames "raft/control-plane.log" root))) 4096)))
-                 (is (<= (length (uiop:directory-files (merge-pathnames "snapshot-artifacts/" root))) 2)))
+                 ;; Reclamation is a joined maintenance task, independent of
+                 ;; checkpoint publication. Preserve the same physical-file bound.
+                 (is (poll-until
+                      (lambda () (<= (length (uiop:directory-files (merge-pathnames "snapshot-artifacts/" root))) 2))
+                      :timeout 15)))
                (gr8s::stop-ha-control-plane ha)
                (is (null (gr8s.ha::ha-control-plane-compaction-thread ha)))
                (loop for row across (gr8s.ha::ha-control-plane-compaction-phase-times ha) do

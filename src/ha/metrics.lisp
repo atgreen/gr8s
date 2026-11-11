@@ -70,8 +70,12 @@
     (bt:with-lock-held ((ha-control-plane-maintenance-lock hcp))
       (push (list "gr8s_generation_reaped_files_total" "Retired application data files reclaimed locally."
                   (ha-control-plane-generation-reaped-files hcp) "counter") samples)
-      (push (list "gr8s_generation_reclamation_error" "Whether the last maintenance attempt failed."
+      (push (list "gr8s_generation_reclamation_error" "Whether the last generation reclamation attempt failed."
                   (if (ha-control-plane-maintenance-error hcp) 1 0)) samples)
+      (push (list "gr8s_snapshot_artifact_reaped_files_total" "Detached snapshot artifact files reclaimed locally."
+                  (ha-control-plane-artifacts-reaped hcp) "counter") samples)
+      (push (list "gr8s_snapshot_artifact_reclamation_error" "Whether the last artifact maintenance attempt failed."
+                  (if (ha-control-plane-artifact-maintenance-error hcp) 1 0)) samples)
       (push (list "gr8s_generation_reclamation_worker_up" "Whether the local generation maintenance thread is alive."
                   (if (and (ha-control-plane-maintenance-thread hcp)
                            (bt:thread-alive-p (ha-control-plane-maintenance-thread hcp))) 1 0)) samples))

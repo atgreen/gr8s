@@ -2,13 +2,42 @@
 ;;;; SPDX-License-Identifier: Apache-2.0
 (in-package #:gr8s.ha)
 
-(defun maintain-ha-store-once (hcp)
-  "Reclaim a batch independently of local checkpoint creation and Raft locks."
-  (let ((removed (gr8s.store::reap-retired-store-generations (ha-control-plane-store hcp))))
+(defun maintain-ha-artifacts-once (hcp)
+  "Claim one obsolete artifact under member ownership; unlink trash outside it."
+  (let* ((member (ha-control-plane-member hcp))
+         (root (gr8s::pod-store-path (ha-control-plane-store hcp)))
+         (eligible nil) (removed 0))
+    (when (sb-thread:holding-mutex-p (raft-member-lock member))
+      (error "Artifact maintenance must start outside the member mutex"))
+    (bt:with-lock-held ((raft-member-lock member))
+      (let ((state (gr8s.raft:raft-node-snapshot-state (raft-member-node member))))
+        (when (and (gr8s.resources::store-snapshot-artifact-owner-p member root)
+                   (gr8s.raft::raft-snapshot-envelope-p state)
+                   (getf (cddr state) :application))
+          (setf eligible t)
+          (gr8s.resources::claim-store-snapshot-artifacts-unlocked member root))))
+    (when eligible
+      (setf removed (gr8s.resources::reap-store-snapshot-artifact-trash root)))
     (bt:with-lock-held ((ha-control-plane-maintenance-lock hcp))
-      (incf (ha-control-plane-generation-reaped-files hcp) removed)
-      (setf (ha-control-plane-maintenance-error hcp) nil))
+      (incf (ha-control-plane-artifacts-reaped hcp) removed)
+      (setf (ha-control-plane-artifact-maintenance-error hcp) nil))
     removed))
+
+(defun maintain-ha-store-once (hcp)
+  "Attempt generation and artifact cleanup independently of local checkpoints."
+  (unwind-protect
+       (let ((removed (gr8s.store::reap-retired-store-generations (ha-control-plane-store hcp))))
+         (bt:with-lock-held ((ha-control-plane-maintenance-lock hcp))
+           (incf (ha-control-plane-generation-reaped-files hcp) removed)
+           (setf (ha-control-plane-maintenance-error hcp) nil))
+         removed)
+    ;; A generation failure must not starve independent artifact reclamation,
+    ;; and an artifact error must not hide the original generation condition.
+    (handler-case (maintain-ha-artifacts-once hcp)
+      (error (condition)
+        (bt:with-lock-held ((ha-control-plane-maintenance-lock hcp))
+          (setf (ha-control-plane-artifact-maintenance-error hcp) (princ-to-string condition)))
+        (format *error-output* "~&gr8s HA artifact maintenance failed: ~A~%" condition)))))
 
 (defun start-ha-maintenance-worker (hcp &key (interval 1))
   "Run generation maintenance even when automatic Raft compaction is disabled."

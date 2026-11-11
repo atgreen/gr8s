@@ -276,3 +276,11 @@ local checkpoint creation. Unknown files and links remain protected and are not
 counted as reclaimed. A successful attempt clears the error gauge, including an
 idle attempt that finds no eligible generation. See
 [application generation maintenance](store-snapshot-artifacts.md#recovering-an-interrupted-application-selection).
+
+Snapshot artifact maintenance exposes `gr8s_snapshot_artifact_reaped_files_total`
+and `gr8s_snapshot_artifact_reclamation_error`. The shared HA maintenance worker
+claims obsolete canonical artifacts under member ownership, then deletes recognized
+private trash outside the member mutex. These measurements are independent of
+generation-reclamation and compaction errors. Counters advance after successful
+batch completion; interrupted filesystem operations can leave deletion progress
+for a retry. Error strings, paths and digests are not metric labels.

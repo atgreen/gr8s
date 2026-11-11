@@ -128,21 +128,24 @@ This does not install application restore callbacks or enable compaction."
   (bt:with-lock-held ((gr8s.raft.transport:raft-member-lock member))
     (install-store-artifact-transport-unlocked member root)))
 
-(defun reap-store-snapshot-artifacts-unlocked (member root)
-  "Reclaim superseded immutable artifacts under exclusive WAL/member ownership.
-Keep the durable snapshot, unfinished installation, original bootstrap baseline,
-unpublished pinned artifacts and queued/sender-owned snapshots. Unsafe files stay."
-  (unless (and (sb-thread:holding-mutex-p (gr8s.raft.transport:raft-member-lock member))
-               (let ((storage (gr8s.raft.transport::raft-member-owned-storage member)))
-                 (and (typep storage 'gr8s.raft::file-raft-storage)
-                      (eq storage (gr8s.raft:raft-node-storage (gr8s.raft.transport:raft-member-node member)))
-                      (equal (merge-pathnames "raft/control-plane.log" root)
-                             (merge-pathnames (gr8s.raft::file-raft-storage-path storage)))
-                      (open-stream-p (gr8s.raft::file-raft-storage-stream storage)))))
+(defun store-snapshot-artifact-owner-p (member root)
+  "True only under the member mutex with its matching application WAL open."
+  (and (sb-thread:holding-mutex-p (gr8s.raft.transport:raft-member-lock member))
+       (let* ((storage (gr8s.raft.transport::raft-member-owned-storage member))
+              (stream (and (typep storage 'gr8s.raft::file-raft-storage)
+                           (gr8s.raft::file-raft-storage-stream storage))))
+         (and stream (open-stream-p stream)
+              (eq storage (gr8s.raft:raft-node-storage (gr8s.raft.transport:raft-member-node member)))
+              (let ((expected (probe-file (merge-pathnames "raft/control-plane.log" root))))
+                (and expected
+                     (equal expected (probe-file (gr8s.raft::file-raft-storage-path storage)))))))))
+
+(defun store-snapshot-artifact-keep-digests-unlocked (member root)
+  "Validate all protected roots before claiming any registry file."
+  (unless (store-snapshot-artifact-owner-p member root)
     (error "Artifact reclamation requires the member's open application WAL and lock"))
   (let* ((node (gr8s.raft.transport:raft-member-node member))
-         (directory (store-snapshot-registry-directory root))
-         (keep (make-hash-table :test 'equal)) (removed 0))
+         (keep (make-hash-table :test 'equal)))
     (labels ((keep-reference (reference)
                (let ((copy (copy-store-snapshot-artifact-reference reference)))
                  (setf (gethash (eighth copy) keep) t)))
@@ -170,20 +173,75 @@ unpublished pinned artifacts and queued/sender-owned snapshots. Unsafe files sta
                                              (gethash "role" record) (gethash "apiURL" record))
             (unless (equal "creating" (gethash "phase" record))
               (setf (gethash (gethash "sha256" (gethash "application" record)) keep) t)))))
-      (unwind-protect
+      keep)))
+
+(defun store-snapshot-artifact-filename-p (name)
+  (and (= (length name) 70) (string= ".jsonl" name :start2 64)
+       (every (lambda (char) (find char "0123456789abcdef")) (subseq name 0 64))))
+
+(defun store-snapshot-artifact-trash-name-p (name)
+  (let* ((prefix ".retired-") (digest-start (length prefix))
+         (digest-end (+ digest-start 64)) (uuid-start (1+ digest-end))
+         (uuid-end (+ uuid-start 36)))
+    (and (= (length name) (+ uuid-end (length ".jsonl")))
+         (uiop:string-prefix-p prefix name)
+         (every (lambda (char) (find char "0123456789abcdef")) (subseq name digest-start digest-end))
+         (char= #\- (char name digest-end))
+         (gr8s.store::store-generation-id-p (subseq name uuid-start uuid-end))
+         (string= ".jsonl" name :start2 uuid-end))))
+
+(defun claim-store-snapshot-artifacts-unlocked (member root &key (maximum-artifacts 1))
+  "Detach a bounded batch of unreferenced artifacts under WAL/member ownership.
+All roots are validated before renaming. Claimed files use unique private trash
+names; later retention of the same digest publishes a separate canonical file.
+No payload is read or unlinked in this critical section. Returns trash paths."
+  (unless (typep maximum-artifacts '(integer 1 *)) (error "Invalid artifact claim budget"))
+  (let* ((keep (store-snapshot-artifact-keep-digests-unlocked member root))
+         (directory (store-snapshot-registry-directory root)) (claimed nil))
+    (unwind-protect
+         (block scan
            (gr8s.raft.transport::raft-snapshot-map-directory
             directory
             (lambda (name)
-              (when (and (= (length name) 70) (string= ".jsonl" name :start2 64)
-                         (every (lambda (char) (find char "0123456789abcdef")) (subseq name 0 64))
+              (when (and (store-snapshot-artifact-filename-p name)
                          (not (gethash (subseq name 0 64) keep)))
                 (let* ((path (merge-pathnames name directory))
-                       (stat (sb-posix:lstat (namestring path))))
-                  (when (gr8s.raft.transport::raft-snapshot-private-stat-p stat nil)
-                    (sb-posix:unlink (namestring path))
-                    (incf removed))))))
-        (when (plusp removed) (gr8s.store::sync-store-generation-directory directory)))
-      removed)))
+                       (stat (gr8s.store::store-generation-stat path)))
+                  (when (and stat (gr8s.raft.transport::raft-snapshot-private-stat-p stat nil))
+                    (let ((trash (merge-pathnames
+                                  (format nil ".retired-~A-~A.jsonl" (subseq name 0 64) (generate-uid)) directory)))
+                      (sb-sys:without-interrupts
+                        (unless (zerop (cffi:foreign-funcall "renameat2" :int -100 :string (namestring path)
+                                                           :int -100 :string (namestring trash) :uint 1 :int))
+                          (error "Cannot claim superseded snapshot artifact"))
+                        (push trash claimed)))
+                    (when (>= (length claimed) maximum-artifacts) (return-from scan nil))))))))
+      (when claimed (gr8s.store::sync-store-generation-directory directory)))
+    (nreverse claimed)))
+
+(defun reap-store-snapshot-artifact-trash (root &key (maximum-artifacts 8))
+  "Unlink recognized private detached artifacts outside the member mutex.
+A trash pathname can never be a portable artifact reference. Its UUID separates
+an old claimed inode from concurrent new retention of the same digest. Recheck
+ownership, mode and single-link regular-file status; unsafe/unknown files stay.
+The caller retains member-root ownership through maintenance shutdown/join."
+  (unless (typep maximum-artifacts '(integer 1 *)) (error "Invalid artifact cleanup budget"))
+  (let ((directory (store-snapshot-registry-directory root)) (removed 0))
+    (unwind-protect
+         (block scan
+           (gr8s.raft.transport::raft-snapshot-map-directory
+            directory
+            (lambda (name)
+              (when (store-snapshot-artifact-trash-name-p name)
+                (let* ((path (merge-pathnames name directory))
+                       (stat (gr8s.store::store-generation-stat path)))
+                  (when (and stat (gr8s.raft.transport::raft-snapshot-private-stat-p stat nil))
+                    (handler-case (progn (sb-posix:unlink (namestring path)) (incf removed))
+                      (sb-posix:syscall-error (condition)
+                        (unless (= sb-posix:enoent (sb-posix:syscall-errno condition)) (error condition)))))))
+              (when (>= removed maximum-artifacts) (return-from scan nil)))))
+      (when (plusp removed) (gr8s.store::sync-store-generation-directory directory)))
+    removed))
 
 
 (defun store-snapshot-startup-temporary-name-p (name registry-p)

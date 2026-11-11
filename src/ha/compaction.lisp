@@ -140,11 +140,9 @@ Drain again before WAL replacement so uncertain durability remains fail-closed."
                                   (with-ha-compaction-phase (hcp :publish)
                                     (gr8s.raft::raft-commit-prepared-compaction
                                      (raft-member-node member) prepared reference)))
-                         (let ((reaped (gr8s.resources::reap-store-snapshot-artifacts-unlocked member root)))
-                           (bt:with-lock-held ((ha-control-plane-compaction-lock hcp))
-                             (incf (ha-control-plane-compaction-count hcp))
-                             (incf (ha-control-plane-compaction-reaped hcp) reaped)
-                             (setf (ha-control-plane-compaction-error hcp) nil)))
+                         (bt:with-lock-held ((ha-control-plane-compaction-lock hcp))
+                           (incf (ha-control-plane-compaction-count hcp))
+                           (setf (ha-control-plane-compaction-error hcp) nil))
                          t)))))))))
       (unwind-protect
            (when (and temporary (probe-file temporary)) (delete-file temporary))

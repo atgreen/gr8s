@@ -295,8 +295,15 @@ successful attempt clears the error. The local metrics are
 `gr8s_generation_reclamation_error`.
 
 Generations without retirement records, including generations superseded before
-this protocol was introduced, remain untouched. Snapshot-registry artifact cleanup
-and repeated native disk-bound acceptance remain separate work.
+this protocol was introduced, remain untouched. The same joined worker reclaims
+obsolete snapshot-registry artifacts independently of local checkpoint creation.
+It validates durable/pending/bootstrap/pinned/outbound roots under the member
+mutex, renames at most one unreferenced canonical file to unique private trash,
+and deletes up to eight trash files outside that mutex. A new copy of the same
+digest uses its canonical pathname and is unaffected by deleting the old trash.
+Interrupted claims and deletions resume after restart. Generation failures do not
+starve artifact cleanup, and artifact failures have their own error gauge.
+Repeated full-scale physical-disk acceptance remains separate work.
 
 `open-store` checks for an intent before loading any application files. It verifies
 that the target still has its matching completion marker, publishes the target

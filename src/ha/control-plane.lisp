@@ -20,15 +20,15 @@
 
 (defstruct ha-control-plane
   member store
-  maintenance-thread maintenance-running maintenance-error
+  maintenance-thread maintenance-running maintenance-error artifact-maintenance-error
   (maintenance-lock (bt:make-lock "gr8s HA maintenance"))
   (maintenance-changed (bt:make-condition-variable :name "gr8s HA maintenance"))
-  (generation-reaped-files 0)
+  (generation-reaped-files 0) (artifacts-reaped 0)
   compaction-thread compaction-running compaction-in-flight compaction-retention-policy compaction-catchup-policy
   (compaction-lock (bt:make-lock "gr8s HA compaction"))
   (compaction-changed (bt:make-condition-variable :name "gr8s HA compaction"))
   (compaction-bytes (* 16 1024 1024)) (compaction-entries 256) (compaction-interval 1)
-  (compaction-count 0) (compaction-reaped 0) compaction-error
+  (compaction-count 0) compaction-error
   (compaction-phase-times (make-array 4 :initial-element nil))
   (compaction-member-lock-times (make-array 4 :initial-element nil)))
 

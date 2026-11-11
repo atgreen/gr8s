@@ -425,22 +425,31 @@ returned zero. The existing plaintext interrupted-transfer probe also passed
 with a 4 MiB compatibility fixture. Authenticated large-transfer handoff is
 therefore verified in the instrumented harness; VM acceptance remains open.
 
-Artifact reclamation now has an explicit internal entry point,
-`gr8s.resources::reap-store-snapshot-artifacts-unlocked`. It requires the
-member mutex and that member's open, owned application WAL. It preserves the
-current snapshot, unfinished snapshot install, original bootstrap baseline,
-and every queued or active outbound snapshot. A sender publishes ownership
-under its link lock before dequeuing, closing the gap before source lookup;
-normal delivery and failures both release ownership after the batch finishes.
-Reclamation acquires locks in member-then-link order.
+Artifact reclamation uses `gr8s.resources::claim-store-snapshot-artifacts-unlocked`
+under the member mutex and that member's open, owned application WAL. It
+preserves the current snapshot, unfinished installation, original bootstrap
+baseline, unpublished pinned artifacts, and queued or active outbound snapshots.
+A sender publishes ownership under its link lock before dequeuing; normal delivery
+and failures release ownership after the batch finishes. Root validation uses
+member-then-link lock order and completes before any file is detached.
 
-Only unreferenced canonical digest filenames that are private, owned,
-single-link regular files are unlinked. Directory changes are fsynced. Invalid
-bootstrap metadata prevents deletion; symlinks, hard links, unexpected modes
-and unknown filenames are preserved. Publication `.part` files and abandoned
-capture temporaries require the separate orphan-cleanup work in
-`podster-ucm.11.3.7`. This helper does not schedule reclamation or enable
-automatic compaction; that integration remains under `podster-ucm.11.3`.
+One eligible canonical artifact per maintenance pass is atomically renamed to a
+unique `.retired-<digest>-<UUID>.jsonl` pathname and the registry directory is
+synchronized. The joined HA maintenance worker then deletes up to eight recognized
+private trash files outside the member lock. A later retention of the same digest
+publishes a new canonical file; deleting the old trash pathname cannot remove it.
+An interrupted rename, uncertain directory sync or partial cleanup is retried from
+the filesystem, including after WAL recovery. No payload hashing or parsing is
+added to reclamation.
+
+Only private, owned, single-link regular files with recognized names are eligible.
+Invalid bootstrap metadata stops new claims; symlinks, hard links, unexpected modes
+and unknown filenames remain. Generation and artifact cleanup are attempted
+independently, with separate counters and error gauges. This worker runs even when
+automatic compaction is disabled and on receivers that make no local checkpoints.
+Shutdown joins it before stopping Raft. Automatic compaction and retained-log
+budgets retain their existing settings. Recognized publication and capture scratch
+files use the separate startup-only temporary cleanup path.
 
 Reclamation validation is recorded in
 `artifact-lifetime-validation-2026-11-10.json`: 137 focused transport/registry

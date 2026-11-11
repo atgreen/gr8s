@@ -352,7 +352,7 @@
                     (target nil))
                (flet ((reap ()
                         (bt:with-lock-held ((gr8s::raft-member-lock member))
-                          (gr8s.resources::reap-store-snapshot-artifacts-unlocked member root))))
+                          (length (gr8s.resources::claim-store-snapshot-artifacts-unlocked member root :maximum-artifacts 64)))))
                  (is (null (gr8s.raft.transport::raft-member-artifact-pins member)))
                  (is (eq :done
                          (gr8s.resources::call-with-store-artifact-pin
@@ -413,8 +413,8 @@
                       (list :gr8s-raft-snapshot 1 :application reference :application-present t
                             :members '(("source" . :voter))))
                     (reap () (bt:with-lock-held ((gr8s::raft-member-lock member))
-                               (gr8s.resources::reap-store-snapshot-artifacts-unlocked member root))))
-               (signals error (gr8s.resources::reap-store-snapshot-artifacts-unlocked member root))
+                               (length (gr8s.resources::claim-store-snapshot-artifacts-unlocked member root :maximum-artifacts 64)))))
+               (signals error (length (gr8s.resources::claim-store-snapshot-artifacts-unlocked member root :maximum-artifacts 64)))
                (bt:with-lock-held ((gr8s::raft-member-lock member))
                  (setf (gethash "peer" (gr8s.raft.transport::raft-member-links member)) link
                        (gr8s.raft.transport::raft-peer-link-items link)
@@ -463,3 +463,159 @@
                  (is (probe-file baseline))
                  (is (probe-file (first paths))))))
         (gr8s::stop-raft-member member)))))
+
+(defun retain-artifact-maintenance-fixture (store root index)
+  (let ((source (merge-pathnames (format nil "artifact-maintenance-~D.jsonl" index) root)))
+    (gr8s.resources::capture-store-snapshot store source index 1)
+    (multiple-value-bind (path reference)
+        (gr8s.resources::retain-store-snapshot-artifact root source index 1 (snapshot-test-digest source))
+      (values path reference source))))
+
+(defun call-with-artifact-maintenance-member (store root function)
+  (let ((member (gr8s.resources::start-store-member-from-wal
+                 store "source" (merge-pathnames "raft/control-plane.log" root)
+                 :bootstrap-role :founder :host "127.0.0.1" :port 0)))
+    (unwind-protect (funcall function member)
+      (gr8s::stop-raft-member member))))
+
+(test detached-artifact-cleanup-cannot-unlink-a-new-copy-of-the-same-digest
+  (with-temporary-store (store root)
+    (call-with-artifact-maintenance-member
+     store root
+     (lambda (member)
+       (multiple-value-bind (target reference source) (retain-artifact-maintenance-fixture store root 2)
+         (let ((trash (bt:with-lock-held ((gr8s::raft-member-lock member))
+                        (gr8s.resources::claim-store-snapshot-artifacts-unlocked member root))))
+           (is (= 1 (length trash)))
+           (is-false (probe-file target))
+           (is (equal (snapshot-test-digest source) (snapshot-test-digest (first trash))))
+           (gr8s.resources::call-with-store-artifact-pin
+            member reference
+            (lambda ()
+              (is (equal target (gr8s.resources::retain-store-snapshot-artifact root source 2 1 (eighth reference))))
+              (is (/= (sb-posix:stat-ino (sb-posix:lstat (namestring target)))
+                      (sb-posix:stat-ino (sb-posix:lstat (namestring (first trash))))))
+              (is (= 1 (gr8s.resources::reap-store-snapshot-artifact-trash root)))
+              (is (equal target (gr8s.resources::checked-store-snapshot-artifact-path root reference)))
+              (is-false (probe-file (first trash)))))))))))
+
+(test artifact-trash-pruning-is-bounded-and-retains-unsafe-and-unknown-files
+  (with-temporary-store (store root)
+    (call-with-artifact-maintenance-member
+     store root
+     (lambda (member)
+       (loop for index from 2 to 4 do (retain-artifact-maintenance-fixture store root index))
+       (let* ((trash (bt:with-lock-held ((gr8s::raft-member-lock member))
+                       (gr8s.resources::claim-store-snapshot-artifacts-unlocked member root :maximum-artifacts 3)))
+              (link (merge-pathnames "artifact-hardlink" root))
+              (unknown (merge-pathnames ".retired-unknown.jsonl" (gr8s.resources::store-snapshot-registry-directory root))))
+         (is (= 3 (length trash)))
+         (gr8s.security::write-private-text-exclusively unknown "preserve")
+         (sb-posix:link (namestring (first trash)) (namestring link))
+         (sb-posix:chmod (namestring (second trash)) #o644)
+         (delete-file (third trash))
+         (sb-posix:symlink (namestring link) (namestring (third trash)))
+         (is (= 0 (gr8s.resources::reap-store-snapshot-artifact-trash root)))
+         (is (equal "preserve" (uiop:read-file-string unknown)))
+         (delete-file link)
+         (sb-posix:chmod (namestring (second trash)) #o600)
+         (is (= 1 (gr8s.resources::reap-store-snapshot-artifact-trash root :maximum-artifacts 1)))
+         (is (= 1 (count-if #'probe-file (subseq trash 0 2))))
+         (is (= 1 (gr8s.resources::reap-store-snapshot-artifact-trash root :maximum-artifacts 1)))
+         (is (sb-posix:s-islnk (sb-posix:stat-mode (sb-posix:lstat (namestring (third trash))))))
+         (is-true (probe-file unknown)))))))
+
+(test detached-artifact-cleanup-resumes-after-uncertain-directory-sync-and-wal-reopen
+  (with-temporary-store (store root)
+    (let* ((wal (merge-pathnames "raft/control-plane.log" root))
+           (member (gr8s.resources::start-store-member-from-wal
+                    store "source" wal :bootstrap-role :founder :host "127.0.0.1" :port 0))
+           (sync (symbol-function 'gr8s.store::sync-store-generation-directory)))
+      (unwind-protect
+           (multiple-value-bind (target reference source) (retain-artifact-maintenance-fixture store root 2)
+             (declare (ignore reference source))
+             (let ((directory (gr8s.resources::store-snapshot-registry-directory root)))
+               (unwind-protect
+                    (progn
+                      (setf (symbol-function 'gr8s.store::sync-store-generation-directory)
+                            (lambda (path)
+                              (if (equal path directory) (error "Injected artifact detach sync uncertainty")
+                                  (funcall sync path))))
+                      (signals error
+                        (bt:with-lock-held ((gr8s::raft-member-lock member))
+                          (gr8s.resources::claim-store-snapshot-artifacts-unlocked member root))))
+                 (setf (symbol-function 'gr8s.store::sync-store-generation-directory) sync)))
+             (is-false (probe-file target))
+             (gr8s::stop-raft-member member)
+             (setf member nil)
+             (let ((reopened (gr8s:open-store root)))
+               (setf member (gr8s.resources::start-store-member-from-wal reopened "source" wal :host "127.0.0.1" :port 0))
+               (let ((hcp (gr8s.ha::make-ha-control-plane :member member :store reopened :compaction-interval nil)))
+                 (is (= 1 (gr8s.ha::maintain-ha-artifacts-once hcp)))
+                 (is (= 0 (gr8s.ha::ha-control-plane-compaction-count hcp)))
+                 (is (= 1 (gr8s.ha::ha-control-plane-artifacts-reaped hcp)))
+                 (is-true (gr8s.resources::checked-store-snapshot-artifact-path
+                           root (getf (cddr (gr8s.raft:raft-node-snapshot-state (gr8s::raft-member-node member))) :application))))))
+        (setf (symbol-function 'gr8s.store::sync-store-generation-directory) sync)
+        (when member (gr8s::stop-raft-member member))))))
+
+(test artifact-maintenance-runs-outside-member-lock-and-failures-are-independent
+  (with-temporary-store (store root)
+    (call-with-artifact-maintenance-member
+     store root
+     (lambda (member)
+       (let ((hcp (gr8s.ha::make-ha-control-plane :member member :store store :compaction-interval nil))
+             (generation (symbol-function 'gr8s.store::reap-retired-store-generations))
+             (prune (symbol-function 'gr8s.resources::reap-store-snapshot-artifact-trash))
+             (called nil))
+         (unwind-protect
+              (progn
+                (retain-artifact-maintenance-fixture store root 2)
+                (setf (symbol-function 'gr8s.store::reap-retired-store-generations)
+                      (lambda (target &rest args) (declare (ignore target args)) (error "Generation failure"))
+                      (symbol-function 'gr8s.resources::reap-store-snapshot-artifact-trash)
+                      (lambda (target &rest args)
+                        (setf called t)
+                        (is-false (sb-thread:holding-mutex-p (gr8s::raft-member-lock member)))
+                        (is-false (sb-thread:holding-mutex-p (gr8s::pod-store-lock store)))
+                        (apply prune target args)))
+                (signals simple-error (gr8s.ha::maintain-ha-store-once hcp))
+                (is-true called)
+                (is (= 1 (gr8s.ha::ha-control-plane-artifacts-reaped hcp)))
+                (setf (symbol-function 'gr8s.resources::reap-store-snapshot-artifact-trash)
+                      (lambda (target &rest args) (declare (ignore target args)) (error "Artifact failure too")))
+                (handler-case
+                    (progn (gr8s.ha::maintain-ha-store-once hcp) (fail "Generation failure was hidden"))
+                  (simple-error (condition) (is (search "Generation failure" (princ-to-string condition)))))
+                (is-true (gr8s.ha::ha-control-plane-artifact-maintenance-error hcp))
+                (setf (symbol-function 'gr8s.store::reap-retired-store-generations) generation)
+                (retain-artifact-maintenance-fixture store root 3)
+                (setf (symbol-function 'gr8s.resources::reap-store-snapshot-artifact-trash)
+                      (lambda (target &rest args) (declare (ignore target args)) (error "PRIVATE artifact cleanup failure")))
+                (finishes (gr8s.ha::maintain-ha-store-once hcp))
+                (let ((text (gr8s.ha::ha-metrics-text hcp)))
+                  (is (search "gr8s_generation_reclamation_error 0" text))
+                  (is (search "gr8s_snapshot_artifact_reclamation_error 1" text))
+                  (is-false (search "PRIVATE" text)))
+                (setf (symbol-function 'gr8s.resources::reap-store-snapshot-artifact-trash) prune)
+                (finishes (gr8s.ha::maintain-ha-store-once hcp))
+                (is (= 2 (gr8s.ha::ha-control-plane-artifacts-reaped hcp)))
+                (is (= 0 (gr8s.ha::ha-control-plane-compaction-count hcp)))
+                (is (search "gr8s_snapshot_artifact_reclamation_error 0" (gr8s.ha::ha-metrics-text hcp))))
+           (setf (symbol-function 'gr8s.store::reap-retired-store-generations) generation
+                 (symbol-function 'gr8s.resources::reap-store-snapshot-artifact-trash) prune)))))))
+
+(test artifact-owner-check-and-cleanup-support-relative-member-roots
+  (with-temporary-store (store root)
+    (call-with-artifact-maintenance-member
+     store root
+     (lambda (member)
+       (multiple-value-bind (target reference source) (retain-artifact-maintenance-fixture store root 2)
+         (declare (ignore reference source))
+         (uiop:with-current-directory (root)
+           (bt:with-lock-held ((gr8s::raft-member-lock member))
+             (is-true (gr8s.resources::store-snapshot-artifact-owner-p member #P"./"))
+             (is-false (gr8s.resources::store-snapshot-artifact-owner-p member #P"./different-root/"))
+             (is (= 1 (length (gr8s.resources::claim-store-snapshot-artifacts-unlocked member #P"./")))))
+           (is (= 1 (gr8s.resources::reap-store-snapshot-artifact-trash #P"./"))))
+         (is-false (probe-file target)))))))
