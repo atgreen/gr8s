@@ -96,6 +96,37 @@ def main():
         result["established"] = states()
         current.rpc("namespace")
         current.rpc("write", name="sentinel", value="preserved")
+        # First exercise a genuine archived-prefix gap below the receiver's
+        # retention budget. The later saturation phase may correctly prefer an
+        # artifact snapshot, so it cannot deterministically cover both paths.
+        archive_before = states()
+        archive_peer = next(node for node in nodes if node is not current)
+        archive_index = archive_before[archive_peer.name]["applied"]
+        archive_terms = {name: value["term"] for name, value in archive_before.items()}
+        archive_batches = sum(value["catchupCacheBatches"] for value in archive_before.values())
+        result["archivedPrefixStoppedMember"] = archive_peer.name
+        result["archivedPrefixStopExitCode"] = archive_peer.stop()
+        assert result["archivedPrefixStopExitCode"] == 0
+        result["archivedPrefixFixture"] = current.rpc("prefix-churn", rounds=36)
+        archive_checkpoint = probe.await_value(
+            lambda: (lambda value: value if value["snapshot"] > archive_index and
+                     value["catchupCacheBytes"] > 0 else None)(current.rpc("status")), timeout=240)
+        result["archivedPrefixCheckpoint"] = archive_checkpoint
+        archive_commit = archive_checkpoint["commit"]
+        archive_peer.launch("recover")
+        archive_after = probe.await_value(
+            lambda: (lambda values: values if all(value["applied"] >= archive_commit and
+                     not value["blocked"] and value["checkpoints"] >= 1 for value in values.values()) and
+                     sum(value["catchupCacheBatches"] for value in values.values()) > archive_batches
+                     else None)(states()), timeout=240)
+        result["archivedPrefixRecovered"] = archive_after
+        assert {name: value["term"] for name, value in archive_after.items()} == archive_terms
+        assert all(value["configMaps"] == archive_after[current.name]["configMaps"]
+                   for value in archive_after.values())
+        generation = probe.read(archive_peer.root / "metadata/application-generation.json")
+        result["archivedPrefixReceiverGenerationIndex"] = generation["index"]
+        assert generation["index"] <= archive_index, "Archive fixture recovered through a newer application snapshot"
+        result["archivedPrefixReplayAcceptance"] = True
         for node in nodes:
             node.rpc("hold-capture")
         current.rpc("start-churn")
