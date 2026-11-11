@@ -164,7 +164,7 @@
                        :wireguard-relay-max-channels 1024
                        :node-name "gr8s-local"
                        :disable-agent nil
-                       :raft-compaction nil
+                       :raft-compaction :auto
                        :cluster-pod-cidr +default-cluster-pod-cidr+
                        :cluster-pod-cidrs (vector +default-cluster-pod-cidr+)
                        :node-pod-prefix +default-node-pod-prefix+
@@ -191,11 +191,12 @@
                        :local-storage-path +default-local-storage-path+)))
     (loop while arguments
           for option = (first arguments)
-          do (if (member option '("--disable-agent" "--raft-init" "--raft-compaction" "--containerd-no-sync") :test #'string=)
+          do (if (member option '("--disable-agent" "--raft-init" "--raft-compaction" "--no-raft-compaction" "--containerd-no-sync") :test #'string=)
                  (progn
                    (cond ((string= option "--disable-agent") (setf (getf options :disable-agent) t))
                          ((string= option "--raft-init") (setf (getf options :raft-init) t))
                          ((string= option "--raft-compaction") (setf (getf options :raft-compaction) t))
+                         ((string= option "--no-raft-compaction") (setf (getf options :raft-compaction) nil))
                          ((string= option "--containerd-no-sync") (setf (getf options :containerd-no-sync) t)))
                    (setf arguments (rest arguments)))
                  (let ((value (option-value arguments option)))
@@ -335,9 +336,12 @@
                       (setf (getf options :local-storage-path) value))
                      (t (error "unknown serve option: ~A" option)))
                    (setf arguments (cddr arguments)))))
-    (when (and (getf options :raft-compaction)
+    (when (and (eq t (getf options :raft-compaction))
                (not (or (getf options :raft-init) (getf options :raft-join))))
       (error "--raft-compaction requires --raft-init or --raft-join"))
+    (when (eq :auto (getf options :raft-compaction))
+      (setf (getf options :raft-compaction)
+            (not (null (or (getf options :raft-init) (getf options :raft-join))))))
     (unless (eq (null (getf options :image-credential-provider-config))
                 (null (getf options :image-credential-provider-bin-dir)))
       (error "image credential provider config and bin directory must be specified together"))
@@ -2303,7 +2307,8 @@ No HA API may start from member-local certificate state before this converges."
                         ("--disable-agent" "Run only the control plane")
                         ("--raft-init" "Found an HA control-plane cluster")
                         ("--raft-join HOST:PORT" "Join an HA control-plane cluster")
-                        ("--raft-compaction" "Opt in to automatic HA checkpoints; requires --raft-init or --raft-join")
+                        ("--raft-compaction" "Enable automatic HA checkpoints (the HA default)")
+                        ("--no-raft-compaction" "Disable automatic HA checkpoints for diagnostics")
                         ("--overlay-backend NAME" "vxlan or wireguard")
                         ("--runtime NAME" "containerd or fake")
                         ("--containerd-mode MODE" "managed or external")

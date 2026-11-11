@@ -7,8 +7,8 @@ under real gRPC and a deterministic in-process simulator. The simulator tests
 leader election, log replication, the §5.4.2 commit rule, ordered application,
 failover, and partitions. The core includes a durable write-ahead log and
 snapshot recovery. Production voters and witnesses recover their durable state
-before serving. Automatic application checkpoints are available through an explicit
-opt-in; their production acceptance and current limits are described below.
+before serving. HA servers enable automatic application checkpoints by default;
+their production acceptance and current limits are described below.
 
 ## The consistency plane
 
@@ -220,10 +220,14 @@ with a witness. Run `make test-raft-snapshots` for the focused suite.
 
 ## Automatic checkpoints and heap sizing
 
-Automatic checkpointing is disabled by default. Add `--raft-compaction` to each
-member's existing `gr8s serve` command to opt in. The flag requires `--raft-init`
-or `--raft-join`; retain the member's original state directory, identity and
-endpoints. The worker periodically checks size and entry thresholds, captures a
+Automatic checkpointing starts by default for `gr8s serve --raft-init` and
+`gr8s serve --raft-join`. Retain each member's original state directory, identity
+and endpoints. `--raft-compaction` remains an explicit enable switch;
+`--no-raft-compaction` disables scheduling for diagnostics. Disabling it allows
+retained log data to grow with writes, so monitor WAL and heap usage while it is
+disabled. Standalone servers do not start a Raft checkpoint worker.
+
+The worker periodically checks size and entry thresholds, captures a
 streamed application artifact, and publishes a durable checkpoint. It does not
 checkpoint on every write.
 
@@ -244,7 +248,7 @@ passed 2,048 churn rounds (128 MiB of payload) with three 384 MiB heaps,
 disconnected-voter catch-up, exact ConfigMap UIDs and contents across full
 restart, leader loss and witness quorum operation. That run disables agents and
 uses the fake runtime. VM, container/BPF and conformance validation are separate;
-automatic checkpointing remains an explicit opt-in. With checkpointing disabled,
+automatic checkpointing can be disabled with `--no-raft-compaction`. When disabled,
 the production WAL can continue growing.
 
 The native binary defaults to a 2 GiB Lisp dynamic heap. Override it by placing
