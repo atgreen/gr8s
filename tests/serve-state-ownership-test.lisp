@@ -315,3 +315,82 @@
       (is (eq t called))
       (let ((storage (gr8s::open-file-raft-storage path)))
         (gr8s::close-file-raft-storage storage)))))
+
+(test offline-maintenance-excludes-independent-patch-writers
+  (with-temporary-store (store root)
+    (declare (ignore store))
+    (let* ((manager (gr8s.patch:open-manager root "offline-test" '("worker")))
+           (journal (merge-pathnames "patches/journal.json" root)))
+      (unwind-protect
+           (progn
+             ;; No serve process exists, but patch state is independently live.
+             (let ((entered nil))
+               (signals error
+                 (gr8s.server::call-with-offline-state-ownership
+                  root (lambda () (setf entered t))))
+               (is (not entered))))
+        (gr8s.patch:close-manager manager))
+      (let ((before (and (probe-file journal) (uiop:read-file-string journal))))
+        (is (eq :offline (gr8s.server::call-with-offline-state-ownership root (lambda () :offline))))
+        (is (equal before (and (probe-file journal) (uiop:read-file-string journal)))))
+      ;; Failure must release both ownership domains, without loading a journal.
+      (signals error
+        (gr8s.server::call-with-offline-state-ownership root (lambda () (error "Injected failure"))))
+      (let ((next (gr8s.patch:open-manager root "after-offline" '("worker"))))
+        (unwind-protect (is (not (null next))) (gr8s.patch:close-manager next))))))
+
+(test offline-maintenance-holds-patch-lock-without-opening-the-journal
+  (with-temporary-store (store root)
+    (declare (ignore store))
+    (let ((journal (merge-pathnames "patches/journal.json" root)))
+      (is (not (probe-file journal)))
+      (gr8s.server::call-with-offline-state-ownership
+       root
+       (lambda ()
+         (is (not (probe-file journal)))
+         (signals error (gr8s.patch:open-manager root "blocked" '("witness")))))
+      (is (not (probe-file journal))))))
+
+(test raw-patch-ownership-refuses-unsafe-locks-and-preserves-the-inode
+  (dolist (failure '(:symlink :hardlink :mode))
+    (with-temporary-store (store root)
+      (declare (ignore store))
+      (let* ((patch-root (merge-pathnames "patches/" root))
+             (path (merge-pathnames "process.lock" patch-root))
+             (lock (gr8s.patch::open-process-lock patch-root)))
+        (close lock)
+        (let ((inode (sb-posix:stat-ino (sb-posix:lstat path))))
+          (setf lock (gr8s.patch::open-process-lock patch-root))
+          (unwind-protect
+               (progn
+                 (is (= inode (sb-posix:stat-ino (sb-posix:lstat path))))
+                 (is (= 1 (logand 1 (cffi:foreign-funcall "fcntl" :int (sb-sys:fd-stream-fd lock) :int 1 :int 0 :int)))))
+            (close lock)))
+        (ecase failure
+          (:symlink (sb-posix:unlink path)
+                    (sb-posix:symlink "/dev/null" path))
+          (:hardlink (sb-posix:link path (merge-pathnames "other-lock" patch-root)))
+          (:mode (sb-posix:chmod path #o666)))
+        (signals error (gr8s.patch::open-process-lock patch-root))
+        (signals error (gr8s.server::call-with-offline-state-ownership root (lambda () :unexpected-entry)))))))
+
+(test raw-patch-ownership-upgrades-legacy-lock-permissions-after-acquisition
+  (with-temporary-store (store root)
+    (declare (ignore store))
+    (let* ((patch-root (merge-pathnames "patches/" root))
+           (path (merge-pathnames "process.lock" patch-root))
+           (lock (gr8s.patch::open-process-lock patch-root)))
+      (unwind-protect
+           (progn
+             (sb-posix:fchmod (sb-sys:fd-stream-fd lock) #o644)
+             ;; An unsuccessful acquisition must leave the live owner's inode alone.
+             (signals error (gr8s.patch::open-process-lock patch-root))
+             (is (= #o644 (logand #o777 (sb-posix:stat-mode (sb-posix:stat path))))))
+        (close lock))
+      (let ((inode (sb-posix:stat-ino (sb-posix:stat path)))
+            (next (gr8s.patch::open-process-lock patch-root)))
+        (unwind-protect
+             (progn
+               (is (= inode (sb-posix:stat-ino (sb-posix:stat path))))
+               (is (= #o600 (logand #o777 (sb-posix:stat-mode (sb-posix:stat path))))))
+          (close next))))))

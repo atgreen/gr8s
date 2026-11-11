@@ -36,8 +36,10 @@ private keys. Enrolled agents renew through their authenticated node sessions;
 their one-time join tokens are not reconnect credentials.
 
 Explicit rotation creates a new certificate and private key. Stop every gr8s
-process using the state directory first; the command takes exclusive offline
-ownership and refuses to race a live server.
+process using the state directory first, including an agent or witness using
+that same directory. The command takes both the server and patch-state locks;
+it refuses to race a live process even when no API server is running. Acquiring
+offline ownership does not load patches or migrate the patch journal.
 
 ```sh
 sudo systemctl stop gr8s-server.service

@@ -6,9 +6,10 @@
 (defvar *serve-state-lease* nil)
 
 (defun call-with-offline-state-ownership (state-directory function)
-  "Run FUNCTION only while no serve process owns STATE-DIRECTORY.
+  "Run FUNCTION only while no serve or patch process owns STATE-DIRECTORY.
 The stable serve lock is shared with startup so offline maintenance cannot
-rewrite credentials or other state underneath a running control plane."
+rewrite credentials or other state underneath a running control plane.
+The independent patch lock also excludes agent and witness patch managers."
   (unless (and (functionp function) (or (stringp state-directory) (pathnamep state-directory)))
     (error "Invalid offline state ownership arguments"))
   (let* ((requested (uiop:ensure-directory-pathname state-directory))
@@ -22,6 +23,8 @@ rewrite credentials or other state underneath a running control plane."
                                    (logior sb-posix:o-rdwr sb-posix:o-creat
                                            sb-posix:o-nofollow sb-posix:o-nonblock)
                                    #o600))
+           (unless (zerop (cffi:foreign-funcall "fcntl" :int fd :int 2 :int 1 :int))
+             (error "Cannot protect offline ownership across exec"))
            (let ((stat (sb-posix:fstat fd)))
              (unless (and (sb-posix:s-isreg (sb-posix:stat-mode stat))
                           (= 1 (sb-posix:stat-nlink stat))
@@ -29,8 +32,9 @@ rewrite credentials or other state underneath a running control plane."
                           (= #o600 (logand #o777 (sb-posix:stat-mode stat))))
                (error "Unsafe serve ownership file")))
            (unless (zerop (cffi:foreign-funcall "flock" :int fd :int 6 :int))
-             (error "State directory ~A is in use; stop gr8s before rotating certificates" root))
-           (funcall function))
+             (error "State directory ~A is in use; stop gr8s before offline maintenance" root))
+           (let ((patch-lock (gr8s.patch::open-process-lock (merge-pathnames "patches/" root))))
+             (unwind-protect (funcall function) (close patch-lock))))
       (when fd (sb-posix:close fd)))))
 
 (defun require-serve-state-ownership (options)

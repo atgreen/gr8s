@@ -83,21 +83,53 @@
 (defun initial-state ()
   (object "format" 1 "buildID" *build-id* "level" 0 "chain" "" "accepted" #()
           "checkpoints" (object) "attempts" (object) "history" #()))
+(defun open-process-lock (root)
+  "Own the stable patch lock without reading or migrating any patch state."
+  (let* ((root (uiop:ensure-directory-pathname root))
+         (file (merge-pathnames "process.lock" root))
+         (existed (probe-file root))
+         (fd nil) (stream nil) (owned nil))
+    (ensure-directories-exist file)
+    (unless existed (sb-posix:chmod (namestring root) #o700))
+    (let ((stat (sb-posix:lstat (string-right-trim "/" (namestring root)))))
+      (unless (and (sb-posix:s-isdir (sb-posix:stat-mode stat))
+                   (= (sb-posix:geteuid) (sb-posix:stat-uid stat))
+                   (= #o700 (logand #o777 (sb-posix:stat-mode stat))))
+        (error "Unsafe patch state directory")))
+    (unwind-protect
+         (progn
+           (setf fd (sb-posix:open (namestring file)
+                                   (logior sb-posix:o-rdwr sb-posix:o-creat
+                                           sb-posix:o-nofollow sb-posix:o-nonblock)
+                                   #o600))
+           (let ((stat (sb-posix:fstat fd)))
+             (unless (and (sb-posix:s-isreg (sb-posix:stat-mode stat))
+                          (= 1 (sb-posix:stat-nlink stat))
+                          (= (sb-posix:geteuid) (sb-posix:stat-uid stat))
+                          ;; Older managers created 0644/0640 locks inside a
+                          ;; private 0700 directory. Accept read-only legacy
+                          ;; group/other bits, then tighten only after ownership.
+                          (= #o600 (logand #o733 (sb-posix:stat-mode stat))))
+               (error "Unsafe patch process lock")))
+           (unless (zerop (cffi:foreign-funcall "fcntl" :int fd :int 2 :int 1 :int))
+             (error "Cannot protect patch ownership across exec"))
+           (unless (zerop (cffi:foreign-funcall "flock" :int fd :int 6 :int))
+             (error "Another process owns this patch state directory"))
+           (sb-posix:fchmod fd #o600)
+           (setf stream (sb-sys:make-fd-stream fd :input t :output t :element-type '(unsigned-byte 8))
+                 fd nil owned t)
+           stream)
+      (unless owned
+        (when stream (close stream))
+        (when fd (sb-posix:close fd))))))
+
 (defun open-manager (directory name roles)
   (let* ((root (merge-pathnames "patches/" (uiop:ensure-directory-pathname directory)))
          (manager (%make-manager :root root :name name :roles roles)))
-    (ensure-directories-exist (path manager "content/.keep"))
-    (sb-posix:chmod (namestring root) #o700)
-    (setf (manager-lock-stream manager)
-          (open (path manager "process.lock") :direction :io :if-exists :overwrite
-                                                :if-does-not-exist :create))
+    (setf (manager-lock-stream manager) (open-process-lock root))
     (handler-case
         (progn
-          ;; Linux flock is associated with this open file description, unlike
-          ;; process-scoped lockf locks, so a second manager in the same PID is excluded too.
-          (unless (zerop (cffi:foreign-funcall "flock" :int (sb-sys:fd-stream-fd (manager-lock-stream manager))
-                                                      :int 6 :int)) ; LOCK_EX | LOCK_NB
-            (error "Another process owns this patch state directory"))
+          (ensure-directories-exist (path manager "content/.keep"))
           (setf (manager-state manager)
                 (if (probe-file (path manager "journal.json"))
                     (read-json (path manager "journal.json"))
