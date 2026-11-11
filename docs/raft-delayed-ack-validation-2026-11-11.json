@@ -40,8 +40,90 @@
     "Current-term learner promotion and existing HA/mTLS replication and failover checks remain passing."
   ],
   "limits": [
-    "Native cluster validation pending separately.",
+    "128-round native smoke passed; the separate 2048-round full workload is pending. This is an internal native harness, not production serve or VM acceptance.",
     "This invariant violation is confirmed; causality for the full-history final-convergence stall remains unproven.",
     "Automatic compaction remains opt-in; full ten-gap objective remains open."
-  ]
+  ],
+  "nativeSmoke": {
+    "passed": true,
+    "evidence": "/tmp/gr8s-compaction-cluster-native-m42o6b87",
+    "binarySha256": "8dfbfbebe180fd87df85e86d9cf1a4141385097b5fa326b62082c824c4db7a62",
+    "mutualTls": true,
+    "processes": 3,
+    "heapLimitMiB": 384,
+    "rounds": 128,
+    "payloadBytes": 8388608,
+    "historyByteBudget": 100663296,
+    "fullChurnAcceptance": false,
+    "leadershipStabilityAcceptance": true,
+    "asymmetricCaptureAcceptance": true,
+    "archivedPrefixReplayAcceptance": true,
+    "diskCatchupAcceptance": true,
+    "catchupHistoryContinuous": true,
+    "historyPreservedAcrossRestart": true,
+    "identitiesPreserved": true,
+    "stopExitCodes": {
+      "cp-a": 0,
+      "cp-b": 0,
+      "cp-c": 0
+    },
+    "cleanupExitCodes": {
+      "cp-a": 0,
+      "cp-b": 0,
+      "cp-c": 0
+    },
+    "elapsedSeconds": 135.4128129859455,
+    "beforeRestart": {
+      "cp-a": {
+        "term": 1,
+        "commit": 339,
+        "applied": 339,
+        "snapshot": 339,
+        "historyEstimatedBytes": 16795168,
+        "loadedHistoryEstimatedBytes": 0
+      },
+      "cp-b": {
+        "term": 1,
+        "commit": 339,
+        "applied": 339,
+        "snapshot": 339,
+        "historyEstimatedBytes": 16795168,
+        "loadedHistoryEstimatedBytes": 1024
+      },
+      "cp-c": {
+        "term": 1,
+        "commit": 339,
+        "applied": 339,
+        "snapshot": 333,
+        "historyEstimatedBytes": 16795168,
+        "loadedHistoryEstimatedBytes": 0
+      }
+    },
+    "afterRestart": {
+      "cp-a": {
+        "term": 3,
+        "commit": 340,
+        "applied": 340,
+        "snapshot": 339,
+        "historyEstimatedBytes": 16795168,
+        "loadedHistoryEstimatedBytes": 16795168
+      },
+      "cp-b": {
+        "term": 3,
+        "commit": 340,
+        "applied": 340,
+        "snapshot": 339,
+        "historyEstimatedBytes": 16795168,
+        "loadedHistoryEstimatedBytes": 16795168
+      },
+      "cp-c": {
+        "term": 3,
+        "commit": 340,
+        "applied": 340,
+        "snapshot": 333,
+        "historyEstimatedBytes": 16795168,
+        "loadedHistoryEstimatedBytes": 16795168
+      }
+    }
+  }
 }
