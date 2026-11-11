@@ -118,6 +118,7 @@
                                 "applied" (gr8s::raft-node-last-applied node)
                                 "snapshot" (gr8s::raft-node-snapshot-index node)
                                 "quorumMembers" (gr8s::raft-cluster-size node)
+                                "compactionEntryThreshold" (gr8s.ha::ha-control-plane-compaction-entries ha)
                                 "configMaps"
                                 (coerce
                                  (sort
@@ -221,8 +222,11 @@
                              :compaction-bytes (* 16 1024 1024) :compaction-entries 100000 :compaction-interval 0.01)
                          (symbol-function 'gr8s.resources::capture-frozen-store-snapshot)
                          (lambda (view path)
-                           (bt:with-lock-held (lock)
-                             (when armed (setf armed nil held t held-index (gr8s.resources::frozen-store-snapshot-index view))))
+                           (bt:with-lock-held ((gr8s::raft-member-lock member))
+                             (bt:with-lock-held (lock)
+                               (when armed
+                                 (setf armed nil held t held-index (gr8s.resources::frozen-store-snapshot-index view)
+                                       (gr8s.ha::ha-control-plane-compaction-entries ha) 100000))))
                            (loop while (bt:with-lock-held (lock) (and held (not stopping))) do (sleep 0.02))
                            (funcall original view path)))
                    (setf (symbol-function 'gr8s.raft::raft-replication-capacity-index)
@@ -268,7 +272,14 @@
                                                         (setf object (gr8s::get-core-resource
                                                                       store "configmaps" "default" (gethash "name" request)))))
                                          (gr8s::core-object "value" (gethash "value" (gethash "data" object)))))
-                                      ((equal command "hold-capture") (bt:with-lock-held (lock) (setf armed t)) (gr8s::core-object "armed" t))
+                                      ((equal command "hold-capture")
+                                       ;; A prior replay phase leaves different WAL
+                                       ;; tails. Force only the next capture's entry
+                                       ;; trigger, restoring normal policy in its hook.
+                                       (bt:with-lock-held ((gr8s::raft-member-lock member))
+                                         (bt:with-lock-held (lock)
+                                           (setf armed t (gr8s.ha::ha-control-plane-compaction-entries ha) 1)))
+                                       (gr8s::core-object "armed" t))
                                       ((equal command "release-capture") (bt:with-lock-held (lock) (setf held nil)) (gr8s::core-object "released" t))
                                       ((equal command "prefix-churn")
                                        (let ((count (gethash "rounds" request)))

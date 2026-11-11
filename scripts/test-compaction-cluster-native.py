@@ -129,6 +129,10 @@ def main():
         result["archivedPrefixReplayAcceptance"] = True
         for node in nodes:
             node.rpc("hold-capture")
+        # Even a member compacted exactly through its current applied index
+        # needs a new committed suffix to capture. Do this before the producer,
+        # which deliberately pauses as soon as the leader's capture is held.
+        result["captureArmFixture"] = current.rpc("prefix-churn", rounds=1)
         current.rpc("start-churn")
 
         def held():
@@ -136,6 +140,7 @@ def main():
             return values if all(value["captureHeld"] for value in values.values()) else None
 
         before = probe.await_value(held, timeout=240)
+        assert all(value["compactionEntryThreshold"] == 100000 for value in before.values()), before
         terms = {name: value["term"] for name, value in before.items()}
 
         def check_churn_leadership(values):
@@ -175,7 +180,8 @@ def main():
             # Advance the leader checkpoint past the stalled follower so release
             # must exercise archived-prefix replication, not only the live tail.
             return values if (values[current.name]["completedRounds"] >= start_round + 32 and
-                              values[current.name]["snapshot"] > values[slow.name]["applied"]) else None
+                              values[current.name]["snapshot"] > values[slow.name]["applied"] and
+                              values[slow.name]["replicationCapacityRefusals"] > 0) else None
 
         asymmetric = probe.await_value(asymmetric_progress, timeout=240)
         result.update(asymmetricHeldFollower=slow.name, asymmetricCapture=asymmetric)
