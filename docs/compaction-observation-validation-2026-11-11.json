@@ -29,7 +29,7 @@
     "Existing phase deadlines, RPC timeout, workload, heap/history/retention budgets and forced cold-election semantics remain unchanged."
   ],
   "limits": [
-    "Native128 smoke passed with166busy observations and fresh final gates. Isolated full2048 run pending separately; no concurrent builds or source suites from this workspace.",
+    "Native128 smoke passed with166busy observations and fresh final gates. Isolated full2048 completed churn with871busy observations, then correctly failed existing240s final convergence gate; product acceptance remains open.",
     "This removes an observer lock wait, not a proven product fix for the original full-history convergence stall."
   ],
   "nativeSmoke": {
@@ -141,6 +141,20 @@
         "retiredGenerationCount": 0,
         "generationTrashCount": 0
       }
+    }
+  },
+  "isolatedFullRun": {
+    "exitCode": 1,
+    "resultPath": "/home/green/.cache/gr8s-test-tmp/gr8s-compaction-cluster-native-fb3vzpbs/result.json",
+    "busyPolls": 871,
+    "mainRoundsCompleted": 2048,
+    "convergenceAcceptance": false,
+    "failureRecord": "snapshot-history-isolated-convergence-failure-2026-11-11.json",
+    "noStatusRpcTimeout": true,
+    "cleanupExitCodes": {
+      "cp-a": 0,
+      "cp-b": 0,
+      "cp-c": 0
     }
   }
 }
