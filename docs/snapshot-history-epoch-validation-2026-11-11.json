@@ -1,0 +1,222 @@
+{
+  "date": "2026-11-11",
+  "productCommit": "70100cf",
+  "harnessAndExecutedRunnerCommit": "6a4bfbc",
+  "passed": true,
+  "sourceSha256": {
+    "src/resources/store-snapshot-materialize.lisp": "4dbef3f478ade8a0f3d7d66e8b6eec8a139da462dc3a0e8fa2ba5e69a5617555",
+    "src/store/application-reload.lisp": "c9f5e902604bacd8259bc43a8f2a027cca1c5ba7ae822e403ea298c62576c12f",
+    "src/resources/store-member-restore.lisp": "1d2aef38d6a5b597fd9b6e34325193d00947e4c617d40c4ebb743405a89975ea",
+    "src/ha/control-plane.lisp": "55696133e824d303f2a591274b3502c539e5ad4805fd5459982e920193e0cbd3",
+    "src/ha/compaction.lisp": "69365b57d713ffaa08ba59136c4bbe439fe962c3095142c9ede682cbe9ac25c3",
+    "src/ha/metrics.lisp": "1446b5ad8cf9a1dbb68d498201409947e0dd954acea9d8f4845c6727817ca00c",
+    "scripts/compaction-cluster-native-harness.lisp": "d7151e6d258f5c2b800a6586d55d1745918951ea88247af33e7f0d9340293221"
+  },
+  "sourceChecks": {
+    "materialization": 90,
+    "genericApplicationReload": 169,
+    "liveMemberRestore": 177,
+    "haControlPlane": 229,
+    "total": 665,
+    "log": "/tmp/gr8s-snapshot-history-epoch-final-tests.log"
+  },
+  "nativeSmoke": {
+    "binarySha256": "92fd0b26e10c4f26ef2ccba212c8e7a514c836566966aec373ec7c649c645977",
+    "elapsedSeconds": 144.222075646976,
+    "rounds": 128,
+    "payloadBytes": 8388608,
+    "heapLimitMiB": 384,
+    "mutualTls": true,
+    "fullChurnAcceptance": false,
+    "archivedPrefixFixture": {
+      "rounds": 36,
+      "payloadBytes": 2359296,
+      "nonce": "7d35c04ecf6d4ce990b646a5511c913a"
+    },
+    "captureArmFixture": {
+      "rounds": 1,
+      "payloadBytes": 65536,
+      "nonce": "cd6da55e0ab64ce19b40aad7a45ca40d"
+    },
+    "archivedPrefixReplayAcceptance": true,
+    "archivedPrefixReceiverGenerationIndex": 1,
+    "leadershipStabilityAcceptance": true,
+    "diskCatchupAcceptance": true,
+    "catchupHistoryContinuous": true,
+    "identitiesPreserved": true,
+    "stopExitCodes": {
+      "cp-a": 0,
+      "cp-b": 0,
+      "cp-c": 0
+    },
+    "cleanupExitCodes": {
+      "cp-a": 0,
+      "cp-b": 0,
+      "cp-c": 0
+    }
+  },
+  "warmHistoryBytes": {
+    "cp-a": 16795168,
+    "cp-b": 16795168,
+    "cp-c": 16795168
+  },
+  "coldRecoveredHistoryBytes": {
+    "cp-a": 16795168,
+    "cp-b": 16795168,
+    "cp-c": 16795168
+  },
+  "additionalPostRunHistoryAssertionPassed": true,
+  "memberLockMeasurements": {
+    "cp-a": [
+      {
+        "section": "check",
+        "attempts": 6995,
+        "totalSeconds": 0.591995,
+        "maxSeconds": 0.018,
+        "lastSeconds": 0.0,
+        "gcTotalSeconds": 0.093703,
+        "gcMaxSeconds": 0.016275,
+        "gcLastSeconds": 0.0
+      },
+      {
+        "section": "freeze",
+        "attempts": 8,
+        "totalSeconds": 0.005,
+        "maxSeconds": 0.001,
+        "lastSeconds": 0.001,
+        "gcTotalSeconds": 0.0,
+        "gcMaxSeconds": 0.0,
+        "gcLastSeconds": 0.0
+      },
+      {
+        "section": "publish",
+        "attempts": 8,
+        "totalSeconds": 0.084,
+        "maxSeconds": 0.02,
+        "lastSeconds": 0.01,
+        "gcTotalSeconds": 0.0,
+        "gcMaxSeconds": 0.0,
+        "gcLastSeconds": 0.0
+      },
+      {
+        "section": "resume",
+        "attempts": 8,
+        "totalSeconds": 0.003,
+        "maxSeconds": 0.001,
+        "lastSeconds": 0.0,
+        "gcTotalSeconds": 0.0,
+        "gcMaxSeconds": 0.0,
+        "gcLastSeconds": 0.0
+      }
+    ],
+    "cp-b": [
+      {
+        "section": "check",
+        "attempts": 4008,
+        "totalSeconds": 0.067,
+        "maxSeconds": 0.007,
+        "lastSeconds": 0.0,
+        "gcTotalSeconds": 0.0,
+        "gcMaxSeconds": 0.0,
+        "gcLastSeconds": 0.0
+      },
+      {
+        "section": "freeze",
+        "attempts": 3,
+        "totalSeconds": 0.001,
+        "maxSeconds": 0.001,
+        "lastSeconds": 0.0,
+        "gcTotalSeconds": 0.0,
+        "gcMaxSeconds": 0.0,
+        "gcLastSeconds": 0.0
+      },
+      {
+        "section": "publish",
+        "attempts": 3,
+        "totalSeconds": 0.073999,
+        "maxSeconds": 0.032,
+        "lastSeconds": 0.02,
+        "gcTotalSeconds": 0.00534,
+        "gcMaxSeconds": 0.00534,
+        "gcLastSeconds": 0.00534
+      },
+      {
+        "section": "resume",
+        "attempts": 3,
+        "totalSeconds": 0.004,
+        "maxSeconds": 0.003,
+        "lastSeconds": 0.003,
+        "gcTotalSeconds": 0.0,
+        "gcMaxSeconds": 0.0,
+        "gcLastSeconds": 0.0
+      }
+    ],
+    "cp-c": [
+      {
+        "section": "check",
+        "attempts": 8183,
+        "totalSeconds": 0.658993,
+        "maxSeconds": 0.017,
+        "lastSeconds": 0.0,
+        "gcTotalSeconds": 0.029139,
+        "gcMaxSeconds": 0.013955,
+        "gcLastSeconds": 0.0
+      },
+      {
+        "section": "freeze",
+        "attempts": 8,
+        "totalSeconds": 0.004,
+        "maxSeconds": 0.001,
+        "lastSeconds": 0.0,
+        "gcTotalSeconds": 0.0,
+        "gcMaxSeconds": 0.0,
+        "gcLastSeconds": 0.0
+      },
+      {
+        "section": "publish",
+        "attempts": 8,
+        "totalSeconds": 0.070998,
+        "maxSeconds": 0.013999,
+        "lastSeconds": 0.008,
+        "gcTotalSeconds": 0.005214,
+        "gcMaxSeconds": 0.005214,
+        "gcLastSeconds": 0.0
+      },
+      {
+        "section": "resume",
+        "attempts": 8,
+        "totalSeconds": 0.004,
+        "maxSeconds": 0.002,
+        "lastSeconds": 0.0,
+        "gcTotalSeconds": 0.0,
+        "gcMaxSeconds": 0.0,
+        "gcLastSeconds": 0.0
+      }
+    ]
+  },
+  "invariants": [
+    "Default resource and Pod reload epoch fences unchanged from before the candidate continuity exception.",
+    "Retained history, embedded old/new object versions and current objects translate into a fresh epoch; pre-interval versions clamp to the minimum.",
+    "Old watch and page cursors expire; next writes and client CAS stay monotonic.",
+    "Encrypted Secret history remains readable; source artifacts are not mutated.",
+    "Overflow refuses generation completion; rewritten byte estimates are invalidated."
+  ],
+  "limits": [
+    "128-round smoke is not the full2048/96MiB-history acceptance.",
+    "Internal HCP/transport harness, not production serve, VM, containers/BPF or conformance.",
+    "GC deltas are process CPU-time changes, not direct stop-the-world pause measurements.",
+    "Automatic checkpoints remain opt-in."
+  ],
+  "previousAttempts": [
+    {
+      "evidence": "/tmp/gr8s-compaction-cluster-native-is4u67br/result.json",
+      "passed": false,
+      "reason": "No archived-prefix batch observed; current objects/full warm history and leadership passed; cold restart not reached."
+    },
+    {
+      "evidence": "/tmp/gr8s-compaction-cluster-native-2w82zdeq/result.json",
+      "passed": false,
+      "reason": "Interrupted held-capture setup stall after archived-prefix phase passed; all cleanup statuses zero."
+    }
+  ]
+}

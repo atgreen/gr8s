@@ -246,6 +246,10 @@ def main():
         recovered = states()
         assert all(value["configMaps"] == expected_maps for value in recovered.values()), recovered
 
+        result["historyPreservedAcrossRestart"] = all(
+            value["historyEstimatedBytes"] >= final[name]["historyEstimatedBytes"] - 2 * 65536
+            for name, value in recovered.items())
+        assert result["historyPreservedAcrossRestart"], "Retained history lost during cold Raft recovery"
         if not args.smoke:
             histories = {name: value["loadedHistoryEstimatedBytes"] for name, value in recovered.items()}
             assert all(value >= 96 * 1024 * 1024 - 2 * 65536 for value in histories.values()), \
