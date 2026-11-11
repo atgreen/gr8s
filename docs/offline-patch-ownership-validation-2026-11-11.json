@@ -1,0 +1,43 @@
+{
+  "sourceCommit": "f911704",
+  "bead": "podster-ucm.3.1",
+  "baseline": {
+    "sourceHelperFromCommit": "6d9d83b",
+    "method": "Load exact prior offline ownership function after ASDF initialization; patch manager owns its independently acquired flock.",
+    "checks": 6,
+    "passed": 4,
+    "failed": 2,
+    "expectedFailure": true,
+    "invalidInitialHarness": "Initial callback called FiveAM fail inside signals-error and falsely passed. Replaced with a nonthrowing entered flag; only corrected baseline counts as evidence."
+  },
+  "fixedOwnershipSuite": {
+    "checks": 126,
+    "passed": 126,
+    "processExit": 0
+  },
+  "integration": {
+    "patchChecks": 94,
+    "certificateChecks": 149,
+    "explicitCertificateTests": 27,
+    "passed": 243,
+    "processExit": 0
+  },
+  "behavior": [
+    "Offline maintenance holds serve then patch process locks, nonblocking, without loading journal.",
+    "Patch managers share raw safe lock opener; no lock inode unlink/truncate.",
+    "Private directory, no-follow regular single-link owner lock, close-on-exec.",
+    "Legacy read-only group/other lock bits accepted inside private directory and tightened only after successful ownership.",
+    "Failure and callback unwind release ownership."
+  ],
+  "limitations": [
+    "This is a consistency prerequisite; operator backup artifact, restore workflow, schedules, retention and remote copies remain open.",
+    "Source/loopback tests only; no new native or VM acceptance claimed."
+  ],
+  "logSha256": {
+    "offline-patch-ownership-baseline.log": "587ed125311e5b82d74ec63fb38feca655cb281818f29f335fab1249c2723030",
+    "offline-patch-ownership-baseline-corrected.log": "c91d3590fdc4d415203588f56bb2194cb6d304d6e14b13215aa74de86ef5997b",
+    "offline-patch-ownership-fixed.log": "8135a97089c083fbb37ed9e9f14c4b817dd0449b1cc238c9b4c6f1191455a810",
+    "offline-patch-ownership-integration.log": "74a56157149688267b9d3ad719d5c5a0ec685f1d7c34221d7c3f1cce73c9aa1f",
+    "offline-state-ownership-before.lisp": "c57ab3c46dc7e3765b15761123ea226684388fb6b36902cbb65d7e6c2ad44125"
+  }
+}
