@@ -473,6 +473,12 @@ live tracker state. Serialization and validation avoid a base64 string covering
 the entire blob. The live metainfo itself remains resident and contributes to
 normal application heap requirements.
 
+Tracker publication uses the same canonical validator over a seekable view of
+owned input bytes. It copies caller data before validation, then stores that
+validated copy. Validation does not build a decoded metainfo tree or re-encode
+the entire blob, and caller mutation after validation cannot change the bytes
+published in the swarm.
+
 Readers that support only inline metainfo reject chunked swarm headers. Before
 a member can receive such an artifact, its binary must support `chunks-v1`.
 This includes rollback targets reading the selected generation's tracker file;

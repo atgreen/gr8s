@@ -382,3 +382,31 @@
         (is-false (gethash "metainfoFormat" swarm))
         (is-false (find "imageTrackerMetainfoChunk" records :key (lambda (row) (gethash "kind" row)) :test #'equal))
         (gr8s.resources::validate-store-snapshot source)))))
+
+(test tracker-publishes-the-owned-bytes-that-passed-validation
+  (with-temporary-store (store root)
+    (let ((tracker (gr8s.store:pod-store-image-tracker store))
+          (validate (symbol-function 'gr8s.image-distribution::validated-metainfo-infohash)))
+      (multiple-value-bind (digest torrent) (tracker-test-torrent)
+        (let* ((caller (copy-seq (gr8s.image-distribution::blob-torrent-metainfo torrent)))
+               (expected (copy-seq caller))
+               (source (merge-pathnames "owned-tracker.jsonl" root)))
+          (multiple-value-bind (status token)
+              (gr8s.image-distribution::tracker-acquire-origin tracker digest "seed")
+            (declare (ignore status))
+            (unwind-protect
+                 (progn
+                   (setf (symbol-function 'gr8s.image-distribution::validated-metainfo-infohash)
+                         (lambda (incoming bytes)
+                           (prog1 (funcall validate incoming bytes)
+                             ;; Simulate caller mutation after successful
+                             ;; validation but before publication can copy.
+                             (setf (aref caller 0) (char-code #\e)))))
+                   (gr8s.image-distribution::tracker-publish-swarm
+                    tracker digest "seed" token caller "10.0.0.1" 6881 (bt-octets "-GR8001-AAAAAAAAAAAA")))
+              (setf (symbol-function 'gr8s.image-distribution::validated-metainfo-infohash) validate)))
+          (is (/= (aref caller 0) (aref expected 0)))
+          (is (equalp expected (gr8s.image-distribution::tracker-swarm-metainfo
+                               (gethash digest (gr8s.image-distribution::image-tracker-swarms tracker)))))
+          (gr8s.resources::capture-store-snapshot store source 42 7)
+          (gr8s.resources::validate-store-snapshot source))))))

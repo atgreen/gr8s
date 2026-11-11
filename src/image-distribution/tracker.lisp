@@ -106,20 +106,13 @@
     (error "A BitTorrent peer id must contain exactly 20 octets")))
 
 (defun validated-metainfo-infohash (digest metainfo)
-  "Validate canonical BEP 52 metadata and bind its single filename to DIGEST."
-  (let* ((decoded (decode-bencode metainfo))
-         (info (bencode-value decoded "info"))
-         (name (bencode-value info "name"))
-         (file-tree (bencode-value info "file tree"))
-         (hex (subseq digest 7)))
-    (unless (equalp metainfo (encode-bencode decoded))
-      (error "Torrent metadata must use canonical bencoding"))
-    (unless (= 2 (bencode-value info "meta version" 0))
-      (error "OCI blob torrents must use BitTorrent v2 metadata"))
-    (unless (and name (string= hex (trivial-utf-8:utf-8-bytes-to-string name))
-                 (bencode-value file-tree hex))
-      (error "Torrent metadata is not for OCI blob ~A" digest))
-    (torrent-sha256 (encode-bencode info))))
+  "Validate canonical BEP52 without decoding or re-encoding complete metainfo."
+  (unless (and (vectorp metainfo) (not (stringp metainfo)))
+    (error "Tracker metainfo must contain octets"))
+  (let ((octets (if (typep metainfo '(vector (unsigned-byte 8))) metainfo
+                    (bencode-octets metainfo))))
+    (with-open-stream (stream (flexi-streams:make-in-memory-input-stream octets))
+      (nth-value 1 (validate-tracker-metainfo-stream stream (length octets) digest nil)))))
 
 (defun put-tracker-peer (tracker swarm node-name address port peer-id complete-p now)
   (validate-peer-endpoint address port peer-id)
@@ -138,10 +131,15 @@
         (error "A swarm already exists for ~A" digest))
       (let ((now (or now (funcall (image-tracker-clock tracker)))))
         (require-current-origin tracker digest node-name token now)
-        (let* ((infohash (validated-metainfo-infohash digest metainfo))
-               (swarm (make-tracker-swarm
-                       :digest digest :metainfo (copy-seq metainfo)
-                       :infohash infohash)))
+        ;; Validate the exact owned bytes that will be published, rather than
+        ;; checking a caller's vector and copying it after validation.
+        (let* ((owned (if (typep metainfo '(vector (unsigned-byte 8)))
+                          (copy-seq metainfo)
+                          (if (and (vectorp metainfo) (not (stringp metainfo)))
+                              (bencode-octets metainfo)
+                              (error "Tracker metainfo must contain octets"))))
+               (infohash (validated-metainfo-infohash digest owned))
+               (swarm (make-tracker-swarm :digest digest :metainfo owned :infohash infohash)))
           (put-tracker-peer tracker swarm node-name address port peer-id t now)
           (setf (gethash digest (image-tracker-swarms tracker)) swarm)
           (remhash digest (image-tracker-origins tracker))

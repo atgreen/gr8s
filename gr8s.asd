@@ -75,6 +75,7 @@
                               :components ((:file "package")
                                            (:file "bencode")
                                            (:file "torrent-v2")
+                                           (:file "metainfo-stream")
                                            (:file "tracker")
                                            (:file "peer-wire")
                                            (:file "piece-store")
