@@ -162,7 +162,94 @@
           "queuedTypes": [],
           "activeSnapshots": []
         }
-      ]
+      ],
+      "gcCpuSeconds": 156.456097,
+      "gcWallSeconds": 159.111882,
+      "compactionPhases": [
+        {
+          "phase": "freeze",
+          "attempts": 86,
+          "totalSeconds": 0.009,
+          "maxSeconds": 0.001,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "phase": "capture",
+          "attempts": 86,
+          "totalSeconds": 229.042399,
+          "maxSeconds": 5.86696,
+          "lastSeconds": 3.168978,
+          "gcTotalSeconds": 29.661886,
+          "gcMaxSeconds": 0.596453,
+          "gcLastSeconds": 0.416257
+        },
+        {
+          "phase": "retain",
+          "attempts": 85,
+          "totalSeconds": 654.166403,
+          "maxSeconds": 18.875868,
+          "lastSeconds": 9.237935,
+          "gcTotalSeconds": 93.402146,
+          "gcMaxSeconds": 2.578277,
+          "gcLastSeconds": 1.292943
+        },
+        {
+          "phase": "publish",
+          "attempts": 85,
+          "totalSeconds": 4.430965,
+          "maxSeconds": 0.124999,
+          "lastSeconds": 0.053999,
+          "gcTotalSeconds": 0.29315,
+          "gcMaxSeconds": 0.018959,
+          "gcLastSeconds": 0.007058
+        }
+      ],
+      "compactionMemberLocks": [
+        {
+          "section": "check",
+          "attempts": 4894,
+          "totalSeconds": 0.659993,
+          "maxSeconds": 0.02,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.181799,
+          "gcMaxSeconds": 0.017955,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "freeze",
+          "attempts": 86,
+          "totalSeconds": 0.057999,
+          "maxSeconds": 0.007999,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.005037,
+          "gcMaxSeconds": 0.005037,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "publish",
+          "attempts": 85,
+          "totalSeconds": 4.431965,
+          "maxSeconds": 0.124999,
+          "lastSeconds": 0.053999,
+          "gcTotalSeconds": 0.29315,
+          "gcMaxSeconds": 0.018959,
+          "gcLastSeconds": 0.007058
+        },
+        {
+          "section": "resume",
+          "attempts": 85,
+          "totalSeconds": 0.042999,
+          "maxSeconds": 0.002,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        }
+      ],
+      "checkpoints": 85
     },
     "cp-b": {
       "term": 1,
@@ -205,7 +292,94 @@
           "queuedTypes": [],
           "activeSnapshots": []
         }
-      ]
+      ],
+      "gcCpuSeconds": 73.629067,
+      "gcWallSeconds": 74.859527,
+      "compactionPhases": [
+        {
+          "phase": "freeze",
+          "attempts": 90,
+          "totalSeconds": 0.006,
+          "maxSeconds": 0.001,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "phase": "capture",
+          "attempts": 90,
+          "totalSeconds": 243.069287,
+          "maxSeconds": 25.624821,
+          "lastSeconds": 2.781981,
+          "gcTotalSeconds": 11.532491,
+          "gcMaxSeconds": 1.354751,
+          "gcLastSeconds": 0.1208
+        },
+        {
+          "phase": "retain",
+          "attempts": 89,
+          "totalSeconds": 632.112565,
+          "maxSeconds": 12.671912,
+          "lastSeconds": 9.209937,
+          "gcTotalSeconds": 50.700376,
+          "gcMaxSeconds": 1.179801,
+          "gcLastSeconds": 0.800859
+        },
+        {
+          "phase": "publish",
+          "attempts": 89,
+          "totalSeconds": 4.934968,
+          "maxSeconds": 0.211,
+          "lastSeconds": 0.053999,
+          "gcTotalSeconds": 0.236053,
+          "gcMaxSeconds": 0.028166,
+          "gcLastSeconds": 0.0
+        }
+      ],
+      "compactionMemberLocks": [
+        {
+          "section": "check",
+          "attempts": 7776,
+          "totalSeconds": 0.856998,
+          "maxSeconds": 0.015,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.049306,
+          "gcMaxSeconds": 0.009563,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "freeze",
+          "attempts": 90,
+          "totalSeconds": 0.063998,
+          "maxSeconds": 0.009999,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.005487,
+          "gcMaxSeconds": 0.005487,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "publish",
+          "attempts": 89,
+          "totalSeconds": 4.937968,
+          "maxSeconds": 0.211,
+          "lastSeconds": 0.053999,
+          "gcTotalSeconds": 0.236053,
+          "gcMaxSeconds": 0.028166,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "resume",
+          "attempts": 89,
+          "totalSeconds": 0.044,
+          "maxSeconds": 0.002,
+          "lastSeconds": 0.001,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        }
+      ],
+      "checkpoints": 89
     },
     "cp-c": {
       "term": 1,
@@ -248,7 +422,94 @@
           "queuedTypes": [],
           "activeSnapshots": []
         }
-      ]
+      ],
+      "gcCpuSeconds": 73.655446,
+      "gcWallSeconds": 74.881493,
+      "compactionPhases": [
+        {
+          "phase": "freeze",
+          "attempts": 93,
+          "totalSeconds": 0.01,
+          "maxSeconds": 0.001,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "phase": "capture",
+          "attempts": 93,
+          "totalSeconds": 225.102419,
+          "maxSeconds": 5.038964,
+          "lastSeconds": 2.712981,
+          "gcTotalSeconds": 11.124239,
+          "gcMaxSeconds": 0.295653,
+          "gcLastSeconds": 0.142827
+        },
+        {
+          "phase": "retain",
+          "attempts": 92,
+          "totalSeconds": 643.359469,
+          "maxSeconds": 16.022887,
+          "lastSeconds": 8.351942,
+          "gcTotalSeconds": 50.682655,
+          "gcMaxSeconds": 1.717292,
+          "gcLastSeconds": 0.590533
+        },
+        {
+          "phase": "publish",
+          "attempts": 92,
+          "totalSeconds": 5.442968,
+          "maxSeconds": 0.243998,
+          "lastSeconds": 0.036999,
+          "gcTotalSeconds": 0.285738,
+          "gcMaxSeconds": 0.025586,
+          "gcLastSeconds": 0.0
+        }
+      ],
+      "compactionMemberLocks": [
+        {
+          "section": "check",
+          "attempts": 10631,
+          "totalSeconds": 1.214994,
+          "maxSeconds": 0.046,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.101821,
+          "gcMaxSeconds": 0.03258,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "freeze",
+          "attempts": 93,
+          "totalSeconds": 0.06,
+          "maxSeconds": 0.005,
+          "lastSeconds": 0.002,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "publish",
+          "attempts": 92,
+          "totalSeconds": 5.443968,
+          "maxSeconds": 0.243998,
+          "lastSeconds": 0.036999,
+          "gcTotalSeconds": 0.285738,
+          "gcMaxSeconds": 0.025586,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "resume",
+          "attempts": 92,
+          "totalSeconds": 0.046999,
+          "maxSeconds": 0.006,
+          "lastSeconds": 0.001,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        }
+      ],
+      "checkpoints": 92
     }
   },
   "afterRestart": {
@@ -293,7 +554,94 @@
           "queuedTypes": [],
           "activeSnapshots": []
         }
-      ]
+      ],
+      "gcCpuSeconds": 2.681634,
+      "gcWallSeconds": 2.706981,
+      "compactionPhases": [
+        {
+          "phase": "freeze",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "phase": "capture",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "phase": "retain",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "phase": "publish",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        }
+      ],
+      "compactionMemberLocks": [
+        {
+          "section": "check",
+          "attempts": 3309,
+          "totalSeconds": 0.311998,
+          "maxSeconds": 0.009,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.004747,
+          "gcMaxSeconds": 0.004747,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "freeze",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "publish",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "resume",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        }
+      ],
+      "checkpoints": 0
     },
     "cp-b": {
       "term": 3,
@@ -336,7 +684,94 @@
           "queuedTypes": [],
           "activeSnapshots": []
         }
-      ]
+      ],
+      "gcCpuSeconds": 2.679154,
+      "gcWallSeconds": 2.727981,
+      "compactionPhases": [
+        {
+          "phase": "freeze",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "phase": "capture",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "phase": "retain",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "phase": "publish",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        }
+      ],
+      "compactionMemberLocks": [
+        {
+          "section": "check",
+          "attempts": 3318,
+          "totalSeconds": 0.337999,
+          "maxSeconds": 0.009,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.011321,
+          "gcMaxSeconds": 0.006223,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "freeze",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "publish",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "resume",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        }
+      ],
+      "checkpoints": 0
     },
     "cp-c": {
       "term": 3,
@@ -379,7 +814,99 @@
           "queuedTypes": [],
           "activeSnapshots": []
         }
-      ]
+      ],
+      "gcCpuSeconds": 1.429586,
+      "gcWallSeconds": 1.465986,
+      "compactionPhases": [
+        {
+          "phase": "freeze",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "phase": "capture",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "phase": "retain",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "phase": "publish",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        }
+      ],
+      "compactionMemberLocks": [
+        {
+          "section": "check",
+          "attempts": 56,
+          "totalSeconds": 0.005,
+          "maxSeconds": 0.002,
+          "lastSeconds": 0.001,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "freeze",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "publish",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        },
+        {
+          "section": "resume",
+          "attempts": 0,
+          "totalSeconds": 0.0,
+          "maxSeconds": 0.0,
+          "lastSeconds": 0.0,
+          "gcTotalSeconds": 0.0,
+          "gcMaxSeconds": 0.0,
+          "gcLastSeconds": 0.0
+        }
+      ],
+      "checkpoints": 0
     }
-  }
+  },
+  "timingInterpretation": [
+    "Phase and member-lock GC deltas measure process-wide GC CPU, not exclusive phase pauses. gcWallSeconds is the separate cumulative process-wide GC real-time counter.",
+    "Critical-section durations exclude acquisition wait and counter update; they do not bound every member-lock holder or heartbeat latency.",
+    "All warm sampled terms remained1 under the strict stability gate; cold forced restart allowed new elections."
+  ]
 }
