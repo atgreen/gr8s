@@ -37,9 +37,9 @@ attached. Counters reset with the process. Restoring an application or starting
 a new watch epoch can reduce the history gauges.
 
 These metrics complement API server, scheduler, dataplane, and process metrics.
-Raft health, disk/inode capacity, and reconciliation convergence are tracked
-separately under `podster-ucm.6`; these memory families do not establish that
-broader telemetry work as complete.
+The sections below cover Raft health, disk/inode capacity, datastore file
+growth, and reconciliation convergence. Each family describes a local
+observation with the sampling limits documented for that collector.
 
 ## Raft and checkpoint worker
 
@@ -83,7 +83,7 @@ Checkpoint phase measurements use the four fixed `phase` labels `freeze`,
 measures artifact serialization; `retain` measures registry retention and
 validation; `publish` measures prepared Raft publication, including disk cache
 and WAL persistence, under the member lock. Gate draining, waiting to acquire
-locks, digest calculation, artifact reaping, and cleanup are outside these phase
+locks, digest calculation, asynchronous artifact reclamation, and cleanup are outside these phase
 timings. They are execution durations, not a complete measure of request latency
 or heartbeat interruption. GC pauses during a phase contribute to its elapsed
 time. All four labels are emitted with zero values before observation.
@@ -106,8 +106,9 @@ and `resume`. Each has the suffixes `observations_total`,
 - `check` includes the initial trigger and readiness checks.
 - `freeze` includes trigger rechecking, prepared-boundary construction, the
   application-view copy, and gate reopening.
-- `publish` includes readiness rechecking, checkpoint publication, artifact
-  reaping and successful-checkpoint bookkeeping.
+- `publish` includes readiness rechecking, checkpoint publication and
+  successful-checkpoint bookkeeping. Artifact reclamation runs separately in
+  the joined maintenance worker, outside the compaction critical section.
 - `resume` includes the cleanup path's readiness check and gate reopening.
 
 Timing starts after acquiring the member lock and ends after the section body,
