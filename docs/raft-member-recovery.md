@@ -205,7 +205,7 @@ journal is refused and requires explicit cluster migration; restarting it with
 only understand mode version 1 also refuse this descriptor.
 
 Snapshot capture is registered under the outer store barriers before member
-locking. Automatic compaction is opt-in with `serve --raft-compaction`.
+locking. HA `serve` starts automatic compaction by default; `--no-raft-compaction` disables scheduling.
 Witness peers receive a durable
 configuration-only projection of store snapshots, without application artifacts
 or an application artifact retainer. Voters and learners retain the full
@@ -498,7 +498,7 @@ uncertain WAL failure leaves application access blocked. Shutdown wakes and
 joins the worker before stopping Raft. Internal counters record successful
 cycles, reclaimed artifacts and the most recent error.
 
-The opt-in worker's HA tests cover repeated byte-triggered checkpoints and
+The checkpoint worker's HA tests cover repeated byte-triggered checkpoints and
 recovery, capture failure, uncertain storage failure and waking a long-interval
 worker at shutdown. They also cover live writes during capture and recovery of
 the newer committed suffix. Production activation still requires capture-pause and
@@ -517,8 +517,8 @@ revalidates the prefix under the lock and publishes the frozen metadata with
 the artifact. It preserves newer committed and uncommitted log entries, current
 term/vote, and live membership. A superseding snapshot or pending installation
 causes publication to return `nil`; the caller still owns artifact retention
-and cleanup. The opt-in worker uses these helpers; automatic compaction remains
-disabled by default pending sustained heap and multi-member availability proof.
+and cleanup. The checkpoint worker uses these helpers. HA `serve` enables scheduling by
+default; the full multi-member acceptance evidence is described below.
 
 Image-tracker snapshot iteration freezes policy, leases, swarms and peers under
 the tracker mutex, then encodes records and invokes the writer after releasing
@@ -671,12 +671,14 @@ and all published artifacts are preserved. A
 [three-cycle SIGKILL validation](snapshot-startup-scratch-validation-2026-11-10.json)
 checks live-owner protection, restart cleanup, and retained data/artifacts.
 
-Operators can opt in on each HA server by adding `--raft-compaction` to the
-existing `gr8s serve` command, alongside `--raft-init` or `--raft-join HOST:PORT`.
-The switch starts that server's checkpoint worker with the normal thresholds
-and a one-second check interval. Omit it to keep automatic compaction disabled.
-It is rejected outside HA mode. This exposes the opt-in production startup path;
-it does not replace the separate production/VM and sustained-availability gates.
+Each HA `gr8s serve` starts its checkpoint worker with the normal thresholds
+and a one-second check interval. `--raft-compaction` explicitly enables the same
+behavior; `--no-raft-compaction` disables scheduling for diagnostics. Explicit
+enabling requires `--raft-init` or `--raft-join HOST:PORT`; standalone startup
+has no worker. With scheduling disabled, retained logs can grow without a
+checkpoint bound. Changing this setting preserves the original state directory,
+identity and endpoints. Native acceptance covers the fake-runtime production
+CLI; VM and real-container acceptance remain separate gates.
 
 Build this internal harness with
 `sbcl --noinform --non-interactive --load scripts/build-compaction-cluster-native-harness.lisp`.
@@ -724,8 +726,9 @@ passes this workload and both recovery phases at a 384 MiB dynamic heap limit:
 93 checkpoints, sampled WAL below 3 MiB, at most two retained artifacts, and
 full watch-history retention before recovery. The cold input includes a
 130 MB checkpoint followed by a 59 MB journal. This proves the recorded
-single-member memory/recovery path; multi-member capture availability remains
-unverified, and automatic compaction remains disabled by default.
+single-member memory/recovery path. Later full multi-member and production CLI
+evidence extends it; see the acceptance records below. HA scheduling is now
+enabled by default.
 
 History's byte estimate includes array headers and whole GC pages occupied by
 large strings. On this SBCL build, a 64 KiB base string occupies three 32 KiB

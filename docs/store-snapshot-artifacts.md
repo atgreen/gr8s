@@ -3,7 +3,7 @@
 The internal artifact writer captures application records without constructing a
 whole-store JSON string, byte vector, or Lisp snapshot. Production HA uses these
 artifacts for snapshot catch-up and durable recovery. Automatic checkpoints are
-available through `serve --raft-compaction`. Operator backups also need the stable
+enabled by default for HA `serve`; `--no-raft-compaction` disables scheduling. Operator backups also need the stable
 member identity, signing/encryption keys and patch state; an application artifact
 alone does not include them.
 
