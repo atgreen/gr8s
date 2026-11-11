@@ -983,12 +983,22 @@ Protocol-only traffic remains available to establish a recovery commit."
    round. Steps down first if MSG's term is newer."
   (raft-step-down-if-stale node (getf msg :term))
   (when (and (eq (raft-node-role node) :leader)
-             (= (getf msg :term) (raft-node-current-term node)))
+             (= (getf msg :term) (raft-node-current-term node))
+             (member (getf msg :from) (raft-replicate-ids node) :test #'equal))
     (let ((peer (getf msg :from)))
       (if (getf msg :success)
           (progn
-            (setf (gethash peer (raft-node-match-index node)) (getf msg :match-index)
-                  (gethash peer (raft-node-next-index node)) (1+ (getf msg :match-index)))
+            (unless (and (typep (getf msg :match-index) '(integer 0 #.most-positive-fixnum))
+                         (<= (getf msg :match-index) (raft-last-log-index node)))
+              (return-from raft-handle-append-entries-reply nil))
+            ;; Replies may arrive after a newer append or snapshot acknowledgement.
+            ;; A successful acknowledgement cannot revoke already proven progress.
+            (setf (gethash peer (raft-node-match-index node))
+                  (max (gethash peer (raft-node-match-index node) 0)
+                       (getf msg :match-index))
+                  (gethash peer (raft-node-next-index node))
+                  (max (gethash peer (raft-node-next-index node) 1)
+                       (1+ (gethash peer (raft-node-match-index node)))))
             (when (>= (getf msg :match-index) (raft-node-snapshot-index node))
               (remhash peer (raft-node-peer-snapshot-required node)))
             (let ((applied (getf msg :applied-index))

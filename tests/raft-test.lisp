@@ -1585,3 +1585,53 @@
       (setf (gr8s.raft:raft-node-peers node) nil)
       (gr8s.raft::raft-become-leader node)
       (is (zerop (hash-table-count (gr8s.raft::raft-node-peer-snapshot-required node)))))))
+
+(test delayed-append-ack-cannot-undo-newer-snapshot-or-log-progress
+  (let ((node (gr8s.raft:make-raft-node
+               :id "leader" :peers '("peer") :role :leader :current-term 3
+               :snapshot-index 10 :snapshot-term 2 :commit-index 10 :last-applied 10
+               :log (make-array 5 :adjustable t :fill-pointer 5
+                                :initial-contents
+                                (loop for index from 11 to 15 collect
+                                  (gr8s.raft:make-raft-entry :index index :term 3 :command '(:noop)))))))
+    (setf (gethash "leader" (gr8s.raft:raft-node-match-index node)) 15)
+    (gr8s.raft::raft-handle-install-snapshot-reply
+     node '(:from "peer" :term 3 :success t :match-index 10))
+    (gr8s.raft::raft-handle-append-entries-reply
+     node '(:from "peer" :term 3 :success t :match-index 6 :applied-index 6))
+    (is (= 10 (gethash "peer" (gr8s.raft:raft-node-match-index node))))
+    (is (= 11 (gethash "peer" (gr8s.raft:raft-node-next-index node))))
+    (gr8s.raft::raft-handle-append-entries-reply
+     node '(:from "peer" :term 3 :success t :match-index 14 :applied-index 14))
+    (gr8s.raft::raft-handle-append-entries-reply
+     node '(:from "peer" :term 3 :success t :match-index 12 :applied-index 12))
+    (is (= 14 (gethash "peer" (gr8s.raft:raft-node-match-index node))))
+    (is (= 15 (gethash "peer" (gr8s.raft:raft-node-next-index node))))
+    ;; Applied proof must use this reply's match, not the newer remembered match.
+    (gr8s.raft::raft-handle-append-entries-reply
+     node '(:from "peer" :term 3 :success t :match-index 12 :applied-index 15))
+    (is (= 14 (cdr (gethash "peer" (gr8s.raft::raft-node-peer-applied node)))))
+    (gr8s.raft::raft-handle-append-entries-reply
+     node '(:from "peer" :term 3 :success nil :next-index 2 :capacity-limited t))
+    (is (= 15 (gethash "peer" (gr8s.raft:raft-node-next-index node))))
+    (is-false (gethash "peer" (gr8s.raft::raft-node-peer-snapshot-required node)))))
+
+(test append-acknowledgements-require-current-peer-and-bounded-index
+  (let ((node (gr8s.raft:make-raft-node :id "leader" :peers '("peer") :role :leader
+                                      :current-term 3 :snapshot-index 10 :snapshot-term 3
+                                      :commit-index 10 :last-applied 10)))
+    (setf (gethash "peer" (gr8s.raft:raft-node-match-index node)) 10
+          (gethash "peer" (gr8s.raft:raft-node-next-index node)) 11)
+    (dolist (index '(11 -1 nil "10"))
+      (finishes (gr8s.raft::raft-handle-append-entries-reply
+                 node (list :from "peer" :term 3 :success t :match-index index)))
+      (is (= 10 (gethash "peer" (gr8s.raft:raft-node-match-index node))))
+      (is (= 11 (gethash "peer" (gr8s.raft:raft-node-next-index node)))))
+    (dolist (success '(nil t))
+      (gr8s.raft::raft-handle-append-entries-reply
+       node (list :from "outsider" :term 3 :success success :match-index 10 :next-index 2)))
+    (is-false (gethash "outsider" (gr8s.raft:raft-node-match-index node)))
+    (is-false (gethash "outsider" (gr8s.raft:raft-node-next-index node)))
+    (gr8s.raft::raft-handle-append-entries-reply
+     node '(:from "peer" :term 2 :success t :match-index 1))
+    (is (= 10 (gethash "peer" (gr8s.raft:raft-node-match-index node))))))
