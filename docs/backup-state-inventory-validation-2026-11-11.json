@@ -1,0 +1,36 @@
+{
+  "scope": "Offline stable-state inventory prerequisite for operator bundles; no backup save/restore CLI or encrypted archive yet.",
+  "unitChecks": 32,
+  "unitPassed": 32,
+  "productionStoppedStateInventory": {
+    "files": 38,
+    "bytes": 216208070,
+    "largestFileBytes": 107603579,
+    "excluded": [
+      ".gr8s-serve.lock",
+      "patches/process.lock",
+      "raft/control-plane.log.lock",
+      "raft/transfers/"
+    ]
+  },
+  "productionStateRoot": "/home/green/.cache/gr8s-test-tmp/gr8s-ha-production-pjyns5be/cp1/",
+  "productionRequiredPathsVerified": [
+    "metadata/application-generation.json",
+    "raft/bootstrap.json",
+    "raft/control-plane.log",
+    "patches/journal.json",
+    "pki/raft/pki/cluster-ca.key"
+  ],
+  "payloadsRead": false,
+  "notes": [
+    "Visitor carries file stat metadata and requires future writer to no-follow-open/recheck before copying.",
+    "Acquisition may tighten a legacy patch process-lock inode to0600; application/PKI payloads are not changed.",
+    "First fixture used0755 patch directory and was correctly refused; fixture corrected to real manager0700, production checks unchanged.",
+    "No peak-heap, encrypted archive integrity, restore, schedule or remote-copy acceptance claimed."
+  ],
+  "logSha256": {
+    "backup-state-inventory.log": "2e0ee8cf0f80ae2dcda708a62fa543dc1e852b1db99a7a0e25b3f4d07783fba8",
+    "backup-state-inventory-fixed.log": "79865419ded9072a3e1a9d95d25b7f898e52b994830707c358e0d2effded557e",
+    "backup-state-production-inventory.log": "fa813210708dc60f958ca52f0bd6238870c07fea19b7d50eba18c6862556ae59"
+  }
+}
