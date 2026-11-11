@@ -9,9 +9,18 @@ Lisp. This document is the running ledger of conformance progress against the
 **official upstream v1.36 `certified-conformance` suite** (446 selected cases),
 run via Sonobuoy against a native gr8s cluster.
 
-gr8s has **not** passed Kubernetes conformance, and this document reports
-results as-is. Each row links to the committed evidence JSON for that run
-(official JUnit archive, native request log, and artifact hashes).
+> **Milestone (2026-11-11):** gr8s **passes every case of the upstream Kubernetes
+> v1.37 `certified-conformance` suite — 462 of 462, 0 failures**, run via Sonobuoy
+> against a native two-node gr8s cluster (build `v1.37.2-g6584550+dirty`; the
+> tested changes are committed in `6584550..827ef7c6`). Machine-generated
+> evidence: [conformance-full-v1.37-2026-11-11.json](conformance-full-v1.37-2026-11-11.json),
+> produced by `scripts/e2e-two-node.sh report`. gr8s is not yet a CNCF-submitted
+> _Certified Kubernetes_ distribution.
+
+This document reports results as-is. Each row links to the committed evidence
+JSON for that run (JUnit archive, gr8s request log, and artifact hashes). The
+round ledger below is the earlier **v1.36** (446-case) progression that led to
+the v1.37 milestone above.
 
 ## Round ledger
 

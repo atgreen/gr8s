@@ -29,6 +29,7 @@
 #   scripts/e2e-two-node.sh status    # nodes, pods, Sonobuoy progress
 #   scripts/e2e-two-node.sh watch     # live progress until the run finishes
 #   scripts/e2e-two-node.sh results   # retrieve + summarize the finished run
+#   scripts/e2e-two-node.sh report    # print the finished run's conformance evidence JSON
 #   scripts/e2e-two-node.sh down      # stop the cluster (keep the VMs)
 #   scripts/e2e-two-node.sh destroy   # down + delete the VMs and overlays
 #   scripts/e2e-two-node.sh run       # up + test, then print how to watch (default)
@@ -333,6 +334,29 @@ cmd_results() {
   ok "results archive: $out"; "$SONOBUOY" results "$out" 2>/dev/null || true
 }
 
+cmd_report() {  # print the finished run's conformance evidence JSON (stdout)
+  [ -f "$KUBECONFIG_FILE" ] || die "no cluster; run '$0 up' first"
+  local tb; tb="$("$SONOBUOY" retrieve --kubeconfig "$KUBECONFIG_FILE" "$RUNDIR" 2>/dev/null)" \
+    || die "retrieve failed (run may be unfinished)"
+  log "results archive: $tb" >&2
+  local gr8slog=""
+  if [ -f "$RUNDIR/vm-ips" ]; then          # hash the control plane's gr8s log into the report
+    gr8slog="$RUNDIR/gr8s.log"
+    ssh_n "$(head -1 "$RUNDIR/vm-ips")" 'journalctl -u gr8s --no-pager' > "$gr8slog" 2>/dev/null || gr8slog=""
+  fi
+  # Record the version the cluster itself reports (authoritative for what ran),
+  # falling back to this checkout's describe; derive the build commit from it.
+  local ver; ver="$("${KC[@]}" version -o json 2>/dev/null \
+    | python3 -c 'import sys,json;print(json.load(sys.stdin).get("serverVersion",{}).get("gitVersion",""))' 2>/dev/null)"
+  [ -n "$ver" ] || ver="$(git -C "$HERE" describe --tags --always --dirty 2>/dev/null || echo unknown)"
+  local commit; commit="$(printf '%s' "$ver" | sed -nE 's/.*-g([0-9a-f]+).*/\1/p')"
+  [ -n "$commit" ] || commit="$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  python3 "$HERE/scripts/conformance-report.py" --tarball "$tb" \
+    ${gr8slog:+--gr8s-log "$gr8slog"} \
+    --version "$ver" --commit "$commit" \
+    --command "scripts/e2e-two-node.sh run (mode=$MODE)"
+}
+
 cmd_down() {
   log "stopping cluster (VMs kept)"
   tunnel_down
@@ -353,7 +377,7 @@ cmd_run() { cmd_up; cmd_test; }
 
 case "${1:-run}" in
   up) cmd_up ;; test) cmd_test ;; status) cmd_status ;; watch) cmd_watch ;;
-  results) cmd_results ;; down) cmd_down ;; destroy) cmd_destroy ;; run) cmd_run ;;
+  results) cmd_results ;; report) cmd_report ;; down) cmd_down ;; destroy) cmd_destroy ;; run) cmd_run ;;
   -h|--help|help) sed -n '2,46p' "$0" ;;
-  *) die "unknown command '$1'; try: up test status watch results down destroy run" ;;
+  *) die "unknown command '$1'; try: up test status watch results report down destroy run" ;;
 esac
