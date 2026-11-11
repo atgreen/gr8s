@@ -1,0 +1,178 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+(in-package #:gr8s.server)
+
+(defun backup-relative-components (name)
+  (unless (and (stringp name) (<= 1 (length name) 4096)
+               (not (find-if (lambda (c) (or (< (char-code c) 32) (find c "\\:*?[]"))) name))
+               (not (char= #\/ (char name 0))))
+    (error "Invalid backup member path"))
+  (let ((parts (uiop:split-string name :separator "/")))
+    (when (or (some (lambda (part) (member part '("" "." "..") :test #'equal)) parts)
+              (backup-excluded-path-p name))
+      (error "Unsafe or excluded backup member path"))
+    parts))
+
+(defun backup-path-follows-p (previous current)
+  ;; Component order matches the directory visitor, not flat slash ordering.
+  ;; Prefix/equal paths also reject file-as-directory and duplicate collisions.
+  (loop for left in (backup-relative-components previous)
+        for right in (backup-relative-components current)
+        when (not (equal left right)) return (string< left right)
+        finally (return nil)))
+
+(defun write-backup-bundle-json (writer kind object)
+  (let ((json (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify object))))
+    (when (> (length json) 16384) (error "Backup metadata record too large"))
+    (write-backup-record writer (concatenate '(vector (unsigned-byte 8)) (vector kind) json))))
+
+(defun parse-backup-bundle-json (record count)
+  (unless (<= 2 (length record) 16385) (error "Invalid backup metadata size"))
+  (let ((object (com.inuoe.jzon:parse
+                 (trivial-utf-8:utf-8-bytes-to-string (subseq record 1))
+                 :max-depth 8 :max-string-length 4096)))
+    (unless (and (hash-table-p object) (= count (hash-table-count object)))
+      (error "Invalid backup metadata object"))
+    object))
+
+(defun backup-source-matches-p (before after)
+  (and (sb-posix:s-isreg (sb-posix:stat-mode after))
+       (= 1 (sb-posix:stat-nlink after)) (= (sb-posix:geteuid) (sb-posix:stat-uid after))
+       (zerop (logand #o022 (sb-posix:stat-mode after)))
+       (every (lambda (accessor) (= (funcall accessor before) (funcall accessor after)))
+              (list #'sb-posix:stat-dev #'sb-posix:stat-ino #'sb-posix:stat-size
+                    #'sb-posix:stat-mtime #'sb-posix:stat-ctime))))
+
+(defun write-backup-bundle-file (writer name path expected)
+  (backup-relative-components name)
+  (let ((fd nil) (input nil) (hash (ironclad:make-digest :sha256))
+        (buffer (make-array 65535 :element-type '(unsigned-byte 8))) (copied 0))
+    (unwind-protect
+         (progn
+           (setf fd (sb-posix:open (namestring path)
+                                   (logior sb-posix:o-rdonly sb-posix:o-nofollow sb-posix:o-nonblock) 0))
+           (unless (zerop (cffi:foreign-funcall "fcntl" :int fd :int 2 :int 1 :int))
+             (error "Cannot protect backup input across exec"))
+           (unless (backup-source-matches-p expected (sb-posix:fstat fd))
+             (error "Backup source changed before copying: ~A" name))
+           (setf input (sb-sys:make-fd-stream fd :input t :element-type '(unsigned-byte 8) :auto-close t))
+           (write-backup-bundle-json writer 1 (json-object "path" name "bytes" (sb-posix:stat-size expected) "mode" #o600))
+           (loop for count = (read-sequence buffer input) while (plusp count) do
+             (incf copied count)
+             (when (> copied (sb-posix:stat-size expected)) (error "Backup source grew during capture"))
+             (ironclad:update-digest hash buffer :end count)
+             (write-backup-record writer (concatenate '(vector (unsigned-byte 8)) #(2) (subseq buffer 0 count))))
+           (unless (and (= copied (sb-posix:stat-size expected))
+                        (backup-source-matches-p expected (sb-posix:fstat fd)))
+             (error "Backup source changed during capture: ~A" name))
+           (write-backup-record writer (concatenate '(vector (unsigned-byte 8)) #(3) (ironclad:produce-digest hash))))
+      (if input (close input) (when fd (sb-posix:close fd))))))
+
+(defun write-state-backup-stream (root output key)
+  "Capture files under offline ownership; OUTPUT belongs to the caller's staging file."
+  (let ((writer (open-backup-writer output key)) (previous nil))
+    (write-backup-bundle-json
+     writer 0 (json-object "format" "gr8s-state-bundle" "version" 1
+                           "buildID" gr8s.patch:*build-id* "release" +gr8s-version+
+                           "createdAt" (get-universal-time) "exclusionPolicy" "gr8s-control-plane-v1"))
+    (multiple-value-bind (count bytes excluded)
+        (map-offline-backup-files
+         root (lambda (name path stat)
+                (when (and previous (not (backup-path-follows-p previous name)))
+                  (error "Backup inventory is not in canonical order"))
+                (write-backup-bundle-file writer name path stat)
+                (setf previous name)))
+      (write-backup-bundle-json writer 4 (json-object "files" count "bytes" bytes "excluded" (coerce excluded 'vector)))
+      (finish-backup-writer writer)
+      (values count bytes))))
+
+(defun verify-state-backup-stream (input key &key on-file on-data on-file-end)
+  "Validate a complete bundle. Callbacks may only write into private staging state.
+No success is returned until authenticated final EOF, counters and digests agree."
+  (let* ((reader (open-backup-reader input key))
+         (record (or (read-backup-record reader) (error "Missing backup manifest")))
+         (manifest (progn (unless (= 0 (aref record 0)) (error "Missing backup manifest"))
+                          (parse-backup-bundle-json record 6)))
+         (previous nil) (remaining nil) (hash nil) (count 0) (bytes 0))
+    (unless (and (equal "gr8s-state-bundle" (gethash "format" manifest))
+                 (eql 1 (gethash "version" manifest))
+                 (gr8s.patch::valid-digest-p (gethash "buildID" manifest))
+                 (stringp (gethash "release" manifest))
+                 (typep (gethash "createdAt" manifest) '(unsigned-byte 64))
+                 (equal "gr8s-control-plane-v1" (gethash "exclusionPolicy" manifest)))
+      (error "Invalid or unsupported backup manifest"))
+    (loop
+      (setf record (or (read-backup-record reader) (error "Missing backup bundle footer")))
+      (case (aref record 0)
+        (1
+         (when remaining (error "Backup file lacks its digest"))
+         (let* ((metadata (parse-backup-bundle-json record 3))
+                (name (gethash "path" metadata)) (size (gethash "bytes" metadata)))
+           (backup-relative-components name)
+           (unless (and (or (null previous) (backup-path-follows-p previous name))
+                        (typep size '(unsigned-byte 64)) (eql #o600 (gethash "mode" metadata)))
+             (error "Invalid backup file metadata or order"))
+           (setf previous name remaining size hash (ironclad:make-digest :sha256))
+           (incf count) (incf bytes size)
+           (when on-file (funcall on-file name size))))
+        (2
+         (unless (and remaining (<= 1 (1- (length record)) remaining)) (error "Unexpected or excessive backup file data"))
+         (ironclad:update-digest hash record :start 1)
+         (decf remaining (1- (length record)))
+         (when on-data (funcall on-data record 1 (length record))))
+        (3
+         (unless (and remaining (zerop remaining) (= 33 (length record))
+                      (equalp (subseq record 1) (ironclad:produce-digest hash)))
+           (error "Incomplete backup file or checksum mismatch"))
+         (setf remaining nil hash nil)
+         (when on-file-end (funcall on-file-end)))
+        (4
+         (when remaining (error "Backup footer interrupts a file"))
+         (let* ((footer (parse-backup-bundle-json record 3)) (excluded (gethash "excluded" footer)))
+           (unless (and (eql count (gethash "files" footer)) (eql bytes (gethash "bytes" footer))
+                        (vectorp excluded) (not (stringp excluded))
+                        (every (lambda (name) (and (stringp name) (backup-excluded-path-p name))) excluded)
+                        (null (read-backup-record reader)))
+             (error "Invalid backup totals, exclusions or final marker"))
+           (return (values manifest count bytes))))
+        (otherwise (error "Unknown backup bundle record"))))))
+
+(defun canonical-backup-output-path (root output)
+  (let* ((path (merge-pathnames output (uiop:getcwd)))
+         (parent (truename (uiop:pathname-directory-pathname path)))
+         (target (merge-pathnames (file-namestring path) parent)))
+    (unless (and (pathname-name path) (not (wild-pathname-p path))) (error "Backup output must name a file"))
+    (gr8s.store::check-store-generation-directory parent :metadata t)
+    (when (uiop:subpathp target (truename (uiop:ensure-directory-pathname root)))
+      (error "Backup output must be outside the captured state directory"))
+    target))
+
+(defun capture-state-backup (root output key)
+  "Publish one private encrypted bundle without overwriting any existing output."
+  (let* ((target (canonical-backup-output-path root output))
+         (parent (uiop:pathname-directory-pathname target))
+         (temporary (merge-pathnames (format nil ".gr8s-backup-~A.tmp" (generate-uid)) parent))
+         (fd nil) (stream nil) (owned nil) (count nil) (bytes nil))
+    (unwind-protect
+         (progn
+           (setf fd (sb-posix:open (namestring temporary)
+                                   (logior sb-posix:o-wronly sb-posix:o-creat sb-posix:o-excl sb-posix:o-nofollow)
+                                   #o600)
+                 owned (sb-posix:fstat fd)
+                 stream (sb-sys:make-fd-stream fd :output t :element-type '(unsigned-byte 8) :auto-close t))
+           (unless (zerop (cffi:foreign-funcall "fcntl" :int fd :int 2 :int 1 :int))
+             (error "Cannot protect backup output across exec"))
+           (multiple-value-setq (count bytes) (write-state-backup-stream root stream key))
+           (finish-output stream)
+           (sb-posix:fsync (sb-sys:fd-stream-fd stream))
+           (close stream) (setf stream nil fd nil)
+           (unless (zerop (cffi:foreign-funcall "renameat2" :int -100 :string (namestring temporary)
+                                               :int -100 :string (namestring target) :uint 1 :int))
+             (error "Cannot publish backup output; destination must not exist"))
+           (gr8s.store::sync-store-generation-directory parent)
+           (values target count bytes))
+      (if stream (close stream) (when fd (sb-posix:close fd)))
+      (let ((remaining (and owned (gr8s.store::store-generation-stat temporary))))
+        (when (and remaining (= (sb-posix:stat-dev remaining) (sb-posix:stat-dev owned))
+                   (= (sb-posix:stat-ino remaining) (sb-posix:stat-ino owned)))
+          (sb-posix:unlink temporary))))))

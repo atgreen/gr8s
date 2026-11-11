@@ -9,7 +9,10 @@
 
 (defun backup-excluded-path-p (relative)
   (or (member relative +backup-lock-paths+ :test #'equal)
-      (some (lambda (prefix) (uiop:string-prefix-p prefix relative)) +backup-runtime-prefixes+)))
+      (some (lambda (prefix)
+              (or (equal relative (string-right-trim "/" prefix))
+                  (uiop:string-prefix-p prefix relative)))
+            +backup-runtime-prefixes+)))
 
 (defun map-offline-backup-files (directory function)
   "Visit stable state files under offline ownership without opening application state.
@@ -35,7 +38,7 @@ all other files, including identity, generations and patch state, are retained."
                       ((sb-posix:s-isdir (sb-posix:stat-mode stat))
                        (dolist (child (sort (directory (merge-pathnames #P"*.*" (uiop:ensure-directory-pathname path))
                                                       :resolve-symlinks nil)
-                                           #'string< :key #'namestring))
+                                           #'string< :key (lambda (child) (string-right-trim "/" (namestring child)))))
                          (visit child (enough-namestring child root))))
                       ((and (sb-posix:s-isreg (sb-posix:stat-mode stat))
                             (= 1 (sb-posix:stat-nlink stat)))
