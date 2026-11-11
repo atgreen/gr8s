@@ -124,6 +124,55 @@
         (is (member '("firewall-cmd" "--add-port=443/tcp") applied :test #'equal))
         (is (member '("firewall-cmd" "--remove-port=443/tcp") applied :test #'equal))))))
 
+(test control-plane-firewall-follows-the-in-cluster-api-listener-lifecycle
+  ;; The in-cluster apiserver (0.0.0.0:6443) backs the "kubernetes" Service VIP;
+  ;; Pods on other nodes cannot reach 10.96.0.1:443 unless its port is admitted.
+  (let ((ran '()))
+    (flet ((runner (argv) (push argv ran) (values "" 0)))
+      (is (eq t (gr8s::ensure-control-plane-firewall
+                 7443 :in-cluster-api-port 6443 :runner #'runner)))
+      (is (eq t (gr8s::remove-control-plane-firewall
+                 7443 :in-cluster-api-port 6443 :runner #'runner)))
+      (let ((applied (reverse ran)))
+        (is (member '("firewall-cmd" "--add-port=6443/tcp") applied :test #'equal))
+        (is (member '("firewall-cmd" "--remove-port=6443/tcp") applied :test #'equal))))))
+
+(test image-peer-firewall-follows-listener-lifecycle
+  (let ((ran '()))
+    (flet ((runner (argv) (push argv ran) (values "" 0)))
+      (is (eq t (gr8s::ensure-image-peer-firewall 7444 :runner #'runner)))
+      (is (eq t (gr8s::remove-image-peer-firewall 7444 :runner #'runner)))
+      (let ((applied (reverse ran)))
+        (is (member '("firewall-cmd" "--add-port=7444/tcp") applied :test #'equal))
+        (is (member '("firewall-cmd" "--remove-port=7444/tcp") applied :test #'equal))))))
+
+(test apiserver-masquerade-follows-lifecycle-for-a-remote-control-plane
+  ;; A Pod on another node reaches the "kubernetes" Service's node-IP endpoint
+  ;; over the underlay but the reply returns over the overlay; masquerading to
+  ;; this node's IP keeps the path symmetric past the stateful host firewall.
+  (let ((ran '()))
+    (flet ((runner (argv) (push argv ran) (values "" 0)))
+      (is (eq t (gr8s::ensure-apiserver-masquerade "192.168.122.44" 6443 :runner #'runner)))
+      (is (eq t (gr8s::remove-apiserver-masquerade "192.168.122.44" 6443 :runner #'runner)))
+      (let ((applied (reverse ran)))
+        (is (member '("firewall-cmd" "--direct" "--add-rule" "ipv4" "nat"
+                      "POSTROUTING" "0" "-d" "192.168.122.44" "-p" "tcp"
+                      "--dport" "6443" "-j" "MASQUERADE")
+                    applied :test #'equal))
+        (is (member '("firewall-cmd" "--direct" "--remove-rule" "ipv4" "nat"
+                      "POSTROUTING" "0" "-d" "192.168.122.44" "-p" "tcp"
+                      "--dport" "6443" "-j" "MASQUERADE")
+                    applied :test #'equal))))))
+
+(test apiserver-masquerade-skips-a-loopback-control-plane
+  ;; The control plane's own in-process agent targets loopback; same-node
+  ;; Pod->apiserver never leaves the host, so no masquerade (and no firewalld
+  ;; probe) is attempted.
+  (let ((ran '()))
+    (flet ((runner (argv) (push argv ran) (values "" 0)))
+      (is (null (gr8s::ensure-apiserver-masquerade "127.0.0.1" 6443 :runner #'runner)))
+      (is (null ran)))))
+
 (test remove-overlay-firewall-withdraws-all-three-when-active
   (let ((ran '()))
     (flet ((runner (argv) (push argv ran) (values "" 0)))

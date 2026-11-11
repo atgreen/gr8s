@@ -95,16 +95,18 @@
           collect (list "firewall-cmd" (format nil "~A-port=~D/tcp" verb port))))
 
 (defun ensure-control-plane-firewall
-    (node-port &key kubelet-port relay-port-start relay-max-channels
+    (node-port &key kubelet-port in-cluster-api-port relay-port-start relay-max-channels
                       (runner #'host-firewall-run))
   "Open routable control-plane TCP listeners in an active firewalld. NODE-PORT
    admits agent enrollment; KUBELET-PORT admits the authenticated kubelet proxy
-   used by metrics, logs, exec, and related node APIs. A NIL or zero port is
-   disabled. No-op without firewalld; fail-soft. Returns T when rules were
-   attempted."
+   used by metrics, logs, exec, and related node APIs; IN-CLUSTER-API-PORT admits
+   the in-cluster apiserver that backs the \"kubernetes\" Service VIP, so Pods on
+   other nodes can reach it. A NIL or zero port is disabled. No-op without
+   firewalld; fail-soft. Returns T when rules were attempted."
   (let ((commands
           (append
-           (control-plane-firewall-commands "--add" node-port kubelet-port)
+           (control-plane-firewall-commands "--add" node-port kubelet-port
+                                            in-cluster-api-port)
            (when (and relay-port-start relay-max-channels)
              (list
               (list "firewall-cmd"
@@ -125,6 +127,70 @@
      :runner runner)
     t))
 
+(defun ensure-image-peer-firewall (port &key (runner #'host-firewall-run))
+  "Admit TCP traffic to this node's mTLS image-peer (BitTorrent) listener so
+   peers on other nodes can fetch blobs from it. No-op without firewalld;
+   fail-soft. Returns T when a rule was attempted."
+  (when (and port (plusp port) (host-firewalld-active-p :runner runner))
+    (apply-overlay-firewall-commands
+     (list (list "firewall-cmd" (format nil "--add-port=~D/tcp" port)))
+     :runner runner)
+    t))
+
+(defun remove-image-peer-firewall (port &key (runner #'host-firewall-run))
+  "Withdraw the rule opened by ENSURE-IMAGE-PEER-FIREWALL. No-op without
+   firewalld; fail-soft."
+  (when (and port (plusp port) (host-firewalld-active-p :runner runner))
+    (apply-overlay-firewall-commands
+     (list (list "firewall-cmd" (format nil "--remove-port=~D/tcp" port)))
+     :runner runner)
+    t))
+
+(defun routable-masquerade-address-p (address)
+  "True for an apiserver address worth masquerading toward: a non-empty, non-
+   loopback host. The control plane's own in-process agent targets loopback and
+   needs no rule (same-node Pod->apiserver never leaves the host)."
+  (and (stringp address) (plusp (length address))
+       (not (uiop:string-prefix-p "127." address))
+       (not (string= "localhost" address))))
+
+(defun apiserver-masquerade-command (verb address port)
+  "firewall-cmd direct-rule argv masquerading Pod->apiserver traffic to this
+   node's IP in nat POSTROUTING."
+  (list "firewall-cmd" "--direct" (format nil "~A-rule" verb) "ipv4" "nat"
+        "POSTROUTING" "0" "-d" address "-p" "tcp"
+        "--dport" (format nil "~D" port) "-j" "MASQUERADE"))
+
+(defun ensure-apiserver-masquerade
+    (address port &key (runner #'host-firewall-run))
+  "Source-NAT this node's Pod->in-cluster-apiserver traffic to the node's own
+   address. The \"kubernetes\" Service endpoint is the control-plane node's
+   underlay IP, so a Pod on another node reaches it over the underlay while the
+   reply returns over the overlay; that asymmetry makes the stateful host
+   firewall drop the follow-up packets as ct-invalid and the TLS handshake times
+   out. Masquerading restores a symmetric path. A loopback ADDRESS (the control
+   plane's own agent) is skipped. No-op without firewalld; fail-soft. Returns T
+   when a rule was attempted."
+  (when (and (routable-masquerade-address-p address)
+             (typep port '(integer 1 65535))
+             (host-firewalld-active-p :runner runner))
+    (apply-overlay-firewall-commands
+     (list (apiserver-masquerade-command "--add" address port))
+     :runner runner)
+    t))
+
+(defun remove-apiserver-masquerade
+    (address port &key (runner #'host-firewall-run))
+  "Withdraw ENSURE-APISERVER-MASQUERADE's rule. No-op without firewalld;
+   fail-soft."
+  (when (and (routable-masquerade-address-p address)
+             (typep port '(integer 1 65535))
+             (host-firewalld-active-p :runner runner))
+    (apply-overlay-firewall-commands
+     (list (apiserver-masquerade-command "--remove" address port))
+     :runner runner)
+    t))
+
 (defun remove-overlay-firewall
     (node-pod-cidr &key (runner #'host-firewall-run)
                         (interface +node-vxlan-interface+)
@@ -140,13 +206,14 @@
      :runner runner)))
 
 (defun remove-control-plane-firewall
-    (node-port &key kubelet-port relay-port-start relay-max-channels
+    (node-port &key kubelet-port in-cluster-api-port relay-port-start relay-max-channels
                       (runner #'host-firewall-run))
   "Withdraw the TCP listeners opened by ENSURE-CONTROL-PLANE-FIREWALL. No-op
    without firewalld; fail-soft."
   (let ((commands
           (append
-           (control-plane-firewall-commands "--remove" node-port kubelet-port)
+           (control-plane-firewall-commands "--remove" node-port kubelet-port
+                                            in-cluster-api-port)
            (when (and relay-port-start relay-max-channels)
              (list
               (list "firewall-cmd"

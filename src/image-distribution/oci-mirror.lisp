@@ -134,12 +134,20 @@ the fetch owner before it can publish under a stale lease."
 (defun ensure-strict-p2p-blob
     (cache digest tracker-call peer-fetch origin-fetch publish-seed
      &key (piece-length +default-image-piece-length+) (wait-interval 0.1)
-          (renewal-interval 30))
+          (renewal-interval 30) (max-peer-attempts 3))
   "Materialize DIGEST without a registry stampede. TRACKER-CALL serializes the
 cold fetch. PEER-FETCH receives TEMPORARY, METAINFO and PEERS. ORIGIN-FETCH is
-invoked only while this node holds the exclusive lease. PUBLISH-SEED receives
-the verified path, torrent and token and must publish the initial seed before
-waiters can observe final metadata."
+invoked while this node holds the exclusive lease, or as a last resort after
+MAX-PEER-ATTEMPTS failed peer fetches. PUBLISH-SEED receives the verified path,
+torrent and token and must publish the initial seed before waiters can observe
+final metadata.
+
+Peer fetching is an optimization, not a requirement: a peer that is unreachable
+(for example a cross-node peer whose port a host firewall drops), slow, or
+serving bad data must never fail a pull that the origin registry can serve. So
+PEER failures are swallowed and, once the tracker keeps advertising a peer this
+node cannot use, ORIGIN-FETCH runs without a lease -- serving the blob and
+announcing this node as a peer without claiming the authoritative origin seed."
   (let ((held-token nil)
         (cached (oci-cache-blob-path cache digest)))
    (when (verified-oci-blob-p cached digest)
@@ -149,33 +157,54 @@ waiters can observe final metadata."
    (labels ((peer (temporary)
              (let ((view (call-tracker tracker-call :lookup digest)))
                (when (eq :available (tracker-status view))
-                 (funcall peer-fetch temporary digest (getf view :metainfo)
-                          (getf view :peers)))))
+                 (handler-case
+                     (funcall peer-fetch temporary digest (getf view :metainfo)
+                              (getf view :peers))
+                   (error (condition)
+                     ;; An unreachable, slow, or dishonest peer is not a pull
+                     ;; failure: report no peer so the caller falls back to
+                     ;; origin. ENSURE-OCI-BLOB re-verifies the digest, so a
+                     ;; partial or wrong peer write cannot be mistaken for the
+                     ;; blob.
+                     (format *error-output*
+                             "~&[image-mirror] peer fetch for ~A failed (~A); ~
+                              falling back to origin~%"
+                             digest condition)
+                     nil)))))
            (origin (temporary)
-             (loop
-               for lease = (call-tracker tracker-call :acquire digest)
-               for status = (tracker-status lease)
-               do (case status
-                    (:granted
-                     (let ((token (getf lease :token)))
-                       (setf held-token token)
-                       (call-with-origin-renewal
-                        tracker-call digest token
-                        (lambda () (funcall origin-fetch temporary))
-                        :renewal-interval renewal-interval)
-                       (return t)))
-                    (:available
-                     (when (peer temporary) (return t))
-                     (sleep wait-interval))
-                    ((:waiting :missing) (sleep wait-interval))
-                    (otherwise
-                     (error "Unexpected image tracker acquire status ~S" status)))))
+             (let ((peer-attempts 0))
+               (loop
+                 for lease = (call-tracker tracker-call :acquire digest)
+                 for status = (tracker-status lease)
+                 do (case status
+                      (:granted
+                       (let ((token (getf lease :token)))
+                         (setf held-token token)
+                         (call-with-origin-renewal
+                          tracker-call digest token
+                          (lambda () (funcall origin-fetch temporary))
+                          :renewal-interval renewal-interval)
+                         (return t)))
+                      (:available
+                       (when (peer temporary) (return t))
+                       ;; The tracker advertises a peer we could not fetch from.
+                       ;; Retry a few times for a transient hiccup, then fetch
+                       ;; from the origin registry rather than spin forever on a
+                       ;; peer that will never serve us.
+                       (when (>= (incf peer-attempts) max-peer-attempts)
+                         (funcall origin-fetch temporary)
+                         (return t))
+                       (sleep wait-interval))
+                      ((:waiting :missing) (sleep wait-interval))
+                      (otherwise
+                       (error "Unexpected image tracker acquire status ~S" status))))))
            (publish (path source)
-             (let ((torrent (make-oci-blob-torrent path digest piece-length)))
-               (when (and (eq source :origin) (null held-token))
-                 (error "Cannot publish ~A without its origin lease" digest))
-               (funcall publish-seed path torrent
-                        (and (eq source :origin) held-token)))))
+             ;; With a lease, publish as the authoritative origin seed; without
+             ;; one (the peer-exhaustion fallback above), announce as an ordinary
+             ;; peer instead -- PUBLISH-SEED treats a NIL token as an announce.
+             (funcall publish-seed path
+                      (make-oci-blob-torrent path digest piece-length)
+                      (and (eq source :origin) held-token))))
     (ensure-oci-blob cache digest :peer-fetch #'peer :origin-fetch #'origin
                      :publish #'publish))))
 
