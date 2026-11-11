@@ -34,4 +34,14 @@ for values in rejections:
     else:
         raise AssertionError(f"Unsafe observation accepted: {values}")
 assert probe.status_samples_fresh({"a": dict(fresh, term=2)})  # Cold elections are explicit.
-print("OBSERVATION-POLICY-CHECKS-PASSED 12")
+clean = dict(busy=False, artifactReclaimableCount=0, artifactTrashCount=0,
+             artifactCanonicalCount=2, artifactProtectedCount=2, artifactMaintenanceError=False, maintenanceWorkerUp=True)
+assert probe.artifact_samples_reclaimed({"a": clean})
+assert not probe.artifact_samples_reclaimed(None)
+assert not probe.artifact_samples_reclaimed({"a": dict(clean, busy=True)})
+assert not probe.artifact_samples_reclaimed({"a": dict(clean, artifactReclaimableCount=1)})
+assert not probe.artifact_samples_reclaimed({"a": dict(clean, artifactTrashCount=1)})
+assert not probe.artifact_samples_reclaimed({"a": dict(clean, artifactCanonicalCount=3)})
+assert not probe.artifact_samples_reclaimed({"a": dict(clean, artifactMaintenanceError="failure")})
+assert not probe.artifact_samples_reclaimed({"a": dict(clean, maintenanceWorkerUp=False)})
+print("OBSERVATION-POLICY-CHECKS-PASSED 20")

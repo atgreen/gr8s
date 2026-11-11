@@ -138,11 +138,13 @@
                                                         collect (getf message :last-index)) 'vector))))
                     'vector)))
                (status ()
-                 (let ((object
+                 (let* ((artifact-keep nil)
+                        (object
                          (compaction-native-try-sample
                           (gr8s::raft-member-lock member) (gr8s::pod-store-lock store)
                           (lambda ()
                              (let ((node (gr8s::raft-member-node member)))
+                               (setf artifact-keep (gr8s.resources::store-snapshot-artifact-keep-digests-unlocked member root))
                                (gr8s::core-object
                                 "busy" nil
                                 "blocked" (if (gr8s.store::pod-store-access-blocked store) t nil)
@@ -197,8 +199,27 @@
                      (setf (gethash "applicationGenerationCount" object) generations
                            (gethash "retiredGenerationCount" object) records
                            (gethash "generationTrashCount" object) trash))
+                   (let ((registry (merge-pathnames "snapshot-artifacts/" root))
+                         (canonical 0) (trash 0) (reclaimable 0))
+                     (when (gr8s.store::store-generation-stat registry)
+                       (gr8s.store::check-store-generation-directory registry)
+                       (gr8s.raft.transport::raft-snapshot-map-directory
+                        registry (lambda (name)
+                                   (cond ((gr8s.resources::store-snapshot-artifact-trash-name-p name) (incf trash))
+                                         ((gr8s.resources::store-snapshot-artifact-filename-p name)
+                                          (incf canonical)
+                                          (unless (gethash (subseq name 0 64) artifact-keep)
+                                            (let ((stat (gr8s.store::store-generation-stat (merge-pathnames name registry))))
+                                              (when (and stat (gr8s.raft.transport::raft-snapshot-private-stat-p stat nil))
+                                                (incf reclaimable)))))))))
+                     (setf (gethash "artifactCanonicalCount" object) canonical
+                           (gethash "artifactProtectedCount" object) (hash-table-count artifact-keep)
+                           (gethash "artifactReclaimableCount" object) reclaimable
+                           (gethash "artifactTrashCount" object) trash))
                    (bt:with-lock-held ((gr8s.ha::ha-control-plane-maintenance-lock ha))
-                     (setf (gethash "generationFilesReaped" object) (gr8s.ha::ha-control-plane-generation-reaped-files ha)
+                     (setf (gethash "artifactFilesReaped" object) (gr8s.ha::ha-control-plane-artifacts-reaped ha)
+                           (gethash "artifactMaintenanceError" object) (gr8s.ha::ha-control-plane-artifact-maintenance-error ha)
+                           (gethash "generationFilesReaped" object) (gr8s.ha::ha-control-plane-generation-reaped-files ha)
                            (gethash "maintenanceError" object) (gr8s.ha::ha-control-plane-maintenance-error ha)
                            (gethash "maintenanceWorkerUp" object)
                            (if (and (gr8s.ha::ha-control-plane-maintenance-thread ha)

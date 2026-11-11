@@ -41,6 +41,14 @@ def status_samples_fresh(values, expected_terms=None):
     return fresh
 
 
+def artifact_samples_reclaimed(values):
+    return bool(values) and all(not value.get("busy") and
+                               value["artifactReclaimableCount"] == 0 and
+                               value["artifactTrashCount"] == 0 and
+                               value["artifactCanonicalCount"] <= value["artifactProtectedCount"] and
+                               value["maintenanceWorkerUp"] and not value["artifactMaintenanceError"] for value in values.values())
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=Path("build/gr8s-compaction-cluster-acceptance"))
@@ -48,6 +56,8 @@ def main():
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--require-generation-reclamation", action="store_true",
                         help="Require retired application generations to be reclaimed before cold restart")
+    parser.add_argument("--require-artifact-reclamation", action="store_true",
+                        help="Require obsolete registry artifacts to be reclaimed before cold restart")
     parser.add_argument("--require-stable-leadership", action="store_true",
                         help="Fail on any unforced term change during churn; restart elections remain allowed")
     parser.add_argument("--timeout", type=float, default=2400)
@@ -68,6 +78,8 @@ def main():
     result["asymmetricCaptureAcceptance"] = False
     result["generationReclamationRequested"] = args.require_generation_reclamation
     result["generationReclamationAcceptance"] = False
+    result["artifactReclamationRequested"] = args.require_artifact_reclamation
+    result["artifactReclamationAcceptance"] = False
     started = time.monotonic()
     print(f"Evidence: {base}", flush=True)
 
@@ -281,6 +293,17 @@ def main():
                                   any(value["generationFilesReaped"] > 0 for value in values.values())) else None
             final = probe.await_value(generations_reclaimed, timeout=120)
             result["generationReclamationAcceptance"] = True
+        if args.require_artifact_reclamation:
+            def artifacts_reclaimed():
+                values = states()
+                if values is None:
+                    return None
+                result["lastArtifactReclamationSample"] = values
+                check_churn_leadership(values)
+                return values if (artifact_samples_reclaimed(values) and
+                                  any(value["artifactFilesReaped"] > 0 for value in values.values())) else None
+            final = probe.await_value(artifacts_reclaimed, timeout=120)
+            result["artifactReclamationAcceptance"] = True
         result.update(beforeRestart=final, samples=samples)
         result["leadershipStabilityAcceptance"] = check_churn_leadership(final)
         expected_maps = final[current.name]["configMaps"]
@@ -310,7 +333,17 @@ def main():
             node.launch("recover")
         probe.await_value(lambda: established(nodes), timeout=240)
         probe.await_value(lambda: leader(nodes), timeout=240)
-        recovered = probe.await_value(states)
+        if args.require_artifact_reclamation:
+            def cold_artifacts_reclaimed():
+                values = states()
+                if values is None:
+                    return None
+                result["lastColdArtifactReclamationSample"] = values
+                return values if artifact_samples_reclaimed(values) else None
+            recovered = probe.await_value(cold_artifacts_reclaimed, timeout=120)
+            result["coldArtifactReclamationAcceptance"] = True
+        else:
+            recovered = probe.await_value(states)
         assert all(value["configMaps"] == expected_maps for value in recovered.values()), recovered
 
         result["historyPreservedAcrossRestart"] = all(
