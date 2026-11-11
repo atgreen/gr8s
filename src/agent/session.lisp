@@ -967,32 +967,62 @@ plist interface without leaking generated protocol classes into that layer."
     (host port node-name ca-certificate-path certificate-path private-key-path
      &key (timeout 10))
   "Return (values CALL CLOSE). CALL implements the callback contract consumed
-by ENSURE-STRICT-P2P-BLOB; the channel uses the enrolled node's mTLS identity."
-  (let* ((channel (make-node-tls-channel
-                   host port :timeout timeout
-                   :ca-certificate-path ca-certificate-path
-                   :certificate-path certificate-path
-                   :private-key-path private-key-path))
-         (stub (gr8s.node.v1::make-node-service-stub channel)))
-    (values
-     (lambda (action digest &rest arguments)
-       (flet ((argument (name default)
-                (getf arguments name default)))
-         (multiple-value-bind (response status)
-             (gr8s.node.v1::node-service-track-image
-              stub
-              (make-instance
-               'gr8s.node.v1::image-tracker-request
-               :node-name node-name
-               :action (string-downcase (symbol-name action))
-               :digest digest
-               :lease-token (argument :token #())
-               :metainfo (argument :metainfo #())
-               :peer-address (argument :address "")
-               :peer-port (argument :port 0)
-               :peer-id (argument :peer-id #())
-               :complete (argument :complete nil))
-              :timeout timeout)
-           (declare (ignore status))
-           (image-tracker-response-plist response))))
-     (lambda () (ag-grpc:channel-close channel)))))
+by ENSURE-STRICT-P2P-BLOB; the channel uses the enrolled node's mTLS identity.
+
+The image coordinator drives CALL from several threads at once -- one mirror
+worker per concurrent containerd pull plus the periodic announcement thread --
+yet they share one gRPC channel, hence one HTTP/2 connection over one TLS
+stream whose buffered writes are not concurrency-safe. Two defenses keep that
+shared connection usable under the pull storm of a conformance run:
+
+ 1. Serialize every call on one lock, so only a single request is ever in
+    flight on the connection.
+ 2. Reconnect on failure. A write that fails midway (a timeout or reset under
+    load) can leave the HTTP/2 connection's TLS stream wedged, after which every
+    later call on it signals; left unrecovered that fails every image pull on
+    the node. So a failed call drops the channel and retries once on a fresh
+    one -- a single hiccup no longer wedges image distribution."
+  (let ((channel nil)
+        (stub nil)
+        (lock (bt:make-lock "gr8s image tracker rpc")))
+    (labels ((connect ()
+               (setf channel (make-node-tls-channel
+                              host port :timeout timeout
+                              :ca-certificate-path ca-certificate-path
+                              :certificate-path certificate-path
+                              :private-key-path private-key-path)
+                     stub (gr8s.node.v1::make-node-service-stub channel)))
+             (disconnect ()
+               (let ((old (shiftf channel nil)))
+                 (setf stub nil)
+                 (when old (ignore-errors (ag-grpc:channel-close old)))))
+             (invoke (action digest arguments)
+               (unless stub (connect))
+               (multiple-value-bind (response status)
+                   (gr8s.node.v1::node-service-track-image
+                    stub
+                    (make-instance
+                     'gr8s.node.v1::image-tracker-request
+                     :node-name node-name
+                     :action (string-downcase (symbol-name action))
+                     :digest digest
+                     :lease-token (getf arguments :token #())
+                     :metainfo (getf arguments :metainfo #())
+                     :peer-address (getf arguments :address "")
+                     :peer-port (getf arguments :port 0)
+                     :peer-id (getf arguments :peer-id #())
+                     :complete (getf arguments :complete nil))
+                    :timeout timeout)
+                 (declare (ignore status))
+                 (image-tracker-response-plist response))))
+      (values
+       (lambda (action digest &rest arguments)
+         (bt:with-lock-held (lock)
+           (handler-case (invoke action digest arguments)
+             (error (condition)
+               (disconnect)
+               (handler-case (invoke action digest arguments)
+                 (error ()
+                   ;; The fresh channel failed too: surface the original error.
+                   (error condition)))))))
+       (lambda () (bt:with-lock-held (lock) (disconnect)))))))

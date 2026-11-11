@@ -8,6 +8,12 @@
 
 (defparameter +image-peer-alpn+ "gr8s-bittorrent/1")
 
+(defparameter +image-peer-default-port+ 7444
+  "Stable TCP port for the node's mTLS BitTorrent image-peer server. Peers on
+other nodes connect here to fetch blobs, so it must be a fixed, firewall-admitted
+port -- an ephemeral (port 0) listener could never be opened in a host firewall,
+leaving cross-node P2P fetches silently unreachable.")
+
 (defun image-peer-certificate-pem (certificate)
   (pure-tls/acme::wrap-pem
    "CERTIFICATE" (pure-tls::x509-certificate-raw-der certificate)))
@@ -322,7 +328,8 @@
 
 (defun start-node-image-distribution
     (directory tracker-call tracker-close ca-certificate-path certificate-path
-     private-key-path advertise-address &key (peer-port 0) (mirror-port 0))
+     private-key-path advertise-address
+     &key (peer-port +image-peer-default-port+) (mirror-port 0))
   "Start this node's mTLS BitTorrent seeder and loopback OCI mirror."
   (let* ((directory (uiop:ensure-directory-pathname directory))
          (pki (load-image-peer-pki ca-certificate-path))

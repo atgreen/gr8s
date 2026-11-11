@@ -1409,6 +1409,12 @@ The new identity takes effect when the node agent next starts."
                       path)))))
   t)
 
+(defconstant +in-cluster-api-port+ 6443
+  "Fixed port of the in-cluster apiserver (0.0.0.0:6443) that backs the
+\"kubernetes\" Service. It is distinct from the admin API's --port, must be
+admitted through the host firewall for cross-node Pods, and is the port a node
+agent masquerades Pod->apiserver traffic toward.")
+
 (defun agent (options &key control
                             (stop-predicate (lambda () *shutdown-requested*)))
   "Run a node agent against the control plane at --server until STOP-PREDICATE is
@@ -1456,7 +1462,27 @@ The new identity takes effect when the node agent next starts."
                     (gr8s.runtime.containerd::containerd-runtime-registry-host-config-directory runtime)
                     (managed-containerd-directory manager "containerd/certs.d")
                     (gr8s.runtime.containerd::containerd-runtime-image-mirror-port runtime)
-                    (gr8s.security::node-image-distribution-mirror-port image-distribution))))
+                    (gr8s.security::node-image-distribution-mirror-port image-distribution))
+              ;; Admit this node's image-peer listener so peers on other nodes
+              ;; can fetch blobs from it; without the rule a host firewall drops
+              ;; the mirror's cross-node P2P fetch and it falls back to origin.
+              (ignore-errors
+                (ensure-image-peer-firewall
+                 gr8s.security::+image-peer-default-port+))
+              ;; Source-NAT cross-node Pod->apiserver traffic to this node's IP.
+              ;; The "kubernetes" Service endpoint is the control plane's node IP,
+              ;; so without this the reply path is asymmetric and the stateful
+              ;; host firewall drops it (TLS handshake timeout in e2e BeforeSuite).
+              ;; Skipped for a loopback control plane (this node's own agent).
+              (ignore-errors
+                (ensure-apiserver-masquerade host +in-cluster-api-port+))
+              ;; Admit the Service NodePort range so Pods and off-node clients
+              ;; can reach <nodeIP>:<nodePort> relays; without it the host
+              ;; firewall rejects the port and NodePort Services fail
+              ;; (EHOSTUNREACH), as do their conformance tests.
+              (ignore-errors
+                (ensure-node-port-range-firewall
+                 +node-port-minimum+ +node-port-maximum+))))
           (setf node-runtime
               (make-node-runtime
                (agent-state-path options "runtime/") runtime manager
@@ -1511,6 +1537,13 @@ The new identity takes effect when the node agent next starts."
           (when kubelet (stop-kubelet-server kubelet))
           (stop-node-runtime node-runtime)
           (when image-distribution
+            (ignore-errors
+              (remove-image-peer-firewall gr8s.security::+image-peer-default-port+))
+            (ignore-errors
+              (remove-apiserver-masquerade host +in-cluster-api-port+))
+            (ignore-errors
+              (remove-node-port-range-firewall
+               +node-port-minimum+ +node-port-maximum+))
             (gr8s.security::stop-node-image-distribution image-distribution)))))))
   0)
 
@@ -1789,6 +1822,14 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
   (require-serve-state-ownership options)
   (let* ((address (getf options :listen))
          (port (getf options :port))
+         ;; The admin API (ADDRESS:PORT above, e.g. a loopback port reached over
+         ;; an SSH tunnel) is distinct from the in-cluster API, which always
+         ;; listens on 0.0.0.0:+IN-CLUSTER-API-PORT+ so Pods can reach it through
+         ;; the "kubernetes" Service. The Service endpoint must advertise this
+         ;; port, never the admin PORT: advertising PORT points 10.96.0.1:443 at
+         ;; a loopback-only admin listener and every in-cluster API call is
+         ;; refused. Bind it once and feed both the listener and the endpoint.
+         (in-cluster-api-port +in-cluster-api-port+)
          (state-directory
            (uiop:ensure-directory-pathname (getf options :state-directory)))
          (store (progn
@@ -1905,6 +1946,14 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                          (equal "containerd" (getf options :runtime))
                          (equal "managed" (getf options :containerd-mode)))
                 (getf options :kubelet-port))
+              ;; A managed-containerd control-plane node also hosts the in-cluster
+              ;; apiserver (0.0.0.0:IN-CLUSTER-API-PORT) that backs the "kubernetes"
+              ;; Service; admit it so Pods on other nodes can reach 10.96.0.1:443.
+              :in-cluster-api-port
+              (when (and (not (getf options :disable-agent))
+                         (equal "containerd" (getf options :runtime))
+                         (equal "managed" (getf options :containerd-mode)))
+                in-cluster-api-port)
               :relay-port-start
               (when (getf options :wireguard-relay-address)
                 (getf options :wireguard-relay-port-start))
@@ -1957,12 +2006,14 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                                  (equal "managed" (getf options :containerd-mode)))
                         (when leaderp
                           (ensure-extension-apiserver-authentication store pki)
-                          (ensure-native-api-service store (serve-api-advertise-address options) port))
+                          (ensure-native-api-service store (serve-api-advertise-address options)
+                                                     in-cluster-api-port))
                         (setf aggregator (start-api-aggregator store pki))
                         (setf service-network-created (ensure-in-cluster-network pki))
                         (setf api-server
                               (start-in-cluster-api
                                store runtime reconciler pki
+                               :port in-cluster-api-port
                                :debug-state-directory state-directory
                                :debug-member-resolver (make-debug-member-resolver ha)))
                         (setf (pod-store-in-cluster-config store)
@@ -2061,6 +2112,11 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                       (equal "containerd" (getf options :runtime))
                       (equal "managed" (getf options :containerd-mode)))
              (getf options :kubelet-port))
+           :in-cluster-api-port
+           (when (and (not (getf options :disable-agent))
+                      (equal "containerd" (getf options :runtime))
+                      (equal "managed" (getf options :containerd-mode)))
+             in-cluster-api-port)
            :relay-port-start
            (when (getf options :wireguard-relay-address)
              (getf options :wireguard-relay-port-start))

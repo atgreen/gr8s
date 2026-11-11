@@ -11,12 +11,14 @@ The control plane and node agent are written from scratch in Common Lisp. The
 binary embeds containerd and runc, compiles its own eBPF networking programs,
 and includes a Raft datastore for high availability.
 
-> **Project status:** gr8s is experimental and has **not passed Kubernetes
-> conformance**. It is intended for exploration, development, and testing.
-> Evaluate its compatibility and operational behavior before production use.
-> See the [API coverage](docs/kubernetes-surface.md),
-> [known gaps](docs/k3s-gap-inventory.md), and
-> [conformance results](docs/CONFORMANCE.md) for the current scope and evidence.
+> **Project status:** gr8s is experimental. On a two-node cluster it **passes
+> the upstream Kubernetes v1.37 `certified-conformance` end-to-end suite —
+> 469/469, run via Sonobuoy** ([report](docs/conformance-milestone-v1.37.md)). It is not yet a
+> CNCF-submitted _Certified Kubernetes_ distribution, and remains intended for
+> exploration, development, and testing; evaluate its compatibility and
+> operational behavior before production use. See the
+> [API coverage](docs/kubernetes-surface.md) and
+> [known gaps](docs/k3s-gap-inventory.md) for the current scope.
 
 ## Why gr8s?
 
@@ -56,8 +58,9 @@ networking components.
 That architecture gives gr8s an integrated system to explore and develop,
 with features such as live Lisp inspection and a directly compiled eBPF
 dataplane. It also means its compatibility and operational behavior differ from
-k3s. gr8s is experimental and has not passed Kubernetes conformance; it does
-not yet provide every k3s add-on or operational workflow. Check the
+k3s. gr8s passes the upstream Kubernetes v1.37 `certified-conformance` suite,
+but is experimental and does not yet provide every k3s add-on or operational
+workflow. Check the
 [compatibility gaps](docs/k3s-gap-inventory.md), [API coverage](docs/kubernetes-surface.md),
 and [conformance results](docs/CONFORMANCE.md) before choosing it for a workload.
 
@@ -221,6 +224,7 @@ follow the [testing guide](docs/building-and-testing.md#test-matrix).
 - [Multi-node design](docs/multi-node-design.md)
 - [Known compatibility gaps](docs/k3s-gap-inventory.md)
 - [Conformance results](docs/CONFORMANCE.md)
+- [v1.37 certified-conformance milestone (469/469)](docs/conformance-milestone-v1.37.md)
 
 ## Versioning
 

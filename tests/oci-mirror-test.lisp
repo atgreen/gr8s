@@ -71,6 +71,57 @@
       (uiop:delete-directory-tree directory :validate t
                                             :if-does-not-exist :ignore))))
 
+(test strict-unreachable-peer-falls-back-to-origin
+  ;; The tracker advertises a peer this node cannot reach (e.g. a cross-node
+  ;; peer whose port a host firewall drops). Peer fetching must not fail the
+  ;; pull: after a bounded number of attempts the origin registry serves it, and
+  ;; the lease-less fallback announces (NIL token) rather than claiming the seed.
+  (let* ((directory (merge-pathnames
+                     (format nil "gr8s-strict-fallback-~36R/"
+                             (random most-positive-fixnum))
+                     (uiop:temporary-directory)))
+         (cache (gr8s.image-distribution::make-oci-blob-cache directory))
+         (bytes (bt-octets "fallback body"))
+         (digest (format nil "sha256:~A"
+                         (ironclad:byte-array-to-hex-string
+                          (ironclad:digest-sequence :sha256 bytes))))
+         (peer-attempts 0) (origin-calls 0) (published nil))
+    (unwind-protect
+         (let ((path
+                 (gr8s.image-distribution::ensure-strict-p2p-blob
+                  cache digest
+                  ;; Always advertises a peer and never grants a lease: the only
+                  ;; routes to the blob are peer-fetch (which fails) or fallback.
+                  (lambda (action requested-digest &rest arguments)
+                    (declare (ignore requested-digest arguments))
+                    (ecase action
+                      (:lookup '(:status :available))
+                      (:acquire '(:status :available))
+                      ((:announce :publish :renew) '(:status :ok))))
+                  ;; An unreachable peer: every fetch signals.
+                  (lambda (temporary requested-digest metainfo peers)
+                    (declare (ignore temporary requested-digest metainfo peers))
+                    (incf peer-attempts)
+                    (error "simulated unreachable peer"))
+                  ;; The origin registry can serve it.
+                  (lambda (temporary)
+                    (incf origin-calls)
+                    (with-open-file (stream temporary :direction :output
+                                                      :if-does-not-exist :create
+                                                      :element-type '(unsigned-byte 8))
+                      (write-sequence bytes stream))
+                    t)
+                  (lambda (verified-path torrent token)
+                    (setf published (list verified-path torrent token)))
+                  :piece-length 16384 :wait-interval 0.0 :max-peer-attempts 2)))
+           (is (equal path (first published)))
+           (is (gr8s.image-distribution::verified-oci-blob-p path digest))
+           (is (<= 1 peer-attempts))
+           (is (= 1 origin-calls))
+           (is (null (third published))))
+      (uiop:delete-directory-tree directory :validate t
+                                            :if-does-not-exist :ignore))))
+
 (test loopback-oci-mirror-serves-only-a-verified-leased-blob
   (let* ((directory (merge-pathnames
                      (format nil "gr8s-http-mirror-~36R/"
