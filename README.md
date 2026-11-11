@@ -12,8 +12,9 @@ binary embeds containerd and runc, compiles its own eBPF networking programs,
 and includes a Raft datastore for high availability.
 
 > **Project status:** gr8s is experimental. On a two-node cluster it **passes
-> the upstream Kubernetes v1.37 `certified-conformance` end-to-end suite —
-> 469/469, run via Sonobuoy** ([report](docs/conformance-milestone-v1.37.md)). It is not yet a
+> every case of the upstream Kubernetes v1.37 `certified-conformance` end-to-end
+> suite — 462/462, 0 failures, run via Sonobuoy**
+> ([evidence](docs/conformance-full-v1.37-2026-11-11.json)). It is not yet a
 > CNCF-submitted _Certified Kubernetes_ distribution, and remains intended for
 > exploration, development, and testing; evaluate its compatibility and
 > operational behavior before production use. See the
@@ -224,7 +225,7 @@ follow the [testing guide](docs/building-and-testing.md#test-matrix).
 - [Multi-node design](docs/multi-node-design.md)
 - [Known compatibility gaps](docs/k3s-gap-inventory.md)
 - [Conformance results](docs/CONFORMANCE.md)
-- [v1.37 certified-conformance milestone (469/469)](docs/conformance-milestone-v1.37.md)
+- [v1.37 certified-conformance evidence (462/462)](docs/conformance-full-v1.37-2026-11-11.json)
 
 ## Versioning
 
