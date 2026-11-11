@@ -44,7 +44,9 @@
              (make-array 20 :element-type '(unsigned-byte 8) :initial-element index))))
         (format t "~&Fixture swarm ~D published~%" index)))))
 
-(destructuring-bind (mode directory) (uiop:command-line-arguments)
+(destructuring-bind (mode directory)
+    (let ((arguments (uiop:command-line-arguments)))
+      (if (equal "--" (first arguments)) (rest arguments) arguments))
   (unless (= (* 384 1024 1024) (sb-ext:dynamic-space-size)) (error "This probe requires a 384 MiB heap"))
   (let* ((root (uiop:ensure-directory-pathname directory))
          (expected-path (merge-pathnames "tracker-memory-expected.json" root))
