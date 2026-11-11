@@ -3,6 +3,13 @@
 ;;;; Internal HCP worker/transport probe; offline TLS, not production serve.
 (in-package #:cl-user)
 
+(defun compaction-native-try-sample (member-lock store-lock function)
+  "Return only fresh progress, or an explicit busy observation without progress."
+  (or (sb-thread:with-mutex (member-lock :wait-p nil)
+        (or (sb-thread:with-mutex (store-lock :wait-p nil) (funcall function))
+            (gr8s::core-object "busy" t "busyLock" "store" "blocked" t)))
+      (gr8s::core-object "busy" t "busyLock" "member" "blocked" t)))
+
 (defun compaction-cluster-native-main ()
   (when (equal "--prepare-tls" (first (uiop:command-line-arguments)))
     (learner-native-prepare-tls (second (uiop:command-line-arguments))
@@ -132,10 +139,13 @@
                     'vector)))
                (status ()
                  (let ((object
-                         (bt:with-lock-held ((gr8s::raft-member-lock member))
-                           (bt:with-lock-held ((gr8s::pod-store-lock store))
+                         (compaction-native-try-sample
+                          (gr8s::raft-member-lock member) (gr8s::pod-store-lock store)
+                          (lambda ()
                              (let ((node (gr8s::raft-member-node member)))
                                (gr8s::core-object
+                                "busy" nil
+                                "blocked" (if (gr8s.store::pod-store-access-blocked store) t nil)
                                 "role" (string-downcase (symbol-name (gr8s::raft-node-role node)))
                                 "selfRole" (string-downcase (symbol-name (gr8s::raft-node-self-role node)))
                                 "term" (gr8s::raft-node-current-term node)
@@ -172,6 +182,7 @@
                                 "heapAfterGcBytes" gr8s.server::*heap-after-gc*
                                 "heapLimitMiB" (/ (sb-ext:dynamic-space-size) (* 1024 1024))
                                 "mutualTls" (if (gr8s.raft.transport::raft-member-credentials member) t nil)))))))
+                   (when (gethash "busy" object) (return-from status object))
                    (let ((base (gr8s.store::store-generation-base root))
                          (retired (merge-pathnames "metadata/retired-generations/" root))
                          (generations 0) (trash 0) (records 0))
@@ -192,7 +203,6 @@
                            (gethash "maintenanceWorkerUp" object)
                            (if (and (gr8s.ha::ha-control-plane-maintenance-thread ha)
                                     (bt:thread-alive-p (gr8s.ha::ha-control-plane-maintenance-thread ha))) t nil)))
-                   (setf (gethash "blocked" object) (if (gr8s.store::store-access-blocked-p store) t nil))
                    (bt:with-lock-held ((gr8s.ha::ha-control-plane-compaction-lock ha))
                      (setf (gethash "checkpoints" object) (gr8s.ha::ha-control-plane-compaction-count ha)
                            (gethash "compactionError" object) (gr8s.ha::ha-control-plane-compaction-error ha)

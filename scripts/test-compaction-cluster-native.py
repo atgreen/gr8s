@@ -26,6 +26,21 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def status_samples_fresh(values, expected_terms=None):
+    """Validate fresh partial samples; a busy observation proves no progress."""
+    fresh = True
+    for name, value in values.items():
+        if value.get("busy"):
+            assert value["blocked"] and "applied" not in value and "term" not in value, value
+            fresh = False
+            continue
+        assert value["mutualTls"] and value["heapLimitMiB"] == 384, value
+        assert not value["churnError"] and not value["compactionError"], value
+        if expected_terms is not None:
+            assert value["term"] == expected_terms[name], f"Unforced term change on {name}: {value}"
+    return fresh
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=Path("build/gr8s-compaction-cluster-acceptance"))
@@ -56,6 +71,12 @@ def main():
     started = time.monotonic()
     print(f"Evidence: {base}", flush=True)
 
+    expected_terms = None
+
+    def fresh_status(node):
+        value = node.rpc("status")
+        return None if value.get("busy") else value
+
     def states():
         values = {}
         for node in nodes:
@@ -68,21 +89,22 @@ def main():
                                                   error=f"{type(error).__name__}: {error}",
                                                   partialSamples=values)
                 raise
-        for value in values.values():
-            assert value["mutualTls"] and value["heapLimitMiB"] == 384, value
-            assert not value["churnError"] and not value["compactionError"], value
+        if not status_samples_fresh(values, expected_terms if args.require_stable_leadership else None):
+            result["statusBusyPolls"] = result.get("statusBusyPolls", 0) + 1
+            result["lastBusyStatusSample"] = values
+            return None
         return values
 
     def established(candidates):
         values = {node.name: node.rpc("status") for node in candidates}
-        return values if all(value["quorumMembers"] == len(candidates) and
+        return values if all(not value.get("busy") and value["quorumMembers"] == len(candidates) and
                              value["selfRole"] == "voter" and not value["blocked"]
                              for value in values.values()) else None
 
     def leader(candidates):
         for node in candidates:
             value = node.rpc("status")
-            if value["role"] == "leader" and not value["blocked"]:
+            if not value.get("busy") and value["role"] == "leader" and not value["blocked"]:
                 return node
         return None
 
@@ -107,13 +129,13 @@ def main():
             assert node.rpc("join", port=current.port)["accepted"]
             probe.await_value(lambda: established(nodes[:index + 1]), timeout=240)
             current = probe.await_value(lambda: leader(nodes[:index + 1]))
-        result["established"] = states()
+        result["established"] = probe.await_value(states)
         current.rpc("namespace")
         current.rpc("write", name="sentinel", value="preserved")
         # First exercise a genuine archived-prefix gap below the receiver's
         # retention budget. The later saturation phase may correctly prefer an
         # artifact snapshot, so it cannot deterministically cover both paths.
-        archive_before = states()
+        archive_before = probe.await_value(states)
         archive_peer = next(node for node in nodes if node is not current)
         archive_index = archive_before[archive_peer.name]["applied"]
         archive_terms = {name: value["term"] for name, value in archive_before.items()}
@@ -123,13 +145,13 @@ def main():
         assert result["archivedPrefixStopExitCode"] == 0
         result["archivedPrefixFixture"] = current.rpc("prefix-churn", rounds=36)
         archive_checkpoint = probe.await_value(
-            lambda: (lambda value: value if value["snapshot"] > archive_index and
-                     value["catchupCacheBytes"] > 0 else None)(current.rpc("status")), timeout=240)
+            lambda: (lambda value: value if value and value["snapshot"] > archive_index and
+                     value["catchupCacheBytes"] > 0 else None)(fresh_status(current)), timeout=240)
         result["archivedPrefixCheckpoint"] = archive_checkpoint
         archive_commit = archive_checkpoint["commit"]
         archive_peer.launch("recover")
         archive_after = probe.await_value(
-            lambda: (lambda values: values if all(value["applied"] >= archive_commit and
+            lambda: (lambda values: values if values and all(value["applied"] >= archive_commit and
                      not value["blocked"] and value["checkpoints"] >= 1 for value in values.values()) and
                      sum(value["catchupCacheBatches"] for value in values.values()) > archive_batches
                      else None)(states()), timeout=240)
@@ -151,11 +173,12 @@ def main():
 
         def held():
             values = states()
-            return values if all(value["captureHeld"] for value in values.values()) else None
+            return values if values and all(value["captureHeld"] for value in values.values()) else None
 
         before = probe.await_value(held, timeout=240)
         assert all(value["compactionEntryThreshold"] == 100000 for value in before.values()), before
         terms = {name: value["term"] for name, value in before.items()}
+        expected_terms = terms
 
         def check_churn_leadership(values):
             actual = {name: value["term"] for name, value in values.items()}
@@ -168,7 +191,7 @@ def main():
         # Neither producers nor background captures can fake the marker commit.
         time.sleep(2)
         current.rpc("write", name="while-held", value="committed-with-all-captures-held")
-        target = current.rpc("status")["commit"]
+        target = probe.await_value(lambda: fresh_status(current))["commit"]
 
         def marker_applied():
             values = held()
@@ -182,13 +205,15 @@ def main():
         # Keep one follower's writer held while leader + other voter continue.
         # Its own compactor cannot rescue it; replication must respect the limit.
         slow = next(node for node in nodes if node is not current)
-        start_round = current.rpc("status")["completedRounds"]
+        start_round = probe.await_value(lambda: fresh_status(current))["completedRounds"]
         for node in nodes:
             if node is not slow:
                 node.rpc("release-capture")
 
         def asymmetric_progress():
             values = states()
+            if values is None:
+                return None
             result["lastAsymmetricSample"] = values
             check_churn_leadership(values)
             # Advance the leader checkpoint past the stalled follower so release
@@ -213,6 +238,11 @@ def main():
         with (base / "samples.jsonl").open("w") as out:
             while True:
                 values = states()
+                if values is None:
+                    if time.monotonic() > deadline:
+                        raise TimeoutError("Full churn did not complete with fresh observations")
+                    time.sleep(1)
+                    continue
                 result["lastChurnSample"] = values
                 out.write(json.dumps(values) + "\n")
                 out.flush()
@@ -224,9 +254,11 @@ def main():
                 if time.monotonic() > deadline:
                     raise TimeoutError("Full churn did not complete")
                 time.sleep(1)
-        final_commit = current.rpc("status")["commit"]
+        final_commit = probe.await_value(lambda: fresh_status(current))["commit"]
         def converged():
             values = states()
+            if values is None:
+                return None
             result["lastConvergenceSample"] = values
             check_churn_leadership(values)
             return values if all(value["applied"] >= final_commit and not value["blocked"] and
@@ -237,6 +269,8 @@ def main():
         if args.require_generation_reclamation:
             def generations_reclaimed():
                 values = states()
+                if values is None:
+                    return None
                 result["lastReclamationSample"] = values
                 check_churn_leadership(values)
                 return values if (all(value["applicationGenerationCount"] <= 1 and
@@ -271,11 +305,12 @@ def main():
         assert all(code == 0 for code in result["stopExitCodes"].values())
         if digest(binary) != result["binarySha256"]:
             raise RuntimeError("Binary changed before cold restart")
+        expected_terms = None  # Cold restart explicitly permits a new election term.
         for node in nodes:
             node.launch("recover")
         probe.await_value(lambda: established(nodes), timeout=240)
         probe.await_value(lambda: leader(nodes), timeout=240)
-        recovered = states()
+        recovered = probe.await_value(states)
         assert all(value["configMaps"] == expected_maps for value in recovered.values()), recovered
 
         result["historyPreservedAcrossRestart"] = all(
