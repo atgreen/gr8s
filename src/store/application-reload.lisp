@@ -40,7 +40,7 @@
                (zerop (pod-store-active-requests store)))
     (store-access-unavailable "Application reload requires a drained access gate")))
 
-(defun check-store-reload-revisions (store id descriptor)
+(defun check-store-reload-revisions (store id descriptor &key resource-history-continuity)
   "Reject stale staged clocks BEFORE intent or selection changes. Caller holds all barriers."
   (let* ((path (store-generation-root (pod-store-path store) id))
          (boundary (progn (check-store-generation-directory (merge-pathnames "metadata/" path))
@@ -57,7 +57,8 @@
     ;; A failed load may already have installed these exact clocks. Retry the
     ;; pending generation without demanding another revision bump.
     (unless (and (not (pod-store-application-loaded-p store)) (equal path (store-data-path store)))
-      (unless (and (> (gethash "resourceEpochFloor" boundary) (pod-store-resource-revision store))
+      (unless (and (> (gethash (if resource-history-continuity "resourceRevision" "resourceEpochFloor") boundary)
+                      (pod-store-resource-revision store))
                    (> (gethash "podEpochFloor" boundary) (max (pod-store-pod-revision store)
                                                            (pod-store-pod-revision-ceiling store))))
         (error "Snapshot generation must be rematerialized above the member's revision clocks")))
@@ -87,7 +88,8 @@
             (bt:with-lock-held ((pod-store-consensus-write-lock store))
               (let ((*store-application-barriers* store)) (funcall function))))))))
 
-(defun reload-store-application (store id &key call-with-member-lock validate-recovery commit-recovery)
+(defun reload-store-application (store id &key call-with-member-lock validate-recovery commit-recovery
+                                             resource-history-continuity)
   "Replace application state on STORE itself, leaving access blocked on success or failure.
 Caller has quiesced remaining node/controller/retained-reference ingress. Lock order:
 workload -> credentials -> consensus writer -> supplied member barrier -> raw store.
@@ -95,13 +97,18 @@ HA requires all three callbacks. VALIDATE-RECOVERY receives descriptor/STORE bef
 intent or selection changes and must return T after checking actual member state.
 COMMIT-RECOVERY receives descriptor/STORE after load and
 must durably coordinate member snapshot/applied/WAL state before intent removal.
-It runs under the barriers and must not reenter public store operations."
+It runs under the barriers and must not reenter public store operations.
+RESOURCE-HISTORY-CONTINUITY is only for a verified same-log Raft snapshot: all
+three callbacks are required, the incoming resource clock must advance, but its
+existing history floor may be retained. Other restores require a new epoch."
   (when (or *core-write-active* (eq store *store-request-lease*))
     (error "Cannot reload application state from a transaction or leased request"))
+  (unless (member resource-history-continuity '(nil t))
+    (error "Invalid resource history continuity policy"))
   (when (or (and call-with-member-lock (not (functionp call-with-member-lock)))
             (and validate-recovery (not (functionp validate-recovery)))
             (and commit-recovery (not (functionp commit-recovery)))
-            (and (pod-store-consensus-commit-fn store)
+            (and (or (pod-store-consensus-commit-fn store) resource-history-continuity)
                  (not (and call-with-member-lock validate-recovery commit-recovery))))
     (error "HA application reload requires member barrier, boundary validation and durable recovery callbacks"))
   (bt:with-lock-held ((pod-store-lock store)) (require-store-reload-quiescence store))
@@ -117,7 +124,8 @@ It runs under the barriers and must not reenter public store operations."
              (bt:with-lock-held ((pod-store-lock store))
                (require-store-reload-quiescence store)
                (setf descriptor (checked-store-generation-descriptor (pod-store-path store) id))
-               (setf boundary (check-store-reload-revisions store id descriptor))
+               (setf boundary (check-store-reload-revisions
+                               store id descriptor :resource-history-continuity resource-history-continuity))
                (when (and validate-recovery (not (eq t (funcall validate-recovery descriptor store))))
                  (error "Member recovery boundary validation did not succeed"))
                ;; Validate and durably announce target BEFORE releasing old data.

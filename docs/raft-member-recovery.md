@@ -205,10 +205,21 @@ journal is refused and requires explicit cluster migration; restarting it with
 only understand mode version 1 also refuse this descriptor.
 
 Snapshot capture is registered under the outer store barriers before member
-locking. Automatic compaction remains disabled. Witness peers receive a durable
+locking. Automatic compaction is opt-in with `serve --raft-compaction`.
+Witness peers receive a durable
 configuration-only projection of store snapshots, without application artifacts
 or an application artifact retainer. Voters and learners retain the full
 application snapshot path.
+
+A validated same-log Raft artifact install preserves incoming resource watch
+history and object resource versions when its resource clock already satisfies
+the member's required minimum. A minimum revision is a lower bound; supplying
+one does not by itself require discarding history. This continuity path still
+requires a strictly newer resource clock and member-barrier, durable-boundary
+validation and recovery-commit callbacks. If the incoming clock needs an upward
+rebase, history starts a new epoch and public object versions are rebased.
+Generic application reloads continue to require a new resource-history epoch;
+Pod revision-ceiling and epoch checks remain in place for both paths.
 
 Internal admission callers can propose a learner with `:promotion-role :voter`
 to record its requested eventual role. The intent becomes effective with the

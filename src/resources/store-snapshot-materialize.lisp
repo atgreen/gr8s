@@ -73,7 +73,8 @@ validated marker visible. This function never writes the live selector."
          (staged (gr8s.store::make-pod-store (uiop:ensure-directory-pathname root)))
          (fields '("items" "customResourceItems" "workloadDeletions" "jobControllerStates" "templateHistory"))
          (spools nil) (tracker-output nil) (tracker-count 0) (counts (make-hash-table :test #'equal))
-         (header nil) (clocks nil) (target-clocks nil) (record-count nil))
+         (header nil) (clocks nil) (target-clocks nil) (record-count nil)
+         (resource-rebased nil) (pod-rebased nil))
     (setf (gr8s.store::pod-store-data-root staged) path)
     (dolist (directory '("objects/" "nodes/" "observations/" "publications/" "metadata/" "image-tracker/"))
       (gr8s.store::ensure-store-generation-directory (merge-pathnames directory path) path))
@@ -103,11 +104,16 @@ validated marker visible. This function never writes the live selector."
                        (when minimum-resource-revision
                          (let ((revision (max minimum-resource-revision (gethash "resourceRevision" record))))
                            (unless (< revision (1- (expt 2 64))) (error "No resource revision space remains after restore"))
-                           (setf (gethash "resourceRevision" target-clocks) revision
-                                 (gethash "templateHistoryFloor" target-clocks) revision
-                                 (gethash "resourceHistoryStart" target-clocks) revision)))
+                           (setf resource-rebased (> minimum-resource-revision (gethash "resourceRevision" record))
+                                 (gethash "resourceRevision" target-clocks) revision)
+                           ;; A minimum is a bound, not a request to discard
+                           ;; valid incoming history or rewrite object versions.
+                           (when resource-rebased
+                             (setf (gethash "templateHistoryFloor" target-clocks) revision
+                                   (gethash "resourceHistoryStart" target-clocks) revision))))
                        (when minimum-pod-revision
-                         (setf (gethash "podRevision" target-clocks)
+                         (setf pod-rebased (> minimum-pod-revision (gethash "podRevision" record))
+                               (gethash "podRevision" target-clocks)
                                (max minimum-pod-revision (gethash "podRevision" record)))
                          (unless (< (+ (gethash "podRevision" target-clocks) gr8s.store::*pod-revision-reservation*)
                                     (1- (expt 2 64)))
@@ -117,7 +123,7 @@ validated marker visible. This function never writes the live selector."
                        (terpri tracker-output)
                        (incf tracker-count))
                       ((equal kind "resource")
-                       (when minimum-resource-revision
+                       (when resource-rebased
                          (setf (gethash "resourceVersion" (gethash "metadata" object))
                                (write-to-string (gethash "resourceRevision" target-clocks))))
                        (let ((resource (gethash "resource" record)))
@@ -127,14 +133,14 @@ validated marker visible. This function never writes the live selector."
                       ((equal kind "workloadDeletion") (emit "workloadDeletions" (gethash "value" record) (gethash "key" record)))
                       ((equal kind "jobControllerState") (emit "jobControllerStates" (gethash "value" record) (gethash "key" record)))
                       ((equal kind "history")
-                       (unless minimum-resource-revision (emit "templateHistory" (gethash "entry" record))))
+                       (unless resource-rebased (emit "templateHistory" (gethash "entry" record))))
                       ((equal kind "node")
-                       (when minimum-pod-revision
+                       (when pod-rebased
                          (setf (gethash "resourceVersion" object) (write-to-string (gethash "podRevision" target-clocks))))
                        (write-snapshot-generation-json
                         (merge-pathnames (format nil "nodes/~A.json" (gethash "id" object)) path) object))
                       ((equal kind "pod")
-                       (when minimum-pod-revision
+                       (when pod-rebased
                          ;; Desired/observation revisions are shared Raft CAS
                          ;; identities. Rebase only the member's API publication.
                          (setf (gethash "resourceVersion" (gethash "publication" record))

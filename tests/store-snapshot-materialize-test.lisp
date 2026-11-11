@@ -198,3 +198,44 @@
           (signals error (apply #'gr8s.resources::materialize-store-snapshot root source (snapshot-test-digest source)
                                 :generation-id id (list key (1- (expt 2 64)))))
           (is (null (probe-file (gr8s.store::store-generation-complete-path root id)))))))))
+
+(test snapshot-minimums-preserve-history-and-versions-unless-clock-must-advance
+  (with-temporary-store (store root)
+    (let* ((artifact (merge-pathnames "minimums.jsonl" root))
+           (pod (ha-make-pod store "minimum-preserved")))
+      (gr8s::create-core-resource store "configmaps" (configmap-input "first" "k" "one") "default")
+      (gr8s::create-core-resource store "configmaps" (configmap-input "second" "k" "two") "default")
+      (ha-make-pod store "later-pod")
+      (gr8s.resources::capture-store-snapshot store artifact 42 7)
+      (let ((revision (gr8s::pod-store-resource-revision store))
+            (pod-revision (gr8s::pod-store-pod-revision store))
+            (history (gr8s::pod-store-template-history store))
+            (object (gr8s::get-core-resource store "configmaps" "default" "first"))
+            (view (gr8s::pod-published-view store pod)))
+        (is (plusp (length history)))
+        (dolist (case (list (list 0 0 nil nil)
+                           (list revision pod-revision nil nil)
+                           (list (+ revision 100) pod-revision t nil)
+                           (list revision (+ pod-revision 100) nil t)))
+          (destructuring-bind (minimum pod-minimum rebase-resource rebase-pod) case
+            (multiple-value-bind (path descriptor)
+                (gr8s.resources::materialize-store-snapshot
+                 root artifact (snapshot-test-digest artifact)
+                 :minimum-resource-revision minimum :minimum-pod-revision pod-minimum)
+              (declare (ignore path))
+              (gr8s.store::publish-store-generation root (gethash "generation" descriptor))
+              (let* ((restored (gr8s:open-store root))
+                     (incoming (gr8s::get-core-resource restored "configmaps" "default" "first"))
+                     (restored-pod (gr8s:get-pod restored "default" "minimum-preserved")))
+                (is (= (max minimum revision) (gr8s::pod-store-resource-revision restored)))
+                (if rebase-resource
+                    (progn
+                      (is (null (gr8s::pod-store-template-history restored)))
+                      (is (equal (write-to-string minimum) (gethash "resourceVersion" (gethash "metadata" incoming)))))
+                    (progn
+                      (is (equalp history (gr8s::pod-store-template-history restored)))
+                      (is (equalp object incoming))))
+                (if rebase-pod
+                    (is (equal (write-to-string pod-minimum)
+                               (gethash "resourceVersion" (gethash "metadata" (gr8s::pod-published-view restored restored-pod)))))
+                    (is (equalp view (gr8s::pod-published-view restored restored-pod))))))))))))

@@ -601,3 +601,26 @@
         (setf (symbol-function 'ag-grpc:make-grpc-server) original)
         (gr8s::close-file-raft-storage storage)
         (when member (gr8s::stop-raft-member member))))))
+
+(test live-artifact-install-preserves-history-when-incoming-clock-is-ahead
+  (with-temporary-store (source source-root)
+    (with-temporary-store (sink sink-root)
+      (gr8s::create-core-resource source "configmaps" (configmap-input "earlier" "k" "history") "default")
+      (let ((reference (seed-member-restore-artifact source source-root))
+            (sender nil) (receiver nil))
+        (unwind-protect
+             (progn
+               (setf sender (gr8s::start-raft-member "source")
+                     receiver (gr8s::start-raft-member "sink" :storage-path (merge-pathnames "raft/wal" sink-root)))
+               (gr8s.resources::configure-store-artifact-transport sender source-root)
+               (gr8s.resources::configure-member-store-restore receiver sink)
+               (send-artifact-wire-test-snapshot sender receiver (artifact-wire-test-message reference))
+               (is (= (gr8s::pod-store-resource-revision source) (gr8s::pod-store-resource-revision sink)))
+               (is (equalp (gr8s::pod-store-template-history source) (gr8s::pod-store-template-history sink)))
+               (is (equalp (gr8s::get-core-resource source "configmaps" "default" "earlier")
+                           (gr8s::get-core-resource sink "configmaps" "default" "earlier")))
+               (is-false (gr8s.store::store-access-blocked-p sink))
+               (is (equalp (gr8s::pod-store-template-history source)
+                           (gr8s::pod-store-template-history (gr8s:open-store sink-root)))))
+          (when receiver (gr8s::stop-raft-member receiver))
+          (when sender (gr8s::stop-raft-member sender)))))))
