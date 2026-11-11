@@ -752,19 +752,25 @@
       (is (search "skill" output)))))
 
 
-(test serve-compaction-is-explicit-and-requires-ha
-  (is-false (getf (gr8s::parse-serve-options '("--raft-init")) :raft-compaction))
+(test serve-compaction-defaults-to-ha-and-supports-explicit-overrides
+  (is-false (getf (gr8s::parse-serve-options nil) :raft-compaction))
+  (is-true (getf (gr8s::parse-serve-options '("--raft-init")) :raft-compaction))
+  (is-true (getf (gr8s::parse-serve-options '("--raft-join" "127.0.0.1:7449")) :raft-compaction))
+  (is-false (getf (gr8s::parse-serve-options '("--raft-init" "--no-raft-compaction")) :raft-compaction))
+  (is-false (getf (gr8s::parse-serve-options '("--no-raft-compaction")) :raft-compaction))
+  (is-false (getf (gr8s::parse-serve-options '("--raft-init" "--raft-compaction" "--no-raft-compaction")) :raft-compaction))
+  (is-true (getf (gr8s::parse-serve-options '("--raft-init" "--no-raft-compaction" "--raft-compaction")) :raft-compaction))
   (is-true (getf (gr8s::parse-serve-options '("--raft-init" "--raft-compaction")) :raft-compaction))
   (is-true (getf (gr8s::parse-serve-options '("--raft-compaction" "--raft-join" "127.0.0.1:7449")) :raft-compaction))
   (signals error (gr8s::parse-serve-options '("--raft-compaction"))))
 
-(test production-ha-startup-forwards-the-compaction-opt-in
+(test production-ha-startup-forwards-default-and-explicit-compaction
   (dolist (enabled '(nil t))
     (with-temporary-store (store root)
       (declare (ignore root))
       (let* ((options (gr8s::parse-serve-options
                        (append '("--raft-init" "--node-name" "cli-compaction" "--listen" "127.0.0.1")
-                               (when enabled '("--raft-compaction")))))
+                               (unless enabled '("--no-raft-compaction")))))
              (ha nil))
         ;; Bind an ephemeral transport port in this source-level startup test.
         (setf (getf options :raft-port) 0)

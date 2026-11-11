@@ -56,9 +56,10 @@ HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()
 
 
 class Node:
-    def __init__(self, binary, base, name, heap, compaction=False):
+    def __init__(self, binary, base, name, heap, compaction=False, default_compaction=False):
         self.binary, self.name, self.heap = binary, name, heap
         self.compaction, self.http = compaction, None
+        self.default_compaction = default_compaction
         self.root = base / name
         self.root.mkdir(mode=0o700)
         self.api, self.grpc, self.raft = port(), port(), port()
@@ -85,7 +86,7 @@ class Node:
         if enrollment:
             args += ["--raft-node-name", self.name, "--raft-token", enrollment["token"],
                      "--raft-ca-pin", enrollment["caPin"]]
-        if self.compaction:
+        if self.compaction and not self.default_compaction:
             args += ["--raft-compaction"]
         self.http = None
         self.process = subprocess.Popen(args, cwd=REPO, stdout=self.log, stderr=subprocess.STDOUT)
@@ -341,15 +342,20 @@ def main():
     parser.add_argument("--binary", type=Path, default=REPO / "build/gr8s")
     parser.add_argument("--heap-mib", type=int, default=384)
     parser.add_argument("--compaction", action="store_true", help="Enable production checkpoints and disconnected-voter churn")
+    parser.add_argument("--default-compaction", action="store_true",
+                        help="Run checkpoint churn without passing an enable flag to serve")
     parser.add_argument("--compaction-rounds", type=int, default=2048)
     parser.add_argument("--smoke", action="store_true", help="Allow 128-round partial compaction integration evidence")
     parser.add_argument("--witness", action="store_true", help="Also validate witness catch-up, restart and quorum participation")
     args = parser.parse_args()
+    if args.default_compaction:
+        args.compaction = True
     if args.compaction and (args.compaction_rounds < 128 or (args.compaction_rounds < 2048 and not args.smoke)):
         parser.error("compaction requires 2048 rounds, or --smoke with at least 128")
     binary = args.binary.resolve()
     base = Path(tempfile.mkdtemp(prefix="gr8s-ha-production-"))
-    nodes = [Node(binary, base, f"cp{i}", args.heap_mib, compaction=args.compaction) for i in range(1, 4)]
+    nodes = [Node(binary, base, f"cp{i}", args.heap_mib, compaction=args.compaction,
+                  default_compaction=args.default_compaction) for i in range(1, 4)]
     witness = Witness(binary, base, "w1", args.heap_mib) if args.witness else None
     cleanup_nodes = [*nodes, witness] if witness else nodes
     result = {"passed": False, "productionServe": True, "nativeBinary": True,
@@ -358,6 +364,8 @@ def main():
               "heapLimitMiB": args.heap_mib,
               "binarySha256": hashlib.sha256(binary.read_bytes()).hexdigest(), "evidence": str(base),
               "runnerSha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+              "defaultCompactionRequested": args.default_compaction,
+              "compactionEnableFlagPassed": args.compaction and not args.default_compaction,
               "compactionRequested": args.compaction, "compactionAcceptance": False,
               "fullCompactionWorkloadRequested": args.compaction and not args.smoke,
               "fullCompactionAcceptance": False,
