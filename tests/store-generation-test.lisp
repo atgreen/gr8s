@@ -439,9 +439,14 @@
                        (uiop:read-file-string (gr8s::service-account-signing-key-path store)))))
       (dotimes (round 5)
         (let ((previous (gr8s.store:store-data-path store)))
-          (gr8s.store::quiesce-store-access store)
-          (gr8s.store::reload-store-application store (gethash "generation" descriptor))
-          (gr8s.store::resume-store-access store)
+          (gr8s.store::call-with-store-data-reader
+           store (lambda (reader-path)
+                   (gr8s.store::quiesce-store-access store)
+                   (gr8s.store::reload-store-application store (gethash "generation" descriptor))
+                   (gr8s.store::resume-store-access store)
+                   (gr8s.store::reap-retired-store-generations store)
+                   ;; The old reader still owns its filesystem root after same-object reload.
+                   (is-true (probe-file reader-path))))
           (gr8s.store::reap-retired-store-generations store)
           (when (plusp round) (is-false (probe-file previous)))
           (is (equal uid (gr8s:pod-uid (gr8s:get-pod store "default" "snapshot-pod"))))

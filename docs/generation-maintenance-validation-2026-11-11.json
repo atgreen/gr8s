@@ -1,0 +1,182 @@
+{
+  "date": "2026-11-11",
+  "issues": [
+    "podster-ucm.11.3.3.14.2",
+    "podster-ucm.11.3.3.14.3"
+  ],
+  "sourceCommit": "ebcd03d",
+  "harnessCommit": "9fef4a6",
+  "passed": true,
+  "sourceSha256": {
+    "src/store/types.lisp": "64e4d02a343a56213546806cdae0220ebfb17bbe4e717a5a5c8f3f4fcb7c5032",
+    "src/store/generation-reclamation.lisp": "798285f61c5622b8aa1e23a2f557dd2c47a4201468bb33887db25d2719e0b2b4",
+    "src/store/application-reload.lisp": "e4dcc82f172174924b0a38de9e8276cb10add9a5e6547688f05b74a782937a0f",
+    "src/ha/control-plane.lisp": "b1399ba4fb384506d443268ae02255eea922910602338096775f7957ccd144f7",
+    "src/ha/maintenance.lisp": "b195589d205c7a258ed5dc7276acb6cbf04a7542a48e94f14c1590850296eda9",
+    "src/ha/metrics.lisp": "b51d2430fe078d2992e5fdb2a6e00f591931c136a552acd10c7a47cd2bed238b",
+    "tests/store-generation-test.lisp": "01f0c8315cceea66be36c698029e4e62effe8bfcf50ae1e3a2e3da78a5acef6f",
+    "tests/ha-control-plane-test.lisp": "3b2fc15f874dbdc8dcbe4395cfdb8cb499cd6a7a079bc13a6874bcc58807702e",
+    "scripts/compaction-cluster-native-harness.lisp": "2cfa8e6ba80ad3af3a1408935d89e4733bf5cbbd842d3514ee9fd28dd6469986",
+    "scripts/test-compaction-cluster-native.py": "3b0d6df67293ab43c26fe97471d1da7a932331e9f37b9e2c457a63303c98b9db"
+  },
+  "integration": {
+    "exitCode": 0,
+    "checks": 717,
+    "log": "/home/green/.cache/gr8s-evidence/generation-maintenance-integration.log",
+    "suites": {
+      "store-generation": 138,
+      "store-application-reload": 169,
+      "store-restore-intent": 50,
+      "ha-control-plane": 255,
+      "raft-tls": 105
+    }
+  },
+  "finalStartupOwnershipFocus": {
+    "exitCode": 0,
+    "checks": 14,
+    "overlapsIntegration": true,
+    "log": "/home/green/.cache/gr8s-evidence/generation-maintenance-final-focus.log"
+  },
+  "covered": [
+    "Selected/live roots, pending intents, incomplete reloads and active filesystem reader pins prevent retirement claims.",
+    "Claim is an atomic durable no-replace rename under the raw store mutex; data pruning occurs outside live store/member locks.",
+    "Bounded application-entry batches resume after detachment and injected directory-sync uncertainty.",
+    "Private known-layout cleanup preserves symlinks, hardlinks, unknown files/directories and unrelated staged generations.",
+    "Reader pins preserve multiple values and clean up on errors and nonlocal exits; pins survive application reset.",
+    "Five real snapshot materialization/reload cycles reclaim predecessor directories while preserving current Pod UID, ConfigMap and signing-key file bytes.",
+    "Joined background maintenance works without compaction or retained-budget changes; stop waits for an active cleanup, errors retry, metrics clear on success.",
+    "Existing production HA recovery and mTLS identity/certificate suites remain passing."
+  ],
+  "limits": [
+    "Native128-round3x384MiB mTLS reclamation and cold-recovery smoke passed. This does not prove full2048 or production serve/VM acceptance.",
+    "No snapshot-registry artifact reclamation scheduling change; the parent receiver disk lifecycle gap remains open.",
+    "Unmarked old generations and unrecognized or unsafe contents intentionally remain untouched.",
+    "Application-entry work is batched; the small retirement-metadata directory is enumerated separately.",
+    "Full2048 availability/recovery acceptance remains unproven; previous status-RPC timeout is preserved separately."
+  ],
+  "liveReaderReloadFollowup": {
+    "exitCode": 0,
+    "checks": 24,
+    "overlapWithIntegration": 19,
+    "newChecks": 5,
+    "log": "/home/green/.cache/gr8s-evidence/generation-reader-live-reload-tests.log",
+    "covered": "Hold an actual filesystem reader pin across five same-object snapshot reloads; predecessor stays present until reader unwind, then is reclaimed without losing current Pod, ConfigMap or signing-key bytes."
+  },
+  "nativeSmoke": {
+    "passed": true,
+    "evidence": "/home/green/.cache/gr8s-test-tmp/gr8s-compaction-cluster-native-5e5gkezk",
+    "binarySha256": "b0073917f70d830b0b02ad86f9397644da6f16fc7716a15d44d5d91ab5a0964b",
+    "nativeHarness": true,
+    "productionServe": false,
+    "vmAcceptance": false,
+    "mutualTls": true,
+    "processes": 3,
+    "heapLimitMiB": 384,
+    "rounds": 128,
+    "payloadBytes": 8388608,
+    "historyByteBudget": 100663296,
+    "fullChurnAcceptance": false,
+    "generationReclamationRequested": true,
+    "generationReclamationAcceptance": true,
+    "leadershipStabilityAcceptance": true,
+    "asymmetricCaptureAcceptance": true,
+    "archivedPrefixReplayAcceptance": true,
+    "diskCatchupAcceptance": true,
+    "catchupHistoryContinuous": true,
+    "historyPreservedAcrossRestart": true,
+    "identitiesPreserved": true,
+    "stopExitCodes": {
+      "cp-a": 0,
+      "cp-b": 0,
+      "cp-c": 0
+    },
+    "cleanupExitCodes": {
+      "cp-a": 0,
+      "cp-b": 0,
+      "cp-c": 0
+    },
+    "elapsedSeconds": 138.51576812402345,
+    "beforeRestart": {
+      "cp-a": {
+        "term": 1,
+        "commit": 339,
+        "applied": 339,
+        "snapshot": 339,
+        "historyEstimatedBytes": 16795168,
+        "applicationGenerationCount": 1,
+        "retiredGenerationCount": 0,
+        "generationTrashCount": 0,
+        "generationFilesReaped": 0,
+        "maintenanceError": false,
+        "maintenanceWorkerUp": true
+      },
+      "cp-b": {
+        "term": 1,
+        "commit": 339,
+        "applied": 339,
+        "snapshot": 339,
+        "historyEstimatedBytes": 16795168,
+        "applicationGenerationCount": 1,
+        "retiredGenerationCount": 0,
+        "generationTrashCount": 0,
+        "generationFilesReaped": 22,
+        "maintenanceError": false,
+        "maintenanceWorkerUp": true
+      },
+      "cp-c": {
+        "term": 1,
+        "commit": 339,
+        "applied": 339,
+        "snapshot": 333,
+        "historyEstimatedBytes": 16795168,
+        "applicationGenerationCount": 1,
+        "retiredGenerationCount": 0,
+        "generationTrashCount": 0,
+        "generationFilesReaped": 5,
+        "maintenanceError": false,
+        "maintenanceWorkerUp": true
+      }
+    },
+    "afterRestart": {
+      "cp-a": {
+        "term": 3,
+        "commit": 340,
+        "applied": 340,
+        "snapshot": 339,
+        "historyEstimatedBytes": 16795168,
+        "applicationGenerationCount": 1,
+        "retiredGenerationCount": 0,
+        "generationTrashCount": 0,
+        "generationFilesReaped": 6,
+        "maintenanceError": false,
+        "maintenanceWorkerUp": true
+      },
+      "cp-b": {
+        "term": 3,
+        "commit": 340,
+        "applied": 340,
+        "snapshot": 339,
+        "historyEstimatedBytes": 16795168,
+        "applicationGenerationCount": 1,
+        "retiredGenerationCount": 0,
+        "generationTrashCount": 0,
+        "generationFilesReaped": 5,
+        "maintenanceError": false,
+        "maintenanceWorkerUp": true
+      },
+      "cp-c": {
+        "term": 3,
+        "commit": 340,
+        "applied": 340,
+        "snapshot": 333,
+        "historyEstimatedBytes": 16795168,
+        "applicationGenerationCount": 1,
+        "retiredGenerationCount": 0,
+        "generationTrashCount": 0,
+        "generationFilesReaped": 6,
+        "maintenanceError": false,
+        "maintenanceWorkerUp": true
+      }
+    }
+  }
+}
