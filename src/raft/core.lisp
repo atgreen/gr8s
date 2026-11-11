@@ -81,8 +81,8 @@
   ;; Current-leadership applied receipts: peer -> (term . applied-index).
   ;; Log match alone does not establish that application restore has completed.
   (peer-applied (make-hash-table :test 'equal))
-  ;; A capacity-limited receiver must install a checkpoint instead of replaying
-  ;; more cached prefix. Startup may keep its local compactor gated until catch-up.
+  ;; Values are refused new indices that a recovery image must cover. They do
+  ;; not move when the leader compacts again. Startup may gate a peer's compactor.
   (peer-snapshot-required (make-hash-table :test 'equal))
   ;; candidate volatile
   (votes (make-hash-table :test 'equal))
@@ -542,20 +542,25 @@ RPC can widen the same string. This is distinct from printed-wire expansion."
     (integer (if (typep command 'fixnum) 0 (+ 32 (ceiling (integer-length command) 8))))
     (t 128)))
 
+(defun raft-cached-append-message (node peer)
+  "Return a bounded real cached prefix, independent of snapshot preference."
+  (let* ((next (gethash peer (raft-node-next-index node) (1+ (raft-last-log-index node))))
+         (cached (when (and (raft-node-catchup-byte-limit node)
+                            (<= next (raft-node-snapshot-index node)))
+                   (raft-storage-read-catchup (raft-node-storage node) node next))))
+    (when cached
+      (list :type :append-entries :term (raft-node-current-term node) :from (raft-node-id node)
+            :prev-log-index (1- next) :prev-log-term (car cached) :entries (cdr cached)
+            :leader-commit (raft-node-commit-index node)))))
+
 (defun raft-append-message (node peer)
   "Build a bounded AppendEntries batch beginning at PEER's next-index.
 Retries never encode the entire retained suffix. One oversized command travels
 alone so existing persisted commands remain deliverable."
   (let* ((next (gethash peer (raft-node-next-index node) (1+ (raft-last-log-index node))))
-         (cached (when (and (raft-node-catchup-byte-limit node)
-                            (not (gethash peer (raft-node-peer-snapshot-required node)))
-                            (<= next (raft-node-snapshot-index node)))
-                   (raft-storage-read-catchup (raft-node-storage node) node next))))
-    (when cached
-      (return-from raft-append-message
-        (list :type :append-entries :term (raft-node-current-term node) :from (raft-node-id node)
-              :prev-log-index (1- next) :prev-log-term (car cached) :entries (cdr cached)
-              :leader-commit (raft-node-commit-index node))))
+         (cached (unless (gethash peer (raft-node-peer-snapshot-required node))
+                   (raft-cached-append-message node peer))))
+    (when cached (return-from raft-append-message cached))
     (let* ((prev-index (1- next))
          (bytes 0)
          (entries
@@ -976,6 +981,19 @@ Protocol-only traffic remains available to establish a recovery commit."
                                               :success t :match-index last-new
                                               :applied-index (min last-new (raft-node-last-applied node))))))))))))
 
+(defun raft-peer-recovery-index (node peer)
+  "Read the refused index, including legacy boolean markers during live upgrade."
+  (let ((required (gethash peer (raft-node-peer-snapshot-required node))))
+    (when required
+      (if (integerp required) required
+          (gethash peer (raft-node-next-index node) (raft-node-snapshot-index node))))))
+
+(defun raft-note-peer-recovery-progress (node peer index)
+  "Use pre-reply progress so an old boolean also has a stable conservative target."
+  (let ((required (raft-peer-recovery-index node peer)))
+    (when (and required (>= index required))
+      (remhash peer (raft-node-peer-snapshot-required node)))))
+
 (defun raft-handle-append-entries-reply (node msg)
   "Handle an AppendEntries reply as leader: on success record the peer's
    match/next-index and advance the commit index (applying anything newly
@@ -991,6 +1009,7 @@ Protocol-only traffic remains available to establish a recovery commit."
             (unless (and (typep (getf msg :match-index) '(integer 0 #.most-positive-fixnum))
                          (<= (getf msg :match-index) (raft-last-log-index node)))
               (return-from raft-handle-append-entries-reply nil))
+            (raft-note-peer-recovery-progress node peer (getf msg :match-index))
             ;; Replies may arrive after a newer append or snapshot acknowledgement.
             ;; A successful acknowledgement cannot revoke already proven progress.
             (setf (gethash peer (raft-node-match-index node))
@@ -999,8 +1018,6 @@ Protocol-only traffic remains available to establish a recovery commit."
                   (gethash peer (raft-node-next-index node))
                   (max (gethash peer (raft-node-next-index node) 1)
                        (1+ (gethash peer (raft-node-match-index node)))))
-            (when (>= (getf msg :match-index) (raft-node-snapshot-index node))
-              (remhash peer (raft-node-peer-snapshot-required node)))
             (let ((applied (getf msg :applied-index))
                   (matched (getf msg :match-index)))
               (when (and (member peer (raft-replicate-ids node) :test #'equal)
@@ -1015,20 +1032,22 @@ Protocol-only traffic remains available to establish a recovery commit."
             (raft-advance-commit node)
             (raft-apply-committed node))
           ;; Back up and retry on the next replication round.
-          (progn
+          (let ((required (raft-peer-recovery-index node peer)))
             (setf (gethash peer (raft-node-next-index node))
                   (min (1+ (raft-last-log-index node))
                        (max (1+ (gethash peer (raft-node-match-index node) 0))
                             (or (getf msg :next-index)
                                 (1- (gethash peer (raft-node-next-index node) 1))))))
-            ;; Only a newer durable checkpoint can free the receiver's prefix.
-            ;; Keep this preference across ordinary heartbeat retries; the next
-            ;; successful snapshot/catch-up or membership/leadership reset clears it.
-            (when (and (getf msg :capacity-limited)
-                       (member peer (raft-replicate-ids node) :test #'equal)
-                       (<= (gethash peer (raft-node-next-index node))
-                           (raft-node-snapshot-index node)))
-              (setf (gethash peer (raft-node-peer-snapshot-required node)) t)))))))
+            ;; Anchor recovery to the actual refused new index. A later local
+            ;; checkpoint must not move this target while an image is in flight.
+            ;; Delayed refusals behind known progress cannot revoke that proof.
+            (let ((refused (getf msg :next-index)))
+              (when (and (getf msg :capacity-limited)
+                         (typep refused '(integer 1 #.most-positive-fixnum))
+                         (> refused (gethash peer (raft-node-match-index node) 0))
+                         (<= refused (raft-node-snapshot-index node)))
+                (setf (gethash peer (raft-node-peer-snapshot-required node))
+                      (max refused (if (integerp required) required 0))))))))))
 
 (defun raft-validate-snapshot-envelope (state)
   (unless (raft-snapshot-envelope-p state) (error "Unsupported snapshot envelope"))
@@ -1086,8 +1105,7 @@ Protocol-only traffic remains available to establish a recovery commit."
              (member (getf msg :from) (raft-replicate-ids node) :test #'equal)
              (<= 0 (getf msg :match-index) (raft-last-log-index node)))
     (let ((peer (getf msg :from)) (index (getf msg :match-index)))
-      (when (>= index (raft-node-snapshot-index node))
-        (remhash peer (raft-node-peer-snapshot-required node)))
+      (raft-note-peer-recovery-progress node peer index)
       (setf (gethash peer (raft-node-match-index node))
             (max index (gethash peer (raft-node-match-index node) 0))
             (gethash peer (raft-node-next-index node))

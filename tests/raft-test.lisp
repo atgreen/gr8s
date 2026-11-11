@@ -1635,3 +1635,94 @@
     (gr8s.raft::raft-handle-append-entries-reply
      node '(:from "peer" :term 2 :success t :match-index 1))
     (is (= 10 (gethash "peer" (gr8s.raft:raft-node-match-index node))))))
+
+(test capacity-recovery-ack-does-not-chase-newer-checkpoints
+  (with-temporary-store (store root)
+    (declare (ignore store))
+    (let* ((storage (gr8s::open-file-raft-storage (merge-pathnames "moving-checkpoint.log" root)))
+           (leader (make-disk-catchup-test-node storage))
+           (replies nil)
+           (follower (gr8s.raft:make-raft-node
+                      :id "follower" :current-term 2 :retained-byte-limit 512
+                      :uncommitted-weight-fn (constantly 128)
+                      :send-fn (lambda (target message) (declare (ignore target)) (push message replies)))))
+      (unwind-protect
+           (progn
+             (gr8s.raft::raft-configure leader '(("leader" . :voter) ("follower" . :voter)))
+             (setf (gethash "follower" (gr8s.raft:raft-node-match-index leader)) 2
+                   (gethash "follower" (gr8s.raft:raft-node-next-index leader)) 3)
+             (gr8s.raft:raft-compact leader 3)
+             (gr8s.raft::raft-handle-append-entries-reply
+              leader '(:from "follower" :term 2 :success nil :capacity-limited t :next-index 3))
+             (let ((image (gr8s.raft::raft-append-message leader "follower")))
+               (is (eq :install-snapshot (getf image :type)))
+               (is (= 3 (getf image :last-index)))
+               (gr8s.raft:raft-handle-message follower image)
+               ;; The leader advances while this image's receipt is in flight.
+               (let ((entry (gr8s.raft:make-raft-entry :index 4 :term 2 :command '(:payload 4))))
+                 (gr8s.raft:raft-storage-append-entry storage entry)
+                 (vector-push-extend entry (gr8s.raft:raft-node-log leader)))
+               (gr8s.raft:raft-storage-save-commit-index storage 4)
+               (setf (gr8s.raft:raft-node-commit-index leader) 4
+                     (gr8s.raft:raft-node-last-applied leader) 4)
+               (gr8s.raft:raft-compact leader 4)
+               (gr8s.raft::raft-handle-install-snapshot-reply
+                leader '(:from "follower" :term 2 :success t :match-index 2))
+               (is-true (gethash "follower" (gr8s.raft::raft-node-peer-snapshot-required leader)))
+               (gr8s.raft:raft-handle-message leader (first replies)))
+             (is-false (gethash "follower" (gr8s.raft::raft-node-peer-snapshot-required leader)))
+             ;; An older capacity refusal cannot revoke this recovered prefix.
+             (gr8s.raft::raft-handle-append-entries-reply
+              leader '(:from "follower" :term 2 :success nil :capacity-limited t :next-index 3))
+             (is-false (gethash "follower" (gr8s.raft::raft-node-peer-snapshot-required leader)))
+             (let ((tail (gr8s.raft::raft-append-message leader "follower")))
+               (is (eq :append-entries (getf tail :type)))
+               (when (eq :append-entries (getf tail :type))
+                 (is (= 3 (getf tail :prev-log-index)))
+                 (is (= 4 (gr8s.raft:raft-entry-index (first (getf tail :entries))))))
+               (gr8s.raft:raft-handle-message follower tail)
+               (is (= 4 (gr8s.raft:raft-node-last-applied follower)))
+               (is (= 512 (gr8s.raft::raft-node-retained-byte-limit follower)))))
+        (gr8s::close-file-raft-storage storage)))))
+
+(test newer-capacity-refusal-retains-its-own-recovery-boundary
+  (let ((node (gr8s.raft:make-raft-node :id "leader" :peers '("peer") :role :leader :current-term 2
+                                      :snapshot-index 3 :snapshot-term 2 :commit-index 3 :last-applied 3)))
+    (setf (gethash "peer" (gr8s.raft:raft-node-match-index node)) 1
+          (gethash "peer" (gr8s.raft:raft-node-next-index node)) 2)
+    (flet ((refuse (index)
+             (gr8s.raft::raft-handle-append-entries-reply
+              node (list :from "peer" :term 2 :success nil :capacity-limited t :next-index index)))
+           (ack (index)
+             (gr8s.raft::raft-handle-install-snapshot-reply
+              node (list :from "peer" :term 2 :success t :match-index index))))
+      (refuse 2)
+      (ack 2)
+      (is-false (gethash "peer" (gr8s.raft::raft-node-peer-snapshot-required node)))
+      (refuse 3)
+      (is-true (gethash "peer" (gr8s.raft::raft-node-peer-snapshot-required node)))
+      (ack 2)
+      (is-true (gethash "peer" (gr8s.raft::raft-node-peer-snapshot-required node)))
+      (ack 3)
+      (is-false (gethash "peer" (gr8s.raft::raft-node-peer-snapshot-required node))))))
+
+(test legacy-capacity-markers-use-pre-reply-progress-during-live-redefinition
+  (let ((node (gr8s.raft:make-raft-node :id "leader" :peers '("peer") :role :leader :current-term 2
+                                      :snapshot-index 4 :snapshot-term 2 :commit-index 4 :last-applied 4)))
+    (flet ((seed ()
+             (setf (gethash "peer" (gr8s.raft:raft-node-match-index node)) 2
+                   (gethash "peer" (gr8s.raft:raft-node-next-index node)) 3
+                   (gethash "peer" (gr8s.raft::raft-node-peer-snapshot-required node)) t)))
+      (seed)
+      (gr8s.raft::raft-handle-install-snapshot-reply node '(:from "peer" :term 2 :success t :match-index 3))
+      (is-false (gethash "peer" (gr8s.raft::raft-node-peer-snapshot-required node)))
+      (seed)
+      (gr8s.raft::raft-handle-append-entries-reply node '(:from "peer" :term 2 :success t :match-index 3 :applied-index 3))
+      (is-false (gethash "peer" (gr8s.raft::raft-node-peer-snapshot-required node)))
+      (seed)
+      (setf (gethash "peer" (gr8s.raft:raft-node-match-index node)) 1)
+      (gr8s.raft::raft-handle-append-entries-reply node '(:from "peer" :term 2 :success nil :capacity-limited t :next-index 2))
+      (gr8s.raft::raft-handle-install-snapshot-reply node '(:from "peer" :term 2 :success t :match-index 2))
+      (is-true (gethash "peer" (gr8s.raft::raft-node-peer-snapshot-required node)))
+      (gr8s.raft::raft-handle-install-snapshot-reply node '(:from "peer" :term 2 :success t :match-index 3))
+      (is-false (gethash "peer" (gr8s.raft::raft-node-peer-snapshot-required node))))))

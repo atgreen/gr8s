@@ -207,7 +207,48 @@ Unknown files, directories, symlinks, hard links or permissions preserve the roo
         (error "Artifact snapshot lacks an exact application boundary"))
       application)))
 
-(defun raft-link-send-snapshot-file (member stub message path digest &key format header)
+(defun raft-snapshot-stub-peer (member stub)
+  "Resolve existing link senders as well as new callers during live redefinition."
+  (when stub
+    (sb-thread:with-mutex ((raft-member-lock member) :wait-p nil)
+      (maphash (lambda (id link)
+                 (when (eq stub (raft-peer-link-stub link))
+                   (return-from raft-snapshot-stub-peer id)))
+               (raft-member-links member)))))
+
+(defun raft-link-snapshot-obsolete-p (member peer message previous-state &optional streaming)
+  "Return obsolete/state/bounded-replay-probe without waiting for member lock.
+A queued image may yield to cached replay. Once bytes are sent, keep the image
+until confirmed progress covers it; a prefix alone cannot prove retention space.
+Probe capacity at most once per unchanged second while recovery is required."
+  (unless peer (return-from raft-link-snapshot-obsolete-p (values nil previous-state nil)))
+  (or (sb-thread:with-mutex ((raft-member-lock member) :wait-p nil)
+        (let* ((node (raft-member-node member))
+               (valid (and (eq :leader (gr8s.raft:raft-node-role node))
+                           (= (getf message :term) (gr8s.raft:raft-node-current-term node))
+                           (member peer (gr8s.raft::raft-replicate-ids node) :test #'equal))))
+          (unless valid
+            (return-from raft-link-snapshot-obsolete-p (values (not (null previous-state)) previous-state nil)))
+          (let* ((matched (gethash peer (gr8s.raft:raft-node-match-index node) 0))
+                 (next (gethash peer (gr8s.raft:raft-node-next-index node) 1))
+                 (required (gethash peer (gr8s.raft::raft-node-peer-snapshot-required node)))
+                 (state (list (gr8s.raft:raft-node-current-term node) matched next required
+                              (gr8s.raft:raft-node-snapshot-index node)
+                              (gr8s.raft::raft-node-catchup-byte-limit node)
+                              (when (and required streaming)
+                                (floor (get-internal-real-time) internal-time-units-per-second)))))
+            (when (equal state previous-state)
+              (return-from raft-link-snapshot-obsolete-p (values nil state nil)))
+            (when (>= matched (getf message :last-index))
+              (return-from raft-link-snapshot-obsolete-p (values t state nil)))
+            (let ((probe (when (and (plusp matched) (= next (1+ matched))
+                                    (or streaming (not required)))
+                           (gr8s.raft::raft-cached-append-message node peer))))
+              (return-from raft-link-snapshot-obsolete-p
+                (values (and probe (not streaming)) state probe))))))
+      (values nil previous-state nil)))
+
+(defun raft-link-send-snapshot-file (member stub message path digest &key format header obsolete-p)
   (let ((token (gr8s::generate-uid)))
     (with-open-file (stream path :element-type '(unsigned-byte 8))
       (let ((total (file-length stream)) (offset 0)
@@ -215,6 +256,8 @@ Unknown files, directories, symlinks, hard links or permissions preserve the roo
         (unless (<= 1 total (raft-member-snapshot-max-bytes member)) (error "Snapshot exceeds transfer limit"))
         (loop for count = (read-sequence buffer stream) while (plusp count) do
           (unless (raft-member-running member) (error "Snapshot sender stopped"))
+          (when (and obsolete-p (funcall obsolete-p (plusp offset)))
+            (return-from raft-link-send-snapshot-file :obsolete))
           (let ((*raft-snapshot-rpc-timeout*
                   (if (and format (= (+ offset count) total))
                       *raft-artifact-completion-timeout* *raft-snapshot-rpc-timeout*)))
@@ -229,40 +272,53 @@ Unknown files, directories, symlinks, hard links or permissions preserve the roo
           (incf offset count))
         (unless (= offset total) (error "Snapshot source size changed during transfer"))))))
 
-(defun raft-link-send-snapshot (member stub message &key (recipient-role :voter))
-  "Send bounded snapshot chunks. Store artifacts travel as raw bytes; witnesses
-receive the exact configuration envelope with no application payload/reference."
-  (when (and (eq recipient-role :witness) (raft-message-artifact-reference message))
-    ;; A witness has no application restore/retention callback. Its complete
-    ;; state is the committed configuration, represented as a stateless image.
-    ;; Copy the envelope: voter and learner deliveries still need the artifact.
-    (let ((state (copy-list (getf message :state))))
-      (setf message (copy-list message)
-            (getf (cddr state) :application) nil
-            (getf (cddr state) :application-present) t
-            (getf message :state) state)))
-  (let ((reference (raft-message-artifact-reference message)))
-    (when reference
-      (let ((source (raft-member-artifact-source-fn member))
-            (header (raft-message->octets message)))
-        (unless (and (functionp source) (<= (length header) +raft-snapshot-header-bytes+))
-          (error "Artifact snapshot requires a source and a bounded header"))
-        (let ((path (funcall source member message)) (digest (eighth reference)))
-          (unless (equal digest (raft-snapshot-file-digest path)) (error "Artifact source checksum mismatch"))
-          (raft-link-send-snapshot-file member stub message path digest :format :artifact-v1 :header header)))
-      (return-from raft-link-send-snapshot nil)))
-  ;; Legacy opaque snapshots remain available for generic state-machine users.
-  (let ((path (bt:with-lock-held ((raft-member-lock member)) (raft-snapshot-new-path member "out")))
-        (created nil))
-    (unwind-protect
-         (progn
-           (raft-snapshot-create-file path)
-           (setf created t)
-           (with-open-file (stream path :direction :output :if-exists :overwrite :external-format :utf-8)
-             (with-standard-io-syntax
-               (let ((*print-pretty* nil) (*print-circle* nil) (*read-eval* nil)) (prin1 message stream))))
-           (raft-link-send-snapshot-file member stub message path (raft-snapshot-file-digest path)))
-      (when (and created (probe-file path)) (delete-file path)))))
+(defun raft-link-send-snapshot (member stub message &key (recipient-role :voter) peer)
+  "Send bounded chunks, abandoning an obsolete image only after current proof.
+Store artifacts travel as raw bytes; witnesses receive configuration only."
+  (let ((probe-state nil))
+    (flet ((obsolete-p (&optional streaming)
+             (unless peer (setf peer (raft-snapshot-stub-peer member stub)))
+             (multiple-value-bind (obsolete state probe)
+                 (raft-link-snapshot-obsolete-p member peer message probe-state streaming)
+               (setf probe-state state)
+               (when probe
+                 ;; Admission and application still run through normal Raft.
+                 ;; A failed probe neither advances proof nor discards the image.
+                 (handler-case (raft-link-deliver-message stub probe) (error () nil)))
+               obsolete)))
+      (when (obsolete-p) (return-from raft-link-send-snapshot nil))
+      (when (and (eq recipient-role :witness) (raft-message-artifact-reference message))
+        ;; A witness has no application restore/retention callback. Its complete
+        ;; state is the committed configuration, represented as a stateless image.
+        ;; Copy the envelope: voter and learner deliveries still need the artifact.
+        (let ((state (copy-list (getf message :state))))
+          (setf message (copy-list message)
+                (getf (cddr state) :application) nil
+                (getf (cddr state) :application-present) t
+                (getf message :state) state)))
+      (let ((reference (raft-message-artifact-reference message)))
+        (when reference
+          (let ((source (raft-member-artifact-source-fn member))
+                (header (raft-message->octets message)))
+            (unless (and (functionp source) (<= (length header) +raft-snapshot-header-bytes+))
+              (error "Artifact snapshot requires a source and a bounded header"))
+            (let ((path (funcall source member message)) (digest (eighth reference)))
+              (when (obsolete-p) (return-from raft-link-send-snapshot nil))
+              (unless (equal digest (raft-snapshot-file-digest path)) (error "Artifact source checksum mismatch"))
+              (raft-link-send-snapshot-file member stub message path digest :format :artifact-v1 :header header :obsolete-p #'obsolete-p)))
+          (return-from raft-link-send-snapshot nil)))
+      ;; Legacy opaque snapshots remain available for generic state-machine users.
+      (let ((path (bt:with-lock-held ((raft-member-lock member)) (raft-snapshot-new-path member "out")))
+            (created nil))
+        (unwind-protect
+             (progn
+               (raft-snapshot-create-file path)
+               (setf created t)
+               (with-open-file (stream path :direction :output :if-exists :overwrite :external-format :utf-8)
+                 (with-standard-io-syntax
+                   (let ((*print-pretty* nil) (*print-circle* nil) (*read-eval* nil)) (prin1 message stream))))
+               (raft-link-send-snapshot-file member stub message path (raft-snapshot-file-digest path) :obsolete-p #'obsolete-p))
+          (when (and created (probe-file path)) (delete-file path)))))))
 
 (defun raft-decode-artifact-header (member chunk)
   (let ((bytes (getf chunk :artifact-envelope)))

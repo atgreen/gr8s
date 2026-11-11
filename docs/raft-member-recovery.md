@@ -615,6 +615,22 @@ continues to use the current WAL and application artifact; this cache is
 expendable and is not a new recovery format. The worker restores the previous
 cache policy when stopped, respecting a stricter existing policy.
 
+A capacity refusal records the refused log index as the peer's recovery
+boundary. A valid acknowledgement covering that boundary clears the snapshot
+preference even if the leader has since published a newer checkpoint. Delayed
+refusals behind confirmed peer progress cannot rearm it.
+
+Before sending an image, the sender checks whether a confirmed preceding
+prefix and an actual cached batch permit ordinary replay. During a transfer it
+also attempts bounded cached batches between chunks, using the follower's
+normal retention admission checks. An in-flight image remains available until
+confirmed progress covers its index: a cached prefix alone cannot establish
+that the follower has room for the entire tail. Capacity refusals and replay
+RPC failures preserve the needed image. Unchanged capacity probes are limited
+to once per monotonic second; successful progress permits the next batch.
+These checks preserve the existing retention limits and authenticated Raft
+reply validation. They do not change the persisted recovery format.
+
 For canonical checksummed WALs, cache construction copies the selected durable
 entry frames through a fixed 64 KiB buffer. A private index holds only terms and
 byte offsets for current WAL entries; it never retains command payloads. Durable

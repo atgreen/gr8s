@@ -644,3 +644,99 @@
         (setf (symbol-function 'gr8s:open-store) original)))))
 
 (in-suite gr8s)
+
+(in-suite raft-snapshot)
+
+(test snapshot-stream-replays-with-admission-and-preserves-needed-images
+  (dolist (mode '(:replay :queued :capacity :missing :rpc-error))
+    (with-temporary-store (store root)
+      (let* ((storage (gr8s::open-file-raft-storage (merge-pathnames "stream-proof.log" root)))
+             (leader (make-disk-catchup-test-node storage))
+             (member (gr8s.raft.transport::make-raft-member :node leader :running t))
+             (stub (gensym "STUB"))
+             (limit (if (eq mode :capacity) 128 512))
+             (follower (gr8s.raft:make-raft-node
+                        :id "follower" :current-term 2 :snapshot-index 3 :snapshot-term 2
+                        :commit-index 3 :last-applied 3 :retained-byte-limit limit
+                        :uncommitted-weight-fn (constantly 128)
+                        :send-fn (lambda (target reply)
+                                   (declare (ignore target))
+                                   (bt:with-lock-held ((gr8s.raft.transport:raft-member-lock member))
+                                     (gr8s.raft:raft-handle-message leader reply)))))
+             (deliver (symbol-function 'gr8s.raft.transport::raft-link-deliver-message))
+             (read-prefix (symbol-function 'gr8s.raft::raft-storage-read-catchup))
+             (source (merge-pathnames "stream-artifact.jsonl" root))
+             (chunks 0) (appends 0) (lookups 0) (done nil) (cache-reads 0)
+             (inject (not (member mode '(:queued :missing)))))
+        (unwind-protect
+             (progn
+               (setf (gethash "follower" (gr8s.raft.transport::raft-member-links member))
+                     (gr8s.raft.transport::make-raft-peer-link :id "follower" :stub stub))
+               (gr8s.raft::raft-configure leader '(("leader" . :voter) ("follower" . :voter)))
+               (gr8s.raft:raft-compact leader 3)
+               (let ((entry (gr8s.raft:make-raft-entry :index 4 :term 2 :command '(:payload 4))))
+                 (gr8s.raft:raft-storage-append-entry storage entry)
+                 (vector-push-extend entry (gr8s.raft:raft-node-log leader)))
+               (gr8s.raft:raft-storage-save-commit-index storage 4)
+               (setf (gr8s.raft:raft-node-commit-index leader) 4 (gr8s.raft:raft-node-last-applied leader) 4
+                     (gethash "follower" (gr8s.raft:raft-node-match-index leader)) 2
+                     (gethash "follower" (gr8s.raft:raft-node-next-index leader)) 3)
+               (gr8s.raft::raft-handle-append-entries-reply
+                leader '(:from "follower" :term 2 :success nil :capacity-limited t :next-index 3))
+               (gr8s.raft:raft-compact leader 4)
+               (when (member mode '(:queued :missing))
+                 (gr8s.raft::raft-handle-install-snapshot-reply
+                  leader '(:from "follower" :term 2 :success t :match-index 3)))
+               (when (eq mode :missing) (gr8s.raft::raft-storage-clear-catchup storage))
+               (gr8s::create-core-resource store "configmaps"
+                 (core-fixture "ConfigMap" "stream" "data"
+                               (gr8s::core-object "value" (make-string 200000 :initial-element #\x))) "default")
+               (gr8s.resources::capture-store-snapshot store source 4 2)
+               (let* ((digest (snapshot-test-digest source))
+                      (reference (gr8s.resources::store-snapshot-artifact-reference 4 2 digest))
+                      (message (list :type :install-snapshot :term 2 :from "leader" :last-index 4 :last-term 2
+                                     :state (gr8s.raft::raft-capture-snapshot leader reference 4))))
+                 (setf (gr8s.raft.transport::raft-member-artifact-source-fn member)
+                       (lambda (incoming envelope) (declare (ignore incoming envelope)) (incf lookups) source)
+                       (symbol-function 'gr8s.raft::raft-storage-read-catchup)
+                       (lambda (&rest args) (incf cache-reads) (apply read-prefix args))
+                       (symbol-function 'gr8s.raft.transport::raft-link-deliver-message)
+                       (lambda (incoming request)
+                         (declare (ignore incoming))
+                         (case (getf request :type)
+                           (:append-entries
+                            (incf appends)
+                            (when (eq mode :rpc-error) (error "Injected replay RPC failure"))
+                            (gr8s.raft:raft-handle-message follower request))
+                           (:snapshot-chunk
+                            (incf chunks)
+                            (when inject
+                              (setf inject nil)
+                              (bt:with-lock-held ((gr8s.raft.transport:raft-member-lock member))
+                                (gr8s.raft::raft-handle-install-snapshot-reply
+                                 leader '(:from "follower" :term 2 :success t :match-index 3))))
+                            (when (getf request :done)
+                              (setf done t)
+                              (gr8s.raft:raft-handle-message follower message))))))
+                 ;; No new keyword is needed by an already-running link sender.
+                 (gr8s.raft.transport::raft-link-send-snapshot member stub message)
+                 (is (= 4 (gr8s.raft:raft-node-last-applied follower)))
+                 (is (= limit (gr8s.raft::raft-node-retained-byte-limit follower)))
+                 (is-false (gethash "follower" (gr8s.raft::raft-node-peer-snapshot-required leader)))
+                 (if (member mode '(:replay :queued))
+                     (progn
+                       (is (= 3 (gr8s.raft:raft-node-snapshot-index follower)))
+                       (is (> appends 0))
+                       (is-false done)
+                       (when (eq mode :queued) (is (= 0 chunks)) (is (= 0 lookups))))
+                     (progn
+                       (is (= 4 (gr8s.raft:raft-node-snapshot-index follower)))
+                       (is (> chunks 1))
+                       (is-true done)))
+                 (when (eq mode :missing) (is (= 0 appends)) (is (= 1 cache-reads)))
+                 (when (member mode '(:capacity :rpc-error)) (is (> appends 0)))))
+          (setf (symbol-function 'gr8s.raft.transport::raft-link-deliver-message) deliver
+                (symbol-function 'gr8s.raft::raft-storage-read-catchup) read-prefix)
+          (gr8s::close-file-raft-storage storage))))))
+
+(in-suite gr8s)
