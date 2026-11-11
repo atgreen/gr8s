@@ -1471,7 +1471,14 @@ agent masquerades Pod->apiserver traffic toward.")
               ;; host firewall drops it (TLS handshake timeout in e2e BeforeSuite).
               ;; Skipped for a loopback control plane (this node's own agent).
               (ignore-errors
-                (ensure-apiserver-masquerade host +in-cluster-api-port+))))
+                (ensure-apiserver-masquerade host +in-cluster-api-port+))
+              ;; Admit the Service NodePort range so Pods and off-node clients
+              ;; can reach <nodeIP>:<nodePort> relays; without it the host
+              ;; firewall rejects the port and NodePort Services fail
+              ;; (EHOSTUNREACH), as do their conformance tests.
+              (ignore-errors
+                (ensure-node-port-range-firewall
+                 +node-port-minimum+ +node-port-maximum+))))
           (setf node-runtime
               (make-node-runtime
                (agent-state-path options "runtime/") runtime manager
@@ -1530,6 +1537,9 @@ agent masquerades Pod->apiserver traffic toward.")
               (remove-image-peer-firewall gr8s.security::+image-peer-default-port+))
             (ignore-errors
               (remove-apiserver-masquerade host +in-cluster-api-port+))
+            (ignore-errors
+              (remove-node-port-range-firewall
+               +node-port-minimum+ +node-port-maximum+))
             (gr8s.security::stop-node-image-distribution image-distribution)))))))
   0)
 

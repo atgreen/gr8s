@@ -53,15 +53,32 @@
   "The firewall-cmd argv lists that admit (VERB \"--add\") or withdraw (VERB
    \"--remove\") gr8s overlay traffic through firewalld, scoped to the overlay.
    Idempotent at firewalld: --add-* / --remove-* is a no-op when already in the
-   wanted state."
-  (let ((cidrs (if (stringp node-pod-cidr) (list node-pod-cidr) node-pod-cidr)))
+   wanted state.
+
+   Also source-NATs this node's Pod->NodePort traffic to the node's address. A
+   Pod reaching a NodePort on another node arrives there over the underlay with
+   its Pod source address, which the remote node cannot route a reply to
+   symmetrically, so its stateful firewall drops the connection. Masquerading
+   restores a symmetric path, exactly as kube-proxy does for the default
+   externalTrafficPolicy. Scoped to NODE-POD-CIDR so an external client's source
+   address at a Local-policy NodePort is left untouched."
+  (let ((cidrs (if (stringp node-pod-cidr) (list node-pod-cidr) node-pod-cidr))
+        (rule-verb (if (string= verb "--add") "--add-rule" "--remove-rule"))
+        (ports (format nil "~D:~D" gr8s.controllers::+node-port-minimum+
+                       gr8s.controllers::+node-port-maximum+)))
     (append
      (list (list "firewall-cmd" "--zone" zone
                  (format nil "~A-interface" verb) interface))
      (loop for cidr in cidrs
            collect (list "firewall-cmd" "--zone" zone
                          (format nil "~A-source" verb) cidr))
-     (list (list "firewall-cmd" (format nil "~A-port=~D/udp" verb port))))))
+     (list (list "firewall-cmd" (format nil "~A-port=~D/udp" verb port)))
+     (loop for cidr in cidrs
+           nconc (loop for protocol in '("tcp" "udp")
+                       collect (list "firewall-cmd" "--direct" rule-verb
+                                     "ipv4" "nat" "POSTROUTING" "0"
+                                     "-s" cidr "-p" protocol "--dport" ports
+                                     "-j" "MASQUERADE"))))))
 
 (defun apply-overlay-firewall-commands (commands &key (runner #'host-firewall-run))
   "Run each firewall-cmd in COMMANDS, logging (not raising on) any failure.
@@ -145,6 +162,32 @@
      (list (list "firewall-cmd" (format nil "--remove-port=~D/tcp" port)))
      :runner runner)
     t))
+
+(defun node-port-range-firewall-commands (verb minimum maximum)
+  "firewall-cmd argv admitting the Service NodePort range for TCP and UDP."
+  (when (and (integerp minimum) (integerp maximum) (<= 1 minimum maximum 65535))
+    (list (list "firewall-cmd" (format nil "~A-port=~D-~D/tcp" verb minimum maximum))
+          (list "firewall-cmd" (format nil "~A-port=~D-~D/udp" verb minimum maximum)))))
+
+(defun ensure-node-port-range-firewall (minimum maximum &key (runner #'host-firewall-run))
+  "Admit the Service NodePort range so Pods and off-node clients can reach
+   <nodeIP>:<nodePort>. Every node binds a userspace relay for each NodePort
+   Service that has endpoints; without this rule the stateful host firewall
+   rejects the port (EHOSTUNREACH) and NodePort Services -- and their
+   conformance tests -- fail. No-op without firewalld; fail-soft. Returns T when
+   rules were attempted."
+  (let ((commands (node-port-range-firewall-commands "--add" minimum maximum)))
+    (when (and commands (host-firewalld-active-p :runner runner))
+      (apply-overlay-firewall-commands commands :runner runner)
+      t)))
+
+(defun remove-node-port-range-firewall (minimum maximum &key (runner #'host-firewall-run))
+  "Withdraw ENSURE-NODE-PORT-RANGE-FIREWALL's rules. No-op without firewalld;
+   fail-soft."
+  (let ((commands (node-port-range-firewall-commands "--remove" minimum maximum)))
+    (when (and commands (host-firewalld-active-p :runner runner))
+      (apply-overlay-firewall-commands commands :runner runner)
+      t)))
 
 (defun routable-masquerade-address-p (address)
   "True for an apiserver address worth masquerading toward: a non-empty, non-
