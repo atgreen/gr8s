@@ -1,0 +1,40 @@
+{
+  "issue": "podster-ucm.6",
+  "testedCommit": "b5d7e5e",
+  "passed": true,
+  "checks": 436,
+  "groups": {
+    "apiserverMetrics": 95,
+    "leaderGate": 5,
+    "haControlPlane": 255,
+    "raftTransport": 60,
+    "reconciliationValuesErrorsUnwind": 15,
+    "reconciliationRealWorkerRecovery": 6
+  },
+  "coverage": {
+    "heapGcWatchRetention": "Real API listener, configured heap/counters, omitted unobserved GC, bounded history labels and read-only sampling.",
+    "raft": "Local progress/retention/compaction and phase critical-section telemetry; bounded configured-peer receipt freshness after normal dispatch.",
+    "datastore": "Actual statvfs bytes/inodes, explicit unavailable/absent semantics, growth and selected-generation versus stable WAL paths.",
+    "reconciliation": "Worker attempts, errors, normal and abnormal completion, live worker recovery, leader gate and fixed-kind observed-generation lag.",
+    "documentation": "docs/control-plane-metrics.md documents local sampling, resets, fixed labels, error semantics and attribution limits."
+  },
+  "logs": {
+    "telemetry-parent-current-integration.log": "c8fef24e9a3791151ac93dba5d5833bd5cceaf165b5046e9b9040067287fa9bc",
+    "telemetry-parent-reconciliation-current.log": "8007f2826efc3cbd6e186a22da1829f0d41f5a2a4ba21eb8f4fa1741d4e4f8fb"
+  },
+  "sourceSha256": {
+    "src/server/memory-monitor.lisp": "7e6e12ffa0c1e256a1ea3d40cf86dce331a6190478cdb26716fce6183d3b2de5",
+    "src/server/reconciliation-metrics.lisp": "b52d0552c9b44c438c136941ab6460540c8c909f7db220c8f1dd981ea4b10a9e",
+    "src/ha/metrics.lisp": "261ea93633608d8f94e52ebb086e9dab5110d529b0cd87cbdbc882b1ae3efd21",
+    "src/apiserver/http.lisp": "d1e5100b0ba7914d02586967277829f1329ae025f44764b042972d236c74d0e8",
+    "tests/apiserver-metrics-test.lisp": "379d4fb4c5b10fc4c3fc63d24d3f5b95820ef882df39dd878f27c37ca39a1367",
+    "tests/main-test.lisp": "3ab69eefdbfc86836de424b6cc44f22bc8d5c813569c7d69f1caada70ad51501",
+    "tests/ha-control-plane-test.lisp": "cebdbb79316be902ca459cc77dc37bd6b30ae571e6ebdb288b7bb8ac61ee9a15",
+    "tests/raft-transport-test.lisp": "48d1f7b1671c7bffe4db33cb87247669dcdd2bf7281d7a33b26f4c41583274b5",
+    "docs/control-plane-metrics.md": "38e254aacb3c1040344d8be99025b64c3bbd87a78aa8ee4ab2348126f55591a9"
+  },
+  "limitations": [
+    "Initial invocation included a nonexistent main suite selector, which ran nothing; no coverage is claimed for it. Both required reconciliation tests were rerun explicitly and their existence checked.",
+    "Telemetry reports local observations; it does not establish quorum health, workload readiness, total state disk usage, or a cluster-wide atomic snapshot."
+  ]
+}
