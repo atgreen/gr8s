@@ -15,7 +15,7 @@
   ;; base plus a "-gr8s.N" suffix carried in a git tag (e.g. v1.37.2-gr8s.0),
   ;; surfaced through VERSION-STRING as +GR8S-VERSION+ (see src/version.lisp).
   :version "1.37.2"
-  :depends-on ("0conf/dns-wire" "ag-grpc" "bordeaux-threads" "cffi" "chipz" "cl-cancel"
+  :depends-on ("0conf" "ag-grpc" "bordeaux-threads" "cffi" "chipz" "cl-cancel"
                "cl-cel" "cl-dns-proxy" "cl-raft/wal" "cl-re2" "cl-rtnetlink"
                "cl-torrent" "cl-wireguard-overlay"
                "cl-work-queue" "cl-safe-yaml" "cl-cronexpr"
