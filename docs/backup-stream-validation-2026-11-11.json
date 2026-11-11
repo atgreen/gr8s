@@ -17,7 +17,7 @@
     "records": 2048,
     "plaintextBytes": 134217728,
     "heapLimitBytes": 100663296,
-    "afterFullGcBytes": 23075696
+    "afterFullGcBytes": 23155984
   },
   "memoryScope": "Source-loaded encryption module and pinned crypto dependencies only; no full gr8s process/VM claim. After-GC usage is not peak.",
   "harnessCorrection": "The first thread-confinement test used an unsupported bare-symbol FiveAM assertion. Corrected assertion and reran all194 checks; failed log retained.",
@@ -27,6 +27,13 @@
     "backup-stream-tests-final-v2.log": "88bc27ef81dfec070e48dc606a06ee0c5ba9797fc075a12c13da2275f8559bb5",
     "backup-stream-memory.log": "425ba09d717eb301f3a790b552dbc0862f159dbef21e02d2f508c58adc879ad9",
     "backup-stream-memory-portable.log": "a6ab6447455350bec5399232ff348cd00ff5b60fc5edb7e6bd3a886c7875ef37",
-    "backup-stream-openssl-final.json": "4a1300322d49f5667aa73bdfd7393676c0f8246490b1094698fc778083005700"
+    "backup-stream-openssl-final.json": "4a1300322d49f5667aa73bdfd7393676c0f8246490b1094698fc778083005700",
+    "backup-stream-memory-portable-v2.log": "2954b54a7c11746b12f50e42c6dd80f43c5e844b7b70804fb3da9364247b92d1"
+  },
+  "probeArgumentCorrection": "Initial portable probe treated SBCL -- separator as output filename; argument handling corrected and probe rerun at intended path. Misnamed public fixture moved outside checkout; no data discarded.",
+  "probeSourceSha256": "0853f4d62b8c4c3566d5ba53fe77ec5828da40886b147f4deb9f9ea914c17e23",
+  "memoryFixture": {
+    "path": "/home/green/.cache/gr8s-test-tmp/backup-stream-memory-portable-v2.bin",
+    "bytes": 134260798
   }
 }
