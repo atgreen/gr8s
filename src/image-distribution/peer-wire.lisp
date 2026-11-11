@@ -11,13 +11,6 @@
 (defconstant +peer-block-length+ 16384)
 (defconstant +maximum-peer-message-length+ (+ 9 +peer-block-length+))
 
-(defstruct peer-handshake
-  infohash peer-id)
-
-(defstruct peer-message
-  kind (piece 0) (begin 0) (length 0)
-  (payload #() :type vector))
-
 (defun put-u32 (octets offset value)
   (unless (typep value '(unsigned-byte 32))
     (error "BitTorrent integer is outside the uint32 range"))
@@ -40,31 +33,6 @@
                (= 20 (length peer-id)))
     (error "A BitTorrent peer id must contain exactly 20 octets")))
 
-(defun encode-peer-handshake (v2-infohash peer-id)
-  "Encode the standard handshake using BEP 52's first 20 infohash bytes."
-  (unless (and (typep v2-infohash '(vector (unsigned-byte 8)))
-               (= 32 (length v2-infohash)))
-    (error "A BitTorrent v2 infohash must contain exactly 32 octets"))
-  (require-peer-id peer-id)
-  (let ((result (make-array +peer-handshake-length+
-                            :element-type '(unsigned-byte 8)
-                            :initial-element 0)))
-    (setf (aref result 0) (length +peer-protocol-name+))
-    (replace result (bencode-octets +peer-protocol-name+) :start1 1)
-    ;; Bytes 20..27 are reserved. No DHT, extension protocol, or PEX bit is set.
-    (replace result v2-infohash :start1 28 :end2 20)
-    (replace result peer-id :start1 48)
-    result))
-
-(defun decode-peer-handshake (octets)
-  (unless (and (= +peer-handshake-length+ (length octets))
-               (= (length +peer-protocol-name+) (aref octets 0))
-               (equalp (bencode-octets +peer-protocol-name+)
-                       (subseq octets 1 20)))
-    (error "Invalid BitTorrent peer handshake"))
-  (make-peer-handshake :infohash (subseq octets 28 48)
-                       :peer-id (subseq octets 48 68)))
-
 (defun peer-message-id (kind)
   (ecase kind
     (:choke 0) (:unchoke 1) (:interested 2) (:not-interested 3)
@@ -76,84 +44,6 @@
                (typep (peer-message-piece message) '(unsigned-byte 32))
                (typep (peer-message-begin message) '(unsigned-byte 32)))
     (error "Invalid BitTorrent block request")))
-
-(defun encode-peer-message (message)
-  "Encode one length-prefixed standard peer-wire message."
-  (when (eq :keepalive (peer-message-kind message))
-    (return-from encode-peer-message
-      (make-array 4 :element-type '(unsigned-byte 8) :initial-element 0)))
-  (let* ((kind (peer-message-kind message))
-         (payload-length
-           (case kind
-             ((:choke :unchoke :interested :not-interested) 0)
-             (:have 4)
-             (:bitfield (length (peer-message-payload message)))
-             ((:request :cancel)
-              (validate-block-request message) 12)
-             (:piece
-              (let ((length (length (peer-message-payload message))))
-                (unless (<= 1 length +peer-block-length+)
-                  (error "Invalid BitTorrent piece block length"))
-                (+ 8 length)))
-             (otherwise (error "Unsupported BitTorrent message ~S" kind))))
-         (wire-length (1+ payload-length))
-         (result (make-array (+ 4 wire-length)
-                             :element-type '(unsigned-byte 8)
-                             :initial-element 0)))
-    (when (> wire-length +maximum-peer-message-length+)
-      (error "BitTorrent peer message exceeds the configured bound"))
-    (put-u32 result 0 wire-length)
-    (setf (aref result 4) (peer-message-id kind))
-    (case kind
-      (:have (put-u32 result 5 (peer-message-piece message)))
-      (:bitfield (replace result (peer-message-payload message) :start1 5))
-      ((:request :cancel)
-       (put-u32 result 5 (peer-message-piece message))
-       (put-u32 result 9 (peer-message-begin message))
-       (put-u32 result 13 (peer-message-length message)))
-      (:piece
-       (put-u32 result 5 (peer-message-piece message))
-       (put-u32 result 9 (peer-message-begin message))
-       (replace result (peer-message-payload message) :start1 13)))
-    result))
-
-(defun decode-peer-message (octets)
-  "Decode one complete length-prefixed standard peer-wire message."
-  (when (< (length octets) 4) (error "Truncated BitTorrent peer message"))
-  (let ((wire-length (get-u32 octets 0)))
-    (unless (= (+ wire-length 4) (length octets))
-      (error "BitTorrent message length prefix does not match its frame"))
-    (when (> wire-length +maximum-peer-message-length+)
-      (error "BitTorrent peer message exceeds the configured bound"))
-    (when (zerop wire-length)
-      (return-from decode-peer-message (make-peer-message :kind :keepalive)))
-    (let* ((id (aref octets 4))
-           (kind (case id
-                   (0 :choke) (1 :unchoke) (2 :interested) (3 :not-interested)
-                   (4 :have) (5 :bitfield) (6 :request) (7 :piece) (8 :cancel)
-                   (otherwise (error "Unsupported BitTorrent message id ~D" id))))
-           (message
-             (case kind
-               ((:choke :unchoke :interested :not-interested)
-                (unless (= wire-length 1) (error "Invalid control message length"))
-                (make-peer-message :kind kind))
-               (:have
-                (unless (= wire-length 5) (error "Invalid have message length"))
-                (make-peer-message :kind kind :piece (get-u32 octets 5)))
-               (:bitfield
-                (make-peer-message :kind kind :payload (subseq octets 5)))
-               ((:request :cancel)
-                (unless (= wire-length 13) (error "Invalid request message length"))
-                (make-peer-message :kind kind :piece (get-u32 octets 5)
-                                   :begin (get-u32 octets 9)
-                                   :length (get-u32 octets 13)))
-               (:piece
-                (unless (>= wire-length 10) (error "Invalid piece message length"))
-                (make-peer-message :kind kind :piece (get-u32 octets 5)
-                                   :begin (get-u32 octets 9)
-                                   :payload (subseq octets 13))))))
-      (when (member kind '(:request :cancel)) (validate-block-request message))
-      message)))
 
 (defun rarest-missing-piece (completed availability peer-bitfield)
   "Choose the rarest piece this peer has, breaking ties by lowest index."
@@ -224,7 +114,7 @@
 
 (defun ensure-handshake-swarm (handshake torrent)
   (unless (equalp (peer-handshake-infohash handshake)
-                  (subseq (blob-torrent-infohash torrent) 0 20))
+                  (subseq (torrent-infohash torrent) 0 20))
     (error "Peer attempted to join the wrong BitTorrent swarm")))
 
 (defun read-file-block (pathname torrent piece begin length)
@@ -235,14 +125,14 @@
       (error "Peer requested a block outside the OCI blob"))
     (with-open-file (stream pathname :direction :input
                                      :element-type '(unsigned-byte 8))
-      (file-position stream (+ (* piece (blob-torrent-piece-length torrent)) begin))
+      (file-position stream (+ (* piece (torrent-piece-length torrent)) begin))
       (read-exactly stream length))))
 
 (defun serve-peer-stream (stream torrent pathname peer-id completed &key handshake)
   "Serve verified pieces over one already-authenticated peer stream."
   (let ((handshake (or handshake (read-peer-handshake stream))))
     (ensure-handshake-swarm handshake torrent)
-    (write-peer-handshake stream (blob-torrent-infohash torrent) peer-id)
+    (write-peer-handshake stream (torrent-infohash torrent) peer-id)
     (write-peer-message
      stream (make-peer-message :kind :bitfield
                                :payload (piece-vector-to-bitfield completed)))
@@ -273,9 +163,8 @@
              (format stream "Peer supplied corrupt BitTorrent piece ~D"
                      (corrupt-peer-piece-index condition)))))
 
-(defun missing-peer-blocks (store peer-pieces)
-  (let ((torrent (piece-store-torrent store))
-        (completed (piece-store-completed store)))
+(defun missing-peer-blocks (torrent store peer-pieces)
+  (let ((completed (completed-pieces store)))
     (loop for piece below (length completed)
           when (and (zerop (aref completed piece))
                     (= 1 (aref peer-pieces piece)))
@@ -290,7 +179,7 @@
   "Download all missing pieces available from one authenticated peer."
   (unless (typep pipeline-depth '(integer 1 128))
     (error "BitTorrent pipeline depth must be between 1 and 128"))
-  (write-peer-handshake stream (blob-torrent-infohash torrent) peer-id)
+  (write-peer-handshake stream (torrent-infohash torrent) peer-id)
   (ensure-handshake-swarm (read-peer-handshake stream) torrent)
   (let ((peer-pieces nil) (choked-p t) (pending nil) (remaining nil))
     (write-peer-message stream (make-peer-message :kind :interested))
@@ -304,7 +193,7 @@
                        (torrent-piece-count torrent))))
                (:unchoke (setf choked-p nil))
                (:choke (setf choked-p t))))
-    (setf remaining (missing-peer-blocks store peer-pieces))
+    (setf remaining (missing-peer-blocks torrent store peer-pieces))
     (loop while (or remaining pending)
           do (loop while (and remaining (not choked-p)
                               (< (length pending) pipeline-depth))
@@ -324,7 +213,7 @@
                     (unless request (error "Peer sent an unrequested piece block"))
                     (setf pending (delete request pending :test #'eq))
                     (when (eq :corrupt
-                              (piece-store-accept-block
+                              (accept-block
                                store (first key) (second key)
                                (peer-message-payload message)))
                       (error 'corrupt-peer-piece :piece (first key)))))

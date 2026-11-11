@@ -226,7 +226,7 @@
                             (gr8s.image-distribution::make-tracker-command
                              :action :publish :digest digest :node-name "node-a"
                              :now 1002 :token token
-                             :metainfo (gr8s.image-distribution::blob-torrent-metainfo torrent)
+                             :metainfo (gr8s.image-distribution::torrent-metainfo torrent)
                              :address "10.0.0.1" :port 6881 :peer-id peer-id))))
                      (is (eq :ok (getf published :status))))
                    (dolist (store (list s1 s2))
@@ -236,7 +236,7 @@
                               :now 1002)))
                        (is (eq :available
                                (gr8s.image-distribution::tracker-view-status view)))
-                       (is (equalp (gr8s.image-distribution::blob-torrent-infohash torrent)
+                       (is (equalp (gr8s.image-distribution::torrent-infohash torrent)
                                    (gr8s.image-distribution::tracker-view-infohash view)))
                        (is (string= "node-a"
                                     (gr8s.image-distribution::tracker-peer-node-name

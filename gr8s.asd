@@ -16,6 +16,9 @@
   ;; surfaced through VERSION-STRING as +GR8S-VERSION+ (see src/version.lisp).
   :version "1.37.2"
   :depends-on ("0conf/dns-wire" "ag-grpc" "bordeaux-threads" "cffi" "chipz" "cl-cancel"
+               "cl-cel" "cl-dns-proxy" "cl-raft/wal" "cl-re2" "cl-rtnetlink"
+               "cl-torrent" "cl-wireguard-overlay"
+               "cl-work-queue" "cl-safe-yaml" "cl-cronexpr"
                "com.inuoe.jzon" "flexi-streams" "hunchentoot" "cl-ppcre"
                "pure-tls/acme" "drakma" "ironclad"
                "sb-posix" "slynk" "trivial-utf-8" "usocket" "version-string"
@@ -41,8 +44,7 @@
                              (:module "raft"
                               :serial t
                               :components ((:file "package")
-                                           (:file "core")
-                                           (:file "log")))
+                                           (:file "extensions")))
                              (:file "package")
                              (:file "version")
                              (:module "generated"
@@ -64,21 +66,14 @@
                                            (:file "node-protocol")))
                              (:file "foundation/dns")
                              (:file "foundation/json")
-                             (:module "patch"
-                              :serial t
-                              :components ((:file "package") (:file "artifact")
-                                           (:file "publisher") (:file "executor") (:file "coordinator")
-                                           (:file "cli")))
                              (:file "foundation/network-steering")
                              (:module "image-distribution"
                               :serial t
                               :components ((:file "package")
-                                           (:file "bencode")
                                            (:file "torrent-v2")
                                            (:file "metainfo-stream")
                                            (:file "tracker")
                                            (:file "peer-wire")
-                                           (:file "piece-store")
                                            (:file "oci-cache")
                                            (:file "oci-mirror")))
                              (:module "model"
@@ -180,8 +175,6 @@
                                            (:file "cron-schedule")
                                            (:file "cronjob-resources")
                                            (:file "re2")
-                                           (:file "admission-cel")
-                                           (:file "cel-library")
                                            (:file "admission-resources")
                                            (:file "storage-api")
                                            (:file "namespace-lifecycle")
@@ -426,7 +419,7 @@
                                            (:file "backup-bundle")
                                            (:file "main")
                                            (:file "reconciliation-metrics")
-                                           (:file "patch-integration")
+                                           (:file "controller-pass")
                                            (:file "compat"))))))
   :in-order-to ((test-op (test-op "gr8s/tests"))))
 
@@ -436,7 +429,6 @@
   :components ((:module "tests"
                 :serial t
                 :components ((:file "package")
-                             (:file "patch-test")
                              (:file "protocol-package-test")
                              (:file "torrent-v2-test")
                              (:file "image-tracker-test")
@@ -446,8 +438,6 @@
                              (:file "websocket-test")
                              (:file "node-protocol-test")
                              (:file "agent-trace-test")
-                             (:file "dns-test")
-                             (:file "dns-port-pair-test")
                              (:file "model-test")
                              (:file "store-test")
                              (:file "raft-test")
@@ -640,12 +630,3 @@
                       :fiveam :run!
                       (find-symbol "GR8S" "GR8S/TESTS"))
                (error "gr8s tests failed"))))
-
-;; Keep the patch suite runnable inside a real ASDF TEST-OP: loading a patch must
-;; establish its own session rather than inherit the test operation's forcing policy.
-(asdf:defsystem "gr8s/patch-tests"
-  :depends-on ("gr8s/tests")
-  :perform (test-op (operation component)
-             (declare (ignore operation component))
-             (unless (uiop:symbol-call :fiveam :run! (find-symbol "PATCH" "GR8S/TESTS"))
-               (error "gr8s patch tests failed"))))

@@ -13,7 +13,7 @@
     (let ((writer (gr8s.server::open-backup-writer out (backup-test-key))))
       (gr8s.server::write-backup-bundle-json
        writer 0 (gr8s::json-object "format" "gr8s-state-bundle" "version" 1
-                                  "buildID" gr8s.patch:*build-id* "release" "test"
+                                  "release" "test"
                                   "createdAt" 0 "exclusionPolicy" "gr8s-control-plane-v1"))
       (dolist (record records) (gr8s.server::write-backup-record writer record))
       (gr8s.server::finish-backup-writer writer))))
@@ -65,7 +65,7 @@
         (is (null (directory (merge-pathnames ".gr8s-backup-*.*" output-root))))))))
 
 (test bundle-verification-rejects-authenticated-unsafe-paths-and-order
-  (dolist (name '("../escape" "/absolute" "x/../escape" "x//y" "x\\y" "patches/process.lock" "agent/containerd/x"))
+  (dolist (name '("../escape" "/absolute" "x/../escape" "x//y" "x\\y" "agent/containerd/x"))
     (signals error
       (verify-test-bundle-bytes (make-test-bundle-records
                                 (append (test-bundle-file-records name) (list (test-bundle-footer 1 0)))))))

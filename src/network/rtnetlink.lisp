@@ -1,22 +1,24 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
 ;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
-;;;; Linux rtnetlink (NETLINK_ROUTE) client for the CNI data path.
+;;;; gr8s node-networking helpers layered over the cl-rtnetlink library.
 ;;;;
-;;;; gr8s configures host networking -- veth pairs, link attributes, addresses,
-;;;; routes, and permanent neighbors -- by encoding UAPI netlink messages by hand
-;;;; and exchanging them over a private AF_NETLINK socket, rather than forking
-;;;; iproute2. Each transaction opens its own socket in the calling thread's
-;;;; network namespace, so a worker that has entered a Pod netns programs that
-;;;; namespace without disturbing others. Requests carry NLM_F_ACK, so the
-;;;; kernel's error reply surfaces as a Lisp condition (rtnetlink-error). The
-;;;; routed-veth helpers stamp each link with a stable alias and a derived MAC so
-;;;; that a create interrupted by a crash can be recognized and adopted on retry.
+;;;; The Linux rtnetlink (NETLINK_ROUTE) wire codec and the link, address, route
+;;;; and neighbor operations now live in the standalone cl-rtnetlink library
+;;;; (installed via ocicl); gr8s.network re-homes its public API in package.lisp.
+;;;; What remains here is the gr8s-specific layer those primitives serve: the
+;;;; routed-veth helpers that stamp each link with a stable alias and a derived
+;;;; MAC so a create interrupted by a crash can be recognized and adopted on
+;;;; retry; link ownership and tagging checks; the node gateway; host-route
+;;;; discovery; and IPv4/IPv6 forwarding.  A kernel error still surfaces as the
+;;;; library's RTNETLINK-ERROR condition, which gr8s handlers catch.
 
 (in-package #:gr8s.network)
 
-;; Linux UAPI messages are constructed here rather than invoking iproute2.
-;; Every transaction gets a private socket in the calling thread's namespace.
+;; Raw socket syscalls for the one AF_NETLINK path gr8s still drives itself: the
+;; WireGuard generic-netlink client in wireguard.lisp.  The rtnetlink route
+;; transactions use cl-rtnetlink's own private socket; these stay here because a
+;; gr8s network file is the only remaining caller.
 (sb-alien:define-alien-routine ("socket" %rtnl-socket) sb-alien:int
   (domain sb-alien:int) (type sb-alien:int) (protocol sb-alien:int))
 (sb-alien:define-alien-routine ("connect" %rtnl-connect) sb-alien:int
@@ -28,160 +30,6 @@
 (sb-alien:define-alien-routine ("recv" %rtnl-recv) sb-alien:long
   (fd sb-alien:int) (buffer sb-alien:system-area-pointer)
   (length sb-alien:unsigned-long) (flags sb-alien:int))
-
-(define-condition rtnetlink-error (cni-error)
-  ((errno :initarg :errno :reader rtnetlink-error-errno)))
-
-(defun fail-rtnetlink (operation errno)
-  "Signal RTNETLINK-ERROR for OPERATION with ERRNO, its message the matching
-   strerror text. Does not return normally."
-  (error 'rtnetlink-error :errno errno
-         :message (format nil "rtnetlink ~A: ~A" operation
-                          (sb-int:strerror errno))))
-
-(defun netlink-octets (&rest parts)
-  "Concatenate PARTS into one (unsigned-byte 8) vector."
-  (apply #'concatenate '(vector (unsigned-byte 8)) parts))
-
-(defun netlink-integer (value size)
-  "Encode VALUE as a SIZE-byte vector in the host's byte order (little-endian on
-   this build)."
-  (let ((bytes (make-array size :element-type '(unsigned-byte 8))))
-    (dotimes (index size bytes)
-      (setf (aref bytes index)
-            (ldb (byte 8 (* 8 #+little-endian index
-                                 #-little-endian (- size index 1))) value)))))
-
-(defun netlink-read-integer (bytes offset size)
-  "Decode the SIZE-byte integer at OFFSET in BYTES, in the host's byte order."
-  (loop for index below size
-        sum (ash (aref bytes (+ offset index))
-                 (* 8 #+little-endian index
-                      #-little-endian (- size index 1)))))
-
-(defun netlink-align (size)
-  "Round SIZE up to the 4-byte netlink alignment."
-  (logand (+ size 3) (lognot 3)))
-
-(defun netlink-string (string)
-  "Encode STRING as NUL-terminated UTF-8 bytes, the form netlink string
-   attributes expect."
-  (netlink-octets (trivial-utf-8:string-to-utf-8-bytes string) #(0)))
-
-(defun netlink-attribute (type payload)
-  "Encode one netlink attribute (nlattr) of TYPE wrapping PAYLOAD: the 4-byte
-   length/type header, the payload, and trailing zero padding to netlink
-   alignment."
-  (let ((size (+ 4 (length payload))))
-    (netlink-octets
-     (netlink-integer size 2) (netlink-integer type 2) payload
-     (make-array (- (netlink-align size) size)
-                 :element-type '(unsigned-byte 8) :initial-element 0))))
-
-(defun netlink-message (type flags payload &optional (sequence 1))
-  "Wrap PAYLOAD in an nlmsghdr of TYPE and FLAGS (total length, type, flags,
-   SEQUENCE, and a zero port id)."
-  (netlink-octets
-   (netlink-integer (+ 16 (length payload)) 4)
-   (netlink-integer type 2) (netlink-integer flags 2)
-   (netlink-integer sequence 4) (netlink-integer 0 4) payload))
-
-(defun parse-netlink-reply (buffer count sequence)
-  "Return matching payloads and whether the kernel acknowledged the request."
-  (let ((offset 0) (payloads nil) (acknowledged nil))
-    (loop while (< offset count)
-          do (when (< (- count offset) 16)
-               (invalid-cni "truncated rtnetlink reply header"))
-             (let ((size (netlink-read-integer buffer offset 4))
-                   (type (netlink-read-integer buffer (+ offset 4) 2))
-                   (reply-sequence (netlink-read-integer buffer (+ offset 8) 4)))
-               (unless (<= 16 size (- count offset))
-                 (invalid-cni "invalid rtnetlink reply length"))
-               (when (= sequence reply-sequence)
-                 (case type
-                   (2 ; NLMSG_ERROR includes successful ACKs (error = 0).
-                    (when (< size 20)
-                      (invalid-cni "truncated rtnetlink acknowledgement"))
-                    (let ((code (netlink-read-integer buffer (+ offset 16) 4)))
-                      (unless (zerop code)
-                        (fail-rtnetlink "request" (- (expt 2 32) code)))
-                      (setf acknowledged t)))
-                   (3 (setf acknowledged t)) ; NLMSG_DONE
-                   (4 (invalid-cni "rtnetlink receive overrun"))
-                   (otherwise
-                    (push (subseq buffer offset (+ offset size)) payloads))))
-               (incf offset (netlink-align size))))
-    (values (nreverse payloads) acknowledged)))
-
-(defun call-rtnetlink (type flags payload &key (timeout 5))
-  "Run one rtnetlink request/response transaction and return the kernel's reply
-   messages -- those that are neither an ACK nor NLMSG_DONE, possibly none.
-   Opens a private CLOEXEC AF_NETLINK socket in the calling thread's namespace,
-   forces NLM_F_REQUEST|NLM_F_ACK onto FLAGS, sends TYPE with PAYLOAD, and reads
-   until the kernel acknowledges. Signals RTNETLINK-ERROR on a socket error or a
-   non-zero kernel status, or INVALID-CNI on a malformed reply, a datagram larger
-   than the 64 KiB buffer, or TIMEOUT seconds without acknowledgement. Closes the
-   socket before returning."
-  (let ((fd (%rtnl-socket 16 (logior 3 #o2000000) 0)) ; AF_NETLINK, CLOEXEC
-        (address (netlink-octets (netlink-integer 16 2)
-                                (make-array 10 :element-type '(unsigned-byte 8)
-                                               :initial-element 0)))
-        (message (netlink-message type (logior flags 5) payload))
-        (buffer (make-array 65536 :element-type '(unsigned-byte 8)))
-        (replies nil)
-        (deadline (+ (get-internal-real-time)
-                     (* timeout internal-time-units-per-second))))
-    (when (minusp fd) (fail-rtnetlink "socket" (sb-alien:get-errno)))
-    (unwind-protect
-         (progn
-           (sb-sys:with-pinned-objects (address message)
-             (unless (zerop (%rtnl-connect fd (sb-sys:vector-sap address) 12))
-               (fail-rtnetlink "connect" (sb-alien:get-errno)))
-             (unless (= (length message)
-                        (%rtnl-send fd (sb-sys:vector-sap message)
-                                    (length message) 0))
-               (fail-rtnetlink "send" (sb-alien:get-errno))))
-           (loop
-             (let ((remaining (/ (- deadline (get-internal-real-time))
-                                 internal-time-units-per-second)))
-               (unless (and (plusp remaining)
-                            (sb-sys:wait-until-fd-usable fd :input remaining))
-                 (invalid-cni "timed out waiting for rtnetlink acknowledgement")))
-             (let ((count
-                     (sb-sys:with-pinned-objects (buffer)
-                       ;; MSG_TRUNC lets us detect an oversized datagram.
-                       (%rtnl-recv fd (sb-sys:vector-sap buffer)
-                                   (length buffer) 32))))
-               (when (minusp count)
-                 (fail-rtnetlink "receive" (sb-alien:get-errno)))
-               (when (> count (length buffer))
-                 (invalid-cni "rtnetlink datagram exceeds receive buffer"))
-               (multiple-value-bind (messages acknowledged)
-                   (parse-netlink-reply buffer count 1)
-                 (setf replies (nconc replies messages))
-                 (when acknowledged (return replies))))))
-      (sb-posix:close fd))))
-
-(defun netlink-interface-message (&key (index 0) (flags 0) (change 0))
-  "Encode an ifinfomsg body: interface INDEX, link FLAGS, and the CHANGE mask
-   selecting which flag bits FLAGS applies to."
-  (netlink-octets #(0 0 0 0) (netlink-integer index 4)
-                  (netlink-integer flags 4) (netlink-integer change 4)))
-
-(defun validate-network-interface-name (name)
-  "Return NAME when it is a safe Linux interface name -- a string of 1 to 15
-   characters drawn from [A-Za-z0-9-_.] that is neither \".\" nor \"..\" -- and
-   signal INVALID-CNI otherwise. Guards names before they reach the kernel or a
-   namespace path."
-  (unless (and (stringp name) (<= 1 (length name) 15)
-               (every (lambda (character)
-                        (or (and (char<= #\a character #\z))
-                            (and (char<= #\A character #\Z))
-                            (and (char<= #\0 character #\9))
-                            (find character "-_."))) name)
-               (not (member name '("." "..") :test #'string=)))
-    (invalid-cni "unsafe network interface name ~S" name))
-  name)
 
 (defun routed-veth-name (sandbox-id interface-name)
   "Derive the host-side veth name for SANDBOX-ID's INTERFACE-NAME: \"gr\" followed
@@ -265,52 +113,6 @@
       (ignore-errors (delete-network-link host-name))
       (error condition))))
 
-(defun netlink-attributes (message offset)
-  "Parse the netlink attributes in MESSAGE from OFFSET into a hash table from
-   attribute type (with the nested/byte-order flag bits masked off) to its raw
-   payload bytes. Signals INVALID-CNI on a truncated or malformed attribute."
-  (let ((attributes (make-hash-table)))
-    (loop while (< offset (length message))
-          do (when (< (- (length message) offset) 4)
-               (invalid-cni "truncated rtnetlink attribute"))
-             (let ((size (netlink-read-integer message offset 2))
-                   (type (logand #x3fff
-                                 (netlink-read-integer message (+ offset 2) 2))))
-               (unless (<= 4 size (- (length message) offset))
-                 (invalid-cni "invalid rtnetlink attribute length"))
-               (setf (gethash type attributes)
-                     (subseq message (+ offset 4) (+ offset size)))
-               (incf offset (netlink-align size))))
-    attributes))
-
-(defun network-link-attributes-by-index (index)
-  "Read kernel link attributes for an interface index in this namespace."
-  (unless (plusp index) (fail-rtnetlink "link lookup" 19))
-  (let* ((messages (call-rtnetlink 18 0 (netlink-interface-message :index index)))
-         (message (find 16 messages :key (lambda (item) (netlink-read-integer item 4 2)))))
-    (unless (and message (>= (length message) 32))
-      (invalid-cni "kernel returned no link information for index ~A" index))
-    (netlink-attributes message 32)))
-
-(defun network-link-attributes (name)
-  "Read kernel link attributes for a validated interface name."
-  (network-link-attributes-by-index
-   (native-interface-index (validate-network-interface-name name))))
-
-(defun network-octets-integer (octets)
-  "Decode network-byte-order OCTETS into one unsigned integer."
-  (loop with value = 0 for byte across octets
-        do (setf value (logior (ash value 8) byte))
-        finally (return value)))
-
-(defun network-prefix-octets-integer (octets bits)
-  "Decode an abbreviated network prefix into its BITS-wide address value."
-  (unless (<= (length octets) (/ bits 8))
-    (invalid-cni "route destination has ~D octets for a ~D-bit address"
-                 (length octets) bits))
-  (ash (network-octets-integer octets)
-       (* 8 (- (/ bits 8) (length octets)))))
-
 (defun read-family-host-routes (family)
   "Read non-default routes for address FAMILY from all Linux routing tables."
   (let* ((ipv6-p (= family 10))
@@ -375,103 +177,6 @@
              (network-link-kind-p attributes "veth")
              (equalp (gethash 1 attributes) (routed-veth-mac owner role))))))
 
-(defun set-network-link-mtu (name mtu)
-  "Set the link NAME's MTU to MTU."
-  (call-rtnetlink
-   16 0 (netlink-octets
-         (netlink-interface-message :index (cni-interface-index name))
-         (netlink-attribute 4 (netlink-integer mtu 4)))))
-
-(defun set-network-link-up (name)
-  "Bring the link NAME administratively up (set IFF_UP)."
-  (call-rtnetlink 16 0
-                  (netlink-interface-message
-                   :index (cni-interface-index name) :flags 1 :change 1)))
-
-(defun delete-network-link (name)
-  "Delete the link NAME (RTM_DELLINK). A no-op when it no longer exists, and
-   tolerant of ENODEV -- the namespace or peer can vanish between the index
-   lookup and the delete. Signals INVALID-CNI on an unsafe name."
-  (validate-network-interface-name name)
-  (let ((index (native-interface-index name)))
-    (unless (zerop index)
-      (handler-case
-          (call-rtnetlink 17 0 (netlink-interface-message :index index))
-        (rtnetlink-error (condition)
-          ;; Namespace destruction can remove the peer between lookup and DEL.
-          (unless (= 19 (rtnetlink-error-errno condition)) (error condition)))))))
-
-(defun ipv4-network-octets (address)
-  "Return ADDRESS, a dotted-quad IPv4 string, as its four network-order bytes."
-  (let ((integer (parse-ipv4-integer address)))
-    (make-array 4 :element-type '(unsigned-byte 8)
-                  :initial-contents
-                  (loop for shift from 24 downto 0 by 8
-                        collect (ldb (byte 8 shift) integer)))))
-
-(defun network-address-wire-values (address)
-  "Return ADDRESS's rtnetlink family, network-order bytes, and address width."
-  (if (find #\: address)
-      (values 10 (0conf:parse-ipv6 address) 128)
-      (values 2 (ipv4-network-octets address) 32)))
-
-(defun add-network-address (name address prefix)
-  "Assign ADDRESS/PREFIX to the link NAME (RTM_NEWADDR). Idempotent: an
-   already-present address (EEXIST) is accepted. Signals INVALID-CNI on a prefix
-   outside 0..32."
-  (multiple-value-bind (family bytes bits) (network-address-wire-values address)
-    (unless (<= 0 prefix bits) (invalid-cni "invalid address prefix ~A" prefix))
-    (handler-case
-        (call-rtnetlink
-         20 #x600 ; RTM_NEWADDR, CREATE | EXCL
-         (netlink-octets
-          (vector family prefix (if (= family 10) 2 0) 0)
-          (netlink-integer (cni-interface-index name) 4)
-          (netlink-attribute 1 bytes) ; IFA_ADDRESS
-          (netlink-attribute 2 bytes))) ; IFA_LOCAL
-      (rtnetlink-error (condition)
-        (unless (= 17 (rtnetlink-error-errno condition)) (error condition))))))
-
-(defun replace-network-route (destination prefix name &key gateway source exclusive)
-  "Install or replace the main-table route to DESTINATION/PREFIX out of the link
-   NAME (RTM_NEWROUTE, NLM_F_CREATE|NLM_F_REPLACE) as a static unicast route,
-   optionally via GATEWAY and with preferred SOURCE. Signals INVALID-CNI on a
-   prefix outside 0..32. With EXCLUSIVE, fail rather than replace an existing route."
-  (multiple-value-bind (family bytes bits) (network-address-wire-values destination)
-    (unless (<= 0 prefix bits) (invalid-cni "invalid route prefix ~A" prefix))
-    (flet ((same-family-bytes (value)
-             (when value
-               (multiple-value-bind (other-family other-bytes)
-                   (network-address-wire-values value)
-                 (unless (= family other-family)
-                   (invalid-cni "route address families do not match"))
-                 other-bytes))))
-      (call-rtnetlink
-       24 (if exclusive #x600 #x500) ; RTM_NEWROUTE, CREATE | EXCL or REPLACE
-       (netlink-octets
-        (vector family prefix 0 0 254 4 (if gateway 0 253) 1)
-        (netlink-integer 0 4)
-        (netlink-attribute 1 bytes)
-        (netlink-attribute 4 (netlink-integer (cni-interface-index name) 4))
-        (if gateway (netlink-attribute 5 (same-family-bytes gateway)) #())
-        (if source (netlink-attribute 7 (same-family-bytes source)) #()))))))
-
-(defun remove-network-route (destination prefix name)
-  "Delete the main-table route to DESTINATION/PREFIX through NAME, accepting absence."
-  (multiple-value-bind (family bytes bits) (network-address-wire-values destination)
-    (unless (<= 0 prefix bits) (invalid-cni "invalid route prefix ~A" prefix))
-    (handler-case
-        (call-rtnetlink
-         25 0 ; RTM_DELROUTE
-         (netlink-octets
-          (vector family prefix 0 0 254 4 0 1)
-          (netlink-integer 0 4)
-          (netlink-attribute 1 bytes)
-          (netlink-attribute 4 (netlink-integer (cni-interface-index name) 4))))
-      (rtnetlink-error (condition)
-        (unless (= 3 (rtnetlink-error-errno condition)) ; ESRCH
-          (error condition))))))
-
 (defparameter +node-gateway-interface+ "gr8s-gateway")
 (defparameter +node-gateway-address+ "169.254.1.1")
 (defparameter +node-gateway-ipv6-address+ "fe80::1")
@@ -523,94 +228,6 @@ Refuse foreign links; concurrent endpoint ADD requests share this interface."
       (invalid-cni "refusing to remove another network's gateway interface"))
     (delete-network-link +node-gateway-interface+))
   nil)
-
-(defun remove-network-address (name address prefix)
-  "Delete an IP address from NAME, accepting an already absent address."
-  (multiple-value-bind (family bytes bits) (network-address-wire-values address)
-    (unless (<= 0 prefix bits) (invalid-cni "invalid address prefix ~A" prefix))
-    (handler-case
-        (call-rtnetlink
-         21 0
-         (netlink-octets
-          (vector family prefix 0 0) (netlink-integer (cni-interface-index name) 4)
-          (netlink-attribute 1 bytes)
-          (netlink-attribute 2 bytes)))
-      (rtnetlink-error (condition)
-        (unless (= 99 (rtnetlink-error-errno condition)) (error condition))))))
-
-(defun network-address-present-p (name address prefix)
-  "Check an exact IP address/prefix assignment through rtnetlink."
-  (multiple-value-bind (family bytes) (network-address-wire-values address)
-    (let ((index (cni-interface-index name)))
-      (loop for message in (call-rtnetlink 22 #x300
-                                          (netlink-octets (vector family 0 0 0)
-                                                           (netlink-integer 0 4)))
-            do (when (and (>= (length message) 24)
-                          (= 20 (netlink-read-integer message 4 2))
-                          (= family (aref message 16))
-                          (= prefix (aref message 17))
-                          (= index (netlink-read-integer message 20 4)))
-                 (let ((attributes (netlink-attributes message 24)))
-                   (when (equalp bytes (or (gethash 2 attributes)
-                                           (gethash 1 attributes)))
-                     (return t))))
-            finally (return nil)))))
-
-(defun netlink-neighbor-message (family interface state flags)
-  "Encode Linux ndmsg fields for a neighbor or VXLAN FDB transaction."
-  (netlink-octets (vector family 0 0 0)
-                  (netlink-integer (cni-interface-index interface) 4)
-                  (netlink-integer state 2) (vector flags 1)))
-
-(defun replace-permanent-network-neighbor (interface address mac)
-  "Install a neighbor that survives ARP/NDP cache aging on INTERFACE."
-  (multiple-value-bind (family bytes) (network-address-wire-values address)
-    (call-rtnetlink
-     28 #x500
-     (netlink-octets (netlink-neighbor-message family interface 128 0)
-                     (netlink-attribute 1 bytes)
-                     (netlink-attribute 2 mac)))))
-
-(defun permanent-network-neighbor-p (interface address mac)
-  "Check the MAC and NUD_PERMANENT state of an IP neighbor via rtnetlink."
-  (multiple-value-bind (family bytes) (network-address-wire-values address)
-    (let ((index (cni-interface-index interface)))
-      (loop for message in (call-rtnetlink 30 #x300
-                                          (netlink-neighbor-message family interface 0 0))
-            thereis (and (>= (length message) 28) (= 28 (netlink-read-integer message 4 2))
-                         (= family (aref message 16)) (= index (netlink-read-integer message 20 4))
-                         (logtest 128 (netlink-read-integer message 24 2))
-                         (let ((attributes (netlink-attributes message 28)))
-                           (and (equalp bytes (gethash 1 attributes))
-                                (equalp mac (gethash 2 attributes)))))))))
-
-(defun network-route-present-p (destination prefix interface &key gateway source)
-  "Check a main-table IP route, output interface, gateway and optional source."
-  (multiple-value-bind (family bytes bits) (network-address-wire-values destination)
-    (flet ((value-bytes (value)
-             (when value
-               (multiple-value-bind (other-family other-bytes)
-                   (network-address-wire-values value)
-                 (and (= family other-family) other-bytes)))))
-      (let ((index (cni-interface-index interface))
-            (zero (make-array (length bytes) :element-type '(unsigned-byte 8)
-                                             :initial-element 0)))
-        (loop for message in (call-rtnetlink
-                              26 #x300
-                              (netlink-octets (vector family 0 0 0 0 0 0 0)
-                                               (netlink-integer 0 4)))
-              thereis (and (>= (length message) 28) (= 24 (netlink-read-integer message 4 2))
-                           (= family (aref message 16)) (= prefix (aref message 17))
-                           (= 254 (aref message 20))
-                           (let ((attributes (netlink-attributes message 28)))
-                             (and (= (network-prefix-octets-integer
-                                      (gethash 1 attributes zero) bits)
-                                     (network-prefix-octets-integer bytes bits))
-                                  (equalp (netlink-integer index 4) (gethash 4 attributes))
-                                  (equalp (value-bytes gateway) (gethash 5 attributes))
-                                  (or (not source)
-                                      (equalp (value-bytes source)
-                                              (gethash 7 attributes)))))))))))
 
 (defun enable-node-ipv4-forwarding ()
   "Enable IPv4 forwarding by writing 1 to /proc/sys/net/ipv4/ip_forward, skipping

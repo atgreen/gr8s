@@ -129,36 +129,33 @@
       (uiop:delete-directory-tree root :validate t)
       (uiop:delete-directory-tree outside :validate t))))
 
-(test serve-command-owns-state-during-patch-startup-and-shutdown
+(test serve-command-owns-state-during-startup-and-shutdown
   (with-temporary-store (store root)
     (declare (ignore store))
     (let* ((options (list :state-directory root))
-           (symbols '(gr8s.server::bootstrap-patches gr8s.server::serve-owned gr8s.server::shutdown-patches))
-           (originals (mapcar #'symbol-function symbols))
+           (original (symbol-function 'gr8s.server::serve-owned))
            (events nil))
       (flet ((owned (event)
                (push event events)
                (is (not (null (gr8s.server::require-serve-state-ownership options))))
                (signals error (gr8s.server::call-with-serve-state-ownership
-                               options (lambda () (fail "patch lifecycle lost ownership"))))))
+                               options (lambda () (fail "serve lifecycle lost ownership"))))))
         (unwind-protect
              (progn
-               (setf (symbol-function (first symbols)) (lambda (ignored) (declare (ignore ignored)) (owned :patches))
-                     (symbol-function (second symbols)) (lambda (ignored) (declare (ignore ignored)) (owned :serve) (error "initializer failure"))
-                     (symbol-function (third symbols)) (lambda () (owned :shutdown)))
+               (setf (symbol-function 'gr8s.server::serve-owned)
+                     (lambda (ignored) (declare (ignore ignored)) (owned :serve) (error "initializer failure")))
                (signals error (gr8s.server::run-serve-command options))
-               (is (equal '(:shutdown :serve :patches) events))
+               (is (equal '(:serve) events))
                (is (eq :released (gr8s.server::call-with-serve-state-ownership options (lambda () :released)))))
-          (loop for symbol in symbols for original in originals do (setf (symbol-function symbol) original)))))))
+          (setf (symbol-function 'gr8s.server::serve-owned) original))))))
 
-(test ha-endpoint-is-stable-before-application-or-patch-initialization
+(test ha-endpoint-is-stable-before-application-initialization
   (with-temporary-store (store root)
     (declare (ignore store))
     (let* ((options (list :state-directory root :raft-init t :raft-id "cp1"))
            (path (merge-pathnames "metadata/server-ha-endpoint.json" root))
            (open-original (symbol-function 'gr8s:open-store))
-           (patch-original (symbol-function 'gr8s.server::bootstrap-patches))
-           (opened 0) (patched 0))
+           (opened 0))
       (unwind-protect
            (progn
              (setf (symbol-function 'gr8s:open-store)
@@ -169,9 +166,7 @@
                      (let ((record (gr8s.store::read-private-generation-json path)))
                        (is (= 7000 (gethash "port" record)))
                        (is (equal "cp1" (gethash "memberId" record))))
-                     (error "interrupted application initialization"))
-                   (symbol-function 'gr8s.server::bootstrap-patches)
-                   (lambda (ignored) (declare (ignore ignored)) (incf patched)))
+                     (error "interrupted application initialization")))
              (signals error (gr8s::serve options))
              (is (= 1 opened))
              (let ((before (uiop:read-file-string path)))
@@ -184,14 +179,12 @@
                    (setf (getf changed (first change)) (second change))
                    (signals error (gr8s.server::run-serve-command changed))))
                (is (= 2 opened))
-               (is (= 0 patched))
                (is (equal before (uiop:read-file-string path))))
              ;; Join/founder flags are startup intent, not a new member identity.
              (is (eq :same (gr8s.server::call-with-serve-state-ownership
                             (list :state-directory root :raft-join "127.0.0.1:7000" :raft-id "cp1")
                             (lambda () :same)))))
-        (setf (symbol-function 'gr8s:open-store) open-original
-              (symbol-function 'gr8s.server::bootstrap-patches) patch-original)))))
+        (setf (symbol-function 'gr8s:open-store) open-original)))))
 
 (test ha-endpoint-rejects-unsafe-or-invalid-descriptors
   (dolist (failure '(:symlink :hardlink :permissions :null :extra :zero :wildcard))
@@ -315,82 +308,3 @@
       (is (eq t called))
       (let ((storage (gr8s::open-file-raft-storage path)))
         (gr8s::close-file-raft-storage storage)))))
-
-(test offline-maintenance-excludes-independent-patch-writers
-  (with-temporary-store (store root)
-    (declare (ignore store))
-    (let* ((manager (gr8s.patch:open-manager root "offline-test" '("worker")))
-           (journal (merge-pathnames "patches/journal.json" root)))
-      (unwind-protect
-           (progn
-             ;; No serve process exists, but patch state is independently live.
-             (let ((entered nil))
-               (signals error
-                 (gr8s.server::call-with-offline-state-ownership
-                  root (lambda () (setf entered t))))
-               (is (not entered))))
-        (gr8s.patch:close-manager manager))
-      (let ((before (and (probe-file journal) (uiop:read-file-string journal))))
-        (is (eq :offline (gr8s.server::call-with-offline-state-ownership root (lambda () :offline))))
-        (is (equal before (and (probe-file journal) (uiop:read-file-string journal)))))
-      ;; Failure must release both ownership domains, without loading a journal.
-      (signals error
-        (gr8s.server::call-with-offline-state-ownership root (lambda () (error "Injected failure"))))
-      (let ((next (gr8s.patch:open-manager root "after-offline" '("worker"))))
-        (unwind-protect (is (not (null next))) (gr8s.patch:close-manager next))))))
-
-(test offline-maintenance-holds-patch-lock-without-opening-the-journal
-  (with-temporary-store (store root)
-    (declare (ignore store))
-    (let ((journal (merge-pathnames "patches/journal.json" root)))
-      (is (not (probe-file journal)))
-      (gr8s.server::call-with-offline-state-ownership
-       root
-       (lambda ()
-         (is (not (probe-file journal)))
-         (signals error (gr8s.patch:open-manager root "blocked" '("witness")))))
-      (is (not (probe-file journal))))))
-
-(test raw-patch-ownership-refuses-unsafe-locks-and-preserves-the-inode
-  (dolist (failure '(:symlink :hardlink :mode))
-    (with-temporary-store (store root)
-      (declare (ignore store))
-      (let* ((patch-root (merge-pathnames "patches/" root))
-             (path (merge-pathnames "process.lock" patch-root))
-             (lock (gr8s.patch::open-process-lock patch-root)))
-        (close lock)
-        (let ((inode (sb-posix:stat-ino (sb-posix:lstat path))))
-          (setf lock (gr8s.patch::open-process-lock patch-root))
-          (unwind-protect
-               (progn
-                 (is (= inode (sb-posix:stat-ino (sb-posix:lstat path))))
-                 (is (= 1 (logand 1 (cffi:foreign-funcall "fcntl" :int (sb-sys:fd-stream-fd lock) :int 1 :int 0 :int)))))
-            (close lock)))
-        (ecase failure
-          (:symlink (sb-posix:unlink path)
-                    (sb-posix:symlink "/dev/null" path))
-          (:hardlink (sb-posix:link path (merge-pathnames "other-lock" patch-root)))
-          (:mode (sb-posix:chmod path #o666)))
-        (signals error (gr8s.patch::open-process-lock patch-root))
-        (signals error (gr8s.server::call-with-offline-state-ownership root (lambda () :unexpected-entry)))))))
-
-(test raw-patch-ownership-upgrades-legacy-lock-permissions-after-acquisition
-  (with-temporary-store (store root)
-    (declare (ignore store))
-    (let* ((patch-root (merge-pathnames "patches/" root))
-           (path (merge-pathnames "process.lock" patch-root))
-           (lock (gr8s.patch::open-process-lock patch-root)))
-      (unwind-protect
-           (progn
-             (sb-posix:fchmod (sb-sys:fd-stream-fd lock) #o644)
-             ;; An unsuccessful acquisition must leave the live owner's inode alone.
-             (signals error (gr8s.patch::open-process-lock patch-root))
-             (is (= #o644 (logand #o777 (sb-posix:stat-mode (sb-posix:stat path))))))
-        (close lock))
-      (let ((inode (sb-posix:stat-ino (sb-posix:stat path)))
-            (next (gr8s.patch::open-process-lock patch-root)))
-        (unwind-protect
-             (progn
-               (is (= inode (sb-posix:stat-ino (sb-posix:stat path))))
-               (is (= #o600 (logand #o777 (sb-posix:stat-mode (sb-posix:stat path))))))
-          (close next))))))

@@ -86,7 +86,7 @@
     (let ((legacy (make-node-pool-config "10.88.0.0/16" 24)))
       (handler-case
           (progn (validate-node-pool-assignments legacy nodes) legacy)
-        (cni-error () nil)))))
+        ((or cni-error rtnetlink-error) () nil)))))
 
 (defun persisted-node-route-identities (state-directory)
   "Derive allowed route/link identities from this agent's durable local journal."

@@ -187,7 +187,7 @@ program is missing.  Used for optional host tools like firewall-cmd."
               (note :ok "pod-pool routes"
                     (format nil "no host route overlaps ~A (state dir ~A)"
                             cluster-pod-cidr directory)))
-          (cni-error (c)
+          ((or cni-error rtnetlink-error) (c)
             (note :fail "pod-pool routes"
                   (format nil "~A (checked state dir ~A)" c directory)
                   (format nil "if the route is a live Pod owned by another agent, re-run with ~

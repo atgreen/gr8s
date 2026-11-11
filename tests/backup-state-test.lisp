@@ -19,22 +19,18 @@
                       "metadata/application-generation.json" "metadata/application-restore.json"
                       "application-generations/fixture/generation.meta"
                       "raft/bootstrap.json" "raft/control-plane.log"
-                      "snapshot-artifacts/fixture.jsonl" "patches/journal.json"
-                      "patches/content/fixture/patch.lisp" "patches/admin.token"
+                      "snapshot-artifacts/fixture.jsonl"
                       "agent/pki/node.key" "network/pool.json" "storage/default-class-seeded"
                       ".extra-identity"))
           (seen nil))
       (dolist (name required) (write-backup-fixture root name))
-      ;; A real patch manager creates its state directory privately.
-      (sb-posix:chmod (merge-pathnames "patches/" root) #o700)
       (multiple-value-bind (count bytes excluded)
           (gr8s.server::map-offline-backup-files
            root (lambda (name path stat)
                   (declare (ignore path stat)) (push name seen)))
         (is (= count (length seen)))
         (is (plusp bytes))
-        (is (member ".gr8s-serve.lock" excluded :test #'equal))
-        (is (member "patches/process.lock" excluded :test #'equal)))
+        (is (member ".gr8s-serve.lock" excluded :test #'equal)))
       (dolist (name required) (is (member name seen :test #'equal))))))
 
 (test backup-inventory-skips-runtime-trees-without-traversing-them
@@ -63,13 +59,9 @@
           (:fifo (sb-posix:mkfifo bad #o600)))
         (signals error (gr8s.server::map-offline-backup-files root (lambda (&rest values) (declare (ignore values)))))))))
 
-(test backup-inventory-excludes-live-patch-and-serve-writers
+(test backup-inventory-excludes-live-serve-writers
   (with-temporary-store (store root)
     (declare (ignore store))
-    (let ((manager (gr8s.patch:open-manager root "backup-test" '("witness"))))
-      (unwind-protect
-           (signals error (gr8s.server::map-offline-backup-files root (lambda (&rest args) (declare (ignore args)))))
-        (gr8s.patch:close-manager manager)))
     (gr8s.server::call-with-serve-state-ownership
      (list :state-directory root)
      (lambda ()

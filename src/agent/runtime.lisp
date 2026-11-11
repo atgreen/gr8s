@@ -1251,11 +1251,11 @@ just the DNS server; for any other runtime, nothing."
                (call-with-agent-cni-server
                 node-runtime
                 (lambda () (call-with-dns-server body :forward-rules (node-runtime-dns-forward-rules node-runtime)
-                                                 :service-resolver
-                                           (store-service-dns-resolver (node-runtime-store node-runtime)))))))
+                                                 :resolver
+                                           (make-cluster-dns-resolver (node-runtime-store node-runtime)))))))
             (call-with-dns-server body :forward-rules (node-runtime-dns-forward-rules node-runtime)
-                                       :service-resolver
-                                        (store-service-dns-resolver (node-runtime-store node-runtime))))
+                                       :resolver
+                                        (make-cluster-dns-resolver (node-runtime-store node-runtime))))
         (funcall body))))
 
 (defun call-with-external-cni-dns-gateway
@@ -2506,9 +2506,6 @@ errors becomes a failed response; an error on any other variant is re-signaled."
       (case variant
         (:operation-request
          (cond
-           ((= (slot-value payload 'gr8s.node.v1::kind)
-               gr8s.node.v1::+operationkind-operation_kind_patch+)
-            (gr8s.patch::start-node-patch-operation payload emit))
            ((= (slot-value payload 'gr8s.node.v1::kind)
                gr8s.node.v1::+operationkind-operation_kind_metrics+)
             (start-metrics-operation node-runtime payload emit))

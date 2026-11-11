@@ -76,7 +76,7 @@
   "Load and validate a kubelet v1 CredentialProviderConfig from CONFIG-PATH.
 Provider names resolve only within BIN-DIRECTORY and are returned in configuration order."
   (multiple-value-bind (document duplicates)
-      (gr8s.resources::yaml-parse (uiop:read-file-string config-path))
+      (gr8s.resources:parse-yaml (uiop:read-file-string config-path))
     (when duplicates (error "Credential provider config has duplicate fields: ~{~A~^; ~}" duplicates))
     (let* ((config (require-object document "credential provider config"))
            (providers (gethash "providers" config))

@@ -79,17 +79,17 @@
           (signals error
             (gr8s.image-distribution::tracker-publish-swarm
              tracker digest "node-a" stale-token
-             (gr8s.image-distribution::blob-torrent-metainfo torrent)
+             (gr8s.image-distribution::torrent-metainfo torrent)
              "10.0.0.1" 6881 (bt-octets "-GR8001-AAAAAAAAAAAA")))
           (gr8s.image-distribution::tracker-publish-swarm
            tracker digest "node-b" current-token
-           (gr8s.image-distribution::blob-torrent-metainfo torrent)
+           (gr8s.image-distribution::torrent-metainfo torrent)
            "10.0.0.2" 6881 (bt-octets "-GR8001-BBBBBBBBBBBB"))
           (let ((view (gr8s.image-distribution::tracker-lookup
                        tracker digest "node-a")))
             (is (eq :available
                     (gr8s.image-distribution::tracker-view-status view)))
-            (is (equalp (gr8s.image-distribution::blob-torrent-infohash torrent)
+            (is (equalp (gr8s.image-distribution::torrent-infohash torrent)
                         (gr8s.image-distribution::tracker-view-infohash view)))
             (is (= 1 (length
                       (gr8s.image-distribution::tracker-view-peers view))))
@@ -107,7 +107,7 @@
         (is (eq :granted status))
         (gr8s.image-distribution::tracker-publish-swarm
          tracker digest "node-a" token
-         (gr8s.image-distribution::blob-torrent-metainfo torrent)
+         (gr8s.image-distribution::torrent-metainfo torrent)
          "10.0.0.1" 6881 (bt-octets "-GR8001-AAAAAAAAAAAA")))
       (gr8s.image-distribution::tracker-announce-peer
        tracker digest "node-b" "10.0.0.2" 6881
@@ -128,7 +128,7 @@
         (declare (ignore status))
         (gr8s.image-distribution::tracker-publish-swarm
          tracker digest "node-0" token
-         (gr8s.image-distribution::blob-torrent-metainfo torrent)
+         (gr8s.image-distribution::torrent-metainfo torrent)
          "10.0.0.1" 6881 (bt-octets "-GR8001-000000000000")))
       (loop for index from 1 to 12
             do (gr8s.image-distribution::tracker-announce-peer
@@ -160,5 +160,5 @@
            tracker
            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
            "node-a" token
-           (gr8s.image-distribution::blob-torrent-metainfo torrent)
+           (gr8s.image-distribution::torrent-metainfo torrent)
            "10.0.0.1" 6881 (bt-octets "-GR8001-AAAAAAAAAAAA")))))))

@@ -151,9 +151,7 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
                   "buildDate" "1970-01-01T00:00:00Z"
                   "goVersion" "common-lisp"
                   "compiler" "sbcl"
-                  "platform" "linux/amd64"
-                  "gr8sPatch" (if gr8s.patch:*manager* (gr8s.patch:inventory gr8s.patch:*manager*)
-                                  (json-object "buildID" gr8s.patch:*build-id* "installedLevel" 0 "loadedLevel" 0))))))
+                  "platform" "linux/amd64"))))
 
 (defun api-versions-response ()
   "Answer /api with the single core API version (v1) this server serves."
@@ -1408,8 +1406,6 @@ Watches are long-running requests, which that filter leaves alone."
   "Answer the current request from whichever API handler serves PATH."
   (progn
         (cond
-          ((equal path "/apis/gr8s.io/v1/patchrollouts")
-           (serve-patch-request store method))
           ((cl-ppcre:scan "^/apis/gr8s[.]io/v1/pkiauthorities/cluster(/.*)?$" path)
            (gr8s.server::serve-pki-authority-request store path method))
           ((and store (eq method :get)

@@ -102,7 +102,8 @@
     (rsim-run sim 6)
     (dolist (id '("a" "b" "c"))
       (is (= 2 (gethash "x" (rsim-kv sim id))) "node ~A has x=2" id)
-      (is (= 2 (gr8s::raft-node-commit-index (rsim-node sim id)))))))
+      ;; Commit index covers the leader's election barrier plus both proposals.
+      (is (= 3 (gr8s::raft-node-commit-index (rsim-node sim id)))))))
 
 (test raft-linearizable-compare-and-swap
   (let ((sim (three-node-sim)) (r1 nil) (r2 nil))
@@ -353,7 +354,8 @@
     (rsim-run sim 40)
     (dolist (id '("a" "b" "c"))
       (is (= 49 (gethash "counter" (rsim-kv sim id))))
-      (is (= 50 (gr8s::raft-node-commit-index (rsim-node sim id)))))))
+      ;; Commit index covers the leader's election barrier plus all 50 proposals.
+      (is (= 51 (gr8s::raft-node-commit-index (rsim-node sim id)))))))
 (test raft-failed-application-retries-before-advancing-or-calling-the-client
   (let ((attempts 0) (effects nil) (callbacks 0)
         (node (make-standalone-node)))
@@ -364,7 +366,9 @@
     (gr8s::raft-log-append node (gr8s::make-raft-entry :term 1 :command '(:set "x" 1)))
     (gr8s::raft-log-append node (gr8s::make-raft-entry :term 1 :command '(:set "x" 2)))
     (setf (gr8s::raft-node-commit-index node) 2
-          (gethash 1 (gr8s::raft-node-pending node)) (lambda (result) (declare (ignore result)) (incf callbacks)))
+          ;; Pending callbacks are keyed (term . callback) so a stale entry replaced
+          ;; at the same index is dropped rather than resolved; entry 1 has term 1.
+          (gethash 1 (gr8s::raft-node-pending node)) (cons 1 (lambda (result) (declare (ignore result)) (incf callbacks))))
     (signals error (gr8s::raft-apply-committed node))
     (is (= 0 (gr8s::raft-node-last-applied node)))
     (is (= 0 callbacks))

@@ -11,7 +11,7 @@
 
 (defun re2-test-span (pattern text)
   "Return the span of PATTERN's match in TEXT as a list, or NIL."
-  (multiple-value-bind (start end) (gr8s::re2-search (gr8s::re2-compile pattern) text)
+  (multiple-value-bind (start end) (gr8s.resources::re2-search (gr8s.resources::re2-compile pattern) text)
     (and start (list start end))))
 
 (test re2-matches-as-go-regexp-does
@@ -81,18 +81,18 @@
   (dolist (pattern '("(" ")" "[" "a**" "a*+" "a++" "a{2}{3}" "*" "+a" "?" "(?=a)" "(?!a)" "(?<=a)" "(?<!a)"
                      "\\1" "\\8" "\\C" "\\y" "\\" "a{1001}" "a{2,1}" "[b-a]" "[[:nope:]]" "\\p{Nope}"
                      "(?P<n" "(?z)" "\\x{110000}" "\\xg"))
-    (signals gr8s::re2-syntax-error (gr8s::re2-compile pattern) "accepted ~S" pattern))
+    (signals gr8s.resources::re2-syntax-error (gr8s.resources::re2-compile pattern) "accepted ~S" pattern))
   (dolist (pattern '("a{,2}" "a{" "a{x}" "{" "}" "]" "a|" "|" "()" "(|a)" "(?i)" "(?P<name>a)" "(?<name>a)" "a{1000}"))
-    (finishes (gr8s::re2-compile pattern)))
+    (finishes (gr8s.resources::re2-compile pattern)))
   ;; Text that is not a repeat count stays literal.
   (is (equal '(0 5) (re2-test-span "a{,2}" "a{,2}")))
-  (signals gr8s::re2-syntax-error (gr8s::re2-compile "((a{1000}){1000}){1000}"))
-  (signals gr8s::re2-syntax-error (gr8s::re2-compile "(a{100}){100}"))
-  (finishes (gr8s::re2-compile "(a{10}){100}")))
+  (signals gr8s.resources::re2-syntax-error (gr8s.resources::re2-compile "((a{1000}){1000}){1000}"))
+  (signals gr8s.resources::re2-syntax-error (gr8s.resources::re2-compile "(a{100}){100}"))
+  (finishes (gr8s.resources::re2-compile "(a{10}){100}")))
 
 (test re2-runs-in-linear-time
   (let* ((text (make-string 5000 :initial-element #\a))
-         (program (gr8s::re2-compile "(a|a)*(a*)*(x+x+)+y"))
+         (program (gr8s.resources::re2-compile "(a|a)*(a*)*(x+x+)+y"))
          (start (get-internal-real-time)))
-    (is (null (gr8s::re2-search program text)))
+    (is (null (gr8s.resources::re2-search program text)))
     (is (< (- (get-internal-real-time) start) (* 20 internal-time-units-per-second)))))

@@ -9,6 +9,77 @@
 (def-suite service-dns :in gr8s)
 (in-suite service-dns)
 
+;;; DNS query helpers shared by the Service DNS tests.  (These previously lived
+;;; in dns-test.lisp, which tested the forwarding proxy engine now owned by the
+;;; cl-dns-proxy library and its own test suite.)
+
+(defparameter +kubernetes-service-name+
+  "kubernetes.default.svc.cluster.local")
+
+(defun dns-a-query (name &optional (id #x4752))
+  "Encode an A-record query with a stable test identifier."
+  (0conf:encode-message
+   (0conf:make-dns-message
+    :id id
+    :flags #x0100
+    :questions
+    (list (0conf:make-question :name name
+                               :qtype 0conf:+type-a+
+                               :qclass 0conf:+class-in+)))))
+
+(defun test-udp-dns-query (port name)
+  "Exchange an actual UDP query with the local DNS test server."
+  (let ((socket (make-instance 'sb-bsd-sockets:inet-socket
+                               :type :datagram :protocol :udp))
+        (query (dns-a-query name))
+        (buffer (make-array 4096 :element-type '(unsigned-byte 8))))
+    (unwind-protect
+         (progn
+           (sb-bsd-sockets:socket-connect socket #(127 0 0 1) port)
+           (sb-bsd-sockets:socket-send socket query (length query))
+           (multiple-value-bind (ignored size)
+               (sb-bsd-sockets:socket-receive socket buffer (length buffer))
+             (declare (ignore ignored))
+             (subseq buffer 0 size)))
+      (sb-bsd-sockets:socket-close socket))))
+
+(defun write-test-dns-frame (stream packet)
+  "Write a complete length-prefixed test DNS packet."
+  (write-byte (ldb (byte 8 8) (length packet)) stream)
+  (write-byte (ldb (byte 8 0) (length packet)) stream)
+  (write-sequence packet stream)
+  (finish-output stream))
+
+(defun read-test-dns-frame (stream)
+  "Read and verify a complete length-prefixed test DNS packet."
+  (let* ((length (+ (ash (read-byte stream) 8) (read-byte stream)))
+         (packet (make-array length :element-type '(unsigned-byte 8))))
+    (is (= length (read-sequence packet stream)))
+    packet))
+
+(defun test-tcp-dns-query (port name)
+  "Exchange a framed TCP query with the local DNS test server."
+  (let ((socket (make-instance 'sb-bsd-sockets:inet-socket
+                               :type :stream :protocol :tcp))
+        (stream nil))
+    (unwind-protect
+         (progn
+           (sb-bsd-sockets:socket-connect socket #(127 0 0 1) port)
+           (setf stream
+                 (sb-bsd-sockets:socket-make-stream
+                  socket :input t :output t
+                  :element-type '(unsigned-byte 8) :buffering :none))
+           (write-test-dns-frame stream (dns-a-query name))
+           (read-test-dns-frame stream))
+      (if stream
+          (ignore-errors (close stream)))
+      (ignore-errors (sb-bsd-sockets:socket-close socket)))))
+
+(defun dns-first-a-address (packet)
+  "Read the first A-record address from a test response."
+  (0conf:a-address
+   (first (0conf:dns-message-answers (0conf:decode-message packet)))))
+
 (defun service-dns-test-message (store name &optional (type 0conf:+type-a+))
   "Ask the production authority path without allowing unknown cluster names upstream."
   (0conf:decode-message

@@ -3,125 +3,42 @@
 ;;;;
 ;;;; Package boundary for the transport-independent Raft consensus engine and
 ;;;; its durable write-ahead log.
+;;;;
+;;;; The engine and WAL now live in the standalone cl-raft library (installed via
+;;;; ocicl).  gr8s.raft is a thin facade: it inherits the library's public API,
+;;;; re-exports it so gr8s.raft.transport and gr8s.ha keep using gr8s.raft as
+;;;; before, imports the handful of library internals those packages reach into,
+;;;; and adds raft-cached-append-message (see extensions.lisp), a gr8s-specific
+;;;; accessor the snapshot transport needs that the library keeps inlined.
 
 (defpackage #:gr8s.raft
-  (:use #:cl)
-  (:export
-   #:close-file-raft-storage
-   #:copy-raft-entry
-   #:copy-raft-node
-   #:file-raft-storage
-   #:file-raft-storage-path
-   #:file-raft-storage-stream
-   #:load-raft-log
-   #:make-raft-entry
-   #:make-raft-node
-   #:make-raft-recovered
-   #:open-file-raft-storage
-   #:raft-adopt-config
-   #:raft-advance-commit
-   #:raft-append-message
-   #:raft-apply-committed
-   #:raft-become-candidate
-   #:raft-become-follower
-   #:raft-become-leader
-   #:raft-begin-pre-election
-   #:raft-broadcast
-   #:raft-broadcast-append
-   #:raft-cluster-size
-   #:raft-compact
-   #:raft-config-change-in-flight-p
-   #:raft-config-addresses
-   #:raft-config-api-urls
-   #:raft-configure
-   #:raft-current-config
-   #:raft-entry
-   #:raft-entry-command
-   #:raft-entry-index
-   #:raft-entry-p
-   #:raft-entry-term
-   #:raft-handle-append-entries
-   #:raft-handle-append-entries-reply
-   #:raft-handle-message
-   #:raft-handle-pre-vote
-   #:raft-handle-pre-vote-reply
-   #:raft-handle-request-vote
-   #:raft-handle-request-vote-reply
-   #:raft-last-log-index
-   #:raft-last-log-term
-   #:raft-leader-p
-   #:raft-log-append
-   #:raft-log-entry
-   #:raft-log-length
-   #:raft-log-term
-   #:raft-log-truncate
-   #:raft-majority
-   #:raft-maybe-become-leader
-   #:raft-peer-ready-for-promotion-p
-   #:raft-member-role
-   #:raft-node
-   #:raft-node-api-urls
-   #:raft-node-apply-fn
-   #:raft-node-commit-index
-   #:raft-node-current-term
-   #:raft-node-departing-members
-   #:raft-node-election-elapsed
-   #:raft-node-election-timeout
-   #:raft-node-heartbeat-elapsed
-   #:raft-node-heartbeat-timeout
-   #:raft-node-id
-   #:raft-node-last-applied
-   #:raft-node-leader-contact-elapsed
-   #:raft-node-leader-id
-   #:raft-node-log
-   #:raft-node-match-index
-   #:raft-node-next-index
-   #:raft-node-on-configured
-   #:raft-node-p
-   #:raft-node-peer-addresses
-   #:raft-node-peers
-   #:raft-node-pending
-   #:raft-node-promotion-intents
-   #:raft-node-pending-members
-   #:raft-node-pre-vote-term
-   #:raft-node-pre-votes
-   #:raft-node-removed
-   #:raft-node-restore-fn
-   #:raft-node-role
-   #:raft-node-roles
-   #:raft-node-self-role
-   #:raft-node-send-fn
-   #:raft-node-snapshot-fn
-   #:raft-node-snapshot-index
-   #:raft-node-snapshot-state
-   #:raft-node-snapshot-pending
-   #:raft-node-snapshot-term
-   #:raft-node-storage
-   #:raft-node-timeout-fn
-   #:raft-node-voted-for
-   #:raft-node-votes
-   #:raft-persist-hard-state
-   #:raft-propose
-   #:raft-propose-config
-   #:raft-recovered
-   #:raft-recovered-commit-index
-   #:raft-recovered-commit-marker-p
-   #:raft-recovered-entries
-   #:raft-recovered-snapshot-index
-   #:raft-recovered-snapshot-state
-   #:raft-recovered-snapshot-term
-   #:raft-recovered-term
-   #:raft-recovered-vote
-   #:raft-replicate-ids
-   #:raft-reset-election-timer
-   #:raft-restore-snapshot
-   #:raft-send
-   #:raft-step-down-if-stale
-   #:raft-storage-append-entry
-   #:raft-storage-save-commit-index
-   #:raft-storage-save-hard-state
-   #:raft-storage-save-snapshot
-   #:raft-storage-replace-snapshot
-   #:raft-storage-truncate
-   #:raft-tick
-   #:recover-raft-node))
+  (:use #:cl #:cl-raft)
+  ;; Library internals that gr8s.ha / gr8s.raft.transport reach into directly,
+  ;; and that raft-cached-append-message is built from.
+  (:import-from #:cl-raft
+   #:file-raft-storage-catchup-error
+   #:file-raft-storage-ownership-fd
+   #:raft-command-memory-weight
+   #:raft-command-wire-weight
+   #:raft-commit-prepared-compaction
+   #:raft-node-catchup-byte-limit
+   #:raft-node-peer-snapshot-required
+   #:raft-node-retained-byte-limit
+   #:raft-node-uncommitted-byte-limit
+   #:raft-node-uncommitted-weight-fn
+   #:raft-prepare-compaction
+   #:raft-prepared-compaction-index
+   #:raft-prepared-compaction-term
+   #:raft-resume-snapshot-install
+   #:raft-snapshot-envelope-p
+   #:raft-storage-catchup-usage
+   #:raft-storage-clear-catchup
+   #:raft-storage-read-catchup
+   #:raft-validate-snapshot-envelope)
+  (:export #:raft-cached-append-message))
+
+;;; Re-export the whole cl-raft public surface through gr8s.raft so packages that
+;;; (:use #:gr8s.raft) inherit it exactly as they did the in-tree engine.
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (do-external-symbols (symbol '#:cl-raft)
+    (export symbol '#:gr8s.raft)))
