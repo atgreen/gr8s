@@ -150,6 +150,34 @@
     (check-store-generation-directory (store-generation-root root id))
     (write-store-generation-descriptor (store-generation-complete-path root id) descriptor)))
 
+(defun store-generation-retirement-path (root id)
+  (unless (store-generation-id-p id) (error "Invalid retired generation identity"))
+  (merge-pathnames (format nil "metadata/retired-generations/~A.json" id)
+                   (uiop:ensure-directory-pathname root)))
+
+(defun record-replaced-store-generation (root target-id)
+  "Record only the selected predecessor, before changing intent or selection.
+Caller owns application publication barriers. A record is evidence of former
+selection, not permission to delete: selection, intent and live readers still
+protect the generation. Legacy application files never receive this marker."
+  (when (selected-store-generation-root root)
+    (let* ((previous (read-store-generation-descriptor (store-generation-selector-path root)))
+           (id (gethash "generation" previous)))
+      (unless (equal id target-id)
+        (let* ((path (store-generation-retirement-path root id))
+               (directory (uiop:pathname-directory-pathname path))
+               (metadata (merge-pathnames "metadata/" (uiop:ensure-directory-pathname root))))
+          (check-store-generation-directory metadata :metadata t)
+          (ensure-store-generation-directory directory metadata)
+          (if (store-generation-stat path)
+              (progn
+                (unless (store-generation-descriptor-equal-p
+                         previous (read-store-generation-descriptor path))
+                  (error "Retired generation descriptor disagrees with selected predecessor"))
+                ;; Retry durability after an uncertain previous directory sync.
+                (sync-store-generation-directory directory))
+              (write-store-generation-descriptor path previous)))))))
+
 (defun publish-store-generation (root id)
   "Select a completed generation. Caller must quiesce the live store and manage restore intent/reload.
 This helper does not change an existing store object's indexes or data-root."
@@ -161,6 +189,7 @@ This helper does not change an existing store object's indexes or data-root."
         (error "Generation selection conflicts with pending application restore")))
     (selected-store-generation-root root) ; never silently overwrite malformed selection
     (ensure-store-generation-directory (uiop:pathname-directory-pathname selector) root :metadata t)
+    (record-replaced-store-generation root id)
     (write-store-generation-descriptor selector descriptor :replace t)))
 
 
@@ -195,6 +224,7 @@ This function neither selects nor changes any existing store object's indexes."
     (when (and pending (not (store-generation-descriptor-equal-p pending descriptor)))
       (error "Another application restore is pending"))
     (ensure-store-generation-directory (uiop:pathname-directory-pathname path) root :metadata t)
+    (record-replaced-store-generation root id)
     (if pending
         (sync-store-generation-directory (uiop:pathname-directory-pathname path))
         (write-store-generation-descriptor path descriptor))

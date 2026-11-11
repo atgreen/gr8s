@@ -125,5 +125,14 @@
         "loadedHistoryEstimatedBytes": 16795168
       }
     }
+  },
+  "nativeFullQuotaFailure": {
+    "exitCode": 1,
+    "evidence": "/home/green/.cache/gr8s-evidence/gr8s-compaction-cluster-native-yre5meop",
+    "originalEvidencePath": "/tmp/gr8s-compaction-cluster-native-yre5meop",
+    "log": "/tmp/gr8s-monotonic-ack-native-full.log",
+    "resultJsonAvailable": false,
+    "reason": "Host /tmp quota exceeded during compaction and final report write. Zero-byte result.json; full acceptance remains unproven.",
+    "binarySha256": "8dfbfbebe180fd87df85e86d9cf1a4141385097b5fa326b62082c824c4db7a62"
   }
 }

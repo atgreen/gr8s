@@ -1,0 +1,38 @@
+{
+  "date": "2026-11-11",
+  "issue": "podster-ucm.11.3.3.14.1",
+  "passed": true,
+  "sourceSha256": {
+    "src/store/generations.lisp": "9d4c48b7fb40b54bd5033a64be0e1197b251d5891019e186550729d3f5f30091",
+    "tests/store-generation-test.lisp": "04bc0ee5b8d18d16fc5deb95b6fe83aa206a27e5ae3c03db2057f48e35c50003"
+  },
+  "integration": {
+    "exitCode": 0,
+    "log": "/tmp/gr8s-generation-retirement-tests.log",
+    "checks": 658,
+    "suites": {
+      "store-generation": 71,
+      "store-application-reload": 169,
+      "raft-snapshot": 177,
+      "ha-control-plane": 241
+    }
+  },
+  "restoreIntent": {
+    "exitCode": 0,
+    "log": "/home/green/.cache/gr8s-evidence/retirement-restore-intent-tests.log",
+    "checks": 50
+  },
+  "covered": [
+    "Only the selected predecessor gets a durable retirement descriptor before intent or selector publication.",
+    "Initial legacy selection, repeated same selection and unrelated staged generations are not marked.",
+    "Retries preserve the exact descriptor and resume after interruption between retirement and intent.",
+    "Retirement publication failure prevents intent/selector changes.",
+    "Symlink metadata is rejected before transition.",
+    "Existing live restore, HA and crash/retry intent boundaries remain passing."
+  ],
+  "limits": [
+    "No application generation reaper is implemented in this change.",
+    "Retirement does not imply deletion eligibility; current selector, intent, live store roots and active filesystem readers remain protected.",
+    "The ongoing native full compaction attempt uses the earlier frozen acknowledgement-fix binary and does not validate this retirement change."
+  ]
+}

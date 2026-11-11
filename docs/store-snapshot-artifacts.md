@@ -254,6 +254,20 @@ a different pending target is rejected. The caller must first quiesce live acces
 and coordinate the member's applied/WAL boundary. Beginning an intent does not
 change the selector or an existing store object's application indexes.
 
+Before replacing an existing selection or publishing a restore intent, gr8s
+synchronizes the selected predecessor's exact descriptor in
+`metadata/retired-generations/<UUID>.json`. The record uses the same private,
+bounded, no-symlink metadata checks as the selector. Retries preserve the record;
+a retirement-write failure prevents the new intent or selection from being
+published. Initial selection from the legacy layout, selecting the same UUID,
+and unrelated staged generations do not create retirement records.
+
+A retirement record proves that a generation was previously selected; it does
+not by itself make that generation safe to delete. An interrupted transition
+can leave it selected or in use. Automatic reclamation of retired application
+generations is not yet implemented. Keep these records with the member state;
+do not remove generation directories based solely on their presence.
+
 `open-store` checks for an intent before loading any application files. It verifies
 that the target still has its matching completion marker, publishes the target
 selector, and loads that generation's application state and clocks. Only after
