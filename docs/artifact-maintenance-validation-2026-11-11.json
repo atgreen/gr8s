@@ -1,0 +1,228 @@
+{
+  "date": "2026-11-11",
+  "issue": "podster-ucm.11.3.3.14.4",
+  "sourceCommit": "1c3345e",
+  "harnessCommit": "a5576d2",
+  "passed": true,
+  "sourceSha256": {
+    "src/resources/store-snapshot-registry.lisp": "2ab2af6ace811607f137341b3f69bb3eb2f789de98e8fd8d32472159db864855",
+    "src/ha/control-plane.lisp": "fc12ba969009f4662d3da847ac4ba216b1838526250fc631f816b28fe3a0f72b",
+    "src/ha/compaction.lisp": "931d16ff6741b83a5d50bc9cca0556997590031d8e9fe1cc1c2d6f11837210bc",
+    "src/ha/maintenance.lisp": "1a8f6dffcbf7d301d623cf799b013abb2770a44ec6d51f0a89797dce1ebce408",
+    "src/ha/metrics.lisp": "261ea93633608d8f94e52ebb086e9dab5110d529b0cd87cbdbc882b1ae3efd21",
+    "tests/store-snapshot-registry-test.lisp": "84b91389628682f652df60b6e43164e0f9fc66393ababe1361bf0786f1a5e86a",
+    "tests/ha-control-plane-test.lisp": "cebdbb79316be902ca459cc77dc37bd6b30ae571e6ebdb288b7bb8ac61ee9a15",
+    "scripts/compaction-cluster-native-harness.lisp": "ab92a769438196bbd5deb7de5e4491e0230128f16643773a0faf25b610c6fb58",
+    "scripts/test-compaction-cluster-native.py": "c679dfb5fa2ab486402b0410687c67d0eaad40ce38ade6fd63dd640c601bea0e",
+    "scripts/test-compaction-observation.py": "d972848336c9bc6cc54b466d2922b2891ab35dbc176efe5c76622b7a567f60cc"
+  },
+  "integration": {
+    "exitCode": 0,
+    "checks": 505,
+    "log": "/home/green/.cache/gr8s-evidence/artifact-maintenance-final-integration.log",
+    "suites": {
+      "store-snapshot-registry": 145,
+      "ha-control-plane": 255,
+      "raft-tls": 105
+    }
+  },
+  "ownerFollowup": {
+    "exitCode": 0,
+    "checks": 150,
+    "overlap": 145,
+    "newChecks": 5,
+    "log": "/home/green/.cache/gr8s-evidence/artifact-maintenance-owner-followup.log"
+  },
+  "policyChecks": {
+    "exitCode": 0,
+    "checks": 20,
+    "command": "python3 scripts/test-compaction-observation.py"
+  },
+  "covered": [
+    "Current/pending/bootstrap/pinned/queued/active-send artifact roots are validated before any claim.",
+    "One atomic no-replace rename per default claim pass; known private detached files are deleted outside member/store locks, up to8 per default cleanup pass.",
+    "Concurrent later retention of the same digest creates a different canonical inode, unaffected by old trash deletion.",
+    "Sync uncertainty and partial cleanup resume from on-disk namespace after WAL close/reopen.",
+    "Unknown names, symlinks, hardlinks and unsafe modes remain untouched.",
+    "Independent generation/artifact cleanup attempts preserve original generation errors and expose separate counters/error gauges.",
+    "Relative member roots identify the same canonical owned WAL; unrelated roots are rejected."
+  ],
+  "limits": [
+    "128-round native probe is internal3-process validation, not productionserve/VM/full2048 acceptance.",
+    "Parent full-scale physical-disk and catch-up gates remain open.",
+    "Filesystem metadata is enumerated separately from bounded per-pass rename/unlink work."
+  ],
+  "nativeSmoke": {
+    "passed": true,
+    "evidence": "/home/green/.cache/gr8s-test-tmp/gr8s-compaction-cluster-native-787f6e1o",
+    "binarySha256": "e7869bf2f933f1b74e2dd8e94553ff1810feb929e44221d034d6f999ee2f0bf5",
+    "nativeHarness": true,
+    "productionServe": false,
+    "vmAcceptance": false,
+    "mutualTls": true,
+    "processes": 3,
+    "heapLimitMiB": 384,
+    "rounds": 128,
+    "payloadBytes": 8388608,
+    "fullChurnAcceptance": false,
+    "statusBusyPolls": 158,
+    "leadershipStabilityAcceptance": true,
+    "asymmetricCaptureAcceptance": true,
+    "generationReclamationAcceptance": true,
+    "artifactReclamationAcceptance": true,
+    "coldArtifactReclamationAcceptance": true,
+    "archivedPrefixReplayAcceptance": true,
+    "diskCatchupAcceptance": true,
+    "historyPreservedAcrossRestart": true,
+    "identitiesPreserved": true,
+    "stopExitCodes": {
+      "cp-a": 0,
+      "cp-b": 0,
+      "cp-c": 0
+    },
+    "cleanupExitCodes": {
+      "cp-a": 0,
+      "cp-b": 0,
+      "cp-c": 0
+    },
+    "elapsedSeconds": 140.30159677821212,
+    "beforeRestart": {
+      "cp-a": {
+        "busy": false,
+        "term": 1,
+        "applied": 339,
+        "historyEstimatedBytes": 16795168,
+        "artifactCanonicalCount": 2,
+        "artifactProtectedCount": 2,
+        "artifactReclaimableCount": 0,
+        "artifactTrashCount": 0,
+        "artifactFilesReaped": 7,
+        "artifactMaintenanceError": false,
+        "applicationGenerationCount": 1
+      },
+      "cp-b": {
+        "busy": false,
+        "term": 1,
+        "applied": 339,
+        "historyEstimatedBytes": 16795168,
+        "artifactCanonicalCount": 2,
+        "artifactProtectedCount": 2,
+        "artifactReclaimableCount": 0,
+        "artifactTrashCount": 0,
+        "artifactFilesReaped": 6,
+        "artifactMaintenanceError": false,
+        "applicationGenerationCount": 1
+      },
+      "cp-c": {
+        "busy": false,
+        "term": 1,
+        "applied": 339,
+        "historyEstimatedBytes": 16795168,
+        "artifactCanonicalCount": 2,
+        "artifactProtectedCount": 2,
+        "artifactReclaimableCount": 0,
+        "artifactTrashCount": 0,
+        "artifactFilesReaped": 8,
+        "artifactMaintenanceError": false,
+        "applicationGenerationCount": 1
+      }
+    },
+    "afterRestart": {
+      "cp-a": {
+        "busy": false,
+        "term": 3,
+        "applied": 340,
+        "historyEstimatedBytes": 16795168,
+        "artifactCanonicalCount": 2,
+        "artifactProtectedCount": 2,
+        "artifactReclaimableCount": 0,
+        "artifactTrashCount": 0,
+        "artifactFilesReaped": 0,
+        "artifactMaintenanceError": false,
+        "applicationGenerationCount": 1
+      },
+      "cp-b": {
+        "busy": false,
+        "term": 3,
+        "applied": 340,
+        "historyEstimatedBytes": 16795168,
+        "artifactCanonicalCount": 2,
+        "artifactProtectedCount": 2,
+        "artifactReclaimableCount": 0,
+        "artifactTrashCount": 0,
+        "artifactFilesReaped": 0,
+        "artifactMaintenanceError": false,
+        "applicationGenerationCount": 1
+      },
+      "cp-c": {
+        "busy": false,
+        "term": 3,
+        "applied": 340,
+        "historyEstimatedBytes": 16795168,
+        "artifactCanonicalCount": 2,
+        "artifactProtectedCount": 2,
+        "artifactReclaimableCount": 0,
+        "artifactTrashCount": 0,
+        "artifactFilesReaped": 0,
+        "artifactMaintenanceError": false,
+        "applicationGenerationCount": 1
+      }
+    }
+  },
+  "postShutdownRegistryStorage": {
+    "cp-a": {
+      "files": [
+        {
+          "name": "389ba350c84b490c996d1860f21c7baa53855ee663632265c030f48da6a82d12.jsonl",
+          "regular": true,
+          "apparentBytes": 356,
+          "allocatedBytes": 4096
+        },
+        {
+          "name": "c80c7125039ba162995da4e5ea4b36aaa68bf6d9ffb694c01789896f48a765e4.jsonl",
+          "regular": true,
+          "apparentBytes": 21762112,
+          "allocatedBytes": 21766144
+        }
+      ],
+      "apparentBytes": 21762468,
+      "allocatedBytes": 21770240
+    },
+    "cp-b": {
+      "files": [
+        {
+          "name": "b8003b67e890748b823157d034a5c80875439d47753a34ad366751548f7457de.jsonl",
+          "regular": true,
+          "apparentBytes": 356,
+          "allocatedBytes": 4096
+        },
+        {
+          "name": "c80c7125039ba162995da4e5ea4b36aaa68bf6d9ffb694c01789896f48a765e4.jsonl",
+          "regular": true,
+          "apparentBytes": 21762112,
+          "allocatedBytes": 21766144
+        }
+      ],
+      "apparentBytes": 21762468,
+      "allocatedBytes": 21770240
+    },
+    "cp-c": {
+      "files": [
+        {
+          "name": "1bc2935cec7eefefeff055a94af98ac9aa59f1f0a92f5e4ed7bb82e52fc1eec9.jsonl",
+          "regular": true,
+          "apparentBytes": 21366503,
+          "allocatedBytes": 21368832
+        },
+        {
+          "name": "b8003b67e890748b823157d034a5c80875439d47753a34ad366751548f7457de.jsonl",
+          "regular": true,
+          "apparentBytes": 356,
+          "allocatedBytes": 4096
+        }
+      ],
+      "apparentBytes": 21366859,
+      "allocatedBytes": 21372928
+    }
+  }
+}
