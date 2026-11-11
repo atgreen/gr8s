@@ -3,7 +3,7 @@
 (in-package #:gr8s.image-distribution)
 
 (defparameter *image-tracker-snapshot-kinds*
-  '("imageTrackerConfig" "imageTrackerOrigin" "imageTrackerSwarm" "imageTrackerPeer"))
+  '("imageTrackerConfig" "imageTrackerOrigin" "imageTrackerSwarm" "imageTrackerPeer" "imageTrackerMetainfoChunk"))
 
 (defun image-tracker-record-p (record)
   (member (gethash "kind" record) *image-tracker-snapshot-kinds* :test #'equal))
@@ -58,10 +58,26 @@ those small vectors as well as peer identities. The result owns its own mutex."
              (image-tracker-origins tracker))
     (maphash
      (lambda (digest swarm)
-       (funcall function (image-tracker-object
-                          "kind" "imageTrackerSwarm" "digest" digest
-                          "metainfo" (ag-grpc:base64-encode (tracker-swarm-metainfo swarm))
-                          "infohash" (ag-grpc:base64-encode (tracker-swarm-infohash swarm))))
+       (let ((metainfo (tracker-swarm-metainfo swarm)))
+         (if (<= (length metainfo) +tracker-metainfo-inline-bytes+)
+             (funcall function (image-tracker-object
+                                "kind" "imageTrackerSwarm" "digest" digest
+                                "metainfo" (ag-grpc:base64-encode metainfo)
+                                "infohash" (ag-grpc:base64-encode (tracker-swarm-infohash swarm))))
+             (progn
+               (funcall function (image-tracker-object
+                                  "kind" "imageTrackerSwarm" "digest" digest
+                                  "metainfoFormat" "chunks-v1" "metainfoBytes" (length metainfo)
+                                  "metainfoSha256" (ironclad:byte-array-to-hex-string
+                                                    (ironclad:digest-sequence :sha256 metainfo))
+                                  "infohash" (ag-grpc:base64-encode (tracker-swarm-infohash swarm))))
+               (loop for offset from 0 below (length metainfo) by +tracker-metainfo-chunk-bytes+ do
+                 (funcall function
+                          (image-tracker-object
+                           "kind" "imageTrackerMetainfoChunk" "digest" digest "offset" offset
+                           "data" (ag-grpc:base64-encode
+                                   (subseq metainfo offset
+                                           (min (length metainfo) (+ offset +tracker-metainfo-chunk-bytes+))))))))))
        (maphash (lambda (node peer)
                   (funcall function (image-tracker-object
                                      "kind" "imageTrackerPeer" "digest" digest "node" node
@@ -91,16 +107,31 @@ those small vectors as well as peer identities. The result owns its own mutex."
           (let ((digest (gethash "digest" record)) (node (gethash "node" record)))
             (unless (and (stringp digest) (equal digest (canonical-oci-digest digest)))
               (error "Invalid snapshot tracker digest"))
-            (unless (or (equal kind "imageTrackerSwarm") (and (stringp node) (plusp (length node))))
+            (unless (or (member kind '("imageTrackerSwarm" "imageTrackerMetainfoChunk") :test #'equal)
+                        (and (stringp node) (plusp (length node))))
               (error "Invalid snapshot tracker node"))
             (cond
               ((equal kind "imageTrackerOrigin")
                (tracker-record-octets record "token" 32)
                (unless (time-value "expiresAt") (error "Invalid snapshot tracker lease expiry")))
               ((equal kind "imageTrackerSwarm")
-               (unless (equalp (tracker-record-octets record "infohash" 32)
-                               (validated-metainfo-infohash digest (tracker-record-octets record "metainfo")))
-                 (error "Snapshot tracker metainfo/infohash mismatch")))
+               (tracker-record-octets record "infohash" 32)
+               (if (tracker-chunked-swarm-record-p record)
+                   (unless (and (not (nth-value 1 (gethash "metainfo" record)))
+                                (typep (gethash "metainfoBytes" record) '(integer 1 #.most-positive-fixnum))
+                                (let ((hash (gethash "metainfoSha256" record)))
+                                  (and (stringp hash) (= 64 (length hash))
+                                       (every (lambda (char) (find char "0123456789abcdef")) hash))))
+                     (error "Invalid chunked tracker metainfo header"))
+                   (unless (equalp (tracker-record-octets record "infohash" 32)
+                                   (validated-metainfo-infohash digest (tracker-record-octets record "metainfo")))
+                     (error "Snapshot tracker metainfo/infohash mismatch"))))
+              ((equal kind "imageTrackerMetainfoChunk")
+               (unless (and (typep (gethash "offset" record) '(integer 0 #.most-positive-fixnum))
+                            (let ((data (gethash "data" record)))
+                              (and (stringp data) (<= (length data) (* 4 (ceiling +tracker-metainfo-chunk-bytes+ 3)))))
+                            (<= 1 (length (tracker-record-octets record "data")) +tracker-metainfo-chunk-bytes+))
+                 (error "Invalid tracker metainfo chunk")))
               ((equal kind "imageTrackerPeer")
                (validate-peer-endpoint (gethash "address" record) (gethash "port" record)
                                        (tracker-record-octets record "peerId" 20))
@@ -128,11 +159,12 @@ those small vectors as well as peer identities. The result owns its own mutex."
              (make-origin-lease :node-name node :token (tracker-record-octets record "token" 32)
                                 :expires-at (gethash "expiresAt" record))))
       ((equal kind "imageTrackerSwarm")
-       ;; A peer may occur before its swarm in the input.
-       (let ((swarm (or (gethash digest (image-tracker-swarms tracker))
-                        (setf (gethash digest (image-tracker-swarms tracker)) (make-tracker-swarm :digest digest)))))
-         (setf (tracker-swarm-metainfo swarm) (tracker-record-octets record "metainfo")
-               (tracker-swarm-infohash swarm) (tracker-record-octets record "infohash" 32))))
+       (unless (tracker-chunked-swarm-record-p record)
+         ;; A peer may occur before its swarm in the input.
+         (let ((swarm (or (gethash digest (image-tracker-swarms tracker))
+                          (setf (gethash digest (image-tracker-swarms tracker)) (make-tracker-swarm :digest digest)))))
+           (setf (tracker-swarm-metainfo swarm) (tracker-record-octets record "metainfo")
+                 (tracker-swarm-infohash swarm) (tracker-record-octets record "infohash" 32)))))
       ((equal kind "imageTrackerPeer")
        (let ((swarm (or (gethash digest (image-tracker-swarms tracker))
                         (setf (gethash digest (image-tracker-swarms tracker)) (make-tracker-swarm :digest digest)))))
@@ -152,21 +184,38 @@ those small vectors as well as peer identities. The result owns its own mutex."
           (sb-sys:make-fd-stream fd :input t :element-type '(unsigned-byte 8) :auto-close t))
       (error (condition) (sb-posix:close fd) (error condition)))))
 
+(defun install-streamed-tracker-metainfo (tracker header stream total)
+  ;; Metainfo itself is live tracker state. Assemble it once, after validation;
+  ;; validation and materialization never retain all swarm payloads together.
+  (let* ((digest (gethash "digest" header))
+         (bytes (make-array total :element-type '(unsigned-byte 8)))
+         (swarm (or (gethash digest (image-tracker-swarms tracker))
+                    (setf (gethash digest (image-tracker-swarms tracker))
+                          (make-tracker-swarm :digest digest)))))
+    (unless (= total (read-sequence bytes stream)) (error "Truncated tracker metainfo spool"))
+    (setf (tracker-swarm-metainfo swarm) bytes
+          (tracker-swarm-infohash swarm) (tracker-record-octets header "infohash" 32))))
+
 (defun load-store-image-tracker (store)
   (let* ((tracker (gr8s.store:pod-store-image-tracker store))
          (path (merge-pathnames "image-tracker/state.jsonl" (gr8s.store:store-data-path store))))
     (clear-image-tracker-state tracker)
     (when (gr8s.store::store-generation-stat path)
-      (let ((index (gr8s.resources::make-snapshot-validation-index))
+      (let ((index (gr8s.resources::make-snapshot-validation-index
+                    :tracker-metainfo-directory (uiop:pathname-directory-pathname path)
+                    :tracker-metainfo-consumer
+                    (lambda (header stream total) (install-streamed-tracker-metainfo tracker header stream total))))
             (buffer (make-array 4096 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
-        (bt:with-lock-held ((image-tracker-lock tracker))
-          (with-open-stream (stream (open-image-tracker-state path))
-            (loop for record = (gr8s.resources::read-store-snapshot-record stream buffer (* 16 1024 1024))
-                  while record do
-                    (validate-image-tracker-record record)
-                    (gr8s.resources::index-store-snapshot-record index record)
-                    (apply-image-tracker-record-unlocked tracker record)))
-          (gr8s.resources::finish-store-snapshot-index index)
-          (unless (gr8s.resources::snapshot-validation-index-tracker-config-p index)
-            (error "Snapshot tracker file has no configuration"))))))
+        (unwind-protect
+             (bt:with-lock-held ((image-tracker-lock tracker))
+               (with-open-stream (stream (open-image-tracker-state path))
+                 (loop for record = (gr8s.resources::read-store-snapshot-record stream buffer (* 16 1024 1024))
+                       while record do
+                         (validate-image-tracker-record record)
+                         (gr8s.resources::index-store-snapshot-record index record)
+                         (apply-image-tracker-record-unlocked tracker record)))
+               (gr8s.resources::finish-store-snapshot-index index)
+               (unless (gr8s.resources::snapshot-validation-index-tracker-config-p index)
+                 (error "Snapshot tracker file has no configuration")))
+          (gr8s.resources::close-snapshot-validation-index index)))))
   store)

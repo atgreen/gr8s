@@ -1,0 +1,221 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+(in-package #:gr8s.image-distribution)
+
+(defun validate-tracker-metainfo-stream (stream total digest expected-infohash)
+  "Validate canonical BEP52 metainfo from a seekable binary STREAM.
+Only scalar offsets and two fixed comparison buffers are retained. Unknown byte
+strings, including piece layers, are skipped without decoding or copying them.
+The exact canonical info dictionary bytes establish EXPECTED-INFOHASH."
+  (unless (and (typep total '(integer 1 #.most-positive-fixnum))
+               (= total (file-length stream))
+               (equal digest (canonical-oci-digest digest))
+               (typep expected-infohash '(vector (unsigned-byte 8)))
+               (= 32 (length expected-infohash)))
+    (error "Invalid streamed tracker metainfo envelope"))
+  (file-position stream 0)
+  (let ((hex (subseq digest 7))
+        (left (make-array 4096 :element-type '(unsigned-byte 8)))
+        (right (make-array 4096 :element-type '(unsigned-byte 8)))
+        (info-start nil) (info-end nil) (name-p nil) (version-p nil) (file-p nil))
+    (labels
+        ((octet ()
+           (or (read-byte stream nil nil) (error "Truncated tracker metainfo")))
+         (peek ()
+           (let* ((position (file-position stream)) (value (octet)))
+             (file-position stream position)
+             value))
+         (digit-p (value) (<= 48 value 57))
+         (seek (position)
+           (unless (<= 0 position total) (error "Tracker metainfo string exceeds its file"))
+           (unless (file-position stream position) (error "Tracker metainfo source is not seekable")))
+         (range-equals (range text)
+           (and (= (second range) (length text))
+                (let ((position (file-position stream)))
+                  (unwind-protect
+                       (progn
+                         (seek (first range))
+                         (loop for character across text always (= (octet) (char-code character))))
+                    (seek position)))))
+         (range-less (a b)
+           (let ((position (file-position stream)) (common (min (second a) (second b))))
+             (unwind-protect
+                  (loop for offset from 0 below common by (length left)
+                        for count = (min (length left) (- common offset)) do
+                          (seek (+ (first a) offset))
+                          (unless (= count (read-sequence left stream :end count))
+                            (error "Truncated tracker metainfo dictionary key"))
+                          (seek (+ (first b) offset))
+                          (unless (= count (read-sequence right stream :end count))
+                            (error "Truncated tracker metainfo dictionary key"))
+                          (loop for index below count
+                                for x = (aref left index) for y = (aref right index)
+                                when (/= x y) do (return-from range-less (< x y)))
+                        finally (return (< (second a) (second b))))
+               (seek position))))
+         (byte-string ()
+           (let* ((first (octet)) (size 0) (digits 0))
+             (unless (digit-p first) (error "Tracker metainfo dictionary key is not a string"))
+             (loop for value = first then (octet) do
+               (cond
+                 ((digit-p value)
+                  (when (and (plusp digits) (= first 48))
+                    (error "Noncanonical tracker metainfo string length"))
+                  (incf digits)
+                  (setf size (+ (* size 10) (- value 48)))
+                  (when (> size total) (error "Tracker metainfo string length exceeds its file")))
+                 ((= value 58) (return))
+                 (t (error "Invalid tracker metainfo string length"))))
+             (let ((start (file-position stream)))
+               (seek (+ start size))
+               (list start size))))
+         (integer-value (role)
+           (unless (= 105 (octet)) (error "Invalid tracker metainfo integer"))
+           (let* ((value (octet)) (negative (= value 45)) (digits 0) (first nil))
+             (when negative (setf value (octet)))
+             (loop
+               (when (= value 101) (return))
+               (unless (digit-p value) (error "Invalid tracker metainfo integer digit"))
+               (when (and (plusp digits) (= first 48))
+                 (error "Noncanonical tracker metainfo integer"))
+               (unless first (setf first value))
+               (incf digits)
+               (setf value (octet)))
+             (when (or (zerop digits) (and negative (= first 48)))
+               (error "Noncanonical tracker metainfo integer"))
+             (when (eq role :version)
+               (unless (and (not negative) (= digits 1) (= first 50))
+                 (error "OCI blob torrents must use BitTorrent v2 metadata"))
+               (setf version-p t))))
+         (child-role (role key)
+           (cond
+             ((and (eq role :root) (range-equals key "info")) :info)
+             ((eq role :info)
+              (cond ((range-equals key "name") :name)
+                    ((range-equals key "meta version") :version)
+                    ((range-equals key "file tree") :tree)
+                    (t :other)))
+             ((and (eq role :tree) (range-equals key hex)) :file)
+             (t :other)))
+         (value (role depth)
+           (when (> depth 128) (error "Tracker metainfo nesting limit exceeded"))
+           (let ((marker (peek)) (start (file-position stream)))
+             (when (and (member role '(:root :info :tree :file)) (/= marker 100))
+               (error "Tracker metainfo requires a dictionary"))
+             (when (and (eq role :name) (not (digit-p marker)))
+               (error "Tracker metainfo filename must be a byte string"))
+             (when (and (eq role :version) (/= marker 105))
+               (error "Tracker metainfo version must be an integer"))
+             (cond
+               ((digit-p marker)
+                (let ((range (byte-string)))
+                  (when (eq role :name)
+                    (unless (range-equals range hex) (error "Tracker metainfo filename does not match OCI digest"))
+                    (setf name-p t))))
+               ((= marker 105) (integer-value role))
+               ((= marker 108)
+                (octet)
+                (loop until (= 101 (peek)) do (value :other (1+ depth)))
+                (octet))
+               ((= marker 100)
+                (octet)
+                (let ((previous nil))
+                  (loop until (= 101 (peek)) do
+                    (let ((key (byte-string)))
+                      (when (and previous (not (range-less previous key)))
+                        (error "Tracker metainfo dictionary keys must be strictly sorted"))
+                      (setf previous key)
+                      (value (child-role role key) (1+ depth)))))
+                (octet)
+                (when (eq role :info)
+                  (setf info-start start info-end (file-position stream)))
+                (when (eq role :file) (setf file-p t)))
+               (t (error "Invalid tracker metainfo marker"))))))
+      (value :root 0)
+      (unless (and (= total (file-position stream)) info-start info-end name-p version-p file-p)
+        (error "Incomplete or trailing tracker metainfo"))
+      (let ((hash (ironclad:make-digest :sha256)))
+        (seek info-start)
+        (loop for remaining = (- info-end (file-position stream))
+              for count = (min remaining (length left))
+              while (plusp remaining) do
+                (unless (= count (read-sequence left stream :end count))
+                  (error "Truncated tracker info dictionary"))
+                (ironclad:update-digest hash left :end count))
+        (unless (equalp expected-infohash (ironclad:produce-digest hash))
+          (error "Snapshot tracker metainfo/infohash mismatch")))
+      (seek total)
+      t)))
+
+(defconstant +tracker-metainfo-chunk-bytes+ 49152)
+(defconstant +tracker-metainfo-inline-bytes+ (* 3 512 1024))
+
+(defun tracker-chunked-swarm-record-p (record)
+  (and (equal "imageTrackerSwarm" (gethash "kind" record))
+       (equal "chunks-v1" (gethash "metainfoFormat" record))))
+
+(defstruct tracker-metainfo-input header stream hash (received 0))
+
+(defun close-tracker-metainfo-input (input)
+  (when (and input (tracker-metainfo-input-stream input))
+    (let ((stream (tracker-metainfo-input-stream input)))
+      (setf (tracker-metainfo-input-stream input) nil)
+      ;; Discard pending scratch writes before normal close. ABORT on a stream
+      ;; associated with /proc/self/fd would attempt to unlink that pseudo-path.
+      (unwind-protect (clear-output stream) (close stream)))))
+
+(defun start-tracker-metainfo-input (header directory)
+  "Own one anonymous, close-on-exec spool; retain no metainfo payload in RAM."
+  (let ((fd nil) (stream nil) (transferred nil))
+    (unwind-protect
+         (progn
+           ;; Linux O_TMPFILE | O_DIRECTORY and O_CLOEXEC, as in the Raft cache.
+           ;; No scratch pathname survives a failed validation or process crash.
+           (setf fd (sb-posix:open (namestring (uiop:ensure-directory-pathname directory))
+                                   (logior sb-posix:o-rdwr #o20200000 #o2000000) #o600)
+                 stream (sb-sys:make-fd-stream fd :input t :output t
+                                              :file (format nil "/proc/self/fd/~D" fd)
+                                              :element-type '(unsigned-byte 8) :auto-close t)
+                 fd nil)
+           (prog1
+               (make-tracker-metainfo-input
+                :header (image-tracker-object "digest" (gethash "digest" header)
+                                              "infohash" (gethash "infohash" header)
+                                              "metainfoBytes" (gethash "metainfoBytes" header)
+                                              "metainfoSha256" (gethash "metainfoSha256" header))
+                :stream stream :hash (ironclad:make-digest :sha256))
+             (setf transferred t)))
+      (unless transferred
+        (cond (stream (close stream))
+              (fd (sb-posix:close fd)))))))
+
+(defun feed-tracker-metainfo-input (input record consumer)
+  "Validate one ordered chunk. Call CONSUMER only after full semantic validation.
+Returns true when the complete blob has been validated and its spool closed."
+  (let* ((header (tracker-metainfo-input-header input))
+         (stream (tracker-metainfo-input-stream input))
+         (bytes (tracker-record-octets record "data"))
+         (received (tracker-metainfo-input-received input))
+         (total (gethash "metainfoBytes" header)))
+    (unless (and (equal (gethash "digest" header) (gethash "digest" record))
+                 (= received (gethash "offset" record))
+                 (<= (+ received (length bytes)) total))
+      (error "Out-of-order or oversized tracker metainfo chunk"))
+    (write-sequence bytes stream)
+    (ironclad:update-digest (tracker-metainfo-input-hash input) bytes)
+    (incf (tracker-metainfo-input-received input) (length bytes))
+    (when (= total (tracker-metainfo-input-received input))
+      (unwind-protect
+           (progn
+             (unless (equal (gethash "metainfoSha256" header)
+                            (ironclad:byte-array-to-hex-string
+                             (ironclad:produce-digest (tracker-metainfo-input-hash input))))
+               (error "Tracker metainfo content checksum mismatch"))
+             (finish-output stream)
+             (validate-tracker-metainfo-stream stream total (gethash "digest" header)
+                                               (tracker-record-octets header "infohash" 32))
+             (when consumer
+               (file-position stream 0)
+               (funcall consumer header stream total))
+             t)
+        (close-tracker-metainfo-input input)))))

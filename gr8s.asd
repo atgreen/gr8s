@@ -152,6 +152,7 @@
                                            (:file "core-resources")
                                            (:file "pki-authority")
                                            (:file "store-snapshot")
+                                           (:file "tracker-metainfo-stream")
                                            (:file "store-snapshot-index")
                                            (:file "store-image-tracker")
                                            (:file "store-snapshot-freeze")

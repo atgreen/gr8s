@@ -5,6 +5,8 @@
 
 (defstruct snapshot-validation-index
   tracker-config-p
+  tracker-metainfo-input tracker-metainfo-consumer
+  (tracker-metainfo-directory (uiop:temporary-directory))
   (tracker-origins (make-hash-table :test #'equal))
   (tracker-swarms (make-hash-table :test #'equal))
   (tracker-peers (make-hash-table :test #'equal))
@@ -13,6 +15,11 @@
   (cidr-descendants (make-hash-table :test #'equal))
   (definitions (make-hash-table :test #'equal))
   (custom-shapes (make-hash-table :test #'equal)))
+
+(defun close-snapshot-validation-index (index)
+  (let ((input (snapshot-validation-index-tracker-metainfo-input index)))
+    (setf (snapshot-validation-index-tracker-metainfo-input index) nil)
+    (gr8s.image-distribution::close-tracker-metainfo-input input)))
 
 (defun snapshot-claim-identity (index category value)
   (let ((key (list category value)))
@@ -65,7 +72,15 @@
     (values (format nil "custom:~A/~A" group plural) (list kind scope apis))))
 
 (defun index-store-snapshot-record (index record)
-  (let ((kind (gethash "kind" record)) (object (gethash "object" record)))
+  (let* ((kind (gethash "kind" record)) (object (gethash "object" record))
+         (input (snapshot-validation-index-tracker-metainfo-input index)))
+    (when (equal kind "imageTrackerMetainfoChunk")
+      (unless input (error "Tracker metainfo chunk has no active header"))
+      (when (gr8s.image-distribution::feed-tracker-metainfo-input
+             input record (snapshot-validation-index-tracker-metainfo-consumer index))
+        (setf (snapshot-validation-index-tracker-metainfo-input index) nil))
+      (return-from index-store-snapshot-record index))
+    (when input (error "Incomplete tracker metainfo before another snapshot record"))
     (cond
       ((gr8s.image-distribution::image-tracker-record-p record)
        (let ((digest (gethash "digest" record)) (node (gethash "node" record)))
@@ -75,7 +90,12 @@
                                         (t digest)))
          (cond ((equal kind "imageTrackerConfig") (setf (snapshot-validation-index-tracker-config-p index) t))
                ((equal kind "imageTrackerOrigin") (setf (gethash digest (snapshot-validation-index-tracker-origins index)) t))
-               ((equal kind "imageTrackerSwarm") (setf (gethash digest (snapshot-validation-index-tracker-swarms index)) t))
+               ((equal kind "imageTrackerSwarm")
+                (setf (gethash digest (snapshot-validation-index-tracker-swarms index)) t)
+                (when (gr8s.image-distribution::tracker-chunked-swarm-record-p record)
+                  (setf (snapshot-validation-index-tracker-metainfo-input index)
+                        (gr8s.image-distribution::start-tracker-metainfo-input
+                         record (snapshot-validation-index-tracker-metainfo-directory index)))))
                ((equal kind "imageTrackerPeer") (setf (gethash digest (snapshot-validation-index-tracker-peers index)) t)))))
       ((equal kind "resource")
        (let* ((resource (gethash "resource" record))
@@ -129,6 +149,8 @@
   index)
 
 (defun finish-store-snapshot-index (index)
+  (when (snapshot-validation-index-tracker-metainfo-input index)
+    (error "Incomplete tracker metainfo at end of snapshot"))
   (when (and (not (snapshot-validation-index-tracker-config-p index))
              (plusp (+ (hash-table-count (snapshot-validation-index-tracker-origins index))
                        (hash-table-count (snapshot-validation-index-tracker-swarms index))
@@ -162,14 +184,18 @@
 FUNCTION receives provisional records for a staging destination. END is delivered only
 after all validation succeeds. Returns header/clocks/count like MAP-STORE-SNAPSHOT-RECORDS.
 Identity indexes grow with object count; payload memory is bounded by a single record."
-  (let ((index (make-snapshot-validation-index)) (end nil))
-    (multiple-value-bind (header clocks count)
-        (map-store-snapshot-records
-         path (lambda (record)
-                (if (equal "end" (gethash "kind" record)) (setf end record)
-                    (progn (index-store-snapshot-record index record)
-                           (when function (funcall function record)))))
-         :expected-index expected-index :expected-term expected-term :max-record-bytes max-record-bytes)
-      (finish-store-snapshot-index index)
-      (when function (funcall function end))
-      (values header clocks count))))
+  (let ((index (make-snapshot-validation-index
+                 :tracker-metainfo-directory (uiop:pathname-directory-pathname path)))
+        (end nil))
+    (unwind-protect
+         (multiple-value-bind (header clocks count)
+             (map-store-snapshot-records
+              path (lambda (record)
+                     (if (equal "end" (gethash "kind" record)) (setf end record)
+                         (progn (index-store-snapshot-record index record)
+                                (when function (funcall function record)))))
+              :expected-index expected-index :expected-term expected-term :max-record-bytes max-record-bytes)
+           (finish-store-snapshot-index index)
+           (when function (funcall function end))
+           (values header clocks count))
+      (close-snapshot-validation-index index))))

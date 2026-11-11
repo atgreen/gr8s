@@ -447,10 +447,47 @@ state. Older artifacts without tracker records load an empty tracker with defaul
 policy. This compatibility behavior cannot recover tracker state absent from an
 older artifact.
 
-The existing snapshot limits apply: 16 MiB per record and 2 MiB per JSON string.
-Metainfo is currently one base64 string, so larger metainfo needs a chunked format
-before it can be included. This does not enable production compaction or replace
-the required node RPC and background-writer barriers and Raft/WAL recovery hooks.
+The snapshot limits remain 16 MiB per record and 2 MiB per JSON string.
+Metainfo up to 1,572,864 bytes (1.5 MiB) uses the inline `imageTrackerSwarm` representation.
+Larger metainfo uses a swarm header with `metainfoFormat: "chunks-v1"`,
+`metainfoBytes`, `metainfoSha256`, and `infohash`, followed immediately by
+`imageTrackerMetainfoChunk` records. Each chunk names the swarm digest and its
+byte offset; `data` contains at most 49,152 decoded bytes, or 65,536 base64
+characters. Chunk sequences must be contiguous and ordered. Legacy inline
+swarm and peer records retain their existing ordering rules.
+
+Validation writes one active metainfo sequence to an anonymous, private,
+close-on-exec file on the source filesystem. It checks offsets, total size and
+SHA-256, then validates canonical bencoding, the OCI filename, BEP52 version and
+infohash using file offsets and fixed buffers. Dictionary keys are compared as
+byte ranges without allocating their contents. Missing, duplicate, reordered,
+corrupt or semantically invalid sequences fail before the successful final
+record is delivered. Every exit closes the spool, including staging callback
+failures; no scratch pathname survives process termination. Chunked validation
+requires Linux anonymous-file support on that filesystem and available space
+for the active blob.
+
+Materialization preserves bounded chunk records in the generation's tracker
+file. Reload and startup assemble each validated raw metainfo vector once as
+live tracker state. Serialization and validation avoid a base64 string covering
+the entire blob. The live metainfo itself remains resident and contributes to
+normal application heap requirements.
+
+Readers that support only inline metainfo reject chunked swarm headers. Before
+a member can receive such an artifact, its binary must support `chunks-v1`.
+This includes rollback targets reading the selected generation's tracker file;
+retain a compatible binary or restore a pre-upgrade backup. Artifacts without
+chunked metainfo retain the inline representation. The format does not replace
+node RPC and background-writer barriers or Raft/WAL recovery hooks.
+
+The developer probe `scripts/test-tracker-metainfo-memory.lisp` has separate
+`capture NEW_ROOT` and `verify NEW_ROOT` modes. Run them in separate SBCL
+processes with `--dynamic-space-size 384` and cached dependencies. Capture
+requires a nonexistent state directory under an existing parent. It publishes
+four canonical torrents with 16 MiB of metainfo padding each, then captures,
+validates, materializes and reloads the store. Verify reopens the persisted
+selected generation and compares each metainfo's size and SHA-256. The probe
+preserves its state and artifact for inspection.
 
 Established watches cooperate with the access gate. When draining begins, Pod,
 Node and durable-resource watches emit a Kubernetes `ERROR` event with status

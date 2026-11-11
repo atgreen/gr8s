@@ -187,3 +187,198 @@
         (delete-file path))
       (gr8s.security::write-private-text-exclusively path "")
       (signals error (gr8s:open-store root)))))
+
+
+(test large-canonical-tracker-metainfo-survives-streamed-snapshot-and-reopen
+  ;; A legitimate optional BEP52 field can cross the snapshot JSON string
+  ;; limit while leaving the OCI filename and infohash unchanged.
+  (dolist (padding-size '(1572600 1573000 3145728))
+    (with-temporary-store (store root)
+      (multiple-value-bind (digest torrent) (tracker-test-torrent)
+        (let* ((tracker (gr8s.store:pod-store-image-tracker store))
+               (decoded (gr8s.image-distribution::decode-bencode
+                         (gr8s.image-distribution::blob-torrent-metainfo torrent)))
+               (metainfo
+                 (gr8s.image-distribution::encode-bencode
+                  (gr8s.image-distribution::bencode-dictionary
+                   (acons "comment" (make-array padding-size :element-type '(unsigned-byte 8)
+                                                            :initial-element 120)
+                          (gr8s.image-distribution::bencode-map-entries decoded)))))
+               (expected (ironclad:digest-sequence :sha256 metainfo))
+               (source (merge-pathnames "large-tracker.jsonl" root)))
+          (is (equalp (gr8s.image-distribution::blob-torrent-infohash torrent)
+                      (gr8s.image-distribution::validated-metainfo-infohash digest metainfo)))
+          (multiple-value-bind (status token)
+              (gr8s.image-distribution::tracker-acquire-origin tracker digest "seed")
+            (declare (ignore status))
+            (gr8s.image-distribution::tracker-publish-swarm
+             tracker digest "seed" token metainfo "10.0.0.1" 6881
+             (bt-octets "-GR8001-AAAAAAAAAAAA")))
+          (gr8s.resources::capture-store-snapshot store source 42 7)
+          (gr8s.resources::validate-store-snapshot source)
+          (multiple-value-bind (path descriptor)
+              (materialize-live-test-snapshot store root source)
+            (declare (ignore path))
+            (gr8s.store::quiesce-store-access store :timeout 0)
+            (unwind-protect
+                 (progn
+                   (gr8s.store::reload-store-application store (gethash "generation" descriptor))
+                   (is (equalp expected
+                               (ironclad:digest-sequence
+                                :sha256
+                                (gr8s.image-distribution::tracker-swarm-metainfo
+                                 (gethash digest (gr8s.image-distribution::image-tracker-swarms tracker)))))))
+              (gr8s.store::resume-store-access store)))
+          (let* ((reopened (gr8s:open-store root))
+                 (swarm (gethash digest (gr8s.image-distribution::image-tracker-swarms
+                                         (gr8s.store:pod-store-image-tracker reopened)))))
+            (is (not (null swarm)))
+            (is (equalp expected (ironclad:digest-sequence
+                                 :sha256 (gr8s.image-distribution::tracker-swarm-metainfo swarm))))))))))
+
+
+(test streamed-tracker-metainfo-checks-canonical-filename-and-infohash
+  (with-temporary-store (store root)
+    (declare (ignore store))
+    (multiple-value-bind (digest torrent) (tracker-test-torrent)
+      (let ((bytes (gr8s.image-distribution::blob-torrent-metainfo torrent))
+            (infohash (gr8s.image-distribution::blob-torrent-infohash torrent))
+            (path (merge-pathnames "metainfo.bin" root)))
+        (with-open-file (output path :direction :output :if-exists :error
+                                    :element-type '(unsigned-byte 8))
+          (write-sequence bytes output))
+        (with-open-file (input path :element-type '(unsigned-byte 8))
+          (is-true (gr8s.image-distribution::validate-tracker-metainfo-stream
+                    input (length bytes) digest infohash))
+          (signals error
+            (gr8s.image-distribution::validate-tracker-metainfo-stream
+             input (length bytes) digest (make-array 32 :element-type '(unsigned-byte 8) :initial-element 0)))
+          (signals error
+            (gr8s.image-distribution::validate-tracker-metainfo-stream
+             input (1- (length bytes)) digest infohash))
+          (signals error
+            (gr8s.image-distribution::validate-tracker-metainfo-stream
+             input (length bytes)
+             "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" infohash)))))))
+
+(defun populate-large-snapshot-tracker (store &optional (padding-size 1600000))
+  (multiple-value-bind (digest torrent) (tracker-test-torrent)
+    (let* ((tracker (gr8s.store:pod-store-image-tracker store))
+           (decoded (gr8s.image-distribution::decode-bencode
+                     (gr8s.image-distribution::blob-torrent-metainfo torrent)))
+           (metainfo (gr8s.image-distribution::encode-bencode
+                      (gr8s.image-distribution::bencode-dictionary
+                       (acons "comment" (make-array padding-size :element-type '(unsigned-byte 8) :initial-element 120)
+                              (gr8s.image-distribution::bencode-map-entries decoded))))))
+      (multiple-value-bind (status token)
+          (gr8s.image-distribution::tracker-acquire-origin tracker digest "seed")
+        (declare (ignore status))
+        (gr8s.image-distribution::tracker-publish-swarm
+         tracker digest "seed" token metainfo "10.0.0.1" 6881 (bt-octets "-GR8001-AAAAAAAAAAAA"))))))
+
+(test tracker-metainfo-chunks-reject-corruption-before-completion-and-close-spools
+  (with-temporary-store (store root)
+    (populate-large-snapshot-tracker store)
+    (let ((source (merge-pathnames "chunked-tracker.jsonl" root))
+          (original (symbol-function 'gr8s.image-distribution::start-tracker-metainfo-input))
+          (opened nil))
+      (gr8s.resources::capture-store-snapshot store source 42 7)
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s.image-distribution::start-tracker-metainfo-input)
+                   (lambda (&rest arguments)
+                     (let ((input (apply original arguments)))
+                       (push input opened)
+                       input)))
+             (dolist (mutation '(:offset :duplicate :missing :bytes :checksum :infohash :length))
+               (let* ((records (read-store-snapshot-records source))
+                      (header (find "imageTrackerSwarm" records :key (lambda (row) (gethash "kind" row)) :test #'equal))
+                      (chunks (remove-if-not (lambda (row) (equal "imageTrackerMetainfoChunk" (gethash "kind" row))) records))
+                      (chunk (first chunks)))
+                 (is (> (length chunks) 1))
+                 (ecase mutation
+                   (:offset (incf (gethash "offset" chunk)))
+                   (:duplicate
+                    (setf records (loop for row in records append (if (eq row chunk) (list row row) (list row)))))
+                   (:missing (setf records (remove (car (last chunks)) records :test #'eq)))
+                   (:bytes
+                    (let ((bytes (ag-grpc:base64-decode (gethash "data" chunk))))
+                      (setf (aref bytes 0) (logxor 1 (aref bytes 0))
+                            (gethash "data" chunk) (ag-grpc:base64-encode bytes))))
+                   (:checksum (setf (gethash "metainfoSha256" header) (make-string 64 :initial-element #\0)))
+                   (:infohash (setf (gethash "infohash" header)
+                                   (ag-grpc:base64-encode (make-array 32 :element-type '(unsigned-byte 8) :initial-element 0))))
+                   (:length (incf (gethash "metainfoBytes" header))))
+                 (let* ((reason (ecase mutation
+                                  ((:offset :duplicate) "Out-of-order")
+                                  ((:missing :length) "Incomplete tracker metainfo")
+                                  ((:bytes :checksum) "checksum mismatch")
+                                  (:infohash "infohash mismatch")))
+                        (condition (handler-case
+                                       (progn (gr8s.resources::validate-store-snapshot
+                                               (snapshot-index-records-path root records)) nil)
+                                     (error (failure) failure))))
+                   (is (and condition (search reason (princ-to-string condition)))
+                       "Expected ~A rejection, got ~A" reason condition))
+                 (is-false (some #'gr8s.image-distribution::tracker-metainfo-input-stream opened))))
+             ;; A staging consumer can fail after a non-final chunk. It must not
+             ;; leave an open anonymous file or deliver the successful END row.
+             (let ((ended nil))
+               (let ((condition
+                       (handler-case
+                           (progn
+                             (gr8s.resources::validate-store-snapshot
+                              source :function (lambda (row)
+                                                 (when (equal "end" (gethash "kind" row)) (setf ended t))
+                                                 (when (equal "imageTrackerMetainfoChunk" (gethash "kind" row))
+                                                   (error "Injected staging consumer failure"))))
+                             nil)
+                         (error (failure) failure))))
+                 (is (and condition (search "Injected staging consumer failure" (princ-to-string condition)))))
+               (is-false ended)
+               (is-false (some #'gr8s.image-distribution::tracker-metainfo-input-stream opened))))
+        (setf (symbol-function 'gr8s.image-distribution::start-tracker-metainfo-input) original)))))
+
+(test streamed-tracker-metainfo-rejects-noncanonical-structure-with-unchanged-infohash
+  ;; Mutations are outside `info`: an implementation that only checks the
+  ;; filename and infohash would accept them. Canonical validation must reject.
+  (with-temporary-store (store root)
+    (declare (ignore store))
+    (multiple-value-bind (digest torrent) (tracker-test-torrent)
+      (let ((original (gr8s.image-distribution::blob-torrent-metainfo torrent))
+            (infohash (gr8s.image-distribution::blob-torrent-infohash torrent))
+            (path (merge-pathnames "canonical-metainfo.bin" root)))
+        (labels ((check (prefix &optional trailing)
+                   (let ((bytes (concatenate '(vector (unsigned-byte 8))
+                                             (subseq original 0 1) (bt-octets prefix)
+                                             (subseq original 1) (bt-octets (or trailing "")))))
+                     (with-open-file (output path :direction :output :if-exists :supersede
+                                                 :element-type '(unsigned-byte 8))
+                       (write-sequence bytes output))
+                     (with-open-file (input path :element-type '(unsigned-byte 8))
+                       (gr8s.image-distribution::validate-tracker-metainfo-stream
+                        input (length bytes) digest infohash)))))
+          (is-true (check "1:ai0e"))
+          (dolist (prefix '("1:ai02e" "1:ai-0e" "1:ai-e" "1:ai+2e"
+                            "01:ai0e" "1:a01:x" "1:ai1e1:ai2e" "1:zi0e"))
+            (signals error (check prefix)))
+          (signals error (check "" "0"))
+          ;; Equal prefixes spanning both fixed comparison buffers must retain
+          ;; byte ordering without allocating a vector for each dictionary key.
+          (let ((a (make-string 8193 :initial-element #\a))
+                (b (concatenate 'string (make-string 8192 :initial-element #\a) "b")))
+            (is-true (check (format nil "~D:~Ai0e~D:~Ai0e" (length a) a (length b) b)))
+            (signals error (check (format nil "~D:~Ai0e~D:~Ai0e" (length b) b (length a) a)))))))))
+
+
+(test tracker-metainfo-keeps-previously-supported-inline-representation
+  (with-temporary-store (store root)
+    (populate-large-snapshot-tracker store 100000)
+    (let ((source (merge-pathnames "inline-tracker.jsonl" root)))
+      (gr8s.resources::capture-store-snapshot store source 42 7)
+      (let* ((records (read-store-snapshot-records source))
+             (swarm (find "imageTrackerSwarm" records :key (lambda (row) (gethash "kind" row)) :test #'equal)))
+        (is (stringp (gethash "metainfo" swarm)))
+        (is-false (gethash "metainfoFormat" swarm))
+        (is-false (find "imageTrackerMetainfoChunk" records :key (lambda (row) (gethash "kind" row)) :test #'equal))
+        (gr8s.resources::validate-store-snapshot source)))))
