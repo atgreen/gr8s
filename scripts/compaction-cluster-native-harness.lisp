@@ -105,6 +105,31 @@
                  (gr8s::core-object "apiVersion" "v1" "kind" "ConfigMap"
                    "metadata" (gr8s::core-object "name" name)
                    "data" (gr8s::core-object "value" value)))
+               (peer-progress ()
+                 ;; STATUS already holds the member mutex. Never encode command
+                 ;; payloads, only bounded queue descriptors and scalar progress.
+                 (let ((node (gr8s::raft-member-node member)))
+                   (coerce
+                    (loop for id being the hash-keys of (gr8s.raft.transport::raft-member-links member)
+                            using (hash-value link)
+                          collect
+                          (bt:with-lock-held ((gr8s.raft.transport::raft-peer-link-lock link))
+                            (gr8s::core-object
+                             "peer" id
+                             "nextIndex" (gethash id (gr8s.raft:raft-node-next-index node) 0)
+                             "matchIndex" (gethash id (gr8s.raft:raft-node-match-index node) 0)
+                             "snapshotRequired" (if (gethash id (gr8s.raft::raft-node-peer-snapshot-required node)) t nil)
+                             "senderAlive" (if (and (gr8s.raft.transport::raft-peer-link-thread link)
+                                                    (bt:thread-alive-p (gr8s.raft.transport::raft-peer-link-thread link))) t nil)
+                             "queuedCount" (length (gr8s.raft.transport::raft-peer-link-items link))
+                             "queuedTypes" (coerce
+                                            (loop for message in (gr8s.raft.transport::raft-peer-link-items link)
+                                                  for i below 4 collect (string-downcase (symbol-name (getf message :type)))) 'vector)
+                             "activeSnapshots" (coerce
+                                                (loop for message in (gr8s.raft.transport::raft-peer-link-active-items link)
+                                                      for i below 4 when (eq :install-snapshot (getf message :type))
+                                                        collect (getf message :last-index)) 'vector))))
+                    'vector)))
                (status ()
                  (let ((object
                          (bt:with-lock-held ((gr8s::raft-member-lock member))
@@ -114,6 +139,9 @@
                                 "role" (string-downcase (symbol-name (gr8s::raft-node-role node)))
                                 "selfRole" (string-downcase (symbol-name (gr8s::raft-node-self-role node)))
                                 "term" (gr8s::raft-node-current-term node)
+                                "gcCpuSeconds" (/ sb-ext:*gc-run-time* (float internal-time-units-per-second 1d0))
+                                "gcWallSeconds" (/ sb-ext:*gc-real-time* (float internal-time-units-per-second 1d0))
+                                "peerProgress" (peer-progress)
                                 "commit" (gr8s::raft-node-commit-index node)
                                 "applied" (gr8s::raft-node-last-applied node)
                                 "snapshot" (gr8s::raft-node-snapshot-index node)

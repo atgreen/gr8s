@@ -211,10 +211,15 @@ def main():
                     raise TimeoutError("Full churn did not complete")
                 time.sleep(1)
         final_commit = current.rpc("status")["commit"]
-        final = probe.await_value(lambda: (lambda values: values if all(
-            value["applied"] >= final_commit and not value["blocked"] and
-            value["checkpoints"] >= (1 if args.smoke else 2)
-            for value in values.values()) else None)(states()), timeout=240)
+        def converged():
+            values = states()
+            result["lastConvergenceSample"] = values
+            check_churn_leadership(values)
+            return values if all(value["applied"] >= final_commit and not value["blocked"] and
+                                 value["checkpoints"] >= (1 if args.smoke else 2)
+                                 for value in values.values()) else None
+
+        final = probe.await_value(converged, timeout=240)
         result.update(beforeRestart=final, samples=samples)
         result["leadershipStabilityAcceptance"] = check_churn_leadership(final)
         expected_maps = final[current.name]["configMaps"]
