@@ -1,0 +1,60 @@
+{
+  "sourceCommit": "73dbff7",
+  "bead": "podster-ucm.3.2.2",
+  "unitChecks": {
+    "inventory": 32,
+    "transport": 194,
+    "bundle": 42,
+    "total": 268,
+    "passed": 268
+  },
+  "stoppedProductionStateProbe": {
+    "passed": true,
+    "source": "/home/green/.cache/gr8s-test-tmp/gr8s-ha-production-pjyns5be/cp1/",
+    "evidence": "/home/green/.cache/gr8s-test-tmp/gr8s-backup-bundle-KJq5H3/",
+    "files": 38,
+    "plaintextBytes": 216208070,
+    "ciphertextBytes": 216287572,
+    "heapLimitBytes": 201326592,
+    "afterFullGcBytes": 75812320,
+    "manifest": {
+      "format": "gr8s-state-bundle",
+      "version": 1,
+      "buildID": "sha256:692951872dcd5947bab84ab99fdb7eae3b38859ea094f878df39b666e89172c3",
+      "release": "1.37.2",
+      "createdAt": 4003375334,
+      "exclusionPolicy": "gr8s-control-plane-v1"
+    }
+  },
+  "probeScope": "Source-loaded gr8s, stopped fake-runtime HA acceptance state; capture and verify only, no restore or live backup acceptance. After-GC is not peak.",
+  "archiveSha256": "6d60c43d6bf76185774de302cb7de8eab1ef63a0799002fb7b6827928c66ae31",
+  "privateArtifactModes": {
+    "state.bin": "0600",
+    "key.bin": "0600"
+  },
+  "coverage": [
+    "empty and multi-frame files",
+    "canonical component order, duplicate and parent-file collision rejection",
+    "authenticated traversal/excluded paths rejected",
+    "file lengths/digests, footer totals and final EOF",
+    "existing target preserved, output under source rejected",
+    "interrupted capture cleans owned temporary file",
+    "source inode replacement before open refused"
+  ],
+  "remaining": [
+    "key management and backup CLI",
+    "staging restore and atomic new-root publication",
+    "member versus disaster revision/membership policy",
+    "rotation and real-process restore acceptance",
+    "scheduling/retention/remote copies and crash orphan cleanup"
+  ],
+  "harnessNotes": "Initial new test forms had unmatched parentheses; corrected before successful test runs. Failed logs retained.",
+  "logSha256": {
+    "backup-bundle-tests.log": "8daadd0352e092d5364a6e1f34a000fae3a139b0ada387e96795af8cc86d9db6",
+    "backup-bundle-tests-v2.log": "27f013d3c1933ca98449d2d02a96bf83ed8f9615975001dc8f9140a01515f1a2",
+    "backup-bundle-tests-final.log": "4b9d5a35c92217f2416571172e6545642d8dea983c95b760d1e72b47636c89ca",
+    "backup-bundle-tests-final-v2.log": "7a22b2e9270a47d2d58e69736bf8e8d11116584c547489a207f7ebfd86c72386",
+    "backup-bundle-production-probe.log": "7d43182a721ea901c2b7f9fcd17a0d7089aec8dece40f8f814964b4c60520685",
+    "backup-bundle-production-portable.log": "96270feb136aa571ecddb04b5318e7606d89c2fb165923b674b3f76a871cfc99"
+  }
+}
