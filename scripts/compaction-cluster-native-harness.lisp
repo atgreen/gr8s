@@ -172,6 +172,26 @@
                                 "heapAfterGcBytes" gr8s.server::*heap-after-gc*
                                 "heapLimitMiB" (/ (sb-ext:dynamic-space-size) (* 1024 1024))
                                 "mutualTls" (if (gr8s.raft.transport::raft-member-credentials member) t nil)))))))
+                   (let ((base (gr8s.store::store-generation-base root))
+                         (retired (merge-pathnames "metadata/retired-generations/" root))
+                         (generations 0) (trash 0) (records 0))
+                     (when (gr8s.store::store-generation-stat base)
+                       (gr8s.store::map-generation-directory-entries
+                        base (lambda (name)
+                               (cond ((gr8s.store::store-generation-id-p name) (incf generations))
+                                     ((uiop:string-prefix-p ".retired-" name) (incf trash))) t)))
+                     (when (gr8s.store::store-generation-stat retired)
+                       (gr8s.store::map-generation-directory-entries
+                        retired (lambda (name) (when (equal (pathname-type name) "json") (incf records)) t)))
+                     (setf (gethash "applicationGenerationCount" object) generations
+                           (gethash "retiredGenerationCount" object) records
+                           (gethash "generationTrashCount" object) trash))
+                   (bt:with-lock-held ((gr8s.ha::ha-control-plane-maintenance-lock ha))
+                     (setf (gethash "generationFilesReaped" object) (gr8s.ha::ha-control-plane-generation-reaped-files ha)
+                           (gethash "maintenanceError" object) (gr8s.ha::ha-control-plane-maintenance-error ha)
+                           (gethash "maintenanceWorkerUp" object)
+                           (if (and (gr8s.ha::ha-control-plane-maintenance-thread ha)
+                                    (bt:thread-alive-p (gr8s.ha::ha-control-plane-maintenance-thread ha))) t nil)))
                    (setf (gethash "blocked" object) (if (gr8s.store::store-access-blocked-p store) t nil))
                    (bt:with-lock-held ((gr8s.ha::ha-control-plane-compaction-lock ha))
                      (setf (gethash "checkpoints" object) (gr8s.ha::ha-control-plane-compaction-count ha)
@@ -273,6 +293,7 @@
                          (symbol-function 'gr8s.raft::raft-storage-replace-snapshot)
                          (lambda (&rest arguments)
                            (timed-storage-stage "replace-wal" (lambda () (apply original-replace-wal arguments)))))
+                   (gr8s.ha::start-ha-maintenance-worker ha)
                    (gr8s.ha::start-ha-compaction-worker ha)
                    (learner-native-write-json (merge-pathnames "ready.json" control) (gr8s::core-object "ready" t))
                    (loop

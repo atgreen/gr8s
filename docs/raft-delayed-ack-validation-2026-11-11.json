@@ -40,7 +40,7 @@
     "Current-term learner promotion and existing HA/mTLS replication and failover checks remain passing."
   ],
   "limits": [
-    "128-round native smoke passed; the separate 2048-round full workload is pending. This is an internal native harness, not production serve or VM acceptance.",
+    "128-round native smoke passed. Full2048 attempts failed from host temporary-storage quota and, separately, status observation timeout; full acceptance remains unproven. Internal harness, not production serve or VM acceptance.",
     "This invariant violation is confirmed; causality for the full-history final-convergence stall remains unproven.",
     "Automatic compaction remains opt-in; full ten-gap objective remains open."
   ],
@@ -134,5 +134,11 @@
     "resultJsonAvailable": false,
     "reason": "Host /tmp quota exceeded during compaction and final report write. Zero-byte result.json; full acceptance remains unproven.",
     "binarySha256": "8dfbfbebe180fd87df85e86d9cf1a4141385097b5fa326b62082c824c4db7a62"
+  },
+  "nativeFullStatusTimeout": {
+    "exitCode": 1,
+    "resultPath": "/home/green/.cache/gr8s-test-tmp/gr8s-compaction-cluster-native-7eg5sesm/result.json",
+    "summary": "Full workload remained unproven: status RPC observation timeout during churn, last complete sample1818rounds, all cleanup0.",
+    "failureRecord": "snapshot-history-status-timeout-2026-11-11.json"
   }
 }

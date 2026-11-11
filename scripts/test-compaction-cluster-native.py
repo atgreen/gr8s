@@ -31,6 +31,8 @@ def main():
     parser.add_argument("--binary", type=Path, default=Path("build/gr8s-compaction-cluster-acceptance"))
     parser.add_argument("--rounds", type=int, default=2048)
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--require-generation-reclamation", action="store_true",
+                        help="Require retired application generations to be reclaimed before cold restart")
     parser.add_argument("--require-stable-leadership", action="store_true",
                         help="Fail on any unforced term change during churn; restart elections remain allowed")
     parser.add_argument("--timeout", type=float, default=2400)
@@ -49,11 +51,23 @@ def main():
                   requireStableLeadership=args.require_stable_leadership,
                   leadershipStabilityAcceptance=False)
     result["asymmetricCaptureAcceptance"] = False
+    result["generationReclamationRequested"] = args.require_generation_reclamation
+    result["generationReclamationAcceptance"] = False
     started = time.monotonic()
     print(f"Evidence: {base}", flush=True)
 
     def states():
-        values = {node.name: node.rpc("status") for node in nodes}
+        values = {}
+        for node in nodes:
+            started_poll = time.monotonic()
+            try:
+                values[node.name] = node.rpc("status")
+            except Exception as error:
+                result["failedStatusPoll"] = dict(member=node.name,
+                                                  elapsedSeconds=time.monotonic() - started_poll,
+                                                  error=f"{type(error).__name__}: {error}",
+                                                  partialSamples=values)
+                raise
         for value in values.values():
             assert value["mutualTls"] and value["heapLimitMiB"] == 384, value
             assert not value["churnError"] and not value["compactionError"], value
@@ -220,6 +234,19 @@ def main():
                                  for value in values.values()) else None
 
         final = probe.await_value(converged, timeout=240)
+        if args.require_generation_reclamation:
+            def generations_reclaimed():
+                values = states()
+                result["lastReclamationSample"] = values
+                check_churn_leadership(values)
+                return values if (all(value["applicationGenerationCount"] <= 1 and
+                                      value["retiredGenerationCount"] == 0 and
+                                      value["generationTrashCount"] == 0 and
+                                      value["maintenanceWorkerUp"] and not value["maintenanceError"]
+                                      for value in values.values()) and
+                                  any(value["generationFilesReaped"] > 0 for value in values.values())) else None
+            final = probe.await_value(generations_reclaimed, timeout=120)
+            result["generationReclamationAcceptance"] = True
         result.update(beforeRestart=final, samples=samples)
         result["leadershipStabilityAcceptance"] = check_churn_leadership(final)
         expected_maps = final[current.name]["configMaps"]
