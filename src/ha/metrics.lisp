@@ -4,7 +4,7 @@
 
 (defun ha-metrics-text (hcp)
   "Copy local Raft/worker measurements without encoding commands or changing state."
-  (let ((member (ha-control-plane-member hcp)) (samples nil) (peers nil) (phases nil) (sections nil))
+  (let ((member (ha-control-plane-member hcp)) (samples nil) (peers nil) (phases nil) (sections nil) (receives nil))
     (bt:with-lock-held ((raft-member-lock member))
       (let* ((node (raft-member-node member))
              (last (gr8s.raft::raft-last-log-index node))
@@ -40,6 +40,11 @@
         (maphash
          (lambda (id link)
            (bt:with-lock-held ((gr8s.raft.transport::raft-peer-link-lock link))
+             (when (gr8s.raft.transport::raft-member-configured-peer-p member id)
+               (push (list id (gr8s.raft.transport::raft-peer-link-received-messages link)
+                           (when (eql (gr8s.raft:raft-node-current-term node)
+                                      (gr8s.raft.transport::raft-peer-link-last-receive-term link))
+                             (gr8s.raft.transport::raft-peer-link-last-receive-ticks link))) receives))
              (push (list id
                          (when (eq :leader (gr8s.raft:raft-node-role node))
                            (max 0 (- last (gethash id (gr8s.raft:raft-node-match-index node) 0))))
@@ -84,6 +89,21 @@
                                              (if (zerop column) (nth column row)
                                                  (/ (float (nth column row) 1d0)
                                                     internal-time-units-per-second)))))))
+      (gr8s.kubelet::write-prometheus-family
+       out "gr8s_raft_peer_received_messages_total"
+       "Recognized current-term messages from configured peers dispatched normally; link lifetime, not quorum health." "counter"
+       (loop for (id count ticks) in receives collect (list (list (cons "peer" id)) count)))
+      (gr8s.kubelet::write-prometheus-family
+       out "gr8s_raft_peer_receive_observed"
+       "Whether a configured peer has a normal recognized message receipt in the current local term." "gauge"
+       (loop for (id count ticks) in receives collect (list (list (cons "peer" id)) (if ticks 1 0))))
+      (gr8s.kubelet::write-prometheus-family
+       out "gr8s_raft_peer_last_receive_age_seconds"
+       "Monotonic age of last recognized current-term receipt; omitted before observation or after term change." "gauge"
+       (loop with now = (get-internal-real-time)
+             for (id count ticks) in receives when ticks
+               collect (list (list (cons "peer" id))
+                             (/ (float (max 0 (- now ticks)) 1d0) internal-time-units-per-second))))
       (gr8s.kubelet::write-prometheus-family
        out "gr8s_raft_peer_replication_lag_entries" "Leader's last log index minus peer acknowledged match index; leader only." "gauge"
        (loop for (id lag queued) in peers when lag collect (list (list (cons "peer" id)) lag)))

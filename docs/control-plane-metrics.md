@@ -132,7 +132,26 @@ locks, reads worker counters under the worker lock, and formats text after
 releasing those locks. Worker and Raft samples can represent slightly different
 instants. Comparing retained bytes with the configured budget helps identify
 write backpressure; sustained apply or peer replication lag needs investigation.
-Peer heartbeat freshness remains separate telemetry work under `podster-ucm.6`.
+Peer receipt freshness uses current configured members, including learners:
+
+| Metric | Meaning |
+|---|---|
+| `gr8s_raft_peer_received_messages_total{peer=...}` | Recognized current-term messages whose dispatch returned normally; counter for the physical link lifetime |
+| `gr8s_raft_peer_receive_observed{peer=...}` | One after such a receipt in the current local term; zero before observation or after a term change |
+| `gr8s_raft_peer_last_receive_age_seconds{peer=...}` | Monotonic age of the latest such receipt; omitted when the observation gauge is zero |
+
+The production Deliver handler authenticates the sender before dispatch. Stale
+terms, unconfigured peers, pre-vote traffic, unknown types and dispatch errors do
+not refresh these observations. A received current-term vote request may be
+denied and an AppendEntries request may fail its log-match check; both still
+show that the peer sent a message. This is receipt telemetry, not proof of a
+successful write, quorum reachability, application convergence or readiness.
+
+Counters and timestamps reset on process restart or physical link replacement.
+A retained old link produces no receipt series while its member is outside the
+current configuration. If the same link is reused after readmission, its counter
+and last current-term receipt can remain. No per-message or object labels are
+allocated. Only local monotonic time is used; remote wall clocks are irrelevant.
 
 ## State filesystem capacity
 

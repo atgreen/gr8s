@@ -154,3 +154,34 @@
                (is (equal (list new) (roots))))
           (setf (symbol-function 'gr8s.raft.transport::raft-link-stub) stub-original
                 (symbol-function 'gr8s.raft.transport::raft-link-send-snapshot) send-original))))))
+
+(test peer-receive-observation-follows-normal-current-term-dispatch
+  (let* ((node (gr8s::make-raft-node :id "local" :peers '("peer") :current-term 3
+                                   :send-fn (lambda (&rest args) (declare (ignore args)))))
+         (member (gr8s.raft.transport::make-raft-member :node node))
+         (link (gr8s.raft.transport::make-raft-peer-link :id "peer"))
+         (message (list :type :append-entries :term 3 :from "peer" :prev-log-index 0
+                        :prev-log-term 0 :entries nil :leader-commit 0)))
+    (setf (gethash "peer" (gr8s.raft.transport::raft-member-links member)) link)
+    (gr8s.raft.transport::raft-member-dispatch-message member message)
+    (is (= 1 (gr8s.raft.transport::raft-peer-link-received-messages link)))
+    (is (= 3 (gr8s.raft.transport::raft-peer-link-last-receive-term link)))
+    (is (integerp (gr8s.raft.transport::raft-peer-link-last-receive-ticks link)))
+    (let ((stale (copy-list message)))
+      (setf (getf stale :term) 2)
+      (gr8s.raft.transport::raft-member-dispatch-message member stale))
+    (signals error
+      (gr8s.raft.transport::raft-member-dispatch-message member '(:type :unknown :term 3 :from "peer")))
+    (is (= 1 (gr8s.raft.transport::raft-peer-link-received-messages link)))
+    ;; A retained physical link for a removed member must not keep producing
+    ;; observations. Learners remain current configured members.
+    (bt:with-lock-held ((gr8s::raft-member-lock member))
+      (gr8s.raft:raft-configure node '(("local" . :voter) ("peer" . :learner)))
+      (gr8s.raft.transport::raft-member-note-receive-unlocked member message)
+      (is (= 2 (gr8s.raft.transport::raft-peer-link-received-messages link)))
+      (gr8s.raft:raft-configure node '(("local" . :voter)))
+      (gr8s.raft.transport::raft-member-note-receive-unlocked member message)
+      (is (= 2 (gr8s.raft.transport::raft-peer-link-received-messages link)))
+      (gr8s.raft.transport::raft-member-note-receive-unlocked
+       member '(:type :append-entries :term 3 :from "unconfigured")))
+    (is (= 1 (hash-table-count (gr8s.raft.transport::raft-member-links member))))))

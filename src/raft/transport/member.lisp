@@ -114,6 +114,9 @@
   ;; Published under LOCK before dequeue: registry GC must see sender-owned
   ;; snapshots even while their source callback has not opened the artifact.
   (active-items '())
+  ;; Receipt telemetry is protected by LOCK; only current configured peers
+  ;; are observed, after normal protocol dispatch under the member mutex.
+  (received-messages 0) last-receive-ticks last-receive-term
   channel stub thread
   ;; Operation relay is synchronous and ordered per peer, independently of the
   ;; Raft replication outbox. A distinct HTTP/2 connection prevents a long exec
@@ -257,11 +260,41 @@ release it only after source lookup and delivery finish, including failures."
       (let ((check (raft-member-startup-check-fn member)))
         (when check (ignore-errors (funcall check member)))))))
 
+(defun raft-member-configured-peer-p (member id)
+  "Current configured remote member, including learners; not a retained old link."
+  (let ((node (raft-member-node member)))
+    (and (not (equal id (raft-node-id node)))
+         (if (plusp (hash-table-count (raft-node-roles node)))
+             (gethash id (raft-node-roles node))
+             (member id (raft-node-peers node) :test #'equal)))))
+
+(defun raft-member-note-receive-unlocked (member message)
+  "Observe configured-peer, current-term protocol receipt after normal dispatch.
+The production Deliver handler authenticates before calling dispatch. A normal
+return can still reject a vote/log match; receipt is not quorum or apply health."
+  (unless (sb-thread:holding-mutex-p (raft-member-lock member))
+    (error "Raft receive observation requires the member lock"))
+  (let* ((node (raft-member-node member)) (id (getf message :from))
+         (term (getf message :term))
+         (link (and (raft-member-configured-peer-p member id)
+                    (gethash id (raft-member-links member)))))
+    (when (and link (typep term '(integer 0 *))
+               (= term (raft-node-current-term node))
+               (member (getf message :type)
+                       '(:request-vote :request-vote-reply :append-entries :append-entries-reply
+                         :snapshot-chunk :install-snapshot-reply)))
+      (bt:with-lock-held ((raft-peer-link-lock link))
+        (incf (raft-peer-link-received-messages link))
+        (setf (raft-peer-link-last-receive-ticks link) (get-internal-real-time)
+              (raft-peer-link-last-receive-term link) term)))))
+
 (defun raft-member-dispatch-message-unlocked (member message)
-  (case (getf message :type)
-    (:snapshot-chunk (raft-member-receive-snapshot-chunk member message))
-    (:install-snapshot (error "Snapshots must use bounded chunk transport"))
-    (t (raft-handle-message (raft-member-node member) message))))
+  (multiple-value-prog1
+      (case (getf message :type)
+        (:snapshot-chunk (raft-member-receive-snapshot-chunk member message))
+        (:install-snapshot (error "Snapshots must use bounded chunk transport"))
+        (t (raft-handle-message (raft-member-node member) message)))
+    (raft-member-note-receive-unlocked member message)))
 
 (defun raft-member-dispatch-message (member message)
   "Acquire optional outer snapshot barriers BEFORE the member mutex.

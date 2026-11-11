@@ -86,6 +86,12 @@
                       (= (gr8s::raft-node-commit-index (gr8s::raft-member-node leader))
                          (gr8s::raft-node-commit-index (gr8s::raft-member-node follower))))
                     :timeout 15))
+               (is (poll-until
+                    (lambda () (search "gr8s_raft_peer_receive_observed{peer=\"cp2\"} 1"
+                                       (gr8s.ha::ha-metrics-text founder))) :timeout 10))
+               (is (poll-until
+                    (lambda () (search "gr8s_raft_peer_receive_observed{peer=\"cp1\"} 1"
+                                       (gr8s.ha::ha-metrics-text joiner))) :timeout 10))
                (is (= #o600 (logand #o777 (sb-posix:stat-mode
                                            (sb-posix:stat (namestring (gr8s::raft-ca-key-path root)))))))
                (is (equal (gr8s::cluster-pki-ca-fingerprint (member-raft-pki founder))
