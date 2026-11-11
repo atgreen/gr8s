@@ -1,0 +1,385 @@
+{
+  "implementationCommit": "0698a7d",
+  "passed": true,
+  "nativeFull": {
+    "passed": true,
+    "evidence": "/home/green/.cache/gr8s-test-tmp/gr8s-compaction-cluster-native-m5vhwsnh",
+    "binarySha256": "39df1767ae984dbc2b72d8baf68a5db2389dd0c3b8f449e8262568617f9a077c",
+    "nativeHarness": true,
+    "productionServe": false,
+    "vmAcceptance": false,
+    "mutualTls": true,
+    "processes": 3,
+    "heapLimitMiB": 384,
+    "rounds": 2048,
+    "payloadBytes": 134217728,
+    "historyByteBudget": 100663296,
+    "fullChurnAcceptance": true,
+    "leadershipStabilityAcceptance": true,
+    "asymmetricCaptureAcceptance": true,
+    "generationReclamationAcceptance": true,
+    "artifactReclamationAcceptance": true,
+    "coldArtifactReclamationAcceptance": true,
+    "archivedPrefixReplayAcceptance": true,
+    "diskCatchupAcceptance": true,
+    "catchupHistoryContinuous": true,
+    "historyPreservedAcrossRestart": true,
+    "identitiesPreserved": true,
+    "stopExitCodes": {
+      "cp-a": 0,
+      "cp-b": 0,
+      "cp-c": 0
+    },
+    "cleanupExitCodes": {
+      "cp-a": 0,
+      "cp-b": 0,
+      "cp-c": 0
+    },
+    "elapsedSeconds": 1282.129044199828,
+    "statusBusyPolls": 624
+  },
+  "resultSha256": "df818e6661e1052b2b53200e658e155dedfecde58c3d619b5adf1060b1f08234",
+  "sourceSha256": {
+    "src/raft/core.lisp": "fe4a0b178ee2a261dc98c083910e552027d4bcb5de5b0f366ac9bb2f1eb090e9",
+    "src/raft/transport/snapshot.lisp": "1e23b07e6b23e92b957590a8caa691b3024b93af43a6e4118b03f3bca0aeacba",
+    "src/ha/compaction.lisp": "931d16ff6741b83a5d50bc9cca0556997590031d8e9fe1cc1c2d6f11837210bc",
+    "src/ha/maintenance.lisp": "1a8f6dffcbf7d301d623cf799b013abb2770a44ec6d51f0a89797dce1ebce408",
+    "src/resources/store-snapshot-registry.lisp": "2ab2af6ace811607f137341b3f69bb3eb2f789de98e8fd8d32472159db864855",
+    "scripts/compaction-cluster-native-harness.lisp": "ab92a769438196bbd5deb7de5e4491e0230128f16643773a0faf25b610c6fb58",
+    "scripts/test-compaction-cluster-native.py": "c679dfb5fa2ab486402b0410687c67d0eaad40ce38ade6fd63dd640c601bea0e"
+  },
+  "postShutdownDisk": {
+    "cp-a": {
+      "application-generations": {
+        "files": 7,
+        "apparentBytes": 131108632,
+        "allocatedBytes": 131133440
+      },
+      "snapshot-artifacts": {
+        "files": 2,
+        "apparentBytes": 130561950,
+        "allocatedBytes": 130568192
+      },
+      "metadata/retired-generations": {
+        "files": 0,
+        "apparentBytes": 0,
+        "allocatedBytes": 0
+      },
+      "raft": {
+        "files": 3,
+        "apparentBytes": 1393519,
+        "allocatedBytes": 1400832
+      }
+    },
+    "cp-b": {
+      "application-generations": {
+        "files": 7,
+        "apparentBytes": 131241125,
+        "allocatedBytes": 131264512
+      },
+      "snapshot-artifacts": {
+        "files": 2,
+        "apparentBytes": 130430161,
+        "allocatedBytes": 130437120
+      },
+      "metadata/retired-generations": {
+        "files": 0,
+        "apparentBytes": 0,
+        "allocatedBytes": 0
+      },
+      "raft": {
+        "files": 3,
+        "apparentBytes": 1857462,
+        "allocatedBytes": 1863680
+      }
+    },
+    "cp-c": {
+      "application-generations": {
+        "files": 7,
+        "apparentBytes": 130844336,
+        "allocatedBytes": 130867200
+      },
+      "snapshot-artifacts": {
+        "files": 2,
+        "apparentBytes": 130561950,
+        "allocatedBytes": 130568192
+      },
+      "metadata/retired-generations": {
+        "files": 0,
+        "apparentBytes": 0,
+        "allocatedBytes": 0
+      },
+      "raft": {
+        "files": 3,
+        "apparentBytes": 863119,
+        "allocatedBytes": 868352
+      }
+    }
+  },
+  "limitations": [
+    "Internal loopback mTLS native harness; production serve and VM/runtime acceptance are separate gates.",
+    "Passing this run proves convergence with the combined fixes; it does not isolate a unique cause of each preserved earlier failure."
+  ],
+  "beforeRestart": {
+    "cp-a": {
+      "term": 1,
+      "commit": 4179,
+      "applied": 4179,
+      "snapshot": 4103,
+      "historyEstimatedBytes": 100656464,
+      "heapAfterGcBytes": 221006400,
+      "heapLimitMiB": 384,
+      "applicationGenerationCount": 1,
+      "retiredGenerationCount": 0,
+      "generationTrashCount": 0,
+      "artifactCanonicalCount": 2,
+      "artifactProtectedCount": 2,
+      "artifactReclaimableCount": 0,
+      "artifactTrashCount": 0,
+      "artifactFilesReaped": 84,
+      "generationFilesReaped": 0,
+      "maintenanceError": false,
+      "artifactMaintenanceError": false,
+      "compactionError": false,
+      "peerProgress": [
+        {
+          "peer": "cp-b",
+          "nextIndex": 4180,
+          "matchIndex": 4179,
+          "snapshotRequired": false,
+          "senderAlive": true,
+          "queuedCount": 0,
+          "queuedTypes": [],
+          "activeSnapshots": []
+        },
+        {
+          "peer": "cp-c",
+          "nextIndex": 4180,
+          "matchIndex": 4179,
+          "snapshotRequired": false,
+          "senderAlive": true,
+          "queuedCount": 0,
+          "queuedTypes": [],
+          "activeSnapshots": []
+        }
+      ]
+    },
+    "cp-b": {
+      "term": 1,
+      "commit": 4179,
+      "applied": 4179,
+      "snapshot": 4103,
+      "historyEstimatedBytes": 100656464,
+      "heapAfterGcBytes": 235790112,
+      "heapLimitMiB": 384,
+      "applicationGenerationCount": 1,
+      "retiredGenerationCount": 0,
+      "generationTrashCount": 0,
+      "artifactCanonicalCount": 2,
+      "artifactProtectedCount": 3,
+      "artifactReclaimableCount": 0,
+      "artifactTrashCount": 0,
+      "artifactFilesReaped": 90,
+      "generationFilesReaped": 12,
+      "maintenanceError": false,
+      "artifactMaintenanceError": false,
+      "compactionError": false,
+      "peerProgress": [
+        {
+          "peer": "cp-a",
+          "nextIndex": 0,
+          "matchIndex": 0,
+          "snapshotRequired": false,
+          "senderAlive": true,
+          "queuedCount": 0,
+          "queuedTypes": [],
+          "activeSnapshots": []
+        },
+        {
+          "peer": "cp-c",
+          "nextIndex": 0,
+          "matchIndex": 0,
+          "snapshotRequired": false,
+          "senderAlive": true,
+          "queuedCount": 0,
+          "queuedTypes": [],
+          "activeSnapshots": []
+        }
+      ]
+    },
+    "cp-c": {
+      "term": 1,
+      "commit": 4179,
+      "applied": 4179,
+      "snapshot": 4117,
+      "historyEstimatedBytes": 100656464,
+      "heapAfterGcBytes": 215055936,
+      "heapLimitMiB": 384,
+      "applicationGenerationCount": 1,
+      "retiredGenerationCount": 0,
+      "generationTrashCount": 0,
+      "artifactCanonicalCount": 2,
+      "artifactProtectedCount": 2,
+      "artifactReclaimableCount": 0,
+      "artifactTrashCount": 0,
+      "artifactFilesReaped": 92,
+      "generationFilesReaped": 5,
+      "maintenanceError": false,
+      "artifactMaintenanceError": false,
+      "compactionError": false,
+      "peerProgress": [
+        {
+          "peer": "cp-a",
+          "nextIndex": 0,
+          "matchIndex": 0,
+          "snapshotRequired": false,
+          "senderAlive": true,
+          "queuedCount": 0,
+          "queuedTypes": [],
+          "activeSnapshots": []
+        },
+        {
+          "peer": "cp-b",
+          "nextIndex": 0,
+          "matchIndex": 0,
+          "snapshotRequired": false,
+          "senderAlive": true,
+          "queuedCount": 0,
+          "queuedTypes": [],
+          "activeSnapshots": []
+        }
+      ]
+    }
+  },
+  "afterRestart": {
+    "cp-a": {
+      "term": 3,
+      "commit": 4180,
+      "applied": 4180,
+      "snapshot": 4158,
+      "historyEstimatedBytes": 100656464,
+      "heapAfterGcBytes": 138616992,
+      "heapLimitMiB": 384,
+      "applicationGenerationCount": 1,
+      "retiredGenerationCount": 0,
+      "generationTrashCount": 0,
+      "artifactCanonicalCount": 2,
+      "artifactProtectedCount": 2,
+      "artifactReclaimableCount": 0,
+      "artifactTrashCount": 0,
+      "artifactFilesReaped": 1,
+      "generationFilesReaped": 6,
+      "maintenanceError": false,
+      "artifactMaintenanceError": false,
+      "compactionError": false,
+      "peerProgress": [
+        {
+          "peer": "cp-b",
+          "nextIndex": 4181,
+          "matchIndex": 4180,
+          "snapshotRequired": false,
+          "senderAlive": true,
+          "queuedCount": 0,
+          "queuedTypes": [],
+          "activeSnapshots": []
+        },
+        {
+          "peer": "cp-c",
+          "nextIndex": 4181,
+          "matchIndex": 4180,
+          "snapshotRequired": false,
+          "senderAlive": true,
+          "queuedCount": 0,
+          "queuedTypes": [],
+          "activeSnapshots": []
+        }
+      ]
+    },
+    "cp-b": {
+      "term": 3,
+      "commit": 4180,
+      "applied": 4180,
+      "snapshot": 4151,
+      "historyEstimatedBytes": 100656464,
+      "heapAfterGcBytes": 140707632,
+      "heapLimitMiB": 384,
+      "applicationGenerationCount": 1,
+      "retiredGenerationCount": 0,
+      "generationTrashCount": 0,
+      "artifactCanonicalCount": 2,
+      "artifactProtectedCount": 2,
+      "artifactReclaimableCount": 0,
+      "artifactTrashCount": 0,
+      "artifactFilesReaped": 0,
+      "generationFilesReaped": 6,
+      "maintenanceError": false,
+      "artifactMaintenanceError": false,
+      "compactionError": false,
+      "peerProgress": [
+        {
+          "peer": "cp-a",
+          "nextIndex": 0,
+          "matchIndex": 0,
+          "snapshotRequired": false,
+          "senderAlive": true,
+          "queuedCount": 0,
+          "queuedTypes": [],
+          "activeSnapshots": []
+        },
+        {
+          "peer": "cp-c",
+          "nextIndex": 0,
+          "matchIndex": 0,
+          "snapshotRequired": false,
+          "senderAlive": true,
+          "queuedCount": 0,
+          "queuedTypes": [],
+          "activeSnapshots": []
+        }
+      ]
+    },
+    "cp-c": {
+      "term": 3,
+      "commit": 4180,
+      "applied": 4180,
+      "snapshot": 4166,
+      "historyEstimatedBytes": 100656464,
+      "heapAfterGcBytes": 138992592,
+      "heapLimitMiB": 384,
+      "applicationGenerationCount": 1,
+      "retiredGenerationCount": 0,
+      "generationTrashCount": 0,
+      "artifactCanonicalCount": 2,
+      "artifactProtectedCount": 2,
+      "artifactReclaimableCount": 0,
+      "artifactTrashCount": 0,
+      "artifactFilesReaped": 1,
+      "generationFilesReaped": 6,
+      "maintenanceError": false,
+      "artifactMaintenanceError": false,
+      "compactionError": false,
+      "peerProgress": [
+        {
+          "peer": "cp-a",
+          "nextIndex": 0,
+          "matchIndex": 0,
+          "snapshotRequired": false,
+          "senderAlive": true,
+          "queuedCount": 0,
+          "queuedTypes": [],
+          "activeSnapshots": []
+        },
+        {
+          "peer": "cp-b",
+          "nextIndex": 0,
+          "matchIndex": 0,
+          "snapshotRequired": false,
+          "senderAlive": true,
+          "queuedCount": 0,
+          "queuedTypes": [],
+          "activeSnapshots": []
+        }
+      ]
+    }
+  }
+}

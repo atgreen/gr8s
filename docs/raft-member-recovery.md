@@ -631,6 +631,17 @@ to once per monotonic second; successful progress permits the next batch.
 These checks preserve the existing retention limits and authenticated Raft
 reply validation. They do not change the persisted recovery format.
 
+The [full recovery validation](capacity-recovery-full-validation-2026-11-11.json)
+completed 2,048 churn rounds using three 384 MiB native processes with mTLS.
+All members retained the full 96 MiB history window, converged at index 4,179
+without an unforced term change, and recovered after a cold restart with
+history, identities and current data preserved. Final warm and cold samples
+show one application generation per member, two canonical artifacts and no
+reclaimable artifacts or trash. The delayed receiver reclaimed obsolete
+generations during the run. This is internal native acceptance; production
+`serve` and VM/runtime acceptance remain separate checks. Earlier failed runs
+remain preserved as diagnostic evidence.
+
 For canonical checksummed WALs, cache construction copies the selected durable
 entry frames through a fixed 64 KiB buffer. A private index holds only terms and
 byte offsets for current WAL entries; it never retains command payloads. Durable

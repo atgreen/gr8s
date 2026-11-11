@@ -184,6 +184,16 @@ conflicting one, persists the replacement before restoring application state,
 and acknowledges only after restore succeeds. Failed restore blocks voting and
 the logical clock until a retry succeeds; restore callbacks must be retryable.
 
+Capacity recovery tracks the refused log boundary rather than a moving leader
+checkpoint. Bounded cached-log replay uses normal follower admission checks;
+an active snapshot is retained until acknowledged progress covers it. The
+[full native recovery validation](capacity-recovery-full-validation-2026-11-11.json)
+passed 2,048 churn rounds with three 384 MiB mTLS processes, the full 96 MiB
+history window, final convergence, cold recovery, and obsolete-generation and
+artifact reclamation. This internal harness does not establish VM/runtime
+acceptance. See [member recovery](raft-member-recovery.md) for the protocol and
+its validation limits.
+
 Transfer uses ordered chunks containing at most 64 KiB of file data, authenticated
 by the existing member mTLS connection. SHA-256 and header checks precede install.
 One private partial file is retained per member; retries replace it and abandoned
