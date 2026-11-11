@@ -1,0 +1,31 @@
+{
+  "date": "2026-11-11",
+  "candidateCommit": "5ad4f00",
+  "runnerPassed": true,
+  "semanticAcceptance": false,
+  "scope": "128-round internal native HCP smoke; does not prove watch-cursor safety across member-local epochs",
+  "binarySha256": "ec14b4b3ece4a1a2cf760658f711f943095e0430e5c8715ae4aeb98aacc25579",
+  "elapsedSeconds": 128.96304305107333,
+  "rounds": 128,
+  "heapLimitMiB": 384,
+  "catchupHistoryContinuous": true,
+  "leadershipStabilityAcceptance": true,
+  "identitiesPreserved": true,
+  "stopExitCodes": {
+    "cp-a": 0,
+    "cp-b": 0,
+    "cp-c": 0
+  },
+  "cleanupExitCodes": {
+    "cp-a": 0,
+    "cp-b": 0,
+    "cp-c": 0
+  },
+  "warmHistoryBytes": {
+    "cp-a": 13028864,
+    "cp-b": 13028864,
+    "cp-c": 13028864
+  },
+  "reviewFinding": "install-core-state-delta rebases commands onto each replicas local committed revision. Same Raft log does not prove identical public revision numbering. Candidate resource-history-continuity policy relaxes the watch epoch fence without establishing that numbering lineage; do not merge it.",
+  "nextAction": "Preserve snapshot history by translating its revision range into a fresh local epoch, retaining the default generic restore fences. Remove candidate continuity exception, add cursor/epoch regression, rerun unchanged native acceptance."
+}
