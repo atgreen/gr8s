@@ -604,3 +604,191 @@
         (when (open-stream-p (usocket:socket-stream socket))
           (ignore-errors (usocket:socket-shutdown socket :io)))
         (when writer (bt:join-thread writer))))))
+
+(test accepted-worker-raw-close-cannot-bypass-a-deferred-writer-close
+  (with-http2-close-connection (connection socket peer listener)
+    (let ((returned (bt:make-semaphore)) (closer nil) (failure nil))
+      (setf (ag-http2:connection-state connection) :open)
+      (unwind-protect
+           (progn
+             (bt2:with-lock-held ((ag-http2::connection-write-lock connection))
+               (write-byte 42 (usocket:socket-stream socket))
+               (setf closer
+                     (bt:make-thread
+                      (lambda ()
+                        (unwind-protect
+                             (handler-case (ag-http2:connection-close connection)
+                               (error (condition) (setf failure condition)))
+                          (bt:signal-semaphore returned)))))
+               (is (bt:wait-on-semaphore returned :timeout 3))
+               (is (null failure))
+               (is (open-stream-p (usocket:socket-stream socket)))
+               ;; This is the accepted worker's outer unwind cleanup after
+               ;; SERVER-HANDLE-CONNECTION returned from its bounded close.
+               (usocket:socket-close socket)
+               (is (open-stream-p (usocket:socket-stream socket))))
+             (when closer (bt:join-thread closer))
+             (is (wait-until (lambda () (not (open-stream-p (usocket:socket-stream socket)))) :timeout 3)))
+        (when closer (bt:join-thread closer))))))
+
+(test close-preserves-an-active-frame-readers-input-buffer
+  (with-http2-close-connection (connection socket peer listener)
+    (let ((entered (bt:make-semaphore)) (release (bt:make-semaphore))
+          (reader nil) (failure nil) (held-input nil)
+          (read-frame (symbol-function 'ag-http2:read-frame)))
+      (setf (ag-http2:connection-state connection) :open)
+      (write-byte 42 (usocket:socket-stream peer))
+      (force-output (usocket:socket-stream peer))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'ag-http2:read-frame)
+                   (lambda (stream &optional limit)
+                     (declare (ignore limit))
+                     ;; Own a real fd-stream input buffer across a suspension,
+                     ;; as a partial frame read can do while waiting for bytes.
+                     (read-byte stream)
+                     (setf held-input (sb-impl::fd-stream-ibuf stream))
+                     (bt:signal-semaphore entered)
+                     (unless (bt:wait-on-semaphore release :timeout 10)
+                       (error "Frame reader was not released"))
+                     nil)
+                   reader (bt:make-thread
+                           (lambda ()
+                             (handler-case (ag-http2:connection-read-frame connection)
+                               (error (condition) (setf failure condition))))))
+             (is (bt:wait-on-semaphore entered :timeout 3))
+             (is (not (null held-input)))
+             (is (null failure))
+             (ag-http2:connection-close connection)
+             (is (open-stream-p (usocket:socket-stream socket)))
+             (is (eq held-input (sb-impl::fd-stream-ibuf (usocket:socket-stream socket))))
+             (bt:signal-semaphore release)
+             (bt:join-thread reader)
+             (setf reader nil)
+             (is (null failure))
+             (is (wait-until (lambda () (not (open-stream-p (usocket:socket-stream socket)))) :timeout 3)))
+        (bt:signal-semaphore release)
+        (when reader (bt:join-thread reader))
+        (setf (symbol-function 'ag-http2:read-frame) read-frame)))))
+
+(test close-ownership-rejects-late-readers-before-public-state-closes
+  (with-http2-close-connection (connection socket peer listener)
+    (let ((claimed (bt:make-semaphore)) (release (bt:make-semaphore))
+          (closer nil) (failure nil) (called nil)
+          (read-frame (symbol-function 'ag-http2:read-frame)))
+      (setf (ag-http2:connection-state connection) :open)
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'ag-http2:read-frame)
+                   (lambda (&rest args) (declare (ignore args)) (setf called t) nil)
+                   closer
+                   (bt:make-thread
+                    (lambda ()
+                      (let ((gr8s.protocol::*http2-connection-close-body*
+                              (lambda (&rest args)
+                                (declare (ignore args))
+                                (bt:signal-semaphore claimed)
+                                (bt:wait-on-semaphore release :timeout 10))))
+                        (handler-case (ag-http2:connection-close connection)
+                          (error (condition) (setf failure condition)))))))
+             (is (bt:wait-on-semaphore claimed :timeout 3))
+             (is (eq :open (ag-http2:connection-state connection)))
+             (signals end-of-file (ag-http2:connection-read-frame connection))
+             (is-false called)
+             (bt:signal-semaphore release)
+             (bt:join-thread closer)
+             (setf closer nil)
+             (is (null failure))
+             (is (eq :closed (ag-http2:connection-state connection))))
+        (bt:signal-semaphore release)
+        (when closer (bt:join-thread closer))
+        (setf (symbol-function 'ag-http2:read-frame) read-frame)))))
+
+(test interrupted-frame-reader-releases-input-ownership
+  (with-http2-close-connection (connection socket peer listener)
+    (let ((entered (bt:make-semaphore)) (release (bt:make-semaphore))
+          (reader nil) (cancelled nil) (failure nil)
+          (read-frame (symbol-function 'ag-http2:read-frame)))
+      (setf (ag-http2:connection-state connection) :open)
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'ag-http2:read-frame)
+                   (lambda (&rest args)
+                     (declare (ignore args))
+                     (bt:signal-semaphore entered)
+                     (bt:wait-on-semaphore release :timeout 10)
+                     nil)
+                   reader
+                   (bt:make-thread
+                    (lambda ()
+                      (handler-case (ag-http2:connection-read-frame connection)
+                        (http2-close-cancelled () (setf cancelled t))
+                        (error (condition) (setf failure condition))))))
+             (is (bt:wait-on-semaphore entered :timeout 3))
+             (sb-thread:interrupt-thread reader (lambda () (error 'http2-close-cancelled)))
+             (bt:join-thread reader)
+             (setf reader nil)
+             (is-true cancelled)
+             (is (null failure))
+             (ag-http2:connection-close connection)
+             (is-false (open-stream-p (usocket:socket-stream socket))))
+        (bt:signal-semaphore release)
+        (when reader (bt:join-thread reader))
+        (setf (symbol-function 'ag-http2:read-frame) read-frame)))))
+
+(test handshake-rundown-preserves-buffers-and-cannot-reopen-a-closed-connection
+  (dolist (server-p '(nil t))
+    (with-http2-close-connection (connection socket peer listener)
+      (let ((entered (bt:make-semaphore)) (release (bt:make-semaphore))
+            (closed (bt:make-semaphore)) (handshake nil) (closer nil)
+            (read-failure nil) (close-failure nil))
+        (setf (ag-http2:connection-state connection) :new)
+        (unwind-protect
+             (progn
+               (setf handshake
+                     (bt:make-thread
+                      (lambda ()
+                        (let* ((body (lambda (incoming)
+                                       (write-byte 42 (ag-http2::connection-stream incoming))
+                                       (bt:signal-semaphore entered)
+                                       (bt:wait-on-semaphore release :timeout 10)
+                                       ;; Both upstream handshakes mark OPEN last.
+                                       (setf (ag-http2:connection-state incoming) :open)))
+                               (gr8s.protocol::*upstream-http2-connection-handshake* body)
+                               (gr8s.protocol::*upstream-http2-server-handshake* body))
+                          (handler-case
+                              (if server-p (ag-http2:server-connection-handshake connection)
+                                  (ag-http2::connection-handshake connection))
+                            (error (condition) (setf read-failure condition)))))))
+               (is (bt:wait-on-semaphore entered :timeout 3))
+               (setf closer
+                     (bt:make-thread
+                      (lambda ()
+                        (unwind-protect
+                             (handler-case (ag-http2:connection-close connection)
+                               (error (condition) (setf close-failure condition)))
+                          (bt:signal-semaphore closed)))))
+               (is (bt:wait-on-semaphore closed :timeout 3))
+               (is (null close-failure))
+               (is (open-stream-p (usocket:socket-stream socket)))
+               (usocket:socket-close socket)
+               (is (open-stream-p (usocket:socket-stream socket)))
+               (bt:signal-semaphore release)
+               (bt:join-thread handshake)
+               (setf handshake nil)
+               (is (null read-failure))
+               (is (eq :closed (ag-http2:connection-state connection)))
+               (is (wait-until (lambda () (not (open-stream-p (usocket:socket-stream socket)))) :timeout 3)))
+          (bt:signal-semaphore release)
+          (when handshake (bt:join-thread handshake))
+          (when closer (bt:join-thread closer)))))))
+
+(test http2-lifetime-hooks-preserve-unrelated-sockets-and-partial-initialization
+  (let ((partial (make-instance 'ag-http2:http2-connection :client-p t)))
+    (is (typep partial 'ag-http2:http2-connection))
+    (is-false (slot-boundp partial 'ag-http2::socket)))
+  (with-http2-close-connection (connection socket peer listener)
+    ;; PEER has no HTTP/2 connection wrapper, so raw close stays immediate.
+    (usocket:socket-close peer)
+    (is-false (open-stream-p (usocket:socket-stream peer)))
+    (is (open-stream-p (usocket:socket-stream socket)))))
