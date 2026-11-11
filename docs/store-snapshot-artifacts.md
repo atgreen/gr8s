@@ -495,6 +495,12 @@ validates, materializes and reloads the store. Verify reopens the persisted
 selected generation and compares each metainfo's size and SHA-256. The probe
 preserves its state and artifact for inspection.
 
+The [chunked metainfo validation](tracker-metainfo-chunks-validation-2026-11-11.json)
+records the parser-limit baseline, publication allocation failure, corrected
+capture/reload and fresh-process verification, and the restore integration
+checks. Four 16 MiB metainfo payloads fit the probe's unchanged 384 MiB heap;
+this is source-loaded SBCL validation, distinct from production CLI and VM tests.
+
 Established watches cooperate with the access gate. When draining begins, Pod,
 Node and durable-resource watches emit a Kubernetes `ERROR` event with status
 `410 Expired`, close their streams, and release their request leases. Clients

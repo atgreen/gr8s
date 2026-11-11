@@ -1,0 +1,105 @@
+{
+  "passed": true,
+  "implementationCommit": "888e129c79f9a78aebec38dadf0ad2f03e2c23ac",
+  "issues": [
+    "podster-ucm.11.3.3.10",
+    "podster-ucm.11.3.3.10.1"
+  ],
+  "baseline": {
+    "productCommit": "649abee",
+    "checks": 2,
+    "passed": 1,
+    "failed": 1,
+    "expectedError": "JSON-PARSE-LIMIT-ERROR: Maximum string length exceeded. Limit2097152."
+  },
+  "affectedChecks": 150,
+  "priorIntegrationChecks": 1321,
+  "finalIntegrationPending": false,
+  "sourceSha256": {
+    "gr8s.asd": "bfe41be6c5f55b7c9d64e42a72722685deba2a4f1af0610ff025385ea55007fd",
+    "src/image-distribution/metainfo-stream.lisp": "ed3223625e9afbafea17767e5823999a9017ade3e0651c2efd42856015176b52",
+    "src/image-distribution/tracker.lisp": "4993547714b04fcd9fc43fd41c87155580a13f2ffdec67e41e3c8a61dbff7de0",
+    "src/resources/tracker-metainfo-stream.lisp": "873202a76fb8fa024b03c28261aa928849bfa8da84e5d750967c7dd22044bc5e",
+    "src/resources/store-image-tracker.lisp": "ebc4c5bd8975d12acdc8eaa0b6f4963d0d3b5d122c25ca1d4887117c99c7b699",
+    "src/resources/store-snapshot-index.lisp": "8e82190b39e10e1746cc5a2be3ffd04ca1cf002cae0c94c965a80e5f07e4d897",
+    "tests/store-image-tracker-snapshot-test.lisp": "802b008f6cebb190ab3d217959565b2085fd42597c4e6662dbbb8697a28e3cdd",
+    "scripts/test-tracker-metainfo-memory.lisp": "6752050a9673a71995cc328afc567254f107fe570fd49821eaa9162c3fdea840"
+  },
+  "logSha256": {
+    "tracker-metainfo-old-product-baseline.log": "cff0e67a8ab49a0250e09e4048d0ae50f4444da9b9793e6107d5b01a9e0193e6",
+    "tracker-metainfo-chunks-focused-close-fixed.log": "67e6d23ccd601434249c5139c699d832f6011419be87cbd486607e3ce4b205fe",
+    "tracker-publication-affected.log": "b35a6373951f035a636da0ffc9b2cb90ac6ff7ed1f77d8eccfbbb55a158e9ff7",
+    "tracker-metainfo-memory-capture-fixed.log": "05fcb251a687625c09ea83f157b8b1058bf3a69b57115d9d89afce735c29bec8",
+    "tracker-metainfo-memory-bounded-capture.log": "90fc7db980bde985a66b2fc9af61847b1f65b3ddda68a49a7720972af9f60cf8",
+    "tracker-metainfo-memory-bounded-verify.log": "cdb39a852d0d6157b244dcd30c8c3ef7e41d4b653ea3e3eaad25fb172f96035e",
+    "tracker-metainfo-publication-final-integration.log": "d4c136f5cc57490d4d474854b4640ae6bc11457418b78591e64bb94b9b4213f2"
+  },
+  "memory": {
+    "evidence": "/home/green/.cache/gr8s-test-tmp/tracker-metainfo-memory-bounded-publication",
+    "heapLimitMiB": 384,
+    "cachedFasls": true,
+    "productionServe": false,
+    "nativeStandaloneBinary": false,
+    "fixtureSwarms": 4,
+    "fixturePaddingBytes": 67108864,
+    "actualMetainfoBytes": 67110188,
+    "inventory": [
+      {
+        "digest": "sha256:084fed08b978af4d7d196a7446a86b58009e636b611db16211b65a9aadff29c5",
+        "bytes": 16777547,
+        "sha256": "800a15db4b7627cc57ad0a5bc3714ffdf5ee513bfe389a8a2698f3450bcc88a1"
+      },
+      {
+        "digest": "sha256:4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a",
+        "bytes": 16777547,
+        "sha256": "d2514d86e4456eed95a74fd407d5653817fd32e887cbc7af7281291e2278a7b3"
+      },
+      {
+        "digest": "sha256:6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+        "bytes": 16777547,
+        "sha256": "09a1b0f722546cc13cf2ceb00d07b3df7cd1b7f271ab9ba6fd706431d24130d3"
+      },
+      {
+        "digest": "sha256:dbc1b4c900ffe48d575b5da5c638040125f65db0fe3e24494b76ea986457d986",
+        "bytes": 16777547,
+        "sha256": "d5a745c07e28f12de8fd5389bc00aa453c685276edcf53063b5f3b1b84d750cd"
+      }
+    ],
+    "captureReloadHeapAfterGcBytes": 141974272,
+    "freshProcessVerifyHeapAfterGcBytes": 141847456,
+    "artifactBytes": 89684331,
+    "artifactSha256": "ffd356956268139ff9872b65803705a7f7cf3b8ac55f0ed1fccc231c5af0e158",
+    "maxRecordBytes": 65684,
+    "chunkRecords": 1368,
+    "chunkedSwarmHeaders": 4,
+    "maxChunkBase64Characters": 65536,
+    "captureExitCode": 0,
+    "verifyExitCode": 0
+  },
+  "setupFailure": {
+    "evidence": "/home/green/.cache/gr8s-test-tmp/tracker-metainfo-memory-1e53baf",
+    "phase": "Second fixture swarm publication; capture not reached",
+    "heapExhaustionReproduced": true,
+    "fixtureDataAndHeapChangedForRetry": false,
+    "allocationFix": "Validate one owned copy through a zero-copy vector stream; no whole-metainfo decode/re-encode."
+  },
+  "limits": [
+    "Heap-after-GC is not peak usage. The384MiB hard limit applies throughout each separate process; native memory and RSS are outside it.",
+    "Capture probe is a source-loaded SBCL process with cached FASLs, not standard production serve or VM/runtime acceptance.",
+    "Application raw metainfo and the publication-owned copy still require heap; fixed-buffer validation does not eliminate live data.",
+    "Chunked snapshots require compatible readers and Linux anonymous-file support on the source filesystem."
+  ],
+  "finalIntegrationChecks": 1321,
+  "totalChecks": 1471,
+  "integrationSuites": {
+    "store-snapshot": 134,
+    "store-snapshot-index": 28,
+    "store-snapshot-materialize": 90,
+    "store-application-reload": 169,
+    "store-member-restore": 177,
+    "store-snapshot-registry": 150,
+    "ha-control-plane": 255,
+    "raft-snapshot": 213,
+    "raft-tls": 105
+  }
+}
