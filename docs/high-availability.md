@@ -194,6 +194,13 @@ artifact reclamation. This internal harness does not establish VM/runtime
 acceptance. See [member recovery](raft-member-recovery.md) for the protocol and
 its validation limits.
 
+The [production CLI recovery validation](production-recovery-current-validation-2026-11-11.json)
+also passed 2,048 churn rounds with one voter offline, followed by catch-up,
+leader loss and rejoin, full cold restart, witness restart and quorum writes.
+It preserved member identities and exact ConfigMap names, UIDs and contents.
+This uses the standard native `serve` and `witness` commands with a fake workload
+runtime and disabled agents; container, BPF and VM acceptance remain separate.
+
 Transfer uses ordered chunks containing at most 64 KiB of file data, authenticated
 by the existing member mTLS connection. SHA-256 and header checks precede install.
 One private partial file is retained per member; retries replace it and abandoned
