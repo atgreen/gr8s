@@ -96,23 +96,28 @@ application ingress/writer barriers. This function neither persists nor adopts R
       t)))
 
 (defun make-store-raft-apply-function (store)
-  "Use the same deterministic application dispatcher for new and recovered members."
+  "Use the same deterministic application dispatcher for new and recovered members.
+A failing install surfaces as RAFT-APPLY-ERROR so background apply drivers can
+leave the entry un-applied and retry instead of crashing their thread."
   (lambda (command)
-    (when (consp command)
-      (case (car command)
-        (:store-recovery-barrier :recovered)
-        (:core-state (prog1 (gr8s.resources::install-core-state-blob store (second command))
-                       (gr8s.resources::reconcile-pki-authority store)))
-        (:core-delta (prog1 (gr8s.resources::install-core-state-delta store (second command))
-                       (gr8s.resources::reconcile-pki-authority store)))
-        (:secrets-encryption (gr8s.resources::install-secret-encryption-command store (second command)))
-        (:pod-state (gr8s.store::install-pod-state-blob store (second command)))
-        (:pod-delta (gr8s.store::install-pod-state-delta store (second command)))
-        (:node-state (gr8s.store::install-node-state-blob store (second command)))
-        (:node-delta (gr8s.store::install-node-state-delta store (second command)))
-        (:image-tracker
-         (gr8s.image-distribution::tracker-apply-command (gr8s.store::pod-store-image-tracker store) (second command)))
-        (:node-enrollment (apply #'gr8s.controllers::install-node-enrollment-command store (second command)))))))
+    (handler-case
+        (when (consp command)
+          (case (car command)
+            (:store-recovery-barrier :recovered)
+            (:core-state (prog1 (gr8s.resources::install-core-state-blob store (second command))
+                           (gr8s.resources::reconcile-pki-authority store)))
+            (:core-delta (prog1 (gr8s.resources::install-core-state-delta store (second command))
+                           (gr8s.resources::reconcile-pki-authority store)))
+            (:secrets-encryption (gr8s.resources::install-secret-encryption-command store (second command)))
+            (:pod-state (gr8s.store::install-pod-state-blob store (second command)))
+            (:pod-delta (gr8s.store::install-pod-state-delta store (second command)))
+            (:node-state (gr8s.store::install-node-state-blob store (second command)))
+            (:node-delta (gr8s.store::install-node-state-delta store (second command)))
+            (:image-tracker
+             (gr8s.image-distribution::tracker-apply-command (gr8s.store::pod-store-image-tracker store) (second command)))
+            (:node-enrollment (apply #'gr8s.controllers::install-node-enrollment-command store (second command)))))
+      (raft-apply-error (condition) (error condition))
+      (error (condition) (error 'raft-apply-error :underlying condition)))))
 
 (defun store-raft-command-retention-weight (command)
   "Reserve allocator pages and waiter metadata in addition to command contents."

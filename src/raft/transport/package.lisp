@@ -10,6 +10,8 @@
    #:make-raft-member
    #:make-raft-peer-link
    #:octets->raft-message
+   #:raft-apply-error
+   #:raft-apply-error-underlying
    #:raft-cluster-add-member
    #:raft-cluster-address-book-members
    #:raft-cluster-call-join
