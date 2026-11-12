@@ -1900,6 +1900,15 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
            (multiple-value-bind (certificate key) (ensure-apiserver-kubelet-client-credentials pki)
              (setf *kubelet-proxy-credentials*
                    (list (cluster-pki-trust-certificates pki) certificate key)))
+           ;; Refuse to expose the node control plane without authentication.
+           ;; Without PKI the node listener is plaintext and trusts the hello's
+           ;; node-name with no credential; a misconfiguration must fail loudly
+           ;; rather than silently serve an unauthenticated node control plane.
+           (unless (or pki (getf options :insecure-node-listener))
+             (error "Refusing to start the node control-plane listener without PKI: ~
+                     node sessions would be unauthenticated and plaintext. Configure ~
+                     cluster PKI, or set :insecure-node-listener for a deliberate ~
+                     test/dev insecure listener."))
            (setf node-server
                  (start-node-grpc-server
                   store :host (getf options :node-listen "127.0.0.1")
