@@ -61,3 +61,11 @@
   (format t "module export snapshots: ~D packages~%" (length result)))
 
 (format t "~%OWNERSHIP-MAP-DONE~%")
+
+;; Also emit a flat TSV (NAME<TAB>OWNER) for scripting.
+(with-open-file (f "tools/refactor/gr8s-owners.tsv" :direction :output
+                   :if-exists :supersede :if-does-not-exist :create)
+  (with-open-file (in "tools/refactor/gr8s-owners.sexp")
+    (dolist (row (read in))
+      (format f "~A~C~A~%" (first row) #\Tab (second row)))))
+(format t "TSV-DONE~%")
