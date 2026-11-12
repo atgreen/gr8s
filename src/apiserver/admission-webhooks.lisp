@@ -537,7 +537,11 @@ as upstream does, once per webhook that failurePolicy: Ignore lets through."
 
 (defun admission-mutate (store attributes)
   "Run the mutating webhooks over the attributes' object and return the result.
-Each IfNeeded webhook runs once more when a later webhook changed the object."
+Each IfNeeded webhook runs once more when a later webhook changed the object.
+This single reinvocation pass is deliberate and matches upstream: Kubernetes'
+reinvocationHandler re-dispatches at most once (round 0 then round 1), so a
+mutating webhook is invoked at most twice and the object is not iterated to a
+fixed point -- changes made during the reinvocation pass are not re-reviewed."
   (let ((hooks (admission-hooks store "mutatingwebhookconfigurations" attributes))
         (invoked nil) (pending nil)
         (*cel-authorizer-check* (admission-authorizer-check store))
