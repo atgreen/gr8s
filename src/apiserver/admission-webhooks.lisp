@@ -353,6 +353,9 @@ cache, address/verify-name split and socket-close-on-deadline live in the client
        :body (trivial-utf-8:string-to-utf-8-bytes body)
        :trust-certificates (and bundle (admission-ca-certificates (core-base64-bytes bundle "caBundle")))
        :auto-load-system-ca (null bundle)
+       ;; Admission calls the same webhook backend on every matching request;
+       ;; reuse the connection instead of a fresh TLS handshake each time.
+       :reuse t
        :timeout timeout
        :body-limit +admission-maximum-response+)
     (declare (ignore headers))

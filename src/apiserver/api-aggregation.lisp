@@ -327,6 +327,9 @@ its own aggregator-connect; this is only for request/response callers.)"
        :insecure insecure
        :client-certificate (aggregator-certificate-path aggregator)
        :client-key (aggregator-key-path aggregator)
+       ;; Availability probes and the HPA metrics poll hit the same aggregated
+       ;; backend repeatedly; keep the front-proxy mTLS connection alive.
+       :reuse t
        :timeout timeout))))
 
 (defun aggregated-api-fetch-json (store apiservice target)
