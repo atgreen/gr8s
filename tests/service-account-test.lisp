@@ -208,6 +208,52 @@
       (gr8s.resources::delete-core-resource store "rolebindings" "alpha" "read-pods")
       (is (not (gr8s.resources::service-account-authorized-p store identity "get" "" "pods" "hello" "alpha"))))))
 
+(test rbac-escalation-and-bind-require-held-permissions-or-the-verb
+  (with-temporary-store (store directory)
+    (values directory)
+    (service-account-test-store store)
+    (let ((editor (gr8s.resources::make-api-user-identity :username "editor" :groups #("system:authenticated")))
+          (master (gr8s.resources::make-api-user-identity :username "root" :groups #("system:masters"))))
+      ;; "editor" is granted only get/list pods in alpha.
+      (gr8s.resources::create-core-resource store "roles"
+        (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "pod-reader")
+          "rules" (vector (gr8s.resources::core-object "apiGroups" #("") "resources" #("pods") "verbs" #("get" "list")))) "alpha")
+      (gr8s.resources::create-core-resource store "rolebindings"
+        (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "pod-reader")
+          "roleRef" (gr8s.resources::core-object "apiGroup" "rbac.authorization.k8s.io" "kind" "Role" "name" "pod-reader")
+          "subjects" (vector (gr8s.resources::core-object "kind" "User" "name" "editor" "apiGroup" "rbac.authorization.k8s.io"))) "alpha")
+      ;; Granting only permissions it already holds is allowed.
+      (finishes (gr8s.resources::confirm-rbac-role-grant-authorized
+                 store editor
+                 (vector (gr8s.resources::core-object "apiGroups" #("") "resources" #("pods") "verbs" #("get")))
+                 nil "r1" "alpha"))
+      ;; Granting a permission it does not hold is an escalation -> 403.
+      (signals gr8s.model:kubernetes-error
+        (gr8s.resources::confirm-rbac-role-grant-authorized
+         store editor
+         (vector (gr8s.resources::core-object "apiGroups" #("") "resources" #("secrets") "verbs" #("get")))
+         nil "r2" "alpha"))
+      ;; A nil identity (internal/bootstrap write) and system:masters are exempt.
+      (finishes (gr8s.resources::confirm-rbac-role-grant-authorized
+                 store nil
+                 (vector (gr8s.resources::core-object "apiGroups" #("") "resources" #("secrets") "verbs" #("*")))
+                 nil "r3" "alpha"))
+      (finishes (gr8s.resources::confirm-rbac-role-grant-authorized
+                 store master
+                 (vector (gr8s.resources::core-object "apiGroups" #("") "resources" #("secrets") "verbs" #("*")))
+                 nil "r4" "alpha"))
+      ;; bind: editor cannot bind a role whose permissions it lacks; masters/nil can.
+      (gr8s.resources::create-core-resource store "roles"
+        (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "secret-admin")
+          "rules" (vector (gr8s.resources::core-object "apiGroups" #("") "resources" #("secrets") "verbs" #("*")))) "alpha")
+      (let ((binding (gr8s.resources::core-object
+                      "roleRef" (gr8s.resources::core-object "apiGroup" "rbac.authorization.k8s.io" "kind" "Role" "name" "secret-admin")
+                      "subjects" (vector (gr8s.resources::core-object "kind" "User" "name" "editor" "apiGroup" "rbac.authorization.k8s.io")))))
+        (signals gr8s.model:kubernetes-error
+          (gr8s.resources::confirm-rbac-binding-authorized store editor binding nil "alpha"))
+        (finishes (gr8s.resources::confirm-rbac-binding-authorized store nil binding nil "alpha"))
+        (finishes (gr8s.resources::confirm-rbac-binding-authorized store master binding nil "alpha"))))))
+
 (test admission-projects-real-credentials-and-preserves-automount-opt-out
   (with-temporary-store (store directory)
     (values directory)
