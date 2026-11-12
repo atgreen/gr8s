@@ -390,7 +390,10 @@ Store artifacts travel as raw bytes; witnesses receive configuration only."
                    (= (raft-snapshot-receiver-index receiver) (getf message :last-index))
                    (= (raft-snapshot-receiver-last-term receiver) (getf message :last-term)))
         (error "Snapshot header differs from transfer identity"))
-      (raft-handle-message (raft-member-node member) message))))
+      ;; Applying the installed snapshot's committed suffix must not crash this
+      ;; thread on a failing apply; the tick loop retries the un-applied entry.
+      (handler-case (raft-handle-message (raft-member-node member) message)
+        (raft-apply-error (condition) (warn "~A" condition) nil)))))
 
 (defun raft-member-receive-snapshot-chunk (member message)
   "Handle one authenticated chunk while holding MEMBER's lock. One partial file

@@ -311,7 +311,13 @@ return can still reject a vote/log match; receipt is not quorum or apply health.
       (case (getf message :type)
         (:snapshot-chunk (raft-member-receive-snapshot-chunk member message))
         (:install-snapshot (error "Snapshots must use bounded chunk transport"))
-        (t (raft-handle-message (raft-member-node member) message)))
+        ;; RAFT-HANDLE-MESSAGE applies committed entries on this server thread; a
+        ;; failing apply leaves LAST-APPLIED un-advanced for the tick loop to
+        ;; retry and must not crash the thread (and with it the process). Send no
+        ;; reply, so the leader re-sends and the entry is retried; any other error
+        ;; still propagates.
+        (t (handler-case (raft-handle-message (raft-member-node member) message)
+             (raft-apply-error (condition) (warn "~A" condition) nil))))
     (raft-member-note-receive-unlocked member message)))
 
 (defun raft-member-dispatch-message (member message)
@@ -411,6 +417,9 @@ Normal replication continues while the barrier drains outstanding application wr
               (message (octets->raft-message wire))
               (command (getf message :command)))
          (multiple-value-bind (result committed index)
+             ;; RAFT-MEMBER-PROPOSE-SYNC contains an inline single-voter apply
+             ;; failure and returns :apply-failed, so this handler thread survives
+             ;; and the forwarding follower re-sends while the tick loop retries.
              (raft-member-propose-sync member command :timeout 10)
            (make-instance 'gr8s.node.v1::raft-proposal-result
                           :committed (eq committed t)
