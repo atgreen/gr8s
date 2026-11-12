@@ -4,7 +4,7 @@
 ;;;; Package boundary for control-plane reconciliation loops.
 
 (defpackage #:gr8s.controllers
-  (:use #:cl #:gr8s)
+  (:use #:cl)
   (:shadow
    #:+pod-certificate-request-beta-version+
    #:control-plane-runtime

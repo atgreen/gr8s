@@ -4,7 +4,7 @@
 ;;;; Package boundary for node and streaming wire protocols.
 
 (defpackage #:gr8s.protocol
-  (:use #:cl #:gr8s)
+  (:use #:cl)
   (:shadow
    #:+node-protocol-version+
    #:connect-runtime-stream

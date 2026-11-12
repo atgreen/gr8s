@@ -4,7 +4,7 @@
 ;;;; Package boundary for HTTP, watch, OpenAPI, and streaming API adapters.
 
 (defpackage #:gr8s.apiserver
-  (:use #:cl #:gr8s)
+  (:use #:cl)
   (:shadow
    #:node-grpc-server
    #:node-grpc-server-port

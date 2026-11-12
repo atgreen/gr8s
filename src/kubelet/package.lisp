@@ -4,7 +4,7 @@
 ;;;; Package boundary for node-side Pod and container orchestration.
 
 (defpackage #:gr8s.kubelet
-  (:use #:cl #:gr8s)
+  (:use #:cl)
   (:local-nicknames (#:dp #:gr8s.deviceplugin.v1beta1)
                     (#:pr #:gr8s.podresources.v1))
   (:shadow

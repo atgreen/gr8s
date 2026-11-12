@@ -4,7 +4,7 @@
 ;;;; Package boundary for the per-node agent and its operation streams.
 
 (defpackage #:gr8s.agent
-  (:use #:cl #:gr8s)
+  (:use #:cl)
   (:shadow
    #:cancel-node-session
    #:make-node-session-control

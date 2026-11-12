@@ -4,7 +4,7 @@
 ;;;; Package boundary for CNI and the node networking dataplane.
 
 (defpackage #:gr8s.network
-  (:use #:cl #:gr8s)
+  (:use #:cl)
   (:export #:validate-network-policy-spec))
 
 (eval-when (:compile-toplevel :load-toplevel :execute)

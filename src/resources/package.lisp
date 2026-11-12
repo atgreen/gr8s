@@ -4,7 +4,7 @@
 ;;;; Package boundary for Kubernetes resource semantics and admission.
 
 (defpackage #:gr8s.resources
-  (:use #:cl #:gr8s)
+  (:use #:cl)
   ;; RE2-syntax regular expressions now come from the extracted cl-re2 library.
   (:import-from #:cl-re2
    #:re2-compile #:re2-search #:re2-match-p
