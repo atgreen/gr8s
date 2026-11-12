@@ -2029,35 +2029,47 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                     (setf worker (start-reconciliation-worker reconciler
                                   :leader-gate (when ha (lambda () (ha-control-plane-leader-p ha)))
                                   :before-reconcile (lambda ()
-                                      (reconcile-crd-deletions store)
-                                      (reconcile-flowcontrol store)
-                                      (reconcile-cluster-role-aggregation store)
-                                      (collect-orphaned-custom-resources store)
-                                      (reconcile-certificate-signing-requests store pki)
-                                      (reconcile-pod-certificate-requests store pki)
-                                      (reconcile-certificates store pki)
-                                      (reconcile-storage-bindings store)
-                                      (reconcile-volume-attachments store)
-                                      (reconcile-resource-quotas store)
-                                      (reconcile-namespace-deletions reconciler)
-                                      (reconcile-namespace-defaults store)
-                                      (collect-orphaned-api-objects reconciler)
-                                      (reconcile-workloads reconciler)
-                                      (reconcile-horizontal-pod-autoscalers reconciler)
-                                      (reconcile-storage-version-migrations store)
-                                      (reconcile-endpointslices store)
-                                      (reconcile-endpoints store)
-                                      (reconcile-service-ip-addresses store)
-                                      (reconcile-service-load-balancer-status store)
-                                      (reconcile-ingress-status store)
-                                      (prune-projected-tokens store)
+                                      ;; Isolate each controller: one that throws
+                                      ;; must not starve every controller after it
+                                      ;; (which would also stall service-discovery
+                                      ;; projection to node agents). Log and go on;
+                                      ;; the next pass retries from committed state.
+                                      (macrolet ((run (form)
+                                                   `(handler-case ,form
+                                                      (error (condition)
+                                                        (format *error-output*
+                                                                "gr8s: reconcile step ~S failed this pass, continuing: ~A~%"
+                                                                ',(if (consp form) (first form) form)
+                                                                condition)))))
+                                      (run (reconcile-crd-deletions store))
+                                      (run (reconcile-flowcontrol store))
+                                      (run (reconcile-cluster-role-aggregation store))
+                                      (run (collect-orphaned-custom-resources store))
+                                      (run (reconcile-certificate-signing-requests store pki))
+                                      (run (reconcile-pod-certificate-requests store pki))
+                                      (run (reconcile-certificates store pki))
+                                      (run (reconcile-storage-bindings store))
+                                      (run (reconcile-volume-attachments store))
+                                      (run (reconcile-resource-quotas store))
+                                      (run (reconcile-namespace-deletions reconciler))
+                                      (run (reconcile-namespace-defaults store))
+                                      (run (collect-orphaned-api-objects reconciler))
+                                      (run (reconcile-workloads reconciler))
+                                      (run (reconcile-horizontal-pod-autoscalers reconciler))
+                                      (run (reconcile-storage-version-migrations store))
+                                      (run (reconcile-endpointslices store))
+                                      (run (reconcile-endpoints store))
+                                      (run (reconcile-service-ip-addresses store))
+                                      (run (reconcile-service-load-balancer-status store))
+                                      (run (reconcile-ingress-status store))
+                                      (run (prune-projected-tokens store))
                                       ;; Each snapshot also carries projected tokens, renewed when due.
-                                      (publish-service-discovery-snapshots runtime)
+                                      (run (publish-service-discovery-snapshots runtime))
                                       ;; ClusterIP Services are load-balanced in-kernel by the
                                       ;; agent's eBPF socket LB; the control plane only keeps the
                                       ;; in-cluster API address present.
                                       (when service-network-created
-                                        (ensure-in-cluster-network pki)))))
+                                        (run (ensure-in-cluster-network pki)))))))
                     (let* ((kubeconfig (or (getf options :kubeconfig) (default-kubeconfig-path options)))
                            (client-address (serve-api-advertise-address options)))
                       (setf kubeconfig-path kubeconfig)
