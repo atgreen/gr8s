@@ -1955,6 +1955,32 @@
           (ignore-errors (bt:join-thread agent-thread)))
         (gr8s.apiserver::stop-node-grpc-server server)))))
 
+(test node-operation-response-and-stream-are-bound-to-the-owning-node
+  (with-temporary-store (store path)
+    (values path)
+    (gr8s.controllers::register-node
+     store (gr8s.model::make-node-record :id "node-own" :name "owner"
+                                         :pod-cidr "10.88.6.0/24"))
+    (let* ((server (gr8s.apiserver::%make-node-grpc-server :store store))
+           (request (make-instance 'gr8s.node.v1::operation-request
+                                   :operation-id "bound-op"
+                                   :kind gr8s.node.v1::+operationkind-operation_kind_exec+))
+           (operation (gr8s.apiserver::queue-node-operation server "owner" request))
+           (stream-msg (make-instance 'gr8s.node.v1::operation-stream
+                                      :operation-id "bound-op" :sequence 1
+                                      :channel gr8s.node.v1::+streamchannel-stream_channel_stdout+
+                                      :data (trivial-utf-8:string-to-utf-8-bytes "x")))
+           (response (make-instance 'gr8s.node.v1::operation-response
+                                    :operation-id "bound-op"
+                                    :status gr8s.node.v1::+operationstatus-operation_status_complete+)))
+      ;; A node that does not own the operation cannot inject a stream or finish it.
+      (gr8s.apiserver::note-node-operation-stream server "attacker" stream-msg)
+      (gr8s.apiserver::note-node-operation-response server "attacker" response)
+      (is-false (gr8s.apiserver::pending-node-operation-done-p operation))
+      ;; The addressed node is accepted and finishes it.
+      (gr8s.apiserver::note-node-operation-response server "owner" response)
+      (is-true (gr8s.apiserver::pending-node-operation-done-p operation)))))
+
 (test pending-node-operation-wakes-for-stream-data-before-completion
   (with-temporary-store (store path)
     (values path)
@@ -1985,7 +2011,7 @@
                         operation 0 :timeout 2))))
               :name "gr8s pending stream waiter")))
       (sleep 0.05)
-      (gr8s.apiserver::note-node-operation-stream server message)
+      (gr8s.apiserver::note-node-operation-stream server "worker-stream" message)
       (bt:join-thread waiter)
       (is (eq message (first result)))
       (is (= 1 (second result)))

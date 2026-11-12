@@ -651,21 +651,31 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
     (bt:condition-notify (pending-node-operation-finished operation)))
   operation)
 
-(defun note-node-operation-stream (server message)
+(defun note-node-operation-stream (server node-name message)
   "Append MESSAGE locally, or return it to the peer that originated a routed
-operation. No-op when no operation matches MESSAGE's id."
+operation. No-op when no operation matches MESSAGE's id, or when NODE-NAME is not
+the node the operation was addressed to."
   (let ((operation
           (find-node-operation
            server (slot-value message 'gr8s.node.v1::operation-id))))
-    (when operation
-      (let ((origin (pending-node-operation-origin-member operation)))
-        (if origin
-            (let ((router (node-grpc-server-operation-router server)))
-              (unless (and router
-                           (funcall router :operation-stream origin
-                                    (pending-node-operation-node-name operation) message))
-                (finish-node-operation operation :error "Operation origin is unavailable")))
-            (record-node-operation-stream operation message))))))
+    (cond
+      ((null operation))
+      ((not (equal node-name (pending-node-operation-node-name operation)))
+       ;; A node may only speak for operations addressed to itself; reject a
+       ;; stream forged against another node's in-flight operation id.
+       (format *error-output*
+               "gr8s: node ~A sent an operation stream for ~A owned by ~A; ignoring~%"
+               node-name (slot-value message 'gr8s.node.v1::operation-id)
+               (pending-node-operation-node-name operation)))
+      (t
+       (let ((origin (pending-node-operation-origin-member operation)))
+         (if origin
+             (let ((router (node-grpc-server-operation-router server)))
+               (unless (and router
+                            (funcall router :operation-stream origin
+                                     (pending-node-operation-node-name operation) message))
+                 (finish-node-operation operation :error "Operation origin is unavailable")))
+             (record-node-operation-stream operation message)))))))
 
 (defun record-node-operation-response (operation response)
   "Record terminal RESPONSE on OPERATION. Returns true for a terminal response."
@@ -679,14 +689,22 @@ operation. No-op when no operation matches MESSAGE's id."
               (slot-value response 'gr8s.node.v1::error-message)))
     t))
 
-(defun note-node-operation-response (server response)
+(defun note-node-operation-response (server node-name response)
   "Finish the matching operation when RESPONSE is terminal (complete or failed),
    carrying the response and, on failure, its error message. No-op for a
-   non-terminal status or an unknown operation id."
+   non-terminal status, an unknown operation id, or a RESPONSE from a node other
+   than the one the operation was addressed to."
   (let ((operation
           (find-node-operation
            server (slot-value response 'gr8s.node.v1::operation-id))))
-    (when operation
+    (when (and operation
+               (or (equal node-name (pending-node-operation-node-name operation))
+                   (progn
+                     (format *error-output*
+                             "gr8s: node ~A sent an operation response for ~A owned by ~A; ignoring~%"
+                             node-name (slot-value response 'gr8s.node.v1::operation-id)
+                             (pending-node-operation-node-name operation))
+                     nil)))
       (let ((origin (pending-node-operation-origin-member operation)))
         (if origin
             (let ((terminal
@@ -1281,10 +1299,10 @@ An explicit unready or malformed current report withdraws its prior proof."
                             (slot-value claim 'gr8s.node.v1::name) node-name condition))))))
     (:operation-response
      (note-node-operation-response
-      server (slot-value envelope 'gr8s.node.v1::operation-response)))
+      server node-name (slot-value envelope 'gr8s.node.v1::operation-response)))
     (:operation-stream
      (note-node-operation-stream
-      server (slot-value envelope 'gr8s.node.v1::operation-stream)))
+      server node-name (slot-value envelope 'gr8s.node.v1::operation-stream)))
     (:credential-token-request
      (let* ((request (slot-value envelope 'gr8s.node.v1::credential-token-request))
             (response
