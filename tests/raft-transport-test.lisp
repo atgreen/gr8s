@@ -185,3 +185,64 @@
       (gr8s.raft.transport::raft-member-note-receive-unlocked
        member '(:type :append-entries :term 3 :from "unconfigured")))
     (is (= 1 (hash-table-count (gr8s.raft.transport::raft-member-links member))))))
+
+;;; podster-5vz.15: a committed-entry apply failure (RAFT-APPLY-ERROR, signalled
+;;; by MAKE-STORE-RAFT-APPLY-FUNCTION) must never crash the thread that applies
+;;; it. The library leaves LAST-APPLIED un-advanced on a signalling apply, so the
+;;; entry retries; these threads (the gRPC Deliver handler and the gRPC/local
+;;; propose paths) must survive. Only the typed condition is contained -- any
+;;; other error still propagates. These unit tests stub RAFT-HANDLE-MESSAGE /
+;;; RAFT-MEMBER-PROPOSE to force the apply outcome without a real committed log.
+
+(test follower-dispatch-contains-apply-error-but-not-other-errors
+  (let* ((node (cl-raft::make-raft-node :id "local" :peers '("peer") :current-term 3
+                                        :send-fn (lambda (&rest args) (declare (ignore args)))))
+         (member (gr8s.raft.transport::make-raft-member :node node))
+         (message (list :type :append-entries :term 3 :from "peer" :prev-log-index 0
+                        :prev-log-term 0 :entries nil :leader-commit 0))
+         (handle (symbol-function 'gr8s.raft.transport::raft-handle-message)))
+    (unwind-protect
+         (progn
+           ;; A failing apply on the follower's Deliver thread is contained: no
+           ;; reply (NIL), the thread lives, and the leader re-sends for retry.
+           (setf (symbol-function 'gr8s.raft.transport::raft-handle-message)
+                 (lambda (&rest args)
+                   (declare (ignore args))
+                   (error 'gr8s.raft.transport:raft-apply-error
+                          :underlying (make-condition 'simple-error
+                                                      :format-control "injected apply failure"))))
+           (let ((result :unset))
+             (finishes (setf result (gr8s.raft.transport::raft-member-dispatch-message member message)))
+             (is (null result) "a contained apply error dispatches to NIL (no reply)"))
+           ;; Any non-apply error from the same path still propagates.
+           (setf (symbol-function 'gr8s.raft.transport::raft-handle-message)
+                 (lambda (&rest args)
+                   (declare (ignore args))
+                   (error "unrelated handler failure")))
+           (signals error
+             (gr8s.raft.transport::raft-member-dispatch-message member message)))
+      (setf (symbol-function 'gr8s.raft.transport::raft-handle-message) handle))))
+
+(test propose-sync-reports-apply-failure-instead-of-crashing
+  (let* ((node (cl-raft::make-raft-node :id "solo" :peers nil :current-term 1
+                                        :send-fn (lambda (&rest args) (declare (ignore args)))))
+         (member (gr8s.raft.transport::make-raft-member :node node))
+         (propose (symbol-function 'gr8s.raft.transport::raft-member-propose)))
+    (unwind-protect
+         (progn
+           ;; A single-voter leader applies inline inside RAFT-MEMBER-PROPOSE; a
+           ;; failing apply must surface as a retriable :apply-failed non-commit
+           ;; rather than unwind out of the proposing thread.
+           (setf (symbol-function 'gr8s.raft.transport::raft-member-propose)
+                 (lambda (&rest args)
+                   (declare (ignore args))
+                   (error 'gr8s.raft.transport:raft-apply-error
+                          :underlying (make-condition 'simple-error
+                                                      :format-control "injected inline apply failure"))))
+           (multiple-value-bind (result committed index)
+               (gr8s.raft.transport::raft-member-propose-sync member '(:noop))
+             (is (null result))
+             (is (eq :apply-failed committed)
+                 "an inline apply failure is reported as a retriable non-commit")
+             (is (null index))))
+      (setf (symbol-function 'gr8s.raft.transport::raft-member-propose) propose))))

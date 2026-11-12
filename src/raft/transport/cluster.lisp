@@ -286,22 +286,31 @@
   (let ((lock (bt:make-lock "gr8s raft propose-sync"))
         (cv (bt:make-condition-variable))
         (done nil) (result nil))
-    (multiple-value-bind (index ok reason)
-        (raft-member-propose member command
-                             (lambda (r)
-                               (bt:with-lock-held (lock)
-                                 (setf result r done t)
-                                 (bt:condition-notify cv))))
-      (if (not ok)
-          (values nil (or reason :not-leader) nil)
-          (bt:with-lock-held (lock)
-            (let ((deadline (+ (get-internal-real-time)
-                               (* timeout internal-time-units-per-second))))
-              (loop until done
-                    do (let ((remaining (/ (- deadline (get-internal-real-time))
-                                           internal-time-units-per-second)))
-                         (when (<= remaining 0) (return))
-                         (bt:condition-wait cv lock :timeout remaining)))
-              (if done
-                  (values result t index)
-                  (values nil :timeout nil))))))))
+    ;; A single-voter leader applies the committed entry inline on this thread
+    ;; (API request, local commit driver, or gRPC propose handler) while the
+    ;; member lock is held. A failing apply must not throw out of here and kill
+    ;; that thread: report a retriable non-commit (:apply-failed) so the caller
+    ;; surfaces a 503 or re-forwards, while the tick loop retries the entry.
+    (handler-case
+        (multiple-value-bind (index ok reason)
+            (raft-member-propose member command
+                                 (lambda (r)
+                                   (bt:with-lock-held (lock)
+                                     (setf result r done t)
+                                     (bt:condition-notify cv))))
+          (if (not ok)
+              (values nil (or reason :not-leader) nil)
+              (bt:with-lock-held (lock)
+                (let ((deadline (+ (get-internal-real-time)
+                                   (* timeout internal-time-units-per-second))))
+                  (loop until done
+                        do (let ((remaining (/ (- deadline (get-internal-real-time))
+                                               internal-time-units-per-second)))
+                             (when (<= remaining 0) (return))
+                             (bt:condition-wait cv lock :timeout remaining)))
+                  (if done
+                      (values result t index)
+                      (values nil :timeout nil))))))
+      (raft-apply-error (condition)
+        (warn "~A" condition)
+        (values nil :apply-failed nil)))))
