@@ -525,6 +525,7 @@
                              (:file "backup-stream-test")
                              (:file "backup-bundle-test")
                              (:file "http-test")
+                             (:file "http-client-test")
                              (:file "pod-http-proxy-test")
                              (:file "core-resource-http-test")
                              (:file "api-defaults-test")
