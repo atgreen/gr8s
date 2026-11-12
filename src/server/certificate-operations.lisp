@@ -106,22 +106,6 @@
     (cl-ppcre:register-groups-bind (match) (pattern text) (setf value match))
     (or value (error "kubeconfig does not contain ~A" field))))
 
-(defun read-pki-api-response-body (stream headers)
-  "Read one non-streaming PKI API response body from STREAM."
-  (let* ((length-text (cdr (assoc :content-length headers)))
-         (length (and length-text (parse-integer length-text)))
-         (body (make-array (or length 256) :element-type '(unsigned-byte 8)
-                           :adjustable (null length) :fill-pointer (if length length 0))))
-    (if length
-        (loop with offset = 0
-              while (< offset length)
-              for next = (read-sequence body stream :start offset)
-              do (when (= next offset) (error "PKI authority response body was truncated"))
-                 (setf offset next))
-        (loop for octet = (read-byte stream nil nil)
-              while octet do (vector-push-extend octet body)))
-    (trivial-utf-8:utf-8-bytes-to-string body)))
-
 (defun pki-api-request (url ca certificate key &optional (redirects-left 3))
   "POST URL over verified mutual TLS, following only HTTPS redirects."
   (let* ((uri (puri:parse-uri url))
@@ -129,47 +113,26 @@
          (host (puri:uri-host uri))
          (port (or (puri:uri-port uri) 443))
          (path (or (puri:uri-path uri) "/"))
-         (target (format nil "~A~@[?~A~]" path (puri:uri-query uri)))
-         (socket nil)
-         (stream nil))
+         (target (format nil "~A~@[?~A~]" path (puri:uri-query uri))))
     (unless (and (eq scheme :https) host)
       (error "PKI authority endpoint must be an HTTPS URL: ~A" url))
-    (unwind-protect
-         (progn
-           (setf socket (usocket:socket-connect host port :element-type '(unsigned-byte 8)
-                                                :timeout 15)
-                 stream (pure-tls:make-tls-client-stream
-                         (usocket:socket-stream socket)
-                         :hostname host
-                         :context (pure-tls:make-tls-context
-                                   :verify-mode pure-tls:+verify-required+
-                                   :ca-file (namestring ca) :auto-load-system-ca nil)
-                         :verify pure-tls:+verify-required+
-                         :client-certificate (namestring certificate)
-                         :client-key (namestring key)))
-           (write-sequence
-            (gr8s.protocol::ascii-octets
-             (format nil "POST ~A HTTP/1.1~C~CHost: ~A:~D~C~CAccept: application/json~C~CContent-Length: 0~C~CConnection: close~C~C~C~C"
-                     target #\Return #\Linefeed host port #\Return #\Linefeed
-                     #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed
-                     #\Return #\Linefeed))
-            stream)
-           (force-output stream)
-           (multiple-value-bind (status headers)
-               (gr8s.protocol::parse-http-response-head
-                (gr8s.protocol::read-http-response-head stream))
-             (let ((body (read-pki-api-response-body stream headers))
-                   (location (cdr (assoc :location headers))))
-               (if (member status '(301 302 303 307 308))
-                   (progn
-                     (unless (and location (plusp redirects-left))
-                       (error "PKI authority redirect could not be followed (HTTP ~D)" status))
-                     (pki-api-request
-                      (puri:render-uri (puri:merge-uris location uri) nil)
-                      ca certificate key (1- redirects-left)))
-                   (values body status)))))
-      (when stream (ignore-errors (close stream)))
-      (when socket (ignore-errors (usocket:socket-close socket))))))
+    (multiple-value-bind (status headers body)
+        (gr8s.http-client:https-request
+         :host host :port port :server-name host :method :post :target target
+         ;; An explicit Content-Length: 0 keeps the bodyless POST on the wire the
+         ;; PKI authority expects; the shared client omits it for an empty body.
+         :headers '(("Accept" . "application/json") ("Content-Length" . "0"))
+         :trust-certificates (pure-tls:load-certificate-chain (namestring ca))
+         :client-certificate certificate :client-key key :timeout 15)
+      (let ((location (cdr (assoc "location" headers :test #'string=))))
+        (if (member status '(301 302 303 307 308))
+            (progn
+              (unless (and location (plusp redirects-left))
+                (error "PKI authority redirect could not be followed (HTTP ~D)" status))
+              (pki-api-request
+               (puri:render-uri (puri:merge-uris location uri) nil)
+               ca certificate key (1- redirects-left)))
+            (values (trivial-utf-8:utf-8-bytes-to-string body) status))))))
 
 (defun call-pki-authority-api (options kind stage)
   "Invoke one authenticated online PKI transition through the Kubernetes API."
