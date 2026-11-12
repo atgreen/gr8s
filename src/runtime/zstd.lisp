@@ -10,7 +10,7 @@
 ;;;; the saved image), so a build host without libzstd still produces a binary;
 ;;;; the dependency is needed only when a runtime is actually installed.
 
-(in-package #:gr8s)
+(in-package #:gr8s.runtime)
 
 (cffi:define-foreign-library libzstd
   (:unix (:or "libzstd.so.1" "libzstd.so"))

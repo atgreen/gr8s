@@ -4,7 +4,7 @@
 ;;;; Compose MODEL's structural Pod parser with gr8s validation policy. This is
 ;;;; the compatibility facade; MODEL itself has no dependency on these layers.
 
-(in-package #:gr8s)
+(in-package #:gr8s.kubelet)
 
 (defparameter *gr8s-pod-parser-policy*
   (gr8s.model:make-pod-parser-policy

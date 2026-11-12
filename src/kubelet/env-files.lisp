@@ -7,7 +7,7 @@
 ;;;; earlier container writes KEY='value' lines; the kubelet reads the named key
 ;;;; when it creates each container that refers to it.
 
-(in-package #:gr8s)
+(in-package #:gr8s.kubelet)
 
 (defun relaxed-environment-name-p (name)
   "Accept what IsRelaxedEnvVarName does: printable ASCII other than '='."

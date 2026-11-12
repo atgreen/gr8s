@@ -7,7 +7,7 @@
 ;;;; retains its transition timestamp, including across process restarts; this
 ;;;; history does not advance the independently tracked agent-observed revision.
 
-(in-package #:gr8s)
+(in-package #:gr8s.kubelet)
 
 (defparameter *pod-condition-clock* #'get-universal-time)
 

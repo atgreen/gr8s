@@ -9,7 +9,7 @@
 ;;;; attribution travels inside the single binary. A dev image reads the plain
 ;;;; NOTICES file from the tree root instead.
 
-(in-package #:gr8s)
+(in-package #:gr8s.server)
 
 (defvar *embedded-notices-gz* nil
   "The gzip-compressed NOTICES document, set by build-native.lisp for the native

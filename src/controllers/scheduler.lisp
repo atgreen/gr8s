@@ -7,7 +7,7 @@
 ;;;; node with the fewest nonterminal Pods, preserves explicit assignments, and
 ;;;; keeps observed workload status separate from desired Pod objects.
 
-(in-package #:gr8s)
+(in-package #:gr8s.controllers)
 
 (defparameter +default-cluster-pod-cidr+ "10.80.0.0/12")
 (defparameter +default-node-pod-prefix+ 20)

@@ -6,7 +6,7 @@
 ;;;; allocation geometry and preserve existing node assignments across restarts.
 ;;;; Host-route validation is shared with agent network configuration.
 
-(in-package #:gr8s)
+(in-package #:gr8s.agent)
 
 (defun make-node-pool-config (cidr node-prefix &optional (cidrs (vector cidr)) (node-prefixes (vector node-prefix)))
   "Construct the versioned on-disk pool configuration object."

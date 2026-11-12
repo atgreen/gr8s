@@ -7,7 +7,7 @@
 ;;;; observed revision: rendering conditions must never acknowledge a workload.
 ;;;; Every record belongs to one UID and cannot revive a replacement by name.
 
-(in-package #:gr8s)
+(in-package #:gr8s.kubelet)
 
 (defun save-pod-observation (store pod status &key validator)
   "Persist an actual observation only while POD's exact desired UID/revision exists.

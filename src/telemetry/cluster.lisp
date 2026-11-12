@@ -11,7 +11,7 @@
 ;;;; in node order so a scrape is a consistent snapshot; label values are escaped
 ;;;; for the exposition format.
 
-(in-package #:gr8s)
+(in-package #:gr8s.telemetry)
 
 (defun prometheus-label (value)
   "Return VALUE escaped for use inside a Prometheus label value: backslash,

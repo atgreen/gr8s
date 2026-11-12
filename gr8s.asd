@@ -107,6 +107,12 @@
                              ;; GR8S-homed placeholders that would then diverge.
                              (:file "runtime/containerd/package")
                              (:file "runtime/containerd/integration")
+                             ;; Cross-module imports for the formerly-GR8S impl files
+                             ;; (scheduler, agent pod pool, kubelet helpers).  Loaded
+                             ;; once every source module package exists -- including
+                             ;; runtime.containerd above -- and before the first of
+                             ;; those files compiles below.
+                             (:file "refactor/moved-imports")
                              (:file "kubelet/pod-parser-policy")
                              (:file "kubelet/env-files")
                              (:file "kubelet/user-namespaces")
@@ -402,6 +408,7 @@
                                            (:file "hpa-controller")
                                            (:file "workload-deletion")
                                            (:file "compat")))
+                             (:file "telemetry/integration")
                              (:file "telemetry/cluster")
                              (:module "apiserver-extensions"
                               :pathname "apiserver/"

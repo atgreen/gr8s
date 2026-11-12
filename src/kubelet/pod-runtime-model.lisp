@@ -6,7 +6,7 @@
 ;;;; and mounts, numeric Linux identities, downward environment references and
 ;;;; selectors for the labels gr8s actually assigns to its worker nodes.
 
-(in-package #:gr8s)
+(in-package #:gr8s.kubelet)
 
 (defun pod-runtime-container-object (pod container)
   "Return CONTAINER's authoritative JSON specification within POD."

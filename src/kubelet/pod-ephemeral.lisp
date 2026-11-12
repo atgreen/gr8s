@@ -7,7 +7,7 @@
 ;;;; apart from the Pod's workload, and their separate status. They share the
 ;;;; sandbox, run once and never decide a Pod's phase, readiness or restarts.
 
-(in-package #:gr8s)
+(in-package #:gr8s.kubelet)
 
 (defparameter *pod-ephemeral-update* nil
   "True while the ephemeralcontainers subresource writes, the only way to change that list.")

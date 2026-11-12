@@ -1,0 +1,118 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; Cross-module imports for formerly-GR8S implementation files.
+;;;;
+;;;; The scheduler, node-agent pod pool, and kubelet pod/runtime helpers used
+;;;; to live in the GR8S composition package and reach every sibling symbol
+;;;; through it.  They now live in their owning module packages; this file
+;;;; shadowing-imports exactly the sibling symbols their bodies reference.
+;;;; INTERN (not FIND-SYMBOL) forward-declares collaborators that define the
+;;;; symbol later in the serial system.  Loaded after all package boundaries
+;;;; exist and before the first of these implementation files compiles.
+
+(in-package #:cl-user)
+
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (dolist (spec '(
+                  ;; GR8S.AGENT
+                  ("GR8S.AGENT" "CL-RTNETLINK" "IPV4-NETWORK-OCTETS" "NETLINK-ATTRIBUTES"
+                   "NETLINK-INTEGER" "NETLINK-STRING" "NETWORK-LINK-ATTRIBUTES-BY-INDEX"
+                   "RTNETLINK-ERROR-ERRNO")
+                  ("GR8S.AGENT" "GR8S.CONTROLLERS" "+DEFAULT-CLUSTER-POD-CIDR+"
+                   "+DEFAULT-NODE-POD-PREFIX+" "FORMAT-POD-ADDRESS" "LIST-NODES"
+                   "NORMALIZE-POD-POOL-GEOMETRY" "PARSE-POD-CIDR" "POD-CIDRS-OVERLAP-P")
+                  ("GR8S.AGENT" "GR8S.FOUNDATION" "JSON-OBJECT")
+                  ("GR8S.AGENT" "GR8S.MODEL" "NODE-RECORD-ALL-POD-CIDRS" "NODE-RECORD-API-ONLY"
+                   "NODE-RECORD-NAME")
+                  ("GR8S.AGENT" "GR8S.NETWORK" "+NODE-VXLAN-INTERFACE+"
+                   "+NODE-WIREGUARD-INTERFACE+" "CNI-CONTEXT-CONTAINER-ID" "INVALID-CNI"
+                   "MAKE-CNI-CONTEXT" "NETWORK-LINK-KIND-P" "NETWORK-LINK-UNTAGGED-P"
+                   "NODE-IPAM-ALLOCATIONS" "NODE-VXLAN-OWNER" "NODE-WIREGUARD-OWNER"
+                   "OPEN-NODE-IPAM" "READ-IP-HOST-ROUTES" "ROUTED-CNI-HOST-NAME"
+                   "ROUTED-CNI-OWNER" "ROUTED-VETH-MAC" "SAFE-CNI-CONTAINER-ID-P"
+                   "VXLAN-ROUTER-ADDRESS" "VXLAN-ROUTER-MAC")
+                  ("GR8S.AGENT" "GR8S.SECURITY" "WRITE-PRIVATE-TEXT-ATOMICALLY")
+                  ;; GR8S.CONTROLLERS
+                  ("GR8S.CONTROLLERS" "GR8S.APISERVER" "PUBLISH-NODE-CHANGE-UNLOCKED"
+                   "TABLE-GET")
+                  ("GR8S.CONTROLLERS" "GR8S.KUBELET" "DELETION-REQUESTED-P" "POD-DELETION-TIME"
+                   "POD-FOR-THIS-SCHEDULER-P" "POD-SCHEDULING-GATED-P" "SAVE-POD-OBSERVATION")
+                  ("GR8S.CONTROLLERS" "GR8S.MODEL" "COPY-NODE-RECORD" "DNS-LABEL-P"
+                   "KUBERNETES-ERROR-STATUS-CODE" "MAKE-NODE-RECORD" "NODE-RECORD-ALL-POD-CIDRS"
+                   "NODE-RECORD-ALLOCATABLE" "NODE-RECORD-CAPACITY"
+                   "NODE-RECORD-CERTIFICATE-ISSUER-FINGERPRINT" "NODE-RECORD-CREATION-TIMESTAMP"
+                   "NODE-RECORD-EXTENDED-RESOURCES" "NODE-RECORD-ID" "NODE-RECORD-KUBELET-PORT"
+                   "NODE-RECORD-LAST-HEARTBEAT" "NODE-RECORD-LEASE-DEADLINE" "NODE-RECORD-NAME"
+                   "NODE-RECORD-POD-CIDR" "NODE-RECORD-READY-P" "NODE-RECORD-READY-SINCE"
+                   "NODE-RECORD-RUNTIME-DOWN-MESSAGE" "NODE-RECORD-UNDERLAY-ADDRESS"
+                   "NODE-RECORD-WIREGUARD-ENDPOINTS" "NODE-RECORD-WIREGUARD-PUBLIC-KEY"
+                   "NODE-RECORD-WIREGUARD-REFLEXIVE-OBSERVED-AT" "POD-NAME" "POD-NAMESPACE"
+                   "POD-NODE-NAME" "POD-RESOURCE-VERSION" "POD-STATUS-REVISION" "POD-TO-OBJECT"
+                   "POD-UID")
+                  ("GR8S.CONTROLLERS" "GR8S.RESOURCES" "CHOOSE-PREEMPTION-UNLOCKED"
+                   "COMMIT-CORE-RESOURCES" "COPY-CORE-OBJECT" "COPY-CORE-RESOURCE-INDEX"
+                   "CORE-OBJECT" "CORE-RESOURCE-KEY" "CREATE-CORE-RESOURCE" "GET-CORE-RESOURCE"
+                   "NODE-API-OBJECT" "NODE-SELECTOR-TERM-MATCHES-P"
+                   "POD-AFFINITY-PREFERENCE-SCORE-UNLOCKED" "POD-AWAITING-PREEMPTION-P"
+                   "POD-FITS-NODE-UNLOCKED" "POD-NODE-PLACEABLE-P" "POD-NODE-PREFERENCE-SCORE"
+                   "POD-TOPOLOGY-SPREAD-PENALTY-UNLOCKED" "POD-UNSCHEDULABLE-MESSAGE"
+                   "PREEMPT-POD" "UPDATE-CORE-RESOURCE")
+                  ("GR8S.CONTROLLERS" "GR8S.SECURITY" "OCTETS-TO-HEX")
+                  ("GR8S.CONTROLLERS" "GR8S.STORE" "COPY-POD-STATUS-VALUE" "CURRENT-TIMESTAMP"
+                   "GENERATE-UID" "INDEX-POD" "NEXT-POD-REVISION-UNLOCKED"
+                   "NOTE-NODE-DESIRED-CHANGE" "NOTE-NODE-STATE-CHANGE" "NOTE-POD-DESIRED-CHANGE"
+                   "PERSIST-NODE" "PERSIST-POD" "POD-PUBLISHED-VIEW"
+                   "POD-STORE-CONSENSUS-COMMIT-FN" "POD-STORE-LOCK" "POD-STORE-NODES"
+                   "POD-STORE-NOMINATED-NODES" "POD-STORE-POD-CLIENT-STATUSES"
+                   "POD-STORE-POD-OBSERVED-PHASES" "POD-STORE-POD-OBSERVED-RESOURCE-VERSIONS"
+                   "POD-STORE-POD-OBSERVED-STATUSES" "POD-STORE-PODS"
+                   "POD-STORE-RESOURCE-REVISION" "POD-STORE-RESOURCES"
+                   "POD-STORE-SCHEDULING-NOTES" "PUBLISH-POD-SPEC-CHANGE-UNLOCKED"
+                   "STAGE-NODE-WRITE" "WITH-STORE-LOCK")
+                  ;; GR8S.KUBELET
+                  ("GR8S.KUBELET" "GR8S.APISERVER" "ADD-POD-HOST-ADDRESS"
+                   "ADMIT-SUBRESOURCE-WRITE" "APPLY-CORE-JSON-PATCH" "APPLY-POD-CLIENT-STATUS"
+                   "APPLY-POD-PATCHED-OBJECT" "COPY-JSON-OBJECT" "CORE-JSON-EQUAL-P"
+                   "CORE-RESOURCE-DRY-RUN-P" "CORE-RESOURCE-REQUEST-OBJECT" "JSON-RESPONSE"
+                   "MERGE-JSON-OBJECT" "POD-RESPONSE-OBJECT")
+                  ("GR8S.KUBELET" "GR8S.CONTROLLERS" "PARSE-IPV4-INTEGER")
+                  ("GR8S.KUBELET" "GR8S.MODEL" "CONTAINER-SPEC-IMAGE" "CONTAINER-SPEC-NAME"
+                   "DNS-LABEL-P" "INVALID-POD" "NODE-RECORD-LABELS" "NODE-RECORD-NAME"
+                   "OPTIONAL-VECTOR" "POD-CONTAINERS" "POD-EPHEMERAL-CONTAINERS"
+                   "POD-INIT-CONTAINERS" "POD-NAME" "POD-NAMESPACE" "POD-NODE-NAME"
+                   "POD-RESOURCE-VERSION" "POD-TO-OBJECT" "POD-UID" "REJECT-UNSUPPORTED-FIELDS"
+                   "REQUIRE-DNS-LABEL" "REQUIRE-DNS-SUBDOMAIN" "REQUIRE-NONEMPTY-STRING"
+                   "REQUIRE-OBJECT" "REQUIRE-STRING-VECTOR")
+                  ("GR8S.KUBELET" "GR8S.RESOURCES" "APPLY-POD-LEVEL-RESOURCES"
+                   "CONTAINER-RESOURCE-MAP" "COPY-CORE-OBJECT" "CORE-DATA-KEY-P"
+                   "CORE-LABEL-NAME-P" "CORE-OBJECT" "CORE-QUALIFIED-KEY-P"
+                   "CORE-RESOURCE-ERROR" "CSI-DRIVER-NAME-VALID-P" "NATIVE-NODE-ARCHITECTURE"
+                   "POD-LEVEL-REQUIREMENTS-QOS" "POD-UNSCHEDULABLE-MESSAGE"
+                   "STORAGE-NODE-LABELS" "STORAGE-QUANTITY" "TEMPLATE-SCHEMA"
+                   "TEMPLATE-STRATEGIC-MERGE" "VALIDATE-CORE-STRING-MAP"
+                   "VALIDATE-HOST-STORAGE-SOURCE" "VALIDATE-POD-AFFINITY-GROUP"
+                   "VALIDATE-POD-LEVEL-RESOURCES" "VALIDATE-STORAGE-ACCESS-MODES"
+                   "VALIDATE-TOPOLOGY-SPREAD-CONSTRAINTS")
+                  ("GR8S.KUBELET" "GR8S.RUNTIME" "CONTAINER-CONFIG-ERROR" "RUNTIME-DELETE-POD"
+                   "RUNTIME-FORGET-POD-FINALIZATION" "RUNTIME-OBSERVE" "RUNTIME-TERMINATE-POD")
+                  ("GR8S.KUBELET" "GR8S.RUNTIME.CONTAINERD" "CONTAINERD-OWNED-SANDBOX"
+                   "CONTAINERD-POD-LOG-DIRECTORY" "CONTAINERD-RUNTIME-LOG-ROOT")
+                  ("GR8S.KUBELET" "GR8S.SECURITY" "WRITE-PRIVATE-TEXT-ATOMICALLY")
+                  ("GR8S.KUBELET" "GR8S.STORE" "COPY-POD-STATUS-VALUE" "CURRENT-STATUS-POD-P"
+                   "CURRENT-TIMESTAMP" "GET-POD" "NOTE-POD-STATE-CHANGE"
+                   "PERSIST-POD-STATUS-STATE" "POD-STORE-NOMINATED-NODES"
+                   "POD-STORE-POD-CLIENT-STATUSES" "POD-STORE-POD-CONDITION-HISTORIES"
+                   "POD-STORE-POD-FINALIZATION-STATES" "POD-STORE-POD-OBSERVED-PHASES"
+                   "POD-STORE-POD-OBSERVED-RESOURCE-VERSIONS" "POD-STORE-POD-OBSERVED-STATUSES"
+                   "PUBLISH-POD-STATUS-UNLOCKED" "REMOVE-POD" "UPDATE-POD" "WITH-STORE-LOCK")
+                  ;; GR8S.RUNTIME
+                  ("GR8S.RUNTIME" "GR8S.FOUNDATION" "+GR8S-VERSION+")
+                  ("GR8S.RUNTIME" "GR8S.SERVER" "MAIN")
+                  ))
+    (destructuring-bind (into from &rest names) spec
+      (let ((ipkg (find-package into)) (fpkg (find-package from)))
+        (unless ipkg (error "moved-imports: missing target package ~A" into))
+        (unless fpkg (error "moved-imports: missing source package ~A" from))
+        (dolist (name names)
+          (shadowing-import (intern name fpkg) ipkg))))))

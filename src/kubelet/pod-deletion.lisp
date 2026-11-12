@@ -6,7 +6,7 @@
 ;;;; Repeated deletes may shorten the original grace period, never restart it;
 ;;;; the same timestamp travels to agents and survives either side restarting.
 
-(in-package #:gr8s)
+(in-package #:gr8s.kubelet)
 
 (defparameter *pod-deletion-clock* #'get-universal-time)
 

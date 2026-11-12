@@ -7,7 +7,7 @@
 ;;;; enforcement and downward resource references. Decimal exponents remain
 ;;;; symbolic so an oversized declaration cannot allocate an enormous power.
 
-(in-package #:gr8s)
+(in-package #:gr8s.kubelet)
 
 (defstruct container-quantity
   "Represent an exact decimal coefficient times ten to SCALE, retaining its quantity format."

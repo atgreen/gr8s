@@ -7,7 +7,7 @@
 ;;;; /etc/hosts aliases. Also derive status.qosClass and the node address a
 ;;;; hostNetwork Pod shares, so both come from what the Pod actually declares.
 
-(in-package #:gr8s)
+(in-package #:gr8s.kubelet)
 
 (defparameter +safe-pod-sysctls+
   '("kernel.shm_rmid_forced" "net.ipv4.ip_local_port_range" "net.ipv4.tcp_syncookies"
