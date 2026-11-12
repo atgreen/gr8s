@@ -626,3 +626,20 @@
         (is-true (resource user "create" "authentication.k8s.io" "selfsubjectreviews"))
         (is-false (resource user "create" "authorization.k8s.io" "subjectaccessreviews"))
         (is-false (resource user "get" "" "pods"))))))
+
+(test api-audit-event-captures-who-what-and-result
+  (let ((identity (gr8s.resources::make-api-user-identity :username "alice" :groups #("system:authenticated"))))
+    (let ((event (gr8s.apiserver::build-api-audit-event
+                  identity "create" "" "pods" "web" "default"
+                  "10.1.2.3" "kubectl/v1.30" "/api/v1/namespaces/default/pods" 201)))
+      (is (equal "alice" (gethash "username" (gethash "user" event))))
+      (is (equal "create" (gethash "verb" event)))
+      (is (equal "pods" (gethash "resource" (gethash "objectRef" event))))
+      (is (equal "default" (gethash "namespace" (gethash "objectRef" event))))
+      (is (equal "10.1.2.3" (aref (gethash "sourceIPs" event) 0)))
+      (is (= 201 (gethash "code" (gethash "responseStatus" event)))))
+    ;; An unauthenticated request records the anonymous user and serialises.
+    (let ((anon (gr8s.apiserver::build-api-audit-event
+                 nil "get" "" "nodes" nil nil nil nil "/api/v1/nodes" 401)))
+      (is (equal "system:anonymous" (gethash "username" (gethash "user" anon))))
+      (is (stringp (com.inuoe.jzon:stringify anon))))))
