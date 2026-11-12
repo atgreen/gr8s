@@ -176,64 +176,19 @@ Both are issued afresh, so an address that changed is covered."
 
 ;;; HTTPS requests with client credentials
 
-(defun read-http-response-body (stream headers &key (limit (* 16 1024 1024)))
-  "Read the body HEADERS frame on STREAM, of at most LIMIT octets."
-  (let ((length-text (cdr (assoc "content-length" headers :test #'string=)))
-        (chunked (search "chunked" (string-downcase (or (cdr (assoc "transfer-encoding" headers :test #'string=)) "")))))
-    (cond
-      (chunked
-       (let ((body (make-array 4096 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
-         (loop
-           (let* ((line (admission-read-line stream))
-                  (size (parse-integer line :end (or (position #\; line) (length line)) :radix 16)))
-             (when (zerop size)
-               (loop until (zerop (length (admission-read-line stream))))
-               (return))
-             (when (> (+ size (length body)) limit) (error "HTTP response is too large"))
-             (loop for octet across (admission-read-exactly stream size) do (vector-push-extend octet body))
-             (admission-read-line stream)))
-         (coerce body '(simple-array (unsigned-byte 8) (*)))))
-      (length-text
-       (let ((length (parse-integer length-text)))
-         (when (> length limit) (error "HTTP response is too large"))
-         (admission-read-exactly stream length)))
-      (t (let ((body (make-array 4096 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
-           (loop for octet = (read-byte stream nil nil)
-                 while octet
-                 do (when (>= (length body) limit) (error "HTTP response is too large"))
-                    (vector-push-extend octet body))
-           (coerce body '(simple-array (unsigned-byte 8) (*))))))))
-
 (defun tls-http-request (&key address port server-name (method :get) target headers body
                               trust-certificates client-certificate client-key (timeout 10))
   "Send one HTTP/1.1 request over TLS verified against TRUST-CERTIFICATES for SERVER-NAME,
 presenting CLIENT-CERTIFICATE when given. Return the status, lowercase headers and body octets."
-  (let ((socket nil) (pure-tls:*session-ticket-cache* (make-hash-table :test 'equal)))
-    (unwind-protect
-         ;; A deadline is no ERROR, and one escaping a request thread ends the process.
-         (handler-case
-          (sb-sys:with-deadline (:seconds timeout)
-           (setf socket (usocket:socket-connect address port :element-type '(unsigned-byte 8)
-                                                             :timeout timeout :nodelay t))
-           (let* ((context (pure-tls:make-tls-context :verify-mode pure-tls:+verify-required+ :auto-load-system-ca nil))
-                  (stream (progn
-                            (setf (pure-tls::tls-context-trust-store context)
-                                  (pure-tls::make-trust-store :certificates trust-certificates))
-                            (pure-tls:make-tls-client-stream
-                             (usocket:socket-stream socket) :hostname server-name :context context
-                             :verify pure-tls:+verify-required+
-                             :client-certificate (and client-certificate (namestring client-certificate))
-                             :client-key (and client-key (namestring client-key))))))
-             (aggregator-write-request stream method target (format nil "~A:~D" server-name port)
-                                       headers (or body #()))
-             (multiple-value-bind (code response-headers) (aggregator-read-response-head stream)
-               (values code response-headers
-                       (if (or (eq method :head) (member code '(204 304)))
-                           (make-array 0 :element-type '(unsigned-byte 8))
-                           (read-http-response-body stream response-headers))))))
-           (sb-sys:deadline-timeout ()
-             (error "no answer from ~A:~D within ~D seconds" address port timeout)))
-      (when socket (ignore-errors (usocket:socket-close socket))))))
+  ;; The transport lives in the shared client; keep this entry point's contract,
+  ;; including the "no answer" wording a deadline reports to callers.
+  (handler-case
+      (gr8s.http-client:https-request
+       :host address :port port :server-name server-name :method method :target target
+       :headers headers :body body :trust-certificates trust-certificates
+       :client-certificate client-certificate :client-key client-key :timeout timeout)
+    ((or cl-cancel:deadline-exceeded sb-sys:deadline-timeout) ()
+      (error "no answer from ~A:~D within ~D seconds" address port timeout))))
 
 ;;; Delegated authentication and authorization
 
