@@ -1410,13 +1410,18 @@ An explicit unready or malformed current report withdraws its prior proof."
               (funcall (node-grpc-server-clock server))
               :lease-duration (node-grpc-server-heartbeat-timeout-seconds server)))
            (snapshot
-             (progn
-               ;; Remove the predecessor before building the reconnect snapshot.
-               ;; Otherwise a concurrent publisher could select its old grant.
-               (bt:with-lock-held ((node-grpc-server-lock server))
-                 (remhash node-name (node-grpc-server-sessions server))
-                 (remhash node-name (node-grpc-server-acknowledged-revisions server))
-                 (clear-service-risk-grant-locked server))
+             (let ((predecessor
+                     ;; Remove the predecessor before building the reconnect snapshot.
+                     ;; Otherwise a concurrent publisher could select its old grant.
+                     (bt:with-lock-held ((node-grpc-server-lock server))
+                       (prog1 (gethash node-name (node-grpc-server-sessions server))
+                         (remhash node-name (node-grpc-server-sessions server))
+                         (remhash node-name (node-grpc-server-acknowledged-revisions server))
+                         (clear-service-risk-grant-locked server)))))
+               ;; Close the superseded session's connection so its handler thread
+               ;; and socket are released; otherwise a node that reconnects
+               ;; repeatedly leaks connections against the listener's slot cap.
+               (when predecessor (close-node-agent-session predecessor))
                (prepare-node-connect-snapshot
                 server node-name
                 (slot-value hello 'gr8s.node.v1::last-applied-revision))))
@@ -1518,6 +1523,15 @@ An explicit unready or malformed current report withdraws its prior proof."
       ;; stream ends. The listener and other node sessions remain untouched.
       (send-node-protocol-error stream condition))))
 
+(defun close-node-agent-session (session)
+  "Evict SESSION and close its underlying connection so its handler thread and
+socket are released rather than leaked. Safe to call more than once."
+  (setf (node-agent-session-evicted-p session) t)
+  (let ((stream (node-agent-session-stream session)))
+    (when (typep stream 'ag-grpc::grpc-server-call-stream)
+      (ignore-errors
+       (ag-http2:connection-close (ag-grpc::server-stream-connection stream))))))
+
 (defun evict-silent-node-sessions (server now)
   "Close sessions whose peer or handler has gone quiet, so a live agent reconnects."
   ;; An agent can keep sending into a connection whose handler is stuck, and
@@ -1531,12 +1545,8 @@ An explicit unready or malformed current report withdraws its prior proof."
                                           (* 2 (node-grpc-server-heartbeat-timeout-seconds server)))))
                           collect (cons node-name session)))))
     (loop for (node-name . session) in silent
-          do (setf (node-agent-session-evicted-p session) t)
-             (log-node-session-stall "no envelope handled from node ~A; closing its session" node-name)
-             (let ((stream (node-agent-session-stream session)))
-               (when (typep stream 'ag-grpc::grpc-server-call-stream)
-                 (ignore-errors
-                  (ag-http2:connection-close (ag-grpc::server-stream-connection stream))))))))
+          do (log-node-session-stall "no envelope handled from node ~A; closing its session" node-name)
+             (close-node-agent-session session))))
 
 (defun stable-transit-node-names (server now)
   "Return ready nodes whose uninterrupted lease has passed the gateway cooldown."
