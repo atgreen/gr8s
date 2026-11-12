@@ -106,6 +106,7 @@
                              ;; already-re-homed owners rather than interning fresh
                              ;; GR8S-homed placeholders that would then diverge.
                              (:file "runtime/containerd/package")
+                             (:file "runtime/containerd/integration")
                              (:file "kubelet/pod-parser-policy")
                              (:file "kubelet/env-files")
                              (:file "kubelet/user-namespaces")

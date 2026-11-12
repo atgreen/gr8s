@@ -4,7 +4,7 @@
 ;;;; containerd and CRI implementation of the GR8S.RUNTIME protocol.
 
 (defpackage #:gr8s.runtime.containerd
-  (:use #:cl #:gr8s #:gr8s.runtime)
+  (:use #:cl #:gr8s.runtime)
   (:shadow
    #:*containerd-cri-namespace*
    #:*cri-runtime-request-timeout*
@@ -204,66 +204,6 @@
    #:read-termination-message-file))
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
-  ;; These services still live in the GR8S composition package while their
-  ;; owners are extracted.  Interning and importing them here preserves the
-  ;; historical symbol identity and makes the temporary dependency explicit.
-  (dolist (name '("APPLY-CONTAINER-PROBE-OBSERVATION"
-                  "APPLY-INIT-CONTAINER-OBSERVATION"
-                  "BEGIN-TERMINATING-CONTAINER-PROBES"
-                  "CANCEL-RUNTIME-POD-DELETION"
-                  "CAPTURE-CONTAINERD-FINALIZED-POD"
-                  "CHECKPOINT-CONTAINER-LIFECYCLE-OBSERVATION"
-                  "CLEANUP-POD-SUBPATHS"
-                  "CLEANUP-POD-VOLUMES"
-                  "CONTAINER-ATTEMPT-LOG-PATH"
-                  "CONTAINER-LIFECYCLE-PHASE"
-                  "CONTAINER-LIFECYCLE-STATUSES"
-                  "CONTAINER-PROBE-RESTART-REQUIRED-P"
-                  "CONTAINER-WITH-POD-LEVEL-LIMITS"
-                  "CONTAINERD-CONTAINER-MOUNTS"
-                  "CONTAINERD-NODE-ADDRESS"
-                  "CONTAINERD-POD-ENVIRONMENT"
-                  "CONTAINERD-POD-SECURITY-CONTEXT"
-                  "CONTAINERD-POD-USER-NAMESPACE"
-                  "CONVERGE-CONTAINERD-CONTAINERS"
-                  "CORE-OBJECT"
-                  "COUNTING-USER-NAMESPACED-POD-STARTS"
-                  "CRI-LINUX-CONTAINER-RESOURCES"
-                  "CURRENT-CONTAINER-INFOS"
-                  "DEFAULT-IMAGE-PULL-POLICY"
-                  "ENSURE-CONTAINER-IMAGE"
-                  "EXPAND-CONTAINER-COMMAND"
-                  "FORGET-CONTAINER-LIFECYCLE-STATE"
-                  "FORMAT-POD-LOGS"
-                  "INCORPORATE-CONTAINER-LOG-HISTORY"
-                  "KNOWN-CONTAINER-ATTEMPT"
-                  "LOAD-CONTAINER-LIFECYCLE-STATE"
-                  "MAKE-CONTAINER-HOOK-MANAGER"
-                  "MAKE-DELETION-CONTROLLER"
-                  "MAKE-IMAGE-PULL-MANAGER"
-                  "MAP-MOUNTS-INTO-USER-NAMESPACE"
-                  "MASK-POST-START-CONTAINERS"
-                  "NATIVE-CONTAINER-PROGRESS-REQUIRED-P"
-                  "POD-FINALIZERS-PRESENT-P"
-                  "POD-IMAGE-PULL-CREDENTIALS"
-                  "POD-RUNTIME-CONTAINER-OBJECT"
-                  "POD-VOLUME-DIRECTORY"
-                  "POD-VOLUME-SUPPLEMENTAL-GROUPS"
-                  "POLL-RUNTIME-POD-DELETION"
-                  "RECONCILE-CONTAINER-PROBES"
-                  "RECONCILE-CONTAINER-UPDATES"
-                  "RECORD-CONTAINER-LIFECYCLE-EVENT"
-                  "REFRESH-POD-PROJECTED-VOLUMES"
-                  "RUNTIME-AVAILABILITY-MESSAGE"
-                  "SEPARATE-EPHEMERAL-STATUSES"
-                  "START-CONTAINER-POST-START-HOOK"
-                  "STOP-CONTAINER-PROBES"
-                  "STOP-POD-CONTAINERS-IN-ORDER"
-                  "STOP-RUNTIME-DELETION-CONTROLLER"
-                  "WRITE-PROJECTED-VOLUME-FILE"
-                  "*POD-DELETION-CLOCK*"
-                  "*RUNTIME-DELETION-REGISTER-CANCEL*"))
-    (import (intern name '#:gr8s) '#:gr8s.runtime.containerd))
   (do-external-symbols (symbol '#:gr8s.runtime.containerd)
     (shadowing-import symbol '#:gr8s))
   (dolist (name '("CRI-CREATE-CONTAINER" "CRI-CONTAINER-INFO-EXIT-CODE"
