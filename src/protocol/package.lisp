@@ -13,7 +13,10 @@
    #:make-server-envelope
    #:make-spdy-server
    #:make-unix-grpc-channel
-   #:read-websocket-frame)
+   #:read-websocket-frame
+   #:unsupported-node-protocol-version
+   #:unsupported-node-protocol-version-received
+   #:unsupported-node-protocol-version-supported)
   (:export
    #:+node-protocol-version+
    #:connect-runtime-stream
@@ -22,7 +25,10 @@
    #:make-server-envelope
    #:make-spdy-server
    #:make-unix-grpc-channel
-   #:read-websocket-frame))
+   #:read-websocket-frame
+   #:unsupported-node-protocol-version
+   #:unsupported-node-protocol-version-received
+   #:unsupported-node-protocol-version-supported))
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (let ((protocol (find-package '#:gr8s.protocol))
@@ -34,7 +40,10 @@
                     "MAKE-SERVER-ENVELOPE"
                     "MAKE-SPDY-SERVER"
                     "MAKE-UNIX-GRPC-CHANNEL"
-                    "READ-WEBSOCKET-FRAME"))
+                    "READ-WEBSOCKET-FRAME"
+                    "UNSUPPORTED-NODE-PROTOCOL-VERSION"
+                    "UNSUPPORTED-NODE-PROTOCOL-VERSION-RECEIVED"
+                    "UNSUPPORTED-NODE-PROTOCOL-VERSION-SUPPORTED"))
       (let ((old (find-symbol name composition))
             (new (find-symbol name protocol)))
         (dolist (user (package-used-by-list composition))
@@ -45,5 +54,8 @@
     (dolist (name '("+NODE-PROTOCOL-VERSION+"
                     "ENSURE-NODE-PROTOCOL-VERSION"
                     "MAKE-AGENT-ENVELOPE"
-                    "MAKE-SERVER-ENVELOPE"))
+                    "MAKE-SERVER-ENVELOPE"
+                    "UNSUPPORTED-NODE-PROTOCOL-VERSION"
+                    "UNSUPPORTED-NODE-PROTOCOL-VERSION-RECEIVED"
+                    "UNSUPPORTED-NODE-PROTOCOL-VERSION-SUPPORTED"))
       (export (find-symbol name protocol) composition))))

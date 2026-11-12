@@ -147,8 +147,6 @@
    #:kubernetes-error-reason
    #:create-pod
    #:cri-create-container
-   #:cri-container-info-exit-code
-   #:cri-container-info-state
    #:cri-container-status
    #:cri-delete-container
    #:cri-delete-pod-sandbox
@@ -156,10 +154,6 @@
    #:cri-run-pod-sandbox
    #:cri-runtime-version
    #:cri-start-container
-   #:cri-version-info-runtime-api-version
-   #:cri-version-info-runtime-name
-   #:cri-version-info-runtime-version
-   #:cri-version-info-version
    #:delete-pod
    #:fake-runtime-ensure-count
    #:get-pod

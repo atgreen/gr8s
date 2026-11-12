@@ -87,12 +87,25 @@
                              (:file "controllers/package")
                              (:file "apiserver/package")
                              (:file "runtime/package")
-                             (:file "runtime/containerd/package")
                              (:file "store/package")
                              (:file "network/package")
                              (:file "security/package")
                              (:file "kubelet/package")
                              (:file "server/package")
+                             ;; Agent and telemetry package boundaries are hoisted
+                             ;; here (ahead of their implementation modules below) so
+                             ;; the stage-1 ownership declarations can re-home every
+                             ;; module-owned symbol out of the GR8S facade before any
+                             ;; implementation file loads.
+                             (:file "agent/package")
+                             (:file "telemetry/package")
+                             (:file "refactor/stage1-declarations")
+                             ;; containerd/package's eval-when interns a block of
+                             ;; forward-referenced sibling symbols into GR8S; it must
+                             ;; load AFTER the stage-1 declarations so it picks up the
+                             ;; already-re-homed owners rather than interning fresh
+                             ;; GR8S-homed placeholders that would then diverge.
+                             (:file "runtime/containerd/package")
                              (:file "kubelet/pod-parser-policy")
                              (:file "kubelet/env-files")
                              (:file "kubelet/user-namespaces")
@@ -400,8 +413,8 @@
                                            (:file "budget-http")))
                              (:module "agent"
                               :serial t
-                              :components ((:file "package")
-                                           (:file "integration")
+                              ;; agent/package is hoisted earlier (see above).
+                              :components ((:file "integration")
                                            (:file "session")
                                            (:file "runtime")
                                            (:file "trace")
