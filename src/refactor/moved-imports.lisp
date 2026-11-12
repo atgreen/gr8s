@@ -147,6 +147,27 @@
                   ;; GR8S.RUNTIME
                   ("GR8S.RUNTIME" "GR8S.FOUNDATION" "+GR8S-VERSION+")
                   ("GR8S.RUNTIME" "GR8S.SERVER" "MAIN")
+                  ;; Quoted condition-class and type references the undefined-function
+                  ;; scan did not see (e.g. (error 'kubernetes-error ...)).  They must be
+                  ;; imported before the moved file compiles; otherwise a later
+                  ;; integration shadowing-import replaces -- and so uninterns -- the
+                  ;; fresh symbol the file captured, leaving a dangling #:SYMBOL that no
+                  ;; longer names the condition class.
+                  ("GR8S.AGENT" "CL-RTNETLINK" "RTNETLINK-ERROR")
+                  ("GR8S.AGENT" "GR8S.NETWORK" "CNI-ERROR")
+                  ("GR8S.CONTROLLERS" "GR8S.MODEL" "KUBERNETES-ERROR" "POD")
+                  ("GR8S.KUBELET" "GR8S.MODEL" "POD")
+                  ("GR8S.KUBELET" "GR8S.RUNTIME" "RUNTIME-ERROR")
+                  ("GR8S.NETWORK" "CL-RTNETLINK" "CALL-RTNETLINK" "NETLINK-ATTRIBUTE"
+                   "NETLINK-OCTETS" "NETLINK-READ-INTEGER")
+                  ("GR8S.NETWORK" "GR8S.CONTROLLERS" "SERVICE-AFFINITY-TIMEOUT"
+                   "SERVICE-LOAD-BALANCER-IDENTITY" "SERVICE-LOAD-BALANCER-PORT-OWNERS"
+                   "SERVICE-NODE-ZONE" "SERVICE-PORT-BACKENDS" "SERVICE-PROXIED-P"
+                   "SERVICE-SLICE-ENDPOINT-RECORDS" "TERMINAL-POD-PHASE-P")
+                  ("GR8S.NETWORK" "GR8S.KUBELET" "POD-HOST-NETWORK-P")
+                  ("GR8S.NETWORK" "GR8S.MODEL" "POD")
+                  ("GR8S.NETWORK" "GR8S.RESOURCES" "LIST-CORE-RESOURCES")
+                  ("GR8S.NETWORK" "GR8S.STORE" "LIST-PODS")
                   ))
     (destructuring-bind (into from &rest names) spec
       (let ((ipkg (find-package into)) (fpkg (find-package from)))
