@@ -611,6 +611,23 @@
         (is (equal "InternalError" (gethash "reason" body)))
         (is (search "failed calling webhook \"closed.example.com\"" (gethash "message" body)))))))
 
+(test fail-open-webhooks-are-counted-in-the-fail-open-metric
+  (with-admission-api (store)
+    (values store)
+    (let ((unreachable (gr8s.resources::core-object "url" (format nil "https://localhost:~D/x" *admission-test-port*))))
+      ;; Untrusted backend + failurePolicy Ignore -> the call fails and the request
+      ;; is let through; each fail-open must register in the metric, by name and type.
+      (admission-test-config "ValidatingWebhookConfiguration" "vopen"
+                             (admission-test-webhook "vopen.example.com" "/x" "clientConfig" unreachable "failurePolicy" "Ignore"))
+      (admission-test-config "MutatingWebhookConfiguration" "mopen"
+                             (admission-test-webhook "mopen.example.com" "/x" "clientConfig" unreachable "failurePolicy" "Ignore"))
+      (check-core-status 201 "/api/v1/namespaces/alpha/configmaps" :method :post :object (admission-test-configmap "open"))
+      (let* ((raw (drakma:http-request (core-api-url "/metrics") :proxy nil :redirect nil))
+             (text (if (stringp raw) raw (trivial-utf-8:utf-8-bytes-to-string raw))))
+        (is (search "# TYPE apiserver_admission_webhook_fail_open_count counter" text))
+        (is (search "apiserver_admission_webhook_fail_open_count{name=\"vopen.example.com\",type=\"validating\"}" text))
+        (is (search "apiserver_admission_webhook_fail_open_count{name=\"mopen.example.com\",type=\"mutating\"}" text))))))
+
 (test webhook-configurations-are-exempt-from-admission
   (with-admission-api (store)
     (values store)

@@ -482,6 +482,33 @@ cache, address/verify-name split and socket-close-on-deadline live in the client
       (core-resource-error 500 "InternalError" "Internal error occurred: admission webhook ~S returned an unusable patch: ~A"
                            name (if (typep condition 'kubernetes-error) (kubernetes-error-message condition) condition)))))
 
+(defvar *admission-webhook-fail-open-counts* (make-hash-table :test #'equal)
+  "Counts, keyed by (webhook-name . type), of webhooks whose call failed and whose
+failurePolicy: Ignore let the request through -- apiserver_admission_webhook_fail_open_count.")
+(defvar *admission-webhook-fail-open-lock* (bt:make-lock "gr8s admission fail-open metric"))
+
+(defun note-webhook-fail-open (name type)
+  "Record that webhook NAME of TYPE (\"validating\" or \"mutating\") failed open.  The
+failure is already logged; this is the signal kube-apiserver emits as a metric."
+  (bt:with-lock-held (*admission-webhook-fail-open-lock*)
+    (incf (gethash (cons name type) *admission-webhook-fail-open-counts* 0))))
+
+(defun admission-webhook-fail-open-metrics-text ()
+  "Prometheus exposition of apiserver_admission_webhook_fail_open_count, emitted,
+as upstream does, once per webhook that failurePolicy: Ignore lets through."
+  (let ((rows (bt:with-lock-held (*admission-webhook-fail-open-lock*)
+                (loop for key being the hash-keys of *admission-webhook-fail-open-counts*
+                        using (hash-value count)
+                      collect (list (car key) (cdr key) count)))))
+    (if (null rows)
+        ""
+        (with-output-to-string (out)
+          (format out "# HELP apiserver_admission_webhook_fail_open_count Admission webhook fail open count.~%")
+          (format out "# TYPE apiserver_admission_webhook_fail_open_count counter~%")
+          (loop for (name type count) in rows
+                do (format out "apiserver_admission_webhook_fail_open_count{name=~S,type=~S} ~D~%"
+                           name type count))))))
+
 (defun admission-invoke-mutating (store hook attributes)
   "Call one mutating webhook when selected, returning whether it changed the object."
   (when (admission-hook-selected-p store hook attributes)
@@ -494,6 +521,7 @@ cache, address/verify-name split and socket-close-on-deadline live in the client
                (admission-call-failure (condition)
                  (when (equal "Fail" (gethash "failurePolicy" webhook))
                    (admission-internal-error name (admission-call-failure-message condition)))
+                 (note-webhook-fail-open name "mutating")
                  (format *error-output* "~&Ignoring failed webhook ~A: ~A~%" name condition)
                  (return-from admission-invoke-mutating nil)))))
       (unless (eq t (gethash "allowed" response)) (admission-denial name response))
@@ -568,5 +596,7 @@ Each IfNeeded webhook runs once more when a later webhook changed the object."
           do (when (eq state :failed)
                (if (equal "Fail" (gethash "failurePolicy" webhook))
                    (admission-internal-error (gethash "name" webhook) detail)
-                   (format *error-output* "~&Ignoring failed webhook ~A: ~A~%" (gethash "name" webhook) detail))))
+                   (progn
+                     (note-webhook-fail-open (gethash "name" webhook) "validating")
+                     (format *error-output* "~&Ignoring failed webhook ~A: ~A~%" (gethash "name" webhook) detail)))))
     (admission-emit-warnings attributes)))
