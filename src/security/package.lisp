@@ -4,7 +4,7 @@
 ;;;; Package boundary for cluster identity, certificates, and TLS.
 
 (defpackage #:gr8s.security
-  (:use #:cl #:gr8s)
+  (:use #:cl)
   (:shadow
    #:api-csr-profile-certificate-p
    #:ensure-cluster-pki
