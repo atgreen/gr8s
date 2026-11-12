@@ -55,7 +55,7 @@
 ;; Bake the git-augmented version into the image. This build dumps with
 ;; save-lisp-and-die rather than asdf:program-op, so VERSION-STRING's program-op
 ;; hook never fires; set +GR8S-VERSION+ here instead, while the git repo is present.
-(setf gr8s.foundation:+gr8s-version+ (version-string:make-version-string :gr8s :include-git-p t))
+(setf gr8s.foundation::+gr8s-version+ (version-string:make-version-string :gr8s :include-git-p t))
 
 ;; Base systems are supplied by the dumped image. Patch systems may depend on
 ;; them on hosts without this checkout; no ASDF operation should reload them.
