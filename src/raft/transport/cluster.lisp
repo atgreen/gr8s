@@ -188,17 +188,17 @@
          (role (cond ((string-equal "witness" (gr8s.node.v1::role request)) :witness)
                      ((string-equal "learner" (gr8s.node.v1::role request)) :learner)
                      ((member (gr8s.node.v1::role request) '("" "voter") :test #'string-equal) :voter)
-                     (t (gr8s::pki-fail "invalid-member-role" "Unknown Raft join role"))))
+                     (t (gr8s.security::pki-fail "invalid-member-role" "Unknown Raft join role"))))
          (node-name (gr8s.node.v1::node-name request))
          (token (gr8s.node.v1::join-token request))
          (api-url (gr8s.node.v1::api-url request)))
     (cond
       (credentials
-       (unless (equal id (gr8s::authenticate-raft-peer credentials context))
-         (gr8s::pki-fail
+       (unless (equal id (gr8s.security::authenticate-raft-peer credentials context))
+         (gr8s.security::pki-fail
           "member-identity-mismatch"
           "Raft join for ~A used another member's certificate" id)))
-      (pki (gr8s::validate-token pki token node-name)))
+      (pki (gr8s.security::validate-token pki token node-name)))
     (bt:with-lock-held ((raft-member-lock member))
       (if (not (raft-leader-p node))
           ;; Redirect: point the joiner at the leader we last heard from.
@@ -226,7 +226,7 @@
 
 (defun raft-cluster-call-join (member host port &key node-name token (role :voter) api-url (timeout 5))
   "Dial HOST:PORT and send one Join request for MEMBER. Returns the JoinResponse."
-  (let ((channel (gr8s::make-raft-channel
+  (let ((channel (gr8s.security::make-raft-channel
                   (raft-member-credentials member) host port timeout)))
     (unwind-protect
          (let* ((stub (gr8s.node.v1::make-raft-transport-stub channel))

@@ -165,7 +165,7 @@ Unknown files, directories, symlinks, hard links or permissions preserve the roo
       (when fd (sb-posix:close fd)))))
 
 (defun raft-snapshot-new-path (member prefix)
-  (merge-pathnames (format nil "~A-~A.snapshot" prefix (gr8s::generate-uid))
+  (merge-pathnames (format nil "~A-~A.snapshot" prefix (gr8s.store::generate-uid))
                    (raft-member-snapshot-root-unlocked member)))
 
 (defun raft-snapshot-create-file (path)
@@ -249,7 +249,7 @@ Probe capacity at most once per unchanged second while recovery is required."
       (values nil previous-state nil)))
 
 (defun raft-link-send-snapshot-file (member stub message path digest &key format header obsolete-p)
-  (let ((token (gr8s::generate-uid)))
+  (let ((token (gr8s.store::generate-uid)))
     (with-open-file (stream path :element-type '(unsigned-byte 8))
       (let ((total (file-length stream)) (offset 0)
             (buffer (make-array +raft-snapshot-chunk-bytes+ :element-type '(unsigned-byte 8))))

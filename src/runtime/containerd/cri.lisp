@@ -9,11 +9,11 @@
 
 (defun make-unix-grpc-channel (&rest arguments)
   "Open a Unix gRPC channel through gr8s's transport integration."
-  (apply #'gr8s::make-unix-grpc-channel arguments))
+  (apply #'gr8s.protocol::make-unix-grpc-channel arguments))
 
 (defun register-runtime-deletion-cancel (function)
   "Register FUNCTION with the active runtime deletion operation, when any."
-  (gr8s::register-runtime-deletion-cancel function))
+  (gr8s.kubelet::register-runtime-deletion-cancel function))
 
 (defun cri-json-object (&rest pairs)
   "Return an EQUAL hash table populated by alternating key and value PAIRS."

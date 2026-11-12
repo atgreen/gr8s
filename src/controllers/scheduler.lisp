@@ -450,16 +450,16 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
 
 (defun dra-quantity-add (left right)
   "Return the exact sum of two Kubernetes resource quantities."
-  (let* ((scale (min (gr8s::container-quantity-scale left)
-                     (gr8s::container-quantity-scale right)))
+  (let* ((scale (min (gr8s.kubelet::container-quantity-scale left)
+                     (gr8s.kubelet::container-quantity-scale right)))
          (left-coefficient
-           (* (gr8s::container-quantity-coefficient left)
-              (expt 10 (- (gr8s::container-quantity-scale left) scale))))
+           (* (gr8s.kubelet::container-quantity-coefficient left)
+              (expt 10 (- (gr8s.kubelet::container-quantity-scale left) scale))))
          (right-coefficient
-           (* (gr8s::container-quantity-coefficient right)
-              (expt 10 (- (gr8s::container-quantity-scale right) scale)))))
-    (gr8s::normalize-container-quantity
-     (gr8s::make-container-quantity
+           (* (gr8s.kubelet::container-quantity-coefficient right)
+              (expt 10 (- (gr8s.kubelet::container-quantity-scale right) scale)))))
+    (gr8s.kubelet::normalize-container-quantity
+     (gr8s.kubelet::make-container-quantity
       :coefficient (+ left-coefficient right-coefficient) :scale scale))))
 
 (defun dra-capacity-usage-add (usage consumed)
@@ -471,32 +471,32 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
      (lambda (name amount)
        (let ((before (gethash name result "0")))
          (setf (gethash name result)
-               (gr8s::container-quantity-string
+               (gr8s.kubelet::container-quantity-string
                 (dra-quantity-add
-                 (gr8s::parse-container-quantity before "allocated DRA capacity")
-                 (gr8s::parse-container-quantity amount "consumed DRA capacity"))))))
+                 (gr8s.kubelet::parse-container-quantity before "allocated DRA capacity")
+                 (gr8s.kubelet::parse-container-quantity amount "consumed DRA capacity"))))))
      consumed)
     result))
 
 (defun dra-quantity-at-scale (quantity scale)
   "Return QUANTITY's integer coefficient when expressed at SCALE."
-  (* (gr8s::container-quantity-coefficient quantity)
-     (expt 10 (- (gr8s::container-quantity-scale quantity) scale))))
+  (* (gr8s.kubelet::container-quantity-coefficient quantity)
+     (expt 10 (- (gr8s.kubelet::container-quantity-scale quantity) scale))))
 
 (defun dra-quantity-round-up (requested minimum step)
   "Round REQUESTED upward to MINIMUM plus an integer multiple of STEP."
-  (when (minusp (gr8s::container-quantity-compare requested minimum))
+  (when (minusp (gr8s.kubelet::container-quantity-compare requested minimum))
     (return-from dra-quantity-round-up minimum))
-  (let* ((scale (min (gr8s::container-quantity-scale requested)
-                     (gr8s::container-quantity-scale minimum)
-                     (gr8s::container-quantity-scale step)))
+  (let* ((scale (min (gr8s.kubelet::container-quantity-scale requested)
+                     (gr8s.kubelet::container-quantity-scale minimum)
+                     (gr8s.kubelet::container-quantity-scale step)))
          (requested-value (dra-quantity-at-scale requested scale))
          (minimum-value (dra-quantity-at-scale minimum scale))
          (step-value (dra-quantity-at-scale step scale))
          (difference (- requested-value minimum-value))
          (steps (ceiling difference step-value)))
-    (gr8s::normalize-container-quantity
-     (gr8s::make-container-quantity
+    (gr8s.kubelet::normalize-container-quantity
+     (gr8s.kubelet::make-container-quantity
       :coefficient (+ minimum-value (* steps step-value)) :scale scale))))
 
 (defun dra-resolve-capacity-requests (driver capacity requests)
@@ -525,16 +525,16 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
 
 (defun dra-capacity-consumption (entry requested requested-p)
   "Return ENTRY's policy-adjusted consumption and whether it is valid."
-  (let* ((limit (gr8s::parse-container-quantity
+  (let* ((limit (gr8s.kubelet::parse-container-quantity
                  (gethash "value" entry) "device DRA capacity"))
          (policy (gethash "requestPolicy" entry (core-object)))
-         (amount (gr8s::parse-container-quantity
+         (amount (gr8s.kubelet::parse-container-quantity
                   (if requested-p
                       requested
                       (gethash "default" policy (gethash "value" entry)))
                   "requested DRA capacity")))
-    (when (minusp (gr8s::container-quantity-compare
-                   amount (gr8s::parse-container-quantity "0" "DRA capacity")))
+    (when (minusp (gr8s.kubelet::container-quantity-compare
+                   amount (gr8s.kubelet::parse-container-quantity "0" "DRA capacity")))
       (return-from dra-capacity-consumption (values nil nil)))
     (when requested-p
       (let ((values (gethash "validValues" policy))
@@ -543,35 +543,35 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
                (let ((rounded
                        (find-if
                         (lambda (candidate)
-                          (not (plusp (gr8s::container-quantity-compare
+                          (not (plusp (gr8s.kubelet::container-quantity-compare
                                       amount
-                                      (gr8s::parse-container-quantity
+                                      (gr8s.kubelet::parse-container-quantity
                                        candidate "DRA capacity policy")))))
                         values)))
                  (unless rounded
                    (return-from dra-capacity-consumption (values nil nil)))
-                 (setf amount (gr8s::parse-container-quantity
+                 (setf amount (gr8s.kubelet::parse-container-quantity
                                rounded "DRA capacity policy"))))
               ((hash-table-p range)
-               (let ((minimum (gr8s::parse-container-quantity
+               (let ((minimum (gr8s.kubelet::parse-container-quantity
                                (gethash "min" range) "DRA capacity range"))
                      (step (and (gethash "step" range)
-                                (gr8s::parse-container-quantity
+                                (gr8s.kubelet::parse-container-quantity
                                  (gethash "step" range) "DRA capacity range"))))
                  (setf amount (if step
                                   (dra-quantity-round-up amount minimum step)
-                                  (if (minusp (gr8s::container-quantity-compare
+                                  (if (minusp (gr8s.kubelet::container-quantity-compare
                                               amount minimum))
                                       minimum amount)))
                  (when (and (gethash "max" range)
-                            (plusp (gr8s::container-quantity-compare
+                            (plusp (gr8s.kubelet::container-quantity-compare
                                     amount
-                                    (gr8s::parse-container-quantity
+                                    (gr8s.kubelet::parse-container-quantity
                                      (gethash "max" range)
                                      "DRA capacity range"))))
                    (return-from dra-capacity-consumption (values nil nil))))))))
     (values amount
-            (not (plusp (gr8s::container-quantity-compare amount limit))))))
+            (not (plusp (gr8s.kubelet::container-quantity-compare amount limit))))))
 
 (defun dra-device-consumed-capacity (driver device usage exact)
   "Return DEVICE's consumption map when EXACT fits remaining capacity, else NIL."
@@ -593,16 +593,16 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
              (let* ((already (if (hash-table-p usage)
                                  (gethash name usage "0") "0"))
                     (total (dra-quantity-add
-                            (gr8s::parse-container-quantity
+                            (gr8s.kubelet::parse-container-quantity
                              already "allocated DRA capacity")
                             requested)))
-               (when (plusp (gr8s::container-quantity-compare
+               (when (plusp (gr8s.kubelet::container-quantity-compare
                              total
-                             (gr8s::parse-container-quantity
+                             (gr8s.kubelet::parse-container-quantity
                               (gethash "value" entry) "device DRA capacity")))
                  (setf fits nil))
                (setf (gethash name consumed)
-                     (gr8s::container-quantity-string requested))))))
+                     (gr8s.kubelet::container-quantity-string requested))))))
      capacity)
     (when fits consumed))))
 

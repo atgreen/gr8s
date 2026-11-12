@@ -7,4 +7,4 @@
 
 (defun schedule-pod (store pod)
   "Choose and persist POD's node assignment in STORE."
-  (gr8s::%schedule-pod store pod))
+  (gr8s.controllers::%schedule-pod store pod))

@@ -219,7 +219,7 @@ release it only after source lookup and delivery finish, including failures."
   "Lazily open and cache a channel+stub to this peer, or NIL if unreachable."
   (or (raft-peer-link-stub link)
       (handler-case
-          (let ((channel (gr8s::make-raft-channel
+          (let ((channel (gr8s.security::make-raft-channel
                           (raft-member-credentials member)
                           (raft-peer-link-host link) (raft-peer-link-port link) 2)))
             (setf (raft-peer-link-channel link) channel
@@ -372,7 +372,7 @@ Normal replication continues while the barrier drains outstanding application wr
                              (funcall after-recovery-fn member)))
                          (raft-member-reap-snapshot-orphans member)
                          (apply #'ag-grpc:make-grpc-server port :host host
-                                (gr8s::raft-server-tls-options credentials)))
+                                (gr8s.security::raft-server-tls-options credentials)))
                      (error (condition)
                        (raft-member-close-owned-storage member)
                        (error condition))))))
@@ -382,13 +382,13 @@ Normal replication continues while the barrier drains outstanding application wr
     (gr8s.node.v1::register-raft-transport-service
      server
      :deliver-handler (lambda (request context)
-                        (let ((msg (gr8s::authenticated-raft-message
+                        (let ((msg (gr8s.security::authenticated-raft-message
                                     credentials request context)))
                           (raft-member-dispatch-message member msg))
                         (make-instance 'gr8s.node.v1::raft-ack))
      :propose-handler
      (lambda (request context)
-       (when credentials (gr8s::authenticate-raft-peer credentials context))
+       (when credentials (gr8s.security::authenticate-raft-peer credentials context))
        (let* ((wire (gr8s.node.v1::command request))
               (message (octets->raft-message wire))
               (command (getf message :command)))
@@ -411,13 +411,13 @@ Normal replication continues while the barrier drains outstanding application wr
                            (make-instance 'gr8s.node.v1::join-response :accepted nil))))
      :enroll-member-handler (lambda (request context)
                               (declare (ignore context))
-                              (gr8s::raft-member-handle-enroll member request))
+                              (gr8s.security::raft-member-handle-enroll member request))
      :renew-member-handler (lambda (request context)
-                             (gr8s::raft-member-handle-renew member request context))
+                             (gr8s.security::raft-member-handle-renew member request context))
      :relay-operation-handler
      (lambda (request context)
        (let* ((peer (and credentials
-                         (gr8s::authenticate-raft-peer credentials context)))
+                         (gr8s.security::authenticate-raft-peer credentials context)))
               (source (slot-value request 'gr8s.node.v1::source-member))
               (variant (slot-value request 'gr8s.node.v1::payload-case))
               (payload (and variant
@@ -428,17 +428,17 @@ Normal replication continues while the barrier drains outstanding application wr
               (accepted nil)
               (failure ""))
          (when (and peer (not (equal peer source)))
-           (gr8s::pki-fail "member-identity-mismatch"
+           (gr8s.security::pki-fail "member-identity-mismatch"
                            "Raft member ~A relayed an operation as ~A" peer source))
          (handler-case
              (setf accepted
                    (and node-server payload
                         (case variant
                           ((:operation-request :operation-input :operation-cancel)
-                           (gr8s::accept-routed-node-operation
+                           (gr8s.apiserver::accept-routed-node-operation
                             node-server source node-name variant payload))
                           ((:operation-stream :operation-response)
-                           (gr8s::deliver-routed-node-operation
+                           (gr8s.apiserver::deliver-routed-node-operation
                             node-server variant payload))
                           (otherwise nil))))
            (error (condition) (setf failure (princ-to-string condition))))
@@ -473,7 +473,7 @@ Normal replication continues while the barrier drains outstanding application wr
         (let ((stub
                 (or (raft-peer-link-relay-stub link)
                     (let ((channel
-                            (gr8s::make-raft-channel
+                            (gr8s.security::make-raft-channel
                              (raft-member-credentials member)
                              (raft-peer-link-host link) (raft-peer-link-port link) 2)))
                       (setf (raft-peer-link-relay-channel link) channel
@@ -507,7 +507,7 @@ id, or NIL."
 (defun configure-raft-node-operation-routing (member node-server)
   "Connect NODE-SERVER's operation router to MEMBER's peer transport."
   (setf (raft-member-operation-server member) node-server
-        (gr8s::node-grpc-server-operation-router node-server)
+        (gr8s.apiserver::node-grpc-server-operation-router node-server)
         (lambda (variant target-member node-name payload)
           (raft-member-route-node-operation
            member variant target-member node-name payload)))
@@ -530,7 +530,7 @@ id, or NIL."
   "Begin driving the election/heartbeat clock (call after peers are set)."
   (when (raft-member-credentials member)
     (setf (raft-member-renewal-thread member)
-          (bt:make-thread (lambda () (gr8s::raft-renewal-loop member))
+          (bt:make-thread (lambda () (gr8s.security::raft-renewal-loop member))
                           :name (format nil "gr8s raft renewal ~A" (raft-node-id (raft-member-node member))))))
   (setf (raft-member-tick-thread member)
         (bt:make-thread (lambda () (raft-member-tick-loop member tick-seconds))
@@ -582,7 +582,7 @@ id, or NIL."
                       (and leader (gethash leader (raft-node-peer-addresses node))))))
         (when (and leader address)
           (handler-case
-              (let ((channel (gr8s::make-raft-channel
+              (let ((channel (gr8s.security::make-raft-channel
                               (raft-member-credentials member)
                               (first address) (second address) 2)))
                 (unwind-protect

@@ -87,8 +87,8 @@
 
 (defun containerd-effective-container-resources (runtime pod container)
   "Apply the same resource-manager affinity to container creation and updates."
-  (let ((resources (gr8s::cri-linux-container-resources
-                    (gr8s::container-with-pod-level-limits (gethash "spec" (pod-to-object pod)) container)))
+  (let ((resources (gr8s.kubelet::cri-linux-container-resources
+                    (gr8s.resources::container-with-pod-level-limits (gethash "spec" (pod-to-object pod)) container)))
         (configure (containerd-runtime-resource-config-function runtime)))
     (if configure (funcall configure pod container resources) resources)))
 

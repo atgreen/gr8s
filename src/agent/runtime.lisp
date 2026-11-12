@@ -282,7 +282,7 @@ The v1 socket LB remains active; a validated grant can release v2 tables."
               for address = (and (hash-table-p entry) (gethash "address" entry))
               do (unless (and (safe-cni-container-id-p container)
                               (stringp interface) (plusp (length interface))
-                              (ignore-errors (gr8s::parse-ipv4-integer address)))
+                              (ignore-errors (gr8s.controllers::parse-ipv4-integer address)))
                    (error "invalid external CNI endpoint registry entry"))
                  (setf (gethash (cons container interface)
                                 (node-runtime-external-cni-endpoints node-runtime))

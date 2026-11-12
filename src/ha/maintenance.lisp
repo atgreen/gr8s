@@ -5,7 +5,7 @@
 (defun maintain-ha-artifacts-once (hcp)
   "Claim one obsolete artifact under member ownership; unlink trash outside it."
   (let* ((member (ha-control-plane-member hcp))
-         (root (gr8s::pod-store-path (ha-control-plane-store hcp)))
+         (root (gr8s.store::pod-store-path (ha-control-plane-store hcp)))
          (eligible nil) (removed 0))
     (when (sb-thread:holding-mutex-p (raft-member-lock member))
       (error "Artifact maintenance must start outside the member mutex"))
