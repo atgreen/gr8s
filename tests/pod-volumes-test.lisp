@@ -80,6 +80,10 @@
 
 (test projected-files-and-emptydir-have-real-mount-content
   (with-temporary-store (store directory)
+   ;; Secret/projected volumes are tmpfs-backed in production, which needs root;
+   ;; stub the mount so this stays runnable as an unprivileged developer. Files
+   ;; still land in the (unmounted) directory, so the content checks hold.
+   (with-fake-pod-mounts (mounted options directory)
     (create-volume-test-data store "sonobuoy")
     (let* ((pod (create-pod store (volume-test-pod)))
            (runtime (gr8s.runtime.containerd::make-containerd-runtime :log-root (merge-pathnames "volumes/" directory)))
@@ -101,7 +105,7 @@
         (let ((file (merge-pathnames "retained" (gr8s.cri.v1::host-path work))))
           (with-open-file (stream file :direction :output) (write-string "keep" stream))
           (gr8s.kubelet::containerd-pod-mounts runtime pod (aref (pod-containers pod) 0))
-          (is (equal "keep" (uiop:read-file-string file))))))))
+          (is (equal "keep" (uiop:read-file-string file)))))))))
 
 (test effective-cri-identity-and-downward-environment-follow-pod-fields
   (let* ((pod (volume-test-pod)) (container (aref (pod-containers pod) 0))
@@ -544,6 +548,29 @@
       (let ((condition (handler-case (gr8s.kubelet::containerd-pod-mounts runtime failing (aref (pod-containers failing) 0))
                          (gr8s.runtime::container-image-pull-error (condition) condition))))
         (is (equal "ErrImagePull" (gr8s.kubelet::container-config-error-reason condition)))))))
+
+(test secret-volumes-are-backed-by-tmpfs
+  ;; Secret / projected / serviceAccountToken bytes must never touch persistent
+  ;; disk, so the volume directory is a tmpfs just like an emptyDir{Memory}.
+  (with-temporary-store (store directory)
+    (with-fake-pod-mounts (mounted options directory)
+      (declare (ignorable options))
+      (let* ((runtime (gr8s.runtime.containerd::make-containerd-runtime :log-root (merge-pathnames "logs/" directory)))
+             (object (com.inuoe.jzon:parse *valid-pod-json*))
+             (spec (gethash "spec" object)))
+        (setf (gr8s.runtime.containerd::containerd-runtime-resource-store runtime) store)
+        (gr8s.resources::create-core-resource store "secrets"
+          (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "creds")
+            "data" (gr8s.resources::core-object "k" "dg==")) "default")
+        (setf (gethash "name" (gethash "metadata" object)) "sec-pod"
+              (gethash "namespace" (gethash "metadata" object)) "default"
+              (gethash "volumes" spec)
+              (vector (gr8s.resources::core-object "name" "s"
+                        "secret" (gr8s.resources::core-object "secretName" "creds"))))
+        (let* ((pod (parse-pod object))
+               (volume (aref (gethash "volumes" (gethash "spec" (pod-to-object pod))) 0))
+               (path (gr8s.kubelet::materialize-pod-volume runtime pod volume)))
+          (is (member (namestring (truename path)) mounted :test #'equal)))))))
 
 (test fsgroup-volumes-keep-other-access-and-gain-setgid
   ;; The kubelet ORs fsGroup's group bits and setgid into an emptyDir's 0777, giving 02777.
