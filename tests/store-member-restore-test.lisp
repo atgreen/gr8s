@@ -457,14 +457,17 @@
              (gr8s.raft.transport::raft-member-start member :tick-seconds 0.01)
              (dotimes (i 3) (is-true (sb-thread:wait-on-semaphore attempted :timeout 5)))
              (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
-               (is (= 44 (cl-raft::raft-last-log-index (gr8s.raft.transport::raft-member-node member))))
+               ;; 43 core-delta (apply fails) + 44 election RAFT-BARRIER + 45 the
+               ;; single STORE-RECOVERY-BARRIER: the recovery barrier is appended
+               ;; exactly once and never accumulates across the retrying ticks.
+               (is (= 45 (cl-raft::raft-last-log-index (gr8s.raft.transport::raft-member-node member))))
                (is (= 42 (cl-raft::raft-node-last-applied (gr8s.raft.transport::raft-member-node member)))))
              (is-true (gr8s.store::store-access-blocked-p store))
              (setf (symbol-function 'gr8s.resources::install-core-state-delta) original)
              (is (poll-until (lambda () (not (gr8s.store::store-access-blocked-p store))) :timeout 10))
              (is (equal "B" (configmap-value store "recover" "k")))
              (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
-               (is (= 44 (cl-raft::raft-last-log-index (gr8s.raft.transport::raft-member-node member))))))
+               (is (= 45 (cl-raft::raft-last-log-index (gr8s.raft.transport::raft-member-node member))))))
         (setf (symbol-function 'gr8s.resources::install-core-state-delta) original)
         (when member (gr8s.raft.transport::stop-raft-member member))))))
 

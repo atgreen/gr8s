@@ -245,6 +245,17 @@ release it only after source lookup and delivery finish, including failures."
         (bt:with-lock-held ((raft-peer-link-lock link))
           (setf (raft-peer-link-active-items link) nil))))))
 
+(define-condition raft-apply-error (error)
+  ((underlying :initarg :underlying :reader raft-apply-error-underlying))
+  (:documentation
+   "Signalled when the application apply callback fails on a committed entry. The
+Raft library leaves LAST-APPLIED un-advanced when apply signals, so the entry is
+retried on a later apply pass. Containing this condition lets a background driver
+retry instead of dying; any other error still propagates.")
+  (:report (lambda (condition stream)
+             (format stream "Raft apply callback failed (will retry): ~A"
+                     (raft-apply-error-underlying condition)))))
+
 (defun raft-member-tick-loop (member tick-seconds)
   "MEMBER's clock thread: every TICK-SECONDS, drive RAFT-TICK under the member lock to
    advance the election and heartbeat timers, until the member stops."
@@ -252,7 +263,14 @@ release it only after source lookup and delivery finish, including failures."
     (sleep tick-seconds)
     (when (raft-member-running member)
       (bt:with-lock-held ((raft-member-lock member))
-        (raft-tick (raft-member-node member))
+        ;; RAFT-TICK applies committed entries; a failing apply leaves
+        ;; LAST-APPLIED un-advanced for retry on the next tick and must never
+        ;; kill the clock thread (and with it the whole process). Only the
+        ;; typed apply failure is contained here; any other tick error still
+        ;; propagates.
+        (handler-case (raft-tick (raft-member-node member))
+          (raft-apply-error (condition)
+            (warn "~A" condition)))
         (ignore-errors (raft-member-promote-learners member))
         (raft-member-expire-snapshot-receiver member))
       ;; Store startup checks may acquire outer application barriers. They must
