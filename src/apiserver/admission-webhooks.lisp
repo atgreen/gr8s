@@ -356,6 +356,12 @@ cache, address/verify-name split and socket-close-on-deadline live in the client
        ;; Admission calls the same webhook backend on every matching request;
        ;; reuse the connection instead of a fresh TLS handshake each time.
        :reuse t
+       ;; A rolling webhook backend that refuses or resets a fresh connection is
+       ;; retried, matching upstream's transport resilience, rather than
+       ;; hard-failing on the first reset.  Each attempt is bounded by TIMEOUT, and
+       ;; only fast transport failures (refused/reset/EOF) retry, so a hung backend
+       ;; still fails once at the deadline rather than multiplying it.
+       :max-attempts 3 :retry-interval 1/4
        :timeout timeout
        :body-limit +admission-maximum-response+)
     (declare (ignore headers))
