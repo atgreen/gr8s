@@ -445,7 +445,7 @@
              (let* ((member (gr8s.ha::ha-control-plane-member ha)) (node (gr8s.raft.transport::raft-member-node member)))
                (setf port (gr8s.raft.transport::raft-member-port member))
                (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
-                 (signals error (funcall (gr8s.raft:raft-node-snapshot-fn node))))
+                 (signals error (funcall (gr8s.raft::raft-node-snapshot-fn node))))
                (call-with-bootstrap-barriers
                 store
                 (lambda ()
@@ -568,7 +568,7 @@
              (let ((member (gr8s.ha::ha-control-plane-member ha)))
                (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
                  (is (= frozen-index (cl-raft::raft-node-snapshot-index (gr8s.raft.transport::raft-member-node member))))
-                 (is (> (gr8s.raft:raft-node-last-applied (gr8s.raft.transport::raft-member-node member)) frozen-index))
+                 (is (> (gr8s.raft::raft-node-last-applied (gr8s.raft.transport::raft-member-node member)) frozen-index))
                  (is (null (gr8s.raft.transport::raft-member-artifact-pins member)))))
              (is (not (gr8s.ha::ha-control-plane-compaction-in-flight ha)))
              (setf (symbol-function 'gr8s.resources::capture-frozen-store-snapshot) original)
@@ -592,12 +592,12 @@
              (setf ha (gr8s.ha::start-ha-control-plane store :id "uncertain" :init t
                        :compaction-entries 1 :compaction-interval nil))
              (is (poll-until (lambda () (gr8s.ha::ha-control-plane-leader-p ha)) :timeout 15))
-             (let ((storage (gr8s.raft:raft-node-storage
+             (let ((storage (gr8s.raft::raft-node-storage
                              (gr8s.raft.transport::raft-member-node (gr8s.ha::ha-control-plane-member ha)))))
                (setf (symbol-function 'gr8s.raft::raft-storage-replace-snapshot)
                      (lambda (&rest arguments)
                        (declare (ignore arguments))
-                       (gr8s.raft:close-file-raft-storage storage)
+                       (gr8s.raft::close-file-raft-storage storage)
                        (error "Injected uncertain checkpoint durability")))
                (signals error (gr8s.ha::compact-ha-store-once ha))
                (is (gr8s.store::store-access-blocked-p store))
@@ -676,7 +676,7 @@
              (gr8s.ha::start-ha-compaction-worker ha)
              (let ((fd
                      (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
-                       (gr8s.raft:raft-compact node 3)
+                       (gr8s.raft::raft-compact node 3)
                        (is (= 1 (nth-value 1 (gr8s.raft::raft-storage-catchup-usage storage))))
                        (gr8s.raft::raft-catchup-segment-fd
                         (first (gr8s.raft::file-raft-storage-catchup-segments storage))))))
@@ -796,7 +796,7 @@
       (gr8s.security::write-private-text-exclusively
        (merge-pathnames "pod-revision.ceiling" (gr8s.store::store-generation-root root old)) "7")
       (set-test-generation-current store new)
-      (let* ((member (gr8s.raft.transport::make-raft-member :node (gr8s.raft:make-raft-node :id "maintenance")))
+      (let* ((member (gr8s.raft.transport::make-raft-member :node (gr8s.raft::make-raft-node :id "maintenance")))
              (hcp (gr8s.ha::make-ha-control-plane :store store :member member :compaction-interval nil))
              (original (symbol-function 'gr8s.store::reap-retired-store-generations))
              (entered (bt:make-semaphore)) (release (bt:make-semaphore)) (stopped (bt:make-semaphore))
@@ -806,7 +806,7 @@
                (setf (symbol-function 'gr8s.store::reap-retired-store-generations)
                      (lambda (target &rest args)
                        (setf locked (or (sb-thread:holding-mutex-p (gr8s.store::pod-store-lock target))
-                                        (sb-thread:holding-mutex-p (gr8s.raft.transport:raft-member-lock member))))
+                                        (sb-thread:holding-mutex-p (gr8s.raft.transport::raft-member-lock member))))
                        (bt:signal-semaphore entered)
                        (bt:wait-on-semaphore release)
                        (apply original target args)))
@@ -814,7 +814,7 @@
                (is-true (bt:wait-on-semaphore entered :timeout 10))
                (is-false locked)
                (is-false (gr8s.ha::ha-control-plane-compaction-thread hcp))
-               (is-false (gr8s.raft::raft-node-retained-byte-limit (gr8s.raft.transport:raft-member-node member)))
+               (is-false (gr8s.raft::raft-node-retained-byte-limit (gr8s.raft.transport::raft-member-node member)))
                (is (search "gr8s_generation_reclamation_worker_up 1" (gr8s.ha::ha-metrics-text hcp)))
                (setf stopper (bt:make-thread (lambda ()
                                               (gr8s.ha::stop-ha-maintenance-worker hcp)
@@ -835,7 +835,7 @@
 (test generation-maintenance-retries-errors-and-clears-error-metrics
   (with-temporary-store (store root)
     (declare (ignore root))
-    (let* ((member (gr8s.raft.transport::make-raft-member :node (gr8s.raft:make-raft-node :id "retry")))
+    (let* ((member (gr8s.raft.transport::make-raft-member :node (gr8s.raft::make-raft-node :id "retry")))
            (hcp (gr8s.ha::make-ha-control-plane :store store :member member))
            (original (symbol-function 'gr8s.store::reap-retired-store-generations))
            (retry (bt:make-semaphore)) (release (bt:make-semaphore)) (calls 0))

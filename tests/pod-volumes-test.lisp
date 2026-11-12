@@ -574,7 +574,7 @@
            (gr8s.kubelet::*csi-kubelet-root* (namestring root))
            (expected (merge-pathnames (format nil "pods/~A/volumes/kubernetes.io~~empty-dir/sockets/" (gr8s.model::pod-uid pod)) root))
            (other (merge-pathnames "pods/another-pod/keep" root)))
-      (setf (gr8s.runtime.containerd:containerd-runtime-kubelet-root runtime) root)
+      (setf (gr8s.runtime.containerd::containerd-runtime-kubelet-root runtime) root)
       (ensure-directories-exist other)
       (with-open-file (out other :direction :output :if-does-not-exist :create) (write-string "keep" out))
       (is (equal expected (gr8s.kubelet::materialize-pod-volume runtime pod (aref (gethash "volumes" (gethash "spec" (pod-to-object pod))) 0))))

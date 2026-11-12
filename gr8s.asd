@@ -45,7 +45,6 @@
                               :serial t
                               :components ((:file "package")
                                            (:file "extensions")))
-                             (:file "package")
                              (:file "foundation/package")
                              (:file "version")
                              (:module "generated"
@@ -68,7 +67,6 @@
                              (:file "foundation/dns")
                              (:file "foundation/json")
                              (:file "foundation/network-steering")
-                             (:file "foundation/declarations")
                              (:module "image-distribution"
                               :serial t
                               :components ((:file "package")
@@ -92,19 +90,11 @@
                              (:file "security/package")
                              (:file "kubelet/package")
                              (:file "server/package")
-                             ;; Agent and telemetry package boundaries are hoisted
-                             ;; here (ahead of their implementation modules below) so
-                             ;; the stage-1 ownership declarations can re-home every
-                             ;; module-owned symbol out of the GR8S facade before any
-                             ;; implementation file loads.
+                             ;; Every module package boundary loads up front, so each
+                             ;; module's explicit cross-module imports resolve before
+                             ;; any implementation file compiles below.
                              (:file "agent/package")
                              (:file "telemetry/package")
-                             (:file "refactor/stage1-declarations")
-                             ;; containerd/package's eval-when interns a block of
-                             ;; forward-referenced sibling symbols into GR8S; it must
-                             ;; load AFTER the stage-1 declarations so it picks up the
-                             ;; already-re-homed owners rather than interning fresh
-                             ;; GR8S-homed placeholders that would then diverge.
                              (:file "runtime/containerd/package")
                              (:file "runtime/containerd/integration")
                              ;; Cross-module imports for the formerly-GR8S impl files
@@ -162,7 +152,7 @@
                                            (:file "image-peer-tls")
                                            (:file "raft-tls")
                                            (:file "csr-crypto")
-                                           (:file "compat")))
+                                           ))
                              (:module "resources"
                               :serial t
                               :components ((:file "integration")
@@ -229,13 +219,13 @@
                                            (:file "crd-protobuf")
                                            (:file "crd-deletion")
                                            (:file "node-lease")
-                                           (:file "compat")))
+                                           ))
                              (:module "apiserver-node-session"
                               :pathname "apiserver/"
                               :serial t
                               :components ((:file "node-session-integration")
                                            (:file "node-session")
-                                           (:file "node-session-compat")))
+                                           ))
                              (:module "runtime"
                               :serial t
                               :components ((:file "core")))
@@ -274,7 +264,7 @@
                                            (:file "routed-cni")
                                            (:file "local-pod-delivery")
                                            (:file "host-redirect")
-                                           (:file "compat")))
+                                           ))
                              (:module "protocol-implementation"
                               :pathname "protocol/"
                               :serial t
@@ -288,7 +278,7 @@
                                            (:file "spdy-dictionary")
                                            (:file "spdy-client")
                                            (:file "spdy-server")
-                                           (:file "compat")))
+                                           ))
                              (:file "kubelet/integration")
                              (:file "kubelet/managed-containerd")
                              (:file "runtime/runtime-addons")
@@ -332,7 +322,6 @@
                              (:file "kubelet/local-resource-server")
                              (:file "kubelet/pod-resources")
                              (:file "agent/pod-pool")
-                             (:file "kubelet/compat")
                              (:module "apiserver"
                               :serial t
                               :components ((:file "integration")
@@ -375,7 +364,7 @@
                                            (:file "in-cluster-api")
                                            (:file "api-aggregation")
                                            (:file "kubelet-server")
-                                           (:file "compat")))
+                                           ))
                              (:module "controllers"
                               :serial t
                               :components ((:file "integration")
@@ -407,7 +396,7 @@
                                            (:file "cronjob-controller")
                                            (:file "hpa-controller")
                                            (:file "workload-deletion")
-                                           (:file "compat")))
+                                           ))
                              (:file "telemetry/integration")
                              (:file "telemetry/cluster")
                              (:module "apiserver-extensions"
@@ -428,7 +417,7 @@
                                            (:file "trace")
                                            (:file "port-forward")
                                            (:file "slynk-debug")
-                                           (:file "compat")))
+                                           ))
                              (:module "server"
                               :serial t
                               :components ((:file "integration")
@@ -443,7 +432,7 @@
                                            (:file "main")
                                            (:file "reconciliation-metrics")
                                            (:file "controller-pass")
-                                           (:file "compat"))))))
+                                           )))))
   :in-order-to ((test-op (test-op "gr8s/tests"))))
 
 (asdf:defsystem "gr8s/tests"

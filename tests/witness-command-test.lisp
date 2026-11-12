@@ -90,12 +90,12 @@
     (let ((storage (cl-raft::open-file-raft-storage path)))
       (gr8s.raft::raft-storage-save-hard-state storage 17 "candidate-a")
       (gr8s.raft::raft-storage-append-entry storage (cl-raft::make-raft-entry :index 1 :term 17 :command '(:noop)))
-      (gr8s.raft:close-file-raft-storage storage))
+      (gr8s.raft::close-file-raft-storage storage))
     (let ((first (gr8s.raft.transport::start-raft-member "recovered-witness" :storage-path path :initial-role :witness))
           (stream nil))
       (unwind-protect
            (let ((node (gr8s.raft.transport::raft-member-node first)))
-             (setf stream (gr8s.raft::file-raft-storage-stream (gr8s.raft:raft-node-storage node)))
+             (setf stream (gr8s.raft::file-raft-storage-stream (gr8s.raft::raft-node-storage node)))
              (is (= 17 (cl-raft::raft-node-current-term node)))
              (is (equal "candidate-a" (cl-raft::raft-node-voted-for node)))
              (is (= 1 (cl-raft::raft-last-log-index node)))
@@ -186,9 +186,9 @@
       (with-open-file (out script :direction :output :if-does-not-exist :create)
         (format out "(require :asdf)~%(asdf:load-asd ~S)~%(asdf:load-system :gr8s)~%"
                 (namestring (merge-pathnames "gr8s.asd" (asdf:system-source-directory :gr8s))))
-        (format out "(let ((member (gr8s::start-raft-member ~S :storage-path ~S :initial-role :witness)))~%"
+        (format out "(let ((member (gr8s.raft.transport::start-raft-member ~S :storage-path ~S :initial-role :witness)))~%"
                 "crash-witness" (namestring path))
-        (format out "(gr8s::write-private-text-atomically ~S (write-to-string (gr8s::raft-member-port member)))~%"
+        (format out "(gr8s.security::write-private-text-atomically ~S (write-to-string (gr8s.raft.transport::raft-member-port member)))~%"
                 (namestring ready))
         (write-line "(loop (sleep 1)))" out))
       (unwind-protect

@@ -25,7 +25,7 @@
         in key :on-data (lambda (record start end) (declare (ignore record)) (incf seen (- end start))))
     (unless (and (= count verified-count) (= bytes verified-bytes seen)) (error "Bundle count mismatch"))
     (sb-ext:gc :full t)
-    (let ((result (gr8s::json-object
+    (let ((result (gr8s.foundation::json-object
                    "passed" t "source" (namestring source) "evidence" (namestring base)
                    "files" count "plaintextBytes" bytes "ciphertextBytes" (sb-posix:stat-size (sb-posix:stat path))
                    "heapLimitBytes" (sb-ext:dynamic-space-size) "afterFullGcBytes" (sb-kernel:dynamic-usage)

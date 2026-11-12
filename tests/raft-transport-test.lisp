@@ -176,10 +176,10 @@
     ;; A retained physical link for a removed member must not keep producing
     ;; observations. Learners remain current configured members.
     (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
-      (gr8s.raft:raft-configure node '(("local" . :voter) ("peer" . :learner)))
+      (gr8s.raft::raft-configure node '(("local" . :voter) ("peer" . :learner)))
       (gr8s.raft.transport::raft-member-note-receive-unlocked member message)
       (is (= 2 (gr8s.raft.transport::raft-peer-link-received-messages link)))
-      (gr8s.raft:raft-configure node '(("local" . :voter)))
+      (gr8s.raft::raft-configure node '(("local" . :voter)))
       (gr8s.raft.transport::raft-member-note-receive-unlocked member message)
       (is (= 2 (gr8s.raft.transport::raft-peer-link-received-messages link)))
       (gr8s.raft.transport::raft-member-note-receive-unlocked

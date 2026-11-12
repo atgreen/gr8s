@@ -59,7 +59,7 @@
                                         (gr8s.store::pod-store-pod-published-statuses store))) "Running")
         (clrhash (gr8s.store::pod-store-pods store))
         (clrhash (gr8s.store::pod-store-nodes store))
-        (gr8s.image-distribution::clear-image-tracker-state (gr8s.store:pod-store-image-tracker store))
+        (gr8s.image-distribution::clear-image-tracker-state (gr8s.store::pod-store-image-tracker store))
         (unwind-protect
              (progn
                (setf (symbol-function 'com.inuoe.jzon:stringify)

@@ -29,8 +29,8 @@
                            "START-DNS-SERVER" "STOP-DNS-SERVER"
                            ;; DNS-name helpers gr8s builds its cluster policy from.
                            "CANONICAL-DNS-NAME" "DNS-NAME-IN-ZONE-P"))))
-    (shadowing-import symbols '#:gr8s)
-    (export symbols '#:gr8s)))
+    (shadowing-import symbols '#:gr8s.foundation)
+    (export symbols '#:gr8s.foundation)))
 
 (defconstant +dns-name-error+ 3)
 

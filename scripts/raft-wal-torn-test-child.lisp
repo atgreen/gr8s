@@ -20,7 +20,7 @@
                        (write-sequence bytes out :end cut)
                        (finish-output out)
                        (sb-posix:fsync (sb-sys:fd-stream-fd out))))
-                   (gr8s::write-private-text-atomically ready "partial-unacknowledged-write")
+                   (gr8s.security::write-private-text-atomically ready "partial-unacknowledged-write")
                    (loop (sleep 1))))
            ;; This call never returns or acknowledges success before SIGKILL.
            (gr8s.raft:raft-storage-save-hard-state storage 99 "pending-éλ😀"))

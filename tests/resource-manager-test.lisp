@@ -46,7 +46,7 @@
       (is (equal '(1 2) (coerce (gethash "cpus" (gethash (pod-uid pod) (gr8s.kubelet::node-resource-manager-allocations manager))) 'list)))
       (is (equal '(0 3) (gr8s.kubelet::resource-shared-cpus manager)))
       (is (equal "1-2" (gr8s.cri.v1::cpuset-cpus (gr8s.kubelet::node-container-resources manager pod container))))
-      (signals gr8s.runtime:resource-admission-error (gr8s.kubelet::prepare-node-pod-resources manager other))
+      (signals gr8s.runtime::resource-admission-error (gr8s.kubelet::prepare-node-pod-resources manager other))
       (let ((restored (test-resource-manager path)))
         (is (equal '(0 3) (gr8s.kubelet::resource-shared-cpus restored)))
         (gr8s.kubelet::prepare-node-pod-resources restored pod)
@@ -103,7 +103,7 @@
             (gr8s.kubelet::make-device-plugin :resource "devices.example.test/kvm"
               :devices (list (plugin-wire "DEVICE" :id "local0" :health "Healthy"
                               :topology (plugin-wire "TOPOLOGY-INFO" :nodes (list (plugin-wire "NUMA-NODE" :id 0)))))))
-      (signals gr8s.runtime:resource-admission-error (gr8s.kubelet::prepare-node-pod-resources manager pod))
+      (signals gr8s.runtime::resource-admission-error (gr8s.kubelet::prepare-node-pod-resources manager pod))
       (is (= 0 (hash-table-count (gr8s.kubelet::node-resource-manager-allocations manager))))
       (is (= 0 (hash-table-count (gr8s.kubelet::device-plugin-manager-allocations devices)))))))
 
@@ -268,7 +268,7 @@
 (test affinity-update-tolerates-exit-races-but-fails-closed-for-live-or-unobservable-containers
   (with-temporary-store (store path)
     (declare (ignore store))
-    (let* ((runtime (gr8s.runtime.containerd:make-containerd-runtime :socket-path "/fixture.sock"))
+    (let* ((runtime (gr8s.runtime.containerd::make-containerd-runtime :socket-path "/fixture.sock"))
            (manager (test-resource-manager path :runtime runtime))
            (pod (rm-test-pod "exiting" (list (rm-test-container "main" "1"))))
            (container (first (gr8s.kubelet::resource-pod-containers pod)))
@@ -291,7 +291,7 @@
   (with-temporary-store (store path)
     (let* ((old (create-pod store (rm-test-pod "completed" (list (rm-test-container "main" "2")))))
            (new (create-pod store (rm-test-pod "next" (list (rm-test-container "main" "2")))))
-           (runtime (gr8s.runtime.containerd:make-containerd-runtime :socket-path "/fixture.sock"))
+           (runtime (gr8s.runtime.containerd::make-containerd-runtime :socket-path "/fixture.sock"))
            (manager (test-resource-manager path :runtime runtime :store store)))
       (with-replaced-functions
           ((gr8s.kubelet::containerd-owned-sandbox

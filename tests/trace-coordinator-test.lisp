@@ -27,7 +27,7 @@
 (test trace-coordinator-rejects-an-empty-selection
   (with-temporary-store (store path)
     (declare (ignore path))
-    (signals gr8s.runtime:runtime-error
+    (signals gr8s.runtime::runtime-error
       (gr8s.apiserver::start-trace-coordinator
        nil store "alpha" "app=missing" "kprobe:vfs_read { @=count(); }" 1000))))
 

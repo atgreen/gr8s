@@ -49,7 +49,7 @@
              (bt:signal-semaphore release)
              (bt:join-thread request)
              (bt:join-thread drain)
-             (is (typep request-result 'gr8s.model:pod))
+             (is (typep request-result 'gr8s.model::pod))
              (is (eq store drain-result))
              (assert-store-access-503 (lambda () (gr8s.store::get-pod store "default" "inflight-write")))
              (gr8s.store::resume-store-access store)

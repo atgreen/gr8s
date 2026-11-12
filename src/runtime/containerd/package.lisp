@@ -202,21 +202,3 @@
    #:make-containerd-runtime
    #:read-termination-log-tail
    #:read-termination-message-file))
-
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (do-external-symbols (symbol '#:gr8s.runtime.containerd)
-    (shadowing-import symbol '#:gr8s))
-  (dolist (name '("CRI-CREATE-CONTAINER" "CRI-CONTAINER-INFO-EXIT-CODE"
-                  "CRI-CONTAINER-INFO-STATE" "CRI-CONTAINER-STATUS"
-                  "CRI-DELETE-CONTAINER" "CRI-DELETE-POD-SANDBOX"
-                  "CRI-PULL-IMAGE" "CRI-RUN-POD-SANDBOX"
-                  "CRI-RUNTIME-VERSION" "CRI-START-CONTAINER"
-                  "CRI-STOP-CONTAINER"
-                  "CRI-VERSION-INFO-RUNTIME-API-VERSION"
-                  "CRI-VERSION-INFO-RUNTIME-NAME"
-                  "CRI-VERSION-INFO-RUNTIME-VERSION"
-                  "CRI-VERSION-INFO-VERSION"
-                  "CONTAINERD-RUNTIME-CREDENTIAL-PROVIDER-TOKEN-FUNCTION"
-                  "MAKE-CRI-CONTAINER-CONFIG"
-                  "MAKE-CONTAINERD-RUNTIME"))
-    (export (find-symbol name '#:gr8s.runtime.containerd) '#:gr8s)))

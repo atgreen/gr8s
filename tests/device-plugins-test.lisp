@@ -46,7 +46,7 @@
       (is (= 1 calls))
       (gr8s.kubelet::device-plugin-container-config manager pod2 container)
       (is (equal '(("kvm1") ("kvm0")) ids))
-      (signals gr8s.runtime:runtime-error
+      (signals gr8s.runtime::runtime-error
         (gr8s.kubelet::device-plugin-container-config manager pod3 container))
       (let ((restored (gr8s.kubelet::make-device-plugin-manager path)))
         (is (equal '(("devices.example.test/kvm" . "0")) (gr8s.kubelet::device-plugin-resource-entries restored)))

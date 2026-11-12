@@ -9,30 +9,30 @@
       (if (equal "--" (first args)) (rest args) args))
   (let* ((root (uiop:ensure-directory-pathname root-string))
          (count (parse-integer count-string))
-         (store (gr8s:open-store root))
+         (store (gr8s.store::open-store root))
          (member (if (equal mode "recover")
                      (gr8s.resources::start-store-member-from-wal store "sink" (merge-pathnames "raft/wal" root))
-                     (gr8s::start-raft-member "sink" :storage-path (merge-pathnames "raft/wal" root))))
+                     (gr8s.raft.transport::start-raft-member "sink" :storage-path (merge-pathnames "raft/wal" root))))
          (reported nil))
     (unwind-protect
          (progn
            (unless (equal mode "recover") (gr8s.resources::configure-member-store-restore member store))
-           (gr8s::write-private-text-atomically ready-string (write-to-string (gr8s::raft-member-port member)))
+           (gr8s.security::write-private-text-atomically ready-string (write-to-string (gr8s.raft.transport::raft-member-port member)))
            (loop until (probe-file stop-string) do
              (when (and (not reported)
-                        (bt:with-lock-held ((gr8s::raft-member-lock member))
-                          (= 1 (gr8s::raft-node-last-applied (gr8s::raft-member-node member))))
+                        (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
+                          (= 1 (cl-raft::raft-node-last-applied (gr8s.raft.transport::raft-member-node member))))
                         (not (gr8s.store::store-access-blocked-p store)))
-               (let ((object (gr8s::get-core-resource store "configmaps" "default" (format nil "config-~D" (1- count)))))
-                 (assert (= count (hash-table-count (gr8s::pod-store-resources store))))
+               (let ((object (gr8s.resources::get-core-resource store "configmaps" "default" (format nil "config-~D" (1- count)))))
+                 (assert (= count (hash-table-count (gr8s.store::pod-store-resources store))))
                  (assert (= 65536 (length (gethash "payload" (gethash "data" object)))))
                  (assert (null (gr8s.store::read-store-restore-intent root)))
-                 (gr8s::write-private-text-atomically
+                 (gr8s.security::write-private-text-atomically
                   report-string
                   (com.inuoe.jzon:stringify
-                   (gr8s::core-object "passed" t "liveApplicationRestore" t "startupRecovered" (equal mode "recover") "records" count
+                   (gr8s.resources::core-object "passed" t "liveApplicationRestore" t "startupRecovered" (equal mode "recover") "records" count
                                      "payloadBytes" (* count 65536) "appliedIndex" 1
-                                     "resourceRevision" (gr8s::pod-store-resource-revision store))))
+                                     "resourceRevision" (gr8s.store::pod-store-resource-revision store))))
                  (setf reported t)))
              (sleep 0.05)))
-      (gr8s::stop-raft-member member))))
+      (gr8s.raft.transport::stop-raft-member member))))

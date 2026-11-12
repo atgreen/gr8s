@@ -50,7 +50,7 @@
          (assert (= (* rounds batch) (first value)))
          (format t "~&~A~%"
            (com.inuoe.jzon:stringify
-             (gr8s::core-object "passed" t "rounds" rounds "entries" (* rounds batch)
+             (gr8s.resources::core-object "passed" t "rounds" rounds "entries" (* rounds batch)
                "payloadBytes" payload-bytes "cumulativePayloadMiB" (/ (* rounds batch payload-bytes) (* 1024 1024))
                "maxCheckpointBytes" max-checkpoint-bytes "retainedTailEntries" 2 "restartRecovered" t
                "heapLimitMiB" (/ (sb-ext:dynamic-space-size) (* 1024 1024))

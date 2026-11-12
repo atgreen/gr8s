@@ -9,5 +9,5 @@ exec sbcl --noinform --non-interactive \
   --eval '(require :asdf)' \
   --eval '(asdf:load-asd (merge-pathnames "gr8s.asd" (uiop:ensure-directory-pathname (uiop:getenv "GR8S_ROOT"))))' \
   --eval '(asdf:load-system :gr8s)' \
-  --eval '(uiop:quit (gr8s:main (uiop:command-line-arguments)))' \
+  --eval '(uiop:quit (gr8s.server:main (uiop:command-line-arguments)))' \
   --end-toplevel-options "$@"

@@ -5,7 +5,7 @@
 (in-suite store-image-tracker-snapshot)
 
 (defun populate-snapshot-tracker (store)
-  (let ((tracker (gr8s.store:pod-store-image-tracker store)))
+  (let ((tracker (gr8s.store::pod-store-image-tracker store)))
     (setf (gr8s.image-distribution::image-tracker-clock tracker) (lambda () 1000)
           (gr8s.image-distribution::image-tracker-origin-lease-seconds tracker) 30
           (gr8s.image-distribution::image-tracker-peer-ttl-seconds tracker) 90)
@@ -115,13 +115,13 @@
          tracker "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "later")
         (gr8s.store::quiesce-store-access store :timeout 0)
         (gr8s.store::reload-store-application store (gethash "generation" descriptor))
-        (is (eq tracker (gr8s.store:pod-store-image-tracker store)))
+        (is (eq tracker (gr8s.store::pod-store-image-tracker store)))
         (is (eq clock (gr8s.image-distribution::image-tracker-clock tracker)))
         (is (eq lock (gr8s.image-distribution::image-tracker-lock tracker)))
         (is (equalp expected (snapshot-tracker-records tracker)))
         (gr8s.store::resume-store-access store)
         (let ((reopened (gr8s.store::open-store root)))
-          (is (equalp expected (snapshot-tracker-records (gr8s.store:pod-store-image-tracker reopened)))))))))
+          (is (equalp expected (snapshot-tracker-records (gr8s.store::pod-store-image-tracker reopened)))))))))
 
 (test tracker-snapshot-rejects-duplicates-and-inconsistent-relationships
   (with-temporary-store (store root)
@@ -161,7 +161,7 @@
           (is (not (probe-file (merge-pathnames "image-tracker/state.jsonl" path))))
           (gr8s.store::quiesce-store-access store :timeout 0)
           (gr8s.store::reload-store-application store (gethash "generation" descriptor))
-          (is (eq tracker (gr8s.store:pod-store-image-tracker store)))
+          (is (eq tracker (gr8s.store::pod-store-image-tracker store)))
           (is (zerop (hash-table-count (gr8s.image-distribution::image-tracker-origins tracker))))
           (is (zerop (hash-table-count (gr8s.image-distribution::image-tracker-swarms tracker))))
           (is (= 120 (gr8s.image-distribution::image-tracker-origin-lease-seconds tracker)))
@@ -195,7 +195,7 @@
   (dolist (padding-size '(1572600 1573000 3145728))
     (with-temporary-store (store root)
       (multiple-value-bind (digest torrent) (tracker-test-torrent)
-        (let* ((tracker (gr8s.store:pod-store-image-tracker store))
+        (let* ((tracker (gr8s.store::pod-store-image-tracker store))
                (decoded (gr8s.image-distribution::decode-bencode
                          (gr8s.image-distribution::torrent-metainfo torrent)))
                (metainfo
@@ -231,7 +231,7 @@
               (gr8s.store::resume-store-access store)))
           (let* ((reopened (gr8s.store::open-store root))
                  (swarm (gethash digest (gr8s.image-distribution::image-tracker-swarms
-                                         (gr8s.store:pod-store-image-tracker reopened)))))
+                                         (gr8s.store::pod-store-image-tracker reopened)))))
             (is (not (null swarm)))
             (is (equalp expected (ironclad:digest-sequence
                                  :sha256 (gr8s.image-distribution::tracker-swarm-metainfo swarm))))))))))
@@ -263,7 +263,7 @@
 
 (defun populate-large-snapshot-tracker (store &optional (padding-size 1600000))
   (multiple-value-bind (digest torrent) (tracker-test-torrent)
-    (let* ((tracker (gr8s.store:pod-store-image-tracker store))
+    (let* ((tracker (gr8s.store::pod-store-image-tracker store))
            (decoded (gr8s.image-distribution::decode-bencode
                      (gr8s.image-distribution::torrent-metainfo torrent)))
            (metainfo (gr8s.image-distribution::encode-bencode
@@ -385,7 +385,7 @@
 
 (test tracker-publishes-the-owned-bytes-that-passed-validation
   (with-temporary-store (store root)
-    (let ((tracker (gr8s.store:pod-store-image-tracker store))
+    (let ((tracker (gr8s.store::pod-store-image-tracker store))
           (validate (symbol-function 'gr8s.image-distribution::validated-metainfo-infohash)))
       (multiple-value-bind (digest torrent) (tracker-test-torrent)
         (let* ((caller (copy-seq (gr8s.image-distribution::torrent-metainfo torrent)))

@@ -1289,7 +1289,7 @@
                (nreverse writes)))
     (is (= 2 (length (gr8s.controllers::service-lb-controller-applied-risk-keys controller))))
     (flet ((published (backends)
-             (gr8s.controllers:service-lb-risk-published-p
+             (gr8s.controllers::service-lb-risk-published-p
               controller :list-services (constantly (list service))
               :risk-backends-of (lambda (ignored-service ignored-port)
                                   (declare (ignore ignored-service ignored-port))
@@ -1839,7 +1839,7 @@
         (dotimes (i 4)
           (declare (ignore i))
           (multiple-value-bind (scanned reclaimed deferred)
-              (gr8s.network:sweep-service-packet-state dataplane :budget 1 :next-key next-key :run #'gc-run)
+              (gr8s.network::sweep-service-packet-state dataplane :budget 1 :next-key next-key :run #'gc-run)
             (is (<= scanned 2))
             (is (= scanned reclaimed))
             (is (zerop deferred))))
@@ -1853,12 +1853,12 @@
     (declare (ignore keys))
     (let ((seen nil))
       (signals simple-error
-        (gr8s.network:sweep-service-packet-state
+        (gr8s.network::sweep-service-packet-state
          dataplane :budget 1 :next-key next-key
          :run (lambda (&rest ignored) (declare (ignore ignored)) (error "syscall interrupted"))))
       (is (= 1 (gr8s.network::service-lb-dataplane-gc-failures dataplane)))
       (multiple-value-bind (scanned reclaimed deferred)
-          (gr8s.network:sweep-service-packet-state
+          (gr8s.network::sweep-service-packet-state
            dataplane :budget 1 :next-key next-key
            :run (lambda (fd direction key)
                   (declare (ignore fd)) (push (list direction (aref key 0)) seen) 2))
@@ -1868,11 +1868,11 @@
       (is (equal '((1 1) (0 2)) seen))
       (is (= 2 (gr8s.network::service-lb-dataplane-gc-deferred dataplane)))
       (signals type-error
-        (gr8s.network:sweep-service-packet-state dataplane :budget 0)))))
+        (gr8s.network::sweep-service-packet-state dataplane :budget 0)))))
 
 (test service-packet-gc-is-idle-without-a-maintenance-program
   (let ((called nil))
-    (is (zerop (gr8s.network:sweep-service-packet-state
+    (is (zerop (gr8s.network::sweep-service-packet-state
                 (gr8s.network::%make-service-lb-dataplane)
                 :next-key (lambda (&rest ignored) (declare (ignore ignored)) (setf called t))
                 :run (lambda (&rest ignored) (declare (ignore ignored)) (setf called t)))))
@@ -1966,7 +1966,7 @@
   (signals type-error (gr8s.network::run-service-nat-gc-key 0 3 #()))
   (signals simple-error (gr8s.network::run-service-nat-gc-key 0 2 (make-array 16)))
   (signals simple-error (gr8s.network::run-service-nat-gc-key 0 0 (make-array 32)))
-  (signals type-error (gr8s.network:run-service-packet-gc-key 0 2 (make-array 32))))
+  (signals type-error (gr8s.network::run-service-packet-gc-key 0 2 (make-array 32))))
 
 
 (test service-packet-gc-defers-uncoordinated-retained-endpoints
@@ -1978,7 +1978,7 @@
             (gr8s.network::service-lb-dataplane-maps dataplane)))
     (let ((legacy t) (queries 0) (*error-output* (make-string-output-stream)))
       (flet ((verify ()
-               (gr8s.network:service-packet-gc-compatible-p
+               (gr8s.network::service-packet-gc-compatible-p
                 dataplane :paths (constantly '("endpoint/gr8s_pkt_stages"))
                 :refresh (constantly t)
                 :map-id #'whistler/loader:map-info-fd
@@ -2017,7 +2017,7 @@
     (declare (ignore keys next-key))
     (setf (gr8s.network::service-lb-dataplane-gc-compatible-p dataplane) t)
     (let ((*error-output* (make-string-output-stream)))
-      (is-false (gr8s.network:service-packet-gc-compatible-p
+      (is-false (gr8s.network::service-packet-gc-compatible-p
                  dataplane :paths (constantly nil) :refresh (constantly nil)
                  :map-id (lambda (map) (declare (ignore map)) (error "must defer before map checks"))))
       (is-false (gr8s.network::service-lb-dataplane-gc-compatible-p dataplane))
@@ -2041,7 +2041,7 @@
                                                            :context "prog-load" :errno 13))
                      :current))
                (verify ()
-                 (gr8s.network:service-packet-gc-compatible-p
+                 (gr8s.network::service-packet-gc-compatible-p
                   dataplane :paths (constantly '("endpoint/gr8s_pkt_stages"))
                   :refresh (lambda (plane paths)
                              (gr8s.network::refresh-service-packet-pipelines

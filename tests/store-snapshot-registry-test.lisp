@@ -253,7 +253,7 @@
                  (gr8s.resources::configure-store-artifact-transport sender source-root)
                  (gr8s.resources::configure-store-artifact-transport receiver sink-root)
                  (signals error (send-artifact-wire-test-snapshot sender receiver (artifact-wire-test-message reference)))
-                 (is-true (gr8s.raft:raft-node-snapshot-pending (gr8s.raft.transport::raft-member-node receiver)))
+                 (is-true (gr8s.raft::raft-node-snapshot-pending (gr8s.raft.transport::raft-member-node receiver)))
                  (is (= 42 (cl-raft::raft-recovered-snapshot-index (cl-raft::load-raft-log wal))))
                  (is (null (gr8s.raft.transport::raft-member-snapshot-receiver receiver)))
                  (is (probe-file (gr8s.resources::checked-store-snapshot-artifact-path sink-root reference)))
@@ -421,7 +421,7 @@
                        (list (list :type :install-snapshot :state (envelope (first references))))
                        (gr8s.raft.transport::raft-peer-link-active-items link)
                        (list (list :type :install-snapshot :state (envelope (second references))))
-                       (gr8s.raft:raft-node-snapshot-pending (gr8s.raft.transport::raft-member-node member))
+                       (gr8s.raft::raft-node-snapshot-pending (gr8s.raft.transport::raft-member-node member))
                        (list 4 1 (envelope (third references)) #())))
                (let* ((journal (merge-pathnames "raft/bootstrap.json" root))
                       (before (uiop:read-file-string journal)))
@@ -437,7 +437,7 @@
                (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
                  (setf (gr8s.raft.transport::raft-peer-link-items link) nil
                        (gr8s.raft.transport::raft-peer-link-active-items link) nil
-                       (gr8s.raft:raft-node-snapshot-pending (gr8s.raft.transport::raft-member-node member)) nil))
+                       (gr8s.raft::raft-node-snapshot-pending (gr8s.raft.transport::raft-member-node member)) nil))
                ;; Unsafe/unknown files are preserved even if their basename is a digest.
                (sb-posix:chmod (namestring (first paths)) #o644)
                (sb-posix:link (namestring (second paths)) (namestring (merge-pathnames "other-link" root)))
@@ -454,11 +454,11 @@
                ;; A different current snapshot must not reclaim the journal baseline.
                (let* ((node (gr8s.raft.transport::raft-member-node member))
                       (baseline (gr8s.resources::checked-store-snapshot-artifact-path
-                                 root (getf (cddr (gr8s.raft:raft-node-snapshot-state node)) :application)))
+                                 root (getf (cddr (gr8s.raft::raft-node-snapshot-state node)) :application)))
                       (source (merge-pathnames "sample-0.jsonl" root)))
                  (gr8s.resources::retain-store-snapshot-artifact root source 2 1 (snapshot-test-digest source))
                  (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
-                   (setf (gr8s.raft:raft-node-snapshot-state node) (envelope (first references))))
+                   (setf (gr8s.raft::raft-node-snapshot-state node) (envelope (first references))))
                  (is (= 0 (reap)))
                  (is (probe-file baseline))
                  (is (probe-file (first paths))))))
@@ -555,7 +555,7 @@
                  (is (= 0 (gr8s.ha::ha-control-plane-compaction-count hcp)))
                  (is (= 1 (gr8s.ha::ha-control-plane-artifacts-reaped hcp)))
                  (is-true (gr8s.resources::checked-store-snapshot-artifact-path
-                           root (getf (cddr (gr8s.raft:raft-node-snapshot-state (gr8s.raft.transport::raft-member-node member))) :application))))))
+                           root (getf (cddr (gr8s.raft::raft-node-snapshot-state (gr8s.raft.transport::raft-member-node member))) :application))))))
         (setf (symbol-function 'gr8s.store::sync-store-generation-directory) sync)
         (when member (gr8s.raft.transport::stop-raft-member member))))))
 

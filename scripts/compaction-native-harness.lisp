@@ -13,8 +13,8 @@
 (defun compaction-native-write (function)
   (compaction-native-await
    (lambda () (handler-case (progn (funcall function) t)
-                (gr8s:kubernetes-error (condition)
-                  (unless (= 503 (gr8s::kubernetes-error-status-code condition)) (error condition))
+                (gr8s.model::kubernetes-error (condition)
+                  (unless (= 503 (gr8s.model::kubernetes-error-status-code condition)) (error condition))
                   nil)))))
 
 (defun compaction-native-root-bytes (root)
@@ -36,7 +36,7 @@
 
 (defun compaction-native-cold-recovery (root-text port-text clock-text)
   (let* ((root (uiop:ensure-directory-pathname root-text)) (store nil) (ha nil)
-         (result (gr8s::core-object "passed" nil "phase" "cold-recovery"
+         (result (gr8s.resources::core-object "passed" nil "phase" "cold-recovery"
                    "heapLimitMiB" (/ (sb-ext:dynamic-space-size) (* 1024 1024)))))
     (setf gr8s.store::*podtemplate-clock* (constantly (parse-integer clock-text)))
     (unwind-protect
@@ -44,25 +44,25 @@
              (progn
                (assert (= 384 (gethash "heapLimitMiB" result)))
                (setf (sb-ext:gc-logfile) (namestring (merge-pathnames "cold-gc.log" root))
-                     store (gr8s:open-store root :defer-restore-completion t))
+                     store (gr8s.store::open-store root :defer-restore-completion t))
                ;; Check the full checkpoint before HA deliberately establishes
                ;; a new watch epoch during application snapshot recovery.
-               (let ((history-bytes (reduce #'+ (gr8s::pod-store-template-history store)
+               (let ((history-bytes (reduce #'+ (gr8s.store::pod-store-template-history store)
                                            :key #'gr8s.resources::template-history-entry-bytes)))
                  (setf (gethash "loadedHistoryEstimatedBytes" result) history-bytes)
                  (assert (>= history-bytes (- gr8s.resources::*resource-watch-history-bytes* (* 2 65536)))))
-               (setf ha (gr8s::start-ha-control-plane store :id "compact-native" :init t
+               (setf ha (gr8s.ha::start-ha-control-plane store :id "compact-native" :init t
                           :port (parse-integer port-text)))
-               (compaction-native-await (lambda () (gr8s::ha-control-plane-leader-p ha)))
+               (compaction-native-await (lambda () (gr8s.ha::ha-control-plane-leader-p ha)))
                (assert (equal "preserved" (gethash "value" (gethash "data"
-                         (gr8s::get-core-resource store "configmaps" "default" "sentinel")))))
-               (let ((history-bytes (reduce #'+ (gr8s::pod-store-template-history store)
+                         (gr8s.resources::get-core-resource store "configmaps" "default" "sentinel")))))
+               (let ((history-bytes (reduce #'+ (gr8s.store::pod-store-template-history store)
                                            :key #'gr8s.resources::template-history-entry-bytes)))
                  (setf (gethash "historyEstimatedBytes" result) history-bytes))
                (setf (gethash "passed" result) t (gethash "coldRecovery" result) t
                      (gethash "sentinelRecovered" result) t))
            (error (condition) (setf (gethash "error" result) (princ-to-string condition))))
-      (when ha (gr8s::stop-ha-control-plane ha)))
+      (when ha (gr8s.ha::stop-ha-control-plane ha)))
     (write-line (com.inuoe.jzon:stringify result))
     (uiop:quit (if (gethash "passed" result) 0 1))))
 
@@ -76,9 +76,9 @@
       (return-from compaction-native-main
         (compaction-native-cold-recovery root-text recovery-port recovery-clock)))
     (let* ((root (uiop:ensure-directory-pathname root-text)) (rounds (parse-integer rounds-text))
-           (store (gr8s:open-store root)) (ha nil) (port nil)
+           (store (gr8s.store::open-store root)) (ha nil) (port nil)
            (max-wal 0) (max-artifacts 0) (max-registry-files 0) (max-history 0) (checkpoints 0) (samples 0)
-           (result (gr8s::core-object "passed" nil "nativeHarness" t "productionServe" nil
+           (result (gr8s.resources::core-object "passed" nil "nativeHarness" t "productionServe" nil
                      "vmAcceptance" nil "automaticWorker" t "productionDefaultEnabled" nil
                      "rounds" rounds "payloadBytesWritten" (* rounds 65536)
                      "walTriggerBytes" (* 16 1024 1024)
@@ -89,10 +89,10 @@
       ;; Observe the collector's normal decisions, including fragmentation and
       ;; old-generation retention, without forcing collections or tuning policy.
       (setf (sb-ext:gc-logfile) (namestring (merge-pathnames "gc.log" root)))
-      (labels ((ready () (gr8s::ha-control-plane-leader-p ha))
+      (labels ((ready () (gr8s.ha::ha-control-plane-leader-p ha))
                (sample ()
-                 (let ((member (gr8s::ha-control-plane-member ha)))
-                   (bt:with-lock-held ((gr8s::raft-member-lock member))
+                 (let ((member (gr8s.ha::ha-control-plane-member ha)))
+                   (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
                      (let* ((files (uiop:directory-files (merge-pathnames "snapshot-artifacts/" root)))
                             (artifacts (count "jsonl" files :test #'equal :key #'pathname-type))
                             (pins (length (gr8s.raft.transport::raft-member-artifact-pins member))))
@@ -104,12 +104,12 @@
                                                   (sb-posix:stat (merge-pathnames "raft/control-plane.log" root))))
                              max-artifacts (max max-artifacts artifacts)
                              max-registry-files (max max-registry-files (length files)))))
-                   (bt:with-lock-held ((gr8s::raft-member-lock member))
-                     (bt:with-lock-held ((gr8s::pod-store-lock store))
-                       (let* ((node (gr8s::raft-member-node member))
-                              (history (gr8s::pod-store-template-history store))
-                              (metrics (gr8s::core-object
-                                        "resourceRevision" (gr8s::pod-store-resource-revision store)
+                   (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
+                     (bt:with-lock-held ((gr8s.store::pod-store-lock store))
+                       (let* ((node (gr8s.raft.transport::raft-member-node member))
+                              (history (gr8s.store::pod-store-template-history store))
+                              (metrics (gr8s.resources::core-object
+                                        "resourceRevision" (gr8s.store::pod-store-resource-revision store)
                                         "heapAfterGcBytes" gr8s.server::*heap-after-gc*
                                         "historyEstimatedBytes" (reduce #'+ history :key #'gr8s.resources::template-history-entry-bytes)
                                         "historyUniqueBytes" (compaction-native-root-bytes history)
@@ -125,26 +125,26 @@
                  (progn
                    (assert (= 384 (gethash "heapLimitMiB" result)))
                    (assert (>= rounds 2048))
-                   (setf ha (gr8s::start-ha-control-plane store :id "compact-native" :init t
+                   (setf ha (gr8s.ha::start-ha-control-plane store :id "compact-native" :init t
                              :compaction-bytes (* 16 1024 1024) :compaction-entries 100000 :compaction-interval 0.01)
-                         port (gr8s::raft-member-port (gr8s::ha-control-plane-member ha)))
+                         port (gr8s.raft.transport::raft-member-port (gr8s.ha::ha-control-plane-member ha)))
                    (compaction-native-await #'ready)
                    (compaction-native-write
-                    (lambda () (gr8s::create-core-resource store "namespaces"
-                                  (gr8s::core-object "apiVersion" "v1" "kind" "Namespace"
-                                    "metadata" (gr8s::core-object "name" "default")) nil)))
+                    (lambda () (gr8s.resources::create-core-resource store "namespaces"
+                                  (gr8s.resources::core-object "apiVersion" "v1" "kind" "Namespace"
+                                    "metadata" (gr8s.resources::core-object "name" "default")) nil)))
                    (compaction-native-write
-                    (lambda () (gr8s::create-core-resource store "configmaps"
-                                  (gr8s::core-object "apiVersion" "v1" "kind" "ConfigMap"
-                                    "metadata" (gr8s::core-object "name" "sentinel")
-                                    "data" (gr8s::core-object "value" "preserved")) "default")))
+                    (lambda () (gr8s.resources::create-core-resource store "configmaps"
+                                  (gr8s.resources::core-object "apiVersion" "v1" "kind" "ConfigMap"
+                                    "metadata" (gr8s.resources::core-object "name" "sentinel")
+                                    "data" (gr8s.resources::core-object "value" "preserved")) "default")))
                    (dotimes (i rounds)
                      (compaction-native-write
-                      (lambda () (gr8s::create-core-resource store "configmaps"
-                                    (gr8s::core-object "apiVersion" "v1" "kind" "ConfigMap"
-                                      "metadata" (gr8s::core-object "name" "churn")
-                                      "data" (gr8s::core-object "value" (make-string 65536 :initial-element #\x))) "default")))
-                     (compaction-native-write (lambda () (gr8s::delete-core-resource store "configmaps" "default" "churn")))
+                      (lambda () (gr8s.resources::create-core-resource store "configmaps"
+                                    (gr8s.resources::core-object "apiVersion" "v1" "kind" "ConfigMap"
+                                      "metadata" (gr8s.resources::core-object "name" "churn")
+                                      "data" (gr8s.resources::core-object "value" (make-string 65536 :initial-element #\x))) "default")))
+                     (compaction-native-write (lambda () (gr8s.resources::delete-core-resource store "configmaps" "default" "churn")))
                      (when (zerop (mod i 32)) (sample)))
                    (compaction-native-await #'ready)
                    (sample)
@@ -155,7 +155,7 @@
                    (assert (< max-wal (* 32 1024 1024)))
                    (assert (<= max-artifacts 3))
                    (assert (>= max-history (- gr8s.resources::*resource-watch-history-bytes* (* 2 65536))))
-                   (gr8s::stop-ha-control-plane ha)
+                   (gr8s.ha::stop-ha-control-plane ha)
                    (assert (null (gr8s.ha::ha-control-plane-compaction-thread ha)))
                    (let ((count (length (uiop:directory-files (merge-pathnames "snapshot-artifacts/" root)))))
                      (setf (gethash "quiescentArtifactCount" result) count)
@@ -175,10 +175,10 @@
                    ;; startup can acquire its own gate; the stopped consensus
                    ;; hook remains attached throughout this handoff.
                    (gr8s.store::resume-store-access store)
-                   (setf ha (gr8s::start-ha-control-plane store :id "compact-native" :init t :port port))
+                   (setf ha (gr8s.ha::start-ha-control-plane store :id "compact-native" :init t :port port))
                    (compaction-native-await #'ready)
                    (assert (equal "preserved" (gethash "value" (gethash "data"
-                             (gr8s::get-core-resource store "configmaps" "default" "sentinel")))))
+                             (gr8s.resources::get-core-resource store "configmaps" "default" "sentinel")))))
                    (setf (gethash "passed" result) t
                          (gethash "checkpoints" result) checkpoints
                          (gethash "sampledMaxWalBytes" result) max-wal
@@ -190,6 +190,6 @@
                          (gethash "inPlaceMemberRecovery" result) t
                          (gethash "sentinelRecovered" result) t))
                (error (condition) (setf (gethash "error" result) (princ-to-string condition))))
-          (when ha (gr8s::stop-ha-control-plane ha)))
+          (when ha (gr8s.ha::stop-ha-control-plane ha)))
         (write-line (com.inuoe.jzon:stringify result))
         (uiop:quit (if (gethash "passed" result) 0 1))))))

@@ -6,7 +6,7 @@
 
 (defun make-reload-test-member ()
   (gr8s.raft.transport::make-raft-member
-   :node (gr8s.raft:make-raft-node :id "reload-member" :current-term 9
+   :node (gr8s.raft::make-raft-node :id "reload-member" :current-term 9
                                   :snapshot-index 10 :snapshot-term 4 :last-applied 10 :commit-index 10)))
 
 (defun reload-test-validator (member descriptor)
@@ -15,7 +15,7 @@
 
 (test every-store-slot-has-an-explicit-reload-classification
   (let* ((slots (mapcar (lambda (slot) (symbol-name (sb-mop:slot-definition-name slot)))
-                       (sb-mop:class-slots (find-class 'gr8s.store:pod-store))))
+                       (sb-mop:class-slots (find-class 'gr8s.store::pod-store))))
          (fields (append gr8s.store::*store-application-reload-fields* gr8s.store::*store-member-reload-fields*))
          (names (mapcar (lambda (field) (subseq (symbol-name field) (length "POD-STORE-"))) fields)))
     (is (= (length names) (length (remove-duplicates names :test #'equal))))
@@ -108,7 +108,7 @@
       (is (eq store
               (gr8s.store::reload-store-application
                store id :call-with-member-lock
-               (lambda (function) (bt:with-lock-held ((gr8s.raft.transport:raft-member-lock member))
+               (lambda (function) (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
                                   (let ((prior barrier-held))
                                     (unwind-protect (progn (setf barrier-held t) (funcall function))
                                       (setf barrier-held prior)))))
@@ -155,7 +155,7 @@
             (lambda (kind payload) (incf proposals) (apply-pod-test-command store kind payload)))
       (gr8s.store::quiesce-store-access store :timeout 0)
       (gr8s.store::reload-store-application
-       store id :call-with-member-lock (lambda (function) (bt:with-lock-held ((gr8s.raft.transport:raft-member-lock member)) (funcall function)))
+       store id :call-with-member-lock (lambda (function) (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member)) (funcall function)))
        :validate-recovery (reload-test-validator member descriptor)
        :commit-recovery (lambda (&rest args) (declare (ignore args)) t))
       (is (= 0 proposals))
@@ -207,11 +207,11 @@
           (materialize-live-test-snapshot store root source)
         (is (not (search sentinel (uiop:read-file-string (merge-pathnames "objects/state.json" path)))))
         ;; A different currently loaded policy must not survive the generation change.
-        (setf (gr8s.store:pod-store-secret-encryption-config store) (gr8s.resources::new-secret-encryption-config))
+        (setf (gr8s.store::pod-store-secret-encryption-config store) (gr8s.resources::new-secret-encryption-config))
         (gr8s.store::quiesce-store-access store :timeout 0)
         (gr8s.store::reload-store-application store (gethash "generation" descriptor))
         (gr8s.store::resume-store-access store)
-        (is (equalp config (gr8s.store:pod-store-secret-encryption-config store)))
+        (is (equalp config (gr8s.store::pod-store-secret-encryption-config store)))
         (is (equal ca-bytes (uiop:read-file-string ca-path)))
         (dolist (target (list store (gr8s.store::open-store root)))
           (let ((secret (gr8s.resources::get-core-resource target "secrets" "default" "reload-secret")))
@@ -234,7 +234,7 @@
   (with-temporary-store (store root)
     (let* ((descriptor (make-restore-intent-fixture store root))
            (id (gethash "generation" descriptor)))
-      (gr8s.store:with-store-lock (store)
+      (gr8s.store::with-store-lock (store)
         (gr8s.store::advance-replicated-pod-revision-unlocked store (+ 10 (gr8s.store::pod-store-pod-revision-ceiling store))))
       (gr8s.store::quiesce-store-access store :timeout 0)
       (signals error (gr8s.store::reload-store-application store id))
@@ -417,14 +417,14 @@
   (with-temporary-store (store root)
     (let* ((descriptor (make-restore-intent-fixture store root))
            (id (gethash "generation" descriptor)) (member (make-reload-test-member))
-           (node (gr8s.raft.transport:raft-member-node member))
+           (node (gr8s.raft.transport::raft-member-node member))
            (validate (reload-test-validator member descriptor)) (checks 0))
       (setf (gr8s.store::pod-store-consensus-commit-fn store) (lambda (&rest args) (declare (ignore args)) (error "No proposal expected")))
-      (setf (gr8s.raft:raft-node-current-term node) 10)
+      (setf (gr8s.raft::raft-node-current-term node) 10)
       (gr8s.store::quiesce-store-access store :timeout 0)
       (signals error
         (gr8s.store::reload-store-application
-         store id :call-with-member-lock (lambda (function) (bt:with-lock-held ((gr8s.raft.transport:raft-member-lock member)) (funcall function)))
+         store id :call-with-member-lock (lambda (function) (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member)) (funcall function)))
          :validate-recovery (lambda (incoming target)
                               (incf checks)
                               (is (eq store target))
@@ -439,49 +439,49 @@
       (is (gr8s.store::get-pod store "default" "legacy-later")))))
 
 (test member-generation-validator-checks-current-boundary-role-and-identity
-  (let* ((member (make-reload-test-member)) (node (gr8s.raft.transport:raft-member-node member))
+  (let* ((member (make-reload-test-member)) (node (gr8s.raft.transport::raft-member-node member))
          (digest (make-string 64 :initial-element #\a))
          (descriptor (gr8s.resources::core-object "index" 42 "term" 7 "artifactSha256" digest))
          (validate (reload-test-validator member descriptor)))
     (signals error (funcall validate descriptor nil))
     (setf (gethash "artifactSha256" descriptor) (copy-seq digest)
           (char digest 0) #\b)
-    (bt:with-lock-held ((gr8s.raft.transport:raft-member-lock member))
+    (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
       (is (funcall validate descriptor nil))
       (dolist (field '("index" "term" "artifactSha256"))
         (let ((bad (snapshot-index-copy descriptor)))
           (setf (gethash field bad) (if (equal field "artifactSha256") (make-string 64 :initial-element #\f) 8))
           (signals error (funcall validate bad nil))))
       (dolist (role '(:leader :candidate))
-        (setf (gr8s.raft:raft-node-role node) role)
+        (setf (gr8s.raft::raft-node-role node) role)
         (signals error (funcall validate descriptor nil)))
-      (setf (gr8s.raft:raft-node-role node) :follower)
+      (setf (gr8s.raft::raft-node-role node) :follower)
       (dolist (index '(42 43))
-        (setf (gr8s.raft:raft-node-snapshot-index node) index (gr8s.raft:raft-node-snapshot-term node) 7
-              (gr8s.raft:raft-node-last-applied node) index (gr8s.raft:raft-node-commit-index node) index)
+        (setf (gr8s.raft::raft-node-snapshot-index node) index (gr8s.raft::raft-node-snapshot-term node) 7
+              (gr8s.raft::raft-node-last-applied node) index (gr8s.raft::raft-node-commit-index node) index)
         (signals error (funcall validate descriptor nil)))
-      (setf (gr8s.raft:raft-node-snapshot-index node) 10 (gr8s.raft:raft-node-snapshot-term node) 8
-            (gr8s.raft:raft-node-last-applied node) 10 (gr8s.raft:raft-node-commit-index node) 10)
+      (setf (gr8s.raft::raft-node-snapshot-index node) 10 (gr8s.raft::raft-node-snapshot-term node) 8
+            (gr8s.raft::raft-node-last-applied node) 10 (gr8s.raft::raft-node-commit-index node) 10)
       (signals error (funcall validate descriptor nil)))))
 
 (test member-generation-validator-allows-only-the-exact-durable-pending-artifact
-  (let* ((member (make-reload-test-member)) (node (gr8s.raft.transport:raft-member-node member))
+  (let* ((member (make-reload-test-member)) (node (gr8s.raft.transport::raft-member-node member))
          (descriptor (gr8s.resources::core-object "index" 42 "term" 7 "artifactSha256" (make-string 64 :initial-element #\a)))
          (validate (reload-test-validator member descriptor))
          (application (list :gr8s-store-artifact 1 :index 42 :term 7 :sha256 (gethash "artifactSha256" descriptor)))
          (state (list :gr8s-raft-snapshot 1 :application application :application-present t :members (list (cons "reload-member" :voter)))))
-    (bt:with-lock-held ((gr8s.raft.transport:raft-member-lock member))
-      (setf (gr8s.raft:raft-node-snapshot-pending node) (list 42 7 state #())
-            (gr8s.raft:raft-node-current-term node) 12)
+    (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
+      (setf (gr8s.raft::raft-node-snapshot-pending node) (list 42 7 state #())
+            (gr8s.raft::raft-node-current-term node) 12)
       (is (funcall validate descriptor nil))
       (setf (getf (cddr application) :sha256) (make-string 64 :initial-element #\b))
       (signals error (funcall validate descriptor nil))
       (setf (getf (cddr application) :sha256) (gethash "artifactSha256" descriptor))
-      (setf (gr8s.raft:raft-node-snapshot-pending node) (list 43 7 state #()))
+      (setf (gr8s.raft::raft-node-snapshot-pending node) (list 43 7 state #()))
       (signals error (funcall validate descriptor nil))
-      (setf (gr8s.raft:raft-node-snapshot-pending node) (list 42 8 state #()))
+      (setf (gr8s.raft::raft-node-snapshot-pending node) (list 42 8 state #()))
       (signals error (funcall validate descriptor nil))
-      (setf (gr8s.raft:raft-node-snapshot-pending node) (list 42 7 nil #()))
+      (setf (gr8s.raft::raft-node-snapshot-pending node) (list 42 7 nil #()))
       (signals error (funcall validate descriptor nil)))))
 
 (test unsuccessful-preflight-cannot-create-an-intent-or-change-selection
@@ -498,7 +498,7 @@
   (let* ((member (make-reload-test-member)) (entered (bt:make-semaphore)) (release (bt:make-semaphore))
          (descriptor (gr8s.resources::core-object "index" 42 "term" 7 "artifactSha256" (make-string 64 :initial-element #\a)))
          (validate (reload-test-validator member descriptor))
-         (thread (bt:make-thread (lambda () (bt:with-lock-held ((gr8s.raft.transport:raft-member-lock member))
+         (thread (bt:make-thread (lambda () (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
                                              (bt:signal-semaphore entered) (bt:wait-on-semaphore release :timeout 5))))))
     (unwind-protect
          (progn (is-true (bt:wait-on-semaphore entered :timeout 5))
@@ -507,22 +507,22 @@
       (bt:join-thread thread))))
 
 (test pending-member-validation-is-idempotent-but-never-rolls-back-newer-commits
-  (let* ((member (make-reload-test-member)) (node (gr8s.raft.transport:raft-member-node member))
+  (let* ((member (make-reload-test-member)) (node (gr8s.raft.transport::raft-member-node member))
          (descriptor (gr8s.resources::core-object "index" 42 "term" 7 "artifactSha256" (make-string 64 :initial-element #\a)))
          (validate (reload-test-validator member descriptor))
          (state (list :gr8s-raft-snapshot 1 :application (list :gr8s-store-artifact 1 :index 42 :term 7 :sha256 (gethash "artifactSha256" descriptor))
                                          :application-present t :members (list (cons "reload-member" :voter)))))
-    (bt:with-lock-held ((gr8s.raft.transport:raft-member-lock member))
-      (setf (gr8s.raft:raft-node-snapshot-pending node) (list 42 7 state #())
-            (gr8s.raft:raft-node-snapshot-index node) 42 (gr8s.raft:raft-node-snapshot-term node) 7
-            (gr8s.raft:raft-node-last-applied node) 42 (gr8s.raft:raft-node-commit-index node) 42)
+    (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
+      (setf (gr8s.raft::raft-node-snapshot-pending node) (list 42 7 state #())
+            (gr8s.raft::raft-node-snapshot-index node) 42 (gr8s.raft::raft-node-snapshot-term node) 7
+            (gr8s.raft::raft-node-last-applied node) 42 (gr8s.raft::raft-node-commit-index node) 42)
       (is (funcall validate descriptor nil))
-      (setf (gr8s.raft:raft-node-snapshot-index node) 43
-            (gr8s.raft:raft-node-last-applied node) 43 (gr8s.raft:raft-node-commit-index node) 43)
+      (setf (gr8s.raft::raft-node-snapshot-index node) 43
+            (gr8s.raft::raft-node-last-applied node) 43 (gr8s.raft::raft-node-commit-index node) 43)
       (signals error (funcall validate descriptor nil)))))
 
 (test member-validator-rejects-unrepresentable-boundaries-and-unverifiable-log-state
-  (let* ((member (make-reload-test-member)) (node (gr8s.raft.transport:raft-member-node member))
+  (let* ((member (make-reload-test-member)) (node (gr8s.raft.transport::raft-member-node member))
          (descriptor (gr8s.resources::core-object "index" 42 "term" 7 "artifactSha256" (make-string 64 :initial-element #\a)))
          (validate (reload-test-validator member descriptor)))
     (dolist (args (list (list 9 0 7 (gethash "artifactSha256" descriptor))
@@ -530,8 +530,8 @@
                        (list 6 42 7 (gethash "artifactSha256" descriptor))
                        (list 9 42 7 "invalid")))
       (signals error (apply #'gr8s.ha::make-member-generation-validator member args)))
-    (bt:with-lock-held ((gr8s.raft.transport:raft-member-lock member))
-      (setf (gr8s.raft:raft-node-commit-index node) 11)
+    (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
+      (setf (gr8s.raft::raft-node-commit-index node) 11)
       (signals error (funcall validate descriptor nil)))))
 
 (test validator-supports-exact-published-snapshot-recovery-from-real-wal
@@ -545,38 +545,38 @@
                                            :members (list (cons "reload-member" :voter))))
            (validate (gr8s.ha::make-member-generation-validator member 9 42 7 (gethash "artifactSha256" descriptor) :recover t))
            (restored 0)
-           (node (gr8s.raft:make-raft-node
+           (node (gr8s.raft::make-raft-node
                   :id "reload-member"
                   :restore-fn (lambda (incoming)
                                 (is (equal application incoming))
-                                (bt:with-lock-held ((gr8s.raft.transport:raft-member-lock member))
+                                (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
                                   (is (funcall validate descriptor nil)))
                                 (incf restored))))
-           (storage (gr8s.raft:open-file-raft-storage path)))
+           (storage (gr8s.raft::open-file-raft-storage path)))
       (unwind-protect
            (progn
-             (gr8s.raft:raft-storage-replace-snapshot storage 42 7 state 9 nil #())
-             (gr8s.raft:close-file-raft-storage storage)
-             (setf (gr8s.raft.transport:raft-member-node member) node)
-             (gr8s.raft:recover-raft-node node path)
+             (gr8s.raft::raft-storage-replace-snapshot storage 42 7 state 9 nil #())
+             (gr8s.raft::close-file-raft-storage storage)
+             (setf (gr8s.raft.transport::raft-member-node member) node)
+             (gr8s.raft::recover-raft-node node path)
              (is (= 1 restored))
-             (bt:with-lock-held ((gr8s.raft.transport:raft-member-lock member))
+             (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
                (signals error (funcall (reload-test-validator member descriptor) descriptor nil))
                (is (funcall validate descriptor nil))
-               (setf (getf (cddr (getf (cddr (gr8s.raft:raft-node-snapshot-state node)) :application)) :sha256)
+               (setf (getf (cddr (getf (cddr (gr8s.raft::raft-node-snapshot-state node)) :application)) :sha256)
                      (make-string 64 :initial-element #\b))
                (signals error (funcall validate descriptor nil))))
-        (gr8s.raft:close-file-raft-storage storage)
-        (when (gr8s.raft:raft-node-storage node) (gr8s.raft:close-file-raft-storage (gr8s.raft:raft-node-storage node)))))))
+        (gr8s.raft::close-file-raft-storage storage)
+        (when (gr8s.raft::raft-node-storage node) (gr8s.raft::close-file-raft-storage (gr8s.raft::raft-node-storage node)))))))
 
 (test fresh-application-snapshot-may-replace-a-conflicting-uncommitted-tail
-  (let* ((member (make-reload-test-member)) (node (gr8s.raft.transport:raft-member-node member))
+  (let* ((member (make-reload-test-member)) (node (gr8s.raft.transport::raft-member-node member))
          (descriptor (gr8s.resources::core-object "index" 42 "term" 7 "artifactSha256" (make-string 64 :initial-element #\a)))
          (validate (reload-test-validator member descriptor)))
-    (bt:with-lock-held ((gr8s.raft.transport:raft-member-lock member))
+    (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
       (loop for index from 11 to 43 do
-        (vector-push-extend (gr8s.raft:make-raft-entry :index index :term 8 :command :uncommitted)
-                            (gr8s.raft:raft-node-log node)))
+        (vector-push-extend (gr8s.raft::make-raft-entry :index index :term 8 :command :uncommitted)
+                            (gr8s.raft::raft-node-log node)))
       (is (funcall validate descriptor nil))
-      (is (= 43 (gr8s.raft:raft-last-log-index node)))
-      (is (= 10 (gr8s.raft:raft-node-last-applied node))))))
+      (is (= 43 (gr8s.raft::raft-last-log-index node)))
+      (is (= 10 (gr8s.raft::raft-node-last-applied node))))))

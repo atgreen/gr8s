@@ -29,33 +29,3 @@
    #:unsupported-node-protocol-version
    #:unsupported-node-protocol-version-received
    #:unsupported-node-protocol-version-supported))
-
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (let ((protocol (find-package '#:gr8s.protocol))
-        (composition (find-package '#:gr8s)))
-    (dolist (name '("+NODE-PROTOCOL-VERSION+"
-                    "CONNECT-RUNTIME-STREAM"
-                    "ENSURE-NODE-PROTOCOL-VERSION"
-                    "MAKE-AGENT-ENVELOPE"
-                    "MAKE-SERVER-ENVELOPE"
-                    "MAKE-SPDY-SERVER"
-                    "MAKE-UNIX-GRPC-CHANNEL"
-                    "READ-WEBSOCKET-FRAME"
-                    "UNSUPPORTED-NODE-PROTOCOL-VERSION"
-                    "UNSUPPORTED-NODE-PROTOCOL-VERSION-RECEIVED"
-                    "UNSUPPORTED-NODE-PROTOCOL-VERSION-SUPPORTED"))
-      (let ((old (find-symbol name composition))
-            (new (find-symbol name protocol)))
-        (dolist (user (package-used-by-list composition))
-          (when (eq old (find-symbol name user))
-            (shadowing-import new user)))
-        (shadowing-import new composition)
-        (export new protocol)))
-    (dolist (name '("+NODE-PROTOCOL-VERSION+"
-                    "ENSURE-NODE-PROTOCOL-VERSION"
-                    "MAKE-AGENT-ENVELOPE"
-                    "MAKE-SERVER-ENVELOPE"
-                    "UNSUPPORTED-NODE-PROTOCOL-VERSION"
-                    "UNSUPPORTED-NODE-PROTOCOL-VERSION-RECEIVED"
-                    "UNSUPPORTED-NODE-PROTOCOL-VERSION-SUPPORTED"))
-      (export (find-symbol name protocol) composition))))

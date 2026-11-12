@@ -27,11 +27,11 @@
       (is (null (gr8s.store::selected-store-generation-root root)))
       (is (gr8s.store::get-pod store "default" "legacy-later"))
       (let ((restored (gr8s.store::open-store root)))
-        (is (equal (gr8s.store::store-generation-root root id) (gr8s.store:store-data-path restored)))
+        (is (equal (gr8s.store::store-generation-root root id) (gr8s.store::store-data-path restored)))
         (is (gr8s.store::get-pod restored "default" "snapshot-pod"))
         (signals gr8s.model::kubernetes-error (gr8s.store::get-pod restored "default" "legacy-later"))
         (is (null (probe-file intent)))
-        (is (equal root (gr8s.store:store-data-path store)))
+        (is (equal root (gr8s.store::store-data-path store)))
         (is (gr8s.store::finish-store-restore restored descriptor))))))
 
 (test interrupted-selection-and-load-failure-retain-intent-for-retry

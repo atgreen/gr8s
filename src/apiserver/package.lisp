@@ -31,33 +31,6 @@
    #:publish-node-desired-state
    #:start-node-grpc-server
    #:stop-node-grpc-server))
-
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (let ((apiserver (find-package '#:gr8s.apiserver))
-        (composition (find-package '#:gr8s)))
-    ;; Establish these identities before resource adapters and the node-session
-    ;; implementation are read.  GR8S remains the compatibility facade.
-    (dolist (name '("NODE-GRPC-SERVER"
-                    "NODE-GRPC-SERVER-PORT"
-                    "NODE-SESSION-ACKNOWLEDGED-REVISION"
-                    "PENDING-NODE-OPERATION-DONE-P"
-                    "PENDING-NODE-OPERATION-ERROR"
-                    "PENDING-NODE-OPERATION-RESPONSE"
-                    "PUBLISH-NODE-DESIRED-STATE"
-                    "QUEUE-NODE-OPERATION"
-                    "RELEASE-NODE-OPERATION"
-                    "START-NODE-GRPC-SERVER"
-                    "STOP-NODE-GRPC-SERVER"))
-      (shadowing-import (find-symbol name apiserver) composition))
-    (dolist (name '("NODE-GRPC-SERVER-PORT"
-                    "NODE-SESSION-ACKNOWLEDGED-REVISION"
-                    "PUBLISH-NODE-DESIRED-STATE"
-                    "START-NODE-GRPC-SERVER"
-                    "STOP-NODE-GRPC-SERVER"))
-      (let ((symbol (find-symbol name apiserver)))
-        (export symbol apiserver)
-        (export symbol composition)))))
-
 ;;; The WireGuard overlay topology planner -- direct-peer adjacency and
 ;;; deterministic next-hop selection over an overlay-node graph -- now lives in
 ;;; the standalone cl-wireguard-overlay library (installed via ocicl).  gr8s
@@ -94,5 +67,4 @@
                           "WIREGUARD-TOPOLOGY-PLAN-TRANSIT-NODES"
 ))))
     (shadowing-import symbols '#:gr8s.apiserver)
-    (export symbols '#:gr8s.apiserver)
-    (shadowing-import symbols '#:gr8s)))
+    (export symbols '#:gr8s.apiserver)))

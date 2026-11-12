@@ -11,23 +11,23 @@
     (sb-posix:mkdir (namestring sink-root) #o700)
     (unwind-protect
          (progn
-           (setf sender (gr8s::start-raft-member "source")
-                 receiver (gr8s::start-raft-member "sink" :storage-path (merge-pathnames "raft/wal" sink-root)
+           (setf sender (gr8s.raft.transport::start-raft-member "source")
+                 receiver (gr8s.raft.transport::start-raft-member "sink" :storage-path (merge-pathnames "raft/wal" sink-root)
                             :restore-fn (lambda (ref) (setf restored ref))))
            (gr8s.resources::configure-store-artifact-transport sender root)
            (gr8s.resources::configure-store-artifact-transport receiver sink-root)
-           (setf channel (gr8s::make-raft-channel nil "127.0.0.1" (gr8s::raft-member-port receiver) 2))
+           (setf channel (gr8s.security::make-raft-channel nil "127.0.0.1" (gr8s.raft.transport::raft-member-port receiver) 2))
            (gr8s.raft.transport::raft-link-send-snapshot
             sender (gr8s.node.v1::make-raft-transport-stub channel)
             (list :type :install-snapshot :term 1 :from "source" :last-index 1 :last-term 1
                   :state (list :gr8s-raft-snapshot 1 :application reference :application-present t
                                :members '(("source" . :voter) ("sink" . :learner)) :addresses nil :api-urls nil)))
            (assert (equal reference restored))
-           (assert (= 1 (gr8s::raft-node-last-applied (gr8s::raft-member-node receiver))))
+           (assert (= 1 (cl-raft::raft-node-last-applied (gr8s.raft.transport::raft-member-node receiver))))
            (gr8s.resources::checked-store-snapshot-artifact-path sink-root reference))
       (when channel (ag-grpc:channel-close channel))
-      (when receiver (gr8s::stop-raft-member receiver))
-      (when sender (gr8s::stop-raft-member sender)))))
+      (when receiver (gr8s.raft.transport::stop-raft-member receiver))
+      (when sender (gr8s.raft.transport::stop-raft-member sender)))))
 
 (defun transfer-live-memory-test-artifact (root reference count)
   (let* ((sink-root (merge-pathnames "live-transfer-sink/" root))
@@ -47,7 +47,7 @@
                (when channel (ag-grpc:channel-close channel) (setf channel nil)))
              (stop-receiver (successful)
                (when process
-                 (ignore-errors (gr8s::write-private-text-atomically stop "stop"))
+                 (ignore-errors (gr8s.security::write-private-text-atomically stop "stop"))
                  (loop repeat 200 while (sb-ext:process-alive-p process) do (sleep 0.05))
                  (when (sb-ext:process-alive-p process) (sb-ext:process-kill process 9))
                  (sb-ext:process-wait process)
@@ -66,7 +66,7 @@
                             (namestring report) (namestring stop) mode)
                       :search t :wait nil :input nil :output log :error :output))
                (await-file ready 120)
-               (setf channel (gr8s::make-raft-channel nil "127.0.0.1" (parse-integer (uiop:read-file-string ready)) 2)))
+               (setf channel (gr8s.security::make-raft-channel nil "127.0.0.1" (parse-integer (uiop:read-file-string ready)) 2)))
              (collect-report ()
                (await-file report 60)
                (let ((result (com.inuoe.jzon:parse (uiop:read-file-string report))))
@@ -75,7 +75,7 @@
                  result)))
       (unwind-protect
            (progn
-             (setf sender (gr8s::start-raft-member "source"))
+             (setf sender (gr8s.raft.transport::start-raft-member "source"))
              (gr8s.resources::configure-store-artifact-transport sender root)
              (launch "live")
              (gr8s.raft.transport::raft-link-send-snapshot
@@ -99,29 +99,29 @@
                (setf completed t)
                (values (gr8s.resources::checked-store-snapshot-artifact-path sink-root reference) result)))
         (close-channel)
-        (when sender (gr8s::stop-raft-member sender))
+        (when sender (gr8s.raft.transport::stop-raft-member sender))
         (stop-receiver completed)))))
 
 (defun populate-memory-test-store (store count bytes)
   "Keep construction temporaries off the caller's stack across later reload GCs."
   (dotimes (i count)
     (let ((name (format nil "config-~D" i)))
-      (setf (gethash (list "configmaps" "default" name) (gr8s::pod-store-resources store))
-            (gr8s::core-object
+      (setf (gethash (list "configmaps" "default" name) (gr8s.store::pod-store-resources store))
+            (gr8s.resources::core-object
              "apiVersion" "v1" "kind" "ConfigMap"
-             "metadata" (gr8s::core-object "name" name "namespace" "default" "resourceVersion" "1")
-             "data" (gr8s::core-object "payload" (make-string bytes :element-type 'base-char :initial-element #\x))))))
-  (setf (gr8s::pod-store-resource-revision store) 1)
+             "metadata" (gr8s.resources::core-object "name" name "namespace" "default" "resourceVersion" "1")
+             "data" (gr8s.resources::core-object "payload" (make-string bytes :element-type 'base-char :initial-element #\x))))))
+  (setf (gr8s.store::pod-store-resource-revision store) 1)
   store)
 
 (defun assert-memory-test-store (store count bytes)
   "Verify the complete count and final payload without retaining an old table."
-  (assert (= count (hash-table-count (gr8s::pod-store-resources store))))
-  (let ((object (gr8s::get-core-resource store "configmaps" "default" (format nil "config-~D" (1- count)))))
+  (assert (= count (hash-table-count (gr8s.store::pod-store-resources store))))
+  (let ((object (gr8s.resources::get-core-resource store "configmaps" "default" (format nil "config-~D" (1- count)))))
     (assert (= bytes (length (gethash "payload" (gethash "data" object))))))
   t)
 
-(let* ((directory (merge-pathnames (format nil "gr8s-artifact-memory-~A/" (gr8s::generate-uid))
+(let* ((directory (merge-pathnames (format nil "gr8s-artifact-memory-~A/" (gr8s.store::generate-uid))
                                   (uiop:temporary-directory)))
        (count (parse-integer (or (uiop:getenv "GR8S_SNAPSHOT_RECORDS") "1024")))
        (bytes 65536)
@@ -140,15 +140,15 @@
        (legacy (equal "1" (uiop:getenv "GR8S_SNAPSHOT_LEGACY"))))
   (sb-posix:mkdir (namestring directory) #o700)
   (unwind-protect
-       (let* ((store (gr8s:open-store directory))
+       (let* ((store (gr8s.store::open-store directory))
               (target (merge-pathnames "artifact.jsonl" directory)))
          (populate-memory-test-store store count bytes)
          (sb-ext:gc :full t)
          (if legacy
              (let ((json (gr8s.resources::core-state-json
-                          store (gr8s::pod-store-resources store) 1
-                          (gr8s::pod-store-workload-deletions store)
-                          (gr8s::pod-store-job-controller-states store))))
+                          store (gr8s.store::pod-store-resources store) 1
+                          (gr8s.store::pod-store-workload-deletions store)
+                          (gr8s.store::pod-store-job-controller-states store))))
                (gr8s.security::write-private-text-exclusively target json))
              (progn
                (gr8s.resources::capture-store-snapshot store target 1 1)
@@ -173,8 +173,8 @@
                (gr8s.resources::materialize-store-snapshot
                 directory target (gr8s.raft.transport::raft-snapshot-file-digest target)
                 :expected-index 1 :expected-term 1
-                :minimum-resource-revision (when reload (1+ (gr8s::pod-store-resource-revision store)))
-                :minimum-pod-revision (when reload (1+ (gr8s::pod-store-pod-revision-ceiling store))))
+                :minimum-resource-revision (when reload (1+ (gr8s.store::pod-store-resource-revision store)))
+                :minimum-pod-revision (when reload (1+ (gr8s.store::pod-store-pod-revision-ceiling store))))
              (declare (ignore path))
              (setf materialized-count records reload-descriptor descriptor)))
          (when (and reload (not legacy))
@@ -192,28 +192,28 @@
                            store "memory-founder" (merge-pathnames "raft/control-plane.log" directory)
                            :bootstrap-role :founder))
                     (assert (gr8s.store::store-access-blocked-p store))
-                    (gr8s::raft-member-start member)
+                    (gr8s.raft.transport::raft-member-start member)
                     (loop repeat 600 until (not (gr8s.store::store-access-blocked-p store))
                           do (sleep 0.05)
                           finally (assert (not (gr8s.store::store-access-blocked-p store))))
                     (assert-memory-test-store store count bytes)
-                    (let ((node (gr8s::raft-member-node member)))
-                      (assert (= 1 (gr8s::raft-node-snapshot-index node)))
-                      (assert (= 0 (gr8s::raft-node-snapshot-term node)))
+                    (let ((node (gr8s.raft.transport::raft-member-node member)))
+                      (assert (= 1 (cl-raft::raft-node-snapshot-index node)))
+                      (assert (= 0 (cl-raft::raft-node-snapshot-term node)))
                       (setf bootstrap-report
-                            (gr8s::core-object "passed" t "records" count
-                                               "appliedIndex" (gr8s::raft-node-last-applied node)
-                                               "resourceRevision" (gr8s::pod-store-resource-revision store)))))
+                            (gr8s.resources::core-object "passed" t "records" count
+                                               "appliedIndex" (cl-raft::raft-node-last-applied node)
+                                               "resourceRevision" (gr8s.store::pod-store-resource-revision store)))))
                (when member
-                 (gr8s::stop-raft-member member)
-                 (setf (gr8s::pod-store-consensus-commit-fn store) nil)))))
-         (let ((result (gr8s::core-object
+                 (gr8s.raft.transport::stop-raft-member member)
+                 (setf (gr8s.store::pod-store-consensus-commit-fn store) nil)))))
+         (let ((result (gr8s.resources::core-object
                         "passed" t "legacy" legacy "records" count
                         "validatedRecords" validated-count "materializedRecords" materialized-count
-                        "residentResourcesAfterOperation" (hash-table-count (gr8s::pod-store-resources store))
+                        "residentResourcesAfterOperation" (hash-table-count (gr8s.store::pod-store-resources store))
                         "reloadedSameStore" reloaded "retainedArtifactAfterTransferCleanup" retained "transferredArtifact" transferred "liveReceiver" receiver-report "bootstrapFounder" bootstrap-report "payloadBytes" (* count bytes)
                         "artifactBytes" (sb-posix:stat-size (sb-posix:stat (namestring target))))))
            (unless reloaded
-             (setf (gethash "residentSourceResources" result) (hash-table-count (gr8s::pod-store-resources store))))
+             (setf (gethash "residentSourceResources" result) (hash-table-count (gr8s.store::pod-store-resources store))))
            (format t "~&~A~%" (com.inuoe.jzon:stringify result))))
     (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore)))

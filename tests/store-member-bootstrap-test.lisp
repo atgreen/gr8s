@@ -52,7 +52,7 @@
            (signals error (gr8s.resources::bootstrap-store-member-wal store "fresh" :role :learner))))
         (is (equal before (uiop:read-file-string wal))))
       (let ((storage (cl-raft::open-file-raft-storage wal)))
-        (unwind-protect (gr8s.raft:raft-storage-save-hard-state storage 9 "acknowledged")
+        (unwind-protect (gr8s.raft::raft-storage-save-hard-state storage 9 "acknowledged")
           (cl-raft::close-file-raft-storage storage)))
       (let ((before (uiop:read-file-string wal)))
         (call-with-bootstrap-barriers store (lambda () (signals error (gr8s.resources::bootstrap-store-member-wal store "fresh"))))

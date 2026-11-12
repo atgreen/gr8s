@@ -12,7 +12,7 @@
            (progn
              (cl-raft::raft-configure node '(("n1" . :voter) ("l" . :learner)))
              (setf (gethash "l" (cl-raft::raft-node-peer-addresses node)) '("old-host" 19191)
-                   (gethash "l" (gr8s.raft:raft-node-promotion-intents node)) :voter)
+                   (gethash "l" (gr8s.raft::raft-node-promotion-intents node)) :voter)
              (gr8s.raft::raft-set-hard-state node 2 "n1")
              (cl-raft::raft-log-append node (cl-raft::make-raft-entry :term 2 :command '(:set "x" 1)))
              (gr8s.raft::raft-set-commit-index node 1)
@@ -566,7 +566,7 @@
         (format stream "(let* ((member (gr8s.raft.transport:make-raft-member :node (gr8s.raft:make-raft-node :id ~S) :snapshot-directory ~S)) (root (gr8s.raft.transport::raft-member-snapshot-root-unlocked member)) (file (merge-pathnames ~S root)))~%" "child" (namestring base) "in-crash.snapshot")
         (write-line "(gr8s.raft.transport::raft-snapshot-create-file file)" stream)
         (write-line "(with-open-file (out file :direction :output :if-exists :overwrite) (write-string (make-string 65536 :initial-element (code-char 120)) out))" stream)
-        (format stream "(gr8s::write-private-text-atomically ~S (namestring root))~%" (namestring ready))
+        (format stream "(gr8s.security::write-private-text-atomically ~S (namestring root))~%" (namestring ready))
         (write-line "(loop (sleep 1)))" stream))
       (unwind-protect
            (progn
@@ -655,14 +655,14 @@
              (member (gr8s.raft.transport::make-raft-member :node leader :running t))
              (stub (gensym "STUB"))
              (limit (if (eq mode :capacity) 128 512))
-             (follower (gr8s.raft:make-raft-node
+             (follower (gr8s.raft::make-raft-node
                         :id "follower" :current-term 2 :snapshot-index 3 :snapshot-term 2
                         :commit-index 3 :last-applied 3 :retained-byte-limit limit
                         :uncommitted-weight-fn (constantly 128)
                         :send-fn (lambda (target reply)
                                    (declare (ignore target))
-                                   (bt:with-lock-held ((gr8s.raft.transport:raft-member-lock member))
-                                     (gr8s.raft:raft-handle-message leader reply)))))
+                                   (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
+                                     (gr8s.raft::raft-handle-message leader reply)))))
              (deliver (symbol-function 'gr8s.raft.transport::raft-link-deliver-message))
              (read-prefix (symbol-function 'gr8s.raft::raft-storage-read-catchup))
              (source (merge-pathnames "stream-artifact.jsonl" root))
@@ -673,17 +673,17 @@
                (setf (gethash "follower" (gr8s.raft.transport::raft-member-links member))
                      (gr8s.raft.transport::make-raft-peer-link :id "follower" :stub stub))
                (gr8s.raft::raft-configure leader '(("leader" . :voter) ("follower" . :voter)))
-               (gr8s.raft:raft-compact leader 3)
-               (let ((entry (gr8s.raft:make-raft-entry :index 4 :term 2 :command '(:payload 4))))
-                 (gr8s.raft:raft-storage-append-entry storage entry)
-                 (vector-push-extend entry (gr8s.raft:raft-node-log leader)))
-               (gr8s.raft:raft-storage-save-commit-index storage 4)
-               (setf (gr8s.raft:raft-node-commit-index leader) 4 (gr8s.raft:raft-node-last-applied leader) 4
-                     (gethash "follower" (gr8s.raft:raft-node-match-index leader)) 2
-                     (gethash "follower" (gr8s.raft:raft-node-next-index leader)) 3)
+               (gr8s.raft::raft-compact leader 3)
+               (let ((entry (gr8s.raft::make-raft-entry :index 4 :term 2 :command '(:payload 4))))
+                 (gr8s.raft::raft-storage-append-entry storage entry)
+                 (vector-push-extend entry (gr8s.raft::raft-node-log leader)))
+               (gr8s.raft::raft-storage-save-commit-index storage 4)
+               (setf (gr8s.raft::raft-node-commit-index leader) 4 (gr8s.raft::raft-node-last-applied leader) 4
+                     (gethash "follower" (gr8s.raft::raft-node-match-index leader)) 2
+                     (gethash "follower" (gr8s.raft::raft-node-next-index leader)) 3)
                (gr8s.raft::raft-handle-append-entries-reply
                 leader '(:from "follower" :term 2 :success nil :capacity-limited t :next-index 3))
-               (gr8s.raft:raft-compact leader 4)
+               (gr8s.raft::raft-compact leader 4)
                (when (member mode '(:queued :missing))
                  (gr8s.raft::raft-handle-install-snapshot-reply
                   leader '(:from "follower" :term 2 :success t :match-index 3)))
@@ -707,30 +707,30 @@
                            (:append-entries
                             (incf appends)
                             (when (eq mode :rpc-error) (error "Injected replay RPC failure"))
-                            (gr8s.raft:raft-handle-message follower request))
+                            (gr8s.raft::raft-handle-message follower request))
                            (:snapshot-chunk
                             (incf chunks)
                             (when inject
                               (setf inject nil)
-                              (bt:with-lock-held ((gr8s.raft.transport:raft-member-lock member))
+                              (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
                                 (gr8s.raft::raft-handle-install-snapshot-reply
                                  leader '(:from "follower" :term 2 :success t :match-index 3))))
                             (when (getf request :done)
                               (setf done t)
-                              (gr8s.raft:raft-handle-message follower message))))))
+                              (gr8s.raft::raft-handle-message follower message))))))
                  ;; No new keyword is needed by an already-running link sender.
                  (gr8s.raft.transport::raft-link-send-snapshot member stub message)
-                 (is (= 4 (gr8s.raft:raft-node-last-applied follower)))
+                 (is (= 4 (gr8s.raft::raft-node-last-applied follower)))
                  (is (= limit (gr8s.raft::raft-node-retained-byte-limit follower)))
                  (is-false (gethash "follower" (gr8s.raft::raft-node-peer-snapshot-required leader)))
                  (if (member mode '(:replay :queued))
                      (progn
-                       (is (= 3 (gr8s.raft:raft-node-snapshot-index follower)))
+                       (is (= 3 (gr8s.raft::raft-node-snapshot-index follower)))
                        (is (> appends 0))
                        (is-false done)
                        (when (eq mode :queued) (is (= 0 chunks)) (is (= 0 lookups))))
                      (progn
-                       (is (= 4 (gr8s.raft:raft-node-snapshot-index follower)))
+                       (is (= 4 (gr8s.raft::raft-node-snapshot-index follower)))
                        (is (> chunks 1))
                        (is-true done)))
                  (when (eq mode :missing) (is (= 0 appends)) (is (= 1 cache-reads)))

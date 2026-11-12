@@ -453,7 +453,7 @@
            (pki (gr8s.security::ensure-cluster-pki pki-root))
            (old-fingerprint (gr8s.security::cluster-pki-ca-fingerprint pki)))
       (gr8s.controllers::register-node
-       store (gr8s.model:make-node-record
+       store (gr8s.model::make-node-record
               :id "worker-a-id" :name "worker-a" :pod-cidr "10.80.1.0/24"))
       (gr8s.controllers::record-node-certificate-issuer store "worker-a" old-fingerprint)
       (gr8s.server::prepare-cluster-ca-rotation pki-root)

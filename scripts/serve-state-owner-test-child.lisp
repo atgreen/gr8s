@@ -7,4 +7,4 @@
     (let ((args (uiop:command-line-arguments))) (if (equal "--" (first args)) (rest args) args))
   (gr8s.server::call-with-serve-state-ownership
    (list :state-directory root)
-   (lambda () (gr8s::write-private-text-atomically ready "owned") (loop (sleep 1)))))
+   (lambda () (gr8s.security::write-private-text-atomically ready "owned") (loop (sleep 1)))))

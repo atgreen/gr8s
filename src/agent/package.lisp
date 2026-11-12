@@ -18,18 +18,4 @@
    #:run-node-session))
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
-  (let ((agent (find-package '#:gr8s.agent))
-        (composition (find-package '#:gr8s)))
-    (dolist (name '("CANCEL-NODE-SESSION"
-                    "MAKE-NODE-SESSION-CONTROL"
-                    "NODE-RUNTIME-WIREGUARD-METRICS-TEXT"
-                    "NODE-SESSION-CANCELLED-P"
-                    "RUN-NODE-SESSION"))
-      (let ((old (find-symbol name composition))
-            (new (find-symbol name agent)))
-        (dolist (user (package-used-by-list composition))
-          (when (eq old (find-symbol name user))
-            (shadowing-import new user)))
-        (shadowing-import new composition)
-        (export new agent)))
-    (export (find-symbol "RUN-NODE-SESSION" agent) composition)))
+  (export (intern "NODE-RUNTIME-WIREGUARD-METRICS-TEXT" '#:gr8s.agent) '#:gr8s.agent))

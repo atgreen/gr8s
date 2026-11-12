@@ -35,7 +35,7 @@
         (gr8s.store::publish-store-generation root *test-store-generation-id*)
         (let ((reopened (gr8s.store::open-store root)))
           (is (equal root (gr8s.store::pod-store-path reopened)))
-          (is (equal (gr8s.store:store-data-path staged) (gr8s.store:store-data-path reopened)))
+          (is (equal (gr8s.store::store-data-path staged) (gr8s.store::store-data-path reopened)))
           (is (equal uid (gr8s.model::pod-uid (gr8s.store::get-pod reopened "default" "generation-pod"))))
           (signals gr8s.model::kubernetes-error (gr8s.store::get-pod reopened "default" "legacy-pod"))
           (is (equal "10.88.0.0/20" (ha-node-cidr reopened "generation-node")))
@@ -51,7 +51,7 @@
                     (:node-delta (gr8s.store::install-node-state-delta reopened payload))
                     (:core-delta (gr8s.resources::install-core-state-delta reopened payload)))))
           (let ((new (ha-make-pod reopened "after-selection")))
-            (is (uiop:subpathp (gr8s.store::pod-path reopened new) (gr8s.store:store-data-path reopened)))
+            (is (uiop:subpathp (gr8s.store::pod-path reopened new) (gr8s.store::store-data-path reopened)))
             (is (null (probe-file (merge-pathnames (format nil "~A.json" (gr8s.model::pod-uid new)) root)))))
           (gr8s.controllers::update-node-kubelet-port reopened "generation-node" 12345)
           (gr8s.resources::create-core-resource reopened "configmaps" (core-fixture "ConfigMap" "after-selection") "default")
@@ -136,7 +136,7 @@
       (signals error (gr8s.store::open-store root))
       (sb-posix:unlink (namestring selector))
       (gr8s.store::publish-store-generation root *test-store-generation-id*)
-      (is (equal generation (gr8s.store:store-data-path (gr8s.store::open-store root)))))))
+      (is (equal generation (gr8s.store::store-data-path (gr8s.store::open-store root)))))))
 
 (test generation-publication-failure-boundaries-preserve-complete-choices
   (with-temporary-store (legacy root)
@@ -196,8 +196,8 @@
           (is (equal issuer-path (gr8s.resources::service-account-issuer-record-path reopened digest)))
           (is (equal key-before (uiop:read-file-string key-path)))
           (is (equal issuer-before (uiop:read-file-string issuer-path)))
-          (is (null (probe-file (merge-pathnames "pki/" (gr8s.store:store-data-path reopened)))))
-          (is (null (probe-file (merge-pathnames "credentials/" (gr8s.store:store-data-path reopened))))))))))
+          (is (null (probe-file (merge-pathnames "pki/" (gr8s.store::store-data-path reopened)))))
+          (is (null (probe-file (merge-pathnames "credentials/" (gr8s.store::store-data-path reopened))))))))))
 
 (test ha-store-open-preserves-restore-intent-until-wal-validation
   (with-temporary-store (legacy root)
@@ -208,7 +208,7 @@
            (opened (gr8s.store::open-store root :defer-restore-completion t)))
       (is-true (gr8s.store::read-store-restore-intent root))
       (is (equal (gr8s.store::store-generation-root root *test-store-generation-id*)
-                 (gr8s.store:store-data-path opened)))
+                 (gr8s.store::store-data-path opened)))
       (gr8s.store::finish-store-restore opened intent)
       (is (null (gr8s.store::read-store-restore-intent root))))))
 
@@ -303,7 +303,7 @@
   (with-temporary-store (store root)
     (destructuring-bind (old new staged) (make-retirement-test-generations root)
       (setf (gr8s.store::pod-store-data-root store) (gr8s.store::store-generation-root root old))
-      (let ((data (merge-pathnames "pod-revision.ceiling" (gr8s.store:store-data-path store))))
+      (let ((data (merge-pathnames "pod-revision.ceiling" (gr8s.store::store-data-path store))))
         (gr8s.security::write-private-text-exclusively data "17")
         (gr8s.store::call-with-store-data-reader
          store (lambda (path)
@@ -438,7 +438,7 @@
            (key (progn (gr8s.resources::load-service-account-signing-key store)
                        (uiop:read-file-string (gr8s.resources::service-account-signing-key-path store)))))
       (dotimes (round 5)
-        (let ((previous (gr8s.store:store-data-path store)))
+        (let ((previous (gr8s.store::store-data-path store)))
           (gr8s.store::call-with-store-data-reader
            store (lambda (reader-path)
                    (gr8s.store::quiesce-store-access store)

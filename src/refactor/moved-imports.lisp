@@ -1,15 +1,15 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
 ;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
-;;;; Cross-module imports for formerly-GR8S implementation files.
+;;;; Cross-module imports for implementation files that formerly reached
+;;;; their sibling symbols through the GR8S composition package.
 ;;;;
-;;;; The scheduler, node-agent pod pool, and kubelet pod/runtime helpers used
-;;;; to live in the GR8S composition package and reach every sibling symbol
-;;;; through it.  They now live in their owning module packages; this file
-;;;; shadowing-imports exactly the sibling symbols their bodies reference.
-;;;; INTERN (not FIND-SYMBOL) forward-declares collaborators that define the
-;;;; symbol later in the serial system.  Loaded after all package boundaries
-;;;; exist and before the first of these implementation files compiles.
+;;;; The scheduler, node-agent pod pool, kubelet pod/runtime helpers, and the
+;;;; control-plane node-session / extension surfaces now live in their owning
+;;;; module packages; this file shadowing-imports exactly the sibling symbols
+;;;; their bodies reference.  INTERN (not FIND-SYMBOL) forward-declares
+;;;; collaborators defined later in the serial system.  Loaded after every
+;;;; module package boundary exists and before the first such file compiles.
 
 (in-package #:cl-user)
 
@@ -33,6 +33,44 @@
                    "ROUTED-CNI-OWNER" "ROUTED-VETH-MAC" "SAFE-CNI-CONTAINER-ID-P"
                    "VXLAN-ROUTER-ADDRESS" "VXLAN-ROUTER-MAC")
                   ("GR8S.AGENT" "GR8S.SECURITY" "WRITE-PRIVATE-TEXT-ATOMICALLY")
+                  ;; GR8S.APISERVER
+                  ("GR8S.APISERVER" "GR8S.CONTROLLERS" "+DEFAULT-CLUSTER-POD-CIDR+"
+                   "+DEFAULT-NODE-POD-PREFIX+" "ALLOCATE-NODE-POD-CIDRS"
+                   "CANONICAL-NODE-UNDERLAY-ADDRESS" "EXPIRE-NODE-HEARTBEATS" "GET-NODE"
+                   "LIST-NODES" "MARK-NODE-READY" "NORMALIZE-POD-POOL-GEOMETRY"
+                   "NOTE-NODE-RUNTIME-HEALTH" "RECORD-NODE-CERTIFICATE-ISSUER" "REGISTER-NODE"
+                   "UPDATE-NODE-CAPACITY" "UPDATE-NODE-EXTENDED-RESOURCES"
+                   "UPDATE-NODE-KUBELET-PORT" "UPDATE-NODE-UNDERLAY-ADDRESS"
+                   "UPDATE-NODE-WIREGUARD-ENDPOINTS" "UPDATE-NODE-WIREGUARD-PUBLIC-KEY")
+                  ("GR8S.APISERVER" "GR8S.FOUNDATION" "+DNS-POD-SERVER-ADDRESS+" "JSON-OBJECT"
+                   "NODE-STEERING-CAPACITY-SCORE" "RANK-NETWORK-STEERING-CANDIDATES"
+                   "STEERING-BOUNDED-INTEGER")
+                  ("GR8S.APISERVER" "GR8S.KUBELET" "DELETION-REQUESTED-P"
+                   "EXTENDED-RESOURCE-NAME-P" "SAVE-POD-FINALIZATION-STATE"
+                   "SAVE-POD-OBSERVATION")
+                  ("GR8S.APISERVER" "GR8S.MODEL" "KUBERNETES-ERROR-STATUS-CODE"
+                   "MAKE-NODE-RECORD" "NODE-RECORD-ALL-POD-CIDRS" "NODE-RECORD-CAPACITY"
+                   "NODE-RECORD-ID" "NODE-RECORD-LABELS" "NODE-RECORD-NAME"
+                   "NODE-RECORD-POD-CIDR" "NODE-RECORD-READY-P" "NODE-RECORD-READY-SINCE"
+                   "NODE-RECORD-UNDERLAY-ADDRESS" "NODE-RECORD-WIREGUARD-ENDPOINTS"
+                   "NODE-RECORD-WIREGUARD-PUBLIC-KEY"
+                   "NODE-RECORD-WIREGUARD-REFLEXIVE-OBSERVED-AT" "POD-NAME" "POD-NAMESPACE"
+                   "POD-NODE-NAME" "POD-RESOURCE-VERSION" "POD-TO-OBJECT" "POD-UID")
+                  ("GR8S.APISERVER" "GR8S.PROTOCOL" "+NODE-PROTOCOL-VERSION+"
+                   "ENSURE-NODE-PROTOCOL-VERSION" "MAKE-SERVER-ENVELOPE")
+                  ("GR8S.APISERVER" "GR8S.RESOURCES" "CORE-OBJECT" "GET-CORE-RESOURCE"
+                   "MINT-SERVICE-ACCOUNT-TOKEN" "NODE-CAPACITY-FROM-ENTRIES"
+                   "NOTE-NODE-HEARTBEAT-LEASE" "RECORD-NODE-RUNTIME-EVENTS"
+                   "UPDATE-NODE-CSI-REGISTRATIONS")
+                  ("GR8S.APISERVER" "GR8S.SECURITY" "AUTHENTICATE-NODE-PEER"
+                   "CLUSTER-PKI-CA-CERTIFICATE-PATH" "CLUSTER-PKI-CA-FINGERPRINT"
+                   "CLUSTER-PKI-TRUST-CERTIFICATES" "ENROLL-NODE-CSR"
+                   "ENSURE-NODE-SERVER-CREDENTIALS" "NODE-CERTIFICATE-ISSUER-FINGERPRINT"
+                   "NODE-CERTIFICATE-NEEDS-ACTIVE-CA-RENEWAL-P" "NODE-SERVER-TLS-OPTIONS"
+                   "PKI-ASCII-OCTETS" "RENEW-AUTHENTICATED-NODE-CSR")
+                  ("GR8S.APISERVER" "GR8S.STORE" "CURRENT-TIMESTAMP" "GENERATE-UID" "GET-POD"
+                   "POD-STORE-CONSENSUS-COMMIT-FN" "POD-STORE-IMAGE-TRACKER"
+                   "POD-STORE-RESOURCE-REVISION")
                   ;; GR8S.CONTROLLERS
                   ("GR8S.CONTROLLERS" "GR8S.APISERVER" "PUBLISH-NODE-CHANGE-UNLOCKED"
                    "TABLE-GET")

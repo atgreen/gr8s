@@ -28,5 +28,4 @@
                        'cl-cronexpr:extend-zone-transitions
                        'cl-cronexpr:+unix-epoch-universal+)))
     (import symbols '#:gr8s.resources)
-    (export symbols '#:gr8s.resources)
-    (shadowing-import symbols '#:gr8s)))
+    (export symbols '#:gr8s.resources)))

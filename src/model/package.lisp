@@ -96,21 +96,3 @@
    #:require-object
    #:require-string-vector
    #:validate-owner-references))
-
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (do-external-symbols (symbol '#:gr8s.model)
-    (shadowing-import symbol '#:gr8s))
-  ;; Preserve only the historical public facade. Parser helpers remain an
-  ;; explicit MODEL interface without broadening GR8S's public API.
-  (dolist (name '("CONTAINER-SPEC-ARGS" "CONTAINER-SPEC-COMMAND"
-                  "CONTAINER-SPEC-ENV" "CONTAINER-SPEC-IMAGE"
-                  "CONTAINER-SPEC-NAME" "CONTAINER-SPEC-PORTS"
-                  "KUBERNETES-ERROR" "KUBERNETES-ERROR-REASON"
-                  "MAKE-NODE-RECORD" "NODE-RECORD-ID"
-                  "NODE-RECORD-LAST-HEARTBEAT" "NODE-RECORD-NAME"
-                  "NODE-RECORD-POD-CIDR" "NODE-RECORD-POD-CIDRS"
-                  "NODE-RECORD-ALL-POD-CIDRS" "NODE-RECORD-READY-P"
-                  "POD-CONTAINERS" "POD-NAME" "POD-NODE-NAME"
-                  "POD-NAMESPACE" "POD-RESTART-POLICY"
-                  "POD-RESOURCE-VERSION" "POD-TO-OBJECT" "POD-UID"))
-    (export (find-symbol name '#:gr8s.model) '#:gr8s)))

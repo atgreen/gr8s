@@ -88,8 +88,8 @@
                         (declare (ignore path))
                         :active)
                :command "serve")
-            (gr8s.runtime:runtime-error (error) error))))
-    (is (typep condition 'gr8s.runtime:runtime-error))
+            (gr8s.runtime::runtime-error (error) error))))
+    (is (typep condition 'gr8s.runtime::runtime-error))
     (is (search "another kubelet is listening" (princ-to-string condition)))
     (is (search "gr8s serve --disable-agent" (princ-to-string condition)))))
 

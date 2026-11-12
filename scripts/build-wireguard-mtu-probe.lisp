@@ -7,7 +7,7 @@
 
 (defun wireguard-mtu-probe-main ()
   (destructuring-bind (pod-cidr maximum-text) (uiop:command-line-arguments)
-    (let ((route (gr8s::json-object "podCIDR" pod-cidr)))
+    (let ((route (gr8s.foundation::json-object "podCIDR" pod-cidr)))
       (multiple-value-bind (mtu reason)
           (gr8s.network::discover-wireguard-path-mtu
            (lambda (size)

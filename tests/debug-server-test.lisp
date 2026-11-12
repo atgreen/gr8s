@@ -37,7 +37,7 @@
                  (when secret
                    (write-sequence (slynk-frame secret) stream)
                    (finish-output stream))
-                 (write-sequence (slynk-frame (format nil "(:emacs-rex (gr8s::debug-eval ~S) \"GR8S\" t 1)" form)) stream)
+                 (write-sequence (slynk-frame (format nil "(:emacs-rex (gr8s.apiserver::debug-eval ~S) \"GR8S.APISERVER\" t 1)" form)) stream)
                  (finish-output stream)
                  (loop for frame = (slynk-read-frame stream)
                        while frame
@@ -134,7 +134,7 @@
                     ;; The caller sends ordinary Slynk protocol immediately;
                     ;; OPEN-ON-DEMAND-DEBUG-STREAM already sent the secret.
                     (write-sequence
-                     (slynk-frame "(:emacs-rex (gr8s::debug-eval \"(+ 20 22)\") \"GR8S\" t 1)")
+                     (slynk-frame "(:emacs-rex (gr8s.apiserver::debug-eval \"(+ 20 22)\") \"GR8S.APISERVER\" t 1)")
                      stream)
                     (finish-output stream)
                     (is (loop repeat 20
@@ -166,7 +166,7 @@
                         :operation-id "debug-1" :sequence 1
                         :channel gr8s.node.v1::+streamchannel-stream_channel_stdin+
                         :data (slynk-frame
-                               "(:emacs-rex (gr8s::debug-eval \"(+ 5 6)\") \"GR8S\" t 1)"))
+                               "(:emacs-rex (gr8s.apiserver::debug-eval \"(+ 5 6)\") \"GR8S.APISERVER\" t 1)"))
          #'emit)
         (let ((relayed
                 (wait-until
@@ -220,7 +220,7 @@
                          :operation-id "member-debug-1" :sequence 1
                          :channel gr8s.node.v1::+streamchannel-stream_channel_stdin+
                          :data (slynk-frame
-                                "(:emacs-rex (gr8s::debug-eval \"(+ 20 23)\") \"GR8S\" t 1)"))
+                                "(:emacs-rex (gr8s.apiserver::debug-eval \"(+ 20 23)\") \"GR8S.APISERVER\" t 1)"))
           #'emit))
         (is-true
          (wait-until
@@ -279,14 +279,14 @@
              (text ""))
         (unwind-protect
              (progn
-               (gr8s.runtime:runtime-port-forward-send
+               (gr8s.runtime::runtime-port-forward-send
                 runtime session
                 (slynk-frame
-                 "(:emacs-rex (gr8s::debug-eval \"(+ 40 4)\") \"GR8S\" t 1)"))
+                 "(:emacs-rex (gr8s.apiserver::debug-eval \"(+ 40 4)\") \"GR8S.APISERVER\" t 1)"))
                (loop repeat 20
                      until (search "44" text)
                      do (multiple-value-bind (data done error)
-                            (gr8s.runtime:runtime-port-forward-next runtime session)
+                            (gr8s.runtime::runtime-port-forward-next runtime session)
                           (is-false done)
                           (is-false error)
                           (when data
@@ -296,8 +296,8 @@
                (is (search "(:return " text))
                (is (search "44" text)))
           (ignore-errors
-           (gr8s.runtime:runtime-cancel-port-forward runtime session "test complete"))
-          (gr8s.runtime:runtime-release-port-forward runtime session))
+           (gr8s.runtime::runtime-cancel-port-forward runtime session "test complete"))
+          (gr8s.runtime::runtime-release-port-forward runtime session))
         (is-true (wait-until (lambda () (null gr8s.apiserver::*on-demand-debug-session*))
                              :timeout 5))
         (let ((observed (bt:with-lock-held (route-lock) (copy-list routes))))

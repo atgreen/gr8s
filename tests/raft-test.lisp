@@ -247,13 +247,13 @@
 (in-suite raft)
 (defclass failing-raft-storage ()
   ((operation :initarg :operation :accessor failing-raft-operation)))
-(defmethod gr8s.raft:raft-storage-append-entry ((storage failing-raft-storage) entry)
+(defmethod gr8s.raft::raft-storage-append-entry ((storage failing-raft-storage) entry)
   (declare (ignore entry))
   (when (eq :append (failing-raft-operation storage)) (error "Injected append failure")))
-(defmethod gr8s.raft:raft-storage-truncate ((storage failing-raft-storage) index)
+(defmethod gr8s.raft::raft-storage-truncate ((storage failing-raft-storage) index)
   (declare (ignore index))
   (when (eq :truncate (failing-raft-operation storage)) (error "Injected truncate failure")))
-(defmethod gr8s.raft:raft-storage-save-snapshot ((storage failing-raft-storage) index term state)
+(defmethod gr8s.raft::raft-storage-save-snapshot ((storage failing-raft-storage) index term state)
   (declare (ignore index term state))
   (when (eq :snapshot (failing-raft-operation storage)) (error "Injected snapshot failure")))
 
@@ -414,21 +414,21 @@
            (callback nil))
       (unwind-protect
            (progn
-             (is-true (nth-value 1 (gr8s.raft:raft-propose node '(:first))))
-             (is-true (nth-value 1 (gr8s.raft:raft-propose node '(:second))))
-             (is (= 2 (gr8s.raft:raft-node-commit-index node)))
-             (let ((before (length (gr8s.raft:raft-node-log node)))
+             (is-true (nth-value 1 (gr8s.raft::raft-propose node '(:first))))
+             (is-true (nth-value 1 (gr8s.raft::raft-propose node '(:second))))
+             (is (= 2 (gr8s.raft::raft-node-commit-index node)))
+             (let ((before (length (gr8s.raft::raft-node-log node)))
                    (bytes (sb-posix:stat-size (sb-posix:stat path))))
-               (is (eq :capacity (nth-value 2 (gr8s.raft:raft-propose node '(:third)
+               (is (eq :capacity (nth-value 2 (gr8s.raft::raft-propose node '(:third)
                                               (lambda (value) (declare (ignore value)) (setf callback t))))))
-               (is (= before (length (gr8s.raft:raft-node-log node))))
+               (is (= before (length (gr8s.raft::raft-node-log node))))
                (is (= bytes (sb-posix:stat-size (sb-posix:stat path))))
                (is (null callback))
                (is (zerop (hash-table-count (gr8s.raft::raft-node-pending node)))))
-             (is-true (nth-value 1 (gr8s.raft:raft-propose node '(:raft-barrier))))
-             (gr8s.raft:raft-compact node (gr8s.raft:raft-node-last-applied node))
-             (is-true (nth-value 1 (gr8s.raft:raft-propose node '(:third))))
-             (is (= 4 (gr8s.raft:raft-node-commit-index node))))
+             (is-true (nth-value 1 (gr8s.raft::raft-propose node '(:raft-barrier))))
+             (gr8s.raft::raft-compact node (gr8s.raft::raft-node-last-applied node))
+             (is-true (nth-value 1 (gr8s.raft::raft-propose node '(:third))))
+             (is (= 4 (gr8s.raft::raft-node-commit-index node))))
         (cl-raft::close-file-raft-storage storage)))))
 
 (test replicated-retention-refusal-commits-certified-prefix-and-retries-after-compaction
@@ -452,33 +452,33 @@
                (cl-raft::raft-persist-hard-state node)
                (send 0 (list (entry '(:first)) (entry '(:second))) 0)
                (is (getf (first replies) :success))
-               (is (= 2 (length (gr8s.raft:raft-node-log node))))
-               (is (zerop (gr8s.raft:raft-node-commit-index node)))
+               (is (= 2 (length (gr8s.raft::raft-node-log node))))
+               (is (zerop (gr8s.raft::raft-node-commit-index node)))
                (send 2 (list (entry '(:third))) 2)
                (is (not (getf (first replies) :success)))
                (is (= 3 (getf (first replies) :next-index)))
-               (is (= 2 (gr8s.raft:raft-node-commit-index node)))
-               (is (= 2 (gr8s.raft:raft-node-last-applied node)))
-               (is (= 2 (length (gr8s.raft:raft-node-log node))))
+               (is (= 2 (gr8s.raft::raft-node-commit-index node)))
+               (is (= 2 (gr8s.raft::raft-node-last-applied node)))
+               (is (= 2 (length (gr8s.raft::raft-node-log node))))
                (let ((durable (gr8s.raft::load-raft-log path)))
                  (is (= 2 (gr8s.raft::raft-recovered-commit-index durable)))
                  (is (= 2 (length (gr8s.raft::raft-recovered-entries durable)))))
                (let ((bytes (sb-posix:stat-size (sb-posix:stat path))))
                  (send 2 (list (entry '(:third))) 3)
                  (is (= bytes (sb-posix:stat-size (sb-posix:stat path)))))
-               (gr8s.raft:raft-compact node 2)
+               (gr8s.raft::raft-compact node 2)
                (send 2 (list (entry '(:third))) 3)
                (is (getf (first replies) :success))
-               (is (= 3 (gr8s.raft:raft-node-commit-index node)))
+               (is (= 3 (gr8s.raft::raft-node-commit-index node)))
                ;; Matching retransmissions do not consume the budget twice.
                (setf (gr8s.raft::raft-node-retained-byte-limit node) 1)
                (send 2 (list (entry '(:third))) 3)
                (is (getf (first replies) :success))
-               (is (= 1 (length (gr8s.raft:raft-node-log node))))
+               (is (= 1 (length (gr8s.raft::raft-node-log node))))
                ;; Recovery traffic may establish a commit even over budget.
                (send 3 (list (entry '(:raft-barrier))) 4)
                (is (getf (first replies) :success))
-               (is (= 4 (gr8s.raft:raft-node-last-applied node))))
+               (is (= 4 (gr8s.raft::raft-node-last-applied node))))
           (cl-raft::close-file-raft-storage storage))))))
 
 (test replicated-retention-replacement-reuses-uncommitted-tail-budget
@@ -492,9 +492,9 @@
     (gr8s.raft::raft-handle-append-entries
      node (list :term 2 :from "new-leader" :prev-log-index 1 :prev-log-term 1 :leader-commit 1
                 :entries (list (gr8s.raft::make-raft-entry :term 2 :command '(:replacement)))))
-    (is (= 2 (length (gr8s.raft:raft-node-log node))))
+    (is (= 2 (length (gr8s.raft::raft-node-log node))))
     (is (= 2 (gr8s.raft::raft-log-term node 2)))
-    (is (= 1 (gr8s.raft:raft-node-commit-index node)))
+    (is (= 1 (gr8s.raft::raft-node-commit-index node)))
     (signals error
       (gr8s.raft::raft-handle-append-entries
        node (list :term 3 :from "bad-leader" :prev-log-index 0 :prev-log-term 0 :leader-commit 2
@@ -548,7 +548,7 @@
 
 (in-suite raft)
 
-(defmethod gr8s.raft:raft-storage-save-hard-state ((storage failing-raft-storage) term vote)
+(defmethod gr8s.raft::raft-storage-save-hard-state ((storage failing-raft-storage) term vote)
   (declare (ignore term vote))
   (when (eq :hard (failing-raft-operation storage)) (error "Injected hard-state failure")))
 
@@ -614,7 +614,7 @@
     (is (null (cl-raft::raft-node-voted-for node)))
     (is (equal "leader" (cl-raft::raft-node-leader-id node)))))
 
-(defclass checkpoint-failing-raft-storage (gr8s.raft:file-raft-storage)
+(defclass checkpoint-failing-raft-storage (gr8s.raft::file-raft-storage)
   ((phase :initarg :phase :accessor checkpoint-failure-phase)))
 
 (defmethod gr8s.raft::file-raft-checkpoint-sync :before
@@ -709,7 +709,7 @@
              (is (= 5 (cl-raft::raft-last-log-index node)))
              (is (null (cl-raft::file-raft-storage-stream storage)))
              (let ((before (uiop:read-file-string path)))
-               (signals error (gr8s.raft:raft-storage-save-hard-state storage 2 "other"))
+               (signals error (gr8s.raft::raft-storage-save-hard-state storage 2 "other"))
                (signals error (cl-raft::raft-compact node 3))
                (is (equal before (uiop:read-file-string path))))
              (is (null (directory (format nil "~A.checkpoint-*" path))))
@@ -741,7 +741,7 @@
                (is (equal before (uiop:read-file-string path))))
              (is (= 0 (cl-raft::raft-node-snapshot-index node)))
              (is (null (directory (format nil "~A.checkpoint-*" path))))
-             (gr8s.raft:raft-storage-save-hard-state storage 2 "peer")
+             (gr8s.raft::raft-storage-save-hard-state storage 2 "peer")
              (is (= 2 (cl-raft::raft-recovered-term (cl-raft::load-raft-log path)))))
         (cl-raft::close-file-raft-storage storage)))))
 
@@ -765,7 +765,7 @@
     (let ((owner (cl-raft::open-file-raft-storage path)))
       (unwind-protect
            (progn
-             (gr8s.raft:raft-storage-save-hard-state owner 7 "first")
+             (gr8s.raft::raft-storage-save-hard-state owner 7 "first")
              (let ((before (uiop:read-file-string path)) (validated nil) (restored nil)
                    (node (cl-raft::make-raft-node :id "second")))
                (setf (cl-raft::raft-node-restore-fn node) (lambda (state) (declare (ignore state)) (setf restored t)))
@@ -781,7 +781,7 @@
       (cl-raft::close-file-raft-storage owner)
       (let ((next (cl-raft::open-file-raft-storage path)))
         (unwind-protect
-             (progn (gr8s.raft:raft-storage-save-hard-state next 8 "next")
+             (progn (gr8s.raft::raft-storage-save-hard-state next 8 "next")
                     (is (= 8 (cl-raft::raft-recovered-term (cl-raft::load-raft-log path)))))
           (cl-raft::close-file-raft-storage next))))))
 
@@ -805,7 +805,7 @@
 (test raft-wal-recovery-failures-release-ownership
   (with-raft-temp-dir (path)
     (let ((owner (cl-raft::open-file-raft-storage path)))
-      (gr8s.raft:raft-storage-save-snapshot owner 3 1 '(:state))
+      (gr8s.raft::raft-storage-save-snapshot owner 3 1 '(:state))
       (cl-raft::close-file-raft-storage owner))
     (dolist (phase '(:validation :restore))
       (let ((node (cl-raft::make-raft-node :id "failed")))
@@ -840,7 +840,7 @@
              (is (eq :signaled (sb-ext:process-status process)))
              (let ((owner (cl-raft::open-file-raft-storage path)))
                (unwind-protect
-                    (progn (gr8s.raft:raft-storage-save-hard-state owner 18 "parent")
+                    (progn (gr8s.raft::raft-storage-save-hard-state owner 18 "parent")
                            (is (= 18 (cl-raft::raft-recovered-term (cl-raft::load-raft-log path)))))
                  (cl-raft::close-file-raft-storage owner))))
         (when (sb-ext:process-alive-p process)
@@ -857,7 +857,7 @@
              (gr8s.raft.transport::stop-raft-member member)
              (is (open-stream-p (gr8s.raft::file-raft-storage-stream storage)))
              (signals error (cl-raft::open-file-raft-storage path))
-             (gr8s.raft:raft-storage-save-hard-state storage 3 "caller")
+             (gr8s.raft::raft-storage-save-hard-state storage 3 "caller")
              (is (= 3 (cl-raft::raft-recovered-term (cl-raft::load-raft-log path)))))
         (gr8s.raft.transport::stop-raft-member member)
         (cl-raft::close-file-raft-storage storage)))))
@@ -900,7 +900,7 @@
                             (is (equal '(:set "x" "kept")
                                        (cl-raft::raft-entry-command (cl-raft::raft-log-entry node 1))))
                             (is (= (length baseline) (raft-wal-size path)))
-                            (gr8s.raft:raft-storage-save-hard-state (cl-raft::raft-node-storage node) 19 "after-repair")
+                            (gr8s.raft::raft-storage-save-hard-state (cl-raft::raft-node-storage node) 19 "after-repair")
                             (is (= 19 (cl-raft::raft-recovered-term (cl-raft::load-raft-log path)))))
                        (when (cl-raft::raft-node-storage node)
                          (cl-raft::close-file-raft-storage (cl-raft::raft-node-storage node)))))))))))
@@ -930,7 +930,7 @@
       (write-line "(:hard 7 \"legacy\")" out))
     (let ((storage (cl-raft::open-file-raft-storage path)))
       (unwind-protect
-           (gr8s.raft:raft-storage-append-entry storage
+           (gr8s.raft::raft-storage-append-entry storage
              (cl-raft::make-raft-entry :index 1 :term 7 :command (list :set "x" (format nil "éλ😀~%kept"))))
         (cl-raft::close-file-raft-storage storage)))
     (let ((recovered (cl-raft::load-raft-log path)))
@@ -959,7 +959,7 @@
         (is (null (cl-raft::raft-node-storage node))))
       (is (= (length damaged) (raft-wal-size path))))))
 
-(defclass repair-observing-raft-storage (gr8s.raft:file-raft-storage)
+(defclass repair-observing-raft-storage (gr8s.raft::file-raft-storage)
   ((failure :initarg :failure :initform nil :reader repair-sync-failure)
    (sizes :initform nil :accessor repair-sync-sizes)))
 
@@ -983,10 +983,10 @@
                      (progn
                        (signals error (cl-raft::load-raft-log path :repair-storage storage))
                        (is (null (gr8s.raft::file-raft-storage-stream storage)))
-                       (signals error (gr8s.raft:raft-storage-save-hard-state storage 19 "blocked")))
+                       (signals error (gr8s.raft::raft-storage-save-hard-state storage 19 "blocked")))
                      (progn
                        (is (= 17 (cl-raft::raft-recovered-term (cl-raft::load-raft-log path :repair-storage storage))))
-                       (gr8s.raft:raft-storage-save-hard-state storage 19 "after-sync")
+                       (gr8s.raft::raft-storage-save-hard-state storage 19 "after-sync")
                        (is (= 19 (cl-raft::raft-recovered-term (cl-raft::load-raft-log path))))))
                  (is (equal (list (length baseline)) (repair-sync-sizes storage)))
                  (signals error (cl-raft::open-file-raft-storage path)))
@@ -1025,7 +1025,7 @@
                         (is (= expected (cl-raft::raft-node-current-term node)))
                         (is (= before (raft-wal-size path)))
                         (setf expected (+ 20 cycle))
-                        (gr8s.raft:raft-storage-save-hard-state (cl-raft::raft-node-storage node) expected "new-acknowledgment")
+                        (gr8s.raft::raft-storage-save-hard-state (cl-raft::raft-node-storage node) expected "new-acknowledgment")
                         (is (= expected (cl-raft::raft-recovered-term (cl-raft::load-raft-log path)))))
                    (when (cl-raft::raft-node-storage node)
                      (cl-raft::close-file-raft-storage (cl-raft::raft-node-storage node)))))))
@@ -1048,10 +1048,10 @@
     (let ((storage (cl-raft::open-file-raft-storage path)))
       (unwind-protect
            (progn
-             (signals error (gr8s.raft:raft-storage-append-entry storage
+             (signals error (gr8s.raft::raft-storage-append-entry storage
                               (cl-raft::make-raft-entry :index 1 :term 1 :command (make-instance 'unstable-wal-print-object))))
              (is (null (gr8s.raft::file-raft-storage-stream storage)))
-             (signals error (gr8s.raft:raft-storage-save-hard-state storage 2 "blocked"))
+             (signals error (gr8s.raft::raft-storage-save-hard-state storage 2 "blocked"))
              (signals error (cl-raft::open-file-raft-storage path)))
         (cl-raft::close-file-raft-storage storage)))))
 
@@ -1061,8 +1061,8 @@
           (storage (cl-raft::open-file-raft-storage path)))
       (unwind-protect
            (progn
-             (gr8s.raft:raft-storage-save-hard-state storage 26 "base")
-             (gr8s.raft:raft-storage-append-entry storage
+             (gr8s.raft::raft-storage-save-hard-state storage 26 "base")
+             (gr8s.raft::raft-storage-append-entry storage
                (cl-raft::make-raft-entry :index 1 :term 26 :command 'gr8s.raft::wal-test-symbol))
              (let ((recovered (cl-raft::load-raft-log path)))
                (is (= 26 (cl-raft::raft-recovered-term recovered)))
@@ -1129,7 +1129,7 @@
 
 (in-suite raft)
 
-(defmethod gr8s.raft:raft-storage-save-commit-index ((storage failing-raft-storage) index)
+(defmethod gr8s.raft::raft-storage-save-commit-index ((storage failing-raft-storage) index)
   (declare (ignore index))
   (when (eq :commit (failing-raft-operation storage)) (error "Injected commit boundary failure")))
 
@@ -1142,7 +1142,7 @@
       (unwind-protect
            (progn
              (cl-raft::raft-configure node '(("one" . :voter)))
-             (gr8s.raft:raft-storage-save-hard-state storage 1 "one")
+             (gr8s.raft::raft-storage-save-hard-state storage 1 "one")
              (cl-raft::raft-propose node '(:raft-config :members (("one" . :voter) ("two" . :voter))
                                                   :addresses (("one" "127.0.0.1" 7101) ("two" "127.0.0.1" 7102))))
              (is (= 1 (cl-raft::raft-node-commit-index node)))
@@ -1201,7 +1201,7 @@
              (cl-raft::close-file-raft-storage storage)
              (let ((saved (cl-raft::load-raft-log path)))
                (is (= 1 (cl-raft::raft-recovered-snapshot-index saved)))
-               (is (= 3 (gr8s.raft:raft-recovered-commit-index saved))))
+               (is (= 3 (gr8s.raft::raft-recovered-commit-index saved))))
              (cl-raft::recover-raft-node recovered path)
              (is (= 3 (cl-raft::raft-node-commit-index recovered) (cl-raft::raft-node-last-applied recovered)))
              (is (= 3 (cl-raft::raft-last-log-index recovered))))
@@ -1246,8 +1246,8 @@
                        (gr8s.raft::make-raft-entry :index index :term (if (= index 1) 1 2)
                                                   :command (list :payload index)))))))
     (gr8s.raft::raft-persist-hard-state node)
-    (map nil (lambda (entry) (gr8s.raft:raft-storage-append-entry storage entry)) (gr8s.raft:raft-node-log node))
-    (gr8s.raft:raft-storage-save-commit-index storage 3)
+    (map nil (lambda (entry) (gr8s.raft::raft-storage-append-entry storage entry)) (gr8s.raft::raft-node-log node))
+    (gr8s.raft::raft-storage-save-commit-index storage 3)
     node))
 
 (test disk-catchup-replicates-through-multiple-compactions-without-live-prefix
@@ -1260,25 +1260,25 @@
            (files (length (uiop:directory-files root))))
       (unwind-protect
            (progn
-             (gr8s.raft:raft-compact node 3)
-             (is-true (nth-value 1 (gr8s.raft:raft-propose node '(:payload 4))))
-             (is-true (nth-value 1 (gr8s.raft:raft-propose node '(:payload 5))))
-             (gr8s.raft:raft-compact node 5)
-             (is (zerop (length (gr8s.raft:raft-node-log node))))
+             (gr8s.raft::raft-compact node 3)
+             (is-true (nth-value 1 (gr8s.raft::raft-propose node '(:payload 4))))
+             (is-true (nth-value 1 (gr8s.raft::raft-propose node '(:payload 5))))
+             (gr8s.raft::raft-compact node 5)
+             (is (zerop (length (gr8s.raft::raft-node-log node))))
              (is (= 2 (nth-value 1 (gr8s.raft::raft-storage-catchup-usage storage))))
              (is (= files (length (uiop:directory-files root))))
              (loop for next from 1 to 5 do
-               (setf (gethash "follower" (gr8s.raft:raft-node-next-index node)) next)
+               (setf (gethash "follower" (gr8s.raft::raft-node-next-index node)) next)
                (let ((message (gr8s.raft::raft-append-message node "follower")))
                  (is (eq :append-entries (getf message :type)))
                  (is (= 1 (length (getf message :entries))))
                  (is (= (1- next) (getf message :prev-log-index)))
                  (is (= (cond ((= next 1) 0) ((= next 2) 1) (t 2)) (getf message :prev-log-term)))
                  (gr8s.raft::raft-handle-append-entries follower message)))
-             (is (= 5 (gr8s.raft:raft-node-commit-index follower)))
-             (is (= 5 (gr8s.raft:raft-node-last-applied follower)))
+             (is (= 5 (gr8s.raft::raft-node-commit-index follower)))
+             (is (= 5 (gr8s.raft::raft-node-last-applied follower)))
              (is (equal '((:payload 1) (:payload 2) (:payload 3) (:payload 4) (:payload 5))
-                        (map 'list #'gr8s.raft:raft-entry-command (gr8s.raft:raft-node-log follower)))))
+                        (map 'list #'gr8s.raft::raft-entry-command (gr8s.raft::raft-node-log follower)))))
         (cl-raft::close-file-raft-storage storage)))))
 
 (test disk-catchup-eviction-and-close-release-anonymous-descriptors
@@ -1288,7 +1288,7 @@
            (node (make-disk-catchup-test-node storage)))
       (unwind-protect
            (progn
-             (gr8s.raft:raft-compact node 3)
+             (gr8s.raft::raft-compact node 3)
              (let* ((segment (first (gr8s.raft::file-raft-storage-catchup-segments storage)))
                     (fd (gr8s.raft::raft-catchup-segment-fd segment))
                     (stat (sb-posix:fstat fd)))
@@ -1298,10 +1298,10 @@
                (gr8s.raft::raft-catchup-evict storage 1 1)
                (signals sb-posix:syscall-error (sb-posix:fstat fd)))
              (is (zerop (gr8s.raft::raft-storage-catchup-usage storage)))
-             (setf (gethash "follower" (gr8s.raft:raft-node-next-index node)) 1)
+             (setf (gethash "follower" (gr8s.raft::raft-node-next-index node)) 1)
              (is (eq :install-snapshot (getf (gr8s.raft::raft-append-message node "follower") :type)))
-             (gr8s.raft:raft-propose node '(:payload 4))
-             (gr8s.raft:raft-compact node 4)
+             (gr8s.raft::raft-propose node '(:payload 4))
+             (gr8s.raft::raft-compact node 4)
              (let ((fd (gr8s.raft::raft-catchup-segment-fd
                         (first (gr8s.raft::file-raft-storage-catchup-segments storage)))))
                (cl-raft::close-file-raft-storage storage)
@@ -1316,17 +1316,17 @@
            (node (make-disk-catchup-test-node storage)))
       (unwind-protect
            (progn
-             (gr8s.raft:raft-compact node 3)
+             (gr8s.raft::raft-compact node 3)
              (let ((fd (gr8s.raft::raft-catchup-segment-fd
                         (first (gr8s.raft::file-raft-storage-catchup-segments storage)))))
                (with-open-file (out (format nil "/proc/self/fd/~D" fd) :direction :output :if-exists :overwrite)
                  (write-char #\! out)))
-             (setf (gethash "follower" (gr8s.raft:raft-node-next-index node)) 1)
+             (setf (gethash "follower" (gr8s.raft::raft-node-next-index node)) 1)
              (is (eq :install-snapshot (getf (gr8s.raft::raft-append-message node "follower") :type)))
              (is (not (null (gr8s.raft::file-raft-storage-catchup-error storage))))
              (is (zerop (gr8s.raft::raft-storage-catchup-usage storage)))
              (is (= 3 (gr8s.raft::raft-recovered-commit-index (gr8s.raft::load-raft-log path))))
-             (is (= 3 (gr8s.raft:raft-node-last-applied node))))
+             (is (= 3 (gr8s.raft::raft-node-last-applied node))))
         (cl-raft::close-file-raft-storage storage)))))
 
 (test failed-checkpoint-cannot-publish-an-unadopted-disk-cache-boundary
@@ -1339,13 +1339,13 @@
            (progn
              (change-class storage 'checkpoint-failing-raft-storage :phase :file)
              (let ((bytes (raft-wal-size path)))
-               (signals error (gr8s.raft:raft-compact node 3))
+               (signals error (gr8s.raft::raft-compact node 3))
                (is (= bytes (raft-wal-size path))))
-             (is (zerop (gr8s.raft:raft-node-snapshot-index node)))
+             (is (zerop (gr8s.raft::raft-node-snapshot-index node)))
              (is (null (gr8s.raft::raft-storage-read-catchup storage node 1)))
              (is (= 3 (gr8s.raft::raft-recovered-commit-index (gr8s.raft::load-raft-log path))))
              (setf (checkpoint-failure-phase storage) nil)
-             (gr8s.raft:raft-compact node 3)
+             (gr8s.raft::raft-compact node 3)
              (is (not (null (gr8s.raft::raft-storage-read-catchup storage node 1)))))
         (cl-raft::close-file-raft-storage storage)))))
 
@@ -1357,14 +1357,14 @@
       (unwind-protect
            (progn
              (setf (gr8s.raft::raft-node-catchup-byte-limit node) 1)
-             (gr8s.raft:raft-compact node 3)
+             (gr8s.raft::raft-compact node 3)
              (is (zerop (gr8s.raft::raft-storage-catchup-usage storage)))
-             (setf (gethash "follower" (gr8s.raft:raft-node-next-index node)) 1)
+             (setf (gethash "follower" (gr8s.raft::raft-node-next-index node)) 1)
              (is (eq :install-snapshot (getf (gr8s.raft::raft-append-message node "follower") :type)))
              (setf (gr8s.raft::raft-node-catchup-byte-limit node) 65536)
-             (gr8s.raft:raft-propose node '(:payload 4))
-             (gr8s.raft:raft-compact node 4)
-             (setf (gethash "follower" (gr8s.raft:raft-node-next-index node)) 4
+             (gr8s.raft::raft-propose node '(:payload 4))
+             (gr8s.raft::raft-compact node 4)
+             (setf (gethash "follower" (gr8s.raft::raft-node-next-index node)) 4
                    (gr8s.raft::raft-node-append-entry-limit node) 64
                    (gr8s.raft::raft-node-append-byte-budget node) 1)
              (let ((message (gr8s.raft::raft-append-message node "follower")))
@@ -1382,12 +1382,12 @@
            (*raft-wal-reader-evaluated* nil) (*read-eval* t))
       (unwind-protect
            (progn
-             (gr8s.raft:raft-compact node 3)
+             (gr8s.raft::raft-compact node 3)
              (let ((fd (gr8s.raft::raft-catchup-segment-fd
                         (first (gr8s.raft::file-raft-storage-catchup-segments storage)))))
                (with-open-file (out (format nil "/proc/self/fd/~D" fd) :direction :output :if-exists :overwrite)
                  (write-string "#.(progn (setf gr8s/tests::*raft-wal-reader-evaluated* t) '(:snapshot 0 0 nil))" out)))
-             (setf (gethash "follower" (gr8s.raft:raft-node-next-index node)) 1)
+             (setf (gethash "follower" (gr8s.raft::raft-node-next-index node)) 1)
              (is (eq :install-snapshot (getf (gr8s.raft::raft-append-message node "follower") :type)))
              (is-false *raft-wal-reader-evaluated*)
              (is (zerop (gr8s.raft::raft-storage-catchup-usage storage))))
@@ -1406,33 +1406,33 @@
              ;; Keep an uncommitted Unicode suffix while checkpointing the
              ;; exact applied boundary; arbitrary older application capture is
              ;; deliberately rejected by the core.
-             (let ((entry (gr8s.raft:make-raft-entry :index 4 :term 2 :command (list :payload text))))
-               (gr8s.raft:raft-storage-append-entry storage entry)
-               (vector-push-extend entry (gr8s.raft:raft-node-log node)))
-             (is (= 3 (gr8s.raft:raft-node-last-applied node)))
+             (let ((entry (gr8s.raft::make-raft-entry :index 4 :term 2 :command (list :payload text))))
+               (gr8s.raft::raft-storage-append-entry storage entry)
+               (vector-push-extend entry (gr8s.raft::raft-node-log node)))
+             (is (= 3 (gr8s.raft::raft-node-last-applied node)))
              ;; Neither archived prefix nor retained checkpoint suffix may print
              ;; an entry when its durable frame is available.
              (setf (symbol-function 'gr8s.raft::raft-wal-form-metrics)
                    (lambda (form &optional output)
                      (when (eq :entry (first form)) (error "Copied entry was reserialized"))
                      (funcall original form output)))
-             (gr8s.raft:raft-compact node 3)
+             (gr8s.raft::raft-compact node 3)
              (is (= 1 (hash-table-count (gr8s.raft::file-raft-storage-entry-frames storage))))
              (cl-raft::close-file-raft-storage storage)
              (setf node (gr8s.raft::make-raft-node :id "recovered" :catchup-byte-limit (* 8 1024 1024)))
              (gr8s.raft::recover-raft-node node path)
-             (setf storage (gr8s.raft:raft-node-storage node))
-             (gr8s.raft:raft-storage-save-commit-index storage 4)
-             (setf (gr8s.raft:raft-node-commit-index node) 4)
+             (setf storage (gr8s.raft::raft-node-storage node))
+             (gr8s.raft::raft-storage-save-commit-index storage 4)
+             (setf (gr8s.raft::raft-node-commit-index node) 4)
              (gr8s.raft::raft-apply-committed node)
              (is (= 1 (hash-table-count (gr8s.raft::file-raft-storage-entry-frames storage))))
              (is (plusp (gr8s.raft::raft-catchup-framed-prefix-size storage node 4)))
-             (gr8s.raft:raft-compact node 4)
+             (gr8s.raft::raft-compact node 4)
              (let ((batch (gr8s.raft::raft-storage-read-catchup storage node 4)))
                (is (not (null batch)))
                (is (= 2 (car batch)))
                (is (equal (list (list :payload text))
-                          (mapcar #'gr8s.raft:raft-entry-command (cdr batch)))))
+                          (mapcar #'gr8s.raft::raft-entry-command (cdr batch)))))
              (is (zerop (hash-table-count (gr8s.raft::file-raft-storage-entry-frames storage)))))
         (setf (symbol-function 'gr8s.raft::raft-wal-form-metrics) original)
         (cl-raft::close-file-raft-storage storage)))))
@@ -1445,31 +1445,31 @@
            (node nil))
       (unwind-protect
            (progn
-             (gr8s.raft:raft-storage-save-hard-state storage 3 nil)
+             (gr8s.raft::raft-storage-save-hard-state storage 3 nil)
              (loop for i from 1 to 3 do
-               (gr8s.raft:raft-storage-append-entry storage
-                 (gr8s.raft:make-raft-entry :index i :term 2 :command (list :old i))))
-             (gr8s.raft:raft-storage-save-commit-index storage 1)
-             (gr8s.raft:raft-storage-truncate storage 2)
+               (gr8s.raft::raft-storage-append-entry storage
+                 (gr8s.raft::make-raft-entry :index i :term 2 :command (list :old i))))
+             (gr8s.raft::raft-storage-save-commit-index storage 1)
+             (gr8s.raft::raft-storage-truncate storage 2)
              (is (= 1 (hash-table-count (gr8s.raft::file-raft-storage-entry-frames storage))))
              (cl-raft::close-file-raft-storage storage)
              ;; Exercise O_APPEND reopening without recovery first: its initial
              ;; OS offset is zero, but the new frame belongs at the existing EOF.
              (let ((old-size (raft-wal-size path)))
                (setf storage (cl-raft::open-file-raft-storage path))
-               (gr8s.raft:raft-storage-append-entry storage
-                 (gr8s.raft:make-raft-entry :index 2 :term 3 :command '(:new "λ")))
+               (gr8s.raft::raft-storage-append-entry storage
+                 (gr8s.raft::make-raft-entry :index 2 :term 3 :command '(:new "λ")))
                (is (= old-size (aref (gethash 2 (gr8s.raft::file-raft-storage-entry-frames storage)) 1))))
-             (gr8s.raft:raft-storage-save-commit-index storage 2)
+             (gr8s.raft::raft-storage-save-commit-index storage 2)
              (cl-raft::close-file-raft-storage storage)
              (setf node (gr8s.raft::make-raft-node :id "recovered" :catchup-byte-limit 65536))
              (gr8s.raft::recover-raft-node node path)
-             (setf storage (gr8s.raft:raft-node-storage node))
+             (setf storage (gr8s.raft::raft-node-storage node))
              (is (= 2 (hash-table-count (gr8s.raft::file-raft-storage-entry-frames storage))))
              (is (null (gethash 3 (gr8s.raft::file-raft-storage-entry-frames storage))))
-             (gr8s.raft:raft-compact node 2)
+             (gr8s.raft::raft-compact node 2)
              (let ((batch (gr8s.raft::raft-storage-read-catchup storage node 1)))
-               (is (equal '((:old 1) (:new "λ")) (mapcar #'gr8s.raft:raft-entry-command (cdr batch))))))
+               (is (equal '((:old 1) (:new "λ")) (mapcar #'gr8s.raft::raft-entry-command (cdr batch))))))
         (cl-raft::close-file-raft-storage storage)))))
 
 (test failed-checkpoint-preserves-frame-offset-index-and-missing-index-falls-back
@@ -1481,13 +1481,13 @@
       (unwind-protect
            (progn
              (change-class storage 'checkpoint-failing-raft-storage :phase :file)
-             (signals error (gr8s.raft:raft-compact node 3))
+             (signals error (gr8s.raft::raft-compact node 3))
              (is (eq frames (gr8s.raft::file-raft-storage-entry-frames storage)))
              (is (= 3 (hash-table-count frames)))
              (setf (checkpoint-failure-phase storage) nil)
              (clrhash frames)
              (is (null (gr8s.raft::raft-catchup-framed-prefix-size storage node 3)))
-             (gr8s.raft:raft-compact node 3)
+             (gr8s.raft::raft-compact node 3)
              (is (not (null (gr8s.raft::raft-storage-read-catchup storage node 1)))))
         (cl-raft::close-file-raft-storage storage)))))
 
@@ -1502,28 +1502,28 @@
            (progn
              (loop for index from 4 to 5
                    for command in '((:unicode "λ😀") (:copied "日本語"))
-                   for entry = (gr8s.raft:make-raft-entry :index index :term 2 :command command)
-                   do (gr8s.raft:raft-storage-append-entry storage entry)
-                      (vector-push-extend entry (gr8s.raft:raft-node-log node)))
+                   for entry = (gr8s.raft::make-raft-entry :index index :term 2 :command command)
+                   do (gr8s.raft::raft-storage-append-entry storage entry)
+                      (vector-push-extend entry (gr8s.raft::raft-node-log node)))
              ;; The first suffix entry must use the legacy/missing-index
              ;; serializer, followed by raw binary copying and a text trailer.
              (remhash 4 (gr8s.raft::file-raft-storage-entry-frames storage))
-             (gr8s.raft:raft-compact node 3)
-             (let ((entry (gr8s.raft:make-raft-entry :index 6 :term 2 :command '(:after "é"))))
-               (gr8s.raft:raft-storage-append-entry storage entry)
-               (vector-push-extend entry (gr8s.raft:raft-node-log node)))
-             (gr8s.raft:raft-storage-save-commit-index storage 6)
+             (gr8s.raft::raft-compact node 3)
+             (let ((entry (gr8s.raft::make-raft-entry :index 6 :term 2 :command '(:after "é"))))
+               (gr8s.raft::raft-storage-append-entry storage entry)
+               (vector-push-extend entry (gr8s.raft::raft-node-log node)))
+             (gr8s.raft::raft-storage-save-commit-index storage 6)
              (let ((loaded (gr8s.raft::load-raft-log path)))
                (is (= 6 (gr8s.raft::raft-recovered-commit-index loaded)))
                (is (equal '((:unicode "λ😀") (:copied "日本語") (:after "é"))
-                          (mapcar #'gr8s.raft:raft-entry-command (gr8s.raft::raft-recovered-entries loaded)))))
+                          (mapcar #'gr8s.raft::raft-entry-command (gr8s.raft::raft-recovered-entries loaded)))))
              (is (= 3 (hash-table-count (gr8s.raft::file-raft-storage-entry-frames storage))))
-             (setf (gr8s.raft:raft-node-commit-index node) 6)
+             (setf (gr8s.raft::raft-node-commit-index node) 6)
              (gr8s.raft::raft-apply-committed node)
-             (gr8s.raft:raft-compact node 6)
+             (gr8s.raft::raft-compact node 6)
              (is (equal '((:unicode "λ😀") (:copied "日本語") (:after "é"))
                         (loop for next from 4 to 6 append
-                          (mapcar #'gr8s.raft:raft-entry-command
+                          (mapcar #'gr8s.raft::raft-entry-command
                                   (cdr (gr8s.raft::raft-storage-read-catchup storage node next)))))))
         (cl-raft::close-file-raft-storage storage)))))
 
@@ -1541,33 +1541,33 @@
       (unwind-protect
            (progn
              (gr8s.raft::raft-configure leader '(("leader" . :voter) ("follower" . :voter)))
-             (gr8s.raft:raft-compact leader 3)
-             (setf (gethash "follower" (gr8s.raft:raft-node-next-index leader)) 1)
+             (gr8s.raft::raft-compact leader 3)
+             (setf (gethash "follower" (gr8s.raft::raft-node-next-index leader)) 1)
              (dotimes (i 2)
                (values i)
-               (gr8s.raft:raft-handle-message follower
+               (gr8s.raft::raft-handle-message follower
                  (gr8s.raft::raft-append-message leader "follower"))
                (is (getf (first replies) :success))
-               (gr8s.raft:raft-handle-message leader (first replies)))
-             (is (= 2 (gr8s.raft:raft-node-last-applied follower)))
-             (gr8s.raft:raft-handle-message follower
+               (gr8s.raft::raft-handle-message leader (first replies)))
+             (is (= 2 (gr8s.raft::raft-node-last-applied follower)))
+             (gr8s.raft::raft-handle-message follower
                (gr8s.raft::raft-append-message leader "follower"))
              (is (not (getf (first replies) :success)))
              (is (getf (first replies) :capacity-limited))
-             (is (= 2 (gr8s.raft:raft-node-last-applied follower)))
-             (gr8s.raft:raft-handle-message leader (first replies))
+             (is (= 2 (gr8s.raft::raft-node-last-applied follower)))
+             (gr8s.raft::raft-handle-message leader (first replies))
              (let ((message (gr8s.raft::raft-append-message leader "follower")))
                (is (eq :install-snapshot (getf message :type)))
                ;; Heartbeat retries must retain the snapshot preference.
                (is (eq :install-snapshot
                        (getf (gr8s.raft::raft-append-message leader "follower") :type)))
-               (gr8s.raft:raft-handle-message follower message))
-             (is (= 3 (gr8s.raft:raft-node-last-applied follower)))
+               (gr8s.raft::raft-handle-message follower message))
+             (is (= 3 (gr8s.raft::raft-node-last-applied follower)))
              (is (= 512 (gr8s.raft::raft-node-retained-byte-limit follower)))
-             (is (zerop (length (gr8s.raft:raft-node-log follower))))
-             (gr8s.raft:raft-handle-message leader (first replies))
+             (is (zerop (length (gr8s.raft::raft-node-log follower))))
+             (gr8s.raft::raft-handle-message leader (first replies))
              (is (not (gethash "follower" (gr8s.raft::raft-node-peer-snapshot-required leader))))
-             (is (= 4 (gethash "follower" (gr8s.raft:raft-node-next-index leader)))))
+             (is (= 4 (gethash "follower" (gr8s.raft::raft-node-next-index leader)))))
         (cl-raft::close-file-raft-storage storage)))))
 
 (test snapshot-capacity-hints-are-current-term-member-scoped-and-reset
@@ -1586,59 +1586,59 @@
       (gr8s.raft::raft-configure node '(("leader" . :voter) ("peer" . :voter)))
       (is (zerop (hash-table-count (gr8s.raft::raft-node-peer-snapshot-required node))))
       (reply "peer" 2)
-      (setf (gr8s.raft:raft-node-peers node) nil)
+      (setf (gr8s.raft::raft-node-peers node) nil)
       (gr8s.raft::raft-become-leader node)
       (is (zerop (hash-table-count (gr8s.raft::raft-node-peer-snapshot-required node)))))))
 
 (test delayed-append-ack-cannot-undo-newer-snapshot-or-log-progress
-  (let ((node (gr8s.raft:make-raft-node
+  (let ((node (gr8s.raft::make-raft-node
                :id "leader" :peers '("peer") :role :leader :current-term 3
                :snapshot-index 10 :snapshot-term 2 :commit-index 10 :last-applied 10
                :log (make-array 5 :adjustable t :fill-pointer 5
                                 :initial-contents
                                 (loop for index from 11 to 15 collect
-                                  (gr8s.raft:make-raft-entry :index index :term 3 :command '(:noop)))))))
-    (setf (gethash "leader" (gr8s.raft:raft-node-match-index node)) 15)
+                                  (gr8s.raft::make-raft-entry :index index :term 3 :command '(:noop)))))))
+    (setf (gethash "leader" (gr8s.raft::raft-node-match-index node)) 15)
     (gr8s.raft::raft-handle-install-snapshot-reply
      node '(:from "peer" :term 3 :success t :match-index 10))
     (gr8s.raft::raft-handle-append-entries-reply
      node '(:from "peer" :term 3 :success t :match-index 6 :applied-index 6))
-    (is (= 10 (gethash "peer" (gr8s.raft:raft-node-match-index node))))
-    (is (= 11 (gethash "peer" (gr8s.raft:raft-node-next-index node))))
+    (is (= 10 (gethash "peer" (gr8s.raft::raft-node-match-index node))))
+    (is (= 11 (gethash "peer" (gr8s.raft::raft-node-next-index node))))
     (gr8s.raft::raft-handle-append-entries-reply
      node '(:from "peer" :term 3 :success t :match-index 14 :applied-index 14))
     (gr8s.raft::raft-handle-append-entries-reply
      node '(:from "peer" :term 3 :success t :match-index 12 :applied-index 12))
-    (is (= 14 (gethash "peer" (gr8s.raft:raft-node-match-index node))))
-    (is (= 15 (gethash "peer" (gr8s.raft:raft-node-next-index node))))
+    (is (= 14 (gethash "peer" (gr8s.raft::raft-node-match-index node))))
+    (is (= 15 (gethash "peer" (gr8s.raft::raft-node-next-index node))))
     ;; Applied proof must use this reply's match, not the newer remembered match.
     (gr8s.raft::raft-handle-append-entries-reply
      node '(:from "peer" :term 3 :success t :match-index 12 :applied-index 15))
     (is (= 14 (cdr (gethash "peer" (gr8s.raft::raft-node-peer-applied node)))))
     (gr8s.raft::raft-handle-append-entries-reply
      node '(:from "peer" :term 3 :success nil :next-index 2 :capacity-limited t))
-    (is (= 15 (gethash "peer" (gr8s.raft:raft-node-next-index node))))
+    (is (= 15 (gethash "peer" (gr8s.raft::raft-node-next-index node))))
     (is-false (gethash "peer" (gr8s.raft::raft-node-peer-snapshot-required node)))))
 
 (test append-acknowledgements-require-current-peer-and-bounded-index
-  (let ((node (gr8s.raft:make-raft-node :id "leader" :peers '("peer") :role :leader
+  (let ((node (gr8s.raft::make-raft-node :id "leader" :peers '("peer") :role :leader
                                       :current-term 3 :snapshot-index 10 :snapshot-term 3
                                       :commit-index 10 :last-applied 10)))
-    (setf (gethash "peer" (gr8s.raft:raft-node-match-index node)) 10
-          (gethash "peer" (gr8s.raft:raft-node-next-index node)) 11)
+    (setf (gethash "peer" (gr8s.raft::raft-node-match-index node)) 10
+          (gethash "peer" (gr8s.raft::raft-node-next-index node)) 11)
     (dolist (index '(11 -1 nil "10"))
       (finishes (gr8s.raft::raft-handle-append-entries-reply
                  node (list :from "peer" :term 3 :success t :match-index index)))
-      (is (= 10 (gethash "peer" (gr8s.raft:raft-node-match-index node))))
-      (is (= 11 (gethash "peer" (gr8s.raft:raft-node-next-index node)))))
+      (is (= 10 (gethash "peer" (gr8s.raft::raft-node-match-index node))))
+      (is (= 11 (gethash "peer" (gr8s.raft::raft-node-next-index node)))))
     (dolist (success '(nil t))
       (gr8s.raft::raft-handle-append-entries-reply
        node (list :from "outsider" :term 3 :success success :match-index 10 :next-index 2)))
-    (is-false (gethash "outsider" (gr8s.raft:raft-node-match-index node)))
-    (is-false (gethash "outsider" (gr8s.raft:raft-node-next-index node)))
+    (is-false (gethash "outsider" (gr8s.raft::raft-node-match-index node)))
+    (is-false (gethash "outsider" (gr8s.raft::raft-node-next-index node)))
     (gr8s.raft::raft-handle-append-entries-reply
      node '(:from "peer" :term 2 :success t :match-index 1))
-    (is (= 10 (gethash "peer" (gr8s.raft:raft-node-match-index node))))))
+    (is (= 10 (gethash "peer" (gr8s.raft::raft-node-match-index node))))))
 
 (test capacity-recovery-ack-does-not-chase-newer-checkpoints
   (with-temporary-store (store root)
@@ -1646,34 +1646,34 @@
     (let* ((storage (cl-raft::open-file-raft-storage (merge-pathnames "moving-checkpoint.log" root)))
            (leader (make-disk-catchup-test-node storage))
            (replies nil)
-           (follower (gr8s.raft:make-raft-node
+           (follower (gr8s.raft::make-raft-node
                       :id "follower" :current-term 2 :retained-byte-limit 512
                       :uncommitted-weight-fn (constantly 128)
                       :send-fn (lambda (target message) (declare (ignore target)) (push message replies)))))
       (unwind-protect
            (progn
              (gr8s.raft::raft-configure leader '(("leader" . :voter) ("follower" . :voter)))
-             (setf (gethash "follower" (gr8s.raft:raft-node-match-index leader)) 2
-                   (gethash "follower" (gr8s.raft:raft-node-next-index leader)) 3)
-             (gr8s.raft:raft-compact leader 3)
+             (setf (gethash "follower" (gr8s.raft::raft-node-match-index leader)) 2
+                   (gethash "follower" (gr8s.raft::raft-node-next-index leader)) 3)
+             (gr8s.raft::raft-compact leader 3)
              (gr8s.raft::raft-handle-append-entries-reply
               leader '(:from "follower" :term 2 :success nil :capacity-limited t :next-index 3))
              (let ((image (gr8s.raft::raft-append-message leader "follower")))
                (is (eq :install-snapshot (getf image :type)))
                (is (= 3 (getf image :last-index)))
-               (gr8s.raft:raft-handle-message follower image)
+               (gr8s.raft::raft-handle-message follower image)
                ;; The leader advances while this image's receipt is in flight.
-               (let ((entry (gr8s.raft:make-raft-entry :index 4 :term 2 :command '(:payload 4))))
-                 (gr8s.raft:raft-storage-append-entry storage entry)
-                 (vector-push-extend entry (gr8s.raft:raft-node-log leader)))
-               (gr8s.raft:raft-storage-save-commit-index storage 4)
-               (setf (gr8s.raft:raft-node-commit-index leader) 4
-                     (gr8s.raft:raft-node-last-applied leader) 4)
-               (gr8s.raft:raft-compact leader 4)
+               (let ((entry (gr8s.raft::make-raft-entry :index 4 :term 2 :command '(:payload 4))))
+                 (gr8s.raft::raft-storage-append-entry storage entry)
+                 (vector-push-extend entry (gr8s.raft::raft-node-log leader)))
+               (gr8s.raft::raft-storage-save-commit-index storage 4)
+               (setf (gr8s.raft::raft-node-commit-index leader) 4
+                     (gr8s.raft::raft-node-last-applied leader) 4)
+               (gr8s.raft::raft-compact leader 4)
                (gr8s.raft::raft-handle-install-snapshot-reply
                 leader '(:from "follower" :term 2 :success t :match-index 2))
                (is-true (gethash "follower" (gr8s.raft::raft-node-peer-snapshot-required leader)))
-               (gr8s.raft:raft-handle-message leader (first replies)))
+               (gr8s.raft::raft-handle-message leader (first replies)))
              (is-false (gethash "follower" (gr8s.raft::raft-node-peer-snapshot-required leader)))
              ;; An older capacity refusal cannot revoke this recovered prefix.
              (gr8s.raft::raft-handle-append-entries-reply
@@ -1683,17 +1683,17 @@
                (is (eq :append-entries (getf tail :type)))
                (when (eq :append-entries (getf tail :type))
                  (is (= 3 (getf tail :prev-log-index)))
-                 (is (= 4 (gr8s.raft:raft-entry-index (first (getf tail :entries))))))
-               (gr8s.raft:raft-handle-message follower tail)
-               (is (= 4 (gr8s.raft:raft-node-last-applied follower)))
+                 (is (= 4 (gr8s.raft::raft-entry-index (first (getf tail :entries))))))
+               (gr8s.raft::raft-handle-message follower tail)
+               (is (= 4 (gr8s.raft::raft-node-last-applied follower)))
                (is (= 512 (gr8s.raft::raft-node-retained-byte-limit follower)))))
         (cl-raft::close-file-raft-storage storage)))))
 
 (test newer-capacity-refusal-retains-its-own-recovery-boundary
-  (let ((node (gr8s.raft:make-raft-node :id "leader" :peers '("peer") :role :leader :current-term 2
+  (let ((node (gr8s.raft::make-raft-node :id "leader" :peers '("peer") :role :leader :current-term 2
                                       :snapshot-index 3 :snapshot-term 2 :commit-index 3 :last-applied 3)))
-    (setf (gethash "peer" (gr8s.raft:raft-node-match-index node)) 1
-          (gethash "peer" (gr8s.raft:raft-node-next-index node)) 2)
+    (setf (gethash "peer" (gr8s.raft::raft-node-match-index node)) 1
+          (gethash "peer" (gr8s.raft::raft-node-next-index node)) 2)
     (flet ((refuse (index)
              (gr8s.raft::raft-handle-append-entries-reply
               node (list :from "peer" :term 2 :success nil :capacity-limited t :next-index index)))
@@ -1711,11 +1711,11 @@
       (is-false (gethash "peer" (gr8s.raft::raft-node-peer-snapshot-required node))))))
 
 (test legacy-capacity-markers-use-pre-reply-progress-during-live-redefinition
-  (let ((node (gr8s.raft:make-raft-node :id "leader" :peers '("peer") :role :leader :current-term 2
+  (let ((node (gr8s.raft::make-raft-node :id "leader" :peers '("peer") :role :leader :current-term 2
                                       :snapshot-index 4 :snapshot-term 2 :commit-index 4 :last-applied 4)))
     (flet ((seed ()
-             (setf (gethash "peer" (gr8s.raft:raft-node-match-index node)) 2
-                   (gethash "peer" (gr8s.raft:raft-node-next-index node)) 3
+             (setf (gethash "peer" (gr8s.raft::raft-node-match-index node)) 2
+                   (gethash "peer" (gr8s.raft::raft-node-next-index node)) 3
                    (gethash "peer" (gr8s.raft::raft-node-peer-snapshot-required node)) t)))
       (seed)
       (gr8s.raft::raft-handle-install-snapshot-reply node '(:from "peer" :term 2 :success t :match-index 3))
@@ -1724,7 +1724,7 @@
       (gr8s.raft::raft-handle-append-entries-reply node '(:from "peer" :term 2 :success t :match-index 3 :applied-index 3))
       (is-false (gethash "peer" (gr8s.raft::raft-node-peer-snapshot-required node)))
       (seed)
-      (setf (gethash "peer" (gr8s.raft:raft-node-match-index node)) 1)
+      (setf (gethash "peer" (gr8s.raft::raft-node-match-index node)) 1)
       (gr8s.raft::raft-handle-append-entries-reply node '(:from "peer" :term 2 :success nil :capacity-limited t :next-index 2))
       (gr8s.raft::raft-handle-install-snapshot-reply node '(:from "peer" :term 2 :success t :match-index 2))
       (is-true (gethash "peer" (gr8s.raft::raft-node-peer-snapshot-required node)))

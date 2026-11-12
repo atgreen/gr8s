@@ -35,7 +35,7 @@
          (progn
            (setf thread (bt:make-thread (lambda () (ag-grpc:server-start server))))
            (lifetime-await (lambda () (ag-grpc::server-socket server)))
-           (setf channel (gr8s::make-raft-channel
+           (setf channel (gr8s.security::make-raft-channel
                           nil "127.0.0.1" (usocket:get-local-port (ag-grpc::server-socket server)) 5))
            (lifetime-no-delay (ag-grpc::channel-connection channel))
            ;; Warm caches before comparing live bytes after full GC. Keep both
@@ -63,7 +63,7 @@
                (let ((live (sb-kernel:dynamic-usage)))
                  (unless baseline (setf baseline live))
                  (unless (<= live (+ baseline allowance)) (setf plateau-p nil))
-                 (push (gr8s::core-object "calls" (* (1+ batch) 1000)
+                 (push (gr8s.resources::core-object "calls" (* (1+ batch) 1000)
                                          "liveBytesAfterFullGc" live
                                          "pendingDeadlineEntries"
                                          (bt2:with-lock-held (cl-cancel::*timer-lock*)
@@ -72,7 +72,7 @@
                                          "serverStreams" (lifetime-stream-count server-mux)) samples))))
            (assert (= 6000 calls))
            (assert (= 1 peak))
-           (gr8s::core-object "passed" plateau-p "nativeHarness" t "productionServe" nil
+           (gr8s.resources::core-object "passed" plateau-p "nativeHarness" t "productionServe" nil
                               "vmAcceptance" nil
                               "heapLimitMiB" (/ (sb-ext:dynamic-space-size) (* 1024 1024))
                               "calls" calls "connections" 1 "peakServerStreams" peak

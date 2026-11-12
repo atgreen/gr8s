@@ -158,7 +158,7 @@ ordinary Slynk protocol bytes suitable for an opaque tunnel."
 (defun debug-eval (text)
   "Evaluate one form from TEXT in this package, returning its printed output and value.
 Errors come back as text with a backtrace, so a client never lands in a debugger."
-  (let ((*package* (find-package '#:gr8s)))
+  (let ((*package* (find-package '#:gr8s.apiserver)))
     (with-output-to-string (*standard-output*)
       (block evaluation
         (handler-bind

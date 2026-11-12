@@ -39,6 +39,3 @@
    #:stop-ha-control-plane))
 
 ;; Preserve the historical facade while source files migrate package by package.
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (do-external-symbols (symbol '#:gr8s.ha)
-    (shadowing-import symbol '#:gr8s)))
