@@ -294,6 +294,26 @@ A container without a CPU request gets the minimum share, as a kubelet gives it.
                                     :limit (container-quantity-integer (parse-container-quantity value))))))))
 
 
+(defun node-memory-capacity-bytes ()
+  "Total machine memory in bytes from /proc/meminfo, or NIL when unavailable."
+  (ignore-errors
+    (let ((total (cdr (assoc "MemTotal" (read-key-value-file "/proc/meminfo") :test #'equal))))
+      (when total (* 1024 (parse-integer total :junk-allowed t))))))
+
+(defun container-oom-score-adj (qos-class container memory-capacity)
+  "The kubelet's per-QoS OOM score adjustment: Guaranteed is protected, BestEffort
+is sacrificed first, and Burstable scales inversely with its memory request against
+MEMORY-CAPACITY. Clamped to [-996, 999] as upstream does."
+  (cond
+    ((equal qos-class "Guaranteed") -997)
+    ((equal qos-class "BestEffort") 1000)
+    (t
+     (let ((request (let ((quantity (container-resource-quantity container "requests" "memory")))
+                      (if quantity (container-quantity-integer quantity) 0))))
+       (if (and memory-capacity (plusp memory-capacity))
+           (max -996 (min 999 (- 1000 (floor (* 1000 request) memory-capacity))))
+           999)))))
+
 (defun pod-hugepage-resource-names (spec)
   "Return the hugepage sizes the effective Pod request actually reserves."
   (let ((requests (pod-spec-resource-totals spec)))

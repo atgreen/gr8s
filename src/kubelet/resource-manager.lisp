@@ -264,6 +264,12 @@
         (unless (or cpus shared) (reject-node-resource-admission "OutOfcpu" "NUMA affinity has no shared CPUs"))
         (setf (gr8s.cri.v1::cpuset-cpus resources) (format-cpu-set (or cpus shared)))))
     (when node (setf (gr8s.cri.v1::cpuset-mems resources) (write-to-string node)))
+    ;; Prioritise OOM kills by QoS the way the kubelet does, so the kernel
+    ;; sacrifices BestEffort before Burstable before Guaranteed under memory
+    ;; pressure instead of treating every container's default score of 0 alike.
+    (setf (gr8s.cri.v1::oom-score-adj resources)
+          (container-oom-score-adj (pod-spec-qos-class (resource-pod-spec pod))
+                                   container (node-memory-capacity-bytes)))
     resources))
 
 (defun update-node-container-affinity (manager pod container id)
