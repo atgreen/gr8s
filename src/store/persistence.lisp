@@ -243,8 +243,13 @@
                             :direction :output
                             :if-exists :supersede
                             :if-does-not-exist :create)
-      (com.inuoe.jzon:stringify (pod-to-object pod) :stream stream))
-    (uiop:rename-file-overwriting-target temporary target))
+      (com.inuoe.jzon:stringify (pod-to-object pod) :stream stream)
+      (finish-output stream)
+      (sb-posix:fsync (sb-sys:fd-stream-fd stream)))
+    (uiop:rename-file-overwriting-target temporary target)
+    ;; Persist the rename itself: without the directory fsync a power cut after
+    ;; RENAME can lose it on some filesystems, matching the durable WAL path.
+    (sync-store-generation-directory (store-data-path store)))
   pod)
 
 (defun persist-node (store node)
@@ -264,8 +269,11 @@
                             :direction :output
                             :if-exists :supersede
                             :if-does-not-exist :create)
-      (com.inuoe.jzon:stringify (node-record-to-object node) :stream stream))
-    (uiop:rename-file-overwriting-target temporary target))
+      (com.inuoe.jzon:stringify (node-record-to-object node) :stream stream)
+      (finish-output stream)
+      (sb-posix:fsync (sb-sys:fd-stream-fd stream)))
+    (uiop:rename-file-overwriting-target temporary target)
+    (sync-store-generation-directory (nodes-path store)))
   node)
 
 (defun index-pod (store pod)
