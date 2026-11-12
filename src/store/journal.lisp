@@ -83,8 +83,12 @@ Counting just the payload substantially understates retained physical heap."
                                             :if-exists :error
                                             :if-does-not-exist :create
                                             :external-format :utf-8)
-             (write-string text stream))
-           (uiop:rename-file-overwriting-target temporary path))
+             (write-string text stream)
+             (finish-output stream)
+             (sb-posix:fsync (sb-sys:fd-stream-fd stream)))
+           (uiop:rename-file-overwriting-target temporary path)
+           ;; Persist the rename: a power cut after RENAME can otherwise lose it.
+           (sync-store-generation-directory (uiop:pathname-directory-pathname path)))
       (when (probe-file temporary) (delete-file temporary))))
   path)
 
