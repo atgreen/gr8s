@@ -316,6 +316,10 @@ Configuration resources are exempt so a bad webhook can always be removed."
 (defparameter +admission-maximum-response+ (* 16 1024 1024)
   "Largest webhook response body accepted.")
 
+;; admission-read-line and admission-read-exactly remain as the wire-reading
+;; primitives the API aggregator's response parser and the test fixtures' request
+;; readers share; admission-read-http-response is gone now that its callers go
+;; through gr8s.http-client.
 (defun admission-read-exactly (stream count)
   "Read COUNT octets from STREAM."
   (let ((buffer (make-array count :element-type '(unsigned-byte 8))) (filled 0))
@@ -324,40 +328,6 @@ Configuration resources are exempt so a bad webhook can always be removed."
                (when (= next filled) (error "connection closed during response body"))
                (setf filled next)))
     buffer))
-
-(defun admission-read-http-response (stream)
-  "Read an HTTP/1.1 response, returning its status code and body octets."
-  (let* ((status-line (admission-read-line stream))
-         (code (let ((space (position #\Space status-line)))
-                 (or (and space (parse-integer status-line :start (1+ space) :junk-allowed t))
-                     (error "malformed HTTP status line"))))
-         (length nil) (chunked nil))
-    (loop for line = (admission-read-line stream)
-          until (zerop (length line))
-          do (let* ((colon (position #\: line))
-                    (name (and colon (string-downcase (subseq line 0 colon))))
-                    (value (and colon (string-trim '(#\Space #\Tab) (subseq line (1+ colon))))))
-               (cond ((equal name "content-length") (setf length (parse-integer value)))
-                     ((equal name "transfer-encoding") (setf chunked (search "chunked" (string-downcase value)))))))
-    (values
-     code
-     (cond
-       (chunked
-        (let ((body (make-array 1024 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
-          (loop
-            (let* ((line (admission-read-line stream))
-                   (size (parse-integer line :end (or (position #\; line) (length line)) :radix 16)))
-              (when (zerop size)
-                (loop until (zerop (length (admission-read-line stream))))
-                (return))
-              (when (> (+ size (length body)) +admission-maximum-response+) (error "webhook response is too large"))
-              (loop for octet across (admission-read-exactly stream size) do (vector-push-extend octet body))
-              (admission-read-line stream)))
-          (coerce body '(simple-array (unsigned-byte 8) (*)))))
-       (length
-        (when (> length +admission-maximum-response+) (error "webhook response is too large"))
-        (admission-read-exactly stream length))
-       (t (make-array 0 :element-type '(unsigned-byte 8)))))))
 
 (defun admission-tls-context (bundle)
   "Trust exactly the certificates in the base64 BUNDLE, or the system roots without one."
