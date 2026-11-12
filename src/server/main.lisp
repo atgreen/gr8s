@@ -334,6 +334,8 @@
                       (unless (storage-absolute-path-p value)
                         (error "local storage path must be absolute without traversal"))
                       (setf (getf options :local-storage-path) value))
+                     ((string= option "--audit-log-path")
+                      (setf (getf options :audit-log-path) value))
                      (t (error "unknown serve option: ~A" option)))
                    (setf arguments (cddr arguments)))))
     (when (and (eq t (getf options :raft-compaction))
@@ -2022,6 +2024,14 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                         (seed-default-storage-class store state-directory
                                                     :path (getf options :local-storage-path))))
                     (start-volume-reclaimer store node-server (lambda () *shutdown-requested*))
+                    ;; Enable structured API audit logging when a path is given,
+                    ;; so who-did-what-when-from-where is recoverable.
+                    (when (getf options :audit-log-path)
+                      (setf gr8s.apiserver::*api-audit-sink*
+                            (gr8s.apiserver::api-audit-log-sink
+                             (open (getf options :audit-log-path) :direction :output
+                                   :if-exists :append :if-does-not-exist :create
+                                   :external-format :utf-8))))
                     (setf server
                           (start-in-cluster-api
                            store runtime reconciler pki :address address :port port

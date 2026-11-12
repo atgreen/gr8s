@@ -209,13 +209,66 @@ one then answers 404 rather than 403, as upstream's does."
                                (api-identity-username identity) verb (or resource path)))))
     identity))
 
+(defvar *api-audit-sink* nil
+  "A function of one audit-event core-object that records an API audit event, or
+NIL to disable API audit logging. Bound by serve from --audit-log-path.")
+
+(defun api-audit-log-sink (stream)
+  "Return an audit sink that appends each event to STREAM as one JSON line."
+  (lambda (event)
+    (ignore-errors
+      (com.inuoe.jzon:stringify event :stream stream)
+      (terpri stream)
+      (finish-output stream))))
+
+(defun build-api-audit-event (identity verb group resource name namespace
+                              source-ip user-agent request-uri status)
+  "Build a Metadata-level API audit event (who did what, when, from where, result)."
+  (core-object
+   "kind" "Event"
+   "apiVersion" "audit.k8s.io/v1"
+   "level" "Metadata"
+   "timestamp" (current-timestamp)
+   "verb" (or verb :null)
+   "user" (core-object
+           "username" (if identity (api-identity-username identity) "system:anonymous")
+           "groups" (coerce (and identity (api-identity-groups identity)) 'vector))
+   "sourceIPs" (vector (or source-ip :null))
+   "userAgent" (or user-agent :null)
+   "objectRef" (core-object "resource" (or resource :null) "apiGroup" (or group :null)
+                            "namespace" (or namespace :null) "name" (or name :null))
+   "requestURI" (or request-uri :null)
+   "responseStatus" (core-object "code" status)))
+
+(defun emit-api-audit-event (identity request status)
+  "Record one API audit event for REQUEST when auditing is enabled."
+  (when *api-audit-sink*
+    (ignore-errors
+      (let ((path (request-route-path (hunchentoot:script-name request)))
+            (method (hunchentoot:request-method request)))
+        (multiple-value-bind (verb group resource name namespace)
+            (handler-case (kubernetes-authorization-target path method)
+              (error () (values (string-downcase (princ-to-string method)) nil nil nil nil)))
+          (funcall *api-audit-sink*
+                   (build-api-audit-event
+                    identity verb group resource name namespace
+                    (or (hunchentoot:header-in :x-forwarded-for request)
+                        (hunchentoot:remote-addr request))
+                    (hunchentoot:header-in :user-agent request)
+                    (hunchentoot:request-uri request)
+                    status)))))))
+
 (defmethod hunchentoot:acceptor-dispatch-request ((acceptor gr8s-in-cluster-acceptor) request)
   "Enforce authentication and authorization on the dedicated TLS API listener."
-  (handler-case
-      (let* ((*flowcontrol-request-level* nil)
-             (*authenticated-api-identity* (authorize-in-cluster-request (acceptor-store acceptor) request)))
-        (call-next-method))
-    (kubernetes-error (condition) (kubernetes-error-response condition))))
+  (let ((identity nil))
+    (unwind-protect
+         (handler-case
+             (let* ((*flowcontrol-request-level* nil)
+                    (*authenticated-api-identity* (authorize-in-cluster-request (acceptor-store acceptor) request)))
+               (setf identity *authenticated-api-identity*)
+               (call-next-method))
+           (kubernetes-error (condition) (kubernetes-error-response condition)))
+      (emit-api-audit-event identity request (hunchentoot:return-code*)))))
 
 (defun start-in-cluster-api (store runtime reconciler pki &key (address "0.0.0.0") (port 6443)
                                                                (certificate-addresses nil)
