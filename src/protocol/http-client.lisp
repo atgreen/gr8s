@@ -44,6 +44,11 @@
 
 (define-condition http-response-too-large (http-client-error) ())
 
+(define-condition http-connection-closed (http-client-error) ()
+  (:documentation "The peer closed the connection before (or during) its response.
+A fresh connection may succeed, so a pooled connection failing this way is replaced
+rather than treated as a request error."))
+
 (defparameter +default-response-limit+ (* 16 1024 1024)
   "Default ceiling on a response body, in octets.")
 
@@ -58,7 +63,7 @@ A lone LF is tolerated; end of stream before any octet signals an error."
     (loop for byte = (read-byte stream nil nil)
           do (cond
                ((null byte)
-                (if saw-octet (return) (error 'http-client-error :message "connection closed mid-response")))
+                (if saw-octet (return) (error 'http-connection-closed :message "connection closed mid-response")))
                ((= byte 13))                      ; CR -- swallow, the LF ends the line
                ((= byte 10) (return))             ; LF -- end of line
                (t (setf saw-octet t)
@@ -70,7 +75,7 @@ A lone LF is tolerated; end of stream before any octet signals an error."
   (let ((buffer (make-array count :element-type '(unsigned-byte 8))))
     (let ((got (read-sequence buffer stream)))
       (unless (= got count)
-        (error 'http-client-error :message "connection closed before the full response body")))
+        (error 'http-connection-closed :message "connection closed before the full response body")))
     buffer))
 
 ;;; ---------------------------------------------------------------------------
@@ -289,7 +294,9 @@ reusable-p); REUSABLE-P is true only when the connection may be pooled afterward
 (defun stale-connection-p (condition)
   "A pooled connection failing this way is dead -- the request should be retried on
 a fresh one.  A deadline or cancellation is not here, so it propagates instead."
-  (or (retryable-p condition) (typep condition 'stream-error)))
+  (or (retryable-p condition)
+      (typep condition 'stream-error)
+      (typep condition 'http-connection-closed)))
 
 (defun attempt-request (host port server-name host-header method target headers body
                         trust-certificates auto-load-system-ca insecure client-certificate client-key
