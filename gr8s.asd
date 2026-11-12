@@ -67,6 +67,10 @@
                              (:file "foundation/dns")
                              (:file "foundation/json")
                              (:file "foundation/network-steering")
+                             ;; Shared outbound HTTP/1.1-over-TLS client (pure-tls +
+                             ;; cl-cancel).  No gr8s dependencies; loaded early so the
+                             ;; request/response callers below can use it.
+                             (:file "protocol/http-client")
                              (:module "image-distribution"
                               :serial t
                               :components ((:file "package")
