@@ -289,6 +289,56 @@ finishes stops the node starting Pods, and nothing else reports it (podster-uqb.
     (save-pod-observation (reconciler-store reconciler) pod status)
     status))
 
+(defparameter +memory-eviction-threshold-bytes+ (* 100 1024 1024)
+  "Minimum free node memory before node-pressure eviction reclaims, matching the
+kubelet's default memory.available eviction threshold (100Mi).")
+
+(defun pod-memory-eviction-rank (pod)
+  "Sort key for node-pressure eviction (lower evicts first): BestEffort before
+Burstable, and within a class the lower-priority Pod first, so the least-critical
+workloads are sacrificed first -- Guaranteed Pods are excluded by the caller."
+  (let ((qos (pod-spec-qos-class (gethash "spec" (pod-to-object pod)))))
+    (list (if (equal qos "BestEffort") 0 1) (pod-spec-priority pod))))
+
+(defun select-memory-eviction-pod (pods)
+  "Choose the local Pod to evict first to relieve node memory pressure, or NIL when
+only Guaranteed Pods remain (never sacrificed for memory pressure alone; the
+per-QoS oom_score_adj leaves them to the kernel as a last resort)."
+  (let ((candidates (remove "Guaranteed" pods
+                            :key (lambda (pod) (pod-spec-qos-class (gethash "spec" (pod-to-object pod))))
+                            :test #'equal)))
+    (first (stable-sort (copy-list candidates)
+                        (lambda (a b)
+                          (let ((ra (pod-memory-eviction-rank a)) (rb (pod-memory-eviction-rank b)))
+                            (or (< (first ra) (first rb))
+                                (and (= (first ra) (first rb)) (< (second ra) (second rb))))))))))
+
+(defun node-memory-available-bytes ()
+  "Available node memory in bytes from /proc/meminfo MemAvailable, or NIL."
+  (ignore-errors
+    (let ((available (cdr (assoc "MemAvailable" (read-key-value-file "/proc/meminfo") :test #'equal))))
+      (when available (* 1024 (parse-integer available :junk-allowed t))))))
+
+(defparameter *node-memory-available-fn* #'node-memory-available-bytes
+  "Reader for available node memory in bytes; injectable for tests.")
+
+(defun node-pressure-evict (reconciler)
+  "When free node memory is below the eviction threshold, gracefully evict the
+least-critical local Pod (BestEffort/Burstable, lowest priority first), one per
+pass so pressure is relieved incrementally rather than by a mass kill. Returns the
+evicted Pod, or NIL. This replaces relying solely on the kernel OOM killer."
+  (when (runtime-runs-containers-p (reconciler-runtime reconciler))
+    (let ((available (funcall *node-memory-available-fn*)))
+      (when (and available (< available +memory-eviction-threshold-bytes+))
+        (let ((pod (select-memory-eviction-pod
+                    (remove-if #'deletion-requested-p (list-pods (reconciler-store reconciler))))))
+          (when pod
+            (evict-pod-for-storage
+             reconciler pod
+             (format nil "The node was low on resource: memory. Threshold ~D bytes, ~D available."
+                     +memory-eviction-threshold-bytes+ available))
+            pod))))))
+
 (defun pod-recorded-eviction (reconciler pod)
   "Return POD's durable eviction status, if a previous pass evicted it."
   (let ((status (pod-observed-status (reconciler-store reconciler) pod)))
@@ -653,6 +703,9 @@ spurious 404 from the same request that created the Pod."
   ;; supervisor reports the outage once instead of every Pod failing each pass.
   (when (runtime-unavailable-message (reconciler-runtime reconciler))
     (return-from reconcile-all nil))
+  ;; Relieve node memory pressure by gracefully evicting a low-QoS Pod before the
+  ;; pass, rather than leaving the node to the kernel OOM killer.
+  (ignore-errors (node-pressure-evict reconciler))
   (loop for pod in (stable-sort (copy-list (list-pods (reconciler-store reconciler)))
                                 ;; Finish deletions first, then place the most important Pods.
                                 (lambda (left right)
