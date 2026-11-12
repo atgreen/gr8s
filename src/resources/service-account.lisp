@@ -258,6 +258,76 @@ evaluate applicable live RoleBindings and ClusterRoleBindings."
                                 (gethash "rules" role)))))))
      bindings)))
 
+(defun rbac-identity-covers-rule-p (store identity rule namespace)
+  "True when IDENTITY is already authorized for every permission RULE would grant
+in NAMESPACE, so conferring it is not a privilege escalation. Mirrors upstream's
+rule-covering check by asking the live authorizer for each (verb x apiGroup x
+resource[/name]) or (verb x nonResourceURL) the rule confers."
+  (flet ((authz (verb group resource name url)
+           (service-account-authorized-p store identity verb group resource name namespace url)))
+    (let ((verbs (coerce (gethash "verbs" rule #()) 'list))
+          (urls (coerce (gethash "nonResourceURLs" rule #()) 'list)))
+      (if urls
+          (every (lambda (verb)
+                   (every (lambda (url) (authz verb nil nil nil url)) urls))
+                 verbs)
+          (let ((groups (coerce (gethash "apiGroups" rule #()) 'list))
+                (resources (coerce (gethash "resources" rule #()) 'list))
+                (names (coerce (gethash "resourceNames" rule #()) 'list)))
+            (every
+             (lambda (verb)
+               (every
+                (lambda (group)
+                  (every
+                   (lambda (resource)
+                     (if names
+                         (every (lambda (name) (authz verb group resource name nil)) names)
+                         (authz verb group resource nil nil)))
+                   resources))
+                groups))
+             verbs))))))
+
+(defun confirm-rbac-role-grant-authorized (store identity rules cluster-p name namespace)
+  "Reject a Role/ClusterRole write that grants permissions IDENTITY does not hold,
+unless IDENTITY has the 'escalate' verb on the role resource -- upstream's
+privilege-escalation prevention for roles/clusterroles. A NIL IDENTITY (internal
+or bootstrap write) and system:masters are allowed; the latter via the authorizer."
+  (when (and store identity)
+    (let ((role-resource (if cluster-p "clusterroles" "roles")))
+      (unless (service-account-authorized-p store identity "escalate"
+                                            "rbac.authorization.k8s.io" role-resource name namespace)
+        (loop for rule across rules
+              unless (rbac-identity-covers-rule-p store identity rule namespace)
+                do (core-resource-error
+                    403 "Forbidden"
+                    "User ~A may not grant RBAC permissions it does not itself hold (needs 'escalate' on ~A)"
+                    (api-identity-username identity) role-resource))))))
+
+(defun confirm-rbac-binding-authorized (store identity object cluster-p namespace)
+  "Reject a RoleBinding/ClusterRoleBinding write to a role whose permissions IDENTITY
+does not hold, unless IDENTITY has the 'bind' verb on the referenced role --
+upstream's privilege-escalation prevention for bindings. A NIL IDENTITY and
+system:masters are allowed."
+  (when (and store identity)
+    (let* ((ref (gethash "roleRef" object))
+           (cluster-role-p (equal "ClusterRole" (gethash "kind" ref)))
+           (role-resource (if cluster-role-p "clusterroles" "roles"))
+           (role-name (gethash "name" ref))
+           (role-namespace (unless cluster-role-p namespace))
+           ;; The namespace the binding actually confers access in.
+           (covering-namespace (unless cluster-p namespace)))
+      (unless (service-account-authorized-p store identity "bind"
+                                            "rbac.authorization.k8s.io" role-resource role-name role-namespace)
+        (let ((role (handler-case (get-core-resource store role-resource role-namespace role-name)
+                      (kubernetes-error () nil))))
+          (when role
+            (loop for rule across (gethash "rules" role #())
+                  unless (rbac-identity-covers-rule-p store identity rule covering-namespace)
+                    do (core-resource-error
+                        403 "Forbidden"
+                        "User ~A may not bind role ~A whose permissions it does not itself hold (needs 'bind')"
+                        (api-identity-username identity) role-name))))))))
+
 (defun ensure-default-service-account (store namespace)
   "Create the namespace's default ServiceAccount without replacing an existing identity.
 It passes admission as upstream's service account controller's create does."

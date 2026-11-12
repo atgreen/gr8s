@@ -292,6 +292,9 @@
       ((member resource '("roles" "clusterroles") :test #'equal)
        (when (eq 'null (gethash "rules" object)) (remhash "rules" object))
        (validate-rbac-rules (gethash "rules" object #()) (equal resource "clusterroles"))
+       (confirm-rbac-role-grant-authorized store *authenticated-api-identity*
+                                           (gethash "rules" object #())
+                                           (equal resource "clusterroles") name namespace)
        (when (equal resource "clusterroles") (validate-cluster-role-aggregation-rule object)))
       ((equal resource "networkpolicies")
        ;; Validated as upstream's API does; the agent parses what it enforces into an np-spec.
@@ -321,7 +324,9 @@
            (core-resource-error 422 "Invalid" "PodCertificateRequest spec must be an object"))
          (unless (and (stringp (gethash "signerName" spec)) (plusp (length (gethash "signerName" spec))))
            (core-resource-error 422 "Invalid" "PodCertificateRequest spec.signerName is required"))))
-      (t (validate-rbac-binding object (equal resource "clusterrolebindings"))))
+      (t (validate-rbac-binding object (equal resource "clusterrolebindings"))
+         (confirm-rbac-binding-authorized store *authenticated-api-identity*
+                                          object (equal resource "clusterrolebindings") namespace)))
     object))
 
 (defparameter *resource-discovery-names*
