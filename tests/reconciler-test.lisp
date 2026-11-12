@@ -494,3 +494,18 @@
         (is (string= "Pending" (gethash "phase" status)))
         (is (string= "ContainerRuntimeUnavailable" (gethash "reason" status))))
       (is (= 0 (fake-runtime-ensure-count runtime))))))
+
+(test memory-eviction-selects-least-critical-pod-first
+  (flet ((make-pod (name qos-json priority)
+           (parse-pod (format nil "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"~A\"},\"spec\":{\"priority\":~D,\"containers\":[{\"name\":\"c\",\"image\":\"busybox\",\"resources\":~A}]}}"
+                              name priority qos-json))))
+    (let ((best-hi (make-pod "be-hi" "{}" 100))
+          (best-lo (make-pod "be-lo" "{}" 0))
+          (burst (make-pod "burst" "{\"requests\":{\"memory\":\"50Mi\"}}" 0))
+          (guaranteed (make-pod "guar" "{\"requests\":{\"cpu\":\"1\",\"memory\":\"64Mi\"},\"limits\":{\"cpu\":\"1\",\"memory\":\"64Mi\"}}" 0)))
+      ;; BestEffort is evicted before Burstable; within a class the lower priority first.
+      (is (equal "be-lo" (pod-name (gr8s.kubelet::select-memory-eviction-pod
+                                    (list burst best-hi best-lo guaranteed)))))
+      (is (equal "burst" (pod-name (gr8s.kubelet::select-memory-eviction-pod (list burst guaranteed)))))
+      ;; Only Guaranteed Pods remain: nothing is evicted for memory pressure alone.
+      (is (null (gr8s.kubelet::select-memory-eviction-pod (list guaranteed)))))))
