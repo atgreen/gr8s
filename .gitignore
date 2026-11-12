@@ -6,6 +6,8 @@
 .beads/proxieddb/
 *.gate.lock*
 build/
+# ocicl restores pinned dependencies from ocicl.csv; the tree is not vendored.
+ocicl/
 __pycache__/
 *.pyc
 .beads/.auto-import-issues.jsonl

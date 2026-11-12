@@ -22,9 +22,38 @@ NODE_PROTOCOL_PROTO := proto/gr8s/node/v1/node.proto
 NODE_PROTOCOL_LISP := src/generated/node-v1-generated.lisp
 TEST_EVAL := --eval '(require :asdf)' --eval '(asdf:test-system :gr8s)'
 
-.PHONY: test-raft-snapshots test-raft-checkpoint-memory test-pod-transactions test-pod-transaction-memory test-core-recovery test-core-recovery-memory all help containerd-bundle generate-protocol test-protocol-generation test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api test-install-lifecycle check smoke smoke-two-node run kubeconfig notices native clean
+# Dependencies are pinned in ocicl.csv and restored on demand with `ocicl
+# install`; the ocicl/ tree itself is not vendored. The stamp reinstalls
+# whenever the lockfile changes and is an order-only prerequisite of every
+# target that loads a Lisp system, so a fresh checkout builds without a manual
+# install step.
+OCICL ?= ocicl
+OCICL_STAMP := ocicl/.ocicl-installed
+
+.PHONY: test-raft-snapshots test-raft-checkpoint-memory test-pod-transactions test-pod-transaction-memory test-core-recovery test-core-recovery-memory all help containerd-bundle generate-protocol test-protocol-generation test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api test-install-lifecycle check smoke smoke-two-node run kubeconfig notices native clean deps
 
 all: native
+
+deps: $(OCICL_STAMP)
+
+$(OCICL_STAMP): ocicl.csv
+	$(OCICL) install
+	@mkdir -p ocicl && touch $@
+
+# Order-only: restore pinned dependencies before any target that loads a Lisp
+# system. Targets that reach a Lisp load through generate-protocol inherit the
+# stamp via $(NODE_PROTOCOL_LISP) below.
+$(NODE_PROTOCOL_LISP) build/gr8s: | $(OCICL_STAMP)
+
+test-pod-transaction-memory test-raft-checkpoint-memory test-core-recovery-memory \
+test-containerd test-routed-network test-vxlan-network test-agent-network \
+test-node-topology test-service-lb smoke-service-lb smoke-service-lb-agent: | $(OCICL_STAMP)
+
+build/gr8s-endpoint-test.json build/gr8s-service-test.json \
+build/gr8s-service-packet-test.json build/gr8s-service-packet-gc-test.json \
+build/gr8s-service-packet-guard-test.json build/gr8s-service-nat-test.json \
+build/gr8s-service-nat-policy-test.json build/gr8s-service-nat-guard-test.json \
+build/gr8s-service-wire-test.json build/gr8s-legacy-service-packet-guard-test.json: | $(OCICL_STAMP)
 
 containerd-bundle:
 	scripts/install-containerd.sh build/containerd
@@ -62,6 +91,7 @@ help:
 	@echo "  run           Start gr8s (override STATE_DIR, PORT, RUNTIME, KUBECONFIG)"
 	@echo "  kubeconfig    Write KUBECONFIG for the configured PORT"
 	@echo "  native        Build the dumped native executable at build/gr8s"
+	@echo "  deps          Restore pinned dependencies from ocicl.csv into ocicl/"
 	@echo "  clean         Remove build outputs"
 
 generate-protocol: $(NODE_PROTOCOL_LISP)
