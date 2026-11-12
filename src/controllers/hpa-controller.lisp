@@ -92,26 +92,20 @@ saying why they could not be read. NIL means usage comes from the controller's o
 
 (defun aggregated-api-get (store apiservice target)
   "GET TARGET from APIService's server as the controller manager and return the parsed object."
-  (let ((aggregator (gethash store *aggregators*)) (socket nil))
+  (let ((aggregator (gethash store *aggregators*)))
     (unless (and aggregator (apiservice-available-p apiservice))
       (error "the server is currently unable to handle the request"))
-    (unwind-protect
-         (multiple-value-bind (connected stream) (aggregator-connect store apiservice aggregator)
-           (setf socket connected)
-           (let ((service (apiservice-service apiservice)))
-             (sb-sys:with-deadline (:seconds 10)
-               (aggregator-write-request
-                stream :get target (format nil "~A.~A.svc:~D" (gethash "name" service) (gethash "namespace" service)
-                                           (gethash "port" service))
-                '(("Accept" . "application/json") ("User-Agent" . "kube-controller-manager/gr8s")
-                  ("X-Remote-User" . "system:kube-controller-manager") ("X-Remote-Group" . "system:masters")
-                  ("X-Remote-Group" . "system:authenticated"))
-                #())
-               (multiple-value-bind (code body) (admission-read-http-response stream)
-                 (unless (<= 200 code 299)
-                   (error "the server responded with HTTP ~D" code))
-                 (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string body))))))
-      (when socket (ignore-errors (usocket:socket-close socket))))))
+    (multiple-value-bind (code headers body)
+        (aggregator-https-request
+         store apiservice aggregator :get target
+         '(("Accept" . "application/json") ("User-Agent" . "kube-controller-manager/gr8s")
+           ("X-Remote-User" . "system:kube-controller-manager") ("X-Remote-Group" . "system:masters")
+           ("X-Remote-Group" . "system:authenticated"))
+         :timeout 10)
+      (declare (ignore headers))
+      (unless (<= 200 code 299)
+        (error "the server responded with HTTP ~D" code))
+      (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string body)))))
 
 (defun pod-metrics-usage-table (list)
   "Index a PodMetricsList by Pod name, each a table of container name to (cpu-cores . memory-bytes)."

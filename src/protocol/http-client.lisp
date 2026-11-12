@@ -146,16 +146,21 @@ transfer-encoding, or read-until-close, never exceeding LIMIT octets."
 ;;; ---------------------------------------------------------------------------
 ;;; TLS context
 
-(defun make-client-context (trust-certificates auto-load-system-ca)
-  "A verifying pure-tls client context trusting exactly TRUST-CERTIFICATES, or the
-system roots when AUTO-LOAD-SYSTEM-CA and no certificates are given."
-  (let ((context (pure-tls:make-tls-context
-                  :verify-mode pure-tls:+verify-required+
-                  :auto-load-system-ca (and auto-load-system-ca (null trust-certificates)))))
-    (when trust-certificates
-      (setf (pure-tls::tls-context-trust-store context)
-            (pure-tls::make-trust-store :certificates trust-certificates)))
-    context))
+(defun make-client-context (trust-certificates auto-load-system-ca insecure)
+  "A pure-tls client context.  INSECURE skips verification entirely (for an
+endpoint that opts out of TLS verification, e.g. an APIService with
+insecureSkipTLSVerify).  Otherwise the chain is verified against exactly
+TRUST-CERTIFICATES, or the system roots when AUTO-LOAD-SYSTEM-CA and no
+certificates are given."
+  (if insecure
+      (pure-tls:make-tls-context :verify-mode pure-tls:+verify-none+ :auto-load-system-ca nil)
+      (let ((context (pure-tls:make-tls-context
+                      :verify-mode pure-tls:+verify-required+
+                      :auto-load-system-ca (and auto-load-system-ca (null trust-certificates)))))
+        (when trust-certificates
+          (setf (pure-tls::tls-context-trust-store context)
+                (pure-tls::make-trust-store :certificates trust-certificates)))
+        context)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; The client
@@ -170,7 +175,7 @@ status codes are never here -- a 5xx is the caller's failure policy, not ours.")
   (some (lambda (type) (typep condition type)) *retryable-conditions*))
 
 (defun attempt-request (host port server-name host-header method target headers body
-                        trust-certificates auto-load-system-ca client-certificate client-key
+                        trust-certificates auto-load-system-ca insecure client-certificate client-key
                         timeout body-limit context)
   "One connect/handshake/exchange.  Returns (values code headers body-octets).
 
@@ -196,8 +201,8 @@ close-notify write that could itself block past the deadline."
                     (let ((stream (pure-tls:make-tls-client-stream
                                    (usocket:socket-stream socket)
                                    :hostname server-name
-                                   :context (make-client-context trust-certificates auto-load-system-ca)
-                                   :verify pure-tls:+verify-required+
+                                   :context (make-client-context trust-certificates auto-load-system-ca insecure)
+                                   :verify (if insecure pure-tls:+verify-none+ pure-tls:+verify-required+)
                                    :client-certificate (and client-certificate (namestring client-certificate))
                                    :client-key (and client-key (namestring client-key)))))
                       (write-request stream method target
@@ -212,7 +217,7 @@ close-notify write that could itself block past the deadline."
       (when socket (ignore-errors (usocket:socket-close socket))))))
 
 (defun https-request (&key host port server-name host-header (method :get) target headers body
-                           trust-certificates (auto-load-system-ca nil)
+                           trust-certificates (auto-load-system-ca nil) (insecure nil)
                            client-certificate client-key
                            (timeout 10) (max-attempts 1) (retry-interval 1)
                            (body-limit +default-response-limit+)
@@ -223,15 +228,16 @@ and return (values status-code response-headers body-octets).
 
 HOST is dialed; SERVER-NAME is what the certificate must match and what SNI/Host
 carry (HOST-HEADER overrides the Host line).  METHOD is a keyword; HEADERS an alist;
-BODY an octet vector.  The exchange is bounded by TIMEOUT seconds, tightened by any
-deadline on CONTEXT, and an already-cancelled CONTEXT aborts it.  On a transport-
-transient failure up to MAX-ATTEMPTS are made, RETRY-INTERVAL seconds apart; HTTP
-status codes are returned, never retried."
+BODY an octet vector.  INSECURE skips certificate verification entirely (for an
+endpoint that opts out, e.g. insecureSkipTLSVerify).  The exchange is bounded by
+TIMEOUT seconds, tightened by any deadline on CONTEXT, and an already-cancelled
+CONTEXT aborts it.  On a transport-transient failure up to MAX-ATTEMPTS are made,
+RETRY-INTERVAL seconds apart; HTTP status codes are returned, never retried."
   (loop with attempt = 0
         do (incf attempt)
            (handler-case
                (return (attempt-request host port server-name host-header method target headers body
-                                        trust-certificates auto-load-system-ca
+                                        trust-certificates auto-load-system-ca insecure
                                         client-certificate client-key timeout body-limit context))
              (error (condition)
                (if (and (< attempt max-attempts) (retryable-p condition))

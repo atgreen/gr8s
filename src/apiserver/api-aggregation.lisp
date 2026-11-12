@@ -303,30 +303,45 @@
                     collect (cons (string-downcase (subseq line 0 colon))
                                   (string-trim '(#\Space #\Tab) (subseq line (1+ colon))))))))
 
+(defun aggregator-https-request (store apiservice aggregator method target headers
+                                 &key (timeout +aggregator-probe-timeout+))
+  "Issue one non-streaming request to APIService's backend over the aggregator's
+front-proxy mutual TLS, returning (values code response-headers body-octets).
+
+The connect endpoint comes from the Service; the certificate is verified for, and
+SNI/Host carry, the Service's cluster name; trust is the APIService's caBundle,
+or no verification when it sets insecureSkipTLSVerify.  (The streaming proxy keeps
+its own aggregator-connect; this is only for request/response callers.)"
+  (let* ((service (apiservice-service apiservice))
+         (spec (gethash "spec" apiservice))
+         (bundle (gethash "caBundle" spec))
+         (insecure (and (gethash "insecureSkipTLSVerify" spec) t))
+         (server-name (format nil "~A.~A.svc" (gethash "name" service) (gethash "namespace" service))))
+    (multiple-value-bind (address port) (admission-service-endpoint store service)
+      (gr8s.http-client:https-request
+       :host address :port port :server-name server-name
+       :host-header (format nil "~A:~D" server-name (gethash "port" service))
+       :method method :target target :headers headers
+       :trust-certificates (and bundle (not insecure)
+                                (admission-ca-certificates (core-base64-bytes bundle "caBundle")))
+       :insecure insecure
+       :client-certificate (aggregator-certificate-path aggregator)
+       :client-key (aggregator-key-path aggregator)
+       :timeout timeout))))
+
 (defun aggregated-api-fetch-json (store apiservice target)
   "Fetch TARGET from an available APIService over the authenticated aggregator transport."
-  (let ((aggregator (gethash store *aggregators*))
-        (socket nil))
+  (let ((aggregator (gethash store *aggregators*)))
     (unless aggregator (error "the API aggregator is not running"))
-    (unwind-protect
-         (multiple-value-bind (connected stream) (aggregator-connect store apiservice aggregator)
-           (setf socket connected)
-           (let ((service (apiservice-service apiservice)))
-             (aggregator-write-request
-              stream :get target
-              (format nil "~A.~A.svc:~D" (gethash "name" service) (gethash "namespace" service)
-                      (gethash "port" service))
-              (append (aggregator-identity-headers nil)
-                      '(("Accept" . "application/json")
-                        ("User-Agent" . "kube-aggregator/gr8s")))
-              #()))
-           (multiple-value-bind (code headers) (aggregator-read-response-head stream)
-             (unless (<= 200 code 299)
-               (error "aggregated server returned HTTP ~D for ~A" code target))
-             (let ((body (flexi-streams:with-output-to-sequence (output)
-                           (aggregator-copy-body stream output headers))))
-               (com.inuoe.jzon:parse body))))
-      (when socket (ignore-errors (usocket:socket-close socket))))))
+    (multiple-value-bind (code headers body)
+        (aggregator-https-request store apiservice aggregator :get target
+                                  (append (aggregator-identity-headers nil)
+                                          '(("Accept" . "application/json")
+                                            ("User-Agent" . "kube-aggregator/gr8s"))))
+      (declare (ignore headers))
+      (unless (<= 200 code 299)
+        (error "aggregated server returned HTTP ~D for ~A" code target))
+      (com.inuoe.jzon:parse body))))
 
 (defun merge-aggregated-openapi-v2 (store document)
   "Merge available APIService Swagger paths and definitions into local DOCUMENT.
@@ -546,25 +561,19 @@ TARGET is the request line's path, the current request's own unless given."
                       :key (lambda (entry) (gethash "port" entry))))
       (return-from apiservice-availability-probe
         (values "ServicePortError" (format nil "service/~A in ~S is not listening on port ~D" name namespace port))))
-    (let ((target (format nil "/apis/~A/~A" (gethash "group" spec) (gethash "version" spec)))
-          (socket nil) (stream nil))
+    (let ((target (format nil "/apis/~A/~A" (gethash "group" spec) (gethash "version" spec))))
       (handler-case
-          (unwind-protect
-               (progn
-                 (multiple-value-setq (socket stream) (aggregator-connect store apiservice aggregator))
-                 (sb-sys:with-deadline (:seconds +aggregator-probe-timeout+)
-                   (aggregator-write-request
-                    stream :get target (format nil "~A.~A.svc:~D" name namespace port)
-                    '(("Accept" . "application/json") ("User-Agent" . "kube-aggregator/gr8s")
-                      ("X-Remote-User" . "system:kube-aggregator") ("X-Remote-Group" . "system:masters"))
-                    #())
-                   (multiple-value-bind (code response) (admission-read-http-response stream)
-                     (if (<= 200 code 299)
-                         (values nil (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string response)))
-                         (values "FailedDiscoveryCheck"
-                                 (format nil "failing or missing response from https://~A.~A.svc:~D~A: bad status: ~D"
-                                         name namespace port target code))))))
-            (when socket (ignore-errors (usocket:socket-close socket))))
+          (multiple-value-bind (code headers response)
+              (aggregator-https-request
+               store apiservice aggregator :get target
+               '(("Accept" . "application/json") ("User-Agent" . "kube-aggregator/gr8s")
+                 ("X-Remote-User" . "system:kube-aggregator") ("X-Remote-Group" . "system:masters")))
+            (declare (ignore headers))
+            (if (<= 200 code 299)
+                (values nil (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string response)))
+                (values "FailedDiscoveryCheck"
+                        (format nil "failing or missing response from https://~A.~A.svc:~D~A: bad status: ~D"
+                                name namespace port target code))))
         (admission-call-failure (condition)
           (values "MissingEndpoints" (admission-call-failure-message condition)))
         ((or error sb-sys:deadline-timeout) (condition)
