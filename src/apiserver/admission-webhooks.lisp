@@ -370,32 +370,23 @@ Configuration resources are exempt so a bad webhook can always be removed."
     context))
 
 (defun admission-https-post (&key address port server-name host-header target body bundle timeout)
-  "POST BODY over verified TLS to SERVER-NAME at ADDRESS within TIMEOUT seconds.
-pure-tls keeps session tickets per hostname and trusts a resumed session without
-checking the chain, so a private ticket cache keeps one webhook's caBundle from
-vouching for another webhook that names the same host."
-  (let ((socket nil) (pure-tls:*session-ticket-cache* (make-hash-table :test 'equal)))
-    (unwind-protect
-         (sb-sys:with-deadline (:seconds timeout)
-           (setf socket (usocket:socket-connect address port :element-type '(unsigned-byte 8)
-                                                             :timeout timeout :nodelay t))
-           (let* ((context (admission-tls-context bundle))
-                  (stream (pure-tls:make-tls-client-stream (usocket:socket-stream socket)
-                                                           :hostname server-name :context context
-                                                           :verify pure-tls:+verify-required+))
-                  (octets (trivial-utf-8:string-to-utf-8-bytes body)))
-             (write-sequence
-              (trivial-utf-8:string-to-utf-8-bytes
-               (format nil "POST ~A HTTP/1.1~C~CHost: ~A~C~CContent-Type: application/json~C~CAccept: application/json~C~CContent-Length: ~D~C~CConnection: close~C~C~C~C"
-                       target #\Return #\Linefeed host-header #\Return #\Linefeed #\Return #\Linefeed
-                       #\Return #\Linefeed (length octets) #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed))
-              stream)
-             (write-sequence octets stream)
-             (force-output stream)
-             (admission-read-http-response stream)))
-      ;; Closing the socket alone avoids a close-notify write that could block
-      ;; on a hung peer after the deadline has already passed.
-      (when socket (ignore-errors (usocket:socket-close socket))))))
+  "POST BODY over verified TLS to SERVER-NAME at ADDRESS within TIMEOUT seconds,
+returning the status code and body octets.  A thin wrapper over the shared HTTP
+client: it trusts exactly the webhook's caBundle (or the system roots without one)
+and caps the response at +ADMISSION-MAXIMUM-RESPONSE+.  The private session-ticket
+cache, address/verify-name split and socket-close-on-deadline live in the client."
+  (multiple-value-bind (code headers response)
+      (gr8s.http-client:https-request
+       :host address :port port :server-name server-name :host-header host-header
+       :method :post :target target
+       :headers '(("Content-Type" . "application/json") ("Accept" . "application/json"))
+       :body (trivial-utf-8:string-to-utf-8-bytes body)
+       :trust-certificates (and bundle (admission-ca-certificates (core-base64-bytes bundle "caBundle")))
+       :auto-load-system-ca (null bundle)
+       :timeout timeout
+       :body-limit +admission-maximum-response+)
+    (declare (ignore headers))
+    (values code response)))
 
 (defun admission-call-webhook (store webhook body)
   "POST BODY to WEBHOOK's backend, returning the parsed AdmissionReview or signaling a call failure."
@@ -423,6 +414,7 @@ vouching for another webhook that names the same host."
                                       :host-header (format nil "~A:~D" server-name visible-port)
                                       :body body :bundle (gethash "caBundle" config) :timeout timeout))
             (admission-call-failure (condition) (failure (admission-call-failure-message condition)))
+            (cl-cancel:deadline-exceeded () (failure "context deadline exceeded"))
             (sb-sys:deadline-timeout () (failure "context deadline exceeded"))
             (usocket:timeout-error () (failure "context deadline exceeded"))
             (error (condition) (failure (remove #\Newline (princ-to-string condition)))))
