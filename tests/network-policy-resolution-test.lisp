@@ -259,6 +259,39 @@ Return (values result final-contents events)."
   ;; An endpoint created before these maps existed is left alone.
   (is (null (npr-capture-writes (list t) (list t) :exists nil))))
 
+(test npr-pod-maps-fail-closed-when-a-trie-write-fails
+  ;; A trie write that throws mid-way (e.g. an eBPF LPM map hitting its capacity)
+  ;; must leave the Pod denied, not in the zero-initialised allow-all mode.
+  (let* ((maps (make-hash-table :test #'equal))
+         (egress-cidr (setf (gethash "netpol_egress_cidr" maps)
+                            (make-hash-table :test #'equalp))))
+    (flet ((trie-count (name) (hash-table-count (gethash name maps (make-hash-table)))))
+      (signals error
+        (gr8s.network::write-pod-network-policy
+         "/pin/sand/"
+         (list t (list "10.0.0.0/8" '() '((6 443 443)))) ; isolated egress with rules
+         (list nil)
+         :exists (constantly t)
+         :open (lambda (path) (subseq path (length "/pin/sand/")))
+         :map-info (lambda (fd name) (declare (ignore fd))
+                     (or (gethash name maps) (setf (gethash name maps) (make-hash-table :test #'equalp))))
+         ;; The egress CIDR trie is "full": adding to it throws.
+         :update (lambda (map key value)
+                   (when (eq map egress-cidr) (error "simulated LPM capacity exhaustion"))
+                   (setf (gethash key map) value))
+         :delete (lambda (map key) (remhash key map))
+         :keys (lambda (map) (loop for key being the hash-keys of map collect key))
+         :close (constantly nil)))
+      ;; Deny-all: both directions isolated, every allow trie emptied.
+      (let ((mode (gethash "netpol_mode" maps)))
+        (is (equalp #(1 0 0 0) (gethash (gr8s.network::%netpol-u32-le 0) mode)))
+        (is (equalp #(1 0 0 0) (gethash (gr8s.network::%netpol-u32-le 1) mode))))
+      (dolist (name '("netpol_egress_cidr" "netpol_egress_ports"
+                      "netpol_egress_cidr_v6" "netpol_egress_ports_v6"
+                      "netpol_ingress_cidr" "netpol_ingress_ports"
+                      "netpol_ingress_cidr_v6" "netpol_ingress_ports_v6"))
+        (is (zerop (trie-count name)) "~A is emptied" name)))))
+
 (test npr-converge-writes-changed-policies-and-skips-failures
   (let* ((specs (gr8s.network::network-policy-specs-from-objects
                  (list (npr-policy "prod" "{\"podSelector\":{\"matchLabels\":{\"app\":\"web\"}},\"policyTypes\":[\"Egress\"],

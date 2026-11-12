@@ -553,22 +553,44 @@ untouched. OPEN/MAP-INFO/UPDATE/DELETE/KEYS/EXISTS/CLOSE are injectable for test
                     (dolist (key (funcall keys trie))
                       (unless (find key contents :key #'car :test #'equalp)
                         (funcall delete trie key)))))
-             (loop for (direction cidr-name ports-name cidr-v6-name ports-v6-name)
-                     in '((:egress "netpol_egress_cidr" "netpol_egress_ports"
-                                  "netpol_egress_cidr_v6" "netpol_egress_ports_v6")
-                          (:ingress "netpol_ingress_cidr" "netpol_ingress_ports"
+             (handler-case
+                 (progn
+                   (loop for (direction cidr-name ports-name cidr-v6-name ports-v6-name)
+                           in '((:egress "netpol_egress_cidr" "netpol_egress_ports"
+                                        "netpol_egress_cidr_v6" "netpol_egress_ports_v6")
+                                (:ingress "netpol_ingress_cidr" "netpol_ingress_ports"
+                                         "netpol_ingress_cidr_v6" "netpol_ingress_ports_v6"))
+                         for (isolated . entries) = (if (eq direction :egress) egress ingress)
+                         do (multiple-value-bind (cidrs ports cidrs-v6 ports-v6)
+                                (network-policy-map-contents (and isolated entries))
+                              (replace-contents (open-map ports-name) ports)
+                              (replace-contents (open-map cidr-name) cidrs)
+                              (replace-contents (open-map ports-v6-name) ports-v6)
+                              (replace-contents (open-map cidr-v6-name) cidrs-v6)))
+                   (let ((mode (open-map "netpol_mode")))
+                     (funcall update mode (%netpol-u32-le 0) (%netpol-u32-le (if (car egress) 1 0)))
+                     (funcall update mode (%netpol-u32-le 1) (%netpol-u32-le (if (car ingress) 1 0))))
+                   t)
+               (error (condition)
+                 ;; Fail closed. A partial write -- e.g. an eBPF LPM trie hitting
+                 ;; its capacity -- must never leave a policy-selected Pod in the
+                 ;; zero-initialised allow-all mode. Drop every allow rule and
+                 ;; isolate both directions so the Pod defaults to deny, then alarm
+                 ;; and resignal so the caller does not record this policy as
+                 ;; written and retries it on the next convergence.
+                 (ignore-errors
+                   (dolist (name '("netpol_egress_cidr" "netpol_egress_ports"
+                                   "netpol_egress_cidr_v6" "netpol_egress_ports_v6"
+                                   "netpol_ingress_cidr" "netpol_ingress_ports"
                                    "netpol_ingress_cidr_v6" "netpol_ingress_ports_v6"))
-                   for (isolated . entries) = (if (eq direction :egress) egress ingress)
-                   do (multiple-value-bind (cidrs ports cidrs-v6 ports-v6)
-                          (network-policy-map-contents (and isolated entries))
-                        (replace-contents (open-map ports-name) ports)
-                        (replace-contents (open-map cidr-name) cidrs)
-                        (replace-contents (open-map ports-v6-name) ports-v6)
-                        (replace-contents (open-map cidr-v6-name) cidrs-v6)))
-             (let ((mode (open-map "netpol_mode")))
-               (funcall update mode (%netpol-u32-le 0) (%netpol-u32-le (if (car egress) 1 0)))
-               (funcall update mode (%netpol-u32-le 1) (%netpol-u32-le (if (car ingress) 1 0))))
-             t)
+                     (replace-contents (open-map name) '()))
+                   (let ((mode (open-map "netpol_mode")))
+                     (funcall update mode (%netpol-u32-le 0) (%netpol-u32-le 1))
+                     (funcall update mode (%netpol-u32-le 1) (%netpol-u32-le 1))))
+                 (format *error-output*
+                         "gr8s: ALARM network policy write for ~A failed; failing closed (deny-all): ~A~%"
+                         directory condition)
+                 (error condition))))
         (dolist (fd fds) (ignore-errors (funcall close fd)))))))
 
 (defvar *pod-network-policy-written* (make-hash-table :test #'equal)
