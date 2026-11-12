@@ -108,7 +108,7 @@
 
 (defun artifact-wire-test-message (reference)
   (list :type :install-snapshot :term 9 :from "source" :last-index 42 :last-term 7
-        :state (list :gr8s-raft-snapshot 1 :application reference :application-present t
+        :state (list :cl-raft-snapshot 1 :application reference :application-present t
                      :members '(("source" . :voter) ("sink" . :learner)) :addresses nil :api-urls nil)))
 
 (defun send-artifact-wire-test-snapshot (sender receiver message)
@@ -410,7 +410,7 @@
                    (push path paths) (push reference references))))
              (setf paths (nreverse paths) references (nreverse references))
              (flet ((envelope (reference)
-                      (list :gr8s-raft-snapshot 1 :application reference :application-present t
+                      (list :cl-raft-snapshot 1 :application reference :application-present t
                             :members '(("source" . :voter))))
                     (reap () (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
                                (length (gr8s.resources::claim-store-snapshot-artifacts-unlocked member root :maximum-artifacts 64)))))

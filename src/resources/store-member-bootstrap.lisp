@@ -54,7 +54,7 @@
          (api-url (gethash "apiURL" descriptor)))
     ;; The first committed config change carries the complete bound address book.
     ;; A learner's zero boundary cannot mask the leader's index-one baseline.
-    (list :gr8s-raft-snapshot 1 :application reference :application-present t
+    (list :cl-raft-snapshot 1 :application reference :application-present t
           :members (list (cons id role)) :addresses nil
           :api-urls (when (plusp (length api-url)) (list (cons id api-url))))))
 

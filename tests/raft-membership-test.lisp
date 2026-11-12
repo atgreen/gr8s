@@ -215,7 +215,7 @@
       (is (null (gethash "n1" (cl-raft::raft-node-peer-addresses node))))
       (setf (cl-raft::raft-node-restore-fn node) (lambda (state) (declare (ignore state)) (setf restored t)))
       (signals error (gr8s.raft::raft-restore-snapshot-contents
-                      node (list :gr8s-raft-snapshot 1 :application-present t :application nil
+                      node (list :cl-raft-snapshot 1 :application-present t :application nil
                                  :members '(("n1" . :voter) ("l" . :learner)) :promotions bad)))
       (is (not restored)))
     (signals error (cl-raft::raft-propose-config node :add "l" :role :voter :promotion-role :voter))))

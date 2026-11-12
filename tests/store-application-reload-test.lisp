@@ -469,7 +469,7 @@
          (descriptor (gr8s.resources::core-object "index" 42 "term" 7 "artifactSha256" (make-string 64 :initial-element #\a)))
          (validate (reload-test-validator member descriptor))
          (application (list :gr8s-store-artifact 1 :index 42 :term 7 :sha256 (gethash "artifactSha256" descriptor)))
-         (state (list :gr8s-raft-snapshot 1 :application application :application-present t :members (list (cons "reload-member" :voter)))))
+         (state (list :cl-raft-snapshot 1 :application application :application-present t :members (list (cons "reload-member" :voter)))))
     (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
       (setf (gr8s.raft::raft-node-snapshot-pending node) (list 42 7 state #())
             (gr8s.raft::raft-node-current-term node) 12)
@@ -510,7 +510,7 @@
   (let* ((member (make-reload-test-member)) (node (gr8s.raft.transport::raft-member-node member))
          (descriptor (gr8s.resources::core-object "index" 42 "term" 7 "artifactSha256" (make-string 64 :initial-element #\a)))
          (validate (reload-test-validator member descriptor))
-         (state (list :gr8s-raft-snapshot 1 :application (list :gr8s-store-artifact 1 :index 42 :term 7 :sha256 (gethash "artifactSha256" descriptor))
+         (state (list :cl-raft-snapshot 1 :application (list :gr8s-store-artifact 1 :index 42 :term 7 :sha256 (gethash "artifactSha256" descriptor))
                                          :application-present t :members (list (cons "reload-member" :voter)))))
     (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
       (setf (gr8s.raft::raft-node-snapshot-pending node) (list 42 7 state #())
@@ -541,7 +541,7 @@
            (member (gr8s.raft.transport::make-raft-member))
            (descriptor (gr8s.resources::core-object "index" 42 "term" 7 "artifactSha256" (make-string 64 :initial-element #\a)))
            (application (list :gr8s-store-artifact 1 :index 42 :term 7 :sha256 (gethash "artifactSha256" descriptor)))
-           (state (list :gr8s-raft-snapshot 1 :application application :application-present t
+           (state (list :cl-raft-snapshot 1 :application application :application-present t
                                            :members (list (cons "reload-member" :voter))))
            (validate (gr8s.ha::make-member-generation-validator member 9 42 7 (gethash "artifactSha256" descriptor) :recover t))
            (restored 0)

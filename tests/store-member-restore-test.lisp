@@ -479,7 +479,7 @@
              (if (eq mode :absent)
                  (gr8s.raft::raft-storage-save-hard-state storage 9 "sink")
                  (gr8s.raft::raft-storage-replace-snapshot
-                  storage 42 7 (list :gr8s-raft-snapshot 1 :application '(:opaque-state)
+                  storage 42 7 (list :cl-raft-snapshot 1 :application '(:opaque-state)
                                      :application-present t :members '(("sink" . :voter)) :addresses nil :api-urls nil)
                   9 "sink" #()))
           (cl-raft::close-file-raft-storage storage))
