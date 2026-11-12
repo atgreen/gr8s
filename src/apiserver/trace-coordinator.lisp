@@ -120,7 +120,12 @@
 (defun make-trace-operation-request (source pod-uids duration-milliseconds node index)
   (make-instance
    'gr8s.node.v1::operation-request
-   :operation-id (format nil "trace-~36R-~D-~A" (random (expt 36 8)) index node)
+   ;; A CSPRNG id, not cl:random: an operation id must be unguessable so another
+   ;; node cannot forge a response/stream against it.
+   :operation-id (format nil "trace-~36R-~D-~A"
+                         (reduce (lambda (acc byte) (+ (ash acc 8) byte))
+                                 (secure-random-octets 16) :initial-value 0)
+                         index node)
    :kind gr8s.node.v1::+operationkind-operation_kind_trace+
    :trace-source source
    :trace-pod-uids pod-uids
