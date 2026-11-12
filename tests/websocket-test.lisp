@@ -4,18 +4,18 @@
 
 (defun websocket-roundtrip (payload &key masked-p (opcode 2))
   (let ((path (merge-pathnames
-               (format nil "gr8s-websocket-~A.bin" (gr8s::generate-uid))
+               (format nil "gr8s-websocket-~A.bin" (gr8s.store::generate-uid))
                #P"/tmp/")))
     (unwind-protect
          (progn
            (with-open-file (output path :direction :output
                                         :if-exists :supersede
                                         :element-type '(unsigned-byte 8))
-             (gr8s::write-websocket-frame
+             (gr8s.protocol::write-websocket-frame
               output opcode payload :masked-p masked-p))
            (with-open-file (input path :direction :input
                                       :element-type '(unsigned-byte 8))
-             (gr8s::read-websocket-frame input)))
+             (gr8s.protocol::read-websocket-frame input)))
       (ignore-errors (delete-file path)))))
 
 (test websocket-frames-roundtrip-short-extended-and-masked-payloads

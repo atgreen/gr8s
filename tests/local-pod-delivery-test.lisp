@@ -12,7 +12,7 @@
   ;; ifindex is a native-order u32 at offset 0 (the program redirects to it);
   ;; Pod MAC is 6 wire bytes at offset 4, veth MAC 6 wire bytes at offset 10
   ;; (the program copies them verbatim into the frame's dst/src MAC).
-  (let ((v (gr8s::encode-local-pod-value #x12345678
+  (let ((v (gr8s.network::encode-local-pod-value #x12345678
                                          #(1 2 3 4 5 6)
                                          #(7 8 9 10 11 12))))
     (is (= 16 (length v)))
@@ -23,22 +23,22 @@
 (test local-pod-key-is-the-lpm-slash32-destination
   ;; An LPM /32 key: prefixlen 32 (host order, little-endian u32) then the
   ;; destination address in network byte order -- same shape as netpol-cidr-lpm-key.
-  (is (equalp #(32 0 0 0 1 2 3 4) (gr8s::local-pod-ipv4-key "1.2.3.4")))
-  (is (equalp #(32 0 0 0 10 96 0 1) (gr8s::local-pod-ipv4-key "10.96.0.1"))))
+  (is (equalp #(32 0 0 0 1 2 3 4) (gr8s.network::local-pod-ipv4-key "1.2.3.4")))
+  (is (equalp #(32 0 0 0 10 96 0 1) (gr8s.network::local-pod-ipv4-key "10.96.0.1"))))
 
 (test local-pod-mac-round-trips-through-the-pinned-identity-value
   ;; The agent reads a Pod's own MAC back from its pinned endpoint_identity map;
   ;; decode must invert the encoder the CNI used to write it.
   (let* ((mac #(#xaa #xbb #xcc #xdd #xee #xff))
-         (identity (gr8s::encode-cni-endpoint-identity "10.80.1.7" mac)))
-    (is (equalp mac (gr8s::decode-endpoint-identity-mac identity)))))
+         (identity (gr8s.network::encode-cni-endpoint-identity "10.80.1.7" mac)))
+    (is (equalp mac (gr8s.network::decode-endpoint-identity-mac identity)))))
 
 (test converge-writes-the-whole-node-table-into-every-local-pod
   ;; Two local Pods: each Pod's local_pod_v4 must end up with both Pods' entries.
   (let ((endpoints '(("sandboxA" "eth0" "10.80.0.2")
                      ("sandboxB" "eth0" "10.80.0.3")))
         (writes '()))
-    (gr8s::converge-node-local-pod-delivery
+    (gr8s.network::converge-node-local-pod-delivery
      endpoints
      :directory-fn (lambda (sandbox) (format nil "/pins/~A/" sandbox))
      :value-fn (lambda (sandbox interface directory)

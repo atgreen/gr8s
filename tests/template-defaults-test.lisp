@@ -21,32 +21,32 @@
   (is (null (nth-value 1 (gethash "enableServiceLinks" pod-spec))) "~A" context))
 
 (defun minimal-pod-spec (&optional (restart "Always"))
-  (gr8s::core-object "restartPolicy" restart
-                     "containers" (vector (gr8s::core-object "name" "main" "image" "busybox"))))
+  (gr8s.resources::core-object "restartPolicy" restart
+                     "containers" (vector (gr8s.resources::core-object "name" "main" "image" "busybox"))))
 
 (test workload-templates-carry-the-pod-spec-defaults
   (with-temporary-store (store path)
     (values path)
     (flet ((create (resource kind spec)
-             (gr8s::create-core-resource
-              store resource (gr8s::core-object "apiVersion" (if (member kind '("Job" "CronJob") :test #'equal) "batch/v1" "apps/v1")
-                                                "kind" kind "metadata" (gr8s::core-object "name" "t") "spec" spec)
+             (gr8s.resources::create-core-resource
+              store resource (gr8s.resources::core-object "apiVersion" (if (member kind '("Job" "CronJob") :test #'equal) "batch/v1" "apps/v1")
+                                                "kind" kind "metadata" (gr8s.resources::core-object "name" "t") "spec" spec)
               "alpha")))
       (dolist (resource '(("deployments" "Deployment") ("replicasets" "ReplicaSet")
                           ("daemonsets" "DaemonSet") ("statefulsets" "StatefulSet")))
         (check-template-defaults
          (template-spec (create (first resource) (second resource)
-                                (gr8s::core-object "selector" (gr8s::core-object "matchLabels" (gr8s::core-object "app" "t"))
-                                                   "template" (gr8s::core-object "metadata" (gr8s::core-object "labels" (gr8s::core-object "app" "t"))
+                                (gr8s.resources::core-object "selector" (gr8s.resources::core-object "matchLabels" (gr8s.resources::core-object "app" "t"))
+                                                   "template" (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "labels" (gr8s.resources::core-object "app" "t"))
                                                                                  "spec" (minimal-pod-spec)))))
          (first resource)))
       (check-template-defaults
-       (template-spec (create "jobs" "Job" (gr8s::core-object "template" (gr8s::core-object "spec" (minimal-pod-spec "Never")))))
+       (template-spec (create "jobs" "Job" (gr8s.resources::core-object "template" (gr8s.resources::core-object "spec" (minimal-pod-spec "Never")))))
        "jobs")
       (check-template-defaults
        (template-spec (create "cronjobs" "CronJob"
-                              (gr8s::core-object "schedule" "*/5 * * * *"
-                                                 "jobTemplate" (gr8s::core-object "spec" (gr8s::core-object "template" (gr8s::core-object "spec" (minimal-pod-spec "Never"))))))
+                              (gr8s.resources::core-object "schedule" "*/5 * * * *"
+                                                 "jobTemplate" (gr8s.resources::core-object "spec" (gr8s.resources::core-object "template" (gr8s.resources::core-object "spec" (minimal-pod-spec "Never"))))))
                       "jobTemplate" "spec")
        "cronjobs"))))
 
@@ -61,23 +61,23 @@
   (with-temporary-store (store path)
     (values path)
     (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime)))
-      (gr8s::create-core-resource store "deployments" (workload-fixture "Deployment" "web" 2) "alpha")
+      (gr8s.resources::create-core-resource store "deployments" (workload-fixture "Deployment" "web" 2) "alpha")
       (run-workload-passes reconciler)
       (mark-workload-pods-ready store runtime)
       (run-workload-passes reconciler)
       (let ((pods (mapcar #'pod-uid (list-pods store "alpha")))
-            (set (gethash "name" (gethash "metadata" (first (gr8s::list-core-resources store "replicasets" "alpha"))))))
+            (set (gethash "name" (gethash "metadata" (first (gr8s.resources::list-core-resources store "replicasets" "alpha"))))))
         (is (= 2 (length pods)))
         ;; As an older gr8s stored them.
-        (strip-template-defaults (template-spec (gr8s::get-core-resource-unlocked store "deployments" "alpha" "web")))
-        (strip-template-defaults (template-spec (gr8s::get-core-resource-unlocked store "replicasets" "alpha" set)))
+        (strip-template-defaults (template-spec (gr8s.resources::get-core-resource-unlocked store "deployments" "alpha" "web")))
+        (strip-template-defaults (template-spec (gr8s.resources::get-core-resource-unlocked store "replicasets" "alpha" set)))
         ;; Its next write stores the defaults; that is not a new template.
-        (gr8s::update-core-resource store "deployments" "alpha" "web"
-          (lambda (object) (setf (gethash "annotations" (gethash "metadata" object)) (gr8s::core-object "touched" "yes")) object))
-        (is (equal "IfNotPresent" (gethash "imagePullPolicy" (aref (gethash "containers" (template-spec (gr8s::get-core-resource store "deployments" "alpha" "web"))) 0))))
+        (gr8s.resources::update-core-resource store "deployments" "alpha" "web"
+          (lambda (object) (setf (gethash "annotations" (gethash "metadata" object)) (gr8s.resources::core-object "touched" "yes")) object))
+        (is (equal "IfNotPresent" (gethash "imagePullPolicy" (aref (gethash "containers" (template-spec (gr8s.resources::get-core-resource store "deployments" "alpha" "web"))) 0))))
         (run-workload-passes reconciler)
         (is (equal (list set) (mapcar (lambda (object) (gethash "name" (gethash "metadata" object)))
-                                      (gr8s::list-core-resources store "replicasets" "alpha"))))
+                                      (gr8s.resources::list-core-resources store "replicasets" "alpha"))))
         (is (equal (sort (copy-list pods) #'string<) (sort (mapcar #'pod-uid (list-pods store "alpha")) #'string<)))))))
 
 (test a-daemonset-gaining-template-defaults-keeps-its-revision
@@ -85,32 +85,32 @@
     (values path)
     (register-test-nodes store "node-a")
     (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime)))
-      (gr8s::create-core-resource store "daemonsets" (daemonset-fixture "ds") "alpha")
+      (gr8s.resources::create-core-resource store "daemonsets" (daemonset-fixture "ds") "alpha")
       (run-workload-passes reconciler)
       (mark-all-pods-ready store runtime "alpha")
       (run-workload-passes reconciler)
       (let ((pods (mapcar #'pod-uid (live-pods store "alpha")))
-            (revision (first (gr8s::list-core-resources store "controllerrevisions" "alpha"))))
+            (revision (first (gr8s.resources::list-core-resources store "controllerrevisions" "alpha"))))
         (is (= 1 (length pods)))
-        (strip-template-defaults (template-spec (gr8s::get-core-resource-unlocked store "daemonsets" "alpha" "ds")))
+        (strip-template-defaults (template-spec (gr8s.resources::get-core-resource-unlocked store "daemonsets" "alpha" "ds")))
         (strip-template-defaults
-         (gethash "spec" (gethash "template" (gethash "spec" (gethash "data" (gr8s::get-core-resource-unlocked
+         (gethash "spec" (gethash "template" (gethash "spec" (gethash "data" (gr8s.resources::get-core-resource-unlocked
                                                                               store "controllerrevisions" "alpha"
                                                                               (gethash "name" (gethash "metadata" revision))))))))
-        (gr8s::update-core-resource store "daemonsets" "alpha" "ds"
-          (lambda (object) (setf (gethash "annotations" (gethash "metadata" object)) (gr8s::core-object "touched" "yes")) object))
+        (gr8s.resources::update-core-resource store "daemonsets" "alpha" "ds"
+          (lambda (object) (setf (gethash "annotations" (gethash "metadata" object)) (gr8s.resources::core-object "touched" "yes")) object))
         (run-workload-passes reconciler)
-        (is (= 1 (length (gr8s::list-core-resources store "controllerrevisions" "alpha"))))
+        (is (= 1 (length (gr8s.resources::list-core-resources store "controllerrevisions" "alpha"))))
         (is (equal pods (mapcar #'pod-uid (live-pods store "alpha"))))))))
 
 (test a-job-gaining-template-defaults-is-not-a-template-change
   (with-temporary-store (store path)
     (values path)
-    (gr8s::create-core-resource
-     store "jobs" (gr8s::core-object "apiVersion" "batch/v1" "kind" "Job" "metadata" (gr8s::core-object "name" "j")
-                                     "spec" (gr8s::core-object "template" (gr8s::core-object "spec" (minimal-pod-spec "Never"))))
+    (gr8s.resources::create-core-resource
+     store "jobs" (gr8s.resources::core-object "apiVersion" "batch/v1" "kind" "Job" "metadata" (gr8s.resources::core-object "name" "j")
+                                     "spec" (gr8s.resources::core-object "template" (gr8s.resources::core-object "spec" (minimal-pod-spec "Never"))))
      "alpha")
-    (strip-template-defaults (template-spec (gr8s::get-core-resource-unlocked store "jobs" "alpha" "j")))
+    (strip-template-defaults (template-spec (gr8s.resources::get-core-resource-unlocked store "jobs" "alpha" "j")))
     (finishes
-      (gr8s::update-core-resource store "jobs" "alpha" "j"
-        (lambda (object) (setf (gethash "annotations" (gethash "metadata" object)) (gr8s::core-object "touched" "yes")) object)))))
+      (gr8s.resources::update-core-resource store "jobs" "alpha" "j"
+        (lambda (object) (setf (gethash "annotations" (gethash "metadata" object)) (gr8s.resources::core-object "touched" "yes")) object)))))

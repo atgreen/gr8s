@@ -16,35 +16,35 @@
 (test gateway-backend-resolver-maps-the-route-port-to-a-service-port
   (with-temporary-store (store directory)
     (values directory)
-    (gr8s::create-core-resource
+    (gr8s.resources::create-core-resource
      store "services"
-     (gr8s::core-object
-      "metadata" (gr8s::core-object "name" "web")
-      "spec" (gr8s::core-object
+     (gr8s.resources::core-object
+      "metadata" (gr8s.resources::core-object "name" "web")
+      "spec" (gr8s.resources::core-object
               "clusterIP" "10.96.0.40"
-              "ports" (vector (gr8s::core-object "name" "http" "port" 80
+              "ports" (vector (gr8s.resources::core-object "name" "http" "port" 80
                                                   "targetPort" 8080))))
      "default")
-    (gr8s::create-core-resource
+    (gr8s.resources::create-core-resource
      store "endpointslices"
-     (gr8s::core-object
-      "metadata" (gr8s::core-object
+     (gr8s.resources::core-object
+      "metadata" (gr8s.resources::core-object
                   "name" "web-a"
-                  "labels" (gr8s::core-object "kubernetes.io/service-name" "web"))
+                  "labels" (gr8s.resources::core-object "kubernetes.io/service-name" "web"))
       "addressType" "IPv4"
-      "ports" (vector (gr8s::core-object "name" "http" "port" 8080 "protocol" "TCP"))
-      "endpoints" (vector (gr8s::core-object
+      "ports" (vector (gr8s.resources::core-object "name" "http" "port" 8080 "protocol" "TCP"))
+      "endpoints" (vector (gr8s.resources::core-object
                            "addresses" (vector "10.80.0.8")
-                           "conditions" (gr8s::core-object "ready" t))))
+                           "conditions" (gr8s.resources::core-object "ready" t))))
      "default")
     (multiple-value-bind (address port)
-        (funcall (gr8s::make-service-backend-resolver store)
-                 (gr8s::make-gw-backend :name "web" :namespace "default" :port 80))
+        (funcall (gr8s.controllers::make-service-backend-resolver store)
+                 (gr8s.controllers::make-gw-backend :name "web" :namespace "default" :port 80))
       (is (equal "10.80.0.8" address))
       (is (= 8080 port)))
     (multiple-value-bind (address port)
-        (funcall (gr8s::make-service-backend-resolver store)
-                 (gr8s::make-gw-backend :name "web" :namespace "default" :port "http"))
+        (funcall (gr8s.controllers::make-service-backend-resolver store)
+                 (gr8s.controllers::make-gw-backend :name "web" :namespace "default" :port "http"))
       (is (equal "10.80.0.8" address))
       (is (= 8080 port)))))
 
@@ -116,21 +116,21 @@
                                                     :address "127.0.0.1" :port 0)))
          (backend-port (hunchentoot:acceptor-port backend))
          (routes (list
-                  (gr8s::make-gw-route
+                  (gr8s.controllers::make-gw-route
                    :namespace "default" :hostnames '("app.example.com")
-                   :rules (list (gr8s::make-gw-rule
-                                 :matches (list (gr8s::make-gw-match :path-type :prefix :path "/"))
-                                 :backends (list (gr8s::make-gw-backend :name "echo" :port backend-port)))))
-                  (gr8s::make-gw-route
+                   :rules (list (gr8s.controllers::make-gw-rule
+                                 :matches (list (gr8s.controllers::make-gw-match :path-type :prefix :path "/"))
+                                 :backends (list (gr8s.controllers::make-gw-backend :name "echo" :port backend-port)))))
+                  (gr8s.controllers::make-gw-route
                    :namespace "default" :hostnames '("fail.example.com")
-                   :rules (list (gr8s::make-gw-rule
-                                 :matches (list (gr8s::make-gw-match :path-type :prefix :path "/"))
-                                 :backends (list (gr8s::make-gw-backend :name "missing" :port 1)))))))
-         (router (gr8s::compile-gateway-router routes))
+                   :rules (list (gr8s.controllers::make-gw-rule
+                                 :matches (list (gr8s.controllers::make-gw-match :path-type :prefix :path "/"))
+                                 :backends (list (gr8s.controllers::make-gw-backend :name "missing" :port 1)))))))
+         (router (gr8s.controllers::compile-gateway-router routes))
          (resolver (lambda (backend)
-                     (when (equal (gr8s::gw-backend-name backend) "echo")
+                     (when (equal (gr8s.controllers::gw-backend-name backend) "echo")
                        (values "127.0.0.1" backend-port))))
-         (gateway (gr8s::start-gateway-listener :port 0
+         (gateway (gr8s.controllers::start-gateway-listener :port 0
                                                 :router router :resolver resolver :name "test"))
          (listener-port (hunchentoot:acceptor-port gateway)))
     (unwind-protect
@@ -148,89 +148,89 @@
            (is (= 404 (gw-raw-request listener-port "nope.org" "/x")))
            (is (null *gw-backend-last*))
            (is (= 503 (gw-raw-request listener-port "fail.example.com" "/y"))))
-      (gr8s::stop-gateway-listener gateway)
+      (gr8s.controllers::stop-gateway-listener gateway)
       (hunchentoot:stop backend))))
 
 (test gateway-rate-limiter-admits-then-throttles
   ;; Unit-level token bucket: capacity = rps, starts full; rapid calls drain it.
-  (let ((gr8s::*gateway-rate-buckets* (make-hash-table :test 'equal)))
-    (is (gr8s::gateway-rate-allow-p "ns/r" 1))        ; first token
-    (is (not (gr8s::gateway-rate-allow-p "ns/r" 1)))  ; drained, throttled
+  (let ((gr8s.controllers::*gateway-rate-buckets* (make-hash-table :test 'equal)))
+    (is (gr8s.controllers::gateway-rate-allow-p "ns/r" 1))        ; first token
+    (is (not (gr8s.controllers::gateway-rate-allow-p "ns/r" 1)))  ; drained, throttled
     ;; A different route has its own bucket.
-    (is (gr8s::gateway-rate-allow-p "ns/other" 1))))
+    (is (gr8s.controllers::gateway-rate-allow-p "ns/other" 1))))
 
 (test gateway-proxy-rate-limits-and-counts-metrics
   (let* ((backend (hunchentoot:start (make-instance 'gw-echo-acceptor
                                                     :address "127.0.0.1" :port 0)))
          (backend-port (hunchentoot:acceptor-port backend))
-         (routes (list (gr8s::make-gw-route
+         (routes (list (gr8s.controllers::make-gw-route
                         :namespace "default" :name "rl" :rate-limit 1 :hostnames '("rl.test")
-                        :rules (list (gr8s::make-gw-rule
-                                      :matches (list (gr8s::make-gw-match :path-type :prefix :path "/"))
-                                      :backends (list (gr8s::make-gw-backend :name "echo" :port backend-port)))))))
-         (router (gr8s::compile-gateway-router routes))
+                        :rules (list (gr8s.controllers::make-gw-rule
+                                      :matches (list (gr8s.controllers::make-gw-match :path-type :prefix :path "/"))
+                                      :backends (list (gr8s.controllers::make-gw-backend :name "echo" :port backend-port)))))))
+         (router (gr8s.controllers::compile-gateway-router routes))
          (resolver (lambda (b) (declare (ignore b)) (values "127.0.0.1" backend-port)))
-         (gateway (gr8s::start-gateway-listener :port 0
+         (gateway (gr8s.controllers::start-gateway-listener :port 0
                                                 :router router :resolver resolver :name "rl-gw"))
          (listener-port (hunchentoot:acceptor-port gateway)))
     ;; The acceptor handles requests on its own thread, so dynamic rebinding would
     ;; not reach it; clear the process-global tables instead.
-    (clrhash gr8s::*gateway-rate-buckets*)
-    (clrhash gr8s::*gateway-request-counts*)
+    (clrhash gr8s.controllers::*gateway-rate-buckets*)
+    (clrhash gr8s.controllers::*gateway-request-counts*)
     (unwind-protect
          (progn
            ;; First request passes to the backend; the immediate second is throttled.
            (is (= 200 (gw-raw-request listener-port "rl.test" "/a")))
            (is (= 429 (gw-raw-request listener-port "rl.test" "/a")))
            ;; Metrics recorded both outcomes for this route.
-           (let ((text (gr8s::gateway-metrics-text)))
+           (let ((text (gr8s.controllers::gateway-metrics-text)))
              (is (search "gr8s_gateway_requests_total" text))
              (is (search "route=\"default/rl\"" text))
              (is (search "code=\"200\"" text))
              (is (search "code=\"429\"" text))))
-      (gr8s::stop-gateway-listener gateway)
+      (gr8s.controllers::stop-gateway-listener gateway)
       (hunchentoot:stop backend))))
 
 (test gateway-proxy-applies-http-filters
   (let* ((backend (hunchentoot:start (make-instance 'gw-echo-acceptor
                                                     :address "127.0.0.1" :port 0)))
          (backend-port (hunchentoot:acceptor-port backend))
-         (echo (gr8s::make-gw-backend :name "echo" :port backend-port))
+         (echo (gr8s.controllers::make-gw-backend :name "echo" :port backend-port))
          (routes (list
                   ;; Header modifiers: set a request header the backend should see,
                   ;; and a response header the client should see.
-                  (gr8s::make-gw-route
+                  (gr8s.controllers::make-gw-route
                    :namespace "default" :hostnames '("hdr.test")
-                   :rules (list (gr8s::make-gw-rule
-                                 :matches (list (gr8s::make-gw-match :path-type :prefix :path "/"))
-                                 :filters (list (gr8s::make-gw-filter
+                   :rules (list (gr8s.controllers::make-gw-rule
+                                 :matches (list (gr8s.controllers::make-gw-match :path-type :prefix :path "/"))
+                                 :filters (list (gr8s.controllers::make-gw-filter
                                                  :type :request-headers
                                                  :data (list :set '(("x-test" . "injected")) :add nil :remove nil))
-                                                (gr8s::make-gw-filter
+                                                (gr8s.controllers::make-gw-filter
                                                  :type :response-headers
                                                  :data (list :set '(("x-resp" . "added")) :add nil :remove nil)))
                                  :backends (list echo))))
                   ;; URL rewrite: ReplacePrefixMatch /api -> /.
-                  (gr8s::make-gw-route
+                  (gr8s.controllers::make-gw-route
                    :namespace "default" :hostnames '("rw.test")
-                   :rules (list (gr8s::make-gw-rule
-                                 :matches (list (gr8s::make-gw-match :path-type :prefix :path "/api"))
-                                 :filters (list (gr8s::make-gw-filter
+                   :rules (list (gr8s.controllers::make-gw-rule
+                                 :matches (list (gr8s.controllers::make-gw-match :path-type :prefix :path "/api"))
+                                 :filters (list (gr8s.controllers::make-gw-filter
                                                  :type :rewrite
                                                  :data (list :hostname nil :path (list :type :prefix :value "/"))))
                                  :backends (list echo))))
                   ;; Request redirect: short-circuit to https, 301, no backend.
-                  (gr8s::make-gw-route
+                  (gr8s.controllers::make-gw-route
                    :namespace "default" :hostnames '("redir.test")
-                   :rules (list (gr8s::make-gw-rule
-                                 :matches (list (gr8s::make-gw-match :path-type :prefix :path "/"))
-                                 :filters (list (gr8s::make-gw-filter
+                   :rules (list (gr8s.controllers::make-gw-rule
+                                 :matches (list (gr8s.controllers::make-gw-match :path-type :prefix :path "/"))
+                                 :filters (list (gr8s.controllers::make-gw-filter
                                                  :type :redirect
                                                  :data (list :scheme "https" :status-code 301
                                                              :hostname nil :port nil :path nil))))))))
-         (router (gr8s::compile-gateway-router routes))
+         (router (gr8s.controllers::compile-gateway-router routes))
          (resolver (lambda (b) (declare (ignore b)) (values "127.0.0.1" backend-port)))
-         (gateway (gr8s::start-gateway-listener :port 0
+         (gateway (gr8s.controllers::start-gateway-listener :port 0
                                                 :router router :resolver resolver :name "filters"))
          (listener-port (hunchentoot:acceptor-port gateway)))
     (unwind-protect
@@ -255,5 +255,5 @@
              (is (= 301 code))
              (is (equal "https://redir.test/page" (gw-header headers "location")))
              (is (null *gw-backend-last*))))
-      (gr8s::stop-gateway-listener gateway)
+      (gr8s.controllers::stop-gateway-listener gateway)
       (hunchentoot:stop backend))))

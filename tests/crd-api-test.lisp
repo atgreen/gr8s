@@ -11,24 +11,24 @@
 
 (defun crd-fixture (&key (group "widgets.example.test") (plural "widgets") (kind "Widget") (scope "Namespaced") (versions '("v1")))
   "Build an executable structural definition with a genuine status subresource."
-  (gr8s::core-object "apiVersion" "apiextensions.k8s.io/v1" "kind" "CustomResourceDefinition"
-    "metadata" (gr8s::core-object "name" (format nil "~A.~A" plural group))
-    "spec" (gr8s::core-object "group" group "names" (gr8s::core-object "plural" plural "kind" kind)
+  (gr8s.resources::core-object "apiVersion" "apiextensions.k8s.io/v1" "kind" "CustomResourceDefinition"
+    "metadata" (gr8s.resources::core-object "name" (format nil "~A.~A" plural group))
+    "spec" (gr8s.resources::core-object "group" group "names" (gr8s.resources::core-object "plural" plural "kind" kind)
       "scope" scope "versions"
       (coerce (loop for version in versions for index from 0 collect
-                   (gr8s::core-object "name" version "served" t "storage" (zerop index)
-                     "subresources" (gr8s::core-object "status" (gr8s::core-object))
-                     "schema" (gr8s::core-object "openAPIV3Schema"
-                       (gr8s::core-object "type" "object" "properties"
-                         (gr8s::core-object "spec" (gr8s::core-object "type" "object" "properties"
-                           (gr8s::core-object "count" (gr8s::core-object "type" "integer" "minimum" 1 "default" 2)))
-                           "status" (gr8s::core-object "type" "object" "properties"
-                             (gr8s::core-object "ready" (gr8s::core-object "type" "boolean")))))))) 'vector))))
+                   (gr8s.resources::core-object "name" version "served" t "storage" (zerop index)
+                     "subresources" (gr8s.resources::core-object "status" (gr8s.resources::core-object))
+                     "schema" (gr8s.resources::core-object "openAPIV3Schema"
+                       (gr8s.resources::core-object "type" "object" "properties"
+                         (gr8s.resources::core-object "spec" (gr8s.resources::core-object "type" "object" "properties"
+                           (gr8s.resources::core-object "count" (gr8s.resources::core-object "type" "integer" "minimum" 1 "default" 2)))
+                           "status" (gr8s.resources::core-object "type" "object" "properties"
+                             (gr8s.resources::core-object "ready" (gr8s.resources::core-object "type" "boolean")))))))) 'vector))))
 
 (defun crd-instance (&optional (name "one") (group "widgets.example.test") (kind "Widget") (version "v1"))
   "Build a real custom object with an empty spec that receives declared defaults."
-  (gr8s::core-object "apiVersion" (format nil "~A/~A" group version) "kind" kind
-                    "metadata" (gr8s::core-object "name" name) "spec" (gr8s::core-object)))
+  (gr8s.resources::core-object "apiVersion" (format nil "~A/~A" group version) "kind" kind
+                    "metadata" (gr8s.resources::core-object "name" name) "spec" (gr8s.resources::core-object)))
 
 (defvar *crd-api-port* nil "The kernel-assigned port of the current WITH-CRD-API server.")
 
@@ -66,19 +66,19 @@
       (let ((input (crd-instance)))
         (setf (gethash "unknown" input) t
               (gethash "extra" (gethash "spec" input)) t
-              (gethash "status" input) (gr8s::core-object "ready" t))
+              (gethash "status" input) (gr8s.resources::core-object "ready" t))
         (let ((object (crd-api-request 201 collection :method :post :object input)))
           (is (= 2 (gethash "count" (gethash "spec" object))))
           (is (null (gethash "unknown" object)))
           (is (null (gethash "extra" (gethash "spec" object))))
           (is (null (gethash "status" object)))
-          (setf (gethash "status" object) (gr8s::core-object "ready" t)
+          (setf (gethash "status" object) (gr8s.resources::core-object "ready" t)
                 (gethash "count" (gethash "spec" object)) 999)
           (let ((updated (crd-api-request 200 (concatenate 'string item "/status") :method :put :object object)))
             (is (= 2 (gethash "count" (gethash "spec" updated))))
             (is-true (gethash "ready" (gethash "status" updated))))
           (crd-api-request 409 (concatenate 'string item "/status") :method :put :object object)))
-      (crd-api-request 422 item :method :patch :content-type "application/merge-patch+json" :object (gr8s::core-object "spec" (gr8s::core-object "count" 0)))
+      (crd-api-request 422 item :method :patch :content-type "application/merge-patch+json" :object (gr8s.resources::core-object "spec" (gr8s.resources::core-object "count" 0)))
       (crd-api-request 404 "/apis/widgets.example.test/v1/namespaces/beta/widgets/one")
       (is (= 1 (length (gethash "items" (crd-api-request 200 "/apis/widgets.example.test/v1/widgets")))))
       (crd-api-request 200 item :method :delete)
@@ -87,18 +87,18 @@
 (test custom-identities-survive-restart-with-group-and-builtin-collisions
   (with-temporary-store (store path)
     (dolist (group '("first.example.test" "second.example.test"))
-      (gr8s::create-core-resource store "customresourcedefinitions" (crd-fixture :group group :plural "configmaps" :kind "ConfigMap") nil)
+      (gr8s.resources::create-core-resource store "customresourcedefinitions" (crd-fixture :group group :plural "configmaps" :kind "ConfigMap") nil)
       (let* ((*package* (find-package :gr8s/tests))
-             (gr8s::*stored-resource-types* (append gr8s::*stored-resource-types* (gr8s::crd-resource-types store))))
-        (gr8s::create-core-resource store (format nil "custom:~A/configmaps" group) (crd-instance "same" group "ConfigMap") "alpha")))
-    (gr8s::create-core-resource store "configmaps" (gr8s::core-object "metadata" (gr8s::core-object "name" "same") "data" (gr8s::core-object "builtin" "true")) "alpha")
+             (gr8s.resources::*stored-resource-types* (append gr8s.resources::*stored-resource-types* (gr8s.resources::crd-resource-types store))))
+        (gr8s.resources::create-core-resource store (format nil "custom:~A/configmaps" group) (crd-instance "same" group "ConfigMap") "alpha")))
+    (gr8s.resources::create-core-resource store "configmaps" (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "same") "data" (gr8s.resources::core-object "builtin" "true")) "alpha")
     (let* ((loaded (open-store path))
-           (gr8s::*stored-resource-types* (append gr8s::*stored-resource-types* (gr8s::crd-resource-types loaded))))
+           (gr8s.resources::*stored-resource-types* (append gr8s.resources::*stored-resource-types* (gr8s.resources::crd-resource-types loaded))))
       (dolist (group '("first.example.test" "second.example.test"))
-        (let ((object (gr8s::get-core-resource loaded (format nil "custom:~A/configmaps" group) "alpha" "same")))
+        (let ((object (gr8s.resources::get-core-resource loaded (format nil "custom:~A/configmaps" group) "alpha" "same")))
           (is (equal (format nil "~A/v1" group) (gethash "apiVersion" object)))
           (is (= 2 (gethash "count" (gethash "spec" object))))))
-      (is (equal "true" (gethash "builtin" (gethash "data" (gr8s::get-core-resource loaded "configmaps" "alpha" "same"))))))))
+      (is (equal "true" (gethash "builtin" (gethash "data" (gr8s.resources::get-core-resource loaded "configmaps" "alpha" "same"))))))))
 
 (test custom-version-none-conversion-shares-uid-and-status-generation
   (with-crd-api (store path)
@@ -111,45 +111,45 @@
       (is (equal "widgets.example.test/v2" (gethash "apiVersion" created)))
       (is (equal "widgets.example.test/v1" (gethash "apiVersion" read)))
       (is (equal (gethash "uid" (gethash "metadata" created)) (gethash "uid" (gethash "metadata" read))))
-      (let ((patched (crd-api-request 200 v2 :method :patch :content-type "application/merge-patch+json" :object (gr8s::core-object "spec" (gr8s::core-object "count" 3)))))
+      (let ((patched (crd-api-request 200 v2 :method :patch :content-type "application/merge-patch+json" :object (gr8s.resources::core-object "spec" (gr8s.resources::core-object "count" 3)))))
         (is (= 2 (gethash "generation" (gethash "metadata" patched)))))
       (is (= 3 (gethash "count" (gethash "spec" (crd-api-request 200 v1))))))))
 
 (test crd-deletion-resumes-real-instance-cleanup-after-restart
   (with-temporary-store (store path)
-    (let* ((definition (gr8s::create-core-resource store "customresourcedefinitions" (crd-fixture) nil))
-           (resource (gr8s::crd-custom-key definition))
-           (gr8s::*stored-resource-types* (append gr8s::*stored-resource-types* (gr8s::crd-resource-types store)))
+    (let* ((definition (gr8s.resources::create-core-resource store "customresourcedefinitions" (crd-fixture) nil))
+           (resource (gr8s.resources::crd-custom-key definition))
+           (gr8s.resources::*stored-resource-types* (append gr8s.resources::*stored-resource-types* (gr8s.resources::crd-resource-types store)))
            (input (crd-instance)))
       (setf (gethash "finalizers" (gethash "metadata" input)) #("example.test/cleanup"))
-      (gr8s::create-core-resource store resource input "alpha")
-      (gr8s::delete-core-resource store "customresourcedefinitions" nil "widgets.widgets.example.test")
+      (gr8s.resources::create-core-resource store resource input "alpha")
+      (gr8s.resources::delete-core-resource store "customresourcedefinitions" nil "widgets.widgets.example.test")
       (let* ((loaded (open-store path))
-             (metadata (gethash "metadata" (gr8s::get-core-resource loaded resource "alpha" "one"))))
+             (metadata (gethash "metadata" (gr8s.resources::get-core-resource loaded resource "alpha" "one"))))
         (is-true (gethash "deletionTimestamp" metadata))
-        (is-true (gethash "deletionTimestamp" (gethash "metadata" (gr8s::get-core-resource loaded "customresourcedefinitions" nil "widgets.widgets.example.test"))))
-        (gr8s::reconcile-crd-deletions loaded)
-        (is (= 1 (length (gr8s::list-core-resources loaded resource "alpha"))))
-        (gr8s::update-core-resource loaded resource "alpha" "one"
+        (is-true (gethash "deletionTimestamp" (gethash "metadata" (gr8s.resources::get-core-resource loaded "customresourcedefinitions" nil "widgets.widgets.example.test"))))
+        (gr8s.resources::reconcile-crd-deletions loaded)
+        (is (= 1 (length (gr8s.resources::list-core-resources loaded resource "alpha"))))
+        (gr8s.resources::update-core-resource loaded resource "alpha" "one"
           (lambda (object) (setf (gethash "finalizers" (gethash "metadata" object)) #()) object))
-        (gr8s::reconcile-crd-deletions loaded)
-        (signals kubernetes-error (gr8s::get-core-resource loaded "customresourcedefinitions" nil "widgets.widgets.example.test"))
-        (is (null (gr8s::crd-resource-types loaded)))))))
+        (gr8s.resources::reconcile-crd-deletions loaded)
+        (signals kubernetes-error (gr8s.resources::get-core-resource loaded "customresourcedefinitions" nil "widgets.widgets.example.test"))
+        (is (null (gr8s.resources::crd-resource-types loaded)))))))
 
 (test custom-watch-journal-and-failed-crd-checkpoint-preserve-real-state
   (with-temporary-store (store path)
-    (gr8s::create-core-resource store "customresourcedefinitions" (crd-fixture) nil)
+    (gr8s.resources::create-core-resource store "customresourcedefinitions" (crd-fixture) nil)
     (let* ((resource "custom:widgets.example.test/widgets")
-           (gr8s::*stored-resource-types* (append gr8s::*stored-resource-types* (gr8s::crd-resource-types store)))
-           (revision (gr8s::pod-store-resource-revision store)))
-      (gr8s::create-core-resource store resource (crd-instance) "alpha")
-      (let ((events (gr8s::template-watch-events store "alpha" "" "" revision :resource resource)))
+           (gr8s.resources::*stored-resource-types* (append gr8s.resources::*stored-resource-types* (gr8s.resources::crd-resource-types store)))
+           (revision (gr8s.store::pod-store-resource-revision store)))
+      (gr8s.resources::create-core-resource store resource (crd-instance) "alpha")
+      (let ((events (gr8s.apiserver::template-watch-events store "alpha" "" "" revision :resource resource)))
         (is (equal "ADDED" (gethash "type" (first events)))))
       (with-failing-core-writes ("injected storage failure")
-        (signals error (gr8s::delete-core-resource store "customresourcedefinitions" nil "widgets.widgets.example.test")))
+        (signals error (gr8s.resources::delete-core-resource store "customresourcedefinitions" nil "widgets.widgets.example.test")))
       (dolist (current (list store (open-store path)))
-        (is (= 1 (length (gr8s::list-core-resources current resource "alpha"))))
-        (is (null (gethash "deletionTimestamp" (gethash "metadata" (gr8s::get-core-resource current "customresourcedefinitions" nil "widgets.widgets.example.test")))))))))
+        (is (= 1 (length (gr8s.resources::list-core-resources current resource "alpha"))))
+        (is (null (gethash "deletionTimestamp" (gethash "metadata" (gr8s.resources::get-core-resource current "customresourcedefinitions" nil "widgets.widgets.example.test")))))))))
 
 (test custom-strict-field-validation-is-executable-and-published
   (with-crd-api (store path)
@@ -161,7 +161,7 @@
       (crd-api-request 400 collection :method :post :object input :parameters '(("fieldValidation" . "Strict")))
       (crd-api-request 201 collection :method :post :object input :parameters '(("fieldValidation" . "Warn")))
       (crd-api-request 400 (concatenate 'string collection "/one") :method :patch :content-type "application/merge-patch+json"
-                       :object (gr8s::core-object "metadata" (gr8s::core-object "unknown" t)) :parameters '(("fieldValidation" . "Strict")))
+                       :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "unknown" t)) :parameters '(("fieldValidation" . "Strict")))
       (crd-api-request 400 collection :method :post :parameters '(("fieldValidation" . "Strict"))
                        :text "{\"apiVersion\":\"widgets.example.test/v1\",\"kind\":\"Widget\",\"metadata\":{\"name\":\"duplicate\"},\"spec\":{\"count\":2,\"count\":3}}")
       (let* ((document (crd-api-request 200 "/openapi/v3/apis/widgets.example.test/v1"))
@@ -188,7 +188,7 @@
         (crd-api-request 422 status-url :method :put :object status))
       (crd-api-request 200 "/apis/widgets.example.test/v2/namespaces/alpha/widgets/one"
                        :method :patch :content-type "application/merge-patch+json"
-                       :object (gr8s::core-object "spec" (gr8s::core-object "count" 3)))
+                       :object (gr8s.resources::core-object "spec" (gr8s.resources::core-object "count" 3)))
       (let ((status (crd-api-request 200 status-url)))
         (setf (gethash "storedVersions" (gethash "status" status)) #("v2")
               (gethash "group" (gethash "spec" status)) "must-not-change.example.test")
@@ -200,7 +200,7 @@
         (crd-api-request 200 item :method :put :object current))
       (crd-api-request 404 "/apis/widgets.example.test/v1/namespaces/alpha/widgets/one")
       (is (equal "widgets.example.test/v2"
-                 (gethash "apiVersion" (gr8s::get-core-resource store "custom:widgets.example.test/widgets" "alpha" "one")))))))
+                 (gethash "apiVersion" (gr8s.resources::get-core-resource store "custom:widgets.example.test/widgets" "alpha" "one")))))))
 
 (test crd-status-cannot-claim-inert-establishment-and-collection-deletion-cleans-instances
   (with-crd-api (store path)
@@ -208,7 +208,7 @@
     (let* ((base "/apis/apiextensions.k8s.io/v1/customresourcedefinitions")
            (item (concatenate 'string base "/widgets.widgets.example.test"))
            (definition (crd-fixture)))
-      (setf (gethash "labels" (gethash "metadata" definition)) (gr8s::core-object "cleanup" "selected"))
+      (setf (gethash "labels" (gethash "metadata" definition)) (gr8s.resources::core-object "cleanup" "selected"))
       (crd-api-request 201 base :method :post :object definition)
       (crd-api-request 201 base :method :post :object (crd-fixture :group "other.example.test"))
       (crd-api-request 201 "/apis/widgets.example.test/v1/namespaces/alpha/widgets" :method :post :object (crd-instance))
@@ -225,28 +225,28 @@
 (test custom-gc-resolves-non-storage-owner-versions-and-exact-uids
   (with-temporary-store (store path)
     (values path)
-    (gr8s::create-core-resource store "customresourcedefinitions" (crd-fixture :versions '("v1" "v2")) nil)
-    (let* ((gr8s::*stored-resource-types* (append gr8s::*stored-resource-types* (gr8s::crd-resource-types store)))
+    (gr8s.resources::create-core-resource store "customresourcedefinitions" (crd-fixture :versions '("v1" "v2")) nil)
+    (let* ((gr8s.resources::*stored-resource-types* (append gr8s.resources::*stored-resource-types* (gr8s.resources::crd-resource-types store)))
            (resource "custom:widgets.example.test/widgets")
-           (owner (gr8s::create-core-resource store resource (crd-instance "owner") "alpha"))
+           (owner (gr8s.resources::create-core-resource store resource (crd-instance "owner") "alpha"))
            (child (crd-instance "child")))
       (setf (gethash "ownerReferences" (gethash "metadata" child))
-            (vector (gr8s::core-object "apiVersion" "widgets.example.test/v2" "kind" "Widget" "name" "owner"
+            (vector (gr8s.resources::core-object "apiVersion" "widgets.example.test/v2" "kind" "Widget" "name" "owner"
                                      "uid" (gethash "uid" (gethash "metadata" owner)))))
-      (gr8s::create-core-resource store resource child "alpha")
-      (gr8s::collect-orphaned-custom-resources store)
-      (is (= 2 (length (gr8s::list-core-resources store resource "alpha"))))
-      (gr8s::delete-core-resource store resource "alpha" "owner")
-      (gr8s::create-core-resource store resource (crd-instance "owner") "alpha")
-      (gr8s::collect-orphaned-custom-resources store)
-      (signals kubernetes-error (gr8s::get-core-resource store resource "alpha" "child"))
-      (is (= 1 (length (gr8s::list-core-resources store resource "alpha")))))))
+      (gr8s.resources::create-core-resource store resource child "alpha")
+      (gr8s.controllers::collect-orphaned-custom-resources store)
+      (is (= 2 (length (gr8s.resources::list-core-resources store resource "alpha"))))
+      (gr8s.resources::delete-core-resource store resource "alpha" "owner")
+      (gr8s.resources::create-core-resource store resource (crd-instance "owner") "alpha")
+      (gr8s.controllers::collect-orphaned-custom-resources store)
+      (signals kubernetes-error (gr8s.resources::get-core-resource store resource "alpha" "child"))
+      (is (= 1 (length (gr8s.resources::list-core-resources store resource "alpha")))))))
 
 (defun crd-test-owned-instance (name owner)
   "Build a custom object NAME with a blocking reference to custom object OWNER."
   (let ((child (crd-instance name)))
     (setf (gethash "ownerReferences" (gethash "metadata" child))
-          (vector (gr8s::core-object "apiVersion" "widgets.example.test/v1" "kind" "Widget"
+          (vector (gr8s.resources::core-object "apiVersion" "widgets.example.test/v1" "kind" "Widget"
                                      "name" (gethash "name" (gethash "metadata" owner))
                                      "uid" (gethash "uid" (gethash "metadata" owner))
                                      "blockOwnerDeletion" t)))
@@ -255,60 +255,60 @@
 (test orphan-deletion-of-a-custom-resource-detaches-its-dependents
   (with-temporary-store (store path)
     (values path)
-    (gr8s::create-core-resource store "customresourcedefinitions" (crd-fixture) nil)
-    (let* ((gr8s::*stored-resource-types* (append gr8s::*stored-resource-types* (gr8s::crd-resource-types store)))
+    (gr8s.resources::create-core-resource store "customresourcedefinitions" (crd-fixture) nil)
+    (let* ((gr8s.resources::*stored-resource-types* (append gr8s.resources::*stored-resource-types* (gr8s.resources::crd-resource-types store)))
            (reconciler (make-reconciler store (make-fake-runtime)))
            (resource "custom:widgets.example.test/widgets")
-           (owner (gr8s::create-core-resource store resource (crd-instance "owner") "alpha")))
-      (gr8s::create-core-resource store resource (crd-test-owned-instance "child" owner) "alpha")
-      (is-true (gr8s::core-deletion-held-p store resource "alpha" "owner" "Orphan"))
-      (gr8s::delete-workload-resource store resource "alpha" "owner" :policy "Orphan")
-      (is (find "orphan" (gethash "finalizers" (gethash "metadata" (gr8s::get-core-resource store resource "alpha" "owner")))
+           (owner (gr8s.resources::create-core-resource store resource (crd-instance "owner") "alpha")))
+      (gr8s.resources::create-core-resource store resource (crd-test-owned-instance "child" owner) "alpha")
+      (is-true (gr8s.controllers::core-deletion-held-p store resource "alpha" "owner" "Orphan"))
+      (gr8s.controllers::delete-workload-resource store resource "alpha" "owner" :policy "Orphan")
+      (is (find "orphan" (gethash "finalizers" (gethash "metadata" (gr8s.resources::get-core-resource store resource "alpha" "owner")))
                 :test #'equal))
-      (gr8s::process-workload-deletions reconciler)
-      (signals kubernetes-error (gr8s::get-core-resource store resource "alpha" "owner"))
-      (let ((child (gethash "metadata" (gr8s::get-core-resource store resource "alpha" "child"))))
+      (gr8s.controllers::process-workload-deletions reconciler)
+      (signals kubernetes-error (gr8s.resources::get-core-resource store resource "alpha" "owner"))
+      (let ((child (gethash "metadata" (gr8s.resources::get-core-resource store resource "alpha" "child"))))
         (is (zerop (length (gethash "ownerReferences" child)))))
       ;; With its owner detached, the collector has no reason to touch it.
-      (gr8s::collect-orphaned-custom-resources store)
-      (is-true (gr8s::get-core-resource store resource "alpha" "child")))))
+      (gr8s.controllers::collect-orphaned-custom-resources store)
+      (is-true (gr8s.resources::get-core-resource store resource "alpha" "child")))))
 
 (test orphan-deletion-holds-for-a-cluster-scoped-dependent
   (with-temporary-store (store path)
     (values path)
     (let ((definition (crd-fixture)))
       (setf (gethash "scope" (gethash "spec" definition)) "Cluster")
-      (gr8s::create-core-resource store "customresourcedefinitions" definition nil))
-    (let* ((gr8s::*stored-resource-types* (append gr8s::*stored-resource-types* (gr8s::crd-resource-types store)))
+      (gr8s.resources::create-core-resource store "customresourcedefinitions" definition nil))
+    (let* ((gr8s.resources::*stored-resource-types* (append gr8s.resources::*stored-resource-types* (gr8s.resources::crd-resource-types store)))
            (reconciler (make-reconciler store (make-fake-runtime)))
            (resource "custom:widgets.example.test/widgets")
-           (owner (gr8s::create-core-resource store resource (crd-instance "owner") nil)))
-      (gr8s::create-core-resource store resource (crd-test-owned-instance "child" owner) nil)
-      (is-true (gr8s::core-deletion-held-p store resource nil "owner" "Orphan"))
-      (gr8s::delete-workload-resource store resource nil "owner" :policy "Orphan")
-      (gr8s::process-workload-deletions reconciler)
-      (gr8s::collect-orphaned-custom-resources store)
-      (signals kubernetes-error (gr8s::get-core-resource store resource nil "owner"))
-      (is-true (gr8s::get-core-resource store resource nil "child")))))
+           (owner (gr8s.resources::create-core-resource store resource (crd-instance "owner") nil)))
+      (gr8s.resources::create-core-resource store resource (crd-test-owned-instance "child" owner) nil)
+      (is-true (gr8s.controllers::core-deletion-held-p store resource nil "owner" "Orphan"))
+      (gr8s.controllers::delete-workload-resource store resource nil "owner" :policy "Orphan")
+      (gr8s.controllers::process-workload-deletions reconciler)
+      (gr8s.controllers::collect-orphaned-custom-resources store)
+      (signals kubernetes-error (gr8s.resources::get-core-resource store resource nil "owner"))
+      (is-true (gr8s.resources::get-core-resource store resource nil "child")))))
 
 (test foreground-deletion-of-a-custom-resource-waits-for-its-dependents
   (with-temporary-store (store path)
     (values path)
-    (gr8s::create-core-resource store "customresourcedefinitions" (crd-fixture) nil)
-    (let* ((gr8s::*stored-resource-types* (append gr8s::*stored-resource-types* (gr8s::crd-resource-types store)))
+    (gr8s.resources::create-core-resource store "customresourcedefinitions" (crd-fixture) nil)
+    (let* ((gr8s.resources::*stored-resource-types* (append gr8s.resources::*stored-resource-types* (gr8s.resources::crd-resource-types store)))
            (reconciler (make-reconciler store (make-fake-runtime)))
            (resource "custom:widgets.example.test/widgets")
-           (owner (gr8s::create-core-resource store resource (crd-instance "owner") "alpha")))
-      (gr8s::create-core-resource store resource (crd-test-owned-instance "child" owner) "alpha")
-      (gr8s::delete-workload-resource store resource "alpha" "owner" :policy "Foreground")
-      (gr8s::process-workload-deletions reconciler)
-      (signals kubernetes-error (gr8s::get-core-resource store resource "alpha" "child"))
-      (gr8s::process-workload-deletions reconciler)
-      (signals kubernetes-error (gr8s::get-core-resource store resource "alpha" "owner"))
-      (is (zerop (hash-table-count (gr8s::pod-store-workload-deletions store)))))))
+           (owner (gr8s.resources::create-core-resource store resource (crd-instance "owner") "alpha")))
+      (gr8s.resources::create-core-resource store resource (crd-test-owned-instance "child" owner) "alpha")
+      (gr8s.controllers::delete-workload-resource store resource "alpha" "owner" :policy "Foreground")
+      (gr8s.controllers::process-workload-deletions reconciler)
+      (signals kubernetes-error (gr8s.resources::get-core-resource store resource "alpha" "child"))
+      (gr8s.controllers::process-workload-deletions reconciler)
+      (signals kubernetes-error (gr8s.resources::get-core-resource store resource "alpha" "owner"))
+      (is (zerop (hash-table-count (gr8s.store::pod-store-workload-deletions store)))))))
 
 (test custom-discovery-uses-kube-aware-version-priority
-  (let* ((group (gr8s::crd-api-group "versions.example.test" '("v2alpha1" "v1beta2" "v1" "v10" "foo10" "foo1")))
+  (let* ((group (gr8s.apiserver::crd-api-group "versions.example.test" '("v2alpha1" "v1beta2" "v1" "v10" "foo10" "foo1")))
          (versions (map 'list (lambda (entry) (gethash "version" entry)) (gethash "versions" group))))
     (is (equal '("v10" "v1" "v1beta2" "v2alpha1" "foo1" "foo10") versions))
     (is (equal "v10" (gethash "version" (gethash "preferredVersion" group))))))
@@ -316,7 +316,7 @@
 (test custom-watch-cannot-follow-a-same-name-definition-replacement
   (with-crd-api (store path)
     (values path)
-    (gr8s::create-core-resource store "customresourcedefinitions" (crd-fixture) nil)
+    (gr8s.resources::create-core-resource store "customresourcedefinitions" (crd-fixture) nil)
     (sb-sys:with-deadline (:seconds 10)
       (multiple-value-bind (stream code)
           (drakma:http-request (crd-api-url "/apis/widgets.example.test/v1/namespaces/alpha/widgets")
@@ -324,8 +324,8 @@
         (unwind-protect
              (progn
                (is (= 200 code))
-               (gr8s::delete-core-resource store "customresourcedefinitions" nil "widgets.widgets.example.test")
-               (gr8s::create-core-resource store "customresourcedefinitions" (crd-fixture) nil)
+               (gr8s.resources::delete-core-resource store "customresourcedefinitions" nil "widgets.widgets.example.test")
+               (gr8s.resources::create-core-resource store "customresourcedefinitions" (crd-fixture) nil)
                (let ((event (read-template-watch-event stream)))
                  (is (equal "ERROR" (gethash "type" event)))
                  (is (= 410 (gethash "code" (gethash "object" event))))))
@@ -334,20 +334,20 @@
 (test custom-lists-and-continue-tokens-cannot-replay-a-previous-definition
   (with-temporary-store (store path)
     (values path)
-    (gr8s::create-core-resource store "customresourcedefinitions" (crd-fixture) nil)
+    (gr8s.resources::create-core-resource store "customresourcedefinitions" (crd-fixture) nil)
     (let* ((resource "custom:widgets.example.test/widgets")
-           (gr8s::*stored-resource-types* (append gr8s::*stored-resource-types* (gr8s::crd-resource-types store))))
-      (gr8s::create-core-resource store resource (crd-instance "a") "alpha")
-      (gr8s::create-core-resource store resource (crd-instance "b") "alpha")
-      (let* ((page (gr8s::template-list-page store "alpha" "" "" :resource resource :limit 1))
+           (gr8s.resources::*stored-resource-types* (append gr8s.resources::*stored-resource-types* (gr8s.resources::crd-resource-types store))))
+      (gr8s.resources::create-core-resource store resource (crd-instance "a") "alpha")
+      (gr8s.resources::create-core-resource store resource (crd-instance "b") "alpha")
+      (let* ((page (gr8s.resources::template-list-page store "alpha" "" "" :resource resource :limit 1))
              (metadata (gethash "metadata" page))
              (token (gethash "continue" metadata))
              (revision (gethash "resourceVersion" metadata)))
-        (gr8s::delete-core-resource store "customresourcedefinitions" nil "widgets.widgets.example.test")
-        (gr8s::create-core-resource store "customresourcedefinitions" (crd-fixture) nil)
-        (is (= 410 (core-resource-status (lambda () (gr8s::template-list-page store "alpha" "" "" :resource resource :continuation token)))))
-        (is (= 410 (core-resource-status (lambda () (gr8s::template-list-page store "alpha" "" "" :resource resource :resource-version revision :match "Exact")))))
-        (is (zerop (length (gethash "items" (gr8s::template-list-page store "alpha" "" "" :resource resource)))))))))
+        (gr8s.resources::delete-core-resource store "customresourcedefinitions" nil "widgets.widgets.example.test")
+        (gr8s.resources::create-core-resource store "customresourcedefinitions" (crd-fixture) nil)
+        (is (= 410 (core-resource-status (lambda () (gr8s.resources::template-list-page store "alpha" "" "" :resource resource :continuation token)))))
+        (is (= 410 (core-resource-status (lambda () (gr8s.resources::template-list-page store "alpha" "" "" :resource resource :resource-version revision :match "Exact")))))
+        (is (zerop (length (gethash "items" (gr8s.resources::template-list-page store "alpha" "" "" :resource resource)))))))))
 
 (test crd-status-accepts-upstream-compatible-message-only-conditions
   (with-crd-api (store path)
@@ -357,12 +357,12 @@
            (status-url (concatenate 'string base "/widgets.widgets.example.test/status")))
       (setf (gethash "conditions" (gethash "status" definition))
             (concatenate 'vector (gethash "conditions" (gethash "status" definition))
-                         (vector (gr8s::core-object "message" "updated"))))
+                         (vector (gr8s.resources::core-object "message" "updated"))))
       (let ((updated (crd-api-request 200 status-url :method :put :object definition)))
         (is (find "updated" (gethash "conditions" (gethash "status" updated)) :test #'equal :key (lambda (condition) (gethash "message" condition)))))
       (let ((patched (crd-api-request 200 status-url :method :patch :content-type "application/json-patch+json"
-                           :object (vector (gr8s::core-object "op" "add" "path" "/status/conditions"
-                                                            "value" (vector (gr8s::core-object "message" "patched")))))))
+                           :object (vector (gr8s.resources::core-object "op" "add" "path" "/status/conditions"
+                                                            "value" (vector (gr8s.resources::core-object "message" "patched")))))))
         (is (find "patched" (gethash "conditions" (gethash "status" patched)) :test #'equal :key (lambda (condition) (gethash "message" condition))))))))
 
 (in-suite gr8s)

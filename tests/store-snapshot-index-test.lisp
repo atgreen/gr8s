@@ -43,7 +43,7 @@
                           (snapshot-index-records-path directory
                             (append (butlast records) (list row (car (last records)))))))))
       (is (gr8s.resources::validate-store-snapshot source :expected-index 42 :expected-term 7))
-      (is (= 1 (hash-table-count (gr8s::pod-store-pods store)))))))
+      (is (= 1 (hash-table-count (gr8s.store::pod-store-pods store)))))))
 
 (test snapshot-index-node-claims-are-canonical-and-check-overlap-both-directions
   (with-temporary-store (store directory)
@@ -83,7 +83,7 @@
 (defun snapshot-test-resource-record (resource object namespace)
   (setf (gethash "resourceVersion" (gethash "metadata" object)) "0")
   (when namespace (setf (gethash "namespace" (gethash "metadata" object)) namespace))
-  (gr8s::core-object "kind" "resource" "resource" resource "namespace" (or namespace 'gr8s.resources::null)
+  (gr8s.resources::core-object "kind" "resource" "resource" resource "namespace" (or namespace 'gr8s.resources::null)
                     "name" (gethash "name" (gethash "metadata" object)) "object" object))
 
 (test snapshot-index-resolves-custom-definitions-after-instances-and-checks-shapes
@@ -114,8 +114,8 @@
     (let ((source (merge-pathnames "source.jsonl" directory)))
       (capture-valid-store-snapshot store source)
       (let* ((records (read-store-snapshot-records source))
-             (one (gr8s::core-object "kind" "workloadDeletion" "key" "same" "value" (gr8s::core-object)))
-             (two (gr8s::core-object "kind" "jobControllerState" "key" "same" "value" (gr8s::core-object)))
+             (one (gr8s.resources::core-object "kind" "workloadDeletion" "key" "same" "value" (gr8s.resources::core-object)))
+             (two (gr8s.resources::core-object "kind" "jobControllerState" "key" "same" "value" (gr8s.resources::core-object)))
              (prefix (butlast records)) (end (car (last records))))
         (is (gr8s.resources::validate-store-snapshot
              (snapshot-index-records-path directory (append prefix (list one two end)))))

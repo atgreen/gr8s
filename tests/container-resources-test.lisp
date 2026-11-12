@@ -19,19 +19,19 @@
 
 (defun resource-test-cri (resources-json)
   "Return the CRI resources derived from RESOURCES-JSON."
-  (gr8s::cri-linux-container-resources (resource-test-container (resource-test-pod resources-json))))
+  (gr8s.kubelet::cri-linux-container-resources (resource-test-container (resource-test-pod resources-json))))
 
 (test quantities-round-trip-exactly-without-floating-point
   (loop for (input expected) in '(("100m" 100) ("1" 1000) ("0.5" 500) ("1.5" 1500) ("2k" 2000000)
                                   ("1e3" 1000000) ("0.0001" 1) ("1001u" 2))
-        do (is (= expected (gr8s::container-milli-cpu (gr8s::parse-container-quantity input))) input))
+        do (is (= expected (gr8s.kubelet::container-milli-cpu (gr8s.kubelet::parse-container-quantity input))) input))
   (loop for (input expected) in '(("128Mi" 134217728) ("1Gi" 1073741824) ("1G" 1000000000)
                                   ("1500M" 1500000000) ("64" 64) ("1.5Ki" 1536))
-        do (is (= expected (gr8s::container-quantity-integer (gr8s::parse-container-quantity input))) input))
+        do (is (= expected (gr8s.kubelet::container-quantity-integer (gr8s.kubelet::parse-container-quantity input))) input))
   (dolist (bad '("" "1x" "abc" "1.2.3" "--1"))
-    (signals kubernetes-error (gr8s::parse-container-quantity bad)))
+    (signals kubernetes-error (gr8s.kubelet::parse-container-quantity bad)))
   ;; An enormous exponent must be refused rather than computed.
-  (signals kubernetes-error (gr8s::container-quantity-integer (gr8s::parse-container-quantity "1e4000"))))
+  (signals kubernetes-error (gr8s.kubelet::container-quantity-integer (gr8s.kubelet::parse-container-quantity "1e4000"))))
 
 (test limits-become-the-kubelets-cgroup-values
   (let ((cri (resource-test-cri "{\"limits\":{\"cpu\":\"250m\",\"memory\":\"64Mi\"},\"requests\":{\"cpu\":\"100m\"}}")))
@@ -76,4 +76,4 @@
 (test init-containers-get-their-own-cgroup-values
   (let* ((pod (parse-pod "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"i\"},\"spec\":{\"initContainers\":[{\"name\":\"init\",\"image\":\"busybox:latest\",\"resources\":{\"limits\":{\"cpu\":\"100m\"}}}],\"containers\":[{\"name\":\"c\",\"image\":\"busybox:latest\"}]}}"))
          (init (aref (gethash "initContainers" (gethash "spec" (pod-to-object pod))) 0)))
-    (is (= 10000 (gr8s.cri.v1::cpu-quota (gr8s::cri-linux-container-resources init))))))
+    (is (= 10000 (gr8s.cri.v1::cpu-quota (gr8s.kubelet::cri-linux-container-resources init))))))

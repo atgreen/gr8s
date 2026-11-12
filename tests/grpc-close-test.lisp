@@ -79,9 +79,9 @@
     (check-fresh-connection-after-repeated-close connection listener socket)))
 
 (test reloading-close-compatibility-preserves-the-true-upstream-function
-  (let ((original gr8s::*upstream-http2-connection-close*))
+  (let ((original gr8s.protocol::*upstream-http2-connection-close*))
     (load (asdf:system-relative-pathname :gr8s "src/protocol/grpc-close-compat.lisp"))
-    (is (eq original gr8s::*upstream-http2-connection-close*)))
+    (is (eq original gr8s.protocol::*upstream-http2-connection-close*)))
   (with-http2-close-connection (connection socket peer listener)
     (ag-http2:connection-close connection)
     (check-fresh-connection-after-repeated-close connection listener socket)))
@@ -291,7 +291,7 @@
          (progn
            (setf thread (bt:make-thread (lambda () (ag-grpc:server-start server))))
            (unless (poll-until (lambda () (ag-grpc::server-socket server))) (error "Test server did not listen"))
-           (setf channel (gr8s::make-raft-channel nil "127.0.0.1" (usocket:get-local-port (ag-grpc::server-socket server)) 5))
+           (setf channel (gr8s.security::make-raft-channel nil "127.0.0.1" (usocket:get-local-port (ag-grpc::server-socket server)) 5))
            (dotimes (i 512)
              (ag-grpc:call-unary channel "/retirement.Test/Echo" (make-instance 'gr8s.node.v1::raft-ack)
                                  :response-type 'gr8s.node.v1::raft-ack :timeout 5))

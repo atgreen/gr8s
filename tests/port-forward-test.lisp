@@ -25,27 +25,27 @@
           '(simple-array (unsigned-byte 8) (*))))
 
 (test the-header-dictionary-is-the-one-spdy-names
-  (is (= 1423 (length gr8s::+spdy-header-dictionary+)))
+  (is (= 1423 (length gr8s.protocol::+spdy-header-dictionary+)))
   (let ((a 1) (b 0))
-    (loop for octet across gr8s::+spdy-header-dictionary+
+    (loop for octet across gr8s.protocol::+spdy-header-dictionary+
           do (setf a (mod (+ a octet) 65521) b (mod (+ b a) 65521)))
     (is (= #xE3C6A7C2 (+ (* b 65536) a)))))
 
 (test header-blocks-compressed-by-real-zlib-inflate
-  (let ((inflater (gr8s::make-spdy-inflater))
+  (let ((inflater (gr8s.protocol::make-spdy-inflater))
         (noise (format nil "~{~A~}" (loop repeat 40 collect "19b25856e1c150ca834cffc8b59b23adbd0ec0389e58eb22b3b64768098d002b"))))
     (destructuring-bind (first second third) (mapcar #'hex-octets *zlib-spdy-header-blocks*)
       (is (equal '(("streamtype" . "error") ("port" . "8080") ("requestid" . "0"))
-                 (gr8s::spdy-inflate-header-block inflater first)))
+                 (gr8s.protocol::spdy-inflate-header-block inflater first)))
       (is (equal '(("streamtype" . "data") ("port" . "8080") ("requestid" . "0"))
-                 (gr8s::spdy-inflate-header-block inflater second))
+                 (gr8s.protocol::spdy-inflate-header-block inflater second))
           "the second block refers back into the first")
       (is (equal `(("streamtype" . "data") ("x-noise" . ,noise) ("requestid" . "7"))
-                 (gr8s::spdy-inflate-header-block inflater third))))))
+                 (gr8s.protocol::spdy-inflate-header-block inflater third))))))
 
 (test corrupt-header-blocks-are-refused
   (flet ((refused (block)
-           (signals error (gr8s::spdy-inflate-header-block (gr8s::make-spdy-inflater) block))))
+           (signals error (gr8s.protocol::spdy-inflate-header-block (gr8s.protocol::make-spdy-inflater) block))))
     (refused (hex-octets "78f9deadbeef00"))
     (refused (hex-octets "78f9"))
     ;; A stored block whose length check is wrong.
@@ -61,20 +61,20 @@
     (let ((path (format nil "/api/v1/namespaces/default/pods/hello/~A" subresource)))
       (dolist (method '(:get :post))
         (is (equal (list "create" "" (format nil "pods/~A" subresource) "hello" "default")
-                   (multiple-value-list (gr8s::kubernetes-authorization-target path method)))
+                   (multiple-value-list (gr8s.apiserver::kubernetes-authorization-target path method)))
             "~A ~A" method path))))
   ;; Reading a Pod, its log or its proxy is still a read.
-  (is (equal "get" (gr8s::kubernetes-authorization-target "/api/v1/namespaces/default/pods/hello" :get)))
-  (is (equal "get" (gr8s::kubernetes-authorization-target "/api/v1/namespaces/default/pods/hello/log" :get)))
-  (is (equal "get" (gr8s::kubernetes-authorization-target "/api/v1/namespaces/default/pods/hello/proxy" :get))))
+  (is (equal "get" (gr8s.apiserver::kubernetes-authorization-target "/api/v1/namespaces/default/pods/hello" :get)))
+  (is (equal "get" (gr8s.apiserver::kubernetes-authorization-target "/api/v1/namespaces/default/pods/hello/log" :get)))
+  (is (equal "get" (gr8s.apiserver::kubernetes-authorization-target "/api/v1/namespaces/default/pods/hello/proxy" :get))))
 
 ;;; The node path
 
 (defun runtime-accept-forward (stream)
   "Answer the upgrade as the runtime would, returning the request head and an alist of stream types to IDs."
-  (let ((head (map 'string #'code-char (gr8s::read-http-response-head stream))))
+  (let ((head (map 'string #'code-char (gr8s.protocol::read-http-response-head stream))))
     (write-sequence
-     (gr8s::ascii-octets
+     (gr8s.protocol::ascii-octets
       (format nil "HTTP/1.1 101 Switching Protocols~C~CConnection: Upgrade~C~CUpgrade: SPDY/3.1~C~C~C~C"
               #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed))
      stream)
@@ -89,84 +89,84 @@ Forwarding URLs lead to STREAM-LISTENER, where the test plays the container runt
   (let ((store (gensym "STORE")) (path (gensym "PATH")) (node-server (gensym "SERVER")) (fake (gensym "FAKE"))
         (node-runtime (gensym "NODE")) (control (gensym "CONTROL")) (agent (gensym "AGENT")))
     `(with-temporary-store (,store ,path)
-       (gr8s:register-node ,store (gr8s:make-node-record :id "forward-node" :name "worker-forward"
+       (gr8s.controllers::register-node ,store (gr8s.model::make-node-record :id "forward-node" :name "worker-forward"
                                                          :pod-cidr "10.88.7.0/24"))
-       (let* ((,node-server (gr8s:start-node-grpc-server ,store :host "127.0.0.1" :port 0))
+       (let* ((,node-server (gr8s.apiserver::start-node-grpc-server ,store :host "127.0.0.1" :port 0))
               (,fake (make-fake-runtime))
-              (,node-runtime (gr8s::make-node-runtime (merge-pathnames "worker-forward/runtime/" ,path) ,fake nil))
-              (,runtime (gr8s::make-control-plane-runtime ,store ,node-server))
+              (,node-runtime (gr8s.agent::make-node-runtime (merge-pathnames "worker-forward/runtime/" ,path) ,fake nil))
+              (,runtime (gr8s.controllers::make-control-plane-runtime ,store ,node-server))
               (reconciler (make-reconciler ,store ,runtime))
-              (,control (gr8s::make-node-session-control))
+              (,control (gr8s.agent::make-node-session-control))
               (,stream-listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t
                                                                      :element-type '(unsigned-byte 8)))
               (,pod nil)
               (,agent nil))
-         (gr8s::set-fake-runtime-exec-url
+         (gr8s.runtime::set-fake-runtime-exec-url
           ,fake (format nil "http://127.0.0.1:~D/portforward/token" (usocket:get-local-port ,stream-listener)))
          (unwind-protect
               (progn
-                (gr8s::start-node-runtime ,node-runtime)
+                (gr8s.agent::start-node-runtime ,node-runtime)
                 (setf ,agent
                       (bt:make-thread
                        (lambda ()
-                         (gr8s:run-node-session
-                          "127.0.0.1" (gr8s:node-grpc-server-port ,node-server) "worker-forward"
+                         (gr8s.agent::run-node-session
+                          "127.0.0.1" (gr8s.apiserver::node-grpc-server-port ,node-server) "worker-forward"
                           (merge-pathnames "worker-forward/identity.json" ,path)
-                          (lambda (snapshot) (gr8s::reconcile-node-snapshot ,node-runtime snapshot))
+                          (lambda (snapshot) (gr8s.agent::reconcile-node-snapshot ,node-runtime snapshot))
                           :operation-handler
                           (lambda (variant payload emit)
-                            (gr8s::dispatch-node-operation ,node-runtime variant payload emit))
+                            (gr8s.agent::dispatch-node-operation ,node-runtime variant payload emit))
                           :reconnect-delay 0.01 :control ,control))
                        :name "gr8s test port-forward agent"))
-                (is-true (wait-until (lambda () (gr8s:node-record-ready-p (gr8s:get-node ,store "worker-forward")))
+                (is-true (wait-until (lambda () (gr8s.model::node-record-ready-p (gr8s.controllers::get-node ,store "worker-forward")))
                                      :timeout 5))
                 (setf ,pod (create-pod ,store (parse-pod *valid-pod-json*)))
                 (reconcile-pod reconciler "default" "hello")
                 (is-true (wait-until (lambda () (runtime-observe ,fake (pod-uid ,pod))) :timeout 5))
                 ,@body)
-           (ignore-errors (gr8s::cancel-node-session ,control))
-           (ignore-errors (gr8s::cancel-all-node-operations ,node-runtime "test over"))
+           (ignore-errors (gr8s.agent::cancel-node-session ,control))
+           (ignore-errors (gr8s.agent::cancel-all-node-operations ,node-runtime "test over"))
            (when ,agent (ignore-errors (bt:join-thread ,agent)))
-           (ignore-errors (gr8s:stop-node-grpc-server ,node-server))
+           (ignore-errors (gr8s.apiserver::stop-node-grpc-server ,node-server))
            (ignore-errors (usocket:socket-close ,stream-listener)))))))
 
 (test large-output-does-not-stall-the-node-session
   ;; The node's reading thread sends these logs itself, far past one flow-control window.
   (with-temporary-store (store path)
-    (gr8s:register-node store (gr8s:make-node-record :id "large-node" :name "worker-large" :pod-cidr "10.88.8.0/24"))
-    (let* ((node-server (gr8s:start-node-grpc-server store :host "127.0.0.1" :port 0))
+    (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "large-node" :name "worker-large" :pod-cidr "10.88.8.0/24"))
+    (let* ((node-server (gr8s.apiserver::start-node-grpc-server store :host "127.0.0.1" :port 0))
            (fake (make-fake-runtime))
-           (node-runtime (gr8s::make-node-runtime (merge-pathnames "worker-large/runtime/" path) fake nil))
-           (runtime (gr8s::make-control-plane-runtime store node-server))
+           (node-runtime (gr8s.agent::make-node-runtime (merge-pathnames "worker-large/runtime/" path) fake nil))
+           (runtime (gr8s.controllers::make-control-plane-runtime store node-server))
            (reconciler (make-reconciler store runtime))
-           (control (gr8s::make-node-session-control))
+           (control (gr8s.agent::make-node-session-control))
            (agent nil))
       (unwind-protect
            (progn
-             (gr8s::start-node-runtime node-runtime)
+             (gr8s.agent::start-node-runtime node-runtime)
              (setf agent
                    (bt:make-thread
                     (lambda ()
-                      (gr8s:run-node-session
-                       "127.0.0.1" (gr8s:node-grpc-server-port node-server) "worker-large"
+                      (gr8s.agent::run-node-session
+                       "127.0.0.1" (gr8s.apiserver::node-grpc-server-port node-server) "worker-large"
                        (merge-pathnames "worker-large/identity.json" path)
-                       (lambda (snapshot) (gr8s::reconcile-node-snapshot node-runtime snapshot))
+                       (lambda (snapshot) (gr8s.agent::reconcile-node-snapshot node-runtime snapshot))
                        :operation-handler
                        (lambda (variant payload emit)
-                         (gr8s::dispatch-node-operation node-runtime variant payload emit))
+                         (gr8s.agent::dispatch-node-operation node-runtime variant payload emit))
                        :reconnect-delay 0.01 :control control))
                     :name "gr8s test large output agent"))
-             (is-true (wait-until (lambda () (gr8s:node-record-ready-p (gr8s:get-node store "worker-large"))) :timeout 5))
+             (is-true (wait-until (lambda () (gr8s.model::node-record-ready-p (gr8s.controllers::get-node store "worker-large"))) :timeout 5))
              (let* ((pod (create-pod store (parse-pod *valid-pod-json*)))
                     (container (container-spec-name (aref (pod-containers pod) 0)))
                     (logs (make-string 400000 :initial-element #\x)))
                (reconcile-pod reconciler "default" "hello")
                (is-true (wait-until (lambda () (runtime-observe fake (pod-uid pod))) :timeout 5))
-               (setf (gethash container (gr8s::runtime-pod-logs (runtime-observe fake (pod-uid pod)))) logs)
-               (is (equal logs (gr8s::runtime-logs runtime (pod-uid pod) container)))))
-        (ignore-errors (gr8s::cancel-node-session control))
+               (setf (gethash container (gr8s.runtime::runtime-pod-logs (runtime-observe fake (pod-uid pod)))) logs)
+               (is (equal logs (gr8s.runtime::runtime-logs runtime (pod-uid pod) container)))))
+        (ignore-errors (gr8s.agent::cancel-node-session control))
         (when agent (ignore-errors (bt:join-thread agent)))
-        (ignore-errors (gr8s:stop-node-grpc-server node-server))))))
+        (ignore-errors (gr8s.apiserver::stop-node-grpc-server node-server))))))
 
 (defun runtime-accept-socket (listener)
   (usocket:socket-accept listener :element-type '(unsigned-byte 8)))
@@ -175,13 +175,13 @@ Forwarding URLs lead to STREAM-LISTENER, where the test plays the container runt
   "Return everything the Pod's side sends through SESSION, with any failure message."
   (let ((all (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
     (loop
-      (multiple-value-bind (data done failure) (gr8s::runtime-port-forward-next runtime session)
+      (multiple-value-bind (data done failure) (gr8s.runtime::runtime-port-forward-next runtime session)
         (when done (return (values all failure)))
         (loop for octet across data do (vector-push-extend octet all))))))
 
 (test connections-forward-through-a-remote-agent
   (with-forwarding-agent (runtime pod listener)
-    (let* ((session (gr8s::runtime-start-port-forward runtime (pod-uid pod) 8080))
+    (let* ((session (gr8s.runtime::runtime-start-port-forward runtime (pod-uid pod) 8080))
            (socket (runtime-accept-socket listener))
            (stream (usocket:socket-stream socket)))
       (unwind-protect
@@ -193,12 +193,12 @@ Forwarding URLs lead to STREAM-LISTENER, where the test plays the container runt
                    (error-stream (cdr (assoc "error" streams :test #'equal))))
                (is (equal (list :data error-stream t) (subseq (fake-spdy-read-frame stream) 0 3))
                    "the agent ends its side of the error stream at once, as kubectl does")
-               (gr8s::runtime-port-forward-send runtime session (trivial-utf-8:string-to-utf-8-bytes "ping"))
+               (gr8s.runtime::runtime-port-forward-send runtime session (trivial-utf-8:string-to-utf-8-bytes "ping"))
                (let ((frame (fake-spdy-read-frame stream)))
                  (is (eql data-stream (second frame)))
                  (is (equal "ping" (trivial-utf-8:utf-8-bytes-to-string (fourth frame)))))
                ;; The client finishing its side must reach the Pod, which can still answer.
-               (gr8s::runtime-port-forward-send runtime session (make-array 0 :element-type '(unsigned-byte 8)) :eof t)
+               (gr8s.runtime::runtime-port-forward-send runtime session (make-array 0 :element-type '(unsigned-byte 8)) :eof t)
                (let ((frame (fake-spdy-read-frame stream)))
                  (is (eql data-stream (second frame)))
                  (is-true (third frame)))
@@ -207,12 +207,12 @@ Forwarding URLs lead to STREAM-LISTENER, where the test plays the container runt
                (multiple-value-bind (data failure) (forwarded-data runtime session)
                  (is (equal "pong" (trivial-utf-8:utf-8-bytes-to-string (coerce data '(simple-array (unsigned-byte 8) (*))))))
                  (is (member failure '(nil "") :test #'equal)))))
-        (gr8s::runtime-release-port-forward runtime session)
+        (gr8s.runtime::runtime-release-port-forward runtime session)
         (ignore-errors (usocket:socket-close socket))))))
 
 (test the-runtimes-error-reaches-the-client
   (with-forwarding-agent (runtime pod listener)
-    (let* ((session (gr8s::runtime-start-port-forward runtime (pod-uid pod) 9))
+    (let* ((session (gr8s.runtime::runtime-start-port-forward runtime (pod-uid pod) 9))
            (socket (runtime-accept-socket listener))
            (stream (usocket:socket-stream socket)))
       (unwind-protect
@@ -224,27 +224,27 @@ Forwarding URLs lead to STREAM-LISTENER, where the test plays the container runt
              (multiple-value-bind (data failure) (forwarded-data runtime session)
                (is (zerop (length data)))
                (is (search "failed to connect to localhost:9" failure))))
-        (gr8s::runtime-release-port-forward runtime session)
+        (gr8s.runtime::runtime-release-port-forward runtime session)
         (ignore-errors (usocket:socket-close socket))))))
 
 (test invalid-ports-and-unforwardable-runtimes-fail-cleanly
   (with-forwarding-agent (runtime pod listener)
-    (let ((session (gr8s::runtime-start-port-forward runtime (pod-uid pod) 70000)))
+    (let ((session (gr8s.runtime::runtime-start-port-forward runtime (pod-uid pod) 70000)))
       (unwind-protect
            (multiple-value-bind (data failure) (forwarded-data runtime session)
              (is (zerop (length data)))
              (is (search "valid port" failure)))
-        (gr8s::runtime-release-port-forward runtime session))))
-  (signals gr8s:runtime-error (gr8s::runtime-start-port-forward (make-fake-runtime) "uid" 80)))
+        (gr8s.runtime::runtime-release-port-forward runtime session))))
+  (signals gr8s.runtime::runtime-error (gr8s.runtime::runtime-start-port-forward (make-fake-runtime) "uid" 80)))
 
 (test a-slow-client-pauses-the-pod-instead-of-filling-memory
   (with-forwarding-agent (runtime pod listener)
-    (let* ((session (gr8s::runtime-start-port-forward runtime (pod-uid pod) 8080))
-           (operation (gr8s::control-plane-port-forward-operation session))
+    (let* ((session (gr8s.runtime::runtime-start-port-forward runtime (pod-uid pod) 8080))
+           (operation (gr8s.controllers::control-plane-port-forward-operation session))
            (socket (runtime-accept-socket listener))
            (stream (usocket:socket-stream socket))
            (chunk (make-array 65536 :element-type '(unsigned-byte 8) :initial-element 7))
-           (total (* 4 gr8s::+port-forward-window-bytes+))
+           (total (* 4 gr8s.runtime::+port-forward-window-bytes+))
            (writer nil))
       (unwind-protect
            (multiple-value-bind (head streams) (runtime-accept-forward stream)
@@ -261,26 +261,26 @@ Forwarding URLs lead to STREAM-LISTENER, where the test plays the container runt
                              :name "gr8s test slow client writer"))
                ;; Nobody is taking the output, so what's waiting must stop at about one window.
                (flet ((queued ()
-                        (bt:with-lock-held ((gr8s::pending-node-operation-lock operation))
-                          (reduce #'+ (gr8s::pending-node-operation-stream-messages operation)
+                        (bt:with-lock-held ((gr8s.apiserver::pending-node-operation-lock operation))
+                          (reduce #'+ (gr8s.apiserver::pending-node-operation-stream-messages operation)
                                   :key (lambda (message) (length (slot-value message 'gr8s.node.v1::data)))))))
-                 (is-true (wait-until (lambda () (>= (queued) gr8s::+port-forward-window-bytes+)) :timeout 10))
+                 (is-true (wait-until (lambda () (>= (queued) gr8s.runtime::+port-forward-window-bytes+)) :timeout 10))
                  (sleep 0.5)
-                 (is (<= (queued) (+ gr8s::+port-forward-window-bytes+ 65536))
+                 (is (<= (queued) (+ gr8s.runtime::+port-forward-window-bytes+ 65536))
                      "the node stops once the window is full"))
                ;; Taking the output releases the rest, and every byte arrives.
                (let ((data (forwarded-data runtime session)))
                  (is (= total (length data)))
                  (is (every (lambda (octet) (= 7 octet)) data)))
-               (is (null (gr8s::pending-node-operation-stream-messages operation))
+               (is (null (gr8s.apiserver::pending-node-operation-stream-messages operation))
                    "what's been consumed isn't kept")))
-        (gr8s::runtime-release-port-forward runtime session)
+        (gr8s.runtime::runtime-release-port-forward runtime session)
         (ignore-errors (usocket:socket-close socket))
         (when writer (ignore-errors (bt:join-thread writer)))))))
 
 (test a-pod-that-stops-reading-holds-up-only-its-own-connection
   (with-forwarding-agent (runtime pod listener)
-    (let* ((stalled (gr8s::runtime-start-port-forward runtime (pod-uid pod) 8080))
+    (let* ((stalled (gr8s.runtime::runtime-start-port-forward runtime (pod-uid pod) 8080))
            (stalled-socket (runtime-accept-socket listener))
            (chunk (make-array 65536 :element-type '(unsigned-byte 8) :initial-element 1))
            (sender nil))
@@ -291,17 +291,17 @@ Forwarding URLs lead to STREAM-LISTENER, where the test plays the container runt
              (setf sender (bt:make-thread
                            (lambda ()
                              (ignore-errors
-                              (loop repeat 512 do (gr8s::runtime-port-forward-send runtime stalled chunk))))
+                              (loop repeat 512 do (gr8s.runtime::runtime-port-forward-send runtime stalled chunk))))
                            :name "gr8s test stalled sender"))
              (is-true (wait-until (lambda ()
-                                    (>= (gr8s::control-plane-port-forward-in-flight stalled)
-                                        gr8s::+port-forward-window-bytes+))
+                                    (>= (gr8s.controllers::control-plane-port-forward-in-flight stalled)
+                                        gr8s.runtime::+port-forward-window-bytes+))
                                   :timeout 10)
                       "the sender fills the window")
              (sleep 0.5)
              (is (bt:thread-alive-p sender) "and then waits")
              ;; The node's session must still serve another connection.
-             (let* ((other (gr8s::runtime-start-port-forward runtime (pod-uid pod) 8081))
+             (let* ((other (gr8s.runtime::runtime-start-port-forward runtime (pod-uid pod) 8081))
                     (socket (runtime-accept-socket listener))
                     (stream (usocket:socket-stream socket)))
                (unwind-protect
@@ -311,12 +311,12 @@ Forwarding URLs lead to STREAM-LISTENER, where the test plays the container runt
                       (fake-spdy-send stream (cdr (assoc "error" streams :test #'equal)) "" :fin t)
                       (is (equal "alive" (trivial-utf-8:utf-8-bytes-to-string
                                           (coerce (forwarded-data runtime other) '(simple-array (unsigned-byte 8) (*)))))))
-                 (gr8s::runtime-release-port-forward runtime other)
+                 (gr8s.runtime::runtime-release-port-forward runtime other)
                  (ignore-errors (usocket:socket-close socket))))
              ;; Cancelling frees whoever is waiting.
-             (gr8s::runtime-cancel-port-forward runtime stalled "test over")
+             (gr8s.runtime::runtime-cancel-port-forward runtime stalled "test over")
              (is-true (wait-until (lambda () (not (bt:thread-alive-p sender))) :timeout 10)))
-        (gr8s::runtime-release-port-forward runtime stalled)
+        (gr8s.runtime::runtime-release-port-forward runtime stalled)
         (ignore-errors (usocket:socket-close stalled-socket))))))
 
 ;;; A real kubectl
@@ -325,26 +325,26 @@ Forwarding URLs lead to STREAM-LISTENER, where the test plays the container runt
   (let ((path (uiop:getenv "GR8S_TEST_KUBECTL")))
     (and path (plusp (length path)) (probe-file path) path)))
 
-(defstruct (tcp-forward-runtime (:include gr8s::fake-runtime) (:constructor make-tcp-forward-runtime ()))
+(defstruct (tcp-forward-runtime (:include gr8s.runtime::fake-runtime) (:constructor make-tcp-forward-runtime ()))
   "A fake runtime whose Pods' ports are simply this host's, so kubectl can exercise the API path.")
 
 (defstruct tcp-forward-session socket stream)
 
-(defmethod gr8s::runtime-start-port-forward ((runtime tcp-forward-runtime) uid port)
+(defmethod gr8s.runtime::runtime-start-port-forward ((runtime tcp-forward-runtime) uid port)
   (declare (ignore uid))
   (handler-case
       (let ((socket (usocket:socket-connect "127.0.0.1" port :element-type '(unsigned-byte 8))))
         (make-tcp-forward-session :socket socket :stream (usocket:socket-stream socket)))
     (usocket:socket-error ()
-      (error 'gr8s:runtime-error :message (format nil "failed to connect to localhost:~D" port)))))
+      (error 'gr8s.runtime::runtime-error :message (format nil "failed to connect to localhost:~D" port)))))
 
-(defmethod gr8s::runtime-port-forward-send ((runtime tcp-forward-runtime) session data &key eof)
+(defmethod gr8s.runtime::runtime-port-forward-send ((runtime tcp-forward-runtime) session data &key eof)
   (let ((stream (tcp-forward-session-stream session)))
     (write-sequence data stream)
     (finish-output stream)
     (when eof (usocket:socket-shutdown (tcp-forward-session-socket session) :output))))
 
-(defmethod gr8s::runtime-port-forward-next ((runtime tcp-forward-runtime) session)
+(defmethod gr8s.runtime::runtime-port-forward-next ((runtime tcp-forward-runtime) session)
   (let* ((stream (tcp-forward-session-stream session))
          (first (ignore-errors (read-byte stream nil nil))))
     (if first
@@ -356,11 +356,11 @@ Forwarding URLs lead to STREAM-LISTENER, where the test plays the container runt
           (values (subseq buffer 0 count) nil nil))
         (values nil t nil))))
 
-(defmethod gr8s::runtime-cancel-port-forward ((runtime tcp-forward-runtime) session reason)
+(defmethod gr8s.runtime::runtime-cancel-port-forward ((runtime tcp-forward-runtime) session reason)
   (declare (ignore reason))
   (ignore-errors (usocket:socket-close (tcp-forward-session-socket session))))
 
-(defmethod gr8s::runtime-release-port-forward ((runtime tcp-forward-runtime) session)
+(defmethod gr8s.runtime::runtime-release-port-forward ((runtime tcp-forward-runtime) session)
   (ignore-errors (usocket:socket-close (tcp-forward-session-socket session))))
 
 (defun start-echo-server ()
@@ -484,7 +484,7 @@ Forwarding URLs lead to STREAM-LISTENER, where the test plays the container runt
                             (format out "apiVersion: v1~%kind: Config~%clusters:~%- name: c~%  cluster: {server: \"http://127.0.0.1:~D\"}~%contexts:~%- name: x~%  context: {cluster: c, user: u, namespace: default}~%current-context: x~%users:~%- name: u~%  user: {}~%"
                                     (hunchentoot:acceptor-port ,server)))
                           ,@body)
-                     (when ,server (ignore-errors (gr8s:stop-server ,server)))
+                     (when ,server (ignore-errors (gr8s.apiserver::stop-server ,server)))
                      (ignore-errors (usocket:socket-close ,listener)))))))))))
 
 (test kubectl-forwards-over-the-websocket-tunnel
@@ -555,7 +555,7 @@ Forwarding URLs lead to STREAM-LISTENER, where the test plays the container runt
                                                      until (= octet 10) collect octet)))
                                    (string-right-trim '(#\Return) (map 'string #'code-char octets))))
                                (next-frame ()
-                                 (multiple-value-bind (opcode payload) (gr8s::read-websocket-frame stream)
+                                 (multiple-value-bind (opcode payload) (gr8s.protocol::read-websocket-frame stream)
                                    (declare (ignore opcode))
                                    (values (aref payload 0) (subseq payload 1)))))
                           (send-line (format nil "GET /api/v1/namespaces/default/pods/hello/portforward?ports=~D HTTP/1.1" echo-port))
@@ -577,12 +577,12 @@ Forwarding URLs lead to STREAM-LISTENER, where the test plays the container runt
                               (is (= 1 channel))
                               (is (equalp port-bytes data))))
                           (let ((message (trivial-utf-8:string-to-utf-8-bytes "def")))
-                            (gr8s::write-websocket-frame stream 2 (concatenate '(vector (unsigned-byte 8)) #(0) message)
+                            (gr8s.protocol::write-websocket-frame stream 2 (concatenate '(vector (unsigned-byte 8)) #(0) message)
                                                          :masked-p t)
                             (multiple-value-bind (channel data) (next-frame)
                               (is (= 0 channel))
                               (is (equalp message data))))
-                          (gr8s::write-websocket-frame stream 8 #(3 232) :masked-p t))
+                          (gr8s.protocol::write-websocket-frame stream 8 #(3 232) :masked-p t))
                      (ignore-errors (usocket:socket-close socket)))))
-            (when server (ignore-errors (gr8s:stop-server server)))
+            (when server (ignore-errors (gr8s.apiserver::stop-server server)))
             (ignore-errors (usocket:socket-close listener))))))))

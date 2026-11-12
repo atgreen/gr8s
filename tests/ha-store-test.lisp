@@ -20,26 +20,26 @@
            name key value)))
 
 (defun configmap-value (store name key)
-  (let ((object (ignore-errors (gr8s::get-core-resource store "configmaps" "default" name))))
+  (let ((object (ignore-errors (gr8s.resources::get-core-resource store "configmaps" "default" name))))
     (and object (gethash key (gethash "data" object)))))
 
 (defun ha-secret-input (name value)
-  (gr8s::core-object
+  (gr8s.resources::core-object
    "apiVersion" "v1" "kind" "Secret"
-   "metadata" (gr8s::core-object "name" name "namespace" "default")
-   "data" (gr8s::core-object "password" value)))
+   "metadata" (gr8s.resources::core-object "name" name "namespace" "default")
+   "data" (gr8s.resources::core-object "password" value)))
 
 (defun ha-secret-value (store name)
-  (let ((object (gr8s::get-core-resource store "secrets" "default" name)))
+  (let ((object (gr8s.resources::get-core-resource store "secrets" "default" name)))
     (and object (gethash "password" (gethash "data" object)))))
 
 (defun apply-ha-core-command (store command)
   "Apply one captured HA core command to STORE, as the Raft state machine does."
   (case (first command)
-    (:core-state (gr8s::install-core-state-blob store (second command)))
-    (:core-delta (gr8s::install-core-state-delta store (second command)))
+    (:core-state (gr8s.resources::install-core-state-blob store (second command)))
+    (:core-delta (gr8s.resources::install-core-state-delta store (second command)))
     (:secrets-encryption
-     (gr8s::install-secret-encryption-command store (second command)))
+     (gr8s.resources::install-secret-encryption-command store (second command)))
     (t (error "Unsupported HA core command ~S" (first command)))))
 
 (test secret-encryption-and-key-rotation-replicate-without-plaintext
@@ -47,18 +47,18 @@
     (with-temporary-store (follower follower-path)
       ;; HA members share the cluster CA identity from which encryption keys are
       ;; derived, but never replicate the derived keys themselves.
-      (gr8s::ensure-cluster-pki leader-path)
+      (gr8s.security::ensure-cluster-pki leader-path)
       (ensure-directories-exist (merge-pathnames "pki/cluster-ca.key" follower-path))
       (uiop:copy-file (merge-pathnames "pki/cluster-ca.key" leader-path)
                       (merge-pathnames "pki/cluster-ca.key" follower-path))
       (let ((commands '()))
-        (setf (gr8s::pod-store-consensus-commit-fn leader)
+        (setf (gr8s.store::pod-store-consensus-commit-fn leader)
               (lambda (tag payload)
                 (push (list tag payload) commands)
                 (apply-ha-core-command leader (list tag payload))
                 (apply-ha-core-command follower (list tag payload))))
-        (gr8s::enable-secret-encryption leader)
-        (gr8s::create-core-resource
+        (gr8s.resources::enable-secret-encryption leader)
+        (gr8s.resources::create-core-resource
          leader "secrets" (ha-secret-input "credentials" "cmFmdC1zZW50aW5lbA==")
          "default")
         (is (equal "cmFmdC1zZW50aW5lbA=="
@@ -66,17 +66,17 @@
         (is (null (search "cmFmdC1zZW50aW5lbA=="
                           (second (find :core-delta commands :key #'first))))
             "the Raft delta contains only ciphertext")
-        (let ((next-key (gr8s::prepare-secret-encryption-key leader)))
-          (gr8s::promote-secret-encryption-key leader)
-          (gr8s::reencrypt-secrets leader)
-          (gr8s::finalize-secret-encryption-key leader)
+        (let ((next-key (gr8s.resources::prepare-secret-encryption-key leader)))
+          (gr8s.resources::promote-secret-encryption-key leader)
+          (gr8s.resources::reencrypt-secrets leader)
+          (gr8s.resources::finalize-secret-encryption-key leader)
           (is (equal next-key
                      (gethash "activeKeyId"
-                              (gr8s::secret-encryption-status follower))))
+                              (gr8s.resources::secret-encryption-status follower))))
           (is (equal "cmFmdC1zZW50aW5lbA=="
                      (ha-secret-value follower "credentials")))
           (is (= 1 (length (gethash "keys"
-                                    (gr8s::secret-encryption-status follower))))))))))
+                                    (gr8s.resources::secret-encryption-status follower))))))))))
 
 (test stale-member-core-commands-preserve-unrelated-commits
   ;; Two members can prepare writes from the same committed base before either
@@ -88,13 +88,13 @@
       (with-temporary-store (replica replica-path)
         (declare (ignore left-path right-path replica-path))
         (let ((left-command nil) (right-command nil))
-          (setf (gr8s::pod-store-consensus-commit-fn left)
+          (setf (gr8s.store::pod-store-consensus-commit-fn left)
                 (lambda (tag payload) (setf left-command (list tag payload)))
-                (gr8s::pod-store-consensus-commit-fn right)
+                (gr8s.store::pod-store-consensus-commit-fn right)
                 (lambda (tag payload) (setf right-command (list tag payload))))
-          (gr8s::create-core-resource left "configmaps"
+          (gr8s.resources::create-core-resource left "configmaps"
                                       (configmap-input "from-left" "k" "left") "default")
-          (gr8s::create-core-resource right "configmaps"
+          (gr8s.resources::create-core-resource right "configmaps"
                                       (configmap-input "from-right" "k" "right") "default")
           (apply-ha-core-command replica left-command)
           (apply-ha-core-command replica right-command)
@@ -110,10 +110,10 @@
   ;; author-side transaction and stash it for a second proposal (podster-7bw).
   (with-temporary-store (store path)
     (declare (ignore path))
-    (setf (gr8s::pod-store-consensus-commit-fn store)
+    (setf (gr8s.store::pod-store-consensus-commit-fn store)
           (lambda (tag payload)
             (apply-ha-core-command store (list tag payload))))
-    (gr8s::create-core-resource store "configmaps"
+    (gr8s.resources::create-core-resource store "configmaps"
                                 (configmap-input "leader-local" "k" "committed")
                                 "default")
     (is (equal "committed" (configmap-value store "leader-local" "k"))
@@ -121,25 +121,25 @@
 
 (defun ha-member-for-store (id store)
   "A member whose state machine installs replicated core-state blobs on STORE."
-  (gr8s::start-raft-member
+  (gr8s.raft.transport::start-raft-member
    id :apply-fn (lambda (command)
                   (when (consp command)
                     (case (car command)
-                      (:core-state (gr8s::install-core-state-blob store (second command)))
-                      (:core-delta (gr8s::install-core-state-delta store (second command)))
+                      (:core-state (gr8s.resources::install-core-state-blob store (second command)))
+                      (:core-delta (gr8s.resources::install-core-state-delta store (second command)))
                       (:secrets-encryption
-                       (gr8s::install-secret-encryption-command store (second command)))
-                      (:pod-state (gr8s::install-pod-state-blob store (second command)))
-                      (:pod-delta (gr8s::install-pod-state-delta store (second command)))
-                      (:node-state (gr8s::install-node-state-blob store (second command)))
-                      (:node-delta (gr8s::install-node-state-delta store (second command))))))))
+                       (gr8s.resources::install-secret-encryption-command store (second command)))
+                      (:pod-state (gr8s.store::install-pod-state-blob store (second command)))
+                      (:pod-delta (gr8s.store::install-pod-state-delta store (second command)))
+                      (:node-state (gr8s.store::install-node-state-blob store (second command)))
+                      (:node-delta (gr8s.store::install-node-state-delta store (second command))))))))
 
 (defun wire-ha-store (store member)
   "Make STORE's durable writes replicate through MEMBER's Raft log."
-  (setf (gr8s::pod-store-consensus-commit-fn store)
+  (setf (gr8s.store::pod-store-consensus-commit-fn store)
         (lambda (tag json)
           (multiple-value-bind (result committed)
-              (gr8s::raft-member-propose-sync member (list tag json) :timeout 10)
+              (gr8s.raft.transport::raft-member-propose-sync member (list tag json) :timeout 10)
             (declare (ignore result))
             (unless (eq committed t) (error "core write did not commit (not leader)"))))))
 
@@ -159,20 +159,20 @@
           (unwind-protect
                (progn
                  (dolist (self (list (list "a" a) (list "b" b) (list "c" c)))
-                   (gr8s::raft-member-set-peers
+                   (gr8s.raft.transport::raft-member-set-peers
                     (second self)
                     (loop for other in (list (list "a" a) (list "b" b) (list "c" c))
                           unless (equal (first other) (first self))
-                            collect (list (first other) (gr8s::raft-member-host (second other))
-                                          (gr8s::raft-member-port (second other))))))
-                 (dolist (m members) (gr8s::raft-member-start m))
-                 (is (poll-until (lambda () (= 1 (count-if #'gr8s::raft-member-leader-p members)))))
+                            collect (list (first other) (gr8s.raft.transport::raft-member-host (second other))
+                                          (gr8s.raft.transport::raft-member-port (second other))))))
+                 (dolist (m members) (gr8s.raft.transport::raft-member-start m))
+                 (is (poll-until (lambda () (= 1 (count-if #'gr8s.raft.transport::raft-member-leader-p members)))))
                  (wire-ha-store sa a) (wire-ha-store sb b) (wire-ha-store sc c)
 
                  ;; Create on the leader's store; it replicates to all three.
-                 (let* ((leader (find-if #'gr8s::raft-member-leader-p members))
+                 (let* ((leader (find-if #'gr8s.raft.transport::raft-member-leader-p members))
                         (leader-store (store-of-member leader a sa b sb c sc)))
-                   (gr8s::create-core-resource leader-store "configmaps"
+                   (gr8s.resources::create-core-resource leader-store "configmaps"
                                                (configmap-input "cm1" "k" "v1") "default")
                    (is (poll-until
                         (lambda () (every (lambda (s) (equal "v1" (configmap-value s "cm1" "k")))
@@ -180,7 +180,7 @@
                        "the create replicates to every member's store")
 
                    ;; Update on the leader; the new value replicates too.
-                   (gr8s::update-core-resource
+                   (gr8s.resources::update-core-resource
                     leader-store "configmaps" "default" "cm1"
                     (lambda (object) (setf (gethash "k" (gethash "data" object)) "v2") object))
                    (is (poll-until
@@ -189,17 +189,17 @@
                        "the update replicates to every member's store"))
 
                  ;; Kill the leader; a survivor takes over with the data intact.
-                 (let ((old-leader (find-if #'gr8s::raft-member-leader-p members)))
-                   (gr8s::stop-raft-member old-leader)
+                 (let ((old-leader (find-if #'gr8s.raft.transport::raft-member-leader-p members)))
+                   (gr8s.raft.transport::stop-raft-member old-leader)
                    (setf live (remove old-leader live))
-                   (is (poll-until (lambda () (= 1 (count-if #'gr8s::raft-member-leader-p live))) :timeout 15)
+                   (is (poll-until (lambda () (= 1 (count-if #'gr8s.raft.transport::raft-member-leader-p live))) :timeout 15)
                        "the survivors elect a new leader")
-                   (let* ((new-leader (find-if #'gr8s::raft-member-leader-p live))
+                   (let* ((new-leader (find-if #'gr8s.raft.transport::raft-member-leader-p live))
                           (new-store (store-of-member new-leader a sa b sb c sc)))
                      (is (equal "v2" (configmap-value new-store "cm1" "k"))
                          "the new leader kept the committed ConfigMap")
                      ;; A new write commits under the new leader and replicates to the survivors.
-                     (gr8s::create-core-resource new-store "configmaps"
+                     (gr8s.resources::create-core-resource new-store "configmaps"
                                                  (configmap-input "cm2" "k" "w1") "default")
                      (is (poll-until
                           (lambda () (every (lambda (m)
@@ -209,7 +209,7 @@
                           :timeout 10)
                          "the post-failover create replicates to every survivor")
                      ;; A delete also replicates to every survivor's store.
-                     (gr8s::delete-core-resource new-store "configmaps" "default" "cm1")
+                     (gr8s.resources::delete-core-resource new-store "configmaps" "default" "cm1")
                      (is (poll-until
                           (lambda () (every (lambda (m)
                                               (null (configmap-value
@@ -217,125 +217,125 @@
                                             live))
                           :timeout 10)
                          "a delete replicates to every survivor's store"))))
-            (dolist (m live) (ignore-errors (gr8s::stop-raft-member m)))))))))
+            (dolist (m live) (ignore-errors (gr8s.raft.transport::stop-raft-member m)))))))))
 
 (defun capture-ha-core-write (store function)
-  (let ((original (gr8s::pod-store-consensus-commit-fn store)) (command nil))
+  (let ((original (gr8s.store::pod-store-consensus-commit-fn store)) (command nil))
     (unwind-protect
          (progn
-           (setf (gr8s::pod-store-consensus-commit-fn store)
+           (setf (gr8s.store::pod-store-consensus-commit-fn store)
                  (lambda (tag payload) (setf command (list tag payload)) nil))
            (funcall function)
            command)
-      (setf (gr8s::pod-store-consensus-commit-fn store) original))))
+      (setf (gr8s.store::pod-store-consensus-commit-fn store) original))))
 
 (test concurrent-core-writers-conflict-without-partial-publication
   (with-temporary-store (left lp)
     (with-temporary-store (right rp)
       (declare (ignore lp rp))
       (let ((seed (capture-ha-core-write
-                   left (lambda () (gr8s::create-core-resource left "configmaps"
+                   left (lambda () (gr8s.resources::create-core-resource left "configmaps"
                                     (configmap-input "shared" "k" "base") "default")))))
         (dolist (store (list left right)) (apply-ha-core-command store seed)))
       ;; A restored/local-event-heavy member may expose a different RV for the
       ;; same replicated object. Conditions must not compare those local clocks.
-      (setf (gr8s::pod-store-resource-revision right) 10000)
+      (setf (gr8s.store::pod-store-resource-revision right) 10000)
       (setf (gethash "resourceVersion" (gethash "metadata"
-                     (gethash '("configmaps" "default" "shared") (gr8s::pod-store-resources right)))) "10000")
+                     (gethash '("configmaps" "default" "shared") (gr8s.store::pod-store-resources right)))) "10000")
       (let* ((winner (capture-ha-core-write left
-                       (lambda () (gr8s::update-core-resource left "configmaps" "default" "shared"
+                       (lambda () (gr8s.resources::update-core-resource left "configmaps" "default" "shared"
                          (lambda (object) (setf (gethash "k" (gethash "data" object)) "winner") object)))))
              (loser (capture-ha-core-write right
-                      (lambda () (gr8s::update-core-resource right "configmaps" "default" "shared"
+                      (lambda () (gr8s.resources::update-core-resource right "configmaps" "default" "shared"
                         (lambda (object) (setf (gethash "k" (gethash "data" object)) "loser") object))))))
         (dolist (store (list left right))
           (apply-ha-core-command store winner)
-          (let ((revision (gr8s::pod-store-resource-revision store))
-                (history (gr8s::pod-store-template-history store)))
+          (let ((revision (gr8s.store::pod-store-resource-revision store))
+                (history (gr8s.store::pod-store-template-history store)))
             (is (equal '(:core-conflict) (apply-ha-core-command store loser)))
-            (is (= revision (gr8s::pod-store-resource-revision store)))
-            (is (eq history (gr8s::pod-store-template-history store)))
+            (is (= revision (gr8s.store::pod-store-resource-revision store)))
+            (is (eq history (gr8s.store::pod-store-template-history store)))
             (is (equal "winner" (configmap-value store "shared" "k")))))))))
 
 (test stale-delete-cannot-remove-a-recreated-core-object
   (with-temporary-store (store root)
     (declare (ignore root))
-    (gr8s::create-core-resource store "configmaps" (configmap-input "aba" "k" "same") "default")
+    (gr8s.resources::create-core-resource store "configmaps" (configmap-input "aba" "k" "same") "default")
     (let ((stale (capture-ha-core-write store
-                   (lambda () (gr8s::delete-core-resource store "configmaps" "default" "aba")))))
-      (gr8s::delete-core-resource store "configmaps" "default" "aba")
-      (gr8s::create-core-resource store "configmaps" (configmap-input "aba" "k" "same") "default")
+                   (lambda () (gr8s.resources::delete-core-resource store "configmaps" "default" "aba")))))
+      (gr8s.resources::delete-core-resource store "configmaps" "default" "aba")
+      (gr8s.resources::create-core-resource store "configmaps" (configmap-input "aba" "k" "same") "default")
       (is (equal '(:core-conflict) (apply-ha-core-command store stale)))
       (is (equal "same" (configmap-value store "aba" "k"))))))
 
 (test core-map-conflicts-reject-the-whole-transaction
   (with-temporary-store (store root)
     (declare (ignore root))
-    (let* ((resources (gr8s::copy-core-resource-index store))
-           (jobs (gr8s::core-object "job" (gr8s::core-object "finished" 1)))
+    (let* ((resources (gr8s.resources::copy-core-resource-index store))
+           (jobs (gr8s.resources::core-object "job" (gr8s.resources::core-object "finished" 1)))
            (payload (gr8s.resources::core-state-delta-json
-                     store resources 1 (gr8s::pod-store-workload-deletions store) jobs)))
-      (setf (gethash "job" (gr8s::pod-store-job-controller-states store))
-            (gr8s::core-object "finished" 2))
-      (is (equal '(:core-conflict) (gr8s::install-core-state-delta store payload)))
-      (is (= 2 (gethash "finished" (gethash "job" (gr8s::pod-store-job-controller-states store)))))
-      (is (= 0 (gr8s::pod-store-resource-revision store))))))
+                     store resources 1 (gr8s.store::pod-store-workload-deletions store) jobs)))
+      (setf (gethash "job" (gr8s.store::pod-store-job-controller-states store))
+            (gr8s.resources::core-object "finished" 2))
+      (is (equal '(:core-conflict) (gr8s.resources::install-core-state-delta store payload)))
+      (is (= 2 (gethash "finished" (gethash "job" (gr8s.store::pod-store-job-controller-states store)))))
+      (is (= 0 (gr8s.store::pod-store-resource-revision store))))))
 
 (test encrypted-core-preconditions-preserve-secrecy-and-reject-stale-policy
   (with-temporary-store (store root)
     (declare (ignore root))
-    (gr8s::enable-secret-encryption store)
-    (gr8s::create-core-resource store "secrets" (ha-secret-input "guarded" "c2VjcmV0LW9sZA==") "default")
+    (gr8s.resources::enable-secret-encryption store)
+    (gr8s.resources::create-core-resource store "secrets" (ha-secret-input "guarded" "c2VjcmV0LW9sZA==") "default")
     (let ((command (capture-ha-core-write store
-                     (lambda () (gr8s::update-core-resource store "secrets" "default" "guarded"
+                     (lambda () (gr8s.resources::update-core-resource store "secrets" "default" "guarded"
                        (lambda (object)
                          (setf (gethash "password" (gethash "data" object)) "c2VjcmV0LW5ldw==") object))))))
       (is (null (search "c2VjcmV0LW9sZA==" (second command))))
       (is (null (search "c2VjcmV0LW5ldw==" (second command))))
-      (gr8s::prepare-secret-encryption-key store)
-      (let ((config (gr8s::pod-store-secret-encryption-config store)))
+      (gr8s.resources::prepare-secret-encryption-key store)
+      (let ((config (gr8s.store::pod-store-secret-encryption-config store)))
         (is (equal '(:core-conflict) (apply-ha-core-command store command)))
-        (is (eq config (gr8s::pod-store-secret-encryption-config store)))
+        (is (eq config (gr8s.store::pod-store-secret-encryption-config store)))
         (is (equal "c2VjcmV0LW9sZA==" (ha-secret-value store "guarded")))))))
 
 (test a-core-key-conflict-rejects-all-other-effects-in-the-same-delta
   (with-temporary-store (store root)
     (declare (ignore root))
     (dolist (name '("first" "second"))
-      (gr8s::create-core-resource store "configmaps" (configmap-input name "k" "base") "default"))
-    (let ((resources (gr8s::copy-core-resource-index store)))
+      (gr8s.resources::create-core-resource store "configmaps" (configmap-input name "k" "base") "default"))
+    (let ((resources (gr8s.resources::copy-core-resource-index store)))
       (dolist (name '("first" "second"))
         (let* ((key (list "configmaps" "default" name))
-               (object (gr8s::copy-core-object (gethash key resources))))
+               (object (gr8s.resources::copy-core-object (gethash key resources))))
           (setf (gethash "k" (gethash "data" object)) "staged"
                 (gethash key resources) object)))
       (let ((payload (gr8s.resources::core-state-delta-json
-                      store resources 4 (gr8s::pod-store-workload-deletions store)
-                      (gr8s::pod-store-job-controller-states store))))
-        (gr8s::update-core-resource store "configmaps" "default" "second"
+                      store resources 4 (gr8s.store::pod-store-workload-deletions store)
+                      (gr8s.store::pod-store-job-controller-states store))))
+        (gr8s.resources::update-core-resource store "configmaps" "default" "second"
           (lambda (object) (setf (gethash "k" (gethash "data" object)) "winner") object))
-        (let ((revision (gr8s::pod-store-resource-revision store)))
-          (is (equal '(:core-conflict) (gr8s::install-core-state-delta store payload)))
-          (is (= revision (gr8s::pod-store-resource-revision store)))
+        (let ((revision (gr8s.store::pod-store-resource-revision store)))
+          (is (equal '(:core-conflict) (gr8s.resources::install-core-state-delta store payload)))
+          (is (= revision (gr8s.store::pod-store-resource-revision store)))
           (is (equal "base" (configmap-value store "first" "k")))
           (is (equal "winner" (configmap-value store "second" "k"))))))))
 
 (test encrypted-prior-object-conditions-apply-and-survive-reopen
   (with-temporary-store (store root)
-    (gr8s::enable-secret-encryption store)
-    (gr8s::create-core-resource store "secrets" (ha-secret-input "updated" "b2xk") "default")
+    (gr8s.resources::enable-secret-encryption store)
+    (gr8s.resources::create-core-resource store "secrets" (ha-secret-input "updated" "b2xk") "default")
     (let ((command (capture-ha-core-write store
-                     (lambda () (gr8s::update-core-resource store "secrets" "default" "updated"
+                     (lambda () (gr8s.resources::update-core-resource store "secrets" "default" "updated"
                        (lambda (object) (setf (gethash "password" (gethash "data" object)) "bmV3") object))))))
       (is (equal '(:core-ok) (apply-ha-core-command store command)))
       (is (equal "bmV3" (ha-secret-value store "updated")))
-      (is (equal "bmV3" (ha-secret-value (gr8s:open-store root) "updated"))))))
+      (is (equal "bmV3" (ha-secret-value (gr8s.store::open-store root) "updated"))))))
 
 (test replicated-core-conditions-include-status-and-case-sensitive-content
-  (let* ((before (gr8s::core-object "metadata" (gr8s::core-object "uid" "same-uid" "resourceVersion" "1")
-                                  "spec" (gr8s::core-object "mode" "Active")
-                                  "status" (gr8s::core-object "ready" 1)))
-         (after (gr8s::copy-core-object before)))
+  (let* ((before (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "uid" "same-uid" "resourceVersion" "1")
+                                  "spec" (gr8s.resources::core-object "mode" "Active")
+                                  "status" (gr8s.resources::core-object "ready" 1)))
+         (after (gr8s.resources::copy-core-object before)))
     (setf (gethash "resourceVersion" (gethash "metadata" after)) "10000")
     (is-true (gr8s.resources::core-replicated-state-equal-p before after))
     (setf (gethash "ready" (gethash "status" after)) 2)

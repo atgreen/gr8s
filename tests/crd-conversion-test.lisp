@@ -13,39 +13,39 @@
 (defun crd-conversion-fixture (&key (storage "v1") webhook)
   "Build upstream's hostPort/host+port definition, converting through WEBHOOK when given."
   (flet ((schema (&rest fields)
-           (gr8s::core-object "openAPIV3Schema"
-             (gr8s::core-object "type" "object" "properties"
-               (let ((properties (gr8s::core-object)))
+           (gr8s.resources::core-object "openAPIV3Schema"
+             (gr8s.resources::core-object "type" "object" "properties"
+               (let ((properties (gr8s.resources::core-object)))
                  (dolist (field fields properties)
-                   (setf (gethash field properties) (gr8s::core-object "type" "string"))))))))
-    (gr8s::core-object
+                   (setf (gethash field properties) (gr8s.resources::core-object "type" "string"))))))))
+    (gr8s.resources::core-object
      "apiVersion" "apiextensions.k8s.io/v1" "kind" "CustomResourceDefinition"
-     "metadata" (gr8s::core-object "name" "hosts.stable.example.com")
-     "spec" (gr8s::core-object
+     "metadata" (gr8s.resources::core-object "name" "hosts.stable.example.com")
+     "spec" (gr8s.resources::core-object
              "group" "stable.example.com" "scope" "Namespaced"
-             "names" (gr8s::core-object "plural" "hosts" "kind" "Host")
+             "names" (gr8s.resources::core-object "plural" "hosts" "kind" "Host")
              "conversion" (if webhook
-                              (gr8s::core-object "strategy" "Webhook" "webhook" webhook)
-                              (gr8s::core-object "strategy" "None"))
+                              (gr8s.resources::core-object "strategy" "Webhook" "webhook" webhook)
+                              (gr8s.resources::core-object "strategy" "None"))
              "versions" (vector
-                         (gr8s::core-object "name" "v1" "served" t "storage" (equal storage "v1")
+                         (gr8s.resources::core-object "name" "v1" "served" t "storage" (equal storage "v1")
                                             "schema" (schema "hostPort")
-                                            "selectableFields" (vector (gr8s::core-object "jsonPath" ".hostPort")))
-                         (gr8s::core-object "name" "v2" "served" t "storage" (equal storage "v2")
+                                            "selectableFields" (vector (gr8s.resources::core-object "jsonPath" ".hostPort")))
+                         (gr8s.resources::core-object "name" "v2" "served" t "storage" (equal storage "v2")
                                             "schema" (schema "host" "port")
-                                            "selectableFields" (vector (gr8s::core-object "jsonPath" ".host")
-                                                                       (gr8s::core-object "jsonPath" ".port"))))))))
+                                            "selectableFields" (vector (gr8s.resources::core-object "jsonPath" ".host")
+                                                                       (gr8s.resources::core-object "jsonPath" ".port"))))))))
 
 (defun crd-conversion-webhook-spec ()
   "Point a definition at the local backend's conversion path."
-  (gr8s::core-object "conversionReviewVersions" #("v1" "v1beta1")
-                     "clientConfig" (gr8s::core-object
+  (gr8s.resources::core-object "conversionReviewVersions" #("v1" "v1beta1")
+                     "clientConfig" (gr8s.resources::core-object
                                      "url" (format nil "https://localhost:~D/crdconvert" *admission-test-port*)
                                      "caBundle" *admission-test-bundle*)))
 
 (defun crd-conversion-convert (object desired)
   "Convert one object between hostPort and host+port as upstream's sample webhook does."
-  (let ((copy (gr8s::copy-core-object object)))
+  (let ((copy (gr8s.resources::copy-core-object object)))
     (setf (gethash "apiVersion" copy) desired)
     (if (uiop:string-suffix-p desired "/v2")
         (let ((value (gethash "hostPort" copy)))
@@ -61,7 +61,7 @@
 
 (defun crd-conversion-success (request)
   "Answer a ConversionReview REQUEST by converting all of its objects."
-  (gr8s::core-object "result" (gr8s::core-object "status" "Success")
+  (gr8s.resources::core-object "result" (gr8s.resources::core-object "status" "Success")
                      "convertedObjects" (map 'vector
                                              (lambda (object)
                                                (crd-conversion-convert object (gethash "desiredAPIVersion" request)))
@@ -69,8 +69,8 @@
 
 (defun crd-conversion-host (version name &rest fields)
   "Build a custom object at VERSION in namespace alpha."
-  (let ((object (gr8s::core-object "apiVersion" (format nil "stable.example.com/~A" version) "kind" "Host"
-                                   "metadata" (gr8s::core-object "name" name "namespace" "alpha"))))
+  (let ((object (gr8s.resources::core-object "apiVersion" (format nil "stable.example.com/~A" version) "kind" "Host"
+                                   "metadata" (gr8s.resources::core-object "name" name "namespace" "alpha"))))
     (loop for (key value) on fields by #'cddr do (setf (gethash key object) value))
     object))
 
@@ -93,11 +93,11 @@
           (setf (gethash "conversionReviewVersions" unknown) #("v9"))
           (refused unknown))
         (let ((no-target (crd-conversion-webhook-spec)))
-          (setf (gethash "clientConfig" no-target) (gr8s::core-object))
+          (setf (gethash "clientConfig" no-target) (gr8s.resources::core-object))
           (refused no-target))
         (let ((both (crd-conversion-webhook-spec)))
           (setf (gethash "service" (gethash "clientConfig" both))
-                (gr8s::core-object "namespace" "alpha" "name" "hook"))
+                (gr8s.resources::core-object "namespace" "alpha" "name" "hook"))
           (refused both)))
       (let ((none (crd-conversion-fixture)))
         (setf (gethash "webhook" (gethash "conversion" (gethash "spec" none))) (crd-conversion-webhook-spec))
@@ -118,8 +118,8 @@
         (incf reviews)
         (setf largest (max largest (length (gethash "objects" request))))
         ;; The backend answers on its own thread, so this fails if the request holds the lock.
-        (if (bt:acquire-lock (gr8s::pod-store-lock store) nil)
-            (bt:release-lock (gr8s::pod-store-lock store))
+        (if (bt:acquire-lock (gr8s.store::pod-store-lock store) nil)
+            (bt:release-lock (gr8s.store::pod-store-lock store))
             (setf lock-free nil))
         (crd-conversion-success request))
       (crd-conversion-create-definition :webhook (crd-conversion-webhook-spec))
@@ -139,7 +139,7 @@
                          :object (crd-conversion-host "v2" "two" "host" "example" "port" "443"))))
           (is (equal "stable.example.com/v2" (gethash "apiVersion" created)))
           (is (equal "example" (gethash "host" created))))
-        (let ((stored (gr8s::get-core-resource store "custom:stable.example.com/hosts" "alpha" "two")))
+        (let ((stored (gr8s.resources::get-core-resource store "custom:stable.example.com/hosts" "alpha" "two")))
           (is (equal "stable.example.com/v1" (gethash "apiVersion" stored)))
           (is (equal "example:443" (gethash "hostPort" stored))))
         ;; An update at v2 keeps its identity and conversion.
@@ -150,7 +150,7 @@
         (let ((merged (check-core-status 200 (crd-conversion-path "v2" "two") :method :patch
                         :octets "{\"port\":\"445\"}" :content-type "application/merge-patch+json")))
           (is (equal "445" (gethash "port" merged))))
-        (is (equal "example:445" (gethash "hostPort" (gr8s::get-core-resource store "custom:stable.example.com/hosts" "alpha" "two"))))
+        (is (equal "example:445" (gethash "hostPort" (gr8s.resources::get-core-resource store "custom:stable.example.com/hosts" "alpha" "two"))))
         ;; A new storage version leaves a mixed collection, which one review converts.
         (setf (gethash "storage" (aref (gethash "versions" (gethash "spec" definition)) 0)) nil
               (gethash "storage" (aref (gethash "versions" (gethash "spec" definition)) 1)) t)
@@ -158,7 +158,7 @@
         (check-core-status 201 (crd-conversion-path "v1") :method :post
           :object (crd-conversion-host "v1" "three" "hostPort" "localhost:8080"))
         (is (equal "stable.example.com/v2"
-                   (gethash "apiVersion" (gr8s::get-core-resource store "custom:stable.example.com/hosts" "alpha" "three"))))
+                   (gethash "apiVersion" (gr8s.resources::get-core-resource store "custom:stable.example.com/hosts" "alpha" "three"))))
         (let ((v1 (check-core-status 200 (crd-conversion-path "v1"))) (v2 (check-core-status 200 (crd-conversion-path "v2"))))
           (is (= 3 (length (gethash "items" v1))))
           (is (= 3 (length (gethash "items" v2))))
@@ -202,10 +202,10 @@
              (let ((status (check-core-status 500 (crd-conversion-path "v2" "one"))))
                (is (search expected (gethash "message" status)) "~A" (gethash "message" status)))))
       (with-admission-handler (path request)
-        (gr8s::core-object "result" (gr8s::core-object "status" "Failure" "message" "no way")))
+        (gr8s.resources::core-object "result" (gr8s.resources::core-object "status" "Failure" "message" "no way")))
       (fails "no way")
       (with-admission-handler (path request)
-        (gr8s::core-object "result" (gr8s::core-object "status" "Success") "convertedObjects" #()))
+        (gr8s.resources::core-object "result" (gr8s.resources::core-object "status" "Success") "convertedObjects" #()))
       (fails "returned 0 objects")
       (with-admission-handler (path request)
         (let ((answer (crd-conversion-success request)))
@@ -221,7 +221,7 @@
     (with-admission-handler (path request)
       (let* ((answer (crd-conversion-success request))
              (metadata (gethash "metadata" (aref (gethash "convertedObjects" answer) 0))))
-        (setf (gethash "labels" metadata) (gr8s::core-object "added" "yes")
+        (setf (gethash "labels" metadata) (gr8s.resources::core-object "added" "yes")
               (gethash "finalizers" metadata) #("example.com/invented"))
         answer))
     (let ((converted (check-core-status 200 (crd-conversion-path "v2" "one"))))

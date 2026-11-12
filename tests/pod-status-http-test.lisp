@@ -85,9 +85,9 @@
 (test client-status-survives-a-store-reopen
   (with-temporary-store (store path)
     (let ((pod (status-test-pod store "web")))
-      (gr8s::save-pod-client-status store pod (gr8s::core-object "reason" "E2E"))
+      (gr8s.apiserver::save-pod-client-status store pod (gr8s.resources::core-object "reason" "E2E"))
       (let ((reopened (open-store path)))
-        (is (equal "E2E" (gethash "reason" (gethash (pod-uid pod) (gr8s::pod-store-pod-client-statuses reopened)))))))))
+        (is (equal "E2E" (gethash "reason" (gethash (pod-uid pod) (gr8s.store::pod-store-pod-client-statuses reopened)))))))))
 
 (test typed-status-writes-decode-only-writable-fields
   (flet ((field (number text)
@@ -97,7 +97,7 @@
            (status (concatenate '(vector (unsigned-byte 8))
                                 (field 3 "hello") (field 4 "E2E") (field 5 "9.9.9.9")
                                 (vector (logior (ash 2 3) 2) (length condition)) condition))
-           (decoded (gr8s::decode-pod-status-protobuf status)))
+           (decoded (gr8s.apiserver::decode-pod-status-protobuf status)))
       (is (equal "hello" (gethash "message" decoded)))
       (is (equal "E2E" (gethash "reason" decoded)))
       (is (null (gethash "hostIP" decoded)))
@@ -119,18 +119,18 @@
 (test assigned-pods-publish-the-nodes-address
   (with-temporary-store (store path)
     (declare (ignorable path))
-    (let ((node (gr8s::make-node-record :id "n" :name "n1" :pod-cidr "10.80.0.0/20" :underlay-address "192.0.2.7")))
-      (setf (gethash "n1" (gr8s::pod-store-nodes store)) node)
+    (let ((node (gr8s.model::make-node-record :id "n" :name "n1" :pod-cidr "10.80.0.0/20" :underlay-address "192.0.2.7")))
+      (setf (gethash "n1" (gr8s.store::pod-store-nodes store)) node)
       (let* ((pod (create-pod store (parse-pod "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"a\"},\"spec\":{\"nodeName\":\"n1\",\"containers\":[{\"name\":\"c\",\"image\":\"busybox:latest\"}]}}")))
-             (status (gr8s::add-pod-status-conditions store pod (gr8s::pod-status "Running"))))
+             (status (gr8s.kubelet::add-pod-status-conditions store pod (gr8s.kubelet::pod-status "Running"))))
         (is (equal "192.0.2.7" (gethash "hostIP" status)))
         (is (equal "192.0.2.7" (gethash "ip" (aref (gethash "hostIPs" status) 0))))))
     ;; An unassigned Pod has no host to report.
     (let* ((pod (create-pod store (parse-pod *valid-pod-json*)))
-           (status (gr8s::add-pod-status-conditions store pod (gr8s::pod-status "Pending"))))
+           (status (gr8s.kubelet::add-pod-status-conditions store pod (gr8s.kubelet::pod-status "Pending"))))
       (is (null (gethash "hostIP" status))))))
 
 (test a-node-without-an-underlay-reports-this-host
-  (let ((gr8s::*local-primary-ipv4* "198.51.100.4"))
-    (is (equal "198.51.100.4" (gr8s::node-reported-address (gr8s::make-node-record :id "n" :name "n" :underlay-address ""))))
-    (is (equal "192.0.2.7" (gr8s::node-reported-address (gr8s::make-node-record :id "n" :name "n" :underlay-address "192.0.2.7"))))))
+  (let ((gr8s.apiserver::*local-primary-ipv4* "198.51.100.4"))
+    (is (equal "198.51.100.4" (gr8s.apiserver::node-reported-address (gr8s.model::make-node-record :id "n" :name "n" :underlay-address ""))))
+    (is (equal "192.0.2.7" (gr8s.apiserver::node-reported-address (gr8s.model::make-node-record :id "n" :name "n" :underlay-address "192.0.2.7"))))))

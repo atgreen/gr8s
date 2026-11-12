@@ -22,39 +22,39 @@
 
 (defun create-volume-test-data (store namespace)
   "Create ConfigMap and Secret fixtures in NAMESPACE."
-  (gr8s::create-core-resource store "configmaps"
-    (gr8s::core-object "metadata" (gr8s::core-object "name" "settings")
-                       "data" (gr8s::core-object "message" "hello projection")) namespace)
-  (gr8s::create-core-resource store "secrets"
-    (gr8s::core-object "metadata" (gr8s::core-object "name" "credentials")
-                       "data" (gr8s::core-object "binary" "AP8=")) namespace))
+  (gr8s.resources::create-core-resource store "configmaps"
+    (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "settings")
+                       "data" (gr8s.resources::core-object "message" "hello projection")) namespace)
+  (gr8s.resources::create-core-resource store "secrets"
+    (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "credentials")
+                       "data" (gr8s.resources::core-object "binary" "AP8=")) namespace))
 
 (test assigned-projections-include-only-referenced-namespace-data
   (with-temporary-store (store directory)
     (create-volume-test-data store "sonobuoy")
     (create-volume-test-data store "other")
     (let* ((pod (create-pod store (volume-test-pod)))
-           (assignment (gr8s::pod-assignment pod store))
+           (assignment (gr8s.controllers::pod-assignment pod store))
            (agent-store (open-store (merge-pathnames "agent/" directory))))
       (is (= 2 (length (slot-value assignment 'gr8s.node.v1::resource-objects-json))))
-      (gr8s::install-assigned-resource-objects agent-store (list assignment))
+      (gr8s.kubelet::install-assigned-resource-objects agent-store (list assignment))
       (is (equal "hello projection"
-                 (gethash "message" (gethash "data" (gr8s::get-core-resource agent-store "configmaps" "sonobuoy" "settings")))))
-      (signals kubernetes-error (gr8s::get-core-resource agent-store "configmaps" "other" "settings"))
-      (let ((foreign (gr8s::get-core-resource store "configmaps" "other" "settings")))
+                 (gethash "message" (gethash "data" (gr8s.resources::get-core-resource agent-store "configmaps" "sonobuoy" "settings")))))
+      (signals kubernetes-error (gr8s.resources::get-core-resource agent-store "configmaps" "other" "settings"))
+      (let ((foreign (gr8s.resources::get-core-resource store "configmaps" "other" "settings")))
         (setf (slot-value assignment 'gr8s.node.v1::resource-objects-json)
               (list (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify foreign))))
         (let ((*error-output* (make-broadcast-stream)))
-          (gr8s::install-assigned-resource-objects agent-store (list assignment))))
-      (signals kubernetes-error (gr8s::get-core-resource agent-store "configmaps" "other" "settings"))
-      (gr8s::install-assigned-resource-objects agent-store nil)
-      (is (null (gr8s::list-core-resources agent-store "secrets"))))))
+          (gr8s.kubelet::install-assigned-resource-objects agent-store (list assignment))))
+      (signals kubernetes-error (gr8s.resources::get-core-resource agent-store "configmaps" "other" "settings"))
+      (gr8s.kubelet::install-assigned-resource-objects agent-store nil)
+      (is (null (gr8s.resources::list-core-resources agent-store "secrets"))))))
 
 (test one-pods-bad-resource-object-does-not-stop-the-others
   (with-temporary-store (store directory)
     (create-volume-test-data store "sonobuoy")
-    (let* ((good (gr8s::pod-assignment (create-pod store (volume-test-pod)) store))
-           (bad (gr8s::pod-assignment (create-pod store (volume-test-pod-named "projection-bad")) store))
+    (let* ((good (gr8s.controllers::pod-assignment (create-pod store (volume-test-pod)) store))
+           (bad (gr8s.controllers::pod-assignment (create-pod store (volume-test-pod-named "projection-bad")) store))
            (agent-store (open-store (merge-pathnames "agent/" directory))))
       ;; An object the agent would reject on arrival, as a token Secret named after an
       ;; uppercase Pod UID once was.
@@ -62,33 +62,33 @@
             (list (trivial-utf-8:string-to-utf-8-bytes
                    "{\"kind\":\"Secret\",\"metadata\":{\"namespace\":\"sonobuoy\"}}")))
       (let ((*error-output* (make-broadcast-stream)))
-        (finishes (gr8s::install-assigned-resource-objects agent-store (list bad good))))
+        (finishes (gr8s.kubelet::install-assigned-resource-objects agent-store (list bad good))))
       (is (equal "hello projection"
-                 (gethash "message" (gethash "data" (gr8s::get-core-resource agent-store "configmaps" "sonobuoy" "settings"))))))))
+                 (gethash "message" (gethash "data" (gr8s.resources::get-core-resource agent-store "configmaps" "sonobuoy" "settings"))))))))
 
 (test one-pods-missing-reference-does-not-stop-the-nodes-snapshot
   (with-temporary-store (store directory)
     (create-volume-test-data store "sonobuoy")
     (let ((missing (create-pod store (volume-test-pod-named "projection-missing")))
           (present (create-pod store (volume-test-pod))))
-      (gr8s::persist-pod-assignment store missing "node-a")
-      (gr8s::persist-pod-assignment store present "node-a")
+      (gr8s.controllers::persist-pod-assignment store missing "node-a")
+      (gr8s.controllers::persist-pod-assignment store present "node-a")
       ;; A namespace being torn down deletes its Secrets before its Pods.
-      (gr8s::delete-core-resource store "secrets" "sonobuoy" "credentials")
-      (is (= 1 (length (slot-value (gr8s::pod-assignment missing store) 'gr8s.node.v1::resource-objects-json))))
-      (is (= 2 (length (slot-value (gr8s::node-desired-state-snapshot store "node-a") 'gr8s.node.v1::pods)))))))
+      (gr8s.resources::delete-core-resource store "secrets" "sonobuoy" "credentials")
+      (is (= 1 (length (slot-value (gr8s.controllers::pod-assignment missing store) 'gr8s.node.v1::resource-objects-json))))
+      (is (= 2 (length (slot-value (gr8s.controllers::node-desired-state-snapshot store "node-a") 'gr8s.node.v1::pods)))))))
 
 (test projected-files-and-emptydir-have-real-mount-content
   (with-temporary-store (store directory)
     (create-volume-test-data store "sonobuoy")
     (let* ((pod (create-pod store (volume-test-pod)))
-           (runtime (gr8s::make-containerd-runtime :log-root (merge-pathnames "volumes/" directory)))
+           (runtime (gr8s.runtime.containerd::make-containerd-runtime :log-root (merge-pathnames "volumes/" directory)))
            (spec (gethash "spec" (pod-to-object pod))))
       ;; Keep this test runnable as an unprivileged developer. Native coverage
       ;; exercises fsGroup ownership and nonroot container access in the VM.
       (remhash "fsGroup" (gethash "securityContext" spec))
-      (setf (gr8s::containerd-runtime-resource-store runtime) store)
-      (let* ((mounts (gr8s::containerd-pod-mounts runtime pod (aref (pod-containers pod) 0)))
+      (setf (gr8s.runtime.containerd::containerd-runtime-resource-store runtime) store)
+      (let* ((mounts (gr8s.kubelet::containerd-pod-mounts runtime pod (aref (pod-containers pod) 0)))
              (config (first mounts)) (secret (second mounts)) (work (third mounts)))
         (is (= 3 (length mounts)))
         (is (gr8s.cri.v1::readonly config))
@@ -96,27 +96,27 @@
         (is (not (gr8s.cri.v1::readonly work)))
         (is (equal "hello projection" (uiop:read-file-string
                                       (merge-pathnames "message" (gr8s.cri.v1::host-path config)))))
-        (is (equalp #(0 255) (gr8s::read-file-octets
+        (is (equalp #(0 255) (gr8s.runtime::read-file-octets
                              (merge-pathnames "nested/binary" (gr8s.cri.v1::host-path secret)))))
         (let ((file (merge-pathnames "retained" (gr8s.cri.v1::host-path work))))
           (with-open-file (stream file :direction :output) (write-string "keep" stream))
-          (gr8s::containerd-pod-mounts runtime pod (aref (pod-containers pod) 0))
+          (gr8s.kubelet::containerd-pod-mounts runtime pod (aref (pod-containers pod) 0))
           (is (equal "keep" (uiop:read-file-string file))))))))
 
 (test effective-cri-identity-and-downward-environment-follow-pod-fields
   (let* ((pod (volume-test-pod)) (container (aref (pod-containers pod) 0))
-         (context (gr8s::containerd-pod-security-context pod container)))
+         (context (gr8s.kubelet::containerd-pod-security-context pod container)))
     (is (= 1001 (gr8s.cri.v1::value (gr8s.cri.v1::run-as-user context))))
     (is (= 3000 (gr8s.cri.v1::value (gr8s.cri.v1::run-as-group context))))
     (is (equal '(2000) (gr8s.cri.v1::supplemental-groups context)))
     (is (gr8s.cri.v1::no-new-privs context))
     (is (gr8s.cri.v1::readonly-rootfs context))
     (is (equal '(("NS" . "sonobuoy") ("LITERAL" . "ok"))
-               (gr8s::containerd-pod-environment nil pod container nil)))))
+               (gr8s.kubelet::containerd-pod-environment nil pod container nil)))))
 
 (test invalid-projections-are-rejected-before-runtime-or-filesystem-access
   (dolist (path '("../escape" "/absolute" "nested/../escape" "" "./escape"))
-    (is (not (gr8s::safe-volume-relative-path-p path))))
+    (is (not (gr8s.kubelet::safe-volume-relative-path-p path))))
   (let* ((pod (volume-test-pod)) (object (pod-to-object pod))
          (spec (gethash "spec" object))
          (source (gethash "secret" (aref (gethash "volumes" spec) 1))))
@@ -124,61 +124,61 @@
     (signals kubernetes-error (parse-pod object)))
   (let* ((object (pod-to-object (volume-test-pod)))
          (spec (gethash "spec" object)))
-    (setf (gethash "nodeSelector" spec) (gr8s::core-object "bad key!" "ssd"))
+    (setf (gethash "nodeSelector" spec) (gr8s.resources::core-object "bad key!" "ssd"))
     (signals kubernetes-error (parse-pod object))))
 
 (test scheduler-honors-node-label-selectors
   (with-temporary-store (store directory)
     (values directory)
-    (gr8s:register-node store (gr8s:make-node-record :id "node-a" :name "worker-a" :pod-cidr "10.88.0.0/24"))
-    (gr8s:mark-node-ready store "worker-a" (get-universal-time))
+    (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "node-a" :name "worker-a" :pod-cidr "10.88.0.0/24"))
+    (gr8s.controllers::mark-node-ready store "worker-a" (get-universal-time))
     (let* ((object (pod-to-object (volume-test-pod)))
            (spec (gethash "spec" object)))
-      (setf (gethash "nodeSelector" spec) (gr8s::core-object "kubernetes.io/os" "windows"))
-      (is (null (gr8s::schedule-pod store (create-pod store (parse-pod object)))))
+      (setf (gethash "nodeSelector" spec) (gr8s.resources::core-object "kubernetes.io/os" "windows"))
+      (is (null (gr8s.controllers::schedule-pod store (create-pod store (parse-pod object)))))
       ;; A label no node carries is valid and leaves the Pod pending.
-      (setf (gethash "nodeSelector" spec) (gr8s::core-object "x-test.k8s.io/unsatisfiable" "not-schedulable")
+      (setf (gethash "nodeSelector" spec) (gr8s.resources::core-object "x-test.k8s.io/unsatisfiable" "not-schedulable")
             (gethash "name" (gethash "metadata" object)) "unsatisfiable")
-      (is (null (gr8s::schedule-pod store (create-pod store (parse-pod object)))))
-      (setf (gethash "nodeSelector" spec) (gr8s::core-object "kubernetes.io/hostname" "worker-a")
+      (is (null (gr8s.controllers::schedule-pod store (create-pod store (parse-pod object)))))
+      (setf (gethash "nodeSelector" spec) (gr8s.resources::core-object "kubernetes.io/hostname" "worker-a")
             (gethash "name" (gethash "metadata" object)) "selected")
-      (is (equal "worker-a" (gr8s:node-record-name (gr8s::schedule-pod store (create-pod store (parse-pod object))))))
+      (is (equal "worker-a" (gr8s.model::node-record-name (gr8s.controllers::schedule-pod store (create-pod store (parse-pod object))))))
       ;; A label written through the API counts exactly like a derived one.
       (remhash "nodeName" spec)
-      (setf (gethash "nodeSelector" spec) (gr8s::core-object "disk" "ssd")
+      (setf (gethash "nodeSelector" spec) (gr8s.resources::core-object "disk" "ssd")
             (gethash "name" (gethash "metadata" object)) "needs-disk")
       (let ((pod (create-pod store (parse-pod object))))
-        (is (null (gr8s::schedule-pod store pod)))
-        (setf (gr8s::node-record-labels (gr8s:get-node store "worker-a")) (gr8s::core-object "disk" "ssd"))
-        (is (equal "worker-a" (gr8s:node-record-name (gr8s::schedule-pod store pod))))))))
+        (is (null (gr8s.controllers::schedule-pod store pod)))
+        (setf (gr8s.model::node-record-labels (gr8s.controllers::get-node store "worker-a")) (gr8s.resources::core-object "disk" "ssd"))
+        (is (equal "worker-a" (gr8s.model::node-record-name (gr8s.controllers::schedule-pod store pod))))))))
 
 (test key-environment-references-project-only-needed-objects-and-omit-optional-values
   (with-temporary-store (store directory)
-    (gr8s::create-core-resource store "secrets"
-      (gr8s::core-object "metadata" (gr8s::core-object "name" "env-secret")
-                         "data" (gr8s::core-object "key" "c2VjcmV0LXZhbHVl")) "sonobuoy")
-    (gr8s::create-core-resource store "configmaps"
-      (gr8s::core-object "metadata" (gr8s::core-object "name" "env-config")
-                         "data" (gr8s::core-object "key" "config-value")) "sonobuoy")
+    (gr8s.resources::create-core-resource store "secrets"
+      (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "env-secret")
+                         "data" (gr8s.resources::core-object "key" "c2VjcmV0LXZhbHVl")) "sonobuoy")
+    (gr8s.resources::create-core-resource store "configmaps"
+      (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "env-config")
+                         "data" (gr8s.resources::core-object "key" "config-value")) "sonobuoy")
     (let* ((object (com.inuoe.jzon:parse *valid-pod-json*))
            (container (aref (gethash "containers" (gethash "spec" object)) 0))
            (agent-store (open-store (merge-pathnames "agent/" directory)))
-           (runtime (gr8s::make-containerd-runtime)))
+           (runtime (gr8s.runtime.containerd::make-containerd-runtime)))
       (setf (gethash "namespace" (gethash "metadata" object)) "sonobuoy"
             (gethash "env" container)
             (vector
-             (gr8s::core-object "name" "SECRET" "valueFrom" (gr8s::core-object "secretKeyRef" (gr8s::core-object "name" "env-secret" "key" "key")))
-             (gr8s::core-object "name" "CONFIG" "valueFrom" (gr8s::core-object "configMapKeyRef" (gr8s::core-object "name" "env-config" "key" "key")))
-             (gr8s::core-object "name" "OPTIONAL_KEY" "valueFrom" (gr8s::core-object "secretKeyRef" (gr8s::core-object "name" "env-secret" "key" "missing" "optional" t)))
-             (gr8s::core-object "name" "OPTIONAL_OBJECT" "valueFrom" (gr8s::core-object "secretKeyRef" (gr8s::core-object "name" "missing" "key" "missing" "optional" t)))))
-      (let* ((pod (create-pod store (parse-pod object))) (assignment (gr8s::pod-assignment pod store)))
+             (gr8s.resources::core-object "name" "SECRET" "valueFrom" (gr8s.resources::core-object "secretKeyRef" (gr8s.resources::core-object "name" "env-secret" "key" "key")))
+             (gr8s.resources::core-object "name" "CONFIG" "valueFrom" (gr8s.resources::core-object "configMapKeyRef" (gr8s.resources::core-object "name" "env-config" "key" "key")))
+             (gr8s.resources::core-object "name" "OPTIONAL_KEY" "valueFrom" (gr8s.resources::core-object "secretKeyRef" (gr8s.resources::core-object "name" "env-secret" "key" "missing" "optional" t)))
+             (gr8s.resources::core-object "name" "OPTIONAL_OBJECT" "valueFrom" (gr8s.resources::core-object "secretKeyRef" (gr8s.resources::core-object "name" "missing" "key" "missing" "optional" t)))))
+      (let* ((pod (create-pod store (parse-pod object))) (assignment (gr8s.controllers::pod-assignment pod store)))
         (is (= 2 (length (slot-value assignment 'gr8s.node.v1::resource-objects-json))))
-        (gr8s::install-assigned-resource-objects agent-store (list assignment))
-        (setf (gr8s::containerd-runtime-resource-store runtime) agent-store)
+        (gr8s.kubelet::install-assigned-resource-objects agent-store (list assignment))
+        (setf (gr8s.runtime.containerd::containerd-runtime-resource-store runtime) agent-store)
         (is (equal '(("SECRET" . "secret-value") ("CONFIG" . "config-value"))
-                   (gr8s::containerd-pod-environment runtime pod (aref (pod-containers pod) 0) nil)))
-        (signals gr8s::runtime-error
-          (gr8s::containerd-key-environment-value runtime pod "secrets" (gr8s::core-object "name" "env-secret" "key" "missing")))))))
+                   (gr8s.kubelet::containerd-pod-environment runtime pod (aref (pod-containers pod) 0) nil)))
+        (signals gr8s.runtime::runtime-error
+          (gr8s.kubelet::containerd-key-environment-value runtime pod "secrets" (gr8s.resources::core-object "name" "env-secret" "key" "missing")))))))
 
 (defun security-profile-test-pod ()
   "Return a Pod shaped like the e2e framework's restricted security mixin output."
@@ -186,9 +186,9 @@
 
 (test effective-confinement-reaches-the-cri-container-and-sandbox
   (let* ((pod (security-profile-test-pod))
-         (inherits (gr8s::containerd-pod-security-context pod (aref (pod-containers pod) 0)))
-         (overrides (gr8s::containerd-pod-security-context pod (aref (pod-containers pod) 1)))
-         (sandbox (gr8s::containerd-pod-sandbox-security pod)))
+         (inherits (gr8s.kubelet::containerd-pod-security-context pod (aref (pod-containers pod) 0)))
+         (overrides (gr8s.kubelet::containerd-pod-security-context pod (aref (pod-containers pod) 1)))
+         (sandbox (gr8s.kubelet::containerd-pod-sandbox-security pod)))
     (is (= gr8s.cri.v1::|+PROFILETYPE-RuntimeDefault+|
            (gr8s.cri.v1::profile-type (gr8s.cri.v1::seccomp inherits))))
     (is (= gr8s.cri.v1::|+PROFILETYPE-Unconfined+|
@@ -209,7 +209,7 @@
   ;; RuntimeDefault is enum zero: the profile must still be present on the wire,
   ;; or containerd would silently run the container Unconfined.
   (let* ((pod (security-profile-test-pod))
-         (context (gr8s::containerd-pod-security-context pod (aref (pod-containers pod) 0)))
+         (context (gr8s.kubelet::containerd-pod-security-context pod (aref (pod-containers pod) 0)))
          (decoded (ag-proto:deserialize-from-bytes
                    'gr8s.cri.v1::linux-container-security-context
                    (ag-proto:serialize-to-bytes context))))
@@ -220,9 +220,9 @@
 
 (test sandbox-config-carries-pod-confinement
   (let* ((pod (security-profile-test-pod))
-         (config (gr8s::make-cri-pod-sandbox-config
+         (config (gr8s.runtime.containerd::make-cri-pod-sandbox-config
                   "restricted" "uid" "default" 0 "/tmp/logs" nil
-                  :security (gr8s::containerd-pod-sandbox-security pod)))
+                  :security (gr8s.kubelet::containerd-pod-sandbox-security pod)))
          (context (gr8s.cri.v1::security-context (gr8s.cri.v1::linux config))))
     (is (not (null (gr8s.cri.v1::seccomp context))))
     (is (equal "s0:c1,c2" (gr8s.cri.v1::level (gr8s.cri.v1::selinux-options context))))
@@ -265,11 +265,11 @@
                     (format stream "90 1 0:50 / ~A rw - tmpfs gr8s-pod-volume rw~%"
                             (string-right-trim "/" target))))))
          (write-table)
-         (let ((gr8s::*pod-mount-table-path* ,table)
-               (gr8s::*pod-tmpfs-mount*
+         (let ((gr8s.kubelet::*pod-mount-table-path* ,table)
+               (gr8s.kubelet::*pod-tmpfs-mount*
                  (lambda (target requested)
                    (push target ,mounted) (push requested ,mount-options) (write-table) 0))
-               (gr8s::*pod-tmpfs-unmount*
+               (gr8s.kubelet::*pod-tmpfs-unmount*
                  (lambda (target)
                    (setf ,mounted (remove (string-right-trim "/" target) ,mounted :test #'equal
                                           :key (lambda (item) (string-right-trim "/" item))))
@@ -284,17 +284,17 @@
   (with-temporary-store (store directory)
     (declare (ignorable store))
     (with-fake-pod-mounts (mounted options directory)
-      (let* ((runtime (gr8s::make-containerd-runtime :log-root (merge-pathnames "logs/" directory)))
+      (let* ((runtime (gr8s.runtime.containerd::make-containerd-runtime :log-root (merge-pathnames "logs/" directory)))
              (pod (memory-volume-test-pod))
              (volume (memory-volume-object pod))
-             (path (gr8s::materialize-pod-volume runtime pod volume)))
+             (path (gr8s.kubelet::materialize-pod-volume runtime pod volume)))
         (is (= 1 (length mounted)))
         (is (equal '("size=67108864") options))
         (is (equal (namestring (truename path)) (first mounted)))
         (is (= #o777 (logand #o777 (sb-posix:stat-mode (sb-posix:stat (namestring path))))))
         (with-open-file (stream (merge-pathnames "kept" path) :direction :output) (write-string "x" stream))
         ;; A restarted container materializes again against the same live tmpfs.
-        (gr8s::materialize-pod-volume runtime pod volume)
+        (gr8s.kubelet::materialize-pod-volume runtime pod volume)
         (is (= 1 (length mounted)))
         (is (probe-file (merge-pathnames "kept" path)))))))
 
@@ -302,22 +302,22 @@
   (with-temporary-store (store directory)
     (declare (ignorable store))
     (with-fake-pod-mounts (mounted options directory)
-      (let ((runtime (gr8s::make-containerd-runtime :log-root (merge-pathnames "logs/" directory))))
+      (let ((runtime (gr8s.runtime.containerd::make-containerd-runtime :log-root (merge-pathnames "logs/" directory))))
         (let ((pod (memory-volume-test-pod "{\"medium\":\"\"}")))
-          (gr8s::materialize-pod-volume runtime pod (memory-volume-object pod))
+          (gr8s.kubelet::materialize-pod-volume runtime pod (memory-volume-object pod))
           (is (null mounted)))
         (let ((pod (memory-volume-test-pod "{\"medium\":\"Memory\"}")))
-          (gr8s::materialize-pod-volume runtime pod (memory-volume-object pod))
+          (gr8s.kubelet::materialize-pod-volume runtime pod (memory-volume-object pod))
           (is (equal '("") options)))))))
 
 (test pod-termination-unmounts-then-removes-only-volume-data
   (with-temporary-store (store directory)
     (declare (ignorable store))
     (with-fake-pod-mounts (mounted options directory)
-      (let* ((runtime (gr8s::make-containerd-runtime :log-root (merge-pathnames "logs/" directory)))
+      (let* ((runtime (gr8s.runtime.containerd::make-containerd-runtime :log-root (merge-pathnames "logs/" directory)))
              (pod (memory-volume-test-pod))
-             (path (gr8s::materialize-pod-volume runtime pod (memory-volume-object pod)))
-             (pod-directory (gr8s::containerd-pod-log-directory runtime (pod-uid pod)))
+             (path (gr8s.kubelet::materialize-pod-volume runtime pod (memory-volume-object pod)))
+             (pod-directory (gr8s.runtime.containerd::containerd-pod-log-directory runtime (pod-uid pod)))
              (log (merge-pathnames "c.0.log" pod-directory))
              (outside (merge-pathnames "outside" directory)))
         (declare (ignorable options))
@@ -325,51 +325,51 @@
         (with-open-file (stream outside :direction :output) (write-string "host" stream))
         ;; A container can plant symlinks in its volume; removal must not follow them.
         (sb-posix:symlink (namestring outside) (namestring (merge-pathnames "escape" path)))
-        (gr8s::cleanup-pod-volumes runtime (pod-uid pod))
+        (gr8s.kubelet::cleanup-pod-volumes runtime (pod-uid pod))
         (is (null mounted))
         (is (null (probe-file (merge-pathnames "volumes/" pod-directory))))
         (is (probe-file log))
         (is (equal "host" (uiop:read-file-string outside)))
         ;; Retrying after a crash, or for a Pod that never ran here, is harmless.
-        (gr8s::cleanup-pod-volumes runtime (pod-uid pod))
-        (gr8s::cleanup-pod-volumes runtime "never-ran")))))
+        (gr8s.kubelet::cleanup-pod-volumes runtime (pod-uid pod))
+        (gr8s.kubelet::cleanup-pod-volumes runtime "never-ran")))))
 
 (test failed-unmount-keeps-volume-data-for-retry
   (with-temporary-store (store directory)
     (declare (ignorable store))
     (with-fake-pod-mounts (mounted options directory)
-      (let* ((runtime (gr8s::make-containerd-runtime :log-root (merge-pathnames "logs/" directory)))
+      (let* ((runtime (gr8s.runtime.containerd::make-containerd-runtime :log-root (merge-pathnames "logs/" directory)))
              (pod (memory-volume-test-pod))
-             (path (gr8s::materialize-pod-volume runtime pod (memory-volume-object pod))))
+             (path (gr8s.kubelet::materialize-pod-volume runtime pod (memory-volume-object pod))))
         (declare (ignorable options))
         (with-open-file (stream (merge-pathnames "kept" path) :direction :output) (write-string "x" stream))
-        (let ((gr8s::*pod-tmpfs-unmount* (lambda (target) (declare (ignore target)) -1)))
-          (signals gr8s::runtime-error (gr8s::cleanup-pod-volumes runtime (pod-uid pod))))
+        (let ((gr8s.kubelet::*pod-tmpfs-unmount* (lambda (target) (declare (ignore target)) -1)))
+          (signals gr8s.runtime::runtime-error (gr8s.kubelet::cleanup-pod-volumes runtime (pod-uid pod))))
         (is (probe-file (merge-pathnames "kept" path)))
         (is (= 1 (length mounted)))
-        (gr8s::cleanup-pod-volumes runtime (pod-uid pod))
+        (gr8s.kubelet::cleanup-pod-volumes runtime (pod-uid pod))
         (is (null mounted))
         (is (null (probe-file path)))))))
 
 (test sandbox-replacement-keeps-volumes-but-pod-deletion-removes-them
   (let ((calls nil)
-        (runtime (gr8s::make-containerd-runtime :log-root "/tmp/gr8s-unused-volume-logs/"))
-        (delete-uid (symbol-function 'gr8s::containerd-delete-uid))
-        (cleanup (symbol-function 'gr8s::cleanup-pod-volumes)))
+        (runtime (gr8s.runtime.containerd::make-containerd-runtime :log-root "/tmp/gr8s-unused-volume-logs/"))
+        (delete-uid (symbol-function 'gr8s.runtime.containerd::containerd-delete-uid))
+        (cleanup (symbol-function 'gr8s.kubelet::cleanup-pod-volumes)))
     (unwind-protect
          (progn
-           (setf (symbol-function 'gr8s::containerd-delete-uid)
+           (setf (symbol-function 'gr8s.runtime.containerd::containerd-delete-uid)
                  (lambda (&rest arguments) (declare (ignore arguments)) (push :sandbox calls) nil)
-                 (symbol-function 'gr8s::cleanup-pod-volumes)
+                 (symbol-function 'gr8s.kubelet::cleanup-pod-volumes)
                  (lambda (&rest arguments) (declare (ignore arguments)) (push :volumes calls) nil))
-           (gr8s::containerd-replace-uid runtime "uid")
+           (gr8s.runtime.containerd::containerd-replace-uid runtime "uid")
            (is (equal '(:sandbox) calls))
            (setf calls nil)
-           (gr8s:runtime-delete runtime "uid")
+           (gr8s.runtime::runtime-delete runtime "uid")
            ;; Volumes go only after the sandbox can no longer be holding them.
            (is (equal '(:volumes :sandbox) calls)))
-      (setf (symbol-function 'gr8s::containerd-delete-uid) delete-uid
-            (symbol-function 'gr8s::cleanup-pod-volumes) cleanup))))
+      (setf (symbol-function 'gr8s.runtime.containerd::containerd-delete-uid) delete-uid
+            (symbol-function 'gr8s.kubelet::cleanup-pod-volumes) cleanup))))
 
 (defun environment-test-pod (container-fields &optional spec-fields)
   "Return an unsaved sonobuoy Pod with extra JSON CONTAINER-FIELDS and SPEC-FIELDS."
@@ -377,7 +377,7 @@
 
 (defun environment-test-service (store namespace name address ports-json)
   "Create a Service directly, as the agent's discovery projection provides one."
-  (gr8s::create-core-resource
+  (gr8s.resources::create-core-resource
    store "services"
    (com.inuoe.jzon:parse (format nil "{\"apiVersion\":\"v1\",\"kind\":\"Service\",\"metadata\":{\"name\":~S},\"spec\":{\"clusterIP\":~S,\"ports\":~A}}" name address ports-json))
    namespace))
@@ -387,21 +387,21 @@
   (let ((directory (gensym "DIRECTORY")))
     `(with-temporary-store (,store ,directory)
        (create-volume-test-data ,store "sonobuoy")
-       (let ((,runtime (gr8s::make-containerd-runtime :log-root (merge-pathnames "logs/" ,directory))))
-         (setf (gr8s::containerd-runtime-resource-store ,runtime) ,store)
+       (let ((,runtime (gr8s.runtime.containerd::make-containerd-runtime :log-root (merge-pathnames "logs/" ,directory))))
+         (setf (gr8s.runtime.containerd::containerd-runtime-resource-store ,runtime) ,store)
          ,@body))))
 
 (defun environment-of (runtime store pod)
   "Return the created POD's resolved variables for its only container."
   (let ((created (create-pod store pod)))
-    (gr8s::containerd-pod-environment runtime created (aref (pod-containers created) 0) nil)))
+    (gr8s.kubelet::containerd-pod-environment runtime created (aref (pod-containers created) 0) nil)))
 
 (defun environment-value (name environment)
   "Return one variable's value."
   (cdr (assoc name environment :test #'equal)))
 
 (test service-pairs-match-the-kubernetes-names-and-formats
-  (let ((pairs (gr8s::service-environment-pairs
+  (let ((pairs (gr8s.kubelet::service-environment-pairs
                 (com.inuoe.jzon:parse "{\"metadata\":{\"name\":\"foo-service\"},\"spec\":{\"clusterIP\":\"10.96.0.9\",\"ports\":[{\"name\":\"http-web\",\"port\":8765,\"protocol\":\"TCP\"},{\"port\":53,\"protocol\":\"UDP\"}]}}"))))
     (is (equal "10.96.0.9" (environment-value "FOO_SERVICE_SERVICE_HOST" pairs)))
     (is (equal "8765" (environment-value "FOO_SERVICE_SERVICE_PORT" pairs)))
@@ -413,7 +413,7 @@
     (is (equal "10.96.0.9" (environment-value "FOO_SERVICE_PORT_8765_TCP_ADDR" pairs)))
     (is (equal "udp://10.96.0.9:53" (environment-value "FOO_SERVICE_PORT_53_UDP" pairs))))
   ;; Headless Services have no address to advertise.
-  (is (null (gr8s::service-environment-pairs
+  (is (null (gr8s.kubelet::service-environment-pairs
              (com.inuoe.jzon:parse "{\"metadata\":{\"name\":\"h\"},\"spec\":{\"clusterIP\":\"None\",\"ports\":[{\"port\":80}]}}")))))
 
 (test containers-get-services-from-their-namespace-and-the-api-service
@@ -438,12 +438,12 @@
 
 (test env-from-prefixes-keys-and-explicit-env-wins
   (with-environment-runtime (runtime store)
-    (gr8s::create-core-resource store "configmaps"
-      (gr8s::core-object "metadata" (gr8s::core-object "name" "vars")
-                         "data" (gr8s::core-object "shared" "from-config" "only" "c")) "sonobuoy")
-    (gr8s::create-core-resource store "secrets"
-      (gr8s::core-object "metadata" (gr8s::core-object "name" "sec")
-                         "data" (gr8s::core-object "token" "c2VjcmV0")) "sonobuoy")
+    (gr8s.resources::create-core-resource store "configmaps"
+      (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "vars")
+                         "data" (gr8s.resources::core-object "shared" "from-config" "only" "c")) "sonobuoy")
+    (gr8s.resources::create-core-resource store "secrets"
+      (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "sec")
+                         "data" (gr8s.resources::core-object "token" "c2VjcmV0")) "sonobuoy")
     (let ((environment
             (environment-of runtime store
               (environment-test-pod "\"envFrom\":[{\"configMapRef\":{\"name\":\"vars\"}},{\"prefix\":\"p_\",\"secretRef\":{\"name\":\"sec\"}}],\"env\":[{\"name\":\"shared\",\"value\":\"explicit\"}]"))))
@@ -459,11 +459,11 @@
                      (environment-test-pod "\"envFrom\":[{\"configMapRef\":{\"name\":\"absent\",\"optional\":true}}]"))))))
   (with-environment-runtime (runtime store)
     (let ((required (create-pod store (environment-test-pod "\"envFrom\":[{\"secretRef\":{\"name\":\"missing\"}}]"))))
-      (signals gr8s::runtime-error
-        (gr8s::containerd-pod-environment runtime required (aref (pod-containers required) 0) nil)))))
+      (signals gr8s.runtime::runtime-error
+        (gr8s.kubelet::containerd-pod-environment runtime required (aref (pod-containers required) 0) nil)))))
 
 (test env-from-references-reach-the-agent-including-init-containers
-  (let ((declared (gr8s::pod-resource-reference-declarations
+  (let ((declared (gr8s.kubelet::pod-resource-reference-declarations
                    (parse-pod "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"e\"},\"spec\":{\"initContainers\":[{\"name\":\"i\",\"image\":\"b\",\"env\":[{\"name\":\"K\",\"valueFrom\":{\"secretKeyRef\":{\"name\":\"init-sec\",\"key\":\"k\"}}}]}],\"containers\":[{\"name\":\"c\",\"image\":\"b\",\"envFrom\":[{\"configMapRef\":{\"name\":\"cm\",\"optional\":true}},{\"secretRef\":{\"name\":\"sec\"}}]}]}}"))))
     (is (member '("configmaps" "cm" t) declared :test #'equal))
     (is (member '("secrets" "sec" nil) declared :test #'equal))
@@ -494,27 +494,27 @@
 
 (test image-pull-policies-default-as-kubernetes-does
   (dolist (image '("a" "a:latest" "registry:5000/a" "registry:5000/a:latest"))
-    (is (equal "Always" (gr8s::default-image-pull-policy image)) "~A" image))
+    (is (equal "Always" (gr8s.kubelet::default-image-pull-policy image)) "~A" image))
   (dolist (image '("a:1" "registry:5000/a:1" "a@sha256:abc"))
-    (is (equal "IfNotPresent" (gr8s::default-image-pull-policy image)) "~A" image)))
+    (is (equal "IfNotPresent" (gr8s.kubelet::default-image-pull-policy image)) "~A" image)))
 
 (test image-volumes-mount-the-pulled-image-read-only
-  (let* ((runtime (gr8s::make-containerd-runtime :log-root "/nonexistent/"))
+  (let* ((runtime (gr8s.runtime.containerd::make-containerd-runtime :log-root "/nonexistent/"))
          (pod (image-volume-test-pod "{\"reference\":\"a:1\"}"
                                      ",\"subPathExpr\":\"$(DIR)/x\",\"mountPropagation\":\"HostToContainer\""))
          (present nil) (pulls nil))
-    (with-replaced-functions ((gr8s::cri-image-present-p (lambda (socket image &rest options)
+    (with-replaced-functions ((gr8s.runtime.containerd::cri-image-present-p (lambda (socket image &rest options)
                                                            (declare (ignore socket options))
                                                            (member image present :test #'equal)))
-                              (gr8s::cri-image-id (lambda (socket image &rest options)
+                              (gr8s.runtime.containerd::cri-image-id (lambda (socket image &rest options)
                                                     (declare (ignore socket options))
                                                     (format nil "sha256:~A" image)))
-                              (gr8s::cri-pull-image (lambda (socket image &rest options)
+                              (gr8s.runtime.containerd::cri-pull-image (lambda (socket image &rest options)
                                                       (declare (ignore socket options))
                                                       (push image pulls))))
       (flet ((mounts ()
-               (gr8s::containerd-pod-mounts runtime pod (aref (pod-containers pod) 0) '(("DIR" . "dir")))))
-        (signals gr8s::container-image-pending (mounts))
+               (gr8s.kubelet::containerd-pod-mounts runtime pod (aref (pod-containers pod) 0) '(("DIR" . "dir")))))
+        (signals gr8s.runtime::container-image-pending (mounts))
         (gap-wait-for-pull runtime "a:1")
         (is (equal '("a:1") pulls) "only the mounted image is pulled")
         (setf present '("a:1"))
@@ -528,22 +528,22 @@
                  (gr8s.cri.v1::propagation mount))))))))
 
 (test image-volume-pull-failures-hold-the-container-as-its-own-image-would
-  (let* ((runtime (gr8s::make-containerd-runtime :log-root "/nonexistent/"))
+  (let* ((runtime (gr8s.runtime.containerd::make-containerd-runtime :log-root "/nonexistent/"))
          (missing (image-volume-test-pod "{\"reference\":\"a:1\",\"pullPolicy\":\"Never\"}"))
          (failing (image-volume-test-pod "{\"reference\":\"b:1\"}"))
-         (now 4000000000) (gr8s::*container-lifecycle-clock* (lambda () now)))
-    (with-replaced-functions ((gr8s::cri-image-present-p (constantly nil))
-                              (gr8s::cri-pull-image (lambda (&rest arguments)
+         (now 4000000000) (gr8s.kubelet::*container-lifecycle-clock* (lambda () now)))
+    (with-replaced-functions ((gr8s.runtime.containerd::cri-image-present-p (constantly nil))
+                              (gr8s.runtime.containerd::cri-pull-image (lambda (&rest arguments)
                                                       (declare (ignore arguments))
                                                       (error "registry says no"))))
-      (signals gr8s::container-config-error
-        (gr8s::containerd-pod-mounts runtime missing (aref (pod-containers missing) 0)))
-      (signals gr8s::container-image-pending
-        (gr8s::containerd-pod-mounts runtime failing (aref (pod-containers failing) 0)))
+      (signals gr8s.runtime::container-config-error
+        (gr8s.kubelet::containerd-pod-mounts runtime missing (aref (pod-containers missing) 0)))
+      (signals gr8s.runtime::container-image-pending
+        (gr8s.kubelet::containerd-pod-mounts runtime failing (aref (pod-containers failing) 0)))
       (gap-wait-for-pull runtime "b:1")
-      (let ((condition (handler-case (gr8s::containerd-pod-mounts runtime failing (aref (pod-containers failing) 0))
-                         (gr8s::container-image-pull-error (condition) condition))))
-        (is (equal "ErrImagePull" (gr8s::container-config-error-reason condition)))))))
+      (let ((condition (handler-case (gr8s.kubelet::containerd-pod-mounts runtime failing (aref (pod-containers failing) 0))
+                         (gr8s.runtime::container-image-pull-error (condition) condition))))
+        (is (equal "ErrImagePull" (gr8s.kubelet::container-config-error-reason condition)))))))
 
 (test fsgroup-volumes-keep-other-access-and-gain-setgid
   ;; The kubelet ORs fsGroup's group bits and setgid into an emptyDir's 0777, giving 02777.
@@ -551,18 +551,18 @@
     (declare (ignorable store))
     (let* ((object (com.inuoe.jzon:parse *valid-pod-json*))
            (spec (gethash "spec" object))
-           (runtime (gr8s::make-containerd-runtime :log-root (merge-pathnames "logs/" directory))))
+           (runtime (gr8s.runtime.containerd::make-containerd-runtime :log-root (merge-pathnames "logs/" directory))))
       (setf (gethash "name" (gethash "metadata" object)) "fsgroup"
-            (gethash "securityContext" spec) (gr8s::core-object "fsGroup" (sb-posix:getgid))
-            (gethash "volumes" spec) (vector (gr8s::core-object "name" "data" "emptyDir" (gr8s::core-object))))
+            (gethash "securityContext" spec) (gr8s.resources::core-object "fsGroup" (sb-posix:getgid))
+            (gethash "volumes" spec) (vector (gr8s.resources::core-object "name" "data" "emptyDir" (gr8s.resources::core-object))))
       (let* ((pod (parse-pod object))
-             (path (gr8s::materialize-pod-volume runtime pod (aref (gethash "volumes" (gethash "spec" (pod-to-object pod))) 0)))
+             (path (gr8s.kubelet::materialize-pod-volume runtime pod (aref (gethash "volumes" (gethash "spec" (pod-to-object pod))) 0)))
              (stat (sb-posix:stat (namestring path))))
         (is (= #o2777 (logand #o7777 (sb-posix:stat-mode stat))))
         (is (= (sb-posix:getgid) (sb-posix:stat-gid stat)))
         ;; A tmpfs root starts sticky (1777), and keeps it: 03777.
         (sb-posix:chmod (namestring path) #o1777)
-        (gr8s::materialize-pod-volume runtime pod (aref (gethash "volumes" (gethash "spec" (pod-to-object pod))) 0))
+        (gr8s.kubelet::materialize-pod-volume runtime pod (aref (gethash "volumes" (gethash "spec" (pod-to-object pod))) 0))
         (is (= #o3777 (logand #o7777 (sb-posix:stat-mode (sb-posix:stat (namestring path))))))))))
 
 (test managed-emptydirs-use-real-kubelet-paths-and-clean-up-by-uid
@@ -570,17 +570,17 @@
     (let* ((pod (create-pod store (parse-pod
                   "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"socket-pod\"},\"spec\":{\"volumes\":[{\"name\":\"sockets\",\"emptyDir\":{}}],\"containers\":[{\"name\":\"main\",\"image\":\"busybox\"}]}}")))
            (root (merge-pathnames "kubelet/" directory))
-           (runtime (gr8s::make-containerd-runtime :log-root (merge-pathnames "logs/" directory)))
+           (runtime (gr8s.runtime.containerd::make-containerd-runtime :log-root (merge-pathnames "logs/" directory)))
            (gr8s.kubelet::*csi-kubelet-root* (namestring root))
-           (expected (merge-pathnames (format nil "pods/~A/volumes/kubernetes.io~~empty-dir/sockets/" (gr8s::pod-uid pod)) root))
+           (expected (merge-pathnames (format nil "pods/~A/volumes/kubernetes.io~~empty-dir/sockets/" (gr8s.model::pod-uid pod)) root))
            (other (merge-pathnames "pods/another-pod/keep" root)))
       (setf (gr8s.runtime.containerd:containerd-runtime-kubelet-root runtime) root)
       (ensure-directories-exist other)
       (with-open-file (out other :direction :output :if-does-not-exist :create) (write-string "keep" out))
-      (is (equal expected (gr8s::materialize-pod-volume runtime pod (aref (gethash "volumes" (gethash "spec" (pod-to-object pod))) 0))))
+      (is (equal expected (gr8s.kubelet::materialize-pod-volume runtime pod (aref (gethash "volumes" (gethash "spec" (pod-to-object pod))) 0))))
       (is (= sb-posix:s-ifdir (logand sb-posix:s-ifmt (sb-posix:stat-mode (sb-posix:lstat expected)))))
       (is (= #o700 (logand #o777 (sb-posix:stat-mode
-                                 (sb-posix:stat (merge-pathnames (format nil "pods/~A/" (gr8s::pod-uid pod)) root))))))
-      (gr8s::cleanup-pod-volumes runtime (gr8s::pod-uid pod))
+                                 (sb-posix:stat (merge-pathnames (format nil "pods/~A/" (gr8s.model::pod-uid pod)) root))))))
+      (gr8s.kubelet::cleanup-pod-volumes runtime (gr8s.model::pod-uid pod))
       (is-false (probe-file expected))
       (is-true (probe-file other)))))

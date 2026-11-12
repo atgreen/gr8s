@@ -15,20 +15,20 @@
   (loop for (value text) in '((0 "0") (1 "1") (357.35d0 "357.35") (26066944 "2.6066944e+07")
                               (123456 "123456") (1000000 "1e+06") (0.00012d0 "0.00012")
                               (1.5d-5 "1.5e-05") (1.633253812d9 "1.633253812e+09") (-2.5d0 "-2.5"))
-        do (is (equal text (gr8s::prometheus-float-string value)))))
+        do (is (equal text (gr8s.kubelet::prometheus-float-string value)))))
 
 (defun kubelet-test-usage (time cpu memory)
   "Return a container measurement taken at TIME nanoseconds."
-  (gr8s::make-kubelet-usage :time time :cpu-core-nanoseconds cpu :memory-working-set memory))
+  (gr8s.kubelet::make-kubelet-usage :time time :cpu-core-nanoseconds cpu :memory-working-set memory))
 
 (test container-stat-listings-are-not-filtered-by-label
   ;; Some CRI implementations do not apply labels consistently to the stats
   ;; listing. The join with managed sandboxes is the ownership boundary.
   (is (null (gr8s.cri.v1::label-selector
-             (gr8s::kubelet-container-stats-filter)))))
+             (gr8s.kubelet::kubelet-container-stats-filter)))))
 
 (test cri-listings-join-into-pods-of-running-containers
-  (let ((pods (gr8s::assemble-kubelet-pod-stats
+  (let ((pods (gr8s.kubelet::assemble-kubelet-pod-stats
                '(("s1" "web" "default" "u1" 1700000000000000000)
                  ("s2" "idle" "kube-system" "u2" 1700000001000000000))
                '(("c1" "s1" "app" t 1700000002000000000)
@@ -40,19 +40,19 @@
                      (list "c3" (kubelet-test-usage 1700000011000000000 9 9) nil nil)
                      (list "c4" (kubelet-test-usage 1700000011000000000 9 9) nil nil)))))
     ;; Sorted by namespace then name; a ready sandbox without running containers still counts.
-    (is (equal '("web" "idle") (mapcar #'gr8s::kubelet-pod-stats-name pods)))
+    (is (equal '("web" "idle") (mapcar #'gr8s.kubelet::kubelet-pod-stats-name pods)))
     (let ((web (first pods)))
-      (is (equal "u1" (gr8s::kubelet-pod-stats-uid web)))
-      (is (= 1700000000 (gr8s::kubelet-pod-stats-start-time web)))
+      (is (equal "u1" (gr8s.kubelet::kubelet-pod-stats-uid web)))
+      (is (= 1700000000 (gr8s.kubelet::kubelet-pod-stats-start-time web)))
       ;; Exited containers and containers of unknown sandboxes are left out.
-      (is (equal '("app" "sidecar") (mapcar #'gr8s::kubelet-container-stats-name (gr8s::kubelet-pod-stats-containers web))))
-      (is (= 4096 (gr8s::kubelet-container-stats-rootfs-used-bytes (first (gr8s::kubelet-pod-stats-containers web)))))
-      (let ((usage (gr8s::kubelet-pod-stats-usage web)))
-        (is (= 3500000000 (gr8s::kubelet-usage-cpu-core-nanoseconds usage)))
-        (is (= 1024 (gr8s::kubelet-usage-memory-working-set usage)))
-        (is (= 1700000011000000000 (gr8s::kubelet-usage-time usage)))
-        (is (null (gr8s::kubelet-usage-memory-rss usage)))))
-    (is (null (gr8s::kubelet-usage-cpu-core-nanoseconds (gr8s::kubelet-pod-stats-usage (second pods)))))))
+      (is (equal '("app" "sidecar") (mapcar #'gr8s.kubelet::kubelet-container-stats-name (gr8s.kubelet::kubelet-pod-stats-containers web))))
+      (is (= 4096 (gr8s.kubelet::kubelet-container-stats-rootfs-used-bytes (first (gr8s.kubelet::kubelet-pod-stats-containers web)))))
+      (let ((usage (gr8s.kubelet::kubelet-pod-stats-usage web)))
+        (is (= 3500000000 (gr8s.kubelet::kubelet-usage-cpu-core-nanoseconds usage)))
+        (is (= 1024 (gr8s.kubelet::kubelet-usage-memory-working-set usage)))
+        (is (= 1700000011000000000 (gr8s.kubelet::kubelet-usage-time usage)))
+        (is (null (gr8s.kubelet::kubelet-usage-memory-rss usage)))))
+    (is (null (gr8s.kubelet::kubelet-usage-cpu-core-nanoseconds (gr8s.kubelet::kubelet-pod-stats-usage (second pods)))))))
 
 (test node-usage-reads-the-root-cgroup-and-proc
   (let ((directory (uiop:ensure-directory-pathname
@@ -66,43 +66,43 @@
              (put "meminfo" (format nil "MemTotal:       4000 kB~%MemFree:        1000 kB~%Inactive(file):  999 kB~%"))
              (put "memory.stat" (format nil "anon 1048576~%inactive_file 1024000~%pgfault 10~%pgmajfault 2~%"))
              (put "stat" (format nil "cpu  1 2 3 4 5 6 7 8~%btime 1700000000~%")))
-           (let ((gr8s::*node-cpu-previous-sample* nil))
-             (let ((usage (gr8s::measure-node-usage :cgroup-root directory :proc-root directory)))
-               (is (= 2500000000 (gr8s::kubelet-usage-cpu-core-nanoseconds usage)))
-               (is (null (gr8s::kubelet-usage-cpu-nano-cores usage)))
-               (is (= (* 3000 1024) (gr8s::kubelet-usage-memory-usage usage)))
+           (let ((gr8s.kubelet::*node-cpu-previous-sample* nil))
+             (let ((usage (gr8s.kubelet::measure-node-usage :cgroup-root directory :proc-root directory)))
+               (is (= 2500000000 (gr8s.kubelet::kubelet-usage-cpu-core-nanoseconds usage)))
+               (is (null (gr8s.kubelet::kubelet-usage-cpu-nano-cores usage)))
+               (is (= (* 3000 1024) (gr8s.kubelet::kubelet-usage-memory-usage usage)))
                ;; The root memory.stat's inactive file pages win over /proc/meminfo's.
-               (is (= (- (* 3000 1024) 1024000) (gr8s::kubelet-usage-memory-working-set usage)))
-               (is (= (- (* 4000 1024) (- (* 3000 1024) 1024000)) (gr8s::kubelet-usage-memory-available usage)))
-               (is (= 1048576 (gr8s::kubelet-usage-memory-rss usage)))
-               (is (= 2 (gr8s::kubelet-usage-major-page-faults usage))))
+               (is (= (- (* 3000 1024) 1024000) (gr8s.kubelet::kubelet-usage-memory-working-set usage)))
+               (is (= (- (* 4000 1024) (- (* 3000 1024) 1024000)) (gr8s.kubelet::kubelet-usage-memory-available usage)))
+               (is (= 1048576 (gr8s.kubelet::kubelet-usage-memory-rss usage)))
+               (is (= 2 (gr8s.kubelet::kubelet-usage-major-page-faults usage))))
              ;; A second reading gives a rate.
-             (setf gr8s::*node-cpu-previous-sample*
-                   (cons (- (gr8s::unix-time-nanoseconds) 1000000000) 1500000000))
-             (let ((cores (gr8s::kubelet-usage-cpu-nano-cores
-                           (gr8s::measure-node-usage :cgroup-root directory :proc-root directory))))
+             (setf gr8s.kubelet::*node-cpu-previous-sample*
+                   (cons (- (gr8s.kubelet::unix-time-nanoseconds) 1000000000) 1500000000))
+             (let ((cores (gr8s.kubelet::kubelet-usage-cpu-nano-cores
+                           (gr8s.kubelet::measure-node-usage :cgroup-root directory :proc-root directory))))
                (is (< 900000000 cores 1000000001))))
-           (is (= 1700000000 (gr8s::node-boot-time (merge-pathnames "stat" directory))))
+           (is (= 1700000000 (gr8s.kubelet::node-boot-time (merge-pathnames "stat" directory))))
            ;; Without cpu.stat, /proc/stat's busy ticks are used: user nice system irq softirq steal.
            (delete-file (merge-pathnames "cpu.stat" directory))
            (is (= (* (+ 1 2 3 6 7 8) 10000000)
-                  (gr8s::kubelet-usage-cpu-core-nanoseconds
-                   (gr8s::measure-node-usage :cgroup-root directory :proc-root directory)))))
+                  (gr8s.kubelet::kubelet-usage-cpu-core-nanoseconds
+                   (gr8s.kubelet::measure-node-usage :cgroup-root directory :proc-root directory)))))
       (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))
 
 (defun kubelet-test-node-stats ()
   "Return a node with one two-container Pod, as a scrape measures it."
-  (gr8s::make-kubelet-node-stats
+  (gr8s.kubelet::make-kubelet-node-stats
    :name "node-a" :start-time 1700000000
-   :usage (gr8s::make-kubelet-usage :time 1700000020123456789 :cpu-core-nanoseconds 357350000000
+   :usage (gr8s.kubelet::make-kubelet-usage :time 1700000020123456789 :cpu-core-nanoseconds 357350000000
                                     :cpu-nano-cores 250000000 :memory-working-set 1468006400
                                     :memory-usage 2000000000 :memory-available 2000000000)
-   :pods (list (gr8s::make-kubelet-pod-stats
+   :pods (list (gr8s.kubelet::make-kubelet-pod-stats
                 :name "web" :namespace "default" :uid "u1" :start-time 1700000000
-                :containers (list (gr8s::make-kubelet-container-stats
+                :containers (list (gr8s.kubelet::make-kubelet-container-stats
                                    :name "app" :start-time 1700000002
                                    :usage (kubelet-test-usage 1700000010000000000 3000000000 26066944))
-                                  (gr8s::make-kubelet-container-stats
+                                  (gr8s.kubelet::make-kubelet-container-stats
                                    :name "sidecar" :start-time 1700000003
                                    :usage (kubelet-test-usage 1700000011000000000 500000000 1024)))
                 :usage (kubelet-test-usage 1700000011000000000 3500000000 26067968)))))
@@ -137,43 +137,43 @@ pod_memory_working_set_bytes{namespace=\"default\",pod=\"web\"} 2.6067968e+07 17
 # TYPE resource_scrape_error gauge
 resource_scrape_error 0
 ")
-             (gr8s::kubelet-resource-metrics-text (kubelet-test-node-stats))))
+             (gr8s.kubelet::kubelet-resource-metrics-text (kubelet-test-node-stats))))
   ;; A failed measurement reports only the error, as the kubelet's collector does.
   (is (equal (format nil "~
 # HELP resource_scrape_error [STABLE] 1 if there was an error while getting container metrics, 0 otherwise
 # TYPE resource_scrape_error gauge
 resource_scrape_error 1
 ")
-             (gr8s::kubelet-resource-metrics-text nil :error t)))
+             (gr8s.kubelet::kubelet-resource-metrics-text nil :error t)))
   ;; Label values are escaped.
   (is (search "pod=\"a\\\"b\\\\c\""
-              (gr8s::kubelet-resource-metrics-text
-               (gr8s::make-kubelet-node-stats
-                :usage (gr8s::make-kubelet-usage)
-                :pods (list (gr8s::make-kubelet-pod-stats :name "a\"b\\c" :namespace "n" :containers nil
+              (gr8s.kubelet::kubelet-resource-metrics-text
+               (gr8s.kubelet::make-kubelet-node-stats
+                :usage (gr8s.kubelet::make-kubelet-usage)
+                :pods (list (gr8s.kubelet::make-kubelet-pod-stats :name "a\"b\\c" :namespace "n" :containers nil
                                                           :usage (kubelet-test-usage 1 1 1))))))))
 
 (test stats-summary-has-the-kubelet-shape
-  (let* ((summary (gr8s::kubelet-stats-summary-object (kubelet-test-node-stats)))
+  (let* ((summary (gr8s.kubelet::kubelet-stats-summary-object (kubelet-test-node-stats)))
          (node (gethash "node" summary))
          (pod (aref (gethash "pods" summary) 0))
          (container (aref (gethash "containers" pod) 0)))
     (is (equal "node-a" (gethash "nodeName" node)))
     (is (equal "2023-11-14T22:13:20Z" (gethash "startTime" node)))
-    (is (= 357350000000 (gr8s::table-get node "cpu" "usageCoreNanoSeconds")))
-    (is (= 250000000 (gr8s::table-get node "cpu" "usageNanoCores")))
-    (is (equal "2023-11-14T22:13:40Z" (gr8s::table-get node "cpu" "time")))
-    (is (= 1468006400 (gr8s::table-get node "memory" "workingSetBytes")))
-    (is (= 2000000000 (gr8s::table-get node "memory" "availableBytes")))
+    (is (= 357350000000 (gr8s.apiserver::table-get node "cpu" "usageCoreNanoSeconds")))
+    (is (= 250000000 (gr8s.apiserver::table-get node "cpu" "usageNanoCores")))
+    (is (equal "2023-11-14T22:13:40Z" (gr8s.apiserver::table-get node "cpu" "time")))
+    (is (= 1468006400 (gr8s.apiserver::table-get node "memory" "workingSetBytes")))
+    (is (= 2000000000 (gr8s.apiserver::table-get node "memory" "availableBytes")))
     ;; Unmeasured fields are omitted, as the kubelet's omitempty tags do.
     (is (null (nth-value 1 (gethash "rssBytes" (gethash "memory" node)))))
     (is (equal '("default" "web" "u1")
-               (list (gr8s::table-get pod "podRef" "namespace") (gr8s::table-get pod "podRef" "name")
-                     (gr8s::table-get pod "podRef" "uid"))))
-    (is (= 3500000000 (gr8s::table-get pod "cpu" "usageCoreNanoSeconds")))
+               (list (gr8s.apiserver::table-get pod "podRef" "namespace") (gr8s.apiserver::table-get pod "podRef" "name")
+                     (gr8s.apiserver::table-get pod "podRef" "uid"))))
+    (is (= 3500000000 (gr8s.apiserver::table-get pod "cpu" "usageCoreNanoSeconds")))
     (is (equal "app" (gethash "name" container)))
     (is (equal "2023-11-14T22:13:22Z" (gethash "startTime" container)))
-    (is (= 26066944 (gr8s::table-get container "memory" "workingSetBytes")))
+    (is (= 26066944 (gr8s.apiserver::table-get container "memory" "workingSetBytes")))
     ;; It serializes as JSON a client can read back.
     (is (= 2 (length (gethash "containers"
                               (aref (gethash "pods" (com.inuoe.jzon:parse (com.inuoe.jzon:stringify summary))) 0)))))))

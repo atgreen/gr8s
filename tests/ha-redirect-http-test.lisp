@@ -11,7 +11,7 @@
 (in-suite ha-redirect-http)
 
 (test ha-http-redirects-writes-and-serves-reads
-  (let ((server (gr8s::start-server
+  (let ((server (gr8s.apiserver::start-server
                  :address "127.0.0.1" :port 0
                  :leader-status-fn (lambda () (values nil "http://10.0.0.9:6443")))))
     (unwind-protect
@@ -31,10 +31,10 @@
                (drakma:http-request (format nil "http://127.0.0.1:~D/livez" (hunchentoot:acceptor-port server)) :redirect nil)
              (is (= 200 status) "reads are served locally on a follower")
              (is (string= "ok" body))))
-      (gr8s::stop-server server))))
+      (gr8s.apiserver::stop-server server))))
 
 (test ha-http-503-when-no-leader-known
-  (let ((server (gr8s::start-server
+  (let ((server (gr8s.apiserver::start-server
                  :address "127.0.0.1" :port 0
                  :leader-status-fn (lambda () (values nil nil)))))
     (unwind-protect
@@ -43,4 +43,4 @@
                                   :method :post :content "{}" :redirect nil)
            (declare (ignore body))
            (is (= 503 status) "a write with no known leader is 503"))
-      (gr8s::stop-server server))))
+      (gr8s.apiserver::stop-server server))))

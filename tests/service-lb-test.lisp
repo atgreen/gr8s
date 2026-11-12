@@ -17,7 +17,7 @@
   (multiple-value-bind (packet-maps packet-programs)
       (gr8s.network::compile-service-packet-lb)
     (multiple-value-bind (socket-maps ignored)
-        (gr8s::compile-service-lb)
+        (gr8s.network::compile-service-lb)
       (declare (ignore ignored))
       (dolist (name '("gr8s_service_v4" "gr8s_backend_v4" "gr8s_backend_index_v4"))
         (is (equalp (find name socket-maps :test #'equal :key (lambda (spec) (getf spec :name)))
@@ -35,43 +35,43 @@
   ;; (protocol << 48) | (vip << 16) | htons(port), serialized little-endian, where
   ;; vip is the address octets read little-endian (network-order bytes on a LE host).
   (is (equalp #(#x00 #x50 #x0A #x60 #x00 #x0A #x06 #x00)
-              (gr8s::service-lb-vip-key "10.96.0.10" 80)))
+              (gr8s.network::service-lb-vip-key "10.96.0.10" 80)))
   (is (equalp #(#x00 #x50 #x0A #x60 #x00 #x0A #x11 #x00)
-              (gr8s::service-lb-vip-key "10.96.0.10" 80 "UDP")))
+              (gr8s.network::service-lb-vip-key "10.96.0.10" 80 "UDP")))
   ;; Distinct ports and addresses must not collide into the same key.
-  (is (not (equalp (gr8s::service-lb-vip-key "10.96.0.10" 80)
-                   (gr8s::service-lb-vip-key "10.96.0.10" 443))))
-  (is (not (equalp (gr8s::service-lb-vip-key "10.96.0.10" 80)
-                   (gr8s::service-lb-vip-key "10.96.0.11" 80)))))
+  (is (not (equalp (gr8s.network::service-lb-vip-key "10.96.0.10" 80)
+                   (gr8s.network::service-lb-vip-key "10.96.0.10" 443))))
+  (is (not (equalp (gr8s.network::service-lb-vip-key "10.96.0.10" 80)
+                   (gr8s.network::service-lb-vip-key "10.96.0.11" 80)))))
 
 (test service-lb-ipv6-key-and-backend-byte-layout
   (is (equalp #(#xfd #x00 #x00 #x00 #x00 #x00 #x00 #x00
                 #x00 #x00 #x00 #x00 #x00 #x00 #x00 #x0a
                 #x00 #x50 #x06 #x00)
-              (gr8s::service-lb-vip-key "fd00::a" 80)))
+              (gr8s.network::service-lb-vip-key "fd00::a" 80)))
   (is (equalp #(#xfd #x88 #x00 #x00 #x00 #x00 #x00 #x00
                 #x00 #x00 #x00 #x00 #x00 #x00 #x00 #x05
                 #x1f #x90 #x00 #x00)
-              (gr8s::service-lb-backend-value "fd88::5" 8080))))
+              (gr8s.network::service-lb-backend-value "fd88::5" 8080))))
 
 (test service-risk-key-byte-layout
   (is (equalp #(#x0a #x58 #x01 #x05 #x1f #x90 #x06 #x00)
-              (gr8s::service-lb-risk-key "10.88.1.5" 8080 "TCP")))
+              (gr8s.network::service-lb-risk-key "10.88.1.5" 8080 "TCP")))
   (is (equalp #(#x0a #x58 #x01 #x05 #x1f #x90 #x11 #x00)
-              (gr8s::service-lb-risk-key "10.88.1.5" 8080 "UDP"))))
+              (gr8s.network::service-lb-risk-key "10.88.1.5" 8080 "UDP"))))
 
 (test service-lb-service-value-byte-layout
   ;; count u16 @0, affinity u16 @2, base slot u32 @4, timeout u32 @8, reserved u32 @12,
   ;; all little-endian (logical integers).
   (is (equalp #(#x01 #x00 #x00 #x00 #x07 #x00 #x00 #x00 #x00 #x00 #x00 #x00 #x00 #x00 #x00 #x00)
-              (gr8s::service-lb-service-value 1 7)))
+              (gr8s.network::service-lb-service-value 1 7)))
   (is (equalp #(#x00 #x02 #x01 #x00 #xD2 #x04 #x00 #x00 #x10 #x0E #x00 #x00 #x00 #x00 #x00 #x00)
-              (gr8s::service-lb-service-value 512 1234 :affinity-timeout 3600))))
+              (gr8s.network::service-lb-service-value 512 1234 :affinity-timeout 3600))))
 
 (test service-lb-retain-plan-only-for-additive-backends
   (flet ((plan (backends &key (timeout 10800))
            (multiple-value-bind (key value slots indices)
-               (gr8s::service-lb-entries
+               (gr8s.network::service-lb-entries
                 "10.96.0.10" 80 0 backends :affinity-timeout timeout)
              (declare (ignore indices))
              (values (list (cons key value)) slots))))
@@ -79,24 +79,24 @@
         (plan '(("10.88.1.5" . 8080) ("10.88.1.6" . 8080)))
       (multiple-value-bind (new-services new-backends)
           (plan '(("10.88.1.5" . 8080) ("10.88.1.6" . 8080) ("10.88.1.7" . 8080)))
-        (is-true (gr8s::service-lb-plan-retains-selection-p
+        (is-true (gr8s.controllers::service-lb-plan-retains-selection-p
                   old-services old-backends new-services new-backends))
-        (is-false (gr8s::service-lb-plan-retains-selection-p
+        (is-false (gr8s.controllers::service-lb-plan-retains-selection-p
                    old-services old-backends new-services
                    (remove-if (lambda (entry)
                                 (equalp (cdr entry)
-                                        (gr8s::service-lb-backend-value "10.88.1.6" 8080)))
+                                        (gr8s.network::service-lb-backend-value "10.88.1.6" 8080)))
                               new-backends))))
       (multiple-value-bind (new-services new-backends)
           (plan '(("10.88.1.5" . 8080) ("10.88.1.7" . 8080)))
-        (is-false (gr8s::service-lb-plan-retains-selection-p
+        (is-false (gr8s.controllers::service-lb-plan-retains-selection-p
                    old-services old-backends new-services new-backends)))
       (multiple-value-bind (new-services new-backends)
           (plan '(("10.88.1.5" . 8080) ("10.88.1.6" . 8080) ("10.88.1.7" . 8080))
                 :timeout 3600)
-        (is-false (gr8s::service-lb-plan-retains-selection-p
+        (is-false (gr8s.controllers::service-lb-plan-retains-selection-p
                    old-services old-backends new-services new-backends)))
-      (is-false (gr8s::service-lb-plan-retains-selection-p
+      (is-false (gr8s.controllers::service-lb-plan-retains-selection-p
                  nil nil old-services old-backends)))))
 
 (test service-lb-plan-keys-by-protocol-and-carries-affinity
@@ -109,11 +109,11 @@
           (gethash "protocol" (aref (gethash "ports" spec) 1)) "UDP"
           (gethash "sessionAffinity" spec) "ClientIP"
           (gethash "sessionAffinityConfig" spec)
-          (gr8s::core-object "clientIP" (gr8s::core-object "timeoutSeconds" 30)))
+          (gr8s.resources::core-object "clientIP" (gr8s.resources::core-object "timeoutSeconds" 30)))
     (let ((service-entries
-            (gr8s::service-lb-plan (list service) (lambda (s p) (declare (ignore s p)) '(("10.88.1.5" 8080))))))
-      (is (equalp (gr8s::service-lb-vip-key "10.96.0.10" 80 "TCP") (car (first service-entries))))
-      (is (equalp (gr8s::service-lb-vip-key "10.96.0.10" 80 "UDP") (car (second service-entries))))
+            (gr8s.controllers::service-lb-plan (list service) (lambda (s p) (declare (ignore s p)) '(("10.88.1.5" 8080))))))
+      (is (equalp (gr8s.network::service-lb-vip-key "10.96.0.10" 80 "TCP") (car (first service-entries))))
+      (is (equalp (gr8s.network::service-lb-vip-key "10.96.0.10" 80 "UDP") (car (second service-entries))))
       (let ((value (cdr (first service-entries))))
         (is (= 1 (aref value 2)))
         (is (= 30 (aref value 8)))))))
@@ -121,33 +121,33 @@
 (test service-lb-backend-byte-layout
   ;; Backend slot key is little-endian; addr u32 @0 and port u16 @4 are network
   ;; byte order so the program copies them verbatim into user_ip4 / user_port.
-  (is (equalp #(#x07 #x00 #x00 #x00) (gr8s::service-lb-backend-key 7)))
+  (is (equalp #(#x07 #x00 #x00 #x00) (gr8s.network::service-lb-backend-key 7)))
   (is (equalp #(#x0A #x58 #x01 #x05 #x1F #x90 #x00 #x00)
-              (gr8s::service-lb-backend-value "10.88.1.5" 8080))))
+              (gr8s.network::service-lb-backend-value "10.88.1.5" 8080))))
 
 (test service-lb-ports-are-validated
-  (signals error (gr8s::service-lb-vip-key "10.96.0.10" 0))
-  (signals error (gr8s::service-lb-vip-key "10.96.0.10" 70000))
-  (signals error (gr8s::service-lb-backend-value "10.88.1.5" 0)))
+  (signals error (gr8s.network::service-lb-vip-key "10.96.0.10" 0))
+  (signals error (gr8s.network::service-lb-vip-key "10.96.0.10" 70000))
+  (signals error (gr8s.network::service-lb-backend-value "10.88.1.5" 0)))
 
 (test service-lb-entries-assign-consecutive-slots
   (multiple-value-bind (vip-key service-value backends)
-      (gr8s::service-lb-entries "10.96.0.10" 80 5
+      (gr8s.network::service-lb-entries "10.96.0.10" 80 5
                                 '(("10.88.1.5" . 8080) ("10.88.2.7" . 8080)))
-    (is (equalp (gr8s::service-lb-vip-key "10.96.0.10" 80) vip-key))
+    (is (equalp (gr8s.network::service-lb-vip-key "10.96.0.10" 80) vip-key))
     ;; Two backends, base slot 5.
-    (is (equalp (gr8s::service-lb-service-value 2 5) service-value))
+    (is (equalp (gr8s.network::service-lb-service-value 2 5) service-value))
     (is (= 2 (length backends)))
-    (is (equalp (gr8s::service-lb-backend-key 5) (car (first backends))))
-    (is (equalp (gr8s::service-lb-backend-value "10.88.1.5" 8080) (cdr (first backends))))
-    (is (equalp (gr8s::service-lb-backend-key 6) (car (second backends))))
-    (is (equalp (gr8s::service-lb-backend-value "10.88.2.7" 8080) (cdr (second backends))))))
+    (is (equalp (gr8s.network::service-lb-backend-key 5) (car (first backends))))
+    (is (equalp (gr8s.network::service-lb-backend-value "10.88.1.5" 8080) (cdr (first backends))))
+    (is (equalp (gr8s.network::service-lb-backend-key 6) (car (second backends))))
+    (is (equalp (gr8s.network::service-lb-backend-value "10.88.2.7" 8080) (cdr (second backends))))))
 
 ;;; In-process JIT: the program compiles to loadable specs with no ELF. Pure
 ;;; userspace; needs no CAP_BPF and no kernel, so it runs in the ordinary suite.
 
 (test service-lb-program-compiles-in-process
-  (multiple-value-bind (map-specs prog-specs) (gr8s::compile-service-lb)
+  (multiple-value-bind (map-specs prog-specs) (gr8s.network::compile-service-lb)
     ;; Five maps per family, with the key/value sizes the encoders target.
     (is (= 10 (length map-specs)))
     (let ((service (find "gr8s_service_v4" map-specs
@@ -180,7 +180,7 @@
       (is (>= (length (getf prog :relocs)) 2)))))
 
 (test service-lb-program-compiles-every-ipv4-and-ipv6-socket-hook
-  (multiple-value-bind (maps programs) (gr8s::compile-service-lb)
+  (multiple-value-bind (maps programs) (gr8s.network::compile-service-lb)
     (is (= 10 (length maps)))
     (dolist (name '("gr8s_service_v6" "gr8s_backend_v6"
                     "gr8s_backend_index_v6" "gr8s_affinity_v6"
@@ -192,7 +192,7 @@
 
 (test service-lb-v2-staging-pins-shared-maps-without-changing-socket-hooks
   (multiple-value-bind (maps programs)
-      (gr8s::compile-service-lb :packet-services :v2)
+      (gr8s.network::compile-service-lb :packet-services :v2)
     (let ((names (mapcar (lambda (spec) (getf spec :name)) maps)))
       (is (= (length names) (length (remove-duplicates names :test #'equal))))
       (dolist (name '("gr8s_nat_fwd_v2" "gr8s_nat_rev_v2"
@@ -226,7 +226,7 @@
      :update (lambda (&rest ignored) (declare (ignore ignored)) (error "map update failed")))))
 
 (test service-nat-identity-rows-bind-primary-alias-and-incarnation
-  (let* ((record (gr8s::json-object
+  (let* ((record (gr8s.foundation::json-object
                   "podIP" "10.88.1.2" "address" "10.88.1.9"
                   "nodeID" "node-1" "podUID" "pod-1"
                   "sandboxID" "sandbox-1" "interfaceName" "eth0"))
@@ -239,22 +239,22 @@
       (is (typep (car row) '(simple-array (unsigned-byte 8) (4))))
       (is (typep (cdr row) '(simple-array (unsigned-byte 8) (32))))
       (is (equalp #(10 88 1 9) (subseq (cdr row) 0 4)))
-      (is (= #x20001 (gr8s::netlink-read-integer (cdr row) 4 4)))
+      (is (= #x20001 (cl-rtnetlink::netlink-read-integer (cdr row) 4 4)))
       (is (equalp #(10 88 1 2) (subseq (cdr row) 24 28))))
-    (is (= 1 (gr8s::netlink-read-integer (cdr primary) 28 4)))
-    (is (= 2 (gr8s::netlink-read-integer (cdr alias) 28 4)))
+    (is (= 1 (cl-rtnetlink::netlink-read-integer (cdr primary) 28 4)))
+    (is (= 2 (cl-rtnetlink::netlink-read-integer (cdr alias) 28 4)))
     (is (equalp (subseq (cdr primary) 8 24) (subseq (cdr alias) 8 24)))
     (is (equalp rows (gr8s.network::service-nat-identity-rows record)))
-    (let ((local (gr8s::encode-cni-endpoint-identity-v2
+    (let ((local (gr8s.network::encode-cni-endpoint-identity-v2
                   "10.88.1.2" #(2 17 34 51 68 85)
                   "node-1" "sandbox-1" "eth0" "10.88.1.9")))
       (is (= 48 (length local)))
       (is (equalp (subseq (cdr primary) 8 24) (subseq local 32 48)))
-      (is (equalp (subseq (gr8s::encode-cni-endpoint-identity
+      (is (equalp (subseq (gr8s.network::encode-cni-endpoint-identity
                           "10.88.1.2" #(2 17 34 51 68 85)) 0 32)
                   (subseq local 0 32)))
       (is (not (equalp (subseq local 32 48)
-                       (subseq (gr8s::encode-cni-endpoint-identity-v2
+                       (subseq (gr8s.network::encode-cni-endpoint-identity-v2
                                 "10.88.1.2" #(2 17 34 51 68 85)
                                 "node-1" "sandbox-2" "eth0" "10.88.1.9") 32 48)))))
     (setf (gethash "podUID" record) "pod-2")
@@ -264,7 +264,7 @@
     (is (not (equalp (subseq (cdr primary) 8 24)
                      (subseq (cdr (first (gr8s.network::service-nat-identity-rows record))) 8 24)))))
   (let ((writes nil)
-        (record (gr8s::json-object
+        (record (gr8s.foundation::json-object
                  "podIP" "10.88.1.2" "address" "10.88.1.9"
                  "nodeID" "node-1" "podUID" "pod-1"
                  "sandboxID" "sandbox-1" "interfaceName" "eth0")))
@@ -277,7 +277,7 @@
     (is (= 2 (length writes)))))
 
 (test v2-owner-republish-preserves-readiness-only-for-the-same-pair
-  (let* ((record (gr8s::json-object
+  (let* ((record (gr8s.foundation::json-object
                   "podIP" "10.88.1.2" "address" "10.88.1.9"
                   "nodeID" "node-1" "podUID" "pod-1"
                   "sandboxID" "sandbox-1" "interfaceName" "eth0"))
@@ -291,13 +291,13 @@
                           (declare (ignore map))
                           (setf (gethash key values) (copy-seq value)))))
              (flags (key)
-               (gr8s::netlink-read-integer (gethash key values) 4 4)))
+               (cl-rtnetlink::netlink-read-integer (gethash key values) 4 4)))
       (let* ((rows (gr8s.network::service-nat-identity-rows record))
              (primary (caar rows)) (alias (caadr rows)))
         (is (= 2 (publish)))
         (is (= #x20001 (flags primary)))
         (dolist (key (list primary alias))
-          (replace (gethash key values) (gr8s::service-lb-bytes #x20007 4) :start1 4))
+          (replace (gethash key values) (gr8s.network::service-lb-bytes #x20007 4) :start1 4))
         (is (= 2 (publish)))
         (is (= #x20007 (flags primary)))
         (is (= #x20007 (flags alias)))
@@ -306,7 +306,7 @@
         (is (= #x20001 (flags primary)))
         (is (= #x20001 (flags alias)))
         (dolist (key (list primary alias))
-          (replace (gethash key values) (gr8s::service-lb-bytes #x20007 4) :start1 4))
+          (replace (gethash key values) (gr8s.network::service-lb-bytes #x20007 4) :start1 4))
         (setf (gethash "sandboxID" record) "sandbox-2")
         (is (= 2 (publish)))
         (is (= #x20001 (flags primary)))
@@ -319,7 +319,7 @@
          (values (make-hash-table :test #'equalp)))
     (dolist (row rows)
       (let ((value (copy-seq (cdr row))))
-        (replace value (gr8s::service-lb-bytes #x20007 4) :start1 4)
+        (replace value (gr8s.network::service-lb-bytes #x20007 4) :start1 4)
         (setf (gethash (car row) values) value)))
     (is (= 2 (gr8s.network::clear-service-nat-owner-readiness
               :map
@@ -333,10 +333,10 @@
                         (is (eq :map map))
                         (setf (gethash key values) (copy-seq value))))))
     (dolist (key (list primary alias))
-      (is (= #x20001 (gr8s::netlink-read-integer (gethash key values) 4 4))))))
+      (is (= #x20001 (cl-rtnetlink::netlink-read-integer (gethash key values) 4 4))))))
 
 (test v2-owner-inventory-readback-requires-both-current-rows
-  (let* ((record (gr8s::json-object
+  (let* ((record (gr8s.foundation::json-object
                   "podIP" "10.88.1.2" "address" "10.88.1.9"
                   "nodeID" "node-1" "podUID" "pod-1"
                   "sandboxID" "sandbox-1" "interfaceName" "eth0"))
@@ -353,14 +353,14 @@
                            (first keys)))))
          (runtime (gr8s.agent::%make-node-runtime
                    :service-lb
-                   (gr8s::%make-service-lb-dataplane
+                   (gr8s.network::%make-service-lb-dataplane
                     :maps (list (fake-lb-map "gr8s_nat_risk_v2" 4)
                                 (fake-lb-map "gr8s_nat_id_v2" 5)))
-                   :network (gr8s::json-object "serviceTranslations" (vector record))
+                   :network (gr8s.foundation::json-object "serviceTranslations" (vector record))
                    :received-revision 4 :service-risk-ready-revision 4)))
     (is-false (gr8s.network::service-nat-identities-published-p
                :map (vector record) :lookup lookup :next-key next-key))
-    (signals gr8s::node-snapshot-incomplete
+    (signals gr8s.kubelet::node-snapshot-incomplete
       (gr8s.agent::ensure-node-snapshot-service-risk-ready
        runtime :owner-lookup lookup :owner-next-key next-key))
     (dolist (row rows)
@@ -372,7 +372,7 @@
     (remhash (caar (last rows)) values)
     (is-false (gr8s.network::service-nat-identities-published-p
                :map (vector record) :lookup lookup :next-key next-key))
-    (signals gr8s::node-snapshot-incomplete
+    (signals gr8s.kubelet::node-snapshot-incomplete
       (gr8s.agent::ensure-node-snapshot-service-risk-ready
        runtime :owner-lookup lookup :owner-next-key next-key))
     (setf (gethash (caar (last rows)) values) (copy-seq (cdar (last rows))))
@@ -388,7 +388,7 @@
       (is-false (gr8s.network::service-nat-identities-published-p
                  :map (vector record) :lookup lookup :next-key next-key))
       (let ((tombstone (copy-seq (cdr (first rows)))))
-        (replace tombstone (gr8s::service-lb-bytes #x20000 4) :start1 4)
+        (replace tombstone (gr8s.network::service-lb-bytes #x20000 4) :start1 4)
         (setf (gethash extra values) tombstone)
         (is-true (gr8s.network::service-nat-identities-published-p
                   :map (vector record) :lookup lookup :next-key next-key)))
@@ -413,7 +413,7 @@
     (dolist (row rows) (setf (gethash (car row) values) (copy-seq (cdr row))))
     (is (= 2 (gr8s.network::withdraw-service-nat-owner-pair
                :map rows :lookup lookup :update update)))
-    (is (every (lambda (row) (= #x20000 (gr8s::netlink-read-integer
+    (is (every (lambda (row) (= #x20000 (cl-rtnetlink::netlink-read-integer
                                          (gethash (car row) values) 4 4))) rows))
     (is (= 0 (gr8s.network::withdraw-service-nat-owner-pair
                :map rows :lookup lookup :update update)))
@@ -423,13 +423,13 @@
     (is (every (lambda (row) (equalp (cdr row) (gethash (car row) values))) other))))
 
 (test v2-withdrawn-network-owners-retire-without-changing-local-or-reused-rows
-  (let* ((retired (gr8s::json-object "podIP" "10.88.1.2" "address" "10.88.1.9"
+  (let* ((retired (gr8s.foundation::json-object "podIP" "10.88.1.2" "address" "10.88.1.9"
                                       "nodeID" "node-1" "sandboxID" "sandbox-old"
                                       "interfaceName" "eth0"))
-         (kept (gr8s::json-object "podIP" "10.88.2.2" "address" "10.88.2.9"
+         (kept (gr8s.foundation::json-object "podIP" "10.88.2.2" "address" "10.88.2.9"
                                    "nodeID" "node-2" "sandboxID" "sandbox-kept"
                                    "interfaceName" "eth0"))
-         (previous (list (gr8s::json-object "serviceTranslations" (vector retired kept))))
+         (previous (list (gr8s.foundation::json-object "serviceTranslations" (vector retired kept))))
          (old-rows (gr8s.network::service-nat-identity-rows retired))
          (kept-rows (gr8s.network::service-nat-identity-rows kept))
          (replacement (gr8s.network::service-nat-identity-pair
@@ -444,7 +444,7 @@
                :map previous (vector kept) old-rows :lookup lookup :update update)))
     (is (= 2 (gr8s.network::retire-service-nat-withdrawn-identities
                :map previous (vector kept) nil :lookup lookup :update update)))
-    (is (every (lambda (row) (= #x20000 (gr8s::netlink-read-integer
+    (is (every (lambda (row) (= #x20000 (cl-rtnetlink::netlink-read-integer
                                          (gethash (car row) values) 4 4))) old-rows))
     (is (every (lambda (row) (equalp (cdr row) (gethash (car row) values))) kept-rows))
     (dolist (row replacement) (setf (gethash (car row) values) (copy-seq (cdr row))))
@@ -453,11 +453,11 @@
     (is (every (lambda (row) (equalp (cdr row) (gethash (car row) values))) replacement))))
 
 (test cni-v2-owner-publication-writes-the-replicated-pair-before-attachment
-  (let* ((configuration (gr8s::make-cni-configuration
+  (let* ((configuration (gr8s.network::make-cni-configuration
                          :service-packet-root "/pins/shared/" :service-packet-profile :v2
                          :service-node-id "node-1"))
-         (context (gr8s::make-cni-context :container-id "sandbox-1" :interface-name "eth0"))
-         (record (gr8s::json-object
+         (context (gr8s.network::make-cni-context :container-id "sandbox-1" :interface-name "eth0"))
+         (record (gr8s.foundation::json-object
                   "podIP" "10.88.1.2" "address" "10.88.1.9"
                   "nodeID" "node-1" "podUID" "pod-1"
                   "sandboxID" "sandbox-1" "interfaceName" "eth0"))
@@ -480,22 +480,22 @@
     (is (equalp (reverse expected) (reverse writes)))
     (signals error
       (gr8s.network::publish-cni-service-nat-owner
-       (gr8s::make-cni-configuration :service-packet-root "/pins/shared/")
+       (gr8s.network::make-cni-configuration :service-packet-root "/pins/shared/")
        context '("10.88.1.2") "10.88.1.9"
        :open (lambda (&rest ignored)
                (declare (ignore ignored)) (error "must reject v1 before map open"))))))
 
 (test cni-v2-add-clears-old-readiness-before-guard-replacement
-  (let* ((configuration (gr8s::make-cni-configuration
+  (let* ((configuration (gr8s.network::make-cni-configuration
                          :service-packet-root "/pins/shared/" :service-packet-profile :v2
                          :service-node-id "node-1"))
-         (context (gr8s::make-cni-context :container-id "sandbox-1" :interface-name "eth0"))
+         (context (gr8s.network::make-cni-context :container-id "sandbox-1" :interface-name "eth0"))
          (rows (gr8s.network::service-nat-identity-pair
                 "node-1" "sandbox-1" "eth0" "10.88.1.2" "10.88.1.9"))
          (values (make-hash-table :test #'equalp)))
     (dolist (row rows)
       (let ((ready (copy-seq (cdr row))))
-        (replace ready (gr8s::service-lb-bytes #x20007 4) :start1 4)
+        (replace ready (gr8s.network::service-lb-bytes #x20007 4) :start1 4)
         (setf (gethash (car row) values) ready)))
     (gr8s.network::publish-cni-service-nat-owner
      configuration context '("10.88.1.2") "10.88.1.9"
@@ -507,21 +507,21 @@
                (declare (ignore map)) (setf (gethash key values) value))
      :close (lambda (fd) (declare (ignore fd))))
     (is (every (lambda (row)
-                 (= #x20001 (gr8s::netlink-read-integer
+                 (= #x20001 (cl-rtnetlink::netlink-read-integer
                               (gethash (car row) values) 4 4))) rows))))
 
 (test cni-v2-owner-check-rejects-missing-and-stale-incarnations
-  (let* ((configuration (gr8s::make-cni-configuration
+  (let* ((configuration (gr8s.network::make-cni-configuration
                          :service-packet-root "/pins/shared/" :service-packet-profile :v2
                          :service-node-id "node-1"))
-         (context (gr8s::make-cni-context :container-id "sandbox-1" :interface-name "eth0"))
+         (context (gr8s.network::make-cni-context :container-id "sandbox-1" :interface-name "eth0"))
          (rows (gr8s.network::service-nat-identity-pair
                 "node-1" "sandbox-1" "eth0" "10.88.1.2" "10.88.1.9"))
          (values (make-hash-table :test #'equalp))
          (closed 0))
     (dolist (row rows)
       (let ((value (copy-seq (cdr row))))
-        (replace value (gr8s::service-lb-bytes #x20007 4) :start1 4)
+        (replace value (gr8s.network::service-lb-bytes #x20007 4) :start1 4)
         (setf (gethash (car row) values) value)))
     (labels ((check ()
                (gr8s.network::check-cni-service-nat-owner
@@ -535,11 +535,11 @@
                 :close (lambda (fd) (is (= 7 fd)) (incf closed)))))
       (is (null (check)))
       (remhash (car (second rows)) values)
-      (signals gr8s::cni-error (check))
+      (signals gr8s.network::cni-error (check))
       (setf (gethash (car (second rows)) values) (copy-seq (cdr (second rows))))
       (let ((stale (gethash (car (first rows)) values)))
         (setf (aref stale 8) (logxor 1 (aref stale 8))))
-      (signals gr8s::cni-error (check))
+      (signals gr8s.network::cni-error (check))
       (is (= 3 closed)))))
 
 (test v2-receiver-readiness-requires-exact-owner-pair-and-primary-last
@@ -555,19 +555,19 @@
               :map rows :lookup lookup :update update)))
     (is (equalp (mapcar #'car (reverse rows)) (reverse writes)))
     (is (every (lambda (row)
-                 (= #x20005 (gr8s::netlink-read-integer
+                 (= #x20005 (cl-rtnetlink::netlink-read-integer
                               (gethash (car row) values) 4 4))) rows))
     (setf writes nil)
     (is (= 2 (gr8s.network::mark-service-nat-owner-receiver-ready
               :map rows :lookup lookup :update update :complete-history-p t)))
     (is (equalp (mapcar #'car (reverse rows)) (reverse writes)))
     (is (every (lambda (row)
-                 (= #x20007 (gr8s::netlink-read-integer
+                 (= #x20007 (cl-rtnetlink::netlink-read-integer
                               (gethash (car row) values) 4 4))) rows))
     (setf writes nil)
     (let ((stale (gethash (car (second rows)) values)))
       (setf (aref stale 8) (logxor 1 (aref stale 8))))
-    (signals gr8s::cni-error
+    (signals gr8s.network::cni-error
       (gr8s.network::mark-service-nat-owner-receiver-ready
        :map rows :lookup lookup :update update))
     (is (null writes))
@@ -580,15 +580,15 @@
                  (when (equalp key (car (first rows)))
                    (error "primary update failed"))
                  (setf (gethash key values) value))))
-    (is (= #x20001 (gr8s::netlink-read-integer
+    (is (= #x20001 (cl-rtnetlink::netlink-read-integer
                      (gethash (car (first rows)) values) 4 4))
         "A failed primary update must never advertise a backend as ready")))
 
 (test v2-local-receiver-report-requires-both-current-ready-owner-rows
-  (let* ((local (gr8s::json-object
+  (let* ((local (gr8s.foundation::json-object
                  "nodeID" "node-a" "podUID" "pod-a" "sandboxID" "sandbox-a"
                  "interfaceName" "eth0" "podIP" "10.88.1.2" "address" "10.88.1.9"))
-         (remote (gr8s::json-object
+         (remote (gr8s.foundation::json-object
                   "nodeID" "node-b" "podUID" "pod-b" "sandboxID" "sandbox-b"
                   "interfaceName" "eth0" "podIP" "10.88.2.2" "address" "10.88.2.9"))
          (rows (gr8s.network::service-nat-identity-rows local))
@@ -596,23 +596,23 @@
          (lookup (lambda (map key) (declare (ignore map)) (gethash key values))))
     (dolist (row rows)
       (let ((ready (copy-seq (cdr row))))
-        (replace ready (gr8s::service-lb-bytes #x20005 4) :start1 4)
+        (replace ready (gr8s.network::service-lb-bytes #x20005 4) :start1 4)
         (setf (gethash (car row) values) ready)))
     (is (equal (list local)
                (gr8s.network::service-nat-ready-local-receivers
                 :map (vector local remote) "node-a" :lookup lookup)))
     (replace (gethash (car (second rows)) values)
-             (gr8s::service-lb-bytes #x20001 4) :start1 4)
+             (gr8s.network::service-lb-bytes #x20001 4) :start1 4)
     (is (null (gr8s.network::service-nat-ready-local-receivers
                :map (vector local remote) "node-a" :lookup lookup)))
     (is (null (gr8s.network::service-nat-ready-local-receivers
                :map (vector local remote) "node-b" :lookup lookup)))))
 
 (test v2-receiver-snapshot-publishes-remote-pair-with-safe-write-order
-  (let* ((local (gr8s::json-object
+  (let* ((local (gr8s.foundation::json-object
                  "nodeID" "node-a" "podUID" "pod-a" "sandboxID" "sandbox-a"
                  "interfaceName" "eth0" "podIP" "10.88.1.2" "address" "10.88.1.9"))
-         (remote (gr8s::json-object
+         (remote (gr8s.foundation::json-object
                   "nodeID" "node-b" "podUID" "pod-b" "sandboxID" "sandbox-b"
                   "interfaceName" "eth0" "podIP" "10.88.2.2" "address" "10.88.2.9"))
          (records (vector local remote))
@@ -627,7 +627,7 @@
     (dolist (row (append local-rows remote-rows))
       (setf (gethash (car row) values) (copy-seq (cdr row))))
     (dolist (row local-rows)
-      (replace (gethash (car row) values) (gr8s::service-lb-bytes #x20005 4)
+      (replace (gethash (car row) values) (gr8s.network::service-lb-bytes #x20005 4)
                :start1 4))
     (is (= 1 (gr8s.network::publish-service-nat-receiver-readiness
               :mock records (list proof) "node-a" :lookup lookup :update update)))
@@ -640,13 +640,13 @@
     (is (equalp (mapcar #'car remote-rows) (reverse writes)))
     (is-true (gr8s.network::service-nat-receiver-readiness-published-p
               :mock records nil "node-a" :lookup lookup))
-    (is (= #x20005 (gr8s::netlink-read-integer
+    (is (= #x20005 (cl-rtnetlink::netlink-read-integer
                      (gethash (caar local-rows) values) 4 4))
         "Snapshot publication leaves local CNI readiness intact")
     (setf writes nil)
     (let ((stale (copy-seq (cdr proof))))
       (setf (aref stale 0) (logxor 1 (aref stale 0)))
-      (signals gr8s::cni-error
+      (signals gr8s.network::cni-error
         (gr8s.network::publish-service-nat-receiver-readiness
          :mock records (list (cons "pod-b" stale)) "node-a"
          :lookup lookup :update update)))
@@ -658,20 +658,20 @@
     (setf (gethash "clusterIPs" spec) #("10.96.0.10" "fd96::a")
           (gethash "ipFamilies" spec) #("IPv4" "IPv6"))
     (multiple-value-bind (services backends)
-        (gr8s::service-lb-plan
+        (gr8s.controllers::service-lb-plan
          (list service)
          (lambda (ignored-service ignored-port)
            (declare (ignore ignored-service ignored-port))
            '(("10.88.1.5" 8080) ("fd88::5" 8080))))
       (is (= 2 (length services)))
       (is (= 2 (length backends)))
-      (is (find (gr8s::service-lb-vip-key "10.96.0.10" 80)
+      (is (find (gr8s.network::service-lb-vip-key "10.96.0.10" 80)
                 services :key #'car :test #'equalp))
-      (is (find (gr8s::service-lb-vip-key "fd96::a" 80)
+      (is (find (gr8s.network::service-lb-vip-key "fd96::a" 80)
                 services :key #'car :test #'equalp))
-      (is (find (gr8s::service-lb-backend-value "10.88.1.5" 8080)
+      (is (find (gr8s.network::service-lb-backend-value "10.88.1.5" 8080)
                 backends :key #'cdr :test #'equalp))
-      (is (find (gr8s::service-lb-backend-value "fd88::5" 8080)
+      (is (find (gr8s.network::service-lb-backend-value "fd88::5" 8080)
                 backends :key #'cdr :test #'equalp)))))
 
 (test service-lb-consumes-ipv4-and-ipv6-endpoint-slices
@@ -686,10 +686,10 @@
                        (gethash "labels" (gethash "metadata" slice)))
               "svc"))
       (setf (gethash "addressType" v6) "IPv6")
-      (gr8s::create-core-resource store "endpointslices" v4 "default")
-      (gr8s::create-core-resource store "endpointslices" v6 "default")
+      (gr8s.resources::create-core-resource store "endpointslices" v4 "default")
+      (gr8s.resources::create-core-resource store "endpointslices" v6 "default")
       (multiple-value-bind (endpoints found)
-          (gr8s::service-slice-endpoints store service port)
+          (gr8s.controllers::service-slice-endpoints store service port)
         (is-true found)
         (is (equal '(("10.88.1.5" 8080) ("fd88::5" 8080)) endpoints))))))
 
@@ -702,13 +702,13 @@
            (endpoint (aref (gethash "endpoints" slice) 0)))
       (setf (gethash "kubernetes.io/service-name"
                      (gethash "labels" (gethash "metadata" slice))) "svc"
-            (gethash "conditions" endpoint) (gr8s::core-object "ready" nil "serving" t))
-      (gr8s::create-core-resource store "endpointslices" slice "default")
+            (gethash "conditions" endpoint) (gr8s.resources::core-object "ready" nil "serving" t))
+      (gr8s.resources::create-core-resource store "endpointslices" slice "default")
       (multiple-value-bind (selected)
-          (gr8s::service-port-backends store service port :node-name "here")
+          (gr8s.controllers::service-port-backends store service port :node-name "here")
         (is (null selected)))
       (is (equal '(("10.88.1.5" 8080))
-                 (gr8s::service-risk-raw-backends store service port))))))
+                 (gr8s.controllers::service-risk-raw-backends store service port))))))
 
 ;;; Dataplane lifecycle.  Every kernel operation (map creation, pinning,
 ;;; program load, cgroup attach, detach) is injected, so the orchestration is
@@ -728,7 +728,7 @@
 (test service-lb-dataplane-start-pins-then-loads-then-attaches
   (let ((pinned nil) (attach-args nil) (load-saw-maps nil))
     (let ((dataplane
-            (gr8s::start-service-lb-dataplane
+            (gr8s.network::start-service-lb-dataplane
              "/sys/fs/cgroup/gr8s" "/run/gr8s/bpf/service-lb"
              :compile (lambda ()
                         (values (list '(:name "gr8s_service_v4")
@@ -749,7 +749,7 @@
                               (list (cons "gr8s_service_lb" (fake-lb-program 900003))))
              :attach (lambda (program-fd cgroup attach-type)
                        (setf attach-args (list program-fd cgroup attach-type)) :attachment))))
-      (is-false (gr8s::service-lb-dataplane-reopened-p dataplane))
+      (is-false (gr8s.network::service-lb-dataplane-reopened-p dataplane))
       ;; Both maps are pinned, under the given bpffs directory, by their names.
       (is (= 2 (length pinned)))
       (is (member "/run/gr8s/bpf/service-lb/gr8s_service_v4" pinned
@@ -761,13 +761,13 @@
       (is (= 2 (length load-saw-maps)))
       ;; The program is attached to the given cgroup by its loaded fd.
       (is (equal (list 900003 "/sys/fs/cgroup/gr8s" whistler/loader:+bpf-cgroup-inet4-connect+) attach-args))
-      (is (equal '(:attachment) (gr8s::service-lb-dataplane-attachment dataplane)))
-      (is (not (null (gr8s::service-lb-service-table dataplane))))
-      (is (not (null (gr8s::service-lb-backend-table dataplane)))))))
+      (is (equal '(:attachment) (gr8s.network::service-lb-dataplane-attachment dataplane)))
+      (is (not (null (gr8s.network::service-lb-service-table dataplane))))
+      (is (not (null (gr8s.network::service-lb-backend-table dataplane)))))))
 
 (test service-lb-dataplane-staging-mode-reaches-compiler
   (let ((profile nil))
-    (gr8s::start-service-lb-dataplane
+    (gr8s.network::start-service-lb-dataplane
      "/sys/fs/cgroup/gr8s" "/run/gr8s/bpf/service-lb"
      :packet-services :v2
      :compile (lambda (&key packet-services)
@@ -789,7 +789,7 @@
         (existing (list (fake-lb-map "gr8s_service_v4" 900011)
                         (fake-lb-map "gr8s_backend_v4" 900012))))
     (let ((dataplane
-            (gr8s::start-service-lb-dataplane
+            (gr8s.network::start-service-lb-dataplane
              "/sys/fs/cgroup/gr8s" "/run/gr8s/bpf/service-lb"
              :compile (lambda ()
                         (values (list '(:name "gr8s_service_v4")
@@ -821,7 +821,7 @@
              :attach (lambda (program-fd cgroup attach-type)
                        (declare (ignore program-fd cgroup attach-type))
                        :attachment))))
-      (is (gr8s::service-lb-dataplane-reopened-p dataplane))
+      (is (gr8s.network::service-lb-dataplane-reopened-p dataplane))
       (is (null created))
       (is (null pinned))
       (is (equal '("gr8s_backend_v4" "gr8s_service_v4") opened))
@@ -829,12 +829,12 @@
                    (900011 "gr8s_service_v4"))
                  validated))
       (is (= 900011 (whistler/loader:map-info-fd
-                     (gr8s::service-lb-service-table dataplane)))))))
+                     (gr8s.network::service-lb-service-table dataplane)))))))
 
 (test service-lb-dataplane-start-rolls-back-pins-on-load-failure
   (let ((removed nil))
     (signals error
-      (gr8s::start-service-lb-dataplane
+      (gr8s.network::start-service-lb-dataplane
        "/sys/fs/cgroup/gr8s" "/run/gr8s/bpf/service-lb"
        :compile (lambda ()
                   (values (list '(:name "gr8s_service_v4")
@@ -856,30 +856,30 @@
 
 (test service-lb-dataplane-stop-detaches-and-removes-pins
   (let ((detached nil) (removed nil)
-        (dataplane (gr8s::%make-service-lb-dataplane
+        (dataplane (gr8s.network::%make-service-lb-dataplane
                     :cgroup-path "/sys/fs/cgroup/gr8s"
                     :pin-directory "/run/gr8s/bpf/service-lb/"
                     :maps (list (fake-lb-map "gr8s_service_v4" 900001)
                                 (fake-lb-map "gr8s_backend_v4" 900002))
                     :program (fake-lb-program 900003)
                     :attachment '(:attachment))))
-    (gr8s::stop-service-lb-dataplane
+    (gr8s.network::stop-service-lb-dataplane
      dataplane
      :detach (lambda (attachment) (push attachment detached))
      :remove-path (lambda (path) (push (namestring path) removed)))
     (is (equal '(:attachment) detached))
-    (is (null (gr8s::service-lb-dataplane-attachment dataplane)))
+    (is (null (gr8s.network::service-lb-dataplane-attachment dataplane)))
     (is (= 2 (length removed)))
     (is (member "/run/gr8s/bpf/service-lb/gr8s_service_v4" removed :test #'string=))))
 
 (test service-lb-dataplane-stop-can-keep-pins
   (let ((removed nil)
-        (dataplane (gr8s::%make-service-lb-dataplane
+        (dataplane (gr8s.network::%make-service-lb-dataplane
                     :pin-directory "/run/gr8s/bpf/service-lb/"
                     :maps (list (fake-lb-map "gr8s_service_v4" 900001))
                     :program (fake-lb-program 900003)
                     :attachment :attachment)))
-    (gr8s::stop-service-lb-dataplane
+    (gr8s.network::stop-service-lb-dataplane
      dataplane :remove-pins nil
      :detach (lambda (attachment) (declare (ignore attachment)) t)
      :remove-path (lambda (path) (push (namestring path) removed)))
@@ -890,62 +890,62 @@
   ;; Backends must land before the service entry, so the program never reads a
   ;; VIP whose slots are missing.  Record the update order and payloads.
   (let ((writes nil)
-        (dataplane (gr8s::%make-service-lb-dataplane
+        (dataplane (gr8s.network::%make-service-lb-dataplane
                     :maps (list (fake-lb-map "gr8s_service_v4" 900001)
                                 (fake-lb-map "gr8s_backend_v4" 900002)
                                 (fake-lb-map "gr8s_backend_index_v4" 900003)))))
-    (gr8s::service-lb-write-service
+    (gr8s.network::service-lb-write-service
      dataplane "10.96.0.10" 80 3 '(("10.88.1.5" . 8080) ("10.88.2.7" . 8080))
      :update (lambda (map key value)
                (push (list (whistler/loader:map-info-fd map) key value) writes)))
     (setf writes (nreverse writes))
     ;; Backends, membership entries (even without affinity), then the Service.
     (is (equal '(900002 900002 900003 900003 900001) (mapcar #'first writes)))
-    (is (equalp (gr8s::service-lb-backend-key 3) (second (first writes))))
-    (is (equalp (gr8s::service-lb-backend-value "10.88.1.5" 8080) (third (first writes))))
-    (is (equalp (gr8s::service-lb-index-key
-                (gr8s::service-lb-vip-key "10.96.0.10" 80)
-                (gr8s::service-lb-backend-value "10.88.1.5" 8080))
+    (is (equalp (gr8s.network::service-lb-backend-key 3) (second (first writes))))
+    (is (equalp (gr8s.network::service-lb-backend-value "10.88.1.5" 8080) (third (first writes))))
+    (is (equalp (gr8s.network::service-lb-index-key
+                (gr8s.network::service-lb-vip-key "10.96.0.10" 80)
+                (gr8s.network::service-lb-backend-value "10.88.1.5" 8080))
                (second (third writes))))
-    (is (equalp (gr8s::service-lb-vip-key "10.96.0.10" 80) (second (fifth writes))))
-    (is (equalp (gr8s::service-lb-service-value 2 3) (third (fifth writes))))))
+    (is (equalp (gr8s.network::service-lb-vip-key "10.96.0.10" 80) (second (fifth writes))))
+    (is (equalp (gr8s.network::service-lb-service-value 2 3) (third (fifth writes))))))
 
 (test service-lb-write-service-selects-the-ipv6-map-pair
   (let ((writes nil)
-        (dataplane (gr8s::%make-service-lb-dataplane
+        (dataplane (gr8s.network::%make-service-lb-dataplane
                     :maps (list (fake-lb-map "gr8s_service_v4" 900001)
                                 (fake-lb-map "gr8s_backend_v4" 900002)
                                 (fake-lb-map "gr8s_service_v6" 900003)
                                 (fake-lb-map "gr8s_backend_v6" 900004)
                                 (fake-lb-map "gr8s_backend_index_v6" 900005)))))
-    (gr8s::service-lb-write-service
+    (gr8s.network::service-lb-write-service
      dataplane "fd96::a" 80 3 '(("fd88::5" . 8080))
      :update (lambda (map key value)
                (push (list (whistler/loader:map-info-fd map) key value) writes)))
     (setf writes (nreverse writes))
     (is (equal '(900004 900005 900003) (mapcar #'first writes)))
-    (is (equalp (gr8s::service-lb-backend-value "fd88::5" 8080)
+    (is (equalp (gr8s.network::service-lb-backend-value "fd88::5" 8080)
                 (third (first writes))))
-    (is (equalp (gr8s::service-lb-vip-key "fd96::a" 80)
+    (is (equalp (gr8s.network::service-lb-vip-key "fd96::a" 80)
                 (second (third writes))))))
 
 (test service-lb-pin-directory-is-under-state
   (is (string= "/var/lib/gr8s/containerd/bpf/service-lb/"
-               (gr8s::service-lb-pin-directory "/var/lib/gr8s"))))
+               (gr8s.network::service-lb-pin-directory "/var/lib/gr8s"))))
 
 ;;; Controller: converge Service/endpoint state into the maps.  Services are
 ;;; plain core objects and the endpoint lookup and map ops are injected, so no
 ;;; store and no kernel are needed.
 
 (defun fake-lb-service (cluster-ip &key (ports '(80)) external-name)
-  (let ((spec (gr8s::core-object
+  (let ((spec (gr8s.resources::core-object
                "clusterIP" cluster-ip
                "type" (if external-name "ExternalName" "ClusterIP")
-               "selector" (gr8s::core-object "app" "web")
-               "ports" (coerce (mapcar (lambda (p) (gr8s::core-object "port" p)) ports) 'vector))))
+               "selector" (gr8s.resources::core-object "app" "web")
+               "ports" (coerce (mapcar (lambda (p) (gr8s.resources::core-object "port" p)) ports) 'vector))))
     (when external-name (setf (gethash "externalName" spec) external-name))
-    (gr8s::core-object
-     "metadata" (gr8s::core-object "name" "svc" "namespace" "default" "uid" cluster-ip)
+    (gr8s.resources::core-object
+     "metadata" (gr8s.resources::core-object "name" "svc" "namespace" "default" "uid" cluster-ip)
      "spec" spec)))
 
 (test service-risk-plan-keeps-unready-and-topology-filtered-backends
@@ -953,7 +953,7 @@
          (second (fake-lb-service "10.96.0.11"))
          (udp (aref (gethash "ports" (gethash "spec" second)) 0)))
     (setf (gethash "protocol" udp) "UDP")
-    (let ((keys (gr8s::service-risk-keys
+    (let ((keys (gr8s.controllers::service-risk-keys
                  (list second first)
                  (lambda (service port)
                    (declare (ignore service port))
@@ -964,39 +964,39 @@
       (is (= 4 (length keys)))
       (dolist (address '("10.88.1.5" "10.88.1.6"))
         (dolist (protocol '("TCP" "UDP"))
-          (is (member (gr8s::service-lb-risk-key address 8080 protocol)
+          (is (member (gr8s.network::service-lb-risk-key address 8080 protocol)
                       keys :test #'equalp)))))))
 
 (test service-lb-status-advertises-ready-node-addresses
   (with-temporary-store (store directory)
     (declare (ignore directory))
-    (dolist (node (list (gr8s:make-node-record :id "node-a" :name "node-a"
+    (dolist (node (list (gr8s.model::make-node-record :id "node-a" :name "node-a"
                                                :pod-cidr "10.88.0.0/24" :underlay-address "192.0.2.10")
-                        (gr8s:make-node-record :id "node-b" :name "node-b"
+                        (gr8s.model::make-node-record :id "node-b" :name "node-b"
                                                :pod-cidr "10.88.1.0/24" :underlay-address "192.0.2.11")))
-      (gr8s:register-node store node))
-    (gr8s:mark-node-ready store "node-b" (get-universal-time))
+      (gr8s.controllers::register-node store node))
+    (gr8s.controllers::mark-node-ready store "node-b" (get-universal-time))
     (labels ((load-balancer (name &optional class)
                (let ((service (service-test-object name)))
                  (setf (gethash "type" (gethash "spec" service)) "LoadBalancer")
                  (when class (setf (gethash "loadBalancerClass" (gethash "spec" service)) class))
-                 (gr8s::create-core-resource store "services" service "default")))
+                 (gr8s.resources::create-core-resource store "services" service "default")))
              (addresses (name)
-               (let* ((service (gr8s::get-core-resource store "services" "default" name))
+               (let* ((service (gr8s.resources::get-core-resource store "services" "default" name))
                       (status (gethash "status" service))
                       (balancer (gethash "loadBalancer" status)))
                  (map 'list (lambda (entry) (gethash "ip" entry))
                       (gethash "ingress" balancer #())))))
       (load-balancer "managed")
       (load-balancer "custom" "example.test/controller")
-      (gr8s::reconcile-service-load-balancer-status store)
+      (gr8s.controllers::reconcile-service-load-balancer-status store)
       (is (equal '("192.0.2.11") (addresses "managed")))
       (is (null (addresses "custom")))
-      (let ((revision (gr8s::pod-store-resource-revision store)))
-        (gr8s::reconcile-service-load-balancer-status store)
-        (is (= revision (gr8s::pod-store-resource-revision store))))
-      (gr8s:mark-node-ready store "node-a" (get-universal-time))
-      (gr8s::reconcile-service-load-balancer-status store)
+      (let ((revision (gr8s.store::pod-store-resource-revision store)))
+        (gr8s.controllers::reconcile-service-load-balancer-status store)
+        (is (= revision (gr8s.store::pod-store-resource-revision store))))
+      (gr8s.controllers::mark-node-ready store "node-a" (get-universal-time))
+      (gr8s.controllers::reconcile-service-load-balancer-status store)
       (is (equal '("192.0.2.10" "192.0.2.11") (addresses "managed"))))))
 
 (test service-lb-status-advertises-the-local-node-discovered-address
@@ -1004,15 +1004,15 @@
     (declare (ignore directory))
     ;; The in-process local agent intentionally reports no explicit underlay
     ;; address. Its Kubernetes InternalIP is the host's discovered primary IP.
-    (gr8s:register-node store (gr8s:make-node-record :id "local" :name "local"
+    (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "local" :name "local"
                                                      :pod-cidr "10.88.0.0/24"))
-    (gr8s:mark-node-ready store "local" (get-universal-time))
-    (let* ((gr8s::*local-primary-ipv4* "192.0.2.12")
+    (gr8s.controllers::mark-node-ready store "local" (get-universal-time))
+    (let* ((gr8s.apiserver::*local-primary-ipv4* "192.0.2.12")
            (service (service-test-object "managed")))
       (setf (gethash "type" (gethash "spec" service)) "LoadBalancer")
-      (gr8s::create-core-resource store "services" service "default")
-      (gr8s::reconcile-service-load-balancer-status store)
-      (let* ((stored (gr8s::get-core-resource store "services" "default" "managed"))
+      (gr8s.resources::create-core-resource store "services" service "default")
+      (gr8s.controllers::reconcile-service-load-balancer-status store)
+      (let* ((stored (gr8s.resources::get-core-resource store "services" "default" "managed"))
              (ingress (gethash "ingress" (gethash "loadBalancer" (gethash "status" stored)))))
         (is (equal '(("192.0.2.12" "Proxy"))
                    (map 'list (lambda (entry)
@@ -1022,20 +1022,20 @@
 (test service-lb-status-withdraws-a-service-whose-node-port-collides
   (with-temporary-store (store directory)
     (declare (ignore directory))
-    (gr8s:register-node store (gr8s:make-node-record :id "node-a" :name "node-a"
+    (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "node-a" :name "node-a"
                                                      :pod-cidr "10.88.0.0/24"
                                                      :underlay-address "192.0.2.10"))
-    (gr8s:mark-node-ready store "node-a" (get-universal-time))
+    (gr8s.controllers::mark-node-ready store "node-a" (get-universal-time))
     (dolist (name '("alpha" "beta"))
       (let ((service (service-test-object name)))
         (setf (gethash "type" (gethash "spec" service)) "LoadBalancer")
-        (gr8s::create-core-resource store "services" service "default")))
-    (gr8s::reconcile-service-load-balancer-status store)
+        (gr8s.resources::create-core-resource store "services" service "default")))
+    (gr8s.controllers::reconcile-service-load-balancer-status store)
     (flet ((ingress (name)
              (gethash "ingress"
                       (gethash "loadBalancer"
                                (gethash "status"
-                                        (gr8s::get-core-resource store "services" "default" name))))))
+                                        (gr8s.resources::get-core-resource store "services" "default" name))))))
       (is (= 1 (length (ingress "alpha"))))
       (is (null (ingress "beta"))))))
 
@@ -1046,13 +1046,13 @@
                         (fake-lb-service "10.96.0.9" :external-name "db.example.com")
                         (fake-lb-service "10.96.0.10"))))
     (multiple-value-bind (service-entries backend-entries slots)
-        (gr8s::service-lb-plan services (lambda (s p) (declare (ignore s p)) '(("10.88.1.5" 8080))))
+        (gr8s.controllers::service-lb-plan services (lambda (s p) (declare (ignore s p)) '(("10.88.1.5" 8080))))
       (is (= 2 (length service-entries)))
       (is (= 2 (length backend-entries)))
       (is (= 2 slots))
-      (is (find (gr8s::service-lb-vip-key "10.96.0.1" 80) service-entries
+      (is (find (gr8s.network::service-lb-vip-key "10.96.0.1" 80) service-entries
                 :test #'equalp :key #'car))
-      (is (find (gr8s::service-lb-vip-key "10.96.0.10" 80) service-entries
+      (is (find (gr8s.network::service-lb-vip-key "10.96.0.10" 80) service-entries
                 :test #'equalp :key #'car)))))
 
 (test service-lb-plan-packs-backends-deterministically
@@ -1066,22 +1066,22 @@
                      ((and (equal ip "10.96.0.5") (= number 80)) '(("10.88.2.1" 9090)))
                      (t '())))))               ; 10.96.0.5:443 has no ready backends
       (multiple-value-bind (service-entries backend-entries slots)
-          (gr8s::service-lb-plan services #'endpoints)
+          (gr8s.controllers::service-lb-plan services #'endpoints)
         ;; "10.96.0.10" sorts before "10.96.0.5"; slots pack 0,1 then 2.
         (is (= 3 (length service-entries)))
         (is (= 3 (length backend-entries)))
         (is (= 3 slots))
-        (is (equalp (gr8s::service-lb-vip-key "10.96.0.10" 80) (car (first service-entries))))
-        (is (equalp (gr8s::service-lb-service-value 2 0) (cdr (first service-entries))))
-        (is (equalp (gr8s::service-lb-backend-value "10.88.1.5" 8080) (cdr (first backend-entries))))
+        (is (equalp (gr8s.network::service-lb-vip-key "10.96.0.10" 80) (car (first service-entries))))
+        (is (equalp (gr8s.network::service-lb-service-value 2 0) (cdr (first service-entries))))
+        (is (equalp (gr8s.network::service-lb-backend-value "10.88.1.5" 8080) (cdr (first backend-entries))))
         ;; A port with no ready backends still gets a zero-count entry (passthrough);
         ;; its base is the slot counter after the two populated ports (0,1 then 2).
-        (is (equalp (gr8s::service-lb-service-value 0 3) (cdr (third service-entries))))))))
+        (is (equalp (gr8s.network::service-lb-service-value 0 3) (cdr (third service-entries))))))))
 
 (defun make-fake-lb-controller ()
-  (gr8s::make-service-lb-controller
+  (gr8s.controllers::make-service-lb-controller
    nil
-   (gr8s::%make-service-lb-dataplane
+   (gr8s.network::%make-service-lb-dataplane
     :maps (list (fake-lb-map "gr8s_service_v4" 1) (fake-lb-map "gr8s_backend_v4" 2)))))
 
 (test service-lb-converge-writes-backends-before-services-then-is-idempotent
@@ -1089,7 +1089,7 @@
         (one-service (lambda () (list (fake-lb-service "10.96.0.10" :ports '(80)))))
         (two-backends (lambda (s p) (declare (ignore s p)) '(("10.88.1.5" 8080) ("10.88.1.6" 8080)))))
     (let ((writes nil) (deletes nil))
-      (gr8s::converge-service-lb-controller
+      (gr8s.controllers::converge-service-lb-controller
        controller :list-services one-service :endpoints-of two-backends
        :update (lambda (m k v) (declare (ignore k v)) (push (whistler/loader:map-info-fd m) writes))
        :delete (lambda (m k) (declare (ignore k)) (push (whistler/loader:map-info-fd m) deletes)))
@@ -1098,26 +1098,26 @@
       (is (null deletes)))
     ;; Re-converging an unchanged plan writes and deletes nothing.
     (let ((touched nil))
-      (gr8s::converge-service-lb-controller
+      (gr8s.controllers::converge-service-lb-controller
        controller :list-services one-service :endpoints-of two-backends
        :update (lambda (m k v) (declare (ignore m k v)) (push t touched))
        :delete (lambda (m k) (declare (ignore m k)) (push t touched)))
       (is (null touched)))))
 
 (test service-lb-converge-routes-each-family-to-its-own-maps
-  (let* ((dataplane (gr8s::%make-service-lb-dataplane
+  (let* ((dataplane (gr8s.network::%make-service-lb-dataplane
                      :maps (list (fake-lb-map "gr8s_service_v4" 1)
                                  (fake-lb-map "gr8s_backend_v4" 2)
                                  (fake-lb-map "gr8s_backend_index_v4" 3)
                                  (fake-lb-map "gr8s_service_v6" 4)
                                  (fake-lb-map "gr8s_backend_v6" 5)
                                  (fake-lb-map "gr8s_backend_index_v6" 6))))
-         (controller (gr8s::make-service-lb-controller nil dataplane))
+         (controller (gr8s.controllers::make-service-lb-controller nil dataplane))
          (service (fake-lb-service "10.96.0.10"))
          (writes nil))
     (setf (gethash "clusterIPs" (gethash "spec" service))
           #("10.96.0.10" "fd96::a"))
-    (gr8s::converge-service-lb-controller
+    (gr8s.controllers::converge-service-lb-controller
      controller
      :list-services (lambda () (list service))
      :endpoints-of (lambda (ignored-service ignored-port)
@@ -1133,38 +1133,38 @@
 (test service-lb-converge-frees-slots-when-a-backend-leaves
   (let ((controller (make-fake-lb-controller)))
     ;; Start with two backends.
-    (gr8s::converge-service-lb-controller
+    (gr8s.controllers::converge-service-lb-controller
      controller
      :list-services (lambda () (list (fake-lb-service "10.96.0.10" :ports '(80))))
      :endpoints-of (lambda (s p) (declare (ignore s p)) '(("10.88.1.5" 8080) ("10.88.1.6" 8080)))
      :update (constantly nil) :delete (constantly nil))
     ;; Drop to one backend: slot 1 must be deleted from the backend map (fd 2).
     (let ((deletes nil))
-      (gr8s::converge-service-lb-controller
+      (gr8s.controllers::converge-service-lb-controller
        controller
        :list-services (lambda () (list (fake-lb-service "10.96.0.10" :ports '(80))))
        :endpoints-of (lambda (s p) (declare (ignore s p)) '(("10.88.1.5" 8080)))
        :update (constantly nil)
        :delete (lambda (m k) (push (list (whistler/loader:map-info-fd m) k) deletes)))
-      (is (member (list 2 (gr8s::service-lb-backend-key 1)) deletes :test #'equalp)))))
+      (is (member (list 2 (gr8s.network::service-lb-backend-key 1)) deletes :test #'equalp)))))
 
 (test service-lb-converge-withdraws-a-removed-service
   (let ((controller (make-fake-lb-controller)))
-    (gr8s::converge-service-lb-controller
+    (gr8s.controllers::converge-service-lb-controller
      controller
      :list-services (lambda () (list (fake-lb-service "10.96.0.10" :ports '(80))))
      :endpoints-of (lambda (s p) (declare (ignore s p)) '(("10.88.1.5" 8080)))
      :update (constantly nil) :delete (constantly nil))
     ;; Remove the Service entirely: its VIP key (fd 1) and freed slot 0 (fd 2) go.
     (let ((deletes nil))
-      (gr8s::converge-service-lb-controller
+      (gr8s.controllers::converge-service-lb-controller
        controller
        :list-services (lambda () nil)
        :endpoints-of (lambda (s p) (declare (ignore s p)) nil)
        :update (constantly nil)
        :delete (lambda (m k) (push (list (whistler/loader:map-info-fd m) k) deletes)))
-      (is (member (list 1 (gr8s::service-lb-vip-key "10.96.0.10" 80)) deletes :test #'equalp))
-      (is (member (list 2 (gr8s::service-lb-backend-key 0)) deletes :test #'equalp)))))
+      (is (member (list 1 (gr8s.network::service-lb-vip-key "10.96.0.10" 80)) deletes :test #'equalp))
+      (is (member (list 2 (gr8s.network::service-lb-backend-key 0)) deletes :test #'equalp)))))
 
 (defun service-lb-cleanup-fixture ()
   "Model actual hash-map ENOENT semantics for both address families."
@@ -1174,7 +1174,7 @@
                      for fd from 1 collect (fake-lb-map name fd))))
     (flet ((key (map bytes) (list (whistler/loader:map-info-name map) (copy-seq bytes))))
       (values
-       (gr8s::make-service-lb-controller nil (gr8s::%make-service-lb-dataplane :maps maps))
+       (gr8s.controllers::make-service-lb-controller nil (gr8s.network::%make-service-lb-dataplane :maps maps))
        entries
        (lambda (map bytes value) (setf (gethash (key map bytes) entries) (copy-seq value)))
        (lambda (map bytes)
@@ -1185,16 +1185,16 @@
   (multiple-value-bind (controller entries update delete) (service-lb-cleanup-fixture)
     (let ((services (list (fake-lb-service "10.96.0.10" :ports '(80)))))
       (flet ((converge (backends)
-               (gr8s::converge-service-lb-controller
+               (gr8s.controllers::converge-service-lb-controller
                 controller :list-services (constantly services) :endpoints-of (constantly backends)
                 :update update :delete delete)))
         (converge '(("10.88.1.5" 8080) ("10.88.1.6" 8080)))
         ;; IPv6 maps exist, but never contained the retired IPv4 slot.
         (converge '(("10.88.1.5" 8080)))
         (is (= 3 (hash-table-count entries)))
-        (is (= 1 (gr8s::service-lb-controller-applied-slot-count controller)))
+        (is (= 1 (gr8s.controllers::service-lb-controller-applied-slot-count controller)))
         (let ((touched nil))
-          (gr8s::converge-service-lb-controller
+          (gr8s.controllers::converge-service-lb-controller
            controller :list-services (constantly services)
            :endpoints-of (constantly '(("10.88.1.5" 8080)))
            :update (lambda (&rest ignored) (declare (ignore ignored)) (setf touched t))
@@ -1203,14 +1203,14 @@
 
 (test service-lb-cleanup-retries-partial-deletion-and-preserves-other-errors
   (multiple-value-bind (controller entries update delete) (service-lb-cleanup-fixture)
-    (gr8s::converge-service-lb-controller
+    (gr8s.controllers::converge-service-lb-controller
      controller :list-services (constantly (list (fake-lb-service "10.96.0.10" :ports '(80))))
      :endpoints-of (constantly '(("10.88.1.5" 8080) ("10.88.1.6" 8080)))
      :update update :delete delete)
-    (let* ((signature (gr8s::service-lb-controller-applied-signature controller))
+    (let* ((signature (gr8s.controllers::service-lb-controller-applied-signature controller))
            (condition
              (handler-case
-                 (gr8s::converge-service-lb-controller
+                 (gr8s.controllers::converge-service-lb-controller
                   controller :list-services (constantly nil) :endpoints-of (constantly nil)
                   :update update
                   :delete (lambda (map key)
@@ -1220,17 +1220,17 @@
                (whistler/loader:bpf-error (error) error))))
       (is (typep condition 'whistler/loader:bpf-error))
       (when condition (is (= 5 (whistler/loader::bpf-error-errno condition))))
-      (is (eq signature (gr8s::service-lb-controller-applied-signature controller)))
+      (is (eq signature (gr8s.controllers::service-lb-controller-applied-signature controller)))
       (is (= 2 (hash-table-count entries))))
     ;; Retry must tolerate the already removed VIP and slots, then finish
     ;; deleting membership entries and commit the empty desired state.
-    (gr8s::converge-service-lb-controller
+    (gr8s.controllers::converge-service-lb-controller
      controller :list-services (constantly nil) :endpoints-of (constantly nil)
      :update update :delete delete)
     (is (zerop (hash-table-count entries)))
-    (is (zerop (gr8s::service-lb-controller-applied-slot-count controller)))
+    (is (zerop (gr8s.controllers::service-lb-controller-applied-slot-count controller)))
     (let ((touched nil))
-      (gr8s::converge-service-lb-controller
+      (gr8s.controllers::converge-service-lb-controller
        controller :list-services (constantly nil) :endpoints-of (constantly nil)
        :update (lambda (&rest ignored) (declare (ignore ignored)) (setf touched t))
        :delete (lambda (&rest ignored) (declare (ignore ignored)) (setf touched t)))
@@ -1240,13 +1240,13 @@
   (multiple-value-bind (controller entries update delete) (service-lb-cleanup-fixture)
     (declare (ignore update))
     (signals whistler/loader:bpf-error
-      (gr8s::converge-service-lb-controller
+      (gr8s.controllers::converge-service-lb-controller
        controller :list-services (constantly (list (fake-lb-service "10.96.0.10" :ports '(80))))
        :endpoints-of (constantly '(("10.88.1.5" 8080))) :delete delete
        :update (lambda (&rest ignored) (declare (ignore ignored))
                  (error 'whistler/loader:bpf-error :context "map-update" :errno 2))))
     (is (zerop (hash-table-count entries)))
-    (is-false (gr8s::service-lb-controller-applied-signature controller))))
+    (is-false (gr8s.controllers::service-lb-controller-applied-signature controller))))
 
 (defun service-lb-fixture-next-key (entries)
   (lambda (map previous)
@@ -1263,8 +1263,8 @@
                      (fake-lb-map "gr8s_backend_v4" 2)
                      (fake-lb-map "gr8s_backend_index_v4" 3)
                      (fake-lb-map "gr8s_nat_risk_v2" 4)))
-         (dataplane (gr8s::%make-service-lb-dataplane :maps maps))
-         (controller (gr8s::make-service-lb-controller nil dataplane))
+         (dataplane (gr8s.network::%make-service-lb-dataplane :maps maps))
+         (controller (gr8s.controllers::make-service-lb-controller nil dataplane))
          (service (fake-lb-service "10.96.0.10"))
          (writes nil)
          (update (lambda (map key value)
@@ -1280,14 +1280,14 @@
                           '(("10.88.1.5" 8080) ("10.88.1.6" 8080)))))
     ;; The socket plan selects only one endpoint. Both advertised backend
     ;; tuples must be published to the risk map before any Service map write.
-    (gr8s::converge-service-lb-controller
+    (gr8s.controllers::converge-service-lb-controller
      controller :list-services (constantly (list service))
      :endpoints-of (constantly '(("10.88.1.5" 8080)))
      :risk-backends-of risk-backends :update update :delete delete)
     (is (equal '("gr8s_nat_risk_v2" "gr8s_nat_risk_v2"
                  "gr8s_backend_v4" "gr8s_backend_index_v4" "gr8s_service_v4")
                (nreverse writes)))
-    (is (= 2 (length (gr8s::service-lb-controller-applied-risk-keys controller))))
+    (is (= 2 (length (gr8s.controllers::service-lb-controller-applied-risk-keys controller))))
     (flet ((published (backends)
              (gr8s.controllers:service-lb-risk-published-p
               controller :list-services (constantly (list service))
@@ -1298,38 +1298,38 @@
                         (gethash (list (whistler/loader:map-info-name map) key) entries)))))
       (is-true (published '(("10.88.1.5" 8080) ("10.88.1.6" 8080))))
       (remhash (list "gr8s_nat_risk_v2"
-                     (gr8s::service-lb-risk-key "10.88.1.6" 8080 "TCP")) entries)
+                     (gr8s.network::service-lb-risk-key "10.88.1.6" 8080 "TCP")) entries)
       (is-false (published '(("10.88.1.5" 8080) ("10.88.1.6" 8080))))
       (setf (gethash (list "gr8s_nat_risk_v2"
-                           (gr8s::service-lb-risk-key "10.88.1.6" 8080 "TCP")) entries)
-            (gr8s::service-lb-bytes 1 4))
+                           (gr8s.network::service-lb-risk-key "10.88.1.6" 8080 "TCP")) entries)
+            (gr8s.network::service-lb-bytes 1 4))
       (is-false (published '(("10.88.1.5" 8080) ("10.88.1.7" 8080)))))
     (setf writes nil)
-    (gr8s::converge-service-lb-controller
+    (gr8s.controllers::converge-service-lb-controller
      controller :list-services (constantly nil) :endpoints-of (constantly nil)
      :risk-backends-of (constantly nil) :update update :delete delete)
     (is (null writes))
     ;; Retain risk until old return-state owners can be proved drained.
     (is (= 2 (hash-table-count entries)))
-    (setf (gr8s::service-lb-dataplane-reopened-p dataplane) t)
-    (let ((reopened (gr8s::make-service-lb-controller nil dataplane)))
+    (setf (gr8s.network::service-lb-dataplane-reopened-p dataplane) t)
+    (let ((reopened (gr8s.controllers::make-service-lb-controller nil dataplane)))
       (setf writes nil)
-      (gr8s::converge-service-lb-controller
+      (gr8s.controllers::converge-service-lb-controller
        reopened :list-services (constantly (list service))
        :endpoints-of (constantly '(("10.88.1.5" 8080)))
        :risk-backends-of risk-backends :next-key (service-lb-fixture-next-key entries)
        :update update :delete delete)
       (is (not (member "gr8s_nat_risk_v2" writes :test #'equal)))
-      (is (= 2 (length (gr8s::service-lb-controller-applied-risk-keys reopened)))))))
+      (is (= 2 (length (gr8s.controllers::service-lb-controller-applied-risk-keys reopened)))))))
 
 (test v2-risk-phase-withholds-and-withdraws-service-selection
   (let* ((entries (make-hash-table :test #'equalp))
-         (dataplane (gr8s::%make-service-lb-dataplane
+         (dataplane (gr8s.network::%make-service-lb-dataplane
                      :maps (list (fake-lb-map "gr8s_service_v4" 1)
                                  (fake-lb-map "gr8s_backend_v4" 2)
                                  (fake-lb-map "gr8s_backend_index_v4" 3)
                                  (fake-lb-map "gr8s_nat_risk_v2" 4))))
-         (controller (gr8s::make-service-lb-controller nil dataplane))
+         (controller (gr8s.controllers::make-service-lb-controller nil dataplane))
          (service (fake-lb-service "10.96.0.10"))
          (writes nil)
          (fail-risk nil)
@@ -1347,7 +1347,7 @@
          (risk-backends (lambda (&rest ignored)
                           (declare (ignore ignored)) risk-rows)))
     (flet ((converge (publish-services-p endpoints)
-             (gr8s::converge-service-lb-controller
+             (gr8s.controllers::converge-service-lb-controller
               controller :publish-services-p publish-services-p
               :list-services services :risk-backends-of risk-backends
               :endpoints-of endpoints :update update :delete delete)))
@@ -1356,38 +1356,38 @@
                       (error "risk phase selected a backend")))
       (is (equal '("gr8s_nat_risk_v2") writes))
       (is (= 1 (hash-table-count entries)))
-      (is (null (first (gr8s::service-lb-controller-applied-signature controller))))
+      (is (null (first (gr8s.controllers::service-lb-controller-applied-signature controller))))
       (setf writes nil)
       (converge nil (constantly nil))
       (is (null writes))
       (converge t (constantly '(("10.88.1.5" 8080))))
       (is (not (member "gr8s_nat_risk_v2" writes :test #'equal)))
       (is (gethash (list "gr8s_service_v4"
-                         (gr8s::service-lb-vip-key "10.96.0.10" 80)) entries))
+                         (gr8s.network::service-lb-vip-key "10.96.0.10" 80)) entries))
       (setf writes nil)
       (setf risk-rows '(("10.88.1.5" 8080) ("10.88.1.6" 8080))
             fail-risk t)
       (signals whistler/loader:bpf-error
         (converge nil (constantly nil)))
       (is (null (gethash (list "gr8s_service_v4"
-                               (gr8s::service-lb-vip-key "10.96.0.10" 80))
+                               (gr8s.network::service-lb-vip-key "10.96.0.10" 80))
                          entries)))
       (setf fail-risk nil)
       (converge nil (constantly nil))
       (is (equal '("gr8s_nat_risk_v2") writes))
       (is (= 2 (hash-table-count entries)))
       (is (gethash (list "gr8s_nat_risk_v2"
-                         (gr8s::service-lb-risk-key "10.88.1.5" 8080 "TCP"))
+                         (gr8s.network::service-lb-risk-key "10.88.1.5" 8080 "TCP"))
                    entries)))))
 
 (test v2-retained-selection-stages-risk-without-exposing-new-backend
   (let* ((entries (make-hash-table :test #'equalp))
-         (dataplane (gr8s::%make-service-lb-dataplane
+         (dataplane (gr8s.network::%make-service-lb-dataplane
                      :maps (list (fake-lb-map "gr8s_service_v4" 1)
                                  (fake-lb-map "gr8s_backend_v4" 2)
                                  (fake-lb-map "gr8s_backend_index_v4" 3)
                                  (fake-lb-map "gr8s_nat_risk_v2" 4))))
-         (controller (gr8s::make-service-lb-controller nil dataplane))
+         (controller (gr8s.controllers::make-service-lb-controller nil dataplane))
          (service (fake-lb-service "10.96.0.10"))
          (backends '(("10.88.1.5" 8080) ("10.88.1.6" 8080)))
          (update (lambda (map key value)
@@ -1395,9 +1395,9 @@
                          (copy-seq value))))
          (delete (lambda (map key)
                    (remhash (list (whistler/loader:map-info-name map) key) entries)))
-         (vip-key (gr8s::service-lb-vip-key "10.96.0.10" 80)))
+         (vip-key (gr8s.network::service-lb-vip-key "10.96.0.10" 80)))
     (labels ((converge (mode)
-               (gr8s::converge-service-lb-controller
+               (gr8s.controllers::converge-service-lb-controller
                 controller :publish-services-p mode
                 :list-services (constantly (list service))
                 :endpoints-of (lambda (&rest ignored)
@@ -1407,17 +1407,17 @@
                 :update update :delete delete))
              (count-selected ()
                (let ((value (gethash (list "gr8s_service_v4" vip-key) entries)))
-                 (and value (gr8s::netlink-read-integer value 0 2)))))
+                 (and value (cl-rtnetlink::netlink-read-integer value 0 2)))))
       (converge t)
       (is (= 2 (count-selected)))
       (setf backends '( ("10.88.1.5" 8080) ("10.88.1.6" 8080)
                        ("10.88.1.7" 8080)))
       (is-true (converge :retain))
       (is (= 2 (count-selected)))
-      (is (null (gethash (list "gr8s_backend_v4" (gr8s::service-lb-backend-key 2))
+      (is (null (gethash (list "gr8s_backend_v4" (gr8s.network::service-lb-backend-key 2))
                          entries)))
       (is (gethash (list "gr8s_nat_risk_v2"
-                         (gr8s::service-lb-risk-key "10.88.1.7" 8080 "TCP")) entries))
+                         (gr8s.network::service-lb-risk-key "10.88.1.7" 8080 "TCP")) entries))
       (converge t)
       (is (= 3 (count-selected)))
       (setf backends '( ("10.88.1.5" 8080) ("10.88.1.7" 8080)))
@@ -1425,34 +1425,34 @@
       (is (null (count-selected))))))
 
 (test v2-local-risk-readiness-is-fenced-by-received-revision
-  (let* ((dataplane (gr8s::%make-service-lb-dataplane
+  (let* ((dataplane (gr8s.network::%make-service-lb-dataplane
                      :maps (list (fake-lb-map "gr8s_nat_risk_v2" 4)
                                  (fake-lb-map "gr8s_nat_id_v2" 5))))
          (runtime (gr8s.agent::%make-node-runtime
                    :service-lb dataplane :received-revision 4
-                   :network (gr8s::json-object "serviceTranslations" #())
+                   :network (gr8s.foundation::json-object "serviceTranslations" #())
                    :service-risk-ready-revision 4)))
     (is-true (gr8s.agent::node-runtime-local-risk-ready-p runtime))
     (is (null (gr8s.agent::ensure-node-snapshot-service-risk-ready
                runtime :owner-next-key (constantly nil))))
     (setf (gr8s.agent::node-runtime-received-revision runtime) 5)
     (is-false (gr8s.agent::node-runtime-local-risk-ready-p runtime))
-    (signals gr8s::node-snapshot-incomplete
+    (signals gr8s.kubelet::node-snapshot-incomplete
       (gr8s.agent::ensure-node-snapshot-service-risk-ready runtime))
     (setf (gr8s.agent::node-runtime-service-risk-ready-revision runtime) 5)
     (is-true (gr8s.agent::node-runtime-local-risk-ready-p runtime))
     (is (null (gr8s.agent::ensure-node-snapshot-service-risk-ready
                runtime :owner-next-key (constantly nil))))
     (setf (gr8s.agent::node-runtime-service-lb runtime)
-          (gr8s::%make-service-lb-dataplane
+          (gr8s.network::%make-service-lb-dataplane
            :maps (list (fake-lb-map "gr8s_nat_risk_v2" 4))))
-    (signals gr8s::node-snapshot-incomplete
+    (signals gr8s.kubelet::node-snapshot-incomplete
       (gr8s.agent::ensure-node-snapshot-service-risk-ready runtime))
     (setf (gr8s.agent::node-runtime-service-lb runtime) nil)
     (is-false (gr8s.agent::node-runtime-local-risk-ready-p runtime))
     (is (null (gr8s.agent::ensure-node-snapshot-service-risk-ready runtime)))
     (setf (gr8s.agent::node-runtime-service-lb runtime)
-          (gr8s::%make-service-lb-dataplane
+          (gr8s.network::%make-service-lb-dataplane
            :maps (list (fake-lb-map "gr8s_service_v4" 1))))
     (is (null (gr8s.agent::ensure-node-snapshot-service-risk-ready runtime)))))
 
@@ -1467,7 +1467,7 @@
                                   :revision 4
                                   :network (make-instance 'gr8s.node.v1::node-network-config)
                                   :service-discovery-objects-json projection))
-         (dataplane (gr8s::%make-service-lb-dataplane
+         (dataplane (gr8s.network::%make-service-lb-dataplane
                      :maps (list (fake-lb-map "gr8s_nat_risk_v2" 4))))
          (runtime (gr8s.agent::%make-node-runtime
                    :service-lb dataplane :received-revision 4
@@ -1484,12 +1484,12 @@
           (copy-seq digest))
     (is-true (gr8s.agent::node-snapshot-service-risk-granted-p snapshot))
     (is (eq :current (gr8s.agent::node-snapshot-service-grant-mode runtime snapshot)))
-    (signals gr8s::node-snapshot-incomplete
+    (signals gr8s.kubelet::node-snapshot-incomplete
       (gr8s.agent::ensure-node-snapshot-service-selection-ready runtime snapshot))
     (setf (gr8s.agent::node-runtime-service-selection-ready-revision runtime) 4)
     (is (null (gr8s.agent::ensure-node-snapshot-service-selection-ready runtime snapshot)))
     (setf (gr8s.agent::node-runtime-received-revision runtime) 5)
-    (signals gr8s::node-snapshot-incomplete
+    (signals gr8s.kubelet::node-snapshot-incomplete
       (gr8s.agent::ensure-node-snapshot-service-selection-ready runtime snapshot))
     (setf (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json)
           (list one))
@@ -1499,19 +1499,19 @@
     (is (null (gr8s.agent::ensure-node-snapshot-service-selection-ready runtime snapshot)))
     (setf (gr8s.agent::node-runtime-service-selection-grant-digest runtime) nil)
     (is (null (gr8s.agent::node-snapshot-service-grant-mode runtime snapshot)))
-    (signals gr8s::node-snapshot-incomplete
+    (signals gr8s.kubelet::node-snapshot-incomplete
       (gr8s.agent::node-snapshot-service-risk-granted-p snapshot))))
 
 (test service-risk-publication-failure-does-not-expose-service
-  (let* ((dataplane (gr8s::%make-service-lb-dataplane
+  (let* ((dataplane (gr8s.network::%make-service-lb-dataplane
                      :maps (list (fake-lb-map "gr8s_service_v4" 1)
                                  (fake-lb-map "gr8s_backend_v4" 2)
                                  (fake-lb-map "gr8s_backend_index_v4" 3)
                                  (fake-lb-map "gr8s_nat_risk_v2" 4))))
-         (controller (gr8s::make-service-lb-controller nil dataplane))
+         (controller (gr8s.controllers::make-service-lb-controller nil dataplane))
          (other-writes nil))
     (signals whistler/loader:bpf-error
-      (gr8s::converge-service-lb-controller
+      (gr8s.controllers::converge-service-lb-controller
        controller
        :list-services (constantly (list (fake-lb-service "10.96.0.10")))
        :endpoints-of (constantly '(("10.88.1.5" 8080)))
@@ -1522,32 +1522,32 @@
                      (error 'whistler/loader:bpf-error :context "map-update" :errno 28)
                      (push (whistler/loader:map-info-name map) other-writes)))))
     (is (null other-writes))
-    (is-false (gr8s::service-lb-controller-applied-signature controller))))
+    (is-false (gr8s.controllers::service-lb-controller-applied-signature controller))))
 
 (test service-lb-restart-inventories-both-families-and-sparse-backends
   (multiple-value-bind (old entries update delete) (service-lb-cleanup-fixture)
-    (let* ((dataplane (gr8s::service-lb-controller-dataplane old))
+    (let* ((dataplane (gr8s.controllers::service-lb-controller-dataplane old))
            (service (fake-lb-service "10.96.0.10" :ports '(80)))
            (next-key (service-lb-fixture-next-key entries)))
       (setf (gethash "clusterIPs" (gethash "spec" service)) #("10.96.0.10" "fd96::a"))
-      (gr8s::converge-service-lb-controller
+      (gr8s.controllers::converge-service-lb-controller
        old :list-services (constantly (list service))
        :endpoints-of (constantly '(("10.88.1.5" 8080) ("fd88::5" 8080)))
        :update update :delete delete)
       ;; Retained keys need not occupy a dense slot range, and the same slot
       ;; may exist in both families after an interrupted prior update.
       (dolist (family '(:ipv4 :ipv6))
-        (funcall update (gr8s::service-lb-family-map dataplane family :backend)
-                 (gr8s::service-lb-backend-key #xffffffff) #(0)))
+        (funcall update (gr8s.controllers::service-lb-family-map dataplane family :backend)
+                 (gr8s.network::service-lb-backend-key #xffffffff) #(0)))
       (is (= 8 (hash-table-count entries)))
-      (setf (gr8s::service-lb-dataplane-reopened-p dataplane) t)
-      (let ((controller (gr8s::make-service-lb-controller nil dataplane))
+      (setf (gr8s.network::service-lb-dataplane-reopened-p dataplane) t)
+      (let ((controller (gr8s.controllers::make-service-lb-controller nil dataplane))
             (touched nil))
-        (is-false (gr8s::service-lb-controller-map-state-adopted-p controller))
+        (is-false (gr8s.controllers::service-lb-controller-map-state-adopted-p controller))
         ;; A failure after the first map was read must publish no inventory,
         ;; perform no writes, and leave the next tick able to retry all maps.
         (signals whistler/loader:bpf-error
-          (gr8s::converge-service-lb-controller
+          (gr8s.controllers::converge-service-lb-controller
            controller :list-services (constantly nil) :endpoints-of (constantly nil)
            :next-key (lambda (map previous)
                        (when (equal "gr8s_backend_v4" (whistler/loader:map-info-name map))
@@ -1556,28 +1556,28 @@
            :update (lambda (&rest ignored) (declare (ignore ignored)) (setf touched t))
            :delete (lambda (&rest ignored) (declare (ignore ignored)) (setf touched t))))
         (is-false touched)
-        (is-false (gr8s::service-lb-controller-map-state-adopted-p controller))
-        (is-false (gr8s::service-lb-controller-applied-service-keys controller))
-        (is-false (gr8s::service-lb-controller-applied-backend-keys controller))
-        (is-false (gr8s::service-lb-controller-applied-index-keys controller))
+        (is-false (gr8s.controllers::service-lb-controller-map-state-adopted-p controller))
+        (is-false (gr8s.controllers::service-lb-controller-applied-service-keys controller))
+        (is-false (gr8s.controllers::service-lb-controller-applied-backend-keys controller))
+        (is-false (gr8s.controllers::service-lb-controller-applied-index-keys controller))
         ;; Inventory succeeds; fail cleanup after deleting the VIPs/backends.
         (signals whistler/loader:bpf-error
-          (gr8s::converge-service-lb-controller
+          (gr8s.controllers::converge-service-lb-controller
            controller :list-services (constantly nil) :endpoints-of (constantly nil)
            :next-key next-key :update update
            :delete (lambda (map key)
                      (when (search "backend_index" (whistler/loader:map-info-name map))
                        (error 'whistler/loader:bpf-error :context "map-delete" :errno 5))
                      (funcall delete map key))))
-        (is (gr8s::service-lb-controller-map-state-adopted-p controller))
+        (is (gr8s.controllers::service-lb-controller-map-state-adopted-p controller))
         (is (= 2 (hash-table-count entries)))
-        (is-false (gr8s::service-lb-controller-applied-signature controller))
-        (gr8s::converge-service-lb-controller
+        (is-false (gr8s.controllers::service-lb-controller-applied-signature controller))
+        (gr8s.controllers::converge-service-lb-controller
          controller :list-services (constantly nil) :endpoints-of (constantly nil)
          :next-key next-key :update update :delete delete)
         (is (zerop (hash-table-count entries)))
-        (is (eq dataplane (gr8s::service-lb-controller-dataplane controller)))
-        (gr8s::converge-service-lb-controller
+        (is (eq dataplane (gr8s.controllers::service-lb-controller-dataplane controller)))
+        (gr8s.controllers::converge-service-lb-controller
          controller :list-services (constantly nil) :endpoints-of (constantly nil)
          :next-key (lambda (&rest ignored) (declare (ignore ignored)) (setf touched t))
          :update (lambda (&rest ignored) (declare (ignore ignored)) (setf touched t))
@@ -1587,7 +1587,7 @@
 (test service-lb-repacking-removes-backends-from-the-old-family
   (multiple-value-bind (controller entries update delete) (service-lb-cleanup-fixture)
     (flet ((converge (address endpoint)
-             (gr8s::converge-service-lb-controller
+             (gr8s.controllers::converge-service-lb-controller
               controller :list-services (constantly (list (fake-lb-service address :ports '(80))))
               :endpoints-of (constantly (list (list endpoint 8080)))
               :update update :delete delete)))
@@ -1596,7 +1596,7 @@
       (is (= 3 (hash-table-count entries)))
       (is-false (loop for entry being the hash-keys of entries
                       thereis (search "_v4" (first entry))))
-      (is (= 1 (gr8s::service-lb-controller-applied-slot-count controller))))))
+      (is (= 1 (gr8s.controllers::service-lb-controller-applied-slot-count controller))))))
 
 ;;; Traffic policies and topology, as kube-proxy's CategorizeEndpoints decides them.
 
@@ -1605,7 +1605,7 @@
         :node node :zone zone :zone-hints zone-hints :node-hints node-hints))
 
 (defun traffic-spec (&rest pairs)
-  (let ((spec (gr8s::core-object "type" "ClusterIP" "internalTrafficPolicy" "Cluster")))
+  (let ((spec (gr8s.resources::core-object "type" "ClusterIP" "internalTrafficPolicy" "Cluster")))
     (loop for (key value) on pairs by #'cddr do (setf (gethash key spec) value))
     spec))
 
@@ -1614,17 +1614,17 @@
                        (endpoint-record "10.0.1.1" :node "there")
                        (endpoint-record "10.0.0.2" :node "here" :ready nil :serving nil))))
     (multiple-value-bind (cluster local ready-local)
-        (gr8s::categorize-service-endpoints records (traffic-spec) :node-name "here")
+        (gr8s.controllers::categorize-service-endpoints records (traffic-spec) :node-name "here")
       (is (equal '(("10.0.0.1" 80) ("10.0.1.1" 80)) cluster))
       (is (null local))
       (is (= 1 ready-local)))
     (multiple-value-bind (cluster local)
-        (gr8s::categorize-service-endpoints records (traffic-spec "internalTrafficPolicy" "Local") :node-name "here")
+        (gr8s.controllers::categorize-service-endpoints records (traffic-spec "internalTrafficPolicy" "Local") :node-name "here")
       (is (null cluster))
       (is (equal '(("10.0.0.1" 80)) local)))
     ;; A Local node port Service still keeps cluster endpoints for its ClusterIP.
     (multiple-value-bind (cluster local)
-        (gr8s::categorize-service-endpoints records (traffic-spec "type" "NodePort" "externalTrafficPolicy" "Local")
+        (gr8s.controllers::categorize-service-endpoints records (traffic-spec "type" "NodePort" "externalTrafficPolicy" "Local")
                                             :node-name "elsewhere")
       (is (= 2 (length cluster)))
       (is (null local)))))
@@ -1634,65 +1634,65 @@
                        (endpoint-record "10.0.1.1" :node "there" :ready nil :serving t :terminating t)
                        (endpoint-record "10.0.1.2" :node "there" :ready nil :serving nil :terminating t))))
     (multiple-value-bind (cluster local ready-local)
-        (gr8s::categorize-service-endpoints records (traffic-spec "internalTrafficPolicy" "Local") :node-name "here")
+        (gr8s.controllers::categorize-service-endpoints records (traffic-spec "internalTrafficPolicy" "Local") :node-name "here")
       (is (null cluster))
       (is (equal '(("10.0.0.1" 80)) local))
       ;; Terminating endpoints still serve, but a health check reports none ready.
       (is (= 0 ready-local)))
     (is (equal '(("10.0.0.1" 80) ("10.0.1.1" 80))
-               (gr8s::categorize-service-endpoints records (traffic-spec) :node-name "here")))))
+               (gr8s.controllers::categorize-service-endpoints records (traffic-spec) :node-name "here")))))
 
 (test endpoints-follow-topology-hints-only-when-every-ready-one-has-them
   (let ((hinted (list (endpoint-record "10.0.0.1" :node "a" :zone "z1" :zone-hints '("z1") :node-hints '("a"))
                       (endpoint-record "10.0.1.1" :node "b" :zone "z2" :zone-hints '("z2") :node-hints '("b")))))
-    (is (equal '(("10.0.0.1" 80)) (gr8s::categorize-service-endpoints hinted (traffic-spec) :node-name "a" :zone "z1")))
+    (is (equal '(("10.0.0.1" 80)) (gr8s.controllers::categorize-service-endpoints hinted (traffic-spec) :node-name "a" :zone "z1")))
     ;; Zone hints apply when no node hint names this node.
-    (is (equal '(("10.0.1.1" 80)) (gr8s::categorize-service-endpoints hinted (traffic-spec) :node-name "c" :zone "z2")))
+    (is (equal '(("10.0.1.1" 80)) (gr8s.controllers::categorize-service-endpoints hinted (traffic-spec) :node-name "c" :zone "z2")))
     ;; Hints that name neither this node nor its zone are ignored.
-    (is (= 2 (length (gr8s::categorize-service-endpoints hinted (traffic-spec) :node-name "c" :zone "z3")))))
+    (is (= 2 (length (gr8s.controllers::categorize-service-endpoints hinted (traffic-spec) :node-name "c" :zone "z3")))))
   (let ((partly (list (endpoint-record "10.0.0.1" :node "a" :zone-hints '("z1"))
                       (endpoint-record "10.0.1.1" :node "b"))))
-    (is (= 2 (length (gr8s::categorize-service-endpoints partly (traffic-spec) :node-name "a" :zone "z1"))))))
+    (is (= 2 (length (gr8s.controllers::categorize-service-endpoints partly (traffic-spec) :node-name "a" :zone "z1"))))))
 
 (test service-lb-plan-serves-external-addresses-from-shared-slots
   (let ((service (fake-lb-service "10.96.0.10" :ports '(80))))
     (setf (gethash "externalIPs" (gethash "spec" service)) #("203.0.113.250")
           (gethash "status" service)
-          (gr8s::core-object "loadBalancer"
-                             (gr8s::core-object "ingress" (vector (gr8s::core-object "ip" "198.51.100.9")
-                                                                  (gr8s::core-object "ip" "198.51.100.10" "ipMode" "Proxy")))))
+          (gr8s.resources::core-object "loadBalancer"
+                             (gr8s.resources::core-object "ingress" (vector (gr8s.resources::core-object "ip" "198.51.100.9")
+                                                                  (gr8s.resources::core-object "ip" "198.51.100.10" "ipMode" "Proxy")))))
     ;; The same backends: every address points at slot 0.
     (multiple-value-bind (service-entries backend-entries slots)
-        (gr8s::service-lb-plan (list service) (lambda (s p) (declare (ignore s p))
+        (gr8s.controllers::service-lb-plan (list service) (lambda (s p) (declare (ignore s p))
                                                 (values '(("10.88.1.5" 8080)) '(("10.88.1.5" 8080)))))
       (is (= 3 (length service-entries)))
       (is (= 1 (length backend-entries)))
       (is (= 1 slots))
-      (is (equalp (gr8s::service-lb-vip-key "203.0.113.250" 80) (car (second service-entries))))
-      (is (equalp (gr8s::service-lb-vip-key "198.51.100.9" 80) (car (third service-entries))))
-      (is (equalp (gr8s::service-lb-service-value 1 0) (cdr (third service-entries)))))
+      (is (equalp (gr8s.network::service-lb-vip-key "203.0.113.250" 80) (car (second service-entries))))
+      (is (equalp (gr8s.network::service-lb-vip-key "198.51.100.9" 80) (car (third service-entries))))
+      (is (equalp (gr8s.network::service-lb-service-value 1 0) (cdr (third service-entries)))))
     ;; internalTrafficPolicy Local on a node without endpoints: the ClusterIP has none, the
     ;; external addresses still reach every endpoint.
     (multiple-value-bind (service-entries backend-entries)
-        (gr8s::service-lb-plan (list service) (lambda (s p) (declare (ignore s p))
+        (gr8s.controllers::service-lb-plan (list service) (lambda (s p) (declare (ignore s p))
                                                 (values nil '(("10.88.1.5" 8080)))))
-      (is (equalp (gr8s::service-lb-service-value 0 0) (cdr (first service-entries))))
-      (is (equalp (gr8s::service-lb-service-value 1 0) (cdr (second service-entries))))
+      (is (equalp (gr8s.network::service-lb-service-value 0 0) (cdr (first service-entries))))
+      (is (equalp (gr8s.network::service-lb-service-value 1 0) (cdr (second service-entries))))
       (is (= 1 (length backend-entries))))))
 
 (test services-labelled-for-another-proxy-are-left-alone
   (let ((other (fake-lb-service "10.96.0.11")) (headless (fake-lb-service "10.96.0.12")))
     (setf (gethash "labels" (gethash "metadata" other))
-          (gr8s::core-object "service.kubernetes.io/service-proxy-name" "foo-bar")
+          (gr8s.resources::core-object "service.kubernetes.io/service-proxy-name" "foo-bar")
           (gethash "labels" (gethash "metadata" headless))
-          (gr8s::core-object "service.kubernetes.io/headless" ""))
-    (is (null (gr8s::service-lb-plan (list other headless) (lambda (s p) (declare (ignore s p)) '(("10.88.1.5" 8080))))))))
+          (gr8s.resources::core-object "service.kubernetes.io/headless" ""))
+    (is (null (gr8s.controllers::service-lb-plan (list other headless) (lambda (s p) (declare (ignore s p)) '(("10.88.1.5" 8080))))))))
 
 ;;; Unconnected UDP and affinity that follows its backend
 
 (test service-lb-program-compiles-every-socket-hook
   ;; Both families steer connect/sendmsg and restore the Service address on UDP replies.
-  (multiple-value-bind (maps programs) (gr8s::compile-service-lb)
+  (multiple-value-bind (maps programs) (gr8s.network::compile-service-lb)
     (is (equal '("gr8s_service_v4" "gr8s_backend_v4" "gr8s_backend_index_v4" "gr8s_affinity_v4" "gr8s_reverse_v4"
                  "gr8s_service_v6" "gr8s_backend_v6" "gr8s_backend_index_v6" "gr8s_affinity_v6" "gr8s_reverse_v6")
                (mapcar (lambda (spec) (getf spec :name)) maps)))
@@ -1703,32 +1703,32 @@
                      whistler/loader:+bpf-cgroup-udp4-sendmsg+ 19
                      whistler/loader:+bpf-cgroup-inet6-connect+
                      whistler/loader:+bpf-cgroup-udp6-sendmsg+ 20)
-               (mapcar (lambda (spec) (gr8s::service-lb-attach-type (getf spec :section))) programs)))))
+               (mapcar (lambda (spec) (gr8s.network::service-lb-attach-type (getf spec :section))) programs)))))
 
 (test service-lb-affinity-index-finds-each-backend-by-identity
   ;; An affinity Service indexes each backend's offset by (service key, backend value), so
   ;; a client's held backend is found again wherever a change to the set moved it.
   (multiple-value-bind (vip-key value backends indexed)
-      (gr8s::service-lb-entries "10.96.0.10" 80 5 '(("10.88.1.5" . 8080) ("10.88.1.6" . 8080)) :affinity-timeout 60)
+      (gr8s.network::service-lb-entries "10.96.0.10" 80 5 '(("10.88.1.5" . 8080) ("10.88.1.6" . 8080)) :affinity-timeout 60)
     (declare (ignore value))
     (is (= 2 (length backends)))
-    (is (equalp (gr8s::service-lb-index-key vip-key (gr8s::service-lb-backend-value "10.88.1.6" 8080))
+    (is (equalp (gr8s.network::service-lb-index-key vip-key (gr8s.network::service-lb-backend-value "10.88.1.6" 8080))
                 (car (second indexed))))
     (is (equalp #(1 0 0 0) (cdr (second indexed))))
     (is (= 16 (length (car (first indexed))))))
   ;; Membership is checked even without affinity, to reject another Service's
   ;; backend while shared slots are being repacked.
-  (is (= 1 (length (nth-value 3 (gr8s::service-lb-entries "10.96.0.10" 80 0 '(("10.88.1.5" . 8080))))))))
+  (is (= 1 (length (nth-value 3 (gr8s.network::service-lb-entries "10.96.0.10" 80 0 '(("10.88.1.5" . 8080))))))))
 
 (test service-lb-converge-retires-index-entries-of-departed-backends
   (let* ((index-map (fake-lb-map "gr8s_backend_index_v4" 3))
-         (controller (gr8s::make-service-lb-controller
-                      nil (gr8s::%make-service-lb-dataplane
+         (controller (gr8s.controllers::make-service-lb-controller
+                      nil (gr8s.network::%make-service-lb-dataplane
                            :maps (list (fake-lb-map "gr8s_service_v4" 1) (fake-lb-map "gr8s_backend_v4" 2) index-map))))
          (service (fake-lb-service "10.96.0.10" :ports '(80))))
     (setf (gethash "sessionAffinity" (gethash "spec" service)) "ClientIP")
     (let ((writes nil))
-      (gr8s::converge-service-lb-controller
+      (gr8s.controllers::converge-service-lb-controller
        controller :list-services (lambda () (list service))
        :endpoints-of (lambda (s p) (declare (ignore s p)) '(("10.88.1.5" 8080) ("10.88.1.6" 8080)))
        :update (lambda (m k v) (declare (ignore k v)) (push (whistler/loader:map-info-fd m) writes))
@@ -1736,41 +1736,41 @@
       ;; Backends, then their index entries, then the Service.
       (is (equal '(2 2 3 3 1) (nreverse writes))))
     (let ((deletes nil))
-      (gr8s::converge-service-lb-controller
+      (gr8s.controllers::converge-service-lb-controller
        controller :list-services (lambda () (list service))
        :endpoints-of (lambda (s p) (declare (ignore s p)) '(("10.88.1.6" 8080)))
        :update (constantly nil)
        :delete (lambda (m k) (push (list (whistler/loader:map-info-fd m) k) deletes)))
-      (is (member (list 3 (gr8s::service-lb-index-key (gr8s::service-lb-vip-key "10.96.0.10" 80)
-                                                      (gr8s::service-lb-backend-value "10.88.1.5" 8080)))
+      (is (member (list 3 (gr8s.network::service-lb-index-key (gr8s.network::service-lb-vip-key "10.96.0.10" 80)
+                                                      (gr8s.network::service-lb-backend-value "10.88.1.5" 8080)))
                   deletes :test #'equalp)))))
 
 ;;; A Service with no endpoints anywhere is refused, as kube-proxy rejects it.
 
 (test service-lb-refuses-a-service-with-no-endpoints-anywhere
-  (is (= 1 (aref (gr8s::service-lb-service-value 0 0 :refuse t) 12)))
+  (is (= 1 (aref (gr8s.network::service-lb-service-value 0 0 :refuse t) 12)))
   ;; Refusal never applies while there are backends.
-  (is (= 0 (aref (nth-value 1 (gr8s::service-lb-entries "10.96.0.10" 80 0 '(("10.88.1.5" . 8080)) :refuse t)) 12)))
+  (is (= 0 (aref (nth-value 1 (gr8s.network::service-lb-entries "10.96.0.10" 80 0 '(("10.88.1.5" . 8080)) :refuse t)) 12)))
   (let ((service (fake-lb-service "10.96.0.10" :ports '(80))))
     ;; No endpoints at all: refused.
-    (is (= 1 (aref (cdr (first (gr8s::service-lb-plan (list service) (lambda (s p) (declare (ignore s p))
+    (is (= 1 (aref (cdr (first (gr8s.controllers::service-lb-plan (list service) (lambda (s p) (declare (ignore s p))
                                                                          (values nil nil t)))))
                    12)))
     ;; Endpoints only on other nodes (internalTrafficPolicy Local): left to time out, as kube-proxy drops it.
-    (is (= 0 (aref (cdr (first (gr8s::service-lb-plan (list service) (lambda (s p) (declare (ignore s p))
+    (is (= 0 (aref (cdr (first (gr8s.controllers::service-lb-plan (list service) (lambda (s p) (declare (ignore s p))
                                                                          (values nil '(("10.88.1.5" 8080)) nil)))))
                    12)))))
 
 (test endpoints-report-whether-any-exist
-  (is (null (nth-value 3 (gr8s::categorize-service-endpoints
+  (is (null (nth-value 3 (gr8s.controllers::categorize-service-endpoints
                           (list (endpoint-record "10.0.0.1" :ready nil :serving nil)) (traffic-spec)))))
-  (is (eq t (nth-value 3 (gr8s::categorize-service-endpoints
+  (is (eq t (nth-value 3 (gr8s.controllers::categorize-service-endpoints
                           (list (endpoint-record "10.0.1.1" :node "there"))
                           (traffic-spec "internalTrafficPolicy" "Local") :node-name "here")))))
 
 (test service-lb-program-compiles-the-refusal
   ;; The refusal calls bpf_set_retval (helper 187) in the connect4 and sendmsg4 hooks.
-  (multiple-value-bind (maps programs) (gr8s::compile-service-lb)
+  (multiple-value-bind (maps programs) (gr8s.network::compile-service-lb)
     (declare (ignore maps))
     (flet ((calls-helper-p (spec id)
              (let ((insns (getf spec :insns)))
@@ -1785,7 +1785,7 @@
 (test service-packet-maintenance-is-loaded-but-never-attached
   (let ((attached nil))
     (let ((dataplane
-            (gr8s::start-service-lb-dataplane
+            (gr8s.network::start-service-lb-dataplane
              "/fake/cgroup" "/fake/pins"
              :compile (lambda () (values nil nil)) :ensure-directory (constantly nil)
              :load-programs (lambda (&rest ignored)
@@ -1797,11 +1797,11 @@
              :attach (lambda (fd &rest ignored)
                        (declare (ignore ignored)) (push fd attached) :attachment))))
       (is (equal '(900021) attached))
-      (is (= 2 (length (gr8s::service-lb-dataplane-programs dataplane)))))))
+      (is (= 2 (length (gr8s.network::service-lb-dataplane-programs dataplane)))))))
 
 (test service-packet-maintenance-loader-uses-tc-without-cgroup-attach-type
   (let ((calls nil))
-    (gr8s::load-service-lb-programs
+    (gr8s.network::load-service-lb-programs
      (list (list :name "gr8s_packet_gc" :section "classifier" :license "GPL" :insns #())
            (list :name "gr8s_service_lb" :section "cgroup/connect4" :license "GPL" :insns #()))
      nil :load-program (lambda (insns type license &key expected-attach-type)
@@ -1818,7 +1818,7 @@
                                                        :initial-element 0)))
                                    (setf (aref key 0) i (aref key 12) 17) key))))
     (values
-     (gr8s::%make-service-lb-dataplane
+     (gr8s.network::%make-service-lb-dataplane
       :programs (list (cons "gr8s_packet_gc" (fake-lb-program 900031)))
       :maps (list (fake-lb-map "gr8s_pkt_forward" 900032)
                   (fake-lb-map "gr8s_pkt_reverse" 900033)))
@@ -1844,8 +1844,8 @@
             (is (= scanned reclaimed))
             (is (zerop deferred))))
         (is (equal '((0 1) (1 1) (0 2) (1 2) (0 3) (1 3) (0 4)) (nreverse seen)))
-        (is (= 7 (gr8s::service-lb-dataplane-gc-scanned dataplane)))
-        (is (= 7 (gr8s::service-lb-dataplane-gc-reclaimed dataplane)))
+        (is (= 7 (gr8s.network::service-lb-dataplane-gc-scanned dataplane)))
+        (is (= 7 (gr8s.network::service-lb-dataplane-gc-reclaimed dataplane)))
         (is (every #'null (loop for value being the hash-values of keys collect value)))))))
 
 (test service-packet-gc-defers-contention-and-recovers-after-run-failure
@@ -1856,7 +1856,7 @@
         (gr8s.network:sweep-service-packet-state
          dataplane :budget 1 :next-key next-key
          :run (lambda (&rest ignored) (declare (ignore ignored)) (error "syscall interrupted"))))
-      (is (= 1 (gr8s::service-lb-dataplane-gc-failures dataplane)))
+      (is (= 1 (gr8s.network::service-lb-dataplane-gc-failures dataplane)))
       (multiple-value-bind (scanned reclaimed deferred)
           (gr8s.network:sweep-service-packet-state
            dataplane :budget 1 :next-key next-key
@@ -1866,14 +1866,14 @@
         (is (zerop reclaimed))
         (is (= 2 deferred)))
       (is (equal '((1 1) (0 2)) seen))
-      (is (= 2 (gr8s::service-lb-dataplane-gc-deferred dataplane)))
+      (is (= 2 (gr8s.network::service-lb-dataplane-gc-deferred dataplane)))
       (signals type-error
         (gr8s.network:sweep-service-packet-state dataplane :budget 0)))))
 
 (test service-packet-gc-is-idle-without-a-maintenance-program
   (let ((called nil))
     (is (zerop (gr8s.network:sweep-service-packet-state
-                (gr8s::%make-service-lb-dataplane)
+                (gr8s.network::%make-service-lb-dataplane)
                 :next-key (lambda (&rest ignored) (declare (ignore ignored)) (setf called t))
                 :run (lambda (&rest ignored) (declare (ignore ignored)) (setf called t)))))
     (is-false called)))
@@ -1889,7 +1889,7 @@
                                    (setf (aref key 12) 6 (aref key 13) 0
                                          (aref key 14) 0 (aref key 15) 0) key))))
     (values
-     (gr8s::%make-service-lb-dataplane
+     (gr8s.network::%make-service-lb-dataplane
       :programs (list (cons "gr8s_nat_gc" (fake-lb-program 900101)))
       :maps (loop for name in names for fd from 900102 collect (fake-lb-map name fd)))
      keys
@@ -1919,8 +1919,8 @@
           (is (zerop deferred))))
       (is (equal '((0 1) (1 1) (2 1) (0 2) (1 2) (2 2)
                    (0 3) (1 3) (2 3) (0 4) (2 4) (2 5)) (nreverse seen)))
-      (is (= 12 (gr8s::service-lb-dataplane-gc-scanned dataplane)))
-      (is (= 12 (gr8s::service-lb-dataplane-gc-reclaimed dataplane)))
+      (is (= 12 (gr8s.network::service-lb-dataplane-gc-scanned dataplane)))
+      (is (= 12 (gr8s.network::service-lb-dataplane-gc-reclaimed dataplane)))
       (is (every #'null (loop for value being the hash-values of keys collect value))))))
 
 (test service-nat-gc-defers-contention-and-advances-failing-cursors
@@ -1931,7 +1931,7 @@
         (gr8s.network::sweep-service-nat-state
          dataplane :budget 1 :next-key next-key
          :run (lambda (&rest ignored) (declare (ignore ignored)) (error "collector syscall failed"))))
-      (is (= 1 (gr8s::service-lb-dataplane-gc-failures dataplane)))
+      (is (= 1 (gr8s.network::service-lb-dataplane-gc-failures dataplane)))
       (multiple-value-bind (scanned reclaimed deferred)
           (gr8s.network::sweep-service-nat-state
            dataplane :budget 1 :next-key next-key
@@ -1941,7 +1941,7 @@
         (is (= reclaimed 0))
         (is (= deferred 3)))
       (is (equal '((2 1) (1 1) (0 2)) seen))
-      (is (= 3 (gr8s::service-lb-dataplane-gc-deferred dataplane)))
+      (is (= 3 (gr8s.network::service-lb-dataplane-gc-deferred dataplane)))
       (signals type-error (gr8s.network::sweep-service-nat-state dataplane :budget 0)))))
 
 (test service-nat-gc-does-not-use-the-v1-maintenance-program
@@ -1975,7 +1975,7 @@
     (dolist (entry '(("gr8s_pkt_fwd_lock" . 900034) ("gr8s_pkt_rev_lock" . 900035)
                      ("gr8s_pkt_tcp" . 900036)))
       (push (fake-lb-map (car entry) (cdr entry))
-            (gr8s::service-lb-dataplane-maps dataplane)))
+            (gr8s.network::service-lb-dataplane-maps dataplane)))
     (let ((legacy t) (queries 0) (*error-output* (make-string-output-stream)))
       (flet ((verify ()
                (gr8s.network:service-packet-gc-compatible-p
@@ -1988,14 +1988,14 @@
                                            '(900032 900033 900034 900035 900036))
                                        '(900032 900033 900034 900035 900036))))))
         (is-false (verify))
-        (is-false (gr8s::service-lb-dataplane-gc-compatible-p dataplane))
+        (is-false (gr8s.network::service-lb-dataplane-gc-compatible-p dataplane))
         (is (search "Service flow GC deferred:" (get-output-stream-string *error-output*)))
         (is-false (verify))
         (is (equal "" (get-output-stream-string *error-output*)))
         (setf legacy nil)
         (is-true (verify))
-        (is (= 1 (gr8s::service-lb-dataplane-gc-compatible-stage-count dataplane)))
-        (is (null (gr8s::service-lb-dataplane-gc-warning dataplane)))
+        (is (= 1 (gr8s.network::service-lb-dataplane-gc-compatible-stage-count dataplane)))
+        (is (null (gr8s.network::service-lb-dataplane-gc-warning dataplane)))
         (is-true (verify))
         (is (= 3 queries))))))
 
@@ -2003,7 +2003,7 @@
 (test service-packet-maintenance-load-failure-closes-earlier-hooks
   (let ((closed nil))
     (signals simple-error
-      (gr8s::load-service-lb-programs
+      (gr8s.network::load-service-lb-programs
        (list (list :name "gr8s_service_lb" :section "cgroup/connect4" :license "GPL" :insns #())
              (list :name "gr8s_packet_gc" :section "classifier" :license "GPL" :insns #()))
        nil :load-program (lambda (insns type license &key expected-attach-type)
@@ -2015,12 +2015,12 @@
 (test service-packet-gc-does-not-reuse-a-successful-check-while-an-upgrade-is-pending
   (multiple-value-bind (dataplane keys next-key) (service-packet-gc-fixture)
     (declare (ignore keys next-key))
-    (setf (gr8s::service-lb-dataplane-gc-compatible-p dataplane) t)
+    (setf (gr8s.network::service-lb-dataplane-gc-compatible-p dataplane) t)
     (let ((*error-output* (make-string-output-stream)))
       (is-false (gr8s.network:service-packet-gc-compatible-p
                  dataplane :paths (constantly nil) :refresh (constantly nil)
                  :map-id (lambda (map) (declare (ignore map)) (error "must defer before map checks"))))
-      (is-false (gr8s::service-lb-dataplane-gc-compatible-p dataplane))
+      (is-false (gr8s.network::service-lb-dataplane-gc-compatible-p dataplane))
       (is (search "packet pipeline upgrades are pending" (get-output-stream-string *error-output*))))))
 
 (test service-packet-load-diagnostics-retain-gc-gating-until-verified-recovery
@@ -2028,8 +2028,8 @@
     (declare (ignore keys next-key))
     (dolist (entry '(("gr8s_pkt_fwd_lock" . 900034) ("gr8s_pkt_rev_lock" . 900035)
                      ("gr8s_pkt_tcp" . 900036)))
-      (push (fake-lb-map (car entry) (cdr entry)) (gr8s::service-lb-dataplane-maps dataplane)))
-    (setf (gr8s::service-lb-dataplane-gc-compatible-p dataplane) t)
+      (push (fake-lb-map (car entry) (cdr entry)) (gr8s.network::service-lb-dataplane-maps dataplane)))
+    (setf (gr8s.network::service-lb-dataplane-gc-compatible-p dataplane) t)
     (let ((failed t) (verified 0) (*error-output* (make-string-output-stream)))
       (labels ((refresh-endpoint (directory shared cache allow-load)
                  (declare (ignore directory shared cache allow-load))
@@ -2052,7 +2052,7 @@
                                    (list '(900032 900033 900034 900035 900036)
                                          '(900032 900033 900034 900035 900036))))))
         (is-false (verify))
-        (is-false (gr8s::service-lb-dataplane-gc-compatible-p dataplane))
+        (is-false (gr8s.network::service-lb-dataplane-gc-compatible-p dataplane))
         (is (= 0 verified))
         (let ((diagnostic (get-output-stream-string *error-output*)))
           (is (search "errno 13" diagnostic))
@@ -2064,8 +2064,8 @@
         (setf failed nil)
         (is-true (verify))
         (is (= 1 verified))
-        (is (= 0 (hash-table-count (gr8s::service-lb-dataplane-upgrade-warnings dataplane))))
-        (is (null (gr8s::service-lb-dataplane-gc-warning dataplane)))))))
+        (is (= 0 (hash-table-count (gr8s.network::service-lb-dataplane-upgrade-warnings dataplane))))
+        (is (null (gr8s.network::service-lb-dataplane-gc-warning dataplane)))))))
 
 (test service-nat-policy-schema-is-separate-from-legacy-policy-state
   (let* ((legacy (copy-tree gr8s.network::*egress-guard-map-forms*))
@@ -2084,7 +2084,7 @@
 (test legacy-policy-adoption-rejects-the-v2-local-identity-width
   (let ((info (make-array 256 :element-type '(unsigned-byte 8) :initial-element 0)))
     (loop for (offset value) in '((0 2) (8 4) (12 48) (16 1) (20 128))
-          do (replace info (gr8s::netlink-integer value 4) :start1 offset))
-    (signals gr8s::cni-error
-      (gr8s::cni-policy-map-info 42 "endpoint_identity"
+          do (replace info (cl-rtnetlink::netlink-integer value 4) :start1 offset))
+    (signals gr8s.network::cni-error
+      (gr8s.network::cni-policy-map-info 42 "endpoint_identity"
                                :object-info (lambda (fd) (declare (ignore fd)) info)))))

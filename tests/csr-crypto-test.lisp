@@ -31,14 +31,14 @@
     (declare (ignore store))
     (dolist (algorithm '("rsa" "ec" "ed25519"))
       (let* ((bytes (csr-crypto-fixture directory algorithm))
-             (parsed (gr8s::parse-and-verify-certificate-request bytes))
-             (der (copy-seq (cdar (gr8s::csr-pem-blocks bytes)))))
-        (is (equal "fixture.example" (cdr (assoc :common-name (pure-tls::x509-name-rdns (gr8s::parsed-certificate-request-subject parsed))))))
-        (is (= 2 (length (gr8s::parsed-certificate-request-sans parsed))))
-        (is-true (gr8s::parsed-certificate-request-san-extension parsed))
+             (parsed (gr8s.security::parse-and-verify-certificate-request bytes))
+             (der (copy-seq (cdar (gr8s.security::csr-pem-blocks bytes)))))
+        (is (equal "fixture.example" (cdr (assoc :common-name (pure-tls::x509-name-rdns (gr8s.security::parsed-certificate-request-subject parsed))))))
+        (is (= 2 (length (gr8s.security::parsed-certificate-request-sans parsed))))
+        (is-true (gr8s.security::parsed-certificate-request-san-extension parsed))
         (setf (aref der (1- (length der))) (logxor 1 (aref der (1- (length der)))))
         (signals kubernetes-error
-          (gr8s::parse-and-verify-certificate-request
+          (gr8s.security::parse-and-verify-certificate-request
            (trivial-utf-8:string-to-utf-8-bytes (pure-tls/acme::wrap-pem "CERTIFICATE REQUEST" der))))))))
 
 (test csr-pem-label-structure-and-real-certificate-status-validation
@@ -47,18 +47,18 @@
     (let* ((certificate (csr-crypto-fixture directory "ec" :certificate t))
            (request (csr-crypto-fixture directory "rsa"))
            (text (trivial-utf-8:utf-8-bytes-to-string certificate)))
-      (is (equalp certificate (gr8s::validate-csr-certificate-chain certificate)))
-      (is (= 0 (length (gr8s::validate-csr-certificate-chain #()))))
-      (is-true (gr8s::validate-csr-certificate-chain (concatenate '(vector (unsigned-byte 8)) certificate certificate)))
-      (signals kubernetes-error (gr8s::parse-and-verify-certificate-request certificate))
-      (signals kubernetes-error (gr8s::validate-csr-certificate-chain request))
-      (signals kubernetes-error (gr8s::validate-csr-certificate-chain #(1 2 3)))
+      (is (equalp certificate (gr8s.security::validate-csr-certificate-chain certificate)))
+      (is (= 0 (length (gr8s.security::validate-csr-certificate-chain #()))))
+      (is-true (gr8s.security::validate-csr-certificate-chain (concatenate '(vector (unsigned-byte 8)) certificate certificate)))
+      (signals kubernetes-error (gr8s.security::parse-and-verify-certificate-request certificate))
+      (signals kubernetes-error (gr8s.security::validate-csr-certificate-chain request))
+      (signals kubernetes-error (gr8s.security::validate-csr-certificate-chain #(1 2 3)))
       (signals kubernetes-error
-        (gr8s::validate-csr-certificate-chain
+        (gr8s.security::validate-csr-certificate-chain
          (trivial-utf-8:string-to-utf-8-bytes
           (concatenate 'string text "-----BEGIN PRIVATE KEY-----" (string #\Newline) "AQ==" (string #\Newline) "-----END PRIVATE KEY-----"))))
       (signals kubernetes-error
-        (gr8s::parse-and-verify-certificate-request
+        (gr8s.security::parse-and-verify-certificate-request
          (trivial-utf-8:string-to-utf-8-bytes
           (format nil "-----BEGIN CERTIFICATE REQUEST-----~%Headers: forbidden~%AQ==~%-----END CERTIFICATE REQUEST-----~%")))))))
 
@@ -70,17 +70,17 @@
                              "-sigopt" "rsa_padding_mode:pss" "-sigopt" "rsa_pss_saltlen:digest"
                              "-keyout" (namestring key) "-out" (namestring path)) :output :string :error-output :string)
       (let* ((bytes (pure-tls::read-file-bytes path))
-             (root (pure-tls::parse-der (cdar (gr8s::csr-pem-blocks bytes))))
+             (root (pure-tls::parse-der (cdar (gr8s.security::csr-pem-blocks bytes))))
              (parts (pure-tls::asn1-children root))
              (algorithm (copy-seq (pure-tls::asn1-node-raw-bytes (second parts))))
              (salt-position (search #(#xa2 #x03 #x02 #x01 #x20) algorithm)))
-        (is-true (gr8s::parse-and-verify-certificate-request bytes))
+        (is-true (gr8s.security::parse-and-verify-certificate-request bytes))
         (is-true salt-position)
         ;; The CSR signature still correctly signs its unchanged requestInfo;
         ;; only the declared outer algorithm's salt length is now false.
         (setf (aref algorithm (+ salt-position 4)) 31)
         (signals kubernetes-error
-          (gr8s::parse-and-verify-certificate-request
+          (gr8s.security::parse-and-verify-certificate-request
            (trivial-utf-8:string-to-utf-8-bytes
             (pure-tls/acme::wrap-pem "CERTIFICATE REQUEST"
              (pure-tls/acme::encode-sequence (pure-tls::asn1-node-raw-bytes (first parts)) algorithm
@@ -88,7 +88,7 @@
 
 (defun rewrite-and-resign-rsa-csr (request directory transform)
   "Produce genuinely signed adversarial PKCS#10 structures using the original fixture key."
-  (let* ((root (pure-tls::parse-der (cdar (gr8s::csr-pem-blocks request))))
+  (let* ((root (pure-tls::parse-der (cdar (gr8s.security::csr-pem-blocks request))))
          (parts (pure-tls::asn1-children root))
          (info (pure-tls::asn1-children (first parts)))
          (key (pure-tls:load-private-key (merge-pathnames "rsa-key.pem" directory)))
@@ -119,7 +119,7 @@
                                    (pure-tls::asn1-node-raw-bytes (second (pure-tls::asn1-children (third info)))))
                                   (pure-tls::asn1-node-raw-bytes (third info)))
                               (pure-tls::asn1-node-raw-bytes (fourth info)))))))
-          (signals kubernetes-error (gr8s::parse-and-verify-certificate-request rewritten)))))))
+          (signals kubernetes-error (gr8s.security::parse-and-verify-certificate-request rewritten)))))))
 
 (test signed-csr-with-malformed-ip-or-nonascii-dns-san-is-rejected-before-storage
   (with-temporary-store (store directory)
@@ -138,14 +138,14 @@
                                    (pure-tls/acme::encode-sequence
                                      (pure-tls/acme::encode-extension '(2 5 29 17)
                                        (pure-tls/acme::encode-sequence (pure-tls/acme::encode-der (car name) (cdr name)))))))))))))
-          (signals kubernetes-error (gr8s::parse-and-verify-certificate-request rewritten)))))))
+          (signals kubernetes-error (gr8s.security::parse-and-verify-certificate-request rewritten)))))))
 
 (test certificate-status-validates-every-der-object-inside-a-pem-block
   (with-temporary-store (store directory)
     (declare (ignore store))
     (let* ((certificate (csr-crypto-fixture directory "ec" :certificate t))
-           (der (cdar (gr8s::csr-pem-blocks certificate)))
+           (der (cdar (gr8s.security::csr-pem-blocks certificate)))
            (pair (pure-tls/acme::wrap-pem "CERTIFICATE" (concatenate '(vector (unsigned-byte 8)) der der)))
            (garbage (pure-tls/acme::wrap-pem "CERTIFICATE" (concatenate '(vector (unsigned-byte 8)) der #(1)))))
-      (finishes (gr8s::validate-csr-certificate-chain (trivial-utf-8:string-to-utf-8-bytes pair)))
-      (signals kubernetes-error (gr8s::validate-csr-certificate-chain (trivial-utf-8:string-to-utf-8-bytes garbage))))))
+      (finishes (gr8s.security::validate-csr-certificate-chain (trivial-utf-8:string-to-utf-8-bytes pair)))
+      (signals kubernetes-error (gr8s.security::validate-csr-certificate-chain (trivial-utf-8:string-to-utf-8-bytes garbage))))))

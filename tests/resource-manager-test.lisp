@@ -5,21 +5,21 @@
 (in-suite resource-manager)
 
 (defun rm-test-topology ()
-  (gr8s::core-object "online" #(0 1 2 3) "cpus" (gr8s::core-object)
-    "nodes" (vector (gr8s::core-object "id" 0 "cpus" #(0 1) "memory" (* 1024 1024 1024)
-                                      "hugepages" (gr8s::core-object "hugepages-2Mi" "0"))
-                     (gr8s::core-object "id" 1 "cpus" #(2 3) "memory" (* 1024 1024 1024)
-                                      "hugepages" (gr8s::core-object "hugepages-2Mi" "67108864")))))
+  (gr8s.resources::core-object "online" #(0 1 2 3) "cpus" (gr8s.resources::core-object)
+    "nodes" (vector (gr8s.resources::core-object "id" 0 "cpus" #(0 1) "memory" (* 1024 1024 1024)
+                                      "hugepages" (gr8s.resources::core-object "hugepages-2Mi" "0"))
+                     (gr8s.resources::core-object "id" 1 "cpus" #(2 3) "memory" (* 1024 1024 1024)
+                                      "hugepages" (gr8s.resources::core-object "hugepages-2Mi" "67108864")))))
 
 (defun rm-test-container (name cpu &optional (memory "32Mi") device)
-  (let ((limits (gr8s::core-object "cpu" cpu "memory" memory)))
+  (let ((limits (gr8s.resources::core-object "cpu" cpu "memory" memory)))
     (when device (setf (gethash "devices.example.test/kvm" limits) "1"))
-    (gr8s::core-object "name" name "image" "busybox" "resources" (gr8s::core-object "limits" limits))))
+    (gr8s.resources::core-object "name" name "image" "busybox" "resources" (gr8s.resources::core-object "limits" limits))))
 
 (defun rm-test-pod (name containers &optional init)
-  (parse-pod (gr8s::core-object "apiVersion" "v1" "kind" "Pod"
-               "metadata" (gr8s::core-object "name" name "uid" name)
-               "spec" (gr8s::core-object "containers" (coerce containers 'vector) "initContainers" (coerce init 'vector)))))
+  (parse-pod (gr8s.resources::core-object "apiVersion" "v1" "kind" "Pod"
+               "metadata" (gr8s.resources::core-object "name" name "uid" name)
+               "spec" (gr8s.resources::core-object "containers" (coerce containers 'vector) "initContainers" (coerce init 'vector)))))
 
 (defun test-resource-manager (path &rest options)
   (apply #'gr8s.kubelet::make-node-resource-manager path :policy "static"
@@ -129,7 +129,7 @@
     (let* ((manager (test-resource-manager path :store store))
            (socket (merge-pathnames "pod-resources/kubelet.sock" path))
            (server (gr8s.kubelet::start-podresources-server manager nil :path socket))
-           (channel (gr8s::make-unix-grpc-channel (namestring socket) :timeout 5)))
+           (channel (gr8s.protocol::make-unix-grpc-channel (namestring socket) :timeout 5)))
       (unwind-protect
            (progn
              (is (= #o600 (logand #o777 (sb-posix:stat-mode (sb-posix:stat socket)))))
@@ -156,7 +156,7 @@
            (pod (rm-test-pod "original" (list (rm-test-container "main" "1")))))
       (gr8s.kubelet::prepare-node-pod-resources manager pod)
       (setf (gethash "overlapping" (gr8s.kubelet::node-resource-manager-allocations manager))
-            (gr8s::copy-core-object (gethash (pod-uid pod) (gr8s.kubelet::node-resource-manager-allocations manager))))
+            (gr8s.resources::copy-core-object (gethash (pod-uid pod) (gr8s.kubelet::node-resource-manager-allocations manager))))
       (gr8s.kubelet::save-node-resource-checkpoint manager)
       (signals error (test-resource-manager path)))))
 
@@ -164,11 +164,11 @@
   (with-temporary-store (store path)
     (let* ((manager (test-resource-manager path :store store))
            (container (rm-test-container "exclusive" "1"))
-           (object (pod-to-object (rm-test-pod "budget" (list container (gr8s::core-object "name" "shared" "image" "busybox")))))
+           (object (pod-to-object (rm-test-pod "budget" (list container (gr8s.resources::core-object "name" "shared" "image" "busybox")))))
            (spec (gethash "spec" object)))
       (setf (gethash "resources" spec)
-            (gr8s::core-object "limits" (gr8s::core-object "cpu" "3" "memory" "128Mi")
-                              "requests" (gr8s::core-object "cpu" "3" "memory" "128Mi")))
+            (gr8s.resources::core-object "limits" (gr8s.resources::core-object "cpu" "3" "memory" "128Mi")
+                              "requests" (gr8s.resources::core-object "cpu" "3" "memory" "128Mi")))
       (let ((pod (create-pod store (parse-pod object))))
         (gr8s.kubelet::prepare-node-pod-resources manager pod)
         (let* ((report (gr8s.kubelet::podresources-pod manager nil pod))
@@ -192,7 +192,7 @@
             (gr8s.kubelet::make-device-plugin :resource "devices.example.test/kvm" :endpoint "/fixture.sock"
               :devices (list (plugin-wire "DEVICE" :id "wrong-node" :health "Healthy"
                               :topology (plugin-wire "TOPOLOGY-INFO" :nodes (list (plugin-wire "NUMA-NODE" :id 1)))))))
-      (signals gr8s::runtime-error
+      (signals gr8s.runtime::runtime-error
         (gr8s.kubelet::node-pod-device-config manager pod (first (gr8s.kubelet::resource-pod-containers pod)))))))
 
 (test debug-containers-share-their-targets-dedicated-affinity
@@ -200,7 +200,7 @@
     (declare (ignore store))
     (let* ((manager (test-resource-manager path :topology-policy "single-numa-node"))
            (pod (rm-test-pod "debug" (list (rm-test-container "main" "2"))))
-           (debug (gr8s::core-object "name" "debug" "image" "busybox" "targetContainerName" "main")))
+           (debug (gr8s.resources::core-object "name" "debug" "image" "busybox" "targetContainerName" "main")))
       (setf (gethash "ephemeralContainers" (gethash "spec" (pod-to-object pod))) (vector debug))
       (gr8s.kubelet::prepare-node-pod-resources manager pod)
       (let ((config (gr8s.kubelet::node-container-resources manager pod debug))
@@ -216,13 +216,13 @@
          (container (aref (gethash "containers" spec) 0))
          (dra (gr8s.kubelet::make-dra-manager store path))
          (prepared (gr8s.kubelet::make-dra-prepared-claim :namespace "default" :name "allocated-claim" :uid "claim-uid")))
-    (setf (gethash "resourceClaims" spec) (vector (gr8s::core-object "name" "gpu" "resourceClaimName" "allocated-claim"))
-          (gethash "claims" (gethash "resources" container)) (vector (gr8s::core-object "name" "gpu" "request" "selected"))
+    (setf (gethash "resourceClaims" spec) (vector (gr8s.resources::core-object "name" "gpu" "resourceClaimName" "allocated-claim"))
+          (gethash "claims" (gethash "resources" container)) (vector (gr8s.resources::core-object "name" "gpu" "request" "selected"))
           (gethash "driver.example.test" (gr8s.kubelet::dra-prepared-claim-driver-devices prepared))
           (list (make-instance 'gr8s.dra.v1::device :request-names '("selected/subrequest") :pool-name "pool-a"
                                                    :device-name "gpu0" :share-id "share-0" :cdi-device-ids '("vendor.test/gpu=0"))
                 (make-instance 'gr8s.dra.v1::device :request-names '("unrelated") :pool-name "pool-a" :device-name "gpu1"))
-          (gethash (gr8s::core-resource-key "resourceclaims" "default" "allocated-claim") (gr8s.kubelet::dra-manager-claims dra)) prepared)
+          (gethash (gr8s.resources::core-resource-key "resourceclaims" "default" "allocated-claim") (gr8s.kubelet::dra-manager-claims dra)) prepared)
     (values pod dra prepared container)))
 
 (test dra-reporting-requires-preparation-for-this-pod-and-filters-request-scopes
@@ -304,7 +304,7 @@
              (lambda (&rest args) (declare (ignore args))
                (gr8s.runtime.containerd::make-cri-container-info :id "old-container" :state gr8s.cri.v1::+containerstate-container_exited+))))
         (gr8s.kubelet::prepare-node-pod-resources manager old)
-        (gr8s::save-pod-observation store old (gr8s::pod-status "Succeeded"))
+        (gr8s.kubelet::save-pod-observation store old (gr8s.kubelet::pod-status "Succeeded"))
         (finishes (gr8s.kubelet::prepare-node-pod-resources manager new))
         (is-false (gethash (pod-uid old) (gr8s.kubelet::node-resource-manager-allocations manager)))
         (is (equalp #(1 2) (gethash "cpus" (gethash (pod-uid new) (gr8s.kubelet::node-resource-manager-allocations manager)))))))))

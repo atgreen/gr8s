@@ -94,7 +94,7 @@
              (options (parse-cli-options arguments))
              (output
                (with-output-to-string (*standard-output*)
-                 (is (= 0 (gr8s::main-with-environment
+                 (is (= 0 (gr8s.server::main-with-environment
                            arguments (constantly nil) (constantly 99)))))))
         (is (eq :wireguard-rotate-key (getf options :command)))
         (is (equal (namestring directory) (getf options :state-directory)))
@@ -188,7 +188,7 @@
 
 (test top-level-help-lists-node-role-commands
   (let ((help (with-output-to-string (*standard-output*)
-                (gr8s::print-help))))
+                (gr8s.server::print-help))))
     (dolist (word '("NAME:" "USAGE:" "COMMANDS:" "serve" "agent"
                     "witness" "join-token" "--help, -h" "--version, -v"))
       (is (search word help)))))
@@ -216,7 +216,7 @@
                      "notices"))
     (let* ((arguments (list command "--help"))
            (output (with-output-to-string (*standard-output*)
-                     (is (= 0 (gr8s::main-with-environment
+                     (is (= 0 (gr8s.server::main-with-environment
                                arguments (constantly nil) (constantly 99)))))))
       (is (search "NAME:" output))
       (is (search (format nil "gr8s ~A" command) output))
@@ -224,7 +224,7 @@
 
 (test agent-help-is-concise-and-specific
   (let ((help (with-output-to-string (*standard-output*)
-                (gr8s::print-help '("agent")))))
+                (gr8s.server::print-help '("agent")))))
     (dolist (text '("NAME:" "gr8s agent - Run a node agent"
                     "USAGE:" "gr8s agent [OPTIONS]"
                     "OPTIONS:" "--server HOST:PORT" "--token TOKEN"
@@ -235,12 +235,12 @@
 
 (test runtime-help-describes-its-subcommands
   (let ((help (with-output-to-string (*standard-output*)
-                (gr8s::print-help '("runtime")))))
+                (gr8s.server::print-help '("runtime")))))
     (is (search "COMMANDS:" help))
     (is (search "install" help))
     (is (search "list" help)))
   (let ((help (with-output-to-string (*standard-output*)
-                (gr8s::print-help '("runtime" "install")))))
+                (gr8s.server::print-help '("runtime" "install")))))
     (is (search "gr8s runtime install <gvisor|kata> [OPTIONS]" help))
     (is (search "--hypervisor" help))))
 
@@ -248,14 +248,14 @@
   (dolist (command '("runtime" "patch" "wireguard" "network"
                      "certificate" "secrets-encrypt"))
     (let ((output (with-output-to-string (*standard-output*)
-                    (is (= 0 (gr8s::main-with-environment
+                    (is (= 0 (gr8s.server::main-with-environment
                               (list command) (constantly nil) (constantly 99)))))))
       (is (search (format nil "gr8s ~A" command) output))
       (is (search "COMMANDS:" output)))))
 
 (test secrets-encrypt-help-explains-each-stage
   (let ((help (with-output-to-string (*standard-output*)
-                (gr8s::print-help '("secrets-encrypt")))))
+                (gr8s.server::print-help '("secrets-encrypt")))))
     (dolist (description '("Show encryption status"
                            "Enable encryption and rewrite existing Secrets"
                            "Rewrite Secrets as plaintext and discard keys"
@@ -268,7 +268,7 @@
 (test cni-environment-dispatches-before-command-line-parsing
   (let ((called nil))
     (is (= 27
-           (gr8s::main-with-environment
+           (gr8s.server::main-with-environment
             '("not-a-gr8s-command")
             (lambda (name)
               (and (string= name "CNI_COMMAND") "VERSION"))
@@ -290,7 +290,7 @@
       (unwind-protect
            (let ((*standard-output* output)
                  (*error-output* (make-broadcast-stream)))
-             (setf status (gr8s::main-with-environment
+             (setf status (gr8s.server::main-with-environment
                            '("help") (constantly nil) (constantly 99))
                    closed (not (open-stream-p output))))
         (ignore-errors (close output)))
@@ -302,12 +302,12 @@
   (let ((options (parse-cli-options '("runtime" "list" "--state-directory" "/tmp/gr8s-runtime-list-test/"))))
     (is (eq :runtime-list (getf options :command)))
     (is (equal "/tmp/gr8s-runtime-list-test/" (getf options :state-directory))))
-  (let ((gr8s::*embedded-runtime-assets*
-          (list (gr8s::make-runtime-asset
+  (let ((gr8s.runtime::*embedded-runtime-assets*
+          (list (gr8s.runtime::make-runtime-asset
                  :name "containerd"
                  :octets (make-array 42 :element-type '(unsigned-byte 8))))))
     (let ((output (with-output-to-string (*standard-output*)
-                    (gr8s::print-runtime-list (uiop:temporary-directory)))))
+                    (gr8s.runtime::print-runtime-list (uiop:temporary-directory)))))
       (is (search "containerd" output))
       (is (search "42 bytes" output)))))
 
@@ -366,35 +366,35 @@
   (let ((options (parse-cli-options
                   '("serve" "--state-directory" "/tmp/gr8s-managed"))))
     (multiple-value-bind (runtime manager)
-        (gr8s::runtime-from-options options)
-      (is (typep manager 'gr8s::managed-containerd))
+        (gr8s.server::runtime-from-options options)
+      (is (typep manager 'gr8s.kubelet::managed-containerd))
       (is (string= "/tmp/gr8s-managed/containerd/run/containerd.sock"
-                   (gr8s::managed-containerd-socket-path manager)))
-      (is (string= (gr8s::managed-containerd-socket-path manager)
-                   (gr8s::containerd-runtime-socket-path runtime)))
-      (is (not (gr8s::containerd-runtime-host-network runtime)))
+                   (gr8s.kubelet::managed-containerd-socket-path manager)))
+      (is (string= (gr8s.kubelet::managed-containerd-socket-path manager)
+                   (gr8s.runtime.containerd::containerd-runtime-socket-path runtime)))
+      (is (not (gr8s.runtime.containerd::containerd-runtime-host-network runtime)))
       (is (equal '("169.254.1.1")
-                 (gr8s::containerd-runtime-dns-servers runtime)))
+                 (gr8s.runtime.containerd::containerd-runtime-dns-servers runtime)))
       (is (equal '("default.svc.cluster.local"
                    "svc.cluster.local"
                    "cluster.local")
-                 (gr8s::containerd-runtime-dns-searches runtime)))
+                 (gr8s.runtime.containerd::containerd-runtime-dns-searches runtime)))
       (is (equal '("ndots:5")
-                 (gr8s::containerd-runtime-dns-options runtime))))))
+                 (gr8s.runtime.containerd::containerd-runtime-dns-options runtime))))))
 
 (test managed-containerd-uses-runtime-assets-from-the-dumped-image
   (let* ((assets
-           (list (gr8s::make-runtime-asset :name "containerd" :octets #(1))
-                 (gr8s::make-runtime-asset
+           (list (gr8s.runtime::make-runtime-asset :name "containerd" :octets #(1))
+                 (gr8s.runtime::make-runtime-asset
                   :name "containerd-shim-runc-v2" :octets #(2))
-                 (gr8s::make-runtime-asset :name "runc" :octets #(3))))
-         (gr8s::*embedded-runtime-assets* assets)
+                 (gr8s.runtime::make-runtime-asset :name "runc" :octets #(3))))
+         (gr8s.runtime::*embedded-runtime-assets* assets)
          (options (parse-cli-options
                    '("serve" "--state-directory" "/tmp/gr8s-embedded"))))
     (multiple-value-bind (runtime manager)
-        (gr8s::runtime-from-options options)
+        (gr8s.server::runtime-from-options options)
       (declare (ignore runtime))
-      (is (eq assets (gr8s::managed-containerd-runtime-assets manager))))))
+      (is (eq assets (gr8s.kubelet::managed-containerd-runtime-assets manager))))))
 
 (test external-containerd-options-do-not-create-a-supervisor
   (let ((options
@@ -402,40 +402,40 @@
            '("serve" "--containerd-mode" "external"
              "--containerd-socket" "/tmp/external-containerd.sock"))))
     (multiple-value-bind (runtime manager)
-        (gr8s::runtime-from-options options)
+        (gr8s.server::runtime-from-options options)
       (is (null manager))
       (is (string= "/tmp/external-containerd.sock"
-                   (gr8s::containerd-runtime-socket-path runtime)))
-      (is (not (gr8s::containerd-runtime-host-network runtime))))))
+                   (gr8s.runtime.containerd::containerd-runtime-socket-path runtime)))
+      (is (not (gr8s.runtime.containerd::containerd-runtime-host-network runtime))))))
 
 (test kubeconfig-points-kubectl-at-gr8s
   (with-temporary-store (store directory)
     (declare (ignore store))
-    (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory)))
+    (let* ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" directory)))
            (path (merge-pathnames "config" directory)))
-      (multiple-value-bind (certificate key) (gr8s::ensure-admin-client-credentials pki)
-        (gr8s:write-kubeconfig path "https://127.0.0.1:6443"
-                               :ca-certificate (gr8s:cluster-pki-ca-certificate-path pki)
+      (multiple-value-bind (certificate key) (gr8s.apiserver::ensure-admin-client-credentials pki)
+        (gr8s.server::write-kubeconfig path "https://127.0.0.1:6443"
+                               :ca-certificate (gr8s.security::cluster-pki-ca-certificate-path pki)
                                :client-certificate certificate :client-key key))
       (let ((text (uiop:read-file-string path)))
         (is (search "server: https://127.0.0.1:6443" text))
         (is (search "current-context: gr8s" text))))))
 
 (test serve-defaults-to-the-standard-secure-kubernetes-api
-  (let ((options (gr8s::parse-serve-options nil)))
+  (let ((options (gr8s.server::parse-serve-options nil)))
     (is (string= "0.0.0.0" (getf options :listen)))
     (is (= 6443 (getf options :port)))))
 
 (test administrative-kubeconfig-embeds-cluster-trust-and-client-identity
   (with-temporary-store (store directory)
     (declare (ignore store))
-    (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory)))
+    (let* ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" directory)))
            (path (merge-pathnames "admin.kubeconfig" directory)))
       (multiple-value-bind (certificate key)
-          (gr8s::ensure-admin-client-credentials pki)
-        (gr8s:write-kubeconfig
+          (gr8s.apiserver::ensure-admin-client-credentials pki)
+        (gr8s.server::write-kubeconfig
          path "https://127.0.0.1:6443"
-         :ca-certificate (gr8s:cluster-pki-ca-certificate-path pki)
+         :ca-certificate (gr8s.security::cluster-pki-ca-certificate-path pki)
          :client-certificate certificate :client-key key :private t))
       (let ((text (uiop:read-file-string path)))
         (is (search "server: https://127.0.0.1:6443" text))
@@ -448,35 +448,35 @@
   (with-temporary-store (store directory)
     (declare (ignore store))
     (let* ((pki-root (merge-pathnames "pki/" directory))
-           (pki (gr8s:ensure-cluster-pki pki-root))
+           (pki (gr8s.security::ensure-cluster-pki pki-root))
            (path (merge-pathnames "rotating.kubeconfig" directory)))
       (gr8s.server::prepare-cluster-ca-rotation pki-root)
-      (setf pki (gr8s:ensure-cluster-pki pki-root))
+      (setf pki (gr8s.security::ensure-cluster-pki pki-root))
       (multiple-value-bind (certificate key)
-          (gr8s::ensure-admin-client-credentials pki)
-        (gr8s:write-kubeconfig
+          (gr8s.apiserver::ensure-admin-client-credentials pki)
+        (gr8s.server::write-kubeconfig
          path "https://127.0.0.1:6443"
-         :ca-certificates (gr8s::cluster-pki-trust-certificates pki)
+         :ca-certificates (gr8s.security::cluster-pki-trust-certificates pki)
          :client-certificate certificate :client-key key))
       (let ((text (uiop:read-file-string path)))
         (is (search
-             (gr8s::kubeconfig-ca-data
-              nil (gr8s::cluster-pki-trust-certificates pki))
+             (gr8s.server::kubeconfig-ca-data
+              nil (gr8s.security::cluster-pki-trust-certificates pki))
              text))
-        (is (= 2 (length (gr8s::cluster-pki-trust-certificates pki))))))))
+        (is (= 2 (length (gr8s.security::cluster-pki-trust-certificates pki))))))))
 
 (test kubeconfig-without-output-prints-to-stdout
   (with-temporary-store (store directory)
     (declare (ignore store))
-    (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory)))
-           (options (gr8s::parse-cli-options
+    (let* ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" directory)))
+           (options (gr8s.server::parse-cli-options
                      (list "kubeconfig" "--state-directory" (namestring directory)))))
       (is (null (getf options :output)))
-      (multiple-value-bind (certificate key) (gr8s::ensure-admin-client-credentials pki)
+      (multiple-value-bind (certificate key) (gr8s.apiserver::ensure-admin-client-credentials pki)
         (let ((text (with-output-to-string (stream)
-                      (gr8s::print-kubeconfig
+                      (gr8s.server::print-kubeconfig
                        stream (getf options :server)
-                       :ca-certificate (gr8s:cluster-pki-ca-certificate-path pki)
+                       :ca-certificate (gr8s.security::cluster-pki-ca-certificate-path pki)
                        :client-certificate certificate :client-key key))))
           (is (search "server: https://127.0.0.1:6443" text))
           (is (search "current-context: gr8s" text)))))))
@@ -484,16 +484,16 @@
 (test serve-defaults-its-kubeconfig-into-the-state-directory
   (let* ((directory (merge-pathnames (format nil "gr8s-kubeconfig-~36R/" (random (expt 36 8)))
                                      (uiop:temporary-directory)))
-         (options (gr8s::parse-cli-options (list "serve" "--state-directory" (namestring directory))))
-         (path (gr8s::default-kubeconfig-path options)))
+         (options (gr8s.server::parse-cli-options (list "serve" "--state-directory" (namestring directory))))
+         (path (gr8s.server::default-kubeconfig-path options)))
     (unwind-protect
          (progn
            (is (null (getf options :kubeconfig)))
            (is (equal (merge-pathnames "kubeconfig" directory) path))
-           (let ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory))))
-             (multiple-value-bind (certificate key) (gr8s::ensure-admin-client-credentials pki)
-               (gr8s:write-kubeconfig path "https://127.0.0.1:6443" :private t
-                                      :ca-certificate (gr8s:cluster-pki-ca-certificate-path pki)
+           (let ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" directory))))
+             (multiple-value-bind (certificate key) (gr8s.apiserver::ensure-admin-client-credentials pki)
+               (gr8s.server::write-kubeconfig path "https://127.0.0.1:6443" :private t
+                                      :ca-certificate (gr8s.security::cluster-pki-ca-certificate-path pki)
                                       :client-certificate certificate :client-key key)))
            (is (= #o600 (logand #o777 (sb-posix:stat-mode (sb-posix:stat path)))))
            (is (search "server: https://127.0.0.1:6443" (uiop:read-file-string path))))
@@ -534,22 +534,22 @@
              1.0)))))
 
 (test node-listener-and-underlay-options-are-explicit-and-validated
-  (let ((options (gr8s::parse-serve-options
+  (let ((options (gr8s.server::parse-serve-options
                   '("--node-listen" "0.0.0.0" "--node-address" "192.0.2.10"))))
     (is (string= "0.0.0.0" (getf options :node-listen)))
     (is (string= "192.0.2.10" (getf options :node-address)))
     (is (string= "0.0.0.0" (getf options :listen))))
-  (let ((options (gr8s::parse-agent-options
+  (let ((options (gr8s.server::parse-agent-options
                   '("--server" "192.0.2.1:7443" "--token" "test" "--ca-pin" "test"
                     "--node-name" "worker-a" "--state-directory" "/tmp/worker-a"
                     "--node-address" "192.0.2.11"))))
     (is (string= "192.0.2.11" (getf options :node-address))))
   (dolist (address '("127.0.0.1" "0.0.0.0" "224.0.0.1" "255.255.255.255" "192.0.2.1/24"))
-    (signals error (gr8s::parse-serve-options (list "--node-address" address)))))
+    (signals error (gr8s.server::parse-serve-options (list "--node-address" address)))))
 
 (test wireguard-endpoint-options-are-named-repeatable-and-validated
   (let ((options
-          (gr8s::parse-agent-options
+          (gr8s.server::parse-agent-options
            '("--server" "192.0.2.1:7443" "--token" "test" "--ca-pin" "test"
              "--node-name" "worker-a" "--state-directory" "/tmp/worker-a"
              "--wireguard-endpoint" "private=10.0.0.11:51820"
@@ -560,12 +560,12 @@
   (dolist (value '("private" "=10.0.0.11:51820" "private=127.0.0.1:51820"
                    "private=10.0.0.11:0" "private=10.0.0.11:not-a-port"))
     (signals error
-      (gr8s::parse-agent-options
+      (gr8s.server::parse-agent-options
        (list "--server" "192.0.2.1:7443" "--token" "test" "--ca-pin" "test"
              "--node-name" "worker-a" "--state-directory" "/tmp/worker-a"
              "--wireguard-endpoint" value))))
   (signals error
-    (gr8s::parse-agent-options
+    (gr8s.server::parse-agent-options
      '("--server" "192.0.2.1:7443" "--token" "test" "--ca-pin" "test"
        "--node-name" "worker-a" "--state-directory" "/tmp/worker-a"
        "--wireguard-endpoint" "private=10.0.0.11:51820"
@@ -573,7 +573,7 @@
 
 (test wireguard-relay-options-are-explicit-and-bounded
   (let ((options
-          (gr8s::parse-serve-options
+          (gr8s.server::parse-serve-options
            '("--overlay-backend" "wireguard"
              "--wireguard-relay-address" "203.0.113.9"
              "--wireguard-relay-listen" "0.0.0.0"
@@ -584,21 +584,21 @@
     (is (= 46000 (getf options :wireguard-relay-port-start)))
     (is (= 17 (getf options :wireguard-relay-max-channels))))
   (signals error
-    (gr8s::parse-serve-options
+    (gr8s.server::parse-serve-options
      '("--wireguard-relay-address" "203.0.113.9")))
   (signals error
-    (gr8s::parse-serve-options
+    (gr8s.server::parse-serve-options
      '("--overlay-backend" "wireguard"
        "--wireguard-relay-address" "203.0.113.9"
        "--wireguard-relay-port-start" "65535")))
   (signals error
-    (gr8s::parse-serve-options
+    (gr8s.server::parse-serve-options
      '("--overlay-backend" "wireguard"
        "--wireguard-relay-address" "203.0.113.9"
        "--raft-init"))))
 
 (test dns-forward-options-apply-to-serve-and-standalone-agents
-  (let ((agent (gr8s::parse-agent-options
+  (let ((agent (gr8s.server::parse-agent-options
                 '("--server" "192.0.2.1:7443" "--token" "test" "--ca-pin" "test"
                   "--node-name" "worker-a" "--state-directory" "/tmp/worker-a"
                   "--dns-forward" "corp.example=192.0.2.53"
@@ -607,23 +607,23 @@
                (getf agent :dns-forward-rules))))
   (dolist (invalid '("corp.example" "=192.0.2.53" "corp.example=not-an-ip"
                      "corp.example=192.0.2.53:0"))
-    (signals error (gr8s::parse-serve-options (list "--dns-forward" invalid)))))
+    (signals error (gr8s.server::parse-serve-options (list "--dns-forward" invalid)))))
 
 (test join-token-command-uses-the-running-clusters-persisted-pki
   (with-temporary-store (store path)
     (assert store)
-    (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" path)))
+    (let* ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" path)))
            (options (parse-cli-options
                      (list "join-token" "--node-name" "worker-b"
                            "--state-directory" (namestring path))))
            (json (with-output-to-string (stream)
-                   (is (= 0 (gr8s::print-node-join-token options stream)))))
+                   (is (= 0 (gr8s.server::print-node-join-token options stream)))))
            (result (com.inuoe.jzon:parse json)))
       (is (string= "worker-b" (gethash "nodeName" result)))
-      (is (string= (gr8s:cluster-pki-ca-fingerprint pki) (gethash "caPin" result)))
-      (multiple-value-bind (identifier secret) (gr8s::split-join-token (gethash "token" result))
+      (is (string= (gr8s.security::cluster-pki-ca-fingerprint pki) (gethash "caPin" result)))
+      (multiple-value-bind (identifier secret) (gr8s.security::split-join-token (gethash "token" result))
         (declare (ignore secret))
-        (let ((record (gr8s::load-token-record pki identifier)))
+        (let ((record (gr8s.security::load-token-record pki identifier)))
           (is (string= "worker-b" (gethash "nodeName" record)))
           (is (string= "unused" (gethash "state" record))))))))
 
@@ -631,7 +631,7 @@
   (with-temporary-store (store path)
     (assert store)
     (signals error
-      (gr8s::print-node-join-token
+      (gr8s.server::print-node-join-token
        (parse-cli-options (list "join-token" "--node-name" "worker-b"
                                 "--state-directory" (namestring path)))
        (make-broadcast-stream)))
@@ -645,9 +645,9 @@
                             "--state-directory" (namestring directory))))
       (signals error (parse-cli-options arguments))
       (dolist (name '("node.key" "node.crt"))
-        (gr8s::write-private-text-exclusively (merge-pathnames name directory) "fixture"))
+        (gr8s.security::write-private-text-exclusively (merge-pathnames name directory) "fixture"))
       (signals error (parse-cli-options arguments))
-      (gr8s::write-private-text-exclusively (merge-pathnames "ca.crt" directory) "fixture")
+      (gr8s.security::write-private-text-exclusively (merge-pathnames "ca.crt" directory) "fixture")
       (let ((options (parse-cli-options arguments)))
         (is (eq :agent (getf options :command)))
         (is-false (getf options :token))
@@ -655,14 +655,14 @@
 
 (defun run-with-stale-timeout-guard (function)
   "Call FUNCTION with the process-wide timeout guard installed, then remove it."
-  (let ((hook sb-ext:*invoke-debugger-hook*) (installed gr8s::*stale-timeout-guard-installed*))
+  (let ((hook sb-ext:*invoke-debugger-hook*) (installed gr8s.server::*stale-timeout-guard-installed*))
     (unwind-protect
          (progn
-           (setf gr8s::*stale-timeout-guard-installed* nil)
-           (gr8s::install-stale-timeout-guard)
+           (setf gr8s.server::*stale-timeout-guard-installed* nil)
+           (gr8s.server::install-stale-timeout-guard)
            (funcall function))
       (setf sb-ext:*invoke-debugger-hook* hook
-            gr8s::*stale-timeout-guard-installed* installed))))
+            gr8s.server::*stale-timeout-guard-installed* installed))))
 
 (test a-late-timeout-interrupt-cannot-end-a-thread-holding-a-lock
   ;; This is what crashed a full run: a timer fired after its scope, during a lock wait.
@@ -699,15 +699,15 @@
          (is (eq :completed result)))))))
 
 (test the-guard-only-continues-timeouts
-  (let ((hook sb-ext:*invoke-debugger-hook*) (installed gr8s::*stale-timeout-guard-installed*)
+  (let ((hook sb-ext:*invoke-debugger-hook*) (installed gr8s.server::*stale-timeout-guard-installed*)
         (seen nil))
     (unwind-protect
          (progn
-           (setf gr8s::*stale-timeout-guard-installed* nil
+           (setf gr8s.server::*stale-timeout-guard-installed* nil
                  sb-ext:*invoke-debugger-hook* (lambda (condition hook)
                                                  (declare (ignore hook))
                                                  (push condition seen)))
-           (gr8s::install-stale-timeout-guard)
+           (gr8s.server::install-stale-timeout-guard)
            ;; Other conditions, and a timeout with nothing to continue, reach the old hook.
            (let ((real (make-condition 'simple-error :format-control "real"))
                  (bare (make-condition 'sb-ext:timeout)))
@@ -715,15 +715,15 @@
              (funcall sb-ext:*invoke-debugger-hook* bare nil)
              (is (equal (list bare real) seen))))
       (setf sb-ext:*invoke-debugger-hook* hook
-            gr8s::*stale-timeout-guard-installed* installed))))
+            gr8s.server::*stale-timeout-guard-installed* installed))))
 
 (test the-worker-loop-survives-a-timeout
   (with-temporary-store (store directory)
     (declare (ignorable directory))
     (let* ((calls 0)
            (*error-output* (make-broadcast-stream))
-           (worker (gr8s::start-reconciliation-worker
-                    (gr8s::make-reconciler store (make-fake-runtime))
+           (worker (gr8s.server::start-reconciliation-worker
+                    (gr8s.kubelet::make-reconciler store (make-fake-runtime))
                     :interval 0.05
                     :before-reconcile (lambda ()
                                         (when (= 1 (incf calls))
@@ -733,13 +733,13 @@
            (progn
              (loop repeat 100 until (> calls 2) do (sleep 0.05))
              (is (> calls 2)))
-        (gr8s::stop-reconciliation-worker worker)))))
+        (gr8s.server::stop-reconciliation-worker worker)))))
 
 (test skill-command-prints-offline-guidance
   (is (eq :skill (getf (parse-cli-options '("skill")) :command)))
   (signals error (parse-cli-options '("skill" "unexpected")))
   (let ((output (with-output-to-string (*standard-output*)
-                  (is (= 0 (gr8s::main-with-environment
+                  (is (= 0 (gr8s.server::main-with-environment
                             '("skill") (constantly nil) (constantly 99)))))))
     (is (search "# gr8s operator and agent guide" output))
     (is (search "gr8s debug slynk" output))
@@ -747,28 +747,28 @@
     (is (search "gr8s doctor" output)))
   (dolist (arguments '(("help") ("skill" "--help") ("help" "skill")))
     (let ((output (with-output-to-string (*standard-output*)
-                    (is (= 0 (gr8s::main-with-environment
+                    (is (= 0 (gr8s.server::main-with-environment
                               arguments (constantly nil) (constantly 99)))))))
       (is (search "skill" output)))))
 
 
 (test serve-compaction-defaults-to-ha-and-supports-explicit-overrides
-  (is-false (getf (gr8s::parse-serve-options nil) :raft-compaction))
-  (is-true (getf (gr8s::parse-serve-options '("--raft-init")) :raft-compaction))
-  (is-true (getf (gr8s::parse-serve-options '("--raft-join" "127.0.0.1:7449")) :raft-compaction))
-  (is-false (getf (gr8s::parse-serve-options '("--raft-init" "--no-raft-compaction")) :raft-compaction))
-  (is-false (getf (gr8s::parse-serve-options '("--no-raft-compaction")) :raft-compaction))
-  (is-false (getf (gr8s::parse-serve-options '("--raft-init" "--raft-compaction" "--no-raft-compaction")) :raft-compaction))
-  (is-true (getf (gr8s::parse-serve-options '("--raft-init" "--no-raft-compaction" "--raft-compaction")) :raft-compaction))
-  (is-true (getf (gr8s::parse-serve-options '("--raft-init" "--raft-compaction")) :raft-compaction))
-  (is-true (getf (gr8s::parse-serve-options '("--raft-compaction" "--raft-join" "127.0.0.1:7449")) :raft-compaction))
-  (signals error (gr8s::parse-serve-options '("--raft-compaction"))))
+  (is-false (getf (gr8s.server::parse-serve-options nil) :raft-compaction))
+  (is-true (getf (gr8s.server::parse-serve-options '("--raft-init")) :raft-compaction))
+  (is-true (getf (gr8s.server::parse-serve-options '("--raft-join" "127.0.0.1:7449")) :raft-compaction))
+  (is-false (getf (gr8s.server::parse-serve-options '("--raft-init" "--no-raft-compaction")) :raft-compaction))
+  (is-false (getf (gr8s.server::parse-serve-options '("--no-raft-compaction")) :raft-compaction))
+  (is-false (getf (gr8s.server::parse-serve-options '("--raft-init" "--raft-compaction" "--no-raft-compaction")) :raft-compaction))
+  (is-true (getf (gr8s.server::parse-serve-options '("--raft-init" "--no-raft-compaction" "--raft-compaction")) :raft-compaction))
+  (is-true (getf (gr8s.server::parse-serve-options '("--raft-init" "--raft-compaction")) :raft-compaction))
+  (is-true (getf (gr8s.server::parse-serve-options '("--raft-compaction" "--raft-join" "127.0.0.1:7449")) :raft-compaction))
+  (signals error (gr8s.server::parse-serve-options '("--raft-compaction"))))
 
 (test production-ha-startup-forwards-default-and-explicit-compaction
   (dolist (enabled '(nil t))
     (with-temporary-store (store root)
       (declare (ignore root))
-      (let* ((options (gr8s::parse-serve-options
+      (let* ((options (gr8s.server::parse-serve-options
                        (append '("--raft-init" "--node-name" "cli-compaction" "--listen" "127.0.0.1")
                                (unless enabled '("--no-raft-compaction")))))
              (ha nil))
@@ -780,4 +780,4 @@
                (is (not (null ha)))
                (is (eq enabled (not (null (gr8s.ha::ha-control-plane-compaction-thread ha)))))
                (is (eql (if enabled 1 nil) (gr8s.ha::ha-control-plane-compaction-interval ha))))
-          (when ha (gr8s::stop-ha-control-plane ha)))))))
+          (when ha (gr8s.ha::stop-ha-control-plane ha)))))))

@@ -53,20 +53,20 @@
   (with-storage-http (store path)
     (let* ((created (storage-http-check 201 "/api/v1/persistentvolumes" :method :post :object (storage-test-volume "provided" (merge-pathnames "backing/" path))))
            (old-source (gethash "hostPath" (gethash "spec" created)))
-           (status-body (gr8s::copy-core-object created)))
-      (setf (gethash "status" status-body) (gr8s::core-object "phase" "Available")
-            (gethash "hostPath" (gethash "spec" status-body)) (gr8s::core-object "path" "/must-not-replace-source"))
+           (status-body (gr8s.resources::copy-core-object created)))
+      (setf (gethash "status" status-body) (gr8s.resources::core-object "phase" "Available")
+            (gethash "hostPath" (gethash "spec" status-body)) (gr8s.resources::core-object "path" "/must-not-replace-source"))
       (storage-http-check 200 "/api/v1/persistentvolumes/provided/status" :method :put :object status-body)
       (let ((loaded (storage-http-check 200 "/api/v1/persistentvolumes/provided")))
-        (is (gr8s::core-json-equal-p old-source (gethash "hostPath" (gethash "spec" loaded)))))
+        (is (gr8s.apiserver::core-json-equal-p old-source (gethash "hostPath" (gethash "spec" loaded)))))
       (storage-http-check 200 "/api/v1/persistentvolumes/provided" :method :patch :content-type "application/merge-patch+json"
-                          :object (gr8s::core-object "status" (gr8s::core-object "phase" "Bound")))
+                          :object (gr8s.resources::core-object "status" (gr8s.resources::core-object "phase" "Bound")))
       (is (equal "Available" (storage-phase store "persistentvolumes" nil "provided")))
       (storage-http-check 409 "/api/v1/persistentvolumes/provided/status" :method :put :object status-body))))
 
 (test storage-watch-reports-atomic-binding-and-survives-store-reopen
   (with-storage-http (store path)
-    (let* ((claim (gr8s::create-core-resource store "persistentvolumeclaims" (storage-test-claim "claim") "default"))
+    (let* ((claim (gr8s.resources::create-core-resource store "persistentvolumeclaims" (storage-test-claim "claim") "default"))
            (revision (gethash "resourceVersion" (gethash "metadata" claim))))
       (sb-sys:with-deadline (:seconds 8)
         (multiple-value-bind (stream code)
@@ -75,8 +75,8 @@
           (unwind-protect
                (progn
                  (is (= 200 code))
-                 (gr8s::create-core-resource store "persistentvolumes" (storage-test-volume "provided" (merge-pathnames "backing/" path)) nil)
-                 (gr8s::reconcile-storage-bindings store)
+                 (gr8s.resources::create-core-resource store "persistentvolumes" (storage-test-volume "provided" (merge-pathnames "backing/" path)) nil)
+                 (gr8s.resources::reconcile-storage-bindings store)
                  (let* ((event (read-template-watch-event stream)) (object (gethash "object" event)))
                    (is (equal "MODIFIED" (gethash "type" event)))
                    (is (equal "Bound" (gethash "phase" (gethash "status" object)))))
@@ -123,22 +123,22 @@
         (storage-http-check 200 (format nil "/api/v1/namespaces/default/persistentvolumeclaims/~A/status" name))))
     ;; Without either name, creation is refused rather than storing an empty name.
     (storage-http-check 422 "/apis/storage.k8s.io/v1/storageclasses" :method :post
-                        :object (gr8s::core-object "metadata" (gr8s::core-object "name" "") "provisioner" "e2e-fake-provisioner"))
-    (is (null (gr8s::dns-subdomain-p "")))))
+                        :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "") "provisioner" "e2e-fake-provisioner"))
+    (is (null (gr8s.model::dns-subdomain-p "")))))
 
 (test csinodes-accept-no-drivers-and-serve-status
   (with-storage-http (store path)
     (values store path)
     ;; Go sends spec.drivers as null in JSON and leaves it out of protobuf.
     (let ((created (storage-http-check 201 "/apis/storage.k8s.io/v1/csinodes" :method :post
-                                       :object (gr8s::core-object "metadata" (gr8s::core-object "name" "e2e-csinode-a")
-                                                                  "spec" (gr8s::core-object "drivers" 'null)))))
+                                       :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "e2e-csinode-a")
+                                                                  "spec" (gr8s.resources::core-object "drivers" 'null)))))
       (is (equalp #() (gethash "drivers" (gethash "spec" created)))))
     (storage-http-check 201 "/apis/storage.k8s.io/v1/csinodes" :method :post :content-type "application/vnd.kubernetes.protobuf"
                         :octets (storage-protobuf-request "CSINode" (list (list 1 (core-test-protobuf '((1 "e2e-csinode-b")))) (list 2 (core-test-protobuf nil)))
                                                           "storage.k8s.io/v1"))
     (storage-http-check 200 "/apis/storage.k8s.io/v1/csinodes/e2e-csinode-b" :method :patch :content-type "application/strategic-merge-patch+json"
-                        :object (gr8s::core-object "metadata" (gr8s::core-object "labels" (gr8s::core-object "e2e-csinode-b" "patched"))))
+                        :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "labels" (gr8s.resources::core-object "e2e-csinode-b" "patched"))))
     (is (= 1 (length (gethash "items" (storage-http-check 200 "/apis/storage.k8s.io/v1/csinodes" :parameters '(("labelSelector" . "e2e-csinode-b=patched")))))))
     (let* ((storage (storage-http-check 200 "/apis/storage.k8s.io/v1"))
            (names (map 'list (lambda (object) (gethash "name" object)) (gethash "resources" storage))))
@@ -148,8 +148,8 @@
     ;; storageHealth needs the alpha CSIVolumeHealth gate, so as in Kubernetes it is dropped.
     (let ((written (storage-http-check 200 "/apis/storage.k8s.io/v1/csinodes/e2e-csinode-a/status" :method :patch
                                        :content-type "application/merge-patch+json"
-                                       :object (gr8s::core-object "spec" (gr8s::core-object "drivers" (vector (gr8s::core-object "name" "x.example.test" "nodeID" "n")))
-                                                                  "status" (gr8s::core-object "storageHealth" (vector (gr8s::core-object "name" "x.example.test")))))))
+                                       :object (gr8s.resources::core-object "spec" (gr8s.resources::core-object "drivers" (vector (gr8s.resources::core-object "name" "x.example.test" "nodeID" "n")))
+                                                                  "status" (gr8s.resources::core-object "storageHealth" (vector (gr8s.resources::core-object "name" "x.example.test")))))))
       (is (null (gethash "status" written)))
       (is (equalp #() (gethash "drivers" (gethash "spec" written)))))
     (storage-http-check 200 "/apis/storage.k8s.io/v1/csinodes" :method :delete
@@ -172,26 +172,26 @@
       (is (equal "bar" (gethash "foo" (gethash "parameters" created))))
       (is (equalp #("kubernetes.io/vac-protection") (gethash "finalizers" (gethash "metadata" created))))
       (storage-http-check 200 item :method :patch :content-type "application/strategic-merge-patch+json"
-                          :object (gr8s::core-object "metadata" (gr8s::core-object "labels" (gr8s::core-object name "patched"))))
+                          :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "labels" (gr8s.resources::core-object name "patched"))))
       (storage-http-check 422 item :method :patch :content-type "application/merge-patch+json"
-                          :object (gr8s::core-object "parameters" (gr8s::core-object "foo" "baz")))
+                          :object (gr8s.resources::core-object "parameters" (gr8s.resources::core-object "foo" "baz")))
       (storage-http-check 422 item :method :patch :content-type "application/merge-patch+json"
-                          :object (gr8s::core-object "driverName" "other.example.test"))
+                          :object (gr8s.resources::core-object "driverName" "other.example.test"))
       ;; A claim naming the class keeps it until the claim lets go, as vac-protection does.
       (let ((claim (storage-test-claim "uses-class")))
         (setf (gethash "volumeAttributesClassName" (gethash "spec" claim)) name)
-        (gr8s::create-core-resource store "persistentvolumeclaims" claim "default"))
+        (gr8s.resources::create-core-resource store "persistentvolumeclaims" claim "default"))
       (storage-http-check 200 item :method :delete)
-      (gr8s::reconcile-storage-bindings store)
+      (gr8s.resources::reconcile-storage-bindings store)
       (is-true (gethash "deletionTimestamp" (gethash "metadata" (storage-http-check 200 item))))
-      (gr8s::delete-core-resource store "persistentvolumeclaims" "default" "uses-class")
-      (gr8s::reconcile-storage-bindings store)
+      (gr8s.resources::delete-core-resource store "persistentvolumeclaims" "default" "uses-class")
+      (gr8s.resources::reconcile-storage-bindings store)
       (storage-http-check 404 item))
     (storage-http-check 422 "/apis/storage.k8s.io/v1/volumeattributesclasses" :method :post
-                        :object (gr8s::core-object "metadata" (gr8s::core-object "name" "no-parameters") "driverName" "e2e-fake-csi-driver"))
+                        :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "no-parameters") "driverName" "e2e-fake-csi-driver"))
     (storage-http-check 201 "/apis/storage.k8s.io/v1/volumeattributesclasses" :method :post
-                        :object (gr8s::core-object "metadata" (gr8s::core-object "name" "plain" "labels" (gr8s::core-object "plain" "updated"))
-                                                   "driverName" "e2e-fake-csi-driver" "parameters" (gr8s::core-object "foo" "bar")))
+                        :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "plain" "labels" (gr8s.resources::core-object "plain" "updated"))
+                                                   "driverName" "e2e-fake-csi-driver" "parameters" (gr8s.resources::core-object "foo" "bar")))
     (storage-http-check 200 "/apis/storage.k8s.io/v1/volumeattributesclasses" :method :delete
                         :parameters '(("labelSelector" . "plain=updated")))
     (is (zerop (length (gethash "items" (storage-http-check 200 "/apis/storage.k8s.io/v1/volumeattributesclasses")))))))

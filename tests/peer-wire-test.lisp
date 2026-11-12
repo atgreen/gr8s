@@ -128,10 +128,10 @@
 (defun make-test-image-peer-identity (pki directory node-name)
   (let* ((key (merge-pathnames (format nil "~A.key" node-name) directory))
          (certificate (merge-pathnames (format nil "~A.crt" node-name) directory))
-         (csr (gr8s:generate-node-key-and-csr node-name key))
-         (pem (gr8s:enroll-node-csr
-               pki node-name (gr8s:create-join-token pki node-name)
-               (gr8s:cluster-pki-ca-fingerprint pki) csr)))
+         (csr (gr8s.security::generate-node-key-and-csr node-name key))
+         (pem (gr8s.security::enroll-node-csr
+               pki node-name (gr8s.security::create-join-token pki node-name)
+               (gr8s.security::cluster-pki-ca-fingerprint pki) csr)))
     (ensure-directories-exist certificate)
     (with-open-file (stream certificate :direction :output
                                         :if-exists :supersede
@@ -154,7 +154,7 @@
                            (setf socket (usocket:socket-accept
                                          listener :element-type '(unsigned-byte 8)))
                            (multiple-value-bind (authenticated name)
-                               (gr8s::make-image-peer-server-stream
+                               (gr8s.security::make-image-peer-server-stream
                                 (usocket:socket-stream socket) pki certificate key)
                              (declare (ignore name))
                              (setf tls authenticated)
@@ -176,7 +176,7 @@
                      (format nil "gr8s-image-peer-~36R/"
                              (random most-positive-fixnum))
                      (uiop:temporary-directory)))
-         (pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory)))
+         (pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" directory)))
          (bytes (make-array 40000 :element-type '(unsigned-byte 8)))
          (source nil) (destination (merge-pathnames "download.blob" directory))
          (listener nil) (server-thread nil) (server-error nil))
@@ -209,7 +209,7 @@
                                    (raw (usocket:socket-stream socket)))
                               (unwind-protect
                                    (multiple-value-bind (tls node-name)
-                                       (gr8s::make-image-peer-server-stream
+                                       (gr8s.security::make-image-peer-server-stream
                                         raw pki server-certificate server-key)
                                      (unless (string= "leecher-node" node-name)
                                        (error "TLS authenticated unexpected node ~A"
@@ -222,7 +222,7 @@
                           (error (condition) (setf server-error condition))))
                       :name "gr8s test image seeder"))
                (multiple-value-bind (tls socket)
-                   (gr8s::make-image-peer-client-stream
+                   (gr8s.security::make-image-peer-client-stream
                     "127.0.0.1" (usocket:get-local-port listener) "seed-node"
                     pki client-certificate client-key :timeout 10)
                  (unwind-protect
@@ -251,7 +251,7 @@
                      (format nil "gr8s-image-recovery-~36R/"
                              (random most-positive-fixnum))
                      (uiop:temporary-directory)))
-         (pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory)))
+         (pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" directory)))
          (bytes (make-array 50000 :element-type '(unsigned-byte 8)))
          (source nil) (corrupt-source nil)
          (destination (merge-pathnames "download.blob" directory))
@@ -299,7 +299,7 @@
                      (add-seeder "bad-node" bad-certificate bad-key corrupt-source)
                      (add-seeder "good-node" good-certificate good-key source))
                    (is-true
-                    (gr8s::download-image-from-peers
+                    (gr8s.security::download-image-from-peers
                      torrent store leech-id peers pki leecher-certificate leecher-key
                      :pipeline-depth 4 :timeout 10))
                    (is (equalp (ironclad:digest-sequence :sha256 bytes)
@@ -317,36 +317,36 @@
                      (format nil "gr8s-image-stop-~36R/"
                              (random most-positive-fixnum))
                      (uiop:temporary-directory)))
-         (pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory)))
+         (pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" directory)))
          (server nil))
     (unwind-protect
          (multiple-value-bind (certificate key)
              (make-test-image-peer-identity pki directory "stop-node")
            (setf server
-                 (gr8s::start-image-peer-server
+                 (gr8s.security::start-image-peer-server
                   pki certificate key (bt-octets "-GR8001-STOPSTOPSTOP")
                   :host "127.0.0.1" :port 0))
-           (is (plusp (gr8s::image-peer-server-port server)))
-           (gr8s::stop-image-peer-server server)
-           (is-false (bt:thread-alive-p (gr8s::image-peer-server-thread server))))
+           (is (plusp (gr8s.security::image-peer-server-port server)))
+           (gr8s.security::stop-image-peer-server server)
+           (is-false (bt:thread-alive-p (gr8s.security::image-peer-server-thread server))))
       (when (and server
-                 (bt:thread-alive-p (gr8s::image-peer-server-thread server)))
-        (ignore-errors (gr8s::stop-image-peer-server server)))
+                 (bt:thread-alive-p (gr8s.security::image-peer-server-thread server)))
+        (ignore-errors (gr8s.security::stop-image-peer-server server)))
       (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))
 
 (test image-peer-server-stops-blocked-accept-and-tls-readers
   (let* ((directory (merge-pathnames
                      (format nil "gr8s-image-blocked-stop-~36R/" (random most-positive-fixnum))
                      (uiop:temporary-directory)))
-         (pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory))))
+         (pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" directory))))
     (unwind-protect
          (multiple-value-bind (certificate key)
              (make-test-image-peer-identity pki directory "blocked-stop-node")
            (dolist (half-open '(nil t))
-             (let* ((server (gr8s::start-image-peer-server
+             (let* ((server (gr8s.security::start-image-peer-server
                              pki certificate key (bt-octets "-GR8001-STOPSTOPSTOP")
                              :host "0.0.0.0" :port 0))
-                    (port (gr8s::image-peer-server-port server))
+                    (port (gr8s.security::image-peer-server-port server))
                     (client nil) (stopper nil))
                (unwind-protect
                     (progn
@@ -367,14 +367,14 @@
                       (sleep .1)
                       (setf stopper
                             (bt:make-thread
-                             (lambda () (gr8s::stop-image-peer-server server) :stopped)
+                             (lambda () (gr8s.security::stop-image-peer-server server) :stopped)
                              :name "test image peer shutdown"))
                       (let ((result (sb-thread:join-thread stopper :timeout 5 :default :timed-out)))
                         (is (eq :stopped result))
                         (when (eq :timed-out result)
                           (let ((*print-level* 2) (*print-length* 3))
-                            (gr8s::debug-backtraces "image peer" 1))))
-                      (is-false (bt:thread-alive-p (gr8s::image-peer-server-thread server))))
+                            (gr8s.apiserver::debug-backtraces "image peer" 1))))
+                      (is-false (bt:thread-alive-p (gr8s.security::image-peer-server-thread server))))
                  (when client (ignore-errors (usocket:socket-close client)))
                  ;; Bound the regression even when testing the broken code:
                  ;; wake its blocked ACCEPT so it can observe the stop flag.

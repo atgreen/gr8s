@@ -14,25 +14,25 @@
 (test frozen-application-snapshot-is-independent-of-live-containers
   (with-temporary-store (store root)
     (let* ((pod (ha-make-pod store "frozen-pod"))
-           (node (gr8s:make-node-record :id "frozen-node" :name "frozen-node"
+           (node (gr8s.model::make-node-record :id "frozen-node" :name "frozen-node"
                                        :pod-cidr "10.88.0.0/20"))
            (bulk (make-string 65536 :initial-element #\x))
-           (object (gr8s::core-object "payload" bulk))
-           (history (gr8s::core-object "resource" "configmaps" "old" object))
-           (controller (gr8s::core-object "nested" (vector (gr8s::core-object "count" 1))))
+           (object (gr8s.resources::core-object "payload" bulk))
+           (history (gr8s.resources::core-object "resource" "configmaps" "old" object))
+           (controller (gr8s.resources::core-object "nested" (vector (gr8s.resources::core-object "count" 1))))
            (ordinary (merge-pathnames "before.jsonl" root))
            (target (merge-pathnames "frozen.jsonl" root)))
-      (gr8s:register-node store node)
-      (setf (gr8s.model::node-record-labels node) (gr8s::core-object "pool" "original")
-            (gethash (gr8s:pod-uid pod) (gr8s.store::pod-store-pod-condition-histories store))
-            (vector (gr8s::core-object "type" "Ready" "status" "False"))
-            (gethash (gr8s:pod-uid pod) (gr8s.store::pod-store-pod-published-statuses store))
-            (gr8s::core-object "phase" "Pending"))
-      (setf (gethash '("configmaps" "default" "bulk") (gr8s::pod-store-resources store)) object
-            (gr8s::pod-store-template-history store) (list history)
-            (gethash "job" (gr8s::pod-store-job-controller-states store)) controller
-            (gethash "deletion" (gr8s::pod-store-workload-deletions store))
-            (gr8s::core-object "nested" (vector 1 2)))
+      (gr8s.controllers::register-node store node)
+      (setf (gr8s.model::node-record-labels node) (gr8s.resources::core-object "pool" "original")
+            (gethash (gr8s.model::pod-uid pod) (gr8s.store::pod-store-pod-condition-histories store))
+            (vector (gr8s.resources::core-object "type" "Ready" "status" "False"))
+            (gethash (gr8s.model::pod-uid pod) (gr8s.store::pod-store-pod-published-statuses store))
+            (gr8s.resources::core-object "phase" "Pending"))
+      (setf (gethash '("configmaps" "default" "bulk") (gr8s.store::pod-store-resources store)) object
+            (gr8s.store::pod-store-template-history store) (list history)
+            (gethash "job" (gr8s.store::pod-store-job-controller-states store)) controller
+            (gethash "deletion" (gr8s.store::pod-store-workload-deletions store))
+            (gr8s.resources::core-object "nested" (vector 1 2)))
       (populate-snapshot-tracker store)
       (gr8s.resources::capture-store-snapshot store ordinary 42 7)
       (let* ((view (freeze-test-store-snapshot store 42 7))
@@ -40,31 +40,31 @@
              (original (symbol-function 'com.inuoe.jzon:stringify))
              (writes 0))
         (is (not (eq store shadow)))
-        (is (eq object (gethash '("configmaps" "default" "bulk") (gr8s::pod-store-resources shadow))))
-        (is (not (eq (gr8s::pod-store-template-history store) (gr8s::pod-store-template-history shadow))))
-        (is (eq history (first (gr8s::pod-store-template-history shadow))))
+        (is (eq object (gethash '("configmaps" "default" "bulk") (gr8s.store::pod-store-resources shadow))))
+        (is (not (eq (gr8s.store::pod-store-template-history store) (gr8s.store::pod-store-template-history shadow))))
+        (is (eq history (first (gr8s.store::pod-store-template-history shadow))))
         (is (eq bulk (gethash "payload" (gethash '("configmaps" "default" "bulk")
-                                                 (gr8s::pod-store-resources shadow)))))
+                                                 (gr8s.store::pod-store-resources shadow)))))
         ;; Core publication replaces objects; mutable model/controller containers
         ;; can change in place and must already have private snapshot copies.
-        (clrhash (gr8s::pod-store-resources store))
-        (setf (gr8s::pod-store-template-history store) nil
+        (clrhash (gr8s.store::pod-store-resources store))
+        (setf (gr8s.store::pod-store-template-history store) nil
               (gethash "count" (aref (gethash "nested" controller) 0)) 2
-              (aref (gethash "nested" (gethash "deletion" (gr8s::pod-store-workload-deletions store))) 0) 9
-              (gethash "changed" (gethash "metadata" (gr8s:pod-to-object pod))) t
+              (aref (gethash "nested" (gethash "deletion" (gr8s.store::pod-store-workload-deletions store))) 0) 9
+              (gethash "changed" (gethash "metadata" (gr8s.model::pod-to-object pod))) t
               (gethash "pool" (gr8s.model::node-record-labels node)) "changed"
-              (gethash "status" (aref (gethash (gr8s:pod-uid pod)
+              (gethash "status" (aref (gethash (gr8s.model::pod-uid pod)
                                                (gr8s.store::pod-store-pod-condition-histories store)) 0)) "True"
-              (gethash "phase" (gethash (gr8s:pod-uid pod)
+              (gethash "phase" (gethash (gr8s.model::pod-uid pod)
                                         (gr8s.store::pod-store-pod-published-statuses store))) "Running")
-        (clrhash (gr8s::pod-store-pods store))
-        (clrhash (gr8s::pod-store-nodes store))
+        (clrhash (gr8s.store::pod-store-pods store))
+        (clrhash (gr8s.store::pod-store-nodes store))
         (gr8s.image-distribution::clear-image-tracker-state (gr8s.store:pod-store-image-tracker store))
         (unwind-protect
              (progn
                (setf (symbol-function 'com.inuoe.jzon:stringify)
                      (lambda (value &rest arguments)
-                       (dolist (lock (list (gr8s::pod-store-lock store)
+                       (dolist (lock (list (gr8s.store::pod-store-lock store)
                                            (gr8s.store::pod-store-workload-lock store)
                                            (gr8s.store::pod-store-credential-lock store)
                                            (gr8s.store::pod-store-consensus-write-lock store)))
@@ -90,18 +90,18 @@
 
 (test frozen-secret-snapshot-pins-keys-before-credential-changes
   (with-temporary-store (store root)
-    (gr8s::enable-secret-encryption store)
-    (gr8s::create-core-resource
+    (gr8s.resources::enable-secret-encryption store)
+    (gr8s.resources::create-core-resource
      store "secrets"
-     (gr8s::core-object "apiVersion" "v1" "kind" "Secret"
-                        "metadata" (gr8s::core-object "name" "frozen-secret")
-                        "data" (gr8s::core-object "password" "cGlubmVk")) "default")
+     (gr8s.resources::core-object "apiVersion" "v1" "kind" "Secret"
+                        "metadata" (gr8s.resources::core-object "name" "frozen-secret")
+                        "data" (gr8s.resources::core-object "password" "cGlubmVk")) "default")
     (let* ((view (freeze-test-store-snapshot store 42 7))
            (shadow (gr8s.resources::frozen-store-snapshot-store view))
            (target (merge-pathnames "frozen-secret.jsonl" root))
-           (config (gr8s::pod-store-secret-encryption-config store)))
+           (config (gr8s.store::pod-store-secret-encryption-config store)))
       (delete-file (merge-pathnames "pki/cluster-ca.key" root))
-      (setf (gr8s::pod-store-secret-encryption-config store) nil)
+      (setf (gr8s.store::pod-store-secret-encryption-config store) nil)
       (gr8s.resources::capture-frozen-store-snapshot view target)
       (is (null (search "cGlubmVk" (uiop:read-file-string target))))
       (let* ((records (read-store-snapshot-records target))
@@ -114,7 +114,7 @@
         ;; A different store must never inherit the snapshot's credentials, and
         ;; a record not pinned in this view must not fall back to today's key.
         (signals error (gr8s.resources::derive-secret-encryption-key store (aref (gethash "keys" config) 0)))
-        (signals error (gr8s.resources::derive-secret-encryption-key shadow (gr8s::core-object "salt" "invalid")))))))
+        (signals error (gr8s.resources::derive-secret-encryption-key shadow (gr8s.resources::core-object "salt" "invalid")))))))
 
 (defun read-store-snapshot-records (path)
   (with-open-file (stream path)
@@ -126,18 +126,18 @@
            (pod (ha-make-pod store "captured-pod"))
            (original (symbol-function 'com.inuoe.jzon:stringify))
            (writes 0))
-      (gr8s:register-node store (gr8s:make-node-record :id "captured-node" :name "captured-node" :pod-cidr "10.88.0.0/20"))
-      (setf (gethash '("secrets" "default" "shared") (gr8s::pod-store-resources store))
-            (gr8s::core-object "data" (gr8s::core-object "shared" "replicated-secret"))
-            (gethash '("events" "default" "local") (gr8s::pod-store-resources store))
-            (gr8s::core-object "message" "local-event-sentinel"))
-      (setf (gethash "controller" (gr8s::pod-store-job-controller-states store))
-            (gr8s::core-object "finished" 2)
-            (gethash "deleting" (gr8s::pod-store-workload-deletions store))
-            (gr8s::core-object "policy" "Foreground")
-            (gr8s::pod-store-template-history store)
-            (list (gr8s::core-object "resource" "configmaps" "revision" 9)
-                  (gr8s::core-object "resource" "events" "message" "local-history-sentinel")))
+      (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "captured-node" :name "captured-node" :pod-cidr "10.88.0.0/20"))
+      (setf (gethash '("secrets" "default" "shared") (gr8s.store::pod-store-resources store))
+            (gr8s.resources::core-object "data" (gr8s.resources::core-object "shared" "replicated-secret"))
+            (gethash '("events" "default" "local") (gr8s.store::pod-store-resources store))
+            (gr8s.resources::core-object "message" "local-event-sentinel"))
+      (setf (gethash "controller" (gr8s.store::pod-store-job-controller-states store))
+            (gr8s.resources::core-object "finished" 2)
+            (gethash "deleting" (gr8s.store::pod-store-workload-deletions store))
+            (gr8s.resources::core-object "policy" "Foreground")
+            (gr8s.store::pod-store-template-history store)
+            (list (gr8s.resources::core-object "resource" "configmaps" "revision" 9)
+                  (gr8s.resources::core-object "resource" "events" "message" "local-history-sentinel")))
       (gr8s.security::write-private-text-exclusively
        (merge-pathnames "pki/member-private.key" directory) "member-private-sentinel")
       (unwind-protect
@@ -159,7 +159,7 @@
         (is (= 42 (gethash "index" header)))
         (is (= 7 (gethash "term" header)))
         (is (= (1- (length records)) (gethash "records" (car (last records)))))
-        (is (equal (gr8s:pod-uid pod) (gethash "uid" (gethash "metadata" (gethash "object" pod-record)))))
+        (is (equal (gr8s.model::pod-uid pod) (gethash "uid" (gethash "metadata" (gethash "object" pod-record)))))
         (is (hash-table-p (gethash "checkpoint" pod-record)))
         (is (hash-table-p (gethash "publication" pod-record)))
         (is (search "replicated-secret" text))
@@ -173,13 +173,13 @@
 
 (test encrypted-store-snapshot-does-not-expose-secret-data
   (with-temporary-store (store directory)
-    (gr8s::enable-secret-encryption store)
-    (gr8s::create-core-resource
+    (gr8s.resources::enable-secret-encryption store)
+    (gr8s.resources::create-core-resource
      store "secrets"
-     (gr8s::core-object
+     (gr8s.resources::core-object
       "apiVersion" "v1" "kind" "Secret"
-      "metadata" (gr8s::core-object "name" "snapshot-secret")
-      "data" (gr8s::core-object "password" "c25hcHNob3Qtc2VudGluZWw="))
+      "metadata" (gr8s.resources::core-object "name" "snapshot-secret")
+      "data" (gr8s.resources::core-object "password" "c25hcHNob3Qtc2VudGluZWw="))
      "default")
     (let ((target (merge-pathnames "encrypted-snapshot.jsonl" directory)))
       (gr8s.resources::capture-store-snapshot store target 42 7)
@@ -209,14 +209,14 @@
 (test store-snapshot-during-proposal-sees-committed-node-state
   (with-temporary-store (store directory)
     (let ((target (merge-pathnames "committed.jsonl" directory)))
-      (gr8s:register-node store (gr8s:make-node-record :id "worker" :name "worker" :pod-cidr "10.88.0.0/20"))
-      (let ((revision (gr8s::node-record-resource-version (gr8s:get-node store "worker"))))
-        (setf (gr8s::pod-store-consensus-commit-fn store)
+      (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "worker" :name "worker" :pod-cidr "10.88.0.0/20"))
+      (let ((revision (gr8s.model::node-record-resource-version (gr8s.controllers::get-node store "worker"))))
+        (setf (gr8s.store::pod-store-consensus-commit-fn store)
               (lambda (&rest arguments)
                 (declare (ignore arguments))
                 (gr8s.resources::capture-store-snapshot store target 42 7)
                 (error "Proposal did not commit")))
-        (signals error (gr8s::mark-node-ready store "worker" (get-universal-time)))
+        (signals error (gr8s.controllers::mark-node-ready store "worker" (get-universal-time)))
         (let* ((row (find "node" (read-store-snapshot-records target)
                           :test #'equal :key (lambda (r) (gethash "kind" r))))
                (object (gethash "object" row)))
@@ -224,11 +224,11 @@
           (is (equal revision (gethash "resourceVersion" object))))))))
 
 (defun capture-valid-store-snapshot (store target)
-  (gr8s::create-core-resource store "configmaps"
+  (gr8s.resources::create-core-resource store "configmaps"
                               (core-fixture "ConfigMap" "snapshot-config"
-                                            "data" (gr8s::core-object "key" "value")) "default")
+                                            "data" (gr8s.resources::core-object "key" "value")) "default")
   (ha-make-pod store "snapshot-pod")
-  (gr8s:register-node store (gr8s:make-node-record :id "snapshot-worker" :name "snapshot-worker" :pod-cidr "10.88.0.0/20"))
+  (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "snapshot-worker" :name "snapshot-worker" :pod-cidr "10.88.0.0/20"))
   (gr8s.resources::capture-store-snapshot store target 42 7))
 
 (defun write-snapshot-test-records (path records)
@@ -243,7 +243,7 @@
           (gr8s.resources::map-store-snapshot-records
            target (lambda (record) (is (hash-table-p record)) (incf count)) :expected-index 42 :expected-term 7)
         (is (= 42 (gethash "index" header)))
-        (is (= (gr8s::pod-store-pod-revision store) (gethash "podRevision" clocks)))
+        (is (= (gr8s.store::pod-store-pod-revision store) (gethash "podRevision" clocks)))
         (is (= records count)))
       (signals error (gr8s.resources::map-store-snapshot-records target nil :expected-index 41))
       (signals error (gr8s.resources::map-store-snapshot-records target nil :expected-term 8)))))

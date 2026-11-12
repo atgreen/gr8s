@@ -9,25 +9,25 @@
 (def-suite env-files :in gr8s)
 (in-suite env-files)
 
-(defun file-key-pod-object (selector &key (volume (gr8s::core-object "name" "config" "emptyDir" (gr8s::core-object))))
+(defun file-key-pod-object (selector &key (volume (gr8s.resources::core-object "name" "config" "emptyDir" (gr8s.resources::core-object))))
   "Return a Pod object whose container reads CONFIG from SELECTOR, with VOLUME."
-  (gr8s::core-object
-   "apiVersion" "v1" "kind" "Pod" "metadata" (gr8s::core-object "name" "files" "namespace" "default")
-   "spec" (gr8s::core-object
+  (gr8s.resources::core-object
+   "apiVersion" "v1" "kind" "Pod" "metadata" (gr8s.resources::core-object "name" "files" "namespace" "default")
+   "spec" (gr8s.resources::core-object
            "volumes" (if volume (vector volume) #())
-           "containers" (vector (gr8s::core-object
+           "containers" (vector (gr8s.resources::core-object
                                  "name" "app" "image" "busybox"
-                                 "env" (vector (gr8s::core-object "name" "CONFIG"
-                                                                  "valueFrom" (gr8s::core-object "fileKeyRef" selector))))))))
+                                 "env" (vector (gr8s.resources::core-object "name" "CONFIG"
+                                                                  "valueFrom" (gr8s.resources::core-object "fileKeyRef" selector))))))))
 
 (defun file-key-selector (&rest fields)
   "Return a fileKeyRef reading CONFIG_1 from config.env in volume config, with FIELDS overriding."
-  (let ((selector (gr8s::core-object "volumeName" "config" "path" "config.env" "key" "CONFIG_1")))
+  (let ((selector (gr8s.resources::core-object "volumeName" "config" "path" "config.env" "key" "CONFIG_1")))
     (loop for (key value) on fields by #'cddr do (setf (gethash key selector) value))
     selector))
 
 (test file-key-references-are-validated-as-the-api-server-does
-  (is (gr8s::pod-name (parse-pod (file-key-pod-object (file-key-selector "optional" t)))))
+  (is (gr8s.model::pod-name (parse-pod (file-key-pod-object (file-key-selector "optional" t)))))
   (dolist (selector (list (file-key-selector "key" "")
                           (file-key-selector "key" "A=B")
                           (file-key-selector "volumeName" "")
@@ -41,11 +41,11 @@
   (signals kubernetes-error (parse-pod (file-key-pod-object (file-key-selector "volumeName" "missing"))))
   (signals kubernetes-error
     (parse-pod (file-key-pod-object (file-key-selector)
-                                    :volume (gr8s::core-object "name" "config"
-                                                               "hostPath" (gr8s::core-object "path" "/tmp"))))))
+                                    :volume (gr8s.resources::core-object "name" "config"
+                                                               "hostPath" (gr8s.resources::core-object "path" "/tmp"))))))
 
 (test env-files-are-read-as-the-kubelets-parse-env-reads-them
-  (flet ((value (text key) (gr8s::parse-environment-file-value text key)))
+  (flet ((value (text key) (gr8s.kubelet::parse-environment-file-value text key)))
     (let ((text (format nil "# settings~%~%CONFIG_1='value1'~%  CONFIG_2='two words' # note~%MULTI='a~%b'~%EMPTY= 'ignored'~%")))
       (is (equal "value1" (value text "CONFIG_1")))
       (is (equal "two words" (value text "CONFIG_2")))
@@ -61,27 +61,27 @@
 (test file-key-values-come-from-the-pods-empty-dir
   (let* ((root (uiop:ensure-directory-pathname
                 (format nil "/tmp/gr8s-env-files-~36R" (random (expt 36 8) (make-random-state t)))))
-         (runtime (gr8s::make-containerd-runtime :log-root root))
+         (runtime (gr8s.runtime.containerd::make-containerd-runtime :log-root root))
          (pod (let ((pod (parse-pod (file-key-pod-object (file-key-selector)))))
-                (setf (gr8s::pod-uid pod) "uid-env-files")
+                (setf (gr8s.model::pod-uid pod) "uid-env-files")
                 pod)))
     (unwind-protect
-         (let ((file (merge-pathnames "config.env" (gr8s::pod-volume-directory runtime pod "config"))))
+         (let ((file (merge-pathnames "config.env" (gr8s.kubelet::pod-volume-directory runtime pod "config"))))
            ;; Before anything writes the file, the container cannot be configured.
-           (signals gr8s::container-config-error
-             (gr8s::containerd-file-key-environment-value runtime pod (file-key-selector)))
+           (signals gr8s.runtime::container-config-error
+             (gr8s.kubelet::containerd-file-key-environment-value runtime pod (file-key-selector)))
            (ensure-directories-exist file)
            (with-open-file (out file :direction :output :if-exists :supersede)
              (format out "CONFIG_1='value1'~%"))
            (is (equal '("value1" t) (multiple-value-list
-                                      (gr8s::containerd-file-key-environment-value runtime pod (file-key-selector)))))
+                                      (gr8s.kubelet::containerd-file-key-environment-value runtime pod (file-key-selector)))))
            (is (equal '(nil nil) (multiple-value-list
-                                  (gr8s::containerd-file-key-environment-value
+                                  (gr8s.kubelet::containerd-file-key-environment-value
                                    runtime pod (file-key-selector "key" "MISSING" "optional" t)))))
-           (signals gr8s::container-config-error
-             (gr8s::containerd-file-key-environment-value runtime pod (file-key-selector "key" "MISSING")))
+           (signals gr8s.runtime::container-config-error
+             (gr8s.kubelet::containerd-file-key-environment-value runtime pod (file-key-selector "key" "MISSING")))
            ;; The environment the container gets carries the value.
-           (is (equal "value1" (cdr (assoc "CONFIG" (gr8s::containerd-pod-environment runtime pod (aref (pod-containers pod) 0) nil)
+           (is (equal "value1" (cdr (assoc "CONFIG" (gr8s.kubelet::containerd-pod-environment runtime pod (aref (pod-containers pod) 0) nil)
                                            :test #'equal)))))
       (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
 
@@ -91,8 +91,8 @@
   (let* ((object (file-key-pod-object (file-key-selector)))
          (spec (gethash "spec" object))
          (container (aref (gethash "containers" spec) 0)))
-    (setf (gethash "lifecycle" container) (gr8s::core-object "stopSignal" "SIGUSR1")
-          (gethash "schedulingGroup" spec) (gr8s::core-object "podGroupName" "group"))
-    (let ((parsed (gethash "spec" (gr8s::pod-to-object (parse-pod object)))))
+    (setf (gethash "lifecycle" container) (gr8s.resources::core-object "stopSignal" "SIGUSR1")
+          (gethash "schedulingGroup" spec) (gr8s.resources::core-object "podGroupName" "group"))
+    (let ((parsed (gethash "spec" (gr8s.model::pod-to-object (parse-pod object)))))
       (is (null (nth-value 1 (gethash "schedulingGroup" parsed))))
       (is (null (nth-value 1 (gethash "stopSignal" (gethash "lifecycle" (aref (gethash "containers" parsed) 0)))))))))

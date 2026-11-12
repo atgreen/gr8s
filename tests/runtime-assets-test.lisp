@@ -37,17 +37,17 @@
                               host-local)
            (write-test-octets (merge-pathnames "bin/loopback" source) loopback)
            (write-test-octets (merge-pathnames "bin/firewall" source) firewall)
-           (let ((assets (gr8s::load-runtime-assets source)))
+           (let ((assets (gr8s.runtime::load-runtime-assets source)))
              (is (equal '("containerd" "containerd-shim-runc-v2" "runc"
                           "bridge" "host-local" "loopback" "firewall")
-                        (mapcar #'gr8s::runtime-asset-name assets)))
-             (gr8s::materialize-runtime-assets assets destination)
+                        (mapcar #'gr8s.runtime::runtime-asset-name assets)))
+             (gr8s.runtime::materialize-runtime-assets assets destination)
              (loop for asset in assets
                    for expected in (list containerd shim runc bridge host-local
                                          loopback firewall)
                    for path = (merge-pathnames
-                               (gr8s::runtime-asset-name asset) destination)
-                   do (is (equalp expected (gr8s::read-file-octets path)))
+                               (gr8s.runtime::runtime-asset-name asset) destination)
+                   do (is (equalp expected (gr8s.runtime::read-file-octets path)))
                       (is (plusp
                            (logand #o111
                                    (sb-posix:stat-mode (sb-posix:stat path))))))))
@@ -59,16 +59,16 @@
            (merge-pathnames
             (format nil "gr8s-embedded-assets-~36R/" (random (expt 36 8)))
             (uiop:temporary-directory)))
-         (gr8s::*embedded-runtime-assets* nil))
+         (gr8s.runtime::*embedded-runtime-assets* nil))
     (unwind-protect
          (progn
            (dolist (name '("containerd" "containerd-shim-runc-v2" "runc"
                            "bridge" "host-local" "loopback" "firewall"))
              (write-test-octets (merge-pathnames (format nil "bin/~A" name) root)
                                 #(1 2 3)))
-           (gr8s::embed-runtime-assets root)
-           (is (= 7 (length gr8s::*embedded-runtime-assets*)))
-           (is (gr8s::embedded-runtime-assets-p)))
+           (gr8s.runtime::embed-runtime-assets root)
+           (is (= 7 (length gr8s.runtime::*embedded-runtime-assets*)))
+           (is (gr8s.runtime::embedded-runtime-assets-p)))
       (uiop:delete-directory-tree root :validate t
                                   :if-does-not-exist :ignore))))
 
@@ -79,19 +79,19 @@
             (uiop:temporary-directory)))
          (events nil)
          (assets
-           (list (gr8s::make-runtime-asset
+           (list (gr8s.runtime::make-runtime-asset
                   :name "containerd" :octets #(1 2 3))
-                 (gr8s::make-runtime-asset
+                 (gr8s.runtime::make-runtime-asset
                   :name "containerd-shim-runc-v2" :octets #(4 5))
-                 (gr8s::make-runtime-asset
+                 (gr8s.runtime::make-runtime-asset
                   :name "runc" :octets #(6 7 8)))))
     (unwind-protect
-         (gr8s::call-with-runtime-assets
+         (gr8s.runtime::call-with-runtime-assets
           assets root
           (lambda (paths)
             (push :body events)
             (is (equalp #(1 2 3)
-                        (gr8s::read-file-octets
+                        (gr8s.runtime::read-file-octets
                          (cdr (assoc "containerd" paths :test #'string=)))))
             (is (every #'probe-file (mapcar #'cdr paths))))
           :mounter (lambda (directory)
@@ -112,12 +112,12 @@
             (uiop:temporary-directory)))
          (image (merge-pathnames "gr8s.bin" root))
          (runtime (merge-pathnames "runtime/" root))
-         (assets (list (gr8s::make-runtime-asset
+         (assets (list (gr8s.runtime::make-runtime-asset
                         :name "containerd" :octets #(1 2 3)))))
     (unwind-protect
          (progn
            (write-test-octets image #(127 69 76 70))
-           (gr8s::call-with-runtime-assets
+           (gr8s.runtime::call-with-runtime-assets
             assets runtime
             (lambda (paths)
               (declare (ignore paths))
@@ -140,8 +140,8 @@
     (unwind-protect
          (progn
            (write-test-octets executable #(127 69 76 70))
-           (gr8s::call-with-runtime-assets
-            (list (gr8s::make-runtime-asset :name "containerd" :octets #(1)))
+           (gr8s.runtime::call-with-runtime-assets
+            (list (gr8s.runtime::make-runtime-asset :name "containerd" :octets #(1)))
             runtime
             (lambda (paths)
               (declare (ignore paths))
@@ -179,7 +179,7 @@
            (with-open-file (stream writer :direction :output)
              (format stream "#!/bin/sh~%printf '#!/bin/sh\\nexit 0\\n' > \"$2\"~%chmod 755 \"$2\"~%"))
            (sb-posix:chmod (namestring writer) #o755)
-           (let ((image (gr8s::prepare-cni-plugin-image directory writer)))
+           (let ((image (gr8s.runtime::prepare-cni-plugin-image directory writer)))
              (is (equal "gr8s" (file-namestring image)))
              (is-true (probe-file image))
              (is-false (probe-file (concatenate 'string image ".pending")))))
@@ -191,8 +191,8 @@
         (*error-output* (make-broadcast-stream)))
     (unwind-protect
          (progn
-           (is-false (gr8s::prepare-cni-plugin-image directory "/bin/false"))
-           (is-false (gr8s::prepare-cni-plugin-image directory "/nonexistent/gr8s"))
+           (is-false (gr8s.runtime::prepare-cni-plugin-image directory "/bin/false"))
+           (is-false (gr8s.runtime::prepare-cni-plugin-image directory "/nonexistent/gr8s"))
            (is-false (probe-file (merge-pathnames "gr8s" directory))))
       (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))
 
@@ -206,6 +206,6 @@
                                (string-right-trim "/" (namestring (truename directory)))
                                :separator '(#\Space))))
              (mount-info (format nil "42 1 0:1 / ~A rw,nosuid shared:77 - bpf gr8s-bpf rw~%" encoded)))
-        (is-true (gr8s::filesystem-mounted-at-p directory "bpf" :mount-info mount-info))
-        (is-false (gr8s::filesystem-mounted-at-p directory "tmpfs" :mount-info mount-info))
-        (is-false (gr8s::filesystem-mounted-at-p path "bpf" :mount-info mount-info))))))
+        (is-true (gr8s.runtime::filesystem-mounted-at-p directory "bpf" :mount-info mount-info))
+        (is-false (gr8s.runtime::filesystem-mounted-at-p directory "tmpfs" :mount-info mount-info))
+        (is-false (gr8s.runtime::filesystem-mounted-at-p path "bpf" :mount-info mount-info))))))

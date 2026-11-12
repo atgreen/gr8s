@@ -41,8 +41,8 @@
 
 #+sbcl
 (test ag-grpc-channel-connects-over-a-unix-socket
-  (if (not (fboundp 'gr8s::make-unix-grpc-channel))
-      (is (fboundp 'gr8s::make-unix-grpc-channel))
+  (if (not (fboundp 'gr8s.protocol::make-unix-grpc-channel))
+      (is (fboundp 'gr8s.protocol::make-unix-grpc-channel))
       (let ((path (format nil "/tmp/gr8s-grpc-~36R.sock"
                           (random (expt 36 8))))
             (listener nil)
@@ -54,7 +54,7 @@
              (progn
                (multiple-value-setq (listener server-thread release-server)
                  (make-unix-http2-test-server path))
-               (setf channel (gr8s::make-unix-grpc-channel path))
+               (setf channel (gr8s.protocol::make-unix-grpc-channel path))
                (is (ag-grpc::channel-connected-p channel)))
           (when channel (ag-grpc:channel-close channel))
           (when listener

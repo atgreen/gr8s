@@ -12,39 +12,39 @@
 (defun policy-test-pod (name &key (namespace "team") requests limits spec-fields)
   "Build an unassigned one-container Pod declaring REQUESTS and LIMITS plists."
   (flet ((resource-list (plist)
-           (let ((table (gr8s::core-object)))
+           (let ((table (gr8s.resources::core-object)))
              (loop for (key value) on plist by #'cddr do (setf (gethash key table) value))
              table)))
-    (let* ((resources (gr8s::core-object))
-           (spec (gr8s::core-object "containers" (vector (gr8s::core-object "name" "main" "image" "busybox:latest" "resources" resources)))))
+    (let* ((resources (gr8s.resources::core-object))
+           (spec (gr8s.resources::core-object "containers" (vector (gr8s.resources::core-object "name" "main" "image" "busybox:latest" "resources" resources)))))
       (when requests (setf (gethash "requests" resources) (resource-list requests)))
       (when limits (setf (gethash "limits" resources) (resource-list limits)))
       (loop for (key value) on spec-fields by #'cddr do (setf (gethash key spec) value))
-      (parse-pod (gr8s::core-object "apiVersion" "v1" "kind" "Pod"
-                                    "metadata" (gr8s::core-object "name" name "namespace" namespace)
+      (parse-pod (gr8s.resources::core-object "apiVersion" "v1" "kind" "Pod"
+                                    "metadata" (gr8s.resources::core-object "name" name "namespace" namespace)
                                     "spec" spec)))))
 
 (defun policy-test-quota (store name hard &key scopes)
   "Create a ResourceQuota with the HARD plist in the team namespace."
-  (let ((table (gr8s::core-object)))
+  (let ((table (gr8s.resources::core-object)))
     (loop for (key value) on hard by #'cddr do (setf (gethash key table) value))
-    (gr8s::create-core-resource
+    (gr8s.resources::create-core-resource
      store "resourcequotas"
-     (gr8s::core-object "metadata" (gr8s::core-object "name" name)
+     (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" name)
                         "spec" (if scopes
-                                   (gr8s::core-object "hard" table "scopes" scopes)
-                                   (gr8s::core-object "hard" table)))
+                                   (gr8s.resources::core-object "hard" table "scopes" scopes)
+                                   (gr8s.resources::core-object "hard" table)))
      "team")))
 
 (defun policy-test-used (store name)
   "Reconcile quotas and return NAME's status.used table."
-  (gr8s::reconcile-resource-quotas store)
-  (gethash "used" (gethash "status" (gr8s::get-core-resource store "resourcequotas" "team" name))))
+  (gr8s.resources::reconcile-resource-quotas store)
+  (gethash "used" (gethash "status" (gr8s.resources::get-core-resource store "resourcequotas" "team" name))))
 
 (defun policy-test-forbidden-p (function)
   "Return whether calling FUNCTION signals a 403 Kubernetes error."
   (handler-case (progn (funcall function) nil)
-    (kubernetes-error (condition) (= 403 (gr8s::kubernetes-error-status-code condition)))))
+    (kubernetes-error (condition) (= 403 (gr8s.model::kubernetes-error-status-code condition)))))
 
 (test quota-status-counts-objects-and-enforces-hard-limits
   (with-temporary-store (store path)
@@ -56,12 +56,12 @@
       (is (equal "0" (gethash "count/replicasets.apps" used))))
     (is-true (policy-test-forbidden-p
               (lambda () (policy-test-quota store "second" '("pods" "1")))))
-    (gr8s::create-core-resource store "secrets" (gr8s::core-object "metadata" (gr8s::core-object "name" "one")) "team")
+    (gr8s.resources::create-core-resource store "secrets" (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "one")) "team")
     (is (equal "1" (gethash "secrets" (policy-test-used store "objects"))))
     (is-true (policy-test-forbidden-p
               (lambda ()
-                (gr8s::create-core-resource store "secrets" (gr8s::core-object "metadata" (gr8s::core-object "name" "two")) "team"))))
-    (gr8s::delete-core-resource store "secrets" "team" "one")
+                (gr8s.resources::create-core-resource store "secrets" (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "two")) "team"))))
+    (gr8s.resources::delete-core-resource store "secrets" "team" "one")
     (is (equal "0" (gethash "secrets" (policy-test-used store "objects"))))))
 
 (test quota-accounts-pod-compute-and-extended-resources
@@ -111,29 +111,29 @@
   (with-temporary-store (store path)
     (values path)
     (policy-test-quota store "q" '("cpu" "1"))
-    (gr8s::reconcile-resource-quotas store)
-    (let ((gr8s::*policy-status-write* t))
-      (gr8s::update-core-resource store "resourcequotas" "team" "q"
+    (gr8s.resources::reconcile-resource-quotas store)
+    (let ((gr8s.resources::*policy-status-write* t))
+      (gr8s.resources::update-core-resource store "resourcequotas" "team" "q"
                                   (lambda (old)
-                                    (setf (gethash "status" old) (gr8s::core-object "hard" (gr8s::core-object "cpu" "2")))
+                                    (setf (gethash "status" old) (gr8s.resources::core-object "hard" (gr8s.resources::core-object "cpu" "2")))
                                     old)))
-    (is (equal "2" (gethash "cpu" (gethash "hard" (gethash "status" (gr8s::get-core-resource store "resourcequotas" "team" "q"))))))
+    (is (equal "2" (gethash "cpu" (gethash "hard" (gethash "status" (gr8s.resources::get-core-resource store "resourcequotas" "team" "q"))))))
     ;; An ordinary update keeps the server-owned status.
-    (let ((updated (gr8s::update-core-resource store "resourcequotas" "team" "q"
+    (let ((updated (gr8s.resources::update-core-resource store "resourcequotas" "team" "q"
                                                (lambda (old)
                                                  (setf (gethash "cpu" (gethash "hard" (gethash "spec" old))) "3"
-                                                       (gethash "status" old) (gr8s::core-object))
+                                                       (gethash "status" old) (gr8s.resources::core-object))
                                                  old))))
       (is (equal "2" (gethash "cpu" (gethash "hard" (gethash "status" updated))))))
-    (gr8s::reconcile-resource-quotas store)
-    (is (equal "3" (gethash "cpu" (gethash "hard" (gethash "status" (gr8s::get-core-resource store "resourcequotas" "team" "q"))))))))
+    (gr8s.resources::reconcile-resource-quotas store)
+    (is (equal "3" (gethash "cpu" (gethash "hard" (gethash "status" (gr8s.resources::get-core-resource store "resourcequotas" "team" "q"))))))))
 
 (defun policy-test-limit-range (store name limit)
   "Create a one-item LimitRange in the team namespace."
-  (gr8s::create-core-resource
+  (gr8s.resources::create-core-resource
    store "limitranges"
-   (gr8s::core-object "metadata" (gr8s::core-object "name" name)
-                      "spec" (gr8s::core-object "limits" (vector limit)))
+   (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" name)
+                      "spec" (gr8s.resources::core-object "limits" (vector limit)))
    "team"))
 
 (defun policy-test-container-resources (pod)
@@ -146,147 +146,147 @@
     (values path)
     (policy-test-limit-range
      store "bounds"
-     (gr8s::core-object "type" "Container"
-                        "min" (gr8s::core-object "cpu" "50m" "memory" "100Mi" "ephemeral-storage" "100Gi")
-                        "max" (gr8s::core-object "cpu" "500m" "memory" "500Mi" "ephemeral-storage" "500Gi")
-                        "default" (gr8s::core-object "cpu" "500m" "memory" "500Mi" "ephemeral-storage" "500Gi")
-                        "defaultRequest" (gr8s::core-object "cpu" "100m" "memory" "200Mi" "ephemeral-storage" "200Gi")))
+     (gr8s.resources::core-object "type" "Container"
+                        "min" (gr8s.resources::core-object "cpu" "50m" "memory" "100Mi" "ephemeral-storage" "100Gi")
+                        "max" (gr8s.resources::core-object "cpu" "500m" "memory" "500Mi" "ephemeral-storage" "500Gi")
+                        "default" (gr8s.resources::core-object "cpu" "500m" "memory" "500Mi" "ephemeral-storage" "500Gi")
+                        "defaultRequest" (gr8s.resources::core-object "cpu" "100m" "memory" "200Mi" "ephemeral-storage" "200Gi")))
     (multiple-value-bind (requests limits)
-        (policy-test-container-resources (gr8s::admit-pod-policies store (policy-test-pod "none")))
+        (policy-test-container-resources (gr8s.resources::admit-pod-policies store (policy-test-pod "none")))
       (is (equal "100m" (gethash "cpu" requests)))
       (is (equal "200Gi" (gethash "ephemeral-storage" requests)))
       (is (equal "500Mi" (gethash "memory" limits))))
     ;; A declared limit became the request before admission, as upstream defaulting does.
     (multiple-value-bind (requests limits)
         (policy-test-container-resources
-         (gr8s::admit-pod-policies store (policy-test-pod "partial" :requests '("memory" "150Mi" "ephemeral-storage" "150Gi")
+         (gr8s.resources::admit-pod-policies store (policy-test-pod "partial" :requests '("memory" "150Mi" "ephemeral-storage" "150Gi")
                                                                     :limits '("cpu" "300m"))))
       (is (equal "300m" (gethash "cpu" requests)))
       (is (equal "150Mi" (gethash "memory" requests)))
       (is (equal "300m" (gethash "cpu" limits)))
       (is (equal "500Gi" (gethash "ephemeral-storage" limits))))
     (is-true (policy-test-forbidden-p
-              (lambda () (gr8s::admit-pod-policies store (policy-test-pod "small" :requests '("cpu" "10m"))))))
+              (lambda () (gr8s.resources::admit-pod-policies store (policy-test-pod "small" :requests '("cpu" "10m"))))))
     (is-true (policy-test-forbidden-p
-              (lambda () (gr8s::admit-pod-policies store (policy-test-pod "big" :requests '("cpu" "600m"))))))))
+              (lambda () (gr8s.resources::admit-pod-policies store (policy-test-pod "big" :requests '("cpu" "600m"))))))))
 
 (test limit-range-api-defaults-validates-and-enforces-claims
   (with-temporary-store (store path)
     (values path)
     (let* ((created (policy-test-limit-range
                      store "defaulted"
-                     (gr8s::core-object "type" "Container" "max" (gr8s::core-object "cpu" "2"))))
+                     (gr8s.resources::core-object "type" "Container" "max" (gr8s.resources::core-object "cpu" "2"))))
            (item (aref (gethash "limits" (gethash "spec" created)) 0)))
       (is (equal "2" (gethash "cpu" (gethash "default" item))))
       (is (equal "2" (gethash "cpu" (gethash "defaultRequest" item)))))
     (signals kubernetes-error
       (policy-test-limit-range store "inverted"
-                               (gr8s::core-object "type" "Container"
-                                                  "min" (gr8s::core-object "cpu" "2")
-                                                  "max" (gr8s::core-object "cpu" "1"))))
+                               (gr8s.resources::core-object "type" "Container"
+                                                  "min" (gr8s.resources::core-object "cpu" "2")
+                                                  "max" (gr8s.resources::core-object "cpu" "1"))))
     (signals kubernetes-error
-      (policy-test-limit-range store "unknown" (gr8s::core-object "type" "Banana")))
+      (policy-test-limit-range store "unknown" (gr8s.resources::core-object "type" "Banana")))
     (policy-test-limit-range store "claims"
-                             (gr8s::core-object "type" "PersistentVolumeClaim"
-                                                "max" (gr8s::core-object "storage" "1Gi")))
+                             (gr8s.resources::core-object "type" "PersistentVolumeClaim"
+                                                "max" (gr8s.resources::core-object "storage" "1Gi")))
     (is-true (policy-test-forbidden-p
               (lambda ()
-                (gr8s::create-core-resource
+                (gr8s.resources::create-core-resource
                  store "persistentvolumeclaims"
-                 (gr8s::core-object "metadata" (gr8s::core-object "name" "big")
-                                    "spec" (gr8s::core-object "accessModes" #("ReadWriteOnce")
-                                                              "resources" (gr8s::core-object "requests" (gr8s::core-object "storage" "2Gi"))))
+                 (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "big")
+                                    "spec" (gr8s.resources::core-object "accessModes" #("ReadWriteOnce")
+                                                              "resources" (gr8s.resources::core-object "requests" (gr8s.resources::core-object "storage" "2Gi"))))
                  "team"))))))
 
 (test limit-range-enforces-pod-totals-and-request-ratio
   (with-temporary-store (store path)
     (values path)
-    (policy-test-limit-range store "pods" (gr8s::core-object "type" "Pod" "max" (gr8s::core-object "cpu" "1")))
+    (policy-test-limit-range store "pods" (gr8s.resources::core-object "type" "Pod" "max" (gr8s.resources::core-object "cpu" "1")))
     (is-true (policy-test-forbidden-p
-              (lambda () (gr8s::admit-pod-policies store (policy-test-pod "unlimited")))))
+              (lambda () (gr8s.resources::admit-pod-policies store (policy-test-pod "unlimited")))))
     (is-false (policy-test-forbidden-p
-               (lambda () (gr8s::admit-pod-policies store (policy-test-pod "ok" :limits '("cpu" "1"))))))
-    (policy-test-limit-range store "ratio" (gr8s::core-object "type" "Container" "maxLimitRequestRatio" (gr8s::core-object "cpu" "2")))
+               (lambda () (gr8s.resources::admit-pod-policies store (policy-test-pod "ok" :limits '("cpu" "1"))))))
+    (policy-test-limit-range store "ratio" (gr8s.resources::core-object "type" "Container" "maxLimitRequestRatio" (gr8s.resources::core-object "cpu" "2")))
     (is-true (policy-test-forbidden-p
-              (lambda () (gr8s::admit-pod-policies store (policy-test-pod "wide" :requests '("cpu" "100m") :limits '("cpu" "1"))))))))
+              (lambda () (gr8s.resources::admit-pod-policies store (policy-test-pod "wide" :requests '("cpu" "100m") :limits '("cpu" "1"))))))))
 
 (defun policy-test-runtime-class (store name &rest fields)
   "Create a RuntimeClass NAME with extra top-level FIELDS."
-  (let ((object (gr8s::core-object "metadata" (gr8s::core-object "name" name) "handler" "runc")))
+  (let ((object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" name) "handler" "runc")))
     (loop for (key value) on fields by #'cddr do (setf (gethash key object) value))
-    (gr8s::create-core-resource store "runtimeclasses" object nil)))
+    (gr8s.resources::create-core-resource store "runtimeclasses" object nil)))
 
 (test runtime-class-admission-resolves-handler-overhead-and-scheduling
   (with-temporary-store (store path)
     (values path)
     (is-true (policy-test-forbidden-p
-              (lambda () (gr8s::admit-pod-policies store (policy-test-pod "missing" :spec-fields (list "runtimeClassName" "absent"))))))
+              (lambda () (gr8s.resources::admit-pod-policies store (policy-test-pod "missing" :spec-fields (list "runtimeClassName" "absent"))))))
     (policy-test-runtime-class store "fast"
-                               "overhead" (gr8s::core-object "podFixed" (gr8s::core-object "cpu" "10m" "memory" "1Mi"))
-                               "scheduling" (gr8s::core-object "nodeSelector" (gr8s::core-object "disk" "ssd")))
-    (let* ((pod (gr8s::admit-pod-policies store (policy-test-pod "using" :spec-fields (list "runtimeClassName" "fast"))))
+                               "overhead" (gr8s.resources::core-object "podFixed" (gr8s.resources::core-object "cpu" "10m" "memory" "1Mi"))
+                               "scheduling" (gr8s.resources::core-object "nodeSelector" (gr8s.resources::core-object "disk" "ssd")))
+    (let* ((pod (gr8s.resources::admit-pod-policies store (policy-test-pod "using" :spec-fields (list "runtimeClassName" "fast"))))
            (spec (gethash "spec" (pod-to-object pod))))
-      (is (equal "runc" (gr8s::pod-runtime-handler pod)))
+      (is (equal "runc" (gr8s.kubelet::pod-runtime-handler pod)))
       (is (equal "10m" (gethash "cpu" (gethash "overhead" spec))))
       (is (equal "ssd" (gethash "disk" (gethash "nodeSelector" spec))))
       ;; Overhead is charged to the Pod's effective requests.
-      (is (= 1/100 (gethash "cpu" (gr8s::pod-spec-resource-totals spec)))))
+      (is (= 1/100 (gethash "cpu" (gr8s.kubelet::pod-spec-resource-totals spec)))))
     (is-true (policy-test-forbidden-p
-              (lambda () (gr8s::admit-pod-policies
+              (lambda () (gr8s.resources::admit-pod-policies
                           store (policy-test-pod "conflict" :spec-fields (list "runtimeClassName" "fast"
-                                                                               "nodeSelector" (gr8s::core-object "disk" "hdd")))))))
+                                                                               "nodeSelector" (gr8s.resources::core-object "disk" "hdd")))))))
     (is-true (policy-test-forbidden-p
-              (lambda () (gr8s::admit-pod-policies
-                          store (policy-test-pod "stray" :spec-fields (list "overhead" (gr8s::core-object "cpu" "1")))))))
+              (lambda () (gr8s.resources::admit-pod-policies
+                          store (policy-test-pod "stray" :spec-fields (list "overhead" (gr8s.resources::core-object "cpu" "1")))))))
     (signals kubernetes-error
-      (gr8s::update-core-resource store "runtimeclasses" nil "fast"
+      (gr8s.resources::update-core-resource store "runtimeclasses" nil "fast"
                                   (lambda (old) (setf (gethash "handler" old) "other") old)))
     (signals kubernetes-error (policy-test-runtime-class store "Bad_Handler" "handler" "Not A Label"))))
 
 (test priority-class-rules-and-pod-resolution
   (with-temporary-store (store path)
     (values path)
-    (gr8s::ensure-system-priority-classes store)
+    (gr8s.resources::ensure-system-priority-classes store)
     (flet ((class (name value &rest fields)
-             (let ((object (gr8s::core-object "metadata" (gr8s::core-object "name" name) "value" value)))
+             (let ((object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" name) "value" value)))
                (loop for (key field-value) on fields by #'cddr do (setf (gethash key object) field-value))
-               (gr8s::create-core-resource store "priorityclasses" object nil))))
-      (let ((pod (gr8s::admit-pod-policies store (policy-test-pod "plain"))))
+               (gr8s.resources::create-core-resource store "priorityclasses" object nil))))
+      (let ((pod (gr8s.resources::admit-pod-policies store (policy-test-pod "plain"))))
         (is (= 0 (gethash "priority" (gethash "spec" (pod-to-object pod)))))
         (is (equal "PreemptLowerPriority" (gethash "preemptionPolicy" (gethash "spec" (pod-to-object pod))))))
       (is (= 2000000000
              (gethash "priority" (gethash "spec" (pod-to-object
-                                                  (gr8s::admit-pod-policies store (policy-test-pod "critical" :spec-fields (list "priorityClassName" "system-cluster-critical"))))))))
+                                                  (gr8s.resources::admit-pod-policies store (policy-test-pod "critical" :spec-fields (list "priorityClassName" "system-cluster-critical"))))))))
       (is-true (policy-test-forbidden-p
-                (lambda () (gr8s::admit-pod-policies store (policy-test-pod "absent" :spec-fields (list "priorityClassName" "nope"))))))
+                (lambda () (gr8s.resources::admit-pod-policies store (policy-test-pod "absent" :spec-fields (list "priorityClassName" "nope"))))))
       (is-true (policy-test-forbidden-p (lambda () (class "too-high" 1000000001))))
       (is-true (policy-test-forbidden-p (lambda () (class "system-mine" 1))))
-      (is-true (policy-test-forbidden-p (lambda () (gr8s::delete-core-resource store "priorityclasses" nil "system-node-critical"))))
+      (is-true (policy-test-forbidden-p (lambda () (gr8s.resources::delete-core-resource store "priorityclasses" nil "system-node-critical"))))
       (class "gentle" 5 "preemptionPolicy" "Never" "globalDefault" t)
       (signals kubernetes-error (class "second-default" 6 "globalDefault" t))
       (signals kubernetes-error
-        (gr8s::update-core-resource store "priorityclasses" nil "gentle"
+        (gr8s.resources::update-core-resource store "priorityclasses" nil "gentle"
                                     (lambda (old) (setf (gethash "value" old) 7) old)))
       (is (equal "edited"
                  (gethash "description"
-                          (gr8s::update-core-resource store "priorityclasses" nil "gentle"
+                          (gr8s.resources::update-core-resource store "priorityclasses" nil "gentle"
                                                       (lambda (old) (setf (gethash "description" old) "edited") old)))))
-      (let* ((pod (gr8s::admit-pod-policies store (policy-test-pod "defaulted")))
+      (let* ((pod (gr8s.resources::admit-pod-policies store (policy-test-pod "defaulted")))
              (spec (gethash "spec" (pod-to-object pod))))
         (is (= 5 (gethash "priority" spec)))
         (is (equal "gentle" (gethash "priorityClassName" spec)))
         (is (equal "Never" (gethash "preemptionPolicy" spec))))
       (is-true (policy-test-forbidden-p
-                (lambda () (gr8s::admit-pod-policies store (policy-test-pod "lying" :spec-fields (list "priority" 99)))))))))
+                (lambda () (gr8s.resources::admit-pod-policies store (policy-test-pod "lying" :spec-fields (list "priority" 99)))))))))
 
 (test pod-updates-keep-admission-fields-and-requirements-immutable
   (with-temporary-store (store path)
     (values path)
-    (let* ((pod (create-pod store (gr8s::admit-pod-policies store (policy-test-pod "held" :requests '("cpu" "100m")))))
-           (changed (gr8s::copy-core-object (pod-to-object pod))))
+    (let* ((pod (create-pod store (gr8s.resources::admit-pod-policies store (policy-test-pod "held" :requests '("cpu" "100m")))))
+           (changed (gr8s.resources::copy-core-object (pod-to-object pod))))
       (setf (gethash "cpu" (gethash "requests" (gethash "resources" (aref (gethash "containers" (gethash "spec" changed)) 0)))) "200m")
       (signals kubernetes-error (update-pod store (parse-pod changed) (pod-resource-version pod)))
-      (let ((omitted (gr8s::copy-core-object (pod-to-object pod))))
+      (let ((omitted (gr8s.resources::copy-core-object (pod-to-object pod))))
         (remhash "priority" (gethash "spec" omitted))
         (let ((updated (update-pod store (parse-pod omitted) (pod-resource-version pod))))
           (is (= 0 (gethash "priority" (gethash "spec" (pod-to-object updated))))))))))
@@ -305,54 +305,54 @@
     (let* ((runtime (make-fake-runtime))
            (reconciler (make-reconciler store runtime))
            (pod (create-pod store (policy-test-pod "brief" :spec-fields (list "activeDeadlineSeconds" 100)))))
-      (is (equal "Running" (gethash "phase" (gr8s::reconcile-pod reconciler "team" "brief"))))
-      (let ((gr8s::*pod-deletion-clock*
-              (lambda () (+ 200 (gr8s::pod-deletion-time (gethash "creationTimestamp" (gethash "metadata" (pod-to-object pod))))))))
-        (let ((status (gr8s::reconcile-pod reconciler "team" "brief")))
+      (is (equal "Running" (gethash "phase" (gr8s.kubelet::reconcile-pod reconciler "team" "brief"))))
+      (let ((gr8s.kubelet::*pod-deletion-clock*
+              (lambda () (+ 200 (gr8s.kubelet::pod-deletion-time (gethash "creationTimestamp" (gethash "metadata" (pod-to-object pod))))))))
+        (let ((status (gr8s.kubelet::reconcile-pod reconciler "team" "brief")))
           (is (equal "Failed" (gethash "phase" status)))
           (is (equal "DeadlineExceeded" (gethash "reason" status))))
-        (is (null (gr8s::runtime-observe runtime (pod-uid pod))))))))
+        (is (null (gr8s.runtime::runtime-observe runtime (pod-uid pod))))))))
 
 (defun policy-test-node (store name &key extended capacity)
   "Register ready node NAME with EXTENDED advertised and CAPACITY measured quantity tables."
   ;; Each node of a store needs its own Pod CIDR: two random picks collided one run in 200.
-  (gr8s:register-node store (gr8s:make-node-record :id (concatenate 'string "id-" name) :name name
-                                                   :pod-cidr (format nil "10.88.~D.0/24" (length (gr8s::list-nodes store)))))
-  (gr8s:mark-node-ready store name (get-universal-time) :lease-duration 3600)
-  (when extended (gr8s::update-node-extended-resources store name extended))
-  (when capacity (gr8s::update-node-capacity store name capacity)))
+  (gr8s.controllers::register-node store (gr8s.model::make-node-record :id (concatenate 'string "id-" name) :name name
+                                                   :pod-cidr (format nil "10.88.~D.0/24" (length (gr8s.controllers::list-nodes store)))))
+  (gr8s.controllers::mark-node-ready store name (get-universal-time) :lease-duration 3600)
+  (when extended (gr8s.controllers::update-node-extended-resources store name extended))
+  (when capacity (gr8s.controllers::update-node-capacity store name capacity)))
 
 (defun policy-test-class (store name value)
   "Create a PriorityClass NAME with VALUE."
-  (gr8s::create-core-resource store "priorityclasses"
-                              (gr8s::core-object "metadata" (gr8s::core-object "name" name) "value" value) nil))
+  (gr8s.resources::create-core-resource store "priorityclasses"
+                              (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" name) "value" value) nil))
 
 (defun policy-test-priority-pod (store name class dongles)
   "Admit and store a Pod in CLASS using DONGLES of the extended test resource."
-  (create-pod store (gr8s::admit-pod-policies
+  (create-pod store (gr8s.resources::admit-pod-policies
                      store (policy-test-pod name :limits (list "example.com/dongle" (write-to-string dongles))
                                                  :spec-fields (list "priorityClassName" class)))))
 
 (defun policy-test-deleting-p (store name)
   "Return whether the team Pod NAME has begun deletion."
-  (gr8s::deletion-requested-p (get-pod store "team" name)))
+  (gr8s.kubelet::deletion-requested-p (get-pod store "team" name)))
 
 (test scheduler-charges-requests-against-node-resources
   (with-temporary-store (store path)
     (values path)
-    (policy-test-node store "small" :capacity (gr8s::core-object "cpu" "1" "pods" "2"))
+    (policy-test-node store "small" :capacity (gr8s.resources::core-object "cpu" "1" "pods" "2"))
     (let ((pod (create-pod store (policy-test-pod "dongle" :limits '("example.com/dongle" "1")))))
-      (is (null (gr8s::schedule-pod store pod))))
-    (gr8s::update-node-extended-resources store "small" (gr8s::core-object "example.com/dongle" "1"))
-    (is (equal "small" (gr8s:node-record-name
-                        (gr8s::schedule-pod store (get-pod store "team" "dongle")))))
+      (is (null (gr8s.controllers::schedule-pod store pod))))
+    (gr8s.controllers::update-node-extended-resources store "small" (gr8s.resources::core-object "example.com/dongle" "1"))
+    (is (equal "small" (gr8s.model::node-record-name
+                        (gr8s.controllers::schedule-pod store (get-pod store "team" "dongle")))))
     (is (equal "1" (gethash "example.com/dongle"
-                            (gethash "allocatable" (gethash "status" (gr8s::node-api-object (gr8s::get-node store "small")))))))
-    (is (null (gr8s::schedule-pod store (create-pod store (policy-test-pod "second-dongle" :limits '("example.com/dongle" "1"))))))
-    (is (null (gr8s::schedule-pod store (create-pod store (policy-test-pod "too-big" :requests '("cpu" "2"))))))
-    (is-true (gr8s::schedule-pod store (create-pod store (policy-test-pod "fits" :requests '("cpu" "1")))))
+                            (gethash "allocatable" (gethash "status" (gr8s.resources::node-api-object (gr8s.controllers::get-node store "small")))))))
+    (is (null (gr8s.controllers::schedule-pod store (create-pod store (policy-test-pod "second-dongle" :limits '("example.com/dongle" "1"))))))
+    (is (null (gr8s.controllers::schedule-pod store (create-pod store (policy-test-pod "too-big" :requests '("cpu" "2"))))))
+    (is-true (gr8s.controllers::schedule-pod store (create-pod store (policy-test-pod "fits" :requests '("cpu" "1")))))
     ;; The node's two Pod slots are now taken.
-    (is (null (gr8s::schedule-pod store (create-pod store (policy-test-pod "third")))))))
+    (is (null (gr8s.controllers::schedule-pod store (create-pod store (policy-test-pod "third")))))))
 
 (test node-affinity-selects-and-refuses-nodes
   (with-temporary-store (store path)
@@ -360,84 +360,84 @@
     (policy-test-node store "alpha")
     (policy-test-node store "beta")
     (flet ((term (key operator value)
-             (gr8s::core-object (if (uiop:string-prefix-p "metadata." key) "matchFields" "matchExpressions")
-                                (vector (gr8s::core-object "key" key "operator" operator "values" (vector value))))))
+             (gr8s.resources::core-object (if (uiop:string-prefix-p "metadata." key) "matchFields" "matchExpressions")
+                                (vector (gr8s.resources::core-object "key" key "operator" operator "values" (vector value))))))
       (let ((required (lambda (key operator value)
-                        (gr8s::core-object "nodeAffinity"
-                                           (gr8s::core-object "requiredDuringSchedulingIgnoredDuringExecution"
-                                                              (gr8s::core-object "nodeSelectorTerms" (vector (term key operator value))))))))
+                        (gr8s.resources::core-object "nodeAffinity"
+                                           (gr8s.resources::core-object "requiredDuringSchedulingIgnoredDuringExecution"
+                                                              (gr8s.resources::core-object "nodeSelectorTerms" (vector (term key operator value))))))))
         (is (equal "beta"
-                   (gr8s:node-record-name
-                    (gr8s::schedule-pod store (create-pod store (policy-test-pod "named" :spec-fields (list "affinity" (funcall required "metadata.name" "In" "beta"))))))))
-        (is (null (gr8s::schedule-pod store (create-pod store (policy-test-pod "absent" :spec-fields (list "affinity" (funcall required "metadata.name" "In" "gamma")))))))
+                   (gr8s.model::node-record-name
+                    (gr8s.controllers::schedule-pod store (create-pod store (policy-test-pod "named" :spec-fields (list "affinity" (funcall required "metadata.name" "In" "beta"))))))))
+        (is (null (gr8s.controllers::schedule-pod store (create-pod store (policy-test-pod "absent" :spec-fields (list "affinity" (funcall required "metadata.name" "In" "gamma")))))))
         (is (equal "alpha"
-                   (gr8s:node-record-name
-                    (gr8s::schedule-pod store (create-pod store (policy-test-pod "label" :spec-fields (list "affinity" (funcall required "kubernetes.io/hostname" "NotIn" "beta"))))))))
+                   (gr8s.model::node-record-name
+                    (gr8s.controllers::schedule-pod store (create-pod store (policy-test-pod "label" :spec-fields (list "affinity" (funcall required "kubernetes.io/hostname" "NotIn" "beta"))))))))
         (signals kubernetes-error (policy-test-pod "bad-field" :spec-fields (list "affinity" (funcall required "metadata.labels" "In" "x"))))))
-    (let ((preferred (gr8s::core-object "nodeAffinity"
-                                        (gr8s::core-object "preferredDuringSchedulingIgnoredDuringExecution"
-                                                           (vector (gr8s::core-object "weight" 10
-                                                                                      "preference" (gr8s::core-object "matchFields" (vector (gr8s::core-object "key" "metadata.name" "operator" "In" "values" #("alpha"))))))))))
+    (let ((preferred (gr8s.resources::core-object "nodeAffinity"
+                                        (gr8s.resources::core-object "preferredDuringSchedulingIgnoredDuringExecution"
+                                                           (vector (gr8s.resources::core-object "weight" 10
+                                                                                      "preference" (gr8s.resources::core-object "matchFields" (vector (gr8s.resources::core-object "key" "metadata.name" "operator" "In" "values" #("alpha"))))))))))
       (is (equal "alpha"
-                 (gr8s:node-record-name
-                  (gr8s::schedule-pod store (create-pod store (policy-test-pod "favored" :spec-fields (list "affinity" preferred))))))))))
+                 (gr8s.model::node-record-name
+                  (gr8s.controllers::schedule-pod store (create-pod store (policy-test-pod "favored" :spec-fields (list "affinity" preferred))))))))))
 
 (test preemption-removes-only-enough-lower-priority-pods
   (with-temporary-store (store path)
     (values path)
-    (policy-test-node store "only" :extended (gr8s::core-object "example.com/dongle" "1000"))
+    (policy-test-node store "only" :extended (gr8s.resources::core-object "example.com/dongle" "1000"))
     (loop for (name value) in '(("p1" 1) ("p2" 2) ("p3" 3) ("p4" 4)) do (policy-test-class store name value))
     (loop for (name class dongles) in '(("low" "p1" 200) ("mid" "p2" 300) ("high" "p3" 450))
-          do (is-true (gr8s::schedule-pod store (policy-test-priority-pod store name class dongles))))
+          do (is-true (gr8s.controllers::schedule-pod store (policy-test-priority-pod store name class dongles))))
     (let ((preemptor (policy-test-priority-pod store "preemptor" "p4" 500)))
-      (is (null (gr8s::schedule-pod store preemptor)))
+      (is (null (gr8s.controllers::schedule-pod store preemptor)))
       (is-true (policy-test-deleting-p store "low"))
       (is-true (policy-test-deleting-p store "mid"))
       (is-false (policy-test-deleting-p store "high"))
-      (is (equal "only" (gethash (gr8s::pod-uid preemptor) (gr8s::pod-store-nominated-nodes store))))
+      (is (equal "only" (gethash (gr8s.model::pod-uid preemptor) (gr8s.store::pod-store-nominated-nodes store))))
       ;; Victims still hold their resources; nothing further is preempted meanwhile.
-      (is (null (gr8s::schedule-pod store preemptor)))
+      (is (null (gr8s.controllers::schedule-pod store preemptor)))
       (is-false (policy-test-deleting-p store "high"))
-      (dolist (name '("low" "mid")) (gr8s::remove-pod store "team" name))
+      (dolist (name '("low" "mid")) (gr8s.store::remove-pod store "team" name))
       ;; A lesser Pod cannot use the space reserved for the nominated preemptor.
-      (is (null (gr8s::schedule-pod store (policy-test-priority-pod store "latecomer" "p1" 100))))
-      (is-true (gr8s::schedule-pod store preemptor)))))
+      (is (null (gr8s.controllers::schedule-pod store (policy-test-priority-pod store "latecomer" "p1" 100))))
+      (is-true (gr8s.controllers::schedule-pod store preemptor)))))
 
 (test preemption-respects-policy-and-equal-priority
   (with-temporary-store (store path)
     (values path)
-    (policy-test-node store "only" :extended (gr8s::core-object "example.com/dongle" "1"))
+    (policy-test-node store "only" :extended (gr8s.resources::core-object "example.com/dongle" "1"))
     (policy-test-class store "same" 5)
-    (gr8s::create-core-resource store "priorityclasses"
-                                (gr8s::core-object "metadata" (gr8s::core-object "name" "polite") "value" 9 "preemptionPolicy" "Never") nil)
-    (is-true (gr8s::schedule-pod store (policy-test-priority-pod store "resident" "same" 1)))
-    (is (null (gr8s::schedule-pod store (policy-test-priority-pod store "equal" "same" 1))))
+    (gr8s.resources::create-core-resource store "priorityclasses"
+                                (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "polite") "value" 9 "preemptionPolicy" "Never") nil)
+    (is-true (gr8s.controllers::schedule-pod store (policy-test-priority-pod store "resident" "same" 1)))
+    (is (null (gr8s.controllers::schedule-pod store (policy-test-priority-pod store "equal" "same" 1))))
     (is-false (policy-test-deleting-p store "resident"))
-    (is (null (gr8s::schedule-pod store (policy-test-priority-pod store "never" "polite" 1))))
+    (is (null (gr8s.controllers::schedule-pod store (policy-test-priority-pod store "never" "polite" 1))))
     (is-false (policy-test-deleting-p store "resident"))))
 
 (test preempted-pod-reports-disruption-condition
   (with-temporary-store (store path)
     (values path)
-    (policy-test-node store "only" :extended (gr8s::core-object "example.com/dongle" "1"))
+    (policy-test-node store "only" :extended (gr8s.resources::core-object "example.com/dongle" "1"))
     (policy-test-class store "low" 1)
     (policy-test-class store "high" 2)
-    (is-true (gr8s::schedule-pod store (policy-test-priority-pod store "victim" "low" 1)))
-    (is (null (gr8s::schedule-pod store (policy-test-priority-pod store "attacker" "high" 1))))
+    (is-true (gr8s.controllers::schedule-pod store (policy-test-priority-pod store "victim" "low" 1)))
+    (is (null (gr8s.controllers::schedule-pod store (policy-test-priority-pod store "attacker" "high" 1))))
     (let* ((victim (get-pod store "team" "victim"))
-           (status (gr8s::add-pod-status-conditions store victim (gr8s::pod-status "Running")))
-           (condition (gr8s::find-pod-condition (gethash "conditions" status) "DisruptionTarget")))
+           (status (gr8s.kubelet::add-pod-status-conditions store victim (gr8s.kubelet::pod-status "Running")))
+           (condition (gr8s.kubelet::find-pod-condition (gethash "conditions" status) "DisruptionTarget")))
       (is (equal "True" (gethash "status" condition)))
       (is (equal "PreemptionByScheduler" (gethash "reason" condition))))
-    (let ((status (gr8s::add-pod-status-conditions store (get-pod store "team" "attacker") (gr8s::pod-status "Pending"))))
+    (let ((status (gr8s.kubelet::add-pod-status-conditions store (get-pod store "team" "attacker") (gr8s.kubelet::pod-status "Pending"))))
       (is (equal "only" (gethash "nominatedNodeName" status))))))
 
-(defstruct (policy-storage-runtime (:include gr8s::fake-runtime)
+(defstruct (policy-storage-runtime (:include gr8s.runtime::fake-runtime)
                                    (:constructor make-policy-storage-runtime ()))
   "A fake runtime reporting a settable local storage measurement."
   (layers nil) (volume-bytes 0))
 
-(defmethod gr8s::runtime-ephemeral-usage ((runtime policy-storage-runtime) pod)
+(defmethod gr8s.runtime::runtime-ephemeral-usage ((runtime policy-storage-runtime) pod)
   "Report RUNTIME's configured measurement for any POD."
   (declare (ignore pod))
   (values (policy-storage-runtime-layers runtime) (policy-storage-runtime-volume-bytes runtime)))
@@ -450,32 +450,32 @@
            (pod (create-pod store (policy-test-pod "writer" :requests '("ephemeral-storage" "1Ki")
                                                             :limits '("ephemeral-storage" "1Mi"))))
            (clock 1000)
-           (gr8s::*pod-deletion-clock* (lambda () clock)))
+           (gr8s.kubelet::*pod-deletion-clock* (lambda () clock)))
       (setf (policy-storage-runtime-layers runtime) (list (cons "main" 1024)))
-      (is (equal "Running" (gethash "phase" (gr8s::reconcile-pod reconciler "team" "writer"))))
+      (is (equal "Running" (gethash "phase" (gr8s.kubelet::reconcile-pod reconciler "team" "writer"))))
       (setf (policy-storage-runtime-layers runtime) (list (cons "main" (* 2 1024 1024))))
       ;; Measured on a schedule, not on every pass.
-      (is (equal "Running" (gethash "phase" (gr8s::reconcile-pod reconciler "team" "writer"))))
+      (is (equal "Running" (gethash "phase" (gr8s.kubelet::reconcile-pod reconciler "team" "writer"))))
       (incf clock 11)
-      (let ((status (gr8s::reconcile-pod reconciler "team" "writer")))
+      (let ((status (gr8s.kubelet::reconcile-pod reconciler "team" "writer")))
         (is (equal "Failed" (gethash "phase" status)))
         (is (equal "Evicted" (gethash "reason" status))))
-      (is (null (gr8s::runtime-observe runtime (pod-uid pod))))
+      (is (null (gr8s.runtime::runtime-observe runtime (pod-uid pod))))
       (let ((count (fake-runtime-ensure-count runtime)))
-        (is (equal "Evicted" (gethash "reason" (gr8s::reconcile-pod reconciler "team" "writer"))))
+        (is (equal "Evicted" (gethash "reason" (gr8s.kubelet::reconcile-pod reconciler "team" "writer"))))
         (is (= count (fake-runtime-ensure-count runtime)))))))
 
 (test ephemeral-violations-cover-containers-and-pod-totals
   (let ((pod (policy-test-pod "two" :limits '("ephemeral-storage" "1Ki"))))
-    (is (null (gr8s::pod-ephemeral-violation pod (list (cons "main" 1024)) 0)))
-    (is (search "Container main" (gr8s::pod-ephemeral-violation pod (list (cons "main" 1025)) 0)))
-    (is (search "total limit" (gr8s::pod-ephemeral-violation pod (list (cons "main" 1000)) 100)))))
+    (is (null (gr8s.kubelet::pod-ephemeral-violation pod (list (cons "main" 1024)) 0)))
+    (is (search "Container main" (gr8s.kubelet::pod-ephemeral-violation pod (list (cons "main" 1025)) 0)))
+    (is (search "total limit" (gr8s.kubelet::pod-ephemeral-violation pod (list (cons "main" 1000)) 100)))))
 
 (test node-measures-its-own-capacity-and-directory-usage
-  (let ((capacity (gr8s::node-reported-capacity)))
-    (is (plusp (gr8s::policy-value (gethash "cpu" capacity))))
-    (is (plusp (gr8s::policy-value (gethash "memory" capacity))))
-    (is (plusp (gr8s::policy-value (gethash "ephemeral-storage" capacity))))
+  (let ((capacity (gr8s.resources::node-reported-capacity)))
+    (is (plusp (gr8s.resources::policy-value (gethash "cpu" capacity))))
+    (is (plusp (gr8s.resources::policy-value (gethash "memory" capacity))))
+    (is (plusp (gr8s.resources::policy-value (gethash "ephemeral-storage" capacity))))
     (is (equal "110" (gethash "pods" capacity))))
   (with-temporary-store (store path)
     (values store)
@@ -485,16 +485,16 @@
         (write-sequence (make-array 4096 :element-type '(unsigned-byte 8) :initial-element 0) out))
       (sb-posix:symlink "/etc/passwd" (namestring (merge-pathnames "link" root)))
       ;; The symbolic link counts only itself, never its target.
-      (is (<= 4096 (gr8s::directory-disk-bytes (namestring (merge-pathnames "usage/" path))) 4200)))))
+      (is (<= 4096 (gr8s.runtime.containerd::directory-disk-bytes (namestring (merge-pathnames "usage/" path))) 4200)))))
 
 (defun affinity-test-group (kind &rest terms)
   "Return an affinity object requiring TERMS of KIND."
-  (gr8s::core-object kind (gr8s::core-object "requiredDuringSchedulingIgnoredDuringExecution" (coerce terms 'vector))))
+  (gr8s.resources::core-object kind (gr8s.resources::core-object "requiredDuringSchedulingIgnoredDuringExecution" (coerce terms 'vector))))
 
 (defun affinity-test-term (app &rest fields)
   "Return a term selecting app=APP across hostnames, plus FIELDS."
-  (let ((term (gr8s::core-object "topologyKey" "kubernetes.io/hostname"
-                                 "labelSelector" (gr8s::core-object "matchLabels" (gr8s::core-object "app" app)))))
+  (let ((term (gr8s.resources::core-object "topologyKey" "kubernetes.io/hostname"
+                                 "labelSelector" (gr8s.resources::core-object "matchLabels" (gr8s.resources::core-object "app" app)))))
     (loop for (key value) on fields by #'cddr do (setf (gethash key term) value))
     term))
 
@@ -503,13 +503,13 @@
   (let* ((fields (append (when affinity (list "affinity" affinity))
                          (when node (list "nodeName" node))))
          (pod (policy-test-pod name :namespace namespace :spec-fields fields)))
-    (setf (gethash "labels" (gethash "metadata" (gr8s::pod-to-object pod))) (gr8s::core-object "app" app))
+    (setf (gethash "labels" (gethash "metadata" (gr8s.model::pod-to-object pod))) (gr8s.resources::core-object "app" app))
     (create-pod store pod)))
 
 (defun affinity-test-placement (store name app affinity &key (namespace "team"))
   "Create and schedule a Pod, returning its node's name or NIL."
-  (let ((node (gr8s::schedule-pod store (affinity-test-pod store name app affinity :namespace namespace))))
-    (and node (gr8s:node-record-name node))))
+  (let ((node (gr8s.controllers::schedule-pod store (affinity-test-pod store name app affinity :namespace namespace))))
+    (and node (gr8s.model::node-record-name node))))
 
 (test pod-affinity-places-a-pod-beside-the-pods-it-selects
   (with-temporary-store (store path)
@@ -543,9 +543,9 @@
   (with-temporary-store (store path)
     (values path)
     (register-test-nodes store "alpha" "beta")
-    (gr8s::create-core-resource
+    (gr8s.resources::create-core-resource
      store "namespaces"
-     (gr8s::core-object "metadata" (gr8s::core-object "name" "ads" "labels" (gr8s::core-object "team" "ads")))
+     (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "ads" "labels" (gr8s.resources::core-object "team" "ads")))
      nil)
     (affinity-test-pod store "other" "db" nil :namespace "ads" :node "beta")
     ;; A term looks only in its own namespace unless it says otherwise.
@@ -555,10 +555,10 @@
     (is (equal "beta" (affinity-test-placement store "selected" "web"
                                                (affinity-test-group "podAffinity"
                                                                     (affinity-test-term "db" "namespaceSelector"
-                                                                                        (gr8s::core-object "matchLabels" (gr8s::core-object "team" "ads")))))))
+                                                                                        (gr8s.resources::core-object "matchLabels" (gr8s.resources::core-object "team" "ads")))))))
     (is (equal "beta" (affinity-test-placement store "everywhere" "web"
                                                (affinity-test-group "podAffinity"
-                                                                    (affinity-test-term "db" "namespaceSelector" (gr8s::core-object))))))))
+                                                                    (affinity-test-term "db" "namespaceSelector" (gr8s.resources::core-object))))))))
 
 (test preferred-pod-affinity-orders-nodes
   (with-temporary-store (store path)
@@ -566,59 +566,59 @@
     (register-test-nodes store "alpha" "beta")
     (affinity-test-pod store "db" "db" nil :node "beta")
     (flet ((preferred (kind)
-             (gr8s::core-object kind (gr8s::core-object "preferredDuringSchedulingIgnoredDuringExecution"
-                                                        (vector (gr8s::core-object "weight" 10 "podAffinityTerm" (affinity-test-term "db")))))))
+             (gr8s.resources::core-object kind (gr8s.resources::core-object "preferredDuringSchedulingIgnoredDuringExecution"
+                                                        (vector (gr8s.resources::core-object "weight" 10 "podAffinityTerm" (affinity-test-term "db")))))))
       (is (equal "beta" (affinity-test-placement store "near" "near" (preferred "podAffinity"))))
       (is (equal "alpha" (affinity-test-placement store "far" "far" (preferred "podAntiAffinity")))))))
 
 (test pod-affinity-validation-refuses-malformed-terms
-  (dolist (term (list (gr8s::core-object)
-                      (gr8s::core-object "topologyKey" "bad key!")
+  (dolist (term (list (gr8s.resources::core-object)
+                      (gr8s.resources::core-object "topologyKey" "bad key!")
                       (affinity-test-term "db" "unknown" t)
                       (affinity-test-term "db" "namespaces" #("Not_A_Namespace"))
-                      (gr8s::core-object "topologyKey" "zone" "matchLabelKeys" #("app"))
+                      (gr8s.resources::core-object "topologyKey" "zone" "matchLabelKeys" #("app"))
                       (affinity-test-term "db" "matchLabelKeys" #("app") "mismatchLabelKeys" #("app"))))
     (signals kubernetes-error
       (policy-test-pod "bad" :spec-fields (list "affinity" (affinity-test-group "podAffinity" term)))))
   (signals kubernetes-error
     (policy-test-pod "bad-weight"
                      :spec-fields (list "affinity"
-                                        (gr8s::core-object "podAntiAffinity"
-                                                           (gr8s::core-object "preferredDuringSchedulingIgnoredDuringExecution"
-                                                                              (vector (gr8s::core-object "weight" 0 "podAffinityTerm" (affinity-test-term "db")))))))))
+                                        (gr8s.resources::core-object "podAntiAffinity"
+                                                           (gr8s.resources::core-object "preferredDuringSchedulingIgnoredDuringExecution"
+                                                                              (vector (gr8s.resources::core-object "weight" 0 "podAffinityTerm" (affinity-test-term "db")))))))))
 
 (test quota-cross-namespace-affinity-scope-counts-only-reaching-pods
   (with-temporary-store (store path)
     (values path)
-    (gr8s::create-core-resource
+    (gr8s.resources::create-core-resource
      store "resourcequotas"
-     (gr8s::core-object "metadata" (gr8s::core-object "name" "cross")
-                        "spec" (gr8s::core-object
-                                "hard" (gr8s::core-object "pods" "5")
-                                "scopeSelector" (gr8s::core-object
+     (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "cross")
+                        "spec" (gr8s.resources::core-object
+                                "hard" (gr8s.resources::core-object "pods" "5")
+                                "scopeSelector" (gr8s.resources::core-object
                                                  "matchExpressions"
-                                                 (vector (gr8s::core-object "scopeName" "CrossNamespacePodAffinity" "operator" "Exists")))))
+                                                 (vector (gr8s.resources::core-object "scopeName" "CrossNamespacePodAffinity" "operator" "Exists")))))
      "team")
     (flet ((pod (name term)
              (create-pod store (policy-test-pod name :spec-fields (list "affinity" (affinity-test-group "podAntiAffinity" term))))))
-      (pod "plain" (gr8s::core-object "topologyKey" "region"))
+      (pod "plain" (gr8s.resources::core-object "topologyKey" "region"))
       (is (equal "0" (gethash "pods" (policy-test-used store "cross"))))
-      (pod "named" (gr8s::core-object "topologyKey" "region" "namespaces" #("ns1")))
+      (pod "named" (gr8s.resources::core-object "topologyKey" "region" "namespaces" #("ns1")))
       (is (equal "1" (gethash "pods" (policy-test-used store "cross"))))
-      (pod "selected" (gr8s::core-object "topologyKey" "region"
+      (pod "selected" (gr8s.resources::core-object "topologyKey" "region"
                                          "namespaceSelector"
-                                         (gr8s::core-object "matchExpressions"
-                                                            (vector (gr8s::core-object "key" "team" "operator" "In" "values" #("ads"))))))
+                                         (gr8s.resources::core-object "matchExpressions"
+                                                            (vector (gr8s.resources::core-object "key" "team" "operator" "In" "values" #("ads"))))))
       (is (equal "2" (gethash "pods" (policy-test-used store "cross")))))
     (signals kubernetes-error
-      (gr8s::create-core-resource
+      (gr8s.resources::create-core-resource
        store "resourcequotas"
-       (gr8s::core-object "metadata" (gr8s::core-object "name" "cross-in")
-                          "spec" (gr8s::core-object
-                                  "hard" (gr8s::core-object "pods" "5")
-                                  "scopeSelector" (gr8s::core-object
+       (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "cross-in")
+                          "spec" (gr8s.resources::core-object
+                                  "hard" (gr8s.resources::core-object "pods" "5")
+                                  "scopeSelector" (gr8s.resources::core-object
                                                    "matchExpressions"
-                                                   (vector (gr8s::core-object "scopeName" "CrossNamespacePodAffinity"
+                                                   (vector (gr8s.resources::core-object "scopeName" "CrossNamespacePodAffinity"
                                                                               "operator" "In" "values" #("x"))))))
        "team"))))
 
@@ -628,16 +628,16 @@
   (with-temporary-store (store path)
     (values path)
     (policy-test-runtime-class store "beard"
-                               "overhead" (gr8s::core-object "podFixed" (gr8s::core-object "example.com/beardsecond" "250")))
-    (let* ((pod (gr8s::admit-pod-policies store (policy-test-pod "using" :spec-fields (list "runtimeClassName" "beard"))))
+                               "overhead" (gr8s.resources::core-object "podFixed" (gr8s.resources::core-object "example.com/beardsecond" "250")))
+    (let* ((pod (gr8s.resources::admit-pod-policies store (policy-test-pod "using" :spec-fields (list "runtimeClassName" "beard"))))
            (spec (gethash "spec" (pod-to-object pod))))
-      (is (= 250 (gethash "example.com/beardsecond" (gr8s::pod-spec-resource-totals spec))))
-      (is-false (gr8s::resource-fit-p (gr8s::pod-requests-table pod)
+      (is (= 250 (gethash "example.com/beardsecond" (gr8s.kubelet::pod-spec-resource-totals spec))))
+      (is-false (gr8s.resources::resource-fit-p (gr8s.resources::pod-requests-table pod)
                                       (let ((table (make-hash-table :test #'equal)))
                                         (setf (gethash "example.com/beardsecond" table) 200) table)
                                       nil)))
     (signals kubernetes-error
-      (policy-test-runtime-class store "odd" "overhead" (gr8s::core-object "podFixed" (gr8s::core-object "hugepages-2Mi" "2Mi"))))))
+      (policy-test-runtime-class store "odd" "overhead" (gr8s.resources::core-object "podFixed" (gr8s.resources::core-object "hugepages-2Mi" "2Mi"))))))
 
 (test a-preemptor-may-count-another-preemptors-terminating-victims
   ;; Upstream's "validates various priority Pods preempt expectedly with the async
@@ -645,28 +645,28 @@
   ;; those victims are still terminating, and must still be nominated.
   (with-temporary-store (store path)
     (values path)
-    (policy-test-node store "only" :extended (gr8s::core-object "example.com/dongle" "2"))
+    (policy-test-node store "only" :extended (gr8s.resources::core-object "example.com/dongle" "2"))
     (loop for (name value) in '(("low" 1) ("medium" 2) ("high" 3)) do (policy-test-class store name value))
     (dolist (name '("low-0" "low-1"))
-      (is-true (gr8s::schedule-pod store (policy-test-priority-pod store name "low" 1))))
+      (is-true (gr8s.controllers::schedule-pod store (policy-test-priority-pod store name "low" 1))))
     (let ((medium (policy-test-priority-pod store "medium-0" "medium" 2)))
-      (is (null (gr8s::schedule-pod store medium)))
+      (is (null (gr8s.controllers::schedule-pod store medium)))
       (is-true (policy-test-deleting-p store "low-0"))
       (is-true (policy-test-deleting-p store "low-1"))
       (let ((high (policy-test-priority-pod store "high-0" "high" 1)))
-        (is (null (gr8s::schedule-pod store high)))
-        (is (equal "only" (gethash (gr8s::pod-uid high) (gr8s::pod-store-nominated-nodes store))))
-        (dolist (name '("low-0" "low-1")) (gr8s::remove-pod store "team" name))
+        (is (null (gr8s.controllers::schedule-pod store high)))
+        (is (equal "only" (gethash (gr8s.model::pod-uid high) (gr8s.store::pod-store-nominated-nodes store))))
+        (dolist (name '("low-0" "low-1")) (gr8s.store::remove-pod store "team" name))
         ;; The high Pod takes its reservation first, and the medium one no longer fits.
-        (is (null (gr8s::schedule-pod store (get-pod store "team" "medium-0"))))
-        (is-true (gr8s::schedule-pod store high))
-        (is (null (gr8s::schedule-pod store (get-pod store "team" "medium-0"))))))))
+        (is (null (gr8s.controllers::schedule-pod store (get-pod store "team" "medium-0"))))
+        (is-true (gr8s.controllers::schedule-pod store high))
+        (is (null (gr8s.controllers::schedule-pod store (get-pod store "team" "medium-0"))))))))
 
 (test node-status-capacity-names-the-extended-resources
   ;; Upstream's overhead spec adds a resource to status.capacity alone and later
   ;; removes it from there alone, leaving the copy GET returned in allocatable.
   (flet ((advertised (status)
-           (let ((table (gr8s::node-status-extended-resources (com.inuoe.jzon:parse status))))
+           (let ((table (gr8s.apiserver::node-status-extended-resources (com.inuoe.jzon:parse status))))
              (sort (loop for name being the hash-keys of table using (hash-value value)
                          collect (format nil "~A=~A" name value))
                    #'string<))))
@@ -683,13 +683,13 @@
   ;; which they cannot while every medium still reserves the node against the others.
   (with-temporary-store (store path)
     (values path)
-    (policy-test-node store "only" :extended (gr8s::core-object "example.com/dongle" "4"))
+    (policy-test-node store "only" :extended (gr8s.resources::core-object "example.com/dongle" "4"))
     (loop for (name value) in '(("low" 1) ("medium" 2) ("high" 3)) do (policy-test-class store name value))
-    (loop for index below 4 do (is-true (gr8s::schedule-pod store (policy-test-priority-pod store (format nil "low-~D" index) "low" 1))))
+    (loop for index below 4 do (is-true (gr8s.controllers::schedule-pod store (policy-test-priority-pod store (format nil "low-~D" index) "low" 1))))
     (let ((mediums (loop for index below 4 collect (policy-test-priority-pod store (format nil "medium-~D" index) "medium" 1)))
           (highs (loop for index below 2 collect (policy-test-priority-pod store (format nil "high-~D" index) "high" 1))))
-      (dolist (pod (append mediums highs)) (is (null (gr8s::schedule-pod store pod))))
-      (loop for index below 4 do (gr8s::remove-pod store "team" (format nil "low-~D" index)))
-      (dolist (pod highs) (is-true (gr8s::schedule-pod store pod)))
-      (is (= 2 (count-if (lambda (pod) (loop repeat 2 thereis (gr8s::schedule-pod store (get-pod store "team" (pod-name pod)))))
+      (dolist (pod (append mediums highs)) (is (null (gr8s.controllers::schedule-pod store pod))))
+      (loop for index below 4 do (gr8s.store::remove-pod store "team" (format nil "low-~D" index)))
+      (dolist (pod highs) (is-true (gr8s.controllers::schedule-pod store pod)))
+      (is (= 2 (count-if (lambda (pod) (loop repeat 2 thereis (gr8s.controllers::schedule-pod store (get-pod store "team" (pod-name pod)))))
                          mediums))))))

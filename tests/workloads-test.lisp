@@ -30,69 +30,69 @@
 
 (defun workload-fixture (kind name &optional (replicas 2))
   "Build an executable workload with a selector and distinctive template."
-  (gr8s::core-object
-   "apiVersion" "apps/v1" "kind" kind "metadata" (gr8s::core-object "name" name)
-   "spec" (gr8s::core-object
-           "replicas" replicas "selector" (gr8s::core-object "matchLabels" (gr8s::core-object "app" name))
-           "template" (gr8s::core-object "metadata" (gr8s::core-object "labels" (gr8s::core-object "app" name))
-                       "spec" (gr8s::core-object "nodeName" "gr8s-local" "restartPolicy" "Always"
+  (gr8s.resources::core-object
+   "apiVersion" "apps/v1" "kind" kind "metadata" (gr8s.resources::core-object "name" name)
+   "spec" (gr8s.resources::core-object
+           "replicas" replicas "selector" (gr8s.resources::core-object "matchLabels" (gr8s.resources::core-object "app" name))
+           "template" (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "labels" (gr8s.resources::core-object "app" name))
+                       "spec" (gr8s.resources::core-object "nodeName" "gr8s-local" "restartPolicy" "Always"
                                "terminationGracePeriodSeconds" 0
-                               "containers" (vector (gr8s::core-object "name" "main" "image" "busybox:1.36.1"
+                               "containers" (vector (gr8s.resources::core-object "name" "main" "image" "busybox:1.36.1"
                                                      "command" #("sh" "-c" "sleep 300"))))))))
 
 (defun workload-status (store resource name)
   "Read durable controller status in the test namespace."
-  (gethash "status" (gr8s::get-core-resource store resource "alpha" name)))
+  (gethash "status" (gr8s.resources::get-core-resource store resource "alpha" name)))
 
 (defun mark-workload-pods-ready (store runtime)
   "Provide actual fake-runtime container observations rather than modifying controller status."
   (dolist (pod (list-pods store "alpha"))
-    (let ((observation (gr8s::runtime-observe runtime (pod-uid pod))))
+    (let ((observation (gr8s.runtime::runtime-observe runtime (pod-uid pod))))
       (when observation
-        (setf (gr8s::runtime-pod-status observation)
-              (gr8s::core-object "phase" "Running" "containerStatuses"
-                                (vector (gr8s::core-object "name" "main" "containerID" (pod-uid pod)
-                                                          "ready" t "state" (gr8s::core-object "running" (gr8s::core-object))))))))))
+        (setf (gr8s.runtime::runtime-pod-status observation)
+              (gr8s.resources::core-object "phase" "Running" "containerStatuses"
+                                (vector (gr8s.resources::core-object "name" "main" "containerID" (pod-uid pod)
+                                                          "ready" t "state" (gr8s.resources::core-object "running" (gr8s.resources::core-object))))))))))
 
 (defun run-workload-passes (reconciler &optional (count 3))
   "Advance controller and actual Pod reconciliation without fabricating ready status."
   (dotimes (index count)
-    (gr8s::collect-orphaned-api-objects reconciler)
-    (gr8s::reconcile-workloads reconciler)
+    (gr8s.controllers::collect-orphaned-api-objects reconciler)
+    (gr8s.controllers::reconcile-workloads reconciler)
     (reconcile-all reconciler)))
 
 (defun change-workload-image (store resource name image)
   "Update the actual Pod template used for a subsequent rollout."
-  (gr8s::update-core-resource store resource "alpha" name
+  (gr8s.resources::update-core-resource store resource "alpha" name
     (lambda (object)
       (setf (gethash "image" (aref (gethash "containers" (gethash "spec" (gethash "template" (gethash "spec" object)))) 0)) image)
       object)))
 
 (test workload-admission-defaults-generations-and-immutable-selectors
   (with-temporary-store (store path)
-    (let* ((created (gr8s::create-core-resource store "deployments" (workload-fixture "Deployment" "web") "alpha"))
+    (let* ((created (gr8s.resources::create-core-resource store "deployments" (workload-fixture "Deployment" "web") "alpha"))
            (spec (gethash "spec" created)))
       (is (= 1 (gethash "generation" (gethash "metadata" created))))
       (is (equal "RollingUpdate" (gethash "type" (gethash "strategy" spec))))
       (is (equal "25%" (gethash "maxSurge" (gethash "rollingUpdate" (gethash "strategy" spec)))))
       (is (= 600 (gethash "progressDeadlineSeconds" spec)))
       (is (null (list-pods store)))
-      (let ((updated (gr8s::update-core-resource store "deployments" "alpha" "web"
-                       (lambda (object) (setf (gethash "labels" (gethash "metadata" object)) (gr8s::core-object "edited" "yes")) object))))
+      (let ((updated (gr8s.resources::update-core-resource store "deployments" "alpha" "web"
+                       (lambda (object) (setf (gethash "labels" (gethash "metadata" object)) (gr8s.resources::core-object "edited" "yes")) object))))
         (is (= 1 (gethash "generation" (gethash "metadata" updated)))))
-      (gr8s::update-core-resource store "deployments" "alpha" "web"
+      (gr8s.resources::update-core-resource store "deployments" "alpha" "web"
         (lambda (object) (setf (gethash "replicas" (gethash "spec" object)) 3) object))
-      (is (= 2 (gethash "generation" (gethash "metadata" (gr8s::get-core-resource store "deployments" "alpha" "web")))))
+      (is (= 2 (gethash "generation" (gethash "metadata" (gr8s.resources::get-core-resource store "deployments" "alpha" "web")))))
       (signals kubernetes-error
-        (gr8s::update-core-resource store "deployments" "alpha" "web"
+        (gr8s.resources::update-core-resource store "deployments" "alpha" "web"
           (lambda (object)
-            (setf (gethash "selector" (gethash "spec" object)) (gr8s::core-object "matchLabels" (gr8s::core-object "app" "different")))
+            (setf (gethash "selector" (gethash "spec" object)) (gr8s.resources::core-object "matchLabels" (gr8s.resources::core-object "app" "different")))
             object))))))
 
 (test replica-set-creates-scales-and-recovers-real-pod-identities
   (with-temporary-store (store path)
     (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime)))
-      (gr8s::create-core-resource store "replicasets" (workload-fixture "ReplicaSet" "workers" 3) "alpha")
+      (gr8s.resources::create-core-resource store "replicasets" (workload-fixture "ReplicaSet" "workers" 3) "alpha")
       (run-workload-passes reconciler)
       (is (= 3 (length (list-pods store "alpha"))))
       (is (= 0 (gethash "readyReplicas" (workload-status store "replicasets" "workers"))))
@@ -100,13 +100,13 @@
       (run-workload-passes reconciler)
       (is (= 3 (gethash "readyReplicas" (workload-status store "replicasets" "workers"))))
       (let ((uids (sort (mapcar #'pod-uid (list-pods store "alpha")) #'string<))
-            (revision (gr8s::pod-store-resource-revision store)))
+            (revision (gr8s.store::pod-store-resource-revision store)))
         (run-workload-passes reconciler)
-        (is (= revision (gr8s::pod-store-resource-revision store)))
+        (is (= revision (gr8s.store::pod-store-resource-revision store)))
         (let* ((reopened (open-store path)) (restored (make-reconciler reopened runtime)))
           (run-workload-passes restored)
           (is (equal uids (sort (mapcar #'pod-uid (list-pods reopened "alpha")) #'string<)))))
-      (gr8s::update-core-resource store "replicasets" "alpha" "workers"
+      (gr8s.resources::update-core-resource store "replicasets" "alpha" "workers"
         (lambda (object) (setf (gethash "replicas" (gethash "spec" object)) 1) object))
       (run-workload-passes reconciler)
       (is (= 1 (length (list-pods store "alpha"))))
@@ -115,37 +115,37 @@
 (test replica-set-adopts-orphans-releases-mismatches-and-rejects-stale-owner-uids
   (with-temporary-store (store path)
     (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime))
-           (owner (gr8s::create-core-resource store "replicasets" (workload-fixture "ReplicaSet" "workers" 1) "alpha"))
-           (pod-input (gr8s::core-object "apiVersion" "v1" "kind" "Pod"
-                       "metadata" (gr8s::core-object "name" "orphan" "namespace" "alpha" "labels" (gr8s::core-object "app" "workers"))
-                       "spec" (gr8s::copy-core-object (gethash "spec" (gethash "template" (gethash "spec" owner))))))
+           (owner (gr8s.resources::create-core-resource store "replicasets" (workload-fixture "ReplicaSet" "workers" 1) "alpha"))
+           (pod-input (gr8s.resources::core-object "apiVersion" "v1" "kind" "Pod"
+                       "metadata" (gr8s.resources::core-object "name" "orphan" "namespace" "alpha" "labels" (gr8s.resources::core-object "app" "workers"))
+                       "spec" (gr8s.resources::copy-core-object (gethash "spec" (gethash "template" (gethash "spec" owner))))))
            (pod (create-pod store (parse-pod pod-input))) (uid (pod-uid pod)))
       (run-workload-passes reconciler)
       (is (= 1 (length (list-pods store "alpha"))))
-      (is (gr8s::workload-owned-p (pod-to-object (get-pod store "alpha" "orphan")) owner))
+      (is (gr8s.controllers::workload-owned-p (pod-to-object (get-pod store "alpha" "orphan")) owner))
       (is (equal uid (pod-uid (get-pod store "alpha" "orphan"))))
-      (let* ((current (get-pod store "alpha" "orphan")) (replacement (gr8s::copy-core-object (pod-to-object current))))
-        (setf (gethash "labels" (gethash "metadata" replacement)) (gr8s::core-object "app" "unmatched"))
+      (let* ((current (get-pod store "alpha" "orphan")) (replacement (gr8s.resources::copy-core-object (pod-to-object current))))
+        (setf (gethash "labels" (gethash "metadata" replacement)) (gr8s.resources::core-object "app" "unmatched"))
         (update-pod store (parse-pod replacement) (pod-resource-version current)))
       (run-workload-passes reconciler)
-      (is (null (gr8s::workload-controller-reference (pod-to-object (get-pod store "alpha" "orphan")))))
+      (is (null (gr8s.controllers::workload-controller-reference (pod-to-object (get-pod store "alpha" "orphan")))))
       (is (= 2 (length (list-pods store "alpha"))))
-      (gr8s::delete-core-resource store "replicasets" "alpha" "workers")
-      (let ((replacement (gr8s::create-core-resource store "replicasets" (workload-fixture "ReplicaSet" "workers" 0) "alpha")))
+      (gr8s.resources::delete-core-resource store "replicasets" "alpha" "workers")
+      (let ((replacement (gr8s.resources::create-core-resource store "replicasets" (workload-fixture "ReplicaSet" "workers" 0) "alpha")))
         (is (not (equal (gethash "uid" (gethash "metadata" owner)) (gethash "uid" (gethash "metadata" replacement)))))
-        (is (null (gr8s::create-replica-set-pod store owner)))))))
+        (is (null (gr8s.controllers::create-replica-set-pod store owner)))))))
 
 (test deployment-rollout-scales-real-replica-sets-and-cleans-revisions
   (with-temporary-store (store path)
     (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime)))
-      (gr8s::create-core-resource store "deployments" (workload-fixture "Deployment" "web" 2) "alpha")
+      (gr8s.resources::create-core-resource store "deployments" (workload-fixture "Deployment" "web" 2) "alpha")
       (run-workload-passes reconciler)
       (mark-workload-pods-ready store runtime)
       (run-workload-passes reconciler)
       (is (= 2 (gethash "availableReplicas" (workload-status store "deployments" "web"))))
       (let ((old-uids (mapcar #'pod-uid (list-pods store "alpha"))))
         (change-workload-image store "deployments" "web" "busybox:1.37.0")
-        (gr8s::update-core-resource store "deployments" "alpha" "web"
+        (gr8s.resources::update-core-resource store "deployments" "alpha" "web"
           (lambda (object) (setf (gethash "revisionHistoryLimit" (gethash "spec" object)) 0) object))
         (dotimes (iteration 8)
           (run-workload-passes reconciler 1)
@@ -155,14 +155,14 @@
         (is (= 2 (gethash "updatedReplicas" (workload-status store "deployments" "web"))))
         (is (= 2 (gethash "availableReplicas" (workload-status store "deployments" "web"))))
         (is (notany (lambda (pod) (member (pod-uid pod) old-uids :test #'equal)) (list-pods store "alpha")))
-        (is (= 1 (length (gr8s::list-core-resources store "replicasets" "alpha"))))))))
+        (is (= 1 (length (gr8s.resources::list-core-resources store "replicasets" "alpha"))))))))
 
 (test deployment-recreate-and-background-deletion-preserve-controller-ownership
   (with-temporary-store (store path)
     (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime))
            (input (workload-fixture "Deployment" "web" 1)))
-      (setf (gethash "strategy" (gethash "spec" input)) (gr8s::core-object "type" "Recreate"))
-      (gr8s::create-core-resource store "deployments" input "alpha")
+      (setf (gethash "strategy" (gethash "spec" input)) (gr8s.resources::core-object "type" "Recreate"))
+      (gr8s.resources::create-core-resource store "deployments" input "alpha")
       (run-workload-passes reconciler)
       (mark-workload-pods-ready store runtime)
       (run-workload-passes reconciler)
@@ -173,10 +173,10 @@
         (run-workload-passes reconciler)
         (is (= 1 (length (list-pods store "alpha"))))
         (is (not (equal old (pod-uid (first (list-pods store "alpha")))))))
-      (gr8s::delete-core-resource store "deployments" "alpha" "web")
+      (gr8s.resources::delete-core-resource store "deployments" "alpha" "web")
       (run-workload-passes reconciler)
       (is (null (list-pods store "alpha")))
-      (is (null (gr8s::list-core-resources store "replicasets" "alpha"))))))
+      (is (null (gr8s.resources::list-core-resources store "replicasets" "alpha"))))))
 
 (test workload-http-discovery-scale-status-and-strategic-merge
   (with-core-api (store path)
@@ -189,11 +189,11 @@
         (setf (gethash "replicas" (gethash "spec" scale)) 3)
         (check-core-status 200 (concatenate 'string item "/scale") :method :put :object scale))
       (let ((patched (check-core-status 200 (concatenate 'string item "/scale") :method :patch
-                       :content-type "application/merge-patch+json" :object (gr8s::core-object "spec" (gr8s::core-object "replicas" 1)))))
+                       :content-type "application/merge-patch+json" :object (gr8s.resources::core-object "spec" (gr8s.resources::core-object "replicas" 1)))))
         (is (= 1 (gethash "replicas" (gethash "spec" patched)))))
       (check-core-status 409 item :method :put :object created)
       (let ((status-object (check-core-status 200 item)))
-        (setf (gethash "status" status-object) (gr8s::core-object "replicas" 0 "observedGeneration" 3)
+        (setf (gethash "status" status-object) (gr8s.resources::core-object "replicas" 0 "observedGeneration" 3)
               (gethash "replicas" (gethash "spec" status-object)) 99)
         (check-core-status 200 (concatenate 'string item "/status") :method :put :object status-object)
         (is (= 1 (gethash "replicas" (gethash "spec" (check-core-status 200 item))))))
@@ -205,17 +205,17 @@
         (is (gethash "io.k8s.api.apps.v1.Deployment" schemas))
         (is (gethash "/apis/apps/v1/namespaces/{namespace}/deployments/{name}/scale" (gethash "paths" openapi))))
       (check-core-status 200 collection :method :delete)
-      (is (null (gr8s::list-core-resources store "deployments" "alpha"))))))
+      (is (null (gr8s.resources::list-core-resources store "deployments" "alpha"))))))
 
 (test workload-ready-duration-pause-and-progress-deadline-are-observed
   (with-temporary-store (store path)
     (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime))
-           (now (get-universal-time)) (gr8s::*workload-clock* (lambda () now))
-           (gr8s::*pod-condition-clock* (lambda () now))
+           (now (get-universal-time)) (gr8s.controllers::*workload-clock* (lambda () now))
+           (gr8s.kubelet::*pod-condition-clock* (lambda () now))
            (input (workload-fixture "Deployment" "web" 1)))
       (setf (gethash "minReadySeconds" (gethash "spec" input)) 10
             (gethash "progressDeadlineSeconds" (gethash "spec" input)) 20)
-      (gr8s::create-core-resource store "deployments" input "alpha")
+      (gr8s.resources::create-core-resource store "deployments" input "alpha")
       (run-workload-passes reconciler)
       (mark-workload-pods-ready store runtime)
       (run-workload-passes reconciler)
@@ -224,12 +224,12 @@
       (incf now 10)
       (run-workload-passes reconciler)
       (is (= 1 (gethash "availableReplicas" (workload-status store "deployments" "web"))))
-      (gr8s::update-core-resource store "deployments" "alpha" "web"
+      (gr8s.resources::update-core-resource store "deployments" "alpha" "web"
         (lambda (object) (setf (gethash "paused" (gethash "spec" object)) t) object))
       (change-workload-image store "deployments" "web" "busybox:1.37.0")
       (run-workload-passes reconciler)
-      (is (= 1 (length (gr8s::list-core-resources store "replicasets" "alpha"))))
-      (gr8s::update-core-resource store "deployments" "alpha" "web"
+      (is (= 1 (length (gr8s.resources::list-core-resources store "replicasets" "alpha"))))
+      (gr8s.resources::update-core-resource store "deployments" "alpha" "web"
         (lambda (object) (setf (gethash "paused" (gethash "spec" object)) nil) object))
       (run-workload-passes reconciler)
       (incf now 21)
@@ -248,10 +248,10 @@
     (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime))
            (input (workload-fixture "Deployment" "paused" 1)))
       (setf (gethash "paused" (gethash "spec" input)) t)
-      (gr8s::create-core-resource store "deployments" input "alpha")
+      (gr8s.resources::create-core-resource store "deployments" input "alpha")
       (run-workload-passes reconciler)
       (is (null (list-pods store)))
-      (is (null (gr8s::list-core-resources store "replicasets" "alpha")))
+      (is (null (gr8s.resources::list-core-resources store "replicasets" "alpha")))
       (is (= 1 (gethash "observedGeneration" (workload-status store "deployments" "paused")))))))
 
 (test workload-protobuf-retains-explicit-zero-replicas-and-scale-version
@@ -275,54 +275,54 @@
              (updated (check-core-status 200 (concatenate 'string collection "/wire/scale") :method :put
                         :content-type "application/vnd.kubernetes.protobuf" :octets scale)))
         (is (= 2 (gethash "replicas" (gethash "spec" updated))))
-        (is (= 2 (gethash "replicas" (gethash "spec" (gr8s::get-core-resource store "deployments" "alpha" "wire")))))))))
+        (is (= 2 (gethash "replicas" (gethash "spec" (gr8s.resources::get-core-resource store "deployments" "alpha" "wire")))))))))
 
 (test foreground-workload-deletion-checkpoints-and-finishes-after-children-on-restart
   (with-temporary-store (store path)
     (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime))
-           (owner (gr8s::create-core-resource store "deployments" (workload-fixture "Deployment" "web") "alpha")))
+           (owner (gr8s.resources::create-core-resource store "deployments" (workload-fixture "Deployment" "web") "alpha")))
       (run-workload-passes reconciler)
       (is (= 2 (length (list-pods store "alpha"))))
-      (gr8s::delete-workload-resource store "deployments" "alpha" "web" :policy "Foreground")
-      (is (gethash "deletionTimestamp" (gethash "metadata" (gr8s::get-core-resource store "deployments" "alpha" "web"))))
+      (gr8s.controllers::delete-workload-resource store "deployments" "alpha" "web" :policy "Foreground")
+      (is (gethash "deletionTimestamp" (gethash "metadata" (gr8s.resources::get-core-resource store "deployments" "alpha" "web"))))
       (let* ((reopened (open-store path)) (recovered (make-reconciler reopened runtime)))
-        (is (= 1 (hash-table-count (gr8s::pod-store-workload-deletions reopened))))
+        (is (= 1 (hash-table-count (gr8s.store::pod-store-workload-deletions reopened))))
         (run-workload-passes recovered 1)
-        (is (null (gr8s::create-replica-set-pod reopened
-                    (first (gr8s::list-core-resources reopened "replicasets" "alpha")))))
-        (is (gethash "deletionTimestamp" (gethash "metadata" (gr8s::get-core-resource reopened "deployments" "alpha" "web"))))
+        (is (null (gr8s.controllers::create-replica-set-pod reopened
+                    (first (gr8s.resources::list-core-resources reopened "replicasets" "alpha")))))
+        (is (gethash "deletionTimestamp" (gethash "metadata" (gr8s.resources::get-core-resource reopened "deployments" "alpha" "web"))))
         (run-workload-passes recovered 4)
         (is (null (list-pods reopened "alpha")))
-        (is (null (gr8s::list-core-resources reopened "replicasets" "alpha")))
-        (is (null (gr8s::list-core-resources reopened "deployments" "alpha")))
-        (is (zerop (hash-table-count (gr8s::pod-store-workload-deletions reopened)))))
-      (is (null (gr8s::workload-current-unlocked (open-store path) "deployments" owner))))))
+        (is (null (gr8s.resources::list-core-resources reopened "replicasets" "alpha")))
+        (is (null (gr8s.resources::list-core-resources reopened "deployments" "alpha")))
+        (is (zerop (hash-table-count (gr8s.store::pod-store-workload-deletions reopened)))))
+      (is (null (gr8s.controllers::workload-current-unlocked (open-store path) "deployments" owner))))))
 
 (test workload-orphaning-detaches-controller-reference-without-restarting-children
   (with-temporary-store (store path)
     (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime)))
-      (gr8s::create-core-resource store "deployments" (workload-fixture "Deployment" "web") "alpha")
+      (gr8s.resources::create-core-resource store "deployments" (workload-fixture "Deployment" "web") "alpha")
       (run-workload-passes reconciler)
       (let ((uids (sort (mapcar #'pod-uid (list-pods store "alpha")) #'string<)))
-        (gr8s::delete-workload-resource store "deployments" "alpha" "web" :policy "Orphan")
+        (gr8s.controllers::delete-workload-resource store "deployments" "alpha" "web" :policy "Orphan")
         (run-workload-passes reconciler)
-        (is (null (gr8s::list-core-resources store "deployments" "alpha")))
-        (let ((set (first (gr8s::list-core-resources store "replicasets" "alpha"))))
-          (is (null (gr8s::workload-controller-reference set)))
-          (gr8s::delete-workload-resource store "replicasets" "alpha" (gethash "name" (gethash "metadata" set)) :policy "Orphan"))
+        (is (null (gr8s.resources::list-core-resources store "deployments" "alpha")))
+        (let ((set (first (gr8s.resources::list-core-resources store "replicasets" "alpha"))))
+          (is (null (gr8s.controllers::workload-controller-reference set)))
+          (gr8s.controllers::delete-workload-resource store "replicasets" "alpha" (gethash "name" (gethash "metadata" set)) :policy "Orphan"))
         (let* ((reopened (open-store path)) (recovered (make-reconciler reopened runtime)))
           (run-workload-passes recovered)
           (is (equal uids (sort (mapcar #'pod-uid (list-pods reopened "alpha")) #'string<)))
-          (is (every (lambda (pod) (null (gr8s::workload-controller-reference (pod-to-object pod)))) (list-pods reopened "alpha"))))))))
+          (is (every (lambda (pod) (null (gr8s.controllers::workload-controller-reference (pod-to-object pod)))) (list-pods reopened "alpha"))))))))
 
 (test foreground-deletion-does-not-publish-a-failed-checkpoint
   (with-temporary-store (store path)
-    (gr8s::create-core-resource store "replicasets" (workload-fixture "ReplicaSet" "web") "alpha")
+    (gr8s.resources::create-core-resource store "replicasets" (workload-fixture "ReplicaSet" "web") "alpha")
     (with-failing-core-writes ("injected disk failure")
-      (signals error (gr8s::delete-workload-resource store "replicasets" "alpha" "web" :policy "Foreground")))
+      (signals error (gr8s.controllers::delete-workload-resource store "replicasets" "alpha" "web" :policy "Foreground")))
     (dolist (current (list store (open-store path)))
-      (is (zerop (hash-table-count (gr8s::pod-store-workload-deletions current))))
-      (is (not (gethash "deletionTimestamp" (gethash "metadata" (gr8s::get-core-resource current "replicasets" "alpha" "web"))))))))
+      (is (zerop (hash-table-count (gr8s.store::pod-store-workload-deletions current))))
+      (is (not (gethash "deletionTimestamp" (gethash "metadata" (gr8s.resources::get-core-resource current "replicasets" "alpha" "web"))))))))
 
 (test workload-http-validates-and-checkpoints-foreground-delete-options
   (with-core-api (store path)
@@ -330,16 +330,16 @@
            (item (concatenate 'string collection "/web"))
            (created (check-core-status 201 collection :method :post :object (workload-fixture "ReplicaSet" "web" 0)))
            (metadata (gethash "metadata" created)))
-      (check-core-status 422 item :method :delete :object (gr8s::core-object "propagationPolicy" "Invalid"))
+      (check-core-status 422 item :method :delete :object (gr8s.resources::core-object "propagationPolicy" "Invalid"))
       (check-core-status 200 item :method :delete :parameters '(("dryRun" . "All"))
-                         :object (gr8s::core-object "propagationPolicy" "Foreground"))
-      (is (zerop (hash-table-count (gr8s::pod-store-workload-deletions store))))
+                         :object (gr8s.resources::core-object "propagationPolicy" "Foreground"))
+      (is (zerop (hash-table-count (gr8s.store::pod-store-workload-deletions store))))
       (let* ((preconditions (core-test-protobuf (list (list 1 (gethash "uid" metadata))
                                                      (list 2 (gethash "resourceVersion" metadata)))))
              (options (core-test-protobuf-envelope "DeleteOptions" (list (list 2 preconditions) (list 4 "Foreground")) "apps/v1")))
         (check-core-status 200 item :method :delete :content-type "application/vnd.kubernetes.protobuf" :octets options))
       (is (gethash "deletionTimestamp" (gethash "metadata" (check-core-status 200 item))))
-      (gr8s::reconcile-workloads (make-reconciler store (make-fake-runtime)))
+      (gr8s.controllers::reconcile-workloads (make-reconciler store (make-fake-runtime)))
       (check-core-status 404 item))))
 
 (test unsupported-workload-pod-features-report-real-replica-failure
@@ -347,8 +347,8 @@
     (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime))
            (input (workload-fixture "ReplicaSet" "web" 1)))
       (setf (gethash "resources" (aref (gethash "containers" (gethash "spec" (gethash "template" (gethash "spec" input)))) 0))
-            (gr8s::core-object "requests" (gr8s::core-object "nvidia.com/gpu" "1")))
-      (gr8s::create-core-resource store "replicasets" input "alpha")
+            (gr8s.resources::core-object "requests" (gr8s.resources::core-object "nvidia.com/gpu" "1")))
+      (gr8s.resources::create-core-resource store "replicasets" input "alpha")
       (run-workload-passes reconciler)
       (is (null (list-pods store)))
       (let* ((status (workload-status store "replicasets" "web")) (failure (aref (gethash "conditions" status) 0)))
@@ -362,24 +362,24 @@
   (with-temporary-store (store path)
     (let* ((input (workload-fixture "Deployment" "web" 0)) (metadata (gethash "metadata" input)))
       (setf (gethash "name" metadata) "" (gethash "generateName" metadata) (make-string 200 :initial-element #\a))
-      (let* ((created (gr8s::create-core-resource store "deployments" input "alpha"))
+      (let* ((created (gr8s.resources::create-core-resource store "deployments" input "alpha"))
              (name (gethash "name" (gethash "metadata" created))))
         (is (= 63 (length name)))
-        (is (equal name (gethash "name" (gethash "metadata" (gr8s::get-core-resource (open-store path) "deployments" "alpha" name))))))
-      (gr8s::create-core-resource store "deployments" (workload-fixture "Deployment" "collision" 0) "alpha")
+        (is (equal name (gethash "name" (gethash "metadata" (gr8s.resources::get-core-resource (open-store path) "deployments" "alpha" name))))))
+      (gr8s.resources::create-core-resource store "deployments" (workload-fixture "Deployment" "collision" 0) "alpha")
       (let ((calls 0)
-            (gr8s::*pod-name-generator* (lambda (prefix) (declare (ignore prefix)) "collision")))
+            (gr8s.store::*pod-name-generator* (lambda (prefix) (declare (ignore prefix)) "collision")))
         (declare (ignore calls))
-        (signals kubernetes-error (gr8s::create-core-resource store "deployments" input "alpha")))
-      (is (= 2 (length (gr8s::list-core-resources store "deployments" "alpha")))))))
+        (signals kubernetes-error (gr8s.resources::create-core-resource store "deployments" input "alpha")))
+      (is (= 2 (length (gr8s.resources::list-core-resources store "deployments" "alpha")))))))
 
 (test zero-surge-rounded-percentage-rollouts-make-progress
   (with-temporary-store (store path)
     (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime))
            (input (workload-fixture "Deployment" "web" 1)))
       (setf (gethash "strategy" (gethash "spec" input))
-            (gr8s::core-object "type" "RollingUpdate" "rollingUpdate" (gr8s::core-object "maxSurge" 0 "maxUnavailable" "25%")))
-      (gr8s::create-core-resource store "deployments" input "alpha")
+            (gr8s.resources::core-object "type" "RollingUpdate" "rollingUpdate" (gr8s.resources::core-object "maxSurge" 0 "maxUnavailable" "25%")))
+      (gr8s.resources::create-core-resource store "deployments" input "alpha")
       (run-workload-passes reconciler)
       (mark-workload-pods-ready store runtime)
       (run-workload-passes reconciler)
@@ -395,101 +395,101 @@
 (test deployment-releases-mismatched-replica-set-and-rehashes-name-collisions
   (with-temporary-store (store path)
     (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime)))
-      (gr8s::create-core-resource store "deployments" (workload-fixture "Deployment" "web" 1) "alpha")
+      (gr8s.resources::create-core-resource store "deployments" (workload-fixture "Deployment" "web" 1) "alpha")
       (run-workload-passes reconciler)
-      (let* ((old (first (gr8s::list-core-resources store "replicasets" "alpha"))) (name (gethash "name" (gethash "metadata" old))))
-        (gr8s::update-core-resource store "replicasets" "alpha" name
+      (let* ((old (first (gr8s.resources::list-core-resources store "replicasets" "alpha"))) (name (gethash "name" (gethash "metadata" old))))
+        (gr8s.resources::update-core-resource store "replicasets" "alpha" name
           (lambda (object) (setf (gethash "app" (gethash "labels" (gethash "metadata" object))) "someone-else") object))
         (run-workload-passes reconciler)
-        (is (null (gr8s::workload-controller-reference (gr8s::get-core-resource store "replicasets" "alpha" name))))
-        (is (= 2 (length (gr8s::list-core-resources store "replicasets" "alpha"))))
+        (is (null (gr8s.controllers::workload-controller-reference (gr8s.resources::get-core-resource store "replicasets" "alpha" name))))
+        (is (= 2 (length (gr8s.resources::list-core-resources store "replicasets" "alpha"))))
         (is (= 1 (gethash "collisionCount" (workload-status store "deployments" "web"))))
         (let* ((reopened (open-store path)) (restored (make-reconciler reopened runtime)))
           (run-workload-passes restored)
-          (is (= 2 (length (gr8s::list-core-resources reopened "replicasets" "alpha"))))
+          (is (= 2 (length (gr8s.resources::list-core-resources reopened "replicasets" "alpha"))))
           (is (= 1 (gethash "collisionCount" (workload-status reopened "deployments" "web")))))))))
 
 (test pod-list-survives-disappearing-and-replaced-snapshot-identities-over-http
   (with-core-api (store path)
     (dolist (replace '(nil t))
-      (let* ((input (gr8s::copy-core-object (gr8s::core-object "apiVersion" "v1" "kind" "Pod"
-                        "metadata" (gr8s::core-object "name" "racing" "namespace" "alpha")
+      (let* ((input (gr8s.resources::copy-core-object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Pod"
+                        "metadata" (gr8s.resources::core-object "name" "racing" "namespace" "alpha")
                         "spec" (gethash "spec" (gethash "template" (gethash "spec" (workload-fixture "ReplicaSet" "web" 0)))))))
-             (old (create-pod store (parse-pod input))) (original (symbol-function 'gr8s:list-pods)) (intercept t))
+             (old (create-pod store (parse-pod input))) (original (symbol-function 'gr8s.store::list-pods)) (intercept t))
         (unwind-protect
              (progn
-               (setf (symbol-function 'gr8s:list-pods)
+               (setf (symbol-function 'gr8s.store::list-pods)
                      (lambda (actual &optional namespace)
                        (let ((snapshot (funcall original actual namespace)))
                          (when (and intercept (eq actual store))
                            (setf intercept nil)
-                           (gr8s::remove-pod store "alpha" "racing")
-                           (when replace (create-pod store (parse-pod (gr8s::copy-core-object input)))))
+                           (gr8s.store::remove-pod store "alpha" "racing")
+                           (when replace (create-pod store (parse-pod (gr8s.resources::copy-core-object input)))))
                          snapshot)))
                (let ((listed (check-core-status 200 "/api/v1/namespaces/alpha/pods")))
                  (is (zerop (length (gethash "items" listed)))))
                (when replace
                  (is (not (equal (pod-uid old) (pod-uid (get-pod store "alpha" "racing")))))))
-          (setf (symbol-function 'gr8s:list-pods) original))
-        (when replace (gr8s::remove-pod store "alpha" "racing"))))))
+          (setf (symbol-function 'gr8s.store::list-pods) original))
+        (when replace (gr8s.store::remove-pod store "alpha" "racing"))))))
 
 (test deployment-adopts-an-unannotated-matching-revision-as-initial-revision-one
   (with-temporary-store (store path)
     (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime))
            (input (workload-fixture "Deployment" "web" 1))
            (rs (workload-fixture "ReplicaSet" "existing" 1)))
-      (setf (gethash "labels" (gethash "metadata" rs)) (gr8s::core-object "app" "web")
-            (gethash "selector" (gethash "spec" rs)) (gr8s::copy-core-object (gethash "selector" (gethash "spec" input)))
-            (gethash "template" (gethash "spec" rs)) (gr8s::copy-core-object (gethash "template" (gethash "spec" input))))
-      (gr8s::create-core-resource store "replicasets" rs "alpha")
-      (gr8s::create-core-resource store "deployments" input "alpha")
+      (setf (gethash "labels" (gethash "metadata" rs)) (gr8s.resources::core-object "app" "web")
+            (gethash "selector" (gethash "spec" rs)) (gr8s.resources::copy-core-object (gethash "selector" (gethash "spec" input)))
+            (gethash "template" (gethash "spec" rs)) (gr8s.resources::copy-core-object (gethash "template" (gethash "spec" input))))
+      (gr8s.resources::create-core-resource store "replicasets" rs "alpha")
+      (gr8s.resources::create-core-resource store "deployments" input "alpha")
       (run-workload-passes reconciler)
-      (let ((sets (gr8s::list-core-resources store "replicasets" "alpha")))
+      (let ((sets (gr8s.resources::list-core-resources store "replicasets" "alpha")))
         (is (= 1 (length sets)))
-        (is (= 1 (gr8s::deployment-revision (first sets))))
+        (is (= 1 (gr8s.controllers::deployment-revision (first sets))))
         (is (equal "1" (gethash "deployment.kubernetes.io/revision"
-                               (gethash "annotations" (gethash "metadata" (gr8s::get-core-resource store "deployments" "alpha" "web"))))))))))
+                               (gethash "annotations" (gethash "metadata" (gr8s.resources::get-core-resource store "deployments" "alpha" "web"))))))))))
 
 (test deployment-proportionally-scales-a-stalled-and-paused-rollout
   (with-temporary-store (store path)
     (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime))
            (input (workload-fixture "Deployment" "web" 10)))
       (setf (gethash "strategy" (gethash "spec" input))
-            (gr8s::core-object "type" "RollingUpdate" "rollingUpdate" (gr8s::core-object "maxSurge" 3 "maxUnavailable" 2)))
-      (gr8s::create-core-resource store "deployments" input "alpha")
+            (gr8s.resources::core-object "type" "RollingUpdate" "rollingUpdate" (gr8s.resources::core-object "maxSurge" 3 "maxUnavailable" 2)))
+      (gr8s.resources::create-core-resource store "deployments" input "alpha")
       (run-workload-passes reconciler)
       (mark-workload-pods-ready store runtime)
       (run-workload-passes reconciler)
       (change-workload-image store "deployments" "web" "nonexistent:404")
       (run-workload-passes reconciler 6)
-      (let* ((sets (sort (gr8s::list-core-resources store "replicasets" "alpha") #'< :key #'gr8s::deployment-revision))
+      (let* ((sets (sort (gr8s.resources::list-core-resources store "replicasets" "alpha") #'< :key #'gr8s.controllers::deployment-revision))
              (old-name (gethash "name" (gethash "metadata" (first sets))))
              (new-name (gethash "name" (gethash "metadata" (second sets)))))
         (is (= 8 (gethash "replicas" (gethash "spec" (first sets)))))
         (is (= 5 (gethash "replicas" (gethash "spec" (second sets)))))
-        (gr8s::update-core-resource store "deployments" "alpha" "web"
+        (gr8s.resources::update-core-resource store "deployments" "alpha" "web"
           (lambda (object) (setf (gethash "replicas" (gethash "spec" object)) 30) object))
         (run-workload-passes reconciler 5)
-        (is (= 20 (gethash "replicas" (gethash "spec" (gr8s::get-core-resource store "replicasets" "alpha" old-name)))))
-        (is (= 13 (gethash "replicas" (gethash "spec" (gr8s::get-core-resource store "replicasets" "alpha" new-name)))))
-        (gr8s::update-core-resource store "deployments" "alpha" "web"
+        (is (= 20 (gethash "replicas" (gethash "spec" (gr8s.resources::get-core-resource store "replicasets" "alpha" old-name)))))
+        (is (= 13 (gethash "replicas" (gethash "spec" (gr8s.resources::get-core-resource store "replicasets" "alpha" new-name)))))
+        (gr8s.resources::update-core-resource store "deployments" "alpha" "web"
           (lambda (object) (setf (gethash "replicas" (gethash "spec" object)) 13
                                   (gethash "paused" (gethash "spec" object)) t) object))
         (run-workload-passes reconciler 3)
-        (is (= 10 (gethash "replicas" (gethash "spec" (gr8s::get-core-resource store "replicasets" "alpha" old-name)))))
-        (is (= 6 (gethash "replicas" (gethash "spec" (gr8s::get-core-resource store "replicasets" "alpha" new-name)))))))))
+        (is (= 10 (gethash "replicas" (gethash "spec" (gr8s.resources::get-core-resource store "replicasets" "alpha" old-name)))))
+        (is (= 6 (gethash "replicas" (gethash "spec" (gr8s.resources::get-core-resource store "replicasets" "alpha" new-name)))))))))
 
 (test deployment-allows-large-surge-but-bounds-unavailable-percentage
   (with-temporary-store (store path)
     (let ((input (workload-fixture "Deployment" "web" 1)))
       (setf (gethash "strategy" (gethash "spec" input))
-            (gr8s::core-object "type" "RollingUpdate" "rollingUpdate"
-                               (gr8s::core-object "maxSurge" "200%" "maxUnavailable" "100%")))
+            (gr8s.resources::core-object "type" "RollingUpdate" "rollingUpdate"
+                               (gr8s.resources::core-object "maxSurge" "200%" "maxUnavailable" "100%")))
       (is (equal "200%" (gethash "maxSurge" (gethash "rollingUpdate" (gethash "strategy"
-        (gethash "spec" (gr8s::create-core-resource store "deployments" input "alpha")))))))
+        (gethash "spec" (gr8s.resources::create-core-resource store "deployments" input "alpha")))))))
       (setf (gethash "maxUnavailable" (gethash "rollingUpdate" (gethash "strategy" (gethash "spec" input)))) "101%")
       (signals kubernetes-error
-        (gr8s::create-core-resource store "deployments" input "alpha")))))
+        (gr8s.resources::create-core-resource store "deployments" input "alpha")))))
 
 (test workload-scale-allows-an-explicitly-empty-resource-version
   (with-core-api (store path)
@@ -508,11 +508,11 @@
   (with-crd-api (store path)
     (values path)
     (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime))
-           (state (gr8s::hpa-state-for store)) (now 3000000)
-           (gr8s::*workload-clock* (lambda () now))
+           (state (gr8s.controllers::hpa-state-for store)) (now 3000000)
+           (gr8s.controllers::*workload-clock* (lambda () now))
            (item "/apis/autoscalinge2e.example.com/v1/namespaces/alpha/testcrds/web"))
       (crd-api-request 201 "/api/v1/namespaces" :method :post
-                       :object (gr8s::core-object "metadata" (gr8s::core-object "name" "alpha")))
+                       :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "alpha")))
       ;; The upstream spec's definition: replicas in spec and status, and the selector in status.
       (crd-api-request 201 "/apis/apiextensions.k8s.io/v1/customresourcedefinitions" :method :post
                        :text "{\"apiVersion\":\"apiextensions.k8s.io/v1\",\"kind\":\"CustomResourceDefinition\",
@@ -527,16 +527,16 @@
                        :text "{\"apiVersion\":\"autoscalinge2e.example.com/v1\",\"kind\":\"TestCRD\",
                                \"metadata\":{\"name\":\"web\"},\"spec\":{\"replicas\":1}}")
       ;; The ReplicaSet stands in for whatever the custom resource's own controller runs.
-      (gr8s::create-core-resource store "replicasets" (hpa-test-replicaset 1) "alpha")
+      (gr8s.resources::create-core-resource store "replicasets" (hpa-test-replicaset 1) "alpha")
       (run-workload-passes reconciler 2)
       (mark-workload-pods-ready store runtime)
-      (gr8s::create-core-resource
+      (gr8s.resources::create-core-resource
        store "horizontalpodautoscalers"
-       (hpa-test-autoscaler "scaleTargetRef" (gr8s::core-object "apiVersion" "autoscalinge2e.example.com/v1"
+       (hpa-test-autoscaler "scaleTargetRef" (gr8s.resources::core-object "apiVersion" "autoscalinge2e.example.com/v1"
                                                                 "kind" "TestCRD" "name" "web"))
        "alpha")
-      (flet ((sync () (gr8s::sync-horizontal-pod-autoscaler
-                       reconciler state (gr8s::get-core-resource store "horizontalpodautoscalers" "alpha" "web") now)))
+      (flet ((sync () (gr8s.controllers::sync-horizontal-pod-autoscaler
+                       reconciler state (gr8s.resources::get-core-resource store "horizontalpodautoscalers" "alpha" "web") now)))
         ;; Without a selector in its scale nothing can be measured.
         (sync)
         (is (equal "SucceededGetScale" (gethash "reason" (hpa-test-condition store "AbleToScale"))))
@@ -553,11 +553,11 @@
         (sync)
         (is (equal "ValidMetricFound" (gethash "reason" (hpa-test-condition store "ScalingActive"))))
         (is (= 4 (gethash "replicas" (gethash "spec" (crd-api-request 200 (concatenate 'string item "/scale"))))))
-        (is (= 4 (gethash "desiredReplicas" (gethash "status" (gr8s::get-core-resource store "horizontalpodautoscalers" "alpha" "web")))))))))
+        (is (= 4 (gethash "desiredReplicas" (gethash "status" (gr8s.resources::get-core-resource store "horizontalpodautoscalers" "alpha" "web")))))))))
 
 (defun workload-events-about (store kind name)
   "Return (reason . message) of the test namespace's Events about the KIND object NAME."
-  (loop for event in (gr8s::list-core-resources store "events" "alpha")
+  (loop for event in (gr8s.resources::list-core-resources store "events" "alpha")
         for involved = (gethash "involvedObject" event)
         when (and (equal kind (gethash "kind" involved)) (equal name (gethash "name" involved)))
           collect (cons (gethash "reason" event) (gethash "message" event))))
@@ -568,16 +568,16 @@
   (with-temporary-store (store path)
     (declare (ignorable path))
     (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime)))
-      (gr8s::create-core-resource store "deployments" (workload-fixture "Deployment" "web" 2) "alpha")
+      (gr8s.resources::create-core-resource store "deployments" (workload-fixture "Deployment" "web" 2) "alpha")
       (run-workload-passes reconciler)
-      (let* ((set (first (gr8s::list-core-resources store "replicasets" "alpha")))
+      (let* ((set (first (gr8s.resources::list-core-resources store "replicasets" "alpha")))
              (set-name (gethash "name" (gethash "metadata" set))))
         (is (member (cons "ScalingReplicaSet" (format nil "Scaled up replica set ~A from 0 to 2" set-name))
                     (workload-events-about store "Deployment" "web") :test #'equal))
         (dolist (pod (list-pods store "alpha"))
           (is (member (cons "SuccessfulCreate" (format nil "Created pod: ~A" (pod-name pod)))
                       (workload-events-about store "ReplicaSet" set-name) :test #'equal)))
-        (gr8s::update-core-resource store "deployments" "alpha" "web"
+        (gr8s.resources::update-core-resource store "deployments" "alpha" "web"
           (lambda (object) (setf (gethash "replicas" (gethash "spec" object)) 1) object))
         (run-workload-passes reconciler)
         (is (member (cons "ScalingReplicaSet" (format nil "Scaled down replica set ~A from 2 to 1" set-name))
@@ -585,7 +585,7 @@
         (is (find "SuccessfulDelete" (workload-events-about store "ReplicaSet" set-name) :key #'car :test #'equal)))
       (let ((set (workload-fixture "StatefulSet" "db" 1)))
         (setf (gethash "serviceName" (gethash "spec" set)) "db")
-        (gr8s::create-core-resource store "statefulsets" set "alpha"))
+        (gr8s.resources::create-core-resource store "statefulsets" set "alpha"))
       (run-workload-passes reconciler)
       (is (member (cons "SuccessfulCreate" "create Pod db-0 in StatefulSet db successful")
                   (workload-events-about store "StatefulSet" "db") :test #'equal)))))
@@ -594,11 +594,11 @@
   (with-temporary-store (store path)
     (declare (ignorable path))
     (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime)))
-      (gr8s::create-core-resource store "deployments" (workload-fixture "Deployment" "web" 2) "alpha")
+      (gr8s.resources::create-core-resource store "deployments" (workload-fixture "Deployment" "web" 2) "alpha")
       (run-workload-passes reconciler)
       (mark-workload-pods-ready store runtime)
       (run-workload-passes reconciler)
-      (let* ((set-name (gethash "name" (gethash "metadata" (first (gr8s::list-core-resources store "replicasets" "alpha")))))
+      (let* ((set-name (gethash "name" (gethash "metadata" (first (gr8s.resources::list-core-resources store "replicasets" "alpha")))))
              (conditions (gethash "conditions" (workload-status store "deployments" "web"))))
         (flet ((message (type) (gethash "message" (find type conditions :test #'equal :key (lambda (c) (gethash "type" c))))))
           (is (equal "Deployment has minimum availability." (message "Available")))

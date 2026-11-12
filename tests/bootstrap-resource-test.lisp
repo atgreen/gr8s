@@ -32,12 +32,12 @@
           (is (equal (gethash "apiVersion" object) (gethash "apiVersion" created)))
           (check-core-status 409 collection :method :post :object object)
           (is (equalp created (check-core-status 200 url)))
-          (is (equalp created (gr8s::get-core-resource (open-store directory) resource namespace "sonobuoy")))
+          (is (equalp created (gr8s.resources::get-core-resource (open-store directory) resource namespace "sonobuoy")))
           (let ((list (check-core-status 200 collection)))
             (is (= 1 (length (gethash "items" list))))
             (is (equal (gethash "apiVersion" object) (gethash "apiVersion" list))))
           (check-core-status 200 url :method :patch :content-type "application/merge-patch+json"
-                             :object (gr8s::core-object "metadata" (gr8s::core-object "labels" (gr8s::core-object "updated" "yes"))))
+                             :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "labels" (gr8s.resources::core-object "updated" "yes"))))
           (check-core-status 409 url :method :put :object created))))
     (check-core-status 404 "/api/v1/clusterroles")
     (check-core-status 404 "/api/v1/namespaces/other/serviceaccounts/sonobuoy")
@@ -57,21 +57,21 @@
       (check-core-status 400 "/api/v1/namespaces" :method :post :object namespace))
     (check-core-status 422 "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings/sonobuoy"
                        :method :patch :content-type "application/merge-patch+json"
-                       :object (gr8s::core-object "roleRef" (gr8s::core-object "name" "another-role")))
+                       :object (gr8s.resources::core-object "roleRef" (gr8s.resources::core-object "name" "another-role")))
     (let ((role (fourth (third (bootstrap-fixtures)))))
       (setf (gethash "rules" role)
-            (vector (gr8s::core-object "verbs" #("get") "resources" #("pods"))))
+            (vector (gr8s.resources::core-object "verbs" #("get") "resources" #("pods"))))
       (check-core-status 422 "/apis/rbac.authorization.k8s.io/v1/clusterroles" :method :post :object role))))
 
 (test node-api-reflects-registration-and-live-readiness
   (with-core-api (store directory)
     (values directory)
-    (let ((node (gr8s:make-node-record :id "node-identity" :name "worker-a"
+    (let ((node (gr8s.model::make-node-record :id "node-identity" :name "worker-a"
                                       :pod-cidr "10.88.0.0/24" :underlay-address "192.0.2.5")))
-      (gr8s:register-node store node)
+      (gr8s.controllers::register-node store node)
       (let ((object (check-core-status 200 "/api/v1/nodes/worker-a")))
         (is (equal "False" (gethash "status" (aref (gethash "conditions" (gethash "status" object)) 0)))))
-      (gr8s:mark-node-ready store "worker-a" (get-universal-time))
+      (gr8s.controllers::mark-node-ready store "worker-a" (get-universal-time))
       (let* ((list (check-core-status 200 "/api/v1/nodes"))
              (object (aref (gethash "items" list) 0)))
         (is (= 1 (length (gethash "items" list))))
@@ -124,9 +124,9 @@
 
 (test every-named-discovery-resource-exists
   ;; A misspelled table entry would silently publish nothing.
-  (loop for (resource) in gr8s::*resource-discovery-names*
+  (loop for (resource) in gr8s.resources::*resource-discovery-names*
         do (is (or (member resource '("pods" "nodes" "apiservices" "componentstatuses") :test #'equal)
-                   (assoc resource gr8s::*stored-resource-types* :test #'equal))
+                   (assoc resource gr8s.resources::*stored-resource-types* :test #'equal))
                "~A is not a served resource" resource)))
 
 (test collection-delete-discovery-matches-what-is-served
@@ -162,65 +162,65 @@
 (test node-changes-clients-can-see-get-revisions-and-events
   (with-temporary-store (store directory)
     (values directory)
-    (let ((start (gr8s::pod-store-pod-revision store)))
-      (gr8s:register-node store (gr8s:make-node-record :id "a" :name "worker-a" :pod-cidr "10.88.0.0/24"))
-      (let ((registered (gr8s::node-record-resource-version (gr8s::get-node store "worker-a"))))
-        (gr8s:mark-node-ready store "worker-a" 100)
-        (let ((ready (gr8s::node-record-resource-version (gr8s::get-node store "worker-a"))))
+    (let ((start (gr8s.store::pod-store-pod-revision store)))
+      (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "a" :name "worker-a" :pod-cidr "10.88.0.0/24"))
+      (let ((registered (gr8s.model::node-record-resource-version (gr8s.controllers::get-node store "worker-a"))))
+        (gr8s.controllers::mark-node-ready store "worker-a" 100)
+        (let ((ready (gr8s.model::node-record-resource-version (gr8s.controllers::get-node store "worker-a"))))
           (is (> (parse-integer ready) (parse-integer registered)))
           ;; A later heartbeat renews the lease, which clients cannot see.
-          (gr8s:mark-node-ready store "worker-a" 110)
-          (is (equal ready (gr8s::node-record-resource-version (gr8s::get-node store "worker-a"))))))
-      (gr8s::update-node-extended-resources store "worker-a" (gr8s::core-object "example.com/gpu" "2"))
-      (gr8s::mark-node-not-ready store "worker-a")
-      (gr8s::mark-node-not-ready store "worker-a")
-      (let ((events (gr8s::node-watch-events store "" "" start)))
+          (gr8s.controllers::mark-node-ready store "worker-a" 110)
+          (is (equal ready (gr8s.model::node-record-resource-version (gr8s.controllers::get-node store "worker-a"))))))
+      (gr8s.controllers::update-node-extended-resources store "worker-a" (gr8s.resources::core-object "example.com/gpu" "2"))
+      (gr8s.controllers::mark-node-not-ready store "worker-a")
+      (gr8s.controllers::mark-node-not-ready store "worker-a")
+      (let ((events (gr8s.apiserver::node-watch-events store "" "" start)))
         (is (equal '(("ADDED" "worker-a") ("MODIFIED" "worker-a") ("MODIFIED" "worker-a") ("MODIFIED" "worker-a"))
                    (node-watch-names events)))
         (is (apply #'< (mapcar (lambda (event) (parse-integer (gethash "resourceVersion" (gethash "metadata" (gethash "object" event)))))
                                events)))
         (is (equal "False" (gethash "status" (aref (gethash "conditions" (gethash "status" (gethash "object" (fourth events)))) 0)))))
       ;; Resuming returns exactly what came later.
-      (let ((revision (gr8s::pod-store-pod-revision store)))
-        (is (null (gr8s::node-watch-events store "" "" revision)))
-        (gr8s:mark-node-ready store "worker-a" 120)
-        (is (equal '(("MODIFIED" "worker-a")) (node-watch-names (gr8s::node-watch-events store "" "" revision))))))))
+      (let ((revision (gr8s.store::pod-store-pod-revision store)))
+        (is (null (gr8s.apiserver::node-watch-events store "" "" revision)))
+        (gr8s.controllers::mark-node-ready store "worker-a" 120)
+        (is (equal '(("MODIFIED" "worker-a")) (node-watch-names (gr8s.apiserver::node-watch-events store "" "" revision))))))))
 
 (test node-revisions-survive-restart-and-old-revisions-expire
   (with-temporary-store (store directory)
-    (gr8s:register-node store (gr8s:make-node-record :id "a" :name "worker-a" :pod-cidr "10.88.0.0/24"))
-    (gr8s:mark-node-ready store "worker-a" 100)
-    (let* ((before (parse-integer (gr8s::node-record-resource-version (gr8s::get-node store "worker-a"))))
+    (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "a" :name "worker-a" :pod-cidr "10.88.0.0/24"))
+    (gr8s.controllers::mark-node-ready store "worker-a" 100)
+    (let* ((before (parse-integer (gr8s.model::node-record-resource-version (gr8s.controllers::get-node store "worker-a"))))
            (reopened (open-store directory)))
-      (is (= before (parse-integer (gr8s::node-record-resource-version (gr8s::get-node reopened "worker-a")))))
-      (is (>= (gr8s::pod-store-pod-revision reopened) before))
+      (is (= before (parse-integer (gr8s.model::node-record-resource-version (gr8s.controllers::get-node reopened "worker-a")))))
+      (is (>= (gr8s.store::pod-store-pod-revision reopened) before))
       ;; The journal is memory-only, so a client from before the restart must relist.
-      (is (= 410 (handler-case (progn (gr8s::node-list-page reopened "" "" (write-to-string (1- before))) 0)
-                   (kubernetes-error (condition) (gr8s::kubernetes-error-status-code condition))))))))
+      (is (= 410 (handler-case (progn (gr8s.apiserver::node-list-page reopened "" "" (write-to-string (1- before))) 0)
+                   (kubernetes-error (condition) (gr8s.model::kubernetes-error-status-code condition))))))))
 
 (test node-selectors-turn-leaving-the-selection-into-a-deletion
   (with-core-api (store directory)
     (values directory)
     (check-core-status 201 "/api/v1/nodes" :method :post
-      :object (gr8s::core-object "apiVersion" "v1" "kind" "Node"
-                                 "metadata" (gr8s::core-object "name" "api-a" "labels" (gr8s::core-object "set" "one"))))
-    (let ((revision (gr8s::pod-store-pod-revision store)))
+      :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Node"
+                                 "metadata" (gr8s.resources::core-object "name" "api-a" "labels" (gr8s.resources::core-object "set" "one"))))
+    (let ((revision (gr8s.store::pod-store-pod-revision store)))
       (is (= 1 (length (gethash "items" (check-core-status 200 "/api/v1/nodes" :parameters '(("labelSelector" . "set=one")))))))
       (check-core-status 200 "/api/v1/nodes/api-a" :method :patch :content-type "application/merge-patch+json"
-        :object (gr8s::core-object "metadata" (gr8s::core-object "labels" (gr8s::core-object "set" "two"))))
+        :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "labels" (gr8s.resources::core-object "set" "two"))))
       (is (= 0 (length (gethash "items" (check-core-status 200 "/api/v1/nodes" :parameters '(("labelSelector" . "set=one")))))))
-      (is (equal '(("DELETED" "api-a")) (node-watch-names (gr8s::node-watch-events store "set=one" "" revision))))
-      (is (equal '(("ADDED" "api-a")) (node-watch-names (gr8s::node-watch-events store "set=two" "" revision))))
-      (is (equal '(("MODIFIED" "api-a")) (node-watch-names (gr8s::node-watch-events store "" "metadata.name=api-a" revision)))))))
+      (is (equal '(("DELETED" "api-a")) (node-watch-names (gr8s.apiserver::node-watch-events store "set=one" "" revision))))
+      (is (equal '(("ADDED" "api-a")) (node-watch-names (gr8s.apiserver::node-watch-events store "set=two" "" revision))))
+      (is (equal '(("MODIFIED" "api-a")) (node-watch-names (gr8s.apiserver::node-watch-events store "" "metadata.name=api-a" revision)))))))
 
 (test node-list-and-watch-share-a-revision-over-http
   (with-core-api (store directory)
     (values directory)
-    (gr8s:register-node store (gr8s:make-node-record :id "a" :name "worker-a" :pod-cidr "10.88.0.0/24"))
+    (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "a" :name "worker-a" :pod-cidr "10.88.0.0/24"))
     (let* ((list (check-core-status 200 "/api/v1/nodes"))
            (revision (gethash "resourceVersion" (gethash "metadata" list))))
       (is (equal "NodeList" (gethash "kind" list)))
-      (is (= (gr8s::pod-store-pod-revision store) (parse-integer revision)))
+      (is (= (gr8s.store::pod-store-pod-revision store) (parse-integer revision)))
       (let ((verbs (coerce (gethash "verbs" (discovery-entry (check-core-status 200 "/api/v1") "nodes")) 'list)))
         (is (equal '("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch") verbs)))
       (sb-sys:with-deadline (:seconds 10)
@@ -230,7 +230,7 @@
           (unwind-protect
                (progn
                  (is (= 200 code))
-                 (gr8s:mark-node-ready store "worker-a" 100)
+                 (gr8s.controllers::mark-node-ready store "worker-a" 100)
                  (let ((event (read-template-watch-event stream)))
                    (is (equal "MODIFIED" (gethash "type" event)))
                    (is (equal "True" (gethash "status" (aref (gethash "conditions" (gethash "status" (gethash "object" event))) 0))))))
@@ -243,27 +243,27 @@
     (values directory)
     (flet ((node (name label)
              (check-core-status 201 "/api/v1/nodes" :method :post
-               :object (gr8s::core-object "apiVersion" "v1" "kind" "Node"
-                                          "metadata" (gr8s::core-object "name" name "labels" (gr8s::core-object "set" label))))))
+               :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Node"
+                                          "metadata" (gr8s.resources::core-object "name" name "labels" (gr8s.resources::core-object "set" label))))))
       (node "api-a" "one")
       (node "api-b" "one")
       (node "api-c" "two"))
-    (let ((revision (gr8s::pod-store-pod-revision store)))
+    (let ((revision (gr8s.store::pod-store-pod-revision store)))
       (check-core-status 200 "/api/v1/nodes" :method :delete :parameters '(("labelSelector" . "set=one")))
-      (is (null (ignore-errors (gr8s::get-node store "api-a"))))
-      (is (gr8s::get-node store "api-c"))
-      (is (equal '(("DELETED" "api-a") ("DELETED" "api-b")) (node-watch-names (gr8s::node-watch-events store "" "" revision)))))
-    (gr8s:register-node store (gr8s:make-node-record :id "a" :name "worker-a" :pod-cidr "10.88.0.0/24"))
+      (is (null (ignore-errors (gr8s.controllers::get-node store "api-a"))))
+      (is (gr8s.controllers::get-node store "api-c"))
+      (is (equal '(("DELETED" "api-a") ("DELETED" "api-b")) (node-watch-names (gr8s.apiserver::node-watch-events store "" "" revision)))))
+    (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "a" :name "worker-a" :pod-cidr "10.88.0.0/24"))
     ;; An agent's Node stays, and so does the rest of the selection: nothing happens by halves.
     (check-core-status 409 "/api/v1/nodes" :method :delete)
-    (is (gr8s::get-node store "api-c"))
-    (is (gr8s::get-node store "worker-a"))))
+    (is (gr8s.controllers::get-node store "api-c"))
+    (is (gr8s.controllers::get-node store "worker-a"))))
 
 (test apiservices-watch-follows-custom-resource-versions
   (with-crd-api (store directory)
     (values directory)
     ;; Revision 0 would mean "any", so give the list a real one to resume from.
-    (gr8s::create-core-resource store "configmaps" (gr8s::core-object "metadata" (gr8s::core-object "name" "one")) "alpha")
+    (gr8s.resources::create-core-resource store "configmaps" (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "one")) "alpha")
     (let ((collection (crd-api-url "/apis/apiregistration.k8s.io/v1/apiservices"))
           (revision (gethash "resourceVersion" (gethash "metadata" (crd-api-request 200 "/apis/apiregistration.k8s.io/v1/apiservices")))))
       (sb-sys:with-deadline (:seconds 15)
@@ -300,11 +300,11 @@
           for (collection kind) in '(("clusterroles" "ClusterRole") ("clusterrolebindings" "ClusterRoleBinding")
                                      ("namespaces/alpha/roles" "Role") ("namespaces/alpha/rolebindings" "RoleBinding"))
           for name = "wardler:aggregator-1:auth-delegator"
-          for object = (gr8s::core-object "apiVersion" "rbac.authorization.k8s.io/v1" "kind" kind
-                                          "metadata" (gr8s::core-object "name" name))
+          for object = (gr8s.resources::core-object "apiVersion" "rbac.authorization.k8s.io/v1" "kind" kind
+                                          "metadata" (gr8s.resources::core-object "name" name))
           do (if (search "binding" collection)
                  (setf (gethash "roleRef" object)
-                       (gr8s::core-object "apiGroup" "rbac.authorization.k8s.io" "kind" "ClusterRole" "name" "system:auth-delegator")
+                       (gr8s.resources::core-object "apiGroup" "rbac.authorization.k8s.io" "kind" "ClusterRole" "name" "system:auth-delegator")
                        (gethash "subjects" object) #())
                  (setf (gethash "rules" object) #()))
              (check-core-status 201 (concatenate 'string prefix collection) :method :post :object object)
@@ -312,26 +312,26 @@
              (check-core-status 200 (format nil "~A~A/~A" prefix collection name) :method :delete))
     ;; Other kinds keep DNS names.
     (check-core-status 422 "/api/v1/namespaces/alpha/configmaps" :method :post
-      :object (gr8s::core-object "metadata" (gr8s::core-object "name" "not:dns")))))
+      :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "not:dns")))))
 
 (test pods-can-be-bound-once-to-a-node-that-exists
   (with-core-api (store directory)
     (values directory)
-    (gr8s:register-node store (gr8s:make-node-record :id "bind-id" :name "bind-node" :pod-cidr "10.88.40.0/24"))
+    (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "bind-id" :name "bind-node" :pod-cidr "10.88.40.0/24"))
     (let* ((pod (create-pod store (parse-pod *valid-pod-json*)))
            (name (pod-name pod))
            (binding (concatenate 'string "/api/v1/namespaces/default/pods/" name "/binding")))
       (flet ((bind (code node &optional (bound-name name))
                (check-core-status
                 code binding :method :post
-                :object (gr8s::core-object "apiVersion" "v1" "kind" "Binding"
-                                           "metadata" (gr8s::core-object "name" bound-name)
-                                           "target" (gr8s::core-object "kind" "Node" "name" node)))))
+                :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Binding"
+                                           "metadata" (gr8s.resources::core-object "name" bound-name)
+                                           "target" (gr8s.resources::core-object "kind" "Node" "name" node)))))
         (bind 404 "no-such-node")
         (bind 400 "bind-node" "another-pod")
-        (is (null (gr8s::pod-node-name (gr8s:get-pod store "default" name))))
+        (is (null (gr8s.model::pod-node-name (gr8s.store::get-pod store "default" name))))
         (is (= 201 (gethash "code" (bind 201 "bind-node"))))
-        (is (equal "bind-node" (gr8s::pod-node-name (gr8s:get-pod store "default" name))))
+        (is (equal "bind-node" (gr8s.model::pod-node-name (gr8s.store::get-pod store "default" name))))
         ;; A Pod is bound once.
         (bind 409 "bind-node")))))
 
@@ -369,9 +369,9 @@
               stream)
              (finish-output stream)
              (is-true (usocket:wait-for-input socket :timeout 5 :ready-only t) "no answer within 5 seconds")
-             (let ((status (gr8s::admission-read-line stream)))
+             (let ((status (gr8s.apiserver::admission-read-line stream)))
                (is (search " 201 " status) "got ~A" status))
-             (is (equal "chunked" (gethash "name" (gethash "metadata" (gr8s::get-core-resource store "namespaces" nil "chunked"))))))
+             (is (equal "chunked" (gethash "name" (gethash "metadata" (gr8s.resources::get-core-resource store "namespaces" nil "chunked"))))))
         (usocket:socket-close socket)))))
 
 (test componentstatuses-print-their-health-as-a-table
@@ -392,23 +392,23 @@
   (with-core-api (store path)
     (values store path)
     (let ((created (check-core-status 201 "/api/v1/namespaces" :method :post
-                     :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace"
-                                                "metadata" (gr8s::core-object "name" "labelled"
-                                                                              "labels" (gr8s::core-object "team" "a"))))))
+                     :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Namespace"
+                                                "metadata" (gr8s.resources::core-object "name" "labelled"
+                                                                              "labels" (gr8s.resources::core-object "team" "a"))))))
       (is (equal "labelled" (gethash "kubernetes.io/metadata.name" (gethash "labels" (gethash "metadata" created)))))
       (is (equal "a" (gethash "team" (gethash "labels" (gethash "metadata" created))))))
     ;; An update cannot remove or change it.
     (let ((updated (check-core-status 200 "/api/v1/namespaces/labelled" :method :put
-                     :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace"
-                                                "metadata" (gr8s::core-object "name" "labelled"
-                                                                              "labels" (gr8s::core-object "kubernetes.io/metadata.name" "other"))))))
+                     :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Namespace"
+                                                "metadata" (gr8s.resources::core-object "name" "labelled"
+                                                                              "labels" (gr8s.resources::core-object "kubernetes.io/metadata.name" "other"))))))
       (is (equal "labelled" (gethash "kubernetes.io/metadata.name" (gethash "labels" (gethash "metadata" updated))))))))
 
 (test bound-token-claims-and-self-reviews-reach-every-version
   ;; Admission's userInfo carries a bound token's node and pod claims, which policies match on.
-  (let* ((extra (gr8s::core-object "authentication.kubernetes.io/node-name" #("gr8s-local")))
-         (actor (gr8s::api-identity-actor
-                 (gr8s::make-api-service-account-identity :namespace "ns" :name "default" :uid "u" :extra extra))))
+  (let* ((extra (gr8s.resources::core-object "authentication.kubernetes.io/node-name" #("gr8s-local")))
+         (actor (gr8s.resources::api-identity-actor
+                 (gr8s.resources::make-api-service-account-identity :namespace "ns" :name "default" :uid "u" :extra extra))))
     (is (equal "system:serviceaccount:ns:default" (gethash "username" actor)))
     (is (equalp #("gr8s-local") (gethash "authentication.kubernetes.io/node-name" (gethash "extra" actor)))))
   ;; system:basic-user grants self reviews by group and resource, whatever the version.
@@ -416,9 +416,9 @@
                   "/apis/authentication.k8s.io/v1alpha1/selfsubjectreviews"
                   "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews"
                   "/apis/authorization.k8s.io/v1beta1/selfsubjectrulesreviews"))
-    (is (gr8s::authenticated-self-review-request-p path :post) "~A" path))
+    (is (gr8s.apiserver::authenticated-self-review-request-p path :post) "~A" path))
   (dolist (path '("/apis/authentication.k8s.io/v1/tokenreviews"
                   "/apis/authorization.k8s.io/v1/subjectaccessreviews"
                   "/apis/authentication.k8s.io/v1/selfsubjectreviews/x"))
-    (is (not (gr8s::authenticated-self-review-request-p path :post)) "~A" path))
-  (is (not (gr8s::authenticated-self-review-request-p "/apis/authentication.k8s.io/v1/selfsubjectreviews" :get))))
+    (is (not (gr8s.apiserver::authenticated-self-review-request-p path :post)) "~A" path))
+  (is (not (gr8s.apiserver::authenticated-self-review-request-p "/apis/authentication.k8s.io/v1/selfsubjectreviews" :get))))

@@ -13,7 +13,7 @@
        (sleep seconds)
        (format output "~&gr8s test suite still running after ~D seconds~%" seconds)
        (let ((*standard-output* output))
-         (gr8s::debug-backtraces "" 3))
+         (gr8s.apiserver::debug-backtraces "" 3))
        (finish-output output)
        (sb-ext:exit :code 124 :abort t))
      :name "gr8s test suite watchdog")))

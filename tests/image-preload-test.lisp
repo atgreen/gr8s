@@ -11,7 +11,7 @@
 (in-suite gr8s)
 
 (defun window-update-any (bytes)
-  (gr8s::containerd-any "containerd.types.transfer.WindowUpdate"
+  (gr8s.kubelet::containerd-any "containerd.types.transfer.WindowUpdate"
                         (make-instance 'gr8s.containerd.transfer.v1::window-update :update bytes)))
 
 (defun octets (&rest parts)
@@ -30,9 +30,9 @@
              (with-open-file (stream (merge-pathnames name directory) :direction :output)
                (write-string "x" stream)))
            (is (equal '("a.tar" "b.tar")
-                      (mapcar #'file-namestring (gr8s::image-archive-paths directory)))))
+                      (mapcar #'file-namestring (gr8s.kubelet::image-archive-paths directory)))))
       (uiop:delete-directory-tree directory :validate t)))
-  (is (null (gr8s::image-archive-paths "/nonexistent/gr8s-images/"))))
+  (is (null (gr8s.kubelet::image-archive-paths "/nonexistent/gr8s-images/"))))
 
 (test the-import-destination-matches-containerds-image-store
   ;; containerd.types.transfer.ImageStore{platforms: 3, extra_references: 6, unpacks: 10},
@@ -43,8 +43,8 @@
     (is (equalp (octets (list 26 (length platform)) platform
                         (list 50 (length reference)) reference
                         (list 82 (length unpack)) unpack)
-                (ag-proto:serialize-to-bytes (gr8s::image-archive-import-store "linux/amd64" "overlayfs")))))
-  (let ((arm (gr8s::containerd-transfer-platform "linux/arm64/v8")))
+                (ag-proto:serialize-to-bytes (gr8s.kubelet::image-archive-import-store "linux/amd64" "overlayfs")))))
+  (let ((arm (gr8s.kubelet::containerd-transfer-platform "linux/arm64/v8")))
     (is (equal "arm64" (gr8s.containerd.transfer.v1::architecture arm)))
     (is (equal "v8" (gr8s.containerd.transfer.v1::variant arm)))))
 
@@ -54,7 +54,7 @@
                     (dotimes (i size bytes) (setf (aref bytes i) (mod (* i 7) 256)))))
          (sent '()) (granted 0) (credit-seen '()))
     (flexi-streams:with-input-from-sequence (input archive)
-      (gr8s::send-image-archive
+      (gr8s.kubelet::send-image-archive
        input
        (lambda (message)
          (is (equal "containerd.types.transfer.Data" (gr8s.containerd.transfer.v1::type-url message)))
@@ -75,10 +75,10 @@
 
 (test archive-sending-stops-when-containerd-does
   (flexi-streams:with-input-from-sequence (input (make-array 10 :element-type '(unsigned-byte 8) :initial-element 1))
-    (signals gr8s::runtime-error
-      (gr8s::send-image-archive input (lambda (message) message) (lambda () nil))))
+    (signals gr8s.runtime::runtime-error
+      (gr8s.kubelet::send-image-archive input (lambda (message) message) (lambda () nil))))
   (flexi-streams:with-input-from-sequence (input (make-array 10 :element-type '(unsigned-byte 8) :initial-element 1))
-    (signals gr8s::runtime-error
-      (gr8s::send-image-archive input (lambda (message) message)
-                                (lambda () (gr8s::containerd-any "containerd.types.transfer.Data"
+    (signals gr8s.runtime::runtime-error
+      (gr8s.kubelet::send-image-archive input (lambda (message) message)
+                                (lambda () (gr8s.kubelet::containerd-any "containerd.types.transfer.Data"
                                                                  (make-instance 'gr8s.containerd.transfer.v1::data)))))))

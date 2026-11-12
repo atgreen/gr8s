@@ -55,10 +55,10 @@
     `(with-temporary-store (store ,directory)
        (let ((,original (symbol-function 'slynk::sly-secret)))
          (unwind-protect
-              (let* ((,port (gr8s::start-debug-server 0 ,directory :store store))
-                     (,secret (uiop:read-file-string (gr8s::debug-secret-path ,directory))))
+              (let* ((,port (gr8s.apiserver::start-debug-server 0 ,directory :store store))
+                     (,secret (uiop:read-file-string (gr8s.apiserver::debug-secret-path ,directory))))
                 (unwind-protect (progn ,@body)
-                  (gr8s::stop-debug-server ,port)))
+                  (gr8s.apiserver::stop-debug-server ,port)))
            (setf (symbol-function 'slynk::sly-secret) ,original))))))
 
 (test debug-server-is-off-unless-a-port-is-requested
@@ -71,15 +71,15 @@
     (declare (ignorable store))
     (let ((original (symbol-function 'slynk::sly-secret)))
       (unwind-protect
-           (let* ((first (gr8s::install-debug-secret directory))
-                  (path (gr8s::debug-secret-path directory))
+           (let* ((first (gr8s.apiserver::install-debug-secret directory))
+                  (path (gr8s.apiserver::debug-secret-path directory))
                   (mode (logand #o777 (sb-posix:stat-mode (sb-posix:stat (namestring path))))))
              (is (= 64 (length first)))
              (is (every (lambda (character) (digit-char-p character 16)) first))
              (is (= #o600 mode))
              (is (equal first (uiop:read-file-string path)))
              (is (equal first (slynk::sly-secret)))
-             (is (not (equal first (gr8s::install-debug-secret directory)))))
+             (is (not (equal first (gr8s.apiserver::install-debug-secret directory)))))
         (setf (symbol-function 'slynk::sly-secret) original)))))
 
 (test clients-must-present-the-secret-on-a-real-socket
@@ -110,25 +110,25 @@
 (test on-demand-debug-session-is-exclusive-and-restores-process-state
   (with-temporary-store (store directory)
     (let* ((original-secret-function (symbol-function 'slynk::sly-secret))
-           (session (gr8s::start-on-demand-debug-session directory :store store)))
+           (session (gr8s.apiserver::start-on-demand-debug-session directory :store store)))
       (unwind-protect
            (progn
-             (is (plusp (gr8s::on-demand-debug-session-port session)))
-             (is (= 64 (length (gr8s::on-demand-debug-session-secret session))))
-             (signals gr8s::debug-session-conflict
-               (gr8s::start-on-demand-debug-session directory :store store)))
-        (gr8s::stop-on-demand-debug-session session))
+             (is (plusp (gr8s.apiserver::on-demand-debug-session-port session)))
+             (is (= 64 (length (gr8s.apiserver::on-demand-debug-session-secret session))))
+             (signals gr8s.apiserver::debug-session-conflict
+               (gr8s.apiserver::start-on-demand-debug-session directory :store store)))
+        (gr8s.apiserver::stop-on-demand-debug-session session))
       (is (eq original-secret-function (symbol-function 'slynk::sly-secret)))
       ;; A disconnected session releases ownership for the next tunnel.
-      (let ((next (gr8s::start-on-demand-debug-session directory :store store)))
-        (gr8s::stop-on-demand-debug-session next)))))
+      (let ((next (gr8s.apiserver::start-on-demand-debug-session directory :store store)))
+        (gr8s.apiserver::stop-on-demand-debug-session next)))))
 
 (test on-demand-bridge-authenticates-before-relaying-slynk-protocol
   (with-temporary-store (store directory)
-    (let ((session (gr8s::start-on-demand-debug-session directory :store store)))
+    (let ((session (gr8s.apiserver::start-on-demand-debug-session directory :store store)))
       (unwind-protect
            (multiple-value-bind (stream socket)
-               (gr8s::open-on-demand-debug-stream session)
+               (gr8s.apiserver::open-on-demand-debug-stream session)
              (unwind-protect
                   (progn
                     ;; The caller sends ordinary Slynk protocol immediately;
@@ -141,12 +141,12 @@
                               for frame = (slynk-read-frame stream)
                               thereis (and frame (search ":ok" frame) (search "42" frame)))))
                (usocket:socket-close socket)))
-        (gr8s::stop-on-demand-debug-session session)))))
+        (gr8s.apiserver::stop-on-demand-debug-session session)))))
 
 (test node-slynk-operation-relays-bytes-and-cancel-tears-it-down
   (with-temporary-store (store directory)
     (declare (ignore store))
-    (let* ((runtime (gr8s::make-node-runtime
+    (let* ((runtime (gr8s.agent::make-node-runtime
                      (merge-pathnames "agent/" directory) (make-fake-runtime) nil))
            (request (make-instance 'gr8s.node.v1::operation-request
                                    :operation-id "debug-1"
@@ -155,12 +155,12 @@
            (lock (bt:make-lock "node Slynk test messages")))
       (flet ((emit (variant payload)
                (bt:with-lock-held (lock) (push (cons variant payload) messages))))
-        (gr8s::dispatch-node-operation runtime :operation-request request #'emit)
+        (gr8s.agent::dispatch-node-operation runtime :operation-request request #'emit)
         (is-true (wait-until
                   (lambda () (bt:with-lock-held (lock)
                                (find :operation-response messages :key #'car)))
                   :timeout 5))
-        (gr8s::dispatch-node-operation
+        (gr8s.agent::dispatch-node-operation
          runtime :operation-input
          (make-instance 'gr8s.node.v1::operation-input
                         :operation-id "debug-1" :sequence 1
@@ -192,13 +192,13 @@
                                            (length (slot-value (cdr message) 'gr8s.node.v1::data)))))
                               (reverse messages)))))
           (is-true relayed))
-        (gr8s::dispatch-node-operation
+        (gr8s.agent::dispatch-node-operation
          runtime :operation-cancel
          (make-instance 'gr8s.node.v1::operation-cancel
                         :operation-id "debug-1" :reason "client disconnected")
          #'emit)
-        (is-true (wait-until (lambda () (null gr8s::*on-demand-debug-session*)) :timeout 5))
-        (is (null (gr8s::find-node-exec-operation runtime "debug-1")))))))
+        (is-true (wait-until (lambda () (null gr8s.apiserver::*on-demand-debug-session*)) :timeout 5))
+        (is (null (gr8s.agent::find-node-exec-operation runtime "debug-1")))))))
 
 (test member-slynk-operation-relays-bytes-without-blocking-the-mtls-handler
   (with-temporary-store (store directory)
@@ -207,14 +207,14 @@
       (flet ((emit (variant payload)
                (bt:with-lock-held (lock) (push (cons variant payload) messages))))
         (is-true
-         (gr8s::dispatch-member-slynk-operation
+         (gr8s.apiserver::dispatch-member-slynk-operation
           directory store nil "cp-1" :operation-request
           (make-instance 'gr8s.node.v1::operation-request
                          :operation-id "member-debug-1"
                          :kind gr8s.node.v1::+operationkind-operation_kind_slynk+)
           #'emit))
         (is-true
-         (gr8s::dispatch-member-slynk-operation
+         (gr8s.apiserver::dispatch-member-slynk-operation
           directory store nil "cp-1" :operation-input
           (make-instance 'gr8s.node.v1::operation-input
                          :operation-id "member-debug-1" :sequence 1
@@ -236,41 +236,41 @@
                      (search "43" (trivial-utf-8:utf-8-bytes-to-string octets))))))
           :timeout 5))
         (is-true
-         (gr8s::dispatch-member-slynk-operation
+         (gr8s.apiserver::dispatch-member-slynk-operation
           directory store nil "cp-1" :operation-cancel
           (make-instance 'gr8s.node.v1::operation-cancel
                          :operation-id "member-debug-1" :reason "client disconnected")
           #'emit))
-        (is-true (wait-until (lambda () (null gr8s::*on-demand-debug-session*)) :timeout 5))
-        (is (null (bt:with-lock-held (gr8s::*member-slynk-operations-lock*)
-                    (gethash "member-debug-1" gr8s::*member-slynk-operations*))))))))
+        (is-true (wait-until (lambda () (null gr8s.apiserver::*on-demand-debug-session*)) :timeout 5))
+        (is (null (bt:with-lock-held (gr8s.apiserver::*member-slynk-operations-lock*)
+                    (gethash "member-debug-1" gr8s.apiserver::*member-slynk-operations*))))))))
 
 (test member-slynk-tunnel-routes-to-the-exact-selected-member
   (with-temporary-store (store directory)
-    (let* ((origin (gr8s::%make-node-grpc-server :store store))
-           (target (gr8s::%make-node-grpc-server :store store))
+    (let* ((origin (gr8s.apiserver::%make-node-grpc-server :store store))
+           (target (gr8s.apiserver::%make-node-grpc-server :store store))
            (runtime (gr8s.controllers::make-control-plane-runtime store origin))
            (routes nil)
            (route-lock (bt:make-lock "member Slynk route test")))
-      (setf (gr8s::node-grpc-server-operation-router target)
+      (setf (gr8s.apiserver::node-grpc-server-operation-router target)
             (lambda (variant target-member node-name payload)
               (declare (ignore node-name))
               (bt:with-lock-held (route-lock)
                 (push (list :target variant target-member) routes))
-              (gr8s::deliver-routed-node-operation origin variant payload)
+              (gr8s.apiserver::deliver-routed-node-operation origin variant payload)
               "cp-1"))
-      (gr8s::install-member-slynk-handler target directory store nil)
-      (setf (gr8s::node-grpc-server-operation-router origin)
+      (gr8s.apiserver::install-member-slynk-handler target directory store nil)
+      (setf (gr8s.apiserver::node-grpc-server-operation-router origin)
             (lambda (variant target-member node-name payload)
               (bt:with-lock-held (route-lock)
                 (push (list :origin variant target-member node-name) routes))
               (when (and (equal "cp-2" target-member)
                          (uiop:string-prefix-p "@control-plane/cp-2" node-name)
-                         (gr8s::accept-routed-node-operation
+                         (gr8s.apiserver::accept-routed-node-operation
                           target "cp-1" node-name variant payload))
                 "cp-2")))
       (let* ((operation
-               (gr8s::queue-member-operation
+               (gr8s.apiserver::queue-member-operation
                 origin "cp-2"
                 (make-instance 'gr8s.node.v1::operation-request
                                :operation-id "member-route-1"
@@ -298,7 +298,7 @@
           (ignore-errors
            (gr8s.runtime:runtime-cancel-port-forward runtime session "test complete"))
           (gr8s.runtime:runtime-release-port-forward runtime session))
-        (is-true (wait-until (lambda () (null gr8s::*on-demand-debug-session*))
+        (is-true (wait-until (lambda () (null gr8s.apiserver::*on-demand-debug-session*))
                              :timeout 5))
         (let ((observed (bt:with-lock-held (route-lock) (copy-list routes))))
           (is-true (find :origin observed :key #'first))
@@ -313,7 +313,7 @@
                   ("/apis/gr8s.io/v1/controlplanemembers/cp-2/slynk"
                    "controlplanemembers/slynk" "cp-2")))
     (multiple-value-bind (verb group resource name namespace)
-        (gr8s::kubernetes-authorization-target (first case) :get)
+        (gr8s.apiserver::kubernetes-authorization-target (first case) :get)
       (is (equal "create" verb))
       (is (equal "gr8s.io" group))
       (is (equal (second case) resource))
@@ -337,45 +337,45 @@
 
 (test selector-target-must-be-exactly-one-ready-node
   (flet ((node (name ready)
-           (gr8s::core-object "metadata" (gr8s::core-object "name" name)
-                              "status" (gr8s::core-object
+           (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" name)
+                              "status" (gr8s.resources::core-object
                                         "conditions"
-                                        (vector (gr8s::core-object
+                                        (vector (gr8s.resources::core-object
                                                  "type" "Ready"
                                                  "status" (if ready "True" "False")))))))
-    (is (equal "a" (gr8s::selected-ready-node-name (vector (node "a" t)) "x=y")))
-    (signals error (gr8s::selected-ready-node-name #() "x=y"))
-    (signals error (gr8s::selected-ready-node-name (vector (node "a" nil)) "x=y"))
-    (signals error (gr8s::selected-ready-node-name (vector (node "a" t) (node "b" t)) "x=y"))))
+    (is (equal "a" (gr8s.server::selected-ready-node-name (vector (node "a" t)) "x=y")))
+    (signals error (gr8s.server::selected-ready-node-name #() "x=y"))
+    (signals error (gr8s.server::selected-ready-node-name (vector (node "a" nil)) "x=y"))
+    (signals error (gr8s.server::selected-ready-node-name (vector (node "a" t) (node "b" t)) "x=y"))))
 
 (test debug-eval-returns-text-and-never-enters-a-debugger
-  (is (equal (format nil "3~%") (gr8s::debug-eval "(+ 1 2)")))
-  (is (search "printed" (gr8s::debug-eval "(progn (princ \"printed\") nil)")))
-  (let ((failure (gr8s::debug-eval "(error \"boom ~A\" 1)")))
+  (is (equal (format nil "3~%") (gr8s.apiserver::debug-eval "(+ 1 2)")))
+  (is (search "printed" (gr8s.apiserver::debug-eval "(progn (princ \"printed\") nil)")))
+  (let ((failure (gr8s.apiserver::debug-eval "(error \"boom ~A\" 1)")))
     (is (uiop:string-prefix-p "ERROR: boom 1" failure))
     (is (search "DEBUG-EVAL" failure)))
-  (is (uiop:string-prefix-p "ERROR: " (gr8s::debug-eval "(unclosed"))))
+  (is (uiop:string-prefix-p "ERROR: " (gr8s.apiserver::debug-eval "(unclosed"))))
 
 (test debug-helpers-read-live-state
   (with-temporary-store (store directory)
     (declare (ignorable directory))
-    (let ((gr8s::*debug-store* store)
+    (let ((gr8s.apiserver::*debug-store* store)
           (pod (create-pod store (parse-pod *valid-pod-json*))))
-      (is (member "main thread" (gr8s::debug-threads) :test #'equal))
-      (let ((text (gr8s::debug-eval "(debug-pod \"default\" \"hello\")")))
+      (is (member "main thread" (gr8s.apiserver::debug-threads) :test #'equal))
+      (let ((text (gr8s.apiserver::debug-eval "(debug-pod \"default\" \"hello\")")))
         (is (search (pod-uid pod) text))
         (is (search "\"observed\"" text)))
-      (is (search "no Pod" (gr8s::debug-eval "(debug-pod \"default\" \"missing\")")))
-      (is (search "ADDED default/hello" (gr8s::debug-eval "(debug-journal)")))
+      (is (search "no Pod" (gr8s.apiserver::debug-eval "(debug-pod \"default\" \"missing\")")))
+      (is (search "ADDED default/hello" (gr8s.apiserver::debug-eval "(debug-journal)")))
       ;; Output stays machine-readable: no trailing printed value.
-      (is (com.inuoe.jzon:parse (gr8s::debug-eval "(debug-pod \"default\" \"hello\")"))))))
+      (is (com.inuoe.jzon:parse (gr8s.apiserver::debug-eval "(debug-pod \"default\" \"hello\")"))))))
 
 (test thread-backtraces-come-back-even-from-a-blocked-thread
   (let* ((gate (sb-thread:make-semaphore))
          (thread (sb-thread:make-thread (lambda () (sb-thread:wait-on-semaphore gate)) :name "gr8s-blocked-for-test")))
     (sleep 0.5) ; Let the new thread reach its wait before interrupting it.
     (unwind-protect
-         (let ((text (gr8s::debug-eval "(debug-backtraces \"gr8s-blocked-for-test\")")))
+         (let ((text (gr8s.apiserver::debug-eval "(debug-backtraces \"gr8s-blocked-for-test\")")))
            (is (search "gr8s-blocked-for-test" text))
            (is (search "WAIT-ON-SEMAPHORE" (string-upcase text))))
       (sb-thread:signal-semaphore gate)

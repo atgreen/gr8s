@@ -12,56 +12,56 @@
 (in-suite agent-failover)
 
 (test parse-agent-servers-splits-a-comma-list
-  (is (equal '(("127.0.0.1" 7443)) (gr8s::parse-agent-servers "127.0.0.1:7443")))
+  (is (equal '(("127.0.0.1" 7443)) (gr8s.server::parse-agent-servers "127.0.0.1:7443")))
   (is (equal '(("10.0.0.1" 7443) ("10.0.0.2" 7443))
-             (gr8s::parse-agent-servers "10.0.0.1:7443, 10.0.0.2:7443"))))
+             (gr8s.server::parse-agent-servers "10.0.0.1:7443, 10.0.0.2:7443"))))
 
 (test ha-node-endpoints-put-the-local-member-first
-  (let* ((node (gr8s::make-raft-node :id "cp2" :leader-id "cp1"))
-         (member (gr8s::make-raft-member :node node))
-         (hcp (gr8s::make-ha-control-plane :member member)))
-    (setf (gethash "cp1" (gr8s::raft-node-peer-addresses node)) '("10.0.0.1" 7444)
-          (gethash "cp2" (gr8s::raft-node-peer-addresses node)) '("10.0.0.2" 7444)
-          (gethash "cp3" (gr8s::raft-node-peer-addresses node)) '("10.0.0.3" 7444))
+  (let* ((node (cl-raft::make-raft-node :id "cp2" :leader-id "cp1"))
+         (member (gr8s.raft.transport::make-raft-member :node node))
+         (hcp (gr8s.ha::make-ha-control-plane :member member)))
+    (setf (gethash "cp1" (cl-raft::raft-node-peer-addresses node)) '("10.0.0.1" 7444)
+          (gethash "cp2" (cl-raft::raft-node-peer-addresses node)) '("10.0.0.2" 7444)
+          (gethash "cp3" (cl-raft::raft-node-peer-addresses node)) '("10.0.0.3" 7444))
     (is (equal '(("10.0.0.2" 7443)
                  ("10.0.0.1" 7443)
                  ("10.0.0.3" 7443))
-               (gr8s::ha-control-plane-node-endpoints hcp 7443)))))
+               (gr8s.ha::ha-control-plane-node-endpoints hcp 7443)))))
 
 (test ha-node-session-endpoints-put-the-known-leader-first
-  (let* ((node (gr8s::make-raft-node :id "cp2" :leader-id "cp1"))
-         (member (gr8s::make-raft-member :node node))
-         (hcp (gr8s::make-ha-control-plane :member member)))
-    (setf (gethash "cp1" (gr8s::raft-node-peer-addresses node)) '("10.0.0.1" 7444)
-          (gethash "cp2" (gr8s::raft-node-peer-addresses node)) '("10.0.0.2" 7444)
-          (gethash "cp3" (gr8s::raft-node-peer-addresses node)) '("10.0.0.3" 7444))
+  (let* ((node (cl-raft::make-raft-node :id "cp2" :leader-id "cp1"))
+         (member (gr8s.raft.transport::make-raft-member :node node))
+         (hcp (gr8s.ha::make-ha-control-plane :member member)))
+    (setf (gethash "cp1" (cl-raft::raft-node-peer-addresses node)) '("10.0.0.1" 7444)
+          (gethash "cp2" (cl-raft::raft-node-peer-addresses node)) '("10.0.0.2" 7444)
+          (gethash "cp3" (cl-raft::raft-node-peer-addresses node)) '("10.0.0.3" 7444))
     (is (equal '(("10.0.0.1" 7443)
                  ("10.0.0.2" 7443)
                  ("10.0.0.3" 7443))
-               (gr8s::ha-control-plane-node-session-endpoints hcp 7443)))))
+               (gr8s.ha::ha-control-plane-node-session-endpoints hcp 7443)))))
 
 (test agent-rotates-to-a-live-control-plane-endpoint
   (with-temporary-store (store path)
-    (gr8s:register-node
-     store (gr8s:make-node-record :id "node-1" :name "worker-a" :pod-cidr "10.88.0.0/20"))
+    (gr8s.controllers::register-node
+     store (gr8s.model::make-node-record :id "node-1" :name "worker-a" :pod-cidr "10.88.0.0/20"))
     (let* ((identity-path (merge-pathnames "agent/identity.json" path))
-           (server (gr8s:start-node-grpc-server
+           (server (gr8s.apiserver::start-node-grpc-server
                     store :host "127.0.0.1" :port 0 :heartbeat-timeout-seconds 2))
-           (good-port (gr8s:node-grpc-server-port server))
+           (good-port (gr8s.apiserver::node-grpc-server-port server))
            ;; A port with nothing listening: the first endpoint the agent tries.
            (dead-port (let ((s (make-instance 'hunchentoot:easy-acceptor :address "127.0.0.1" :port 0)))
                         (hunchentoot:start s)
                         (prog1 (hunchentoot:acceptor-port s) (hunchentoot:stop s))))
            (applied nil)
-           (control (gr8s::make-node-session-control))
+           (control (gr8s.agent::make-node-session-control))
            (agent-thread nil))
       (unwind-protect
            (progn
-             (gr8s:publish-node-desired-state server "worker-a" (empty-desired-snapshot))
+             (gr8s.apiserver::publish-node-desired-state server "worker-a" (empty-desired-snapshot))
              (setf agent-thread
                    (bt:make-thread
                     (lambda ()
-                      (gr8s:run-node-session
+                      (gr8s.agent::run-node-session
                        "127.0.0.1" dead-port "worker-a" identity-path
                        (lambda (snapshot)
                          (push (slot-value snapshot 'gr8s.node.v1::revision) applied))
@@ -72,6 +72,6 @@
              (is-true (wait-until (lambda () applied) :timeout 10)
                       "the agent reaches the live endpoint after the dead one")
              (is (member 1 applied) "it applied the desired-state revision from the live member"))
-        (gr8s::cancel-node-session control)
+        (gr8s.agent::cancel-node-session control)
         (when agent-thread (ignore-errors (bt:join-thread agent-thread)))
-        (gr8s:stop-node-grpc-server server)))))
+        (gr8s.apiserver::stop-node-grpc-server server)))))

@@ -33,16 +33,16 @@
 
 (test netpol-bakes-rule-constants-into-branches
   ;; allow egress to 10.0.0.0/8 on TCP/80 and UDP/53.
-  (let* ((policy (gr8s::make-network-policy
-                  :rules (list (gr8s::make-netpol-rule "10.0.0.0/8" '((:tcp . 80)))
-                               (gr8s::make-netpol-rule "192.168.5.5/32" '((:udp . 53))))))
-         (forms (gr8s::network-policy-egress-forms policy)))
+  (let* ((policy (gr8s.network::make-network-policy
+                  :rules (list (gr8s.network::make-netpol-rule "10.0.0.0/8" '((:tcp . 80)))
+                               (gr8s.network::make-netpol-rule "192.168.5.5/32" '((:udp . 53))))))
+         (forms (gr8s.network::network-policy-egress-forms policy)))
     ;; 10.0.0.0/8 -> mask 0xff000000, net 0x0a000000.
     (is (netpol-form-has-number forms #xff000000))
     (is (netpol-form-has-number forms #x0a000000))
     ;; 192.168.5.5/32 -> mask 0xffffffff, net = the address itself.
     (is (netpol-form-has-number forms #xffffffff))
-    (is (netpol-form-has-number forms (gr8s::parse-ipv4-integer "192.168.5.5")))
+    (is (netpol-form-has-number forms (gr8s.controllers::parse-ipv4-integer "192.168.5.5")))
     ;; Protocol numbers (tcp=6, udp=17) and ports (80, 53) as literals.
     (is (netpol-form-has-number forms 6))
     (is (netpol-form-has-number forms 17))
@@ -56,26 +56,26 @@
 (test netpol-empty-policy-is-default-deny
   ;; A selected Pod with no egress rules: IPv4 egress is dropped, no allow
   ;; constants, but non-IPv4 still passes (one TC_ACT_OK for the ARP branch).
-  (let* ((policy (gr8s::make-network-policy :rules '()))
-         (forms (gr8s::network-policy-egress-forms policy)))
+  (let* ((policy (gr8s.network::make-network-policy :rules '()))
+         (forms (gr8s.network::network-policy-egress-forms policy)))
     (is (netpol-form-has-symbol forms "TC_ACT_SHOT"))
     (is (= 1 (netpol-count-symbol forms "TC_ACT_OK")))
     (is (not (netpol-form-has-number forms 80)))))
 
 (test netpol-allow-all-cidr-short-circuits
   ;; 0.0.0.0/0 with no ports collapses to an unconditional allow.
-  (let* ((policy (gr8s::make-network-policy
-                  :rules (list (gr8s::make-netpol-rule "0.0.0.0/0"))))
-         (forms (gr8s::network-policy-egress-forms policy)))
+  (let* ((policy (gr8s.network::make-network-policy
+                  :rules (list (gr8s.network::make-netpol-rule "0.0.0.0/0"))))
+         (forms (gr8s.network::network-policy-egress-forms policy)))
     ;; No CIDR comparison constant is emitted for the catch-all rule.
     (is (not (netpol-form-has-number forms #xffffffff)))
     (is (netpol-form-has-symbol forms "TC_ACT_OK"))))
 
 (test netpol-compiles-in-process-to-a-classifier
-  (let ((policy (gr8s::make-network-policy
-                 :rules (list (gr8s::make-netpol-rule "10.0.0.0/8" '((:tcp . 80) (:tcp . 443)))
-                              (gr8s::make-netpol-rule "172.16.0.0/12")))))
-    (multiple-value-bind (map-specs prog-specs) (gr8s::compile-network-policy-egress policy)
+  (let ((policy (gr8s.network::make-network-policy
+                 :rules (list (gr8s.network::make-netpol-rule "10.0.0.0/8" '((:tcp . 80) (:tcp . 443)))
+                              (gr8s.network::make-netpol-rule "172.16.0.0/12")))))
+    (multiple-value-bind (map-specs prog-specs) (gr8s.network::compile-network-policy-egress policy)
       ;; All rules live in the program; no maps.
       (is (null map-specs))
       (is (= 1 (length prog-specs)))
@@ -85,8 +85,8 @@
         (is (zerop (mod (length insns) 8)))))))
 
 (test netpol-empty-policy-compiles
-  (let ((policy (gr8s::make-network-policy :rules '())))
-    (multiple-value-bind (map-specs prog-specs) (gr8s::compile-network-policy-egress policy)
+  (let ((policy (gr8s.network::make-network-policy :rules '())))
+    (multiple-value-bind (map-specs prog-specs) (gr8s.network::compile-network-policy-egress policy)
       (is (null map-specs))
       (is (= 1 (length prog-specs)))
       (is (plusp (length (getf (first prog-specs) :insns)))))))
@@ -95,11 +95,11 @@
   ;; Ingress governs peer -> Pod and must match the SOURCE address (byte 26);
   ;; egress matches the DESTINATION (byte 30). Same rule, different offset, so
   ;; the generated load offset distinguishes the two directions.
-  (let* ((rule (gr8s::make-netpol-rule "10.0.0.0/8"))
-         (ingress (gr8s::make-network-policy :direction :ingress :rules (list rule)))
-         (egress (gr8s::make-network-policy :direction :egress :rules (list rule)))
-         (ing-forms (gr8s::network-policy-forms ingress))
-         (egr-forms (gr8s::network-policy-forms egress)))
+  (let* ((rule (gr8s.network::make-netpol-rule "10.0.0.0/8"))
+         (ingress (gr8s.network::make-network-policy :direction :ingress :rules (list rule)))
+         (egress (gr8s.network::make-network-policy :direction :egress :rules (list rule)))
+         (ing-forms (gr8s.network::network-policy-forms ingress))
+         (egr-forms (gr8s.network::network-policy-forms egress)))
     ;; Both still bake in the CIDR constants.
     (is (netpol-form-has-number ing-forms #xff000000))
     (is (netpol-form-has-number egr-forms #xff000000))
@@ -113,10 +113,10 @@
     (is (netpol-form-has-symbol egr-forms "GR8S-NETPOL-EGRESS"))))
 
 (test netpol-ingress-compiles-in-process
-  (let ((policy (gr8s::make-network-policy
+  (let ((policy (gr8s.network::make-network-policy
                  :direction :ingress
-                 :rules (list (gr8s::make-netpol-rule "192.168.0.0/16" '((:tcp . 8080)))))))
-    (multiple-value-bind (map-specs prog-specs) (gr8s::compile-network-policy-ingress policy)
+                 :rules (list (gr8s.network::make-netpol-rule "192.168.0.0/16" '((:tcp . 8080)))))))
+    (multiple-value-bind (map-specs prog-specs) (gr8s.network::compile-network-policy-ingress policy)
       (is (null map-specs))
       (is (= 1 (length prog-specs)))
       (is (zerop (mod (length (getf (first prog-specs) :insns)) 8))))))

@@ -8,14 +8,14 @@
 (in-package #:gr8s/tests)
 (in-suite gr8s)
 
-(defstruct (blocked-log-runtime (:include gr8s::fake-runtime)
+(defstruct (blocked-log-runtime (:include gr8s.runtime::fake-runtime)
                                 (:constructor make-blocked-log-runtime ()))
   (entered nil)
   (released nil)
   (lock (bt:make-lock "blocked log runtime"))
   (changed (bt:make-condition-variable :name "blocked log runtime changed")))
 
-(defmethod gr8s:runtime-ensure ((runtime blocked-log-runtime) pod)
+(defmethod gr8s.runtime::runtime-ensure ((runtime blocked-log-runtime) pod)
   "Model a blocked image pull for one Pod without blocking direct reads of another Pod's logs."
   (when (equal "slow" (pod-name pod))
     (bt:with-lock-held ((blocked-log-runtime-lock runtime))
@@ -42,57 +42,57 @@
 
 (test logs-remain-available-while-another-pod-snapshot-is-blocked
   (with-temporary-store (store path)
-    (gr8s:register-node store (gr8s:make-node-record :id "log-worker-id" :name "log-worker"
+    (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "log-worker-id" :name "log-worker"
                                                    :pod-cidr "10.88.21.0/24"))
     (let* ((completed (create-pod store (node-log-test-pod "completed")))
            (runtime (make-blocked-log-runtime))
-           (node (gr8s::make-node-runtime (merge-pathnames "log-agent/" path) runtime nil))
-           (server (gr8s:start-node-grpc-server store :host "127.0.0.1" :port 0
+           (node (gr8s.agent::make-node-runtime (merge-pathnames "log-agent/" path) runtime nil))
+           (server (gr8s.apiserver::start-node-grpc-server store :host "127.0.0.1" :port 0
                                                :heartbeat-timeout-seconds 6))
-           (proxy (gr8s::make-control-plane-runtime store server))
+           (proxy (gr8s.controllers::make-control-plane-runtime store server))
            (api (start-server :address "127.0.0.1" :port 0 :store store :runtime proxy))
            (identity (merge-pathnames "session/identity.json" path))
-           (control (gr8s::make-node-session-control))
+           (control (gr8s.agent::make-node-session-control))
            (applied nil)
            (applied-lock (bt:make-lock "applied log-test snapshots"))
            (agent nil))
       (unwind-protect
            (progn
-             (gr8s::start-node-runtime node)
+             (gr8s.agent::start-node-runtime node)
              (setf agent
                    (bt:make-thread
                     (lambda ()
-                      (gr8s:run-node-session
-                       "127.0.0.1" (gr8s:node-grpc-server-port server) "log-worker" identity
+                      (gr8s.agent::run-node-session
+                       "127.0.0.1" (gr8s.apiserver::node-grpc-server-port server) "log-worker" identity
                        (lambda (snapshot)
-                         (let ((statuses (gr8s::reconcile-node-snapshot node snapshot)))
+                         (let ((statuses (gr8s.agent::reconcile-node-snapshot node snapshot)))
                            (bt:with-lock-held (applied-lock)
                              (push (slot-value snapshot 'gr8s.node.v1::revision) applied))
                            statuses))
                        :underlay-address "" :control control :reconnect-delay .01
-                       :status-provider (lambda () (gr8s::node-runtime-status node))
+                       :status-provider (lambda () (gr8s.agent::node-runtime-status node))
                        :operation-handler
                        (lambda (variant payload emit)
-                         (gr8s::dispatch-node-operation node variant payload emit))))))
-             (is-true (wait-until (lambda () (= 1 (gr8s:node-session-acknowledged-revision server "log-worker")))
+                         (gr8s.agent::dispatch-node-operation node variant payload emit))))))
+             (is-true (wait-until (lambda () (= 1 (gr8s.apiserver::node-session-acknowledged-revision server "log-worker")))
                                  :timeout 5))
              ;; The target really completed and retained its output. The new
              ;; snapshot below blocks a different runtime creation operation.
              (let ((actual (runtime-observe runtime (pod-uid completed))))
                (setf (runtime-pod-phase actual) "Succeeded"
-                     (gethash "web" (gr8s::runtime-pod-logs actual)) (format nil "projected-secret=value-1~%")))
+                     (gethash "web" (gr8s.runtime::runtime-pod-logs actual)) (format nil "projected-secret=value-1~%")))
              (is-true
-              (wait-until (lambda () (equal "Succeeded" (gethash "phase" (or (gr8s::pod-observed-status store completed)
-                                                                                          (gr8s::core-object)))))
+              (wait-until (lambda () (equal "Succeeded" (gethash "phase" (or (gr8s.controllers::pod-observed-status store completed)
+                                                                                          (gr8s.resources::core-object)))))
                           :timeout 8))
              (create-pod store (node-log-test-pod "slow"))
-             (let ((revision (gr8s::publish-node-snapshot proxy "log-worker")))
+             (let ((revision (gr8s.controllers::publish-node-snapshot proxy "log-worker")))
                (is-true (wait-until (lambda () (blocked-log-runtime-entered runtime)) :timeout 5))
                ;; A later revision must queue behind the blocked application,
                ;; without blocking receipt of the independent log request.
                (setf revision
-                     (gr8s:publish-node-desired-state
-                      server "log-worker" (gr8s::node-desired-state-snapshot store "log-worker")))
+                     (gr8s.apiserver::publish-node-desired-state
+                      server "log-worker" (gr8s.controllers::node-desired-state-snapshot store "log-worker")))
                (multiple-value-bind (octets status)
                    (drakma:http-request (format nil "http://127.0.0.1:~D/api/v1/namespaces/default/pods/completed/log?container=web"
                                                 (hunchentoot:acceptor-port api))
@@ -101,27 +101,27 @@
                    (is (= 200 status) "log HTTP response ~A: ~A" status body)
                    (is (equal (format nil "projected-secret=value-1~%") body))))
                (is-false (blocked-log-runtime-released runtime))
-               (is (= 1 (gr8s:node-session-acknowledged-revision server "log-worker")))
+               (is (= 1 (gr8s.apiserver::node-session-acknowledged-revision server "log-worker")))
                (is (= 1 (gethash "lastAppliedRevision" (com.inuoe.jzon:parse identity))))
-               (is-true (gr8s:node-record-ready-p (gr8s:get-node store "log-worker")))
+               (is-true (gr8s.model::node-record-ready-p (gr8s.controllers::get-node store "log-worker")))
                (release-blocked-log-runtime runtime)
-               (is-true (wait-until (lambda () (= revision (gr8s:node-session-acknowledged-revision server "log-worker")))
+               (is-true (wait-until (lambda () (= revision (gr8s.apiserver::node-session-acknowledged-revision server "log-worker")))
                                    :timeout 5))
                (is (equal '(1 2 3) (bt:with-lock-held (applied-lock) (reverse applied))))))
         (release-blocked-log-runtime runtime)
-        (gr8s::cancel-node-session control)
+        (gr8s.agent::cancel-node-session control)
         (when agent (ignore-errors (bt:join-thread agent)))
         (stop-server api)
-        (gr8s::stop-node-runtime node)
-        (gr8s:stop-node-grpc-server server)))))
+        (gr8s.agent::stop-node-runtime node)
+        (gr8s.apiserver::stop-node-grpc-server server)))))
 
 (test cancelling-a-session-unwinds-blocked-snapshot-without-acknowledging-it
   (with-temporary-store (store path)
-    (gr8s:register-node store (gr8s:make-node-record :id "cancel-snapshot-id" :name "cancel-snapshot"
+    (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "cancel-snapshot-id" :name "cancel-snapshot"
                                                    :pod-cidr "10.88.22.0/24"))
-    (let* ((server (gr8s:start-node-grpc-server store :host "127.0.0.1" :port 0))
+    (let* ((server (gr8s.apiserver::start-node-grpc-server store :host "127.0.0.1" :port 0))
            (identity (merge-pathnames "cancel-session/identity.json" path))
-           (control (gr8s::make-node-session-control))
+           (control (gr8s.agent::make-node-session-control))
            (barrier (make-blocked-log-runtime))
            (unwound nil) (converted-to-error nil) (applied nil) (agent nil))
       (unwind-protect
@@ -129,8 +129,8 @@
              (setf agent
                    (bt:make-thread
                     (lambda ()
-                      (gr8s:run-node-session
-                       "127.0.0.1" (gr8s:node-grpc-server-port server) "cancel-snapshot" identity
+                      (gr8s.agent::run-node-session
+                       "127.0.0.1" (gr8s.apiserver::node-grpc-server-port server) "cancel-snapshot" identity
                        (lambda (snapshot)
                          (declare (ignore snapshot))
                          (unwind-protect
@@ -149,23 +149,23 @@
                            (setf unwound t)))
                        :underlay-address "" :control control :reconnect-delay .01))))
              (is-true (wait-until (lambda () (blocked-log-runtime-entered barrier)) :timeout 5))
-             (gr8s::cancel-node-session control)
+             (gr8s.agent::cancel-node-session control)
              (is-true (wait-until (lambda () (not (bt:thread-alive-p agent))) :timeout 3))
              (is-true unwound)
              (is-false converted-to-error)
              (is-false applied)
-             (is (= 0 (gr8s:node-session-acknowledged-revision server "cancel-snapshot")))
+             (is (= 0 (gr8s.apiserver::node-session-acknowledged-revision server "cancel-snapshot")))
              (is (= 0 (gethash "lastAppliedRevision" (com.inuoe.jzon:parse identity) 0))))
         (release-blocked-log-runtime barrier)
-        (gr8s::cancel-node-session control)
+        (gr8s.agent::cancel-node-session control)
         (when agent (ignore-errors (bt:join-thread agent)))
-        (gr8s:stop-node-grpc-server server)))))
+        (gr8s.apiserver::stop-node-grpc-server server)))))
 
 (test failing-snapshot-work-closes-its-session-and-drops-queued-revisions
   (let* ((closed nil)
          (barrier (make-blocked-log-runtime))
          (applied nil)
-         (worker (gr8s::start-agent-snapshot-worker
+         (worker (gr8s.agent::start-agent-snapshot-worker
                   (lambda (snapshot replay)
                     (declare (ignore replay))
                     (push (slot-value snapshot 'gr8s.node.v1::revision) applied)
@@ -178,21 +178,21 @@
                   (lambda () (setf closed t)))))
     (unwind-protect
          (progn
-           (gr8s::queue-agent-snapshot-work worker (make-instance 'gr8s.node.v1::desired-state-snapshot :revision 1) :replay t)
+           (gr8s.agent::queue-agent-snapshot-work worker (make-instance 'gr8s.node.v1::desired-state-snapshot :revision 1) :replay t)
            (is-true (wait-until (lambda () (blocked-log-runtime-entered barrier))))
-           (gr8s::queue-agent-snapshot-work worker (make-instance 'gr8s.node.v1::desired-state-snapshot :revision 2))
+           (gr8s.agent::queue-agent-snapshot-work worker (make-instance 'gr8s.node.v1::desired-state-snapshot :revision 2))
            (release-blocked-log-runtime barrier)
            (is-true (wait-until (lambda () closed)))
            (is (equal '(1) applied))
-           (is (typep (gr8s::agent-snapshot-worker-failure worker) 'error))
-           (is (null (gr8s::agent-snapshot-worker-pending worker))))
+           (is (typep (gr8s.agent::agent-snapshot-worker-failure worker) 'error))
+           (is (null (gr8s.agent::agent-snapshot-worker-pending worker))))
       (release-blocked-log-runtime barrier)
-      (gr8s::stop-agent-snapshot-worker worker))))
+      (gr8s.agent::stop-agent-snapshot-worker worker))))
 
 (test stopping-snapshot-work-during-its-failure-handler-is-contained
   (let* ((barrier (make-blocked-log-runtime))
          (worker
-           (gr8s::start-agent-snapshot-worker
+           (gr8s.agent::start-agent-snapshot-worker
             (lambda (snapshot replay) (declare (ignore snapshot replay)) (error "Failed application"))
             (lambda ()
               (bt:with-lock-held ((blocked-log-runtime-lock barrier))
@@ -202,18 +202,18 @@
                                            (blocked-log-runtime-lock barrier))))))))
     (unwind-protect
          (progn
-           (gr8s::queue-agent-snapshot-work worker (make-instance 'gr8s.node.v1::desired-state-snapshot :revision 1))
+           (gr8s.agent::queue-agent-snapshot-work worker (make-instance 'gr8s.node.v1::desired-state-snapshot :revision 1))
            (is-true (wait-until (lambda () (blocked-log-runtime-entered barrier))))
-           (gr8s::stop-agent-snapshot-worker worker)
-           (is-false (bt:thread-alive-p (gr8s::agent-snapshot-worker-thread worker))))
+           (gr8s.agent::stop-agent-snapshot-worker worker)
+           (is-false (bt:thread-alive-p (gr8s.agent::agent-snapshot-worker-thread worker))))
       (release-blocked-log-runtime barrier)
-      (ignore-errors (gr8s::stop-agent-snapshot-worker worker)))))
+      (ignore-errors (gr8s.agent::stop-agent-snapshot-worker worker)))))
 
 (test queued-full-snapshots-are-bounded-and-cannot-regress
   (let* ((barrier (make-blocked-log-runtime))
          (applied nil)
          (worker
-           (gr8s::start-agent-snapshot-worker
+           (gr8s.agent::start-agent-snapshot-worker
             (lambda (snapshot replay)
               (declare (ignore replay))
               (let ((revision (slot-value snapshot 'gr8s.node.v1::revision)))
@@ -227,91 +227,91 @@
             (lambda () (error "Unexpected session failure")))))
     (unwind-protect
          (progn
-           (gr8s::queue-agent-snapshot-work
+           (gr8s.agent::queue-agent-snapshot-work
             worker (make-instance 'gr8s.node.v1::desired-state-snapshot :revision 1) :replay t)
            (is-true (wait-until (lambda () (blocked-log-runtime-entered barrier))))
            (loop for revision from 2 to 100
-                 do (gr8s::queue-agent-snapshot-work
+                 do (gr8s.agent::queue-agent-snapshot-work
                      worker (make-instance 'gr8s.node.v1::desired-state-snapshot :revision revision)))
            ;; Concurrent publishers can deliver an older envelope late.
-           (gr8s::queue-agent-snapshot-work
+           (gr8s.agent::queue-agent-snapshot-work
             worker (make-instance 'gr8s.node.v1::desired-state-snapshot :revision 40))
-           (bt:with-lock-held ((gr8s::agent-snapshot-worker-lock worker))
-             (is (= 1 (length (gr8s::agent-snapshot-worker-pending worker)))))
+           (bt:with-lock-held ((gr8s.agent::agent-snapshot-worker-lock worker))
+             (is (= 1 (length (gr8s.agent::agent-snapshot-worker-pending worker)))))
            (release-blocked-log-runtime barrier)
            (is-true (wait-until (lambda () (= 2 (length applied)))))
            (is (equal '(100 1) applied)))
       (release-blocked-log-runtime barrier)
-      (gr8s::stop-agent-snapshot-worker worker))))
+      (gr8s.agent::stop-agent-snapshot-worker worker))))
 
 (test urgent-withdrawal-cleans-an-unrelated-pod-before-a-retained-pull-finishes
   (with-temporary-store (control-store path)
     (let* ((slow (create-pod control-store (node-log-test-pod "slow")))
            (finished (create-pod control-store (node-log-test-pod "finished")))
            (runtime (make-blocked-log-runtime))
-           (node (gr8s::make-node-runtime (merge-pathnames "urgent-agent/" path) runtime nil))
+           (node (gr8s.agent::make-node-runtime (merge-pathnames "urgent-agent/" path) runtime nil))
            (first (desired-snapshot-for-test slow finished))
            (latest (desired-snapshot-for-test slow))
            (applied nil)
            (closed nil)
            (worker nil))
       (setf (slot-value latest 'gr8s.node.v1::revision) 2
-            (gr8s::node-runtime-state node) :running)
-      (dolist (pod (list slow finished)) (gr8s::put-assigned-pod (gr8s::node-runtime-store node) pod))
-      (gr8s:runtime-ensure runtime finished)
+            (gr8s.agent::node-runtime-state node) :running)
+      (dolist (pod (list slow finished)) (gr8s.agent::put-assigned-pod (gr8s.agent::node-runtime-store node) pod))
+      (gr8s.runtime::runtime-ensure runtime finished)
       (unwind-protect
            (progn
              (setf worker
-                   (gr8s::start-agent-snapshot-worker
+                   (gr8s.agent::start-agent-snapshot-worker
                     (lambda (snapshot replay)
                       (declare (ignore replay))
-                      (gr8s::reconcile-node-snapshot node snapshot)
+                      (gr8s.agent::reconcile-node-snapshot node snapshot)
                       (push (slot-value snapshot 'gr8s.node.v1::revision) applied))
                     (lambda () (setf closed t))
-                    :receive-snapshot (lambda (snapshot) (gr8s::receive-node-snapshot-intent node snapshot))))
-             (gr8s::queue-agent-snapshot-work worker first :replay t)
+                    :receive-snapshot (lambda (snapshot) (gr8s.agent::receive-node-snapshot-intent node snapshot))))
+             (gr8s.agent::queue-agent-snapshot-work worker first :replay t)
              (is-true (wait-until (lambda () (blocked-log-runtime-entered runtime))))
              ;; The latest full snapshot withdraws finished but retains slow.
              ;; Its cleanup must not wait for the unchanged pull to complete.
-             (gr8s::queue-agent-snapshot-work worker latest)
-             (is-true (wait-until (lambda () (null (gr8s:runtime-observe runtime (pod-uid finished))))))
+             (gr8s.agent::queue-agent-snapshot-work worker latest)
+             (is-true (wait-until (lambda () (null (gr8s.runtime::runtime-observe runtime (pod-uid finished))))))
              (is-false (blocked-log-runtime-released runtime))
              (is (null applied))
              (is-false closed)
              (release-blocked-log-runtime runtime)
              (is-true (wait-until (lambda () (equal '(2) applied))))
-             (is (= 2 (gr8s::fake-runtime-ensure-count runtime)))
-             (is (null (gr8s::agent-snapshot-worker-failure worker))))
+             (is (= 2 (gr8s.runtime::fake-runtime-ensure-count runtime)))
+             (is (null (gr8s.agent::agent-snapshot-worker-failure worker))))
         (release-blocked-log-runtime runtime)
-        (gr8s::stop-agent-snapshot-worker worker)))))
+        (gr8s.agent::stop-agent-snapshot-worker worker)))))
 
 (test failed-urgent-persistence-does-not-publish-or-cancel-running-convergence
   (with-temporary-store (control-store path)
     (let* ((slow (create-pod control-store (node-log-test-pod "slow")))
            (runtime (make-blocked-log-runtime))
-           (node (gr8s::make-node-runtime (merge-pathnames "persist-agent/" path) runtime nil))
-           (reconciler (gr8s::node-runtime-reconciler node))
-           (persist (symbol-function 'gr8s::persist-pod))
+           (node (gr8s.agent::make-node-runtime (merge-pathnames "persist-agent/" path) runtime nil))
+           (reconciler (gr8s.agent::node-runtime-reconciler node))
+           (persist (symbol-function 'gr8s.store::persist-pod))
            (cancelled nil)
            (owner nil))
-      (gr8s::put-assigned-pod (gr8s::node-runtime-store node) slow)
+      (gr8s.agent::put-assigned-pod (gr8s.agent::node-runtime-store node) slow)
       (unwind-protect
            (progn
              (setf owner (bt:make-thread
                           (lambda ()
                             (handler-case
-                                (gr8s::reconcile-pod reconciler (pod-namespace slow) (pod-name slow))
-                              (gr8s::pod-reconciliation-superseded () (setf cancelled t))))))
+                                (gr8s.kubelet::reconcile-pod reconciler (pod-namespace slow) (pod-name slow))
+                              (gr8s.kubelet::pod-reconciliation-superseded () (setf cancelled t))))))
              (is-true (wait-until (lambda () (blocked-log-runtime-entered runtime))))
-             (setf (symbol-function 'gr8s::persist-pod)
+             (setf (symbol-function 'gr8s.store::persist-pod)
                    (lambda (&rest arguments) (declare (ignore arguments)) (error "Simulated durable write failure")))
-             (signals error (gr8s::receive-node-snapshot-intent node (desired-snapshot-for-test)))
-             (is (= -1 (gr8s::node-runtime-received-revision node)))
+             (signals error (gr8s.agent::receive-node-snapshot-intent node (desired-snapshot-for-test)))
+             (is (= -1 (gr8s.agent::node-runtime-received-revision node)))
              (is-false cancelled)
-             (is-false (gr8s::deletion-requested-p
-                        (gr8s:get-pod (gr8s::node-runtime-store node) (pod-namespace slow) (pod-name slow))))
+             (is-false (gr8s.kubelet::deletion-requested-p
+                        (gr8s.store::get-pod (gr8s.agent::node-runtime-store node) (pod-namespace slow) (pod-name slow))))
              (is-true (bt:thread-alive-p owner)))
-        (setf (symbol-function 'gr8s::persist-pod) persist)
+        (setf (symbol-function 'gr8s.store::persist-pod) persist)
         (release-blocked-log-runtime runtime)
         (when owner (bt:join-thread owner))))))
 
@@ -319,101 +319,101 @@
   (with-temporary-store (control-store path)
     (let* ((slow (create-pod control-store (node-log-test-pod "slow")))
            (runtime (make-blocked-log-runtime))
-           (node (gr8s::make-node-runtime (merge-pathnames "withdraw-agent/" path) runtime nil))
+           (node (gr8s.agent::make-node-runtime (merge-pathnames "withdraw-agent/" path) runtime nil))
            (first (desired-snapshot-for-test slow))
            (latest (desired-snapshot-for-test))
            (applied nil) (closed nil) (worker nil))
       (setf (slot-value latest 'gr8s.node.v1::revision) 2
-            (gr8s::node-runtime-state node) :running)
+            (gr8s.agent::node-runtime-state node) :running)
       (unwind-protect
            (progn
              (setf worker
-                   (gr8s::start-agent-snapshot-worker
+                   (gr8s.agent::start-agent-snapshot-worker
                     (lambda (snapshot replay)
                       (declare (ignore replay))
-                      (gr8s::reconcile-node-snapshot node snapshot)
+                      (gr8s.agent::reconcile-node-snapshot node snapshot)
                       (push (slot-value snapshot 'gr8s.node.v1::revision) applied))
                     (lambda () (setf closed t))
-                    :receive-snapshot (lambda (snapshot) (gr8s::receive-node-snapshot-intent node snapshot))))
-             (gr8s::queue-agent-snapshot-work worker first :replay t)
+                    :receive-snapshot (lambda (snapshot) (gr8s.agent::receive-node-snapshot-intent node snapshot))))
+             (gr8s.agent::queue-agent-snapshot-work worker first :replay t)
              (is-true (wait-until (lambda () (blocked-log-runtime-entered runtime))))
-             (gr8s::queue-agent-snapshot-work worker latest)
+             (gr8s.agent::queue-agent-snapshot-work worker latest)
              (is-true (wait-until (lambda () (equal '(2) applied))))
              (is-false closed)
-             (is (= 0 (gr8s::fake-runtime-ensure-count runtime)))
-             (is (null (gr8s:list-pods (gr8s::node-runtime-store node))))
-             (signals gr8s::pod-reconciliation-superseded (gr8s::reconcile-node-snapshot node first))
-             (is (= 0 (gr8s::fake-runtime-ensure-count runtime)))
+             (is (= 0 (gr8s.runtime::fake-runtime-ensure-count runtime)))
+             (is (null (gr8s.store::list-pods (gr8s.agent::node-runtime-store node))))
+             (signals gr8s.kubelet::pod-reconciliation-superseded (gr8s.agent::reconcile-node-snapshot node first))
+             (is (= 0 (gr8s.runtime::fake-runtime-ensure-count runtime)))
              ;; A private forced withdrawal never edits the public object.
-             (is-false (gr8s::deletion-requested-p (gr8s:get-pod control-store (pod-namespace slow) (pod-name slow)))))
+             (is-false (gr8s.kubelet::deletion-requested-p (gr8s.store::get-pod control-store (pod-namespace slow) (pod-name slow)))))
         (release-blocked-log-runtime runtime)
-        (gr8s::stop-agent-snapshot-worker worker)))))
+        (gr8s.agent::stop-agent-snapshot-worker worker)))))
 
 (test urgent-assigned-deletion-preserves-authoritative-rv-and-grace
   (with-temporary-store (control-store path)
     (let* ((pod (create-pod control-store (node-log-test-pod "assigned")))
-           (node (gr8s::make-node-runtime (merge-pathnames "grace-agent/" path) (make-fake-runtime) nil)))
-      (gr8s::put-assigned-pod (gr8s::node-runtime-store node) pod)
-      (let* ((deleting (gr8s::mark-pod-deleting control-store (pod-namespace pod) (pod-name pod) :grace-period 7))
+           (node (gr8s.agent::make-node-runtime (merge-pathnames "grace-agent/" path) (make-fake-runtime) nil)))
+      (gr8s.agent::put-assigned-pod (gr8s.agent::node-runtime-store node) pod)
+      (let* ((deleting (gr8s.store::mark-pod-deleting control-store (pod-namespace pod) (pod-name pod) :grace-period 7))
              (snapshot (desired-snapshot-for-test deleting)))
-        (is-true (gr8s::receive-node-snapshot-intent node snapshot))
-        (let ((private (gr8s:get-pod (gr8s::node-runtime-store node) (pod-namespace pod) (pod-name pod))))
+        (is-true (gr8s.agent::receive-node-snapshot-intent node snapshot))
+        (let ((private (gr8s.store::get-pod (gr8s.agent::node-runtime-store node) (pod-namespace pod) (pod-name pod))))
           (is (equal (pod-resource-version deleting) (pod-resource-version private)))
-          (is (= (gr8s::pod-deletion-deadline deleting) (gr8s::pod-deletion-deadline private)))
+          (is (= (gr8s.kubelet::pod-deletion-deadline deleting) (gr8s.kubelet::pod-deletion-deadline private)))
           (is (= 7 (gethash "deletionGracePeriodSeconds" (gethash "metadata" (pod-to-object private))))))))))
 
 (test real-session-acks-only-the-durable-replacement-and-replays-it-on-reconnect
   (with-temporary-store (store path)
-    (gr8s:register-node store (gr8s:make-node-record :id "urgent-worker-id" :name "log-worker"
+    (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "urgent-worker-id" :name "log-worker"
                                                    :pod-cidr "10.88.23.0/24"))
     (let* ((slow (create-pod store (node-log-test-pod "slow")))
            (runtime (make-blocked-log-runtime))
-           (node (gr8s::make-node-runtime (merge-pathnames "wire-agent/" path) runtime nil))
-           (server (gr8s:start-node-grpc-server store :host "127.0.0.1" :port 0))
+           (node (gr8s.agent::make-node-runtime (merge-pathnames "wire-agent/" path) runtime nil))
+           (server (gr8s.apiserver::start-node-grpc-server store :host "127.0.0.1" :port 0))
            (identity (merge-pathnames "wire-session/identity.json" path))
-           (control (gr8s::make-node-session-control))
+           (control (gr8s.agent::make-node-session-control))
            (applied nil) (agent nil))
-      (setf (gr8s::node-runtime-state node) :running)
+      (setf (gr8s.agent::node-runtime-state node) :running)
       (labels ((apply-snapshot (snapshot)
-                 (prog1 (gr8s::reconcile-node-snapshot node snapshot)
+                 (prog1 (gr8s.agent::reconcile-node-snapshot node snapshot)
                    (push (slot-value snapshot 'gr8s.node.v1::revision) applied)))
-               (receive-snapshot (snapshot) (gr8s::receive-node-snapshot-intent node snapshot)))
+               (receive-snapshot (snapshot) (gr8s.agent::receive-node-snapshot-intent node snapshot)))
         (unwind-protect
              (progn
-               (is (= 1 (gr8s:publish-node-desired-state server "log-worker" (gr8s::node-desired-state-snapshot store "log-worker"))))
+               (is (= 1 (gr8s.apiserver::publish-node-desired-state server "log-worker" (gr8s.controllers::node-desired-state-snapshot store "log-worker"))))
                (setf agent
                      (bt:make-thread
                       (lambda ()
-                        (gr8s:run-node-session
-                         "127.0.0.1" (gr8s:node-grpc-server-port server) "log-worker" identity
+                        (gr8s.agent::run-node-session
+                         "127.0.0.1" (gr8s.apiserver::node-grpc-server-port server) "log-worker" identity
                          #'apply-snapshot :snapshot-observer #'receive-snapshot
                          :underlay-address "" :control control :reconnect-delay .01))))
                (is-true (wait-until (lambda () (blocked-log-runtime-entered runtime)) :timeout 5))
-               (is (= 0 (gr8s:node-session-acknowledged-revision server "log-worker")))
+               (is (= 0 (gr8s.apiserver::node-session-acknowledged-revision server "log-worker")))
                (is (= 0 (gethash "lastAppliedRevision" (com.inuoe.jzon:parse identity) 0)))
-               (gr8s::remove-pod store (pod-namespace slow) (pod-name slow))
-               (is (= 2 (gr8s:publish-node-desired-state server "log-worker"
-                                                       (gr8s::node-desired-state-snapshot store "log-worker"))))
-               (is-true (wait-until (lambda () (= 2 (gr8s:node-session-acknowledged-revision server "log-worker"))) :timeout 5))
+               (gr8s.store::remove-pod store (pod-namespace slow) (pod-name slow))
+               (is (= 2 (gr8s.apiserver::publish-node-desired-state server "log-worker"
+                                                       (gr8s.controllers::node-desired-state-snapshot store "log-worker"))))
+               (is-true (wait-until (lambda () (= 2 (gr8s.apiserver::node-session-acknowledged-revision server "log-worker"))) :timeout 5))
                (is (equal '(2) applied))
                (is (= 2 (gethash "lastAppliedRevision" (com.inuoe.jzon:parse identity))))
-               (is (= 0 (gr8s::fake-runtime-ensure-count runtime)))
-               (gr8s::cancel-node-session control)
+               (is (= 0 (gr8s.runtime::fake-runtime-ensure-count runtime)))
+               (gr8s.agent::cancel-node-session control)
                (bt:join-thread agent)
                (setf agent nil)
-               (gr8s:run-node-session
-                "127.0.0.1" (gr8s:node-grpc-server-port server) "log-worker" identity
+               (gr8s.agent::run-node-session
+                "127.0.0.1" (gr8s.apiserver::node-grpc-server-port server) "log-worker" identity
                 #'apply-snapshot :snapshot-observer #'receive-snapshot :underlay-address "" :max-sessions 1)
                (is (equal '(2 2) applied)))
           (release-blocked-log-runtime runtime)
-          (gr8s::cancel-node-session control)
+          (gr8s.agent::cancel-node-session control)
           (when agent (ignore-errors (bt:join-thread agent)))
-          (gr8s:stop-node-grpc-server server))))))
+          (gr8s.apiserver::stop-node-grpc-server server))))))
 
 (test a-duplicate-revision-cannot-drop-required-initial-replay
   (let* ((barrier (make-blocked-log-runtime))
          (calls nil)
-         (worker (gr8s::start-agent-snapshot-worker
+         (worker (gr8s.agent::start-agent-snapshot-worker
                   (lambda (snapshot replay)
                     (declare (ignore snapshot))
                     (push replay calls)
@@ -423,51 +423,51 @@
                         (loop until (blocked-log-runtime-released barrier)
                               do (bt:condition-wait (blocked-log-runtime-changed barrier)
                                                    (blocked-log-runtime-lock barrier))))
-                      (error 'gr8s::pod-reconciliation-superseded)))
+                      (error 'gr8s.kubelet::pod-reconciliation-superseded)))
                   (lambda () (error "Unexpected replay failure")))))
     (unwind-protect
          (progn
-           (gr8s::queue-agent-snapshot-work worker (desired-snapshot-for-test) :replay t)
+           (gr8s.agent::queue-agent-snapshot-work worker (desired-snapshot-for-test) :replay t)
            (is-true (wait-until (lambda () (blocked-log-runtime-entered barrier))))
-           (gr8s::queue-agent-snapshot-work worker (desired-snapshot-for-test))
+           (gr8s.agent::queue-agent-snapshot-work worker (desired-snapshot-for-test))
            (release-blocked-log-runtime barrier)
            (is-true (wait-until (lambda () (= 2 (length calls)))))
            (is (equal '(t t) calls)))
       (release-blocked-log-runtime barrier)
-      (gr8s::stop-agent-snapshot-worker worker))))
+      (gr8s.agent::stop-agent-snapshot-worker worker))))
 
 (test stale-uid-withdrawal-does-not-cancel-a-replacement-owning-the-same-name
   (with-temporary-store (control-store path)
     (let* ((old (create-pod control-store (node-log-test-pod "slow")))
            (runtime (make-blocked-log-runtime))
-           (node (gr8s::make-node-runtime (merge-pathnames "replacement-agent/" path) runtime nil))
-           (store (gr8s::node-runtime-store node))
-           (mark (symbol-function 'gr8s::mark-pod-deleting))
+           (node (gr8s.agent::make-node-runtime (merge-pathnames "replacement-agent/" path) runtime nil))
+           (store (gr8s.agent::node-runtime-store node))
+           (mark (symbol-function 'gr8s.store::mark-pod-deleting))
            (replacement nil) (owner nil) (cancelled nil))
-      (gr8s::put-assigned-pod store old)
+      (gr8s.agent::put-assigned-pod store old)
       (unwind-protect
            (progn
-             (setf (symbol-function 'gr8s::mark-pod-deleting)
+             (setf (symbol-function 'gr8s.store::mark-pod-deleting)
                    (lambda (&rest arguments)
                      ;; Complete the old UID and reuse its name between the
                      ;; arrival observer's list and exact-UID deletion write.
-                     (gr8s::remove-pod store (pod-namespace old) (pod-name old))
+                     (gr8s.store::remove-pod store (pod-namespace old) (pod-name old))
                      (setf replacement (create-pod store (node-log-test-pod "slow"))
                            owner (bt:make-thread
                                   (lambda ()
                                     (handler-case
-                                        (gr8s::reconcile-pod (gr8s::node-runtime-reconciler node)
+                                        (gr8s.kubelet::reconcile-pod (gr8s.agent::node-runtime-reconciler node)
                                                              (pod-namespace replacement) (pod-name replacement))
-                                      (gr8s::pod-reconciliation-superseded () (setf cancelled t))))))
+                                      (gr8s.kubelet::pod-reconciliation-superseded () (setf cancelled t))))))
                      (unless (wait-until (lambda () (blocked-log-runtime-entered runtime)))
                        (error "Replacement did not enter convergence"))
                      (apply mark arguments)))
-             (is-false (gr8s::receive-node-snapshot-intent node (desired-snapshot-for-test)))
+             (is-false (gr8s.agent::receive-node-snapshot-intent node (desired-snapshot-for-test)))
              (is-false (equal (pod-uid old) (pod-uid replacement)))
              (is-false cancelled)
-             (is-false (gr8s::deletion-requested-p (gr8s:get-pod store (pod-namespace replacement) (pod-name replacement))))
+             (is-false (gr8s.kubelet::deletion-requested-p (gr8s.store::get-pod store (pod-namespace replacement) (pod-name replacement))))
              (is-true (bt:thread-alive-p owner)))
-        (setf (symbol-function 'gr8s::mark-pod-deleting) mark)
+        (setf (symbol-function 'gr8s.store::mark-pod-deleting) mark)
         (release-blocked-log-runtime runtime)
         (when owner (bt:join-thread owner))))))
 
@@ -476,12 +476,12 @@
   "Model a physical deletion job whose completion requires another reconciliation poll."
   (delete-polls 0) (delete-released-p nil) (slow-entries 0))
 
-(defmethod gr8s:runtime-ensure ((runtime deferred-cleanup-runtime) pod)
+(defmethod gr8s.runtime::runtime-ensure ((runtime deferred-cleanup-runtime) pod)
   "Record every entry to the retained slow creation operation."
   (when (equal "slow" (pod-name pod)) (incf (deferred-cleanup-runtime-slow-entries runtime)))
   (call-next-method))
 
-(defmethod gr8s::runtime-delete-pod ((runtime deferred-cleanup-runtime) pod)
+(defmethod gr8s.runtime::runtime-delete-pod ((runtime deferred-cleanup-runtime) pod)
   "Leave a real runtime Pod until the independent physical deletion job finishes."
   (incf (deferred-cleanup-runtime-delete-polls runtime))
   (when (deferred-cleanup-runtime-delete-released-p runtime) (call-next-method)))
@@ -491,41 +491,41 @@
     (let* ((slow (create-pod control-store (node-log-test-pod "slow")))
            (finished (create-pod control-store (node-log-test-pod "finished")))
            (runtime (make-deferred-cleanup-runtime))
-           (node (gr8s::make-node-runtime (merge-pathnames "drain-agent/" path) runtime nil))
+           (node (gr8s.agent::make-node-runtime (merge-pathnames "drain-agent/" path) runtime nil))
            (first (desired-snapshot-for-test slow finished))
            (latest (desired-snapshot-for-test slow))
            (applied nil) (worker nil) (closed nil))
       (setf (slot-value latest 'gr8s.node.v1::revision) 2
-            (gr8s::node-runtime-state node) :running)
-      (dolist (pod (list slow finished)) (gr8s::put-assigned-pod (gr8s::node-runtime-store node) pod))
-      (gr8s:runtime-ensure runtime finished)
+            (gr8s.agent::node-runtime-state node) :running)
+      (dolist (pod (list slow finished)) (gr8s.agent::put-assigned-pod (gr8s.agent::node-runtime-store node) pod))
+      (gr8s.runtime::runtime-ensure runtime finished)
       (unwind-protect
            (progn
              (setf worker
-                   (gr8s::start-agent-snapshot-worker
+                   (gr8s.agent::start-agent-snapshot-worker
                     (lambda (snapshot replay)
                       (declare (ignore replay))
-                      (gr8s::reconcile-node-snapshot node snapshot)
+                      (gr8s.agent::reconcile-node-snapshot node snapshot)
                       (push (slot-value snapshot 'gr8s.node.v1::revision) applied))
                     (lambda () (setf closed t))
-                    :receive-snapshot (lambda (snapshot) (gr8s::receive-node-snapshot-intent node snapshot))))
-             (gr8s::queue-agent-snapshot-work worker first)
+                    :receive-snapshot (lambda (snapshot) (gr8s.agent::receive-node-snapshot-intent node snapshot))))
+             (gr8s.agent::queue-agent-snapshot-work worker first)
              (is-true (wait-until (lambda () (= 1 (deferred-cleanup-runtime-slow-entries runtime)))))
-             (gr8s::queue-agent-snapshot-work worker latest)
+             (gr8s.agent::queue-agent-snapshot-work worker latest)
              (is-true (wait-until (lambda () (> (deferred-cleanup-runtime-delete-polls runtime) 1))))
              (is (= 1 (deferred-cleanup-runtime-slow-entries runtime)))
              (is (null applied))
-             (is-true (gr8s:runtime-observe runtime (pod-uid finished)))
+             (is-true (gr8s.runtime::runtime-observe runtime (pod-uid finished)))
              (setf (deferred-cleanup-runtime-delete-released-p runtime) t)
              (is-true (wait-until (lambda () (= 2 (deferred-cleanup-runtime-slow-entries runtime)))))
-             (is (null (gr8s:runtime-observe runtime (pod-uid finished))))
+             (is (null (gr8s.runtime::runtime-observe runtime (pod-uid finished))))
              (release-blocked-log-runtime runtime)
              (is-true (wait-until (lambda () (equal '(2) applied))))
-             (is (= 2 (gr8s::fake-runtime-ensure-count runtime)))
+             (is (= 2 (gr8s.runtime::fake-runtime-ensure-count runtime)))
              (is-false closed))
         (setf (deferred-cleanup-runtime-delete-released-p runtime) t)
         (release-blocked-log-runtime runtime)
-        (gr8s::stop-agent-snapshot-worker worker)))))
+        (gr8s.agent::stop-agent-snapshot-worker worker)))))
 
 (test reopening-private-state-drains-deletion-without-a-control-plane-connection
   (with-temporary-store (control-store path)
@@ -533,29 +533,29 @@
            (finished (create-pod control-store (node-log-test-pod "finished")))
            (runtime (make-deferred-cleanup-runtime))
            (directory (merge-pathnames "offline-agent/" path))
-           (first (gr8s::make-node-runtime directory runtime nil))
+           (first (gr8s.agent::make-node-runtime directory runtime nil))
            (second nil) (owner nil) (done nil))
-      (dolist (pod (list slow finished)) (gr8s::put-assigned-pod (gr8s::node-runtime-store first) pod))
-      (gr8s:runtime-ensure runtime finished)
-      (gr8s::mark-pod-deleting (gr8s::node-runtime-store first)
+      (dolist (pod (list slow finished)) (gr8s.agent::put-assigned-pod (gr8s.agent::node-runtime-store first) pod))
+      (gr8s.runtime::runtime-ensure runtime finished)
+      (gr8s.store::mark-pod-deleting (gr8s.agent::node-runtime-store first)
                               (pod-namespace finished) (pod-name finished) :grace-period 0)
-      (setf second (gr8s::make-node-runtime directory runtime nil))
+      (setf second (gr8s.agent::make-node-runtime directory runtime nil))
       (unwind-protect
            (progn
              (setf owner (bt:make-thread
                           (lambda ()
-                            (gr8s::reconcile-all (gr8s::node-runtime-reconciler second))
+                            (gr8s.kubelet::reconcile-all (gr8s.agent::node-runtime-reconciler second))
                             (setf done t))))
              (is-true (wait-until (lambda () done)))
              (is (= 0 (deferred-cleanup-runtime-slow-entries runtime)))
              (is (= 1 (deferred-cleanup-runtime-delete-polls runtime)))
-             (is-true (gr8s:runtime-observe runtime (pod-uid finished)))
+             (is-true (gr8s.runtime::runtime-observe runtime (pod-uid finished)))
              (setf (deferred-cleanup-runtime-delete-released-p runtime) t)
              (release-blocked-log-runtime runtime)
-             (gr8s::reconcile-all (gr8s::node-runtime-reconciler second))
-             (is (null (gr8s:runtime-observe runtime (pod-uid finished))))
+             (gr8s.kubelet::reconcile-all (gr8s.agent::node-runtime-reconciler second))
+             (is (null (gr8s.runtime::runtime-observe runtime (pod-uid finished))))
              (is (= 1 (deferred-cleanup-runtime-slow-entries runtime)))
-             (is (= 2 (gr8s::fake-runtime-ensure-count runtime))))
+             (is (= 2 (gr8s.runtime::fake-runtime-ensure-count runtime))))
         (setf (deferred-cleanup-runtime-delete-released-p runtime) t)
         (release-blocked-log-runtime runtime)
         (when owner (bt:join-thread owner))))))
@@ -564,19 +564,19 @@
 ;;; teardown once produced 27 session restarts from `container is in starting
 ;;; state, can't be removed` on Pods that had already been withdrawn.
 
-(defstruct (pod-failing-runtime (:include gr8s::fake-runtime)
+(defstruct (pod-failing-runtime (:include gr8s.runtime::fake-runtime)
                                 (:constructor make-pod-failing-runtime ()))
   ;; Pod names whose removal, or ensure, fails until the name is taken away.
   (undeletable nil)
   (broken nil))
 
-(defmethod gr8s::runtime-delete-pod ((runtime pod-failing-runtime) pod)
+(defmethod gr8s.runtime::runtime-delete-pod ((runtime pod-failing-runtime) pod)
   (when (member (pod-name pod) (pod-failing-runtime-undeletable runtime) :test #'equal)
-    (error 'gr8s:runtime-error
+    (error 'gr8s.runtime::runtime-error
            :message "failed to set removing state: container is in starting state, can't be removed"))
   (call-next-method))
 
-(defmethod gr8s:runtime-ensure ((runtime pod-failing-runtime) pod)
+(defmethod gr8s.runtime::runtime-ensure ((runtime pod-failing-runtime) pod)
   ;; Not a RUNTIME-ERROR, which RECONCILE-POD already reports on the Pod.
   (when (member (pod-name pod) (pod-failing-runtime-broken runtime) :test #'equal)
     (error "unexpected failure for one Pod"))
@@ -600,51 +600,51 @@
   (with-temporary-store (store path)
     (values store)
     (let* ((runtime (make-pod-failing-runtime))
-           (node (gr8s::make-node-runtime (merge-pathnames "agent/" path) runtime nil))
-           (agent-store (gr8s::node-runtime-store node))
+           (node (gr8s.agent::make-node-runtime (merge-pathnames "agent/" path) runtime nil))
+           (agent-store (gr8s.agent::node-runtime-store node))
            (stuck (local-test-pod "stuck"))
            (withdrawn (local-test-pod "withdrawn"))
            (kept (local-test-pod "kept")))
-      (setf (gr8s::node-runtime-state node) :running)
+      (setf (gr8s.agent::node-runtime-state node) :running)
       (dolist (pod (list stuck withdrawn))
-        (gr8s::put-assigned-pod agent-store pod)
-        (gr8s::reconcile-pod (gr8s::node-runtime-reconciler node) "default" (pod-name pod)))
+        (gr8s.agent::put-assigned-pod agent-store pod)
+        (gr8s.kubelet::reconcile-pod (gr8s.agent::node-runtime-reconciler node) "default" (pod-name pod)))
       (setf (pod-failing-runtime-undeletable runtime) (list "stuck"))
-      (let ((statuses (gr8s::reconcile-node-snapshot node (desired-snapshot-for-test kept))))
+      (let ((statuses (gr8s.agent::reconcile-node-snapshot node (desired-snapshot-for-test kept))))
         (is (= 1 (length statuses)))
         (is (equal "kept" (slot-value (first statuses) 'gr8s.node.v1::name))))
-      (signals gr8s:kubernetes-error (get-pod agent-store "default" "withdrawn"))
-      (is-true (gr8s::deletion-requested-p (get-pod agent-store "default" "stuck")))
+      (signals gr8s.model::kubernetes-error (get-pod agent-store "default" "withdrawn"))
+      (is-true (gr8s.kubelet::deletion-requested-p (get-pod agent-store "default" "stuck")))
       (is-true (runtime-observe runtime (pod-uid kept)))
       ;; The reconciler owns the retry from here, and never recreates the Pod.
       (let ((ensures (fake-runtime-ensure-count runtime)))
         (setf (pod-failing-runtime-undeletable runtime) nil)
-        (gr8s:reconcile-all (gr8s::node-runtime-reconciler node))
-        (signals gr8s:kubernetes-error (get-pod agent-store "default" "stuck"))
+        (gr8s.kubelet::reconcile-all (gr8s.agent::node-runtime-reconciler node))
+        (signals gr8s.model::kubernetes-error (get-pod agent-store "default" "stuck"))
         (is (= ensures (fake-runtime-ensure-count runtime)))))))
 
 (test a-terminating-uid-holds-back-only-its-replacement-and-the-acknowledgement
   (with-temporary-store (store path)
     (values store)
     (let* ((runtime (make-pod-failing-runtime))
-           (node (gr8s::make-node-runtime (merge-pathnames "agent/" path) runtime nil))
-           (agent-store (gr8s::node-runtime-store node))
+           (node (gr8s.agent::make-node-runtime (merge-pathnames "agent/" path) runtime nil))
+           (agent-store (gr8s.agent::node-runtime-store node))
            (old (local-test-pod "web" "uid-old"))
            (new (local-test-pod "web" "uid-new"))
            (other (local-test-pod "other")))
-      (setf (gr8s::node-runtime-state node) :running)
-      (gr8s::put-assigned-pod agent-store old)
-      (gr8s::reconcile-pod (gr8s::node-runtime-reconciler node) "default" "web")
+      (setf (gr8s.agent::node-runtime-state node) :running)
+      (gr8s.agent::put-assigned-pod agent-store old)
+      (gr8s.kubelet::reconcile-pod (gr8s.agent::node-runtime-reconciler node) "default" "web")
       (setf (pod-failing-runtime-undeletable runtime) (list "web"))
       ;; Two runs of the same snapshot: blocked on the old UID, then clear of it.
-      (signals gr8s::node-snapshot-incomplete
-        (gr8s::reconcile-node-snapshot node (desired-snapshot-for-test new other)))
+      (signals gr8s.kubelet::node-snapshot-incomplete
+        (gr8s.agent::reconcile-node-snapshot node (desired-snapshot-for-test new other)))
       (is-true (runtime-observe runtime (pod-uid other)))
       (is-true (runtime-observe runtime "uid-old"))
       (is (null (runtime-observe runtime "uid-new")))
       (setf (pod-failing-runtime-undeletable runtime) nil)
-      (gr8s:reconcile-all (gr8s::node-runtime-reconciler node))
-      (is (= 2 (length (gr8s::reconcile-node-snapshot
+      (gr8s.kubelet::reconcile-all (gr8s.agent::node-runtime-reconciler node))
+      (is (= 2 (length (gr8s.agent::reconcile-node-snapshot
                         node (desired-snapshot-for-test new other)))))
       (is-true (runtime-observe runtime "uid-new")))))
 
@@ -652,19 +652,19 @@
   (with-temporary-store (store path)
     (values store)
     (let* ((runtime (make-pod-failing-runtime))
-           (node (gr8s::make-node-runtime (merge-pathnames "agent/" path) runtime nil))
-           (agent-store (gr8s::node-runtime-store node))
+           (node (gr8s.agent::make-node-runtime (merge-pathnames "agent/" path) runtime nil))
+           (agent-store (gr8s.agent::node-runtime-store node))
            (running (local-test-pod "running"))
            (other (local-test-pod "other"))
            (snapshot (desired-snapshot-for-test other)))
-      (setf (gr8s::node-runtime-state node) :running)
-      (gr8s::put-assigned-pod agent-store running)
-      (gr8s::reconcile-pod (gr8s::node-runtime-reconciler node) "default" "running")
+      (setf (gr8s.agent::node-runtime-state node) :running)
+      (gr8s.agent::put-assigned-pod agent-store running)
+      (gr8s.kubelet::reconcile-pod (gr8s.agent::node-runtime-reconciler node) "default" "running")
       (push (unreadable-assignment running) (slot-value snapshot 'gr8s.node.v1::pods))
-      (is-false (gr8s::receive-node-snapshot-intent node snapshot))
-      (signals gr8s::node-snapshot-incomplete (gr8s::reconcile-node-snapshot node snapshot))
+      (is-false (gr8s.agent::receive-node-snapshot-intent node snapshot))
+      (signals gr8s.kubelet::node-snapshot-incomplete (gr8s.agent::reconcile-node-snapshot node snapshot))
       ;; Its UID is still assigned, so its running Pod is not treated as withdrawn.
-      (is-false (gr8s::deletion-requested-p (get-pod agent-store "default" "running")))
+      (is-false (gr8s.kubelet::deletion-requested-p (get-pod agent-store "default" "running")))
       (is-true (runtime-observe runtime (pod-uid running)))
       (is-true (runtime-observe runtime (pod-uid other))))))
 
@@ -672,14 +672,14 @@
   (with-temporary-store (store path)
     (values store)
     (let* ((runtime (make-pod-failing-runtime))
-           (node (gr8s::make-node-runtime (merge-pathnames "agent/" path) runtime nil))
-           (agent-store (gr8s::node-runtime-store node))
+           (node (gr8s.agent::make-node-runtime (merge-pathnames "agent/" path) runtime nil))
+           (agent-store (gr8s.agent::node-runtime-store node))
            (broken (local-test-pod "broken"))
            (healthy (local-test-pod "healthy")))
       (setf (pod-failing-runtime-broken runtime) (list "broken"))
-      (gr8s::put-assigned-pod agent-store broken)
-      (gr8s::put-assigned-pod agent-store healthy)
-      (is (= 1 (length (gr8s:reconcile-all (gr8s::node-runtime-reconciler node)))))
+      (gr8s.agent::put-assigned-pod agent-store broken)
+      (gr8s.agent::put-assigned-pod agent-store healthy)
+      (is (= 1 (length (gr8s.kubelet::reconcile-all (gr8s.agent::node-runtime-reconciler node)))))
       (is-true (runtime-observe runtime (pod-uid healthy)))
       (is (null (runtime-observe runtime (pod-uid broken)))))))
 
@@ -687,29 +687,29 @@
   (let* ((closed nil)
          (attempts 0)
          (acknowledged nil)
-         (worker (gr8s::start-agent-snapshot-worker
+         (worker (gr8s.agent::start-agent-snapshot-worker
                   (lambda (snapshot replay)
                     (declare (ignore replay))
                     (when (= 1 (incf attempts))
-                      (error 'gr8s::node-snapshot-incomplete :message "one Pod"))
+                      (error 'gr8s.kubelet::node-snapshot-incomplete :message "one Pod"))
                     (setf acknowledged (slot-value snapshot 'gr8s.node.v1::revision)))
                   (lambda () (setf closed t)))))
     (unwind-protect
          (progn
-           (gr8s::queue-agent-snapshot-work
+           (gr8s.agent::queue-agent-snapshot-work
             worker (make-instance 'gr8s.node.v1::desired-state-snapshot :revision 5) :replay t)
            (is-true (wait-until (lambda () (eql 5 acknowledged)) :timeout 5))
            (is (= 2 attempts))
            (is-false closed)
-           (is (null (gr8s::agent-snapshot-worker-failure worker))))
-      (gr8s::stop-agent-snapshot-worker worker))))
+           (is (null (gr8s.agent::agent-snapshot-worker-failure worker))))
+      (gr8s.agent::stop-agent-snapshot-worker worker))))
 
 (test late-input-for-a-finished-operation-fails-only-that-operation
   (with-temporary-store (store path)
     (values store)
-    (let* ((node (gr8s::make-node-runtime (merge-pathnames "agent/" path) (make-fake-runtime) nil))
+    (let* ((node (gr8s.agent::make-node-runtime (merge-pathnames "agent/" path) (make-fake-runtime) nil))
            (replies nil))
-      (gr8s::dispatch-node-operation
+      (gr8s.agent::dispatch-node-operation
        node :operation-input
        (make-instance 'gr8s.node.v1::operation-input
                       :operation-id "ended-long-ago" :sequence 9
@@ -724,55 +724,55 @@
 (test one-pods-status-failure-keeps-the-rest-of-the-report
   (with-temporary-store (store path)
     (values path)
-    (gr8s:register-node store (gr8s:make-node-record :id "log-worker-id" :name "log-worker"
+    (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "log-worker-id" :name "log-worker"
                                                    :pod-cidr "10.88.21.0/24"))
     (let* ((first-pod (create-pod store (node-log-test-pod "first")))
            (second-pod (create-pod store (node-log-test-pod "second")))
-           (server (gr8s:start-node-grpc-server store :host "127.0.0.1" :port 0))
-           (original (symbol-function 'gr8s::update-pod-observed-status))
-           (status (gr8s::pod-status "Running")))
+           (server (gr8s.apiserver::start-node-grpc-server store :host "127.0.0.1" :port 0))
+           (original (symbol-function 'gr8s.controllers::update-pod-observed-status))
+           (status (gr8s.kubelet::pod-status "Running")))
       (unwind-protect
            (progn
-             (setf (symbol-function 'gr8s::update-pod-observed-status)
+             (setf (symbol-function 'gr8s.controllers::update-pod-observed-status)
                    (lambda (store pod object)
                      (when (equal "first" (pod-name pod)) (error "one Pod's store write failed"))
                      (funcall original store pod object)))
-             (gr8s::handle-node-agent-envelope
+             (gr8s.apiserver::handle-node-agent-envelope
               server "log-worker"
-              (gr8s::make-agent-envelope
+              (gr8s.protocol::make-agent-envelope
                :status
                (make-instance
                 'gr8s.node.v1::node-status
-                :pods (list (gr8s::pod-observed-status-message first-pod status)
-                            (gr8s::pod-observed-status-message second-pod status)))))
-             (is (null (gr8s::pod-observed-status store first-pod)))
-             (is (equal "Running" (gethash "phase" (gr8s::pod-observed-status store second-pod)))))
-        (setf (symbol-function 'gr8s::update-pod-observed-status) original)
-        (gr8s:stop-node-grpc-server server)))))
+                :pods (list (gr8s.agent::pod-observed-status-message first-pod status)
+                            (gr8s.agent::pod-observed-status-message second-pod status)))))
+             (is (null (gr8s.controllers::pod-observed-status store first-pod)))
+             (is (equal "Running" (gethash "phase" (gr8s.controllers::pod-observed-status store second-pod)))))
+        (setf (symbol-function 'gr8s.controllers::update-pod-observed-status) original)
+        (gr8s.apiserver::stop-node-grpc-server server)))))
 
 (test one-pods-removal-failure-keeps-the-node-session-connected
   (with-temporary-store (store path)
-    (gr8s:register-node store (gr8s:make-node-record :id "log-worker-id" :name "log-worker"
+    (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "log-worker-id" :name "log-worker"
                                                    :pod-cidr "10.88.21.0/24"))
     (let* ((stuck (create-pod store (node-log-test-pod "stuck")))
            (runtime (make-pod-failing-runtime))
-           (node (gr8s::make-node-runtime (merge-pathnames "session-agent/" path) runtime nil))
-           (server (gr8s:start-node-grpc-server store :host "127.0.0.1" :port 0
+           (node (gr8s.agent::make-node-runtime (merge-pathnames "session-agent/" path) runtime nil))
+           (server (gr8s.apiserver::start-node-grpc-server store :host "127.0.0.1" :port 0
                                                :heartbeat-timeout-seconds 6))
-           (proxy (gr8s::make-control-plane-runtime store server))
+           (proxy (gr8s.controllers::make-control-plane-runtime store server))
            (identity (merge-pathnames "session/identity.json" path))
-           (control (gr8s::make-node-session-control))
+           (control (gr8s.agent::make-node-session-control))
            (closed 0)
            (agent nil))
       (unwind-protect
            (progn
-             (gr8s::start-node-runtime node)
+             (gr8s.agent::start-node-runtime node)
              (setf agent
                    (bt:make-thread
                     (lambda ()
-                      (gr8s:run-node-session
-                       "127.0.0.1" (gr8s:node-grpc-server-port server) "log-worker" identity
-                       (lambda (snapshot) (gr8s::reconcile-node-snapshot node snapshot))
+                      (gr8s.agent::run-node-session
+                       "127.0.0.1" (gr8s.apiserver::node-grpc-server-port server) "log-worker" identity
+                       (lambda (snapshot) (gr8s.agent::reconcile-node-snapshot node snapshot))
                        :underlay-address "" :control control :reconnect-delay .01
                        :operation-handler
                        (lambda (variant payload emit)
@@ -780,18 +780,18 @@
                          (when (eq variant :session-closed) (incf closed)))))))
              (is-true (wait-until (lambda () (runtime-observe runtime (pod-uid stuck))) :timeout 5))
              (setf (pod-failing-runtime-undeletable runtime) (list "stuck"))
-             (gr8s:remove-pod store "default" "stuck" :uid (pod-uid stuck))
-             (let ((revision (gr8s::publish-node-snapshot proxy "log-worker")))
+             (gr8s.store::remove-pod store "default" "stuck" :uid (pod-uid stuck))
+             (let ((revision (gr8s.controllers::publish-node-snapshot proxy "log-worker")))
                (is-true (wait-until
-                         (lambda () (= revision (gr8s:node-session-acknowledged-revision server "log-worker")))
+                         (lambda () (= revision (gr8s.apiserver::node-session-acknowledged-revision server "log-worker")))
                          :timeout 8)))
              (is (= 0 closed))
-             (is-true (gr8s::deletion-requested-p
-                       (get-pod (gr8s::node-runtime-store node) "default" "stuck")))
+             (is-true (gr8s.kubelet::deletion-requested-p
+                       (get-pod (gr8s.agent::node-runtime-store node) "default" "stuck")))
              (setf (pod-failing-runtime-undeletable runtime) nil)
              (is-true (wait-until (lambda () (null (runtime-observe runtime (pod-uid stuck)))) :timeout 8))
              (is (= 0 closed)))
-        (gr8s::cancel-node-session control)
+        (gr8s.agent::cancel-node-session control)
         (when agent (ignore-errors (bt:join-thread agent)))
-        (gr8s::stop-node-runtime node)
-        (gr8s:stop-node-grpc-server server)))))
+        (gr8s.agent::stop-node-runtime node)
+        (gr8s.apiserver::stop-node-grpc-server server)))))

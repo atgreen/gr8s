@@ -56,9 +56,9 @@
            (make-list (1+ gr8s.agent::+trace-max-programs+))))))
 
 (test trace-cgroup-resolution-selects-every-container-in-exact-pods
-  (let* ((pods (list (gr8s::make-pod :uid "uid-a" :name "web-a"
+  (let* ((pods (list (gr8s.model::make-pod :uid "uid-a" :name "web-a"
                                      :namespace "alpha" :containers #())
-                     (gr8s::make-pod :uid "uid-b" :name "web-b"
+                     (gr8s.model::make-pod :uid "uid-b" :name "web-b"
                                      :namespace "alpha" :containers #())))
          (entries
            (list (gr8s.kubelet::make-cadvisor-entry

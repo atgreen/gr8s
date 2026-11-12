@@ -24,52 +24,52 @@
 
 (test application-reload-reuses-store-preserves-member-state-and-clears-caches
   (with-temporary-store (store root)
-    (let* ((key (gr8s::load-service-account-signing-key store))
-           (key-path (gr8s::service-account-signing-key-path store))
+    (let* ((key (gr8s.resources::load-service-account-signing-key store))
+           (key-path (gr8s.resources::service-account-signing-key-path store))
            (key-bytes (uiop:read-file-string key-path))
            (descriptor (make-restore-intent-fixture store root))
            (id (gethash "generation" descriptor))
-           (lock (gr8s::pod-store-lock store))
-           (credential-lock (gr8s::pod-store-credential-lock store))
-           (writer-lock (gr8s::pod-store-consensus-write-lock store))
-           (workload-lock (gr8s::pod-store-workload-lock store))
+           (lock (gr8s.store::pod-store-lock store))
+           (credential-lock (gr8s.store::pod-store-credential-lock store))
+           (writer-lock (gr8s.store::pod-store-consensus-write-lock store))
+           (workload-lock (gr8s.store::pod-store-workload-lock store))
            (config (list :api-url "member-api" :ca-pem "member-ca")))
-      (setf (gr8s::pod-store-in-cluster-config store) config
-            (gr8s::pod-store-watch-journal-p store) nil
-            (gethash "old" (gr8s::pod-store-verified-tokens store)) :cached
-            (gethash "old" (gr8s::pod-store-projected-tokens store)) :cached
-            (gethash "old" (gr8s::pod-store-pod-certificates store)) :cached
-            (gethash "old" (gr8s::pod-store-nominated-nodes store)) "old-node"
-            (gethash "old" (gr8s::pod-store-scheduling-notes store)) "old-note"
-            (gethash "old" (gr8s::pod-store-job-controller-states store)) (gr8s::core-object)
-            (gethash '("events" "default" "old") (gr8s::pod-store-resources store)) (gr8s::core-object "message" "old"))
+      (setf (gr8s.store::pod-store-in-cluster-config store) config
+            (gr8s.store::pod-store-watch-journal-p store) nil
+            (gethash "old" (gr8s.store::pod-store-verified-tokens store)) :cached
+            (gethash "old" (gr8s.store::pod-store-projected-tokens store)) :cached
+            (gethash "old" (gr8s.store::pod-store-pod-certificates store)) :cached
+            (gethash "old" (gr8s.store::pod-store-nominated-nodes store)) "old-node"
+            (gethash "old" (gr8s.store::pod-store-scheduling-notes store)) "old-note"
+            (gethash "old" (gr8s.store::pod-store-job-controller-states store)) (gr8s.resources::core-object)
+            (gethash '("events" "default" "old") (gr8s.store::pod-store-resources store)) (gr8s.resources::core-object "message" "old"))
       (gr8s.store::quiesce-store-access store :timeout 0)
       (is (eq store (gr8s.store::reload-store-application store id)))
       (is (gr8s.store::store-access-blocked-p store))
       (is (gr8s.store::pod-store-application-loaded-p store))
       (is (null (gr8s.store::read-store-restore-intent root)))
-      (assert-store-access-503 (lambda () (gr8s:get-pod store "default" "snapshot-pod")))
-      (is (eq lock (gr8s::pod-store-lock store)))
-      (is (eq credential-lock (gr8s::pod-store-credential-lock store)))
-      (is (eq writer-lock (gr8s::pod-store-consensus-write-lock store)))
-      (is (eq workload-lock (gr8s::pod-store-workload-lock store)))
-      (is (eq config (gr8s::pod-store-in-cluster-config store)))
-      (is (eq key (gr8s::pod-store-service-account-signing-key store)))
+      (assert-store-access-503 (lambda () (gr8s.store::get-pod store "default" "snapshot-pod")))
+      (is (eq lock (gr8s.store::pod-store-lock store)))
+      (is (eq credential-lock (gr8s.store::pod-store-credential-lock store)))
+      (is (eq writer-lock (gr8s.store::pod-store-consensus-write-lock store)))
+      (is (eq workload-lock (gr8s.store::pod-store-workload-lock store)))
+      (is (eq config (gr8s.store::pod-store-in-cluster-config store)))
+      (is (eq key (gr8s.store::pod-store-service-account-signing-key store)))
       (is (equal key-bytes (uiop:read-file-string key-path)))
-      (is (null (gr8s::pod-store-watch-journal-p store)))
+      (is (null (gr8s.store::pod-store-watch-journal-p store)))
       (is (every #'zerop (mapcar (lambda (accessor) (hash-table-count (funcall accessor store)))
-                                '(gr8s::pod-store-verified-tokens gr8s::pod-store-projected-tokens
-                                  gr8s::pod-store-pod-certificates gr8s::pod-store-nominated-nodes
-                                  gr8s::pod-store-scheduling-notes gr8s::pod-store-job-controller-states))))
-      (is (not (gethash '("events" "default" "old") (gr8s::pod-store-resources store))))
-      (is (zerop (gr8s::pod-store-pod-watch-journal-length store)))
-      (is (zerop (gr8s::pod-store-node-watch-journal-length store)))
-      (is (= (gr8s::pod-store-pod-revision store) (gr8s::pod-store-pod-watch-floor store)))
-      (is (= (gr8s::pod-store-pod-revision store) (gr8s::pod-store-node-watch-floor store)))
+                                '(gr8s.store::pod-store-verified-tokens gr8s.store::pod-store-projected-tokens
+                                  gr8s.store::pod-store-pod-certificates gr8s.store::pod-store-nominated-nodes
+                                  gr8s.store::pod-store-scheduling-notes gr8s.store::pod-store-job-controller-states))))
+      (is (not (gethash '("events" "default" "old") (gr8s.store::pod-store-resources store))))
+      (is (zerop (gr8s.store::pod-store-pod-watch-journal-length store)))
+      (is (zerop (gr8s.store::pod-store-node-watch-journal-length store)))
+      (is (= (gr8s.store::pod-store-pod-revision store) (gr8s.store::pod-store-pod-watch-floor store)))
+      (is (= (gr8s.store::pod-store-pod-revision store) (gr8s.store::pod-store-node-watch-floor store)))
       (gr8s.store::resume-store-access store)
-      (is (gr8s:get-pod store "default" "snapshot-pod"))
-      (signals gr8s:kubernetes-error (gr8s:get-pod store "default" "legacy-later"))
-      (is (gr8s::get-core-resource store "configmaps" "default" "snapshot-config")))))
+      (is (gr8s.store::get-pod store "default" "snapshot-pod"))
+      (signals gr8s.model::kubernetes-error (gr8s.store::get-pod store "default" "legacy-later"))
+      (is (gr8s.resources::get-core-resource store "configmaps" "default" "snapshot-config")))))
 
 (test reload-failure-keeps-access-blocked-and-intent-pending-until-same-object-retry
   (with-temporary-store (store root)
@@ -86,10 +86,10 @@
       (is (not (gr8s.store::pod-store-application-loaded-p store)))
       (is (gr8s.store::read-store-restore-intent root))
       (assert-store-access-503 (lambda () (gr8s.store::resume-store-access store)))
-      (assert-store-access-503 (lambda () (gr8s:get-pod store "default" "snapshot-pod")))
+      (assert-store-access-503 (lambda () (gr8s.store::get-pod store "default" "snapshot-pod")))
       (is (eq store (gr8s.store::reload-store-application store id)))
       (gr8s.store::resume-store-access store)
-      (is (gr8s:get-pod store "default" "snapshot-pod")))))
+      (is (gr8s.store::get-pod store "default" "snapshot-pod")))))
 
 (test ha-reload-requires-member-barrier-and-durable-acknowledgement
   (with-temporary-store (store root)
@@ -98,7 +98,7 @@
            (proposals 0) (barrier-held nil) (acks 0)
            (member (make-reload-test-member))
            (commit (lambda (&rest args) (declare (ignore args)) (incf proposals))))
-      (setf (gr8s::pod-store-consensus-commit-fn store) commit)
+      (setf (gr8s.store::pod-store-consensus-commit-fn store) commit)
       (gr8s.store::quiesce-store-access store :timeout 0)
       (signals error (gr8s.store::reload-store-application store id))
       (is (null (gr8s.store::read-store-restore-intent root)))
@@ -120,7 +120,7 @@
                  (incf acks)))))
       (is (= 1 acks))
       (is (= 0 proposals))
-      (is (eq commit (gr8s::pod-store-consensus-commit-fn store)))
+      (is (eq commit (gr8s.store::pod-store-consensus-commit-fn store)))
       (gr8s.store::resume-store-access store))))
 
 (test recovery-ack-failure-cannot-reopen-partially-acknowledged-application
@@ -139,7 +139,7 @@
 (test reload-rejects-undrained-access-and-barriers-that-skip-the-operation
   (with-temporary-store (store root)
     (let* ((descriptor (make-restore-intent-fixture store root)) (id (gethash "generation" descriptor)))
-      (signals gr8s:kubernetes-error (gr8s.store::reload-store-application store id))
+      (signals gr8s.model::kubernetes-error (gr8s.store::reload-store-application store id))
       (is (null (gr8s.store::read-store-restore-intent root)))
       (gr8s.store::quiesce-store-access store :timeout 0)
       (signals error (gr8s.store::reload-store-application store id :call-with-member-lock (lambda (fn) (declare (ignore fn)) nil)))
@@ -151,7 +151,7 @@
     (let* ((descriptor (make-restore-intent-fixture store root))
            (id (gethash "generation" descriptor))
            (proposals 0) (member (make-reload-test-member)))
-      (setf (gr8s::pod-store-consensus-commit-fn store)
+      (setf (gr8s.store::pod-store-consensus-commit-fn store)
             (lambda (kind payload) (incf proposals) (apply-pod-test-command store kind payload)))
       (gr8s.store::quiesce-store-access store :timeout 0)
       (gr8s.store::reload-store-application
@@ -160,12 +160,12 @@
        :commit-recovery (lambda (&rest args) (declare (ignore args)) t))
       (is (= 0 proposals))
       (gr8s.store::resume-store-access store)
-      (let* ((pod (ha-make-pod store "after-reload")) (uid (gr8s:pod-uid pod)))
+      (let* ((pod (ha-make-pod store "after-reload")) (uid (gr8s.model::pod-uid pod)))
         (is (= 1 proposals))
-        (is (uiop:subpathp (gr8s::pod-path store pod) (gr8s.store::store-generation-root root id)))
+        (is (uiop:subpathp (gr8s.store::pod-path store pod) (gr8s.store::store-generation-root root id)))
         (is (not (probe-file (merge-pathnames (format nil "~A.json" uid) root))))
-        (let ((reopened (gr8s:open-store root)))
-          (is (equal uid (gr8s:pod-uid (gr8s:get-pod reopened "default" "after-reload")))))))))
+        (let ((reopened (gr8s.store::open-store root)))
+          (is (equal uid (gr8s.model::pod-uid (gr8s.store::get-pod reopened "default" "after-reload")))))))))
 
 (test intent-unlink-sync-failure-still-requires-successful-reload-before-resume
   (with-temporary-store (store root)
@@ -189,18 +189,18 @@
       (assert-store-access-503 (lambda () (gr8s.store::resume-store-access store)))
       (is (eq store (gr8s.store::reload-store-application store id)))
       (gr8s.store::resume-store-access store)
-      (is (gr8s:get-pod store "default" "snapshot-pod")))))
+      (is (gr8s.store::get-pod store "default" "snapshot-pod")))))
 
 (test encrypted-secret-generation-reloads-policy-and-keeps-member-key
   (with-temporary-store (store root)
-    (let* ((config (gr8s::enable-secret-encryption store))
+    (let* ((config (gr8s.resources::enable-secret-encryption store))
            (ca-path (merge-pathnames "pki/cluster-ca.key" root))
            (ca-bytes (uiop:read-file-string ca-path))
            (sentinel "cmVsb2FkLXNlY3JldC1zZW50aW5lbA==")
            (source (merge-pathnames "encrypted-reload.jsonl" root)))
-      (gr8s::create-core-resource store "secrets"
+      (gr8s.resources::create-core-resource store "secrets"
                                   (core-fixture "Secret" "reload-secret" "data"
-                                                (gr8s::core-object "password" sentinel)) "default")
+                                                (gr8s.resources::core-object "password" sentinel)) "default")
       (gr8s.resources::capture-store-snapshot store source 42 7)
       (is (not (search sentinel (uiop:read-file-string source))))
       (multiple-value-bind (path descriptor)
@@ -213,29 +213,29 @@
         (gr8s.store::resume-store-access store)
         (is (equalp config (gr8s.store:pod-store-secret-encryption-config store)))
         (is (equal ca-bytes (uiop:read-file-string ca-path)))
-        (dolist (target (list store (gr8s:open-store root)))
-          (let ((secret (gr8s::get-core-resource target "secrets" "default" "reload-secret")))
+        (dolist (target (list store (gr8s.store::open-store root)))
+          (let ((secret (gr8s.resources::get-core-resource target "secrets" "default" "reload-secret")))
             (is (equal sentinel (gethash "password" (gethash "data" secret))))))))))
 
 (test reload-rejects-staged-revisions-overtaken-before-draining
   (with-temporary-store (store root)
     (let* ((descriptor (make-restore-intent-fixture store root))
            (id (gethash "generation" descriptor)))
-      (gr8s::create-core-resource store "configmaps" (core-fixture "ConfigMap" "after-staging") "default")
+      (gr8s.resources::create-core-resource store "configmaps" (core-fixture "ConfigMap" "after-staging") "default")
       (gr8s.store::quiesce-store-access store :timeout 0)
       (signals error (gr8s.store::reload-store-application store id))
       (is (null (gr8s.store::read-store-restore-intent root)))
       (is (null (gr8s.store::selected-store-generation-root root)))
       (is (gr8s.store::pod-store-application-loaded-p store))
       (gr8s.store::resume-store-access store)
-      (is (gr8s::get-core-resource store "configmaps" "default" "after-staging")))))
+      (is (gr8s.resources::get-core-resource store "configmaps" "default" "after-staging")))))
 
 (test reload-rejects-staged-pod-clock-below-local-reservations
   (with-temporary-store (store root)
     (let* ((descriptor (make-restore-intent-fixture store root))
            (id (gethash "generation" descriptor)))
       (gr8s.store:with-store-lock (store)
-        (gr8s.store::advance-replicated-pod-revision-unlocked store (+ 10 (gr8s::pod-store-pod-revision-ceiling store))))
+        (gr8s.store::advance-replicated-pod-revision-unlocked store (+ 10 (gr8s.store::pod-store-pod-revision-ceiling store))))
       (gr8s.store::quiesce-store-access store :timeout 0)
       (signals error (gr8s.store::reload-store-application store id))
       (is (null (gr8s.store::read-store-restore-intent root)))
@@ -245,17 +245,17 @@
 (test rebased-restore-expires-old-watches-and-pages-and-keeps-writes-monotonic
   (with-temporary-store (store root)
     (dolist (name '("first" "second" "third"))
-      (gr8s::create-core-resource store "configmaps" (core-fixture "ConfigMap" name) "default"))
+      (gr8s.resources::create-core-resource store "configmaps" (core-fixture "ConfigMap" name) "default"))
     (let* ((pod (ha-make-pod store "rebased-pod"))
            (source (merge-pathnames "rebase-source.jsonl" root)))
-      (gr8s:register-node store (gr8s:make-node-record :id "rebased-node" :name "rebased-node" :pod-cidr "10.88.0.0/20"))
-      (gr8s::update-pod-observed-status store pod (gr8s::core-object "phase" "Running"))
+      (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "rebased-node" :name "rebased-node" :pod-cidr "10.88.0.0/20"))
+      (gr8s.controllers::update-pod-observed-status store pod (gr8s.resources::core-object "phase" "Running"))
       (gr8s.resources::capture-store-snapshot store source 42 7)
       (let* ((digest (snapshot-test-digest source))
-             (old-core (gr8s::pod-store-resource-revision store))
-             (old-pod (gr8s::pod-store-pod-revision store))
-             (old-ceiling (gr8s::pod-store-pod-revision-ceiling store))
-             (page (gr8s::template-list-page store "default" "" "" :resource "configmaps" :limit 1))
+             (old-core (gr8s.store::pod-store-resource-revision store))
+             (old-pod (gr8s.store::pod-store-pod-revision store))
+             (old-ceiling (gr8s.store::pod-store-pod-revision-ceiling store))
+             (page (gr8s.resources::template-list-page store "default" "" "" :resource "configmaps" :limit 1))
              (token (gethash "continue" (gethash "metadata" page))))
         (is (plusp (length token)))
         (multiple-value-bind (path descriptor) (materialize-live-test-snapshot store root source)
@@ -264,35 +264,35 @@
           (gr8s.store::reload-store-application store (gethash "generation" descriptor))
           (gr8s.store::resume-store-access store)
           (is (equal digest (snapshot-test-digest source)))
-          (is (> (gr8s::pod-store-resource-revision store) old-core))
-          (is (> (gr8s::pod-store-pod-revision store) old-ceiling))
+          (is (> (gr8s.store::pod-store-resource-revision store) old-core))
+          (is (> (gr8s.store::pod-store-pod-revision store) old-ceiling))
           (is (equal '("first" "second" "third")
                      (sort (mapcar (lambda (entry) (gethash "name" entry))
-                                   (gr8s::pod-store-template-history store)) #'string<)))
+                                   (gr8s.store::pod-store-template-history store)) #'string<)))
           (is (every (lambda (entry) (> (gethash "revision" entry) old-core))
-                     (gr8s::pod-store-template-history store)))
-          (is (> (gr8s::pod-store-template-history-floor store) old-core))
-          (dolist (read (list (lambda () (gr8s::template-watch-events store nil "" "" old-core :resource "configmaps"))
-                             (lambda () (gr8s::pod-watch-events store nil "" "" old-pod))
-                             (lambda () (gr8s::node-watch-events store "" "" old-pod))))
+                     (gr8s.store::pod-store-template-history store)))
+          (is (> (gr8s.store::pod-store-template-history-floor store) old-core))
+          (dolist (read (list (lambda () (gr8s.apiserver::template-watch-events store nil "" "" old-core :resource "configmaps"))
+                             (lambda () (gr8s.apiserver::pod-watch-events store nil "" "" old-pod))
+                             (lambda () (gr8s.apiserver::node-watch-events store "" "" old-pod))))
             (handler-case (progn (funcall read) (fail "Old watch must expire: ~A" read))
-              (gr8s:kubernetes-error (condition) (is (= 410 (gr8s::kubernetes-error-status-code condition))))))
-          (is (= 410 (nth-value 1 (gr8s::template-list-page store "default" "" "" :resource "configmaps" :continuation token))))
-          (let* ((restored (gr8s:get-pod store "default" "rebased-pod"))
-                 (uid (gr8s:pod-uid restored)))
-            (is (> (parse-integer (gethash "resourceVersion" (gethash "metadata" (gr8s::pod-published-view store restored)))) old-ceiling))
-            (is (not (gr8s.store::pod-client-revision-satisfied-p store (gr8s:pod-resource-version restored)
-                                                        (gr8s:pod-resource-version restored))))
-            (is (equal (gr8s:pod-resource-version restored)
-                       (gethash uid (gr8s::pod-store-pod-observed-resource-versions store)))))
-          (let ((object (gr8s::create-core-resource store "configmaps" (core-fixture "ConfigMap" "after-rebase") "default"))
+              (gr8s.model::kubernetes-error (condition) (is (= 410 (gr8s.model::kubernetes-error-status-code condition))))))
+          (is (= 410 (nth-value 1 (gr8s.resources::template-list-page store "default" "" "" :resource "configmaps" :continuation token))))
+          (let* ((restored (gr8s.store::get-pod store "default" "rebased-pod"))
+                 (uid (gr8s.model::pod-uid restored)))
+            (is (> (parse-integer (gethash "resourceVersion" (gethash "metadata" (gr8s.store::pod-published-view store restored)))) old-ceiling))
+            (is (not (gr8s.store::pod-client-revision-satisfied-p store (gr8s.model::pod-resource-version restored)
+                                                        (gr8s.model::pod-resource-version restored))))
+            (is (equal (gr8s.model::pod-resource-version restored)
+                       (gethash uid (gr8s.store::pod-store-pod-observed-resource-versions store)))))
+          (let ((object (gr8s.resources::create-core-resource store "configmaps" (core-fixture "ConfigMap" "after-rebase") "default"))
                 (next (ha-make-pod store "after-rebase")))
             (is (> (parse-integer (gethash "resourceVersion" (gethash "metadata" object))) old-core))
-            (is (> (parse-integer (gr8s:pod-resource-version next)) old-ceiling)))
-          (let ((reopened (gr8s:open-store root)))
-            (is (> (gr8s::pod-store-resource-revision reopened) old-core))
-            (is (> (gr8s::pod-store-pod-revision reopened) old-ceiling))
-            (is (gr8s:get-pod reopened "default" "after-rebase"))))))))
+            (is (> (parse-integer (gr8s.model::pod-resource-version next)) old-ceiling)))
+          (let ((reopened (gr8s.store::open-store root)))
+            (is (> (gr8s.store::pod-store-resource-revision reopened) old-core))
+            (is (> (gr8s.store::pod-store-pod-revision reopened) old-ceiling))
+            (is (gr8s.store::get-pod reopened "default" "after-rebase"))))))))
 
 (test mismatched-loaded-boundary-keeps-restore-blocked-until-repaired
   (with-temporary-store (store root)
@@ -316,15 +316,15 @@
   (with-temporary-store (store root)
     (declare (ignore root))
     (handler-case
-        (progn (gr8s::node-watch-events store "" "" 100) (fail "Future Node revision must not wait forever"))
-      (gr8s:kubernetes-error (condition) (is (= 504 (gr8s::kubernetes-error-status-code condition)))))))
+        (progn (gr8s.apiserver::node-watch-events store "" "" 100) (fail "Future Node revision must not wait forever"))
+      (gr8s.model::kubernetes-error (condition) (is (= 504 (gr8s.model::kubernetes-error-status-code condition)))))))
 
 (test rebased-replica-accepts-next-committed-pod-node-and-core-deltas
   (with-temporary-store (leader source-root)
     (let ((pod (ha-make-pod leader "shared-pod"))
           (artifact (merge-pathnames "shared.jsonl" source-root)))
-      (gr8s:register-node leader (gr8s:make-node-record :id "shared-node" :name "shared-node" :pod-cidr "10.88.0.0/20"))
-      (gr8s::create-core-resource leader "configmaps" (core-fixture "ConfigMap" "shared-config") "default")
+      (gr8s.controllers::register-node leader (gr8s.model::make-node-record :id "shared-node" :name "shared-node" :pod-cidr "10.88.0.0/20"))
+      (gr8s.resources::create-core-resource leader "configmaps" (core-fixture "ConfigMap" "shared-config") "default")
       (gr8s.resources::capture-store-snapshot leader artifact 42 7)
       (with-temporary-store (replica replica-root)
         (multiple-value-bind (path descriptor)
@@ -334,46 +334,46 @@
           (gr8s.store::quiesce-store-access replica :timeout 0)
           (gr8s.store::reload-store-application replica (gethash "generation" descriptor))
           (gr8s.store::resume-store-access replica)
-          (is (equal (gr8s:pod-resource-version pod)
-                     (gr8s:pod-resource-version (gr8s:get-pod replica "default" "shared-pod"))))
-          (setf (gr8s::pod-store-consensus-commit-fn leader)
+          (is (equal (gr8s.model::pod-resource-version pod)
+                     (gr8s.model::pod-resource-version (gr8s.store::get-pod replica "default" "shared-pod"))))
+          (setf (gr8s.store::pod-store-consensus-commit-fn leader)
                 (lambda (kind payload)
                   (prog1 (apply-pod-test-command leader kind payload)
                     (let ((result (apply-pod-test-command replica kind payload)))
                       (when (and (consp result) (member (first result) '(:pod-conflict :node-conflict)))
                         (error "Restored replica rejected next committed transition"))))))
-          (gr8s:update-pod leader (changed-pod-label pod "after-restore") (gr8s:pod-resource-version pod))
-          (gr8s::update-node-kubelet-port leader "shared-node" 10250)
-          (gr8s::update-core-resource leader "configmaps" "default" "shared-config"
-                                     (lambda (object) (setf (gethash "data" object) (gr8s::core-object "changed" "yes")) object))
-          (let* ((restored (gr8s:get-pod replica "default" "shared-pod"))
-                 (published (gr8s::pod-published-view replica restored))
+          (gr8s.store::update-pod leader (changed-pod-label pod "after-restore") (gr8s.model::pod-resource-version pod))
+          (gr8s.controllers::update-node-kubelet-port leader "shared-node" 10250)
+          (gr8s.resources::update-core-resource leader "configmaps" "default" "shared-config"
+                                     (lambda (object) (setf (gethash "data" object) (gr8s.resources::core-object "changed" "yes")) object))
+          (let* ((restored (gr8s.store::get-pod replica "default" "shared-pod"))
+                 (published (gr8s.store::pod-published-view replica restored))
                  (version (gethash "resourceVersion" (gethash "metadata" published))))
-            (is (equal "after-restore" (gethash "changed" (gethash "labels" (gethash "metadata" (gr8s:pod-to-object restored))))))
-            (is (equal (gr8s:pod-resource-version (gr8s:get-pod leader "default" "shared-pod"))
-                       (gr8s:pod-resource-version restored)))
+            (is (equal "after-restore" (gethash "changed" (gethash "labels" (gethash "metadata" (gr8s.model::pod-to-object restored))))))
+            (is (equal (gr8s.model::pod-resource-version (gr8s.store::get-pod leader "default" "shared-pod"))
+                       (gr8s.model::pod-resource-version restored)))
             (is (> (parse-integer version) 10000))
-            (is (gr8s.store::pod-client-revision-satisfied-p replica version (gr8s:pod-resource-version restored)))
-            (is (not (gr8s.store::pod-client-revision-satisfied-p replica "2" (gr8s:pod-resource-version restored)))))
+            (is (gr8s.store::pod-client-revision-satisfied-p replica version (gr8s.model::pod-resource-version restored)))
+            (is (not (gr8s.store::pod-client-revision-satisfied-p replica "2" (gr8s.model::pod-resource-version restored)))))
           ;; A controller uses the shared desired revision, not the API epoch.
           ;; Its next proposal must work from the restored member too.
-          (setf (gr8s::pod-store-consensus-commit-fn replica) (gr8s::pod-store-consensus-commit-fn leader))
-          (let ((current (gr8s:get-pod replica "default" "shared-pod")))
-            (gr8s:update-pod replica (changed-pod-label current "controller") (gr8s:pod-resource-version current)))
-          (is (equal "controller" (gethash "changed" (gethash "labels" (gethash "metadata" (gr8s:pod-to-object (gr8s:get-pod leader "default" "shared-pod")))))))
-          (is (= 10250 (gr8s::node-record-kubelet-port (gethash "shared-node" (gr8s::pod-store-nodes replica)))))
-          (let ((object (gr8s::get-core-resource replica "configmaps" "default" "shared-config")))
+          (setf (gr8s.store::pod-store-consensus-commit-fn replica) (gr8s.store::pod-store-consensus-commit-fn leader))
+          (let ((current (gr8s.store::get-pod replica "default" "shared-pod")))
+            (gr8s.store::update-pod replica (changed-pod-label current "controller") (gr8s.model::pod-resource-version current)))
+          (is (equal "controller" (gethash "changed" (gethash "labels" (gethash "metadata" (gr8s.model::pod-to-object (gr8s.store::get-pod leader "default" "shared-pod")))))))
+          (is (= 10250 (gr8s.model::node-record-kubelet-port (gethash "shared-node" (gr8s.store::pod-store-nodes replica)))))
+          (let ((object (gr8s.resources::get-core-resource replica "configmaps" "default" "shared-config")))
             (is (equal "yes" (gethash "changed" (gethash "data" object))))
             (is (> (parse-integer (gethash "resourceVersion" (gethash "metadata" object))) 100)))
-          (let ((reopened (gr8s:open-store replica-root)))
+          (let ((reopened (gr8s.store::open-store replica-root)))
             (is (= 10000 (gr8s.store::pod-store-pod-revision-epoch-floor reopened)))
             (is (not (gr8s.store::pod-client-revision-satisfied-p reopened "2"
-                                                       (gr8s:pod-resource-version (gr8s:get-pod reopened "default" "shared-pod")))))))))))
+                                                       (gr8s.model::pod-resource-version (gr8s.store::get-pod reopened "default" "shared-pod")))))))))))
 
 (test restored-pod-api-rejects-old-client-cas-and-allows-current-and-unconditional-writes
   (with-temporary-store (store root)
     (let* ((original (ha-make-pod store "client-cas"))
-           (old-version (gr8s:pod-resource-version original))
+           (old-version (gr8s.model::pod-resource-version original))
            (artifact (merge-pathnames "client-cas.jsonl" root)))
       (gr8s.resources::capture-store-snapshot store artifact 42 7)
       (multiple-value-bind (path descriptor) (materialize-live-test-snapshot store root artifact)
@@ -393,17 +393,17 @@
                                                   :content (com.inuoe.jzon:stringify object)))))))
                (is (= 409 (nth-value 1 (request url :method :patch :content-type "application/merge-patch+json"
                                               :content (com.inuoe.jzon:stringify
-                                                        (gr8s::core-object "metadata" (gr8s::core-object "resourceVersion" old-version)))))))
+                                                        (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "resourceVersion" old-version)))))))
                (is (= 409 (nth-value 1 (request url :method :delete :content-type "application/json"
                                               :content (com.inuoe.jzon:stringify
-                                                        (gr8s::core-object "preconditions" (gr8s::core-object "resourceVersion" old-version)))))))
+                                                        (gr8s.resources::core-object "preconditions" (gr8s.resources::core-object "resourceVersion" old-version)))))))
                (dolist (entry '(("/resize" . "{\"spec\":{}}")
                                 ("/ephemeralcontainers" . "{\"spec\":{\"ephemeralContainers\":[]}}")
                                 ("/status" . "{\"status\":{}}")))
                  (is (= 409 (nth-value 1 (request (concatenate 'string url (car entry))
                                                 :method :patch :content-type "application/merge-patch+json"
                                                 :content (com.inuoe.jzon:stringify
-                                                          (gr8s::core-object "metadata" (gr8s::core-object "resourceVersion" old-version)))))))
+                                                          (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "resourceVersion" old-version)))))))
                  (is (= 200 (nth-value 1 (request (concatenate 'string url (car entry))
                                                 :method :patch :content-type "application/merge-patch+json" :content (cdr entry))))))
                (is (= 200 (nth-value 1 (request url :method :patch :content-type "application/merge-patch+json"
@@ -419,7 +419,7 @@
            (id (gethash "generation" descriptor)) (member (make-reload-test-member))
            (node (gr8s.raft.transport:raft-member-node member))
            (validate (reload-test-validator member descriptor)) (checks 0))
-      (setf (gr8s::pod-store-consensus-commit-fn store) (lambda (&rest args) (declare (ignore args)) (error "No proposal expected")))
+      (setf (gr8s.store::pod-store-consensus-commit-fn store) (lambda (&rest args) (declare (ignore args)) (error "No proposal expected")))
       (setf (gr8s.raft:raft-node-current-term node) 10)
       (gr8s.store::quiesce-store-access store :timeout 0)
       (signals error
@@ -436,12 +436,12 @@
       (is (null (gr8s.store::selected-store-generation-root root)))
       (is (gr8s.store::pod-store-application-loaded-p store))
       (gr8s.store::resume-store-access store)
-      (is (gr8s:get-pod store "default" "legacy-later")))))
+      (is (gr8s.store::get-pod store "default" "legacy-later")))))
 
 (test member-generation-validator-checks-current-boundary-role-and-identity
   (let* ((member (make-reload-test-member)) (node (gr8s.raft.transport:raft-member-node member))
          (digest (make-string 64 :initial-element #\a))
-         (descriptor (gr8s::core-object "index" 42 "term" 7 "artifactSha256" digest))
+         (descriptor (gr8s.resources::core-object "index" 42 "term" 7 "artifactSha256" digest))
          (validate (reload-test-validator member descriptor)))
     (signals error (funcall validate descriptor nil))
     (setf (gethash "artifactSha256" descriptor) (copy-seq digest)
@@ -466,7 +466,7 @@
 
 (test member-generation-validator-allows-only-the-exact-durable-pending-artifact
   (let* ((member (make-reload-test-member)) (node (gr8s.raft.transport:raft-member-node member))
-         (descriptor (gr8s::core-object "index" 42 "term" 7 "artifactSha256" (make-string 64 :initial-element #\a)))
+         (descriptor (gr8s.resources::core-object "index" 42 "term" 7 "artifactSha256" (make-string 64 :initial-element #\a)))
          (validate (reload-test-validator member descriptor))
          (application (list :gr8s-store-artifact 1 :index 42 :term 7 :sha256 (gethash "artifactSha256" descriptor)))
          (state (list :gr8s-raft-snapshot 1 :application application :application-present t :members (list (cons "reload-member" :voter)))))
@@ -496,7 +496,7 @@
 
 (test member-validator-requires-this-thread-to-own-the-member-lock
   (let* ((member (make-reload-test-member)) (entered (bt:make-semaphore)) (release (bt:make-semaphore))
-         (descriptor (gr8s::core-object "index" 42 "term" 7 "artifactSha256" (make-string 64 :initial-element #\a)))
+         (descriptor (gr8s.resources::core-object "index" 42 "term" 7 "artifactSha256" (make-string 64 :initial-element #\a)))
          (validate (reload-test-validator member descriptor))
          (thread (bt:make-thread (lambda () (bt:with-lock-held ((gr8s.raft.transport:raft-member-lock member))
                                              (bt:signal-semaphore entered) (bt:wait-on-semaphore release :timeout 5))))))
@@ -508,7 +508,7 @@
 
 (test pending-member-validation-is-idempotent-but-never-rolls-back-newer-commits
   (let* ((member (make-reload-test-member)) (node (gr8s.raft.transport:raft-member-node member))
-         (descriptor (gr8s::core-object "index" 42 "term" 7 "artifactSha256" (make-string 64 :initial-element #\a)))
+         (descriptor (gr8s.resources::core-object "index" 42 "term" 7 "artifactSha256" (make-string 64 :initial-element #\a)))
          (validate (reload-test-validator member descriptor))
          (state (list :gr8s-raft-snapshot 1 :application (list :gr8s-store-artifact 1 :index 42 :term 7 :sha256 (gethash "artifactSha256" descriptor))
                                          :application-present t :members (list (cons "reload-member" :voter)))))
@@ -523,7 +523,7 @@
 
 (test member-validator-rejects-unrepresentable-boundaries-and-unverifiable-log-state
   (let* ((member (make-reload-test-member)) (node (gr8s.raft.transport:raft-member-node member))
-         (descriptor (gr8s::core-object "index" 42 "term" 7 "artifactSha256" (make-string 64 :initial-element #\a)))
+         (descriptor (gr8s.resources::core-object "index" 42 "term" 7 "artifactSha256" (make-string 64 :initial-element #\a)))
          (validate (reload-test-validator member descriptor)))
     (dolist (args (list (list 9 0 7 (gethash "artifactSha256" descriptor))
                        (list 9 (1+ most-positive-fixnum) 7 (gethash "artifactSha256" descriptor))
@@ -539,7 +539,7 @@
     (declare (ignore store))
     (let* ((path (merge-pathnames "member.wal" root))
            (member (gr8s.raft.transport::make-raft-member))
-           (descriptor (gr8s::core-object "index" 42 "term" 7 "artifactSha256" (make-string 64 :initial-element #\a)))
+           (descriptor (gr8s.resources::core-object "index" 42 "term" 7 "artifactSha256" (make-string 64 :initial-element #\a)))
            (application (list :gr8s-store-artifact 1 :index 42 :term 7 :sha256 (gethash "artifactSha256" descriptor)))
            (state (list :gr8s-raft-snapshot 1 :application application :application-present t
                                            :members (list (cons "reload-member" :voter))))
@@ -571,7 +571,7 @@
 
 (test fresh-application-snapshot-may-replace-a-conflicting-uncommitted-tail
   (let* ((member (make-reload-test-member)) (node (gr8s.raft.transport:raft-member-node member))
-         (descriptor (gr8s::core-object "index" 42 "term" 7 "artifactSha256" (make-string 64 :initial-element #\a)))
+         (descriptor (gr8s.resources::core-object "index" 42 "term" 7 "artifactSha256" (make-string 64 :initial-element #\a)))
          (validate (reload-test-validator member descriptor)))
     (bt:with-lock-held ((gr8s.raft.transport:raft-member-lock member))
       (loop for index from 11 to 43 do

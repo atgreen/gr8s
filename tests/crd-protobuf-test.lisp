@@ -56,23 +56,23 @@
         (is (equal "string" (gethash "type" (gethash "additionalProperties" (gethash "attrs" properties)))))
         (is (equal "string" (gethash "type" (gethash "items" (gethash "names" properties)))))))
     (let ((created (crd-api-request 201 "/apis/wire.example.test/v1/wirewidgets" :method :post
-                                   :object (gr8s::core-object "apiVersion" "wire.example.test/v1" "kind" "WireWidget"
-                                                            "metadata" (gr8s::core-object "name" "one")))))
+                                   :object (gr8s.resources::core-object "apiVersion" "wire.example.test/v1" "kind" "WireWidget"
+                                                            "metadata" (gr8s.resources::core-object "name" "one")))))
       (is (= 2 (gethash "count" created)))
       (is-true (nth-value 1 (gethash "flag" created))))
     (crd-api-request 422 "/apis/wire.example.test/v1/wirewidgets/one" :method :patch :content-type "application/merge-patch+json"
-                     :object (gr8s::core-object "count" 1))))
+                     :object (gr8s.resources::core-object "count" 1))))
 
 (test typed-crd-union-and-nonfinite-boundaries-are-not-silently-reinterpreted
   (let* ((prefix "k8s.io.apiextensions_apiserver.pkg.apis.apiextensions.v1.")
-         (gr8s::*core-protobuf-field-count* 0))
+         (gr8s.resources::*core-protobuf-field-count* 0))
     (is (equal "https://example.test/ref"
-               (gethash "$ref" (gr8s::template-protobuf-message (concatenate 'string prefix "JSONSchemaProps")
+               (gethash "$ref" (gr8s.resources::template-protobuf-message (concatenate 'string prefix "JSONSchemaProps")
                                  (core-test-protobuf '((3 "https://example.test/ref")))))))
-    (is (eq 'null (gr8s::template-protobuf-message (concatenate 'string prefix "JSON") (core-test-protobuf (list (list 1 #()))))))
-    (is-false (gr8s::template-protobuf-message (concatenate 'string prefix "JSONSchemaPropsOrBool") (core-test-protobuf '((1 0)))))
+    (is (eq 'null (gr8s.resources::template-protobuf-message (concatenate 'string prefix "JSON") (core-test-protobuf (list (list 1 #()))))))
+    (is-false (gr8s.resources::template-protobuf-message (concatenate 'string prefix "JSONSchemaPropsOrBool") (core-test-protobuf '((1 0)))))
     (signals error
-      (gr8s::template-protobuf-message (concatenate 'string prefix "JSONSchemaProps")
+      (gr8s.resources::template-protobuf-message (concatenate 'string prefix "JSONSchemaProps")
           (concatenate '(vector (unsigned-byte 8)) #(73) #(0 0 0 0 0 0 240 127))))))
 
 (in-suite gr8s)

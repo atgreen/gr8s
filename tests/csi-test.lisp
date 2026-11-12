@@ -11,255 +11,255 @@
 (in-suite csi)
 
 (defun csi-test-driver-object (name &key (attach-required t attach-supplied) modes)
-  (let ((spec (gr8s::core-object)))
+  (let ((spec (gr8s.resources::core-object)))
     (when attach-supplied (setf (gethash "attachRequired" spec) attach-required))
     (when modes (setf (gethash "volumeLifecycleModes" spec) modes))
-    (gr8s::core-object "apiVersion" "storage.k8s.io/v1" "kind" "CSIDriver"
-                       "metadata" (gr8s::core-object "name" name) "spec" spec)))
+    (gr8s.resources::core-object "apiVersion" "storage.k8s.io/v1" "kind" "CSIDriver"
+                       "metadata" (gr8s.resources::core-object "name" name) "spec" spec)))
 
 (defun csi-test-volume (name &key (driver "csi.example.test") (handle "disk-1") (class "") claim-ref)
   (let ((volume (storage-test-volume name "/unused" :class class)))
     (remhash "hostPath" (gethash "spec" volume))
-    (setf (gethash "csi" (gethash "spec" volume)) (gr8s::core-object "driver" driver "volumeHandle" handle))
+    (setf (gethash "csi" (gethash "spec" volume)) (gr8s.resources::core-object "driver" driver "volumeHandle" handle))
     (when claim-ref (setf (gethash "claimRef" (gethash "spec" volume)) claim-ref))
     volume))
 
 (test csi-api-objects-are-served-with-kubernetes-defaults-and-immutability
   (with-temporary-store (store path)
     (values path)
-    (let* ((driver (gr8s::create-core-resource store "csidrivers" (csi-test-driver-object "csi.example.test") nil))
+    (let* ((driver (gr8s.resources::create-core-resource store "csidrivers" (csi-test-driver-object "csi.example.test") nil))
            (spec (gethash "spec" driver)))
       (is (eq t (gethash "attachRequired" spec)))
       (is (equal "ReadWriteOnceWithFSType" (gethash "fsGroupPolicy" spec)))
       (is (equalp #("Persistent") (gethash "volumeLifecycleModes" spec))))
     (signals kubernetes-error
-      (gr8s::update-core-resource store "csidrivers" nil "csi.example.test"
+      (gr8s.resources::update-core-resource store "csidrivers" nil "csi.example.test"
                                   (lambda (old)
-                                    (let ((copy (gr8s::copy-core-object old)))
+                                    (let ((copy (gr8s.resources::copy-core-object old)))
                                       (setf (gethash "attachRequired" (gethash "spec" copy)) nil)
                                       copy))))
     (signals kubernetes-error
-      (gr8s::create-core-resource store "csidrivers" (csi-test-driver-object "not_a_driver!") nil))
+      (gr8s.resources::create-core-resource store "csidrivers" (csi-test-driver-object "not_a_driver!") nil))
     (signals kubernetes-error
-      (gr8s::create-core-resource store "csidrivers"
+      (gr8s.resources::create-core-resource store "csidrivers"
                                   (csi-test-driver-object "other.example.test" :modes #("Sometimes")) nil))
-    (is (gr8s::create-core-resource
+    (is (gr8s.resources::create-core-resource
          store "csinodes"
-         (gr8s::core-object "metadata" (gr8s::core-object "name" "worker-a")
-                            "spec" (gr8s::core-object "drivers" (vector (gr8s::core-object "name" "csi.example.test" "nodeID" "n1"))))
+         (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "worker-a")
+                            "spec" (gr8s.resources::core-object "drivers" (vector (gr8s.resources::core-object "name" "csi.example.test" "nodeID" "n1"))))
          nil))
     (signals kubernetes-error
-      (gr8s::create-core-resource
+      (gr8s.resources::create-core-resource
        store "csinodes"
-       (gr8s::core-object "metadata" (gr8s::core-object "name" "worker-b")
-                          "spec" (gr8s::core-object "drivers" (vector (gr8s::core-object "name" "csi.example.test"))))
+       (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "worker-b")
+                          "spec" (gr8s.resources::core-object "drivers" (vector (gr8s.resources::core-object "name" "csi.example.test"))))
        nil))
-    (is (gr8s::create-core-resource
+    (is (gr8s.resources::create-core-resource
          store "csistoragecapacities"
-         (gr8s::core-object "metadata" (gr8s::core-object "name" "cap") "storageClassName" "fast" "capacity" "1Gi")
+         (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "cap") "storageClassName" "fast" "capacity" "1Gi")
          "default"))))
 
 (test leases-serve-leader-election-for-driver-sidecars
   (with-temporary-store (store path)
     (values path)
-    (let ((lease (gr8s::create-core-resource
+    (let ((lease (gr8s.resources::create-core-resource
                   store "leases"
-                  (gr8s::core-object "metadata" (gr8s::core-object "name" "external-provisioner")
-                                     "spec" (gr8s::core-object "holderIdentity" "me" "leaseDurationSeconds" 15))
+                  (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "external-provisioner")
+                                     "spec" (gr8s.resources::core-object "holderIdentity" "me" "leaseDurationSeconds" 15))
                   "kube-system")))
       (is (equal "coordination.k8s.io/v1" (gethash "apiVersion" lease))))
     (signals kubernetes-error
-      (gr8s::create-core-resource store "leases"
-                                  (gr8s::core-object "metadata" (gr8s::core-object "name" "bad")
-                                                     "spec" (gr8s::core-object "unknownField" 1))
+      (gr8s.resources::create-core-resource store "leases"
+                                  (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "bad")
+                                                     "spec" (gr8s.resources::core-object "unknownField" 1))
                                   "kube-system"))))
 
 (test volume-attachment-status-belongs-to-the-attacher
   (with-temporary-store (store path)
     (values path)
-    (let ((input (gr8s::core-object "metadata" (gr8s::core-object "name" "a1")
-                                    "spec" (gr8s::core-object "attacher" "csi.example.test" "nodeName" "worker-a"
-                                                              "source" (gr8s::core-object "persistentVolumeName" "pv"))
-                                    "status" (gr8s::core-object "attached" t))))
-      (is (null (gethash "status" (gr8s::create-core-resource store "volumeattachments" input nil))))
+    (let ((input (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "a1")
+                                    "spec" (gr8s.resources::core-object "attacher" "csi.example.test" "nodeName" "worker-a"
+                                                              "source" (gr8s.resources::core-object "persistentVolumeName" "pv"))
+                                    "status" (gr8s.resources::core-object "attached" t))))
+      (is (null (gethash "status" (gr8s.resources::create-core-resource store "volumeattachments" input nil))))
       ;; external-attacher adds its finalizer repeatedly before any status exists.
       (dotimes (attempt 2)
-        (gr8s::update-core-resource store "volumeattachments" nil "a1"
+        (gr8s.resources::update-core-resource store "volumeattachments" nil "a1"
                                     (lambda (old)
-                                      (let ((copy (gr8s::copy-core-object old)))
+                                      (let ((copy (gr8s.resources::copy-core-object old)))
                                         (setf (gethash "labels" (gethash "metadata" copy))
-                                              (gr8s::core-object "attempt" (write-to-string attempt)))
+                                              (gr8s.resources::core-object "attempt" (write-to-string attempt)))
                                         copy))))
-      (is (null (gethash "status" (gr8s::get-core-resource store "volumeattachments" nil "a1"))))
+      (is (null (gethash "status" (gr8s.resources::get-core-resource store "volumeattachments" nil "a1"))))
       (signals kubernetes-error
-        (gr8s::update-core-resource store "volumeattachments" nil "a1"
+        (gr8s.resources::update-core-resource store "volumeattachments" nil "a1"
                                     (lambda (old)
-                                      (let ((copy (gr8s::copy-core-object old)))
+                                      (let ((copy (gr8s.resources::copy-core-object old)))
                                         (setf (gethash "nodeName" (gethash "spec" copy)) "worker-b")
                                         copy))))
-      (let ((gr8s::*storage-status-write* t))
-        (gr8s::update-core-resource store "volumeattachments" nil "a1"
+      (let ((gr8s.resources::*storage-status-write* t))
+        (gr8s.resources::update-core-resource store "volumeattachments" nil "a1"
                                     (lambda (old)
-                                      (let ((copy (gr8s::copy-core-object old)))
-                                        (setf (gethash "status" copy) (gr8s::core-object "attached" t))
+                                      (let ((copy (gr8s.resources::copy-core-object old)))
+                                        (setf (gethash "status" copy) (gr8s.resources::core-object "attached" t))
                                         copy))))
-      (is (eq t (gethash "attached" (gethash "status" (gr8s::get-core-resource store "volumeattachments" nil "a1"))))))))
+      (is (eq t (gethash "attached" (gethash "status" (gr8s.resources::get-core-resource store "volumeattachments" nil "a1"))))))))
 
 (test claims-of-a-csi-class-are-handed-to-its-external-provisioner
   (with-temporary-store (store path)
     (values path)
-    (gr8s::create-core-resource store "storageclasses"
+    (gr8s.resources::create-core-resource store "storageclasses"
                                 (provisioning-class "fast" "csi.example.test" "volumeBindingMode" "WaitForFirstConsumer") nil)
-    (gr8s::create-core-resource store "storageclasses"
+    (gr8s.resources::create-core-resource store "storageclasses"
                                 (provisioning-class "now" "csi.example.test") nil)
-    (gr8s::create-core-resource store "persistentvolumeclaims" (storage-test-claim "delayed" :class "fast") "default")
-    (gr8s::create-core-resource store "persistentvolumeclaims" (storage-test-claim "immediate" :class "now") "default")
-    (gr8s::reconcile-storage-bindings store)
+    (gr8s.resources::create-core-resource store "persistentvolumeclaims" (storage-test-claim "delayed" :class "fast") "default")
+    (gr8s.resources::create-core-resource store "persistentvolumeclaims" (storage-test-claim "immediate" :class "now") "default")
+    (gr8s.resources::reconcile-storage-bindings store)
     (flet ((annotation (claim key)
-             (gethash key (gethash "annotations" (gethash "metadata" (claim-object store claim)) (gr8s::core-object)))))
-      (is (equal "csi.example.test" (annotation "immediate" gr8s::+external-provisioner-annotation+)))
+             (gethash key (gethash "annotations" (gethash "metadata" (claim-object store claim)) (gr8s.resources::core-object)))))
+      (is (equal "csi.example.test" (annotation "immediate" gr8s.resources::+external-provisioner-annotation+)))
       ;; A delayed claim isn't announced until its consumer has chosen a node.
-      (is (null (annotation "delayed" gr8s::+external-provisioner-annotation+)))
+      (is (null (annotation "delayed" gr8s.resources::+external-provisioner-annotation+)))
       (ready-node store "worker-a" "a" "10.64.0.0/20")
-      (let ((node (gr8s:schedule-pod store (create-pod store (storage-test-pod "consumer" "delayed")))))
-        (is (equal "worker-a" (gr8s:node-record-name node))))
-      (gr8s::reconcile-storage-bindings store)
-      (is (equal "csi.example.test" (annotation "delayed" gr8s::+external-provisioner-annotation+)))
-      (is (equal "worker-a" (annotation "delayed" gr8s::+selected-node-annotation+)))
+      (let ((node (gr8s.controllers::schedule-pod store (create-pod store (storage-test-pod "consumer" "delayed")))))
+        (is (equal "worker-a" (gr8s.model::node-record-name node))))
+      (gr8s.resources::reconcile-storage-bindings store)
+      (is (equal "csi.example.test" (annotation "delayed" gr8s.resources::+external-provisioner-annotation+)))
+      (is (equal "worker-a" (annotation "delayed" gr8s.resources::+selected-node-annotation+)))
       (is (equal "Pending" (storage-phase store "persistentvolumeclaims" "default" "delayed")))
-      (let ((revision (gr8s::pod-store-resource-revision store)))
-        (is-false (gr8s::reconcile-storage-bindings store))
-        (is (= revision (gr8s::pod-store-resource-revision store))))
+      (let ((revision (gr8s.store::pod-store-resource-revision store)))
+        (is-false (gr8s.resources::reconcile-storage-bindings store))
+        (is (= revision (gr8s.store::pod-store-resource-revision store))))
       ;; The sidecar's volume reserves exactly this claim, which then binds to it.
       (let* ((claim (claim-object store "immediate"))
              (volume (csi-test-volume "pvc-sidecar" :class "now"
-                                      :claim-ref (gr8s::core-object
+                                      :claim-ref (gr8s.resources::core-object
                                                   "name" "immediate" "namespace" "default"
                                                   "uid" (gethash "uid" (gethash "metadata" claim))))))
         (setf (gethash "annotations" (gethash "metadata" volume))
-              (gr8s::core-object gr8s::+provisioned-by-annotation+ "csi.example.test")
+              (gr8s.resources::core-object gr8s.resources::+provisioned-by-annotation+ "csi.example.test")
               (gethash "persistentVolumeReclaimPolicy" (gethash "spec" volume)) "Delete")
-        (gr8s::create-core-resource store "persistentvolumes" volume nil))
-      (gr8s::reconcile-storage-bindings store)
+        (gr8s.resources::create-core-resource store "persistentvolumes" volume nil))
+      (gr8s.resources::reconcile-storage-bindings store)
       (is (equal "pvc-sidecar" (claim-volume-name store "immediate")))
       ;; external-provisioner deletes a Released volume, so it must not report Failed.
-      (gr8s::delete-core-resource store "persistentvolumeclaims" "default" "immediate")
-      (gr8s::reconcile-storage-bindings store)
-      (let ((volume (gr8s::get-core-resource store "persistentvolumes" nil "pvc-sidecar")))
+      (gr8s.resources::delete-core-resource store "persistentvolumeclaims" "default" "immediate")
+      (gr8s.resources::reconcile-storage-bindings store)
+      (let ((volume (gr8s.resources::get-core-resource store "persistentvolumes" nil "pvc-sidecar")))
         (is (equal "Released" (gethash "phase" (gethash "status" volume))))
-        (is-false (gr8s::storage-volume-reclaimable-p volume))))))
+        (is-false (gr8s.resources::storage-volume-reclaimable-p volume))))))
 
 (test no-provisioner-classes-still-wait-for-an-administrator
   (with-temporary-store (store path)
     (values path)
-    (gr8s::create-core-resource store "storageclasses"
-                                (provisioning-class "manual" gr8s::+no-provisioner+ "volumeBindingMode" "WaitForFirstConsumer") nil)
-    (gr8s::create-core-resource store "persistentvolumeclaims" (storage-test-claim "claim" :class "manual") "default")
+    (gr8s.resources::create-core-resource store "storageclasses"
+                                (provisioning-class "manual" gr8s.resources::+no-provisioner+ "volumeBindingMode" "WaitForFirstConsumer") nil)
+    (gr8s.resources::create-core-resource store "persistentvolumeclaims" (storage-test-claim "claim" :class "manual") "default")
     (ready-node store "worker-a" "a" "10.64.0.0/20")
-    (is (null (gr8s:schedule-pod store (create-pod store (storage-test-pod "consumer" "claim")))))))
+    (is (null (gr8s.controllers::schedule-pod store (create-pod store (storage-test-pod "consumer" "claim")))))))
 
 (test attachments-follow-consumers-and-honor-the-driver
   (with-temporary-store (store path)
     (values path)
     (ready-node store "worker-a" "a" "10.64.0.0/20")
-    (gr8s::create-core-resource store "persistentvolumes" (csi-test-volume "pv") nil)
-    (gr8s::create-core-resource store "persistentvolumeclaims" (storage-test-claim "claim") "default")
-    (gr8s::reconcile-storage-bindings store)
-    (gr8s::reconcile-volume-attachments store)
-    (is (null (gr8s::list-core-resources store "volumeattachments")))
+    (gr8s.resources::create-core-resource store "persistentvolumes" (csi-test-volume "pv") nil)
+    (gr8s.resources::create-core-resource store "persistentvolumeclaims" (storage-test-claim "claim") "default")
+    (gr8s.resources::reconcile-storage-bindings store)
+    (gr8s.resources::reconcile-volume-attachments store)
+    (is (null (gr8s.resources::list-core-resources store "volumeattachments")))
     (let* ((pod (create-pod store (storage-test-pod "consumer" "claim")))
-           (node (gr8s:schedule-pod store pod))
-           (name (gr8s::volume-attachment-name "csi.example.test" "disk-1" "worker-a")))
+           (node (gr8s.controllers::schedule-pod store pod))
+           (name (gr8s.resources::volume-attachment-name "csi.example.test" "disk-1" "worker-a")))
       (is-true node)
-      (gr8s::reconcile-volume-attachments store)
-      (let* ((attachment (gr8s::get-core-resource store "volumeattachments" nil name))
+      (gr8s.resources::reconcile-volume-attachments store)
+      (let* ((attachment (gr8s.resources::get-core-resource store "volumeattachments" nil name))
              (spec (gethash "spec" attachment)))
         (is (equal "csi.example.test" (gethash "attacher" spec)))
         (is (equal "worker-a" (gethash "nodeName" spec)))
         (is (equal "pv" (gethash "persistentVolumeName" (gethash "source" spec)))))
-      (gr8s::reconcile-volume-attachments store)
-      (is (= 1 (length (gr8s::list-core-resources store "volumeattachments"))))
+      (gr8s.resources::reconcile-volume-attachments store)
+      (is (= 1 (length (gr8s.resources::list-core-resources store "volumeattachments"))))
       ;; The attacher's finalizer keeps the object until it has actually detached.
-      (gr8s::update-core-resource store "volumeattachments" nil name
+      (gr8s.resources::update-core-resource store "volumeattachments" nil name
                                   (lambda (old)
-                                    (let ((copy (gr8s::copy-core-object old)))
+                                    (let ((copy (gr8s.resources::copy-core-object old)))
                                       (setf (gethash "finalizers" (gethash "metadata" copy)) #("external-attacher/csi-example-test"))
                                       copy)))
-      (gr8s::remove-pod store "default" "consumer")
-      (gr8s::reconcile-volume-attachments store)
+      (gr8s.store::remove-pod store "default" "consumer")
+      (gr8s.resources::reconcile-volume-attachments store)
       (is-true (gethash "deletionTimestamp"
-                        (gethash "metadata" (gr8s::get-core-resource store "volumeattachments" nil name))))))
+                        (gethash "metadata" (gr8s.resources::get-core-resource store "volumeattachments" nil name))))))
   (with-temporary-store (store path)
     (values path)
     (ready-node store "worker-a" "a" "10.64.0.0/20")
-    (gr8s::create-core-resource store "csidrivers" (csi-test-driver-object "csi.example.test" :attach-required nil) nil)
-    (gr8s::create-core-resource store "persistentvolumes" (csi-test-volume "pv") nil)
-    (gr8s::create-core-resource store "persistentvolumeclaims" (storage-test-claim "claim") "default")
-    (gr8s::reconcile-storage-bindings store)
-    (gr8s:schedule-pod store (create-pod store (storage-test-pod "consumer" "claim")))
-    (gr8s::reconcile-volume-attachments store)
-    (is (null (gr8s::list-core-resources store "volumeattachments")))))
+    (gr8s.resources::create-core-resource store "csidrivers" (csi-test-driver-object "csi.example.test" :attach-required nil) nil)
+    (gr8s.resources::create-core-resource store "persistentvolumes" (csi-test-volume "pv") nil)
+    (gr8s.resources::create-core-resource store "persistentvolumeclaims" (storage-test-claim "claim") "default")
+    (gr8s.resources::reconcile-storage-bindings store)
+    (gr8s.controllers::schedule-pod store (create-pod store (storage-test-pod "consumer" "claim")))
+    (gr8s.resources::reconcile-volume-attachments store)
+    (is (null (gr8s.resources::list-core-resources store "volumeattachments")))))
 
 (test attachments-gr8s-did-not-create-are-left-alone
   ;; The VolumeAttachment conformance specs create attachments for PVs that don't exist.
   (with-temporary-store (store path)
     (values path)
     (ready-node store "worker-a" "a" "10.64.0.0/20")
-    (let ((ours (gr8s::volume-attachment-name "csi.example.test" "gone" "worker-a")))
+    (let ((ours (gr8s.resources::volume-attachment-name "csi.example.test" "gone" "worker-a")))
       (dolist (name (list "va-e2e-2xjx6" ours))
-        (gr8s::create-core-resource
+        (gr8s.resources::create-core-resource
          store "volumeattachments"
-         (gr8s::core-object "metadata" (gr8s::core-object "name" name)
-                            "spec" (gr8s::core-object "attacher" "e2e-test.storage.k8s.io" "nodeName" "worker-a"
-                                                      "source" (gr8s::core-object "persistentVolumeName" "pv-e2e-2xjx6")))
+         (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" name)
+                            "spec" (gr8s.resources::core-object "attacher" "e2e-test.storage.k8s.io" "nodeName" "worker-a"
+                                                      "source" (gr8s.resources::core-object "persistentVolumeName" "pv-e2e-2xjx6")))
          nil))
-      (is-true (gr8s::gr8s-volume-attachment-name-p ours))
-      (is-false (gr8s::gr8s-volume-attachment-name-p "va-e2e-2xjx6"))
-      (gr8s::reconcile-volume-attachments store)
+      (is-true (gr8s.resources::gr8s-volume-attachment-name-p ours))
+      (is-false (gr8s.resources::gr8s-volume-attachment-name-p "va-e2e-2xjx6"))
+      (gr8s.resources::reconcile-volume-attachments store)
       (is (equal '("va-e2e-2xjx6")
                  (mapcar (lambda (object) (gethash "name" (gethash "metadata" object)))
-                         (gr8s::list-core-resources store "volumeattachments")))))))
+                         (gr8s.resources::list-core-resources store "volumeattachments")))))))
 
 (test csi-assignments-carry-only-what-their-own-volume-needs
   (with-temporary-store (store path)
     (values path)
     (ready-node store "worker-a" "a" "10.64.0.0/20")
-    (gr8s::create-core-resource store "csidrivers" (csi-test-driver-object "csi.example.test") nil)
-    (gr8s::create-core-resource store "csidrivers" (csi-test-driver-object "other.example.test") nil)
+    (gr8s.resources::create-core-resource store "csidrivers" (csi-test-driver-object "csi.example.test") nil)
+    (gr8s.resources::create-core-resource store "csidrivers" (csi-test-driver-object "other.example.test") nil)
     (let ((volume (csi-test-volume "pv")))
       (setf (gethash "nodePublishSecretRef" (gethash "csi" (gethash "spec" volume)))
-            (gr8s::core-object "name" "creds" "namespace" "storage-system"))
-      (gr8s::create-core-resource store "persistentvolumes" volume nil))
-    (gr8s::create-core-resource store "secrets"
-                                (gr8s::core-object "metadata" (gr8s::core-object "name" "creds" "namespace" "storage-system")
-                                                   "data" (gr8s::core-object "key" "dmFsdWU="))
+            (gr8s.resources::core-object "name" "creds" "namespace" "storage-system"))
+      (gr8s.resources::create-core-resource store "persistentvolumes" volume nil))
+    (gr8s.resources::create-core-resource store "secrets"
+                                (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "creds" "namespace" "storage-system")
+                                                   "data" (gr8s.resources::core-object "key" "dmFsdWU="))
                                 "storage-system")
-    (gr8s::create-core-resource store "persistentvolumeclaims" (storage-test-claim "claim") "default")
-    (gr8s::reconcile-storage-bindings store)
+    (gr8s.resources::create-core-resource store "persistentvolumeclaims" (storage-test-claim "claim") "default")
+    (gr8s.resources::reconcile-storage-bindings store)
     (let ((pod (create-pod store (storage-test-pod "consumer" "claim"))))
-      (gr8s:schedule-pod store pod)
-      (gr8s::reconcile-volume-attachments store)
+      (gr8s.controllers::schedule-pod store pod)
+      (gr8s.resources::reconcile-volume-attachments store)
       (let* ((pod (get-pod store "default" "consumer"))
-             (objects (gr8s::pod-persistent-resource-objects store pod))
+             (objects (gr8s.kubelet::pod-persistent-resource-objects store pod))
              (kinds (mapcar (lambda (object) (gethash "kind" object)) objects)))
         (dolist (kind '("PersistentVolumeClaim" "PersistentVolume" "CSIDriver" "VolumeAttachment" "Secret"))
           (is (member kind kinds :test #'equal)))
         (is (= 5 (length objects)))
         (dolist (object objects)
           (unless (equal "Secret" (gethash "kind" object))
-            (is-true (gr8s::assigned-storage-resource-p object pod objects))))
-        (is-true (gr8s::csi-volume-secret-reference-p
+            (is-true (gr8s.kubelet::assigned-storage-resource-p object pod objects))))
+        (is-true (gr8s.kubelet::csi-volume-secret-reference-p
                   (find "Secret" objects :key (lambda (object) (gethash "kind" object)) :test #'equal) objects))
         ;; A forged driver or another node's attachment is refused on arrival.
-        (is-false (gr8s::assigned-storage-resource-p
-                   (gr8s::get-core-resource store "csidrivers" nil "other.example.test") pod objects))
-        (is-false (gr8s::assigned-storage-resource-p
-                   (gr8s::core-object "kind" "VolumeAttachment" "metadata" (gr8s::core-object "name" "x")
-                                      "spec" (gr8s::core-object "nodeName" "worker-b"
-                                                                "source" (gr8s::core-object "persistentVolumeName" "pv")))
+        (is-false (gr8s.kubelet::assigned-storage-resource-p
+                   (gr8s.resources::get-core-resource store "csidrivers" nil "other.example.test") pod objects))
+        (is-false (gr8s.kubelet::assigned-storage-resource-p
+                   (gr8s.resources::core-object "kind" "VolumeAttachment" "metadata" (gr8s.resources::core-object "name" "x")
+                                      "spec" (gr8s.resources::core-object "nodeName" "worker-b"
+                                                                "source" (gr8s.resources::core-object "persistentVolumeName" "pv")))
                    pod objects))
-        (is-false (gr8s::csi-volume-secret-reference-p
-                   (gr8s::core-object "metadata" (gr8s::core-object "name" "creds" "namespace" "elsewhere")) objects))))))
+        (is-false (gr8s.kubelet::csi-volume-secret-reference-p
+                   (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "creds" "namespace" "elsewhere")) objects))))))
 
 (test node-registrations-publish-a-csinode-only-when-they-change
   (with-temporary-store (store path)
@@ -268,19 +268,19 @@
              (make-instance 'gr8s.node.v1::csi-driver-registration
                             :name name :node-id id :max-volumes 16
                             :topology (list (cons "topology.example.test/zone" "z1")))))
-      (is (null (gr8s::update-node-csi-registrations store "worker-a" nil)))
-      (is (null (gr8s::list-core-resources store "csinodes")))
-      (gr8s::update-node-csi-registrations store "worker-a" (list (registration "csi.example.test" "n1")))
-      (let* ((node (gr8s::get-core-resource store "csinodes" nil "worker-a"))
+      (is (null (gr8s.resources::update-node-csi-registrations store "worker-a" nil)))
+      (is (null (gr8s.resources::list-core-resources store "csinodes")))
+      (gr8s.resources::update-node-csi-registrations store "worker-a" (list (registration "csi.example.test" "n1")))
+      (let* ((node (gr8s.resources::get-core-resource store "csinodes" nil "worker-a"))
              (entry (aref (gethash "drivers" (gethash "spec" node)) 0)))
         (is (equal "n1" (gethash "nodeID" entry)))
         (is (equalp #("topology.example.test/zone") (gethash "topologyKeys" entry)))
         (is (= 16 (gethash "count" (gethash "allocatable" entry)))))
-      (let ((revision (gr8s::pod-store-resource-revision store)))
-        (gr8s::update-node-csi-registrations store "worker-a" (list (registration "csi.example.test" "n1")))
-        (is (= revision (gr8s::pod-store-resource-revision store))))
-      (gr8s::update-node-csi-registrations store "worker-a" nil)
-      (is (zerop (length (gethash "drivers" (gethash "spec" (gr8s::get-core-resource store "csinodes" nil "worker-a")))))))))
+      (let ((revision (gr8s.store::pod-store-resource-revision store)))
+        (gr8s.resources::update-node-csi-registrations store "worker-a" (list (registration "csi.example.test" "n1")))
+        (is (= revision (gr8s.store::pod-store-resource-revision store))))
+      (gr8s.resources::update-node-csi-registrations store "worker-a" nil)
+      (is (zerop (length (gethash "drivers" (gethash "spec" (gr8s.resources::get-core-resource store "csinodes" nil "worker-a")))))))))
 
 (test driver-topology-labels-its-node-as-a-kubelet-does
   ;; external-provisioner looks for a driver's topology keys on Node labels.
@@ -289,14 +289,14 @@
     (ready-node store "worker-a" "a" "10.64.0.0/20")
     (flet ((registration (name topology)
              (make-instance 'gr8s.node.v1::csi-driver-registration :name name :node-id "n1" :topology topology))
-           (labels-of () (gr8s::node-record-labels (gr8s::get-node store "worker-a"))))
-      (gr8s::update-node-csi-registrations store "worker-a"
+           (labels-of () (gr8s.model::node-record-labels (gr8s.controllers::get-node store "worker-a"))))
+      (gr8s.resources::update-node-csi-registrations store "worker-a"
                                            (list (registration "csi.example.test" (list (cons "topology.example.test/node" "worker-a")))))
       (is (equal "worker-a" (gethash "topology.example.test/node" (labels-of))))
       (is (equal "worker-a" (gethash "topology.example.test/node"
-                                     (gethash "labels" (gethash "metadata" (gr8s::node-api-object (gr8s::get-node store "worker-a")))))))
+                                     (gethash "labels" (gethash "metadata" (gr8s.resources::node-api-object (gr8s.controllers::get-node store "worker-a")))))))
       ;; A colliding value is reported, never written over the existing label.
-      (gr8s::update-node-csi-registrations store "worker-a"
+      (gr8s.resources::update-node-csi-registrations store "worker-a"
                                            (list (registration "other.example.test" (list (cons "topology.example.test/node" "elsewhere")))))
       (is (equal "worker-a" (gethash "topology.example.test/node" (labels-of)))))))
 
@@ -321,9 +321,9 @@
     (let ((pod (parse-pod (csi-pod-json host :propagation ",\"mountPropagation\":\"Bidirectional\""
                                              :context ",\"securityContext\":{\"privileged\":true}"))))
       (let ((mount (aref (gethash "volumeMounts" (aref (gethash "containers" (gethash "spec" (pod-to-object pod))) 0)) 0)))
-        (is (= gr8s.cri.v1::+mountpropagation-propagation_bidirectional+ (gr8s::container-mount-propagation mount)))))
+        (is (= gr8s.cri.v1::+mountpropagation-propagation_bidirectional+ (gr8s.kubelet::container-mount-propagation mount)))))
     (is (= gr8s.cri.v1::+mountpropagation-propagation_private+
-           (gr8s::container-mount-propagation (gr8s::core-object))))))
+           (gr8s.kubelet::container-mount-propagation (gr8s.resources::core-object))))))
 
 ;;; Driver registration and the publish lifecycle
 
@@ -331,11 +331,11 @@
   "Run BODY with a kubelet root in DIRECTORY and every CSI call answered by a recording driver."
   (let ((table (gensym "TABLE")))
     `(let* ((,calls nil)
-            (gr8s::*csi-kubelet-root* (namestring (uiop:ensure-directory-pathname (merge-pathnames "kubelet/" (truename ,directory)))))
-            (gr8s::*csi-plugins* (make-hash-table :test #'equal))
+            (gr8s.kubelet::*csi-kubelet-root* (namestring (uiop:ensure-directory-pathname (merge-pathnames "kubelet/" (truename ,directory)))))
+            (gr8s.kubelet::*csi-plugins* (make-hash-table :test #'equal))
             (,table (merge-pathnames "csi-mountinfo" ,directory))
-            (gr8s::*pod-mount-table-path* ,table)
-            (gr8s::*csi-call*
+            (gr8s.kubelet::*pod-mount-table-path* ,table)
+            (gr8s.kubelet::*csi-call*
               (lambda (socket operation request)
                 (push (list operation socket request) ,calls)
                 (ecase operation
@@ -370,34 +370,34 @@
   (with-temporary-store (store directory)
     (declare (ignorable store))
     (with-fake-csi-driver (calls directory)
-      (is (null (gr8s::csi-driver-registrations)))
-      (gr8s::scan-csi-plugin-registry)
+      (is (null (gr8s.kubelet::csi-driver-registrations)))
+      (gr8s.kubelet::scan-csi-plugin-registry)
       (is (null calls))
       ;; Driver manifests mount these as hostPath type Directory, as on a kubelet node.
       (dolist (name '("pods/" "plugins/" "plugins_registry/"))
-        (let ((path (format nil "~A~A" gr8s::*csi-kubelet-root* name)))
+        (let ((path (format nil "~A~A" gr8s.kubelet::*csi-kubelet-root* name)))
           (is-true (uiop:directory-exists-p path) "~A" name)
           (is (= #o750 (logand #o7777 (sb-posix:stat-mode (sb-posix:stat path)))))))
-      (multiple-value-bind (path socket) (make-registry-socket gr8s::*csi-kubelet-root* "csi.example.test-reg.sock")
+      (multiple-value-bind (path socket) (make-registry-socket gr8s.kubelet::*csi-kubelet-root* "csi.example.test-reg.sock")
         (unwind-protect
              (progn
-               (gr8s::scan-csi-plugin-registry)
+               (gr8s.kubelet::scan-csi-plugin-registry)
                (is (equal '(:get-info :node-get-info :node-capabilities :notify) (csi-operations calls)))
                (is (eq t (gr8s.pluginregistration.v1::plugin-registered (third (first calls)))))
-               (let ((registration (first (gr8s::csi-driver-registrations))))
+               (let ((registration (first (gr8s.kubelet::csi-driver-registrations))))
                  (is (equal "csi.example.test" (slot-value registration 'gr8s.node.v1::name)))
                  (is (equal "n1" (slot-value registration 'gr8s.node.v1::node-id)))
                  (is (= 8 (slot-value registration 'gr8s.node.v1::max-volumes))))
-               (is-true (gr8s::csi-plugin-stage-unstage-p (gr8s::csi-plugin-for "csi.example.test")))
+               (is-true (gr8s.kubelet::csi-plugin-stage-unstage-p (gr8s.kubelet::csi-plugin-for "csi.example.test")))
                ;; An unchanged socket isn't asked again.
                (let ((count (length calls)))
-                 (gr8s::scan-csi-plugin-registry)
+                 (gr8s.kubelet::scan-csi-plugin-registry)
                  (is (= count (length calls)))))
           (sb-bsd-sockets:socket-close socket))
         (delete-file path)
-        (gr8s::scan-csi-plugin-registry)
-        (is (null (gr8s::csi-driver-registrations)))
-        (signals runtime-error (gr8s::csi-plugin-for "csi.example.test"))))))
+        (gr8s.kubelet::scan-csi-plugin-registry)
+        (is (null (gr8s.kubelet::csi-driver-registrations)))
+        (signals runtime-error (gr8s.kubelet::csi-plugin-for "csi.example.test"))))))
 
 (test unusable-plugins-are-told-why-and-stay-unregistered
   (with-temporary-store (store directory)
@@ -406,11 +406,11 @@
       (destructuring-bind (type versions) scenario
         (with-fake-csi-driver (calls directory :type type :versions versions)
           (multiple-value-bind (path socket)
-              (make-registry-socket gr8s::*csi-kubelet-root* (format nil "~A-reg.sock" (string-downcase type)))
+              (make-registry-socket gr8s.kubelet::*csi-kubelet-root* (format nil "~A-reg.sock" (string-downcase type)))
             (unwind-protect
                  (let ((*error-output* (make-broadcast-stream)))
-                   (gr8s::scan-csi-plugin-registry)
-                   (is (null (gr8s::csi-driver-registrations)))
+                   (gr8s.kubelet::scan-csi-plugin-registry)
+                   (is (null (gr8s.kubelet::csi-driver-registrations)))
                    (is (eq :notify (first (first calls))))
                    (is (not (gr8s.pluginregistration.v1::plugin-registered (third (first calls))))))
               (sb-bsd-sockets:socket-close socket)
@@ -420,12 +420,12 @@
   (with-temporary-store (store directory)
     (declare (ignorable store))
     (let* ((calls nil)
-           (gr8s::*csi-kubelet-root*
+           (gr8s.kubelet::*csi-kubelet-root*
              (namestring (uiop:ensure-directory-pathname
                           (merge-pathnames "kubelet/" (truename directory)))))
-           (gr8s::*csi-plugins* (make-hash-table :test #'equal))
-           (gr8s::*dra-plugins* (make-hash-table :test #'equal))
-           (gr8s::*csi-call*
+           (gr8s.kubelet::*csi-plugins* (make-hash-table :test #'equal))
+           (gr8s.kubelet::*dra-plugins* (make-hash-table :test #'equal))
+           (gr8s.kubelet::*csi-call*
              (lambda (socket operation request)
                (push (list operation socket request) calls)
                (ecase operation
@@ -436,19 +436,19 @@
                                  :supported-versions '("v1.DRAPlugin")))
                  (:notify
                   (make-instance 'gr8s.pluginregistration.v1::registration-status-response))))))
-      (declare (special gr8s::*dra-plugins*))
+      (declare (special gr8s.kubelet::*dra-plugins*))
       (multiple-value-bind (path socket)
-          (make-registry-socket gr8s::*csi-kubelet-root* "devices.example.com-reg.sock")
+          (make-registry-socket gr8s.kubelet::*csi-kubelet-root* "devices.example.com-reg.sock")
         (unwind-protect
              (progn
-               (gr8s::scan-csi-plugin-registry)
-               (let ((plugin (gethash "devices.example.com" gr8s::*dra-plugins*)))
+               (gr8s.kubelet::scan-csi-plugin-registry)
+               (let ((plugin (gethash "devices.example.com" gr8s.kubelet::*dra-plugins*)))
                  (is-true plugin)
                  (when plugin
-                   (is (equal "/run/dra.sock" (gr8s::dra-plugin-endpoint plugin)))))
+                   (is (equal "/run/dra.sock" (gr8s.kubelet::dra-plugin-endpoint plugin)))))
                (is (eq t (gr8s.pluginregistration.v1::plugin-registered
                           (third (first calls)))))
-               (is (null (gr8s::csi-driver-registrations))))
+               (is (null (gr8s.kubelet::csi-driver-registrations))))
           (sb-bsd-sockets:socket-close socket)
           (delete-file path))))))
 
@@ -461,15 +461,15 @@
              (parse-pod
               "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"consumer-two\",\"namespace\":\"default\",\"uid\":\"pod-uid-2\"},\"spec\":{\"nodeName\":\"worker-a\",\"resourceClaims\":[{\"name\":\"device\",\"resourceClaimName\":\"claim\"}],\"containers\":[{\"name\":\"app\",\"image\":\"busybox\",\"resources\":{\"claims\":[{\"name\":\"device\",\"request\":\"gpu\"}]}}]}}"))
            (claim
-             (gr8s::core-object
+             (gr8s.resources::core-object
               "apiVersion" "resource.k8s.io/v1" "kind" "ResourceClaim"
-              "metadata" (gr8s::core-object "name" "claim" "namespace" "default"
+              "metadata" (gr8s.resources::core-object "name" "claim" "namespace" "default"
                                                "uid" "claim-uid")
-              "spec" (gr8s::core-object "devices" (gr8s::core-object))))
-           (manager (gr8s::make-dra-manager store directory))
+              "spec" (gr8s.resources::core-object "devices" (gr8s.resources::core-object))))
+           (manager (gr8s.kubelet::make-dra-manager store directory))
            (calls nil)
-           (gr8s::*dra-plugins* (make-hash-table :test #'equal))
-           (gr8s::*dra-call*
+           (gr8s.kubelet::*dra-plugins* (make-hash-table :test #'equal))
+           (gr8s.kubelet::*dra-call*
              (lambda (plugin operation request)
                (push (list operation plugin request) calls)
                (ecase operation
@@ -497,54 +497,54 @@
                      (list (cons uid
                                  (make-instance
                                   'gr8s.dra.v1::node-unprepare-resource-response))))))))))
-      (declare (special gr8s::*dra-plugins* gr8s::*dra-call*))
-      (gr8s::create-core-resource store "resourceclaims" claim "default")
-      (let ((gr8s::*typed-api-status-write* t))
-        (gr8s::update-core-resource
+      (declare (special gr8s.kubelet::*dra-plugins* gr8s.kubelet::*dra-call*))
+      (gr8s.resources::create-core-resource store "resourceclaims" claim "default")
+      (let ((gr8s.resources::*typed-api-status-write* t))
+        (gr8s.resources::update-core-resource
          store "resourceclaims" "default" "claim"
          (lambda (object)
            (setf (gethash "status" object)
-                 (gr8s::core-object
+                 (gr8s.resources::core-object
                   "allocation"
-                  (gr8s::core-object
+                  (gr8s.resources::core-object
                    "devices"
-                   (gr8s::core-object
+                   (gr8s.resources::core-object
                     "results"
-                    (vector (gr8s::core-object "request" "gpu"
+                    (vector (gr8s.resources::core-object "request" "gpu"
                                                 "driver" "devices.example.com"
                                                 "pool" "pool" "device" "gpu-0"))))
                   "reservedFor"
-                  (vector (gr8s::core-object "resource" "pods" "name" "consumer"
+                  (vector (gr8s.resources::core-object "resource" "pods" "name" "consumer"
                                               "uid" "pod-uid")
-                          (gr8s::core-object "resource" "pods" "name" "consumer-two"
+                          (gr8s.resources::core-object "resource" "pods" "name" "consumer-two"
                                               "uid" "pod-uid-2"))))
            object)))
-      (setf (gethash "devices.example.com" gr8s::*dra-plugins*)
-            (gr8s::make-dra-plugin :name "devices.example.com" :endpoint "/run/dra.sock"))
-      (gr8s::prepare-pod-dynamic-resources manager pod)
-      (gr8s::prepare-pod-dynamic-resources manager second-pod)
+      (setf (gethash "devices.example.com" gr8s.kubelet::*dra-plugins*)
+            (gr8s.kubelet::make-dra-plugin :name "devices.example.com" :endpoint "/run/dra.sock"))
+      (gr8s.kubelet::prepare-pod-dynamic-resources manager pod)
+      (gr8s.kubelet::prepare-pod-dynamic-resources manager second-pod)
       (is (equal '(:prepare) (reverse (mapcar #'first calls))))
-      (setf manager (gr8s::make-dra-manager store directory))
+      (setf manager (gr8s.kubelet::make-dra-manager store directory))
       (let* ((request (third (first calls)))
              (requested-claim (first (gr8s.dra.v1::claims request))))
         (is (equal "default" (gr8s.dra.v1::namespace requested-claim)))
         (is (equal "claim" (gr8s.dra.v1::name requested-claim)))
         (is (equal (gethash "uid"
                             (gethash "metadata"
-                                     (gr8s::get-core-resource store "resourceclaims"
+                                     (gr8s.resources::get-core-resource store "resourceclaims"
                                                               "default" "claim")))
                    (gr8s.dra.v1::uid requested-claim))))
       (let ((container (aref (gethash "containers" (gethash "spec" (pod-to-object pod))) 0)))
         (is (equal '("vendor.example/gpu=0")
-                   (gr8s::container-dra-cdi-device-ids manager pod container)))
-        (gr8s::unprepare-pod-dynamic-resources manager pod)
+                   (gr8s.kubelet::container-dra-cdi-device-ids manager pod container)))
+        (gr8s.kubelet::unprepare-pod-dynamic-resources manager pod)
         (is (equal '(:prepare) (reverse (mapcar #'first calls))))
         (is (equal '("vendor.example/gpu=0")
-                   (gr8s::container-dra-cdi-device-ids manager second-pod container)))
-        (gr8s::unprepare-pod-dynamic-resources manager second-pod)
+                   (gr8s.kubelet::container-dra-cdi-device-ids manager second-pod container)))
+        (gr8s.kubelet::unprepare-pod-dynamic-resources manager second-pod)
         (is (equal '(:prepare :unprepare) (reverse (mapcar #'first calls))))
         (signals runtime-error
-          (gr8s::container-dra-cdi-device-ids manager pod container))))))
+          (gr8s.kubelet::container-dra-cdi-device-ids manager pod container))))))
 
 (test upstream-dra-driver-registers-publishes-prepares-and-unprepares
   (let ((driver (uiop:getenv "GR8S_TEST_DRA_DRIVER")))
@@ -552,22 +552,22 @@
         (skip "Set GR8S_TEST_DRA_DRIVER to Kubernetes' dra-test-driver binary")
         (with-temporary-store (store directory)
           (let* ((root (uiop:ensure-directory-pathname directory))
-                 (gr8s::*csi-kubelet-root*
+                 (gr8s.kubelet::*csi-kubelet-root*
                    (namestring (uiop:ensure-directory-pathname
                                 (merge-pathnames "kubelet/" root))))
-                 (gr8s::*dra-plugins* (make-hash-table :test #'equal))
+                 (gr8s.kubelet::*dra-plugins* (make-hash-table :test #'equal))
                  (kubeconfig (merge-pathnames "kubeconfig" root))
                  (log (merge-pathnames "dra-driver.log" root))
                  (server (start-server :address "127.0.0.1" :port 0 :store store
                                        :runtime (make-fake-runtime)))
                  (process nil)
                  (ready nil))
-            (declare (special gr8s::*dra-plugins*))
+            (declare (special gr8s.kubelet::*dra-plugins*))
             (unwind-protect
                  (progn
                    (let ((node (make-test-node "worker-a" "node-a" "10.64.0.0/20")))
-                     (gr8s:register-node store node)
-                     (gr8s:mark-node-ready store "worker-a" 100))
+                     (gr8s.controllers::register-node store node)
+                     (gr8s.controllers::mark-node-ready store "worker-a" 100))
                    (with-open-file (out kubeconfig :direction :output
                                                    :if-exists :supersede
                                                    :if-does-not-exist :create)
@@ -575,10 +575,10 @@
                              "apiVersion: v1~%kind: Config~%clusters:~%- name: gr8s~%  cluster: {server: ~S}~%contexts:~%- name: gr8s~%  context: {cluster: gr8s, user: gr8s}~%current-context: gr8s~%users:~%- name: gr8s~%  user: {}~%"
                              (format nil "http://127.0.0.1:~D"
                                      (hunchentoot:acceptor-port server))))
-                   (gr8s::ensure-csi-kubelet-directories)
+                   (gr8s.kubelet::ensure-csi-kubelet-directories)
                    (ensure-directories-exist
                     (uiop:ensure-directory-pathname
-                     (gr8s::csi-kubelet-path
+                     (gr8s.kubelet::csi-kubelet-path
                       "plugins/test-driver.cdi.k8s.io")))
                    (setf process
                          (uiop:launch-program
@@ -587,17 +587,17 @@
                                 "kubelet-plugin" "--node-name" "worker-a"
                                 "--num-devices" "1"
                                 "--plugin-registration-path"
-                                (gr8s::csi-kubelet-path "plugins_registry")
-                                "--datadir" (gr8s::csi-kubelet-path "plugins")
+                                (gr8s.kubelet::csi-kubelet-path "plugins_registry")
+                                "--datadir" (gr8s.kubelet::csi-kubelet-path "plugins")
                                 "--cdi-dir" (namestring (merge-pathnames "cdi/" root)))
                           :output (namestring log) :error-output :output))
                    (setf ready
                          (wait-until
                           (lambda ()
-                            (gr8s::scan-csi-plugin-registry)
-                            (and (gethash "test-driver.cdi.k8s.io" gr8s::*dra-plugins*)
+                            (gr8s.kubelet::scan-csi-plugin-registry)
+                            (and (gethash "test-driver.cdi.k8s.io" gr8s.kubelet::*dra-plugins*)
                                  (plusp (length
-                                         (gr8s::list-core-resources
+                                         (gr8s.resources::list-core-resources
                                           store "resourceslices" nil)))))
                           :timeout 30))
                    (is-true ready "External DRA driver did not become ready:~%~A"
@@ -605,27 +605,27 @@
                                 (uiop:read-file-string log)
                                 "driver produced no log"))
                    (when ready
-                     (gr8s::create-core-resource
+                     (gr8s.resources::create-core-resource
                     store "deviceclasses"
-                    (gr8s::core-object
+                    (gr8s.resources::core-object
                      "apiVersion" "resource.k8s.io/v1" "kind" "DeviceClass"
-                     "metadata" (gr8s::core-object "name" "external")
-                     "spec" (gr8s::core-object "selectors" #()))
+                     "metadata" (gr8s.resources::core-object "name" "external")
+                     "spec" (gr8s.resources::core-object "selectors" #()))
                     nil)
-                   (gr8s::create-core-resource
+                   (gr8s.resources::create-core-resource
                     store "resourceclaims"
-                    (gr8s::core-object
+                    (gr8s.resources::core-object
                      "apiVersion" "resource.k8s.io/v1" "kind" "ResourceClaim"
-                     "metadata" (gr8s::core-object "name" "external")
-                     "spec" (gr8s::core-object
+                     "metadata" (gr8s.resources::core-object "name" "external")
+                     "spec" (gr8s.resources::core-object
                              "devices"
-                             (gr8s::core-object
+                             (gr8s.resources::core-object
                               "requests"
                               (vector
-                               (gr8s::core-object
+                               (gr8s.resources::core-object
                                 "name" "device"
                                 "exactly"
-                                (gr8s::core-object
+                                (gr8s.resources::core-object
                                  "deviceClassName" "external"
                                  "allocationMode" "ExactCount" "count" 1))))))
                     "default")
@@ -633,28 +633,28 @@
                             (create-pod
                              store
                              (parse-pod
-                              (gr8s::core-object
+                              (gr8s.resources::core-object
                                "apiVersion" "v1" "kind" "Pod"
-                               "metadata" (gr8s::core-object
+                               "metadata" (gr8s.resources::core-object
                                            "name" "external" "namespace" "default")
-                               "spec" (gr8s::core-object
+                               "spec" (gr8s.resources::core-object
                                        "resourceClaims"
-                                       (vector (gr8s::core-object
+                                       (vector (gr8s.resources::core-object
                                                 "name" "device"
                                                 "resourceClaimName" "external"))
                                        "containers"
-                                       (vector (gr8s::core-object
+                                       (vector (gr8s.resources::core-object
                                                 "name" "app" "image" "busybox"
                                                 "resources"
-                                                (gr8s::core-object
+                                                (gr8s.resources::core-object
                                                  "claims"
-                                                 (vector (gr8s::core-object
+                                                 (vector (gr8s.resources::core-object
                                                           "name" "device"))))))))))
-                          (node (gr8s:schedule-pod store pod))
-                          (manager (gr8s::make-dra-manager
+                          (node (gr8s.controllers::schedule-pod store pod))
+                          (manager (gr8s.kubelet::make-dra-manager
                                     store (merge-pathnames "dra-state/" root)))
                           (claim-object
-                            (gr8s::get-core-resource
+                            (gr8s.resources::get-core-resource
                              store "resourceclaims" "default" "external"))
                           (expected-cdi
                             (format nil
@@ -663,26 +663,26 @@
                           (container (aref (gethash "containers"
                                                     (gethash "spec" (pod-to-object pod)))
                                            0)))
-                     (is (equal "worker-a" (and node (gr8s:node-record-name node))))
-                     (gr8s::prepare-pod-dynamic-resources manager pod)
+                     (is (equal "worker-a" (and node (gr8s.model::node-record-name node))))
+                     (gr8s.kubelet::prepare-pod-dynamic-resources manager pod)
                      (is (equal (list expected-cdi)
-                                (gr8s::container-dra-cdi-device-ids
+                                (gr8s.kubelet::container-dra-cdi-device-ids
                                  manager pod container)))
-                     (is-true (gr8s::unprepare-pod-dynamic-resources manager pod)))))
+                     (is-true (gr8s.kubelet::unprepare-pod-dynamic-resources manager pod)))))
               (when process
                 (ignore-errors (uiop:terminate-process process))
                 (ignore-errors (uiop:wait-process process)))
-              (ignore-errors (gr8s:stop-server server))))))))
+              (ignore-errors (gr8s.apiserver::stop-server server))))))))
 
 (test dra-claims-are-projected-only-to-their-reserved-pod
   (with-temporary-store (store directory)
     (let* ((claim
-             (gr8s::create-core-resource
+             (gr8s.resources::create-core-resource
               store "resourceclaims"
-              (gr8s::core-object
+              (gr8s.resources::core-object
                "apiVersion" "resource.k8s.io/v1" "kind" "ResourceClaim"
-               "metadata" (gr8s::core-object "name" "claim" "namespace" "default")
-               "spec" (gr8s::core-object "devices" (gr8s::core-object)))
+               "metadata" (gr8s.resources::core-object "name" "claim" "namespace" "default")
+               "spec" (gr8s.resources::core-object "devices" (gr8s.resources::core-object)))
               "default"))
            (pod
              (create-pod
@@ -690,18 +690,18 @@
               (parse-pod
                "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"consumer\",\"namespace\":\"default\"},\"spec\":{\"nodeName\":\"worker-a\",\"resourceClaims\":[{\"name\":\"device\",\"resourceClaimName\":\"claim\"}],\"containers\":[{\"name\":\"app\",\"image\":\"busybox\",\"resources\":{\"claims\":[{\"name\":\"device\",\"request\":\"gpu\"}]}}]}}")))
            (agent-store (open-store (merge-pathnames "agent/" directory))))
-      (let ((gr8s::*typed-api-status-write* t))
-        (gr8s::update-core-resource
+      (let ((gr8s.resources::*typed-api-status-write* t))
+        (gr8s.resources::update-core-resource
          store "resourceclaims" "default" "claim"
          (lambda (object)
            (setf (gethash "status" object)
-                 (gr8s::core-object
-                  "allocation" (gr8s::core-object "devices" (gr8s::core-object "results" #()))
+                 (gr8s.resources::core-object
+                  "allocation" (gr8s.resources::core-object "devices" (gr8s.resources::core-object "results" #()))
                   "reservedFor"
-                  (vector (gr8s::core-object "resource" "pods" "name" (pod-name pod)
+                  (vector (gr8s.resources::core-object "resource" "pods" "name" (pod-name pod)
                                               "uid" (pod-uid pod)))))
            object)))
-      (let* ((assignment (gr8s::pod-assignment pod store))
+      (let* ((assignment (gr8s.controllers::pod-assignment pod store))
              (objects
                (mapcar (lambda (bytes)
                          (com.inuoe.jzon:parse
@@ -709,11 +709,11 @@
                        (slot-value assignment 'gr8s.node.v1::resource-objects-json))))
         (is (= 1 (count "ResourceClaim" objects :test #'equal
                         :key (lambda (object) (gethash "kind" object)))))
-        (gr8s::install-assigned-resource-objects agent-store (list assignment))
+        (gr8s.kubelet::install-assigned-resource-objects agent-store (list assignment))
         (is (equal (gethash "uid" (gethash "metadata" claim))
                    (gethash "uid"
                             (gethash "metadata"
-                                     (gr8s::get-core-resource agent-store "resourceclaims"
+                                     (gr8s.resources::get-core-resource agent-store "resourceclaims"
                                                               "default" "claim")))))
         (let ((projected (find "ResourceClaim" objects :test #'equal
                                :key (lambda (object) (gethash "kind" object)))))
@@ -724,38 +724,38 @@
                 (list (trivial-utf-8:string-to-utf-8-bytes
                        (com.inuoe.jzon:stringify projected))))
           (signals kubernetes-error
-            (gr8s::assignment-resource-objects assignment)))))))
+            (gr8s.kubelet::assignment-resource-objects assignment)))))))
 
 (test containerd-node-runtime-wires-the-dra-lifecycle
   (with-temporary-store (unused directory)
     (declare (ignore unused))
-    (let* ((backend (gr8s::make-containerd-runtime
+    (let* ((backend (gr8s.runtime.containerd::make-containerd-runtime
                      :socket-path (namestring (merge-pathnames "unused.sock" directory))
                      :log-root (merge-pathnames "logs/" directory)))
-           (node (gr8s::make-node-runtime (merge-pathnames "agent/" directory) backend nil))
+           (node (gr8s.agent::make-node-runtime (merge-pathnames "agent/" directory) backend nil))
            (pod (parse-pod
                  "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"plain\",\"namespace\":\"default\",\"uid\":\"plain-uid\"},\"spec\":{\"containers\":[{\"name\":\"app\",\"image\":\"busybox\"}]}}"))
            (container (aref (gethash "containers" (gethash "spec" (pod-to-object pod))) 0)))
-      (is (typep (gr8s::node-runtime-dynamic-resource-manager node)
-                 'gr8s::dra-manager))
-      (is-true (gr8s::runtime-prepare-pod-resources backend pod))
-      (is-false (gr8s::runtime-container-cdi-device-ids backend pod container))
-      (is-true (gr8s::runtime-unprepare-pod-resources backend pod)))))
+      (is (typep (gr8s.agent::node-runtime-dynamic-resource-manager node)
+                 'gr8s.kubelet::dra-manager))
+      (is-true (gr8s.runtime::runtime-prepare-pod-resources backend pod))
+      (is-false (gr8s.runtime::runtime-container-cdi-device-ids backend pod container))
+      (is-true (gr8s.runtime::runtime-unprepare-pod-resources backend pod)))))
 
 (defun csi-register-fake ()
-  (bt:with-lock-held (gr8s::*csi-plugins-lock*)
-    (setf (gethash "csi.example.test" gr8s::*csi-plugins*)
-          (gr8s::make-csi-plugin :name "csi.example.test" :endpoint "/run/csi.sock" :stage-unstage-p t))))
+  (bt:with-lock-held (gr8s.kubelet::*csi-plugins-lock*)
+    (setf (gethash "csi.example.test" gr8s.kubelet::*csi-plugins*)
+          (gr8s.kubelet::make-csi-plugin :name "csi.example.test" :endpoint "/run/csi.sock" :stage-unstage-p t))))
 
 (defun csi-test-pod (name uid)
   (parse-pod (format nil "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"~A\",\"namespace\":\"default\",\"uid\":\"~A\"},\"spec\":{\"nodeName\":\"worker-a\",\"containers\":[{\"name\":\"c\",\"image\":\"busybox\"}]}}" name uid)))
 
 (defun bound-csi-volume (&key (modes #("ReadWriteMany")))
-  (gr8s::core-object
-   "metadata" (gr8s::core-object "name" "pv")
-   "spec" (gr8s::core-object "accessModes" modes "mountOptions" #("noatime")
-                             "csi" (gr8s::core-object "driver" "csi.example.test" "volumeHandle" "disk-1" "fsType" "ext4"
-                                                      "volumeAttributes" (gr8s::core-object "tier" "gold")))))
+  (gr8s.resources::core-object
+   "metadata" (gr8s.resources::core-object "name" "pv")
+   "spec" (gr8s.resources::core-object "accessModes" modes "mountOptions" #("noatime")
+                             "csi" (gr8s.resources::core-object "driver" "csi.example.test" "volumeHandle" "disk-1" "fsType" "ext4"
+                                                      "volumeAttributes" (gr8s.resources::core-object "tier" "gold")))))
 
 (test publishing-waits-for-attachment-then-stages-and-publishes
   (with-temporary-store (store directory)
@@ -763,32 +763,32 @@
       (csi-register-fake)
       (let ((pod (csi-test-pod "first" "uid-1")) (volume (bound-csi-volume)))
         ;; No CSIDriver object means an attachment is required, as in Kubernetes.
-        (signals runtime-error (gr8s::materialize-persistent-csi-volume store pod "data" volume))
+        (signals runtime-error (gr8s.kubelet::materialize-persistent-csi-volume store pod "data" volume))
         (is (null calls))
-        (let ((name (gr8s::volume-attachment-name "csi.example.test" "disk-1" "worker-a")))
-          (gr8s::create-core-resource
+        (let ((name (gr8s.resources::volume-attachment-name "csi.example.test" "disk-1" "worker-a")))
+          (gr8s.resources::create-core-resource
            store "volumeattachments"
-           (gr8s::core-object "metadata" (gr8s::core-object "name" name)
-                              "spec" (gr8s::core-object "attacher" "csi.example.test" "nodeName" "worker-a"
-                                                        "source" (gr8s::core-object "persistentVolumeName" "pv")))
+           (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" name)
+                              "spec" (gr8s.resources::core-object "attacher" "csi.example.test" "nodeName" "worker-a"
+                                                        "source" (gr8s.resources::core-object "persistentVolumeName" "pv")))
            nil)
-          (signals runtime-error (gr8s::materialize-persistent-csi-volume store pod "data" volume))
-          (let ((gr8s::*storage-status-write* t))
-            (gr8s::update-core-resource
+          (signals runtime-error (gr8s.kubelet::materialize-persistent-csi-volume store pod "data" volume))
+          (let ((gr8s.resources::*storage-status-write* t))
+            (gr8s.resources::update-core-resource
              store "volumeattachments" nil name
              (lambda (old)
-               (let ((copy (gr8s::copy-core-object old)))
+               (let ((copy (gr8s.resources::copy-core-object old)))
                  (setf (gethash "status" copy)
-                       (gr8s::core-object "attached" t "attachmentMetadata" (gr8s::core-object "lun" "3")))
+                       (gr8s.resources::core-object "attached" t "attachmentMetadata" (gr8s.resources::core-object "lun" "3")))
                  copy)))))
-        (let ((path (gr8s::materialize-persistent-csi-volume store pod "data" volume)))
+        (let ((path (gr8s.kubelet::materialize-persistent-csi-volume store pod "data" volume)))
           (is (equal '(:stage :publish) (csi-operations calls)))
           (let* ((stage (third (second calls))) (publish (third (first calls)))
                  (capability (gr8s.csi.v1::volume-capability publish)))
             (is (equal "disk-1" (gr8s.csi.v1::volume-id publish)))
             (is (equal (gr8s.csi.v1::staging-target-path stage) (gr8s.csi.v1::staging-target-path publish)))
             (is (uiop:string-suffix-p (gr8s.csi.v1::staging-target-path publish) "/globalmount"))
-            (is (equal (format nil "~Apods/uid-1/volumes/kubernetes.io~~csi/data/mount" gr8s::*csi-kubelet-root*)
+            (is (equal (format nil "~Apods/uid-1/volumes/kubernetes.io~~csi/data/mount" gr8s.kubelet::*csi-kubelet-root*)
                        (gr8s.csi.v1::target-path publish)))
             (is (equal (string-right-trim "/" (namestring path)) (gr8s.csi.v1::target-path publish)))
             (is (equal '(("lun" . "3")) (gr8s.csi.v1::publish-context publish)))
@@ -802,71 +802,71 @@
 (test drivers-that-need-no-attachment-publish-at-once
   (with-temporary-store (store directory)
     (with-fake-csi-driver (calls directory)
-      (setf (gethash "csi.example.test" gr8s::*csi-plugins*)
-            (gr8s::make-csi-plugin :name "csi.example.test" :endpoint "/run/csi.sock" :stage-unstage-p nil))
-      (gr8s::create-core-resource store "csidrivers" (csi-test-driver-object "csi.example.test" :attach-required nil) nil)
-      (gr8s::materialize-persistent-csi-volume store (csi-test-pod "first" "uid-1") "data" (bound-csi-volume))
+      (setf (gethash "csi.example.test" gr8s.kubelet::*csi-plugins*)
+            (gr8s.kubelet::make-csi-plugin :name "csi.example.test" :endpoint "/run/csi.sock" :stage-unstage-p nil))
+      (gr8s.resources::create-core-resource store "csidrivers" (csi-test-driver-object "csi.example.test" :attach-required nil) nil)
+      (gr8s.kubelet::materialize-persistent-csi-volume store (csi-test-pod "first" "uid-1") "data" (bound-csi-volume))
       (is (equal '(:publish) (csi-operations calls))))))
 
 (test the-last-pod-using-a-volume-unstages-it
   (with-temporary-store (store directory)
     (with-fake-csi-driver (calls directory)
       (csi-register-fake)
-      (gr8s::create-core-resource store "csidrivers" (csi-test-driver-object "csi.example.test" :attach-required nil) nil)
+      (gr8s.resources::create-core-resource store "csidrivers" (csi-test-driver-object "csi.example.test" :attach-required nil) nil)
       (dolist (entry '(("first" "uid-1") ("second" "uid-2")))
-        (gr8s::materialize-persistent-csi-volume store (apply #'csi-test-pod entry) "data" (bound-csi-volume)))
+        (gr8s.kubelet::materialize-persistent-csi-volume store (apply #'csi-test-pod entry) "data" (bound-csi-volume)))
       (setf calls nil)
-      (gr8s::cleanup-pod-csi-volumes "uid-1")
+      (gr8s.kubelet::cleanup-pod-csi-volumes "uid-1")
       (is (equal '(:unpublish) (csi-operations calls)))
-      (is (equal (format nil "~Apods/uid-1/volumes/kubernetes.io~~csi/data/mount" gr8s::*csi-kubelet-root*)
+      (is (equal (format nil "~Apods/uid-1/volumes/kubernetes.io~~csi/data/mount" gr8s.kubelet::*csi-kubelet-root*)
                  (gr8s.csi.v1::target-path (third (first calls)))))
-      (is (null (probe-file (format nil "~Apods/uid-1/" gr8s::*csi-kubelet-root*))))
+      (is (null (probe-file (format nil "~Apods/uid-1/" gr8s.kubelet::*csi-kubelet-root*))))
       (setf calls nil)
-      (gr8s::cleanup-pod-csi-volumes "uid-2")
+      (gr8s.kubelet::cleanup-pod-csi-volumes "uid-2")
       (is (equal '(:unpublish :unstage) (csi-operations calls)))
       ;; Nothing is left to do on a second pass.
       (setf calls nil)
-      (gr8s::cleanup-pod-csi-volumes "uid-2")
+      (gr8s.kubelet::cleanup-pod-csi-volumes "uid-2")
       (is (null calls)))))
 
 (test a-failed-unpublish-leaves-the-record-so-deletion-retries
   (with-temporary-store (store directory)
     (with-fake-csi-driver (calls directory)
       (csi-register-fake)
-      (gr8s::create-core-resource store "csidrivers" (csi-test-driver-object "csi.example.test" :attach-required nil) nil)
-      (gr8s::materialize-persistent-csi-volume store (csi-test-pod "first" "uid-1") "data" (bound-csi-volume))
+      (gr8s.resources::create-core-resource store "csidrivers" (csi-test-driver-object "csi.example.test" :attach-required nil) nil)
+      (gr8s.kubelet::materialize-persistent-csi-volume store (csi-test-pod "first" "uid-1") "data" (bound-csi-volume))
       ;; The driver is unavailable, so the volume can't be declared gone.
-      (clrhash gr8s::*csi-plugins*)
-      (signals runtime-error (gr8s::cleanup-pod-csi-volumes "uid-1"))
-      (is (= 1 (length (gr8s::csi-volume-records))))
+      (clrhash gr8s.kubelet::*csi-plugins*)
+      (signals runtime-error (gr8s.kubelet::cleanup-pod-csi-volumes "uid-1"))
+      (is (= 1 (length (gr8s.kubelet::csi-volume-records))))
       (csi-register-fake)
-      (gr8s::cleanup-pod-csi-volumes "uid-1")
-      (is (zerop (length (gr8s::csi-volume-records)))))))
+      (gr8s.kubelet::cleanup-pod-csi-volumes "uid-1")
+      (is (zerop (length (gr8s.kubelet::csi-volume-records)))))))
 
 (test inline-volumes-require-a-driver-that-allows-them
   (with-temporary-store (store directory)
     (with-fake-csi-driver (calls directory)
       (csi-register-fake)
       (let* ((pod (csi-test-pod "first" "uid-1"))
-             (volume (gr8s::core-object "name" "secrets"
-                                        "csi" (gr8s::core-object "driver" "csi.example.test" "readOnly" t
-                                                                 "volumeAttributes" (gr8s::core-object "a" "b")))))
-        (signals runtime-error (gr8s::materialize-inline-csi-volume store pod volume))
-        (gr8s::create-core-resource store "csidrivers"
+             (volume (gr8s.resources::core-object "name" "secrets"
+                                        "csi" (gr8s.resources::core-object "driver" "csi.example.test" "readOnly" t
+                                                                 "volumeAttributes" (gr8s.resources::core-object "a" "b")))))
+        (signals runtime-error (gr8s.kubelet::materialize-inline-csi-volume store pod volume))
+        (gr8s.resources::create-core-resource store "csidrivers"
                                     (csi-test-driver-object "csi.example.test" :modes #("Persistent")) nil)
-        (signals runtime-error (gr8s::materialize-inline-csi-volume store pod volume)))
+        (signals runtime-error (gr8s.kubelet::materialize-inline-csi-volume store pod volume)))
       (is (null calls)))
     (with-temporary-store (store second)
       (with-fake-csi-driver (calls second)
-        (setf (gethash "csi.example.test" gr8s::*csi-plugins*)
-              (gr8s::make-csi-plugin :name "csi.example.test" :endpoint "/run/csi.sock" :stage-unstage-p t))
-        (gr8s::create-core-resource store "csidrivers"
+        (setf (gethash "csi.example.test" gr8s.kubelet::*csi-plugins*)
+              (gr8s.kubelet::make-csi-plugin :name "csi.example.test" :endpoint "/run/csi.sock" :stage-unstage-p t))
+        (gr8s.resources::create-core-resource store "csidrivers"
                                     (csi-test-driver-object "csi.example.test" :modes #("Ephemeral")) nil)
         (multiple-value-bind (path readonly)
-            (gr8s::materialize-inline-csi-volume
+            (gr8s.kubelet::materialize-inline-csi-volume
              store (csi-test-pod "first" "uid-1")
-             (gr8s::core-object "name" "secrets"
-                                "csi" (gr8s::core-object "driver" "csi.example.test" "readOnly" t)))
+             (gr8s.resources::core-object "name" "secrets"
+                                "csi" (gr8s.resources::core-object "driver" "csi.example.test" "readOnly" t)))
           (is-true path)
           (is (eq t readonly))
           ;; An inline volume has no separate lifetime to stage for, and no shared identity.

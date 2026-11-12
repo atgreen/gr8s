@@ -6,16 +6,16 @@
   (with-temporary-store (store path)
     (declare (ignore path))
     (flet ((add (name uid node phase app)
-             (let ((pod (gr8s::make-pod
+             (let ((pod (gr8s.model::make-pod
                          :name name :namespace "alpha" :uid uid :node-name node
                          :containers #()
-                         :object (gr8s::core-object
-                                  "metadata" (gr8s::core-object
+                         :object (gr8s.resources::core-object
+                                  "metadata" (gr8s.resources::core-object
                                               "name" name "namespace" "alpha"
-                                              "uid" uid "labels" (gr8s::core-object "app" app))
-                                  "spec" (gr8s::core-object "containers" #() "nodeName" node)
-                                  "status" (gr8s::core-object "phase" phase)))))
-               (gr8s::put-assigned-pod store pod))))
+                                              "uid" uid "labels" (gr8s.resources::core-object "app" app))
+                                  "spec" (gr8s.resources::core-object "containers" #() "nodeName" node)
+                                  "status" (gr8s.resources::core-object "phase" phase)))))
+               (gr8s.agent::put-assigned-pod store pod))))
       (add "a" "uid-a" "node-2" "Running" "api")
       (add "b" "uid-b" "node-1" "Running" "api")
       (add "c" "uid-c" "node-1" "Pending" "api")
@@ -48,11 +48,11 @@
             "{\"source\":\"kprobe:vfs_read { @=count(); }\",\"selector\":\"app=api\",\"durationMilliseconds\":1000}"))))
     (is (string= "app=api" (getf request :selector)))
     (is (= 1000 (getf request :duration-milliseconds))))
-  (signals gr8s::kubernetes-error
+  (signals gr8s.model::kubernetes-error
     (gr8s.apiserver::parse-trace-request-frame
      (trivial-utf-8:string-to-utf-8-bytes
       "{\"source\":\"\",\"selector\":\"app=api\",\"durationMilliseconds\":1000}")))
-  (signals gr8s::kubernetes-error
+  (signals gr8s.model::kubernetes-error
     (gr8s.apiserver::parse-trace-request-frame
      (trivial-utf-8:string-to-utf-8-bytes
       "{\"source\":\"kprobe:vfs_read { @=count(); }\",\"selector\":\"app=api\",\"durationMilliseconds\":300001}"))))

@@ -23,7 +23,7 @@
        (uiop:delete-directory-tree ,directory :validate t :if-does-not-exist :ignore))))
 
 (test net-dev-and-io-stat-parse-as-cadvisor-reads-them
-  (let ((interfaces (gr8s::parse-net-dev (format nil "~
+  (let ((interfaces (gr8s.kubelet::parse-net-dev (format nil "~
 Inter-|   Receive                                                |  Transmit
  face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
     lo:     100       2    0    0    0     0          0         0      100       2    0    0    0     0       0          0
@@ -32,7 +32,7 @@ vethabc:    999       9    0    0    0     0          0         0      999      
 "))))
     (is (equal '(("eth0" 5000 40 1 2 7000 50 3 4)) interfaces)))
   (is (equal '(("/dev/vda" 4096 8192 2 3))
-             (gr8s::parse-io-stat (format nil "252:0 rbytes=4096 wbytes=8192 rios=2 wios=3 dbytes=0 dios=0~%9:9 rbytes=1~%")
+             (gr8s.kubelet::parse-io-stat (format nil "252:0 rbytes=4096 wbytes=8192 rios=2 wios=3 dbytes=0 dios=0~%9:9 rbytes=1~%")
                                   :namer (lambda (device) (and (equal device "252:0") "/dev/vda"))))))
 
 (test container-cgroup-renders-cadvisor-series
@@ -65,10 +65,10 @@ high 0
 max 5
 oom 0
 ")))
-    (let* ((entry (gr8s::make-cadvisor-entry :id "/k8s.io/abc" :name "abc" :image "busybox:1.36" :pod "web"
+    (let* ((entry (gr8s.kubelet::make-cadvisor-entry :id "/k8s.io/abc" :name "abc" :image "busybox:1.36" :pod "web"
                                              :namespace "default" :container "app" :directory (namestring directory)
                                              :started 1700000002000000000 :fs-used 8192 :fs-device "/dev/vda3"))
-           (text (gr8s::kubelet-cadvisor-metrics-text (list entry) :root-p nil :now 1700000010000000000))
+           (text (gr8s.kubelet::kubelet-cadvisor-metrics-text (list entry) :root-p nil :now 1700000010000000000))
            (labels "container=\"app\",id=\"/k8s.io/abc\",image=\"busybox:1.36\",name=\"abc\",namespace=\"default\",pod=\"web\""))
       (flet ((has (line) (search (format nil "~A~%" line) text)))
         (is (has "# HELP container_cpu_usage_seconds_total Cumulative cpu time consumed in seconds."))
@@ -105,8 +105,8 @@ nr_periods 0
 ")
                                     ("cgroup.procs" . "1
 ")))
-    (let ((text (gr8s::kubelet-cadvisor-metrics-text
-                 (list (gr8s::make-cadvisor-entry :id "/k8s.io/s1" :name "s1" :image "registry.k8s.io/pause:3.10"
+    (let ((text (gr8s.kubelet::kubelet-cadvisor-metrics-text
+                 (list (gr8s.kubelet::make-cadvisor-entry :id "/k8s.io/s1" :name "s1" :image "registry.k8s.io/pause:3.10"
                                                   :pod "web" :namespace "default" :container ""
                                                   :directory (namestring directory) :network-p t))
                  :root-p nil)))
@@ -116,7 +116,7 @@ nr_periods 0
       (is (search "container_network_receive_bytes_total{container=\"\",id=\"/k8s.io/s1\",image=\"registry.k8s.io/pause:3.10\",interface=" text)))))
 
 (test root-cgroup-and-machine-are-reported
-  (let ((text (gr8s::kubelet-cadvisor-metrics-text nil)))
+  (let ((text (gr8s.kubelet::kubelet-cadvisor-metrics-text nil)))
     (is (search "container_cpu_usage_seconds_total{container=\"\",cpu=\"total\",id=\"/\",image=\"\",name=\"\",namespace=\"\",pod=\"\"}" text))
     (is (search "container_memory_working_set_bytes{container=\"\",id=\"/\"" text))
     (is (search "# TYPE machine_cpu_cores gauge" text))
@@ -128,7 +128,7 @@ nr_periods 0
 26 25 0:24 / /var/tmp/x rw - tmpfs tmpfs rw
 ")))
     (let ((table (namestring (merge-pathnames "mountinfo" directory))))
-      (is (equal "/dev/vda4" (gr8s::mountinfo-device "/var/lib/containerd/snapshots" table)))
-      (is (equal "/dev/vda3" (gr8s::mountinfo-device "/etc" table)))
+      (is (equal "/dev/vda4" (gr8s.kubelet::mountinfo-device "/var/lib/containerd/snapshots" table)))
+      (is (equal "/dev/vda3" (gr8s.kubelet::mountinfo-device "/etc" table)))
       ;; A tmpfs has no block device, so the enclosing one's device is not claimed for it either.
-      (is (null (gr8s::mountinfo-device "/var/tmp/x/y" table))))))
+      (is (null (gr8s.kubelet::mountinfo-device "/var/tmp/x/y" table))))))

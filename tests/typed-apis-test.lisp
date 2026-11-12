@@ -42,7 +42,7 @@
 (defun typed-namespace (name)
   "Create Namespace NAME."
   (typed-check 201 "/api/v1/namespaces" :method :post
-               :object (gr8s::core-object "metadata" (gr8s::core-object "name" name))))
+               :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" name))))
 
 (test typed-api-groups-are-discoverable
   (with-typed-http (store)
@@ -63,62 +63,62 @@
     (typed-namespace "leases")
     (let* ((collection "/apis/coordination.k8s.io/v1/namespaces/leases/leases")
            (created (typed-check 201 collection :method :post
-                      :object (gr8s::core-object "metadata" (gr8s::core-object "name" "one" "labels" (gr8s::core-object "drop" "true"))
-                                                 "spec" (gr8s::core-object "holderIdentity" "holder" "leaseDurationSeconds" 30
+                      :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "one" "labels" (gr8s.resources::core-object "drop" "true"))
+                                                 "spec" (gr8s.resources::core-object "holderIdentity" "holder" "leaseDurationSeconds" 30
                                                                            "acquireTime" "0001-01-01T00:00:02.000000Z")))))
       (is (equal "Lease" (gethash "kind" created)))
       (is (equal "0001-01-01T00:00:02.000000Z" (gethash "acquireTime" (gethash "spec" created))))
       (typed-check 422 collection :method :post
-        :object (gr8s::core-object "metadata" (gr8s::core-object "name" "bad")
-                                   "spec" (gr8s::core-object "leaseDurationSeconds" 0)))
+        :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "bad")
+                                   "spec" (gr8s.resources::core-object "leaseDurationSeconds" 0)))
       (typed-check 200 (concatenate 'string collection "?labelSelector=drop=true") :method :delete)
       (typed-check 404 (concatenate 'string collection "/one"))
       (is (zerop (length (gethash "items" (typed-check 200 "/apis/coordination.k8s.io/v1/leases"))))))))
 
 (test protobuf-timestamps-cover-go-zero-time
-  (is (equal '(1 1 1 0 0 2) (multiple-value-list (gr8s::protobuf-timestamp-fields -62135596798))))
-  (is (equal '(1970 1 1 0 0 0) (multiple-value-list (gr8s::protobuf-timestamp-fields 0))))
-  (is (equal '(2024 2 29 12 30 45) (multiple-value-list (gr8s::protobuf-timestamp-fields 1709209845)))))
+  (is (equal '(1 1 1 0 0 2) (multiple-value-list (gr8s.resources::protobuf-timestamp-fields -62135596798))))
+  (is (equal '(1970 1 1 0 0 0) (multiple-value-list (gr8s.resources::protobuf-timestamp-fields 0))))
+  (is (equal '(2024 2 29 12 30 45) (multiple-value-list (gr8s.resources::protobuf-timestamp-fields 1709209845)))))
 
 (test priority-levels-default-and-isolate-status
   (with-typed-http (store)
     (values store)
     (let* ((collection "/apis/flowcontrol.apiserver.k8s.io/v1/prioritylevelconfigurations")
            (created (typed-check 201 collection :method :post
-                      :object (gr8s::core-object "metadata" (gr8s::core-object "generateName" "pl-")
-                                                 "spec" (gr8s::core-object "type" "Limited"
-                                                          "limited" (gr8s::core-object "limitResponse" (gr8s::core-object "type" "Reject"))))))
+                      :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "generateName" "pl-")
+                                                 "spec" (gr8s.resources::core-object "type" "Limited"
+                                                          "limited" (gr8s.resources::core-object "limitResponse" (gr8s.resources::core-object "type" "Reject"))))))
            (name (gethash "name" (gethash "metadata" created)))
            (item (format nil "~A/~A" collection name)))
       (is (= 30 (gethash "nominalConcurrencyShares" (gethash "limited" (gethash "spec" created)))))
       (is (= 1 (gethash "generation" (gethash "metadata" created))))
       (let ((patched (typed-check 200 item :method :patch :content-type "application/merge-patch+json"
-                       :object (gr8s::core-object "spec" (gr8s::core-object "limited" (gr8s::core-object "nominalConcurrencyShares" 4))
-                                                  "status" (gr8s::core-object "conditions" (vector (gr8s::core-object "type" "Ignored")))))))
+                       :object (gr8s.resources::core-object "spec" (gr8s.resources::core-object "limited" (gr8s.resources::core-object "nominalConcurrencyShares" 4))
+                                                  "status" (gr8s.resources::core-object "conditions" (vector (gr8s.resources::core-object "type" "Ignored")))))))
         (is (= 2 (gethash "generation" (gethash "metadata" patched))))
         (is (null (gethash "status" patched))))
       (let ((status (typed-check 200 (concatenate 'string item "/status") :method :patch :content-type "application/merge-patch+json"
-                      :object (gr8s::core-object "spec" (gr8s::core-object "type" "Exempt")
-                                                 "status" (gr8s::core-object "conditions" (vector (gr8s::core-object "type" "Kept")))))))
+                      :object (gr8s.resources::core-object "spec" (gr8s.resources::core-object "type" "Exempt")
+                                                 "status" (gr8s.resources::core-object "conditions" (vector (gr8s.resources::core-object "type" "Kept")))))))
         (is (equal "Limited" (gethash "type" (gethash "spec" status))))
         (is (equal "Kept" (gethash "type" (aref (gethash "conditions" (gethash "status" status)) 0))))
         (is (= 2 (gethash "generation" (gethash "metadata" status)))))
       (typed-check 422 collection :method :post
-        :object (gr8s::core-object "metadata" (gr8s::core-object "name" "unset")
-                                   "spec" (gr8s::core-object "type" "Limited"))))))
+        :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "unset")
+                                   "spec" (gr8s.resources::core-object "type" "Limited"))))))
 
 (test resource-claims-keep-their-spec-immutable-and-honor-finalizers
   (with-typed-http (store)
     (values store)
     (typed-namespace "claims")
     (let* ((collection "/apis/resource.k8s.io/v1/namespaces/claims/resourceclaims")
-           (request (gr8s::core-object "name" "req-0" "exactly" (gr8s::core-object "deviceClassName" "example")))
+           (request (gr8s.resources::core-object "name" "req-0" "exactly" (gr8s.resources::core-object "deviceClassName" "example")))
            (created (typed-check 201 collection :method :post
-                      :object (gr8s::core-object "metadata" (gr8s::core-object "name" "claim" "finalizers" #("example.com/hold"))
-                                                 "spec" (gr8s::core-object "devices" (gr8s::core-object "requests" (vector request))))))
+                      :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "claim" "finalizers" #("example.com/hold"))
+                                                 "spec" (gr8s.resources::core-object "devices" (gr8s.resources::core-object "requests" (vector request))))))
            (item (concatenate 'string collection "/claim")))
       (is (equal "ExactCount" (gethash "allocationMode" (gethash "exactly" (aref (gethash "requests" (gethash "devices" (gethash "spec" created))) 0)))))
-      (let ((changed (gr8s::copy-core-object created)))
+      (let ((changed (gr8s.resources::copy-core-object created)))
         (setf (gethash "deviceClassName" (gethash "exactly" (aref (gethash "requests" (gethash "devices" (gethash "spec" changed))) 0))) "other")
         (typed-check 422 item :method :put :object changed))
       (typed-check 200 item :method :delete)
@@ -132,58 +132,58 @@
   (with-temporary-store (store path)
     (declare (ignore path))
     (labels ((namespace (name &optional labels)
-               (gr8s::create-core-resource
+               (gr8s.resources::create-core-resource
                 store "namespaces"
-                (gr8s::core-object
-                 "metadata" (gr8s::core-object "name" name "labels" labels))
+                (gr8s.resources::core-object
+                 "metadata" (gr8s.resources::core-object "name" name "labels" labels))
                 nil))
              (claim (name admin-access)
-               (let ((exactly (gr8s::core-object "deviceClassName" "example")))
+               (let ((exactly (gr8s.resources::core-object "deviceClassName" "example")))
                  (when admin-access
                    (setf (gethash "adminAccess" exactly) t))
-                 (gr8s::core-object
+                 (gr8s.resources::core-object
                   "apiVersion" "resource.k8s.io/v1" "kind" "ResourceClaim"
-                  "metadata" (gr8s::core-object "name" name)
-                  "spec" (gr8s::core-object
-                           "devices" (gr8s::core-object
+                  "metadata" (gr8s.resources::core-object "name" name)
+                  "spec" (gr8s.resources::core-object
+                           "devices" (gr8s.resources::core-object
                                       "requests"
-                                      (vector (gr8s::core-object
+                                      (vector (gr8s.resources::core-object
                                                "name" "device" "exactly" exactly)))))))
              (template (name)
                (let ((claim (claim name t)))
-                 (gr8s::core-object
+                 (gr8s.resources::core-object
                   "apiVersion" "resource.k8s.io/v1" "kind" "ResourceClaimTemplate"
-                  "metadata" (gr8s::core-object "name" name)
-                  "spec" (gr8s::core-object
-                           "metadata" (gr8s::core-object)
+                  "metadata" (gr8s.resources::core-object "name" name)
+                  "spec" (gr8s.resources::core-object
+                           "metadata" (gr8s.resources::core-object)
                            "spec" (gethash "spec" claim))))))
       (namespace "ordinary")
       (namespace "admin"
-                 (gr8s::core-object "resource.kubernetes.io/admin-access" "true"))
-      (signals gr8s::kubernetes-error
-        (gr8s::create-core-resource store "resourceclaims" (claim "refused" t)
+                 (gr8s.resources::core-object "resource.kubernetes.io/admin-access" "true"))
+      (signals gr8s.model::kubernetes-error
+        (gr8s.resources::create-core-resource store "resourceclaims" (claim "refused" t)
                                     "ordinary"))
-      (signals gr8s::kubernetes-error
-        (gr8s::create-core-resource store "resourceclaimtemplates"
+      (signals gr8s.model::kubernetes-error
+        (gr8s.resources::create-core-resource store "resourceclaimtemplates"
                                     (template "template-refused") "ordinary"))
       (finishes
-        (gr8s::create-core-resource store "resourceclaims" (claim "allowed" t)
+        (gr8s.resources::create-core-resource store "resourceclaims" (claim "allowed" t)
                                     "admin"))
-      (gr8s::create-core-resource store "resourceclaims" (claim "status-refused" nil)
+      (gr8s.resources::create-core-resource store "resourceclaims" (claim "status-refused" nil)
                                   "ordinary")
-      (let ((gr8s::*typed-api-status-write* t))
-        (signals gr8s::kubernetes-error
-          (gr8s::update-core-resource
+      (let ((gr8s.resources::*typed-api-status-write* t))
+        (signals gr8s.model::kubernetes-error
+          (gr8s.resources::update-core-resource
            store "resourceclaims" "ordinary" "status-refused"
            (lambda (object)
              (setf (gethash "status" object)
-                   (gr8s::core-object
+                   (gr8s.resources::core-object
                     "allocation"
-                    (gr8s::core-object
+                    (gr8s.resources::core-object
                      "devices"
-                     (gr8s::core-object
+                     (gr8s.resources::core-object
                       "results"
-                      (vector (gr8s::core-object
+                      (vector (gr8s.resources::core-object
                                "request" "device" "driver" "example.com"
                                "pool" "pool" "device" "one" "adminAccess" t))))))
              object)))))))
@@ -194,9 +194,9 @@
     (typed-namespace "applied")
     (let* ((item "/apis/coordination.k8s.io/v1/namespaces/applied/leases/one")
            (config (lambda (&rest labels)
-                     (gr8s::core-object "apiVersion" "coordination.k8s.io/v1" "kind" "Lease"
-                                        "metadata" (gr8s::core-object "name" "one" "labels" (apply #'gr8s::core-object labels))
-                                        "spec" (gr8s::core-object "holderIdentity" "first"))))
+                     (gr8s.resources::core-object "apiVersion" "coordination.k8s.io/v1" "kind" "Lease"
+                                        "metadata" (gr8s.resources::core-object "name" "one" "labels" (apply #'gr8s.resources::core-object labels))
+                                        "spec" (gr8s.resources::core-object "holderIdentity" "first"))))
            (apply-type "application/apply-patch+yaml"))
       (typed-check 400 item :method :patch :content-type apply-type :object (funcall config "a" "1"))
       (let ((created (typed-check 201 item :method :patch :content-type apply-type :object (funcall config "a" "1" "b" "2")
@@ -216,18 +216,18 @@
 (test namespaces-terminate-through-their-finalizer
   (with-typed-http (store)
     (let* ((namespace (typed-namespace "ending"))
-           (reconciler (gr8s::make-reconciler store (make-fake-runtime))))
+           (reconciler (gr8s.kubelet::make-reconciler store (make-fake-runtime))))
       (is (equalp #("kubernetes") (gethash "finalizers" (gethash "spec" namespace))))
       (is (equal "Active" (gethash "phase" (gethash "status" namespace))))
       (typed-check 201 "/api/v1/namespaces/ending/configmaps" :method :post
-        :object (gr8s::core-object "metadata" (gr8s::core-object "name" "kept")))
+        :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "kept")))
       (typed-check 200 "/api/v1/namespaces/ending" :method :delete)
       (let ((terminating (typed-check 200 "/api/v1/namespaces/ending")))
         (is (equal "Terminating" (gethash "phase" (gethash "status" terminating))))
         (is-true (gethash "deletionTimestamp" (gethash "metadata" terminating))))
       (typed-check 403 "/api/v1/namespaces/ending/configmaps" :method :post
-        :object (gr8s::core-object "metadata" (gr8s::core-object "name" "refused")))
-      (gr8s::reconcile-namespace-deletions reconciler)
+        :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "refused")))
+      (gr8s.resources::reconcile-namespace-deletions reconciler)
       (typed-check 404 "/api/v1/namespaces/ending/configmaps/kept")
       (typed-check 404 "/api/v1/namespaces/ending"))))
 
@@ -237,14 +237,14 @@
     (typed-namespace "subresources")
     (let ((patched (typed-check 200 "/api/v1/namespaces/subresources/status" :method :patch
                      :content-type "application/merge-patch+json"
-                     :object (gr8s::core-object "metadata" (gr8s::core-object "annotations" (gr8s::core-object "seen" "true"))
-                                                "spec" (gr8s::core-object "finalizers" #())
-                                                "status" (gr8s::core-object "conditions" (vector (gr8s::core-object "type" "StatusPatch" "status" "True")))))))
+                     :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "annotations" (gr8s.resources::core-object "seen" "true"))
+                                                "spec" (gr8s.resources::core-object "finalizers" #())
+                                                "status" (gr8s.resources::core-object "conditions" (vector (gr8s.resources::core-object "type" "StatusPatch" "status" "True")))))))
       (is (equal "true" (gethash "seen" (gethash "annotations" (gethash "metadata" patched)))))
       (is (equalp #("kubernetes") (gethash "finalizers" (gethash "spec" patched))))
       (is (equal "StatusPatch" (gethash "type" (aref (gethash "conditions" (gethash "status" patched)) 0)))))
     (let* ((current (typed-check 200 "/api/v1/namespaces/subresources"))
-           (changed (gr8s::copy-core-object current)))
+           (changed (gr8s.resources::copy-core-object current)))
       (setf (gethash "finalizers" (gethash "spec" changed)) #("kubernetes" "example.com/held"))
       (is (equalp #("kubernetes" "example.com/held")
                   (gethash "finalizers" (gethash "spec" (typed-check 200 "/api/v1/namespaces/subresources/finalize" :method :put :object changed))))))
@@ -258,75 +258,75 @@
     (values store)
     (typed-namespace "rbac")
     (typed-check 201 "/apis/rbac.authorization.k8s.io/v1/namespaces/rbac/roles" :method :post
-      :object (gr8s::core-object "metadata" (gr8s::core-object "name" "reader")
-                                 "rules" (vector (gr8s::core-object "apiGroups" #("") "resources" #("configmaps") "verbs" #("list")))))
+      :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "reader")
+                                 "rules" (vector (gr8s.resources::core-object "apiGroups" #("") "resources" #("configmaps") "verbs" #("list")))))
     (typed-check 201 "/apis/rbac.authorization.k8s.io/v1/namespaces/rbac/rolebindings" :method :post
-      :object (gr8s::core-object "metadata" (gr8s::core-object "name" "reader")
-                                 "roleRef" (gr8s::core-object "apiGroup" "rbac.authorization.k8s.io" "kind" "Role" "name" "reader")
-                                 "subjects" (vector (gr8s::core-object "kind" "User" "name" "alice" "apiGroup" "rbac.authorization.k8s.io"))))
+      :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "reader")
+                                 "roleRef" (gr8s.resources::core-object "apiGroup" "rbac.authorization.k8s.io" "kind" "Role" "name" "reader")
+                                 "subjects" (vector (gr8s.resources::core-object "kind" "User" "name" "alice" "apiGroup" "rbac.authorization.k8s.io"))))
     (flet ((review (user verb)
              (gethash "allowed"
                       (gethash "status"
                                (typed-check 201 "/apis/authorization.k8s.io/v1/subjectaccessreviews" :method :post
-                                 :object (gr8s::core-object "spec" (gr8s::core-object "user" user
-                                            "resourceAttributes" (gr8s::core-object "namespace" "rbac" "verb" verb "resource" "configmaps"))))))))
+                                 :object (gr8s.resources::core-object "spec" (gr8s.resources::core-object "user" user
+                                            "resourceAttributes" (gr8s.resources::core-object "namespace" "rbac" "verb" verb "resource" "configmaps"))))))))
       (is (eq t (review "alice" "list")))
       (is (null (review "alice" "delete")))
       (is (null (review "bob" "list"))))
     (is (eq t (gethash "allowed" (gethash "status"
       (typed-check 201 "/apis/authorization.k8s.io/v1/namespaces/rbac/localsubjectaccessreviews" :method :post
-        :object (gr8s::core-object "metadata" (gr8s::core-object "namespace" "rbac")
-                  "spec" (gr8s::core-object "user" "alice"
-                           "resourceAttributes" (gr8s::core-object "namespace" "rbac" "verb" "list" "resource" "configmaps"))))))))
+        :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "namespace" "rbac")
+                  "spec" (gr8s.resources::core-object "user" "alice"
+                           "resourceAttributes" (gr8s.resources::core-object "namespace" "rbac" "verb" "list" "resource" "configmaps"))))))))
     (typed-check 422 "/apis/authorization.k8s.io/v1/namespaces/rbac/localsubjectaccessreviews" :method :post
-      :object (gr8s::core-object "metadata" (gr8s::core-object "namespace" "rbac")
-                "spec" (gr8s::core-object "user" "alice"
-                         "resourceAttributes" (gr8s::core-object "namespace" "other" "verb" "list" "resource" "configmaps"))))
+      :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "namespace" "rbac")
+                "spec" (gr8s.resources::core-object "user" "alice"
+                         "resourceAttributes" (gr8s.resources::core-object "namespace" "other" "verb" "list" "resource" "configmaps"))))
     (typed-check 422 "/apis/authorization.k8s.io/v1/subjectaccessreviews" :method :post
-      :object (gr8s::core-object "spec" (gr8s::core-object "resourceAttributes" (gr8s::core-object "verb" "list"))))))
+      :object (gr8s.resources::core-object "spec" (gr8s.resources::core-object "resourceAttributes" (gr8s.resources::core-object "verb" "list"))))))
 
 (test self-subject-rules-reviews-answer-as-kubectl-asks
   (with-typed-http (store)
     ;; kubectl auth can-i --list sends the empty status that Go renders with null lists.
     (let* ((status (gethash "status"
                             (typed-check 201 "/apis/authorization.k8s.io/v1/selfsubjectrulesreviews" :method :post
-                              :object (gr8s::core-object "spec" (gr8s::core-object "namespace" "default")
-                                        "status" (gr8s::core-object "resourceRules" 'null "nonResourceRules" 'null
+                              :object (gr8s.resources::core-object "spec" (gr8s.resources::core-object "namespace" "default")
+                                        "status" (gr8s.resources::core-object "resourceRules" 'null "nonResourceRules" 'null
                                                                     "incomplete" nil)))))
            (rule (aref (gethash "resourceRules" status) 0)))
       ;; The local listener is a cluster administrator, as access reviews already answer.
       (is (equalp #("*") (gethash "verbs" rule)))
       (is (equalp #("*") (gethash "resources" rule)))
       (is (equalp #("*") (gethash "nonResourceURLs" (aref (gethash "nonResourceRules" status) 0)))))
-    (let ((status (gr8s::self-subject-rules-status
-                   store (gr8s::make-api-user-identity :username "bob" :groups #("system:authenticated")) "default")))
+    (let ((status (gr8s.resources::self-subject-rules-status
+                   store (gr8s.resources::make-api-user-identity :username "bob" :groups #("system:authenticated")) "default")))
       (is (zerop (length (gethash "resourceRules" status)))))))
 
 (test service-account-tokens-are-signed-bound-and-reviewable
   (with-typed-http (store)
     (typed-namespace "tokens")
     (typed-check 201 "/api/v1/namespaces/tokens/serviceaccounts" :method :post
-      :object (gr8s::core-object "metadata" (gr8s::core-object "name" "robot")))
+      :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "robot")))
     (let* ((response (typed-check 201 "/api/v1/namespaces/tokens/serviceaccounts/robot/token" :method :post
-                       :object (gr8s::core-object "apiVersion" "authentication.k8s.io/v1" "kind" "TokenRequest" "spec" (gr8s::core-object))))
+                       :object (gr8s.resources::core-object "apiVersion" "authentication.k8s.io/v1" "kind" "TokenRequest" "spec" (gr8s.resources::core-object))))
            (token (gethash "token" (gethash "status" response)))
            (parts (uiop:split-string token :separator '(#\.)))
-           (claims (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string (gr8s::base64url-decode (second parts)))))
+           (claims (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string (gr8s.resources::base64url-decode (second parts)))))
            (review (lambda (value &optional audiences)
-                     (let ((spec (gr8s::core-object "token" value)))
+                     (let ((spec (gr8s.resources::core-object "token" value)))
                        (when audiences (setf (gethash "audiences" spec) audiences))
                        (gethash "status" (typed-check 201 "/apis/authentication.k8s.io/v1/tokenreviews" :method :post
-                                                      :object (gr8s::core-object "spec" spec)))))))
+                                                      :object (gr8s.resources::core-object "spec" spec)))))))
       (is (= 3 (length parts)))
       (is (equal "system:serviceaccount:tokens:robot" (gethash "sub" claims)))
-      (is (equal gr8s::+service-account-issuer+ (gethash "iss" claims)))
+      (is (equal gr8s.resources::+service-account-issuer+ (gethash "iss" claims)))
       (let ((status (funcall review token)))
         (is (eq t (gethash "authenticated" status)))
         (is (equal "system:serviceaccount:tokens:robot" (gethash "username" (gethash "user" status))))
         (is-true (find "system:authenticated" (gethash "groups" (gethash "user" status)) :test #'equal)))
       ;; Tampering with the payload breaks the signature.
       (let ((forged (format nil "~A.~A.~A" (first parts)
-                            (gr8s::base64url-encode (trivial-utf-8:string-to-utf-8-bytes
+                            (gr8s.resources::base64url-encode (trivial-utf-8:string-to-utf-8-bytes
                                                      (substitute #\x #\r (com.inuoe.jzon:stringify claims))))
                             (third parts))))
         (is (null (gethash "authenticated" (funcall review forged)))))
@@ -335,71 +335,71 @@
       ;; It stops working when its account goes away, even if recreated with the same name.
       (typed-check 200 "/api/v1/namespaces/tokens/serviceaccounts/robot" :method :delete)
       (typed-check 201 "/api/v1/namespaces/tokens/serviceaccounts" :method :post
-        :object (gr8s::core-object "metadata" (gr8s::core-object "name" "robot")))
+        :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "robot")))
       (is (null (gethash "authenticated" (funcall review token))))
       (is-true store))
     (typed-check 422 "/api/v1/namespaces/tokens/serviceaccounts/robot/token" :method :post
-      :object (gr8s::core-object "spec" (gr8s::core-object "expirationSeconds" 5)))
+      :object (gr8s.resources::core-object "spec" (gr8s.resources::core-object "expirationSeconds" 5)))
     (typed-check 404 "/api/v1/namespaces/tokens/serviceaccounts/absent/token" :method :post
-      :object (gr8s::core-object "spec" (gr8s::core-object)))))
+      :object (gr8s.resources::core-object "spec" (gr8s.resources::core-object)))))
 
 (test oidc-discovery-publishes-the-signing-key
   (with-typed-http (store)
     (let* ((configuration (typed-check 200 "/.well-known/openid-configuration"))
            (keys (gethash "keys" (typed-check 200 "/openid/v1/jwks")))
            (key (aref keys 0))
-           (signing (gr8s::load-service-account-signing-key store)))
-      (is (equal gr8s::+service-account-issuer+ (gethash "issuer" configuration)))
+           (signing (gr8s.resources::load-service-account-signing-key store)))
+      (is (equal gr8s.resources::+service-account-issuer+ (gethash "issuer" configuration)))
       (is (uiop:string-suffix-p (gethash "jwks_uri" configuration) "/openid/v1/jwks"))
       (is (equal "EC" (gethash "kty" key)))
-      (is (equal (gr8s::service-account-key-id signing) (gethash "kid" key)))
-      (is (equalp (subseq (gr8s::service-account-public-point signing) 1 33)
-                  (gr8s::base64url-decode (gethash "x" key)))))))
+      (is (equal (gr8s.resources::service-account-key-id signing) (gethash "kid" key)))
+      (is (equalp (subseq (gr8s.resources::service-account-public-point signing) 1 33)
+                  (gr8s.resources::base64url-decode (gethash "x" key)))))))
 
 (test signing-key-survives-a-restart
   (with-typed-http (store)
-    (let* ((key (gr8s::load-service-account-signing-key store))
-           (id (gr8s::service-account-key-id key)))
-      (setf (gr8s::pod-store-service-account-signing-key store) nil)
-      (is (equal id (gr8s::service-account-key-id (gr8s::load-service-account-signing-key store)))))))
+    (let* ((key (gr8s.resources::load-service-account-signing-key store))
+           (id (gr8s.resources::service-account-key-id key)))
+      (setf (gr8s.store::pod-store-service-account-signing-key store) nil)
+      (is (equal id (gr8s.resources::service-account-key-id (gr8s.resources::load-service-account-signing-key store)))))))
 
 (defun typed-policy-rule (&rest resources)
   "Build a NamedRuleWithOperations for core RESOURCES on CREATE and UPDATE."
-  (gr8s::core-object "operations" #("CREATE" "UPDATE") "apiGroups" #("") "apiVersions" #("v1")
+  (gr8s.resources::core-object "operations" #("CREATE" "UPDATE") "apiGroups" #("") "apiVersions" #("v1")
                      "resources" (coerce resources 'vector)))
 
 (defun typed-policy (collection name binding-collection binding-spec &rest spec)
   "Create policy NAME in COLLECTION selecting labeled Namespaces, and its binding."
-  (let ((body (apply #'gr8s::core-object spec)))
+  (let ((body (apply #'gr8s.resources::core-object spec)))
     (setf (gethash "matchConstraints" body)
-          (gr8s::core-object "resourceRules" (vector (typed-policy-rule "configmaps"))
-                             "namespaceSelector" (gr8s::core-object "matchLabels" (gr8s::core-object "policed" "true"))))
+          (gr8s.resources::core-object "resourceRules" (vector (typed-policy-rule "configmaps"))
+                             "namespaceSelector" (gr8s.resources::core-object "matchLabels" (gr8s.resources::core-object "policed" "true"))))
     (typed-check 201 (concatenate 'string "/apis/admissionregistration.k8s.io/v1/" collection) :method :post
-      :object (gr8s::core-object "metadata" (gr8s::core-object "name" name) "spec" body))
+      :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" name) "spec" body))
     (setf (gethash "policyName" binding-spec) name)
     (typed-check 201 (concatenate 'string "/apis/admissionregistration.k8s.io/v1/" binding-collection) :method :post
-      :object (gr8s::core-object "metadata" (gr8s::core-object "name" name) "spec" binding-spec))))
+      :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" name) "spec" binding-spec))))
 
 (defun typed-policed-namespaces ()
   "Create one Namespace policies select and one they do not."
   (typed-check 201 "/api/v1/namespaces" :method :post
-    :object (gr8s::core-object "metadata" (gr8s::core-object "name" "policed" "labels" (gr8s::core-object "policed" "true"))))
+    :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "policed" "labels" (gr8s.resources::core-object "policed" "true"))))
   (typed-namespace "free"))
 
 (defun typed-configmap (name &rest data)
   "Build a ConfigMap body named NAME holding DATA."
-  (gr8s::core-object "metadata" (gr8s::core-object "name" name) "data" (apply #'gr8s::core-object data)))
+  (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" name) "data" (apply #'gr8s.resources::core-object data)))
 
 (test validating-admission-policy-denies-selected-writes
   (with-typed-http (store)
     (values store)
     (typed-policed-namespaces)
     (typed-policy "validatingadmissionpolicies" "limit" "validatingadmissionpolicybindings"
-                  (gr8s::core-object "validationActions" #("Deny"))
-                  "variables" (vector (gr8s::core-object "name" "allowed" "expression" "object.data.mode == 'on'"))
-                  "validations" (vector (gr8s::core-object "expression" "variables.allowed"
+                  (gr8s.resources::core-object "validationActions" #("Deny"))
+                  "variables" (vector (gr8s.resources::core-object "name" "allowed" "expression" "object.data.mode == 'on'"))
+                  "validations" (vector (gr8s.resources::core-object "expression" "variables.allowed"
                                                            "messageExpression" "'mode must be on, got ' + object.data.mode")
-                                        (gr8s::core-object "expression" "namespaceObject.metadata.name == 'policed'")))
+                                        (gr8s.resources::core-object "expression" "namespaceObject.metadata.name == 'policed'")))
     (let ((denied (typed-check 422 "/api/v1/namespaces/policed/configmaps" :method :post
                     :object (typed-configmap "off" "mode" "off"))))
       (is (equal "Invalid" (gethash "reason" denied)))
@@ -414,26 +414,26 @@
     (values store)
     (typed-policed-namespaces)
     (typed-policy "validatingadmissionpolicies" "lenient" "validatingadmissionpolicybindings"
-                  (gr8s::core-object "validationActions" #("Deny"))
+                  (gr8s.resources::core-object "validationActions" #("Deny"))
                   "failurePolicy" "Ignore"
-                  "validations" (vector (gr8s::core-object "expression" "object.data.absent == 'x'")))
+                  "validations" (vector (gr8s.resources::core-object "expression" "object.data.absent == 'x'")))
     (typed-policy "validatingadmissionpolicies" "warning" "validatingadmissionpolicybindings"
-                  (gr8s::core-object "validationActions" #("Warn"))
-                  "validations" (vector (gr8s::core-object "expression" "false")))
+                  (gr8s.resources::core-object "validationActions" #("Warn"))
+                  "validations" (vector (gr8s.resources::core-object "expression" "false")))
     (typed-check 201 "/api/v1/namespaces/policed/configmaps" :method :post :object (typed-configmap "kept" "mode" "on"))))
 
 (test mutating-admission-policy-applies-configurations
   (with-typed-http (store)
     (values store)
     (typed-policed-namespaces)
-    (typed-policy "mutatingadmissionpolicies" "mark" "mutatingadmissionpolicybindings" (gr8s::core-object)
-                  "mutations" (vector (gr8s::core-object
+    (typed-policy "mutatingadmissionpolicies" "mark" "mutatingadmissionpolicybindings" (gr8s.resources::core-object)
+                  "mutations" (vector (gr8s.resources::core-object
                                        "patchType" "ApplyConfiguration"
-                                       "applyConfiguration" (gr8s::core-object
+                                       "applyConfiguration" (gr8s.resources::core-object
                                                              "expression" "Object{ metadata: Object.metadata{ annotations: {'mutated-by': 'policy'} } }"))
-                                      (gr8s::core-object
+                                      (gr8s.resources::core-object
                                        "patchType" "JSONPatch"
-                                       "jsonPatch" (gr8s::core-object
+                                       "jsonPatch" (gr8s.resources::core-object
                                                     "expression" "[JSONPatch{op: 'add', path: '/data/seen', value: object.metadata.annotations['mutated-by']}]"))))
     (let ((mutated (typed-check 201 "/api/v1/namespaces/policed/configmaps" :method :post
                      :object (typed-configmap "first" "mode" "on"))))
@@ -445,7 +445,7 @@
                                              :object (typed-configmap "first" "mode" "on"))))))))
 
 (test object-construction-stays-out-of-other-cel-environments
-  (signals gr8s::cel-compile-error (gr8s::compile-cel-expression "Object{spec: 1}")))
+  (signals cl-cel::cel-compile-error (cl-cel::compile-cel-expression "Object{spec: 1}")))
 
 (test json-patches-can-add-into-an-unset-status
   (with-typed-http (store)
@@ -453,12 +453,12 @@
     (typed-namespace "patched")
     (let ((collection "/apis/resource.k8s.io/v1/namespaces/patched/resourceclaims"))
       (typed-check 201 collection :method :post
-        :object (gr8s::core-object "metadata" (gr8s::core-object "name" "claim")
-                  "spec" (gr8s::core-object "devices" (gr8s::core-object "requests"
-                    (vector (gr8s::core-object "name" "req-0" "exactly" (gr8s::core-object "deviceClassName" "example")))))))
+        :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "claim")
+                  "spec" (gr8s.resources::core-object "devices" (gr8s.resources::core-object "requests"
+                    (vector (gr8s.resources::core-object "name" "req-0" "exactly" (gr8s.resources::core-object "deviceClassName" "example")))))))
       (let ((patched (typed-check 200 (concatenate 'string collection "/claim/status") :method :patch
                        :content-type "application/json-patch+json"
-                       :object (vector (gr8s::core-object "op" "add" "path" "/status/allocation" "value" (gr8s::core-object))))))
+                       :object (vector (gr8s.resources::core-object "op" "add" "path" "/status/allocation" "value" (gr8s.resources::core-object))))))
         (is-true (hash-table-p (gethash "allocation" (gethash "status" patched))))
         ;; A whole object sent to status is checked against this ResourceClaim, not core's namesake.
         (setf (gethash "reservedFor" (gethash "status" patched)) #())
@@ -468,79 +468,79 @@
 
 (test bootstrap-cluster-roles-grant-oidc-discovery-when-bound
   (with-typed-http (store)
-    (gr8s::ensure-system-cluster-roles store)
-    (gr8s::ensure-system-cluster-roles store)
+    (gr8s.resources::ensure-system-cluster-roles store)
+    (gr8s.resources::ensure-system-cluster-roles store)
     (typed-check 201 "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings" :method :post
-      :object (gr8s::core-object "metadata" (gr8s::core-object "name" "discover")
-                "roleRef" (gr8s::core-object "apiGroup" "rbac.authorization.k8s.io" "kind" "ClusterRole"
+      :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "discover")
+                "roleRef" (gr8s.resources::core-object "apiGroup" "rbac.authorization.k8s.io" "kind" "ClusterRole"
                                              "name" "system:service-account-issuer-discovery")
-                "subjects" (vector (gr8s::core-object "kind" "ServiceAccount" "name" "default" "namespace" "seen"))))
+                "subjects" (vector (gr8s.resources::core-object "kind" "ServiceAccount" "name" "default" "namespace" "seen"))))
     ;; RBAC objects keep their colons on the wire as well.
     (typed-check 200 "/apis/rbac.authorization.k8s.io/v1/clusterroles/system:service-account-issuer-discovery")
     (typed-check 400 "/apis/rbac.authorization.k8s.io/v1/clusterroles/a%25b")
     (flet ((allowed (namespace)
-             (gr8s::service-account-authorized-p
-              store (gr8s::make-api-service-account-identity :namespace namespace :name "default" :uid "uid")
+             (gr8s.resources::service-account-authorized-p
+              store (gr8s.resources::make-api-service-account-identity :namespace namespace :name "default" :uid "uid")
               "get" nil nil nil nil "/openid/v1/jwks")))
       (is-true (allowed "seen"))
       (is-false (allowed "unseen")))))
 
 (test impersonation-names-the-identity-only-when-authorized
   (with-typed-http (store)
-    (let ((admin (gr8s::make-api-user-identity :username "admin" :groups (vector "system:masters")))
-          (nobody (gr8s::make-api-user-identity :username "nobody" :groups (vector "system:authenticated"))))
-      (is (eq :allowed (if (gr8s::impersonation-allowed-p store admin "users" "" "someone") :allowed :denied)))
-      (is (eq :denied (if (gr8s::impersonation-allowed-p store nobody "users" "" "someone") :allowed :denied)))
-      (is (equal '("ns" "sa") (multiple-value-list (gr8s::service-account-username-parts "system:serviceaccount:ns:sa"))))
-      (is (null (gr8s::service-account-username-parts "alice"))))))
+    (let ((admin (gr8s.resources::make-api-user-identity :username "admin" :groups (vector "system:masters")))
+          (nobody (gr8s.resources::make-api-user-identity :username "nobody" :groups (vector "system:authenticated"))))
+      (is (eq :allowed (if (gr8s.resources::impersonation-allowed-p store admin "users" "" "someone") :allowed :denied)))
+      (is (eq :denied (if (gr8s.resources::impersonation-allowed-p store nobody "users" "" "someone") :allowed :denied)))
+      (is (equal '("ns" "sa") (multiple-value-list (gr8s.resources::service-account-username-parts "system:serviceaccount:ns:sa"))))
+      (is (null (gr8s.resources::service-account-username-parts "alice"))))))
 
 (test projected-tokens-are-bound-to-their-pod-and-renewed-when-due
   (with-typed-http (store)
     (typed-namespace "projected")
     (let* ((account (typed-check 201 "/api/v1/namespaces/projected/serviceaccounts" :method :post
-                      :object (gr8s::core-object "metadata" (gr8s::core-object "name" "robot"))))
-           (pod (gr8s::create-pod
+                      :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "robot"))))
+           (pod (gr8s.store::create-pod
                  store
                  (parse-pod "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"holder\",\"namespace\":\"projected\"},\"spec\":{\"serviceAccountName\":\"robot\",\"containers\":[{\"name\":\"c\",\"image\":\"example\"}],\"volumes\":[{\"name\":\"v\",\"projected\":{\"sources\":[{\"serviceAccountToken\":{\"path\":\"token\",\"audience\":\"reader\",\"expirationSeconds\":3600}}]}}]}}")))
-           (source (first (gr8s::pod-projected-token-sources pod)))
-           (delivery (gr8s::pod-projected-token-object store pod))
-           (encoded (gethash (gr8s::projected-token-data-key source) (gethash "data" delivery)))
+           (source (first (gr8s.resources::pod-projected-token-sources pod)))
+           (delivery (gr8s.resources::pod-projected-token-object store pod))
+           (encoded (gethash (gr8s.resources::projected-token-data-key source) (gethash "data" delivery)))
            (token (trivial-utf-8:utf-8-bytes-to-string (ag-grpc:base64-decode encoded))))
-      (is (equal (gr8s::projected-token-secret-name pod) (gethash "name" (gethash "metadata" delivery))))
+      (is (equal (gr8s.resources::projected-token-secret-name pod) (gethash "name" (gethash "metadata" delivery))))
       ;; The agent normalizes what it receives, so the delivery must be a valid Secret.
-      (is (hash-table-p (gr8s::normalize-core-resource "secrets" delivery "projected" (gr8s::projected-token-secret-name pod))))
-      (multiple-value-bind (identity audiences) (gr8s::verify-service-account-jwt store token '("reader"))
-        (is (equal "system:serviceaccount:projected:robot" (gr8s::api-identity-username identity)))
-        (is (equal (gethash "uid" (gethash "metadata" account)) (gr8s::api-service-account-identity-uid identity)))
+      (is (hash-table-p (gr8s.resources::normalize-core-resource "secrets" delivery "projected" (gr8s.resources::projected-token-secret-name pod))))
+      (multiple-value-bind (identity audiences) (gr8s.resources::verify-service-account-jwt store token '("reader"))
+        (is (equal "system:serviceaccount:projected:robot" (gr8s.resources::api-identity-username identity)))
+        (is (equal (gethash "uid" (gethash "metadata" account)) (gr8s.resources::api-service-account-identity-uid identity)))
         (is (equal '("reader") audiences)))
       ;; Its audience is not the API's, so it cannot be used as an API credential.
-      (is (null (gr8s::authenticate-service-account-token store token)))
+      (is (null (gr8s.resources::authenticate-service-account-token store token)))
       ;; The same token is handed out until 80% of its lifetime has passed.
-      (is (equal token (gr8s::cached-projected-token store pod source)))
-      (let ((entry (first (loop for value being the hash-values of (gr8s::pod-store-projected-tokens store) collect value))))
-        (is (< (- 2880 10) (- (getf entry :refresh) (gr8s::unix-time-now)) (+ 2880 10))))
-      (loop for key being the hash-keys of (gr8s::pod-store-projected-tokens store) using (hash-value entry)
-            do (setf (getf (gethash key (gr8s::pod-store-projected-tokens store)) :refresh) 0))
+      (is (equal token (gr8s.resources::cached-projected-token store pod source)))
+      (let ((entry (first (loop for value being the hash-values of (gr8s.store::pod-store-projected-tokens store) collect value))))
+        (is (< (- 2880 10) (- (getf entry :refresh) (gr8s.resources::unix-time-now)) (+ 2880 10))))
+      (loop for key being the hash-keys of (gr8s.store::pod-store-projected-tokens store) using (hash-value entry)
+            do (setf (getf (gethash key (gr8s.store::pod-store-projected-tokens store)) :refresh) 0))
       (sleep 1)
-      (is (not (equal token (gr8s::cached-projected-token store pod source))))
+      (is (not (equal token (gr8s.resources::cached-projected-token store pod source))))
       ;; Deleting the Pod revokes the token.
-      (gr8s::remove-pod store "projected" "holder" :uid (gr8s::pod-uid pod))
-      (is (null (gr8s::verify-service-account-jwt store token '("reader"))))
-      (gr8s::prune-projected-tokens store)
-      (is (zerop (hash-table-count (gr8s::pod-store-projected-tokens store)))))))
+      (gr8s.store::remove-pod store "projected" "holder" :uid (gr8s.model::pod-uid pod))
+      (is (null (gr8s.resources::verify-service-account-jwt store token '("reader"))))
+      (gr8s.resources::prune-projected-tokens store)
+      (is (zerop (hash-table-count (gr8s.store::pod-store-projected-tokens store)))))))
 
 (test token-reviews-report-what-a-pod-bound-token-proves
   (with-typed-http (store)
     (typed-namespace "bound")
     (let* ((account (typed-check 201 "/api/v1/namespaces/bound/serviceaccounts" :method :post
-                      :object (gr8s::core-object "metadata" (gr8s::core-object "name" "robot"))))
-           (token (gr8s::mint-service-account-token store account :binding (list "pod" "holder" "pod-uid")
+                      :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "robot"))))
+           (token (gr8s.resources::mint-service-account-token store account :binding (list "pod" "holder" "pod-uid")
                                                     :node (list "worker" "node-uid"))))
       ;; The Pod it names does not exist, so the binding fails closed.
-      (is (null (gr8s::verify-service-account-jwt store token (list gr8s::+service-account-issuer+))))
-      (let* ((free (gr8s::mint-service-account-token store account :node (list "worker" "node-uid")))
+      (is (null (gr8s.resources::verify-service-account-jwt store token (list gr8s.resources::+service-account-issuer+))))
+      (let* ((free (gr8s.resources::mint-service-account-token store account :node (list "worker" "node-uid")))
              (status (gethash "status" (typed-check 201 "/apis/authentication.k8s.io/v1/tokenreviews" :method :post
-                                         :object (gr8s::core-object "spec" (gr8s::core-object "token" free)))))
+                                         :object (gr8s.resources::core-object "spec" (gr8s.resources::core-object "token" free)))))
              (extra (gethash "extra" (gethash "user" status))))
         (is (uiop:string-prefix-p "JTI=" (aref (gethash "authentication.kubernetes.io/credential-id" extra) 0)))
         (is (equalp #("worker") (gethash "authentication.kubernetes.io/node-name" extra)))
@@ -551,7 +551,7 @@
     (values store)
     (typed-namespace "watched")
     (typed-check 201 "/api/v1/namespaces/watched/serviceaccounts" :method :post
-      :object (gr8s::core-object "metadata" (gr8s::core-object "name" "seen")))
+      :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "seen")))
     (multiple-value-bind (stream code)
         (drakma:http-request (format nil "http://127.0.0.1:~D/api/v1/namespaces/watched/serviceaccounts" *typed-test-port*)
                              :want-stream t :parameters '(("watch" . "true") ("timeoutSeconds" . "2")))
@@ -573,28 +573,28 @@
     (let* ((collection "/apis/resource.k8s.io/v1/devicetaintrules")
            (item (concatenate 'string collection "/rule"))
            (created (typed-check 201 collection :method :post
-                      :object (gr8s::core-object "metadata" (gr8s::core-object "name" "rule" "labels" (gr8s::core-object "e2e" "x"))
-                                                 "spec" (gr8s::core-object "taint" (gr8s::core-object "key" "testing" "effect" "None")))))
+                      :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "rule" "labels" (gr8s.resources::core-object "e2e" "x"))
+                                                 "spec" (gr8s.resources::core-object "taint" (gr8s.resources::core-object "key" "testing" "effect" "None")))))
            (added (gethash "timeAdded" (gethash "taint" (gethash "spec" created)))))
       (is (stringp added))
       (is (= 1 (gethash "generation" (gethash "metadata" created))))
       (typed-check 422 collection :method :post
-        :object (gr8s::core-object "metadata" (gr8s::core-object "name" "bad")
-                                   "spec" (gr8s::core-object "taint" (gr8s::core-object "key" "testing" "effect" "PreferNoSchedule"))))
+        :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "bad")
+                                   "spec" (gr8s.resources::core-object "taint" (gr8s.resources::core-object "key" "testing" "effect" "PreferNoSchedule"))))
       (typed-check 422 collection :method :post
-        :object (gr8s::core-object "metadata" (gr8s::core-object "name" "bad")
-                                   "spec" (gr8s::core-object "taint" (gr8s::core-object "key" "not a key" "effect" "None"))))
+        :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "bad")
+                                   "spec" (gr8s.resources::core-object "taint" (gr8s.resources::core-object "key" "not a key" "effect" "None"))))
       ;; Changing the effect bumps the generation; the status is not writable here.
       (let ((patched (typed-check 200 item :method :patch :content-type "application/strategic-merge-patch+json"
-                       :object (gr8s::core-object "spec" (gr8s::core-object "taint" (gr8s::core-object "effect" "NoExecute"))
-                                                  "status" (gr8s::core-object "conditions" (vector (gr8s::core-object "type" "Ignored")))))))
+                       :object (gr8s.resources::core-object "spec" (gr8s.resources::core-object "taint" (gr8s.resources::core-object "effect" "NoExecute"))
+                                                  "status" (gr8s.resources::core-object "conditions" (vector (gr8s.resources::core-object "type" "Ignored")))))))
         (is (= 2 (gethash "generation" (gethash "metadata" patched))))
         (is (equal "NoExecute" (gethash "effect" (gethash "taint" (gethash "spec" patched)))))
         (is (null (gethash "status" patched))))
       (let ((status (typed-check 200 (concatenate 'string item "/status") :method :patch
                       :content-type "application/strategic-merge-patch+json"
-                      :object (gr8s::core-object "status" (gr8s::core-object "conditions"
-                                (vector (gr8s::core-object "type" "Testing" "status" "True" "reason" "E2E"
+                      :object (gr8s.resources::core-object "status" (gr8s.resources::core-object "conditions"
+                                (vector (gr8s.resources::core-object "type" "Testing" "status" "True" "reason" "E2E"
                                                            "message" "m" "lastTransitionTime" "2026-01-01T00:00:00Z")))))))
         (is (equal "Testing" (gethash "type" (aref (gethash "conditions" (gethash "status" status)) 0))))
         (is (= 2 (gethash "generation" (gethash "metadata" status)))))
@@ -611,35 +611,35 @@
     (let* ((collection "/apis/storagemigration.k8s.io/v1/storageversionmigrations")
            (item (concatenate 'string collection "/migrate"))
            (created (typed-check 201 collection :method :post
-                      :object (gr8s::core-object "metadata" (gr8s::core-object "name" "migrate")
-                                                 "spec" (gr8s::core-object "resource" (gr8s::core-object "group" "" "resource" "foo"))))))
+                      :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "migrate")
+                                                 "spec" (gr8s.resources::core-object "resource" (gr8s.resources::core-object "group" "" "resource" "foo"))))))
       (typed-check 422 collection :method :post
-        :object (gr8s::core-object "metadata" (gr8s::core-object "name" "empty")
-                                   "spec" (gr8s::core-object "resource" (gr8s::core-object "group" "apps"))))
-      (let ((changed (gr8s::copy-core-object created)))
+        :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "empty")
+                                   "spec" (gr8s.resources::core-object "resource" (gr8s.resources::core-object "group" "apps"))))
+      (let ((changed (gr8s.resources::copy-core-object created)))
         (setf (gethash "resource" (gethash "resource" (gethash "spec" changed))) "bar")
         (typed-check 422 item :method :put :object changed))
       (let ((labelled (typed-check 200 item :method :patch :content-type "application/json-patch+json"
-                        :object (vector (gr8s::core-object "op" "add" "path" "/metadata/labels"
-                                                           "value" (gr8s::core-object "test" "test"))))))
+                        :object (vector (gr8s.resources::core-object "op" "add" "path" "/metadata/labels"
+                                                           "value" (gr8s.resources::core-object "test" "test"))))))
         (is (equal "test" (gethash "test" (gethash "labels" (gethash "metadata" labelled))))))
       (let ((status (typed-check 200 (concatenate 'string item "/status") :method :patch
                       :content-type "application/merge-patch+json"
-                      :object (gr8s::core-object "status" (gr8s::core-object "conditions"
-                                (vector (gr8s::core-object "type" "TestCondition" "status" "True" "reason" "TestReason"
+                      :object (gr8s.resources::core-object "status" (gr8s.resources::core-object "conditions"
+                                (vector (gr8s.resources::core-object "type" "TestCondition" "status" "True" "reason" "TestReason"
                                                            "message" "m" "lastTransitionTime" "2026-01-01T00:00:00Z")))))))
         (is (equal "TestCondition" (gethash "type" (aref (gethash "conditions" (gethash "status" status)) 0)))))
       (typed-check 200 item :method :delete)
       (typed-check 404 item))))
 
 (defun svm-test-object (name group resource)
-  (gr8s::core-object "apiVersion" "storagemigration.k8s.io/v1" "kind" "StorageVersionMigration"
-                     "metadata" (gr8s::core-object "name" name)
-                     "spec" (gr8s::core-object "resource" (gr8s::core-object "group" group "resource" resource))))
+  (gr8s.resources::core-object "apiVersion" "storagemigration.k8s.io/v1" "kind" "StorageVersionMigration"
+                     "metadata" (gr8s.resources::core-object "name" name)
+                     "spec" (gr8s.resources::core-object "resource" (gr8s.resources::core-object "group" group "resource" resource))))
 
 (defun svm-test-condition (store name type)
-  (find type (gethash "conditions" (gethash "status" (gr8s::get-core-resource store "storageversionmigrations" nil name)
-                                            (gr8s::core-object))
+  (find type (gethash "conditions" (gethash "status" (gr8s.resources::get-core-resource store "storageversionmigrations" nil name)
+                                            (gr8s.resources::core-object))
                       #())
         :test #'equal :key (lambda (c) (gethash "type" c))))
 
@@ -649,29 +649,29 @@
   ;; gr8s stores one form per resource, so there is nothing to rewrite.
   (with-temporary-store (store directory)
     (values directory)
-    (gr8s::create-core-resource store "configmaps"
-                                (gr8s::core-object "apiVersion" "v1" "kind" "ConfigMap"
-                                                   "metadata" (gr8s::core-object "name" "one"))
+    (gr8s.resources::create-core-resource store "configmaps"
+                                (gr8s.resources::core-object "apiVersion" "v1" "kind" "ConfigMap"
+                                                   "metadata" (gr8s.resources::core-object "name" "one"))
                                 "default")
-    (gr8s::create-core-resource store "storageversionmigrations" (svm-test-object "cm" "" "configmaps") nil)
-    (gr8s::create-core-resource store "storageversionmigrations" (svm-test-object "foo" "" "foo") nil)
+    (gr8s.resources::create-core-resource store "storageversionmigrations" (svm-test-object "cm" "" "configmaps") nil)
+    (gr8s.resources::create-core-resource store "storageversionmigrations" (svm-test-object "foo" "" "foo") nil)
     (let ((now (get-universal-time)))
-      (gr8s::reconcile-storage-version-migrations store :now now)
+      (gr8s.resources::reconcile-storage-version-migrations store :now now)
       (let ((succeeded (svm-test-condition store "cm" "Succeeded"))
             (running (svm-test-condition store "cm" "Running")))
         (is (equal "True" (gethash "status" succeeded)))
         (is (equal "StorageVersionMigrationSucceeded" (gethash "reason" succeeded)))
         (is (equal "The migration is running, 1 objects verified migrated" (gethash "message" running)))
         (is (plusp (length (gethash "resourceVersion"
-                                    (gethash "status" (gr8s::get-core-resource store "storageversionmigrations" nil "cm")))))))
+                                    (gethash "status" (gr8s.resources::get-core-resource store "storageversionmigrations" nil "cm")))))))
       ;; Within the grace period an unknown resource is left alone.
       (is (null (svm-test-condition store "foo" "Failed")))
-      (gr8s::reconcile-storage-version-migrations store :now (+ now 61))
+      (gr8s.resources::reconcile-storage-version-migrations store :now (+ now 61))
       (let ((failed (svm-test-condition store "foo" "Failed")))
         (is (equal "True" (gethash "status" failed)))
         (is (search "unable to obtain GVR from discovery" (gethash "message" failed))))
       ;; A finished migration is not touched again.
-      (let ((before (gethash "resourceVersion" (gethash "metadata" (gr8s::get-core-resource store "storageversionmigrations" nil "cm")))))
-        (gr8s::reconcile-storage-version-migrations store :now (+ now 120))
+      (let ((before (gethash "resourceVersion" (gethash "metadata" (gr8s.resources::get-core-resource store "storageversionmigrations" nil "cm")))))
+        (gr8s.resources::reconcile-storage-version-migrations store :now (+ now 120))
         (is (equal before (gethash "resourceVersion"
-                                   (gethash "metadata" (gr8s::get-core-resource store "storageversionmigrations" nil "cm")))))))))
+                                   (gethash "metadata" (gr8s.resources::get-core-resource store "storageversionmigrations" nil "cm")))))))))

@@ -52,7 +52,7 @@
 
 (defun l4-listener-bound-port (listener)
   "Return the port LISTENER actually listens on."
-  (nth-value 1 (sb-bsd-sockets:socket-name (gr8s::l4-listener-socket listener))))
+  (nth-value 1 (sb-bsd-sockets:socket-name (gr8s.controllers::l4-listener-socket listener))))
 
 (test the-tag-backend-is-gone-before-its-listener-closes
   ;; podster-uqb.106: a backend thread that outlived its listener went on accepting on that
@@ -83,63 +83,63 @@
                (if (and n (plusp n)) (babel:octets-to-string (subseq buffer 0 n)) ""))))
       (ignore-errors (sb-bsd-sockets:socket-close socket)))))
 
-(defun l4-backend (name port) (gr8s::make-gw-backend :name name :port port))
+(defun l4-backend (name port) (gr8s.controllers::make-gw-backend :name name :port port))
 
 (test gateway-l4-parses-routes
-  (let ((tcp (gr8s::parse-tcproute
+  (let ((tcp (gr8s.controllers::parse-tcproute
               (com.inuoe.jzon:parse
                "{\"metadata\":{\"name\":\"db\",\"namespace\":\"data\"},\"spec\":{\"rules\":[{\"backendRefs\":[{\"name\":\"mysql\",\"port\":3306}]}]}}")))
-        (tls (gr8s::parse-sni-route
+        (tls (gr8s.controllers::parse-sni-route
               (com.inuoe.jzon:parse
                "{\"metadata\":{\"name\":\"sni\",\"namespace\":\"edge\"},\"spec\":{\"hostnames\":[\"a.example.com\",\"*.wild.com\"],\"rules\":[{\"backendRefs\":[{\"name\":\"tls-svc\",\"port\":8443}]}]}}"))))
-    (is (equal "data" (gr8s::l4-tcp-route-namespace tcp)))
-    (is (equal "mysql" (gr8s::gw-backend-name (first (gr8s::l4-tcp-route-backends tcp)))))
-    (is (= 3306 (gr8s::gw-backend-port (first (gr8s::l4-tcp-route-backends tcp)))))
-    (is (equal '("a.example.com" "*.wild.com") (gr8s::l4-sni-route-hostnames tls)))
-    (is (equal "tls-svc" (gr8s::gw-backend-name (first (gr8s::l4-sni-route-backends tls)))))))
+    (is (equal "data" (gr8s.controllers::l4-tcp-route-namespace tcp)))
+    (is (equal "mysql" (gr8s.controllers::gw-backend-name (first (gr8s.controllers::l4-tcp-route-backends tcp)))))
+    (is (= 3306 (gr8s.controllers::gw-backend-port (first (gr8s.controllers::l4-tcp-route-backends tcp)))))
+    (is (equal '("a.example.com" "*.wild.com") (gr8s.controllers::l4-sni-route-hostnames tls)))
+    (is (equal "tls-svc" (gr8s.controllers::gw-backend-name (first (gr8s.controllers::l4-sni-route-backends tls)))))))
 
 (test gateway-l4-sni-dispatch-prefers-exact
-  (let ((routes (list (gr8s::make-l4-sni-route :hostnames '("*.example.com")
+  (let ((routes (list (gr8s.controllers::make-l4-sni-route :hostnames '("*.example.com")
                                                :backends (list (l4-backend "wild" 1)))
-                      (gr8s::make-l4-sni-route :hostnames '("api.example.com")
+                      (gr8s.controllers::make-l4-sni-route :hostnames '("api.example.com")
                                                :backends (list (l4-backend "exact" 2))))))
-    (is (equal "exact" (gr8s::gw-backend-name (gr8s::l4-sni-dispatch routes "api.example.com"))))
-    (is (equal "wild" (gr8s::gw-backend-name (gr8s::l4-sni-dispatch routes "other.example.com"))))
-    (is (null (gr8s::l4-sni-dispatch routes "nope.org")))
-    (is (null (gr8s::l4-sni-dispatch routes nil)))))
+    (is (equal "exact" (gr8s.controllers::gw-backend-name (gr8s.controllers::l4-sni-dispatch routes "api.example.com"))))
+    (is (equal "wild" (gr8s.controllers::gw-backend-name (gr8s.controllers::l4-sni-dispatch routes "other.example.com"))))
+    (is (null (gr8s.controllers::l4-sni-dispatch routes "nope.org")))
+    (is (null (gr8s.controllers::l4-sni-dispatch routes nil)))))
 
 (test gateway-l4-tcp-splices-to-backend
   (multiple-value-bind (stop-backend backend-port) (l4-start-tag-backend "tcp-ok")
     (let* ((resolver (lambda (b) (declare (ignore b)) (values "127.0.0.1" backend-port)))
            (dispatcher (lambda (sni) (declare (ignore sni)) (l4-backend "db" backend-port)))
-           (listener (gr8s::start-l4-listener :port 0 :mode :tcp
+           (listener (gr8s.controllers::start-l4-listener :port 0 :mode :tcp
                                               :dispatcher dispatcher :resolver resolver :name "tcp")))
       (unwind-protect
            (progn
-             (is (= (l4-listener-bound-port listener) (gr8s::l4-listener-port listener)))
-             (is (equal "tcp-ok" (l4-client-read-tag (gr8s::l4-listener-port listener)
+             (is (= (l4-listener-bound-port listener) (gr8s.controllers::l4-listener-port listener)))
+             (is (equal "tcp-ok" (l4-client-read-tag (gr8s.controllers::l4-listener-port listener)
                                                      :send (babel:string-to-octets "ping")))))
-        (gr8s::stop-l4-listener listener)
+        (gr8s.controllers::stop-l4-listener listener)
         (funcall stop-backend)))))
 
 (test gateway-l4-tls-sni-steers-to-matching-backend
   (multiple-value-bind (stop-a port-a) (l4-start-tag-backend "A")
     (multiple-value-bind (stop-b port-b) (l4-start-tag-backend "B")
-      (let* ((sni-routes (list (gr8s::make-l4-sni-route :hostnames '("one.test")
+      (let* ((sni-routes (list (gr8s.controllers::make-l4-sni-route :hostnames '("one.test")
                                                         :backends (list (l4-backend "a" port-a)))
-                               (gr8s::make-l4-sni-route :hostnames '("two.test")
+                               (gr8s.controllers::make-l4-sni-route :hostnames '("two.test")
                                                         :backends (list (l4-backend "b" port-b)))))
              (resolver (lambda (backend)
                          (values "127.0.0.1"
-                                 (if (equal (gr8s::gw-backend-name backend) "a") port-a port-b))))
-             (dispatcher (lambda (sni) (gr8s::l4-sni-dispatch sni-routes sni)))
-             (listener (gr8s::start-l4-listener :port 0 :mode :tls
+                                 (if (equal (gr8s.controllers::gw-backend-name backend) "a") port-a port-b))))
+             (dispatcher (lambda (sni) (gr8s.controllers::l4-sni-dispatch sni-routes sni)))
+             (listener (gr8s.controllers::start-l4-listener :port 0 :mode :tls
                                                 :dispatcher dispatcher :resolver resolver :name "tls"))
-             (port (gr8s::l4-listener-port listener)))
+             (port (gr8s.controllers::l4-listener-port listener)))
         (unwind-protect
              (progn
                (is (equal "A" (l4-client-read-tag port :send (gwsni-client-hello :server-name "one.test"))))
                (is (equal "B" (l4-client-read-tag port :send (gwsni-client-hello :server-name "two.test")))))
-          (gr8s::stop-l4-listener listener)
+          (gr8s.controllers::stop-l4-listener listener)
           (funcall stop-a)
           (funcall stop-b))))))

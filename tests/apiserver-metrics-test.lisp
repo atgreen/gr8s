@@ -46,10 +46,10 @@
 (test lisp-memory-metrics-scrape-is-read-only-and-history-labels-are-bounded
   (with-temporary-store (store path)
     (values path)
-    (gr8s::create-core-resource store "namespaces"
-                                (gr8s::core-object "metadata" (gr8s::core-object "name" "metrics-example")) nil)
-    (let ((revision (gr8s::pod-store-resource-revision store))
-          (bytes (reduce #'+ (gr8s::pod-store-template-history store)
+    (gr8s.resources::create-core-resource store "namespaces"
+                                (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "metrics-example")) nil)
+    (let ((revision (gr8s.store::pod-store-resource-revision store))
+          (bytes (reduce #'+ (gr8s.store::pod-store-template-history store)
                          :key #'gr8s.resources::template-history-entry-bytes))
           (server nil))
       (unwind-protect
@@ -69,20 +69,20 @@
                (is (search "gr8s_watch_history_entries{kind=\"nodes\"} " body))
                (is (search "gr8s_watch_history_entries{kind=\"pods\"} " body))
                (is-false (search "metrics-example" body)))
-             (is (= revision (gr8s::pod-store-resource-revision store)))
+             (is (= revision (gr8s.store::pod-store-resource-revision store)))
              ;; The collector remains read-only even while the application gate
              ;; is closed; it does not enter the consensus transaction wrapper.
              (gr8s.store::quiesce-store-access store)
              (unwind-protect
                   (progn
                     (is (search "gr8s_watch_history_bytes" (gr8s.server::memory-metrics-text store)))
-                    (is (= revision (gr8s::pod-store-resource-revision store))))
+                    (is (= revision (gr8s.store::pod-store-resource-revision store))))
                (gr8s.store::resume-store-access store)))
         (when server (stop-server server))))))
 
 (test datastore-filesystem-metrics-measure-real-capacity-without-application-access
   (with-temporary-store (store path)
-    (let ((revision (gr8s::pod-store-resource-revision store)))
+    (let ((revision (gr8s.store::pod-store-resource-revision store)))
       (gr8s.store::quiesce-store-access store)
       (unwind-protect
            (let ((text (gr8s.server::datastore-filesystem-metrics-text store)))
@@ -100,7 +100,7 @@
                (is (= (sample "inodes_used") (- (sample "inodes") (sample "inodes_free")))))
              (is-false (search (namestring path) text))
              (is-false (search "{" text))
-             (is (= revision (gr8s::pod-store-resource-revision store))))
+             (is (= revision (gr8s.store::pod-store-resource-revision store))))
         (gr8s.store::resume-store-access store)))))
 
 (test datastore-filesystem-measurement-failure-is-not-zero-capacity
@@ -132,8 +132,8 @@
   (with-temporary-store (store path)
     (values path)
     (flet ((create (name)
-             (gr8s::create-core-resource store "namespaces"
-               (gr8s::core-object "metadata" (gr8s::core-object "name" name)) nil))
+             (gr8s.resources::create-core-resource store "namespaces"
+               (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" name)) nil))
            (sample (metric file)
              (datastore-file-metric-value (gr8s.server::datastore-file-metrics-text store) metric file)))
       (create "file-metrics-first")
@@ -151,8 +151,8 @@
 
 (test datastore-file-metrics-use-selected-application-root-and-stable-raft-root
   (with-temporary-store (store path)
-    (gr8s::create-core-resource store "namespaces"
-      (gr8s::core-object "metadata" (gr8s::core-object "name" "old-root")) nil)
+    (gr8s.resources::create-core-resource store "namespaces"
+      (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "old-root")) nil)
     (let ((old-bytes (sb-posix:stat-size
                        (sb-posix:stat (namestring (gr8s.resources::core-resource-state-path store)))))
           (wal (merge-pathnames "raft/control-plane.log" path)))
@@ -162,20 +162,20 @@
       (let ((staged (make-test-generation-store path)))
         (declare (special *test-store-generation-id*))
         (setf (gr8s.store::pod-store-core-checkpoint-needed staged) t)
-        (gr8s::create-core-resource staged "namespaces"
-          (gr8s::core-object "metadata" (gr8s::core-object "name" "new-root-with-different-checkpoint-size")) nil)
+        (gr8s.resources::create-core-resource staged "namespaces"
+          (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "new-root-with-different-checkpoint-size")) nil)
         (gr8s.store::save-consensus-pod-revision-unlocked staged)
         (finish-test-generation path)
         (gr8s.store::publish-store-generation path *test-store-generation-id*)
-        (setf store (gr8s:open-store path)))
-      (let ((revision (gr8s::pod-store-resource-revision store)))
+        (setf store (gr8s.store::open-store path)))
+      (let ((revision (gr8s.store::pod-store-resource-revision store)))
         (gr8s.store::quiesce-store-access store)
         (unwind-protect
              (let ((text (gr8s.server::datastore-file-metrics-text store)))
                (is (> (datastore-file-metric-value text "gr8s_datastore_file_size_bytes" "core_checkpoint")
                       old-bytes))
                (is (= 4 (datastore-file-metric-value text "gr8s_datastore_file_size_bytes" "raft_wal")))
-               (is (= revision (gr8s::pod-store-resource-revision store)))
+               (is (= revision (gr8s.store::pod-store-resource-revision store)))
                (is-false (search (namestring path) text))
                (is-false (search "new-root" text)))
           (gr8s.store::resume-store-access store))))))
@@ -194,18 +194,18 @@
 
 (test workload-generation-metrics-count-observation-lag-with-fixed-kinds
   (with-temporary-store (store path)
-    (bt:with-lock-held ((gr8s::pod-store-lock store))
+    (bt:with-lock-held ((gr8s.store::pod-store-lock store))
       (flet ((put (kind name desired observed)
-               (setf (gethash (gr8s::core-resource-key kind "private-namespace" name)
-                              (gr8s::pod-store-resources store))
-                     (gr8s::core-object
-                      "metadata" (gr8s::core-object "name" name "generation" desired)
-                      "spec" (gr8s::core-object "payload" "private-payload")
-                      "status" (gr8s::core-object "observedGeneration" observed "readyReplicas" 0)))))
+               (setf (gethash (gr8s.resources::core-resource-key kind "private-namespace" name)
+                              (gr8s.store::pod-store-resources store))
+                     (gr8s.resources::core-object
+                      "metadata" (gr8s.resources::core-object "name" name "generation" desired)
+                      "spec" (gr8s.resources::core-object "payload" "private-payload")
+                      "status" (gr8s.resources::core-object "observedGeneration" observed "readyReplicas" 0)))))
         (put "deployments" "private-behind" 3 2)
         (put "deployments" "private-observed-not-ready" 3 3)
         (put "statefulsets" "private-unobserved" 2 'null)))
-    (let ((revision (gr8s::pod-store-resource-revision store)))
+    (let ((revision (gr8s.store::pod-store-resource-revision store)))
       (gr8s.store::quiesce-store-access store)
       (unwind-protect
            (let ((text (gr8s.server::workload-generation-metrics-text store)))
@@ -215,7 +215,7 @@
              (is (search "gr8s_workload_objects{kind=\"daemonsets\"} 0" text))
              (is-false (search "private-" text))
              (is-false (search (namestring path) text))
-             (is (= revision (gr8s::pod-store-resource-revision store))))
+             (is (= revision (gr8s.store::pod-store-resource-revision store))))
         (gr8s.store::resume-store-access store))))
   (is (equal "" (gr8s.server::workload-generation-metrics-text))))
 
@@ -247,12 +247,12 @@
 (test apiserver-requests-are-counted-as-upstream-labels-them
   (with-temporary-store (store path)
     (values path)
-    (let ((previous gr8s::*apiserver-request-metrics*) (server nil))
-      (setf gr8s::*apiserver-request-metrics* (gr8s::make-apiserver-request-metrics))
+    (let ((previous gr8s.apiserver::*apiserver-request-metrics*) (server nil))
+      (setf gr8s.apiserver::*apiserver-request-metrics* (gr8s.apiserver::make-apiserver-request-metrics))
       (unwind-protect
            (progn
              (setf server (start-http-test-server :store store :runtime (make-fake-runtime)))
-             (gr8s::create-core-resource store "namespaces" (gr8s::core-object "metadata" (gr8s::core-object "name" "alpha")) nil)
+             (gr8s.resources::create-core-resource store "namespaces" (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "alpha")) nil)
              (apiserver-metrics-request "/api/v1/namespaces/alpha/configmaps")
              (apiserver-metrics-request "/api/v1/namespaces/alpha/configmaps" :method :post :content-type "application/json"
                                         :content "{\"apiVersion\":\"v1\",\"kind\":\"ConfigMap\",\"metadata\":{\"name\":\"one\"}}")
@@ -290,7 +290,7 @@
                (is (search "# TYPE process_resident_memory_bytes gauge" text))
                ;; The GET and its 404 share one latency series.
                (is (search "apiserver_request_duration_seconds_count{component=\"apiserver\",dry_run=\"\",group=\"\",resource=\"configmaps\",scope=\"resource\",subresource=\"\",verb=\"GET\",version=\"v1\"} 2" text))))
-        (setf gr8s::*apiserver-request-metrics* previous)
+        (setf gr8s.apiserver::*apiserver-request-metrics* previous)
         (when server (stop-server server))))))
 
 (defun count-matches (regex text)
@@ -298,27 +298,27 @@
   (count-if (lambda (line) (cl-ppcre:scan regex line)) (uiop:split-string text :separator '(#\Newline))))
 
 (test apiserver-request-series-are-bounded
-  (let ((metrics (gr8s::make-apiserver-request-metrics))
-        (gr8s::+apiserver-request-series-limit+ 3))
+  (let ((metrics (gr8s.apiserver::make-apiserver-request-metrics))
+        (gr8s.apiserver::+apiserver-request-series-limit+ 3))
     (loop for index below 10
-          do (gr8s::record-apiserver-request (list "GET" "" "" "v1" (format nil "r~D" index) "" "resource") 200 0.01
+          do (gr8s.apiserver::record-apiserver-request (list "GET" "" "" "v1" (format nil "r~D" index) "" "resource") 200 0.01
                                              :metrics metrics))
-    (is (= 3 (hash-table-count (gr8s::apiserver-request-metrics-counts metrics))))
-    (is (= 3 (hash-table-count (gr8s::apiserver-request-metrics-durations metrics))))
+    (is (= 3 (hash-table-count (gr8s.apiserver::apiserver-request-metrics-counts metrics))))
+    (is (= 3 (hash-table-count (gr8s.apiserver::apiserver-request-metrics-durations metrics))))
     ;; A known series keeps counting, and a 429 has no latency.
-    (gr8s::record-apiserver-request (list "GET" "" "" "v1" "r0" "" "resource") 200 nil :metrics metrics)
-    (is (= 2 (gethash (list "GET" "" "" "v1" "r0" "" "resource" "200") (gr8s::apiserver-request-metrics-counts metrics))))
-    (is (= 1 (gr8s::histogram-count
-              (gethash (list "GET" "" "" "v1" "r0" "" "resource") (gr8s::apiserver-request-metrics-durations metrics)))))
+    (gr8s.apiserver::record-apiserver-request (list "GET" "" "" "v1" "r0" "" "resource") 200 nil :metrics metrics)
+    (is (= 2 (gethash (list "GET" "" "" "v1" "r0" "" "resource" "200") (gr8s.apiserver::apiserver-request-metrics-counts metrics))))
+    (is (= 1 (gr8s.kubelet::histogram-count
+              (gethash (list "GET" "" "" "v1" "r0" "" "resource") (gr8s.apiserver::apiserver-request-metrics-durations metrics)))))
     ;; A dry run has no SLI series.
-    (gr8s::record-apiserver-request (list "DELETE" "All" "" "v1" "r0" "" "resource") 200 0.01 :metrics metrics)
-    (is (null (gethash (list "DELETE" "" "v1" "r0" "" "resource") (gr8s::apiserver-request-metrics-sli metrics))))))
+    (gr8s.apiserver::record-apiserver-request (list "DELETE" "All" "" "v1" "r0" "" "resource") 200 0.01 :metrics metrics)
+    (is (null (gethash (list "DELETE" "" "v1" "r0" "" "resource") (gr8s.apiserver::apiserver-request-metrics-sli metrics))))))
 
 (test inflight-watermark-is-the-last-seconds-maximum
-  (let ((metrics (gr8s::make-apiserver-request-metrics)))
-    (gr8s::note-inflight-change :mutating 1 :metrics metrics :now 100)
-    (gr8s::note-inflight-change :mutating 1 :metrics metrics :now 100)
-    (gr8s::note-inflight-change :mutating -1 :metrics metrics :now 100)
-    (gr8s::note-inflight-change :mutating -1 :metrics metrics :now 101)
-    (is (= 2 (getf (gr8s::apiserver-request-metrics-published metrics) :mutating)))
-    (is (= 0 (getf (gr8s::apiserver-request-metrics-inflight metrics) :mutating)))))
+  (let ((metrics (gr8s.apiserver::make-apiserver-request-metrics)))
+    (gr8s.apiserver::note-inflight-change :mutating 1 :metrics metrics :now 100)
+    (gr8s.apiserver::note-inflight-change :mutating 1 :metrics metrics :now 100)
+    (gr8s.apiserver::note-inflight-change :mutating -1 :metrics metrics :now 100)
+    (gr8s.apiserver::note-inflight-change :mutating -1 :metrics metrics :now 101)
+    (is (= 2 (getf (gr8s.apiserver::apiserver-request-metrics-published metrics) :mutating)))
+    (is (= 0 (getf (gr8s.apiserver::apiserver-request-metrics-inflight metrics) :mutating)))))

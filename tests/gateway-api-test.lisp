@@ -55,7 +55,7 @@
             ;; Duplicate create conflicts; GET and the store round-trip match.
             (check-core-status 409 collection :method :post :object object)
             (is (equalp created (check-core-status 200 url)))
-            (is (equalp created (gr8s::get-core-resource (open-store directory) resource namespace name)))
+            (is (equalp created (gr8s.resources::get-core-resource (open-store directory) resource namespace name)))
             (let ((list (check-core-status 200 collection)))
               (is (= 1 (length (gethash "items" list)))))))))
     ;; Cluster-scoped GatewayClass must not be reachable under a namespace.

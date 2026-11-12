@@ -34,7 +34,7 @@
                                  name value))))
 
 (defun smoke-leader (nodes)
-  (find-if (lambda (n) (gr8s::ha-control-plane-leader-p (smoke-node-hcp n))) nodes))
+  (find-if (lambda (n) (gr8s.ha::ha-control-plane-leader-p (smoke-node-hcp n))) nodes))
 
 (test three-member-control-plane-survives-leader-loss
   ;; Each member's API takes a kernel-assigned port: fixed ones collided with other
@@ -49,28 +49,28 @@
                           ;; The API listens before its member starts, which needs the
                           ;; API's URL; it answers leadership once the member exists.
                           (let* ((hcp nil)
-                                 (server (gr8s::start-server
+                                 (server (gr8s.apiserver::start-server
                                           :address "127.0.0.1" :port 0
                                           :store store
-                                          :leader-status-fn (lambda () (gr8s::ha-control-plane-leader-status hcp))))
+                                          :leader-status-fn (lambda () (gr8s.ha::ha-control-plane-leader-status hcp))))
                                  (http-port (hunchentoot:acceptor-port server)))
                             (setf hcp (funcall start (format nil "http://127.0.0.1:~D" http-port)))
                             (push (make-smoke-node :hcp hcp :store store :server server :port http-port) nodes)
                             hcp)))
                  ;; Found cp1, then join cp2 and cp3, each with its API URL.
-                 (let ((h1 (bring-up s1 (lambda (url) (gr8s::start-ha-control-plane
+                 (let ((h1 (bring-up s1 (lambda (url) (gr8s.ha::start-ha-control-plane
                                                        s1 :id "cp1" :init t :api-url url)))))
-                   (is (poll-until (lambda () (gr8s::ha-control-plane-leader-p h1))))
-                   (let ((lp (gr8s::raft-member-port (gr8s::ha-control-plane-member h1))))
-                     (bring-up s2 (lambda (url) (gr8s::start-ha-control-plane
+                   (is (poll-until (lambda () (gr8s.ha::ha-control-plane-leader-p h1))))
+                   (let ((lp (gr8s.raft.transport::raft-member-port (gr8s.ha::ha-control-plane-member h1))))
+                     (bring-up s2 (lambda (url) (gr8s.ha::start-ha-control-plane
                                                  s2 :id "cp2" :join-host "127.0.0.1" :join-port lp :api-url url)))
-                     (bring-up s3 (lambda (url) (gr8s::start-ha-control-plane
+                     (bring-up s3 (lambda (url) (gr8s.ha::start-ha-control-plane
                                                  s3 :id "cp3" :join-host "127.0.0.1" :join-port lp :api-url url)))))
                  (is (poll-until
                       (lambda ()
                         (every (lambda (n)
-                                 (let ((members (gr8s::raft-cluster-members
-                                                 (gr8s::ha-control-plane-member (smoke-node-hcp n)))))
+                                 (let ((members (gr8s.raft.transport::raft-cluster-members
+                                                 (gr8s.ha::ha-control-plane-member (smoke-node-hcp n)))))
                                    (and (= 3 (length members))
                                         (every (lambda (entry) (eq :voter (cdr entry))) members))))
                                nodes))
@@ -91,8 +91,8 @@
 
                  ;; Kill the leader.
                  (let* ((old-leader (smoke-leader nodes)))
-                   (gr8s::stop-ha-control-plane (smoke-node-hcp old-leader))
-                   (gr8s::stop-server (smoke-node-server old-leader))
+                   (gr8s.ha::stop-ha-control-plane (smoke-node-hcp old-leader))
+                   (gr8s.apiserver::stop-server (smoke-node-server old-leader))
                    (setf nodes (remove old-leader nodes))
                    (is (poll-until (lambda () (smoke-leader nodes)) :timeout 20)
                        "a survivor becomes the new leader")
@@ -113,5 +113,5 @@
                           :timeout 10)
                          "the new write replicates to every survivor"))))
             (dolist (n nodes)
-              (ignore-errors (gr8s::stop-server (smoke-node-server n)))
-              (ignore-errors (gr8s::stop-ha-control-plane (smoke-node-hcp n))))))))))
+              (ignore-errors (gr8s.apiserver::stop-server (smoke-node-server n)))
+              (ignore-errors (gr8s.ha::stop-ha-control-plane (smoke-node-hcp n))))))))))

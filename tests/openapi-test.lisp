@@ -42,7 +42,7 @@
   (let ((missing '()))
     (maphash (lambda (name schema)
                (declare (ignore name))
-               (dolist (reference (gr8s::openapi-schema-references schema))
+               (dolist (reference (gr8s.apiserver::openapi-schema-references schema))
                  (unless (gethash reference definitions) (pushnew reference missing :test #'equal))))
              definitions)
     missing))
@@ -134,13 +134,13 @@ must be numeric, a boolean boolean, and a string accepts any scalar."
   (with-core-api (store path)
     (values store path)
     (let ((urls (gethash "paths" (check-core-status 200 "/openapi/v3")))
-          (upstream (gethash "schemas" gr8s::*upstream-openapi*)))
+          (upstream (gethash "schemas" gr8s.apiserver::*upstream-openapi*)))
       (maphash
        (lambda (key names)
          (let ((url (gethash key urls)))
            (is (hash-table-p url) "/openapi/v3 does not list ~A" key)
            (when url
-             (is (search gr8s::+openapi-schema-hash+ (gethash "serverRelativeURL" url)))
+             (is (search gr8s.apiserver::+openapi-schema-hash+ (gethash "serverRelativeURL" url)))
              (let* ((schemas (gethash "schemas" (gethash "components" (check-core-status 200 (format nil "/openapi/v3/~A" key)))))
                     (index (openapi-gvk-index schemas)))
                (is (null (openapi-dangling-references schemas)) "~A has dangling references" key)
@@ -148,10 +148,10 @@ must be numeric, a boolean boolean, and a string accepts any scalar."
                (loop for name across names
                      for served = (gethash name schemas)
                      do (is (hash-table-p served) "~A does not publish ~A" key name)
-                        (unless (member name gr8s::+openapi-registered-everywhere+ :test #'equal)
+                        (unless (member name gr8s.apiserver::+openapi-registered-everywhere+ :test #'equal)
                           (is (json-equal (gethash name upstream) served)
                               "~A publishes a different ~A" key name)))))))
-       (gethash "documents" gr8s::*upstream-openapi*))
+       (gethash "documents" gr8s.apiserver::*upstream-openapi*))
       ;; Every manifest's kind is described in its version's document, as kubectl explain needs.
       (dolist (manifest (openapi-fixture-manifests))
         (let* ((api-version (gethash "apiVersion" manifest))
@@ -174,4 +174,4 @@ must be numeric, a boolean boolean, and a string accepts any scalar."
      \"port\":{\"x-kubernetes-int-or-string\":true,\"type\":\"string\"},
      \"items\":{\"type\":\"array\",\"items\":{\"$ref\":\"#/definitions/X\"}},
      \"map\":{\"type\":\"object\",\"additionalProperties\":{\"type\":\"string\"}}}}")
-                (gr8s::openapi-v2-schema schema)))))
+                (gr8s.apiserver::openapi-v2-schema schema)))))

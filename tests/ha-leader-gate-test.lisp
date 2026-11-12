@@ -18,7 +18,7 @@
            (reconciler (make-reconciler store runtime))
            (leader nil)                 ; promotion toggle, flipped by the test
            (passes 0)                   ; reconcile passes actually run
-           (worker (gr8s::start-reconciliation-worker
+           (worker (gr8s.server::start-reconciliation-worker
                     reconciler
                     :interval 0.01
                     :leader-gate (lambda () leader)
@@ -41,4 +41,4 @@
              (let ((frozen passes))
                (sleep 0.2)
                (is (= frozen passes) "a demoted leader stops reconciling")))
-        (gr8s::stop-reconciliation-worker worker)))))
+        (gr8s.server::stop-reconciliation-worker worker)))))

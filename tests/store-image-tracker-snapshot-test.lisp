@@ -120,7 +120,7 @@
         (is (eq lock (gr8s.image-distribution::image-tracker-lock tracker)))
         (is (equalp expected (snapshot-tracker-records tracker)))
         (gr8s.store::resume-store-access store)
-        (let ((reopened (gr8s:open-store root)))
+        (let ((reopened (gr8s.store::open-store root)))
           (is (equalp expected (snapshot-tracker-records (gr8s.store:pod-store-image-tracker reopened)))))))))
 
 (test tracker-snapshot-rejects-duplicates-and-inconsistent-relationships
@@ -174,19 +174,19 @@
       (gr8s.security::write-private-text-exclusively
        path "{\"kind\":\"imageTrackerConfig\",\"originLeaseSeconds\":30,\"peerTtlSeconds\":90}")
       (sb-posix:chmod (namestring path) #o644)
-      (signals error (gr8s:open-store root))
+      (signals error (gr8s.store::open-store root))
       (sb-posix:chmod (namestring path) #o600)
       (let ((link (merge-pathnames "tracker-link.jsonl" root)))
         (sb-posix:link (namestring path) (namestring link))
-        (signals error (gr8s:open-store root))
+        (signals error (gr8s.store::open-store root))
         (delete-file link))
       (let ((target (merge-pathnames "tracker-target.jsonl" root)))
         (rename-file path target)
         (sb-posix:symlink (namestring target) (namestring path))
-        (signals error (gr8s:open-store root))
+        (signals error (gr8s.store::open-store root))
         (delete-file path))
       (gr8s.security::write-private-text-exclusively path "")
-      (signals error (gr8s:open-store root)))))
+      (signals error (gr8s.store::open-store root)))))
 
 
 (test large-canonical-tracker-metainfo-survives-streamed-snapshot-and-reopen
@@ -229,7 +229,7 @@
                                 (gr8s.image-distribution::tracker-swarm-metainfo
                                  (gethash digest (gr8s.image-distribution::image-tracker-swarms tracker)))))))
               (gr8s.store::resume-store-access store)))
-          (let* ((reopened (gr8s:open-store root))
+          (let* ((reopened (gr8s.store::open-store root))
                  (swarm (gethash digest (gr8s.image-distribution::image-tracker-swarms
                                          (gr8s.store:pod-store-image-tracker reopened)))))
             (is (not (null swarm)))

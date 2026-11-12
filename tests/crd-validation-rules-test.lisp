@@ -16,14 +16,14 @@
 
 (defun rule-definition (schema-text &key (plural "rulers"))
   "Build a definition whose single version uses the JSON schema SCHEMA-TEXT."
-  (gr8s::core-object
+  (gr8s.resources::core-object
    "apiVersion" "apiextensions.k8s.io/v1" "kind" "CustomResourceDefinition"
-   "metadata" (gr8s::core-object "name" (format nil "~A.rules.example.test" plural))
-   "spec" (gr8s::core-object
+   "metadata" (gr8s.resources::core-object "name" (format nil "~A.rules.example.test" plural))
+   "spec" (gr8s.resources::core-object
            "group" "rules.example.test" "scope" "Namespaced"
-           "names" (gr8s::core-object "plural" plural "kind" "Ruler")
-           "versions" (vector (gr8s::core-object "name" "v1" "served" t "storage" t
-                                                 "schema" (gr8s::core-object "openAPIV3Schema" (rule-schema schema-text)))))))
+           "names" (gr8s.resources::core-object "plural" plural "kind" "Ruler")
+           "versions" (vector (gr8s.resources::core-object "name" "v1" "served" t "storage" t
+                                                 "schema" (gr8s.resources::core-object "openAPIV3Schema" (rule-schema schema-text)))))))
 
 (defparameter +rule-spec-schema+
   "{\"type\":\"object\",\"properties\":{\"spec\":{\"type\":\"object\",\"x-kubernetes-validations\":[
@@ -39,8 +39,8 @@
 
 (defun rule-object (name &rest fields)
   "Build a Ruler in namespace default with FIELDS at its top level."
-  (let ((object (gr8s::core-object "apiVersion" "rules.example.test/v1" "kind" "Ruler"
-                                   "metadata" (gr8s::core-object "name" name "namespace" "default"))))
+  (let ((object (gr8s.resources::core-object "apiVersion" "rules.example.test/v1" "kind" "Ruler"
+                                   "metadata" (gr8s.resources::core-object "name" name "namespace" "default"))))
     (loop for (key value) on fields by #'cddr do (setf (gethash key object) value))
     object))
 
@@ -54,7 +54,7 @@
 
 (defun rule-spec (&rest fields)
   "Build a spec object from FIELDS."
-  (apply #'gr8s::core-object fields))
+  (apply #'gr8s.resources::core-object fields))
 
 (test comprehension-results-carry-their-source-size-bound
   ;; A map/filter/transform result holds at most as many entries as its source,
@@ -62,13 +62,13 @@
   ;; source is bounded. Regression: these results were typed as unbounded, which
   ;; inflated the estimate to ~9e17 and refused WorkerPool's immutability rule
   ;; self.map(c, c.name) == oldSelf.map(c, c.name) over a maxItems:1 array.
-  (let* ((item (gr8s::core-object "type" "object" "required" #("name")
-                                  "properties" (gr8s::core-object "name" (gr8s::core-object "type" "string"))))
-         (bounded (gr8s::core-object "type" "array" "maxItems" 1 "items" item)))
+  (let* ((item (gr8s.resources::core-object "type" "object" "required" #("name")
+                                  "properties" (gr8s.resources::core-object "name" (gr8s.resources::core-object "type" "string"))))
+         (bounded (gr8s.resources::core-object "type" "array" "maxItems" 1 "items" item)))
     (flet ((cost (schema)
-             (nth-value 2 (gr8s::crd-compile-rule-expression
+             (nth-value 2 (gr8s.resources::crd-compile-rule-expression
                            "self.map(c, c.name) == oldSelf.map(c, c.name)" schema nil nil))))
-      (is (< (cost bounded) gr8s::+crd-rule-cost-limit+)))))
+      (is (< (cost bounded) gr8s.resources::+crd-rule-cost-limit+)))))
 
 (test object-immutability-rules-admit-and-enforce-updates
   ;; KubeVirt's backup CRDs put this transition rule on the entire spec.
@@ -120,7 +120,7 @@
   (with-core-api (store path)
     (values store path)
     (check-core-status 201 "/api/v1/namespaces" :method :post
-      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "default")))
+      :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s.resources::core-object "name" "default")))
     (check-core-status 201 +rule-crd-path+ :method :post :object (rule-definition +rule-spec-schema+))
     (check-core-status 201 +rule-path+ :method :post
       :object (rule-object "ok" "spec" (rule-spec "x" 1 "y" 0 "firstArray" #(3 4) "secondArray" #(5 10) "largeArray" #(2 2))))
@@ -140,7 +140,7 @@
                         (format nil "{~A,\"x-kubernetes-validations\":[~A]}"
                                 (subseq property 1 (1- (length property))) rule-json))))
     (check-core-status 201 "/api/v1/namespaces" :method :post
-      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "default")))
+      :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s.resources::core-object "name" "default")))
     (check-core-status 201 +rule-crd-path+ :method :post :object (rule-definition schema))))
 
 (test transition-rules-compare-with-the-old-object
@@ -148,11 +148,11 @@
     (values store path)
     (rule-simple-definition "{\"rule\":\"self > oldSelf\"}")
     (let ((created (check-core-status 201 +rule-path+ :method :post :object (rule-object "one" "spec" (rule-spec "num" 10)))))
-      (let ((lower (gr8s::copy-core-object created)))
+      (let ((lower (gr8s.resources::copy-core-object created)))
         (setf (gethash "num" (gethash "spec" lower)) 9)
         (let ((status (check-core-status 422 (concatenate 'string +rule-path+ "/one") :method :put :object lower)))
           (is (search "failed rule" (gethash "message" status)) "~A" (gethash "message" status))))
-      (let ((higher (gr8s::copy-core-object created)))
+      (let ((higher (gr8s.resources::copy-core-object created)))
         (setf (gethash "num" (gethash "spec" higher)) 11)
         (check-core-status 200 (concatenate 'string +rule-path+ "/one") :method :put :object higher)))))
 
@@ -169,8 +169,8 @@
 
 (defun rule-cel (expression &rest bindings)
   "Evaluate EXPRESSION with library functions enabled."
-  (let ((gr8s::*cel-declared-variables* '("self")))
-    (gr8s::evaluate-cel-value (gr8s::compile-cel-expression expression)
+  (let ((cl-cel::*cel-declared-variables* '("self")))
+    (cl-cel::evaluate-cel-value (cl-cel::compile-cel-expression expression)
                               (loop for (name value) on bindings by #'cddr collect (cons name value)))))
 
 (test cel-libraries-behave-as-kubernetes-documents
@@ -242,8 +242,8 @@
   (is (equalp #(3 2 1) (rule-cel "[1,2,3].sortBy(x, -x)")))
   (is (equalp #("bb" "a" "cc") (rule-cel "['a','bb','cc'].sortBy(s, s == 'bb' ? 0 : 1)")))
   (is (eq t (rule-cel "[{'n': 2}, {'n': 1}].sortBy(m, m.n)[0].n == 1")))
-  (signals gr8s::cel-compile-error (gr8s::compile-cel-expression "[1,2].sortBy(x, [x])"))
-  (signals gr8s::cel-evaluation-error (rule-cel "[dyn(1), dyn('a')].sortBy(x, x)")))
+  (signals cl-cel::cel-compile-error (cl-cel::compile-cel-expression "[1,2].sortBy(x, [x])"))
+  (signals cl-cel::cel-evaluation-error (rule-cel "[dyn(1), dyn('a')].sortBy(x, x)")))
 
 (test cel-time-zone-names-read-the-zone-database
   ;; CEL resolves named zones through cl-cel's own zone database, not the cron
@@ -258,13 +258,13 @@
     (is (= 1 (rule-cel "timestamp('2026-03-10T23:30:00Z').getHours('Test/CelZone')")))
     (is (= 23 (rule-cel "timestamp('2026-03-10T23:30:00Z').getHours('UTC')")))
     (is (= 18 (rule-cel "timestamp('2026-03-10T23:30:00Z').getHours('-05:00')")))
-    (signals gr8s::cel-evaluation-error (rule-cel "timestamp('2026-03-10T23:30:00Z').getHours('No/SuchZone')"))))
+    (signals cl-cel::cel-evaluation-error (rule-cel "timestamp('2026-03-10T23:30:00Z').getHours('No/SuchZone')"))))
 
 (test set-and-map-lists-compare-without-order
   (with-core-api (store path)
     (values store path)
     (check-core-status 201 "/api/v1/namespaces" :method :post
-      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "default")))
+      :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s.resources::core-object "name" "default")))
     (check-core-status 201 +rule-crd-path+ :method :post
       :object (rule-definition
                "{\"type\":\"object\",\"properties\":{\"spec\":{\"type\":\"object\",
@@ -280,36 +280,36 @@
     (check-core-status 201 +rule-path+ :method :post
       :object (rule-object "unordered" "spec"
                            (rule-spec "tags" #("b" "a")
-                                      "ports" (vector (gr8s::core-object "name" "y" "port" "2")
-                                                      (gr8s::core-object "name" "x" "port" "1")))))
+                                      "ports" (vector (gr8s.resources::core-object "name" "y" "port" "2")
+                                                      (gr8s.resources::core-object "name" "x" "port" "1")))))
     (let ((status (check-core-status 422 +rule-path+ :method :post
                     :object (rule-object "different" "spec"
                                          (rule-spec "tags" #("b" "c")
-                                                    "ports" (vector (gr8s::core-object "name" "y" "port" "3")
-                                                                    (gr8s::core-object "name" "x" "port" "1")))))))
+                                                    "ports" (vector (gr8s.resources::core-object "name" "y" "port" "3")
+                                                                    (gr8s.resources::core-object "name" "x" "port" "1")))))))
       (is (search "self.tags == ['a','b']" (gethash "message" status)) "~A" (gethash "message" status))
       (is (search "self.ports ==" (gethash "message" status)) "~A" (gethash "message" status)))))
 
 (test policy-expressions-share-a-runtime-budget
-  (let ((program (gr8s::compile-cel-expression "[1,2,3].all(x, x > 0)")))
+  (let ((program (cl-cel::compile-cel-expression "[1,2,3].all(x, x > 0)")))
     ;; Alone each expression has only its per-call limit.
-    (is (eq t (gr8s::evaluate-cel-condition program nil)))
+    (is (eq t (cl-cel::evaluate-cel-condition program nil)))
     ;; A shared budget runs down across expressions, and once spent none of the rest runs.
     (let ((cell (list 1000)))
-      (let ((gr8s::*cel-shared-budget* cell)) (gr8s::evaluate-cel-condition program nil))
+      (let ((cl-cel::*cel-shared-budget* cell)) (cl-cel::evaluate-cel-condition program nil))
       (let ((used (- 1000 (car cell))))
         (is (plusp used))
-        (gr8s::with-cel-budget ((+ (* 2 used) (floor used 2)))
-          (is (eq t (gr8s::evaluate-cel-condition program nil)))
-          (is (eq t (gr8s::evaluate-cel-condition program nil)))
-          (signals gr8s::cel-budget-exhausted (gr8s::evaluate-cel-condition program nil))
-          (signals gr8s::cel-budget-exhausted (gr8s::evaluate-cel-condition program nil)))))))
+        (cl-cel::with-cel-budget ((+ (* 2 used) (floor used 2)))
+          (is (eq t (cl-cel::evaluate-cel-condition program nil)))
+          (is (eq t (cl-cel::evaluate-cel-condition program nil)))
+          (signals cl-cel::cel-budget-exhausted (cl-cel::evaluate-cel-condition program nil))
+          (signals cl-cel::cel-budget-exhausted (cl-cel::evaluate-cel-condition program nil)))))))
 
 (test custom-resource-formats-and-patterns-are-enforced
   (with-core-api (store path)
     (values store path)
     (check-core-status 201 "/api/v1/namespaces" :method :post
-      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "default")))
+      :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s.resources::core-object "name" "default")))
     (check-core-status 201 +rule-crd-path+ :method :post
       :object (rule-definition
                "{\"type\":\"object\",\"properties\":{
@@ -331,24 +331,24 @@
     (values store path)
     (flet ((policy (name &rest validations)
              (check-core-status 201 "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies" :method :post
-               :object (gr8s::core-object
+               :object (gr8s.resources::core-object
                         "apiVersion" "admissionregistration.k8s.io/v1" "kind" "ValidatingAdmissionPolicy"
-                        "metadata" (gr8s::core-object "name" name)
-                        "spec" (gr8s::core-object
+                        "metadata" (gr8s.resources::core-object "name" name)
+                        "spec" (gr8s.resources::core-object
                                 "matchConstraints"
-                                (gr8s::core-object
+                                (gr8s.resources::core-object
                                  "resourceRules"
-                                 (vector (gr8s::core-object "apiGroups" #("apps") "apiVersions" #("v1")
+                                 (vector (gr8s.resources::core-object "apiGroups" #("apps") "apiVersions" #("v1")
                                                             "operations" #("CREATE") "resources" #("deployments"))))
                                 "validations" (coerce validations 'vector))))))
-      (let* ((good (policy "good" (gr8s::core-object "expression" "object.spec.replicas > 1")))
+      (let* ((good (policy "good" (gr8s.resources::core-object "expression" "object.spec.replicas > 1")))
              (status (gethash "status" good)))
         (is (= 1 (gethash "observedGeneration" status)))
         (is (hash-table-p (gethash "typeChecking" status)))
         (is (not (gethash "expressionWarnings" (gethash "typeChecking" status)))))
-      (let* ((bad (policy "bad" (gr8s::core-object "expression" "object.spec.replicas > '1'"
+      (let* ((bad (policy "bad" (gr8s.resources::core-object "expression" "object.spec.replicas > '1'"
                                                    "messageExpression" "'wants replicas > 1, got ' + object.spec.replicas")
-                          (gr8s::core-object "expression" "object.spec.maxRetries < 10")))
+                          (gr8s.resources::core-object "expression" "object.spec.maxRetries < 10")))
              (warnings (gethash "expressionWarnings" (gethash "typeChecking" (gethash "status" bad)))))
         (is (= 3 (length warnings)))
         (is (equal "spec.validations[0].expression" (gethash "fieldRef" (aref warnings 0))))
@@ -361,76 +361,76 @@
   (with-core-api (store path)
     (values store path)
     (check-core-status 201 "/api/v1/namespaces" :method :post
-      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "alpha")))
+      :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s.resources::core-object "name" "alpha")))
     (check-core-status 201 "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies" :method :post
-      :object (gr8s::core-object
+      :object (gr8s.resources::core-object
                "apiVersion" "admissionregistration.k8s.io/v1" "kind" "ValidatingAdmissionPolicy"
-               "metadata" (gr8s::core-object "name" "authz")
-               "spec" (gr8s::core-object
+               "metadata" (gr8s.resources::core-object "name" "authz")
+               "spec" (gr8s.resources::core-object
                        "matchConstraints"
-                       (gr8s::core-object
+                       (gr8s.resources::core-object
                         "resourceRules"
-                        (vector (gr8s::core-object "apiGroups" #("") "apiVersions" #("v1")
+                        (vector (gr8s.resources::core-object "apiGroups" #("") "apiVersions" #("v1")
                                                    "operations" #("CREATE") "resources" #("configmaps"))))
                        "validations"
-                       (vector (gr8s::core-object
+                       (vector (gr8s.resources::core-object
                                 "expression"
                                 "authorizer.group('').resource('secrets').namespace('alpha').check('get').allowed() && authorizer.requestResource.check('create').allowed() && jsonpatch.escapeKey('a/b') == 'a~1b'"
                                 "message" "denied by authorizer"))
-                       "auditAnnotations" (vector (gr8s::core-object "key" "seen" "valueExpression" "object.metadata.name")))))
+                       "auditAnnotations" (vector (gr8s.resources::core-object "key" "seen" "valueExpression" "object.metadata.name")))))
     (check-core-status 201 "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicybindings" :method :post
-      :object (gr8s::core-object
+      :object (gr8s.resources::core-object
                "apiVersion" "admissionregistration.k8s.io/v1" "kind" "ValidatingAdmissionPolicyBinding"
-               "metadata" (gr8s::core-object "name" "authz")
-               "spec" (gr8s::core-object "policyName" "authz" "validationActions" #("Deny"))))
+               "metadata" (gr8s.resources::core-object "name" "authz")
+               "spec" (gr8s.resources::core-object "policyName" "authz" "validationActions" #("Deny"))))
     ;; The local listener acts as a cluster administrator, so every check passes.
     (check-core-status 201 "/api/v1/namespaces/alpha/configmaps" :method :post :object (core-fixture "ConfigMap" "one"))
     (check-core-status 422 "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies" :method :post
-      :object (gr8s::core-object
+      :object (gr8s.resources::core-object
                "apiVersion" "admissionregistration.k8s.io/v1" "kind" "ValidatingAdmissionPolicy"
-               "metadata" (gr8s::core-object "name" "bad-key")
-               "spec" (gr8s::core-object
-                       "matchConstraints" (gr8s::core-object "resourceRules" #())
-                       "auditAnnotations" (vector (gr8s::core-object "key" "NOT OK" "valueExpression" "'x'")))))))
+               "metadata" (gr8s.resources::core-object "name" "bad-key")
+               "spec" (gr8s.resources::core-object
+                       "matchConstraints" (gr8s.resources::core-object "resourceRules" #())
+                       "auditAnnotations" (vector (gr8s.resources::core-object "key" "NOT OK" "valueExpression" "'x'")))))))
 
 (test requests-classify-by-flow-schema-and-report-it
   (with-core-api (store path)
     (values store path)
-    (gr8s::reconcile-flowcontrol store)
-    (let* ((admin (gr8s::make-api-user-identity :username "system:admin" :groups #("system:masters" "system:authenticated")))
-           (user (gr8s::make-api-user-identity :username "noxu" :groups #("system:authenticated")))
-           (other (gr8s::make-api-user-identity :username "foo" :groups #("system:authenticated")))
-           (exempt (gethash "uid" (gethash "metadata" (gr8s::get-core-resource store "flowschemas" nil "exempt"))))
-           (catch-all (gethash "uid" (gethash "metadata" (gr8s::get-core-resource store "flowschemas" nil "catch-all")))))
-      (is (equal exempt (gr8s::flowcontrol-classify store admin "/api/v1/pods" :get)))
-      (is (equal catch-all (gr8s::flowcontrol-classify store other "/healthz" :get)))
+    (gr8s.apiserver::reconcile-flowcontrol store)
+    (let* ((admin (gr8s.resources::make-api-user-identity :username "system:admin" :groups #("system:masters" "system:authenticated")))
+           (user (gr8s.resources::make-api-user-identity :username "noxu" :groups #("system:authenticated")))
+           (other (gr8s.resources::make-api-user-identity :username "foo" :groups #("system:authenticated")))
+           (exempt (gethash "uid" (gethash "metadata" (gr8s.resources::get-core-resource store "flowschemas" nil "exempt"))))
+           (catch-all (gethash "uid" (gethash "metadata" (gr8s.resources::get-core-resource store "flowschemas" nil "catch-all")))))
+      (is (equal exempt (gr8s.apiserver::flowcontrol-classify store admin "/api/v1/pods" :get)))
+      (is (equal catch-all (gr8s.apiserver::flowcontrol-classify store other "/healthz" :get)))
       (check-core-status 201 "/apis/flowcontrol.apiserver.k8s.io/v1/prioritylevelconfigurations" :method :post
-        :object (gr8s::core-object "apiVersion" "flowcontrol.apiserver.k8s.io/v1" "kind" "PriorityLevelConfiguration"
-                                   "metadata" (gr8s::core-object "name" "test-level")
-                                   "spec" (gr8s::core-object "type" "Limited"
-                                                             "limited" (gr8s::core-object "nominalConcurrencyShares" 1
-                                                                                          "limitResponse" (gr8s::core-object "type" "Reject")))))
+        :object (gr8s.resources::core-object "apiVersion" "flowcontrol.apiserver.k8s.io/v1" "kind" "PriorityLevelConfiguration"
+                                   "metadata" (gr8s.resources::core-object "name" "test-level")
+                                   "spec" (gr8s.resources::core-object "type" "Limited"
+                                                             "limited" (gr8s.resources::core-object "nominalConcurrencyShares" 1
+                                                                                          "limitResponse" (gr8s.resources::core-object "type" "Reject")))))
       (let* ((schema (check-core-status 201 "/apis/flowcontrol.apiserver.k8s.io/v1/flowschemas" :method :post
-                       :object (gr8s::core-object
+                       :object (gr8s.resources::core-object
                                 "apiVersion" "flowcontrol.apiserver.k8s.io/v1" "kind" "FlowSchema"
-                                "metadata" (gr8s::core-object "name" "test-schema")
-                                "spec" (gr8s::core-object
+                                "metadata" (gr8s.resources::core-object "name" "test-schema")
+                                "spec" (gr8s.resources::core-object
                                         "matchingPrecedence" 1000
-                                        "priorityLevelConfiguration" (gr8s::core-object "name" "test-level")
-                                        "rules" (vector (gr8s::core-object
-                                                         "subjects" (vector (gr8s::core-object "kind" "User" "user" (gr8s::core-object "name" "noxu")))
-                                                         "nonResourceRules" (vector (gr8s::core-object "verbs" #("*") "nonResourceURLs" #("*")))))))))
+                                        "priorityLevelConfiguration" (gr8s.resources::core-object "name" "test-level")
+                                        "rules" (vector (gr8s.resources::core-object
+                                                         "subjects" (vector (gr8s.resources::core-object "kind" "User" "user" (gr8s.resources::core-object "name" "noxu")))
+                                                         "nonResourceRules" (vector (gr8s.resources::core-object "verbs" #("*") "nonResourceURLs" #("*")))))))))
              (uid (gethash "uid" (gethash "metadata" schema))))
-        (setf gr8s::*flowcontrol-snapshot* nil)
-        (is (equal uid (gr8s::flowcontrol-classify store user "/healthz" :get)))
-        (is (equal catch-all (gr8s::flowcontrol-classify store user "/api/v1/pods" :get)))
-        (is (equal catch-all (gr8s::flowcontrol-classify store other "/healthz" :get)))
-        (gr8s::reconcile-flowcontrol store)
-        (let ((condition (aref (gethash "conditions" (gethash "status" (gr8s::get-core-resource store "flowschemas" nil "test-schema"))) 0)))
+        (setf gr8s.apiserver::*flowcontrol-snapshot* nil)
+        (is (equal uid (gr8s.apiserver::flowcontrol-classify store user "/healthz" :get)))
+        (is (equal catch-all (gr8s.apiserver::flowcontrol-classify store user "/api/v1/pods" :get)))
+        (is (equal catch-all (gr8s.apiserver::flowcontrol-classify store other "/healthz" :get)))
+        (gr8s.apiserver::reconcile-flowcontrol store)
+        (let ((condition (aref (gethash "conditions" (gethash "status" (gr8s.resources::get-core-resource store "flowschemas" nil "test-schema"))) 0)))
           (is (equal "Dangling" (gethash "type" condition)))
           (is (equal "False" (gethash "status" condition))))
         (is (search "apiserver_flowcontrol_nominal_limit_seats{priority_level=\"test-level\"} 100"
-                    (gr8s::flowcontrol-metrics-text store)))))
+                    (gr8s.apiserver::flowcontrol-metrics-text store)))))
     (multiple-value-bind (body status headers) (drakma:http-request (core-api-url "/version"))
       (declare (ignore body))
       (is (= 200 status))
@@ -441,23 +441,23 @@
   (with-core-api (store path)
     (values store path)
     (check-core-status 201 "/api/v1/namespaces" :method :post
-      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "default")))
+      :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s.resources::core-object "name" "default")))
     (check-core-status 201 +rule-crd-path+ :method :post
       :object (rule-definition "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\",\"enum\":[\"sentinel-a\"]},\"b\":{\"type\":\"string\",\"enum\":[\"sentinel-b\"]}}}"))
     (let* ((object (rule-object "one" "a" "x" "b" "y"))
            (metadata (gethash "metadata" object)))
-      (setf (gethash "labels" metadata) (gr8s::core-object "#inv/($%)/alid" ">htt$://"))
+      (setf (gethash "labels" metadata) (gr8s.resources::core-object "#inv/($%)/alid" ">htt$://"))
       (let* ((status (check-core-status 422 +rule-path+ :method :post :object object))
              (message (gethash "message" status)))
         (is (search "sentinel-a" message) "~A" message)
         (is (search "sentinel-b" message) "~A" message)))))
 
 (test oneof-still-judges-branches-while-collecting
-  (let ((schema (gr8s::core-object "type" "object" "properties"
-                  (gr8s::core-object "x" (gr8s::core-object "type" "integer" "anyOf"
-                                            (vector (gr8s::core-object "minimum" 5) (gr8s::core-object "maximum" 1)))))))
-    (is (hash-table-p (gr8s::crd-validate-all (gr8s::core-object "x" 7) schema "resource")))
-    (signals kubernetes-error (gr8s::crd-validate-all (gr8s::core-object "x" 3) schema "resource"))))
+  (let ((schema (gr8s.resources::core-object "type" "object" "properties"
+                  (gr8s.resources::core-object "x" (gr8s.resources::core-object "type" "integer" "anyOf"
+                                            (vector (gr8s.resources::core-object "minimum" 5) (gr8s.resources::core-object "maximum" 1)))))))
+    (is (hash-table-p (gr8s.resources::crd-validate-all (gr8s.resources::core-object "x" 7) schema "resource")))
+    (signals kubernetes-error (gr8s.resources::crd-validate-all (gr8s.resources::core-object "x" 3) schema "resource"))))
 
 ;; As the per-node policy spec needs: a binding selects its namespace by the name label,
 ;; and a policy's denial comes before storage refuses a create that carries a resourceVersion.
@@ -465,98 +465,98 @@
   (with-core-api (store path)
     (values store path)
     (check-core-status 201 "/api/v1/namespaces" :method :post
-      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "alpha")))
+      :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s.resources::core-object "name" "alpha")))
     (check-core-status 201 "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies" :method :post
-      :object (gr8s::core-object
+      :object (gr8s.resources::core-object
                "apiVersion" "admissionregistration.k8s.io/v1" "kind" "ValidatingAdmissionPolicy"
-               "metadata" (gr8s::core-object "name" "by-node")
-               "spec" (gr8s::core-object
+               "metadata" (gr8s.resources::core-object "name" "by-node")
+               "spec" (gr8s.resources::core-object
                        "failurePolicy" "Fail"
                        "matchConstraints"
-                       (gr8s::core-object
+                       (gr8s.resources::core-object
                         "resourceRules"
-                        (vector (gr8s::core-object "apiGroups" #("") "apiVersions" #("v1")
+                        (vector (gr8s.resources::core-object "apiGroups" #("") "apiVersions" #("v1")
                                                    "operations" #("CREATE" "UPDATE" "DELETE") "resources" #("configmaps"))))
                        "validations"
-                       (vector (gr8s::core-object "expression" "object.metadata.name != 'stale'"
+                       (vector (gr8s.resources::core-object "expression" "object.metadata.name != 'stale'"
                                                   "message" "no node association found for user")))))
     (check-core-status 201 "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicybindings" :method :post
-      :object (gr8s::core-object
+      :object (gr8s.resources::core-object
                "apiVersion" "admissionregistration.k8s.io/v1" "kind" "ValidatingAdmissionPolicyBinding"
-               "metadata" (gr8s::core-object "name" "by-node")
-               "spec" (gr8s::core-object
+               "metadata" (gr8s.resources::core-object "name" "by-node")
+               "spec" (gr8s.resources::core-object
                        "policyName" "by-node" "validationActions" #("Deny")
-                       "matchResources" (gr8s::core-object
+                       "matchResources" (gr8s.resources::core-object
                                          "namespaceSelector"
-                                         (gr8s::core-object "matchLabels"
-                                                            (gr8s::core-object "kubernetes.io/metadata.name" "alpha"))))))
+                                         (gr8s.resources::core-object "matchLabels"
+                                                            (gr8s.resources::core-object "kubernetes.io/metadata.name" "alpha"))))))
     (let ((object (core-fixture "ConfigMap" "stale")))
       (setf (gethash "resourceVersion" (gethash "metadata" object)) "12")
       (let ((status (check-core-status 422 "/api/v1/namespaces/alpha/configmaps" :method :post :object object)))
         (is (search "no node association found for user" (gethash "message" status)) "~A" (gethash "message" status))))
     ;; Another namespace is not selected, so storage refuses the revision itself.
     (check-core-status 201 "/api/v1/namespaces" :method :post
-      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "beta")))
+      :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s.resources::core-object "name" "beta")))
     (let ((object (core-fixture "ConfigMap" "stale")))
       (setf (gethash "resourceVersion" (gethash "metadata" object)) "12")
       (check-core-status 400 "/api/v1/namespaces/beta/configmaps" :method :post :object object))))
 
 (test priority-levels-share-seats-and-queue-or-refuse-the-rest
   (flet ((level (name shares response)
-           (gr8s::core-object "metadata" (gr8s::core-object "name" name "uid" name)
-                              "spec" (gr8s::core-object "type" "Limited"
-                                                        "limited" (gr8s::core-object "nominalConcurrencyShares" shares
+           (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" name "uid" name)
+                              "spec" (gr8s.resources::core-object "type" "Limited"
+                                                        "limited" (gr8s.resources::core-object "nominalConcurrencyShares" shares
                                                                                      "limitResponse" response)))))
     ;; Nominal seats are each level's share of 600; exempt levels have no limit.
-    (let ((limits (gr8s::flowcontrol-level-limits
-                   (list (level "big" 100 (gr8s::core-object "type" "Reject"))
-                         (level "small" 20 (gr8s::core-object "type" "Queue"
-                                                              "queuing" (gr8s::core-object "queues" 2 "queueLengthLimit" 3)))
-                         (gr8s::core-object "metadata" (gr8s::core-object "name" "exempt" "uid" "exempt")
-                                            "spec" (gr8s::core-object "type" "Exempt"))))))
+    (let ((limits (gr8s.apiserver::flowcontrol-level-limits
+                   (list (level "big" 100 (gr8s.resources::core-object "type" "Reject"))
+                         (level "small" 20 (gr8s.resources::core-object "type" "Queue"
+                                                              "queuing" (gr8s.resources::core-object "queues" 2 "queueLengthLimit" 3)))
+                         (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "exempt" "uid" "exempt")
+                                            "spec" (gr8s.resources::core-object "type" "Exempt"))))))
       (is (equal '(500 . 0) (gethash "big" limits)))
       (is (equal '(100 . 6) (gethash "small" limits)))
       (is (null (gethash "exempt" limits)))))
   ;; One seat and no queue: the second request is refused with 429. The waiter below runs
   ;; in its own thread, so the level is a fresh one in the shared table.
-  (let ((level (format nil "test-level-~A" (gr8s::generate-uid))))
-    (gr8s::flowcontrol-acquire-seat level 1 0)
-    (handler-case (progn (gr8s::flowcontrol-acquire-seat level 1 0) (is-false t "a second seat was given"))
-      (gr8s::kubernetes-error (condition) (is (= 429 (gr8s::kubernetes-error-status-code condition)))))
+  (let ((level (format nil "test-level-~A" (gr8s.store::generate-uid))))
+    (gr8s.apiserver::flowcontrol-acquire-seat level 1 0)
+    (handler-case (progn (gr8s.apiserver::flowcontrol-acquire-seat level 1 0) (is-false t "a second seat was given"))
+      (gr8s.model::kubernetes-error (condition) (is (= 429 (gr8s.model::kubernetes-error-status-code condition)))))
     ;; With room in the queue, a waiter takes the seat when it is given back.
     (let* ((taken nil)
-           (waiter (bt:make-thread (lambda () (gr8s::flowcontrol-acquire-seat level 1 1) (setf taken t)))))
-      (is-true (wait-until (lambda () (= 1 (cdr (gethash level gr8s::*flowcontrol-seats*)))) :timeout 5))
+           (waiter (bt:make-thread (lambda () (gr8s.apiserver::flowcontrol-acquire-seat level 1 1) (setf taken t)))))
+      (is-true (wait-until (lambda () (= 1 (cdr (gethash level gr8s.apiserver::*flowcontrol-seats*)))) :timeout 5))
       (is-false taken)
-      (gr8s::flowcontrol-release-seat level)
+      (gr8s.apiserver::flowcontrol-release-seat level)
       (bt:join-thread waiter)
       (is-true taken)
-      (is (equal '(1 . 0) (gethash level gr8s::*flowcontrol-seats*)))
-      (gr8s::flowcontrol-release-seat level)
-      (remhash level gr8s::*flowcontrol-seats*))))
+      (is (equal '(1 . 0) (gethash level gr8s.apiserver::*flowcontrol-seats*)))
+      (gr8s.apiserver::flowcontrol-release-seat level)
+      (remhash level gr8s.apiserver::*flowcontrol-seats*))))
 
 (test policies-deny-before-storage-reports-a-name-in-use
   ;; Upstream's storage reports AlreadyExists only after validating admission has run.
   (with-core-api (store path)
     (values store path)
     (check-core-status 201 "/api/v1/namespaces" :method :post
-      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "alpha")))
+      :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s.resources::core-object "name" "alpha")))
     (check-core-status 201 "/api/v1/namespaces/alpha/configmaps" :method :post :object (core-fixture "ConfigMap" "taken"))
     (check-core-status 201 "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies" :method :post
-      :object (gr8s::core-object
+      :object (gr8s.resources::core-object
                "apiVersion" "admissionregistration.k8s.io/v1" "kind" "ValidatingAdmissionPolicy"
-               "metadata" (gr8s::core-object "name" "no-taken")
-               "spec" (gr8s::core-object
-                       "matchConstraints" (gr8s::core-object
-                                           "resourceRules" (vector (gr8s::core-object "apiGroups" #("") "apiVersions" #("v1")
+               "metadata" (gr8s.resources::core-object "name" "no-taken")
+               "spec" (gr8s.resources::core-object
+                       "matchConstraints" (gr8s.resources::core-object
+                                           "resourceRules" (vector (gr8s.resources::core-object "apiGroups" #("") "apiVersions" #("v1")
                                                                                       "operations" #("CREATE") "resources" #("configmaps"))))
-                       "validations" (vector (gr8s::core-object "expression" "object.metadata.name != 'taken'"
+                       "validations" (vector (gr8s.resources::core-object "expression" "object.metadata.name != 'taken'"
                                                                 "message" "that name is not for you")))))
     (check-core-status 201 "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicybindings" :method :post
-      :object (gr8s::core-object
+      :object (gr8s.resources::core-object
                "apiVersion" "admissionregistration.k8s.io/v1" "kind" "ValidatingAdmissionPolicyBinding"
-               "metadata" (gr8s::core-object "name" "no-taken")
-               "spec" (gr8s::core-object "policyName" "no-taken" "validationActions" #("Deny"))))
+               "metadata" (gr8s.resources::core-object "name" "no-taken")
+               "spec" (gr8s.resources::core-object "policyName" "no-taken" "validationActions" #("Deny"))))
     (let ((status (check-core-status 422 "/api/v1/namespaces/alpha/configmaps" :method :post :object (core-fixture "ConfigMap" "taken"))))
       (is (search "that name is not for you" (gethash "message" status)) "~A" (gethash "message" status)))
     ;; Admitted, the name in use is still refused.
