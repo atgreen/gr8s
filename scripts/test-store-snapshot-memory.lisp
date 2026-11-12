@@ -20,7 +20,7 @@
            (gr8s.raft.transport::raft-link-send-snapshot
             sender (gr8s.node.v1::make-raft-transport-stub channel)
             (list :type :install-snapshot :term 1 :from "source" :last-index 1 :last-term 1
-                  :state (list :gr8s-raft-snapshot 1 :application reference :application-present t
+                  :state (list :cl-raft-snapshot 1 :application reference :application-present t
                                :members '(("source" . :voter) ("sink" . :learner)) :addresses nil :api-urls nil)))
            (assert (equal reference restored))
            (assert (= 1 (cl-raft::raft-node-last-applied (gr8s.raft.transport::raft-member-node receiver))))
@@ -81,7 +81,7 @@
              (gr8s.raft.transport::raft-link-send-snapshot
               sender (gr8s.node.v1::make-raft-transport-stub channel)
               (list :type :install-snapshot :term 1 :from "source" :last-index 1 :last-term 1
-                    :state (list :gr8s-raft-snapshot 1 :application reference :application-present t
+                    :state (list :cl-raft-snapshot 1 :application reference :application-present t
                                  :members '(("source" . :voter) ("sink" . :learner)) :addresses nil :api-urls nil)))
              (let ((result (collect-report)))
                (when (equal "1" (uiop:getenv "GR8S_SNAPSHOT_RECOVER_RECEIVER"))
