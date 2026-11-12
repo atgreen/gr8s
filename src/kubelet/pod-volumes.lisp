@@ -303,6 +303,15 @@ SHARE names a provisioned volume's export, whose own directory is created on fir
       (unless (zerop (funcall *pod-tmpfs-mount* target options))
         (pod-volume-system-error "mount" target)))))
 
+(defun ensure-pod-secret-tmpfs (directory)
+  "Mount a tmpfs at DIRECTORY once, so Secret / projected / serviceAccountToken
+volume bytes never touch persistent disk and are wiped on reboot, as the kubelet
+backs these volumes with medium Memory."
+  (unless (pod-volume-mount-targets directory)
+    (let ((target (namestring (truename directory))))
+      (unless (zerop (funcall *pod-tmpfs-mount* target ""))
+        (pod-volume-system-error "mount" target)))))
+
 (defparameter *pod-hugetlbfs-mount*
   (lambda (target options) (%linux-mount "gr8s-hugepages" target "hugetlbfs" #x6 options)))
 
@@ -395,6 +404,11 @@ The Pod's user namespace block is free again once nothing it owns remains."
       (when (and source (equal "Memory" (gethash "medium" source)))
         (ensure-pod-memory-volume directory source pod))
       (when source (ensure-pod-hugepage-volume directory source pod)))
+    ;; Secret, projected, and serviceAccountToken material must not land on
+    ;; persistent disk: back these volumes with tmpfs before their files are
+    ;; written, matching the kubelet. configMap/downwardAPI stay on disk.
+    (when (or (gethash "secret" volume) (gethash "projected" volume))
+      (ensure-pod-secret-tmpfs directory))
     ;; Applied after mounting because the tmpfs root replaces the directory's mode. As the
     ;; kubelet does, the permission bits become 0777 and special bits such as a tmpfs root's
     ;; sticky bit stay; SetVolumeOwnership then ORs in group rwx and setgid for fsGroup.

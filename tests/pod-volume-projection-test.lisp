@@ -16,12 +16,21 @@
   (parse-pod (format nil "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"projected\",\"namespace\":\"sonobuoy\",\"labels\":~A,\"annotations\":~A},\"spec\":{\"volumes\":~A,\"containers\":[{\"name\":\"client\",\"image\":\"busybox:latest\",\"resources\":~A}]}}" labels annotations volumes-json resources)))
 
 (defmacro with-projection ((runtime store directory) &body body)
-  "Run BODY with a containerd runtime whose resources come from a test store."
-  `(with-temporary-store (,store ,directory)
-     (create-volume-test-data ,store "sonobuoy")
-     (let ((,runtime (gr8s.runtime.containerd::make-containerd-runtime :log-root (merge-pathnames "logs/" ,directory))))
-       (setf (gr8s.runtime.containerd::containerd-runtime-resource-store ,runtime) ,store)
-       ,@body)))
+  "Run BODY with a containerd runtime whose resources come from a test store.
+Secret/projected volumes are tmpfs-backed in production (which needs root); stub
+the mount so these tests stay runnable as an unprivileged developer. Files still
+land in the (unmounted) directory, so the content checks hold."
+  (let ((table (gensym "TABLE")))
+    `(with-temporary-store (,store ,directory)
+       (create-volume-test-data ,store "sonobuoy")
+       (let ((,runtime (gr8s.runtime.containerd::make-containerd-runtime :log-root (merge-pathnames "logs/" ,directory)))
+             (,table (merge-pathnames "mountinfo" ,directory)))
+         (with-open-file (stream ,table :direction :output :if-exists :supersede :if-does-not-exist :create)
+           (format stream "22 1 0:21 / /proc rw - proc proc rw~%"))
+         (setf (gr8s.runtime.containerd::containerd-runtime-resource-store ,runtime) ,store)
+         (let ((gr8s.kubelet::*pod-mount-table-path* ,table)
+               (gr8s.kubelet::*pod-tmpfs-mount* (lambda (target options) (declare (ignore target options)) 0)))
+           ,@body)))))
 
 (defun materialized (runtime store pod &optional (index 0))
   "Create POD and return the directory of its volume at INDEX, freshly materialized."
