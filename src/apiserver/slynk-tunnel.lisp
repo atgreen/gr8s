@@ -55,7 +55,7 @@
               do (progn
                    (bt:with-lock-held ((member-slynk-operation-lock operation))
                      (loop while (and (>= (member-slynk-operation-unacknowledged-output operation)
-                                           gr8s::+exec-output-window-bytes+)
+                                           gr8s.runtime::+exec-output-window-bytes+)
                                       (not (member-slynk-operation-finished-p operation)))
                            do (bt:condition-wait (member-slynk-operation-output-window operation)
                                                  (member-slynk-operation-lock operation) :timeout 0.2))

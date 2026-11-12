@@ -43,9 +43,9 @@
   (with-temporary-store (store directory)
     (declare (ignore store))
     (let* ((pki-directory (merge-pathnames "pki/" directory))
-           (pki (gr8s:ensure-cluster-pki pki-directory))
-           (api (gr8s::ensure-kubernetes-api-credentials pki :addresses '("192.0.2.10")))
-           (admin (gr8s::ensure-admin-client-credentials pki))
+           (pki (gr8s.security::ensure-cluster-pki pki-directory))
+           (api (gr8s.apiserver::ensure-kubernetes-api-credentials pki :addresses '("192.0.2.10")))
+           (admin (gr8s.apiserver::ensure-admin-client-credentials pki))
            (api-key (merge-pathnames "kubernetes-api.key" pki-directory))
            (api-before (uiop:read-file-string api))
            (api-key-before (uiop:read-file-string api-key))
@@ -59,62 +59,62 @@
       (is (string= admin-before (uiop:read-file-string admin)))
       (let ((leaf (first (pure-tls:load-certificate-chain api))))
         (pure-tls::verify-certificate-chain
-         (list leaf) (list (gr8s::cluster-pki-ca-certificate pki))
+         (list leaf) (list (gr8s.security::cluster-pki-ca-certificate pki))
          :purpose :server-auth :trust-anchor-mode :replace)
         (is (pure-tls::verify-hostname leaf "192.0.2.10"))))))
 
 (test failed-leaf-certificate-replacement-keeps-the-old-key-pair-usable
   (with-temporary-store (store directory)
     (declare (ignore store))
-    (let* ((pki (gr8s:ensure-cluster-pki directory))
-           (certificate (gr8s::ensure-kubernetes-api-credentials pki))
+    (let* ((pki (gr8s.security::ensure-cluster-pki directory))
+           (certificate (gr8s.apiserver::ensure-kubernetes-api-credentials pki))
            (key (merge-pathnames "kubernetes-api.key" directory))
            (certificate-before (uiop:read-file-string certificate))
            (key-before (uiop:read-file-string key))
-           (original (symbol-function 'gr8s::write-private-text-atomically)))
+           (original (symbol-function 'gr8s.security::write-private-text-atomically)))
       (unwind-protect
            (progn
-             (setf (symbol-function 'gr8s::write-private-text-atomically)
+             (setf (symbol-function 'gr8s.security::write-private-text-atomically)
                    (lambda (path text)
                      (if (equal (pathname path) certificate)
                          (error "injected leaf write failure")
                          (funcall original path text))))
              (signals error
-               (gr8s::ensure-kubernetes-api-credentials
+               (gr8s.apiserver::ensure-kubernetes-api-credentials
                 pki :renew-within most-positive-fixnum :rotate-key t)))
-        (setf (symbol-function 'gr8s::write-private-text-atomically) original))
+        (setf (symbol-function 'gr8s.security::write-private-text-atomically) original))
       (is (string= certificate-before (uiop:read-file-string certificate)))
       (is (string= key-before (uiop:read-file-string key)))
       (let ((leaf (first (pure-tls:load-certificate-chain certificate))))
         (pure-tls::verify-certificate-chain
-         (list leaf) (list (gr8s::cluster-pki-ca-certificate pki))
+         (list leaf) (list (gr8s.security::cluster-pki-ca-certificate pki))
          :purpose :server-auth :trust-anchor-mode :replace)
         (is-true (pure-tls::verify-hostname leaf "127.0.0.1"))))))
 
 (test interrupted-leaf-key-replacement-finishes-from-durable-intent
   (with-temporary-store (store directory)
     (declare (ignore store))
-    (let* ((pki (gr8s:ensure-cluster-pki directory))
-           (certificate (gr8s::ensure-kubernetes-api-credentials pki))
+    (let* ((pki (gr8s.security::ensure-cluster-pki directory))
+           (certificate (gr8s.apiserver::ensure-kubernetes-api-credentials pki))
            (key (merge-pathnames "kubernetes-api.key" directory))
            (old-certificate (uiop:read-file-string certificate))
            (old-key (uiop:read-file-string key)))
-      (gr8s::ensure-kubernetes-api-credentials
+      (gr8s.apiserver::ensure-kubernetes-api-credentials
        pki :renew-within most-positive-fixnum :rotate-key t)
       (let* ((new-certificate (uiop:read-file-string certificate))
              (new-key (uiop:read-file-string key))
-             (manifest (gr8s::leaf-rotation-manifest-path certificate)))
-        (gr8s::write-private-text-atomically certificate old-certificate)
-        (gr8s::write-private-text-atomically key old-key)
-        (gr8s::write-private-text-atomically
+             (manifest (gr8s.apiserver::leaf-rotation-manifest-path certificate)))
+        (gr8s.security::write-private-text-atomically certificate old-certificate)
+        (gr8s.security::write-private-text-atomically key old-key)
+        (gr8s.security::write-private-text-atomically
          manifest
          (com.inuoe.jzon:stringify
           (gr8s.resources::core-object
            "format" "gr8s-leaf-rotation" "version" 1
            "key" new-key "certificate" new-certificate)))
         ;; Model SIGKILL after the first replacement: no condition handler ran.
-        (gr8s::write-private-text-atomically key new-key)
-        (gr8s::ensure-kubernetes-api-credentials pki :renew-within 0)
+        (gr8s.security::write-private-text-atomically key new-key)
+        (gr8s.apiserver::ensure-kubernetes-api-credentials pki :renew-within 0)
         (is (string= new-key (uiop:read-file-string key)))
         (is (string= new-certificate (uiop:read-file-string certificate)))
         (is-false (probe-file manifest))))))
@@ -122,9 +122,9 @@
 (test expiring-api-and-admin-leaves-renew-on-ensure
   (with-temporary-store (store directory)
     (declare (ignore store))
-    (let* ((pki (gr8s:ensure-cluster-pki directory))
-           (api (gr8s::ensure-kubernetes-api-credentials pki))
-           (admin (gr8s::ensure-admin-client-credentials pki))
+    (let* ((pki (gr8s.security::ensure-cluster-pki directory))
+           (api (gr8s.apiserver::ensure-kubernetes-api-credentials pki))
+           (admin (gr8s.apiserver::ensure-admin-client-credentials pki))
            (api-before (uiop:read-file-string api))
            (admin-before (uiop:read-file-string admin))
            (api-key (merge-pathnames "kubernetes-api.key" directory))
@@ -132,8 +132,8 @@
            (api-key-before (uiop:read-file-string api-key))
            (admin-key-before (uiop:read-file-string admin-key))
            (force-within (* 2 365 86400)))
-      (gr8s::ensure-kubernetes-api-credentials pki :renew-within force-within)
-      (gr8s::ensure-admin-client-credentials pki :renew-within force-within)
+      (gr8s.apiserver::ensure-kubernetes-api-credentials pki :renew-within force-within)
+      (gr8s.apiserver::ensure-admin-client-credentials pki :renew-within force-within)
       (is (not (string= api-before (uiop:read-file-string api))))
       (is (not (string= admin-before (uiop:read-file-string admin))))
       (is (string= api-key-before (uiop:read-file-string api-key)))
@@ -142,8 +142,8 @@
 (test certificate-rotation-selects-internal-server-and-kubelet-client-roles
   (with-temporary-store (store directory)
     (declare (ignore store))
-    (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory)))
-           (node-server (gr8s::ensure-node-server-credentials pki))
+    (let* ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" directory)))
+           (node-server (gr8s.security::ensure-node-server-credentials pki))
            (kubelet-client
              (gr8s.apiserver::ensure-apiserver-kubelet-client-credentials pki))
            (node-before (uiop:read-file-string node-server))
@@ -178,38 +178,38 @@
   (with-temporary-store (store directory)
     (declare (ignore store))
     (let* ((pki-root (merge-pathnames "pki/" directory))
-           (pki (gr8s:ensure-cluster-pki pki-root))
-           (old-fingerprint (gr8s::cluster-pki-ca-fingerprint pki))
-           (api (gr8s::ensure-kubernetes-api-credentials pki))
-           (admin (gr8s::ensure-admin-client-credentials pki)))
+           (pki (gr8s.security::ensure-cluster-pki pki-root))
+           (old-fingerprint (gr8s.security::cluster-pki-ca-fingerprint pki))
+           (api (gr8s.apiserver::ensure-kubernetes-api-credentials pki))
+           (admin (gr8s.apiserver::ensure-admin-client-credentials pki)))
       (gr8s.server::prepare-cluster-ca-rotation pki-root)
       (is (equal "prepared"
                  (gethash "stage"
                           (gr8s.server::read-cluster-ca-transition-manifest pki-root))))
-      (let ((prepared (gr8s:ensure-cluster-pki pki-root)))
-        (is (equal old-fingerprint (gr8s::cluster-pki-ca-fingerprint prepared)))
-        (is (= 2 (length (gr8s::cluster-pki-trust-certificates prepared)))))
+      (let ((prepared (gr8s.security::ensure-cluster-pki pki-root)))
+        (is (equal old-fingerprint (gr8s.security::cluster-pki-ca-fingerprint prepared)))
+        (is (= 2 (length (gr8s.security::cluster-pki-trust-certificates prepared)))))
       (gr8s.server::promote-cluster-ca-rotation pki-root)
       (is (equal "promoted"
                  (gethash "stage"
                           (gr8s.server::read-cluster-ca-transition-manifest pki-root))))
-      (let ((promoted (gr8s:ensure-cluster-pki pki-root)))
-        (is (not (equal old-fingerprint (gr8s::cluster-pki-ca-fingerprint promoted))))
-        (is (= 2 (length (gr8s::cluster-pki-trust-certificates promoted))))
+      (let ((promoted (gr8s.security::ensure-cluster-pki pki-root)))
+        (is (not (equal old-fingerprint (gr8s.security::cluster-pki-ca-fingerprint promoted))))
+        (is (= 2 (length (gr8s.security::cluster-pki-trust-certificates promoted))))
         (is (equal "system:admin"
-                   (gr8s::api-identity-username
-                    (gr8s::certificate-api-identity
+                   (gr8s.resources::api-identity-username
+                    (gr8s.resources::certificate-api-identity
                      (pure-tls:load-certificate-chain admin)
-                     (gr8s::cluster-pki-trust-certificates promoted)))))
+                     (gr8s.security::cluster-pki-trust-certificates promoted)))))
         (signals error (gr8s.server::finalize-cluster-ca-rotation pki-root :store-directory directory))
-        (gr8s::ensure-kubernetes-api-credentials promoted :renew-within most-positive-fixnum)
-        (gr8s::ensure-admin-client-credentials promoted :renew-within most-positive-fixnum)
+        (gr8s.apiserver::ensure-kubernetes-api-credentials promoted :renew-within most-positive-fixnum)
+        (gr8s.apiserver::ensure-admin-client-credentials promoted :renew-within most-positive-fixnum)
         (gr8s.server::finalize-cluster-ca-rotation pki-root :store-directory directory)
         (is (equal "idle"
                    (gethash "stage"
                             (gr8s.server::read-cluster-ca-transition-manifest pki-root))))
-        (let ((final (gr8s:ensure-cluster-pki pki-root)))
-          (is (= 1 (length (gr8s::cluster-pki-trust-certificates final))))
+        (let ((final (gr8s.security::ensure-cluster-pki pki-root)))
+          (is (= 1 (length (gr8s.security::cluster-pki-trust-certificates final))))
           (is (not (probe-file (merge-pathnames "pki/pki/cluster-ca-retiring.crt"
                                                 directory))))
           (is (probe-file api)))))))
@@ -218,21 +218,21 @@
   (with-temporary-store (store directory)
     (declare (ignore store))
     (let ((pki-root (merge-pathnames "pki/" directory)))
-      (gr8s:ensure-cluster-pki pki-root)
+      (gr8s.security::ensure-cluster-pki pki-root)
     (gr8s.server::prepare-cluster-ca-rotation pki-root)
     (let* ((active-key (merge-pathnames "pki/pki/cluster-ca.key" directory))
-           (original (symbol-function 'gr8s::write-private-text-atomically))
+           (original (symbol-function 'gr8s.security::write-private-text-atomically))
            (injected nil))
       (unwind-protect
            (progn
-             (setf (symbol-function 'gr8s::write-private-text-atomically)
+             (setf (symbol-function 'gr8s.security::write-private-text-atomically)
                    (lambda (path text)
                      (when (and (not injected) (equal (pathname path) active-key))
                        (setf injected t)
                        (error "injected promotion interruption"))
                      (funcall original path text)))
              (signals error (gr8s.server::promote-cluster-ca-rotation pki-root)))
-        (setf (symbol-function 'gr8s::write-private-text-atomically) original))
+        (setf (symbol-function 'gr8s.security::write-private-text-atomically) original))
       (is (equal "promoting"
                  (gethash "stage"
                           (gr8s.server::read-cluster-ca-transition-manifest pki-root))))
@@ -240,19 +240,19 @@
       (is (equal "promoted"
                  (gethash "stage"
                           (gr8s.server::read-cluster-ca-transition-manifest pki-root))))
-      (let ((pki (gr8s:ensure-cluster-pki pki-root)))
-        (is (= 2 (length (gr8s::cluster-pki-trust-certificates pki)))))))))
+      (let ((pki (gr8s.security::ensure-cluster-pki pki-root)))
+        (is (= 2 (length (gr8s.security::cluster-pki-trust-certificates pki)))))))))
 
 (test interrupted-ca-prepare-and-finalize-resume-idempotently
   (with-temporary-store (store directory)
     (declare (ignore store))
-    (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory))
+    (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" directory))
     (let* ((active-certificate (merge-pathnames "pki/pki/cluster-ca.crt" directory))
-           (original (symbol-function 'gr8s::write-private-text-atomically))
+           (original (symbol-function 'gr8s.security::write-private-text-atomically))
            (injected nil))
       (flet ((interrupt-next-active-write ()
                (setf injected nil
-                     (symbol-function 'gr8s::write-private-text-atomically)
+                     (symbol-function 'gr8s.security::write-private-text-atomically)
                      (lambda (path text)
                        (when (and (not injected) (equal (pathname path) active-certificate))
                          (setf injected t)
@@ -262,12 +262,12 @@
              (progn
                (interrupt-next-active-write)
                (signals error (gr8s.server::prepare-cluster-ca-rotation (merge-pathnames "pki/" directory)))
-               (setf (symbol-function 'gr8s::write-private-text-atomically) original)
+               (setf (symbol-function 'gr8s.security::write-private-text-atomically) original)
                (is (stringp (gr8s.server::prepare-cluster-ca-rotation (merge-pathnames "pki/" directory))))
                (gr8s.server::promote-cluster-ca-rotation (merge-pathnames "pki/" directory))
                (interrupt-next-active-write)
                (signals error (gr8s.server::finalize-cluster-ca-rotation (merge-pathnames "pki/" directory) :store-directory directory)))
-          (setf (symbol-function 'gr8s::write-private-text-atomically) original)))
+          (setf (symbol-function 'gr8s.security::write-private-text-atomically) original)))
       (is-true (gr8s.server::finalize-cluster-ca-rotation (merge-pathnames "pki/" directory) :store-directory directory))
       (is (equal "idle"
                  (gethash "stage"
@@ -277,7 +277,7 @@
   (with-temporary-store (store directory)
     (declare (ignore store))
     (let* ((pki-root (merge-pathnames "pki/" directory))
-           (pki (gr8s:ensure-cluster-pki pki-root))
+           (pki (gr8s.security::ensure-cluster-pki pki-root))
            (agent-directory (merge-pathnames "agent/" directory))
            (agent-ca (merge-pathnames "ca.crt" agent-directory))
            (agent-cert (merge-pathnames "node.crt" agent-directory))
@@ -285,21 +285,21 @@
       (ensure-directories-exist agent-ca)
       (gr8s.apiserver::issue-cluster-certificate
        pki agent-cert agent-key "system:node:worker-a" "system:nodes")
-      (gr8s::write-private-text-atomically
-       agent-ca (uiop:read-file-string (gr8s::cluster-pki-ca-certificate-path pki)))
+      (gr8s.security::write-private-text-atomically
+       agent-ca (uiop:read-file-string (gr8s.security::cluster-pki-ca-certificate-path pki)))
       (gr8s.server::prepare-cluster-ca-rotation pki-root)
       (flet ((hello (text)
                (make-instance 'gr8s.node.v1::server-hello
                               :cluster-ca-bundle
                               (babel:string-to-octets text :encoding :utf-8))))
         (gr8s.agent::install-agent-cluster-ca-bundle
-         (hello (uiop:read-file-string (gr8s::cluster-pki-ca-certificate-path pki)))
+         (hello (uiop:read-file-string (gr8s.security::cluster-pki-ca-certificate-path pki)))
          agent-ca agent-cert)
         (is (= 2 (length (pure-tls:load-certificate-chain agent-ca))))
         (gr8s.server::promote-cluster-ca-rotation pki-root)
-        (let* ((promoted (gr8s:ensure-cluster-pki pki-root))
+        (let* ((promoted (gr8s.security::ensure-cluster-pki pki-root))
                (new-only (gr8s.server::certificate-pem
-                          (gr8s::cluster-pki-ca-certificate promoted)))
+                          (gr8s.security::cluster-pki-ca-certificate promoted)))
                (before (uiop:read-file-string agent-ca)))
           (signals error
             (gr8s.agent::install-agent-cluster-ca-bundle
@@ -315,27 +315,27 @@
   (with-temporary-store (store directory)
     (declare (ignore store))
     (let* ((pki-root (merge-pathnames "pki/" directory))
-           (pki (gr8s:ensure-cluster-pki pki-root))
+           (pki (gr8s.security::ensure-cluster-pki pki-root))
            (agent-directory (merge-pathnames "renewing-agent/" directory))
            (agent-ca (merge-pathnames "ca.crt" agent-directory))
            (agent-cert (merge-pathnames "node.crt" agent-directory))
            (agent-key (merge-pathnames "node.key" agent-directory)))
       (ensure-directories-exist agent-ca)
-      (let ((csr (gr8s:generate-node-key-and-csr "worker-a" agent-key)))
+      (let ((csr (gr8s.security::generate-node-key-and-csr "worker-a" agent-key)))
         (multiple-value-bind (subject spki)
             (gr8s.security::parse-and-verify-node-csr csr "worker-a")
           (declare (ignore subject))
-          (gr8s::write-private-text-atomically
+          (gr8s.security::write-private-text-atomically
            agent-cert
            (pure-tls/acme::wrap-pem
             "CERTIFICATE"
             (gr8s.security::node-certificate-der
              pki (pure-tls/acme::encode-subject "worker-a") spki))))
-        (gr8s::write-private-text-atomically
-         agent-ca (uiop:read-file-string (gr8s::cluster-pki-ca-certificate-path pki)))
+        (gr8s.security::write-private-text-atomically
+         agent-ca (uiop:read-file-string (gr8s.security::cluster-pki-ca-certificate-path pki)))
         (gr8s.server::prepare-cluster-ca-rotation pki-root)
         (gr8s.server::promote-cluster-ca-rotation pki-root)
-        (let* ((promoted (gr8s:ensure-cluster-pki pki-root))
+        (let* ((promoted (gr8s.security::ensure-cluster-pki pki-root))
                (old-leaf (gr8s.security::certificate-from-pem
                           (uiop:read-file-string agent-cert)))
                (renewed
@@ -347,7 +347,7 @@
                   :cluster-ca-bundle
                   (babel:string-to-octets
                    (uiop:read-file-string
-                    (gr8s::cluster-pki-ca-certificate-path promoted))
+                    (gr8s.security::cluster-pki-ca-certificate-path promoted))
                    :encoding :utf-8)
                   :renewed-node-certificate
                   (babel:string-to-octets renewed :encoding :utf-8))))
@@ -358,7 +358,7 @@
            (gr8s.agent::install-agent-session-credentials
             hello agent-ca agent-cert))
           (is-true
-           (gr8s:verify-node-certificate
+           (gr8s.security::verify-node-certificate
             promoted (uiop:read-file-string agent-cert) "worker-a"))
           (is-false
            (gr8s.security::node-certificate-needs-active-ca-renewal-p
@@ -374,8 +374,8 @@
              :cluster-ca-bundle
              (babel:string-to-octets
               (uiop:read-file-string
-               (gr8s::cluster-pki-ca-certificate-path
-                (gr8s:ensure-cluster-pki pki-root)))
+               (gr8s.security::cluster-pki-ca-certificate-path
+                (gr8s.security::ensure-cluster-pki pki-root)))
               :encoding :utf-8))
             agent-ca agent-cert))
           (is (= 1 (length (pure-tls:load-certificate-chain agent-ca)))))))))
@@ -384,13 +384,13 @@
   (with-temporary-store (leader leader-root)
     (with-temporary-store (follower follower-root)
       (let ((leader-pki-root (merge-pathnames "pki/" leader-root)))
-        (gr8s:ensure-cluster-pki leader-pki-root)
+        (gr8s.security::ensure-cluster-pki leader-pki-root)
         (let ((raft-root (merge-pathnames "raft/" leader-pki-root)))
         (gr8s.security::ensure-raft-founder-credentials raft-root "cp1")
         (dolist (relative '("pki/cluster-ca.crt" "pki/cluster-ca.key"))
           (let ((source (merge-pathnames relative raft-root))
                 (target (merge-pathnames relative (merge-pathnames "pki/raft/" follower-root))))
-            (gr8s::write-private-text-atomically target (uiop:read-file-string source)))))
+            (gr8s.security::write-private-text-atomically target (uiop:read-file-string source)))))
         (gr8s.server::prepare-cluster-ca-rotation leader-pki-root))
       (let* ((envelope (gr8s.resources::publish-pki-authority leader))
              (durable
@@ -402,9 +402,9 @@
         (gr8s.resources::install-core-state-blob follower durable)
         (is-true (gr8s.resources::current-pki-authority-envelope follower)
                  "replicated resources include the authority envelope; keys: ~S"
-                 (loop for key being the hash-keys of (gr8s::pod-store-resources follower)
+                 (loop for key being the hash-keys of (gr8s.store::pod-store-resources follower)
                        collect key))
-        (let ((reopened (gr8s:open-store follower-root)))
+        (let ((reopened (gr8s.store::open-store follower-root)))
           (is-true (gr8s.resources::current-pki-authority-envelope reopened)
                    "the encrypted authority record survives a store restart")
           (gr8s.resources::reconcile-pki-authority reopened))
@@ -450,20 +450,20 @@
 (test ca-finalize-requires-every-registered-agent-to-reconnect-under-active-ca
   (with-temporary-store (store directory)
     (let* ((pki-root (merge-pathnames "pki/" directory))
-           (pki (gr8s:ensure-cluster-pki pki-root))
-           (old-fingerprint (gr8s::cluster-pki-ca-fingerprint pki)))
-      (gr8s:register-node
-       store (gr8s.model:make-node-record
+           (pki (gr8s.security::ensure-cluster-pki pki-root))
+           (old-fingerprint (gr8s.security::cluster-pki-ca-fingerprint pki)))
+      (gr8s.controllers::register-node
+       store (gr8s.model::make-node-record
               :id "worker-a-id" :name "worker-a" :pod-cidr "10.80.1.0/24"))
-      (gr8s::record-node-certificate-issuer store "worker-a" old-fingerprint)
+      (gr8s.controllers::record-node-certificate-issuer store "worker-a" old-fingerprint)
       (gr8s.server::prepare-cluster-ca-rotation pki-root)
       (gr8s.server::promote-cluster-ca-rotation pki-root)
-      (let ((promoted (gr8s:ensure-cluster-pki pki-root)))
-        (gr8s::ensure-kubernetes-api-credentials promoted :renew-within most-positive-fixnum)
-        (gr8s::ensure-admin-client-credentials promoted :renew-within most-positive-fixnum)
+      (let ((promoted (gr8s.security::ensure-cluster-pki pki-root)))
+        (gr8s.apiserver::ensure-kubernetes-api-credentials promoted :renew-within most-positive-fixnum)
+        (gr8s.apiserver::ensure-admin-client-credentials promoted :renew-within most-positive-fixnum)
         (signals error (gr8s.server::finalize-cluster-ca-rotation pki-root :store-directory directory))
-        (gr8s::record-node-certificate-issuer
-         store "worker-a" (gr8s::cluster-pki-ca-fingerprint promoted))
+        (gr8s.controllers::record-node-certificate-issuer
+         store "worker-a" (gr8s.security::cluster-pki-ca-fingerprint promoted))
         (is-true (gr8s.server::finalize-cluster-ca-rotation pki-root :store-directory directory))))))
 
 (test ca-rotation-cli-uses-explicit-stages
@@ -502,25 +502,25 @@
 
 (test service-account-signing-key-rotation-dispatches-through-the-public-cli
   (with-temporary-store (store directory)
-    (gr8s::load-service-account-signing-key store)
+    (gr8s.resources::load-service-account-signing-key store)
     (dolist (stage '("prepare" "promote" "finalize"))
       (let ((output
               (with-output-to-string (*standard-output*)
-                (is (= 0 (gr8s::main-with-environment
+                (is (= 0 (gr8s.server::main-with-environment
                           (list "certificate" "service-account-key" stage
                                 "--state-directory" (namestring directory))
                           (constantly nil) (constantly 99)))))))
         (is (plusp (length (string-trim '(#\Newline) output))))))
     (let ((record (com.inuoe.jzon:parse
-                   (gr8s::service-account-signing-key-path store))))
+                   (gr8s.resources::service-account-signing-key-path store))))
       (is (= 1 (length (gethash "keys" record))))
       (is (null (gethash "preparedKid" record))))))
 
 (test certificate-inventory-is-read-only-deterministic-and-classifies-expiry
   (with-temporary-store (store directory)
     (declare (ignore store))
-    (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory)))
-           (ca-path (gr8s:cluster-pki-ca-certificate-path pki))
+    (let* ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" directory)))
+           (ca-path (gr8s.security::cluster-pki-ca-certificate-path pki))
            (ca (first (pure-tls:load-certificate-chain ca-path)))
            (not-before (pure-tls:certificate-not-before ca))
            (not-after (pure-tls:certificate-not-after ca))
@@ -553,7 +553,7 @@
 
 (test certificate-inventory-reports-invalid-certificates-and-signing-key
   (with-temporary-store (store directory)
-    (gr8s::load-service-account-signing-key store)
+    (gr8s.resources::load-service-account-signing-key store)
     (let ((bad (merge-pathnames "pki/kubernetes-api.crt" directory)))
       (with-open-file (stream bad :direction :output :if-exists :supersede)
         (write-line "not a certificate" stream))
@@ -569,8 +569,8 @@
 (test certificate-inventory-covers-standalone-agent-layout
   (with-temporary-store (store directory)
     (declare (ignore store))
-    (let* ((pki (gr8s:ensure-cluster-pki directory))
-           (ca-path (gr8s:cluster-pki-ca-certificate-path pki)))
+    (let* ((pki (gr8s.security::ensure-cluster-pki directory))
+           (ca-path (gr8s.security::cluster-pki-ca-certificate-path pki)))
       (uiop:copy-file ca-path (merge-pathnames "ca.crt" directory))
       (uiop:copy-file ca-path (merge-pathnames "node.crt" directory))
       (let ((records (gr8s.server::certificate-inventory directory)))
@@ -586,8 +586,8 @@
 (test certificate-inventory-covers-combined-agent-trust-anchor
   (with-temporary-store (store directory)
     (declare (ignore store))
-    (let* ((pki (gr8s:ensure-cluster-pki directory))
-           (ca-path (gr8s:cluster-pki-ca-certificate-path pki))
+    (let* ((pki (gr8s.security::ensure-cluster-pki directory))
+           (ca-path (gr8s.security::cluster-pki-ca-certificate-path pki))
            (agent-ca (merge-pathnames "agent/ca.crt" directory)))
       (ensure-directories-exist agent-ca)
       (uiop:copy-file ca-path agent-ca)
@@ -613,7 +613,7 @@
 (test certificate-status-table-and-json-have-stable-machine-fields
   (with-temporary-store (store directory)
     (declare (ignore store))
-    (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory))
+    (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" directory))
     (let* ((records (gr8s.server::certificate-inventory directory))
            (table (with-output-to-string (stream)
                     (gr8s.server::write-certificate-inventory-table records stream)))
@@ -635,7 +635,7 @@
                             (namestring directory) "--output" "json"))
            (before (directory (merge-pathnames "**/*" directory)))
            (output (with-output-to-string (*standard-output*)
-                     (is (= 0 (gr8s::main-with-environment
+                     (is (= 0 (gr8s.server::main-with-environment
                                arguments (constantly nil) (constantly 99)))))))
       (is (search "service-account-signing-key" output))
       (is (search "missing" output))

@@ -17,7 +17,7 @@
 
 (asdf:load-asd (truename "gr8s.asd"))
 (asdf:load-system :gr8s)
-(gr8s::embed-runtime-assets #P"build/containerd/")
+(gr8s.runtime::embed-runtime-assets #P"build/containerd/")
 
 ;; All endpoint pipelines use fixed in-image source. Preserve their compiled
 ;; specs in the dumped heap so the first CNI ADD only creates/loads kernel
@@ -43,19 +43,19 @@
   (if (probe-file notices)
       (progn
         (asdf:load-system :salza2)
-        (setf gr8s::*embedded-notices-gz*
+        (setf gr8s.server::*embedded-notices-gz*
               (uiop:symbol-call
                :salza2 :compress-data
                (trivial-utf-8:string-to-utf-8-bytes (uiop:read-file-string notices))
                (uiop:find-symbol* :gzip-compressor :salza2)))
         (format t "build-native: embedded NOTICES (~D bytes gzipped)~%"
-                (length gr8s::*embedded-notices-gz*)))
+                (length gr8s.server::*embedded-notices-gz*)))
       (warn "build-native: NOTICES missing; `gr8s notices` will be empty. Run `make notices`.")))
 
 ;; Bake the git-augmented version into the image. This build dumps with
 ;; save-lisp-and-die rather than asdf:program-op, so VERSION-STRING's program-op
 ;; hook never fires; set +GR8S-VERSION+ here instead, while the git repo is present.
-(setf gr8s:+gr8s-version+ (version-string:make-version-string :gr8s :include-git-p t))
+(setf gr8s.foundation:+gr8s-version+ (version-string:make-version-string :gr8s :include-git-p t))
 
 ;; Base systems are supplied by the dumped image. Patch systems may depend on
 ;; them on hosts without this checkout; no ASDF operation should reload them.
@@ -66,7 +66,7 @@
   ;; The runtime reads only a leading --dynamic-space-size or --control-stack-size, and
   ;; passes the rest on. Older wrappers end the runtime's options explicitly.
   (let ((arguments (uiop:command-line-arguments)))
-    (uiop:quit (gr8s:main (if (equal (first arguments) "--end-runtime-options")
+    (uiop:quit (gr8s.server:main (if (equal (first arguments) "--end-runtime-options")
                               (rest arguments)
                               arguments)))))
 

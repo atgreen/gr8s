@@ -48,18 +48,18 @@
 
 (test gateway-sni-extracts-host-name
   (is (equal "app.example.com"
-             (gr8s::parse-tls-client-hello-sni (gwsni-client-hello :server-name "app.example.com"))))
+             (gr8s.controllers::parse-tls-client-hello-sni (gwsni-client-hello :server-name "app.example.com"))))
   (is (equal "a.b.c.example.io"
-             (gr8s::parse-tls-client-hello-sni (gwsni-client-hello :server-name "a.b.c.example.io")))))
+             (gr8s.controllers::parse-tls-client-hello-sni (gwsni-client-hello :server-name "a.b.c.example.io")))))
 
 (test gateway-sni-fails-closed
   ;; No SNI extension.
-  (is (null (gr8s::parse-tls-client-hello-sni (gwsni-client-hello))))
+  (is (null (gr8s.controllers::parse-tls-client-hello-sni (gwsni-client-hello))))
   ;; Not a TLS handshake record.
-  (is (null (gr8s::parse-tls-client-hello-sni (gwsni-bytes #x17 #x03 #x03 (gwsni-u16 4) 0 0 0 0))))
+  (is (null (gr8s.controllers::parse-tls-client-hello-sni (gwsni-bytes #x17 #x03 #x03 (gwsni-u16 4) 0 0 0 0))))
   ;; Truncated ClientHello (cut mid-extension).
   (let* ((full (gwsni-client-hello :server-name "truncated.example.com"))
          (cut (subseq full 0 (- (length full) 8))))
-    (is (null (gr8s::parse-tls-client-hello-sni cut))))
+    (is (null (gr8s.controllers::parse-tls-client-hello-sni cut))))
   ;; Too short to be a ClientHello at all.
-  (is (null (gr8s::parse-tls-client-hello-sni (gwsni-bytes #x16 #x03 #x01 0 5)))))
+  (is (null (gr8s.controllers::parse-tls-client-hello-sni (gwsni-bytes #x16 #x03 #x01 0 5)))))

@@ -7,8 +7,8 @@
   "Return only fresh progress, or an explicit busy observation without progress."
   (or (sb-thread:with-mutex (member-lock :wait-p nil)
         (or (sb-thread:with-mutex (store-lock :wait-p nil) (funcall function))
-            (gr8s::core-object "busy" t "busyLock" "store" "blocked" t)))
-      (gr8s::core-object "busy" t "busyLock" "member" "blocked" t)))
+            (gr8s.resources::core-object "busy" t "busyLock" "store" "blocked" t)))
+      (gr8s.resources::core-object "busy" t "busyLock" "member" "blocked" t)))
 
 (defun compaction-cluster-native-main ()
   (when (equal "--prepare-tls" (first (uiop:command-line-arguments)))
@@ -25,7 +25,7 @@
                (control (merge-pathnames "harness/" root))
                (request-path (merge-pathnames "request.json" control))
                (response-path (merge-pathnames "response.json" control))
-               (store (gr8s:open-store root)) (member nil) (ha nil) (producer nil)
+               (store (gr8s.store::open-store root)) (member nil) (ha nil) (producer nil)
                (original (symbol-function 'gr8s.resources::capture-frozen-store-snapshot))
                (original-capacity (symbol-function 'gr8s.raft::raft-replication-capacity-index))
                (original-catchup (symbol-function 'gr8s.raft::raft-storage-read-catchup))
@@ -35,7 +35,7 @@
                (lock (bt:make-lock "compaction probe state"))
                (armed nil) (held nil) (held-index nil) (stopping nil)
                (completed 0) (finished nil) (failure nil) (refusals 0) (conflict-retries 0) (cache-batches 0)
-               (loaded-history (reduce #'+ (gr8s::pod-store-template-history store)
+               (loaded-history (reduce #'+ (gr8s.store::pod-store-template-history store)
                                        :key #'gr8s.resources::template-history-entry-bytes)))
           (labels
               ((timed-storage-stage (name function)
@@ -53,30 +53,30 @@
                    (loop
                      (when (bt:with-lock-held (lock) stopping) (error "Probe stopping"))
                      (handler-case (progn (funcall function) (return t))
-                       (gr8s:kubernetes-error (condition)
+                       (gr8s.model::kubernetes-error (condition)
                          (cond
-                           ((= 503 (gr8s::kubernetes-error-status-code condition)))
+                           ((= 503 (gr8s.model::kubernetes-error-status-code condition)))
                            ;; CORE-CONFLICT is a committed no-op: rebuilding the
                            ;; transaction against the now-current state is safe.
                            ;; Do not retry AlreadyExists or arbitrary conflicts.
-                           ((and (= 409 (gr8s::kubernetes-error-status-code condition))
+                           ((and (= 409 (gr8s.model::kubernetes-error-status-code condition))
                                  (equal "Resource changed before its consensus transaction committed"
-                                        (gr8s::kubernetes-error-message condition)))
+                                        (gr8s.model::kubernetes-error-message condition)))
                             (bt:with-lock-held (lock) (incf conflict-retries)))
                            (t (error condition)))))
                      (when (> (get-internal-real-time) deadline) (error "Probe write timed out"))
                      (sleep 0.02))))
                (find-owned (name value &optional uid)
                  (handler-case
-                     (let* ((object (gr8s::get-core-resource store "configmaps" "default" name))
+                     (let* ((object (gr8s.resources::get-core-resource store "configmaps" "default" name))
                             (actual (gethash "uid" (gethash "metadata" object))))
                        (unless (and (stringp actual) (plusp (length actual))
                                     (or (null uid) (equal uid actual))
                                     (equal value (gethash "value" (gethash "data" object))))
                          (error "Probe object identity/content changed: ~A" name))
                        actual)
-                   (gr8s:kubernetes-error (condition)
-                     (if (= 404 (gr8s::kubernetes-error-status-code condition)) nil
+                   (gr8s.model::kubernetes-error (condition)
+                     (if (= 404 (gr8s.model::kubernetes-error-status-code condition)) nil
                          (error condition)))))
                (create-owned (name value)
                  ;; A lost reply can follow a committed create. Only this
@@ -85,10 +85,10 @@
                    (retry-write
                     (lambda ()
                       (handler-case
-                          (gr8s::create-core-resource store "configmaps" (input name value) "default")
-                        (gr8s:kubernetes-error (condition)
-                          (unless (and (= 409 (gr8s::kubernetes-error-status-code condition))
-                                       (equal "AlreadyExists" (gr8s::kubernetes-error-reason condition)))
+                          (gr8s.resources::create-core-resource store "configmaps" (input name value) "default")
+                        (gr8s.model::kubernetes-error (condition)
+                          (unless (and (= 409 (gr8s.model::kubernetes-error-status-code condition))
+                                       (equal "AlreadyExists" (gr8s.model::kubernetes-error-reason condition)))
                             (error condition))))
                       (setf uid (find-owned name value))
                       (unless uid (error "Created probe object disappeared: ~A" name))))
@@ -102,26 +102,26 @@
                     ;; Absence is success only after our own delete attempt,
                     ;; following a confirmed create of this unique round key.
                     (handler-case
-                        (gr8s::delete-core-resource store "configmaps" "default" name :uid uid)
-                      (gr8s:kubernetes-error (condition)
-                        (unless (= 404 (gr8s::kubernetes-error-status-code condition))
+                        (gr8s.resources::delete-core-resource store "configmaps" "default" name :uid uid)
+                      (gr8s.model::kubernetes-error (condition)
+                        (unless (= 404 (gr8s.model::kubernetes-error-status-code condition))
                           (error condition))))
                     (when (find-owned name value uid)
                       (error "Deleted probe object remains: ~A" name)))))
                (input (name value)
-                 (gr8s::core-object "apiVersion" "v1" "kind" "ConfigMap"
-                   "metadata" (gr8s::core-object "name" name)
-                   "data" (gr8s::core-object "value" value)))
+                 (gr8s.resources::core-object "apiVersion" "v1" "kind" "ConfigMap"
+                   "metadata" (gr8s.resources::core-object "name" name)
+                   "data" (gr8s.resources::core-object "value" value)))
                (peer-progress ()
                  ;; STATUS already holds the member mutex. Never encode command
                  ;; payloads, only bounded queue descriptors and scalar progress.
-                 (let ((node (gr8s::raft-member-node member)))
+                 (let ((node (gr8s.raft.transport::raft-member-node member)))
                    (coerce
                     (loop for id being the hash-keys of (gr8s.raft.transport::raft-member-links member)
                             using (hash-value link)
                           collect
                           (bt:with-lock-held ((gr8s.raft.transport::raft-peer-link-lock link))
-                            (gr8s::core-object
+                            (gr8s.resources::core-object
                              "peer" id
                              "nextIndex" (gethash id (gr8s.raft:raft-node-next-index node) 0)
                              "matchIndex" (gethash id (gr8s.raft:raft-node-match-index node) 0)
@@ -141,28 +141,28 @@
                  (let* ((artifact-keep nil)
                         (object
                          (compaction-native-try-sample
-                          (gr8s::raft-member-lock member) (gr8s::pod-store-lock store)
+                          (gr8s.raft.transport::raft-member-lock member) (gr8s.store::pod-store-lock store)
                           (lambda ()
-                             (let ((node (gr8s::raft-member-node member)))
+                             (let ((node (gr8s.raft.transport::raft-member-node member)))
                                (setf artifact-keep (gr8s.resources::store-snapshot-artifact-keep-digests-unlocked member root))
-                               (gr8s::core-object
+                               (gr8s.resources::core-object
                                 "busy" nil
                                 "blocked" (if (gr8s.store::pod-store-access-blocked store) t nil)
-                                "role" (string-downcase (symbol-name (gr8s::raft-node-role node)))
-                                "selfRole" (string-downcase (symbol-name (gr8s::raft-node-self-role node)))
-                                "term" (gr8s::raft-node-current-term node)
+                                "role" (string-downcase (symbol-name (cl-raft::raft-node-role node)))
+                                "selfRole" (string-downcase (symbol-name (cl-raft::raft-node-self-role node)))
+                                "term" (cl-raft::raft-node-current-term node)
                                 "gcCpuSeconds" (/ sb-ext:*gc-run-time* (float internal-time-units-per-second 1d0))
                                 "gcWallSeconds" (/ sb-ext:*gc-real-time* (float internal-time-units-per-second 1d0))
                                 "peerProgress" (peer-progress)
-                                "commit" (gr8s::raft-node-commit-index node)
-                                "applied" (gr8s::raft-node-last-applied node)
-                                "snapshot" (gr8s::raft-node-snapshot-index node)
-                                "quorumMembers" (gr8s::raft-cluster-size node)
+                                "commit" (cl-raft::raft-node-commit-index node)
+                                "applied" (cl-raft::raft-node-last-applied node)
+                                "snapshot" (cl-raft::raft-node-snapshot-index node)
+                                "quorumMembers" (cl-raft::raft-cluster-size node)
                                 "compactionEntryThreshold" (gr8s.ha::ha-control-plane-compaction-entries ha)
                                 "configMaps"
                                 (coerce
                                  (sort
-                                  (loop for key being the hash-keys of (gr8s::pod-store-resources store)
+                                  (loop for key being the hash-keys of (gr8s.store::pod-store-resources store)
                                         using (hash-value object)
                                         when (and (equal "configmaps" (first key))
                                                   (equal "default" (second key)))
@@ -178,7 +178,7 @@
                                 (loop for entry across (gr8s.raft:raft-node-log node)
                                       sum (+ 128 (gr8s.ha::store-raft-command-retention-weight
                                                   (gr8s.raft:raft-entry-command entry))))
-                                "historyEstimatedBytes" (reduce #'+ (gr8s::pod-store-template-history store)
+                                "historyEstimatedBytes" (reduce #'+ (gr8s.store::pod-store-template-history store)
                                                          :key #'gr8s.resources::template-history-entry-bytes)
                                 "loadedHistoryEstimatedBytes" loaded-history
                                 "heapAfterGcBytes" gr8s.server::*heap-after-gc*
@@ -231,7 +231,7 @@
                            (coerce
                             (loop for name in '("freeze" "capture" "retain" "publish")
                                   for row across (gr8s.ha::ha-control-plane-compaction-phase-times ha)
-                                  collect (gr8s::core-object
+                                  collect (gr8s.resources::core-object
                                            "phase" name "attempts" (if row (aref row 0) 0)
                                            "totalSeconds" (/ (if row (aref row 1) 0) (float internal-time-units-per-second 1d0))
                                            "maxSeconds" (/ (if row (aref row 2) 0) (float internal-time-units-per-second 1d0))
@@ -244,7 +244,7 @@
                            (coerce
                             (loop for name in '("check" "freeze" "publish" "resume")
                                   for row across (gr8s.ha::ha-control-plane-compaction-member-lock-times ha)
-                                  collect (gr8s::core-object
+                                  collect (gr8s.resources::core-object
                                            "section" name "attempts" (if row (aref row 0) 0)
                                            "totalSeconds" (/ (if row (aref row 1) 0) (float internal-time-units-per-second 1d0))
                                            "maxSeconds" (/ (if row (aref row 2) 0) (float internal-time-units-per-second 1d0))
@@ -265,7 +265,7 @@
                            (coerce (loop for name in '("cache-prefix" "replace-wal")
                                          for row = (gethash name storage-stages)
                                          when row collect
-                                           (gr8s::core-object "stage" name "attempts" (aref row 0)
+                                           (gr8s.resources::core-object "stage" name "attempts" (aref row 0)
                                              "totalSeconds" (aref row 1) "maxSeconds" (aref row 2)
                                              "lastSeconds" (aref row 3))) 'vector)
                            (gethash "churnError" object) failure))
@@ -292,16 +292,16 @@
                                  :credentials (when (equal tls-flag "--tls")
                                                 (gr8s.security::load-raft-credentials (merge-pathnames "tls/" root)))
                                  :port (parse-integer port-text)))
-                   (bt:with-lock-held ((gr8s::raft-member-lock member))
-                     (setf (gr8s.raft::raft-node-uncommitted-byte-limit (gr8s::raft-member-node member)) (* 16 1024 1024)
-                           (gr8s.raft::raft-node-uncommitted-weight-fn (gr8s::raft-member-node member))
+                   (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
+                     (setf (gr8s.raft::raft-node-uncommitted-byte-limit (gr8s.raft.transport::raft-member-node member)) (* 16 1024 1024)
+                           (gr8s.raft::raft-node-uncommitted-weight-fn (gr8s.raft.transport::raft-member-node member))
                            #'gr8s.ha::store-raft-command-retention-weight))
-                   (gr8s::raft-member-start member)
+                   (gr8s.raft.transport::raft-member-start member)
                    (setf ha (gr8s.ha::make-ha-control-plane :member member :store store
                              :compaction-bytes (* 16 1024 1024) :compaction-entries 100000 :compaction-interval 0.01)
                          (symbol-function 'gr8s.resources::capture-frozen-store-snapshot)
                          (lambda (view path)
-                           (bt:with-lock-held ((gr8s::raft-member-lock member))
+                           (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
                              (bt:with-lock-held (lock)
                                (when armed
                                  (setf armed nil held t held-index (gr8s.resources::frozen-store-snapshot-index view)
@@ -326,7 +326,7 @@
                            (timed-storage-stage "replace-wal" (lambda () (apply original-replace-wal arguments)))))
                    (gr8s.ha::start-ha-maintenance-worker ha)
                    (gr8s.ha::start-ha-compaction-worker ha)
-                   (learner-native-write-json (merge-pathnames "ready.json" control) (gr8s::core-object "ready" t))
+                   (learner-native-write-json (merge-pathnames "ready.json" control) (gr8s.resources::core-object "ready" t))
                    (loop
                      (when (probe-file request-path)
                        (let* ((request (with-open-file (stream request-path) (com.inuoe.jzon:parse stream)))
@@ -336,31 +336,31 @@
                                     (cond
                                       ((equal command "status") (status))
                                       ((equal command "join")
-                                       (gr8s::core-object "accepted" (if (gr8s::raft-cluster-join member "127.0.0.1" (gethash "port" request)) t nil)))
+                                       (gr8s.resources::core-object "accepted" (if (gr8s.raft.transport::raft-cluster-join member "127.0.0.1" (gethash "port" request)) t nil)))
                                       ((equal command "namespace")
-                                       (retry-write (lambda () (gr8s::create-core-resource store "namespaces"
-                                                                (gr8s::core-object "apiVersion" "v1" "kind" "Namespace"
-                                                                  "metadata" (gr8s::core-object "name" "default")) nil)))
-                                       (gr8s::core-object "committed" t))
+                                       (retry-write (lambda () (gr8s.resources::create-core-resource store "namespaces"
+                                                                (gr8s.resources::core-object "apiVersion" "v1" "kind" "Namespace"
+                                                                  "metadata" (gr8s.resources::core-object "name" "default")) nil)))
+                                       (gr8s.resources::core-object "committed" t))
                                       ((equal command "write")
-                                       (retry-write (lambda () (gr8s::create-core-resource store "configmaps"
+                                       (retry-write (lambda () (gr8s.resources::create-core-resource store "configmaps"
                                                                 (input (gethash "name" request) (gethash "value" request)) "default")))
-                                       (gr8s::core-object "committed" t))
+                                       (gr8s.resources::core-object "committed" t))
                                       ((equal command "read")
                                        (let ((object nil))
                                          (retry-write (lambda ()
-                                                        (setf object (gr8s::get-core-resource
+                                                        (setf object (gr8s.resources::get-core-resource
                                                                       store "configmaps" "default" (gethash "name" request)))))
-                                         (gr8s::core-object "value" (gethash "value" (gethash "data" object)))))
+                                         (gr8s.resources::core-object "value" (gethash "value" (gethash "data" object)))))
                                       ((equal command "hold-capture")
                                        ;; A prior replay phase leaves different WAL
                                        ;; tails. Force only the next capture's entry
                                        ;; trigger, restoring normal policy in its hook.
-                                       (bt:with-lock-held ((gr8s::raft-member-lock member))
+                                       (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
                                          (bt:with-lock-held (lock)
                                            (setf armed t (gr8s.ha::ha-control-plane-compaction-entries ha) 1)))
-                                       (gr8s::core-object "armed" t))
-                                      ((equal command "release-capture") (bt:with-lock-held (lock) (setf held nil)) (gr8s::core-object "released" t))
+                                       (gr8s.resources::core-object "armed" t))
+                                      ((equal command "release-capture") (bt:with-lock-held (lock) (setf held nil)) (gr8s.resources::core-object "released" t))
                                       ((equal command "prefix-churn")
                                        (let ((count (gethash "rounds" request)))
                                          (unless (typep count '(integer 1 36)) (error "Invalid prefix fixture rounds"))
@@ -369,14 +369,14 @@
                                                   (value (make-string 65536 :initial-element #\p))
                                                   (uid (create-owned name value)))
                                              (delete-owned name value uid)))
-                                         (gr8s::core-object "rounds" count "payloadBytes" (* count 65536))))
+                                         (gr8s.resources::core-object "rounds" count "payloadBytes" (* count 65536))))
                                       ((equal command "start-churn")
                                        (when producer (error "Producer already started"))
                                        (setf producer (bt:make-thread #'churn :name "compaction probe producer"))
-                                       (gr8s::core-object "started" t))
-                                      ((equal command "stop") (gr8s::core-object "stopped" t))
+                                       (gr8s.resources::core-object "started" t))
+                                      ((equal command "stop") (gr8s.resources::core-object "stopped" t))
                                       (t (error "Unknown probe command")))
-                                  (error (condition) (gr8s::core-object "error" (princ-to-string condition))))))
+                                  (error (condition) (gr8s.resources::core-object "error" (princ-to-string condition))))))
                          (delete-file request-path)
                          (setf (gethash "nonce" response) (gethash "nonce" request))
                          (learner-native-write-json response-path response)
@@ -384,8 +384,8 @@
                      (sleep 0.02)))
               (bt:with-lock-held (lock) (setf stopping t held nil))
               (when producer (bt:join-thread producer))
-              (when ha (gr8s::stop-ha-control-plane ha))
-              (when (and member (null ha)) (gr8s::stop-raft-member member))
+              (when ha (gr8s.ha::stop-ha-control-plane ha))
+              (when (and member (null ha)) (gr8s.raft.transport::stop-raft-member member))
               (setf (symbol-function 'gr8s.resources::capture-frozen-store-snapshot) original
                     (symbol-function 'gr8s.raft::raft-replication-capacity-index) original-capacity
                     (symbol-function 'gr8s.raft::raft-storage-read-catchup) original-catchup

@@ -1,7 +1,15 @@
 (defpackage #:gr8s/tests
   (:use #:cl #:fiveam)
-  (:import-from #:gr8s
-                #:create-pod
+  (:import-from #:gr8s.apiserver
+                #:start-server
+                #:stop-server)
+  (:import-from #:gr8s.kubelet
+                #:make-reconciler
+                #:parse-pod
+                #:reconcile-all
+                #:reconcile-pod
+                #:reconciler-logs)
+  (:import-from #:gr8s.model
                 #:container-spec-args
                 #:container-spec-command
                 #:container-spec-env
@@ -10,40 +18,37 @@
                 #:container-spec-ports
                 #:kubernetes-error
                 #:kubernetes-error-reason
-                #:delete-pod
-                #:fake-runtime-ensure-count
-                #:get-pod
-                #:list-pods
-                #:make-fake-runtime
-                #:make-reconciler
-                #:mark-pod-deleting
-                #:open-store
-                #:parse-pod
                 #:pod-containers
                 #:pod-name
                 #:pod-namespace
-                #:pod-restart-policy
-                #:parse-cli-options
                 #:pod-resource-version
+                #:pod-restart-policy
                 #:pod-to-object
-                #:pod-uid
-                #:reconcile-all
-                #:reconcile-pod
-                #:reconciler-logs
-                #:runtime-observe
+                #:pod-uid)
+  (:import-from #:gr8s.runtime
+                #:fake-runtime-ensure-count
+                #:make-fake-runtime
                 #:runtime-delete
                 #:runtime-ensure
                 #:runtime-error
                 #:runtime-error-message
                 #:runtime-logs
-                #:runtime-pod-resource-version
+                #:runtime-observe
                 #:runtime-pod-phase
+                #:runtime-pod-resource-version
                 #:runtime-pod-uid
-                #:set-fake-runtime-failure
-                #:start-server
+                #:set-fake-runtime-failure)
+  (:import-from #:gr8s.server
+                #:parse-cli-options
                 #:start-reconciliation-worker
-                #:stop-reconciliation-worker
-                #:stop-server
+                #:stop-reconciliation-worker)
+  (:import-from #:gr8s.store
+                #:create-pod
+                #:delete-pod
+                #:get-pod
+                #:list-pods
+                #:mark-pod-deleting
+                #:open-store
                 #:update-pod))
 
 (in-package #:gr8s/tests)
@@ -114,6 +119,4 @@
                    "RAFT-WAL-WRITE-FRAME"
                    "RECOVER-RAFT-NODE"))
     (rehome '#:cl-raft '#:gr8s.raft (list "+RAFT-WAL-HEADER-LENGTH+"))
-    (rehome '#:cl-torrent '#:gr8s.image-distribution (list "BENCODE-MAP-ENTRIES"))
-    (rehome '#:cl-work-queue '#:gr8s (list "WORK-QUEUE-LANES"))
-    (rehome '#:cl-cronexpr '#:gr8s (list "*CRON-ZONES*" "*CRON-ZONES-LOCK*"))))
+    (rehome '#:cl-torrent '#:gr8s.image-distribution (list "BENCODE-MAP-ENTRIES"))))

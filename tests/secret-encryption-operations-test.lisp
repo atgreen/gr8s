@@ -22,12 +22,12 @@
 
 (test secrets-encrypt-lifecycle-dispatches-through-the-public-cli
   (with-temporary-store (store directory)
-    (gr8s::create-core-resource
+    (gr8s.resources::create-core-resource
      store "secrets"
-     (gr8s::core-object
+     (gr8s.resources::core-object
       "apiVersion" "v1" "kind" "Secret"
-      "metadata" (gr8s::core-object "name" "cli" "namespace" "default")
-      "data" (gr8s::core-object "value" "Y2xpLXNlbnRpbmVs"))
+      "metadata" (gr8s.resources::core-object "name" "cli" "namespace" "default")
+      "data" (gr8s.resources::core-object "value" "Y2xpLXNlbnRpbmVs"))
      "default")
     (dolist (stage '("enable" "prepare" "promote" "reencrypt" "finalize" "status"))
       (let ((result nil)
@@ -35,7 +35,7 @@
         (setf output
               (with-output-to-string (*standard-output*)
                 (setf result
-                      (gr8s::main-with-environment
+                      (gr8s.server::main-with-environment
                        (list "secrets-encrypt" stage "--state-directory"
                              (namestring directory))
                        (constantly nil) (constantly 99)))))
@@ -48,7 +48,7 @@
       (setf output
             (with-output-to-string (*standard-output*)
               (setf result
-                    (gr8s::main-with-environment
+                    (gr8s.server::main-with-environment
                      (list "secrets-encrypt" "disable" "--state-directory"
                            (namestring directory))
                      (constantly nil) (constantly 99)))))
@@ -56,4 +56,4 @@
       (is-false (gethash "enabled" (com.inuoe.jzon:parse output)))
       (is (search "Y2xpLXNlbnRpbmVs"
                   (uiop:read-file-string
-                   (gr8s::core-resource-state-path store)))))))
+                   (gr8s.resources::core-resource-state-path store)))))))

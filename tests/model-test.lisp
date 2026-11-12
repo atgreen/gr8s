@@ -32,7 +32,7 @@
       ;; gives an absent securityContext an empty one).
       (setf (gethash "terminationGracePeriodSeconds" (gethash "spec" expected)) 30
             (gethash "schedulerName" (gethash "spec" expected)) "default-scheduler"
-            (gethash "securityContext" (gethash "spec" expected)) (gr8s::core-object))
+            (gethash "securityContext" (gethash "spec" expected)) (gr8s.resources::core-object))
       (let ((expected-container (aref (gethash "containers" (gethash "spec" expected)) 0)))
         (setf (gethash "terminationMessagePath" expected-container) "/dev/termination-log"
               (gethash "terminationMessagePolicy" expected-container) "File"))

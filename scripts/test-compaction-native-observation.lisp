@@ -43,7 +43,7 @@
                   member store (lambda ()
                                  (check (sb-thread:holding-mutex-p member))
                                  (check (sb-thread:holding-mutex-p store))
-                                 (gr8s::core-object "busy" nil "applied" 17)))))
+                                 (gr8s.resources::core-object "busy" nil "applied" 17)))))
       (check (= 17 (gethash "applied" value))))
     (handler-case (compaction-native-try-sample member store (lambda () (error "Expected")))
       (simple-error () (check t)))

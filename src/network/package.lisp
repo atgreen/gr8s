@@ -4,18 +4,8 @@
 ;;;; Package boundary for CNI and the node networking dataplane.
 
 (defpackage #:gr8s.network
-  (:use #:cl #:gr8s)
+  (:use #:cl)
   (:export #:validate-network-policy-spec))
-
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (let ((network (find-package '#:gr8s.network))
-        (composition (find-package '#:gr8s)))
-    ;; Bootstrap code validates the default NetworkPolicy before this module is
-    ;; loaded.  Establish that forward reference with the symbol this package
-    ;; will define.
-    (let ((symbol (find-symbol "VALIDATE-NETWORK-POLICY-SPEC" network)))
-      (shadowing-import symbol composition))))
-
 ;;; The rtnetlink dataplane primitives -- the Linux UAPI wire codec, the private
 ;;; per-thread socket transaction, and the link/address/route/neighbor
 ;;; operations built on them -- now live in the standalone cl-rtnetlink library
@@ -45,8 +35,7 @@
                            "REPLACE-NETWORK-ROUTE" "REMOVE-NETWORK-ROUTE" "NETWORK-ROUTE-PRESENT-P"
                            "REPLACE-PERMANENT-NETWORK-NEIGHBOR" "PERMANENT-NETWORK-NEIGHBOR-P"))))
     (shadowing-import symbols '#:gr8s.network)
-    (export symbols '#:gr8s.network)
-    (shadowing-import symbols '#:gr8s)))
+    (export symbols '#:gr8s.network)))
 
 ;;; The WireGuard overlay path model -- per-endpoint observations, passive
 ;;; telemetry folding, MTU black-hole discovery, path health/score and the
@@ -126,5 +115,9 @@
                           "WIREGUARD-PEER-PATH-STATE-SELECTED"
 ))))
     (shadowing-import symbols '#:gr8s.network)
-    (export symbols '#:gr8s.network)
-    (shadowing-import symbols '#:gr8s)))
+    (export symbols '#:gr8s.network)))
+
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (dolist (name '("SERVICE-LB-DATAPLANE-LOCK" "SERVICE-LB-DATAPLANE-REOPENED-P"
+                  "SERVICE-PACKET-GC-COMPATIBLE-P" "SWEEP-SERVICE-PACKET-STATE"))
+    (export (intern name '#:gr8s.network) '#:gr8s.network)))

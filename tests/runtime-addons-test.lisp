@@ -23,7 +23,7 @@
       (write-sequence binary-bytes stream))
     (with-open-file (stream (merge-pathnames "addon.json" addon)
                             :direction :output :if-exists :supersede :if-does-not-exist :create)
-      (write-string (funcall json (gr8s::runtime-addon-file-sha512 binary)) stream))
+      (write-string (funcall json (gr8s.runtime::runtime-addon-file-sha512 binary)) stream))
     addon))
 
 (test runtime-addons-load-verifies-checksums-and-rejects-bad-addons
@@ -32,7 +32,7 @@
     (unwind-protect
          (progn
            ;; Absent directory: no addons, no error.
-           (is (null (gr8s::load-installed-runtime-addons root)))
+           (is (null (gr8s.runtime::load-installed-runtime-addons root)))
 
            ;; A valid, checksum-matching addon becomes a runtime handler.
            (write-runtime-addon
@@ -40,7 +40,7 @@
             (lambda (sha)
               (format nil "{\"name\":\"runsc\",\"runtimeType\":\"io.containerd.runsc.v1\",~
                            \"binaries\":[{\"path\":\"shim\",\"sha512\":\"~A\"}]}" sha)))
-           (let ((handlers (gr8s::load-installed-runtime-addons root)))
+           (let ((handlers (gr8s.runtime::load-installed-runtime-addons root)))
              (is (= 1 (length handlers)))
              (is (string= "runsc" (getf (first handlers) :name)))
              (is (string= "io.containerd.runsc.v1" (getf (first handlers) :runtime-type)))
@@ -64,7 +64,7 @@
 
            (handler-bind ((warning #'muffle-warning))
              (let ((names (mapcar (lambda (h) (getf h :name))
-                                  (gr8s::load-installed-runtime-addons root))))
+                                  (gr8s.runtime::load-installed-runtime-addons root))))
                (is (member "runsc" names :test #'string=))
                (is (not (member "bad" names :test #'string=)))
                (is (not (member "evil" names :test #'string=))))))
@@ -78,7 +78,7 @@
     (with-open-file (stream file :direction :output :element-type '(unsigned-byte 8)
                                  :if-exists :supersede :if-does-not-exist :create)
       (write-sequence bytes stream))
-    (gr8s::runtime-addon-file-sha512 file)))
+    (gr8s.runtime::runtime-addon-file-sha512 file)))
 
 (test runtime-addons-verify-non-binary-assets
   "A microVM runtime ships data files (guest kernel, rootfs/initrd,
@@ -104,7 +104,7 @@
                   (shim-sha (write-addon-file dir "shim" #(1 2 3 4)))
                   (kernel-sha (write-addon-file dir "share/kernel" #(9 8 7 6 5))))
              (descriptor dir "kata" shim-sha kernel-sha)
-             (let ((handlers (gr8s::load-installed-runtime-addons root)))
+             (let ((handlers (gr8s.runtime::load-installed-runtime-addons root)))
                (is (member "kata" (mapcar (lambda (h) (getf h :name)) handlers) :test #'string=))))
 
            ;; Good binary but TAMPERED asset: whole addon skipped.
@@ -122,7 +122,7 @@
 
            (handler-bind ((warning #'muffle-warning))
              (let ((names (mapcar (lambda (h) (getf h :name))
-                                  (gr8s::load-installed-runtime-addons root))))
+                                  (gr8s.runtime::load-installed-runtime-addons root))))
                (is (member "kata" names :test #'string=))
                (is (not (member "kata-bad-asset" names :test #'string=)))
                (is (not (member "kata-missing-asset" names :test #'string=))))))
@@ -148,7 +148,7 @@
                            \"options\":{\"ConfigPath\":\"/opt/kata/configuration.toml\",~
                                         \"Debug\":true,\"Retries\":3,\"SystemdCgroup\":false}}"
                       sha)))
-           (let* ((handlers (gr8s::load-installed-runtime-addons root))
+           (let* ((handlers (gr8s.runtime::load-installed-runtime-addons root))
                   (kata (find "kata" handlers :key (lambda (h) (getf h :name)) :test #'string=)))
              (is (not (null kata)))
              (is (string= "io.containerd.kata.v2" (getf kata :runtime-type)))
@@ -173,7 +173,7 @@
 
            (handler-bind ((warning #'muffle-warning))
              (let ((names (mapcar (lambda (h) (getf h :name))
-                                  (gr8s::load-installed-runtime-addons root))))
+                                  (gr8s.runtime::load-installed-runtime-addons root))))
                (is (member "kata" names :test #'string=))
                (is (not (member "nested" names :test #'string=)))
                (is (not (member "quote" names :test #'string=))))))

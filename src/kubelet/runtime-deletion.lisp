@@ -7,7 +7,7 @@
 ;;;; Shortening cancels the old job's transports before starting a replacement;
 ;;;; runtime shutdown joins all owned jobs before containerd is stopped.
 
-(in-package #:gr8s)
+(in-package #:gr8s.kubelet)
 
 (defstruct deletion-job
   deadline thread error done cancelled

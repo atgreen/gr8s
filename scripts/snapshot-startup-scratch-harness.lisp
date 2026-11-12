@@ -13,35 +13,35 @@
       (let* ((base (uiop:ensure-directory-pathname base-text))
              (root (merge-pathnames "state/" base))
              (control (merge-pathnames (format nil "attempt-~A/" iteration) base))
-             (options (gr8s::parse-serve-options '("--raft-init" "--node-name" "scratch-crash" "--listen" "127.0.0.1"))))
+             (options (gr8s.server::parse-serve-options '("--raft-init" "--node-name" "scratch-crash" "--listen" "127.0.0.1"))))
         (ensure-directories-exist (merge-pathnames "marker" control))
         (setf (getf options :state-directory) root (getf options :raft-port) (parse-integer port-text))
         (gr8s.server::call-with-serve-state-ownership
          options
          (lambda ()
-           (let* ((store (gr8s:open-store root :defer-restore-completion t))
+           (let* ((store (gr8s.store::open-store root :defer-restore-completion t))
                   (ha (gr8s.server::maybe-start-ha-control-plane store nil options)))
              (unwind-protect
                   (progn
                     (loop with deadline = (+ (get-internal-real-time) (* 30 internal-time-units-per-second))
-                          until (gr8s::ha-control-plane-leader-p ha)
+                          until (gr8s.ha::ha-control-plane-leader-p ha)
                           do (when (> (get-internal-real-time) deadline) (error "Leader readiness timed out"))
                              (sleep 0.02))
                     (cond
                       ((equal mode "hold")
-                       (handler-case (gr8s::get-core-resource store "namespaces" nil "default")
-                         (gr8s:kubernetes-error (condition)
-                           (unless (= 404 (gr8s::kubernetes-error-status-code condition)) (error condition))
-                           (gr8s::create-core-resource store "namespaces"
-                             (gr8s::core-object "apiVersion" "v1" "kind" "Namespace"
-                               "metadata" (gr8s::core-object "name" "default")) nil)))
-                       (handler-case (gr8s::get-core-resource store "configmaps" "default" "scratch-sentinel")
-                         (gr8s:kubernetes-error (condition)
-                           (unless (= 404 (gr8s::kubernetes-error-status-code condition)) (error condition))
-                           (gr8s::create-core-resource store "configmaps"
-                             (gr8s::core-object "apiVersion" "v1" "kind" "ConfigMap"
-                               "metadata" (gr8s::core-object "name" "scratch-sentinel")
-                               "data" (gr8s::core-object "value" "preserved")) "default")))
+                       (handler-case (gr8s.resources::get-core-resource store "namespaces" nil "default")
+                         (gr8s.model::kubernetes-error (condition)
+                           (unless (= 404 (gr8s.model::kubernetes-error-status-code condition)) (error condition))
+                           (gr8s.resources::create-core-resource store "namespaces"
+                             (gr8s.resources::core-object "apiVersion" "v1" "kind" "Namespace"
+                               "metadata" (gr8s.resources::core-object "name" "default")) nil)))
+                       (handler-case (gr8s.resources::get-core-resource store "configmaps" "default" "scratch-sentinel")
+                         (gr8s.model::kubernetes-error (condition)
+                           (unless (= 404 (gr8s.model::kubernetes-error-status-code condition)) (error condition))
+                           (gr8s.resources::create-core-resource store "configmaps"
+                             (gr8s.resources::core-object "apiVersion" "v1" "kind" "ConfigMap"
+                               "metadata" (gr8s.resources::core-object "name" "scratch-sentinel")
+                               "data" (gr8s.resources::core-object "value" "preserved")) "default")))
                        (let* ((source (merge-pathnames "source.jsonl" control))
                               (completed (merge-pathnames (format nil "raft/capture-~A.jsonl" (gr8s.store:generate-uid)) root))
                               (incomplete (merge-pathnames (format nil "raft/capture-~A.jsonl" (gr8s.store:generate-uid)) root))
@@ -75,19 +75,19 @@
                          (loop until (bt:with-lock-held (lock) (and partial part)) do (sleep 0.02))
                          (scratch-probe-json
                           (merge-pathnames "ready.json" control)
-                          (gr8s::core-object "pid" (sb-posix:getpid) "orphans" (vector partial part (namestring completed))
+                          (gr8s.resources::core-object "pid" (sb-posix:getpid) "orphans" (vector partial part (namestring completed))
                             "artifacts" (coerce (loop for name in (gr8s.raft.transport::raft-snapshot-directory-names registry)
                                                        when (and (> (length name) 6) (string= ".jsonl" name :start2 (- (length name) 6)))
                                                          collect (namestring (merge-pathnames name registry))) 'vector)))
                          (loop (sleep 1))))
                       ((equal mode "recover")
                        (let* ((record (com.inuoe.jzon:parse (uiop:read-file-string (merge-pathnames "ready.json" control))))
-                              (object (gr8s::get-core-resource store "configmaps" "default" "scratch-sentinel")))
+                              (object (gr8s.resources::get-core-resource store "configmaps" "default" "scratch-sentinel")))
                          (loop for path across (gethash "orphans" record)
                                do (assert (null (gr8s.store::store-generation-stat (pathname path)))))
                          (assert (equal "preserved" (gethash "value" (gethash "data" object))))
                          (scratch-probe-json (merge-pathnames "recovered.json" control)
-                                             (gr8s::core-object "recovered" t "orphansRemoved" 3 "sentinelPreserved" t))))
+                                             (gr8s.resources::core-object "recovered" t "orphansRemoved" 3 "sentinelPreserved" t))))
                       (t (error "Unknown scratch probe mode"))))
-               (gr8s::stop-ha-control-plane ha)))))))
+               (gr8s.ha::stop-ha-control-plane ha)))))))
   (error (condition) (format *error-output* "Scratch probe failed: ~A~%" condition) (uiop:quit 1)))

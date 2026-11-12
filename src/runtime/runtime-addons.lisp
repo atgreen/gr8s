@@ -11,7 +11,7 @@
 ;;;; mismatch) is skipped with a warning; it never silently changes the runtime
 ;;;; or blocks the node from starting.
 
-(in-package #:gr8s)
+(in-package #:gr8s.runtime)
 
 (defun runtime-addons-directory (state-directory)
   "The directory holding installed runtime addons for this node."

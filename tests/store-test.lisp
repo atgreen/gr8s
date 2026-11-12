@@ -14,7 +14,7 @@
 (test generated-uids-have-rfc-4122-version-and-variant-bits
   (is (string=
        "00010203-0405-4607-8809-0a0b0c0d0e0f"
-       (gr8s::generate-uid
+       (gr8s.store::generate-uid
         #(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)))))
 
 (defmacro with-temporary-store ((store path) &body body)
@@ -29,17 +29,17 @@
   "Run BODY while every durable core-resource write fails with MESSAGE: a checkpoint,
 which goes through WRITE-PRIVATE-TEXT-ATOMICALLY, and a journal append."
   (let ((checkpoint (gensym "CHECKPOINT")) (journal (gensym "JOURNAL")))
-    `(let ((,checkpoint (symbol-function 'gr8s::write-private-text-atomically))
-           (,journal (symbol-function 'gr8s::append-core-journal-record)))
+    `(let ((,checkpoint (symbol-function 'gr8s.security::write-private-text-atomically))
+           (,journal (symbol-function 'gr8s.resources::append-core-journal-record)))
        (unwind-protect
             (progn
-              (setf (symbol-function 'gr8s::write-private-text-atomically)
+              (setf (symbol-function 'gr8s.security::write-private-text-atomically)
                     (lambda (&rest arguments) (declare (ignore arguments)) (error ,message))
-                    (symbol-function 'gr8s::append-core-journal-record)
+                    (symbol-function 'gr8s.resources::append-core-journal-record)
                     (lambda (&rest arguments) (declare (ignore arguments)) (error ,message)))
               ,@body)
-         (setf (symbol-function 'gr8s::write-private-text-atomically) ,checkpoint
-               (symbol-function 'gr8s::append-core-journal-record) ,journal)))))
+         (setf (symbol-function 'gr8s.security::write-private-text-atomically) ,checkpoint
+               (symbol-function 'gr8s.resources::append-core-journal-record) ,journal)))))
 
 (test temporary-stores-remain-isolated-with-identical-random-states
   (let ((seed (make-random-state nil)) (first-path nil))
@@ -69,7 +69,7 @@ which goes through WRITE-PRIVATE-TEXT-ATOMICALLY, and a journal append."
 (defun labelled-pod-json (json)
   "Return the Pod JSON text with a label added, so that writing it changes the Pod."
   (let ((object (com.inuoe.jzon:parse json)))
-    (setf (gethash "labels" (gethash "metadata" object)) (gr8s::core-object "changed" "yes"))
+    (setf (gethash "labels" (gethash "metadata" object)) (gr8s.resources::core-object "changed" "yes"))
     (com.inuoe.jzon:stringify object)))
 
 (test store-updates-with-optimistic-concurrency

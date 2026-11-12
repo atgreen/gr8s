@@ -14,60 +14,60 @@
   (let* ((directory (uiop:ensure-directory-pathname directory))
          (key (merge-pathnames "worker.key" directory))
          (certificate (merge-pathnames "worker.crt" directory)))
-    (gr8s::write-private-text-exclusively
+    (gr8s.security::write-private-text-exclusively
      certificate
-     (gr8s::enroll-node-csr pki "worker" (gr8s:create-join-token pki "worker")
-                            (gr8s::cluster-pki-ca-fingerprint pki)
-                            (gr8s::generate-node-key-and-csr "worker" key)))
+     (gr8s.security::enroll-node-csr pki "worker" (gr8s.security::create-join-token pki "worker")
+                            (gr8s.security::cluster-pki-ca-fingerprint pki)
+                            (gr8s.security::generate-node-key-and-csr "worker" key)))
     (values certificate key)))
 
 (defun member-certificate-fingerprint (credentials)
   (pure-tls:certificate-fingerprint
-   (first (pure-tls:load-certificate-chain (gr8s::raft-credentials-certificate-path credentials)))))
+   (first (pure-tls:load-certificate-chain (gr8s.security::raft-credentials-certificate-path credentials)))))
 
 (defun presented-certificate-fingerprint (credentials port)
   "Return the fingerprint of the certificate the member at PORT presents to a new connection."
-  (let ((channel (gr8s::make-raft-channel credentials "127.0.0.1" port 5)))
+  (let ((channel (gr8s.security::make-raft-channel credentials "127.0.0.1" port 5)))
     (unwind-protect
          (pure-tls:certificate-fingerprint
           (pure-tls:tls-peer-certificate (ag-http2:connection-stream (ag-grpc:channel-connection channel))))
       (ignore-errors (ag-grpc:channel-close channel)))))
 
 (defun control-plane-credentials (control-plane)
-  (gr8s::raft-member-credentials (gr8s::ha-control-plane-member control-plane)))
+  (gr8s.raft.transport::raft-member-credentials (gr8s.ha::ha-control-plane-member control-plane)))
 
 (defun far-future () (+ (get-universal-time) (* 340 24 60 60)))
 
 (defmacro with-joined-witness ((witness founder state) &body body)
   "Run BODY with WITNESS a member of FOUNDER's cluster, its credentials under the directory STATE."
   `(let* ((raft-pki (member-raft-pki ,founder))
-          (,witness (gr8s::start-raft-member
-                     "w1" :credentials (gr8s::ensure-raft-joiner-credentials
+          (,witness (gr8s.raft.transport::start-raft-member
+                     "w1" :credentials (gr8s.security::ensure-raft-joiner-credentials
                                         (merge-pathnames "raft/" (uiop:ensure-directory-pathname ,state))
                                         "w1" "127.0.0.1" (control-plane-port ,founder)
                                         :role :witness :node-name "w1"
-                                        :token (gr8s:create-join-token raft-pki "w1" :role :witness)
-                                        :ca-pin (gr8s::cluster-pki-ca-fingerprint raft-pki)))))
+                                        :token (gr8s.security::create-join-token raft-pki "w1" :role :witness)
+                                        :ca-pin (gr8s.security::cluster-pki-ca-fingerprint raft-pki)))))
      (unwind-protect
           (progn
-            (gr8s::raft-member-start ,witness)
-            (is (gr8s::raft-cluster-join ,witness "127.0.0.1" (control-plane-port ,founder)
+            (gr8s.raft.transport::raft-member-start ,witness)
+            (is (gr8s.raft.transport::raft-cluster-join ,witness "127.0.0.1" (control-plane-port ,founder)
                                          :role :witness :node-name "w1"))
             (is (poll-until (lambda ()
-                              (assoc "w1" (gr8s::raft-cluster-members (gr8s::ha-control-plane-member ,founder))
+                              (assoc "w1" (gr8s.raft.transport::raft-cluster-members (gr8s.ha::ha-control-plane-member ,founder))
                                      :test #'equal))
                             :timeout 20))
             ,@body)
-       (gr8s::stop-raft-member ,witness))))
+       (gr8s.raft.transport::stop-raft-member ,witness))))
 
 (defun request-renewal (credentials port member-id key)
   "Ask the member at PORT, using CREDENTIALS, to renew MEMBER-ID's certificate using its KEY."
-  (let ((channel (gr8s::make-raft-channel credentials "127.0.0.1" port 10)))
+  (let ((channel (gr8s.security::make-raft-channel credentials "127.0.0.1" port 10)))
     (unwind-protect
          (gr8s.node.v1::raft-transport-renew-member
           (gr8s.node.v1::make-raft-transport-stub channel)
           (make-instance 'gr8s.node.v1::renew-member-request
-                         :certificate-request (gr8s::generate-node-key-and-csr member-id key))
+                         :certificate-request (gr8s.security::generate-node-key-and-csr member-id key))
           :timeout 10)
       (ignore-errors (ag-grpc:channel-close channel)))))
 
@@ -76,7 +76,7 @@
     (with-temporary-store (s2 p2)
       (with-temporary-store (s3 p3)
         (let ((h2 nil) (h3 nil)
-              (leader-store (gr8s::ha-control-plane-store founder)))
+              (leader-store (gr8s.ha::ha-control-plane-store founder)))
           (unwind-protect
                (progn
                  (gr8s.resources::publish-pki-authority leader-store)
@@ -92,7 +92,7 @@
                       (lambda ()
                         (every (lambda (root)
                                  (probe-file (merge-pathnames "pki/pki/cluster-ca-next.key" root)))
-                               (list (gr8s::pod-store-path leader-store) p2 p3)))
+                               (list (gr8s.store::pod-store-path leader-store) p2 p3)))
                       :timeout 15)
                      "every voter extracts prepared CA material")
                  (gr8s.server::update-replicated-pki-authority leader-store "ca" :promote)
@@ -101,28 +101,28 @@
                         (let ((fingerprints
                                 (mapcar
                                  (lambda (root)
-                                   (gr8s::cluster-pki-ca-fingerprint
-                                    (gr8s:ensure-cluster-pki
+                                   (gr8s.security::cluster-pki-ca-fingerprint
+                                    (gr8s.security::ensure-cluster-pki
                                      (merge-pathnames "pki/" root))))
-                                 (list (gr8s::pod-store-path leader-store) p2 p3))))
+                                 (list (gr8s.store::pod-store-path leader-store) p2 p3))))
                           (and (every (lambda (fingerprint)
                                         (equal (first fingerprints) fingerprint))
                                       (rest fingerprints))
                                (every (lambda (root)
                                         (probe-file
                                          (merge-pathnames "pki/pki/cluster-ca-retiring.key" root)))
-                                      (list (gr8s::pod-store-path leader-store) p2 p3)))))
+                                      (list (gr8s.store::pod-store-path leader-store) p2 p3)))))
                       :timeout 15)
                      "promotion installs one active CA and retiring key on every voter")
-                 (gr8s::stop-ha-control-plane founder)
+                 (gr8s.ha::stop-ha-control-plane founder)
                  (is (poll-until
-                      (lambda () (= 1 (count-if #'gr8s::ha-control-plane-leader-p
+                      (lambda () (= 1 (count-if #'gr8s.ha::ha-control-plane-leader-p
                                                 (list h2 h3))))
                       :timeout 15)
                      "the surviving voters elect a leader after the founder stops")
-                 (let* ((new-leader (find-if #'gr8s::ha-control-plane-leader-p
+                 (let* ((new-leader (find-if #'gr8s.ha::ha-control-plane-leader-p
                                              (list h2 h3)))
-                        (new-store (gr8s::ha-control-plane-store new-leader)))
+                        (new-store (gr8s.ha::ha-control-plane-store new-leader)))
                    (is-true (gr8s.resources::current-pki-authority-envelope new-store)
                             "the new leader retained the encrypted authority record")
                    (gr8s.server::update-replicated-pki-authority
@@ -140,8 +140,8 @@
                                           (uiop:read-file-string (second files))))))
                         :timeout 15)
                        "a post-failover signing-key transition converges on both survivors")))
-            (gr8s::stop-ha-control-plane h3)
-            (gr8s::stop-ha-control-plane h2)))))))
+            (gr8s.ha::stop-ha-control-plane h3)
+            (gr8s.ha::stop-ha-control-plane h2)))))))
 
 (test agents-keep-working-after-failing-over-to-another-control-plane
   (with-founded-cluster (founder node-pki)
@@ -149,52 +149,52 @@
       (let ((joiner (join-control-plane founder store path "cp2")))
         (unwind-protect
              (let ((joined-pki (raft-tls-test-pki path)))
-               (is (equal (gr8s::cluster-pki-ca-fingerprint node-pki)
-                          (gr8s::cluster-pki-ca-fingerprint joined-pki)))
+               (is (equal (gr8s.security::cluster-pki-ca-fingerprint node-pki)
+                          (gr8s.security::cluster-pki-ca-fingerprint joined-pki)))
                (multiple-value-bind (certificate key) (enroll-test-worker node-pki path)
-                 (is (gr8s::verify-node-certificate joined-pki (uiop:read-file-string certificate) "worker")
+                 (is (gr8s.security::verify-node-certificate joined-pki (uiop:read-file-string certificate) "worker")
                      "the other control plane accepts the worker")
                  ;; The worker connects as it would after a failover, holding only the
                  ;; CA from its first enrollment, and each side checks the other.
-                 (let* ((server (gr8s:start-node-grpc-server store :pki joined-pki :port 0))
-                        (ca (gr8s::cluster-pki-ca-certificate-path node-pki)))
+                 (let* ((server (gr8s.apiserver::start-node-grpc-server store :pki joined-pki :port 0))
+                        (ca (gr8s.security::cluster-pki-ca-certificate-path node-pki)))
                    (unwind-protect
-                        (let ((channel (gr8s::make-node-tls-channel
-                                        "127.0.0.1" (gr8s:node-grpc-server-port server)
+                        (let ((channel (gr8s.security::make-node-tls-channel
+                                        "127.0.0.1" (gr8s.apiserver::node-grpc-server-port server)
                                         :timeout 10 :ca-certificate-path ca
                                         :certificate-path certificate :private-key-path key)))
                           (is (not (null channel)))
                           (ignore-errors (ag-grpc:channel-close channel)))
-                     (gr8s:stop-node-grpc-server server)))))
-          (gr8s::stop-ha-control-plane joiner))))))
+                     (gr8s.apiserver::stop-node-grpc-server server)))))
+          (gr8s.ha::stop-ha-control-plane joiner))))))
 
 (test a-state-directory-with-another-ca-refuses-to-join
   (with-founded-cluster (founder)
     (with-temporary-store (store path)
       (declare (ignorable store))
       (let* ((existing (raft-tls-test-pki path))
-             (fingerprint (gr8s::cluster-pki-ca-fingerprint existing))
+             (fingerprint (gr8s.security::cluster-pki-ca-fingerprint existing))
              (root (merge-pathnames "pki/" (uiop:ensure-directory-pathname path)))
              (raft-pki (member-raft-pki founder))
              (reason (handler-case
-                         (gr8s::ensure-joining-control-plane-pki
+                         (gr8s.security::ensure-joining-control-plane-pki
                           root "cp2" "127.0.0.1" (control-plane-port founder)
-                          :node-name "cp2" :token (gr8s:create-join-token raft-pki "cp2" :role :voter)
-                          :ca-pin (gr8s::cluster-pki-ca-fingerprint raft-pki))
-                       (gr8s:pki-error (condition) (gr8s:pki-error-reason condition)))))
+                          :node-name "cp2" :token (gr8s.security::create-join-token raft-pki "cp2" :role :voter)
+                          :ca-pin (gr8s.security::cluster-pki-ca-fingerprint raft-pki))
+                       (gr8s.security::pki-error (condition) (gr8s.security::pki-error-reason condition)))))
         (is (equal "node-ca-conflict" reason))
-        (is (equal fingerprint (gr8s::cluster-pki-ca-fingerprint (raft-tls-test-pki path))))
-        (is (null (probe-file (gr8s::raft-member-certificate-path (merge-pathnames "raft/" root))))
+        (is (equal fingerprint (gr8s.security::cluster-pki-ca-fingerprint (raft-tls-test-pki path))))
+        (is (null (probe-file (gr8s.security::raft-member-certificate-path (merge-pathnames "raft/" root))))
             "a refused member isn't left half enrolled")))))
 
 (test the-same-node-ca-can-be-installed-again
   (with-temporary-store (store path)
     (declare (ignorable store))
     (let* ((pki (raft-tls-test-pki path))
-           (certificate (uiop:read-file-string (gr8s::cluster-pki-ca-certificate-path pki)))
-           (key (uiop:read-file-string (gr8s::cluster-pki-ca-private-key-path pki))))
-      (finishes (gr8s::install-shared-node-ca (gr8s::cluster-pki-root pki) certificate key))
-      (is (equal key (uiop:read-file-string (gr8s::cluster-pki-ca-private-key-path pki)))))))
+           (certificate (uiop:read-file-string (gr8s.security::cluster-pki-ca-certificate-path pki)))
+           (key (uiop:read-file-string (gr8s.security::cluster-pki-ca-private-key-path pki))))
+      (finishes (gr8s.security::install-shared-node-ca (gr8s.security::cluster-pki-root pki) certificate key))
+      (is (equal key (uiop:read-file-string (gr8s.security::cluster-pki-ca-private-key-path pki)))))))
 
 (test witnesses-do-not-receive-the-node-ca
   (with-founded-cluster (founder)
@@ -203,109 +203,109 @@
       (let* ((state (uiop:ensure-directory-pathname path))
              (raft-pki (member-raft-pki founder))
              (node-root (merge-pathnames "pki/" state)))
-        (gr8s::enroll-raft-member (merge-pathnames "raft/" state) "w1" "127.0.0.1" (control-plane-port founder)
+        (gr8s.security::enroll-raft-member (merge-pathnames "raft/" state) "w1" "127.0.0.1" (control-plane-port founder)
                                   :role :witness :node-name "w1" :node-root node-root
-                                  :token (gr8s:create-join-token raft-pki "w1" :role :witness)
-                                  :ca-pin (gr8s::cluster-pki-ca-fingerprint raft-pki))
-        (is (probe-file (gr8s::raft-member-certificate-path (merge-pathnames "raft/" state))))
-        (is (null (probe-file (gr8s::raft-ca-certificate-path node-root))))
-        (is (null (probe-file (gr8s::raft-ca-key-path (merge-pathnames "raft/" state)))))))))
+                                  :token (gr8s.security::create-join-token raft-pki "w1" :role :witness)
+                                  :ca-pin (gr8s.security::cluster-pki-ca-fingerprint raft-pki))
+        (is (probe-file (gr8s.security::raft-member-certificate-path (merge-pathnames "raft/" state))))
+        (is (null (probe-file (gr8s.security::raft-ca-certificate-path node-root))))
+        (is (null (probe-file (gr8s.security::raft-ca-key-path (merge-pathnames "raft/" state)))))))))
 
 (test voters-renew-their-own-certificates-in-their-last-30-days
   (with-founded-cluster (founder)
     (with-temporary-store (store path)
       (let ((joiner (join-control-plane founder store path "cp2")))
         (unwind-protect
-             (let* ((member (gr8s::ha-control-plane-member founder))
+             (let* ((member (gr8s.ha::ha-control-plane-member founder))
                     (credentials (control-plane-credentials founder))
                     (before (member-certificate-fingerprint credentials))
-                    (key (uiop:read-file-string (gr8s::raft-credentials-key-path credentials)))
-                    (remaining (- (gr8s::raft-certificate-not-after credentials) (get-universal-time))))
+                    (key (uiop:read-file-string (gr8s.security::raft-credentials-key-path credentials)))
+                    (remaining (- (gr8s.security::raft-certificate-not-after credentials) (get-universal-time))))
                (is (< (* 360 24 60 60) remaining (* 366 24 60 60)) "the certificate lasts about a year")
-               (is (bt:thread-alive-p (gr8s::raft-member-renewal-thread member)))
-               (is (not (gr8s::raft-certificate-expiring-p credentials (get-universal-time))))
-               (is (gr8s::raft-certificate-expiring-p credentials (far-future)))
-               (gr8s::raft-member-renew-if-needed member)
+               (is (bt:thread-alive-p (gr8s.raft.transport::raft-member-renewal-thread member)))
+               (is (not (gr8s.security::raft-certificate-expiring-p credentials (get-universal-time))))
+               (is (gr8s.security::raft-certificate-expiring-p credentials (far-future)))
+               (gr8s.security::raft-member-renew-if-needed member)
                (is (equalp before (member-certificate-fingerprint credentials)) "it isn't due yet")
-               (gr8s::raft-member-renew-if-needed member (far-future))
+               (gr8s.security::raft-member-renew-if-needed member (far-future))
                (let ((after (member-certificate-fingerprint credentials)))
                  (is (not (equalp before after)))
-                 (is (equal key (uiop:read-file-string (gr8s::raft-credentials-key-path credentials))))
+                 (is (equal key (uiop:read-file-string (gr8s.security::raft-credentials-key-path credentials))))
                  (is (equalp after (presented-certificate-fingerprint (control-plane-credentials joiner)
                                                                       (control-plane-port founder)))
                      "new connections get the renewed certificate without a restart"))
                ;; The cluster still commits, and the renewed certificate authenticates.
-               (multiple-value-bind (result committed) (gr8s::raft-member-propose-sync member '(:noop) :timeout 15)
+               (multiple-value-bind (result committed) (gr8s.raft.transport::raft-member-propose-sync member '(:noop) :timeout 15)
                  (declare (ignore result))
                  (is (eq t committed)))
                (is (equalp (member-certificate-fingerprint (control-plane-credentials joiner))
                            (presented-certificate-fingerprint credentials (control-plane-port joiner)))))
-          (gr8s::stop-ha-control-plane joiner))))))
+          (gr8s.ha::stop-ha-control-plane joiner))))))
 
 (test witnesses-renew-through-a-voter
   (with-founded-cluster (founder)
     (with-temporary-store (store path)
       (declare (ignorable store))
       (with-joined-witness (witness founder path)
-        (let* ((credentials (gr8s::raft-member-credentials witness))
+        (let* ((credentials (gr8s.raft.transport::raft-member-credentials witness))
                (before (member-certificate-fingerprint credentials)))
-          (is (null (gr8s::raft-credentials-pki credentials)) "a witness can't sign for itself")
-          (gr8s::raft-member-renew-if-needed witness (far-future))
+          (is (null (gr8s.security::raft-credentials-pki credentials)) "a witness can't sign for itself")
+          (gr8s.security::raft-member-renew-if-needed witness (far-future))
           (is (not (equalp before (member-certificate-fingerprint credentials))))
           (is (equalp (member-certificate-fingerprint credentials)
                       (presented-certificate-fingerprint (control-plane-credentials founder)
-                                                         (gr8s::raft-member-port witness)))))))))
+                                                         (gr8s.raft.transport::raft-member-port witness)))))))))
 
 (test a-failed-renewal-is-reported-and-keeps-the-certificate
   (with-founded-cluster (founder)
     (with-temporary-store (store path)
       (declare (ignorable store))
       (let* ((raft-pki (member-raft-pki founder))
-             (credentials (gr8s::ensure-raft-joiner-credentials
+             (credentials (gr8s.security::ensure-raft-joiner-credentials
                            (merge-pathnames "raft/" (uiop:ensure-directory-pathname path))
                            "w1" "127.0.0.1" (control-plane-port founder)
                            :role :witness :node-name "w1"
-                           :token (gr8s:create-join-token raft-pki "w1" :role :witness)
-                           :ca-pin (gr8s::cluster-pki-ca-fingerprint raft-pki)))
+                           :token (gr8s.security::create-join-token raft-pki "w1" :role :witness)
+                           :ca-pin (gr8s.security::cluster-pki-ca-fingerprint raft-pki)))
              ;; This member never joined, so it has no peer to ask.
-             (lonely (gr8s::start-raft-member "w1" :apply-fn (lambda (c) (declare (ignore c)) nil)
+             (lonely (gr8s.raft.transport::start-raft-member "w1" :apply-fn (lambda (c) (declare (ignore c)) nil)
                                                    :credentials credentials))
              (before (member-certificate-fingerprint credentials)))
         (unwind-protect
              (let ((report (with-output-to-string (*error-output*)
-                             (finishes (gr8s::raft-member-renew-if-needed lonely (far-future))))))
+                             (finishes (gr8s.security::raft-member-renew-if-needed lonely (far-future))))))
                (is (search "couldn't be renewed" report))
                (is (equalp before (member-certificate-fingerprint credentials))))
-          (gr8s::stop-raft-member lonely))))))
+          (gr8s.raft.transport::stop-raft-member lonely))))))
 
 (test renewal-needs-a-current-member-and-its-own-name
   (with-founded-cluster (founder)
     (with-temporary-store (store path)
       (declare (ignorable store))
       (with-joined-witness (witness founder path)
-        (let* ((credentials (gr8s::raft-member-credentials witness))
-               (key (gr8s::raft-credentials-key-path credentials))
+        (let* ((credentials (gr8s.raft.transport::raft-member-credentials witness))
+               (key (gr8s.security::raft-credentials-key-path credentials))
                (other-key (merge-pathnames "other.key" (uiop:ensure-directory-pathname path)))
                (port (control-plane-port founder))
-               (pin (gr8s::cluster-pki-ca-fingerprint (member-raft-pki founder))))
+               (pin (gr8s.security::cluster-pki-ca-fingerprint (member-raft-pki founder))))
           (is (not (rejected-p (lambda () (request-renewal credentials port "w1" key))))
               "the same request works for the member itself")
           (is (rejected-p (lambda () (request-renewal credentials port "cp1" other-key)))
               "a member can't get a certificate in another's name")
           (is (rejected-p
                (lambda ()
-                 (let ((channel (gr8s::make-node-tls-channel "127.0.0.1" port :timeout 5 :ca-pin pin)))
+                 (let ((channel (gr8s.security::make-node-tls-channel "127.0.0.1" port :timeout 5 :ca-pin pin)))
                    (unwind-protect
                         (gr8s.node.v1::raft-transport-renew-member
                          (gr8s.node.v1::make-raft-transport-stub channel)
                          (make-instance 'gr8s.node.v1::renew-member-request
-                                        :certificate-request (gr8s::generate-node-key-and-csr "w1" key))
+                                        :certificate-request (gr8s.security::generate-node-key-and-csr "w1" key))
                          :timeout 5)
                      (ignore-errors (ag-grpc:channel-close channel))))))
               "no certificate")
-          (is (gr8s::raft-cluster-remove-member (gr8s::ha-control-plane-member founder) "w1"))
+          (is (gr8s.raft.transport::raft-cluster-remove-member (gr8s.ha::ha-control-plane-member founder) "w1"))
           (is (poll-until (lambda ()
-                            (null (assoc "w1" (gr8s::raft-cluster-members (gr8s::ha-control-plane-member founder))
+                            (null (assoc "w1" (gr8s.raft.transport::raft-cluster-members (gr8s.ha::ha-control-plane-member founder))
                                          :test #'equal)))
                           :timeout 15))
           (is (rejected-p (lambda () (request-renewal credentials port "w1" key)))

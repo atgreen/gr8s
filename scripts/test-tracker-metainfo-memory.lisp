@@ -53,7 +53,7 @@
          (artifact (merge-pathnames "tracker-memory-artifact.jsonl" root)))
     (unless (member mode '("capture" "verify") :test #'equal) (error "Expected capture or verify mode"))
     (when (equal mode "capture") (sb-posix:mkdir (namestring root) #o700))
-    (let ((store (gr8s:open-store root)))
+    (let ((store (gr8s.store::open-store root)))
       (if (equal mode "capture")
           (progn
             (tracker-memory-populate store root)
@@ -68,8 +68,8 @@
                   (gr8s.resources::materialize-store-snapshot
                    root artifact (gr8s.raft.transport::raft-snapshot-file-digest artifact)
                    :expected-index 1 :expected-term 1
-                   :minimum-resource-revision (1+ (gr8s::pod-store-resource-revision store))
-                   :minimum-pod-revision (1+ (gr8s::pod-store-pod-revision-ceiling store)))
+                   :minimum-resource-revision (1+ (gr8s.store::pod-store-resource-revision store))
+                   :minimum-pod-revision (1+ (gr8s.store::pod-store-pod-revision-ceiling store)))
                 (declare (ignore path))
                 (gr8s.store::quiesce-store-access store :timeout 0)
                 (unwind-protect

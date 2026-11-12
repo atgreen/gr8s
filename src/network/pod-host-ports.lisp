@@ -11,7 +11,7 @@
 ;;;; externalTrafficPolicy as kube-proxy does, and a Local LoadBalancer's
 ;;;; healthCheckNodePort answers whether this node has ready endpoints.
 
-(in-package #:gr8s)
+(in-package #:gr8s.network)
 
 (defstruct host-port-forwarder
   "A listening port and where it currently relays to: an (address . port) TARGET,

@@ -8,7 +8,7 @@
 (defun wireguard-next-hop-probe-main ()
   (destructuring-bind (node-id public-key address port-text pod-cidr)
       (uiop:command-line-arguments)
-    (let ((peer (gr8s::json-object
+    (let ((peer (gr8s.foundation::json-object
                  "nodeID" node-id
                  "underlayAddress" address
                  "wireguardPublicKey" public-key

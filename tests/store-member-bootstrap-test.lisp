@@ -12,17 +12,17 @@
 (test bootstrap-founder-and-learner-publish-exact-pristine-artifacts
   (dolist (role '(:founder :learner))
     (with-temporary-store (store root)
-      (gr8s::create-core-resource store "configmaps" (configmap-input "recover" "k" "A") "default")
+      (gr8s.resources::create-core-resource store "configmaps" (configmap-input "recover" "k" "A") "default")
       (let ((wal nil) (reference nil))
         (call-with-bootstrap-barriers
          store (lambda ()
                  (multiple-value-setq (wal reference)
                    (gr8s.resources::bootstrap-store-member-wal store "fresh" :role role :api-url "http://127.0.0.1:8080"))))
-        (let* ((recovered (gr8s::load-raft-log wal))
-               (state (gr8s::raft-recovered-snapshot-state recovered)))
-          (is (= (if (eq role :founder) 1 0) (gr8s::raft-recovered-snapshot-index recovered)))
-          (is (= 0 (gr8s::raft-recovered-term recovered)))
-          (is (null (gr8s::raft-recovered-entries recovered)))
+        (let* ((recovered (cl-raft::load-raft-log wal))
+               (state (cl-raft::raft-recovered-snapshot-state recovered)))
+          (is (= (if (eq role :founder) 1 0) (cl-raft::raft-recovered-snapshot-index recovered)))
+          (is (= 0 (cl-raft::raft-recovered-term recovered)))
+          (is (null (cl-raft::raft-recovered-entries recovered)))
           (is (equal reference (getf (cddr state) :application)))
           (is (equal (list (cons "fresh" (if (eq role :founder) :voter :learner))) (getf (cddr state) :members)))
           (is (probe-file (gr8s.resources::checked-store-snapshot-artifact-path root reference)))
@@ -51,9 +51,9 @@
            (signals error (gr8s.resources::bootstrap-store-member-wal store "other"))
            (signals error (gr8s.resources::bootstrap-store-member-wal store "fresh" :role :learner))))
         (is (equal before (uiop:read-file-string wal))))
-      (let ((storage (gr8s::open-file-raft-storage wal)))
-        (unwind-protect (gr8s.raft:raft-storage-save-hard-state storage 9 "acknowledged")
-          (gr8s::close-file-raft-storage storage)))
+      (let ((storage (cl-raft::open-file-raft-storage wal)))
+        (unwind-protect (gr8s.raft::raft-storage-save-hard-state storage 9 "acknowledged")
+          (cl-raft::close-file-raft-storage storage)))
       (let ((before (uiop:read-file-string wal)))
         (call-with-bootstrap-barriers store (lambda () (signals error (gr8s.resources::bootstrap-store-member-wal store "fresh"))))
         (is (equal before (uiop:read-file-string wal)))))))
@@ -61,7 +61,7 @@
 (test fresh-founder-and-learner-start-through-the-recovery-gate
   (with-temporary-store (source source-root)
     (with-temporary-store (sink sink-root)
-      (gr8s::create-core-resource source "configmaps" (configmap-input "recover" "k" "A") "default")
+      (gr8s.resources::create-core-resource source "configmaps" (configmap-input "recover" "k" "A") "default")
       (let ((founder nil) (learner nil))
         (unwind-protect
              (progn
@@ -69,26 +69,26 @@
                               source "founder" (merge-pathnames "raft/control-plane.log" source-root)
                               :bootstrap-role :founder))
                (is-true (gr8s.store::store-access-blocked-p source))
-               (gr8s::raft-member-start founder)
+               (gr8s.raft.transport::raft-member-start founder)
                (is (poll-until (lambda () (not (gr8s.store::store-access-blocked-p source))) :timeout 15))
                (is (equal "A" (startup-store-raw-value source)))
                (setf learner (gr8s.resources::start-store-member-from-wal
                               sink "learner" (merge-pathnames "raft/control-plane.log" sink-root)
                               :bootstrap-role :learner))
-               (is (= 0 (gr8s::raft-node-snapshot-index (gr8s::raft-member-node learner))))
-               (is (eq :learner (gr8s::raft-node-self-role (gr8s::raft-member-node learner))))
-               (gr8s::raft-member-start learner)
+               (is (= 0 (cl-raft::raft-node-snapshot-index (gr8s.raft.transport::raft-member-node learner))))
+               (is (eq :learner (cl-raft::raft-node-self-role (gr8s.raft.transport::raft-member-node learner))))
+               (gr8s.raft.transport::raft-member-start learner)
                (sleep 0.2)
                (is-true (gr8s.store::store-access-blocked-p sink))
-               (is (gr8s::raft-cluster-join learner "127.0.0.1" (gr8s::raft-member-port founder)))
+               (is (gr8s.raft.transport::raft-cluster-join learner "127.0.0.1" (gr8s.raft.transport::raft-member-port founder)))
                (is (poll-until (lambda () (not (gr8s.store::store-access-blocked-p sink))) :timeout 20))
                (is (equal "A" (startup-store-raw-value sink)))
-               (is (= 1 (gr8s::raft-node-snapshot-index (gr8s::raft-member-node learner))))
-               (is (poll-until (lambda () (eq :voter (gr8s::raft-node-self-role (gr8s::raft-member-node learner)))) :timeout 15))
-               (gr8s::create-core-resource source "configmaps" (configmap-input "after" "k" "replicated") "default")
+               (is (= 1 (cl-raft::raft-node-snapshot-index (gr8s.raft.transport::raft-member-node learner))))
+               (is (poll-until (lambda () (eq :voter (cl-raft::raft-node-self-role (gr8s.raft.transport::raft-member-node learner)))) :timeout 15))
+               (gr8s.resources::create-core-resource source "configmaps" (configmap-input "after" "k" "replicated") "default")
                (is (poll-until (lambda () (equal "replicated" (configmap-value sink "after" "k"))) :timeout 15)))
-          (when learner (gr8s::stop-raft-member learner))
-          (when founder (gr8s::stop-raft-member founder)))))))
+          (when learner (gr8s.raft.transport::stop-raft-member learner))
+          (when founder (gr8s.raft.transport::stop-raft-member founder)))))))
 
 (test wal-preparation-holds-ownership-before-creating-the-data-file
   (with-raft-temp-dir (path)
@@ -96,29 +96,29 @@
       (unwind-protect
            (progn
              (setf storage
-                   (gr8s::open-file-raft-storage
+                   (cl-raft::open-file-raft-storage
                     path :prepare-fn
                     (lambda (canonical)
                       (incf called)
                       (is (not (probe-file canonical)))
-                      (signals error (gr8s::open-file-raft-storage path :prepare-fn
+                      (signals error (cl-raft::open-file-raft-storage path :prepare-fn
                                       (lambda (ignored) (declare (ignore ignored)) (incf second)))))))
              (is (= 1 called))
              (is (= 0 second)))
-        (when storage (gr8s::close-file-raft-storage storage)))))
+        (when storage (cl-raft::close-file-raft-storage storage)))))
   (with-raft-temp-dir (path)
-    (signals error (gr8s::open-file-raft-storage path :prepare-fn
+    (signals error (cl-raft::open-file-raft-storage path :prepare-fn
                     (lambda (ignored) (declare (ignore ignored)) (error "Injected prepare failure"))))
     (is (not (probe-file path)))
-    (let ((storage (gr8s::open-file-raft-storage path)))
+    (let ((storage (cl-raft::open-file-raft-storage path)))
       (is (not (null storage)))
-      (gr8s::close-file-raft-storage storage))))
+      (cl-raft::close-file-raft-storage storage))))
 
 (test bootstrap-journal-survives-process-kills-at-every-publication-boundary
   (dolist (phase '("before-open" "prepared" "wal-published" "published"))
     (with-temporary-store (store root)
-      (gr8s::ensure-cluster-pki root)
-      (gr8s::create-core-resource store "configmaps" (configmap-input "recover" "k" "A") "default")
+      (gr8s.security::ensure-cluster-pki root)
+      (gr8s.resources::create-core-resource store "configmaps" (configmap-input "recover" "k" "A") "default")
       (let* ((key (merge-pathnames "pki/cluster-ca.key" root))
              (identity (snapshot-test-digest key))
              (script (namestring (merge-pathnames "scripts/store-member-bootstrap-test-child.lisp" (asdf:system-source-directory :gr8s))))
@@ -146,7 +146,7 @@
                  (when (equal phase "before-open") (is (not (probe-file wal))))
                  (unless (equal phase "before-open")
                    ;; Later files must never replace the already retained baseline.
-                   (gr8s::update-core-resource store "configmaps" "default" "recover"
+                   (gr8s.resources::update-core-resource store "configmaps" "default" "recover"
                      (lambda (object) (setf (gethash "k" (gethash "data" object)) "B") object)))
                  (call-with-bootstrap-barriers store
                   (lambda ()
@@ -157,10 +157,10 @@
                (setf member (gr8s.resources::start-store-member-from-wal store "fresh" wal))
                (is (equal "A" (startup-store-raw-value store)))
                (is-true (gr8s.store::store-access-blocked-p store))
-               (gr8s::raft-member-start member)
+               (gr8s.raft.transport::raft-member-start member)
                (is (poll-until (lambda () (not (gr8s.store::store-access-blocked-p store))) :timeout 15))
                (is (equal identity (snapshot-test-digest key))))
-          (when member (gr8s::stop-raft-member member))
+          (when member (gr8s.raft.transport::stop-raft-member member))
           (when process
             (when (sb-ext:process-alive-p process)
               (sb-ext:process-kill process sb-posix:sigkill)
@@ -191,4 +191,4 @@
                (gr8s.resources::store-snapshot-artifact-reference 0 0 digest)))
     (signals error (gr8s.resources::store-snapshot-artifact-reference 0 1 digest))
     (signals error (gr8s.ha::make-member-generation-validator
-                    (gr8s::make-raft-member) 1 0 1 digest :recover t))))
+                    (gr8s.raft.transport::make-raft-member) 1 0 1 digest :recover t))))

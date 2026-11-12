@@ -16,27 +16,27 @@
     (setf (gethash "name" (gethash "metadata" object)) name)
     (loop for (key value) on spec-fields by #'cddr do (setf (gethash key (gethash "spec" object)) value))
     (let ((pod (parse-pod object)))
-      (setf (gr8s::pod-uid pod) (format nil "uid-~A" name))
+      (setf (gr8s.model::pod-uid pod) (format nil "uid-~A" name))
       pod)))
 
 (test host-users-is-validated-as-the-api-server-does
-  (is (gr8s::pod-host-users-p (userns-pod "default")))
-  (is (gr8s::pod-host-users-p (userns-pod "shared" "hostUsers" t)))
-  (is (not (gr8s::pod-host-users-p (userns-pod "own" "hostUsers" nil))))
+  (is (gr8s.kubelet::pod-host-users-p (userns-pod "default")))
+  (is (gr8s.kubelet::pod-host-users-p (userns-pod "shared" "hostUsers" t)))
+  (is (not (gr8s.kubelet::pod-host-users-p (userns-pod "own" "hostUsers" nil))))
   (dolist (field '("hostNetwork" "hostPID" "hostIPC"))
     (signals kubernetes-error (userns-pod "conflict" "hostUsers" nil field t))
-    (is (gr8s::pod-name (userns-pod "allowed" "hostUsers" t field t))))
+    (is (gr8s.model::pod-name (userns-pod "allowed" "hostUsers" t field t))))
   (signals kubernetes-error (userns-pod "bad" "hostUsers" "no")))
 
 (test each-user-namespaced-pod-gets-a-distinct-stable-block
   (let* ((root (uiop:ensure-directory-pathname
                 (format nil "/tmp/gr8s-userns-~36R" (random (expt 36 8) (make-random-state t)))))
-         (runtime (gr8s::make-containerd-runtime :log-root root))
+         (runtime (gr8s.runtime.containerd::make-containerd-runtime :log-root root))
          (first (userns-pod "first" "hostUsers" nil))
          (second (userns-pod "second" "hostUsers" nil)))
     (unwind-protect
          (flet ((host-id (pod)
-                  (let ((namespace (gr8s::containerd-pod-user-namespace runtime pod)))
+                  (let ((namespace (gr8s.kubelet::containerd-pod-user-namespace runtime pod)))
                     (is (= gr8s.cri.v1::+namespacemode-pod+ (gr8s.cri.v1::mode namespace)))
                     (dolist (mappings (list (gr8s.cri.v1::uids namespace) (gr8s.cri.v1::gids namespace)))
                       (is (= 1 (length mappings)))
@@ -49,21 +49,21 @@
              (is (= 131072 two))
              ;; A Pod keeps its block, and a restarted agent finds it again.
              (is (= one (host-id first)))
-             (let ((restarted (gr8s::make-containerd-runtime :log-root root)))
+             (let ((restarted (gr8s.runtime.containerd::make-containerd-runtime :log-root root)))
                (is (= two (gr8s.cri.v1::host-id
-                           (first (gr8s.cri.v1::uids (gr8s::containerd-pod-user-namespace restarted second)))))))
+                           (first (gr8s.cri.v1::uids (gr8s.kubelet::containerd-pod-user-namespace restarted second)))))))
              ;; Once its Pod is gone, a block is free again.
-             (gr8s::cleanup-pod-volumes runtime (pod-uid first))
+             (gr8s.kubelet::cleanup-pod-volumes runtime (pod-uid first))
              (is (= one (host-id (userns-pod "third" "hostUsers" nil)))))
            ;; A Pod in the node's user namespace asks for none.
-           (is (null (gr8s::containerd-pod-user-namespace runtime (userns-pod "host")))))
+           (is (null (gr8s.kubelet::containerd-pod-user-namespace runtime (userns-pod "host")))))
       (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
 
 (test the-sandbox-and-every-container-use-the-pods-user-namespace
   (let* ((namespace (make-instance 'gr8s.cri.v1::user-namespace :mode gr8s.cri.v1::+namespacemode-pod+))
          (pod (userns-pod "own" "hostUsers" nil))
-         (sandbox (gr8s::make-cri-pod-sandbox-config "own" "uid-own" "default" 0 "/tmp/logs" nil :userns namespace))
-         (container (gr8s::containerd-pod-security-context pod (aref (pod-containers pod) 0) :userns namespace)))
+         (sandbox (gr8s.runtime.containerd::make-cri-pod-sandbox-config "own" "uid-own" "default" 0 "/tmp/logs" nil :userns namespace))
+         (container (gr8s.kubelet::containerd-pod-security-context pod (aref (pod-containers pod) 0) :userns namespace)))
     (is (eq namespace (gr8s.cri.v1::userns-options
                        (gr8s.cri.v1::namespace-options
                         (gr8s.cri.v1::security-context (gr8s.cri.v1::linux sandbox))))))
@@ -76,19 +76,19 @@
                                                           :uids (list mapping) :gids (list mapping)))
          (mounts (list (make-instance 'gr8s.cri.v1::mount :container-path "/a" :host-path "/x")
                        (make-instance 'gr8s.cri.v1::mount :container-path "/b" :host-path "/y"))))
-    (gr8s::map-mounts-into-user-namespace mounts own)
+    (gr8s.kubelet::map-mounts-into-user-namespace mounts own)
     (dolist (mount mounts)
       (is (equal (list mapping) (gr8s.cri.v1::uidmappings mount)))
       (is (equal (list mapping) (gr8s.cri.v1::gidmappings mount))))
     ;; A Pod in the node's user namespace mounts as it always did.
     (let ((plain (list (make-instance 'gr8s.cri.v1::mount :container-path "/a" :host-path "/x"))))
-      (gr8s::map-mounts-into-user-namespace plain nil)
+      (gr8s.kubelet::map-mounts-into-user-namespace plain nil)
       (is (null (gr8s.cri.v1::uidmappings (first plain)))))))
 
 (test user-namespaced-pod-starts-are-counted-as-the-kubelet-counts-them
-  (let ((gr8s::*kubelet-instrumentation* (gr8s::make-kubelet-instrumentation)))
-    (gr8s::note-user-namespaced-pod-start t)
-    (gr8s::note-user-namespaced-pod-start nil)
-    (let ((text (gr8s::kubelet-instrumentation-text)))
+  (let ((gr8s.kubelet::*kubelet-instrumentation* (gr8s.kubelet::make-kubelet-instrumentation)))
+    (gr8s.kubelet::note-user-namespaced-pod-start t)
+    (gr8s.kubelet::note-user-namespaced-pod-start nil)
+    (let ((text (gr8s.kubelet::kubelet-instrumentation-text)))
       (is (search (format nil "kubelet_started_user_namespaced_pods_total 2~%") text))
       (is (search (format nil "kubelet_started_user_namespaced_pods_errors_total 1~%") text)))))

@@ -7,15 +7,15 @@
    type (ag-proto:serialize-to-bytes message)))
 
 (test node-protocol-version-is-explicit-and-rejected-when-unsupported
-  (is (= 2 gr8s::+node-protocol-version+))
-  (is (= 2 (gr8s::ensure-node-protocol-version 2)))
+  (is (= 2 gr8s.protocol::+node-protocol-version+))
+  (is (= 2 (gr8s.protocol::ensure-node-protocol-version 2)))
   (handler-case
       (progn
-        (gr8s::ensure-node-protocol-version 1)
+        (gr8s.protocol::ensure-node-protocol-version 1)
         (fail "version 1 must be rejected"))
-    (gr8s::unsupported-node-protocol-version (condition)
-      (is (= 1 (gr8s::unsupported-node-protocol-version-received condition)))
-      (is (= 2 (gr8s::unsupported-node-protocol-version-supported condition))))))
+    (gr8s.protocol::unsupported-node-protocol-version (condition)
+      (is (= 1 (gr8s.protocol::unsupported-node-protocol-version-received condition)))
+      (is (= 2 (gr8s.protocol::unsupported-node-protocol-version-supported condition))))))
 
 (test enrollment-messages-roundtrip-node-identity-material
   (let* ((request
@@ -56,7 +56,7 @@
     (destructuring-bind (variant payload-type) spec
       (let* ((payload (make-instance payload-type))
              (envelope
-               (gr8s::make-agent-envelope variant payload :sequence 42))
+               (gr8s.protocol::make-agent-envelope variant payload :sequence 42))
              (restored
                (roundtrip-node-message
                 envelope 'gr8s.node.v1::agent-envelope)))
@@ -114,7 +114,7 @@
     (destructuring-bind (variant payload-type) spec
       (let* ((payload (make-instance payload-type))
              (envelope
-               (gr8s::make-server-envelope variant payload :sequence 77))
+               (gr8s.protocol::make-server-envelope variant payload :sequence 77))
              (restored
                (roundtrip-node-message
                 envelope 'gr8s.node.v1::server-envelope)))

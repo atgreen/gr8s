@@ -45,7 +45,7 @@
                  (memory (multiple-value-bind (match groups) (cl-ppcre:scan-to-strings "MemTotal:[ \\t]+([0-9]+) kB" info)
                            (unless match (error "Missing NUMA memory capacity in ~A" directory))
                            (* 1024 (parse-integer (aref groups 0)))))
-                 (gr8s::*hugepage-sysfs-directory* (merge-pathnames "hugepages/" directory))
+                 (gr8s.kubelet::*hugepage-sysfs-directory* (merge-pathnames "hugepages/" directory))
                  (pages (node-hugepage-capacity)))
             (push (core-object "id" id "cpus" (coerce (sort members #'<) 'vector) "memory" memory "hugepages" pages) nodes)))))
     (unless nodes (setf nodes (list (core-object "id" 0 "cpus" (coerce online 'vector)

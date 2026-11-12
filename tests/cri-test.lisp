@@ -15,23 +15,23 @@
 
 (test cri-version-reports-containerd-over-a-unix-socket
   (if (string= "1" (or (uiop:getenv "GR8S_RUN_CONTAINERD_TESTS") ""))
-      (if (not (fboundp 'gr8s::cri-runtime-version))
-          (is (fboundp 'gr8s::cri-runtime-version))
+      (if (not (fboundp 'gr8s.runtime.containerd::cri-runtime-version))
+          (is (fboundp 'gr8s.runtime.containerd::cri-runtime-version))
           (let ((version
-                  (gr8s::cri-runtime-version
+                  (gr8s.runtime.containerd::cri-runtime-version
                    (or (uiop:getenv "GR8S_CONTAINERD_SOCKET")
                        "/tmp/gr8s-containerd.sock"))))
             (is (string= "containerd"
-                         (gr8s::cri-version-info-runtime-name version)))
+                         (gr8s.runtime.containerd::cri-version-info-runtime-name version)))
             (is (string= "v1"
-                         (gr8s::cri-version-info-runtime-api-version version)))
+                         (gr8s.runtime.containerd::cri-version-info-runtime-api-version version)))
             (is (search "2.4.2"
-                        (gr8s::cri-version-info-runtime-version version)))))
+                        (gr8s.runtime.containerd::cri-version-info-runtime-version version)))))
       (skip "Set GR8S_RUN_CONTAINERD_TESTS=1 to run the containerd CRI test")))
 
 (test host-network-cri-sandbox-does-not-request-a-hostname-change
   (let ((config
-          (gr8s::make-cri-pod-sandbox-config
+          (gr8s.runtime.containerd::make-cri-pod-sandbox-config
            "gr8s-cri-test"
            "gr8s-cri-test-uid"
            "default"
@@ -42,7 +42,7 @@
 
 (test cri-container-config-carries-dra-cdi-devices
   (let* ((config
-           (gr8s::make-cri-container-config
+           (gr8s.runtime.containerd::make-cri-container-config
             :name "app" :image "busybox" :uid "pod-uid"
             :cdi-device-ids '("vendor.example/gpu=0" "vendor.example/fpga=blue")))
          (devices (gr8s.cri.v1::cdi-devices config)))
@@ -51,7 +51,7 @@
 
 (test cri-sandbox-carries-the-cluster-dns-configuration
   (let* ((config
-           (gr8s::make-cri-pod-sandbox-config
+           (gr8s.runtime.containerd::make-cri-pod-sandbox-config
             "dns-test" "dns-test-uid" "default" 0 "/tmp/gr8s-dns-test" nil
             :dns-servers '("10.88.0.1")
             :dns-searches '("default.svc.cluster.local"
@@ -69,7 +69,7 @@
 (test cri-sandbox-carries-pod-network-annotations
   (let* ((networks "macvlan-blue@net1, sriov-red@net2")
          (config
-           (gr8s::make-cri-pod-sandbox-config
+           (gr8s.runtime.containerd::make-cri-pod-sandbox-config
             "multinet" "multinet-uid" "default" 0 "/tmp/gr8s-multinet" nil
             :annotations
             (list (cons "k8s.v1.cni.cncf.io/networks" networks)))))
@@ -80,7 +80,7 @@
 
 (test cri-exec-request-preserves-command-and-stream-selection
   (let ((request
-          (gr8s::make-cri-exec-request
+          (gr8s.runtime.containerd::make-cri-exec-request
            "container-id" '("sh" "-c" "echo ok")
            :stdin nil :stdout t :stderr t :tty nil)))
     (is (string= "container-id" (gr8s.cri.v1::container-id request)))
@@ -92,7 +92,7 @@
 
 (test cri-exec-sync-request-preserves-container-command-and-timeout
   (let ((request
-          (gr8s::make-cri-exec-sync-request
+          (gr8s.runtime.containerd::make-cri-exec-sync-request
            "container-id" '("sh" "-c" "exit 7") 19)))
     (is (string= "container-id" (gr8s.cri.v1::container-id request)))
     (is (equal '("sh" "-c" "exit 7") (gr8s.cri.v1::cmd request)))
@@ -101,8 +101,8 @@
 (test cri-runs-and-removes-a-host-network-pod-sandbox
   (if (string= "1"
                (or (uiop:getenv "GR8S_RUN_CONTAINERD_LIFECYCLE_TESTS") ""))
-      (if (not (fboundp 'gr8s::cri-run-pod-sandbox))
-          (is (fboundp 'gr8s::cri-run-pod-sandbox))
+      (if (not (fboundp 'gr8s.runtime.containerd::cri-run-pod-sandbox))
+          (is (fboundp 'gr8s.runtime.containerd::cri-run-pod-sandbox))
           (let* ((socket-path
                    (or (uiop:getenv "GR8S_CONTAINERD_SOCKET")
                        "/tmp/gr8s-containerd.sock"))
@@ -112,7 +112,7 @@
             (unwind-protect
                  (progn
                    (setf sandbox-id
-                         (gr8s::cri-run-pod-sandbox
+                         (gr8s.runtime.containerd::cri-run-pod-sandbox
                           socket-path
                           :name "gr8s-cri-test"
                           :uid uid
@@ -121,7 +121,7 @@
                           :host-network t))
                    (is (plusp (length sandbox-id))))
               (when sandbox-id
-                (gr8s::cri-delete-pod-sandbox socket-path sandbox-id)))))
+                (gr8s.runtime.containerd::cri-delete-pod-sandbox socket-path sandbox-id)))))
       (skip "Set GR8S_RUN_CONTAINERD_LIFECYCLE_TESTS=1 to run the CRI lifecycle test")))
 
 (test cri-pulls-runs-logs-and-removes-a-container
@@ -133,18 +133,18 @@
              (uid (format nil "gr8s-cri-container-~D" (get-universal-time)))
              (log-directory (format nil "/tmp/gr8s-cri-logs/~A/" uid))
              (sandbox-config
-               (gr8s::make-cri-pod-sandbox-config
+               (gr8s.runtime.containerd::make-cri-pod-sandbox-config
                 "gr8s-cri-container-test" uid "default" 0 log-directory nil))
              (sandbox-id nil)
              (container-id nil))
         (ensure-directories-exist log-directory)
         (unwind-protect
              (let ((image-ref
-                     (gr8s::cri-pull-image
+                     (gr8s.runtime.containerd::cri-pull-image
                       socket-path "docker.io/library/busybox:1.37.0")))
                (is (plusp (length image-ref)))
                (setf sandbox-id
-                     (gr8s::cri-run-pod-sandbox
+                     (gr8s.runtime.containerd::cri-run-pod-sandbox
                       socket-path
                       :name "gr8s-cri-container-test"
                       :uid uid
@@ -152,24 +152,24 @@
                       :log-directory log-directory
                       :host-network nil))
                (setf container-id
-                     (gr8s::cri-create-container
+                     (gr8s.runtime.containerd::cri-create-container
                       socket-path sandbox-id sandbox-config
                       :name "main"
                       :image "docker.io/library/busybox:1.37.0"
                       :command '("/bin/sh" "-c" "echo gr8s-cri-container-ok")
                       :log-path "main.log"))
-               (gr8s::cri-start-container socket-path container-id)
+               (gr8s.runtime.containerd::cri-start-container socket-path container-id)
                (let ((status
                        (loop repeat 50
                              for current =
-                               (gr8s::cri-container-status
+                               (gr8s.runtime.containerd::cri-container-status
                                 socket-path container-id)
                              when (= gr8s.cri.v1::+containerstate-container_exited+
-                                     (gr8s::cri-container-info-state current))
+                                     (gr8s.runtime.containerd::cri-container-info-state current))
                                return current
                              do (sleep 0.1))))
                  (is (not (null status)))
-                 (is (= 0 (gr8s::cri-container-info-exit-code status))))
+                 (is (= 0 (gr8s.runtime.containerd::cri-container-info-exit-code status))))
                (loop repeat 50
                      until (probe-file (merge-pathnames "main.log" log-directory))
                      do (sleep 0.1))
@@ -177,9 +177,9 @@
                            (uiop:read-file-string
                             (merge-pathnames "main.log" log-directory)))))
           (when container-id
-            (gr8s::cri-delete-container socket-path container-id))
+            (gr8s.runtime.containerd::cri-delete-container socket-path container-id))
           (when sandbox-id
-            (gr8s::cri-delete-pod-sandbox socket-path sandbox-id))))
+            (gr8s.runtime.containerd::cri-delete-pod-sandbox socket-path sandbox-id))))
       (skip "Set GR8S_RUN_CONTAINERD_LIFECYCLE_TESTS=1 to run the CRI lifecycle test")))
 
 (test cri-sandbox-network-status-carries-the-observed-pod-ip
@@ -194,12 +194,12 @@
                                                                           :ip "fd88::2"))))))
          (decoded (ag-proto:deserialize-from-bytes 'gr8s.cri.v1::pod-sandbox-status-response
                                                   (ag-proto:serialize-to-bytes response))))
-    (is (string= "10.88.1.2" (gr8s::cri-pod-sandbox-ip-from-response decoded)))
+    (is (string= "10.88.1.2" (gr8s.runtime.containerd::cri-pod-sandbox-ip-from-response decoded)))
     (is (equalp #("10.88.1.2" "fd88::2")
-                (gr8s::cri-pod-sandbox-ips-from-response decoded))))
-  (is (string= "" (gr8s::cri-pod-sandbox-ip-from-response
+                (gr8s.runtime.containerd::cri-pod-sandbox-ips-from-response decoded))))
+  (is (string= "" (gr8s.runtime.containerd::cri-pod-sandbox-ip-from-response
                     (make-instance 'gr8s.cri.v1::pod-sandbox-status-response))))
-  (is (equalp #() (gr8s::cri-pod-sandbox-ips-from-response
+  (is (equalp #() (gr8s.runtime.containerd::cri-pod-sandbox-ips-from-response
                    (make-instance 'gr8s.cri.v1::pod-sandbox-status-response)))))
 
 (defun running-task-removal-error (&optional (code ag-grpc:+grpc-status-failed-precondition+))
@@ -210,7 +210,7 @@
 
 (test removal-blocked-by-a-leftover-task-reaps-it-and-removes-again
   (let ((removals 0) (reaped 0))
-    (gr8s::call-reaping-leftover-task
+    (gr8s.runtime.containerd::call-reaping-leftover-task
      (lambda () (when (= 1 (incf removals)) (error (running-task-removal-error))))
      (lambda () (incf reaped)))
     (is (= 2 removals))
@@ -223,14 +223,14 @@
                                              :code ag-grpc:+grpc-status-failed-precondition+
                                              :message "container is in use")))
       (signals ag-grpc::grpc-status-error
-        (gr8s::call-reaping-leftover-task (lambda () (error condition)) (lambda () (incf reaped)))))
+        (gr8s.runtime.containerd::call-reaping-leftover-task (lambda () (error condition)) (lambda () (incf reaped)))))
     (is (zerop reaped))))
 
 (test a-task-that-survives-reaping-still-fails-the-removal
   ;; The Pod then keeps waiting and the next pass tries again; nothing loops here.
   (let ((removals 0) (reaped 0))
     (signals ag-grpc::grpc-status-error
-      (gr8s::call-reaping-leftover-task
+      (gr8s.runtime.containerd::call-reaping-leftover-task
        (lambda () (incf removals) (error (running-task-removal-error)))
        (lambda () (incf reaped))))
     (is (= 2 removals))
@@ -239,7 +239,7 @@
 (test containerd-task-requests-match-containerd-wire-format
   ;; containerd.services.tasks.v1.KillRequest: container_id=1, exec_id=2, signal=3, all=4.
   (is (equalp #(10 2 99 49 24 9 32 1)
-              (ag-proto:serialize-to-bytes (gr8s::make-containerd-kill-request "c1"))))
+              (ag-proto:serialize-to-bytes (gr8s.runtime.containerd::make-containerd-kill-request "c1"))))
   (is (equalp #(10 2 99 49)
               (ag-proto:serialize-to-bytes
                (make-instance 'gr8s.containerd.tasks.v1::delete-task-request :container-id "c1"))))
@@ -249,4 +249,4 @@
     (is (string= "c1" (gr8s.containerd.tasks.v1::id response)))
     (is (= 42 (gr8s.containerd.tasks.v1::pid response)))
     (is (= 137 (gr8s.containerd.tasks.v1::exit-status response))))
-  (is (equal "k8s.io" (ag-grpc:metadata-get (gr8s::containerd-namespace-metadata) "containerd-namespace"))))
+  (is (equal "k8s.io" (ag-grpc:metadata-get (gr8s.runtime.containerd::containerd-namespace-metadata) "containerd-namespace"))))

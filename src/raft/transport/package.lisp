@@ -73,6 +73,3 @@
 
 ;; GR8S remains a compatibility facade while callers move to the subsystem
 ;; package. Importing the exact symbols keeps existing GR8S:: references valid.
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (do-external-symbols (symbol '#:gr8s.raft.transport)
-    (shadowing-import symbol '#:gr8s)))

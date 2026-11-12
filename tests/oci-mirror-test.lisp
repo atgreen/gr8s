@@ -16,7 +16,7 @@
   (let* ((directory (merge-pathnames
                      (format nil "gr8s-hosts-~36R/" (random most-positive-fixnum))
                      (uiop:temporary-directory)))
-         (runtime (gr8s.runtime.containerd:make-containerd-runtime
+         (runtime (gr8s.runtime.containerd::make-containerd-runtime
                    :registry-host-config-directory directory
                    :image-mirror-port 18443)))
     (unwind-protect

@@ -12,7 +12,7 @@
   (flexi-streams:with-output-to-sequence (out)
     (let ((writer (gr8s.server::open-backup-writer out (backup-test-key))))
       (gr8s.server::write-backup-bundle-json
-       writer 0 (gr8s::json-object "format" "gr8s-state-bundle" "version" 1
+       writer 0 (gr8s.foundation::json-object "format" "gr8s-state-bundle" "version" 1
                                   "release" "test"
                                   "createdAt" 0 "exclusionPolicy" "gr8s-control-plane-v1"))
       (dolist (record records) (gr8s.server::write-backup-record writer record))
@@ -21,10 +21,10 @@
   (concatenate '(vector (unsigned-byte 8)) (vector kind)
                (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify object))))
 (defun test-bundle-file-records (path &optional (payload (make-array 0 :element-type '(unsigned-byte 8))))
-  (list (test-bundle-json-record 1 (gr8s::json-object "path" path "bytes" (length payload) "mode" #o600))
+  (list (test-bundle-json-record 1 (gr8s.foundation::json-object "path" path "bytes" (length payload) "mode" #o600))
         (concatenate '(vector (unsigned-byte 8)) #(3) (ironclad:digest-sequence :sha256 payload))))
 (defun test-bundle-footer (files bytes)
-  (test-bundle-json-record 4 (gr8s::json-object "files" files "bytes" bytes "excluded" #())))
+  (test-bundle-json-record 4 (gr8s.foundation::json-object "files" files "bytes" bytes "excluded" #())))
 (defun verify-test-bundle-bytes (bytes)
   (flexi-streams:with-input-from-sequence (in bytes)
     (gr8s.server::verify-state-backup-stream in (backup-test-key))))
@@ -131,7 +131,7 @@
 
 (test bundle-verification-rejects-missing-and-excess-payload-and-unknown-records
   (let ((file (test-bundle-file-records "file")))
-    (dolist (records (list (list (test-bundle-json-record 1 (gr8s::json-object "path" "file" "bytes" 1 "mode" #o600))
+    (dolist (records (list (list (test-bundle-json-record 1 (gr8s.foundation::json-object "path" "file" "bytes" 1 "mode" #o600))
                                 (second file) (test-bundle-footer 1 1))
                            (list (first file) (make-array 2 :element-type '(unsigned-byte 8) :initial-element 2)
                                  (second file) (test-bundle-footer 1 0))

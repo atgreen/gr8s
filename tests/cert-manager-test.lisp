@@ -40,7 +40,7 @@
             (is (equal namespace (gethash "namespace" (gethash "metadata" created))))
             (check-core-status 409 collection :method :post :object object)
             (is (equalp created (check-core-status 200 url)))
-            (is (equalp created (gr8s::get-core-resource (open-store directory) resource namespace name)))
+            (is (equalp created (gr8s.resources::get-core-resource (open-store directory) resource namespace name)))
             (is (= 1 (length (gethash "items" (check-core-status 200 collection)))))))))
     ;; ClusterIssuer is cluster-scoped: not reachable under a namespace.
     (check-core-status 404 "/apis/cert-manager.io/v1/namespaces/certs/clusterissuers/selfsigned")
@@ -83,7 +83,7 @@
 
 (defun cm-secret-pem (store namespace name key)
   "Return the decoded PEM string stored under Secret data KEY, or NIL."
-  (let* ((secret (ignore-errors (gr8s::get-core-resource store "secrets" namespace name)))
+  (let* ((secret (ignore-errors (gr8s.resources::get-core-resource store "secrets" namespace name)))
          (data (and secret (gethash "data" secret)))
          (encoded (and data (gethash key data))))
     (when encoded
@@ -97,10 +97,10 @@
 
 (test cert-manager-issues-selfsigned-into-tls-secret
   (with-temporary-store (store directory)
-    (gr8s::create-core-resource store "clusterissuers" (cm-parse *cm-selfsigned-issuer*) nil)
-    (gr8s::create-core-resource store "certificates" (cm-parse *cm-certificate*) "certs")
-    (gr8s::reconcile-certificates store nil)       ; selfSigned needs no PKI
-    (let ((secret (gr8s::get-core-resource store "secrets" "certs" "web-tls")))
+    (gr8s.resources::create-core-resource store "clusterissuers" (cm-parse *cm-selfsigned-issuer*) nil)
+    (gr8s.resources::create-core-resource store "certificates" (cm-parse *cm-certificate*) "certs")
+    (gr8s.controllers::reconcile-certificates store nil)       ; selfSigned needs no PKI
+    (let ((secret (gr8s.resources::get-core-resource store "secrets" "certs" "web-tls")))
       (is (equal "kubernetes.io/tls" (gethash "type" secret)))
       (is (gethash "tls.crt" (gethash "data" secret)))
       (is (gethash "tls.key" (gethash "data" secret))))
@@ -117,7 +117,7 @@
         (is (search (babel:string-to-octets "web.example.com") der))
         (is (search (babel:string-to-octets "api.example.com") der))))
     ;; Status records Ready + a renewalTime.
-    (let* ((cert (gr8s::get-core-resource store "certificates" "certs" "web"))
+    (let* ((cert (gr8s.resources::get-core-resource store "certificates" "certs" "web"))
            (status (gethash "status" cert)))
       (is (equal "True" (gethash "status" (aref (gethash "conditions" status) 0))))
       (is (stringp (gethash "renewalTime" status)))
@@ -125,12 +125,12 @@
 
 (test cert-manager-ca-issuer-signs-from-cluster-ca
   (with-temporary-store (store directory)
-    (let ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki-root/" (uiop:ensure-directory-pathname directory)))))
-      (gr8s::create-core-resource store "issuers" (cm-parse *cm-ca-issuer*) "certs")
-      (gr8s::create-core-resource store "certificates"
+    (let ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki-root/" (uiop:ensure-directory-pathname directory)))))
+      (gr8s.resources::create-core-resource store "issuers" (cm-parse *cm-ca-issuer*) "certs")
+      (gr8s.resources::create-core-resource store "certificates"
         (cm-parse "{\"apiVersion\":\"cert-manager.io/v1\",\"kind\":\"Certificate\",\"metadata\":{\"name\":\"svc\",\"namespace\":\"certs\"},\"spec\":{\"secretName\":\"svc-tls\",\"issuerRef\":{\"name\":\"ca\",\"kind\":\"Issuer\"},\"dnsNames\":[\"svc.example.com\"]}}")
         "certs")
-      (gr8s::reconcile-certificates store pki)
+      (gr8s.controllers::reconcile-certificates store pki)
       (let ((cert-pem (cm-secret-pem store "certs" "svc-tls" "tls.crt")))
         (is (stringp cert-pem))
         (let ((leaf (first (handler-bind ((warning #'muffle-warning))
@@ -139,35 +139,35 @@
           ;; A clean verify against the cluster CA means the leaf was CA-signed
           ;; (verify-certificate-chain signals on any failure).
           (is (progn (pure-tls::verify-certificate-chain
-                      (list leaf) (list (gr8s::cluster-pki-ca-certificate pki))
+                      (list leaf) (list (gr8s.security::cluster-pki-ca-certificate pki))
                       :purpose :server-auth :trust-anchor-mode :replace)
                      t)))))))
 
 (test cert-manager-reissues-after-renewal-time
   (with-temporary-store (store directory)
     (values directory)
-    (let ((gr8s::*cert-manager-clock* (let ((now (get-universal-time))) (lambda () now))))
-      (gr8s::create-core-resource store "clusterissuers" (cm-parse *cm-selfsigned-issuer*) nil)
-      (gr8s::create-core-resource store "certificates" (cm-parse *cm-certificate*) "certs")
-      (gr8s::reconcile-certificates store nil)
-      (is (not (gr8s::cm-certificate-needs-issue-p
-                store (gr8s::get-core-resource store "certificates" "certs" "web"))))
+    (let ((gr8s.controllers::*cert-manager-clock* (let ((now (get-universal-time))) (lambda () now))))
+      (gr8s.resources::create-core-resource store "clusterissuers" (cm-parse *cm-selfsigned-issuer*) nil)
+      (gr8s.resources::create-core-resource store "certificates" (cm-parse *cm-certificate*) "certs")
+      (gr8s.controllers::reconcile-certificates store nil)
+      (is (not (gr8s.controllers::cm-certificate-needs-issue-p
+                store (gr8s.resources::get-core-resource store "certificates" "certs" "web"))))
       ;; Advance the clock past renewalTime (duration 24h, renewBefore default 8h).
-      (let ((future (+ (funcall gr8s::*cert-manager-clock*) (* 20 3600))))
-        (setf gr8s::*cert-manager-clock* (lambda () future)))
-      (is (gr8s::cm-certificate-needs-issue-p
-           store (gr8s::get-core-resource store "certificates" "certs" "web")))
+      (let ((future (+ (funcall gr8s.controllers::*cert-manager-clock*) (* 20 3600))))
+        (setf gr8s.controllers::*cert-manager-clock* (lambda () future)))
+      (is (gr8s.controllers::cm-certificate-needs-issue-p
+           store (gr8s.resources::get-core-resource store "certificates" "certs" "web")))
       ;; A reconcile at the later time refreshes the stored renewalTime.
-      (let ((before (gethash "renewalTime" (gethash "status" (gr8s::get-core-resource store "certificates" "certs" "web")))))
-        (gr8s::reconcile-certificates store nil)
-        (let ((after (gethash "renewalTime" (gethash "status" (gr8s::get-core-resource store "certificates" "certs" "web")))))
+      (let ((before (gethash "renewalTime" (gethash "status" (gr8s.resources::get-core-resource store "certificates" "certs" "web")))))
+        (gr8s.controllers::reconcile-certificates store nil)
+        (let ((after (gethash "renewalTime" (gethash "status" (gr8s.resources::get-core-resource store "certificates" "certs" "web")))))
           (is (not (equal before after))))))))
 
 
 (test managed-ca-leaf-passes-strict-openssl-chain-validation
   (with-temporary-pki (pki root)
     (multiple-value-bind (subject signer issuer)
-        (gr8s.controllers::cm-issuer-signer pki (gr8s::core-object "ca" (gr8s::core-object)))
+        (gr8s.controllers::cm-issuer-signer pki (gr8s.resources::core-object "ca" (gr8s.resources::core-object)))
       (multiple-value-bind (certificate key before after)
           (gr8s.controllers::cm-issue-leaf :common-name "strict.test" :dns-names '("strict.test")
                                           :duration-seconds 3600 :issuer-subject-der subject
@@ -177,6 +177,6 @@
           (with-open-file (out path :direction :output :if-exists :error) (write-string certificate out))
           (multiple-value-bind (out err status)
               (uiop:run-program (list "openssl" "verify" "-x509_strict" "-purpose" "sslserver"
-                                     "-CAfile" (namestring (gr8s:cluster-pki-ca-certificate-path pki))
+                                     "-CAfile" (namestring (gr8s.security::cluster-pki-ca-certificate-path pki))
                                      (namestring path)) :output :string :error-output :string :ignore-error-status t)
             (is (zerop status) "Managed leaf strict validation failed: ~A ~A" out err)))))))

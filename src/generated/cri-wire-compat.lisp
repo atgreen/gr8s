@@ -7,7 +7,7 @@
 ;;;; sends packed groups in LinuxContainerUser responses, including group zero.
 ;;;; Keep this compatibility method outside regenerated bindings.
 
-(in-package #:gr8s)
+(in-package #:gr8s.cri.v1)
 
 (defmethod ag-proto:deserialize-from-bytes
     ((type (eql 'gr8s.cri.v1::linux-container-user)) data)
@@ -15,7 +15,7 @@
   (declare (ignore type))
   (let ((object (make-instance 'gr8s.cri.v1::linux-container-user))
         (buffer (cons data 0)) (groups nil))
-    (labels ((signed-value (source)
+    (cl:labels ((signed-value (source)
                (let ((value (ag-proto::read-varint source)))
                  (if (>= value (ash 1 63)) (- value (ash 1 64)) value))))
       (loop while (< (cdr buffer) (length data))

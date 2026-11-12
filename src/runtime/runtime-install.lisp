@@ -10,7 +10,7 @@
 ;;;; load-installed-runtime-addons verifies at startup. Core runtimes
 ;;;; (containerd, runc, CNI) stay embedded; this is only for optional add-ons.
 
-(in-package #:gr8s)
+(in-package #:gr8s.runtime)
 
 (define-condition runtime-install-error (error)
   ((message :initarg :message :reader runtime-install-error-message))

@@ -23,8 +23,8 @@
 
 (defun test-container-status (name state &rest fields)
   "Return a container status for NAME in STATE, a (KEY . OBJECT) pair such as (\"running\" . {})."
-  (let ((status (gr8s::core-object "name" name "image" "agnhost" "restartCount" 0
-                                   "state" (gr8s::core-object (car state) (cdr state)))))
+  (let ((status (gr8s.resources::core-object "name" name "image" "agnhost" "restartCount" 0
+                                   "state" (gr8s.resources::core-object (car state) (cdr state)))))
     (loop for (key value) on fields by #'cddr do (setf (gethash key status) value))
     status))
 
@@ -35,10 +35,10 @@
 
 (test a-running-container-is-reported-terminated-once-its-pod-is-gone
   (let* ((pod (terminating-test-pod +fail-pod-spec+))
-         (last (gr8s::core-object "phase" "Running"
-                                  "containerStatuses" (vector (test-container-status "fail" (cons "running" (gr8s::core-object))
+         (last (gr8s.resources::core-object "phase" "Running"
+                                  "containerStatuses" (vector (test-container-status "fail" (cons "running" (gr8s.resources::core-object))
                                                                                      "ready" t "started" t))))
-         (final (gr8s::terminating-pod-status pod nil last :gone t))
+         (final (gr8s.kubelet::terminating-pod-status pod nil last :gone t))
          (item (aref (gethash "containerStatuses" final) 0))
          (terminated (gethash "terminated" (gethash "state" item))))
     (is (equal "Failed" (gethash "phase" final)))
@@ -51,8 +51,8 @@
 
 (test a-container-that-never-started-leaves-a-gone-pod-pending
   (let ((pod (terminating-test-pod +fail-pod-spec+)))
-    (dolist (last (list nil (gr8s::core-object "phase" "Pending")))
-      (let ((final (gr8s::terminating-pod-status pod nil last :gone t)))
+    (dolist (last (list nil (gr8s.resources::core-object "phase" "Pending")))
+      (let ((final (gr8s.kubelet::terminating-pod-status pod nil last :gone t)))
         (is (equal "Pending" (gethash "phase" final)))
         (is (equal "waiting" (status-state-name final "fail")))
         (is (equal "ContainerCreating"
@@ -60,90 +60,90 @@
 
 (test a-failed-init-container-keeps-the-pod-failed-and-its-application-waiting
   (let* ((pod (terminating-test-pod +init-fail-pod-spec+))
-         (last (gr8s::core-object
+         (last (gr8s.resources::core-object
                 "phase" "Failed"
-                "initContainerStatuses" (vector (test-container-status "fail" (cons "terminated" (gr8s::core-object "exitCode" 1))))
-                "containerStatuses" (vector (test-container-status "blocked" (cons "waiting" (gr8s::core-object "reason" "PodInitializing"))))))
-         (shutting-down (gr8s::terminating-pod-status pod (gr8s::core-object "phase" "Unknown") last))
-         (final (gr8s::terminating-pod-status pod nil last :gone t)))
+                "initContainerStatuses" (vector (test-container-status "fail" (cons "terminated" (gr8s.resources::core-object "exitCode" 1))))
+                "containerStatuses" (vector (test-container-status "blocked" (cons "waiting" (gr8s.resources::core-object "reason" "PodInitializing"))))))
+         (shutting-down (gr8s.kubelet::terminating-pod-status pod (gr8s.resources::core-object "phase" "Unknown") last))
+         (final (gr8s.kubelet::terminating-pod-status pod nil last :gone t)))
     (dolist (status (list shutting-down final))
       (is (equal "Failed" (gethash "phase" status)))
       (is (= 1 (length (gethash "initContainerStatuses" status))))
       (is (equal "terminated" (status-state-name status "fail" "initContainerStatuses")))
       (is (equal "waiting" (status-state-name status "blocked"))))
     ;; Without a report from before, the phase still follows the kubelet's rules.
-    (is (equal "Failed" (gethash "phase" (gr8s::terminating-pod-status
-                                           pod (gr8s::core-object "phase" "Unknown"
+    (is (equal "Failed" (gethash "phase" (gr8s.kubelet::terminating-pod-status
+                                           pod (gr8s.resources::core-object "phase" "Unknown"
                                                                   "initContainerStatuses" (gethash "initContainerStatuses" last)
                                                                   "containerStatuses" (gethash "containerStatuses" last))
                                            nil))))))
 
 (test shutdown-never-forgets-a-container-or-reverts-a-termination
   (let* ((pod (terminating-test-pod +fail-pod-spec+))
-         (exited (test-container-status "fail" (cons "terminated" (gr8s::core-object "exitCode" 1))))
-         (last (gr8s::core-object "phase" "Failed" "containerStatuses" (vector exited))))
+         (exited (test-container-status "fail" (cons "terminated" (gr8s.resources::core-object "exitCode" 1))))
+         (last (gr8s.resources::core-object "phase" "Failed" "containerStatuses" (vector exited))))
     ;; The runtime lost the container, or reports it waiting again: the exit stands.
-    (dolist (current (list (gr8s::core-object "phase" "Running")
-                           (gr8s::core-object "phase" "Pending" "containerStatuses"
-                                              (vector (test-container-status "fail" (cons "waiting" (gr8s::core-object "reason" "ContainerCreating")))))))
-      (let ((status (gr8s::terminating-pod-status pod current last)))
+    (dolist (current (list (gr8s.resources::core-object "phase" "Running")
+                           (gr8s.resources::core-object "phase" "Pending" "containerStatuses"
+                                              (vector (test-container-status "fail" (cons "waiting" (gr8s.resources::core-object "reason" "ContainerCreating")))))))
+      (let ((status (gr8s.kubelet::terminating-pod-status pod current last)))
         (is (equal "Failed" (gethash "phase" status)))
         (is (equal "terminated" (status-state-name status "fail")))
         (is (= 1 (gethash "exitCode" (gethash "terminated" (gethash "state" (aref (gethash "containerStatuses" status) 0))))))))
     ;; A container still running during grace stays running until it is gone.
-    (let ((status (gr8s::terminating-pod-status
-                   pod (gr8s::core-object "phase" "Running"
-                                          "containerStatuses" (vector (test-container-status "fail" (cons "running" (gr8s::core-object)))))
-                   (gr8s::core-object "phase" "Running"))))
+    (let ((status (gr8s.kubelet::terminating-pod-status
+                   pod (gr8s.resources::core-object "phase" "Running"
+                                          "containerStatuses" (vector (test-container-status "fail" (cons "running" (gr8s.resources::core-object)))))
+                   (gr8s.resources::core-object "phase" "Running"))))
       (is (equal "Running" (gethash "phase" status)))
       (is (equal "running" (status-state-name status "fail"))))))
 
 (test kubelet-phase-follows-restart-policy-for-stopped-containers
   (let ((always (terminating-test-pod "{\"restartPolicy\":\"Always\",\"containers\":[{\"name\":\"a\",\"image\":\"x\"},{\"name\":\"b\",\"image\":\"x\"}]}"))
-        (status (gr8s::core-object "containerStatuses"
-                                   (vector (test-container-status "a" (cons "terminated" (gr8s::core-object "exitCode" 0)))
-                                           (test-container-status "b" (cons "terminated" (gr8s::core-object "exitCode" 0)))))))
+        (status (gr8s.resources::core-object "containerStatuses"
+                                   (vector (test-container-status "a" (cons "terminated" (gr8s.resources::core-object "exitCode" 0)))
+                                           (test-container-status "b" (cons "terminated" (gr8s.resources::core-object "exitCode" 0)))))))
     ;; Restarting containers keep a live Pod Running; once terminal it has succeeded.
-    (is (equal "Running" (gr8s::kubelet-pod-phase always status nil)))
-    (is (equal "Succeeded" (gr8s::kubelet-pod-phase always status t)))
+    (is (equal "Running" (gr8s.kubelet::kubelet-pod-phase always status nil)))
+    (is (equal "Succeeded" (gr8s.kubelet::kubelet-pod-phase always status t)))
     (setf (gethash "exitCode" (gethash "terminated" (gethash "state" (aref (gethash "containerStatuses" status) 1)))) 2)
-    (is (equal "Failed" (gr8s::kubelet-pod-phase always status t)))
+    (is (equal "Failed" (gr8s.kubelet::kubelet-pod-phase always status t)))
     ;; A container not reported at all leaves the phase Pending.
-    (is (equal "Pending" (gr8s::kubelet-pod-phase always (gr8s::core-object "containerStatuses" (vector (aref (gethash "containerStatuses" status) 0))) t)))))
+    (is (equal "Pending" (gr8s.kubelet::kubelet-pod-phase always (gr8s.resources::core-object "containerStatuses" (vector (aref (gethash "containerStatuses" status) 0))) t)))))
 
 (test the-deleted-watch-event-carries-the-terminal-status-the-agent-reported
   (with-temporary-store (store path)
-    (let* ((server (gr8s::%make-node-grpc-server :store store))
-           (runtime (gr8s::make-control-plane-runtime store server))
+    (let* ((server (gr8s.apiserver::%make-node-grpc-server :store store))
+           (runtime (gr8s.controllers::make-control-plane-runtime store server))
            (reconciler (make-reconciler store runtime))
            (fake (make-fake-runtime))
-           (agent (gr8s::make-node-runtime (merge-pathnames "agent/" path) fake nil))
+           (agent (gr8s.agent::make-node-runtime (merge-pathnames "agent/" path) fake nil))
            (pod (create-pod store (grace-pod))))
-      (gr8s::register-node store (gr8s::make-node-record :id "worker-a" :name "worker-a" :pod-cidr "10.88.0.0/24"))
-      (gr8s::mark-node-ready store "worker-a" (get-universal-time))
+      (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "worker-a" :name "worker-a" :pod-cidr "10.88.0.0/24"))
+      (gr8s.controllers::mark-node-ready store "worker-a" (get-universal-time))
       (flet ((sync-agent ()
-               (gr8s::reconcile-node-snapshot agent (grace-snapshot-without-network (gr8s::current-node-snapshot server "worker-a")))
-               (gr8s::handle-node-agent-envelope server "worker-a"
-                                                 (gr8s::make-agent-envelope :status (gr8s::node-runtime-status agent)))))
+               (gr8s.agent::reconcile-node-snapshot agent (grace-snapshot-without-network (gr8s.apiserver::current-node-snapshot server "worker-a")))
+               (gr8s.apiserver::handle-node-agent-envelope server "worker-a"
+                                                 (gr8s.protocol::make-agent-envelope :status (gr8s.agent::node-runtime-status agent)))))
         (unwind-protect
              (progn
-               (gr8s::start-node-runtime agent)
+               (gr8s.agent::start-node-runtime agent)
                (reconcile-pod reconciler "default" "hello")
                (sync-agent)
                ;; The container is really running when deletion begins.
                (let ((actual (runtime-observe fake (pod-uid pod))))
-                 (setf (gr8s::runtime-pod-status actual)
-                       (gr8s::core-object "containerStatuses"
-                                          (vector (test-container-status "web" (cons "running" (gr8s::core-object))
+                 (setf (gr8s.runtime::runtime-pod-status actual)
+                       (gr8s.resources::core-object "containerStatuses"
+                                          (vector (test-container-status "web" (cons "running" (gr8s.resources::core-object))
                                                                          "ready" t "started" t)))))
                (sync-agent)
                (is (equal "running" (status-state-name (reconcile-pod reconciler "default" "hello") "web")))
-               (let ((revision (gr8s::pod-store-pod-revision store)))
-                 (gr8s::delete-reconciled-pod reconciler "default" "hello")
+               (let ((revision (gr8s.store::pod-store-pod-revision store)))
+                 (gr8s.kubelet::delete-reconciled-pod reconciler "default" "hello")
                  (sync-agent)
                  (is (equal "Deleted" (gethash "reason" (reconcile-pod reconciler "default" "hello"))))
                  (signals kubernetes-error (get-pod store "default" "hello"))
-                 (let* ((events (gr8s::pod-watch-events store "default" "" "" revision))
+                 (let* ((events (gr8s.apiserver::pod-watch-events store "default" "" "" revision))
                         (deleted (find "DELETED" events :test #'equal :key (lambda (event) (gethash "type" event))))
                         (status (gethash "status" (gethash "object" deleted))))
                    (is (eq deleted (car (last events))))
@@ -155,31 +155,31 @@
                      (let ((seen (gethash "status" (gethash "object" event))))
                        (is (not (equal "Unknown" (gethash "phase" seen))))
                        (is (= 1 (length (gethash "containerStatuses" seen #())))))))))
-          (gr8s::stop-node-runtime agent))))))
+          (gr8s.agent::stop-node-runtime agent))))))
 
 (test the-control-plane-never-publishes-less-than-clients-saw-at-removal
   (with-temporary-store (store path)
     (values path)
-    (let* ((server (gr8s::%make-node-grpc-server :store store))
-           (reconciler (make-reconciler store (gr8s::make-control-plane-runtime store server)))
-           (exited (gr8s::core-object "phase" "Failed" "containerStatuses"
-                                      (vector (test-container-status "fail" (cons "terminated" (gr8s::core-object "exitCode" 1))))))
-           (running (gr8s::core-object "phase" "Running" "containerStatuses"
-                                       (vector (test-container-status "fail" (cons "running" (gr8s::core-object)))))))
+    (let* ((server (gr8s.apiserver::%make-node-grpc-server :store store))
+           (reconciler (make-reconciler store (gr8s.controllers::make-control-plane-runtime store server)))
+           (exited (gr8s.resources::core-object "phase" "Failed" "containerStatuses"
+                                      (vector (test-container-status "fail" (cons "terminated" (gr8s.resources::core-object "exitCode" 1))))))
+           (running (gr8s.resources::core-object "phase" "Running" "containerStatuses"
+                                       (vector (test-container-status "fail" (cons "running" (gr8s.resources::core-object)))))))
       (flet ((scenario (name published observation)
                ;; Keep the scenarios on distinct Pods. Once a client has seen a
                ;; terminal phase, the status manager intentionally refuses to
                ;; publish a later nonterminal report for that same Pod.
                (let ((pod (create-pod store (terminating-test-pod +fail-pod-spec+ name))))
-                 (gr8s::with-store-lock (store)
-                   (gr8s::publish-pod-status-unlocked store pod published))
-                 (gr8s::save-pod-observation store pod observation)
-                 (gr8s::deleted-pod-final-status
-                  reconciler pod (gr8s::pod-observed-status store pod)))))
+                 (gr8s.store::with-store-lock (store)
+                   (gr8s.store::publish-pod-status-unlocked store pod published))
+                 (gr8s.kubelet::save-pod-observation store pod observation)
+                 (gr8s.kubelet::deleted-pod-final-status
+                  reconciler pod (gr8s.controllers::pod-observed-status store pod)))))
         ;; A node that rebuilt its acknowledgement after losing its last report says less than clients saw.
         (let ((status (scenario "rebuilt" exited
-                                (gr8s::core-object "phase" "Pending" "reason" "Deleted" "containerStatuses"
-                                                   (vector (test-container-status "fail" (cons "waiting" (gr8s::core-object "reason" "ContainerCreating"))))))))
+                                (gr8s.resources::core-object "phase" "Pending" "reason" "Deleted" "containerStatuses"
+                                                   (vector (test-container-status "fail" (cons "waiting" (gr8s.resources::core-object "reason" "ContainerCreating"))))))))
           (is (equal "Failed" (gethash "phase" status)))
           (is (equal "terminated" (status-state-name status "fail"))))
         ;; A Pod already terminal on its node is removed at once: its last report is still published.
@@ -196,20 +196,20 @@
   (with-temporary-store (store path)
     (values path)
     (let* ((pod (create-pod store (terminating-test-pod +fail-pod-spec+)))
-           (exited (test-container-status "fail" (cons "terminated" (gr8s::core-object "exitCode" 1))
+           (exited (test-container-status "fail" (cons "terminated" (gr8s.resources::core-object "exitCode" 1))
                                           "containerID" "containerd://first")))
-      (gr8s::add-pod-status-conditions store pod (gr8s::core-object "phase" "Failed" "containerStatuses" (vector exited)))
+      (gr8s.kubelet::add-pod-status-conditions store pod (gr8s.resources::core-object "phase" "Failed" "containerStatuses" (vector exited)))
       ;; A report missing the container, or still about the exited attempt, keeps the exit.
-      (dolist (report (list (gr8s::core-object "phase" "Pending")
-                            (gr8s::core-object "phase" "Running" "containerStatuses"
-                                               (vector (test-container-status "fail" (cons "running" (gr8s::core-object))
+      (dolist (report (list (gr8s.resources::core-object "phase" "Pending")
+                            (gr8s.resources::core-object "phase" "Running" "containerStatuses"
+                                               (vector (test-container-status "fail" (cons "running" (gr8s.resources::core-object))
                                                                               "containerID" "containerd://first")))))
-        (is (equal "terminated" (status-state-name (gr8s::add-pod-status-conditions store pod report) "fail"))))
+        (is (equal "terminated" (status-state-name (gr8s.kubelet::add-pod-status-conditions store pod report) "fail"))))
       ;; A new attempt that really runs is reported as it is.
       (is (equal "running" (status-state-name
-                            (gr8s::add-pod-status-conditions
-                             store pod (gr8s::core-object "phase" "Running" "containerStatuses"
-                                                          (vector (test-container-status "fail" (cons "running" (gr8s::core-object))
+                            (gr8s.kubelet::add-pod-status-conditions
+                             store pod (gr8s.resources::core-object "phase" "Running" "containerStatuses"
+                                                          (vector (test-container-status "fail" (cons "running" (gr8s.resources::core-object))
                                                                                          "containerID" "containerd://second"))))
                             "fail"))))))
 
@@ -217,5 +217,5 @@
   (with-temporary-store (store path)
     (values path)
     (let ((pod (create-pod store (terminating-test-pod +fail-pod-spec+))))
-      (gr8s::add-pod-status-conditions store pod (gr8s::core-object "phase" "Failed"))
-      (is (equal "Failed" (gethash "phase" (gr8s::add-pod-status-conditions store pod (gr8s::core-object "phase" "Pending"))))))))
+      (gr8s.kubelet::add-pod-status-conditions store pod (gr8s.resources::core-object "phase" "Failed"))
+      (is (equal "Failed" (gethash "phase" (gr8s.kubelet::add-pod-status-conditions store pod (gr8s.resources::core-object "phase" "Pending"))))))))

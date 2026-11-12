@@ -12,28 +12,28 @@
 
 (defun resource-metrics-test-summary ()
   "Return one node summary with one two-container Pod."
-  (gr8s::core-object
-   "node" (gr8s::core-object
+  (gr8s.resources::core-object
+   "node" (gr8s.resources::core-object
            "nodeName" "node-a"
-           "cpu" (gr8s::core-object "time" "2026-11-07T18:00:00Z" "usageNanoCores" 750000000)
-           "memory" (gr8s::core-object "time" "2026-11-07T18:00:00Z" "workingSetBytes" 314572800))
+           "cpu" (gr8s.resources::core-object "time" "2026-11-07T18:00:00Z" "usageNanoCores" 750000000)
+           "memory" (gr8s.resources::core-object "time" "2026-11-07T18:00:00Z" "workingSetBytes" 314572800))
    "pods" (vector
-           (gr8s::core-object
-            "podRef" (gr8s::core-object "namespace" "alpha" "name" "web" "uid" "uid-web")
+           (gr8s.resources::core-object
+            "podRef" (gr8s.resources::core-object "namespace" "alpha" "name" "web" "uid" "uid-web")
             "containers" (vector
-                          (gr8s::core-object
+                          (gr8s.resources::core-object
                            "name" "app"
-                           "cpu" (gr8s::core-object "time" "2026-11-07T18:00:01Z"
+                           "cpu" (gr8s.resources::core-object "time" "2026-11-07T18:00:01Z"
                                                     "usageNanoCores" 250000000
                                                     "usageCoreNanoSeconds" 9000000000)
-                           "memory" (gr8s::core-object "time" "2026-11-07T18:00:01Z"
+                           "memory" (gr8s.resources::core-object "time" "2026-11-07T18:00:01Z"
                                                        "workingSetBytes" 104857600))
-                          (gr8s::core-object
+                          (gr8s.resources::core-object
                            "name" "sidecar"
-                           "cpu" (gr8s::core-object "time" "2026-11-07T18:00:02Z"
+                           "cpu" (gr8s.resources::core-object "time" "2026-11-07T18:00:02Z"
                                                     "usageNanoCores" 50000000
                                                     "usageCoreNanoSeconds" 3000000000)
-                           "memory" (gr8s::core-object "time" "2026-11-07T18:00:02Z"
+                           "memory" (gr8s.resources::core-object "time" "2026-11-07T18:00:02Z"
                                                        "workingSetBytes" 20971520)))))))
 
 (test node-and-pod-metrics-use-standard-resource-quantities
@@ -42,17 +42,17 @@
          (pod (first (coerce (gr8s.apiserver::pod-metrics-from-summary summary) 'list))))
     (is (equal "metrics.k8s.io/v1beta1" (gethash "apiVersion" node)))
     (is (equal "NodeMetrics" (gethash "kind" node)))
-    (is (equal "node-a" (gr8s::table-get node "metadata" "name")))
-    (is (equal "750000000n" (gr8s::table-get node "usage" "cpu")))
-    (is (equal "314572800" (gr8s::table-get node "usage" "memory")))
+    (is (equal "node-a" (gr8s.apiserver::table-get node "metadata" "name")))
+    (is (equal "750000000n" (gr8s.apiserver::table-get node "usage" "cpu")))
+    (is (equal "314572800" (gr8s.apiserver::table-get node "usage" "memory")))
     (is (equal "10s" (gethash "window" node)))
     (is (equal "PodMetrics" (gethash "kind" pod)))
-    (is (equal "alpha" (gr8s::table-get pod "metadata" "namespace")))
+    (is (equal "alpha" (gr8s.apiserver::table-get pod "metadata" "namespace")))
     (is (equal '("app" "sidecar")
                (map 'list (lambda (container) (gethash "name" container))
                     (gethash "containers" pod))))
-    (is (equal "250000000n" (gr8s::table-get (aref (gethash "containers" pod) 0) "usage" "cpu")))
-    (is (equal "104857600" (gr8s::table-get (aref (gethash "containers" pod) 0) "usage" "memory")))
+    (is (equal "250000000n" (gr8s.apiserver::table-get (aref (gethash "containers" pod) 0) "usage" "cpu")))
+    (is (equal "104857600" (gr8s.apiserver::table-get (aref (gethash "containers" pod) 0) "usage" "memory")))
     ;; The newest container sample timestamps the Pod, as metrics-server does.
     (is (equal "2026-11-07T18:00:02Z" (gethash "timestamp" pod)))))
 
@@ -60,16 +60,16 @@
   (let* ((summary (resource-metrics-test-summary))
          (metrics (gr8s.apiserver::container-metrics-from-summary summary))
          (containers (gethash "uid-web" metrics)))
-    (is (= 9000000000 (gr8s::table-get containers "app" "cpu")))
-    (is (= 104857600 (gr8s::table-get containers "app" "memory")))
-    (is (= 3000000000 (gr8s::table-get containers "sidecar" "cpu")))))
+    (is (= 9000000000 (gr8s.apiserver::table-get containers "app" "cpu")))
+    (is (= 104857600 (gr8s.apiserver::table-get containers "app" "memory")))
+    (is (= 3000000000 (gr8s.apiserver::table-get containers "sidecar" "cpu")))))
 
 (test resource-metrics-discovery-is-a-native-read-only-api
   (let* ((group (gr8s.apiserver::resource-metrics-api-group))
          (discovery (gr8s.apiserver::resource-metrics-discovery-object))
          (resources (gethash "resources" discovery)))
     (is (equal "metrics.k8s.io" (gethash "name" group)))
-    (is (equal "v1beta1" (gr8s::table-get group "preferredVersion" "version")))
+    (is (equal "v1beta1" (gr8s.apiserver::table-get group "preferredVersion" "version")))
     (is (equal '("nodes" "pods")
                (map 'list (lambda (resource) (gethash "name" resource)) resources)))
     (is (every (lambda (resource)
@@ -79,15 +79,15 @@
 (test resource-metrics-list-get-and-select-like-kubernetes-resources
   (with-temporary-store (store path)
     (values path)
-    (gr8s:register-node
-     store (gr8s:make-node-record :id "node-a" :name "node-a" :pod-cidr "10.88.0.0/24"
-                                  :labels (gr8s::core-object "zone" "east")))
+    (gr8s.controllers::register-node
+     store (gr8s.model::make-node-record :id "node-a" :name "node-a" :pod-cidr "10.88.0.0/24"
+                                  :labels (gr8s.resources::core-object "zone" "east")))
     (let ((summaries (vector (resource-metrics-test-summary))))
       (flet ((request (path &key labels fields)
                (gr8s.apiserver::resource-metrics-object
                 store summaries path :get :label-selector labels :field-selector fields)))
         (is (= 1 (length (gethash "items" (request "/apis/metrics.k8s.io/v1beta1/nodes")))))
-        (is (equal "node-a" (gr8s::table-get
+        (is (equal "node-a" (gr8s.apiserver::table-get
                              (request "/apis/metrics.k8s.io/v1beta1/nodes/node-a")
                              "metadata" "name")))
         (is (= 0 (length (gethash "items"
@@ -99,7 +99,7 @@
                                            :fields "metadata.name=other")))))
         (is (= 1 (length (gethash "items"
                                   (request "/apis/metrics.k8s.io/v1beta1/namespaces/alpha/pods")))))
-        (is (equal "web" (gr8s::table-get
+        (is (equal "web" (gr8s.apiserver::table-get
                           (request "/apis/metrics.k8s.io/v1beta1/namespaces/alpha/pods/web")
                           "metadata" "name")))
         (is (= 1 (length (gethash "items"
@@ -126,9 +126,9 @@
                               "/apis/metrics.k8s.io/v1beta1/namespaces/alpha/pods/missing")))))
   (is (equal '("list" "metrics.k8s.io" "nodes" nil nil)
              (multiple-value-list
-              (gr8s::kubernetes-authorization-target
+              (gr8s.apiserver::kubernetes-authorization-target
                "/apis/metrics.k8s.io/v1beta1/nodes" :get))))
   (is (equal '("get" "metrics.k8s.io" "pods" "web" "alpha")
              (multiple-value-list
-              (gr8s::kubernetes-authorization-target
+              (gr8s.apiserver::kubernetes-authorization-target
                "/apis/metrics.k8s.io/v1beta1/namespaces/alpha/pods/web" :get)))))

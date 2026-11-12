@@ -101,18 +101,18 @@ application ingress/writer barriers. This function neither persists nor adopts R
     (when (consp command)
       (case (car command)
         (:store-recovery-barrier :recovered)
-        (:core-state (prog1 (gr8s::install-core-state-blob store (second command))
+        (:core-state (prog1 (gr8s.resources::install-core-state-blob store (second command))
                        (gr8s.resources::reconcile-pki-authority store)))
-        (:core-delta (prog1 (gr8s::install-core-state-delta store (second command))
+        (:core-delta (prog1 (gr8s.resources::install-core-state-delta store (second command))
                        (gr8s.resources::reconcile-pki-authority store)))
-        (:secrets-encryption (gr8s::install-secret-encryption-command store (second command)))
-        (:pod-state (gr8s::install-pod-state-blob store (second command)))
-        (:pod-delta (gr8s::install-pod-state-delta store (second command)))
-        (:node-state (gr8s::install-node-state-blob store (second command)))
-        (:node-delta (gr8s::install-node-state-delta store (second command)))
+        (:secrets-encryption (gr8s.resources::install-secret-encryption-command store (second command)))
+        (:pod-state (gr8s.store::install-pod-state-blob store (second command)))
+        (:pod-delta (gr8s.store::install-pod-state-delta store (second command)))
+        (:node-state (gr8s.store::install-node-state-blob store (second command)))
+        (:node-delta (gr8s.store::install-node-state-delta store (second command)))
         (:image-tracker
-         (gr8s.image-distribution::tracker-apply-command (gr8s::pod-store-image-tracker store) (second command)))
-        (:node-enrollment (apply #'gr8s::install-node-enrollment-command store (second command)))))))
+         (gr8s.image-distribution::tracker-apply-command (gr8s.store::pod-store-image-tracker store) (second command)))
+        (:node-enrollment (apply #'gr8s.controllers::install-node-enrollment-command store (second command)))))))
 
 (defun store-raft-command-retention-weight (command)
   "Reserve allocator pages and waiter metadata in addition to command contents."
@@ -126,8 +126,8 @@ application ingress/writer barriers. This function neither persists nor adopts R
             (raft-member-forward-propose-sync member (list tag json) :timeout 10))
       (unless (eq committed t)
         (if (eq committed :proposal-too-large)
-            (gr8s::core-resource-error 413 "RequestEntityTooLarge" "Write exceeds the control-plane proposal byte limit")
-            (gr8s::core-resource-error 503 "ServiceUnavailable"
+            (gr8s.resources::core-resource-error 413 "RequestEntityTooLarge" "Write exceeds the control-plane proposal byte limit")
+            (gr8s.resources::core-resource-error 503 "ServiceUnavailable"
                                       (if (eq committed :capacity)
                                           "Control-plane pending write capacity is full; retry after quorum recovers"
                                           "The control-plane write could not commit"))))
@@ -135,7 +135,7 @@ application ingress/writer barriers. This function neither persists nor adopts R
 
 (defun control-plane-store-bootstrap-role (store id init api-url)
   "Choose fresh/journaled bootstrap without resetting a published member WAL."
-  (let* ((root (gr8s::pod-store-path store))
+  (let* ((root (gr8s.store::pod-store-path store))
          (wal (merge-pathnames "raft/control-plane.log" root))
          (journal (merge-pathnames "raft/bootstrap.json" root))
          (role (if init :founder :learner))
@@ -173,23 +173,23 @@ the cluster. Access stays gated until a current-term committed boundary applies.
          (member nil) (hcp nil) (completed nil)
          (credentials
            (when pki
-             (when (and init bootstrap-role) (gr8s::load-service-account-signing-key store))
-             (let ((root (gr8s::raft-tls-root pki)))
+             (when (and init bootstrap-role) (gr8s.resources::load-service-account-signing-key store))
+             (let ((root (gr8s.security::raft-tls-root pki)))
                (if init
-                   (gr8s::ensure-raft-founder-credentials root id)
-                   (gr8s::ensure-raft-joiner-credentials
+                   (gr8s.security::ensure-raft-founder-credentials root id)
+                   (gr8s.security::ensure-raft-joiner-credentials
                     root id join-host join-port
                     :node-name node-name :token token :ca-pin ca-pin
-                    :node-root (gr8s::cluster-pki-root pki)))))))
-    (when credentials (setf (gr8s::raft-credentials-node-pki credentials) pki))
+                    :node-root (gr8s.security::cluster-pki-root pki)))))))
+    (when credentials (setf (gr8s.security::raft-credentials-node-pki credentials) pki))
     (unwind-protect
          (progn
            (setf member
                  (apply #'gr8s.resources::start-store-member-from-wal
-                        store id (merge-pathnames "raft/control-plane.log" (gr8s::pod-store-path store))
+                        store id (merge-pathnames "raft/control-plane.log" (gr8s.store::pod-store-path store))
                         :host host :port port :credentials credentials
                         :after-recovery-fn after-recovery-fn
-                        :snapshot-directory (merge-pathnames "raft/transfers/" (gr8s::pod-store-path store))
+                        :snapshot-directory (merge-pathnames "raft/transfers/" (gr8s.store::pod-store-path store))
                         (when bootstrap-role
                           (list :bootstrap-role bootstrap-role :bootstrap-api-url api-url))))
            (bt:with-lock-held ((raft-member-lock member))

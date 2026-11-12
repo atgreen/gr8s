@@ -20,11 +20,11 @@
   (with-temporary-store (store path)
     (declare (ignore store))
     (let* ((manager (gr8s.kubelet::make-device-plugin-manager path))
-           (pod1 (gr8s::make-pod :uid "one" :name "one"))
-           (pod2 (gr8s::make-pod :uid "two" :name "two"))
-           (pod3 (gr8s::make-pod :uid "three" :name "three"))
-           (container (gr8s::core-object "name" "compute" "resources"
-                        (gr8s::core-object "limits" (gr8s::core-object "devices.example.test/kvm" "1"))))
+           (pod1 (gr8s.model::make-pod :uid "one" :name "one"))
+           (pod2 (gr8s.model::make-pod :uid "two" :name "two"))
+           (pod3 (gr8s.model::make-pod :uid "three" :name "three"))
+           (container (gr8s.resources::core-object "name" "compute" "resources"
+                        (gr8s.resources::core-object "limits" (gr8s.resources::core-object "devices.example.test/kvm" "1"))))
            (calls 0) (ids nil)
            (gr8s.kubelet::*device-plugin-call*
              (lambda (plugin method request type)
@@ -46,7 +46,7 @@
       (is (= 1 calls))
       (gr8s.kubelet::device-plugin-container-config manager pod2 container)
       (is (equal '(("kvm1") ("kvm0")) ids))
-      (signals gr8s.runtime:runtime-error
+      (signals gr8s.runtime::runtime-error
         (gr8s.kubelet::device-plugin-container-config manager pod3 container))
       (let ((restored (gr8s.kubelet::make-device-plugin-manager path)))
         (is (equal '(("devices.example.test/kvm" . "0")) (gr8s.kubelet::device-plugin-resource-entries restored)))
@@ -69,7 +69,7 @@
            (progn
              (gr8s.kubelet::start-device-plugin-manager manager)
              (is-true (probe-file socket))
-             (let ((channel (gr8s::make-unix-grpc-channel (namestring socket) :timeout 5)))
+             (let ((channel (gr8s.protocol::make-unix-grpc-channel (namestring socket) :timeout 5)))
                (unwind-protect
                     (signals ag-grpc:grpc-status-error
                       (ag-grpc:call-unary channel "/v1beta1.Registration/Register"
@@ -113,7 +113,7 @@
                      (list (plugin-wire "CONTAINER-ALLOCATE-RESPONSE" :envs '(("ALLOCATED_GPU" . "gpu0"))))))
                  :request-type 'gr8s.deviceplugin.v1beta1::allocate-request
                  :response-type 'gr8s.deviceplugin.v1beta1::allocate-response))
-             (let ((channel (gr8s::make-unix-grpc-channel (namestring (merge-pathnames "kubelet.sock" directory)) :timeout 5)))
+             (let ((channel (gr8s.protocol::make-unix-grpc-channel (namestring (merge-pathnames "kubelet.sock" directory)) :timeout 5)))
                (unwind-protect
                     (ag-grpc:call-unary channel "/v1beta1.Registration/Register"
                       (plugin-wire "REGISTER-REQUEST" :version "v1beta1" :endpoint "fake.sock" :resource-name "devices.example.test/gpu")
@@ -121,9 +121,9 @@
                  (ag-grpc:channel-close channel)))
              (is-true (wait-until (lambda () (equal '(("devices.example.test/gpu" . "1"))
                                                     (gr8s.kubelet::device-plugin-resource-entries manager)))))
-             (let ((config (gr8s.kubelet::device-plugin-container-config manager (gr8s::make-pod :uid "rpc-pod")
-                             (gr8s::core-object "name" "gpu" "resources" (gr8s::core-object "limits"
-                                                                                         (gr8s::core-object "devices.example.test/gpu" "1"))))))
+             (let ((config (gr8s.kubelet::device-plugin-container-config manager (gr8s.model::make-pod :uid "rpc-pod")
+                             (gr8s.resources::core-object "name" "gpu" "resources" (gr8s.resources::core-object "limits"
+                                                                                         (gr8s.resources::core-object "devices.example.test/gpu" "1"))))))
                (is (equal '(("ALLOCATED_GPU" . "gpu0")) (getf config :env)))
              (is (equal '("gpu0") allocated-ids))))
         (gr8s.kubelet::stop-device-plugin-manager manager)

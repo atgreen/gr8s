@@ -45,7 +45,7 @@
                               :serial t
                               :components ((:file "package")
                                            (:file "extensions")))
-                             (:file "package")
+                             (:file "foundation/package")
                              (:file "version")
                              (:module "generated"
                               :serial t
@@ -85,12 +85,24 @@
                              (:file "controllers/package")
                              (:file "apiserver/package")
                              (:file "runtime/package")
-                             (:file "runtime/containerd/package")
                              (:file "store/package")
                              (:file "network/package")
                              (:file "security/package")
                              (:file "kubelet/package")
                              (:file "server/package")
+                             ;; Every module package boundary loads up front, so each
+                             ;; module's explicit cross-module imports resolve before
+                             ;; any implementation file compiles below.
+                             (:file "agent/package")
+                             (:file "telemetry/package")
+                             (:file "runtime/containerd/package")
+                             (:file "runtime/containerd/integration")
+                             ;; Cross-module imports for the formerly-GR8S impl files
+                             ;; (scheduler, agent pod pool, kubelet helpers).  Loaded
+                             ;; once every source module package exists -- including
+                             ;; runtime.containerd above -- and before the first of
+                             ;; those files compiles below.
+                             (:file "refactor/moved-imports")
                              (:file "kubelet/pod-parser-policy")
                              (:file "kubelet/env-files")
                              (:file "kubelet/user-namespaces")
@@ -140,7 +152,7 @@
                                            (:file "image-peer-tls")
                                            (:file "raft-tls")
                                            (:file "csr-crypto")
-                                           (:file "compat")))
+                                           ))
                              (:module "resources"
                               :serial t
                               :components ((:file "integration")
@@ -207,13 +219,13 @@
                                            (:file "crd-protobuf")
                                            (:file "crd-deletion")
                                            (:file "node-lease")
-                                           (:file "compat")))
+                                           ))
                              (:module "apiserver-node-session"
                               :pathname "apiserver/"
                               :serial t
                               :components ((:file "node-session-integration")
                                            (:file "node-session")
-                                           (:file "node-session-compat")))
+                                           ))
                              (:module "runtime"
                               :serial t
                               :components ((:file "core")))
@@ -252,7 +264,7 @@
                                            (:file "routed-cni")
                                            (:file "local-pod-delivery")
                                            (:file "host-redirect")
-                                           (:file "compat")))
+                                           ))
                              (:module "protocol-implementation"
                               :pathname "protocol/"
                               :serial t
@@ -266,7 +278,7 @@
                                            (:file "spdy-dictionary")
                                            (:file "spdy-client")
                                            (:file "spdy-server")
-                                           (:file "compat")))
+                                           ))
                              (:file "kubelet/integration")
                              (:file "kubelet/managed-containerd")
                              (:file "runtime/runtime-addons")
@@ -310,7 +322,6 @@
                              (:file "kubelet/local-resource-server")
                              (:file "kubelet/pod-resources")
                              (:file "agent/pod-pool")
-                             (:file "kubelet/compat")
                              (:module "apiserver"
                               :serial t
                               :components ((:file "integration")
@@ -353,7 +364,7 @@
                                            (:file "in-cluster-api")
                                            (:file "api-aggregation")
                                            (:file "kubelet-server")
-                                           (:file "compat")))
+                                           ))
                              (:module "controllers"
                               :serial t
                               :components ((:file "integration")
@@ -385,7 +396,8 @@
                                            (:file "cronjob-controller")
                                            (:file "hpa-controller")
                                            (:file "workload-deletion")
-                                           (:file "compat")))
+                                           ))
+                             (:file "telemetry/integration")
                              (:file "telemetry/cluster")
                              (:module "apiserver-extensions"
                               :pathname "apiserver/"
@@ -398,14 +410,14 @@
                                            (:file "budget-http")))
                              (:module "agent"
                               :serial t
-                              :components ((:file "package")
-                                           (:file "integration")
+                              ;; agent/package is hoisted earlier (see above).
+                              :components ((:file "integration")
                                            (:file "session")
                                            (:file "runtime")
                                            (:file "trace")
                                            (:file "port-forward")
                                            (:file "slynk-debug")
-                                           (:file "compat")))
+                                           ))
                              (:module "server"
                               :serial t
                               :components ((:file "integration")
@@ -420,7 +432,7 @@
                                            (:file "main")
                                            (:file "reconciliation-metrics")
                                            (:file "controller-pass")
-                                           (:file "compat"))))))
+                                           )))))
   :in-order-to ((test-op (test-op "gr8s/tests"))))
 
 (asdf:defsystem "gr8s/tests"

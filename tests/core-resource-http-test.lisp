@@ -51,11 +51,11 @@
            (item "/api/v1/namespaces/alpha/configmaps/settings")
            (original (check-core-status 201 collection :method :post
                        :object (core-fixture "ConfigMap" "settings" "data"
-                                             (gr8s::core-object "mode" "first" "remove" "old")))))
+                                             (gr8s.resources::core-object "mode" "first" "remove" "old")))))
       (is (string= "alpha" (gethash "namespace" (gethash "metadata" original))))
       (check-core-status 404 "/api/v1/namespaces/beta/configmaps/settings")
       (let ((patched (check-core-status 200 item :method :patch :content-type "application/merge-patch+json"
-                       :object (gr8s::core-object "data" (gr8s::core-object "mode" "second" "remove" 'null)))))
+                       :object (gr8s.resources::core-object "data" (gr8s.resources::core-object "mode" "second" "remove" 'null)))))
         (is (string= "second" (gethash "mode" (gethash "data" patched))))
         (is (not (nth-value 1 (gethash "remove" (gethash "data" patched))))))
       (check-core-status 409 item :method :put :object original)
@@ -66,8 +66,8 @@
         (is (string= "ConfigMapList" (gethash "kind" listing)))
         (is (= 1 (length (gethash "items" listing)))))
       (check-core-status 200 item :method :delete
-                         :object (gr8s::core-object "preconditions"
-                                  (gr8s::core-object "uid" (gethash "uid" (gethash "metadata" original)))))
+                         :object (gr8s.resources::core-object "preconditions"
+                                  (gr8s.resources::core-object "uid" (gethash "uid" (gethash "metadata" original)))))
       (check-core-status 404 item))))
 
 (test secret-http-normalizes-stringdata-and-enforces-delete-preconditions
@@ -76,27 +76,27 @@
     (let* ((collection "/api/v1/namespaces/default/secrets")
            (item "/api/v1/namespaces/default/secrets/passwords")
            (object (check-core-status 201 collection :method :post
-                     :object (core-fixture "Secret" "passwords" "stringData" (gr8s::core-object "password" "first"))))
+                     :object (core-fixture "Secret" "passwords" "stringData" (gr8s.resources::core-object "password" "first"))))
            (uid (gethash "uid" (gethash "metadata" object))))
       (is (string= "Zmlyc3Q=" (gethash "password" (gethash "data" object))))
       (is (not (nth-value 1 (gethash "stringData" object))))
       (let ((patched (check-core-status 200 item :method :patch :content-type "application/strategic-merge-patch+json"
-                       :object (gr8s::core-object "stringData" (gr8s::core-object "password" "second")))))
+                       :object (gr8s.resources::core-object "stringData" (gr8s.resources::core-object "password" "second")))))
         (is (string= "c2Vjb25k" (gethash "password" (gethash "data" patched)))))
       (check-core-status 409 item :method :delete :object
-                         (gr8s::core-object "preconditions" (gr8s::core-object "uid" "not-the-secret")))
+                         (gr8s.resources::core-object "preconditions" (gr8s.resources::core-object "uid" "not-the-secret")))
       (check-core-status 200 item :method :delete)
       (check-core-status 201 collection :method :post :object (core-fixture "Secret" "passwords"))
       (check-core-status 409 item :method :delete :object
-                         (gr8s::core-object "preconditions" (gr8s::core-object "uid" uid))))))
+                         (gr8s.resources::core-object "preconditions" (gr8s.resources::core-object "uid" uid))))))
 
 (test core-resource-http-selectors-pagination-and-expiration
   (with-core-api (store path)
     (values path)
     (loop for name in '("alpha" "beta" "gamma")
           do (let ((object (core-fixture "ConfigMap" name)))
-               (setf (gethash "labels" (gethash "metadata" object)) (gr8s::core-object "app" "test"))
-               (gr8s::create-core-resource store "configmaps" object "default")))
+               (setf (gethash "labels" (gethash "metadata" object)) (gr8s.resources::core-object "app" "test"))
+               (gr8s.resources::create-core-resource store "configmaps" object "default")))
     (let* ((collection "/api/v1/namespaces/default/configmaps")
            (page (check-core-status 200 collection :parameters '(("limit" . "1") ("labelSelector" . "app in (test,other)"))))
            (continuation (gethash "continue" (gethash "metadata" page)))
@@ -106,7 +106,7 @@
       (let* ((next (check-core-status 200 collection :parameters parameters))
              (item (aref (gethash "items" next) 0)))
         (is (string= "beta" (gethash "name" (gethash "metadata" item)))))
-      (gr8s::create-core-resource store "configmaps" (core-fixture "ConfigMap" "delta") "default")
+      (gr8s.resources::create-core-resource store "configmaps" (core-fixture "ConfigMap" "delta") "default")
       (let ((page (check-core-status 200 collection :parameters parameters)))
         (is (equal "beta" (gethash "name" (gethash "metadata" (aref (gethash "items" page) 0))))))
       (let ((filtered (check-core-status 200 collection :parameters '(("fieldSelector" . "metadata.name=gamma")))))
@@ -118,17 +118,17 @@
   (with-core-api (store path)
     (values path)
     (flet ((slice (name driver node)
-             (gr8s::core-object
+             (gr8s.resources::core-object
               "apiVersion" "resource.k8s.io/v1" "kind" "ResourceSlice"
-              "metadata" (gr8s::core-object "name" name)
-              "spec" (gr8s::core-object
+              "metadata" (gr8s.resources::core-object "name" name)
+              "spec" (gr8s.resources::core-object
                       "driver" driver "nodeName" node
-                      "pool" (gr8s::core-object
+                      "pool" (gr8s.resources::core-object
                               "name" "pool" "generation" 1
                               "resourceSliceCount" 1)))))
-      (gr8s::create-core-resource store "resourceslices"
+      (gr8s.resources::create-core-resource store "resourceslices"
                                   (slice "worker-a" "devices.example.com" "worker-a") nil)
-      (gr8s::create-core-resource store "resourceslices"
+      (gr8s.resources::create-core-resource store "resourceslices"
                                   (slice "worker-b" "other.example.com" "worker-b") nil))
     (let* ((response
              (check-core-status
@@ -143,38 +143,38 @@
 (test json-patch-replace-can-introduce-object-members
   (with-core-api (store path)
     (values path)
-    (gr8s::create-core-resource store "configmaps"
-      (core-fixture "ConfigMap" "finalized" "data" (gr8s::core-object)) "default")
+    (gr8s.resources::create-core-resource store "configmaps"
+      (core-fixture "ConfigMap" "finalized" "data" (gr8s.resources::core-object)) "default")
     (let* ((item "/api/v1/namespaces/default/configmaps/finalized")
            (patched (check-core-status 200 item :method :patch
                       :content-type "application/json-patch+json"
-                      :object (vector (gr8s::core-object "op" "test" "path" "/metadata/finalizers" "value" 'null)
-                                      (gr8s::core-object
+                      :object (vector (gr8s.resources::core-object "op" "test" "path" "/metadata/finalizers" "value" 'null)
+                                      (gr8s.resources::core-object
                                        "op" "replace" "path" "/metadata/finalizers"
                                        "value" #("example.test/cleanup"))))))
       (is (equalp #("example.test/cleanup") (gethash "finalizers" (gethash "metadata" patched))))
       ;; Permissive member replacement must not manufacture missing parents,
       ;; accept invalid array indices, or make remove silently succeed.
-      (dolist (patch (list (gr8s::core-object "op" "replace" "path" "/missing/child" "value" 1)
-                          (gr8s::core-object "op" "replace" "path" "/metadata/finalizers/1" "value" "x")
-                          (gr8s::core-object "op" "remove" "path" "/data/missing")))
+      (dolist (patch (list (gr8s.resources::core-object "op" "replace" "path" "/missing/child" "value" 1)
+                          (gr8s.resources::core-object "op" "replace" "path" "/metadata/finalizers/1" "value" "x")
+                          (gr8s.resources::core-object "op" "remove" "path" "/data/missing")))
         (check-core-status 422 item :method :patch :content-type "application/json-patch+json"
                            :object (vector patch))))))
 
 (test core-resource-json-patch-tests-values-case-sensitively-and-atomically
   (with-core-api (store path)
     (values path)
-    (gr8s::create-core-resource store "configmaps"
-                               (core-fixture "ConfigMap" "settings" "data" (gr8s::core-object "value" "lower")) "default")
+    (gr8s.resources::create-core-resource store "configmaps"
+                               (core-fixture "ConfigMap" "settings" "data" (gr8s.resources::core-object "value" "lower")) "default")
     (let ((item "/api/v1/namespaces/default/configmaps/settings"))
       (check-core-status 409 item :method :patch :content-type "application/json-patch+json"
-                         :object (vector (gr8s::core-object "op" "replace" "path" "/data/value" "value" "changed")
-                                         (gr8s::core-object "op" "test" "path" "/data/value" "value" "CHANGED")))
+                         :object (vector (gr8s.resources::core-object "op" "replace" "path" "/data/value" "value" "changed")
+                                         (gr8s.resources::core-object "op" "test" "path" "/data/value" "value" "CHANGED")))
       (is (string= "lower" (gethash "value" (gethash "data" (check-core-status 200 item)))))
       (check-core-status 200 item :method :patch :content-type "application/json-patch+json"
-                         :object (vector (gr8s::core-object "op" "test" "path" "/data/value" "value" "lower")
-                                         (gr8s::core-object "op" "add" "path" "/metadata/annotations" "value" (gr8s::core-object))
-                                         (gr8s::core-object "op" "add" "path" "/metadata/annotations/test.io~1key" "value" "yes")))
+                         :object (vector (gr8s.resources::core-object "op" "test" "path" "/data/value" "value" "lower")
+                                         (gr8s.resources::core-object "op" "add" "path" "/metadata/annotations" "value" (gr8s.resources::core-object))
+                                         (gr8s.resources::core-object "op" "add" "path" "/metadata/annotations/test.io~1key" "value" "yes")))
       (let ((annotations (gethash "annotations" (gethash "metadata" (check-core-status 200 item)))))
         (is (string= "yes" (gethash "test.io/key" annotations)))))))
 
@@ -188,7 +188,7 @@
       (check-core-status 404 item)
       (check-core-status 201 collection :method :post :object (core-fixture "ConfigMap" "dry"))
       (check-core-status 200 (concatenate 'string item "?dryRun=All") :method :delete)
-      (check-core-status 200 item :method :delete :object (gr8s::core-object "dryRun" #( "All")))
+      (check-core-status 200 item :method :delete :object (gr8s.resources::core-object "dryRun" #( "All")))
       (check-core-status 200 item)
       (let ((body (check-core-status 400 item :method :patch :content-type "application/apply-patch+yaml"
                                     :object (core-fixture "ConfigMap" "dry"))))
@@ -273,7 +273,7 @@
          ;; validateHostUsers (pkg/apis/core/validation/validation.go) forbids the Pod.
          (spec (core-test-protobuf (list (list 2 container) (list 21 0) (list 11 1) (list 37 0))))
          (input (core-test-protobuf-envelope "Pod" (list (list 1 (core-test-protobuf '((1 "unsupported")))) (list 2 spec))))
-         (decoded (gr8s::decode-core-resource-protobuf input "Pod")))
+         (decoded (gr8s.resources::decode-core-resource-protobuf input "Pod")))
     (is (not (null (nth-value 1 (gethash "automountServiceAccountToken" (gethash "spec" decoded))))))
     (is (null (gethash "automountServiceAccountToken" (gethash "spec" decoded))))
     (is (not (null (nth-value 1 (gethash "hostUsers" (gethash "spec" decoded))))))
@@ -309,10 +309,10 @@
       (is (equal "ClusterIP" (gethash "type" actual)))
       (is (equal "None" (gethash "sessionAffinity" actual)))
       (is (equal "" (gethash "app" (gethash "selector" actual))))
-      (is (not (null (gr8s::service-ip-index (gethash "clusterIP" actual)))))
+      (is (not (null (gr8s.controllers::service-ip-index (gethash "clusterIP" actual)))))
       (is (= 8080 (gethash "targetPort" port)))
       (is (equal "TCP" (gethash "protocol" port)))
-      (is (= 1 (length (gr8s::list-core-resources store "services" "alpha"))))
+      (is (= 1 (length (gr8s.resources::list-core-resources store "services" "alpha"))))
       (check-core-status 400 "/api/v1/namespaces/alpha/services" :method :post
                          :content-type "application/vnd.kubernetes.protobuf" :octets (subseq input 0 5)))))
 
@@ -327,7 +327,7 @@
       (check-core-status 422 "/api/v1/namespaces/alpha/services" :method :post
                          :content-type "application/vnd.kubernetes.protobuf"
                          :octets (service-wire-fixture "bogus" :type "Bogus"))
-      (is (= 1 (length (gr8s::list-core-resources store "services" "alpha"))))
+      (is (= 1 (length (gr8s.resources::list-core-resources store "services" "alpha"))))
       (let ((node-port (check-core-status 201 "/api/v1/namespaces/alpha/services" :method :post
                                           :content-type "application/vnd.kubernetes.protobuf"
                                           :octets (service-wire-fixture "nodeport" :type "NodePort"))))
@@ -362,15 +362,15 @@
 
 (test discovery-storage-version-hashes-match-upstream
   ;; base64 of the first eight bytes of SHA-256 over group/version/kind, core for the empty group.
-  (is (equal "c5X+1R4so64=" (gr8s::storage-version-hash "" "v1" "Pod")))
-  (is (equal "EdX2FP+L0js=" (gr8s::storage-version-hash "stable.example.com" "v1" "CronTab"))))
+  (is (equal "c5X+1R4so64=" (gr8s.apiserver::storage-version-hash "" "v1" "Pod")))
+  (is (equal "EdX2FP+L0js=" (gr8s.apiserver::storage-version-hash "stable.example.com" "v1" "CronTab"))))
 
 (test openapi-v3-documents-survive-a-spec3-round-trip
   ;; kube-openapi omits empty parameters and properties, so publishing them breaks DeepEqual after a round trip.
   (let ((document (com.inuoe.jzon:parse
                    "{\"paths\":{\"/apis/x/v1/things\":{\"parameters\":[],\"get\":{\"parameters\":[{\"name\":\"a\"}]}}},
                      \"components\":{\"schemas\":{\"T\":{\"type\":\"object\",\"properties\":{\"status\":{\"type\":\"object\",\"properties\":{}}}}}}}")))
-    (gr8s::openapi-v3-drop-empty-fields document)
+    (gr8s.apiserver::openapi-v3-drop-empty-fields document)
     (is (equal "{\"paths\":{\"/apis/x/v1/things\":{\"get\":{\"parameters\":[{\"name\":\"a\"}]}}},\"components\":{\"schemas\":{\"T\":{\"type\":\"object\",\"properties\":{\"status\":{\"type\":\"object\"}}}}}}"
                (com.inuoe.jzon:stringify document))))
   (with-core-api (store path)
@@ -382,24 +382,24 @@
 (test lists-and-bookmarks-take-upstream-shapes
   ;; A built-in list's items carry no apiVersion or kind, so a typed client decodes them as
   ;; it decodes a single object; the list itself is left as it was.
-  (let* ((item (gr8s::core-object "apiVersion" "v1" "kind" "Secret" "metadata" (gr8s::core-object "name" "a")))
-         (list (gr8s::core-object "apiVersion" "v1" "kind" "SecretList" "items" (vector item)))
-         (shown (gr8s::list-items-without-type-meta list)))
+  (let* ((item (gr8s.resources::core-object "apiVersion" "v1" "kind" "Secret" "metadata" (gr8s.resources::core-object "name" "a")))
+         (list (gr8s.resources::core-object "apiVersion" "v1" "kind" "SecretList" "items" (vector item)))
+         (shown (gr8s.apiserver::list-items-without-type-meta list)))
     (is (null (gethash "kind" (aref (gethash "items" shown) 0))))
     (is (equal "a" (gethash "name" (gethash "metadata" (aref (gethash "items" shown) 0)))))
     (is (equal "Secret" (gethash "kind" item)))
     ;; Custom resource lists keep them, as upstream's unstructured encoding does.
-    (let ((gr8s::*crd-view-definition* (gr8s::core-object)))
-      (is (eq list (gr8s::list-items-without-type-meta list)))))
+    (let ((gr8s.resources::*crd-view-definition* (gr8s.resources::core-object)))
+      (is (eq list (gr8s.apiserver::list-items-without-type-meta list)))))
   ;; A watch's bookmark becomes a one-row Table when Tables were asked for.
-  (let* ((bookmark (gr8s::core-object "apiVersion" "v1" "kind" "Secret"
-                                      "metadata" (gr8s::core-object "resourceVersion" "7"
-                                                                    "annotations" (gr8s::core-object "k8s.io/initial-events-end" "true"))))
-         (gr8s::*table-api-version* "meta.k8s.io/v1"))
-    (let ((table (let ((gr8s::*table-request* :table)) (gr8s::watch-bookmark-representation bookmark))))
+  (let* ((bookmark (gr8s.resources::core-object "apiVersion" "v1" "kind" "Secret"
+                                      "metadata" (gr8s.resources::core-object "resourceVersion" "7"
+                                                                    "annotations" (gr8s.resources::core-object "k8s.io/initial-events-end" "true"))))
+         (gr8s.apiserver::*table-api-version* "meta.k8s.io/v1"))
+    (let ((table (let ((gr8s.apiserver::*table-request* :table)) (gr8s.apiserver::watch-bookmark-representation bookmark))))
       (is (equal "Table" (gethash "kind" table)))
       (is (= 1 (length (gethash "rows" table))))
       (is (eq bookmark (gethash "object" (aref (gethash "rows" table) 0)))))
     (is (equal "PartialObjectMetadata"
-               (gethash "kind" (let ((gr8s::*table-request* :partial)) (gr8s::watch-bookmark-representation bookmark)))))
-    (is (eq bookmark (let ((gr8s::*table-request* nil)) (gr8s::watch-bookmark-representation bookmark))))))
+               (gethash "kind" (let ((gr8s.apiserver::*table-request* :partial)) (gr8s.apiserver::watch-bookmark-representation bookmark)))))
+    (is (eq bookmark (let ((gr8s.apiserver::*table-request* nil)) (gr8s.apiserver::watch-bookmark-representation bookmark))))))

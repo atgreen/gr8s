@@ -11,12 +11,12 @@
 
 (defun apply-crd-fixture (schema &key (plural "foos") (kind "Foo"))
   "Build a cluster-scoped definition with SCHEMA, as upstream's field validation tests do."
-  (gr8s::core-object "apiVersion" "apiextensions.k8s.io/v1" "kind" "CustomResourceDefinition"
-    "metadata" (gr8s::core-object "name" (format nil "~A.mygroup.example.com" plural))
-    "spec" (gr8s::core-object "group" "mygroup.example.com" "scope" "Cluster"
-             "names" (gr8s::core-object "plural" plural "kind" kind)
-             "versions" (vector (gr8s::core-object "name" "v1" "served" t "storage" t
-                                  "schema" (gr8s::core-object "openAPIV3Schema" schema))))))
+  (gr8s.resources::core-object "apiVersion" "apiextensions.k8s.io/v1" "kind" "CustomResourceDefinition"
+    "metadata" (gr8s.resources::core-object "name" (format nil "~A.mygroup.example.com" plural))
+    "spec" (gr8s.resources::core-object "group" "mygroup.example.com" "scope" "Cluster"
+             "names" (gr8s.resources::core-object "plural" plural "kind" kind)
+             "versions" (vector (gr8s.resources::core-object "name" "v1" "served" t "storage" t
+                                  "schema" (gr8s.resources::core-object "openAPIV3Schema" schema))))))
 
 (defun apply-schema-from-json (text)
   "Parse a schema literal."
@@ -275,32 +275,32 @@
 (test watch-events-read-the-journal-after-a-revision
   (with-temporary-store (store path)
     (values path)
-    (let ((created (gr8s::create-core-resource store "configmaps" (core-fixture "ConfigMap" "one") "default")))
+    (let ((created (gr8s.resources::create-core-resource store "configmaps" (core-fixture "ConfigMap" "one") "default")))
       (declare (ignorable created))
-      (let ((revision (gr8s::pod-store-resource-revision store)))
+      (let ((revision (gr8s.store::pod-store-resource-revision store)))
         ;; An idle watch sees nothing at the current revision.
-        (multiple-value-bind (events watermark) (gr8s::template-watch-events store "default" "" "" revision :resource "configmaps")
+        (multiple-value-bind (events watermark) (gr8s.apiserver::template-watch-events store "default" "" "" revision :resource "configmaps")
           (is (null events))
           (is (= revision watermark)))
-        (gr8s::create-core-resource store "configmaps" (core-fixture "ConfigMap" "two") "default")
-        (gr8s::delete-core-resource store "configmaps" "default" "one")
-        (multiple-value-bind (events watermark) (gr8s::template-watch-events store "default" "" "" revision :resource "configmaps")
+        (gr8s.resources::create-core-resource store "configmaps" (core-fixture "ConfigMap" "two") "default")
+        (gr8s.resources::delete-core-resource store "configmaps" "default" "one")
+        (multiple-value-bind (events watermark) (gr8s.apiserver::template-watch-events store "default" "" "" revision :resource "configmaps")
           (is (equal '("ADDED" "DELETED") (mapcar (lambda (event) (gethash "type" event)) events)))
-          (is (= watermark (gr8s::pod-store-resource-revision store))))
+          (is (= watermark (gr8s.store::pod-store-resource-revision store))))
         ;; A journal read without recent entries, as after a restart, finds the same events.
-        (setf (gr8s::pod-store-template-history-recent store) nil)
-        (is (= 2 (length (gr8s::template-watch-events store "default" "" "" revision :resource "configmaps"))))
+        (setf (gr8s.store::pod-store-template-history-recent store) nil)
+        (is (= 2 (length (gr8s.apiserver::template-watch-events store "default" "" "" revision :resource "configmaps"))))
         ;; Revisions beyond the store and compacted ones still fail.
-        (signals gr8s::kubernetes-error
-          (gr8s::template-watch-events store "default" "" "" (+ 5 (gr8s::pod-store-resource-revision store)) :resource "configmaps"))
-        (setf (gr8s::pod-store-template-history-floor store) revision)
-        (signals gr8s::kubernetes-error
-          (gr8s::template-watch-events store "default" "" "" (1- revision) :resource "configmaps"))))))
+        (signals gr8s.model::kubernetes-error
+          (gr8s.apiserver::template-watch-events store "default" "" "" (+ 5 (gr8s.store::pod-store-resource-revision store)) :resource "configmaps"))
+        (setf (gr8s.store::pod-store-template-history-floor store) revision)
+        (signals gr8s.model::kubernetes-error
+          (gr8s.apiserver::template-watch-events store "default" "" "" (1- revision) :resource "configmaps"))))))
 
 (test api-server-outlasts-more-open-watches-than-hunchentoots-default
   (with-crd-api (store path)
     (values store path)
-    (let ((acceptors (list (make-instance 'gr8s::gr8s-acceptor :address "127.0.0.1" :port 0))))
+    (let ((acceptors (list (make-instance 'gr8s.apiserver::gr8s-acceptor :address "127.0.0.1" :port 0))))
       (dolist (acceptor acceptors)
         (is (<= 1000 (hunchentoot::taskmaster-max-thread-count (hunchentoot::acceptor-taskmaster acceptor))))))))
 
@@ -370,10 +370,10 @@
 
 (defun hpa-fixture (version &rest spec-fields)
   "Build an autoscaler in VERSION with SPEC-FIELDS after its required target."
-  (gr8s::core-object "apiVersion" version "kind" "HorizontalPodAutoscaler"
-    "metadata" (gr8s::core-object "name" "web")
-    "spec" (apply #'gr8s::core-object
-                  "scaleTargetRef" (gr8s::core-object "apiVersion" "apps/v1" "kind" "Deployment" "name" "web")
+  (gr8s.resources::core-object "apiVersion" version "kind" "HorizontalPodAutoscaler"
+    "metadata" (gr8s.resources::core-object "name" "web")
+    "spec" (apply #'gr8s.resources::core-object
+                  "scaleTargetRef" (gr8s.resources::core-object "apiVersion" "apps/v1" "kind" "Deployment" "name" "web")
                   "maxReplicas" 5 spec-fields)))
 
 (test autoscalers-round-trip-between-their-versions
@@ -406,7 +406,7 @@
         (is (search "spec.scaleTargetRef" (gethash "message" (crd-api-request 422 v2 :method :post :object missing)))))
       ;; A client cannot claim status for itself.
       (let ((claimed (hpa-fixture "autoscaling/v2")))
-        (setf (gethash "status" claimed) (gr8s::core-object "currentReplicas" 3 "desiredReplicas" 3))
+        (setf (gethash "status" claimed) (gr8s.resources::core-object "currentReplicas" 3 "desiredReplicas" 3))
         (is (= 0 (gethash "currentReplicas" (gethash "status" (crd-api-request 201 v2 :method :post :object claimed)))))))))
 
 (test apiservices-describe-local-versions-and-refuse-invalid-registration
@@ -433,7 +433,7 @@
   (with-core-api (store path)
     (values store path)
     (check-core-status 201 "/api/v1/namespaces" :method :post
-      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "alpha")))
+      :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s.resources::core-object "name" "alpha")))
     (let ((config-path "/api/v1/namespaces/alpha/configmaps/one"))
       (check-core-status 201 config-path :method :patch
         :octets "{\"apiVersion\":\"v1\",\"kind\":\"ConfigMap\",\"metadata\":{\"name\":\"one\"},\"data\":{\"a\":\"1\"}}"
@@ -475,15 +475,15 @@
            (version (aref (gethash "versions" (gethash "spec" definition)) 0))
            (spec-properties (gethash "properties" (gethash "spec" (gethash "properties" (gethash "openAPIV3Schema" (gethash "schema" version)))))))
       (setf (gethash "ports" spec-properties)
-            (gr8s::core-object "type" "array" "x-kubernetes-list-type" "map" "x-kubernetes-list-map-keys" #("name")
-                               "items" (gr8s::core-object "type" "object" "required" #("name")
-                                                          "properties" (gr8s::core-object "name" (gr8s::core-object "type" "string")
-                                                                                          "port" (gr8s::core-object "type" "integer"))))
+            (gr8s.resources::core-object "type" "array" "x-kubernetes-list-type" "map" "x-kubernetes-list-map-keys" #("name")
+                               "items" (gr8s.resources::core-object "type" "object" "required" #("name")
+                                                          "properties" (gr8s.resources::core-object "name" (gr8s.resources::core-object "type" "string")
+                                                                                          "port" (gr8s.resources::core-object "type" "integer"))))
             (gethash "tags" spec-properties)
-            (gr8s::core-object "type" "array" "x-kubernetes-list-type" "set" "items" (gr8s::core-object "type" "string")))
+            (gr8s.resources::core-object "type" "array" "x-kubernetes-list-type" "set" "items" (gr8s.resources::core-object "type" "string")))
       (check-core-status 201 "/apis/apiextensions.k8s.io/v1/customresourcedefinitions" :method :post :object definition))
     (check-core-status 201 "/api/v1/namespaces" :method :post
-      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "alpha")))
+      :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s.resources::core-object "name" "alpha")))
     (let ((widget "/apis/widgets.example.test/v1/namespaces/alpha/widgets/one"))
       (flet ((apply-widget (manager spec &optional (expected 200) force)
                (check-core-status expected widget :method :patch
@@ -510,7 +510,7 @@
   (with-core-api (store path)
     (values store path)
     (check-core-status 201 "/api/v1/namespaces" :method :post
-      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "alpha")))
+      :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s.resources::core-object "name" "alpha")))
     (let ((pod "/api/v1/namespaces/alpha/pods/one"))
       (flet ((apply-pod (where manager body expected)
                (check-core-status expected where :method :patch :octets body
@@ -540,7 +540,7 @@
   (with-core-api (store path)
     (values store path)
     (check-core-status 201 "/api/v1/namespaces" :method :post
-      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "alpha")))
+      :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s.resources::core-object "name" "alpha")))
     (check-core-status 201 "/apis/apps/v1/namespaces/alpha/deployments" :method :post :octets (deployment-json))
     (check-core-status 201 "/api/v1/namespaces/alpha/services" :method :post
       :octets "{\"apiVersion\":\"v1\",\"kind\":\"Service\",\"metadata\":{\"name\":\"web\"},\"spec\":{\"type\":\"LoadBalancer\",\"selector\":{\"app\":\"web\"},\"ports\":[{\"port\":80}]}}")
@@ -557,7 +557,7 @@
              (entry (status-entry applied "status-applier")))
         (is (equal "Custom" (gethash "type" (aref (gethash "conditions" (gethash "status" applied)) 0))))
         (is (equal "Apply" (gethash "operation" entry)))
-        (is (hash-table-p (gethash "f:conditions" (gethash "f:status" (gethash "fieldsV1" entry (gr8s::core-object)) (gr8s::core-object)))))
+        (is (hash-table-p (gethash "f:conditions" (gethash "f:status" (gethash "fieldsV1" entry (gr8s.resources::core-object)) (gr8s.resources::core-object)))))
         ;; The status endpoint ignores spec, and keeps the stored object's managers.
         (let ((stored (check-core-status 200 deployment)))
           (is (= 2 (gethash "replicas" (gethash "spec" stored))))
@@ -567,7 +567,7 @@
         ;; Any other status write's manager comes to own what it changed.
         (let ((entry (status-entry (patch-status status "{\"status\":{\"observedGeneration\":7}}") "patcher")))
           (is (equal "Update" (gethash "operation" entry)))
-          (is (hash-table-p (gethash "f:observedGeneration" (gethash "f:status" (gethash "fieldsV1" entry (gr8s::core-object)) (gr8s::core-object)))))))
+          (is (hash-table-p (gethash "f:observedGeneration" (gethash "f:status" (gethash "fieldsV1" entry (gr8s.resources::core-object)) (gr8s.resources::core-object)))))))
       (let* ((status "/api/v1/namespaces/alpha/services/web/status")
              (applied (apply-status status "lb-controller"
                                     "{\"apiVersion\":\"v1\",\"kind\":\"Service\",\"metadata\":{\"name\":\"web\"},\"status\":{\"loadBalancer\":{\"ingress\":[{\"ip\":\"192.0.2.7\"}]}}}"))
@@ -584,7 +584,7 @@
   (with-core-api (store path)
     (values path)
     (check-core-status 201 "/api/v1/namespaces" :method :post
-      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "alpha")))
+      :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s.resources::core-object "name" "alpha")))
     (flet ((entry (object manager)
              (find manager (gethash "managedFields" (gethash "metadata" object) #()) :test #'equal
                    :key (lambda (entry) (gethash "manager" entry)))))
@@ -596,21 +596,21 @@
         (is (equal "Update" (and entry (gethash "operation" entry))))
         (is (equal "v1" (and entry (gethash "apiVersion" entry))))
         (is (null (and entry (gethash "subresource" entry))))
-        (is (hash-table-p (gethash "f:a" (gethash "f:labels" (gethash "f:metadata" fields (gr8s::core-object)) (gr8s::core-object)))))
-        (is (hash-table-p (gethash "k:{\"name\":\"a\"}" (gethash "f:containers" (gethash "f:spec" fields (gr8s::core-object)) (gr8s::core-object)))))
-        (is (hash-table-p (gethash "f:restartPolicy" (gethash "f:spec" fields (gr8s::core-object)))))
+        (is (hash-table-p (gethash "f:a" (gethash "f:labels" (gethash "f:metadata" fields (gr8s.resources::core-object)) (gr8s.resources::core-object)))))
+        (is (hash-table-p (gethash "k:{\"name\":\"a\"}" (gethash "f:containers" (gethash "f:spec" fields (gr8s.resources::core-object)) (gr8s.resources::core-object)))))
+        (is (hash-table-p (gethash "f:restartPolicy" (gethash "f:spec" fields (gr8s.resources::core-object)))))
         (is (not (nth-value 1 (gethash "f:status" fields))))
         (is (entry (check-core-status 200 "/api/v1/namespaces/alpha/pods/one") "kubectl-create")))
       (check-core-status 201 "/apis/apps/v1/namespaces/alpha/replicasets" :method :post
                          :object (workload-fixture "ReplicaSet" "web" 1))
-      (gr8s::reconcile-workloads (make-reconciler store (make-fake-runtime)))
+      (gr8s.controllers::reconcile-workloads (make-reconciler store (make-fake-runtime)))
       (let ((pod (find "web" (list-pods store "alpha") :test #'equal
-                       :key (lambda (pod) (gethash "app" (gethash "labels" (gethash "metadata" (pod-to-object pod)) (gr8s::core-object)))))))
+                       :key (lambda (pod) (gethash "app" (gethash "labels" (gethash "metadata" (pod-to-object pod)) (gr8s.resources::core-object)))))))
         (is (not (null pod)))
         (when pod
           (let ((entry (entry (pod-to-object pod) "kube-controller-manager")))
             (is (equal "Update" (and entry (gethash "operation" entry))))
-            (is (hash-table-p (gethash "f:ownerReferences" (gethash "f:metadata" (gethash "fieldsV1" entry (gr8s::core-object)) (gr8s::core-object)))))))))))
+            (is (hash-table-p (gethash "f:ownerReferences" (gethash "f:metadata" (gethash "fieldsV1" entry (gr8s.resources::core-object)) (gr8s.resources::core-object)))))))))))
 
 (test unchanged-writes-keep-their-revision-and-send-no-watch-events
   ;; Upstream's storage skips a write whose result equals the stored object, so a repeated
@@ -618,7 +618,7 @@
   (with-core-api (store path)
     (values path)
     (check-core-status 201 "/api/v1/namespaces" :method :post
-      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "alpha")))
+      :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s.resources::core-object "name" "alpha")))
     (let ((config "/api/v1/namespaces/alpha/configmaps/one")
           (service "/api/v1/namespaces/alpha/services/web")
           (pod "/api/v1/namespaces/alpha/pods/one")
@@ -635,9 +635,9 @@
                                            :content-type "application/apply-patch+yaml"
                                            :parameters '(("fieldManager" . "applier")))))
              (version (where) (gethash "resourceVersion" (gethash "metadata" (check-core-status 200 where))))
-             (pod-version () (gr8s::pod-resource-version (gr8s::get-pod store "alpha" "one"))))
+             (pod-version () (gr8s.model::pod-resource-version (gr8s.store::get-pod store "alpha" "one"))))
         (apply-all 201)
-        (let ((revision (gr8s::pod-store-resource-revision store))
+        (let ((revision (gr8s.store::pod-store-resource-revision store))
               (config-version (version config)) (service-version (version service)) (pod-revision (pod-version)))
           (apply-all 200)
           (dolist (where (list config service pod))
@@ -651,16 +651,16 @@
           (is (equal config-version (version config)))
           (is (equal service-version (version service)))
           (is (equal pod-revision (pod-version)))
-          (is (= revision (gr8s::pod-store-resource-revision store)))
+          (is (= revision (gr8s.store::pod-store-resource-revision store)))
           (dolist (resource '("configmaps" "services"))
-            (is (null (gr8s::template-watch-events store "alpha" "" "" revision :resource resource))))
+            (is (null (gr8s.apiserver::template-watch-events store "alpha" "" "" revision :resource resource))))
           (is (equal "applier" (gethash "manager" (aref (gethash "managedFields" (gethash "metadata" (check-core-status 200 pod))) 0))))
           ;; A real change still writes.
           (apply-merge-patch config "{\"data\":{\"a\":\"2\"}}" "patcher")
           (is (not (equal config-version (version config))))
           (is (equal '("MODIFIED")
                      (mapcar (lambda (event) (gethash "type" event))
-                             (gr8s::template-watch-events store "alpha" "" "" revision :resource "configmaps")))))))))
+                             (gr8s.apiserver::template-watch-events store "alpha" "" "" revision :resource "configmaps")))))))))
 
 (test unchanged-custom-status-writes-keep-their-revision
   (with-crd-api (store path)
@@ -670,7 +670,7 @@
                         "{\"type\":\"object\",\"properties\":{\"spec\":{\"type\":\"object\",\"properties\":{\"foo\":{\"type\":\"string\"}}},
                           \"status\":{\"type\":\"object\",\"properties\":{\"ready\":{\"type\":\"boolean\"}}}}}"))))
       (setf (gethash "subresources" (aref (gethash "versions" (gethash "spec" definition)) 0))
-            (gr8s::core-object "status" (gr8s::core-object)))
+            (gr8s.resources::core-object "status" (gr8s.resources::core-object)))
       (crd-api-request 201 "/apis/apiextensions.k8s.io/v1/customresourcedefinitions" :method :post :object definition))
     (let* ((item "/apis/mygroup.example.com/v1/foos/one")
            (status (concatenate 'string item "/status"))
@@ -691,28 +691,28 @@
                                                  :content-type "application/merge-patch+json"))))))))))
 
 (test map-list-keys-default-and-shared-items-do-not-conflict
-  (let* ((gr8s::*apply-schema*
+  (let* ((gr8s.apiserver::*apply-schema*
            (com.inuoe.jzon:parse "{\"properties\":{\"ports\":{\"type\":\"array\",\"x-kubernetes-list-type\":\"map\",\"x-kubernetes-list-map-keys\":[\"containerPort\",\"protocol\"],\"items\":{\"type\":\"object\"}}}}"))
          (live (com.inuoe.jzon:parse "{\"metadata\":{},\"ports\":[{\"containerPort\":80,\"protocol\":\"TCP\",\"name\":\"a\"}]}"))
          (first-config (com.inuoe.jzon:parse "{\"apiVersion\":\"v1\",\"kind\":\"X\",\"metadata\":{},\"ports\":[{\"containerPort\":80,\"name\":\"a\"}]}"))
          (second-config (com.inuoe.jzon:parse "{\"apiVersion\":\"v1\",\"kind\":\"X\",\"metadata\":{},\"ports\":[{\"containerPort\":80,\"hostPort\":9}]}"))
          (dropped (com.inuoe.jzon:parse "{\"apiVersion\":\"v1\",\"kind\":\"X\",\"metadata\":{}}")))
-    (let* ((one (gr8s::apply-merge live first-config "configmaps" "first" nil))
-           (two (gr8s::apply-merge one second-config "configmaps" "second" nil)))
+    (let* ((one (gr8s.apiserver::apply-merge live first-config "configmaps" "first" nil))
+           (two (gr8s.apiserver::apply-merge one second-config "configmaps" "second" nil)))
       ;; A port without a protocol is the TCP entry, which both managers may hold.
       (is (= 1 (length (gethash "ports" two))))
       (is (= 9 (gethash "hostPort" (aref (gethash "ports" two) 0))))
-      (let ((alone (gr8s::apply-merge one dropped "configmaps" "first" nil)))
+      (let ((alone (gr8s.apiserver::apply-merge one dropped "configmaps" "first" nil)))
         (is (not (nth-value 1 (gethash "ports" alone))))))))
 
 (test nested-items-go-when-dropped-while-their-parent-stays
-  (let* ((gr8s::*apply-schema*
+  (let* ((gr8s.apiserver::*apply-schema*
            (com.inuoe.jzon:parse "{\"properties\":{\"containers\":{\"type\":\"array\",\"x-kubernetes-list-type\":\"map\",\"x-kubernetes-list-map-keys\":[\"name\"],\"items\":{\"type\":\"object\",\"properties\":{\"ports\":{\"type\":\"array\",\"x-kubernetes-list-type\":\"map\",\"x-kubernetes-list-map-keys\":[\"containerPort\",\"protocol\"],\"items\":{\"type\":\"object\"}}}}}}}"))
          (live (com.inuoe.jzon:parse "{\"metadata\":{}}"))
          (with-port (com.inuoe.jzon:parse "{\"apiVersion\":\"v1\",\"kind\":\"X\",\"metadata\":{},\"containers\":[{\"name\":\"c\",\"image\":\"i\",\"ports\":[{\"containerPort\":80}]}]}"))
          (without (com.inuoe.jzon:parse "{\"apiVersion\":\"v1\",\"kind\":\"X\",\"metadata\":{},\"containers\":[{\"name\":\"c\",\"image\":\"i\"}]}"))
-         (one (gr8s::apply-merge live with-port "configmaps" "m" nil))
-         (two (gr8s::apply-merge one without "configmaps" "m" nil))
+         (one (gr8s.apiserver::apply-merge live with-port "configmaps" "m" nil))
+         (two (gr8s.apiserver::apply-merge one without "configmaps" "m" nil))
          (container (aref (gethash "containers" two) 0)))
     (is (equal "i" (gethash "image" container)))
     (is (not (nth-value 1 (gethash "ports" container))))
@@ -724,7 +724,7 @@
   (with-core-api (store path)
     (values store path)
     (check-core-status 201 "/api/v1/namespaces" :method :post
-      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "alpha")))
+      :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s.resources::core-object "name" "alpha")))
     (let ((service "/api/v1/namespaces/alpha/services/one")
           (body "{\"apiVersion\":\"v1\",\"kind\":\"Service\",\"metadata\":{\"name\":\"one\"},\"spec\":{\"ports\":[{\"port\":8080,\"protocol\":\"TCP\"}]}}"))
       (check-core-status 201 service :method :patch :octets body :content-type "application/apply-patch+yaml"
@@ -733,7 +733,7 @@
                                         :parameters '(("fieldManager" . "second"))))
              (entries (gethash "managedFields" (gethash "metadata" second))))
         (is (= 2 (length entries)))
-        (is (gr8s::crd-json-equal-p (gethash "fieldsV1" (aref entries 0)) (gethash "fieldsV1" (aref entries 1))))))))
+        (is (gr8s.resources::crd-json-equal-p (gethash "fieldsV1" (aref entries 0)) (gethash "fieldsV1" (aref entries 1))))))))
 
 ;;; External API servers (podster-uqb.84)
 
@@ -747,20 +747,20 @@ Return its port, a function to read the records, and a function to stop it."
            (lock (bt:make-lock "aggregator test backend"))
            (seen nil)
            (stopping nil))
-      (gr8s::write-private-text-exclusively key (pure-tls/acme::encode-ec-private-key-pem private))
-      (gr8s::write-public-text-exclusively
+      (gr8s.security::write-private-text-exclusively key (pure-tls/acme::encode-ec-private-key-pem private))
+      (gr8s.security::write-public-text-exclusively
        certificate
        (pure-tls/acme::wrap-pem
         "CERTIFICATE"
-        (gr8s::certificate-der
-         (pure-tls/acme::encode-subject gr8s::+pki-ca-common-name+)
+        (gr8s.security::certificate-der
+         (pure-tls/acme::encode-subject gr8s.security::+pki-ca-common-name+)
          (pure-tls/acme::encode-subject server-name)
          (pure-tls/acme::encode-ec-public-key public)
          (list (pure-tls/acme::encode-extension
                 pure-tls/acme::*oid-subject-alt-name*
                 (pure-tls/acme::encode-sequence
-                 (pure-tls/acme::encode-der #x82 (gr8s::pki-ascii-octets server-name)))))
-         (gr8s::cluster-pki-ca-private-key pki))))
+                 (pure-tls/acme::encode-der #x82 (gr8s.security::pki-ascii-octets server-name)))))
+         (gr8s.security::cluster-pki-ca-private-key pki))))
       (flet ((serve (raw)
                (let ((tls (pure-tls:make-tls-server-stream
                            (usocket:socket-stream raw) :certificate (namestring certificate)
@@ -772,17 +772,17 @@ Return its port, a function to read the records, and a function to stop it."
                      ((equal target "/openapi/v2")
                       (let ((document
                               (com.inuoe.jzon:stringify
-                               (gr8s::core-object
-                                "swagger" "2.0" "info" (gr8s::core-object "title" "wardle" "version" "v1alpha1")
-                                "paths" (gr8s::core-object
+                               (gr8s.resources::core-object
+                                "swagger" "2.0" "info" (gr8s.resources::core-object "title" "wardle" "version" "v1alpha1")
+                                "paths" (gr8s.resources::core-object
                                          "/apis/wardle.example.com/v1alpha1/namespaces/{namespace}/flunders"
-                                         (gr8s::core-object "get" (gr8s::core-object "operationId" "listFlunders")))
-                                "definitions" (gr8s::core-object
+                                         (gr8s.resources::core-object "get" (gr8s.resources::core-object "operationId" "listFlunders")))
+                                "definitions" (gr8s.resources::core-object
                                                "io.wardle.v1alpha1.Flunder"
-                                               (gr8s::core-object
+                                               (gr8s.resources::core-object
                                                 "type" "object"
                                                 "x-kubernetes-group-version-kind"
-                                                (vector (gr8s::core-object "group" "wardle.example.com"
+                                                (vector (gr8s.resources::core-object "group" "wardle.example.com"
                                                                            "version" "v1alpha1" "kind" "Flunder"))))))))
                         (write-sequence
                          (trivial-utf-8:string-to-utf-8-bytes
@@ -802,10 +802,10 @@ Return its port, a function to read the records, and a function to stop it."
                          (write-text (format nil "0~C~C~C~C" #\Return #\Linefeed #\Return #\Linefeed))))
                      (t
                        (let ((document (com.inuoe.jzon:stringify
-                                        (gr8s::core-object
+                                        (gr8s.resources::core-object
                                          "apiVersion" "v1" "kind" "APIResourceList"
                                          "groupVersion" "wardle.example.com/v1alpha1"
-                                         "resources" (vector (gr8s::core-object
+                                         "resources" (vector (gr8s.resources::core-object
                                                               "name" "flunders" "singularName" "flunder" "namespaced" t
                                                               "kind" "Flunder" "verbs" #("get" "list")))))))
                          (write-sequence
@@ -842,45 +842,45 @@ Return its port, a function to read the records, and a function to stop it."
 
 (defun aggregator-test-read-request (stream)
   "Read one request from STREAM, returning its method, target, lowercase headers and body."
-  (let* ((request-line (gr8s::admission-read-line stream))
+  (let* ((request-line (gr8s.apiserver::admission-read-line stream))
          (parts (uiop:split-string request-line :separator " "))
-         (headers (loop for line = (gr8s::admission-read-line stream)
+         (headers (loop for line = (gr8s.apiserver::admission-read-line stream)
                         until (zerop (length line))
                         for colon = (position #\: line)
                         collect (cons (string-downcase (subseq line 0 colon))
                                       (string-trim " " (subseq line (1+ colon))))))
          (length (cdr (assoc "content-length" headers :test #'string=))))
     (values (first parts) (second parts) headers
-            (when length (gr8s::admission-read-exactly stream (parse-integer length))))))
+            (when length (gr8s.apiserver::admission-read-exactly stream (parse-integer length))))))
 
 (defun aggregator-test-service (store namespace port)
   "Create a Service and one ready endpoint at PORT, which a registered APIService can name."
-  (gr8s::create-core-resource
+  (gr8s.resources::create-core-resource
    store "services"
-   (gr8s::core-object "metadata" (gr8s::core-object "name" "sample-api")
-                      "spec" (gr8s::core-object "clusterIP" "None"
-                                                "ports" (vector (gr8s::core-object "port" 7443 "targetPort" port))))
+   (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "sample-api")
+                      "spec" (gr8s.resources::core-object "clusterIP" "None"
+                                                "ports" (vector (gr8s.resources::core-object "port" 7443 "targetPort" port))))
    namespace)
   ;; The API refuses a loopback endpoint, which is the only address this backend has.
-  (gr8s::with-store-lock (store)
-    (setf (gethash (gr8s::core-resource-key "endpointslices" namespace "sample-api-1") (gr8s::pod-store-resources store))
-          (gr8s::core-object "apiVersion" "discovery.k8s.io/v1" "kind" "EndpointSlice" "addressType" "IPv4"
-                             "metadata" (gr8s::core-object "name" "sample-api-1" "namespace" namespace
-                                                           "labels" (gr8s::core-object "kubernetes.io/service-name" "sample-api"))
-                             "endpoints" (vector (gr8s::core-object "addresses" #("127.0.0.1")))
-                             "ports" (vector (gr8s::core-object "port" port "protocol" "TCP"))))))
+  (gr8s.store::with-store-lock (store)
+    (setf (gethash (gr8s.resources::core-resource-key "endpointslices" namespace "sample-api-1") (gr8s.store::pod-store-resources store))
+          (gr8s.resources::core-object "apiVersion" "discovery.k8s.io/v1" "kind" "EndpointSlice" "addressType" "IPv4"
+                             "metadata" (gr8s.resources::core-object "name" "sample-api-1" "namespace" namespace
+                                                           "labels" (gr8s.resources::core-object "kubernetes.io/service-name" "sample-api"))
+                             "endpoints" (vector (gr8s.resources::core-object "addresses" #("127.0.0.1")))
+                             "ports" (vector (gr8s.resources::core-object "port" port "protocol" "TCP"))))))
 
 (defun aggregator-test-apiservice (pki)
   "Return a registration of wardle.example.com/v1alpha1 trusting PKI's CA."
-  (gr8s::core-object
+  (gr8s.resources::core-object
    "apiVersion" "apiregistration.k8s.io/v1" "kind" "APIService"
-   "metadata" (gr8s::core-object "name" "v1alpha1.wardle.example.com")
-   "spec" (gr8s::core-object
+   "metadata" (gr8s.resources::core-object "name" "v1alpha1.wardle.example.com")
+   "spec" (gr8s.resources::core-object
            "group" "wardle.example.com" "version" "v1alpha1" "groupPriorityMinimum" 2000 "versionPriority" 200
            "caBundle" (ag-grpc:base64-encode
                        (trivial-utf-8:string-to-utf-8-bytes
-                        (uiop:read-file-string (gr8s::cluster-pki-ca-certificate-path pki))))
-           "service" (gr8s::core-object "namespace" "alpha" "name" "sample-api" "port" 7443))))
+                        (uiop:read-file-string (gr8s.security::cluster-pki-ca-certificate-path pki))))
+           "service" (gr8s.resources::core-object "namespace" "alpha" "name" "sample-api" "port" 7443))))
 
 (defun apiservice-condition (object type)
   "Return OBJECT's condition of TYPE."
@@ -891,19 +891,19 @@ Return its port, a function to read the records, and a function to stop it."
 
 (test extension-apiserver-trust-matches-what-a-real-server-publishes
   (with-temporary-store (store path)
-    (let ((pki (gr8s::ensure-cluster-pki (merge-pathnames "pki/" path))))
-      (gr8s::create-core-resource store "namespaces" (gr8s::core-object "metadata" (gr8s::core-object "name" "kube-system")) nil)
-      (gr8s::ensure-extension-apiserver-rbac store)
-      (dotimes (repeat 2) (gr8s::ensure-extension-apiserver-authentication store pki))
-      (let ((data (gethash "data" (gr8s::get-core-resource store "configmaps" "kube-system" "extension-apiserver-authentication")))
-            (role (gr8s::get-core-resource store "roles" "kube-system" "extension-apiserver-authentication-reader"))
-            (binding (gr8s::get-core-resource store "rolebindings" "kube-system"
+    (let ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" path))))
+      (gr8s.resources::create-core-resource store "namespaces" (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "kube-system")) nil)
+      (gr8s.apiserver::ensure-extension-apiserver-rbac store)
+      (dotimes (repeat 2) (gr8s.apiserver::ensure-extension-apiserver-authentication store pki))
+      (let ((data (gethash "data" (gr8s.resources::get-core-resource store "configmaps" "kube-system" "extension-apiserver-authentication")))
+            (role (gr8s.resources::get-core-resource store "roles" "kube-system" "extension-apiserver-authentication-reader"))
+            (binding (gr8s.resources::get-core-resource store "rolebindings" "kube-system"
                                               "system::extension-apiserver-authentication-reader")))
         (is (equal "[\"front-proxy-client\"]" (gethash "requestheader-allowed-names" data)))
         (is (equal "[\"X-Remote-User\"]" (gethash "requestheader-username-headers" data)))
         (is (equal "[\"X-Remote-Group\"]" (gethash "requestheader-group-headers" data)))
         (is (equal "[\"X-Remote-Extra-\"]" (gethash "requestheader-extra-headers-prefix" data)))
-        (is (equal (uiop:read-file-string (gr8s::cluster-pki-ca-certificate-path pki)) (gethash "client-ca-file" data)))
+        (is (equal (uiop:read-file-string (gr8s.security::cluster-pki-ca-certificate-path pki)) (gethash "client-ca-file" data)))
         ;; A separate CA: nothing the cluster CA signs may assert a request's identity.
         (is-false (equal (gethash "client-ca-file" data) (gethash "requestheader-client-ca-file" data)))
         (is (equalp #("extension-apiserver-authentication")
@@ -912,7 +912,7 @@ Return its port, a function to read the records, and a function to stop it."
         (is (equalp '("system:kube-controller-manager" "system:kube-scheduler")
                     (map 'list (lambda (subject) (gethash "name" subject)) (gethash "subjects" binding)))))
       ;; The client certificate chains to the published CA and is for client authentication.
-      (multiple-value-bind (ca certificate) (gr8s::ensure-front-proxy-credentials pki)
+      (multiple-value-bind (ca certificate) (gr8s.apiserver::ensure-front-proxy-credentials pki)
         (let ((leaf (first (pure-tls:load-certificate-chain certificate))))
           (is (equal "front-proxy-client" (first (pure-tls::certificate-subject-common-names leaf))))
           (finishes (pure-tls::verify-certificate-chain
@@ -921,8 +921,8 @@ Return its port, a function to read the records, and a function to stop it."
 
 (test apiservice-registration-reports-availability-and-proxies-requests
   (with-crd-api (store path)
-    (let* ((pki (gr8s::ensure-cluster-pki (merge-pathnames "pki/" path)))
-           (aggregator (gr8s::start-api-aggregator store pki))
+    (let* ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" path)))
+           (aggregator (gr8s.apiserver::start-api-aggregator store pki))
            (collection "/apis/apiregistration.k8s.io/v1/apiservices")
            (item (concatenate 'string collection "/v1alpha1.wardle.example.com"))
            (flunders "/apis/wardle.example.com/v1alpha1/namespaces/default/flunders"))
@@ -930,7 +930,7 @@ Return its port, a function to read the records, and a function to stop it."
           (aggregator-test-backend pki "sample-api.alpha.svc" path)
         (unwind-protect
              (progn
-               (gr8s::create-core-resource store "namespaces" (gr8s::core-object "metadata" (gr8s::core-object "name" "alpha")) nil)
+               (gr8s.resources::create-core-resource store "namespaces" (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "alpha")) nil)
                ;; No Service yet: registered, not available, and requests get 503.
                (is (null (gethash "status" (crd-api-request 201 collection :method :post :object (aggregator-test-apiservice pki)))))
                (is-true (wait-until
@@ -1006,7 +1006,7 @@ Return its port, a function to read the records, and a function to stop it."
                (let ((status (crd-api-request 200 (concatenate 'string item "/status"))))
                  (setf (gethash "conditions" (gethash "status" status))
                        (concatenate 'vector (gethash "conditions" (gethash "status" status))
-                                    (vector (gr8s::core-object "type" "StatusUpdated" "status" "True" "reason" "E2E"
+                                    (vector (gr8s.resources::core-object "type" "StatusUpdated" "status" "True" "reason" "E2E"
                                                                "message" "Set from e2e test"))))
                  (crd-api-request 200 (concatenate 'string item "/status") :method :put :object status))
                (is-true (apiservice-condition (crd-api-request 200 item) "StatusUpdated"))
@@ -1026,13 +1026,13 @@ Return its port, a function to read the records, and a function to stop it."
                (is-false (gethash "apis/wardle.example.com/v1alpha1" (gethash "paths" (crd-api-request 200 "/openapi/v3"))))
                (is-false (find "wardle.example.com" (gethash "groups" (crd-api-request 200 "/apis")) :test #'equal
                                :key (lambda (entry) (gethash "name" entry)))))
-          (gr8s::stop-api-aggregator aggregator)
+          (gr8s.apiserver::stop-api-aggregator aggregator)
           (funcall stop))))))
 
 (test apiservice-validation-follows-upstreams-rules
   (with-crd-api (store path)
     (values store)
-    (let* ((pki (gr8s::ensure-cluster-pki (merge-pathnames "pki/" path)))
+    (let* ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" path)))
            (collection "/apis/apiregistration.k8s.io/v1/apiservices"))
       (flet ((refused (code change)
                (let ((object (aggregator-test-apiservice pki)))
@@ -1053,7 +1053,7 @@ Return its port, a function to read the records, and a function to stop it."
   ;; selector, under a rule limited to that ConfigMap by resourceNames.
   (flet ((target-name (&rest arguments)
            (fourth (multiple-value-list
-                    (apply #'gr8s::kubernetes-authorization-target
+                    (apply #'gr8s.apiserver::kubernetes-authorization-target
                            "/api/v1/namespaces/kube-system/configmaps" :get arguments)))))
     (is (equal "wanted" (target-name :field-selector "metadata.name=wanted")))
     (is (equal "wanted" (target-name :field-selector "metadata.name==wanted")))
@@ -1064,11 +1064,11 @@ Return its port, a function to read the records, and a function to stop it."
     (is (null (target-name :field-selector "metadata.name=not/a/name"))))
   ;; A request naming an object keeps that name, and a create names nothing it selects.
   (is (equal "one" (fourth (multiple-value-list
-                            (gr8s::kubernetes-authorization-target
+                            (gr8s.apiserver::kubernetes-authorization-target
                              "/api/v1/namespaces/kube-system/configmaps/one" :get
                              :field-selector "metadata.name=other")))))
   (is (null (fourth (multiple-value-list
-                     (gr8s::kubernetes-authorization-target
+                     (gr8s.apiserver::kubernetes-authorization-target
                       "/api/v1/namespaces/kube-system/configmaps" :post
                       :field-selector "metadata.name=other"))))))
 
@@ -1080,16 +1080,16 @@ Return its port, a function to read the records, and a function to stop it."
          (fd (sb-sys:fd-stream-fd (usocket:socket-stream server))))
     (unwind-protect
          (progn
-           (is-false (gr8s::client-connection-closed-p fd))
+           (is-false (gr8s.apiserver::client-connection-closed-p fd))
            ;; Data waiting to be read is not a departure, and peeking leaves it there.
            (write-byte 7 (usocket:socket-stream client))
            (force-output (usocket:socket-stream client))
            (is-true (wait-until (lambda () (listen (usocket:socket-stream server))) :timeout 5))
-           (is-false (gr8s::client-connection-closed-p fd))
+           (is-false (gr8s.apiserver::client-connection-closed-p fd))
            (is (= 7 (read-byte (usocket:socket-stream server))))
            (usocket:socket-close client)
            (setf client nil)
-           (is-true (wait-until (lambda () (gr8s::client-connection-closed-p fd)) :timeout 5)))
+           (is-true (wait-until (lambda () (gr8s.apiserver::client-connection-closed-p fd)) :timeout 5)))
       (when client (usocket:socket-close client))
       (usocket:socket-close server)
       (usocket:socket-close listener))))
@@ -1099,11 +1099,11 @@ Return its port, a function to read the records, and a function to stop it."
          (client (usocket:socket-connect "127.0.0.1" (usocket:get-local-port listener) :element-type '(unsigned-byte 8)))
          (server (usocket:socket-accept listener)))
     (unwind-protect
-         (let ((gr8s::*api-connection-socket* server))
-           (is-false (gr8s::api-watch-client-departed-p))
+         (let ((gr8s.apiserver::*api-connection-socket* server))
+           (is-false (gr8s.apiserver::api-watch-client-departed-p))
            (usocket:socket-close client)
            (setf client nil)
-           (is-true (wait-until #'gr8s::api-watch-client-departed-p :timeout 5)))
+           (is-true (wait-until #'gr8s.apiserver::api-watch-client-departed-p :timeout 5)))
       (when client (usocket:socket-close client))
       (usocket:socket-close server)
       (usocket:socket-close listener))))

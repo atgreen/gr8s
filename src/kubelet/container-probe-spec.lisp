@@ -6,7 +6,7 @@
 ;;;; their API defaults. Resolve named ports and static command substitutions
 ;;;; using the target container declaration, never a different running attempt.
 
-(in-package #:gr8s)
+(in-package #:gr8s.kubelet)
 
 (defun probe-port-name-p (value)
   "Recognize an IANA service name suitable for a named container probe port."

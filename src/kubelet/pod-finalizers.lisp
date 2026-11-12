@@ -6,7 +6,7 @@
 ;;;; API objects wait for their finalizers. Terminal observations and physical
 ;;;; cleanup completion are durable without acknowledging desired revisions.
 
-(in-package #:gr8s)
+(in-package #:gr8s.kubelet)
 
 (defun pod-finalizers (pod)
   "Read the Pod's validated finalizer names."

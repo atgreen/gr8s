@@ -30,5 +30,4 @@
                        ;; pass but is not part of the library's exported surface.
                        (find-symbol "RETRY-BACKOFF-ENTRIES" '#:cl-work-queue))))
     (import symbols '#:gr8s.resources)
-    (export symbols '#:gr8s.resources)
-    (shadowing-import symbols '#:gr8s)))
+    (export symbols '#:gr8s.resources)))

@@ -10,7 +10,7 @@
 ;;;; is validated to stay within the destination, so a crafted archive cannot
 ;;;; escape it.
 
-(in-package #:gr8s)
+(in-package #:gr8s.runtime)
 
 (define-condition tar-error (error)
   ((message :initarg :message :reader tar-error-message))

@@ -15,7 +15,7 @@
 ;;;; that resolver is built from, and re-homes the library's proxy API into the
 ;;;; gr8s composition package so existing callers reach it unchanged.
 
-(in-package #:gr8s)
+(in-package #:gr8s.foundation)
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (let ((symbols (mapcar (lambda (name)
@@ -29,8 +29,8 @@
                            "START-DNS-SERVER" "STOP-DNS-SERVER"
                            ;; DNS-name helpers gr8s builds its cluster policy from.
                            "CANONICAL-DNS-NAME" "DNS-NAME-IN-ZONE-P"))))
-    (shadowing-import symbols '#:gr8s)
-    (export symbols '#:gr8s)))
+    (shadowing-import symbols '#:gr8s.foundation)
+    (export symbols '#:gr8s.foundation)))
 
 (defconstant +dns-name-error+ 3)
 

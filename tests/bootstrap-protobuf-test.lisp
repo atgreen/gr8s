@@ -41,7 +41,7 @@
       (is-true (nth-value 1 (gethash "automountServiceAccountToken" created)))
       (is (null (gethash "automountServiceAccountToken" created)))
       (is (equal (gethash "uid" (gethash "metadata" created))
-                 (gethash "uid" (gethash "metadata" (gr8s::get-core-resource (open-store path) "serviceaccounts" "alpha" "reader")))))
+                 (gethash "uid" (gethash "metadata" (gr8s.resources::get-core-resource (open-store path) "serviceaccounts" "alpha" "reader")))))
       (check-core-status 400 "/api/v1/namespaces/alpha/serviceaccounts" :method :post
                          :content-type "application/vnd.kubernetes.protobuf"
                          :octets (bootstrap-wire-fixture "ServiceAccount" "wrong" :version "rbac.authorization.k8s.io/v1")))))
@@ -79,14 +79,14 @@
 
 (test typed-rbac-grants-are-enforced-by-the-authenticated-tls-api
   (with-core-api (store directory)
-    (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory)))
+    (let* ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" directory)))
            (runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime)) (tls-server nil)
            (*tls-api-port* nil))
-      (setf (gr8s::pod-store-in-cluster-config store)
-            (list :host "10.96.0.1" :port 443 :ca-pem (uiop:read-file-string (gr8s:cluster-pki-ca-certificate-path pki))))
+      (setf (gr8s.store::pod-store-in-cluster-config store)
+            (list :host "10.96.0.1" :port 443 :ca-pem (uiop:read-file-string (gr8s.security::cluster-pki-ca-certificate-path pki))))
       (check-core-status 201 "/api/v1/namespaces/alpha/serviceaccounts" :method :post :content-type "application/vnd.kubernetes.protobuf"
                          :octets (bootstrap-wire-fixture "ServiceAccount" "reader"))
-      (let* ((secret (gr8s::ensure-service-account-credential store "alpha" "reader"))
+      (let* ((secret (gr8s.resources::ensure-service-account-credential store "alpha" "reader"))
              (token (service-account-test-token secret)))
         (unwind-protect
              (progn
@@ -119,13 +119,13 @@
       (let* ((cluster (equal kind "ClusterRoleBinding"))
              (collection (if cluster "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings"
                              "/apis/rbac.authorization.k8s.io/v1/namespaces/alpha/rolebindings"))
-             (object (gr8s::core-object
+             (object (gr8s.resources::core-object
                       "apiVersion" "rbac.authorization.k8s.io/v1" "kind" kind
-                      "metadata" (gr8s::core-object "name" "defaults")
-                      "roleRef" (gr8s::core-object "kind" (if cluster "ClusterRole" "Role") "name" "read-pods")
-                      "subjects" (vector (gr8s::core-object "kind" "User" "name" "alice")
-                                          (gr8s::core-object "kind" "Group" "name" "builders" "apiGroup" "")
-                                          (gr8s::core-object "kind" "ServiceAccount" "name" "reader" "namespace" "alpha"))))
+                      "metadata" (gr8s.resources::core-object "name" "defaults")
+                      "roleRef" (gr8s.resources::core-object "kind" (if cluster "ClusterRole" "Role") "name" "read-pods")
+                      "subjects" (vector (gr8s.resources::core-object "kind" "User" "name" "alice")
+                                          (gr8s.resources::core-object "kind" "Group" "name" "builders" "apiGroup" "")
+                                          (gr8s.resources::core-object "kind" "ServiceAccount" "name" "reader" "namespace" "alpha"))))
              (item (concatenate 'string collection "/defaults"))
              (created (check-core-status 201 collection :method :post :object object)))
         (is (equal "rbac.authorization.k8s.io" (gethash "apiGroup" (gethash "roleRef" created))))
@@ -158,9 +158,9 @@
   (with-core-api (store path)
     (values store path)
     (let* ((collection "/apis/rbac.authorization.k8s.io/v1/namespaces/alpha/rolebindings")
-           (object (gr8s::core-object "kind" "RoleBinding" "metadata" (gr8s::core-object "name" "preview")
-                                      "roleRef" (gr8s::core-object "kind" "Role" "name" "read-pods")
-                                      "subjects" (vector (gr8s::core-object "kind" "User" "name" "alice")))))
+           (object (gr8s.resources::core-object "kind" "RoleBinding" "metadata" (gr8s.resources::core-object "name" "preview")
+                                      "roleRef" (gr8s.resources::core-object "kind" "Role" "name" "read-pods")
+                                      "subjects" (vector (gr8s.resources::core-object "kind" "User" "name" "alice")))))
       (let ((preview (check-core-status 201 (concatenate 'string collection "?dryRun=All") :method :post :object object)))
         (is (equal "rbac.authorization.k8s.io" (gethash "apiGroup" (gethash "roleRef" preview)))))
       (check-core-status 404 (concatenate 'string collection "/preview"))
@@ -176,7 +176,7 @@
 (test a-binding-can-arrive-in-protobuf-as-client-go-sends-it
   (with-core-api (store path)
     (values path)
-    (gr8s:register-node store (gr8s:make-node-record :id "bind-pb-id" :name "bind-pb" :pod-cidr "10.88.41.0/24"))
+    (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "bind-pb-id" :name "bind-pb" :pod-cidr "10.88.41.0/24"))
     (let* ((pod (create-pod store (parse-pod *valid-pod-json*)))
            (input (core-test-protobuf-envelope
                    "Binding"
@@ -184,4 +184,4 @@
                          (list 2 (core-test-protobuf '((1 "Node") (3 "bind-pb"))))))))
       (check-core-status 201 (format nil "/api/v1/namespaces/default/pods/~A/binding" (pod-name pod))
                          :method :post :content-type "application/vnd.kubernetes.protobuf" :octets input)
-      (is (equal "bind-pb" (gr8s::pod-node-name (gr8s:get-pod store "default" (pod-name pod))))))))
+      (is (equal "bind-pb" (gr8s.model::pod-node-name (gr8s.store::get-pod store "default" (pod-name pod))))))))

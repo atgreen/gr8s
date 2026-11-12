@@ -14,8 +14,8 @@
             "GR8S preserves ~A's runtime protocol symbol identity" name)))))
 
 (test observed-runtime-status-publishes-every-pod-address
-  (let* ((status (gr8s::observed-status
-                  (gr8s::make-runtime-pod
+  (let* ((status (gr8s.kubelet::observed-status
+                  (gr8s.runtime::make-runtime-pod
                    :pod-ip "10.88.1.2" :pod-ips #("10.88.1.2" "fd88::2"))))
          (addresses (gethash "podIPs" status)))
     (is (string= "10.88.1.2" (gethash "podIP" status)))
@@ -26,15 +26,15 @@
   (with-temporary-store (store path)
     (values path)
     (let* ((pod (create-pod store (parse-pod *valid-pod-json*)))
-           (status (gr8s::core-object
+           (status (gr8s.resources::core-object
                     "phase" "Running" "podIP" "10.88.1.2"
-                    "podIPs" (vector (gr8s::core-object "ip" "10.88.1.2")
-                                     (gr8s::core-object "ip" "fd88::2")))))
-      (gr8s::save-pod-observation store pod status)
-      (let ((observed (gr8s::control-plane-observation
-                       (gr8s::make-control-plane-runtime store nil) pod)))
+                    "podIPs" (vector (gr8s.resources::core-object "ip" "10.88.1.2")
+                                     (gr8s.resources::core-object "ip" "fd88::2")))))
+      (gr8s.kubelet::save-pod-observation store pod status)
+      (let ((observed (gr8s.controllers::control-plane-observation
+                       (gr8s.controllers::make-control-plane-runtime store nil) pod)))
         (is (equalp #("10.88.1.2" "fd88::2")
-                    (gr8s::runtime-pod-pod-ips observed)))))))
+                    (gr8s.runtime::runtime-pod-pod-ips observed)))))))
 
 (test reconciliation-is-idempotent-and-replaces-changed-pods
   (with-temporary-store (store path)
@@ -79,11 +79,11 @@
            (finished nil)
            (thread nil))
       (reconcile-pod reconciler "default" "hello")
-      (bt:with-lock-held ((gr8s::reconciler-lock reconciler))
+      (bt:with-lock-held ((gr8s.kubelet::reconciler-lock reconciler))
         (setf thread
               (bt:make-thread
                (lambda ()
-                 (gr8s::delete-reconciled-pod
+                 (gr8s.kubelet::delete-reconciled-pod
                   reconciler "default" "hello")
                  (setf finished t))))
         (sleep 0.02)
@@ -142,11 +142,11 @@
             (reconcile-pod reconciler "default" "hello")
             (is (= count (fake-runtime-ensure-count runtime)) "~A after ~A" policy phase)))))))
 
-(defstruct (pending-create-runtime (:include gr8s::fake-runtime)
+(defstruct (pending-create-runtime (:include gr8s.runtime::fake-runtime)
                                    (:constructor make-pending-create-runtime ()))
   "Model an asynchronous backend whose accepted first creation is still Pending.")
 
-(defmethod gr8s::runtime-ensure :around ((runtime pending-create-runtime) pod)
+(defmethod gr8s.runtime::runtime-ensure :around ((runtime pending-create-runtime) pod)
   "Return Pending after recording the real fake-backend creation count."
   (let ((observed (call-next-method)))
     (setf (runtime-pod-phase observed) "Pending")
@@ -165,7 +165,7 @@
          (reconciler (make-reconciler nil runtime))
          (finished nil)
          (thread nil))
-    (bt:with-lock-held ((gr8s::reconciler-lock reconciler))
+    (bt:with-lock-held ((gr8s.kubelet::reconciler-lock reconciler))
       (setf thread
             (bt:make-thread
              (lambda ()
@@ -180,12 +180,12 @@
   ;; A node operation waits seconds for its agent; every Pod read and write would wait with it.
   (with-temporary-store (store path)
     (values path)
-    (let* ((server (gr8s:start-node-grpc-server store :host "127.0.0.1" :port 0))
-           (reconciler (make-reconciler store (gr8s::make-control-plane-runtime store server)))
+    (let* ((server (gr8s.apiserver::start-node-grpc-server store :host "127.0.0.1" :port 0))
+           (reconciler (make-reconciler store (gr8s.controllers::make-control-plane-runtime store server)))
            (finished nil)
            (thread nil))
       (unwind-protect
-           (bt:with-lock-held ((gr8s::reconciler-lock reconciler))
+           (bt:with-lock-held ((gr8s.kubelet::reconciler-lock reconciler))
              (setf thread
                    (bt:make-thread
                     (lambda ()
@@ -194,71 +194,71 @@
                       (setf finished t))))
              (is-true (wait-until (lambda () finished) :timeout 5)))
         (when thread (bt:join-thread thread))
-        (gr8s:stop-node-grpc-server server)))))
+        (gr8s.apiserver::stop-node-grpc-server server)))))
 
 (test fake-runtime-exec-records-the-complete-stream-request
   (let ((runtime (make-fake-runtime)))
-    (gr8s::set-fake-runtime-exec-url
+    (gr8s.runtime::set-fake-runtime-exec-url
      runtime "http://127.0.0.1:1234/exec/token")
     (is (string= "http://127.0.0.1:1234/exec/token"
-                 (gr8s::runtime-exec-url
+                 (gr8s.runtime::runtime-exec-url
                   runtime "pod-uid" "main" '("sh" "-i")
                   :stdin t :stdout t :stderr nil :tty t)))
     (is (equal '("pod-uid" "main" ("sh" "-i") t t nil t)
-               (gr8s::fake-runtime-last-exec runtime)))))
+               (gr8s.runtime::fake-runtime-last-exec runtime)))))
 
 (test metadata-only-pod-updates-adopt-observed-containers-without-restarting
   (with-temporary-store (store directory)
     (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime))
            (pod (create-pod store (parse-pod *valid-pod-json*))))
-      (gr8s::reconcile-pod reconciler "default" "hello")
+      (gr8s.kubelet::reconcile-pod reconciler "default" "hello")
       (let* ((observed (runtime-observe runtime (pod-uid pod)))
-             (object (gr8s::copy-core-object (pod-to-object pod))))
-        (setf (gethash "annotations" (gethash "metadata" object)) (gr8s::core-object "progress" "running"))
-        (let ((updated (gr8s::update-pod store (parse-pod object) (pod-resource-version pod))))
-          (gr8s::reconcile-pod reconciler "default" "hello")
+             (object (gr8s.resources::copy-core-object (pod-to-object pod))))
+        (setf (gethash "annotations" (gethash "metadata" object)) (gr8s.resources::core-object "progress" "running"))
+        (let ((updated (gr8s.store::update-pod store (parse-pod object) (pod-resource-version pod))))
+          (gr8s.kubelet::reconcile-pod reconciler "default" "hello")
           (is (= 1 (fake-runtime-ensure-count runtime)))
           (is (eq observed (runtime-observe runtime (pod-uid pod))))
-          (is (equal (pod-resource-version updated) (gr8s::runtime-pod-resource-version observed)))
+          (is (equal (pod-resource-version updated) (gr8s.runtime::runtime-pod-resource-version observed)))
           ;; A fresh reconciler/store view can still adopt the runtime's durable
           ;; workload identity, instead of relying on a process-local RV cache.
-          (gr8s::reconcile-pod (make-reconciler (open-store directory) runtime) "default" "hello")
+          (gr8s.kubelet::reconcile-pod (make-reconciler (open-store directory) runtime) "default" "hello")
           (is (= 1 (fake-runtime-ensure-count runtime)))
-          (let ((changed (gr8s::copy-core-object (pod-to-object updated))))
+          (let ((changed (gr8s.resources::copy-core-object (pod-to-object updated))))
             (setf (gethash "command" (aref (gethash "containers" (gethash "spec" changed)) 0)) #("changed"))
-            (gr8s::update-pod store (parse-pod changed) (pod-resource-version updated))
-            (gr8s::reconcile-pod reconciler "default" "hello")
+            (gr8s.store::update-pod store (parse-pod changed) (pod-resource-version updated))
+            (gr8s.kubelet::reconcile-pod reconciler "default" "hello")
             (is (= 2 (fake-runtime-ensure-count runtime)))))))))
 
 (test runtime-fingerprints-ignore-object-order-but-preserve-array-order
-  (let* ((pod (parse-pod *valid-pod-json*)) (object (gr8s::copy-core-object (pod-to-object pod)))
+  (let* ((pod (parse-pod *valid-pod-json*)) (object (gr8s.resources::copy-core-object (pod-to-object pod)))
          (spec (gethash "spec" object)) (reordered (make-hash-table :test #'equal)))
     (dolist (key (reverse (loop for key being the hash-keys of spec collect key)))
       (setf (gethash key reordered) (gethash key spec)))
     (setf (gethash "spec" object) reordered)
-    (is (equal (gr8s::pod-runtime-spec-fingerprint pod) (gr8s::pod-runtime-spec-fingerprint (parse-pod object))))
+    (is (equal (gr8s.runtime::pod-runtime-spec-fingerprint pod) (gr8s.runtime::pod-runtime-spec-fingerprint (parse-pod object))))
     (setf (gethash "command" (aref (gethash "containers" reordered) 0)) #("-c" "sh"))
-    (is (not (equal (gr8s::pod-runtime-spec-fingerprint pod) (gr8s::pod-runtime-spec-fingerprint (parse-pod object)))))))
+    (is (not (equal (gr8s.runtime::pod-runtime-spec-fingerprint pod) (gr8s.runtime::pod-runtime-spec-fingerprint (parse-pod object)))))))
 
 (test control-plane-publishes-pod-updates-until-the-agent-observes-the-new-version
   (with-temporary-store (store directory)
     (values directory)
-    (gr8s:register-node store (gr8s:make-node-record :id "worker-id" :name "worker-a" :pod-cidr "10.88.0.0/24"))
-    (gr8s:mark-node-ready store "worker-a" (get-universal-time))
-    (let* ((server (gr8s::%make-node-grpc-server :store store))
-           (runtime (gr8s::make-control-plane-runtime store server))
+    (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "worker-id" :name "worker-a" :pod-cidr "10.88.0.0/24"))
+    (gr8s.controllers::mark-node-ready store "worker-a" (get-universal-time))
+    (let* ((server (gr8s.apiserver::%make-node-grpc-server :store store))
+           (runtime (gr8s.controllers::make-control-plane-runtime store server))
            (reconciler (make-reconciler store runtime))
            (pod (create-pod store (parse-pod *valid-pod-json*))))
-      (gr8s::reconcile-pod reconciler "default" "hello")
-      (gr8s::update-pod-observed-status store pod (gr8s::core-object "phase" "Running"))
+      (gr8s.kubelet::reconcile-pod reconciler "default" "hello")
+      (gr8s.controllers::update-pod-observed-status store pod (gr8s.resources::core-object "phase" "Running"))
       (let* ((old-version (pod-resource-version pod))
-             (old-revision (slot-value (gr8s::current-node-snapshot server "worker-a") 'gr8s.node.v1::revision))
-             (object (gr8s::copy-core-object (pod-to-object pod))))
-        (setf (gethash "annotations" (gethash "metadata" object)) (gr8s::core-object "progress" "new"))
-        (let ((updated (gr8s::update-pod store (parse-pod object) old-version)))
-          (is (equal old-version (gr8s::runtime-pod-resource-version (runtime-observe runtime (pod-uid updated)))))
-          (gr8s::reconcile-pod reconciler "default" "hello")
-          (let* ((snapshot (gr8s::current-node-snapshot server "worker-a"))
+             (old-revision (slot-value (gr8s.apiserver::current-node-snapshot server "worker-a") 'gr8s.node.v1::revision))
+             (object (gr8s.resources::copy-core-object (pod-to-object pod))))
+        (setf (gethash "annotations" (gethash "metadata" object)) (gr8s.resources::core-object "progress" "new"))
+        (let ((updated (gr8s.store::update-pod store (parse-pod object) old-version)))
+          (is (equal old-version (gr8s.runtime::runtime-pod-resource-version (runtime-observe runtime (pod-uid updated)))))
+          (gr8s.kubelet::reconcile-pod reconciler "default" "hello")
+          (let* ((snapshot (gr8s.apiserver::current-node-snapshot server "worker-a"))
                  (assignment (first (slot-value snapshot 'gr8s.node.v1::pods))))
             (is (> (slot-value snapshot 'gr8s.node.v1::revision) old-revision))
             (is (equal (pod-resource-version updated) (slot-value assignment 'gr8s.node.v1::resource-version)))))))))
@@ -268,76 +268,76 @@
 (test reads-of-an-assigned-pod-build-no-snapshot-but-the-worker-tick-still-delivers-changes
   (with-temporary-store (store directory)
     (values directory)
-    (gr8s:register-node store (gr8s:make-node-record :id "worker-id" :name "worker-a" :pod-cidr "10.88.0.0/24"))
-    (gr8s:mark-node-ready store "worker-a" (get-universal-time))
-    (gr8s::create-core-resource store "configmaps"
-      (gr8s::core-object "metadata" (gr8s::core-object "name" "settings")
-                         "data" (gr8s::core-object "key" "one"))
+    (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "worker-id" :name "worker-a" :pod-cidr "10.88.0.0/24"))
+    (gr8s.controllers::mark-node-ready store "worker-a" (get-universal-time))
+    (gr8s.resources::create-core-resource store "configmaps"
+      (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "settings")
+                         "data" (gr8s.resources::core-object "key" "one"))
       "default")
-    (let* ((server (gr8s::%make-node-grpc-server :store store))
-           (runtime (gr8s::make-control-plane-runtime store server))
+    (let* ((server (gr8s.apiserver::%make-node-grpc-server :store store))
+           (runtime (gr8s.controllers::make-control-plane-runtime store server))
            (reconciler (make-reconciler store runtime))
            (object (com.inuoe.jzon:parse *valid-pod-json*))
            (builds 0))
       (setf (gethash "volumes" (gethash "spec" object))
-            (vector (gr8s::core-object "name" "settings"
-                                       "configMap" (gr8s::core-object "name" "settings"))))
+            (vector (gr8s.resources::core-object "name" "settings"
+                                       "configMap" (gr8s.resources::core-object "name" "settings"))))
       (create-pod store (parse-pod (com.inuoe.jzon:stringify object)))
-      (sb-int:encapsulate 'gr8s::node-desired-state-snapshot 'count-builds
+      (sb-int:encapsulate 'gr8s.controllers::node-desired-state-snapshot 'count-builds
                           (lambda (function &rest arguments)
                             (incf builds)
                             (apply function arguments)))
       (unwind-protect
            (progn
-             (gr8s::reconcile-pod reconciler "default" "hello")
+             (gr8s.kubelet::reconcile-pod reconciler "default" "hello")
              (is (= 1 builds) "the first read schedules the Pod and publishes it")
-             (let ((revision (slot-value (gr8s::current-node-snapshot server "worker-a") 'gr8s.node.v1::revision)))
+             (let ((revision (slot-value (gr8s.apiserver::current-node-snapshot server "worker-a") 'gr8s.node.v1::revision)))
                (dotimes (iteration 20)
-                 (gr8s::reconcile-pod reconciler "default" "hello"))
+                 (gr8s.kubelet::reconcile-pod reconciler "default" "hello"))
                (is (= 1 builds) "later reads find the Pod's revision already published")
-               (gr8s::update-core-resource store "configmaps" "default" "settings"
+               (gr8s.resources::update-core-resource store "configmaps" "default" "settings"
                  (lambda (settings)
-                   (setf (gethash "data" settings) (gr8s::core-object "key" "two"))
+                   (setf (gethash "data" settings) (gr8s.resources::core-object "key" "two"))
                    settings))
-               (gr8s::publish-service-discovery-snapshots runtime)
-               (let* ((snapshot (gr8s::current-node-snapshot server "worker-a"))
+               (gr8s.controllers::publish-service-discovery-snapshots runtime)
+               (let* ((snapshot (gr8s.apiserver::current-node-snapshot server "worker-a"))
                       (assignment (first (slot-value snapshot 'gr8s.node.v1::pods))))
                  (is (> (slot-value snapshot 'gr8s.node.v1::revision) revision))
                  (is (some (lambda (octets) (search "two" (trivial-utf-8:utf-8-bytes-to-string octets)))
                            (slot-value assignment 'gr8s.node.v1::resource-objects-json))))))
-        (sb-int:unencapsulate 'gr8s::node-desired-state-snapshot 'count-builds)))))
+        (sb-int:unencapsulate 'gr8s.controllers::node-desired-state-snapshot 'count-builds)))))
 
 (test pending-agent-work-does-not-flood-identical-desired-state-snapshots
   (with-temporary-store (store directory)
     (values directory)
-    (gr8s:register-node store (gr8s:make-node-record :id "worker-id" :name "worker-a" :pod-cidr "10.88.0.0/24"))
-    (gr8s:mark-node-ready store "worker-a" (get-universal-time))
-    (let* ((server (gr8s::%make-node-grpc-server :store store))
-           (runtime (gr8s::make-control-plane-runtime store server))
+    (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "worker-id" :name "worker-a" :pod-cidr "10.88.0.0/24"))
+    (gr8s.controllers::mark-node-ready store "worker-a" (get-universal-time))
+    (let* ((server (gr8s.apiserver::%make-node-grpc-server :store store))
+           (runtime (gr8s.controllers::make-control-plane-runtime store server))
            (reconciler (make-reconciler store runtime)))
       (create-pod store (parse-pod *valid-pod-json*))
-      (gr8s::reconcile-pod reconciler "default" "hello")
-      (let ((revision (slot-value (gr8s::current-node-snapshot server "worker-a") 'gr8s.node.v1::revision)))
+      (gr8s.kubelet::reconcile-pod reconciler "default" "hello")
+      (let ((revision (slot-value (gr8s.apiserver::current-node-snapshot server "worker-a") 'gr8s.node.v1::revision)))
         (dotimes (iteration 20)
-          (gr8s::reconcile-pod reconciler "default" "hello"))
-        (is (= revision (slot-value (gr8s::current-node-snapshot server "worker-a") 'gr8s.node.v1::revision)))))))
+          (gr8s.kubelet::reconcile-pod reconciler "default" "hello"))
+        (is (= revision (slot-value (gr8s.apiserver::current-node-snapshot server "worker-a") 'gr8s.node.v1::revision)))))))
 
 ;; podster-uqb.114: cancelling a creation interrupted its thread with an ERROR. If the
 ;; thread was already signalling, with the handler that expects the cancellation
 ;; unbound for a handler test or a handler function, that ERROR found no handler.
-(defstruct (blocking-create-runtime (:include gr8s::fake-runtime)
+(defstruct (blocking-create-runtime (:include gr8s.runtime::fake-runtime)
                                     (:constructor make-blocking-create-runtime (create)))
   "Run CREATE in place of the fake backend's creation."
   create)
 
-(defmethod gr8s:runtime-ensure ((runtime blocking-create-runtime) pod)
+(defmethod gr8s.runtime::runtime-ensure ((runtime blocking-create-runtime) pod)
   (declare (ignore pod))
   (funcall (blocking-create-runtime-create runtime)))
 
 (defun superseded-reconcile-pod (reconciler)
   "Reconcile the test Pod, answering :SUPERSEDED when cancellation reaches the caller."
-  (handler-case (gr8s::reconcile-pod reconciler "default" "hello")
-    (gr8s::pod-reconciliation-superseded () :superseded)))
+  (handler-case (gr8s.kubelet::reconcile-pod reconciler "default" "hello")
+    (gr8s.kubelet::pod-reconciliation-superseded () :superseded)))
 
 (test cancelling-creation-during-a-signal-still-supersedes-it
   (with-temporary-store (store path)
@@ -359,10 +359,10 @@
                         (superseded-reconcile-pod reconciler)))
                     :name "gr8s cancelled creation test")))
       (is-true (bt:wait-on-semaphore signalling :timeout 10))
-      (gr8s::prioritize-reconciler-deletions reconciler '("other-uid"))
+      (gr8s.kubelet::prioritize-reconciler-deletions reconciler '("other-uid"))
       (is (eq :superseded (bt:join-thread thread)))
       (is-true cleaned-up)
-      (is (null (gr8s::reconciler-active-convergence reconciler))))))
+      (is (null (gr8s.kubelet::reconciler-active-convergence reconciler))))))
 
 (test cancelling-creation-passes-handlers-that-recover-from-errors
   (with-temporary-store (store path)
@@ -375,7 +375,7 @@
                                                    (serious-condition () (setf swallowed t)))))))
            (thread (bt:make-thread (lambda () (superseded-reconcile-pod reconciler)))))
       (is-true (bt:wait-on-semaphore blocked :timeout 10))
-      (gr8s::prioritize-reconciler-deletions reconciler '("other-uid"))
+      (gr8s.kubelet::prioritize-reconciler-deletions reconciler '("other-uid"))
       (is (eq :superseded (bt:join-thread thread)))
       (is-false swallowed))))
 
@@ -390,10 +390,10 @@
                     (bt:signal-semaphore left)
                     (bt:wait-on-semaphore received)
                     :finished)))
-    (setf (gr8s::reconciler-active-convergence reconciler)
-          (gr8s::make-running-pod-convergence :thread thread :uid "finished-uid"))
+    (setf (gr8s.kubelet::reconciler-active-convergence reconciler)
+          (gr8s.kubelet::make-running-pod-convergence :thread thread :uid "finished-uid"))
     (bt:wait-on-semaphore left)
-    (gr8s::cancel-running-pod-convergence reconciler)
+    (gr8s.kubelet::cancel-running-pod-convergence reconciler)
     (bt:signal-semaphore received)
     (is (eq :finished (bt:join-thread thread)))))
 
@@ -409,9 +409,9 @@
            (dumps 0)
            (output (make-string-output-stream)))
       (declare (ignore pod))
-      (gr8s::prioritize-reconciler-deletions reconciler (list (pod-uid deleting)))
-      (let ((gr8s::*held-creation-report-seconds* 0)
-            (gr8s::*held-creation-dump* (lambda () (incf dumps)))
+      (gr8s.kubelet::prioritize-reconciler-deletions reconciler (list (pod-uid deleting)))
+      (let ((gr8s.kubelet::*held-creation-report-seconds* 0)
+            (gr8s.kubelet::*held-creation-dump* (lambda () (incf dumps)))
             (*error-output* output))
         (is (eq :superseded (superseded-reconcile-pod reconciler)))
         (is (eq :superseded (superseded-reconcile-pod reconciler))))
@@ -419,9 +419,9 @@
         (is (search (format nil "unfinished deletions of ~A" (pod-uid deleting)) text))
         (is (= 2 (count #\Newline text))))
       (is (= 1 dumps))
-      (gr8s::finish-reconciler-urgent-deletion reconciler (pod-uid deleting))
-      (is (null (gr8s::reconciler-urgent-since reconciler)))
-      (is (equal "Running" (gethash "phase" (gr8s::reconcile-pod reconciler "default" "hello")))))))
+      (gr8s.kubelet::finish-reconciler-urgent-deletion reconciler (pod-uid deleting))
+      (is (null (gr8s.kubelet::reconciler-urgent-since reconciler)))
+      (is (equal "Running" (gethash "phase" (gr8s.kubelet::reconcile-pod reconciler "default" "hello")))))))
 
 ;; podster-uqb.123: cancelling StartContainer halfway left a running task that CRI
 ;; reported as exited, so the Pod's deletion, and every creation after it, never ended.
@@ -434,14 +434,14 @@
            (after nil)
            (reconciler (make-reconciler store (make-blocking-create-runtime
                                                (lambda ()
-                                                 (gr8s::with-running-pod-cancellation-deferred
+                                                 (gr8s.runtime::with-running-pod-cancellation-deferred
                                                    (bt:signal-semaphore entered)
                                                    (bt:wait-on-semaphore release)
                                                    (setf finished t))
                                                  (setf after t)))))
            (thread (bt:make-thread (lambda () (superseded-reconcile-pod reconciler)))))
       (is-true (bt:wait-on-semaphore entered :timeout 10))
-      (gr8s::prioritize-reconciler-deletions reconciler '("other-uid"))
+      (gr8s.kubelet::prioritize-reconciler-deletions reconciler '("other-uid"))
       (sleep 0.2)
       (is (bt:thread-alive-p thread))
       (bt:signal-semaphore release)
@@ -450,13 +450,13 @@
       (is-false after))))
 
 (test a-deferred-step-outside-creation-runs-normally
-  (is (eq :done (gr8s::with-running-pod-cancellation-deferred :done))))
+  (is (eq :done (gr8s.runtime::with-running-pod-cancellation-deferred :done))))
 
-(defstruct (outage-fake-runtime (:include gr8s::fake-runtime)
+(defstruct (outage-fake-runtime (:include gr8s.runtime::fake-runtime)
                                 (:constructor make-outage-fake-runtime ()))
   down-message)
 
-(defmethod gr8s::runtime-unavailable-message ((runtime outage-fake-runtime))
+(defmethod gr8s.runtime::runtime-unavailable-message ((runtime outage-fake-runtime))
   (outage-fake-runtime-down-message runtime))
 
 (test runtime-outage-pauses-pod-synchronization-and-keeps-observations
@@ -466,7 +466,7 @@
            (reconciler (make-reconciler store runtime)))
       (let ((status (reconcile-pod reconciler "default" "hello")))
         (is (string= "Running" (gethash "phase" status)))
-        (gr8s::save-pod-observation store pod status))
+        (gr8s.kubelet::save-pod-observation store pod status))
       (is (= 1 (fake-runtime-ensure-count runtime)))
       (setf (outage-fake-runtime-down-message runtime) "container runtime is down: test")
       ;; A changed Pod is not started against a dead runtime, and its last

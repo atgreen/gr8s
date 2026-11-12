@@ -113,7 +113,7 @@ Drain again before WAL replacement so uncertain durability remains fail-closed."
              (return-from compact-ha-store-once-exclusive nil))
            (let* ((index (gr8s.raft::raft-prepared-compaction-index prepared))
                   (term (gr8s.raft::raft-prepared-compaction-term prepared))
-                  (root (gr8s::pod-store-path store)))
+                  (root (gr8s.store::pod-store-path store)))
              (setf temporary (merge-pathnames
                               (format nil "raft/capture-~A.jsonl" (gr8s.store:generate-uid)) root))
              (with-ha-compaction-phase (hcp :capture)

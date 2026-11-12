@@ -13,18 +13,18 @@
 (in-suite ha-controller-write)
 
 (defun ha-replicaset-fixture (name)
-  (gr8s::core-object
-   "apiVersion" "apps/v1" "kind" "ReplicaSet" "metadata" (gr8s::core-object "name" name)
-   "spec" (gr8s::core-object
-           "replicas" 1 "selector" (gr8s::core-object "matchLabels" (gr8s::core-object "app" name))
-           "template" (gr8s::core-object
-                       "metadata" (gr8s::core-object "labels" (gr8s::core-object "app" name))
-                       "spec" (gr8s::core-object
-                               "containers" (vector (gr8s::core-object "name" "main" "image" "busybox")))))))
+  (gr8s.resources::core-object
+   "apiVersion" "apps/v1" "kind" "ReplicaSet" "metadata" (gr8s.resources::core-object "name" name)
+   "spec" (gr8s.resources::core-object
+           "replicas" 1 "selector" (gr8s.resources::core-object "matchLabels" (gr8s.resources::core-object "app" name))
+           "template" (gr8s.resources::core-object
+                       "metadata" (gr8s.resources::core-object "labels" (gr8s.resources::core-object "app" name))
+                       "spec" (gr8s.resources::core-object
+                               "containers" (vector (gr8s.resources::core-object "name" "main" "image" "busybox")))))))
 
 (defun ha-replicaset-status-replicas (store name)
-  (let ((rs (ignore-errors (gr8s::get-core-resource store "replicasets" "default" name))))
-    (and rs (gethash "replicas" (gethash "status" rs (gr8s::core-object))))))
+  (let ((rs (ignore-errors (gr8s.resources::get-core-resource store "replicasets" "default" name))))
+    (and rs (gethash "replicas" (gethash "status" rs (gr8s.resources::core-object))))))
 
 (test controller-status-write-replicates-and-survives-failover
   (with-temporary-store (s1 p1)
@@ -34,22 +34,22 @@
         (let ((h1 nil) (h2 nil) (h3 nil))
           (unwind-protect
                (progn
-                 (setf h1 (gr8s::start-ha-control-plane s1 :id "cp1" :init t))
-                 (is (poll-until (lambda () (gr8s::ha-control-plane-leader-p h1))))
-                 (let ((lp (gr8s::raft-member-port (gr8s::ha-control-plane-member h1))))
-                   (setf h2 (gr8s::start-ha-control-plane s2 :id "cp2" :join-host "127.0.0.1" :join-port lp))
-                   (setf h3 (gr8s::start-ha-control-plane s3 :id "cp3" :join-host "127.0.0.1" :join-port lp)))
+                 (setf h1 (gr8s.ha::start-ha-control-plane s1 :id "cp1" :init t))
+                 (is (poll-until (lambda () (gr8s.ha::ha-control-plane-leader-p h1))))
+                 (let ((lp (gr8s.raft.transport::raft-member-port (gr8s.ha::ha-control-plane-member h1))))
+                   (setf h2 (gr8s.ha::start-ha-control-plane s2 :id "cp2" :join-host "127.0.0.1" :join-port lp))
+                   (setf h3 (gr8s.ha::start-ha-control-plane s3 :id "cp3" :join-host "127.0.0.1" :join-port lp)))
                  (is (poll-until
-                      (lambda () (= 2 (length (gr8s::raft-node-peers
-                                               (gr8s::raft-member-node (gr8s::ha-control-plane-member h1))))))
+                      (lambda () (= 2 (length (cl-raft::raft-node-peers
+                                               (gr8s.raft.transport::raft-member-node (gr8s.ha::ha-control-plane-member h1))))))
                       :timeout 15)
                      "both followers joined (leader sees 2 peers)")
                  ;; Create the ReplicaSet (API path) on the leader.
-                 (let ((owner (gr8s::create-core-resource s1 "replicasets"
+                 (let ((owner (gr8s.resources::create-core-resource s1 "replicasets"
                                                           (ha-replicaset-fixture "workers") "default")))
                    ;; A controller status write via the DIRECT commit path.
-                   (gr8s::update-workload-controller-status
-                    s1 "replicasets" owner (gr8s::core-object "replicas" 1 "readyReplicas" 1)))
+                   (gr8s.controllers::update-workload-controller-status
+                    s1 "replicasets" owner (gr8s.resources::core-object "replicas" 1 "readyReplicas" 1)))
                  ;; The controller-written status replicated to every member.
                  (is (poll-until
                       (lambda () (every (lambda (s) (eql 1 (ha-replicaset-status-replicas s "workers")))
@@ -57,13 +57,13 @@
                       :timeout 10)
                      "the controller status replicates to every member's store")
                  ;; Kill the leader; the survivors keep the controller-written status.
-                 (gr8s::stop-ha-control-plane h1)
+                 (gr8s.ha::stop-ha-control-plane h1)
                  (setf h1 nil)
-                 (is (poll-until (lambda () (or (gr8s::ha-control-plane-leader-p h2)
-                                                (gr8s::ha-control-plane-leader-p h3)))
+                 (is (poll-until (lambda () (or (gr8s.ha::ha-control-plane-leader-p h2)
+                                                (gr8s.ha::ha-control-plane-leader-p h3)))
                                  :timeout 20)
                      "a survivor becomes leader")
                  (is (and (eql 1 (ha-replicaset-status-replicas s2 "workers"))
                           (eql 1 (ha-replicaset-status-replicas s3 "workers")))
                      "the controller status is not lost on failover"))
-            (dolist (h (list h1 h2 h3)) (when h (ignore-errors (gr8s::stop-ha-control-plane h))))))))))
+            (dolist (h (list h1 h2 h3)) (when h (ignore-errors (gr8s.ha::stop-ha-control-plane h))))))))))

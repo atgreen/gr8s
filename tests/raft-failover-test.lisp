@@ -17,13 +17,13 @@
 (defun start-resource-member (id)
   "A member whose state machine is a raft-resource-store; returns (values member
    store) so the test can inspect the replica directly."
-  (let ((store (gr8s::make-raft-resource-store)))
-    (values (gr8s::start-raft-member id :apply-fn (lambda (c) (gr8s::raft-resource-apply store c)))
+  (let ((store (gr8s.ha::make-raft-resource-store)))
+    (values (gr8s.raft.transport::start-raft-member id :apply-fn (lambda (c) (gr8s.ha::raft-resource-apply store c)))
             store)))
 
 (defun resource-value (store key)
-  (let ((rec (gr8s::raft-resource-get store key)))
-    (and rec (gr8s::raft-resource-record-value rec))))
+  (let ((rec (gr8s.ha::raft-resource-get store key)))
+    (and rec (gr8s.ha::raft-resource-record-value rec))))
 
 (test raft-replicated-store-survives-leader-failover
   (let* ((ids '("a" "b" "c"))
@@ -39,19 +39,19 @@
          (progn
            ;; All-voter cluster over real gRPC.
            (dolist (p pairs)
-             (gr8s::raft-member-set-peers
+             (gr8s.raft.transport::raft-member-set-peers
               (second p)
               (loop for q in pairs unless (equal (first q) (first p))
-                    collect (list (first q) (gr8s::raft-member-host (second q))
-                                  (gr8s::raft-member-port (second q))))))
-           (dolist (m members) (gr8s::raft-member-start m))
-           (is (poll-until (lambda () (= 1 (count-if #'gr8s::raft-member-leader-p members))))
+                    collect (list (first q) (gr8s.raft.transport::raft-member-host (second q))
+                                  (gr8s.raft.transport::raft-member-port (second q))))))
+           (dolist (m members) (gr8s.raft.transport::raft-member-start m))
+           (is (poll-until (lambda () (= 1 (count-if #'gr8s.raft.transport::raft-member-leader-p members))))
                "a single leader emerges")
 
            ;; A create replicates to every replica.
-           (let ((leader (find-if #'gr8s::raft-member-leader-p members)))
+           (let ((leader (find-if #'gr8s.raft.transport::raft-member-leader-p members)))
              (multiple-value-bind (result ok)
-                 (gr8s::raft-member-propose-sync leader '(:put "cm/a" "v1" :expected nil :uid "u1"))
+                 (gr8s.raft.transport::raft-member-propose-sync leader '(:put "cm/a" "v1" :expected nil :uid "u1"))
                (is-true ok "the create commits on the leader")
                (is (eq :ok (first result)) "the state machine accepts the create")))
            (is (poll-until
@@ -59,21 +59,21 @@
                "the create replicates to all three replicas")
 
            ;; Kill the leader; a survivor takes over.
-           (let ((old-leader (find-if #'gr8s::raft-member-leader-p members)))
-             (gr8s::stop-raft-member old-leader)
+           (let ((old-leader (find-if #'gr8s.raft.transport::raft-member-leader-p members)))
+             (gr8s.raft.transport::stop-raft-member old-leader)
              (setf live (remove old-leader live))
-             (is (poll-until (lambda () (= 1 (count-if #'gr8s::raft-member-leader-p live))) :timeout 15)
+             (is (poll-until (lambda () (= 1 (count-if #'gr8s.raft.transport::raft-member-leader-p live))) :timeout 15)
                  "the survivors elect a new leader after the old one is lost")
 
              ;; The new leader still has the acknowledged data, and new writes commit.
-             (let ((new-leader (find-if #'gr8s::raft-member-leader-p live)))
+             (let ((new-leader (find-if #'gr8s.raft.transport::raft-member-leader-p live)))
                (is (not (null new-leader)))
                (is (equal "v1" (resource-value (funcall store-of
                                                          (car (find new-leader pairs :key #'second)))
                                                "cm/a"))
                    "the new leader retained the committed create")
                (multiple-value-bind (result ok)
-                   (gr8s::raft-member-propose-sync new-leader
+                   (gr8s.raft.transport::raft-member-propose-sync new-leader
                                                    '(:put "cm/b" "v2" :expected nil :uid "u2") :timeout 10)
                  (is-true ok "a write commits under the new leader")
                  (is (eq :ok (first result))))
@@ -85,4 +85,4 @@
                                       live))
                     :timeout 10)
                    "the post-failover write replicates to every survivor"))))
-      (dolist (m live) (ignore-errors (gr8s::stop-raft-member m))))))
+      (dolist (m live) (ignore-errors (gr8s.raft.transport::stop-raft-member m))))))

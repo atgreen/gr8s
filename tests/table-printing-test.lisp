@@ -21,14 +21,14 @@
 (defun table-test-namespace ()
   "Create namespace alpha."
   (check-core-status 201 "/api/v1/namespaces" :method :post
-    :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "alpha"))))
+    :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s.resources::core-object "name" "alpha"))))
 
 (test table-prints-configmaps-with-columns-and-row-objects
   (with-core-api (store path)
     (values store path)
     (table-test-namespace)
     (check-core-status 201 "/api/v1/namespaces/alpha/configmaps" :method :post
-      :object (core-fixture "ConfigMap" "one" "data" (gr8s::core-object "a" "1" "b" "2")))
+      :object (core-fixture "ConfigMap" "one" "data" (gr8s.resources::core-object "a" "1" "b" "2")))
     (multiple-value-bind (table status) (table-test-get "/api/v1/namespaces/alpha/configmaps/one")
       (is (= 200 status))
       (is (equal "Table" (gethash "kind" table)))
@@ -104,9 +104,9 @@
     (let* ((definition (crd-fixture))
            (version (aref (gethash "versions" (gethash "spec" definition)) 0)))
       (setf (gethash "additionalPrinterColumns" version)
-            (vector (gr8s::core-object "name" "Count" "type" "integer" "jsonPath" ".spec.count")
-                    (gr8s::core-object "name" "Missing" "type" "string" "jsonPath" ".spec.nothing")
-                    (gr8s::core-object "name" "Age" "type" "date" "jsonPath" ".metadata.creationTimestamp")))
+            (vector (gr8s.resources::core-object "name" "Count" "type" "integer" "jsonPath" ".spec.count")
+                    (gr8s.resources::core-object "name" "Missing" "type" "string" "jsonPath" ".spec.nothing")
+                    (gr8s.resources::core-object "name" "Age" "type" "date" "jsonPath" ".metadata.creationTimestamp")))
       (check-core-status 201 "/apis/apiextensions.k8s.io/v1/customresourcedefinitions" :method :post :object definition))
     (check-core-status 201 "/apis/widgets.example.test/v1/namespaces/alpha/widgets" :method :post
       :object (let ((instance (crd-instance)))
@@ -123,12 +123,12 @@
     ;; An unsupported column is refused when the definition is admitted.
     (let ((bad (crd-fixture :plural "others" :kind "Other")))
       (setf (gethash "additionalPrinterColumns" (aref (gethash "versions" (gethash "spec" bad)) 0))
-            (vector (gr8s::core-object "name" "X" "type" "nope" "jsonPath" ".spec.count")))
+            (vector (gr8s.resources::core-object "name" "X" "type" "nope" "jsonPath" ".spec.count")))
       (check-core-status 422 "/apis/apiextensions.k8s.io/v1/customresourcedefinitions" :method :post :object bad))))
 
 (test table-pod-status-follows-kubectl
   (flet ((row (json)
-           (multiple-value-list (gr8s::table-pod-row (com.inuoe.jzon:parse json)))))
+           (multiple-value-list (gr8s.apiserver::table-pod-row (com.inuoe.jzon:parse json)))))
     (destructuring-bind (ready status restarts)
         (row "{\"metadata\":{},\"spec\":{\"containers\":[{},{}]},\"status\":{\"phase\":\"Running\",\"containerStatuses\":[{\"ready\":true,\"restartCount\":2,\"state\":{\"running\":{}}},{\"ready\":false,\"restartCount\":1,\"state\":{\"waiting\":{\"reason\":\"CrashLoopBackOff\"}}}]}}")
       (is (equal "1/2" ready))
@@ -151,11 +151,11 @@
            (version (aref (gethash "versions" (gethash "spec" definition)) 0))
            (schema (gethash "openAPIV3Schema" (gethash "schema" version)))
            (properties (gethash "properties" schema)))
-      (setf (gethash "replicas" (gethash "properties" (gethash "spec" properties))) (gr8s::core-object "type" "integer")
-            (gethash "replicas" (gethash "properties" (gethash "status" properties))) (gr8s::core-object "type" "integer")
-            (gethash "selector" (gethash "properties" (gethash "status" properties))) (gr8s::core-object "type" "string"))
+      (setf (gethash "replicas" (gethash "properties" (gethash "spec" properties))) (gr8s.resources::core-object "type" "integer")
+            (gethash "replicas" (gethash "properties" (gethash "status" properties))) (gr8s.resources::core-object "type" "integer")
+            (gethash "selector" (gethash "properties" (gethash "status" properties))) (gr8s.resources::core-object "type" "string"))
       (setf (gethash "scale" (gethash "subresources" version))
-            (gr8s::core-object "specReplicasPath" ".spec.replicas" "statusReplicasPath" ".status.replicas"
+            (gr8s.resources::core-object "specReplicasPath" ".spec.replicas" "statusReplicasPath" ".status.replicas"
                                "labelSelectorPath" ".status.selector"))
       (check-core-status 201 "/apis/apiextensions.k8s.io/v1/customresourcedefinitions" :method :post :object definition))
     (let ((discovery (check-core-status 200 "/apis/widgets.example.test/v1")))
@@ -181,7 +181,7 @@
     (let* ((bad (crd-fixture :plural "others" :kind "Other"))
            (version (aref (gethash "versions" (gethash "spec" bad)) 0)))
       (setf (gethash "scale" (gethash "subresources" version))
-            (gr8s::core-object "specReplicasPath" ".status.x" "statusReplicasPath" ".status.y"))
+            (gr8s.resources::core-object "specReplicasPath" ".status.x" "statusReplicasPath" ".status.y"))
       (check-core-status 422 "/apis/apiextensions.k8s.io/v1/customresourcedefinitions" :method :post :object bad))))
 
 (test openapi-publishes-typed-groups-and-a-protobuf-v2-document

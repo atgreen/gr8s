@@ -1,0 +1,70 @@
+;;;; FINAL symbol ownership: each gr8s-accessible symbol -> the package its
+;;;; defining file belongs to (directory convention + a few overrides).
+(require :asdf) (require :sb-introspect)
+(asdf:load-system "gr8s")
+
+(defparameter *overrides*          ; rel-key (no .lisp) -> package
+  '(("version" . "GR8S.FOUNDATION")))
+(defparameter *dir-rules*          ; checked in order; prefix -> package
+  '(("foundation/" . "GR8S.FOUNDATION")
+    ("telemetry/"  . "GR8S.TELEMETRY")
+    ("generated/"  . "GR8S.GENERATED")
+    ("runtime/containerd/" . "GR8S.RUNTIME.CONTAINERD")
+    ("runtime/"    . "GR8S.RUNTIME")
+    ("raft/transport/" . "GR8S.RAFT.TRANSPORT")
+    ("raft/"       . "GR8S.RAFT")
+    ("kubelet/"    . "GR8S.KUBELET")
+    ("network/"    . "GR8S.NETWORK")
+    ("controllers/" . "GR8S.CONTROLLERS")
+    ("agent/"      . "GR8S.AGENT")
+    ("server/"     . "GR8S.SERVER")
+    ("security/"   . "GR8S.SECURITY")
+    ("resources/"  . "GR8S.RESOURCES")
+    ("apiserver/"  . "GR8S.APISERVER")
+    ("store/"      . "GR8S.STORE")
+    ("ha/"         . "GR8S.HA")
+    ("model/"      . "GR8S.MODEL")
+    ("protocol/"   . "GR8S.PROTOCOL")))
+
+(defun sym-source-file (sym)
+  (dolist (kind '(:function :macro :variable :class :type :structure :condition :method :generic-function))
+    (dolist (src (ignore-errors (sb-introspect:find-definition-sources-by-name sym kind)))
+      (let ((p (sb-introspect:definition-source-pathname src)))
+        (when p (return-from sym-source-file p)))))
+  nil)
+
+(defun rel-key (pathname)
+  (let* ((ns (namestring pathname)) (pos (search "/src/" ns)))
+    (when pos
+      (let ((tail (subseq ns (+ pos 5))))
+        (when (and (> (length tail) 5) (string= ".lisp" tail :start2 (- (length tail) 5)))
+          (subseq tail 0 (- (length tail) 5)))))))
+
+(defun file->package (key)
+  (or (cdr (assoc key *overrides* :test #'equal))
+      (loop for (prefix . pkg) in *dir-rules*
+            when (and (>= (length key) (length prefix))
+                      (string= prefix key :end2 (length prefix)))
+              return pkg)))
+
+(let ((gr8s (find-package "GR8S")) (rows '()) (nilsrc '()))
+  (do-symbols (s gr8s)
+    (let ((home (symbol-package s)))
+      (when (and home (not (eq home (find-package "CL")))
+                 (not (eq home (find-package "KEYWORD")))
+                 (or (fboundp s) (boundp s) (find-class s nil) (macro-function s)))
+        (let ((owner
+                (if (eq home gr8s)
+                    (let* ((f (sym-source-file s)) (k (and f (rel-key f))) (p (and k (file->package k))))
+                      (cond (p p)
+                            (t (push (list (symbol-name s) (or k "NIL-SRC")) nilsrc) "GR8S")))
+                    (package-name home))))
+          (push (cons (symbol-name s) owner) rows)))))
+  (setf rows (sort (remove-duplicates rows :test #'equal) #'string< :key #'car))
+  (with-open-file (f "tools/refactor/gr8s-final-owners.tsv" :direction :output
+                     :if-exists :supersede :if-does-not-exist :create)
+    (dolist (r rows) (format f "~A~C~A~%" (car r) #\Tab (cdr r))))
+  (format t "~%FINAL: ~D rows, ~D still-GR8S~%" (length rows)
+          (count "GR8S" rows :key #'cdr :test #'equal))
+  (dolist (u nilsrc) (format t "STILL-GR8S ~A ~A~%" (first u) (second u))))
+(format t "FINAL-OWNERSHIP-DONE~%")

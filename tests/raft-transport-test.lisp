@@ -23,32 +23,32 @@
             "~A is exported from GR8S.RAFT.TRANSPORT" name)))))
 
 (test raft-transport-serialization-round-trips
-  (let* ((entries (list (gr8s::make-raft-entry :index 4 :term 2 :command '(:set "x" 7))
-                        (gr8s::make-raft-entry :index 5 :term 2 :command '(:cas "y" nil "Z"))))
+  (let* ((entries (list (cl-raft::make-raft-entry :index 4 :term 2 :command '(:set "x" 7))
+                        (cl-raft::make-raft-entry :index 5 :term 2 :command '(:cas "y" nil "Z"))))
          (msg (list :type :append-entries :term 2 :from "b"
                     :prev-log-index 3 :prev-log-term 1 :entries entries :leader-commit 3))
-         (back (gr8s::octets->raft-message (gr8s::raft-message->octets msg))))
+         (back (gr8s.raft.transport::octets->raft-message (gr8s.raft.transport::raft-message->octets msg))))
     (is (eq :append-entries (getf back :type)))
     (is (= 2 (getf back :term)))
     (is (equal "b" (getf back :from)))
     (is (= 3 (getf back :prev-log-index)))
     (is (= 2 (length (getf back :entries))))
     (let ((e (second (getf back :entries))))
-      (is (= 5 (gr8s::raft-entry-index e)))
-      (is (= 2 (gr8s::raft-entry-term e)))
-      (is (equal '(:cas "y" nil "Z") (gr8s::raft-entry-command e))))))
+      (is (= 5 (cl-raft::raft-entry-index e)))
+      (is (= 2 (cl-raft::raft-entry-term e)))
+      (is (equal '(:cas "y" nil "Z") (cl-raft::raft-entry-command e))))))
 
 (test raft-link-coalesces-unsent-append-retries
-  (let* ((link (gr8s::make-raft-peer-link :id "b"))
+  (let* ((link (gr8s.raft.transport::make-raft-peer-link :id "b"))
          (vote (list :type :request-vote :term 2 :from "a"))
          (old-append (list :type :append-entries :term 2 :from "a"
                            :prev-log-index 3 :entries nil :leader-commit 3))
          (new-append (list :type :append-entries :term 2 :from "a"
                            :prev-log-index 3 :entries nil :leader-commit 4)))
-    (gr8s::raft-link-enqueue link vote)
-    (gr8s::raft-link-enqueue link old-append)
-    (gr8s::raft-link-enqueue link new-append)
-    (let ((items (gr8s::raft-peer-link-items link)))
+    (gr8s.raft.transport::raft-link-enqueue link vote)
+    (gr8s.raft.transport::raft-link-enqueue link old-append)
+    (gr8s.raft.transport::raft-link-enqueue link new-append)
+    (let ((items (gr8s.raft.transport::raft-peer-link-items link)))
       (is (= 2 (length items)) "a disconnected peer retains at most one unsent AppendEntries")
       (is (eq :request-vote (getf (first items) :type)))
       (is (eq :append-entries (getf (second items) :type)))
@@ -56,26 +56,26 @@
           "the newest AppendEntries supersedes the stale retry"))))
 
 (test idle-raft-link-waits-until-enqueue-signals-it
-  (let* ((member (gr8s::make-raft-member :running t))
-         (link (gr8s::make-raft-peer-link :id "b"))
+  (let* ((member (gr8s.raft.transport::make-raft-member :running t))
+         (link (gr8s.raft.transport::make-raft-peer-link :id "b"))
          (message (list :type :request-vote :term 2 :from "a"))
          (done nil)
          (batch nil)
          (thread
            (bt:make-thread
             (lambda ()
-              (setf batch (gr8s::raft-link-wait-batch member link)
+              (setf batch (gr8s.raft.transport::raft-link-wait-batch member link)
                     done t)))))
     (unwind-protect
          (progn
            (sleep 0.05)
            (is-false done "an empty peer link blocks instead of polling")
-           (gr8s::raft-link-enqueue link message)
+           (gr8s.raft.transport::raft-link-enqueue link message)
            (is (poll-until (lambda () done) :timeout 1))
            (is (equal (list message) batch)))
-      (setf (gr8s::raft-member-running member) nil)
-      (bt:with-lock-held ((gr8s::raft-peer-link-lock link))
-        (bt:condition-notify (gr8s::raft-peer-link-changed link)))
+      (setf (gr8s.raft.transport::raft-member-running member) nil)
+      (bt:with-lock-held ((gr8s.raft.transport::raft-peer-link-lock link))
+        (bt:condition-notify (gr8s.raft.transport::raft-peer-link-changed link)))
       (when (bt:thread-alive-p thread) (bt:join-thread thread)))))
 
 (defun poll-until (predicate &key (timeout 10) (interval 0.05))
@@ -90,7 +90,7 @@
          (members (mapcar
                    (lambda (id)
                      (cons id
-                           (gr8s::start-raft-member
+                           (gr8s.raft.transport::start-raft-member
                             id :apply-fn (let ((kv (cdr (assoc id kvs :test #'equal))))
                                            (lambda (command) (raft-kv-apply kv command))))))
                    ids))
@@ -100,25 +100,25 @@
            ;; Wire every member to the other two, then start the clocks.
            (dolist (entry members)
              (let ((self (car entry)))
-               (gr8s::raft-member-set-peers
+               (gr8s.raft.transport::raft-member-set-peers
                 (cdr entry)
                 (loop for other in members
                       unless (equal (car other) self)
-                        collect (list (car other) (gr8s::raft-member-host (cdr other))
-                                      (gr8s::raft-member-port (cdr other)))))))
-           (dolist (m member-list) (gr8s::raft-member-start m))
+                        collect (list (car other) (gr8s.raft.transport::raft-member-host (cdr other))
+                                      (gr8s.raft.transport::raft-member-port (cdr other)))))))
+           (dolist (m member-list) (gr8s.raft.transport::raft-member-start m))
            ;; A single leader emerges.
-           (is (poll-until (lambda () (= 1 (count-if #'gr8s::raft-member-leader-p member-list)))))
-           (let ((leader (find-if #'gr8s::raft-member-leader-p member-list)))
+           (is (poll-until (lambda () (= 1 (count-if #'gr8s.raft.transport::raft-member-leader-p member-list)))))
+           (let ((leader (find-if #'gr8s.raft.transport::raft-member-leader-p member-list)))
              (is (not (null leader)))
              ;; Propose on the leader; it replicates to every state machine.
-             (gr8s::raft-member-propose leader '(:set "k" "v1"))
+             (gr8s.raft.transport::raft-member-propose leader '(:set "k" "v1"))
              (is (poll-until
                   (lambda ()
                     (every (lambda (kv) (equal "v1" (gethash "k" (cdr kv)))) kvs))))
              (dolist (kv kvs)
                (is (equal "v1" (gethash "k" (cdr kv))) "member ~A replicated k=v1" (car kv)))))
-      (dolist (m member-list) (ignore-errors (gr8s::stop-raft-member m))))))
+      (dolist (m member-list) (ignore-errors (gr8s.raft.transport::stop-raft-member m))))))
 
 (in-suite raft-transport)
 (test snapshot-roots-cover-dequeued-batches-and-release-after-delivery
@@ -130,7 +130,7 @@
            (stub-original (symbol-function 'gr8s.raft.transport::raft-link-stub))
            (send-original (symbol-function 'gr8s.raft.transport::raft-link-send-snapshot)))
       (setf (gethash "peer" (gr8s.raft.transport::raft-member-links member)) link)
-      (flet ((roots () (bt:with-lock-held ((gr8s::raft-member-lock member))
+      (flet ((roots () (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
                         (gr8s.raft.transport::raft-member-snapshot-messages-unlocked member))))
         (unwind-protect
              (progn
@@ -156,7 +156,7 @@
                 (symbol-function 'gr8s.raft.transport::raft-link-send-snapshot) send-original))))))
 
 (test peer-receive-observation-follows-normal-current-term-dispatch
-  (let* ((node (gr8s::make-raft-node :id "local" :peers '("peer") :current-term 3
+  (let* ((node (cl-raft::make-raft-node :id "local" :peers '("peer") :current-term 3
                                    :send-fn (lambda (&rest args) (declare (ignore args)))))
          (member (gr8s.raft.transport::make-raft-member :node node))
          (link (gr8s.raft.transport::make-raft-peer-link :id "peer"))
@@ -175,11 +175,11 @@
     (is (= 1 (gr8s.raft.transport::raft-peer-link-received-messages link)))
     ;; A retained physical link for a removed member must not keep producing
     ;; observations. Learners remain current configured members.
-    (bt:with-lock-held ((gr8s::raft-member-lock member))
-      (gr8s.raft:raft-configure node '(("local" . :voter) ("peer" . :learner)))
+    (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
+      (gr8s.raft::raft-configure node '(("local" . :voter) ("peer" . :learner)))
       (gr8s.raft.transport::raft-member-note-receive-unlocked member message)
       (is (= 2 (gr8s.raft.transport::raft-peer-link-received-messages link)))
-      (gr8s.raft:raft-configure node '(("local" . :voter)))
+      (gr8s.raft::raft-configure node '(("local" . :voter)))
       (gr8s.raft.transport::raft-member-note-receive-unlocked member message)
       (is (= 2 (gr8s.raft.transport::raft-peer-link-received-messages link)))
       (gr8s.raft.transport::raft-member-note-receive-unlocked

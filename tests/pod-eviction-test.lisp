@@ -44,5 +44,5 @@
          (eviction (append (list 10 (length meta)) meta (list 18 0)))
          (bytes (coerce (append '(107 56 115 0) (list 18 (length eviction)) eviction)
                         '(vector (unsigned-byte 8))))
-         (object (gr8s::decode-eviction-protobuf bytes)))
+         (object (gr8s.apiserver::decode-eviction-protobuf bytes)))
     (is (equal "web" (gethash "name" (gethash "metadata" object))))))

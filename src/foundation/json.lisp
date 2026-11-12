@@ -3,7 +3,7 @@
 ;;;;
 ;;;; Small JSON construction primitives shared by every architectural layer.
 
-(in-package #:gr8s)
+(in-package #:gr8s.foundation)
 
 (defun json-object (&rest pairs)
   "Build an EQUAL hash table from alternating key and value PAIRS.

@@ -12,7 +12,7 @@
 
 (defun checked-probe (json &optional (kind "readinessProbe"))
   "Validate a test declaration through production probe validation."
-  (gr8s::validate-container-probe (com.inuoe.jzon:parse json) kind))
+  (gr8s.kubelet::validate-container-probe (com.inuoe.jzon:parse json) kind))
 
 (test probes-validate-actions-and-default-typed-zero-scalars
   (let ((probe (checked-probe "{\"httpGet\":{\"port\":\"http\"},\"periodSeconds\":0,\"timeoutSeconds\":0}")))
@@ -23,16 +23,16 @@
                   "{\"exec\":{\"command\":[\"true\"]},\"tcpSocket\":{\"port\":80}}"
                   "{\"httpGet\":{\"port\":80,\"httpHeaders\":[{\"name\":\"bad name\",\"value\":\"x\"}]}}"
                   "{\"tcpSocket\":{\"port\":80},\"terminationGracePeriodSeconds\":1}"))
-    (signals gr8s:kubernetes-error (checked-probe json)))
-  (signals gr8s:kubernetes-error (checked-probe "{\"exec\":{\"command\":[\"true\"]},\"successThreshold\":2}" "livenessProbe"))
+    (signals gr8s.model::kubernetes-error (checked-probe json)))
+  (signals gr8s.model::kubernetes-error (checked-probe "{\"exec\":{\"command\":[\"true\"]},\"successThreshold\":2}" "livenessProbe"))
   (is (= 2 (gethash "successThreshold" (checked-probe "{\"exec\":{\"command\":[\"true\"]},\"successThreshold\":2}")))))
 
 (test probes-resolve-only-target-ports-and-static-command-values
   (let ((container (com.inuoe.jzon:parse "{\"name\":\"app\",\"ports\":[{\"name\":\"http\",\"containerPort\":8080}],\"env\":[{\"name\":\"DIRECT\",\"value\":\"value\"},{\"name\":\"INDIRECT\",\"valueFrom\":{\"fieldRef\":{\"fieldPath\":\"metadata.name\"}}}]}")))
-    (is (= 8080 (gr8s::resolve-container-probe-port container "http")))
-    (signals gr8s:runtime-error (gr8s::resolve-container-probe-port container "other"))
+    (is (= 8080 (gr8s.kubelet::resolve-container-probe-port container "http")))
+    (signals gr8s.runtime::runtime-error (gr8s.kubelet::resolve-container-probe-port container "other"))
     (is (equal '("value" "" "$(UNKNOWN)" "$(DIRECT)" "")
-               (gr8s::expand-static-probe-command container #("$(DIRECT)" "$(INDIRECT)" "$(UNKNOWN)" "$$(DIRECT)" ""))))))
+               (gr8s.kubelet::expand-static-probe-command container #("$(DIRECT)" "$(INDIRECT)" "$(UNKNOWN)" "$$(DIRECT)" ""))))))
 
 (defun call-with-probe-http-server (function response)
   "Own a real ephemeral HTTP server; RESPONSE sees every complete request header."
@@ -69,9 +69,9 @@
     (call-with-probe-http-server
      (lambda (port)
        (let* ((drakma:*default-http-proxy* '("127.0.0.1" 1))
-              (container (gr8s::core-object "name" "app"))
+              (container (gr8s.resources::core-object "name" "app"))
               (probe (checked-probe (format nil "{\"httpGet\":{\"port\":~D,\"path\":\"/start\",\"httpHeaders\":[{\"name\":\"Host\",\"value\":\"virtual.test\"},{\"name\":\"User-Agent\",\"value\":\"custom-probe\"},{\"name\":\"Accept\",\"value\":\"\"}]}}" port))))
-         (is-true (gr8s::execute-container-probe (gr8s::make-containerd-runtime) container "exact-id" "127.0.0.1" probe))
+         (is-true (gr8s.kubelet::execute-container-probe (gr8s.runtime.containerd::make-containerd-runtime) container "exact-id" "127.0.0.1" probe))
          (is (= 2 (length requests)))
          (is (find-if (lambda (line) (search "Host: virtual.test" line :test #'char-equal)) (first requests)))
          (is (find-if (lambda (line) (search "User-Agent: custom-probe" line :test #'char-equal)) (first requests)))
@@ -81,7 +81,7 @@
        (if (search "/start" (first lines)) (values 302 '(("Location" . "/ready")) "redirect") (values 204 nil "")))))
   (call-with-probe-http-server
    (lambda (port)
-     (is-false (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object "name" "app") "id" "127.0.0.1"
+     (is-false (gr8s.kubelet::execute-container-probe (gr8s.runtime.containerd::make-containerd-runtime) (gr8s.resources::core-object "name" "app") "id" "127.0.0.1"
                                             (checked-probe (format nil "{\"httpGet\":{\"port\":~D}}" port)))))
    (lambda (lines) (declare (ignore lines)) (values 503 nil "unhealthy"))))
 
@@ -89,7 +89,7 @@
   (call-with-probe-http-server
    (lambda (port)
      (let ((start (get-internal-real-time)))
-       (is-false (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object "name" "app") "id" "127.0.0.1"
+       (is-false (gr8s.kubelet::execute-container-probe (gr8s.runtime.containerd::make-containerd-runtime) (gr8s.resources::core-object "name" "app") "id" "127.0.0.1"
                                               (checked-probe (format nil "{\"httpGet\":{\"port\":~D},\"timeoutSeconds\":1}" port))))
        (is (< (/ (- (get-internal-real-time) start) internal-time-units-per-second) 1.7))))
    (lambda (lines) (declare (ignore lines)) (sleep 2) (values 200 nil "too late"))))
@@ -97,7 +97,7 @@
 (test tcp-probes-contact-the-actual-listener
   (let ((listener (usocket:socket-listen "127.0.0.1" 0 :element-type '(unsigned-byte 8))))
     (unwind-protect
-         (is-true (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object "name" "app") "id" "127.0.0.1"
+         (is-true (gr8s.kubelet::execute-container-probe (gr8s.runtime.containerd::make-containerd-runtime) (gr8s.resources::core-object "name" "app") "id" "127.0.0.1"
                                                (checked-probe (format nil "{\"tcpSocket\":{\"port\":~D}}" (usocket:get-local-port listener)))))
       (usocket:socket-close listener))))
 
@@ -111,8 +111,8 @@
 
 (defmethod ag-proto:deserialize-from-bytes ((type (eql 'probe-wire-request)) bytes)
   "Read the actual health protocol request rather than a generated gr8s service."
-  (let ((gr8s::*core-protobuf-field-count* 0))
-    (make-instance 'probe-wire-request :service (gr8s::core-protobuf-string (gr8s::core-protobuf-fields bytes) 1))))
+  (let ((gr8s.resources::*core-protobuf-field-count* 0))
+    (make-instance 'probe-wire-request :service (gr8s.resources::core-protobuf-string (gr8s.resources::core-protobuf-fields bytes) 1))))
 
 (defmethod ag-proto:serialize-to-bytes ((response probe-wire-response))
   "Emit the standard enum field for the real gRPC wire exchange."
@@ -133,30 +133,30 @@
            (setf thread (bt:make-thread (lambda () (ag-grpc:server-start server)) :name "probe health server"))
            (is-true (wait-until (lambda () (eq :running (ag-grpc::server-state server)))))
            (let ((probe (checked-probe (format nil "{\"grpc\":{\"port\":~D,\"service\":\"application\"}}" (usocket:get-local-port (ag-grpc::server-socket server))))))
-             (multiple-value-bind (success message) (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object "name" "app") "id" "127.0.0.1" probe)
+             (multiple-value-bind (success message) (gr8s.kubelet::execute-container-probe (gr8s.runtime.containerd::make-containerd-runtime) (gr8s.resources::core-object "name" "app") "id" "127.0.0.1" probe)
                (is-true success "Health/Check failed: ~A" message))
              (setf health 2)
-             (is-false (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object "name" "app") "id" "127.0.0.1" probe))
+             (is-false (gr8s.kubelet::execute-container-probe (gr8s.runtime.containerd::make-containerd-runtime) (gr8s.resources::core-object "name" "app") "id" "127.0.0.1" probe))
              (is (equal '("application" "application") services))
              (is (every (lambda (agent) (equal "kube-probe/1.37" agent)) agents))))
       (ag-grpc:server-stop server)
       (when thread (bt:join-thread thread)))))
 
 (test exec-probes-target-exact-attempt-and-honor-exit-status
-  (let ((original (symbol-function 'gr8s::cri-exec-sync)) (calls nil) (code 0))
+  (let ((original (symbol-function 'gr8s.runtime.containerd::cri-exec-sync)) (calls nil) (code 0))
     (unwind-protect
          (progn
-           (setf (symbol-function 'gr8s::cri-exec-sync)
+           (setf (symbol-function 'gr8s.runtime.containerd::cri-exec-sync)
                  (lambda (socket id command &key timeout)
                    (declare (ignore socket)) (push (list id command timeout) calls)
-                   (gr8s::make-runtime-exec-result :exit-code code)))
+                   (gr8s.runtime::make-runtime-exec-result :exit-code code)))
            (let ((probe (checked-probe "{\"exec\":{\"command\":[\"test\",\"$(VALUE)\"]}}"))
-                 (container (gr8s::core-object "name" "app" "env" (vector (gr8s::core-object "name" "VALUE" "value" "literal")))))
-             (is-true (gr8s::execute-container-probe (gr8s::make-containerd-runtime) container "current-attempt" "" probe))
+                 (container (gr8s.resources::core-object "name" "app" "env" (vector (gr8s.resources::core-object "name" "VALUE" "value" "literal")))))
+             (is-true (gr8s.kubelet::execute-container-probe (gr8s.runtime.containerd::make-containerd-runtime) container "current-attempt" "" probe))
              (setf code 7)
-             (is-false (gr8s::execute-container-probe (gr8s::make-containerd-runtime) container "current-attempt" "" probe))
+             (is-false (gr8s.kubelet::execute-container-probe (gr8s.runtime.containerd::make-containerd-runtime) container "current-attempt" "" probe))
              (is (equal '(("current-attempt" ("test" "literal") 1) ("current-attempt" ("test" "literal") 1)) calls))))
-      (setf (symbol-function 'gr8s::cri-exec-sync) original))))
+      (setf (symbol-function 'gr8s.runtime.containerd::cri-exec-sync) original))))
 
 (defun call-with-probe-raw-server (function responder &key socket-path)
   "Own actual TCP/Unix peers and concurrent responders, including stalled handshakes and bodies."
@@ -211,16 +211,16 @@
 
 (defun probe-for-http-port (port &optional (path "/"))
   "Construct a validated one-second actual HTTP probe for a loopback fixture."
-  (gr8s::validate-container-probe
-   (gr8s::core-object "timeoutSeconds" 1 "httpGet" (gr8s::core-object "port" port "path" path)) "readinessProbe"))
+  (gr8s.kubelet::validate-container-probe
+   (gr8s.resources::core-object "timeoutSeconds" 1 "httpGet" (gr8s.resources::core-object "port" port "path" path)) "readinessProbe"))
 
 (test probe-http-spec-defaults-empty-header-values-and-restricts-names
   (let* ((probe (checked-probe "{\"httpGet\":{\"port\":80,\"httpHeaders\":[{\"name\":\"Accept\"}]}}"))
          (http (gethash "httpGet" probe)))
     (is (equal "/" (gethash "path" http)))
     (is (equal "" (gethash "value" (aref (gethash "httpHeaders" http) 0)))))
-  (signals gr8s:kubernetes-error (checked-probe "{\"httpGet\":{\"port\":\"a--b\"}}"))
-  (signals gr8s:kubernetes-error (checked-probe "{\"httpGet\":{\"port\":80,\"httpHeaders\":[{\"name\":\"X_Test\",\"value\":\"x\"}]}}")))
+  (signals gr8s.model::kubernetes-error (checked-probe "{\"httpGet\":{\"port\":\"a--b\"}}"))
+  (signals gr8s.model::kubernetes-error (checked-probe "{\"httpGet\":{\"port\":80,\"httpHeaders\":[{\"name\":\"X_Test\",\"value\":\"x\"}]}}")))
 
 (test probe-http-terminal-body-obeys-framing-and-the-10kib-limit
   (dolist (scenario '((200 (("Content-Length" . "0")) "")
@@ -235,7 +235,7 @@
          (lambda (port)
            (unwind-protect
                 (multiple-value-bind (ok message)
-                    (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1" (probe-for-http-port port))
+                    (gr8s.kubelet::execute-container-probe (gr8s.runtime.containerd::make-containerd-runtime) (gr8s.resources::core-object) "id" "127.0.0.1" (probe-for-http-port port))
                   (is-true ok "Framed HTTP status ~D should not read past its body: ~A" code message))
              (bt:signal-semaphore release)))
          (lambda (stream)
@@ -250,7 +250,7 @@
   (call-with-probe-raw-server
    (lambda (port)
      (multiple-value-bind (success message kind)
-         (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1" (probe-for-http-port port))
+         (gr8s.kubelet::execute-container-probe (gr8s.runtime.containerd::make-containerd-runtime) (gr8s.resources::core-object) "id" "127.0.0.1" (probe-for-http-port port))
        (is-false success) (is (eq :error kind)) (is (search "Incomplete" message))))
    (lambda (stream) (probe-request-lines stream) (write-probe-http-response stream 200 '(("Content-Length" . "5")) "no"))))
 
@@ -260,7 +260,7 @@
      (lambda (port)
        (unwind-protect
             (progn
-              (is-true (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1" (probe-for-http-port port "/start")))
+              (is-true (gr8s.kubelet::execute-container-probe (gr8s.runtime.containerd::make-containerd-runtime) (gr8s.resources::core-object) "id" "127.0.0.1" (probe-for-http-port port "/start")))
               (is (= 2 (length requests))))
          (bt:signal-semaphore release)))
      (lambda (stream)
@@ -278,11 +278,11 @@
      (lambda (port)
        (let ((probe (probe-for-http-port port "http://ignored.invalid/ready?check=yes")))
          (setf (gethash "httpHeaders" (gethash "httpGet" probe))
-               (vector (gr8s::core-object "name" "Accept" "value" "application/a")
-                       (gr8s::core-object "name" "Accept" "value" "application/b")
-                       (gr8s::core-object "name" "Host" "value" "")
-                       (gr8s::core-object "name" "Host" "value" "ignored.invalid")))
-         (is-true (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1" probe))
+               (vector (gr8s.resources::core-object "name" "Accept" "value" "application/a")
+                       (gr8s.resources::core-object "name" "Accept" "value" "application/b")
+                       (gr8s.resources::core-object "name" "Host" "value" "")
+                       (gr8s.resources::core-object "name" "Host" "value" "ignored.invalid")))
+         (is-true (gr8s.kubelet::execute-container-probe (gr8s.runtime.containerd::make-containerd-runtime) (gr8s.resources::core-object) "id" "127.0.0.1" probe))
          (is (search "GET /ready?check=yes HTTP/" (first requests)))
          (is (= 2 (count-if (lambda (line) (search "Accept:" line :test #'char-equal)) requests)))
          (is (= 1 (count-if (lambda (line) (search "Host:" line :test #'char-equal)) requests)))
@@ -295,8 +295,8 @@
      (lambda (port)
        (dotimes (attempt 3)
          (declare (ignore attempt))
-         (is-false (gr8s::execute-container-probe
-                    (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1"
+         (is-false (gr8s.kubelet::execute-container-probe
+                    (gr8s.runtime.containerd::make-containerd-runtime) (gr8s.resources::core-object) "id" "127.0.0.1"
                     (checked-probe (format nil "{\"grpc\":{\"port\":~D},\"timeoutSeconds\":1}" port))))
          (is (bt:wait-on-semaphore closed :timeout .5))))
      (lambda (stream)
@@ -308,16 +308,16 @@
 (test exec-probe-constructor-timeouts-close-the-real-unix-peer
   (with-temporary-store (store directory)
     (declare (ignore store))
-    (let ((gr8s::*cri-runtime-request-timeout* 0)
+    (let ((gr8s.runtime.containerd::*cri-runtime-request-timeout* 0)
           (closed (bt:make-semaphore :name "Exec constructor peer closed"))
           (path (merge-pathnames "stalled-cri.sock" directory)))
       (call-with-probe-raw-server
        (lambda (socket-path)
-         (let ((runtime (gr8s::make-containerd-runtime :socket-path (namestring socket-path))))
+         (let ((runtime (gr8s.runtime.containerd::make-containerd-runtime :socket-path (namestring socket-path))))
            (dotimes (attempt 2)
              (declare (ignore attempt))
              (multiple-value-bind (success message kind)
-                 (gr8s::execute-container-probe runtime (gr8s::core-object) "exact-attempt" ""
+                 (gr8s.kubelet::execute-container-probe runtime (gr8s.resources::core-object) "exact-attempt" ""
                    (checked-probe "{\"exec\":{\"command\":[\"true\"]},\"timeoutSeconds\":1}"))
                (is-false success) (is (eq :error kind)) (is (plusp (length message))))
              (is (bt:wait-on-semaphore closed :timeout .5)))))
@@ -337,8 +337,8 @@
               (setf worker (bt:make-thread
                             (lambda ()
                               (handler-case
-                                  (gr8s::execute-container-probe
-                                   (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1"
+                                  (gr8s.kubelet::execute-container-probe
+                                   (gr8s.runtime.containerd::make-containerd-runtime) (gr8s.resources::core-object) "id" "127.0.0.1"
                                    (checked-probe (format nil "{\"grpc\":{\"port\":~D},\"timeoutSeconds\":30}" port)))
                                 (probe-test-cancelled () (setf cancelled t))))
                             :name "cancelled probe constructor"))
@@ -359,7 +359,7 @@
     (call-with-probe-http-server
      (lambda (port)
        (multiple-value-bind (success output result)
-           (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1" (probe-for-http-port port))
+           (gr8s.kubelet::execute-container-probe (gr8s.runtime.containerd::make-containerd-runtime) (gr8s.resources::core-object) "id" "127.0.0.1" (probe-for-http-port port))
          (is-true success) (is (eq :warning result))
          (is (search "actual redirect body" output))
          (is (= 1 requests))))
@@ -368,39 +368,39 @@
        (values 302 '(("Location" . "http://unrelated.invalid/unreachable")) "actual redirect body")))))
 
 (test exec-probe-output-keeps-captured-bytes-with-a-bound
-  (let* ((original (symbol-function 'gr8s::cri-exec-sync))
-         (result (gr8s::make-runtime-exec-result
+  (let* ((original (symbol-function 'gr8s.runtime.containerd::cri-exec-sync))
+         (result (gr8s.runtime::make-runtime-exec-result
                   :stdout (trivial-utf-8:string-to-utf-8-bytes "actual stdout ")
                   :stderr (trivial-utf-8:string-to-utf-8-bytes "actual stderr") :exit-code 7))
          (probe (checked-probe "{\"exec\":{\"command\":[\"check\"]}}")))
     (unwind-protect
          (progn
-           (setf (symbol-function 'gr8s::cri-exec-sync) (lambda (&rest args) (declare (ignore args)) result))
+           (setf (symbol-function 'gr8s.runtime.containerd::cri-exec-sync) (lambda (&rest args) (declare (ignore args)) result))
            (multiple-value-bind (success output)
-               (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "" probe)
+               (gr8s.kubelet::execute-container-probe (gr8s.runtime.containerd::make-containerd-runtime) (gr8s.resources::core-object) "id" "" probe)
              (is-false success) (is (equal "actual stdout actual stderr" output)))
-           (setf result (gr8s::make-runtime-exec-result
+           (setf result (gr8s.runtime::make-runtime-exec-result
                          :stdout (make-array 20000 :element-type '(unsigned-byte 8) :initial-element 120)
                          :stderr (trivial-utf-8:string-to-utf-8-bytes "not included") :exit-code 7))
            (multiple-value-bind (success output)
-               (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "" probe)
+               (gr8s.kubelet::execute-container-probe (gr8s.runtime.containerd::make-containerd-runtime) (gr8s.resources::core-object) "id" "" probe)
              (is-false success) (is (= 10240 (length output))))
-           (setf result (gr8s::make-runtime-exec-result :stdout (make-array 1 :element-type '(unsigned-byte 8) :initial-element 255)))
+           (setf result (gr8s.runtime::make-runtime-exec-result :stdout (make-array 1 :element-type '(unsigned-byte 8) :initial-element 255)))
            (multiple-value-bind (success output)
-               (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "" probe)
+               (gr8s.kubelet::execute-container-probe (gr8s.runtime.containerd::make-containerd-runtime) (gr8s.resources::core-object) "id" "" probe)
              (is-true success) (is (equal (string (code-char #xfffd)) output))))
-      (setf (symbol-function 'gr8s::cri-exec-sync) original))))
+      (setf (symbol-function 'gr8s.runtime.containerd::cri-exec-sync) original))))
 
 (test https-probes-ignore-an-untrusted-certificate-and-respect-empty-body-framing
   (with-temporary-store (store directory)
     (declare (ignore store))
-    (let ((pki (gr8s:ensure-cluster-pki (merge-pathnames "probe-pki/" directory))))
-      (multiple-value-bind (certificate key) (gr8s::ensure-node-server-credentials pki)
+    (let ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "probe-pki/" directory))))
+      (multiple-value-bind (certificate key) (gr8s.security::ensure-node-server-credentials pki)
         (call-with-probe-raw-server
          (lambda (port)
            (multiple-value-bind (success output)
-               (gr8s::execute-container-probe
-                (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1"
+               (gr8s.kubelet::execute-container-probe
+                (gr8s.runtime.containerd::make-containerd-runtime) (gr8s.resources::core-object) "id" "127.0.0.1"
                 (checked-probe (format nil "{\"httpGet\":{\"port\":~D,\"scheme\":\"HTTPS\"},\"timeoutSeconds\":1}" port)))
              (is-true success "Self-signed HTTPS with empty body failed: ~A" output)))
          (lambda (stream)
@@ -416,7 +416,7 @@
      (lambda (port)
        (unwind-protect
             (progn
-              (is-false (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1" (probe-for-http-port port "/start")))
+              (is-false (gr8s.kubelet::execute-container-probe (gr8s.runtime.containerd::make-containerd-runtime) (gr8s.resources::core-object) "id" "127.0.0.1" (probe-for-http-port port "/start")))
               (is (= 1 requests)))
          (bt:signal-semaphore release)))
      (lambda (stream)
@@ -429,17 +429,17 @@
              (write-probe-http-response stream 200 '(("Content-Length" . "0")) "")))))))
 
 (test unresolved-probe-ports-and-exec-infrastructure-are-errors
-  (let ((container (gr8s::core-object "name" "app")) (runtime (gr8s::make-containerd-runtime)))
+  (let ((container (gr8s.resources::core-object "name" "app")) (runtime (gr8s.runtime.containerd::make-containerd-runtime)))
     (dolist (handler '("httpGet" "tcpSocket"))
       (multiple-value-bind (success message kind)
-          (gr8s::execute-container-probe runtime container "id" "127.0.0.1"
+          (gr8s.kubelet::execute-container-probe runtime container "id" "127.0.0.1"
             (checked-probe (format nil "{\"~A\":{\"port\":\"missing\"}}" handler)))
         (is-false success) (is (eq :error kind)) (is (search "not declared" message))))
     (with-temporary-store (store directory)
       (declare (ignore store))
       (multiple-value-bind (success message kind)
-          (gr8s::execute-container-probe
-           (gr8s::make-containerd-runtime :socket-path (namestring (merge-pathnames "absent-cri.sock" directory)))
+          (gr8s.kubelet::execute-container-probe
+           (gr8s.runtime.containerd::make-containerd-runtime :socket-path (namestring (merge-pathnames "absent-cri.sock" directory)))
            container "id" "" (checked-probe "{\"exec\":{\"command\":[\"true\"]}}"))
         (is-false success) (is (eq :error kind)) (is (plusp (length message)))))))
 
@@ -451,7 +451,7 @@
          (unwind-protect
               (let ((start (get-internal-real-time)))
                 (multiple-value-bind (success message kind result)
-                    (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1" (probe-for-http-port port))
+                    (gr8s.kubelet::execute-container-probe (gr8s.runtime.containerd::make-containerd-runtime) (gr8s.resources::core-object) "id" "127.0.0.1" (probe-for-http-port port))
                   (is-false success) (is (eq :error kind)) (is (eq :failure result))
                   (is (plusp (length message)))
                   (is (< (/ (- (get-internal-real-time) start) internal-time-units-per-second) 1.7))))
@@ -463,13 +463,13 @@
   (call-with-probe-http-server
    (lambda (port)
      (multiple-value-bind (success message kind)
-         (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1" (probe-for-http-port port))
+         (gr8s.kubelet::execute-container-probe (gr8s.runtime.containerd::make-containerd-runtime) (gr8s.resources::core-object) "id" "127.0.0.1" (probe-for-http-port port))
        (is-false success) (is-false kind) (is (search "503" message))))
    (lambda (lines) (declare (ignore lines)) (values 503 nil "unhealthy")))
   (call-with-probe-raw-server
    (lambda (port)
      (multiple-value-bind (success message kind)
-         (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1" (probe-for-http-port port))
+         (gr8s.kubelet::execute-container-probe (gr8s.runtime.containerd::make-containerd-runtime) (gr8s.resources::core-object) "id" "127.0.0.1" (probe-for-http-port port))
        (is-false success) (is-false kind) (is (plusp (length message)))))
    (lambda (stream) (probe-request-lines stream) (loop while (read-byte stream nil nil)))))
 
@@ -478,13 +478,13 @@
          (port (usocket:get-local-port listener)))
     (usocket:socket-close listener)
     (multiple-value-bind (success message kind)
-        (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1"
+        (gr8s.kubelet::execute-container-probe (gr8s.runtime.containerd::make-containerd-runtime) (gr8s.resources::core-object) "id" "127.0.0.1"
           (checked-probe (format nil "{\"tcpSocket\":{\"port\":~D}}" port)))
       (is-false success) (is-false kind) (is (plusp (length message))))))
 
 (test exec-probes-distinguish-real-cri-status-from-command-results
   (let* ((server (ag-grpc:make-grpc-server 0 :host "127.0.0.1")) (thread nil)
-         (original (symbol-function 'gr8s::make-unix-grpc-channel))
+         (original (symbol-function 'gr8s.protocol::make-unix-grpc-channel))
          (status ag-grpc:+grpc-status-unavailable+) (exit-code 0) (commands nil) (delay 0) (timeouts nil))
     (ag-grpc:server-register-handler
      server "/runtime.v1.RuntimeService/ExecSync"
@@ -503,47 +503,47 @@
            (is-true (wait-until (lambda () (eq :running (ag-grpc::server-state server)))))
            ;; Change only the socket address family; run the actual generated
            ;; CRI method and decode its real gRPC status/ExecSync response.
-           (setf (symbol-function 'gr8s::make-unix-grpc-channel)
+           (setf (symbol-function 'gr8s.protocol::make-unix-grpc-channel)
                  (lambda (path &key timeout)
                    (declare (ignore path))
                    (ag-grpc:make-channel "127.0.0.1" (usocket:get-local-port (ag-grpc::server-socket server)) :timeout timeout)))
            (let ((probe (checked-probe "{\"exec\":{\"command\":[\"true\"]}}"))
-                 (runtime (gr8s::make-containerd-runtime)))
+                 (runtime (gr8s.runtime.containerd::make-containerd-runtime)))
              (multiple-value-bind (success message kind)
-                 (gr8s::execute-container-probe runtime (gr8s::core-object) "id" "" probe)
+                 (gr8s.kubelet::execute-container-probe runtime (gr8s.resources::core-object) "id" "" probe)
                (is-false success) (is (eq :error kind)) (is (search "UNAVAILABLE" message)))
              (setf status ag-grpc:+grpc-status-deadline-exceeded+)
              (multiple-value-bind (success message kind)
-                 (gr8s::execute-container-probe runtime (gr8s::core-object) "id" "" probe)
+                 (gr8s.kubelet::execute-container-probe runtime (gr8s.resources::core-object) "id" "" probe)
                (is-false success) (is-false kind) (is (search "actual CRI execution status" message)))
              (setf status ag-grpc:+grpc-status-ok+ exit-code 7)
              (multiple-value-bind (success message kind)
-                 (gr8s::execute-container-probe runtime (gr8s::core-object) "id" "" probe)
+                 (gr8s.kubelet::execute-container-probe runtime (gr8s.resources::core-object) "id" "" probe)
                (is-false success) (is-false kind) (is (search "7" message)))
              (setf exit-code 0)
              (multiple-value-bind (success message kind)
-                 (gr8s::execute-container-probe runtime (gr8s::core-object) "id" "" probe)
+                 (gr8s.kubelet::execute-container-probe runtime (gr8s.resources::core-object) "id" "" probe)
                (is-true success "Actual CRI execution failed: ~A" message) (is-false kind))
              (setf delay 1.1)
              (multiple-value-bind (success message kind)
-                 (gr8s::execute-container-probe runtime (gr8s::core-object) "id" "" probe)
+                 (gr8s.kubelet::execute-container-probe runtime (gr8s.resources::core-object) "id" "" probe)
                (is-true success "CRI setup/cleanup time consumed the command's budget: ~A" message) (is-false kind)))
            (is (= 5 (length commands)))
            (is (every (lambda (entry) (= 1 (first entry))) timeouts))
            (is (every (lambda (entry) (equal "121S" (second entry))) timeouts))
            (setf delay 0)
-           (is (= 0 (gr8s::runtime-exec-result-exit-code (gr8s::cri-exec-sync "test-address" "id" '("true") :timeout 0))))
+           (is (= 0 (gr8s.runtime::runtime-exec-result-exit-code (gr8s.runtime.containerd::cri-exec-sync "test-address" "id" '("true") :timeout 0))))
            (is (equal '(0 nil) (first timeouts)))
            ;; A local RPC deadline carries no proof the command timed out.
            ;; Reduce only the fixture's cleanup allowance, keeping its actual
            ;; command timeout and the normal production default unchanged.
            (setf delay 2)
-           (let ((gr8s::*cri-runtime-request-timeout* 0))
+           (let ((gr8s.runtime.containerd::*cri-runtime-request-timeout* 0))
              (multiple-value-bind (success message kind)
-                 (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" ""
+                 (gr8s.kubelet::execute-container-probe (gr8s.runtime.containerd::make-containerd-runtime) (gr8s.resources::core-object) "id" ""
                    (checked-probe "{\"exec\":{\"command\":[\"true\"]}}"))
                (is-false success) (is (eq :error kind)) (is (plusp (length message))))))
-      (setf (symbol-function 'gr8s::make-unix-grpc-channel) original)
+      (setf (symbol-function 'gr8s.protocol::make-unix-grpc-channel) original)
       (ag-grpc:server-stop server)
       (when thread (bt:join-thread thread)))))
 
@@ -552,5 +552,5 @@
     (let ((probe (checked-probe "{\"httpGet\":{\"port\":80}}")))
       (setf (gethash "host" (gethash "httpGet" probe)) host)
       (multiple-value-bind (success message kind)
-          (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1" probe)
+          (gr8s.kubelet::execute-container-probe (gr8s.runtime.containerd::make-containerd-runtime) (gr8s.resources::core-object) "id" "127.0.0.1" probe)
         (is-false success) (is (eq :error kind)) (is (plusp (length message)))))))

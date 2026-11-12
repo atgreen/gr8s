@@ -95,13 +95,3 @@
    #:set-fake-runtime-failure
    #:stop-runtime-deletions
    #:with-running-pod-cancellation-deferred))
-
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (do-external-symbols (symbol '#:gr8s.runtime)
-    (shadowing-import symbol '#:gr8s))
-  (dolist (name '("FAKE-RUNTIME-ENSURE-COUNT" "MAKE-FAKE-RUNTIME"
-                  "RUNTIME-DELETE" "RUNTIME-ENSURE" "RUNTIME-ERROR"
-                  "RUNTIME-ERROR-MESSAGE" "RUNTIME-LOGS" "RUNTIME-OBSERVE"
-                  "RUNTIME-POD-PHASE" "RUNTIME-POD-RESOURCE-VERSION"
-                  "RUNTIME-POD-UID" "SET-FAKE-RUNTIME-FAILURE"))
-    (export (find-symbol name '#:gr8s.runtime) '#:gr8s)))

@@ -3,7 +3,7 @@
 ;;;;
 ;;;; Bounded, deterministic ranking shared by Service and image-peer steering.
 
-(in-package #:gr8s)
+(in-package #:gr8s.foundation)
 
 (defun steering-bounded-integer (value maximum &optional (default 0))
   (if (and (integerp value) (not (minusp value)))

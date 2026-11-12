@@ -76,7 +76,7 @@ The independent patch lock also excludes agent and witness patch managers."
     (or (getf options :node-address)
         (unless (member listen '("0.0.0.0" "::" "[::]") :test #'equal) listen)
         (find-if-not (lambda (address) (uiop:string-prefix-p "127." address))
-                     (ignore-errors (gr8s::host-ipv4-addresses)))
+                     (ignore-errors (gr8s.network::host-ipv4-addresses)))
         "127.0.0.1")))
 
 (defun serve-ha-endpoint-record (options)

@@ -14,20 +14,20 @@
 
 (defun admission-test-cel (expression &rest bindings)
   "Compile and evaluate EXPRESSION with BINDINGS given as a name/value plist."
-  (gr8s::evaluate-cel-condition
-   (gr8s::compile-cel-condition expression)
+  (cl-cel::evaluate-cel-condition
+   (cl-cel::compile-cel-condition expression)
    (loop for (name value) on bindings by #'cddr collect (cons name value))))
 
 (defun admission-test-compile-message (expression)
   "Return the compile failure of EXPRESSION, or NIL if it compiles."
-  (handler-case (progn (gr8s::compile-cel-condition expression) nil)
-    (gr8s::cel-compile-error (condition) (princ-to-string condition))))
+  (handler-case (progn (cl-cel::compile-cel-condition expression) nil)
+    (cl-cel::cel-compile-error (condition) (princ-to-string condition))))
 
 (test cel-evaluates-admission-conditions
   (let ((object (com.inuoe.jzon:parse "{\"metadata\":{\"name\":\"skip-me\",\"labels\":{\"a\":\"b\"}},\"spec\":{\"items\":[1,2,3],\"on\":false}}")))
     (is-false (admission-test-cel "object.metadata.name != 'skip-me'" "object" object))
     (is-true (admission-test-cel "object.metadata.name == \"skip-me\"" "object" object))
-    (signals gr8s::cel-evaluation-error (admission-test-cel "object.metadata.namespace == 'production'" "object" object))
+    (signals cl-cel::cel-evaluation-error (admission-test-cel "object.metadata.namespace == 'production'" "object" object))
     (is-true (admission-test-cel "has(object.metadata.labels) && !has(object.metadata.other)" "object" object))
     (is-true (admission-test-cel "'a' in object.metadata.labels && 2 in object.spec.items" "object" object))
     (is-true (admission-test-cel "object.spec.items.all(x, x > 0) && object.spec.items.exists_one(x, x == 2)" "object" object))
@@ -41,16 +41,16 @@
 (test cel-errors-follow-its-logic-and-budget
   (let ((object (com.inuoe.jzon:parse "{\"metadata\":{}}")))
     ;; A missing field is an error, which only an absorbing operand can hide.
-    (signals gr8s::cel-evaluation-error (admission-test-cel "object.metadata.name == 'x'" "object" object))
+    (signals cl-cel::cel-evaluation-error (admission-test-cel "object.metadata.name == 'x'" "object" object))
     (is-false (admission-test-cel "object.metadata.name == 'x' && false" "object" object))
     (is-true (admission-test-cel "true || object.metadata.name == 'x'" "object" object))
-    (signals gr8s::cel-evaluation-error (admission-test-cel "object.metadata.name == 'x' || false" "object" object))
-    (signals gr8s::cel-evaluation-error (admission-test-cel "1 / 0 == 1"))
-    (signals gr8s::cel-evaluation-error (admission-test-cel "9223372036854775807 + 1 == 0"))
-    (signals gr8s::cel-evaluation-error (admission-test-cel "dyn('a') < dyn(1)"))
+    (signals cl-cel::cel-evaluation-error (admission-test-cel "object.metadata.name == 'x' || false" "object" object))
+    (signals cl-cel::cel-evaluation-error (admission-test-cel "1 / 0 == 1"))
+    (signals cl-cel::cel-evaluation-error (admission-test-cel "9223372036854775807 + 1 == 0"))
+    (signals cl-cel::cel-evaluation-error (admission-test-cel "dyn('a') < dyn(1)"))
     ;; Doubling the list at each level would otherwise run for far too long.
-    (let ((gr8s::+cel-evaluation-budget+ 1000))
-      (signals gr8s::cel-evaluation-error
+    (let ((cl-cel::+cel-evaluation-budget+ 1000))
+      (signals cl-cel::cel-evaluation-error
         (admission-test-cel "[1,2,3,4,5,6,7,8,9,10].all(a, [1,2,3,4,5,6,7,8,9,10].all(b, [1,2,3,4,5,6,7,8,9,10].all(c, a + b + c > 0)))")))))
 
 (test cel-refuses-what-it-cannot-compile-or-evaluate
@@ -99,13 +99,13 @@
 
 (defun admission-test-serve (stream handler)
   "Answer one AdmissionReview on STREAM with the response HANDLER builds from its path and request."
-  (let* ((request-line (gr8s::admission-read-line stream))
-         (length (loop for line = (gr8s::admission-read-line stream)
+  (let* ((request-line (gr8s.apiserver::admission-read-line stream))
+         (length (loop for line = (gr8s.apiserver::admission-read-line stream)
                        until (zerop (length line))
                        when (uiop:string-prefix-p "content-length:" (string-downcase line))
                          collect (parse-integer line :start 15 :junk-allowed nil) into lengths
                        finally (return (first lengths))))
-         (review (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string (gr8s::admission-read-exactly stream length))
+         (review (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string (gr8s.apiserver::admission-read-exactly stream length))
                                        :max-string-length (* 2 1024 1024)))
          (request (gethash "request" review))
          (path (second (uiop:split-string request-line :separator " ")))
@@ -114,8 +114,8 @@
       (setf (gethash "uid" response) (gethash "uid" request))
       (admission-test-respond stream
                               (if (gethash "desiredAPIVersion" request)
-                                  (gr8s::core-object "apiVersion" "apiextensions.k8s.io/v1" "kind" "ConversionReview" "response" response)
-                                  (gr8s::core-object "apiVersion" "admission.k8s.io/v1" "kind" "AdmissionReview" "response" response))
+                                  (gr8s.resources::core-object "apiVersion" "apiextensions.k8s.io/v1" "kind" "ConversionReview" "response" response)
+                                  (gr8s.resources::core-object "apiVersion" "admission.k8s.io/v1" "kind" "AdmissionReview" "response" response))
                               :chunked (search "chunked" path)))))
 
 (defun admission-test-backend (certificate key handler)
@@ -155,11 +155,11 @@
 
 (defun admission-test-allow (&rest fields)
   "Build an allowing AdmissionResponse with FIELDS."
-  (apply #'gr8s::core-object "allowed" t fields))
+  (apply #'gr8s.resources::core-object "allowed" t fields))
 
 (defun admission-test-deny (message &rest fields)
   "Build a denying AdmissionResponse carrying MESSAGE."
-  (apply #'gr8s::core-object "allowed" nil "status" (gr8s::core-object "message" message) fields))
+  (apply #'gr8s.resources::core-object "allowed" nil "status" (gr8s.resources::core-object "message" message) fields))
 
 (defun admission-test-patch (&rest operations)
   "Encode JSON patch OPERATIONS for an AdmissionResponse."
@@ -170,26 +170,26 @@
 
 (defun admission-test-add (path value)
   "Build a JSON patch add operation."
-  (gr8s::core-object "op" "add" "path" path "value" value))
+  (gr8s.resources::core-object "op" "add" "path" path "value" value))
 
 (defun admission-test-credentials (pki)
   "Issue a server certificate for the test names, returning its chain and key paths."
-  (let ((certificate (merge-pathnames "hook.crt" (gr8s::cluster-pki-root pki)))
-        (key (merge-pathnames "hook.key" (gr8s::cluster-pki-root pki))))
+  (let ((certificate (merge-pathnames "hook.crt" (gr8s.security::cluster-pki-root pki)))
+        (key (merge-pathnames "hook.key" (gr8s.security::cluster-pki-root pki))))
     (multiple-value-bind (private public) (ironclad:generate-key-pair :secp256r1)
-      (let ((der (gr8s::certificate-der
-                  (pure-tls/acme::encode-subject gr8s::+pki-ca-common-name+)
+      (let ((der (gr8s.security::certificate-der
+                  (pure-tls/acme::encode-subject gr8s.security::+pki-ca-common-name+)
                   (pure-tls/acme::encode-subject "hook")
                   (pure-tls/acme::encode-ec-public-key public)
                   (list (pure-tls/acme::encode-extension
                          pure-tls/acme::*oid-subject-alt-name*
                          (pure-tls/acme::encode-san-extension (list "hook.alpha.svc" "localhost"))))
-                  (gr8s::cluster-pki-ca-private-key pki))))
-        (gr8s::write-private-text-exclusively key (pure-tls/acme::encode-ec-private-key-pem private))
-        (gr8s::write-private-text-exclusively
+                  (gr8s.security::cluster-pki-ca-private-key pki))))
+        (gr8s.security::write-private-text-exclusively key (pure-tls/acme::encode-ec-private-key-pem private))
+        (gr8s.security::write-private-text-exclusively
          certificate
          (concatenate 'string (pure-tls/acme::wrap-pem "CERTIFICATE" der)
-                      (uiop:read-file-string (gr8s:cluster-pki-ca-certificate-path pki))))))
+                      (uiop:read-file-string (gr8s.security::cluster-pki-ca-certificate-path pki))))))
     (values certificate key)))
 
 (defvar *admission-test-port* nil "Port of the running local TLS backend.")
@@ -204,11 +204,11 @@
     `(with-core-api (,store ,path)
        (let* ((,root (uiop:ensure-directory-pathname
                       (sb-posix:mkdtemp (namestring (merge-pathnames "gr8s-admission-XXXXXX" (uiop:temporary-directory))))))
-              (,pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" ,root)))
+              (,pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" ,root)))
               (*admission-test-bundle*
                 (ag-grpc:base64-encode
                  (trivial-utf-8:string-to-utf-8-bytes
-                  (uiop:read-file-string (gr8s:cluster-pki-ca-certificate-path ,pki))))))
+                  (uiop:read-file-string (gr8s.security::cluster-pki-ca-certificate-path ,pki))))))
          (multiple-value-bind (,certificate ,key) (admission-test-credentials ,pki)
            (progn
              (setf *admission-test-global-handler*
@@ -221,19 +221,19 @@
                       (progn
                         (dolist (namespace '("alpha" "beta"))
                           (check-core-status 201 "/api/v1/namespaces" :method :post
-                            :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace"
-                                                       "metadata" (gr8s::core-object "name" namespace "labels" (gr8s::core-object "team" namespace)))))
+                            :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Namespace"
+                                                       "metadata" (gr8s.resources::core-object "name" namespace "labels" (gr8s.resources::core-object "team" namespace)))))
                         ,@body)
                    (funcall ,stop)
                    (uiop:delete-directory-tree ,root :validate t :if-does-not-exist :ignore))))))))))
 
 (defun admission-test-webhook (name path &rest fields)
   "Build a webhook on ConfigMap writes that calls the local backend at PATH."
-  (let ((webhook (gr8s::core-object
+  (let ((webhook (gr8s.resources::core-object
                   "name" name "sideEffects" "None" "admissionReviewVersions" #("v1")
-                  "clientConfig" (gr8s::core-object "url" (format nil "https://localhost:~D~A" *admission-test-port* path)
+                  "clientConfig" (gr8s.resources::core-object "url" (format nil "https://localhost:~D~A" *admission-test-port* path)
                                                     "caBundle" *admission-test-bundle*)
-                  "rules" (vector (gr8s::core-object "operations" #("CREATE" "UPDATE" "DELETE") "apiGroups" #("")
+                  "rules" (vector (gr8s.resources::core-object "operations" #("CREATE" "UPDATE" "DELETE") "apiGroups" #("")
                                                      "apiVersions" #("v1") "resources" #("configmaps")))
                   "timeoutSeconds" 5)))
     (loop for (key value) on fields by #'cddr do (setf (gethash key webhook) value))
@@ -242,8 +242,8 @@
 (defun admission-test-config (kind name &rest webhooks)
   "Create a webhook configuration of KIND through the API."
   (check-core-status 201 (format nil "/apis/admissionregistration.k8s.io/v1/~(~A~)s" kind) :method :post
-    :object (gr8s::core-object "apiVersion" "admissionregistration.k8s.io/v1" "kind" kind
-                               "metadata" (gr8s::core-object "name" name)
+    :object (gr8s.resources::core-object "apiVersion" "admissionregistration.k8s.io/v1" "kind" kind
+                               "metadata" (gr8s.resources::core-object "name" name)
                                "webhooks" (coerce webhooks 'vector))))
 
 (defmacro with-admission-handler ((path request) &body body)
@@ -252,7 +252,7 @@
 
 (defun admission-test-configmap (name &rest data)
   "Build a ConfigMap with DATA given as a key/value plist."
-  (core-fixture "ConfigMap" name "data" (apply #'gr8s::core-object data)))
+  (core-fixture "ConfigMap" name "data" (apply #'gr8s.resources::core-object data)))
 
 (defclass admission-test-trickle-stream (trivial-gray-streams:fundamental-binary-input-stream)
   ((octets :initarg :octets :accessor admission-test-trickle-octets)
@@ -271,9 +271,9 @@
 (test request-bodies-survive-short-reads
   (let ((octets (coerce (loop for index below 200000 collect (mod index 251)) '(vector (unsigned-byte 8)))))
     (flet ((trickle () (make-instance 'admission-test-trickle-stream :octets octets)))
-      (is (equalp octets (gr8s::read-complete-body (trickle) (length octets))) "known length")
-      (is (equalp octets (gr8s::read-complete-body (trickle) nil)) "chunked, until end of file")
-      (signals kubernetes-error (gr8s::read-complete-body (trickle) (1+ (length octets)))))))
+      (is (equalp octets (gr8s.apiserver::read-complete-body (trickle) (length octets))) "known length")
+      (is (equalp octets (gr8s.apiserver::read-complete-body (trickle) nil)) "chunked, until end of file")
+      (signals kubernetes-error (gr8s.apiserver::read-complete-body (trickle) (1+ (length octets)))))))
 
 ;;; Configuration API
 
@@ -303,7 +303,7 @@
       (is (hash-table-p (gethash "objectSelector" hook)))
       (is (= 1 (gethash "generation" (gethash "metadata" created))))
       (let ((patched (check-core-status 200 item :method :patch :content-type "application/json-patch+json"
-                       :object (vector (gr8s::core-object "op" "replace" "path" "/webhooks/0/rules/0/operations"
+                       :object (vector (gr8s.resources::core-object "op" "replace" "path" "/webhooks/0/rules/0/operations"
                                                           "value" #("UPDATE"))))))
         (is (= 2 (gethash "generation" (gethash "metadata" patched))))
         (is (< (parse-integer (gethash "resourceVersion" (gethash "metadata" created)))
@@ -316,9 +316,9 @@
     (values store)
     (let ((body (check-core-status 422 "/apis/admissionregistration.k8s.io/v1/mutatingwebhookconfigurations"
                   :method :post
-                  :object (gr8s::core-object
+                  :object (gr8s.resources::core-object
                            "apiVersion" "admissionregistration.k8s.io/v1" "kind" "MutatingWebhookConfiguration"
-                           "metadata" (gr8s::core-object "name" "bad")
+                           "metadata" (gr8s.resources::core-object "name" "bad")
                            "webhooks" (vector (admission-test-webhook "a.b.c" "/x" "reinvocationPolicy" "Sometimes"))))))
       (is (search "reinvocationPolicy" (gethash "message" body))))))
 
@@ -327,9 +327,9 @@
     (values store)
     (let ((created (check-core-status 201 "/apis/admissionregistration.k8s.io/v1/validatingwebhookconfigurations"
                      :method :post
-                     :object (gr8s::core-object
+                     :object (gr8s.resources::core-object
                               "apiVersion" "admissionregistration.k8s.io/v1" "kind" "ValidatingWebhookConfiguration"
-                              "metadata" (gr8s::core-object "name" "lenient")
+                              "metadata" (gr8s.resources::core-object "name" "lenient")
                               "webhooks" (vector (admission-test-webhook "a.b.c" "/x" "reinvocationPolicy" "Never"))))))
       (is (not (nth-value 1 (gethash "reinvocationPolicy" (aref (gethash "webhooks" created) 0))))))))
 
@@ -337,9 +337,9 @@
   (with-admission-api (store)
     (values store)
     (flet ((rejected (expected &rest fields)
-             (let* ((object (gr8s::core-object
+             (let* ((object (gr8s.resources::core-object
                              "apiVersion" "admissionregistration.k8s.io/v1" "kind" "ValidatingWebhookConfiguration"
-                             "metadata" (gr8s::core-object "name" "bad")
+                             "metadata" (gr8s.resources::core-object "name" "bad")
                              "webhooks" (vector (apply #'admission-test-webhook "a.b.c" "/x" fields))))
                     (body (check-core-status 422 "/apis/admissionregistration.k8s.io/v1/validatingwebhookconfigurations"
                             :method :post :object object)))
@@ -350,15 +350,15 @@
       (rejected "failurePolicy" "failurePolicy" "Sometimes")
       (rejected "matchPolicy" "matchPolicy" "Maybe")
       (rejected "admissionReviewVersions" "admissionReviewVersions" #("v2"))
-      (rejected "clientConfig" "clientConfig" (gr8s::core-object))
-      (rejected "https" "clientConfig" (gr8s::core-object "url" "http://example.com/"))
-      (rejected "caBundle" "clientConfig" (gr8s::core-object "url" "https://example.com/" "caBundle" "bm90IGEgY2VydA=="))
-      (rejected "segment[0]" "clientConfig" (gr8s::core-object "service" (gr8s::core-object "namespace" "a" "name" "b" "path" "/Upper_Case")))
-      (rejected "operations" "rules" (vector (gr8s::core-object "operations" #("GET") "apiGroups" #("") "apiVersions" #("v1") "resources" #("pods"))))
-      (rejected "if '*/*' is present" "rules" (vector (gr8s::core-object "operations" #("*") "apiGroups" #("") "apiVersions" #("v1") "resources" #("*/*" "pods"))))
-      (rejected "compilation failed" "matchConditions" (vector (gr8s::core-object "name" "bad" "expression" "... [] bad expression")))
-      (rejected "Duplicate" "matchConditions" (vector (gr8s::core-object "name" "same" "expression" "true")
-                                                      (gr8s::core-object "name" "same" "expression" "true"))))))
+      (rejected "clientConfig" "clientConfig" (gr8s.resources::core-object))
+      (rejected "https" "clientConfig" (gr8s.resources::core-object "url" "http://example.com/"))
+      (rejected "caBundle" "clientConfig" (gr8s.resources::core-object "url" "https://example.com/" "caBundle" "bm90IGEgY2VydA=="))
+      (rejected "segment[0]" "clientConfig" (gr8s.resources::core-object "service" (gr8s.resources::core-object "namespace" "a" "name" "b" "path" "/Upper_Case")))
+      (rejected "operations" "rules" (vector (gr8s.resources::core-object "operations" #("GET") "apiGroups" #("") "apiVersions" #("v1") "resources" #("pods"))))
+      (rejected "if '*/*' is present" "rules" (vector (gr8s.resources::core-object "operations" #("*") "apiGroups" #("") "apiVersions" #("v1") "resources" #("*/*" "pods"))))
+      (rejected "compilation failed" "matchConditions" (vector (gr8s.resources::core-object "name" "bad" "expression" "... [] bad expression")))
+      (rejected "Duplicate" "matchConditions" (vector (gr8s.resources::core-object "name" "same" "expression" "true")
+                                                      (gr8s.resources::core-object "name" "same" "expression" "true"))))))
 
 (defun admission-test-protobuf-field (number wire value)
   "Encode one protobuf field, where VALUE is octets for wire type 2 or an integer for 0."
@@ -406,7 +406,7 @@
                                (admission-test-protobuf-field 7 0 7)
                                (admission-test-protobuf-string 8 "v1")
                                (admission-test-protobuf-field 11 2 condition)))
-         (object (gr8s::decode-admission-protobuf
+         (object (gr8s.resources::decode-admission-protobuf
                   (coerce (concatenate '(vector (unsigned-byte 8))
                                        (admission-test-protobuf-field 1 2 (admission-test-protobuf-string 1 "hook"))
                                        (admission-test-protobuf-field 2 2 webhook))
@@ -464,7 +464,7 @@
           (is (eq 'null (gethash "oldObject" request)))))
       (let ((updated (check-core-status 200 "/api/v1/namespaces/alpha/configmaps/good" :method :patch
                        :content-type "application/merge-patch+json"
-                       :object (gr8s::core-object "data" (gr8s::core-object "k" "w")))))
+                       :object (gr8s.resources::core-object "data" (gr8s.resources::core-object "k" "w")))))
         (is (equal "w" (gethash "k" (gethash "data" updated))))
         (let ((request (cdr (first seen))))
           (is (equal "UPDATE" (gethash "operation" request)))
@@ -492,7 +492,7 @@
     (let ((item "/api/v1/namespaces/alpha/configmaps/keep"))
       (check-core-status 400 item :method :put :object (admission-test-configmap "keep" "k" "w"))
       (check-core-status 400 item :method :patch :content-type "application/strategic-merge-patch+json"
-        :object (gr8s::core-object "data" (gr8s::core-object "k" "w")))
+        :object (gr8s.resources::core-object "data" (gr8s.resources::core-object "k" "w")))
       (check-core-status 400 item :method :delete)
       (is (equal "v" (gethash "k" (gethash "data" (check-core-status 200 item))))))))
 
@@ -516,7 +516,7 @@
            (data (gethash "data" created)))
       (is (equal "yes" (gethash "stage-1" data)))
       (is (equal "yes" (gethash "stage-2" data)))
-      (is (gr8s::core-json-equal-p data (gethash "data" (check-core-status 200 "/api/v1/namespaces/alpha/configmaps/mutated")))
+      (is (gr8s.apiserver::core-json-equal-p data (gethash "data" (check-core-status 200 "/api/v1/namespaces/alpha/configmaps/mutated")))
           "the mutated object is what was stored")
       ;; A mutation that leaves the object invalid is refused by normal validation.
       (with-admission-handler (path request)
@@ -554,28 +554,28 @@
     (admission-test-config
      "ValidatingWebhookConfiguration" "selective"
      (admission-test-webhook "namespace.example.com" "/n"
-                             "namespaceSelector" (gr8s::core-object "matchLabels" (gr8s::core-object "team" "alpha"))
-                             "rules" (vector (gr8s::core-object "operations" #("CREATE") "apiGroups" #("") "apiVersions" #("v1") "resources" #("configmaps"))))
+                             "namespaceSelector" (gr8s.resources::core-object "matchLabels" (gr8s.resources::core-object "team" "alpha"))
+                             "rules" (vector (gr8s.resources::core-object "operations" #("CREATE") "apiGroups" #("") "apiVersions" #("v1") "resources" #("configmaps"))))
      (admission-test-webhook "object.example.com" "/o"
-                             "objectSelector" (gr8s::core-object "matchExpressions"
-                                                                 (vector (gr8s::core-object "key" "hooked" "operator" "Exists")))
-                             "namespaceSelector" (gr8s::core-object "matchLabels" (gr8s::core-object "team" "beta"))
-                             "rules" (vector (gr8s::core-object "operations" #("CREATE") "apiGroups" #("") "apiVersions" #("v1") "resources" #("secrets")))))
+                             "objectSelector" (gr8s.resources::core-object "matchExpressions"
+                                                                 (vector (gr8s.resources::core-object "key" "hooked" "operator" "Exists")))
+                             "namespaceSelector" (gr8s.resources::core-object "matchLabels" (gr8s.resources::core-object "team" "beta"))
+                             "rules" (vector (gr8s.resources::core-object "operations" #("CREATE") "apiGroups" #("") "apiVersions" #("v1") "resources" #("secrets")))))
     (check-core-status 400 "/api/v1/namespaces/alpha/configmaps" :method :post :object (admission-test-configmap "a"))
     (check-core-status 201 "/api/v1/namespaces/beta/configmaps" :method :post :object (admission-test-configmap "a"))
     (check-core-status 201 "/api/v1/namespaces/beta/secrets" :method :post :object (core-fixture "Secret" "plain"))
     (check-core-status 400 "/api/v1/namespaces/beta/secrets" :method :post
-      :object (gr8s::core-object "apiVersion" "v1" "kind" "Secret"
-                                 "metadata" (gr8s::core-object "name" "labelled" "labels" (gr8s::core-object "hooked" "yes"))))
+      :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Secret"
+                                 "metadata" (gr8s.resources::core-object "name" "labelled" "labels" (gr8s.resources::core-object "hooked" "yes"))))
     ;; An operation outside the rules is untouched.
     (check-core-status 200 "/api/v1/namespaces/beta/configmaps/a" :method :delete)))
 
 (test rule-matching-follows-upstream-resources-and-scope
   (flet ((matches (resources &key scope (plural "pods") subresource (namespace "alpha"))
-           (let ((rule (gr8s::core-object "operations" #("*") "apiGroups" #("*") "apiVersions" #("*")
+           (let ((rule (gr8s.resources::core-object "operations" #("*") "apiGroups" #("*") "apiVersions" #("*")
                                           "resources" (coerce resources 'vector) "scope" (or scope "*"))))
-             (and (gr8s::admission-rule-matches-p
-                   rule (gr8s::make-admission-attributes :operation "CREATE" :plural plural :subresource subresource :namespace namespace)
+             (and (gr8s.apiserver::admission-rule-matches-p
+                   rule (gr8s.apiserver::make-admission-attributes :operation "CREATE" :plural plural :subresource subresource :namespace namespace)
                    "" "v1")
                   t))))
     (is-true (matches '("pods")))
@@ -597,7 +597,7 @@
 (test failure-policy-governs-unreachable-and-untrusted-backends
   (with-admission-api (store)
     (values store)
-    (let ((untrusted (gr8s::core-object "url" (format nil "https://localhost:~D/x" *admission-test-port*))))
+    (let ((untrusted (gr8s.resources::core-object "url" (format nil "https://localhost:~D/x" *admission-test-port*))))
       ;; A trusted call to the same host first must not vouch for the untrusted ones through TLS resumption.
       (admission-test-config "ValidatingWebhookConfiguration" "trusted" (admission-test-webhook "trusted.example.com" "/x"))
       (check-core-status 201 "/api/v1/namespaces/alpha/configmaps" :method :post :object (admission-test-configmap "first"))
@@ -617,7 +617,7 @@
     (with-admission-handler (path request) (admission-test-deny "never"))
     (admission-test-config "ValidatingWebhookConfiguration" "everything"
                            (admission-test-webhook "all.example.com" "/x"
-                             "rules" (vector (gr8s::core-object "operations" #("*") "apiGroups" #("admissionregistration.k8s.io")
+                             "rules" (vector (gr8s.resources::core-object "operations" #("*") "apiGroups" #("admissionregistration.k8s.io")
                                                                 "apiVersions" #("*") "resources" #("*")))))
     (admission-test-config "MutatingWebhookConfiguration" "second" (admission-test-webhook "a.b.c" "/x"))
     (check-core-status 200 "/apis/admissionregistration.k8s.io/v1/mutatingwebhookconfigurations/second" :method :delete)
@@ -641,24 +641,24 @@
     (values store)
     (with-admission-handler (path request) (admission-test-deny (format nil "reached ~A" path)))
     (check-core-status 201 "/api/v1/namespaces/alpha/services" :method :post
-      :object (gr8s::core-object "apiVersion" "v1" "kind" "Service" "metadata" (gr8s::core-object "name" "hook")
-                                 "spec" (gr8s::core-object "ports" (vector (gr8s::core-object "port" 8443 "targetPort" *admission-test-port*)))))
+      :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Service" "metadata" (gr8s.resources::core-object "name" "hook")
+                                 "spec" (gr8s.resources::core-object "ports" (vector (gr8s.resources::core-object "port" 8443 "targetPort" *admission-test-port*)))))
     (admission-test-config "ValidatingWebhookConfiguration" "service"
                            (admission-test-webhook "service.example.com" "/s"
-                             "clientConfig" (gr8s::core-object "service" (gr8s::core-object "namespace" "alpha" "name" "hook" "port" 8443 "path" "/via-service")
+                             "clientConfig" (gr8s.resources::core-object "service" (gr8s.resources::core-object "namespace" "alpha" "name" "hook" "port" 8443 "path" "/via-service")
                                                                "caBundle" *admission-test-bundle*)))
     ;; No endpoints yet: a call failure under the default Fail policy.
     (let ((body (check-core-status 500 "/api/v1/namespaces/beta/configmaps" :method :post :object (admission-test-configmap "a"))))
       (is (search "no endpoints available" (gethash "message" body)))
       (is (search "https://hook.alpha.svc:8443/via-service?timeout=5s" (gethash "message" body))))
     ;; The API refuses a loopback endpoint, which is the only address this backend has.
-    (gr8s::with-store-lock (store)
-      (setf (gethash (gr8s::core-resource-key "endpointslices" "alpha" "hook-1") (gr8s::pod-store-resources store))
-            (gr8s::core-object "apiVersion" "discovery.k8s.io/v1" "kind" "EndpointSlice" "addressType" "IPv4"
-                               "metadata" (gr8s::core-object "name" "hook-1" "namespace" "alpha"
-                                                             "labels" (gr8s::core-object "kubernetes.io/service-name" "hook"))
-                               "ports" (vector (gr8s::core-object "port" *admission-test-port* "protocol" "TCP"))
-                               "endpoints" (vector (gr8s::core-object "addresses" #("127.0.0.1"))))))
+    (gr8s.store::with-store-lock (store)
+      (setf (gethash (gr8s.resources::core-resource-key "endpointslices" "alpha" "hook-1") (gr8s.store::pod-store-resources store))
+            (gr8s.resources::core-object "apiVersion" "discovery.k8s.io/v1" "kind" "EndpointSlice" "addressType" "IPv4"
+                               "metadata" (gr8s.resources::core-object "name" "hook-1" "namespace" "alpha"
+                                                             "labels" (gr8s.resources::core-object "kubernetes.io/service-name" "hook"))
+                               "ports" (vector (gr8s.resources::core-object "port" *admission-test-port* "protocol" "TCP"))
+                               "endpoints" (vector (gr8s.resources::core-object "addresses" #("127.0.0.1"))))))
     (let ((body (check-core-status 400 "/api/v1/namespaces/beta/configmaps" :method :post :object (admission-test-configmap "a"))))
       (is (search "reached /via-service?timeout=5s" (gethash "message" body))))))
 
@@ -671,7 +671,7 @@
         (apply #'admission-test-allow (admission-test-patch (admission-test-add "/data/hit" "yes"))))
       (admission-test-config "MutatingWebhookConfiguration" "conditions"
                              (admission-test-webhook "conditional.example.com" "/m"
-                               "matchConditions" (vector (gr8s::core-object "name" "skip-me" "expression" "object.metadata.name != 'skip-me'"))))
+                               "matchConditions" (vector (gr8s.resources::core-object "name" "skip-me" "expression" "object.metadata.name != 'skip-me'"))))
       (is-false (gethash "hit" (gethash "data" (check-core-status 201 "/api/v1/namespaces/alpha/configmaps" :method :post
                                                  :object (admission-test-configmap "skip-me" "k" "v")))))
       (is (= 0 calls))
@@ -681,16 +681,16 @@
     ;; A condition's runtime error refuses under Fail and skips under Ignore.
     (admission-test-config "ValidatingWebhookConfiguration" "erroring"
                            (admission-test-webhook "fail.example.com" "/e"
-                             "rules" (vector (gr8s::core-object "operations" #("CREATE") "apiGroups" #("") "apiVersions" #("v1") "resources" #("secrets")))
-                             "matchConditions" (vector (gr8s::core-object "name" "missing" "expression" "object.nothing == 'x'"))))
+                             "rules" (vector (gr8s.resources::core-object "operations" #("CREATE") "apiGroups" #("") "apiVersions" #("v1") "resources" #("secrets")))
+                             "matchConditions" (vector (gr8s.resources::core-object "name" "missing" "expression" "object.nothing == 'x'"))))
     (let ((body (check-core-status 403 "/api/v1/namespaces/alpha/secrets" :method :post :object (core-fixture "Secret" "a"))))
       (is (search "no such key" (gethash "message" body))))
     (check-core-status 200 "/apis/admissionregistration.k8s.io/v1/validatingwebhookconfigurations/erroring" :method :delete)
     (with-admission-handler (path request) (admission-test-deny "reached"))
     (admission-test-config "ValidatingWebhookConfiguration" "erroring"
                            (admission-test-webhook "ignore.example.com" "/e" "failurePolicy" "Ignore"
-                             "rules" (vector (gr8s::core-object "operations" #("CREATE") "apiGroups" #("") "apiVersions" #("v1") "resources" #("secrets")))
-                             "matchConditions" (vector (gr8s::core-object "name" "missing" "expression" "object.nothing == 'x'"))))
+                             "rules" (vector (gr8s.resources::core-object "operations" #("CREATE") "apiGroups" #("") "apiVersions" #("v1") "resources" #("secrets")))
+                             "matchConditions" (vector (gr8s.resources::core-object "name" "missing" "expression" "object.nothing == 'x'"))))
     (check-core-status 201 "/api/v1/namespaces/alpha/secrets" :method :post :object (core-fixture "Secret" "a"))))
 
 (test bad-admission-responses-are-call-failures
@@ -700,7 +700,7 @@
                            (admission-test-webhook "bad.example.com" "/x"))
     (flet ((failure (response expected)
              (with-admission-handler (path request)
-               (let ((copy (gr8s::copy-core-object response)))
+               (let ((copy (gr8s.resources::copy-core-object response)))
                  (when (eq :wrong-uid (gethash "uid" copy)) (setf (gethash "uid" copy) "other"))
                  copy))
              (let ((body (check-core-status 500 "/api/v1/namespaces/alpha/configmaps" :method :post :object (admission-test-configmap "a"))))
@@ -714,8 +714,8 @@
 
 (defun admission-test-pod-object (name &rest fields)
   "Build a minimal Pod manifest named NAME."
-  (let ((pod (gr8s::copy-core-object (pod-to-object (parse-pod *valid-pod-json*)))))
-    (setf (gethash "metadata" pod) (gr8s::core-object "name" name))
+  (let ((pod (gr8s.resources::copy-core-object (pod-to-object (parse-pod *valid-pod-json*)))))
+    (setf (gethash "metadata" pod) (gr8s.resources::core-object "name" name))
     (loop for (key value) on fields by #'cddr
           do (setf (gethash key (gethash "metadata" pod)) value))
     pod))
@@ -723,7 +723,7 @@
 (defun admission-test-pod-webhook (name path resources operations)
   "Build a webhook on the Pod RESOURCES and OPERATIONS."
   (admission-test-webhook name path
-    "rules" (vector (gr8s::core-object "operations" (coerce operations 'vector) "apiGroups" #("")
+    "rules" (vector (gr8s.resources::core-object "operations" (coerce operations 'vector) "apiGroups" #("")
                                        "apiVersions" #("v1") "resources" (coerce resources 'vector)))))
 
 (test pod-writes-pass-through-webhooks
@@ -736,7 +736,7 @@
                (apply #'admission-test-allow
                       (admission-test-patch
                        (admission-test-add "/spec/initContainers"
-                                           (vector (gr8s::core-object "name" "added" "image" "added-image" "resources" (gr8s::core-object)))))))
+                                           (vector (gr8s.resources::core-object "name" "added" "image" "added-image" "resources" (gr8s.resources::core-object)))))))
               ((let* ((object (gethash "object" request))
                       (labels (admission-test-labels (if (hash-table-p object) object (gethash "oldObject" request)))))
                  (and labels (gethash "denied" labels)))
@@ -745,7 +745,7 @@
       (admission-test-config "ValidatingWebhookConfiguration" "pods-validate"
                              (admission-test-pod-webhook "validate.example.com" "/validate" '("pods") '("CREATE" "UPDATE" "DELETE")))
       (let ((body (check-core-status 400 "/api/v1/namespaces/alpha/pods" :method :post
-                    :object (admission-test-pod-object "refused" "labels" (gr8s::core-object "denied" "yes")))))
+                    :object (admission-test-pod-object "refused" "labels" (gr8s.resources::core-object "denied" "yes")))))
         (is (search "the pod is denied" (gethash "message" body))))
       (check-core-status 404 "/api/v1/namespaces/alpha/pods/refused")
       (admission-test-config "MutatingWebhookConfiguration" "pods-mutate"
@@ -759,7 +759,7 @@
         (is (equal "File" (gethash "terminationMessagePolicy" (aref (gethash "containers" (gethash "spec" created)) 0)))))
       (check-core-status 400 "/api/v1/namespaces/alpha/pods/mutated" :method :patch
         :content-type "application/merge-patch+json"
-        :object (gr8s::core-object "metadata" (gr8s::core-object "labels" (gr8s::core-object "denied" "yes"))))
+        :object (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "labels" (gr8s.resources::core-object "denied" "yes"))))
       (is-false (gethash "labels" (gethash "metadata" (check-core-status 200 "/api/v1/namespaces/alpha/pods/mutated"))))
       (check-core-status 200 "/api/v1/namespaces/alpha/pods/mutated" :method :delete)
       (let ((request (first seen)))
@@ -795,13 +795,13 @@
 
 (test containers-validate-termination-message-settings
   (flet ((pod-with (field value)
-           (let* ((object (gr8s::copy-core-object (pod-to-object (parse-pod *valid-pod-json*))))
+           (let* ((object (gr8s.resources::copy-core-object (pod-to-object (parse-pod *valid-pod-json*))))
                   (container (aref (gethash "containers" (gethash "spec" object)) 0)))
              (setf (gethash field container) value)
              object)))
-    (is (gr8s::pod-name (parse-pod (pod-with "terminationMessagePolicy" "File"))))
-    (is (gr8s::pod-name (parse-pod (pod-with "terminationMessagePolicy" "FallbackToLogsOnError"))))
-    (is (gr8s::pod-name (parse-pod (pod-with "terminationMessagePath" "/elsewhere"))))
+    (is (gr8s.model::pod-name (parse-pod (pod-with "terminationMessagePolicy" "File"))))
+    (is (gr8s.model::pod-name (parse-pod (pod-with "terminationMessagePolicy" "FallbackToLogsOnError"))))
+    (is (gr8s.model::pod-name (parse-pod (pod-with "terminationMessagePath" "/elsewhere"))))
     (signals kubernetes-error (parse-pod (pod-with "terminationMessagePolicy" "Sometimes")))
     (signals kubernetes-error (parse-pod (pod-with "terminationMessagePath" "relative/path")))
     (signals kubernetes-error (parse-pod (pod-with "terminationMessagePath" "/a/../b")))))
@@ -812,20 +812,20 @@
     (with-admission-handler (path request) (admission-test-deny "the crd contains unwanted label"))
     (admission-test-config "ValidatingWebhookConfiguration" "crd"
                            (admission-test-webhook "crd.example.com" "/crd"
-                             "rules" (vector (gr8s::core-object "operations" #("CREATE") "apiGroups" #("apiextensions.k8s.io")
+                             "rules" (vector (gr8s.resources::core-object "operations" #("CREATE") "apiGroups" #("apiextensions.k8s.io")
                                                                 "apiVersions" #("*") "resources" #("customresourcedefinitions")))))
     (let ((body (check-core-status 400 "/apis/apiextensions.k8s.io/v1/customresourcedefinitions" :method :post
-                  :object (gr8s::core-object
+                  :object (gr8s.resources::core-object
                            "apiVersion" "apiextensions.k8s.io/v1" "kind" "CustomResourceDefinition"
-                           "metadata" (gr8s::core-object "name" "e2e-deny-crds.webhook.example.com")
-                           "spec" (gr8s::core-object
+                           "metadata" (gr8s.resources::core-object "name" "e2e-deny-crds.webhook.example.com")
+                           "spec" (gr8s.resources::core-object
                                    "group" "webhook.example.com" "scope" "Namespaced"
-                                   "names" (gr8s::core-object "plural" "e2e-deny-crds" "singular" "e2e-deny-crd"
+                                   "names" (gr8s.resources::core-object "plural" "e2e-deny-crds" "singular" "e2e-deny-crd"
                                                               "kind" "E2e-deny-crd" "listKind" "E2e-deny-crdList")
-                                   "versions" (vector (gr8s::core-object
+                                   "versions" (vector (gr8s.resources::core-object
                                                        "name" "v1" "served" t "storage" t
-                                                       "schema" (gr8s::core-object
-                                                                 "openAPIV3Schema" (gr8s::core-object
+                                                       "schema" (gr8s.resources::core-object
+                                                                 "openAPIV3Schema" (gr8s.resources::core-object
                                                                                     "type" "object"
                                                                                     "x-kubernetes-preserve-unknown-fields" t)))))))))
       (is (search "the crd contains unwanted label" (gethash "message" body))))))
@@ -833,14 +833,14 @@
 (test workload-scale-subresource-passes-through-webhooks
   (with-admission-api (store)
     (values store)
-    (let ((seen nil) (deployment (gr8s::core-object
+    (let ((seen nil) (deployment (gr8s.resources::core-object
                                   "apiVersion" "apps/v1" "kind" "Deployment"
-                                  "metadata" (gr8s::core-object "name" "web")
-                                  "spec" (gr8s::core-object
+                                  "metadata" (gr8s.resources::core-object "name" "web")
+                                  "spec" (gr8s.resources::core-object
                                           "replicas" 1
-                                          "selector" (gr8s::core-object "matchLabels" (gr8s::core-object "app" "web"))
-                                          "template" (gr8s::core-object
-                                                      "metadata" (gr8s::core-object "labels" (gr8s::core-object "app" "web"))
+                                          "selector" (gr8s.resources::core-object "matchLabels" (gr8s.resources::core-object "app" "web"))
+                                          "template" (gr8s.resources::core-object
+                                                      "metadata" (gr8s.resources::core-object "labels" (gr8s.resources::core-object "app" "web"))
                                                       "spec" (gethash "spec" (pod-to-object (parse-pod *valid-pod-json*))))))))
       (check-core-status 201 "/apis/apps/v1/namespaces/alpha/deployments" :method :post :object deployment)
       (with-admission-handler (path request)
@@ -850,13 +850,13 @@
             (admission-test-allow)))
       (admission-test-config "ValidatingWebhookConfiguration" "scale"
                              (admission-test-webhook "scale.example.com" "/scale"
-                               "rules" (vector (gr8s::core-object "operations" #("UPDATE") "apiGroups" #("apps")
+                               "rules" (vector (gr8s.resources::core-object "operations" #("UPDATE") "apiGroups" #("apps")
                                                                   "apiVersions" #("v1") "resources" #("deployments/scale")))))
       (let ((item "/apis/apps/v1/namespaces/alpha/deployments/web/scale"))
         (check-core-status 400 item :method :patch :content-type "application/merge-patch+json"
-          :object (gr8s::core-object "spec" (gr8s::core-object "replicas" 9)))
+          :object (gr8s.resources::core-object "spec" (gr8s.resources::core-object "replicas" 9)))
         (check-core-status 200 item :method :patch :content-type "application/merge-patch+json"
-          :object (gr8s::core-object "spec" (gr8s::core-object "replicas" 3)))
+          :object (gr8s.resources::core-object "spec" (gr8s.resources::core-object "replicas" 3)))
         (let ((request (first seen)))
           (is (equal "scale" (gethash "subResource" request)))
           (is (equal "Scale" (gethash "kind" (gethash "kind" request))))
@@ -867,9 +867,9 @@
   (with-admission-api (store)
     (values store)
     (let ((names nil) (template (lambda (name)
-                                  (gr8s::core-object "apiVersion" "v1" "kind" "PodTemplate"
-                                                     "metadata" (gr8s::core-object "name" name)
-                                                     "template" (gr8s::core-object "metadata" (gr8s::core-object)
+                                  (gr8s.resources::core-object "apiVersion" "v1" "kind" "PodTemplate"
+                                                     "metadata" (gr8s.resources::core-object "name" name)
+                                                     "template" (gr8s.resources::core-object "metadata" (gr8s.resources::core-object)
                                                                                    "spec" (gethash "spec" (pod-to-object (parse-pod *valid-pod-json*))))))))
       (dolist (name '("one" "two"))
         (check-core-status 201 "/api/v1/namespaces/alpha/podtemplates" :method :post :object (funcall template name)))
@@ -878,7 +878,7 @@
         (if (equal "two" (gethash "name" request)) (admission-test-deny "keep two") (admission-test-allow)))
       (admission-test-config "ValidatingWebhookConfiguration" "collection"
                              (admission-test-webhook "collection.example.com" "/c"
-                               "rules" (vector (gr8s::core-object "operations" #("DELETE") "apiGroups" #("")
+                               "rules" (vector (gr8s.resources::core-object "operations" #("DELETE") "apiGroups" #("")
                                                                   "apiVersions" #("v1") "resources" #("podtemplates")))))
       (check-core-status 400 "/api/v1/namespaces/alpha/podtemplates" :method :delete)
       (is (equal '("one" "two") (sort (copy-list names) #'string<)))
@@ -904,13 +904,13 @@
         ;; Another writer lands while the first attempt is inside the webhook.
         (unless raced
           (setf raced t)
-          (gr8s::update-core-resource store "configmaps" "alpha" "shared"
+          (gr8s.resources::update-core-resource store "configmaps" "alpha" "shared"
                                       (lambda (old) (setf (gethash "other" (gethash "data" old)) "2") old)))
         (admission-test-allow))
       (admission-test-config "ValidatingWebhookConfiguration" "race" (admission-test-webhook "race.example.com" "/r"))
       (let ((body (check-core-status 200 "/api/v1/namespaces/alpha/configmaps/shared" :method :patch
                     :content-type "application/merge-patch+json"
-                    :object (gr8s::core-object "data" (gr8s::core-object "mine" "3")))))
+                    :object (gr8s.resources::core-object "data" (gr8s.resources::core-object "mine" "3")))))
         (is (equal "2" (gethash "other" (gethash "data" body))) "the concurrent write survives")
         (is (equal "3" (gethash "mine" (gethash "data" body))))))))
 
@@ -922,12 +922,12 @@
              (scale (replicas)
                (check-core-status 200 "/api/v1/namespaces/alpha/replicationcontrollers/rc" :method :patch
                  :content-type "application/merge-patch+json"
-                 :object (gr8s::core-object "spec" (gr8s::core-object "replicas" replicas)))))
+                 :object (gr8s.resources::core-object "spec" (gr8s.resources::core-object "replicas" replicas)))))
         (with-admission-handler (path request)
           (push request seen)
           (cond ((search "/mutate" path)
                  (apply #'admission-test-allow
-                        (admission-test-patch (admission-test-add "/metadata/annotations" (gr8s::core-object "mutated" "yes")))))
+                        (admission-test-patch (admission-test-add "/metadata/annotations" (gr8s.resources::core-object "mutated" "yes")))))
                 ((and deny-create (equal "CREATE" (gethash "operation" request)))
                  (admission-test-deny "no more pods"))
                 ((and deny-delete (equal "DELETE" (gethash "operation" request)))
@@ -939,7 +939,7 @@
                                (admission-test-pod-webhook "validate.example.com" "/validate" '("pods") '("CREATE" "DELETE")))
         (let ((fixture (rc-fixture "rc" 1)))
           (check-core-status 201 "/api/v1/namespaces/alpha/replicationcontrollers" :method :post :object fixture))
-        (gr8s::reconcile-workloads reconciler)
+        (gr8s.controllers::reconcile-workloads reconciler)
         ;; A mutating webhook's change reaches the Pod the controller creates.
         (is (= 1 (length (pods))))
         (is (equal "yes" (gethash "mutated" (gethash "annotations" (gethash "metadata" (pod-to-object (first (pods))))))))
@@ -950,21 +950,21 @@
         ;; A refusal leaves the Pod uncreated and reports it on the owner.
         (setf deny-create t)
         (scale 2)
-        (gr8s::reconcile-workloads reconciler)
+        (gr8s.controllers::reconcile-workloads reconciler)
         (is (= 1 (length (pods))))
-        (let ((status (gethash "status" (gr8s::get-core-resource store "replicationcontrollers" "alpha" "rc"))))
+        (let ((status (gethash "status" (gr8s.resources::get-core-resource store "replicationcontrollers" "alpha" "rc"))))
           (is (search "no more pods" (gethash "message" (aref (gethash "conditions" status) 0)))))
         (setf deny-create nil)
-        (gr8s::reconcile-workloads reconciler)
+        (gr8s.controllers::reconcile-workloads reconciler)
         (is (= 2 (length (pods))))
         ;; A refused deletion leaves the Pod alone until the webhook allows it.
         (setf deny-delete t seen nil)
         (scale 1)
-        (gr8s::reconcile-workloads reconciler)
-        (is (notany #'gr8s::deletion-requested-p (pods)))
+        (gr8s.controllers::reconcile-workloads reconciler)
+        (is (notany #'gr8s.kubelet::deletion-requested-p (pods)))
         (is-true (find "DELETE" seen :test #'equal :key (lambda (entry) (gethash "operation" entry))))
         (setf deny-delete nil)
-        (gr8s::reconcile-workloads reconciler)
+        (gr8s.controllers::reconcile-workloads reconciler)
         (is (= 1 (length (pods))))))))
 
 (test garbage-collection-offers-its-deletions-to-webhooks
@@ -975,16 +975,16 @@
         (if deny (admission-test-deny "keep this configmap") (admission-test-allow)))
       (let ((orphan (admission-test-configmap "orphan")))
         (setf (gethash "ownerReferences" (gethash "metadata" orphan))
-              (vector (gr8s::core-object "apiVersion" "v1" "kind" "ConfigMap" "name" "absent" "uid" "absent-uid")))
+              (vector (gr8s.resources::core-object "apiVersion" "v1" "kind" "ConfigMap" "name" "absent" "uid" "absent-uid")))
         (check-core-status 201 "/api/v1/namespaces/alpha/configmaps" :method :post :object orphan))
       (admission-test-config "ValidatingWebhookConfiguration" "configmaps"
                              (admission-test-webhook "validate.example.com" "/validate"))
-      (gr8s::collect-orphaned-api-objects reconciler)
-      (is-true (gr8s::get-core-resource store "configmaps" "alpha" "orphan"))
+      (gr8s.controllers::collect-orphaned-api-objects reconciler)
+      (is-true (gr8s.resources::get-core-resource store "configmaps" "alpha" "orphan"))
       (let ((request (first seen)))
         (is (equal "DELETE" (gethash "operation" request)))
         (is (equal "system:serviceaccount:kube-system:generic-garbage-collector"
                    (gethash "username" (gethash "userInfo" request)))))
       (setf deny nil)
-      (gr8s::collect-orphaned-api-objects reconciler)
-      (signals kubernetes-error (gr8s::get-core-resource store "configmaps" "alpha" "orphan")))))
+      (gr8s.controllers::collect-orphaned-api-objects reconciler)
+      (signals kubernetes-error (gr8s.resources::get-core-resource store "configmaps" "alpha" "orphan")))))

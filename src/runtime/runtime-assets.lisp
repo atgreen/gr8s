@@ -13,7 +13,7 @@
 ;;;; VM), so an uncompressed, asset-free plugin image is prepared once and the CNI
 ;;;; link points at it instead. Everything here is Linux-only.
 
-(in-package #:gr8s)
+(in-package #:gr8s.runtime)
 
 (defparameter +runtime-asset-names+
   '("containerd" "containerd-shim-runc-v2" "runc"

@@ -8,7 +8,7 @@
 ;;;; keeps it for its lifetime; the runtime maps the volumes it mounts with idmapped
 ;;;; mounts, so files stay owned by the IDs they have inside the Pod.
 
-(in-package #:gr8s)
+(in-package #:gr8s.kubelet)
 
 (defparameter +user-namespace-length+ 65536
   "The IDs each Pod's user namespace maps, as the kubelet's default userNamespaces.idsPerPod.")

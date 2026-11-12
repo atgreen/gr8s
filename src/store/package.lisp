@@ -138,11 +138,3 @@
    #:update-pod-unlocked
    #:with-core-write
    #:with-store-lock))
-
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (do-external-symbols (symbol '#:gr8s.store)
-    (shadowing-import symbol '#:gr8s))
-  (dolist (name '("CREATE-POD" "DELETE-POD" "GET-POD" "LIST-PODS"
-                  "MARK-POD-DELETING" "OPEN-STORE" "REMOVE-POD"
-                  "UPDATE-POD"))
-    (export (find-symbol name '#:gr8s.store) '#:gr8s)))

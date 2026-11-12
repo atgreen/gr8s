@@ -4,7 +4,7 @@
 ;;;; Package boundary for Kubernetes resource semantics and admission.
 
 (defpackage #:gr8s.resources
-  (:use #:cl #:gr8s)
+  (:use #:cl)
   ;; RE2-syntax regular expressions now come from the extracted cl-re2 library.
   (:import-from #:cl-re2
    #:re2-compile #:re2-search #:re2-match-p
@@ -43,44 +43,6 @@
 
 (defvar gr8s.resources::*internal-stored-resource-types* nil
   "Private consensus records, persisted with resources but not exposed through generic Kubernetes CRUD.")
-
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (let ((resources (find-package '#:gr8s.resources))
-        (composition (find-package '#:gr8s)))
-    ;; These operations are referenced by persistence and HA code loaded before
-    ;; their implementations.  Give those forward references their final owner.
-    (dolist (name '("*RAFT-LOCAL-PLANE-RESOURCES*"
-                    "*STORED-RESOURCE-TYPES*"
-                    "COPY-CORE-OBJECT"
-                    "COPY-CORE-RESOURCE-INDEX"
-                    "CORE-OBJECT"
-                    "CORE-RESOURCE-API-VERSION"
-                    "CORE-RESOURCE-ERROR"
-                    "CORE-RESOURCE-KEY"
-                    "CORE-RESOURCE-KIND"
-                    "CORE-RESOURCE-NAMESPACED-P"
-                    "CREATE-CORE-RESOURCE"
-                    "DELETE-CORE-RESOURCE"
-                    "DISABLE-SECRET-ENCRYPTION"
-                    "ENABLE-SECRET-ENCRYPTION"
-                    "FINALIZE-SECRET-ENCRYPTION-KEY"
-                    "GET-CORE-RESOURCE"
-                    "GET-CORE-RESOURCE-UNLOCKED"
-                    "INSTALL-SECRET-ENCRYPTION-COMMAND"
-                    "INSTALL-CORE-STATE-BLOB"
-                    "INSTALL-CORE-STATE-DELTA"
-                    "LIST-CORE-RESOURCES"
-                    "LOAD-CORE-RESOURCES"
-                    "NORMALIZE-CORE-RESOURCE"
-                    "PREPARE-SECRET-ENCRYPTION-KEY"
-                    "PROMOTE-SECRET-ENCRYPTION-KEY"
-                    "REENCRYPT-SECRETS"
-                    "SECRET-ENCRYPTION-STATUS"
-                    "STORED-RESOURCE-TYPE"
-                    "UPDATE-CORE-RESOURCE"
-                    "WITH-CRD-DEFERRED-CONVERSIONS"))
-      (shadowing-import (find-symbol name resources) composition))))
-
 ;;; The CEL (Common Expression Language) engine now lives in the standalone
 ;;; cl-cel library (installed via ocicl).  gr8s drives it from several packages
 ;;; the way the in-tree engine was driven: admission policies, CRD validation and
@@ -145,5 +107,7 @@
                            "MAKE-CEL-OPTIONAL"
                            "MAKE-CEL-PARSER"))))
     (shadowing-import symbols '#:gr8s.resources)
-    (export symbols '#:gr8s.resources)
-    (shadowing-import symbols '#:gr8s)))
+    (export symbols '#:gr8s.resources)))
+
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (export (intern "PARSE-YAML" '#:gr8s.resources) '#:gr8s.resources))

@@ -17,48 +17,48 @@
     (is (search "GET-CURRENT-PID-TGID" text))))
 
 (test trace-compiler-rejects-an-empty-cgroup-scope
-  (signals gr8s.runtime:runtime-error
+  (signals gr8s.runtime::runtime-error
     (gr8s.agent::compile-cgroup-scoped-trace
      "kprobe:tcp_sendmsg { @ = count(); }" nil)))
 
 (test trace-compiler-enforces-request-limits
-  (signals gr8s.runtime:runtime-error
+  (signals gr8s.runtime::runtime-error
     (gr8s.agent::compile-cgroup-scoped-trace
      (make-string (1+ gr8s.agent::+trace-max-source-bytes+)
                   :initial-element #\Space)
      '(101)))
-  (signals gr8s.runtime:runtime-error
+  (signals gr8s.runtime::runtime-error
     (gr8s.agent::compile-cgroup-scoped-trace
      "kprobe:tcp_sendmsg { @ = count(); }"
      '(101)
      :duration-milliseconds
      (1+ gr8s.agent::+trace-max-duration-milliseconds+)))
-  (signals gr8s.runtime:runtime-error
+  (signals gr8s.runtime::runtime-error
     (gr8s.agent::compile-cgroup-scoped-trace
      "kprobe:tcp_sendmsg { @ = count(); }"
      '(101)
      :duration-milliseconds 0)))
 
 (test trace-compiler-rejects-userspace-probes
-  (signals gr8s.runtime:runtime-error
+  (signals gr8s.runtime::runtime-error
     (gr8s.agent::compile-cgroup-scoped-trace
      "uprobe:/usr/lib64/libc.so.6:malloc { @[comm] = count(); }"
      '(101)))
-  (signals gr8s.runtime:runtime-error
+  (signals gr8s.runtime::runtime-error
     (gr8s.agent::compile-cgroup-scoped-trace
      "uretprobe:/usr/lib64/libc.so.6:malloc { @[comm] = count(); }"
      '(101))))
 
 (test trace-compiler-enforces-generated-program-limit
-  (signals gr8s.runtime:runtime-error
+  (signals gr8s.runtime::runtime-error
     (gr8s.agent::enforce-trace-program-limit
      (list :progs
            (make-list (1+ gr8s.agent::+trace-max-programs+))))))
 
 (test trace-cgroup-resolution-selects-every-container-in-exact-pods
-  (let* ((pods (list (gr8s::make-pod :uid "uid-a" :name "web-a"
+  (let* ((pods (list (gr8s.model::make-pod :uid "uid-a" :name "web-a"
                                      :namespace "alpha" :containers #())
-                     (gr8s::make-pod :uid "uid-b" :name "web-b"
+                     (gr8s.model::make-pod :uid "uid-b" :name "web-b"
                                      :namespace "alpha" :containers #())))
          (entries
            (list (gr8s.kubelet::make-cadvisor-entry
@@ -80,7 +80,7 @@
                                 ("/cg/container-a/" . 12)
                                 ("/cg/container-b/" . 21))
                               :test #'equal))))))
-    (signals gr8s.runtime:runtime-error
+    (signals gr8s.runtime::runtime-error
       (gr8s.agent::resolve-trace-cgroup-ids pods '("missing") entries
                                              :inode-function (constantly 1)))))
 
