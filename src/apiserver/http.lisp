@@ -1457,6 +1457,7 @@ Watches are long-running requests, which that filter leaves alone."
                               (funcall (acceptor-control-plane-metrics-fn acceptor)) ""))
                         (if store (scheduler-metrics-text store) "")
                         (runtime-network-metrics runtime) (gateway-metrics-text) (volume-reclaim-metrics-text)
+                        (admission-webhook-fail-open-metrics-text)
                         (if store (flowcontrol-metrics-text store) "")))
           ((string= path "/version") (version-response))
           ((nth-value 1 (component-status-route path))
