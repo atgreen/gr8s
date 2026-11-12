@@ -46,6 +46,7 @@
                               :components ((:file "package")
                                            (:file "extensions")))
                              (:file "package")
+                             (:file "foundation/package")
                              (:file "version")
                              (:module "generated"
                               :serial t
@@ -67,6 +68,7 @@
                              (:file "foundation/dns")
                              (:file "foundation/json")
                              (:file "foundation/network-steering")
+                             (:file "foundation/declarations")
                              (:module "image-distribution"
                               :serial t
                               :components ((:file "package")

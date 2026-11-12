@@ -7,7 +7,7 @@
 ;;;; save-lisp-and-die, since that build does not go through asdf:program-op.
 ;;;; In a REPL/dev image it is the plain base version.
 
-(in-package #:gr8s)
+(in-package #:gr8s.foundation)
 
 (version-string:define-version-parameter +gr8s-version+ :gr8s)
 

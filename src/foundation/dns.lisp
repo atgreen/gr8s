@@ -15,7 +15,7 @@
 ;;;; that resolver is built from, and re-homes the library's proxy API into the
 ;;;; gr8s composition package so existing callers reach it unchanged.
 
-(in-package #:gr8s)
+(in-package #:gr8s.foundation)
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (let ((symbols (mapcar (lambda (name)
