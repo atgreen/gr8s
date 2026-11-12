@@ -21,6 +21,23 @@
   "Return the CRI resources derived from RESOURCES-JSON."
   (gr8s.kubelet::cri-linux-container-resources (resource-test-container (resource-test-pod resources-json))))
 
+(test oom-score-adj-follows-qos
+  (let ((container (resource-test-container (resource-test-pod "{\"requests\":{\"memory\":\"100Mi\"}}"))))
+    ;; Guaranteed is protected; BestEffort is sacrificed first.
+    (is (= -997 (gr8s.kubelet::container-oom-score-adj "Guaranteed" container 1073741824)))
+    (is (= 1000 (gr8s.kubelet::container-oom-score-adj "BestEffort" container 1073741824)))
+    ;; Burstable scales inversely with the memory request against capacity, clamped.
+    (let ((adj (gr8s.kubelet::container-oom-score-adj "Burstable" container 1073741824)))
+      (is (<= -996 adj 999))
+      (is (= adj (- 1000 (floor (* 1000 104857600) 1073741824)))))
+    ;; A larger request is better protected (lower adj).
+    (let ((small (resource-test-container (resource-test-pod "{\"requests\":{\"memory\":\"10Mi\"}}")))
+          (big (resource-test-container (resource-test-pod "{\"requests\":{\"memory\":\"900Mi\"}}"))))
+      (is (< (gr8s.kubelet::container-oom-score-adj "Burstable" big 1073741824)
+             (gr8s.kubelet::container-oom-score-adj "Burstable" small 1073741824))))
+    ;; With no known capacity it stays within range rather than erroring.
+    (is (<= -996 (gr8s.kubelet::container-oom-score-adj "Burstable" container nil) 999))))
+
 (test quantities-round-trip-exactly-without-floating-point
   (loop for (input expected) in '(("100m" 100) ("1" 1000) ("0.5" 500) ("1.5" 1500) ("2k" 2000000)
                                   ("1e3" 1000000) ("0.0001" 1) ("1001u" 2))
