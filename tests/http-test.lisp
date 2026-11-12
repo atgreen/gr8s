@@ -59,6 +59,31 @@
            (is (eq reconciler (gr8s.apiserver::acceptor-reconciler server)))
         (stop-server server)))))
 
+(test oversized-content-length-is-rejected-before-allocation
+  ;; A forged Content-Length must be refused with 413 before the body buffer is
+  ;; allocated, so one cheap request cannot exhaust control-plane memory.
+  (with-temporary-store (store path)
+    (let ((server (start-http-test-server :store store :runtime (make-fake-runtime)))
+          (client nil))
+      (unwind-protect
+           (progn
+             (setf client (usocket:socket-connect "127.0.0.1" *http-test-port*
+                                                  :element-type '(unsigned-byte 8)))
+             (let ((stream (usocket:socket-stream client)))
+               (setf (sb-impl::fd-stream-timeout stream) 20.0)
+               (write-sequence
+                (gr8s.protocol::ascii-octets
+                 (format nil "POST /api/v1/namespaces/default/configmaps HTTP/1.1~C~CHost: 127.0.0.1~C~CContent-Type: application/json~C~CContent-Length: 999999999~C~CConnection: close~C~C~C~C"
+                         #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed
+                         #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed))
+                stream)
+               (finish-output stream)
+               (let ((status (gr8s.protocol::parse-http-response-head
+                              (gr8s.protocol::read-http-response-head stream))))
+                 (is (= 413 status)))))
+        (when client (ignore-errors (usocket:socket-close client)))
+        (stop-server server)))))
+
 (test legacy-discovery-fallback-for-aggregated-discovery-clients
   (let ((server (start-http-test-server)))
     (unwind-protect

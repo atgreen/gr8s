@@ -1303,6 +1303,13 @@ A client that asks for SPDY instead is served as a kubelet's streaming server se
       (t (status-response "Failure" "NotFound"
                           (format nil "No route for ~A ~A" method path) 404)))))
 
+(defparameter +max-request-body-bytes+ (* 24 1024 1024)
+  "Hard cap on a buffered request body. It sits above gr8s's ~16 MiB control-plane
+proposal limit so every legitimate write still fits, while a forged Content-Length
+or an unbounded chunked stream cannot pre-allocate or grow enough to exhaust
+control-plane memory. Oversized writes within this cap are still rejected with a
+413 downstream by the proposal byte limit.")
+
 (defun read-complete-body (stream content-length)
   "Read a whole request body, of CONTENT-LENGTH octets or else until end of file.
 A single read is not enough: pure-tls returns what one TLS record holds rather
@@ -1311,7 +1318,13 @@ than wait for the next, which truncates any body that spans records in flight."
     (loop
       (when (= filled (length buffer))
         (when content-length (return))
-        (setf buffer (let ((larger (make-array (* 2 (length buffer)) :element-type '(unsigned-byte 8))))
+        ;; Chunked bodies carry no Content-Length to check up front, so bound the
+        ;; growth here: reject once a full buffer has reached the cap.
+        (when (>= (length buffer) +max-request-body-bytes+)
+          (core-resource-error 413 "RequestEntityTooLarge"
+                               "Request body exceeds the ~D octet limit" +max-request-body-bytes+))
+        (setf buffer (let ((larger (make-array (min +max-request-body-bytes+ (* 2 (length buffer)))
+                                               :element-type '(unsigned-byte 8))))
                        (replace larger buffer))))
       (let ((next (read-sequence buffer stream :start filled)))
         ;; A chunked stream past its last chunk answers 0 whatever START was.
@@ -1328,6 +1341,17 @@ than wait for the next, which truncates any body that spans records in flight."
          (content-length (and header (parse-integer header :junk-allowed t)))
          (chunked (hunchentoot::input-chunking-p))
          (form (uiop:string-prefix-p "application/x-www-form-urlencoded" (or (hunchentoot:header-in :content-type request) ""))))
+    ;; Reject an oversized declared body before allocating its buffer, so a forged
+    ;; Content-Length cannot trigger a huge up-front allocation. Runs before the
+    ;; APF seat is acquired, so this is the only bound on pre-handler body memory.
+    ;; Mark raw-post-data read (empty) first: otherwise hunchentoot's send-response
+    ;; would itself read the declared body to drain the connection, re-introducing
+    ;; the very allocation we are refusing.
+    (when (and content-length (> content-length +max-request-body-bytes+))
+      (setf (slot-value request 'hunchentoot::raw-post-data) #())
+      (core-resource-error 413 "RequestEntityTooLarge"
+                           "Request body of ~D octets exceeds the ~D octet limit"
+                           content-length +max-request-body-bytes+))
     (when (and (or chunked (and content-length (plusp content-length)))
                (not form)
                (not (uiop:string-prefix-p "multipart/form-data" (or (hunchentoot:header-in :content-type request) ""))))
@@ -1336,6 +1360,9 @@ than wait for the next, which truncates any body that spans records in flight."
         ;; connection's timeout and fails the request: kubectl chunks a body from stdin.
         (when (and chunked (typep stream 'chunga:chunked-input-stream))
           (setf (chunga:chunked-input-stream-eof-after-last-chunk stream) t))
+        ;; Default to an empty body so a rejected (413) chunked read leaves nothing
+        ;; for hunchentoot's send-response to re-read; overwrite on success.
+        (setf (slot-value request 'hunchentoot::raw-post-data) #())
         (setf (slot-value request 'hunchentoot::raw-post-data)
               (read-complete-body stream (unless chunked content-length)))))))
 
