@@ -2122,7 +2122,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                                       (when service-network-created
                                         (run (ensure-in-cluster-network pki)))))))
                     (let* ((kubeconfig (or (getf options :kubeconfig) (default-kubeconfig-path options)))
-                           (client-address (serve-api-advertise-address options)))
+                           (client-address (serve-local-kubeconfig-address options)))
                       (setf kubeconfig-path kubeconfig)
                       ;; A file the user named keeps its usual mode, as they may read it as another user.
                       (multiple-value-bind (admin-certificate admin-key)
