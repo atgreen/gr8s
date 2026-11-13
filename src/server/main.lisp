@@ -2009,12 +2009,24 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                                                      in-cluster-api-port))
                         (setf aggregator (start-api-aggregator store pki))
                         (setf service-network-created (ensure-in-cluster-network pki))
-                        (setf api-server
-                              (start-in-cluster-api
-                               store runtime reconciler pki
-                               :port in-cluster-api-port
-                               :debug-state-directory state-directory
-                               :debug-member-resolver (make-debug-member-resolver ha)))
+                        ;; The external control-plane API (started below on
+                        ;; ADDRESS:PORT) already serves the in-cluster apiserver
+                        ;; endpoint when it binds a wildcard address or the
+                        ;; advertised address on the in-cluster port, and its cert
+                        ;; already covers the advertised address. Starting a second
+                        ;; listener on 0.0.0.0:+in-cluster-api-port+ then just
+                        ;; collides on 6443 and the external API never binds
+                        ;; (podster-o2h). Only start the dedicated in-cluster
+                        ;; listener when the external one does not cover it.
+                        (unless (external-api-covers-in-cluster-endpoint-p
+                                 address port (serve-api-advertise-address options)
+                                 in-cluster-api-port)
+                          (setf api-server
+                                (start-in-cluster-api
+                                 store runtime reconciler pki
+                                 :port in-cluster-api-port
+                                 :debug-state-directory state-directory
+                                 :debug-member-resolver (make-debug-member-resolver ha))))
                         (setf (pod-store-in-cluster-config store)
                               (list :host "10.96.0.1" :port 443
                                     :ca-pem (uiop:read-file-string (cluster-pki-ca-certificate-path pki))))

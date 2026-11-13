@@ -79,6 +79,19 @@ The independent patch lock also excludes agent and witness patch managers."
                      (ignore-errors (gr8s.network::host-ipv4-addresses)))
         "127.0.0.1")))
 
+(defun external-api-covers-in-cluster-endpoint-p
+    (listen-address listen-port advertise-address in-cluster-port)
+  "True when the external control-plane API listener (LISTEN-ADDRESS:LISTEN-PORT)
+   already serves the in-cluster apiserver endpoint (ADVERTISE-ADDRESS:IN-CLUSTER-PORT).
+   It does when it listens on the in-cluster port and on either a wildcard address or
+   exactly the advertised address -- in which case a second dedicated in-cluster
+   listener on 0.0.0.0:IN-CLUSTER-PORT would only collide on the same port
+   (podster-o2h). The external listener's certificate already covers the advertised
+   address, so in-cluster clients reaching it through the Service DNAT still verify."
+  (and (eql listen-port in-cluster-port)
+       (or (member listen-address '("0.0.0.0" "::" "[::]") :test #'equal)
+           (equal listen-address advertise-address))))
+
 (defun serve-ha-endpoint-record (options)
   "Describe exactly the endpoint production will advertise, without binding it."
   (let* ((id (or (getf options :raft-id) (getf options :node-name) "gr8s-local"))
