@@ -7,13 +7,14 @@
 
 (in-package #:gr8s.runtime.containerd)
 
-(defun make-unix-grpc-channel (&rest arguments)
-  "Open a Unix gRPC channel through gr8s's transport integration."
-  (apply #'gr8s.protocol::make-unix-grpc-channel arguments))
-
-(defun register-runtime-deletion-cancel (function)
-  "Register FUNCTION with the active runtime deletion operation, when any."
-  (gr8s.kubelet::register-runtime-deletion-cancel function))
+;; MAKE-UNIX-GRPC-CHANNEL (gr8s.protocol) and REGISTER-RUNTIME-DELETION-CANCEL
+;; (gr8s.kubelet) are inherited symbols here, so this file calls them directly.
+;; An earlier facade-removal refactor (57bf2c62) added local forwarder DEFUNs
+;; for them -- but because the symbols are inherited, each DEFUN *redefined* the
+;; owning package's function with a body that called that very symbol, i.e.
+;; itself: an infinite tail-recursion that silently hung every CRI call, most
+;; visibly cri-runtime-version, wedging agent startup and node readiness
+;; (podster-qvs). Do not reintroduce these wrappers.
 
 (defun cri-json-object (&rest pairs)
   "Return an EQUAL hash table populated by alternating key and value PAIRS."

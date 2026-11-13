@@ -63,6 +63,26 @@
           (when server-thread (bt:join-thread server-thread))
           (ignore-errors (delete-file path))))))
 
+#+sbcl
+(test make-unix-grpc-channel-is-not-a-self-forwarding-wrapper
+  ;; podster-qvs: a facade-removal refactor (57bf2c62) added a DEFUN in
+  ;; src/runtime/containerd/cri.lisp for the INHERITED symbol
+  ;; GR8S.PROTOCOL:MAKE-UNIX-GRPC-CHANNEL whose body called that same symbol,
+  ;; redefining the real transport as an infinite tail-recursion that silently
+  ;; hung every CRI call. A connect to an absent socket must surface a prompt
+  ;; error, never recurse or hang.
+  (let ((path (format nil "/tmp/gr8s-no-such-~36R.sock" (random (expt 36 8))))
+        (start (get-internal-real-time)))
+    (ignore-errors (delete-file path))
+    (handler-case
+        (sb-ext:with-timeout 10
+          (signals error (gr8s.protocol::make-unix-grpc-channel path)))
+      (sb-ext:timeout ()
+        (is (not :hung)
+            "make-unix-grpc-channel hung -- the self-forwarding wrapper regressed")))
+    (is (< (/ (- (get-internal-real-time) start) internal-time-units-per-second) 10)
+        "connect to an absent socket returned promptly")))
+
 #-sbcl
 (test ag-grpc-unix-sockets-require-sbcl
   (skip "Unix gRPC transport is currently implemented for SBCL on Linux"))
