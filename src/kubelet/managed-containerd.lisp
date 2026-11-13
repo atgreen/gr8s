@@ -158,15 +158,30 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
   (let ((code (ignore-errors (uiop:wait-process process))))
     (if code (format nil "exit status ~D" code) "exit status unknown")))
 
+(defvar *last-cri-probe-error* nil
+  "The most recent distinct CRI readiness-probe failure already logged. Lets the
+probe surface why containerd answers no CRI call -- a process-alive-but-CRI-
+unresponsive containerd would otherwise keep the Node NotReady silently -- without
+spamming the log on every poll.")
+
 (defun containerd-cri-ready-p (socket-path)
   "True when SOCKET-PATH exists and answers a CRI RuntimeVersion call within one
-   second. Fail-soft: any error is caught and reported as NIL."
+   second. Fail-soft: any error is caught and reported as NIL, but the first
+   occurrence of each distinct failure is logged so the outage is diagnosable."
   (and (probe-file socket-path)
        (handler-case
            (progn
              (cri-runtime-version socket-path :timeout 1)
+             (setf *last-cri-probe-error* nil)
              t)
-         (error () nil))))
+         (error (condition)
+           (let ((message (format nil "~A: ~A" (type-of condition) condition)))
+             (unless (equal message *last-cri-probe-error*)
+               (setf *last-cri-probe-error* message)
+               (format *error-output*
+                       "gr8s containerd CRI readiness probe failed (~A): ~A~%"
+                       socket-path message)))
+           nil))))
 
 (defun terminate-containerd-process
     (process
