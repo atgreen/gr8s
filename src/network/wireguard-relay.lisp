@@ -10,9 +10,7 @@
   nodes
   ports
   (sources (make-hash-table :test #'equal))
-  (source-changed-at (make-hash-table :test #'equal))
-  (authorized-addresses (make-hash-table :test #'equal))
-  (authorized-at (make-hash-table :test #'equal))
+  (source-last-seen (make-hash-table :test #'equal))
   (rate-window-start 0)
   (rate-window-packets 0)
   (rate-window-bytes 0)
@@ -22,7 +20,6 @@
   (port-start 42000)
   (max-channels 1024)
   (source-change-seconds 30)
-  (authorization-seconds 30)
   (max-packets-per-second 10000)
   (max-bytes-per-second (* 64 1024 1024))
   (idle-seconds 300)
@@ -79,48 +76,41 @@
 
 (defun note-wireguard-relay-source-unlocked
     (coordinator channel node address port now)
+  "Learn NODE's relay source from the relay's own first-hand observation.
+
+The relay is the authority on a node's relay source: it forwards whatever source
+it actually sees, never a source asserted by a peer (that cross-node assertion is
+the N1 poisoning the control plane no longer performs). A node's first observed
+source is accepted; an established source is then STICKY -- a different source is
+adopted only once the current one falls silent for SOURCE-CHANGE-SECONDS, so a
+genuine node holding its session open with keepalives cannot be displaced by a
+transient spoofed datagram. Forwarded traffic is still end-to-end WireGuard, so a
+spoofed source that does win the bootstrap race yields no working session at the
+far peer -- a bounded, self-healing disruption rather than an interception."
   (unless (and (stringp address) (typep port '(integer 1 65535)))
     (error "Invalid WireGuard relay source"))
   (wireguard-relay-channel-port-for channel node)
-  (unless (and (equal address
-                      (gethash node
-                               (wireguard-relay-channel-authorized-addresses channel)))
-               (let ((authorized-at
-                       (gethash node (wireguard-relay-channel-authorized-at channel))))
-                 (and authorized-at
-                      (<= (- now authorized-at)
-                          (wireguard-relay-coordinator-authorization-seconds
-                           coordinator)))))
-    (return-from note-wireguard-relay-source-unlocked nil))
   (let* ((sources (wireguard-relay-channel-sources channel))
          (previous (gethash node sources))
-         (changed-at (gethash node
-                              (wireguard-relay-channel-source-changed-at channel)))
+         (last-seen (gethash node
+                             (wireguard-relay-channel-source-last-seen channel)))
          (candidate (cons address port)))
     (cond
       ((equal candidate previous)
-       (setf (wireguard-relay-channel-last-active channel) now)
+       (setf (gethash node (wireguard-relay-channel-source-last-seen channel)) now
+             (wireguard-relay-channel-last-active channel) now)
        t)
-      ((and changed-at
-            (< (- now changed-at)
+      ;; An established source still seen within the damping window is sticky:
+      ;; reject a challenger so one spoofed datagram cannot steal a live session.
+      ((and previous last-seen
+            (< (- now last-seen)
                (wireguard-relay-coordinator-source-change-seconds coordinator)))
        nil)
       (t
        (setf (gethash node sources) candidate
-             (gethash node (wireguard-relay-channel-source-changed-at channel)) now
+             (gethash node (wireguard-relay-channel-source-last-seen channel)) now
              (wireguard-relay-channel-last-active channel) now)
        t))))
-
-(defun authorize-wireguard-relay-node (coordinator channel node address now)
-  "Bind NODE's relay source IP to fresh authenticated control-plane evidence."
-  (unless (and (stringp address) (plusp (length address)))
-    (return-from authorize-wireguard-relay-node nil))
-  (bt:with-lock-held ((wireguard-relay-coordinator-lock coordinator))
-    (wireguard-relay-channel-port-for channel node)
-    (setf (gethash node (wireguard-relay-channel-authorized-addresses channel)) address
-          (gethash node (wireguard-relay-channel-authorized-at channel)) now
-          (wireguard-relay-channel-last-active channel) now)
-    t))
 
 (defun wireguard-relay-rate-allowed-p-unlocked (coordinator channel length now)
   (when (/= now (wireguard-relay-channel-rate-window-start channel))
@@ -194,20 +184,6 @@
                          :test #'string=)
               do (setf (wireguard-relay-channel-last-active channel) now)))))
 
-(defun refresh-wireguard-relay-source-evidence (server node address now)
-  "Renew NODE's source binding only from fresh authenticated endpoint evidence."
-  (let ((coordinator (wireguard-relay-server-coordinator server)))
-    (bt:with-lock-held ((wireguard-relay-coordinator-lock coordinator))
-      (loop for channel being the hash-values of
-              (wireguard-relay-coordinator-channels coordinator)
-            when (member node (wireguard-relay-channel-nodes channel)
-                         :test #'string=)
-              do (setf (gethash node
-                                (wireguard-relay-channel-authorized-addresses channel))
-                       address
-                       (gethash node (wireguard-relay-channel-authorized-at channel))
-                       now)))))
-
 (defun bind-wireguard-relay-socket (address port)
   (let ((socket (make-instance 'sb-bsd-sockets:inet-socket
                                :type :datagram :protocol :udp)))
@@ -261,7 +237,7 @@
 
 (defun start-wireguard-relay-server
     (&key (address "0.0.0.0") (port-start 42000) (max-channels 1024)
-      (source-change-seconds 30) (authorization-seconds 30)
+      (source-change-seconds 30)
       (max-packets-per-second 10000)
       (max-bytes-per-second (* 64 1024 1024)) (idle-seconds 300))
   "Create a relay service. Pair listeners are bound lazily when authenticated
@@ -273,7 +249,6 @@ topology allocates a channel."
            (make-wireguard-relay-coordinator
             :port-start port-start :max-channels max-channels
             :source-change-seconds source-change-seconds
-            :authorization-seconds authorization-seconds
             :max-packets-per-second max-packets-per-second
             :max-bytes-per-second max-bytes-per-second
             :idle-seconds idle-seconds))))

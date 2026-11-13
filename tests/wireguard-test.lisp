@@ -260,10 +260,8 @@
                (gr8s.network::wireguard-relay-channel-nodes channel)))
     (is (= 42000 (gr8s.network::wireguard-relay-channel-port-for channel "node-a")))
     (is (= 42001 (gr8s.network::wireguard-relay-channel-port-for channel "node-b")))
-    (gr8s.network::authorize-wireguard-relay-node
-     relay channel "node-a" "198.51.100.1" 100)
-    (gr8s.network::authorize-wireguard-relay-node
-     relay channel "node-b" "198.51.100.2" 100)
+    ;; The relay learns each node's source first-hand from its traffic -- no peer
+    ;; authorization step exists to poison (N1).
     (is-true (gr8s.network::note-wireguard-relay-source
               relay channel "node-a" "198.51.100.1" 51000 100))
     (is-true (gr8s.network::note-wireguard-relay-source
@@ -273,10 +271,12 @@
       (is (string= "198.51.100.2" address))
       (is (= 52000 port))
       (is (= 42001 source-port)))
+    ;; node-a's established source is sticky: a different source seen 10s later
+    ;; (< source-change-seconds) cannot displace a still-live session.
     (is-false (gr8s.network::note-wireguard-relay-source
                relay channel "node-a" "203.0.113.1" 53000 110))
-    (gr8s.network::authorize-wireguard-relay-node
-     relay channel "node-a" "203.0.113.1" 131)
+    ;; Once the established source has fallen silent past the window, the relay
+    ;; adopts the new source it now observes first-hand.
     (is-true (gr8s.network::note-wireguard-relay-source
               relay channel "node-a" "203.0.113.1" 53000 131))
     (signals error
@@ -302,8 +302,7 @@
          (sent nil)
          (send (lambda (source-port data length address port)
                  (push (list source-port (subseq data 0 length) address port) sent))))
-    (gr8s.network::authorize-wireguard-relay-node relay channel "a" "198.51.100.1" 0)
-    (gr8s.network::authorize-wireguard-relay-node relay channel "b" "198.51.100.2" 0)
+    ;; Sources are learned first-hand from the datagrams; no authorization step.
     (gr8s.network::relay-wireguard-datagram
      relay channel "a" #(1 2 3) 3 "198.51.100.1" 51000 1 send)
     (is (null sent))
@@ -315,30 +314,31 @@
     (is (equalp '(44001 #(6 7 8) "198.51.100.2" 52000) (first sent)))
     (is (= 2 (length sent)))))
 
-(test wireguard-relay-requires-fresh-authenticated-sources-and-rate-limits
+(test wireguard-relay-learns-sources-first-hand-and-rate-limits
   (let* ((relay (gr8s.network::make-wireguard-relay-coordinator
-                 :port-start 44500 :authorization-seconds 10
+                 :port-start 44500 :source-change-seconds 10
                  :max-packets-per-second 1 :max-bytes-per-second 16))
          (channel (gr8s.network::ensure-wireguard-relay-channel relay "a" "b" 0))
          (sent 0)
          (send (lambda (&rest ignored) (declare (ignore ignored)) (incf sent))))
-    (is-false (gr8s.network::note-wireguard-relay-source
-               relay channel "a" "198.51.100.1" 51000 0))
-    (gr8s.network::authorize-wireguard-relay-node relay channel "a" "198.51.100.1" 0)
-    (gr8s.network::authorize-wireguard-relay-node relay channel "b" "198.51.100.2" 0)
-    (is-false (gr8s.network::note-wireguard-relay-source
-               relay channel "a" "203.0.113.1" 51000 0))
+    ;; First-seen sources are accepted without any peer authorization step.
     (is-true (gr8s.network::note-wireguard-relay-source
               relay channel "a" "198.51.100.1" 51000 0))
     (is-true (gr8s.network::note-wireguard-relay-source
               relay channel "b" "198.51.100.2" 52000 0))
-    (is-true (gr8s.network::relay-wireguard-datagram
-              relay channel "a" #(1 2 3) 3 "198.51.100.1" 51000 1 send))
-    (is-false (gr8s.network::relay-wireguard-datagram
-               relay channel "b" #(4 5) 2 "198.51.100.2" 52000 1 send))
-    (is (= 1 sent))
+    ;; a's established source is sticky: a challenger within the damping window
+    ;; is rejected, so one spoofed datagram cannot steal a live session.
     (is-false (gr8s.network::note-wireguard-relay-source
-               relay channel "a" "198.51.100.1" 51000 11))))
+               relay channel "a" "203.0.113.1" 51000 5))
+    ;; The genuine source keeps refreshing its liveness.
+    (is-true (gr8s.network::note-wireguard-relay-source
+              relay channel "a" "198.51.100.1" 51000 5))
+    ;; One datagram forwards; a second within the same second is rate-limited.
+    (is-true (gr8s.network::relay-wireguard-datagram
+              relay channel "a" #(1 2 3) 3 "198.51.100.1" 51000 5 send))
+    (is-false (gr8s.network::relay-wireguard-datagram
+               relay channel "b" #(4 5) 2 "198.51.100.2" 52000 5 send))
+    (is (= 1 sent))))
 
 (test wireguard-relay-server-forwards-opaque-udp-from-the-opposite-port
   (let ((server nil) (channel nil) (client-a nil) (client-b nil))
@@ -357,12 +357,8 @@
                             (return))
                         (error () (gr8s.network::stop-wireguard-relay-server candidate)))))
            (is-true server)
-           (gr8s.network::authorize-wireguard-relay-node
-            (gr8s.network::wireguard-relay-server-coordinator server)
-            channel "a" "127.0.0.1" (get-universal-time))
-           (gr8s.network::authorize-wireguard-relay-node
-            (gr8s.network::wireguard-relay-server-coordinator server)
-            channel "b" "127.0.0.1" (get-universal-time))
+           ;; No authorization step: the relay learns each client's source
+           ;; first-hand from the datagrams it actually sends.
            (setf client-a (make-instance 'sb-bsd-sockets:inet-socket
                                          :type :datagram :protocol :udp)
                  client-b (make-instance 'sb-bsd-sockets:inet-socket
@@ -421,21 +417,17 @@
 (test authenticated-live-node-heartbeats-keep-advertised-relay-listeners-open
   (let ((server (gr8s.network::start-wireguard-relay-server
                  :address "127.0.0.1" :port-start 47500
-                 :max-channels 1 :authorization-seconds 2 :idle-seconds 10)))
+                 :max-channels 1 :idle-seconds 10)))
     (unwind-protect
-         (let* ((channel (gr8s.network::ensure-wireguard-relay-server-channel
-                          server "a" "b" 0))
-                (coordinator (gr8s.network::wireguard-relay-server-coordinator server)))
-           (gr8s.network::authorize-wireguard-relay-node
-            coordinator channel "a" "198.51.100.1" 0)
-           (gr8s.network::authorize-wireguard-relay-node
-            coordinator channel "b" "198.51.100.2" 0)
-           (is-false (gr8s.network::note-wireguard-relay-source
-                      coordinator channel "a" "198.51.100.1" 51000 3))
+         (progn
+           (gr8s.network::ensure-wireguard-relay-server-channel server "a" "b" 0)
+           ;; A live node's heartbeat refreshes its channel so the idle reaper
+           ;; keeps its advertised listeners open through the idle window...
            (gr8s.network::refresh-wireguard-relay-node server "a" 9)
            (is (= 0 (gr8s.network::reap-wireguard-relay-server server 10)))
            (is (= 2 (hash-table-count
                      (gr8s.network::wireguard-relay-server-listeners server))))
+           ;; ...and once the heartbeats stop, the channel idles out and is reaped.
            (is (= 1 (gr8s.network::reap-wireguard-relay-server server 20))))
       (gr8s.network::stop-wireguard-relay-server server))))
 

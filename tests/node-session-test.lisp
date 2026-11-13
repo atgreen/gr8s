@@ -2771,3 +2771,70 @@
         (unwind-protect
              (is-false (listener-cap server))
           (gr8s.apiserver::stop-node-grpc-server server))))))
+
+(test forged-peer-observation-cannot-redirect-another-nodes-relay-source
+  "N1 regression (podster-83n.1): an authenticated node's self-asserted
+   observation about a PEER must never redirect that peer's relay source. The
+   relay is the sole authority on a node's source and learns it first-hand from
+   the node's own traffic; a cross-node observation is only a data-path candidate
+   hint that agents re-gate with their own WireGuard handshake probe."
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let* ((key-a (make-array 32 :element-type '(unsigned-byte 8) :initial-element 21))
+           (key-b (make-array 32 :element-type '(unsigned-byte 8) :initial-element 22))
+           (relay (gr8s.network::start-wireguard-relay-server
+                   :address "127.0.0.1" :port-start 48000 :max-channels 1)))
+      (unwind-protect
+           (progn
+             (gr8s.controllers::register-node
+              store (gr8s.model::make-node-record
+                     :id "node-a" :name "worker-a" :pod-cidr "10.88.1.0/24"
+                     :underlay-address "192.0.2.10" :wireguard-public-key key-a
+                     :wireguard-endpoints '(("nat-reflexive" "198.51.100.10" 41000))))
+             (gr8s.controllers::register-node
+              store (gr8s.model::make-node-record
+                     :id "node-b" :name "worker-b" :pod-cidr "10.88.2.0/24"
+                     :underlay-address "192.0.2.11" :wireguard-public-key key-b
+                     :wireguard-endpoints '(("nat-reflexive" "198.51.100.11" 41001))))
+             (let* ((server (gr8s.apiserver::%make-node-grpc-server
+                             :store store :port 0 :heartbeat-timeout-seconds 5
+                             :cluster-pod-cidr "10.88.0.0/16" :node-prefix 24
+                             :overlay-backend "wireguard" :wireguard-listen-port 51820
+                             :wireguard-relay-server relay
+                             :wireguard-relay-address "203.0.113.9"))
+                    (coord (gr8s.network::wireguard-relay-server-coordinator relay))
+                    (channel (gr8s.network::ensure-wireguard-relay-channel
+                              coord "worker-b" "worker-a" 1000)))
+               ;; worker-b establishes a live relay session: the relay learns its
+               ;; real source first-hand from worker-b's own traffic.
+               (is-true (gr8s.network::note-wireguard-relay-source
+                         coord channel "worker-b" "198.51.100.11" 41001 1000))
+               ;; ATTACK: authenticated worker-a forges an observation claiming
+               ;; worker-b's reflexive endpoint is an attacker-chosen address.
+               (gr8s.apiserver::record-authenticated-wireguard-observations
+                server "worker-a"
+                (list (make-instance 'gr8s.node.v1::wireguard-peer-observation
+                                     :peer-public-key key-b
+                                     :address "203.0.113.66" :port 41999
+                                     :latest-handshake-unix-seconds 999
+                                     :received-bytes 100))
+                :now 1000 :fresh-seconds 180)
+               ;; The relay source for worker-b is UNCHANGED: the observation can
+               ;; no longer redirect it (the N1 poisoning is gone).
+               (is (equal '("198.51.100.11" . 41001)
+                          (gethash "worker-b"
+                                   (gr8s.network::wireguard-relay-channel-sources
+                                    channel))))
+               ;; And a datagram claiming to be worker-b from the attacker address
+               ;; is rejected while the genuine source is live (sticky damping).
+               (is-false (gr8s.network::note-wireguard-relay-source
+                          coord channel "worker-b" "203.0.113.66" 41999 1005))
+               ;; The observation is still honoured as a data-path candidate hint
+               ;; (downstream-re-gated by the peer's own handshake probe), so NAT
+               ;; reflexive-endpoint discovery keeps working.
+               (is (string= "203.0.113.66"
+                            (second (find "nat-reflexive"
+                                          (gr8s.model::node-record-wireguard-endpoints
+                                           (gr8s.controllers::get-node store "worker-b"))
+                                          :key #'first :test #'string=))))))
+        (gr8s.network::stop-wireguard-relay-server relay)))))
