@@ -1,5 +1,5 @@
 (load (merge-pathnames "network-test-support.lisp" *load-truename*))
-(in-package #:gr8s)
+(in-package #:gr8s.network)
 
 (let ((nodes nil) (pods nil))
   (unwind-protect

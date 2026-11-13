@@ -1,5 +1,5 @@
 (load (merge-pathnames "network-test-support.lisp" *load-truename*))
-(in-package #:gr8s)
+(in-package #:gr8s.network)
 
 (let ((namespaces nil)
       (contexts nil))

@@ -21,7 +21,7 @@
      (:tree ,(merge-pathnames "ocicl/" project))
      :inherit-configuration)))
 (asdf:load-system :gr8s)
-(in-package #:gr8s)
+(in-package #:gr8s.network)
 
 (defvar *vip* "10.96.0.77")
 (defvar *vip-port* 80)
