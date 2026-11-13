@@ -122,6 +122,24 @@ receives no new Pods, as kubelet reports \"container runtime is down\"."
             (note-node-state-change store node)))
         node))))
 
+(defun note-node-pressure (store name memory-pressure disk-pressure pid-pressure)
+  "Record the node-pressure signals NAME's agent reported on its last heartbeat.
+These surface as the kubelet MemoryPressure/DiskPressure/PIDPressure Node
+conditions. Only a change republishes the Node, so steady heartbeats are cheap."
+  (with-store-lock (store)
+    (let ((node (get-node-unlocked store name)))
+      (when (and node
+                 (or (not (eq (and memory-pressure t) (node-record-memory-pressure node)))
+                     (not (eq (and disk-pressure t) (node-record-disk-pressure node)))
+                     (not (eq (and pid-pressure t) (node-record-pid-pressure node)))))
+        (let ((old (node-api-object node)))
+          (setf (node-record-memory-pressure node) (and memory-pressure t)
+                (node-record-disk-pressure node) (and disk-pressure t)
+                (node-record-pid-pressure node) (and pid-pressure t))
+          (publish-node-change-unlocked store old node)
+          (note-node-state-change store node)))
+      node)))
+
 (defun mark-node-not-ready (store name)
   "Mark NAME not ready while preserving its registered identity."
   (with-store-lock (store)

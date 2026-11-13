@@ -440,6 +440,14 @@ api/discovery. Clients resolve `kubectl get ns` and `kubectl get all` through th
         (maphash (lambda (name value) (setf (gethash name list) value)) source)))
     list))
 
+(defun node-pressure-condition (type pressured true-reason false-reason)
+  "A kubelet node-pressure condition (MemoryPressure/DiskPressure/PIDPressure):
+True with TRUE-REASON when the agent reports PRESSURED, False with FALSE-REASON
+otherwise, matching the reasons upstream kubelet uses."
+  (core-object "type" type
+               "status" (if pressured "True" "False")
+               "reason" (if pressured true-reason false-reason)))
+
 (defun node-api-object (node)
   "Serialize a registered worker with readiness taken from its live lease."
   (let ((address (node-reported-address node)))
@@ -470,7 +478,16 @@ api/discovery. Clients resolve `kubectl get ns` and `kubectl get all` through th
                                         (core-object "type" "Ready"
                                                      "status" (if (node-record-ready-p node) "True" "False")
                                                      "reason" (if (node-record-ready-p node) "AgentReady" "AgentNotReady")
-                                                     "message" "Readiness follows the gr8s node session lease")))
+                                                     "message" "Readiness follows the gr8s node session lease"))
+                                    ;; The standard kubelet pressure conditions, driven by the
+                                    ;; agent's last heartbeat so a pressured node is visible and
+                                    ;; avoidable rather than silently Ready.
+                                    (node-pressure-condition "MemoryPressure" (node-record-memory-pressure node)
+                                                             "KubeletHasInsufficientMemory" "KubeletHasSufficientMemory")
+                                    (node-pressure-condition "DiskPressure" (node-record-disk-pressure node)
+                                                             "KubeletHasDiskPressure" "KubeletHasNoDiskPressure")
+                                    (node-pressure-condition "PIDPressure" (node-record-pid-pressure node)
+                                                             "KubeletHasInsufficientPID" "KubeletHasSufficientPID"))
                "addresses" (if (and address (plusp (length address)))
                                (vector (core-object "type" "InternalIP" "address" address)) #())
                "daemonEndpoints" (core-object "kubeletEndpoint" (core-object "Port" (node-record-kubelet-port node)))

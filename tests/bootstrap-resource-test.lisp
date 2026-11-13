@@ -83,6 +83,41 @@
         (is (= 0 (length (gethash "items" list)))))
       (check-core-status 404 "/api/v1/nodes/absent"))))
 
+(defun node-condition-of-type (object type)
+  "Find the Node status condition of TYPE in a serialized Node OBJECT."
+  (find type (gethash "conditions" (gethash "status" object))
+        :test #'equal :key (lambda (condition) (gethash "type" condition))))
+
+(test node-api-reports-pressure-conditions
+  "A Node carries the standard kubelet pressure conditions, False when healthy and
+True (with the kubelet reason) for a signal its heartbeat reported."
+  (let ((node (gr8s.model::make-node-record :id "p" :name "pnode" :pod-cidr "10.88.1.0/24")))
+    (let ((object (gr8s.resources::node-api-object node)))
+      (dolist (type '("MemoryPressure" "DiskPressure" "PIDPressure"))
+        (let ((condition (node-condition-of-type object type)))
+          (is (not (null condition)) "~A condition is present" type)
+          (is (equal "False" (gethash "status" condition))))))
+    (setf (gr8s.model::node-record-memory-pressure node) t)
+    (let ((condition (node-condition-of-type (gr8s.resources::node-api-object node) "MemoryPressure")))
+      (is (equal "True" (gethash "status" condition)))
+      (is (equal "KubeletHasInsufficientMemory" (gethash "reason" condition))))))
+
+(test note-node-pressure-updates-the-published-condition
+  "A heartbeat's memory-pressure signal flips the Node's MemoryPressure condition
+through the served API, and clears when the next heartbeat reports none."
+  (with-core-api (store directory)
+    (values directory)
+    (gr8s.controllers::register-node
+     store (gr8s.model::make-node-record :id "q" :name "qnode" :pod-cidr "10.88.2.0/24"))
+    (gr8s.controllers::note-node-pressure store "qnode" t nil nil)
+    (is (equal "True" (gethash "status"
+                               (node-condition-of-type
+                                (check-core-status 200 "/api/v1/nodes/qnode") "MemoryPressure"))))
+    (gr8s.controllers::note-node-pressure store "qnode" nil nil nil)
+    (is (equal "False" (gethash "status"
+                                (node-condition-of-type
+                                 (check-core-status 200 "/api/v1/nodes/qnode") "MemoryPressure"))))))
+
 (defun discovery-entry (document name)
   "Return the entry for NAME in a legacy discovery DOCUMENT."
   (find name (gethash "resources" document) :test #'equal :key (lambda (entry) (gethash "name" entry))))

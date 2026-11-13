@@ -1145,3 +1145,17 @@
     ;; The stream continues, so only the first block has a zlib header.
     (is (= 0 (aref second 0)))
     (is (search "stdin" (map 'string #'code-char second)))))
+
+(test agent-heartbeat-reports-memory-pressure-from-the-eviction-signal
+  "The heartbeat's memory-pressure flag follows the same available-memory signal
+the reconciler evicts on, so the control plane can raise MemoryPressure."
+  (let ((gr8s.kubelet::*node-memory-available-fn*
+          (lambda () (1- gr8s.kubelet::+memory-eviction-threshold-bytes+))))
+    (is-true (gr8s.agent::agent-node-memory-pressure-p))
+    (is-true (slot-value (gr8s.agent::agent-heartbeat nil)
+                         'gr8s.node.v1::memory-pressure)))
+  (let ((gr8s.kubelet::*node-memory-available-fn*
+          (lambda () (* 10 gr8s.kubelet::+memory-eviction-threshold-bytes+))))
+    (is-false (gr8s.agent::agent-node-memory-pressure-p))
+    (is-false (slot-value (gr8s.agent::agent-heartbeat nil)
+                          'gr8s.node.v1::memory-pressure))))

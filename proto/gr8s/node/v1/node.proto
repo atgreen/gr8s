@@ -145,6 +145,13 @@ message Heartbeat {
   // A node that reports it stays leased but is NotReady, as kubelet reports
   // "container runtime is down".
   string runtime_down_message = 2;
+  // Node-pressure signals the agent observes locally, surfaced as the standard
+  // kubelet Node conditions (MemoryPressure/DiskPressure/PIDPressure) so the
+  // scheduler and clients can see a pressured node. Absent (false) from an older
+  // agent, which the control plane reads as "no pressure reported".
+  bool memory_pressure = 3;
+  bool disk_pressure = 4;
+  bool pid_pressure = 5;
 }
 
 message SnapshotAck {

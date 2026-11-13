@@ -47,6 +47,9 @@
    #:node-record-pod-cidr
    #:node-record-pod-cidrs
    #:node-record-all-pod-cidrs
+   #:node-record-memory-pressure
+   #:node-record-disk-pressure
+   #:node-record-pid-pressure
    #:node-record-ready-p
    #:node-record-ready-since
    #:node-record-resource-version
