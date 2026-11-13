@@ -117,6 +117,35 @@
                         (gr8s.security::enroll-node-csr
                          pki "worker-a" token fingerprint worker-a-csr)))))))))
 
+(test node-sessions-require-mutual-tls-bound-to-the-cluster-ca
+  "podster-0oc.12 (P0): the persistent node listener runs mutual TLS. It presents a
+   server cert/key and trusts the cluster CA to verify client certificates, while
+   leaving them optional so credential-less enrollment shares the one listener. A
+   Connect stream that presents no client certificate is rejected, and a presented
+   cert is verified and name-bound (name-binding is covered by the
+   verify-node-certificate assertions above). N4 additionally refuses to start the
+   node listener without PKI, so the no-TLS branch here is never reached in production."
+  (with-temporary-pki (pki path)
+    path
+    ;; The live node listener is configured for mutual TLS against the cluster CA.
+    (let ((options (gr8s.security::node-server-tls-options pki)))
+      (is (eq t (getf options :tls)))
+      (is (eq :optional (getf options :tls-verify-client)))
+      (is (stringp (getf options :tls-certificate)))
+      (is (stringp (getf options :tls-key)))
+      (is (not (null (getf options :tls-ca-certificate)))))
+    ;; Without PKI there is no listener TLS at all (and N4 refuses that listener).
+    (is (null (gr8s.security::node-server-tls-options nil)))
+    ;; A persistent session whose stream carries no client certificate is rejected.
+    (let* ((connection (make-instance 'ag-http2:http2-connection :stream :no-client-tls))
+           (context (make-instance 'ag-grpc::grpc-call-context :connection connection)))
+      (is (string= "unauthenticated-node"
+                   (pki-error-reason-from
+                    (lambda ()
+                      (gr8s.security::authenticate-node-peer pki context "worker-a"))))))
+    ;; With no PKI, peer authentication is a deliberate no-op (bootstrap/enrollment).
+    (is (null (gr8s.security::authenticate-node-peer nil nil "worker-a")))))
+
 (test control-plane-tls-identity-is-persistent-and-bound-to-the-cluster-ca
   (with-temporary-store (store path)
     (values store)
