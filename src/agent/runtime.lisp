@@ -1250,10 +1250,12 @@ just the DNS server; for any other runtime, nothing."
              (lambda ()
                (call-with-agent-cni-server
                 node-runtime
-                (lambda () (call-with-dns-server body :forward-rules (node-runtime-dns-forward-rules node-runtime)
+                (lambda () (call-with-dns-server body :address +dns-pod-server-address+
+                                                 :forward-rules (node-runtime-dns-forward-rules node-runtime)
                                                  :resolver
                                            (make-cluster-dns-resolver (node-runtime-store node-runtime)))))))
-            (call-with-dns-server body :forward-rules (node-runtime-dns-forward-rules node-runtime)
+            (call-with-dns-server body :address +dns-pod-server-address+
+                                       :forward-rules (node-runtime-dns-forward-rules node-runtime)
                                        :resolver
                                         (make-cluster-dns-resolver (node-runtime-store node-runtime))))
         (funcall body))))
