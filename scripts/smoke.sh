@@ -131,7 +131,11 @@ fi
 server_pid=$!
 
 attempt=0
-until curl -fsS "http://127.0.0.1:$port/readyz" >/dev/null 2>&1; do
+# gr8s serves the API (and /readyz) over authenticated TLS, not plain HTTP, so
+# probe readiness through the generated kubeconfig (client cert over https).
+# Health paths are granted to any authenticated identity, so this returns ok
+# once the store is ready, without needing a plain-HTTP or anonymous endpoint.
+until kubectl --kubeconfig "$work_directory/kubeconfig" get --raw='/readyz' >/dev/null 2>&1; do
   attempt=$((attempt + 1))
   if ! kill -0 "$server_pid" 2>/dev/null; then
     cat "$work_directory/server.log"
