@@ -2739,3 +2739,35 @@
             (is (string= "10.88.1.0/24" (slot-value (first after) 'gr8s.node.v1::pod-cidr)))
             (is (string= "192.0.2.11" (slot-value (first after) 'gr8s.node.v1::underlay-address)))
             (is-false (slot-value (first after) 'gr8s.node.v1::next-hop))))))))
+
+(test node-listener-caps-connections-per-source-ip
+  "The node control-plane listener bounds concurrent connections per source
+   address, so one unauthenticated peer cannot open connections up to the global
+   pool limit and starve every other node during the pre-handshake window.
+   The cap itself is enforced and tested in ag-grpc; here we verify gr8s wires a
+   sane default through and honours an explicit override. 83n.11 / spot-check N2."
+  (with-temporary-store (store path)
+    (flet ((listener-cap (server)
+             (ag-grpc::server-max-connections-per-ip
+              (gr8s.apiserver::node-grpc-server-grpc-server server))))
+      ;; Default: a per-source cap well below ag-grpc's 128-connection pool.
+      (let ((server (gr8s.apiserver::start-node-grpc-server
+                     store :host "127.0.0.1" :port 0 :heartbeat-timeout-seconds 2)))
+        (unwind-protect
+             (is (= gr8s.apiserver::+default-node-max-connections-per-ip+
+                    (listener-cap server)))
+          (gr8s.apiserver::stop-node-grpc-server server)))
+      ;; An explicit cap threads through to the underlying gRPC server.
+      (let ((server (gr8s.apiserver::start-node-grpc-server
+                     store :host "127.0.0.1" :port 0 :heartbeat-timeout-seconds 2
+                     :max-connections-per-ip 4)))
+        (unwind-protect
+             (is (= 4 (listener-cap server)))
+          (gr8s.apiserver::stop-node-grpc-server server)))
+      ;; NIL opts out of the per-source cap for deliberately trusted deployments.
+      (let ((server (gr8s.apiserver::start-node-grpc-server
+                     store :host "127.0.0.1" :port 0 :heartbeat-timeout-seconds 2
+                     :max-connections-per-ip nil)))
+        (unwind-protect
+             (is-false (listener-cap server))
+          (gr8s.apiserver::stop-node-grpc-server server))))))

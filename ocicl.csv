@@ -1,9 +1,9 @@
 0conf, ghcr.io/ocicl/0conf@sha256:ce4145870a4d681d71f0bea2fda62ebe6e2bb670be595c23d654874e11cd43a2, 0conf-20260831-5122d3e/0conf.asd
-ag-grpc, ghcr.io/ocicl/ag-grpc@sha256:9d07877484a4d92b48ef0c605dc9f695cf9a02bfc30ad7e6ff27f7df79b1be6d, ag-gRPC-20261111-de2df7e/ag-grpc.asd
-ag-grpc-all, ghcr.io/ocicl/ag-grpc@sha256:9d07877484a4d92b48ef0c605dc9f695cf9a02bfc30ad7e6ff27f7df79b1be6d, ag-gRPC-20261111-de2df7e/ag-grpc-all.asd
-ag-http2, ghcr.io/ocicl/ag-grpc@sha256:9d07877484a4d92b48ef0c605dc9f695cf9a02bfc30ad7e6ff27f7df79b1be6d, ag-gRPC-20261111-de2df7e/ag-http2.asd
-ag-proto, ghcr.io/ocicl/ag-grpc@sha256:9d07877484a4d92b48ef0c605dc9f695cf9a02bfc30ad7e6ff27f7df79b1be6d, ag-gRPC-20261111-de2df7e/ag-proto.asd
-ag-proto-cli, ghcr.io/ocicl/ag-grpc@sha256:9d07877484a4d92b48ef0c605dc9f695cf9a02bfc30ad7e6ff27f7df79b1be6d, ag-gRPC-20261111-de2df7e/ag-proto-cli.asd
+ag-grpc, ghcr.io/ocicl/ag-grpc-all@sha256:55287e804a91aa636328ab8efe5f35283bf4d59e2264356f14abffffa7010172, ag-gRPC-20261113-12ae2b1/ag-grpc.asd
+ag-grpc-all, ghcr.io/ocicl/ag-grpc-all@sha256:55287e804a91aa636328ab8efe5f35283bf4d59e2264356f14abffffa7010172, ag-gRPC-20261113-12ae2b1/ag-grpc-all.asd
+ag-http2, ghcr.io/ocicl/ag-grpc-all@sha256:55287e804a91aa636328ab8efe5f35283bf4d59e2264356f14abffffa7010172, ag-gRPC-20261113-12ae2b1/ag-http2.asd
+ag-proto, ghcr.io/ocicl/ag-grpc-all@sha256:55287e804a91aa636328ab8efe5f35283bf4d59e2264356f14abffffa7010172, ag-gRPC-20261113-12ae2b1/ag-proto.asd
+ag-proto-cli, ghcr.io/ocicl/ag-grpc-all@sha256:55287e804a91aa636328ab8efe5f35283bf4d59e2264356f14abffffa7010172, ag-gRPC-20261113-12ae2b1/ag-proto-cli.asd
 alexandria, ghcr.io/ocicl/cl-cancel@sha256:43b6f25de42c09e32d99d09891cc9e629b4369cce9d7d0e2c9a1803d0b12f6f6, cl-cancel-20261112-7ea333b/ocicl/alexandria-20260812-f283e25/alexandria.asd
 atomics, ghcr.io/ocicl/cl-cancel@sha256:43b6f25de42c09e32d99d09891cc9e629b4369cce9d7d0e2c9a1803d0b12f6f6, cl-cancel-20261112-7ea333b/ocicl/atomics-20260830-1caed1a/atomics.asd
 atomics-test, ghcr.io/ocicl/cl-cancel@sha256:43b6f25de42c09e32d99d09891cc9e629b4369cce9d7d0e2c9a1803d0b12f6f6, cl-cancel-20261112-7ea333b/ocicl/atomics-20260830-1caed1a/atomics-test.asd

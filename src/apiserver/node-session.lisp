@@ -141,6 +141,16 @@ planner groups by: its name and its region/zone."
 (defparameter +desired-state-delta-capability+ "desired-state-delta"
   "The NodeHello capability of an agent that rebuilds snapshots from deltas.")
 
+(defparameter +default-node-max-connections-per-ip+ 32
+  "Default cap on concurrent connections the node control-plane listener accepts
+   from a single source address, passed through to the gRPC server. It bounds the
+   pre-handshake window: a node authenticates only after connecting, so without a
+   per-source cap one unauthenticated peer could open connections up to the global
+   pool limit and starve every other node. 32 is a quarter of ag-grpc's default
+   128-connection pool -- generous enough for a modest fleet behind one NAT while
+   denying any single source most of the pool. Tune via START-NODE-GRPC-SERVER's
+   :MAX-CONNECTIONS-PER-IP (NIL disables the per-source cap).")
+
 (defun same-pod-assignment-p (left right)
   "Return whether two PodAssignments deliver the same desired Pod and objects."
   (and (string= (slot-value left 'gr8s.node.v1::uid) (slot-value right 'gr8s.node.v1::uid))
@@ -1900,7 +1910,9 @@ socket are released rather than leaked. Safe to call more than once."
                                             (wireguard-relay-port-start 42000)
                                             (wireguard-relay-max-channels 1024)
                                             (clock #'get-universal-time)
-                                            (gateway-stability-seconds 30))
+                                            (gateway-stability-seconds 30)
+                                            (max-connections-per-ip
+                                             +default-node-max-connections-per-ip+))
   "Create and start the node control-plane gRPC server on HOST:PORT: register the
    Connect service (and the Enrollment service when PKI is given), spawn its accept
    thread and the heartbeat monitor, and block until it is listening. Errors on a
@@ -1921,6 +1933,7 @@ socket are released rather than leaked. Safe to call more than once."
     (when (and wireguard-relay-address (not (string= overlay-backend "wireguard")))
       (error "WireGuard relay requires the wireguard overlay backend"))
     (let* ((grpc-server (apply #'ag-grpc:make-grpc-server port :host host
+                             :max-connections-per-ip max-connections-per-ip
                              (node-server-tls-options pki)))
          (relay-server
            (when wireguard-relay-address
