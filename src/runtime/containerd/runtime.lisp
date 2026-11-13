@@ -459,13 +459,27 @@ A container running as any user can write here, and a user mount at the path tak
              :attempt attempt
              :labels termination-labels
              :log-path (container-attempt-log-path (container-spec-name spec) attempt))))
-      (record-container-lifecycle-event runtime (pod-uid pod) (container-spec-name spec) attempt
-                                        "Created" (format nil "Created container ~A" (container-spec-name spec)))
-      (with-running-pod-cancellation-deferred (cri-start-container socket container-id))
-      (record-container-lifecycle-event runtime (pod-uid pod) (container-spec-name spec) attempt
-                                        "Started" (format nil "Started container ~A" (container-spec-name spec)))
-      (start-container-post-start-hook runtime pod spec container-id sandbox-id)
-      container-id)))
+      (start-created-container runtime pod spec sandbox-id container-id attempt socket))))
+
+(defun start-created-container (runtime pod spec sandbox-id container-id attempt socket)
+  "Start the just-created CONTAINER-ID and record its lifecycle, then run its
+   post-start hook, returning CONTAINER-ID. The Created-record, StartContainer, and
+   Started-record run inside one cancellation-deferred span: a supersede must not be
+   honoured between creating a container and starting it. A container left created
+   but never started is one containerd reports as exited, StopContainer skips and
+   RemoveContainer refuses, so its Pod's deletion -- and every creation on the node
+   after it -- never ends (podster-uqb.123). Deferring only StartContainer left that
+   exact wedge reachable one step early, through a cancellation landing in the gap
+   after creation (podster-983 / 0oc.10); CreateContainer itself stays preemptible so
+   a durable urgent deletion is never starved by a blocked creation."
+  (with-running-pod-cancellation-deferred
+    (record-container-lifecycle-event runtime (pod-uid pod) (container-spec-name spec) attempt
+                                      "Created" (format nil "Created container ~A" (container-spec-name spec)))
+    (cri-start-container socket container-id)
+    (record-container-lifecycle-event runtime (pod-uid pod) (container-spec-name spec) attempt
+                                      "Started" (format nil "Started container ~A" (container-spec-name spec))))
+  (start-container-post-start-hook runtime pod spec container-id sandbox-id)
+  container-id)
 
 (defmethod runtime-ensure ((runtime containerd-runtime) pod)
   "Converge native containers without destroying an unchanged sandbox or healthy siblings."
