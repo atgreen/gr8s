@@ -55,8 +55,19 @@ build/gr8s-service-packet-guard-test.json build/gr8s-service-nat-test.json \
 build/gr8s-service-nat-policy-test.json build/gr8s-service-nat-guard-test.json \
 build/gr8s-service-wire-test.json build/gr8s-legacy-service-packet-guard-test.json: | $(OCICL_STAMP)
 
-containerd-bundle:
+# Represent the containerd bundle by its primary output binary so a tree that
+# already has it built neither re-runs the installer nor relinks anything
+# downstream. install-containerd.sh is itself idempotent, but making it a real
+# file target lets make skip it entirely when nothing changed. The pinned
+# containerd/runc/CNI versions live in the script, so bumping one changes the
+# script's mtime and rebuilds the bundle; containerd-bundle stays a convenience
+# alias for the file.
+CONTAINERD_BUNDLE_MARKER := build/containerd/bin/containerd
+
+$(CONTAINERD_BUNDLE_MARKER): scripts/install-containerd.sh
 	scripts/install-containerd.sh build/containerd
+
+containerd-bundle: $(CONTAINERD_BUNDLE_MARKER)
 
 help:
 	@echo "gr8s targets:"
@@ -298,7 +309,7 @@ notices:
 
 native: build/gr8s
 
-build/gr8s: containerd-bundle generate-protocol scripts/build-native.lisp $(LISP_SOURCES)
+build/gr8s: $(CONTAINERD_BUNDLE_MARKER) $(NODE_PROTOCOL_LISP) scripts/build-native.lisp $(LISP_SOURCES)
 	$(SBCL) --noinform --non-interactive --load scripts/build-native.lisp
 
 clean:
