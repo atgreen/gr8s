@@ -18,7 +18,7 @@
      (:tree ,(merge-pathnames "ocicl/" project))
      :inherit-configuration)))
 (asdf:load-system :gr8s)
-(in-package #:gr8s)
+(in-package #:gr8s.network)
 
 (let ((arguments (uiop:command-line-arguments)))
   (unless (and (<= 1 (length arguments) 2)

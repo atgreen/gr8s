@@ -1,7 +1,7 @@
 (require :asdf)
 (asdf:load-system :gr8s)
 
-(in-package #:gr8s)
+(in-package #:gr8s.network)
 
 ;; Invoked by make test-routed-network inside a disposable user/network
 ;; namespace. No host links, routes, or forwarding settings are changed.

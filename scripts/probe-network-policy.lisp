@@ -19,7 +19,7 @@
    `(:source-registry (:directory ,project) (:tree ,(merge-pathnames "ocicl/" project))
      :inherit-configuration)))
 (asdf:load-system :gr8s)
-(in-package #:gr8s)
+(in-package #:gr8s.network)
 
 (defvar *ns* "gr8snpprobe")
 (defvar *host-veth* "gnpvh")

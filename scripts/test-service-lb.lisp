@@ -27,7 +27,7 @@
 
 (asdf:load-system :gr8s)
 
-(in-package #:gr8s)
+(in-package #:gr8s.network)
 
 (defvar *failures* 0)
 
