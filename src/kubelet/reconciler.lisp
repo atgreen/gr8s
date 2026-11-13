@@ -37,7 +37,11 @@
   ;; Pod UID to the universal time its local storage was last measured.
   (storage-measurements (make-hash-table :test #'equal))
   ;; Pod UID to when a NoExecute taint with a finite toleration was first noticed.
-  (taint-timers (make-hash-table :test #'equal)))
+  (taint-timers (make-hash-table :test #'equal))
+  ;; Internal real time since available memory first fell below the soft eviction
+  ;; threshold, or NIL while it is above it. A soft threshold only evicts once it
+  ;; has stayed crossed for the grace period, so a brief dip does not kill a Pod.
+  memory-soft-pressure-since)
 
 (define-condition pod-reconciliation-superseded (serious-condition) ()
   (:documentation "Unwind obsolete creation without translating cancellation into a Pod failure."))
@@ -322,6 +326,17 @@ per-QoS oom_score_adj leaves them to the kernel as a last resort)."
 (defparameter *node-memory-available-fn* #'node-memory-available-bytes
   "Reader for available node memory in bytes; injectable for tests.")
 
+(defparameter +memory-soft-eviction-threshold-bytes+ (* 300 1024 1024)
+  "Available node memory below which a soft eviction begins its grace period; above
+the hard threshold so a sustained squeeze is relieved before it becomes critical.")
+
+(defparameter +memory-soft-eviction-grace-seconds+ 90
+  "Seconds available memory must stay below the soft threshold before the soft
+eviction fires, matching a typical kubelet eviction-soft-grace-period.")
+
+(defparameter *node-pressure-clock-fn* #'get-internal-real-time
+  "Monotonic clock (internal real time units) for soft-eviction grace; injectable for tests.")
+
 (defparameter +disk-eviction-threshold-bytes+ (* 1024 1024 1024)
   "Minimum free node-filesystem bytes before DiskPressure, matching the kubelet's
 default nodefs.available eviction threshold (roughly 10%, 1Gi here as a floor).")
@@ -357,21 +372,49 @@ ceiling the kernel will allocate to."
 (defparameter *node-pid-usage-fn* #'node-pid-usage
   "Reader for (values used-pids max-pids); injectable for tests.")
 
+(defun node-memory-eviction-threshold (reconciler available)
+  "Decide whether memory pressure should evict this pass, tracking the soft
+threshold's grace period on RECONCILER. Returns the crossed threshold in bytes to
+cite, or NIL to wait. Below the hard threshold evicts at once; below the soft
+threshold evicts only after AVAILABLE has stayed there for the grace period; above
+the soft threshold clears the timer."
+  (cond
+    ((null available)
+     (setf (reconciler-memory-soft-pressure-since reconciler) nil)
+     nil)
+    ((< available +memory-eviction-threshold-bytes+)
+     (setf (reconciler-memory-soft-pressure-since reconciler) nil)
+     +memory-eviction-threshold-bytes+)
+    ((< available +memory-soft-eviction-threshold-bytes+)
+     (let ((now (funcall *node-pressure-clock-fn*))
+           (since (reconciler-memory-soft-pressure-since reconciler)))
+       (unless since
+         (setf (reconciler-memory-soft-pressure-since reconciler) now
+               since now))
+       (when (>= (- now since)
+                 (* +memory-soft-eviction-grace-seconds+ internal-time-units-per-second))
+         +memory-soft-eviction-threshold-bytes+)))
+    (t (setf (reconciler-memory-soft-pressure-since reconciler) nil)
+       nil)))
+
 (defun node-pressure-evict (reconciler)
-  "When free node memory is below the eviction threshold, gracefully evict the
-least-critical local Pod (BestEffort/Burstable, lowest priority first), one per
-pass so pressure is relieved incrementally rather than by a mass kill. Returns the
-evicted Pod, or NIL. This replaces relying solely on the kernel OOM killer."
+  "When free node memory is low, gracefully evict the least-critical local Pod
+(BestEffort/Burstable, lowest priority first), one per pass so pressure is relieved
+incrementally rather than by a mass kill. The hard threshold evicts at once; the
+soft threshold evicts only after memory has stayed below it for the grace period.
+Returns the evicted Pod, or NIL. This replaces relying solely on the kernel OOM
+killer."
   (when (runtime-runs-containers-p (reconciler-runtime reconciler))
-    (let ((available (funcall *node-memory-available-fn*)))
-      (when (and available (< available +memory-eviction-threshold-bytes+))
+    (let* ((available (funcall *node-memory-available-fn*))
+           (threshold (node-memory-eviction-threshold reconciler available)))
+      (when threshold
         (let ((pod (select-memory-eviction-pod
                     (remove-if #'deletion-requested-p (list-pods (reconciler-store reconciler))))))
           (when pod
             (evict-pod-for-storage
              reconciler pod
              (format nil "The node was low on resource: memory. Threshold ~D bytes, ~D available."
-                     +memory-eviction-threshold-bytes+ available))
+                     threshold available))
             pod))))))
 
 (defun pod-recorded-eviction (reconciler pod)
