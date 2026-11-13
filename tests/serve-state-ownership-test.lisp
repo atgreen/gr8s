@@ -308,3 +308,26 @@
       (is (eq t called))
       (let ((storage (cl-raft::open-file-raft-storage path)))
         (cl-raft::close-file-raft-storage storage)))))
+
+(test external-api-covers-in-cluster-endpoint-picks-one-listener-on-6443
+  "podster-o2h: the dedicated in-cluster apiserver listener is started only when the
+   external control-plane listener does not already serve the in-cluster endpoint, so
+   a default single-host `gr8s serve` no longer binds 0.0.0.0:6443 twice."
+  ;; Default serve: external 0.0.0.0:6443 already covers the in-cluster 6443 endpoint.
+  (is-true (gr8s.server::external-api-covers-in-cluster-endpoint-p
+            "0.0.0.0" 6443 "10.0.0.5" 6443))
+  (is-true (gr8s.server::external-api-covers-in-cluster-endpoint-p
+            "::" 6443 "10.0.0.5" 6443))
+  ;; External bound to exactly the advertised address on the same port -> covered.
+  (is-true (gr8s.server::external-api-covers-in-cluster-endpoint-p
+            "10.0.0.5" 6443 "10.0.0.5" 6443))
+  ;; The documented workaround (--port 16443) moves the external API off 6443, so the
+  ;; dedicated in-cluster listener is still needed and no longer collides.
+  (is-false (gr8s.server::external-api-covers-in-cluster-endpoint-p
+             "0.0.0.0" 16443 "10.0.0.5" 6443))
+  ;; External bound to a specific non-advertised address -> not covered, keep both.
+  (is-false (gr8s.server::external-api-covers-in-cluster-endpoint-p
+             "10.0.0.9" 6443 "10.0.0.5" 6443))
+  ;; An unset external port never counts as covering the endpoint.
+  (is-false (gr8s.server::external-api-covers-in-cluster-endpoint-p
+             "0.0.0.0" nil "10.0.0.5" 6443)))
