@@ -41,7 +41,11 @@
   ;; Internal real time since available memory first fell below the soft eviction
   ;; threshold, or NIL while it is above it. A soft threshold only evicts once it
   ;; has stayed crossed for the grace period, so a brief dip does not kill a Pod.
-  memory-soft-pressure-since)
+  memory-soft-pressure-since
+  ;; The memory threshold a run of evictions is reclaiming past, or NIL when not
+  ;; evicting. Once eviction starts it continues until available rises a minimum
+  ;; margin above this, so eviction does not thrash one Pod at a time at the edge.
+  memory-eviction-active-threshold)
 
 (define-condition pod-reconciliation-superseded (serious-condition) ()
   (:documentation "Unwind obsolete creation without translating cancellation into a Pod failure."))
@@ -337,6 +341,11 @@ eviction fires, matching a typical kubelet eviction-soft-grace-period.")
 (defparameter *node-pressure-clock-fn* #'get-internal-real-time
   "Monotonic clock (internal real time units) for soft-eviction grace; injectable for tests.")
 
+(defparameter +memory-eviction-minimum-reclaim-bytes+ (* 100 1024 1024)
+  "Once a memory eviction starts, keep evicting until available memory has risen
+this far above the crossed threshold, matching the kubelet's eviction-minimum-reclaim
+so eviction does not thrash one Pod at a time right at the boundary.")
+
 (defparameter +disk-eviction-threshold-bytes+ (* 1024 1024 1024)
   "Minimum free node-filesystem bytes before DiskPressure, matching the kubelet's
 default nodefs.available eviction threshold (roughly 10%, 1Gi here as a floor).")
@@ -374,28 +383,46 @@ ceiling the kernel will allocate to."
 
 (defun node-memory-eviction-threshold (reconciler available)
   "Decide whether memory pressure should evict this pass, tracking the soft
-threshold's grace period on RECONCILER. Returns the crossed threshold in bytes to
-cite, or NIL to wait. Below the hard threshold evicts at once; below the soft
-threshold evicts only after AVAILABLE has stayed there for the grace period; above
-the soft threshold clears the timer."
-  (cond
-    ((null available)
-     (setf (reconciler-memory-soft-pressure-since reconciler) nil)
-     nil)
-    ((< available +memory-eviction-threshold-bytes+)
-     (setf (reconciler-memory-soft-pressure-since reconciler) nil)
-     +memory-eviction-threshold-bytes+)
-    ((< available +memory-soft-eviction-threshold-bytes+)
-     (let ((now (funcall *node-pressure-clock-fn*))
-           (since (reconciler-memory-soft-pressure-since reconciler)))
-       (unless since
-         (setf (reconciler-memory-soft-pressure-since reconciler) now
-               since now))
-       (when (>= (- now since)
-                 (* +memory-soft-eviction-grace-seconds+ internal-time-units-per-second))
-         +memory-soft-eviction-threshold-bytes+)))
-    (t (setf (reconciler-memory-soft-pressure-since reconciler) nil)
-       nil)))
+threshold's grace period and the minimum-reclaim margin on RECONCILER. Returns the
+crossed threshold in bytes to cite, or NIL to wait. Below the hard threshold evicts
+at once; below the soft threshold evicts only after AVAILABLE has stayed there for
+the grace period; and once eviction has started it continues until AVAILABLE has
+risen the minimum-reclaim margin above the threshold, so it does not thrash at the
+edge. Above that margin (or with no reading) the timers reset."
+  (let ((primary
+          (cond
+            ((null available)
+             (setf (reconciler-memory-soft-pressure-since reconciler) nil)
+             nil)
+            ((< available +memory-eviction-threshold-bytes+)
+             (setf (reconciler-memory-soft-pressure-since reconciler) nil)
+             +memory-eviction-threshold-bytes+)
+            ((< available +memory-soft-eviction-threshold-bytes+)
+             (let ((now (funcall *node-pressure-clock-fn*))
+                   (since (reconciler-memory-soft-pressure-since reconciler)))
+               (unless since
+                 (setf (reconciler-memory-soft-pressure-since reconciler) now
+                       since now))
+               (when (>= (- now since)
+                         (* +memory-soft-eviction-grace-seconds+ internal-time-units-per-second))
+                 +memory-soft-eviction-threshold-bytes+)))
+            (t (setf (reconciler-memory-soft-pressure-since reconciler) nil)
+               nil))))
+    (cond
+      (primary
+       ;; Eviction is (still) triggered; remember the threshold to reclaim past.
+       (setf (reconciler-memory-eviction-active-threshold reconciler) primary)
+       primary)
+      ((let ((active (reconciler-memory-eviction-active-threshold reconciler)))
+         (and available active
+              (< available (+ active +memory-eviction-minimum-reclaim-bytes+))))
+       ;; Not newly triggered, but memory has not yet recovered the minimum-reclaim
+       ;; margin above the threshold a prior pass evicted on: keep going.
+       (reconciler-memory-eviction-active-threshold reconciler))
+      (t
+       ;; Recovered past the margin, or no reading: stop and clear the run.
+       (setf (reconciler-memory-eviction-active-threshold reconciler) nil)
+       nil))))
 
 (defun node-pressure-evict (reconciler)
   "When free node memory is low, gracefully evict the least-critical local Pod

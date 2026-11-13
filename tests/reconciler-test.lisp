@@ -539,3 +539,28 @@ has stayed below it for the grace period, and a recovery resets the timer."
       (is (null (gr8s.kubelet::reconciler-memory-soft-pressure-since reconciler)))
       ;; Below the hard threshold evicts immediately, regardless of grace.
       (is (eql hard (gr8s.kubelet::node-memory-eviction-threshold reconciler (1- hard)))))))
+
+(test memory-eviction-minimum-reclaim-prevents-thrash-at-the-edge
+  "Once eviction starts, it keeps going until available memory has risen the
+minimum-reclaim margin above the threshold, rather than stopping the instant
+availability ticks back over it and then re-triggering next pass."
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let* ((reconciler (make-reconciler store (make-fake-runtime)))
+           (clock 0)
+           (gr8s.kubelet::*node-pressure-clock-fn* (lambda () clock))
+           (hard gr8s.kubelet::+memory-eviction-threshold-bytes+)
+           (reclaim gr8s.kubelet::+memory-eviction-minimum-reclaim-bytes+))
+      ;; Falling below the hard threshold starts the eviction run.
+      (is (eql hard (gr8s.kubelet::node-memory-eviction-threshold reconciler (1- hard))))
+      (is (eql hard (gr8s.kubelet::reconciler-memory-eviction-active-threshold reconciler)))
+      ;; Availability ticks just over the threshold but within the reclaim margin:
+      ;; keep evicting instead of stopping and thrashing.
+      (is (eql hard (gr8s.kubelet::node-memory-eviction-threshold reconciler (+ hard 1))))
+      (is (eql hard (gr8s.kubelet::node-memory-eviction-threshold reconciler (+ hard reclaim -1))))
+      ;; Recovered the full margin above the threshold: the run ends.
+      (is (null (gr8s.kubelet::node-memory-eviction-threshold reconciler (+ hard reclaim))))
+      (is (null (gr8s.kubelet::reconciler-memory-eviction-active-threshold reconciler)))
+      ;; With no active run, a value just over the hard threshold is in the soft
+      ;; band and waits for the grace period rather than evicting immediately.
+      (is (null (gr8s.kubelet::node-memory-eviction-threshold reconciler (+ hard 1)))))))
