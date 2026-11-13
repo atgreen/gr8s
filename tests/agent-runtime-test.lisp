@@ -1159,3 +1159,28 @@ the reconciler evicts on, so the control plane can raise MemoryPressure."
     (is-false (gr8s.agent::agent-node-memory-pressure-p))
     (is-false (slot-value (gr8s.agent::agent-heartbeat nil)
                           'gr8s.node.v1::memory-pressure))))
+
+(test agent-heartbeat-reports-disk-and-pid-pressure
+  "Disk pressure follows free bytes or free inodes; PID pressure follows the
+process count against the kernel ceiling; and the heartbeat carries all three."
+  (let ((gr8s.kubelet::*node-disk-available-fn*
+          (lambda () (values (1- gr8s.kubelet::+disk-eviction-threshold-bytes+) 1000000))))
+    (is-true (gr8s.agent::agent-node-disk-pressure-p)))
+  (let ((gr8s.kubelet::*node-disk-available-fn*
+          (lambda () (values (* 100 gr8s.kubelet::+disk-eviction-threshold-bytes+)
+                             (1- gr8s.kubelet::+disk-eviction-threshold-inodes+)))))
+    (is-true (gr8s.agent::agent-node-disk-pressure-p)))
+  (let ((gr8s.kubelet::*node-disk-available-fn*
+          (lambda () (values (* 100 gr8s.kubelet::+disk-eviction-threshold-bytes+) 1000000))))
+    (is-false (gr8s.agent::agent-node-disk-pressure-p)))
+  (let ((gr8s.kubelet::*node-pid-usage-fn* (lambda () (values 95 100))))
+    (is-true (gr8s.agent::agent-node-pid-pressure-p)))
+  (let ((gr8s.kubelet::*node-pid-usage-fn* (lambda () (values 50 100))))
+    (is-false (gr8s.agent::agent-node-pid-pressure-p)))
+  (let ((gr8s.kubelet::*node-memory-available-fn* (lambda () 0))
+        (gr8s.kubelet::*node-disk-available-fn* (lambda () (values 0 0)))
+        (gr8s.kubelet::*node-pid-usage-fn* (lambda () (values 100 100))))
+    (let ((heartbeat (gr8s.agent::agent-heartbeat nil)))
+      (is-true (slot-value heartbeat 'gr8s.node.v1::memory-pressure))
+      (is-true (slot-value heartbeat 'gr8s.node.v1::disk-pressure))
+      (is-true (slot-value heartbeat 'gr8s.node.v1::pid-pressure)))))
