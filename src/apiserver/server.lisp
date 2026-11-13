@@ -182,6 +182,10 @@ without input, and a client without WebSocket pings (any before v5.channel.k8s.i
   (cond
     ((health-response (hunchentoot:script-name request) (acceptor-store acceptor)))
     ((ha-redirect-response acceptor request))
+    ((dashboard-response (acceptor-store acceptor)
+                         (acceptor-runtime acceptor)
+                         (acceptor-reconciler acceptor)
+                         request))
     (t
      (handle-http-request (acceptor-store acceptor)
                           (acceptor-runtime acceptor)
