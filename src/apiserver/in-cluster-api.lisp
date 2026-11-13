@@ -24,9 +24,15 @@
                 renew-within)))
     (error () t)))
 
-(defun kubernetes-api-addresses (addresses)
-  "Return the unique API ADDRESSES plus the stable Service and loopback addresses."
-  (remove-duplicates (append addresses '("10.96.0.1" "127.0.0.1")) :test #'equal))
+(defun kubernetes-api-addresses
+    (addresses &optional (local-addresses (ignore-errors (gr8s.network::host-ipv4-addresses))))
+  "Return the unique API ADDRESSES plus every local IPv4 address and the stable
+Service and loopback addresses. Covering all local addresses (as k0s does) means
+the server certificate verifies against whichever local address a client is
+pointed at, so a kubeconfig that advertises one interface is not broken by the
+server having picked a different one (podster-1v6)."
+  (remove-duplicates (append addresses local-addresses '("10.96.0.1" "127.0.0.1"))
+                     :test #'equal))
 
 (defun ensure-kubernetes-api-credentials
     (pki &key (addresses nil) (renew-within +certificate-leaf-renewal-seconds+) rotate-key)

@@ -2,6 +2,25 @@
 
 (in-suite gr8s)
 
+(test kubernetes-api-addresses-cover-all-local-ipv4-plus-stable-addresses
+  ;; podster-1v6: the API serving certificate must cover every local IPv4 address
+  ;; (as k0s does), so a kubeconfig pointed at any local interface still verifies
+  ;; even when the server advertised a different one. local-addresses is injected
+  ;; here instead of enumerating the host.
+  (let ((names (gr8s.apiserver::kubernetes-api-addresses
+                '("192.168.1.198")
+                '("10.77.77.10" "192.168.1.198" "127.0.0.1"))))
+    ;; the explicitly advertised address, every local address, and the stable
+    ;; Service + loopback addresses are all present...
+    (dolist (expected '("192.168.1.198" "10.77.77.10" "10.96.0.1" "127.0.0.1"))
+      (is (member expected names :test #'equal) "~A missing from ~A" expected names))
+    ;; ...with no duplicates (192.168.1.198 and 127.0.0.1 appeared twice in input).
+    (is (= (length names) (length (remove-duplicates names :test #'equal))))
+    (is (= 4 (length names))))
+  ;; Degrades gracefully: no enumerable local addresses still yields the stable set.
+  (is (equal '("10.96.0.1" "127.0.0.1")
+             (gr8s.apiserver::kubernetes-api-addresses '() '()))))
+
 (test certificate-signatures-use-minimal-positive-der-integers
   (let ((signature (make-array 64 :element-type '(unsigned-byte 8) :initial-element 0)))
     (setf (aref signature 31) 1 (aref signature 63) 128)

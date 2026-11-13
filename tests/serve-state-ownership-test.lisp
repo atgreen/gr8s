@@ -4,6 +4,22 @@
 (def-suite serve-state-ownership :in gr8s)
 (in-suite serve-state-ownership)
 
+(test local-kubeconfig-address-prefers-loopback-over-the-advertised-interface
+  ;; podster-1v6: the locally generated admin kubeconfig targets loopback whenever
+  ;; the listener is reachable there (wildcard bind), like k3s -- so it never
+  ;; depends on which external interface the server advertised. A pinned
+  ;; non-wildcard listen address is used verbatim (loopback unreachable then).
+  (flet ((addr (&rest options) (gr8s.server::serve-local-kubeconfig-address options)))
+    ;; default wildcard bind -> loopback, even with a node-address advertised
+    (is (equal "127.0.0.1" (addr)))
+    (is (equal "127.0.0.1" (addr :listen "0.0.0.0")))
+    (is (equal "127.0.0.1" (addr :listen "::")))
+    (is (equal "127.0.0.1" (addr :node-address "192.168.1.198")))
+    ;; a listener pinned to a specific address cannot use loopback -> use it
+    (is (equal "192.168.1.198" (addr :listen "192.168.1.198")))
+    ;; and that is independent of the advertised address, which stays external
+    (is (equal "192.168.1.198" (gr8s.server::serve-api-advertise-address '(:node-address "192.168.1.198"))))))
+
 (test serve-owns-state-before-open-store-and-releases-on-initializer-failure
   (let* ((root (uiop:ensure-directory-pathname (sb-posix:mkdtemp "/tmp/gr8s-owner-XXXXXX")))
          (options (list :state-directory root))
