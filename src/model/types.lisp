@@ -82,6 +82,12 @@
   ;; Why the node's container runtime is down while its agent still holds the
   ;; lease, or NIL. Not persisted: the next heartbeat reports it again.
   runtime-down-message
+  ;; Node-pressure signals from the agent's most recent heartbeat, surfaced as
+  ;; the standard kubelet Node conditions. Transient like RUNTIME-DOWN-MESSAGE:
+  ;; the next heartbeat reports them again, so they are not persisted.
+  (memory-pressure nil)
+  (disk-pressure nil)
+  (pid-pressure nil)
   last-heartbeat
   lease-deadline
   ;; First heartbeat of the current uninterrupted ready lease. Unlike

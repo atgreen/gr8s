@@ -1201,6 +1201,12 @@ An explicit unready or malformed current report withdraws its prior proof."
         (node-grpc-server-store server) node-name
         (slot-value (slot-value envelope 'gr8s.node.v1::heartbeat)
                     'gr8s.node.v1::runtime-down-message))
+       (let ((heartbeat (slot-value envelope 'gr8s.node.v1::heartbeat)))
+         (note-node-pressure
+          (node-grpc-server-store server) node-name
+          (slot-value heartbeat 'gr8s.node.v1::memory-pressure)
+          (slot-value heartbeat 'gr8s.node.v1::disk-pressure)
+          (slot-value heartbeat 'gr8s.node.v1::pid-pressure)))
        (note-node-heartbeat-lease (node-grpc-server-store server) node-name now)
        (unless previously-ready-p
          (note-topology-decision
