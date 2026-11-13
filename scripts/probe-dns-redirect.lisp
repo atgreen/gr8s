@@ -16,7 +16,7 @@
    `(:source-registry (:directory ,project) (:tree ,(merge-pathnames "ocicl/" project))
      :inherit-configuration)))
 (asdf:load-system :gr8s)
-(in-package #:gr8s)
+(in-package #:gr8s.network)
 
 (defvar *ns* "gr8sprobe")
 (defvar *gw* "169.254.9.9")       ; host-local gateway address carrying the DNS listener
@@ -27,7 +27,7 @@
 ;; TC classifier: redirect UDP -> 169.254.9.9:53 to loopback ingress; pass the
 ;; rest.  Authored in the WHISTLER package so the DSL symbols resolve there.
 (in-package #:whistler)
-(defparameter gr8s::*redirect-forms*
+(defparameter gr8s.network::*redirect-forms*
   '((defprog dns-redirect-probe (:type :tc :section "classifier" :license "GPL")
       (let ((data u64 (tc-data)) (data-end u64 (tc-data-end)))
         (if (> (+ data 42) data-end)
@@ -42,7 +42,7 @@
 ;; Variant: zero the 6-byte destination MAC before redirecting, so lo's
 ;; eth_type_trans sees dst == lo's all-zero address (PACKET_HOST) instead of
 ;; PACKET_OTHERHOST, which would drop the frame before it reaches INPUT.
-(defparameter gr8s::*redirect-mac-forms*
+(defparameter gr8s.network::*redirect-mac-forms*
   '((defprog dns-redirect-probe-mac (:type :tc :section "classifier" :license "GPL")
       (let ((data u64 (tc-data)) (data-end u64 (tc-data-end)))
         (if (> (+ data 42) data-end)
@@ -55,7 +55,7 @@
                        (store u16 data 4 0)                    ; dst MAC bytes 4-5 = 0
                        (redirect 1 1))
                 TC_ACT_OK))))))
-(in-package #:gr8s)
+(in-package #:gr8s.network)
 
 (defun sh (fmt &rest args)
   (let ((cmd (apply #'format nil fmt args)))

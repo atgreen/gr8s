@@ -1,5 +1,20 @@
 (load (merge-pathnames "network-test-support.lisp" *load-truename*))
-(in-package #:gr8s)
+(in-package #:gr8s.network)
+;; Import the sibling-module symbols the removed #:gr8s facade used to expose
+;; (podster-yjf / podster-oed).
+(import '(gr8s.kubelet::make-managed-containerd
+          gr8s.kubelet::managed-containerd-cni-config-text
+          gr8s.agent::make-node-runtime
+          gr8s.agent::node-runtime-network
+          gr8s.agent::node-runtime-ipam
+          gr8s.agent::node-runtime-cni-operations
+          gr8s.agent::apply-node-runtime-network
+          gr8s.agent::call-with-agent-cni-server
+          gr8s.agent::call-with-dns-server
+          cl-dns-proxy::read-dns-frame
+          cl-dns-proxy::write-dns-frame
+          gr8s.runtime::make-fake-runtime
+          gr8s.foundation::+dns-kubernetes-service+))
 
 (defun test-agent-network-policy ()
   ;; User namespaces cannot load privileged BPF programs. This test substitutes

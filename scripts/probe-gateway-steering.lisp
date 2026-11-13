@@ -21,7 +21,15 @@
 (handler-bind ((warning #'muffle-warning))
   (asdf:load-system :gr8s :verbose nil))
 
-(in-package #:gr8s)
+(in-package #:gr8s.network)
+;; This probe reaches into sibling modules the removed #:gr8s facade used to
+;; expose; import the exact symbols it needs so its unqualified references
+;; resolve (podster-yjf / podster-oed).
+(import '(gr8s.controllers::gateway-steering-register
+          gr8s.controllers::gateway-steering-supported-p
+          gr8s.controllers::gateway-steering-unregister
+          gr8s.controllers::start-gateway-steering
+          gr8s.controllers::stop-gateway-steering))
 
 (sb-alien:define-alien-routine ("unshare" %unshare) sb-alien:int (flags sb-alien:int))
 (defconstant +clone-newnet+ #x40000000)

@@ -18,7 +18,14 @@
    `(:source-registry (:directory ,project) (:tree ,(merge-pathnames "ocicl/" project))
      :inherit-configuration)))
 (asdf:load-system :gr8s)
-(in-package #:gr8s)
+(in-package #:gr8s.network)
+;; Import the sibling-module symbols the removed #:gr8s facade used to expose
+;; (podster-yjf / podster-oed).
+(import '(gr8s.controllers::make-service-lb-controller
+          gr8s.controllers::converge-service-lb-controller
+          gr8s.store::open-store
+          gr8s.store::pod-store-resources
+          gr8s.resources::core-resource-key))
 
 (defvar *vip* "10.96.0.77")
 (defvar *vip-port* 80)
