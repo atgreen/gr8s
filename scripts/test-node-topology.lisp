@@ -1,5 +1,20 @@
 (load (merge-pathnames "network-test-support.lisp" *load-truename*))
-(in-package #:gr8s)
+(in-package #:gr8s.network)
+;; Import the sibling-module symbols the removed #:gr8s facade used to expose
+;; (podster-yjf / podster-oed).
+(import '(gr8s.store::open-store
+          gr8s.model::make-node-record
+          gr8s.controllers::register-node
+          gr8s.apiserver::start-node-grpc-server
+          gr8s.apiserver::stop-node-grpc-server
+          gr8s.apiserver::node-grpc-server-port
+          gr8s.agent::make-node-session-control
+          gr8s.agent::run-node-session
+          gr8s.agent::cancel-node-session
+          gr8s.agent::make-node-runtime
+          gr8s.agent::node-runtime-network
+          gr8s.agent::apply-node-runtime-network
+          gr8s.runtime::make-fake-runtime))
 
 (defun topology-test-wait (predicate)
   (loop repeat 400
