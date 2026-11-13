@@ -796,17 +796,19 @@ the node the operation was addressed to."
                                    :key #'first :test #'string=))
                   (observed-at (node-record-wireguard-reflexive-observed-at source)))
              (when (and reflexive observed-at (<= 0 (- now-unix observed-at) 180))
+               ;; A fresh reflexive observation only signals that SOURCE-NAME is
+               ;; behind NAT and may need the relay; it never authorizes a relay
+               ;; source. The relay is the authority on SOURCE-NAME's source and
+               ;; learns it first-hand from SOURCE-NAME's own traffic, so a peer's
+               ;; self-asserted observation can no longer redirect it (N1).
                (let ((channel
                        (gr8s.network::ensure-wireguard-relay-server-channel
                         relay source-name (node-record-name peer) now)))
-                 (when (gr8s.network::authorize-wireguard-relay-node
-                        (gr8s.network::wireguard-relay-server-coordinator relay)
-                        channel source-name (second reflexive) now)
-                   (list (make-instance
-                          'gr8s.node.v1::wireguard-endpoint
-                          :name "relay" :address address
-                          :port (gr8s.network::wireguard-relay-channel-port-for
-                                 channel source-name)))))))
+                 (list (make-instance
+                        'gr8s.node.v1::wireguard-endpoint
+                        :name "relay" :address address
+                        :port (gr8s.network::wireguard-relay-channel-port-for
+                               channel source-name))))))
          (error (condition)
            (format *error-output* "gr8s relay allocation failed for ~A/~A: ~A~%"
                    source-name (node-record-name peer) condition)
@@ -979,16 +981,19 @@ candidates; agents still require their transactional handshake/probe gates."
                                   :key #'first :test #'string=)))
               (when (accept-wireguard-nat-observation-p server target-name now)
                 (let ((changed (not (equal current candidate))))
+                  ;; The observation only updates TARGET's reflexive endpoint
+                  ;; CANDIDATE, which the data path still re-gates through each
+                  ;; agent's own WireGuard handshake probe. It deliberately no
+                  ;; longer touches any relay source authorization: a peer must
+                  ;; not be able to redirect another node's relay source by self-
+                  ;; asserted observation (N1). The relay learns that source
+                  ;; first-hand from the target's own traffic instead.
                   (update-node-wireguard-endpoints
                    (node-grpc-server-store server) target-name
                    (merge-wireguard-reflexive-endpoint
                     (node-record-wireguard-endpoints target)
                     address port)
                    :reflexive-observed-at now)
-                  (when (node-grpc-server-wireguard-relay-server server)
-                    (gr8s.network::refresh-wireguard-relay-source-evidence
-                     (node-grpc-server-wireguard-relay-server server)
-                     target-name address (+ now 2208988800)))
                   (when changed
                     (refresh-node-peer-topology server target-name)))))))
       (error (condition)
