@@ -322,6 +322,41 @@ per-QoS oom_score_adj leaves them to the kernel as a last resort)."
 (defparameter *node-memory-available-fn* #'node-memory-available-bytes
   "Reader for available node memory in bytes; injectable for tests.")
 
+(defparameter +disk-eviction-threshold-bytes+ (* 1024 1024 1024)
+  "Minimum free node-filesystem bytes before DiskPressure, matching the kubelet's
+default nodefs.available eviction threshold (roughly 10%, 1Gi here as a floor).")
+
+(defparameter +disk-eviction-threshold-inodes+ 10000
+  "Minimum free node-filesystem inodes before DiskPressure.")
+
+(defparameter *node-nodefs-path* "/var/lib/kubelet/"
+  "The node filesystem whose free space backs the DiskPressure signal.")
+
+(defun node-disk-available ()
+  "(values available-bytes free-inodes) for the node filesystem, or (values NIL NIL)."
+  (let ((statistics (ignore-errors (filesystem-statistics *node-nodefs-path*))))
+    (if statistics
+        (values (second statistics) (fifth statistics))
+        (values nil nil))))
+
+(defparameter *node-disk-available-fn* #'node-disk-available
+  "Reader for (values available-bytes free-inodes) of the node filesystem; injectable for tests.")
+
+(defun node-pid-usage ()
+  "(values used-pids max-pids) for the node, or (values NIL NIL). The fourth
+/proc/loadavg field is runnable/total processes; /proc/sys/kernel/pid_max is the
+ceiling the kernel will allocate to."
+  (ignore-errors
+    (let* ((loadavg (with-open-file (in "/proc/loadavg") (read-line in)))
+           (field (fourth (remove "" (uiop:split-string loadavg :separator '(#\Space)) :test #'equal)))
+           (total (and field (parse-integer (subseq field (1+ (position #\/ field))) :junk-allowed t)))
+           (maximum (with-open-file (in "/proc/sys/kernel/pid_max")
+                      (parse-integer (read-line in) :junk-allowed t))))
+      (if (and total maximum) (values total maximum) (values nil nil)))))
+
+(defparameter *node-pid-usage-fn* #'node-pid-usage
+  "Reader for (values used-pids max-pids); injectable for tests.")
+
 (defun node-pressure-evict (reconciler)
   "When free node memory is below the eviction threshold, gracefully evict the
 least-critical local Pod (BestEffort/Burstable, lowest priority first), one per

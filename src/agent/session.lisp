@@ -504,13 +504,30 @@ can raise this node's MemoryPressure condition. NIL when memory cannot be read."
   (let ((available (ignore-errors (funcall gr8s.kubelet::*node-memory-available-fn*))))
     (and available (< available gr8s.kubelet::+memory-eviction-threshold-bytes+) t)))
 
+(defun agent-node-disk-pressure-p ()
+  "True when the node filesystem's free bytes or inodes have fallen to the kubelet
+eviction thresholds; NIL when it cannot be measured."
+  (multiple-value-bind (available-bytes free-inodes)
+      (ignore-errors (funcall gr8s.kubelet::*node-disk-available-fn*))
+    (and (or (and available-bytes (< available-bytes gr8s.kubelet::+disk-eviction-threshold-bytes+))
+             (and free-inodes (< free-inodes gr8s.kubelet::+disk-eviction-threshold-inodes+)))
+         t)))
+
+(defun agent-node-pid-pressure-p ()
+  "True when running processes have reached 90% of the kernel's pid ceiling; NIL
+when it cannot be read."
+  (multiple-value-bind (used maximum)
+      (ignore-errors (funcall gr8s.kubelet::*node-pid-usage-fn*))
+    (and used maximum (plusp maximum) (>= (* used 10) (* maximum 9)) t)))
+
 (defun agent-heartbeat (runtime-health &optional (message (agent-runtime-health runtime-health)))
   "Return a heartbeat carrying MESSAGE, why the node's runtime is down, and the
-node-pressure signals the control plane surfaces as Node conditions. Disk and PID
-pressure are not yet observed by the agent, so only memory pressure is reported."
+node-pressure signals the control plane surfaces as the kubelet Node conditions."
   (make-instance 'gr8s.node.v1::heartbeat
                  :runtime-down-message message
-                 :memory-pressure (agent-node-memory-pressure-p)))
+                 :memory-pressure (agent-node-memory-pressure-p)
+                 :disk-pressure (agent-node-disk-pressure-p)
+                 :pid-pressure (agent-node-pid-pressure-p)))
 
 (defun agent-session-monitor
     (session control session-thread heartbeat-interval
