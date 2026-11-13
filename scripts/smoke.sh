@@ -44,7 +44,7 @@ wait_for_workload_cleanup() {
 wait_for_counter() {
   metric=$1
   counter_attempt=0
-  until curl -fsS "http://127.0.0.1:$port/metrics" | awk -v metric="$metric" '
+  until kubectl --kubeconfig "$work_directory/kubeconfig" get --raw='/metrics' | awk -v metric="$metric" '
     index($1, metric "{") == 1 && $2 > 0 { found = 1 }
     END { exit !found }'; do
     counter_attempt=$((counter_attempt + 1))
