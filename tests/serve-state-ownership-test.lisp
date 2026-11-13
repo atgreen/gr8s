@@ -331,3 +331,24 @@
   ;; An unset external port never counts as covering the endpoint.
   (is-false (gr8s.server::external-api-covers-in-cluster-endpoint-p
              "0.0.0.0" nil "10.0.0.5" 6443)))
+
+(test serve-requires-root-fails-fast-with-an-actionable-message
+  "A privileged (managed-containerd) serve/agent must refuse a non-root euid up
+front with one clear line, rather than failing deep in startup (podster-983-adjacent)."
+  ;; Root passes.
+  (is-true (gr8s.server::ensure-running-as-root :command "serve" :euid 0))
+  ;; A non-root euid raises the clean runtime-error with an actionable message.
+  (let ((condition (handler-case
+                       (progn (gr8s.server::ensure-running-as-root :command "serve" :euid 1000) nil)
+                     (gr8s.server::runtime-error (c) c))))
+    (is (not (null condition)) "non-root serve signalled runtime-error")
+    (let ((message (gr8s.runtime:runtime-error-message condition)))
+      (is (search "must run as root" message))
+      (is (search "1000" message))
+      (is (search "--disable-agent" message))))
+  ;; The agent variant omits the serve-only --disable-agent hint.
+  (let ((message (handler-case
+                     (progn (gr8s.server::ensure-running-as-root :command "agent" :euid 1000) "")
+                   (gr8s.server::runtime-error (c) (gr8s.runtime:runtime-error-message c)))))
+    (is (search "gr8s agent must run as root" message))
+    (is (not (search "--disable-agent" message)))))

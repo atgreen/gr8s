@@ -1409,6 +1409,24 @@ The new identity takes effect when the node agent next starts."
                       path)))))
   t)
 
+(defun ensure-running-as-root (&key (command "agent") (euid (sb-posix:geteuid)))
+  "Refuse to start a privileged COMMAND when not effectively root.
+The managed containerd runtime, the eBPF dataplane, CNI networking and
+container mounts all need real root; without it gr8s would otherwise fail deep
+in startup -- pulling images, loading a cgroup/connect4 program, or mounting a
+Pod -- with an opaque error far from the cause. Fail fast, like kubeadm's
+preflight, with one actionable line. EUID is injectable for tests."
+  (unless (zerop euid)
+    (error 'runtime-error
+           :message
+           (format nil
+                   "gr8s ~A must run as root: the managed containerd runtime, eBPF dataplane and Pod networking require root privileges, but the effective uid is ~D. Re-run with sudo~A."
+                   command euid
+                   (if (string= command "serve")
+                       ", or run a control-plane-only process with 'gr8s serve --disable-agent' (or '--runtime fake'), which needs no privileges"
+                       ""))))
+  t)
+
 (defconstant +in-cluster-api-port+ 6443
   "Fixed port of the in-cluster apiserver (0.0.0.0:6443) that backs the
 \"kubernetes\" Service. It is distinct from the admin API's --port, must be
@@ -1424,6 +1442,7 @@ agent masquerades Pod->apiserver traffic toward.")
    dispatching operations -- and stops the kubelet and runtime on exit. CONTROL,
    when given, is the session control handle (used by the in-process agent)."
   (when (managed-containerd-options-p options)
+    (ensure-running-as-root :command "agent")
     (ensure-kubelet-endpoints-available :command "agent"))
   (let* ((enrollment-endpoints (parse-agent-servers (getf options :server)))
          (session-endpoints
@@ -1802,6 +1821,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
        ;; Fail before opening the store, PKI, listeners, or containerd. The
        ;; top-level handler then emits one actionable line without a worker
        ;; thread backtrace.
+       (ensure-running-as-root :command "serve")
        (ensure-kubelet-endpoints-available :command "serve"))
      (serve-owned options))))
 
