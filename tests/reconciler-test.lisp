@@ -509,3 +509,33 @@
       (is (equal "burst" (pod-name (gr8s.kubelet::select-memory-eviction-pod (list burst guaranteed)))))
       ;; Only Guaranteed Pods remain: nothing is evicted for memory pressure alone.
       (is (null (gr8s.kubelet::select-memory-eviction-pod (list guaranteed)))))))
+
+(test memory-soft-eviction-waits-for-the-grace-period
+  "The hard threshold evicts at once; the soft threshold evicts only after memory
+has stayed below it for the grace period, and a recovery resets the timer."
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let* ((reconciler (make-reconciler store (make-fake-runtime)))
+           (clock 0)
+           (gr8s.kubelet::*node-pressure-clock-fn* (lambda () clock))
+           (soft gr8s.kubelet::+memory-soft-eviction-threshold-bytes+)
+           (hard gr8s.kubelet::+memory-eviction-threshold-bytes+)
+           (grace-ticks (* gr8s.kubelet::+memory-soft-eviction-grace-seconds+
+                           internal-time-units-per-second)))
+      ;; Comfortably above the soft threshold: no eviction, timer stays clear.
+      (is (null (gr8s.kubelet::node-memory-eviction-threshold reconciler (* 2 soft))))
+      (is (null (gr8s.kubelet::reconciler-memory-soft-pressure-since reconciler)))
+      ;; Below soft (above hard): the first pass starts the grace timer, no eviction.
+      (is (null (gr8s.kubelet::node-memory-eviction-threshold reconciler (1- soft))))
+      (is (gr8s.kubelet::reconciler-memory-soft-pressure-since reconciler))
+      ;; Still within the grace window: still no eviction.
+      (setf clock (1- grace-ticks))
+      (is (null (gr8s.kubelet::node-memory-eviction-threshold reconciler (1- soft))))
+      ;; Grace elapsed while still crossed: the soft threshold now evicts.
+      (setf clock grace-ticks)
+      (is (eql soft (gr8s.kubelet::node-memory-eviction-threshold reconciler (1- soft))))
+      ;; Recovery above the soft threshold clears the timer.
+      (is (null (gr8s.kubelet::node-memory-eviction-threshold reconciler (* 2 soft))))
+      (is (null (gr8s.kubelet::reconciler-memory-soft-pressure-since reconciler)))
+      ;; Below the hard threshold evicts immediately, regardless of grace.
+      (is (eql hard (gr8s.kubelet::node-memory-eviction-threshold reconciler (1- hard)))))))
