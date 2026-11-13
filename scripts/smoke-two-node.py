@@ -16,7 +16,6 @@ import signal
 import subprocess
 import tempfile
 import time
-import urllib.request
 
 
 def run(*args, check=True, timeout=30, input=None):
@@ -92,8 +91,11 @@ class Smoke:
         return json.loads(self.kubectl('get', 'pod', f'two-node-{index}', '-o', 'json').stdout)
 
     def metrics(self):
-        with urllib.request.urlopen(f'http://127.0.0.1:{self.api_port}/metrics', timeout=3) as response:
-            return response.read().decode()
+        # gr8s serves /metrics over the authenticated TLS API, not plain HTTP;
+        # a plain-HTTP probe reads the TLS handshake and fails with
+        # BadStatusLine. Query it through the kubeconfig like every other call
+        # (cf. the readiness-probe fix in scripts/smoke.sh).
+        return self.kubectl('get', '--raw=/metrics').stdout
 
     def setup(self):
         assert os.geteuid() == 0, 'root is required'
