@@ -10,7 +10,10 @@ agent, and per-Pod state lives in BPF maps the agent updates.
 
 This document covers the whole dataplane: the egress guard, NetworkPolicy,
 Services and load balancing, the Gateway API, CNI/IPAM, DNS, and the VXLAN and
-self-tuning WireGuard cross-node overlays.
+self-tuning WireGuard cross-node overlays. **VXLAN is the default**;
+select WireGuard explicitly with `serve --overlay-backend wireguard`.
+The [network access table](building-and-testing.md#network-access) lists the
+baseline ports needed to join nodes.
 
 ## The per-Pod egress guard
 
@@ -54,23 +57,24 @@ counter to appear through agent telemetry.
 
 ## NetworkPolicy: a compiled eBPF firewall
 
-`networking.k8s.io/v1` NetworkPolicy is enforced as a compiled eBPF firewall on
-real Pods. Rather than recompiling a program per policy change, gr8s folds
-enforcement into the per-Pod egress classifier at the host veth and drives it
-from BPF maps. The resolved policy contains allowed destination CIDRs in an LPM
-trie and permitted `(group, protocol, port)` tuples in a hash. gr8s writes it as *data* into
-pinned maps, so a policy change is a map update, not a recompile or a re-attach.
+`networking.k8s.io/v1` NetworkPolicy controls ingress and egress on real native
+Pods through eBPF guards at the Pod's host veth. The control plane resolves
+Pod/Namespace selectors and named ports into peer addresses and port rules;
+agents publish those rules into pinned maps. Policy changes update data rather
+than requiring a new program for each policy.
 
-Egress to a destination no rule permits is dropped (default-deny), and the drops
-are counted and exported through the same endpoint telemetry as the anti-spoof
-guard.
+Policy supports `podSelector`, `namespaceSelector`, combined selectors,
+`ipBlock` with `except`, protocol/port ranges, and direction-specific default deny.
+Connection state permits reply traffic for allowed flows. Counters report policy
+drops alongside endpoint identity/anti-spoofing telemetry. See
+[`network-policy.lisp`](../src/network/network-policy.lisp) and
+[`network-policy-program.lisp`](../src/network/network-policy-program.lisp).
 
-The smoke test applies a default-deny-egress policy to a running Pod and requires
-its previously reachable gateway to become unreachable, proving enforcement on a
-live Pod; detach-on-removal is covered by unit tests.
-
-**Tracked for completeness:** ingress-direction enforcement, connection tracking
-for reply traffic, namespace selectors, and `ipBlock.except`.
+The original native smoke demonstrated egress default-deny on a live Pod.
+Current source implements both directions and dual-family policy paths; the
+[compatibility inventory](k3s-gap-inventory.md) distinguishes focused support from
+the remaining combined IPv6/dual-stack acceptance work. An old egress-only smoke
+result is not evidence for all newer policy behavior.
 
 ## Services & load balancing
 

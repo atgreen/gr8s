@@ -7,8 +7,8 @@ that boundary.
 ## The self-contained payload
 
 The native build embeds pinned, statically linked **containerd 2.4.2**,
-`containerd-shim-runc-v2`, **runc 1.5.2**, and the `bridge`, `host-local`, and
-`loopback` CNI plugins 1.9.1. It needs no system containerd, host glibc, or
+`containerd-shim-runc-v2`, **runc 1.5.2**, and the `bridge`, `host-local`,
+`loopback`, and `firewall` CNI plugins 1.9.1. It needs no system containerd, host glibc, or
 separate CNI helper binary.
 
 At startup the local gr8s agent mounts a private `tmpfs`, materializes the
@@ -32,7 +32,7 @@ The runtime client is Common Lisp too: gr8s uses ag-gRPC over a Unix-domain
 socket and generated bindings for the pinned Kubernetes CRI v1 schema. The
 checked-in [`proto/cri-v1.proto`](../proto/cri-v1.proto) is the full CRI v1 schema
 pinned from Kubernetes `cri-api` v0.36.0; its generated Common Lisp bindings live
-in `src/cri-v1-generated.lisp`.
+in `src/generated/cri-v1-generated.lisp`.
 
 gr8s owns desired state, while each agent calls containerd's
 `runtime.v1.RuntimeService` and `ImageService` directly over its private Unix

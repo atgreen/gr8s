@@ -24,6 +24,9 @@ The name **gr8s** is a portmanteau of *Green* — its author's surname — and
 > [API coverage](docs/kubernetes-surface.md) and
 > [known gaps](docs/k3s-gap-inventory.md) for the current scope.
 
+Start with the [documentation guide](docs/index.md). If you already know Kubernetes,
+the [component map](docs/kubernetes-users.md) explains where familiar components live.
+
 ## Why gr8s?
 
 - The same executable can run a complete single-node cluster, a control plane,
@@ -39,7 +42,8 @@ The name **gr8s** is a portmanteau of *Green* — its author's surname — and
   Lisp, without clang or LLVM.
 - Raft replicates control-plane state without an external database. Certificates
   authenticate node enrollment and internal communication.
-- An adaptive WireGuard overlay selects paths between nodes. Authenticated
+- Cross-node traffic uses VXLAN by default. An optional adaptive WireGuard
+  overlay selects paths between nodes. Authenticated
   BitTorrent v2 peers share verified image blobs. This avoids repeated registry
   downloads during multi-node rollouts.
 - The API, controllers, agent, networking compiler, and datastore use Common
@@ -93,24 +97,28 @@ sudo build/gr8s serve \
   --kubeconfig /tmp/gr8s.kubeconfig
 ```
 
-In another terminal, create a Pod and wait until it is ready. The server creates
-an owner-only kubeconfig, so these commands use `sudo` to read it. The node needs
-registry access to download the image.
+In another terminal, deploy the [example](examples/getting-started.yaml). The
+server creates an owner-only kubeconfig, so these commands use `sudo` to read it.
+The node needs registry access for the nginx and BusyBox images.
 
 ```sh
-sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig run web \
-  --image=docker.io/library/nginx:1.27 --restart=Never
 sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig wait \
-  --for=condition=Ready pod/web --timeout=180s
-sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig get pods -o wide
-sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig logs web
-
-# Remove the example workload when finished.
-sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig delete pod web
+  --for=condition=Ready node/gr8s-local --timeout=180s
+sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig apply -f examples/getting-started.yaml
+sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig -n gr8s-demo rollout status \
+  deployment/web --timeout=180s
+sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig -n gr8s-demo wait \
+  --for=condition=Ready pod/client --timeout=180s
+sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig -n gr8s-demo exec client -- \
+  wget -qO- http://web.gr8s-demo.svc.cluster.local
 ```
 
-Stop the server with Ctrl-C. The state directory keeps the cluster state for the
-next start.
+Expect two ready web replicas and an HTML response containing `Welcome to nginx!`.
+The [full walkthrough](docs/getting-started.md) checks DNS, performs a rolling
+restart, shows expected results, and explains common failures. Remove the example
+with `sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig delete namespace gr8s-demo`.
+Stop the server with Ctrl-C; the state directory preserves cluster state for the
+next start, although the host may clear `/tmp`.
 
 See [Building, running & testing](docs/building-and-testing.md) to add
 [worker nodes](docs/building-and-testing.md#a-second-node), use external
@@ -126,7 +134,7 @@ To manage a persistent server or agent with systemd, see
 [Installing and operating gr8s with systemd](docs/installing.md).
 It covers verified upgrades, rollback, scoped cleanup, and uninstall.
 
-For multi-member operation, recovery, optional compaction and heap sizing, see
+For multi-member operation, recovery, automatic checkpoints and heap sizing, see
 [High availability](docs/high-availability.md).
 
 ## Dashboard
@@ -143,7 +151,9 @@ sudo build/gr8s dashboard --kubeconfig /tmp/gr8s.kubeconfig
 
 It serves on loopback `http://127.0.0.1:8080` by default (change with `--port`)
 and launches your browser; `--no-launch` prints the URL instead. The process
-runs in the foreground until Ctrl-C.
+runs in the foreground until Ctrl-C. Source builds need the optional
+[dashboard assets step](docs/building-and-testing.md#optional-dashboard-assets)
+before dumping the native executable.
 
 ## Kubernetes capabilities
 
@@ -232,11 +242,15 @@ Run the unit and HTTP tests with `make test`. Tests that load eBPF programs or
 run real containers need a privileged environment. Use a disposable VM and
 follow the [testing guide](docs/building-and-testing.md#test-matrix).
 
+- [Documentation paths](docs/index.md)
+- [First workload: Deployment, Service, DNS, and rollout](docs/getting-started.md)
+- [Kubernetes component map](docs/kubernetes-users.md)
 - [Building, running & testing](docs/building-and-testing.md)
 - [Kubernetes API surface](docs/kubernetes-surface.md)
 - [Networking & the eBPF dataplane](docs/networking.md)
 - [Runtime & the container stack](docs/runtime.md)
 - [High availability](docs/high-availability.md)
+- [Source map and developer walkthrough](docs/development.md)
 - [Design & compatibility boundary](docs/design.md)
 - [Multi-node design](docs/multi-node-design.md)
 - [Known compatibility gaps](docs/k3s-gap-inventory.md)

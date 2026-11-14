@@ -271,6 +271,8 @@ sampling limits. Preserve logs and state when recovery remains blocked; repeated
 restarting or removing files does not establish a safe recovery boundary.
 
 Application snapshots support Raft recovery; they are not an operator backup of
-cluster identity, signing/encryption keys or patch state. A complete operator
-backup/restore workflow remains separate work. gr8s has not passed Kubernetes
-conformance.
+cluster identity or signing/encryption keys. Capture/verify primitives exist,
+but a complete operator restore-to-live workflow remains separate work; see the
+[operational gap inventory](k3s-gap-inventory.md#operational-boundaries).
+The [conformance result](CONFORMANCE.md) records a two-node Kubernetes test run;
+it does not establish arbitrary HA failure or recovery acceptance.

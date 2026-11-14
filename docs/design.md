@@ -1,95 +1,86 @@
-# gr8s v1 design
+# Architecture and compatibility boundary
 
-## Goal
+gr8s implements a Kubernetes control plane and node agent in Common Lisp. One
+native executable supplies a combined server/node, a worker agent, a control-plane-only
+server, or a Raft witness. It embeds containerd/runc for container execution and
+Whistler for compiling and loading its eBPF dataplane.
 
-gr8s is a single-machine, Kubernetes-compatible Pod control plane written in
-Common Lisp. It lets a local user manage Pods with ordinary `kubectl` commands
-while an embedded containerd performs container execution.
+The user-facing contract is the Kubernetes API: authenticated HTTPS, standard
+manifests, discovery, workload controllers, scheduling, RBAC, storage, and custom
+resources. The [API reference](kubernetes-surface.md) and
+[gap inventory](k3s-gap-inventory.md) describe its scope. The
+[conformance ledger](CONFORMANCE.md) records measured compatibility. gr8s remains
+experimental; a conformance result does not establish operational maturity.
 
-The supported workflow is `kubectl apply`, `get`, `delete`, `describe`, and
-`logs` for Pods in the `default` namespace. Pod specs cover images, commands,
-arguments, environment variables, and container ports.
+## Ownership boundaries
 
-## Boundaries
+```text
+kubectl / Kubernetes clients
+             |
+       HTTPS API + admission + RBAC
+             |
+       durable desired state <---- optional Raft replication
+             |
+       controllers + scheduler
+             |
+       revisioned node protocol over mutual TLS
+             |
+       agent + Pod reconciler
+          /              \
+   CRI / containerd       native networking / DNS / Services
+          |                       |
+         runc                 kernel links + eBPF
+```
 
-gr8s v1 runs on SBCL and Linux. Its unauthenticated HTTP API binds only to
-`127.0.0.1`. It does not implement Deployments, Services, volumes, multi-node
-scheduling, admission control, RBAC, or TLS.
+The control plane owns API identities, desired state, placement, enrollment,
+Pod CIDR assignment, and the desired snapshot sent to each node. Controllers
+create and update ordinary API objects. They run only on the leader in HA mode.
 
-Kubernetes compatibility is behavioral and intentionally limited to the API
-surface required by the supported workflow. Unsupported resources and fields
-return Kubernetes-shaped status errors rather than being silently accepted.
+Each agent owns its private containerd instance by default, its assigned Pods,
+local IPAM, mounts, interfaces, routing, probes, and runtime observations. The
+agent's CNI Unix socket is private; the same executable invoked as CNI forwards
+ADD/CHECK/DEL to that agent. The local agent uses the same ownership and protocol
+boundary as a remote worker. See [multi-node design](multi-node-design.md).
 
-## Architecture
+containerd supplies CRI and container lifecycle; runc supplies OCI execution.
+gr8s supervises and materializes its embedded runtime payload, while keeping
+mutable runtime data below the configured state directory. External CRI and CNI
+modes are documented in [runtime](runtime.md) and [networking](networking.md).
 
-`gr8s-api` serves Kubernetes discovery and core v1 Pod endpoints. It maps HTTP
-requests to domain operations and emits Kubernetes-shaped JSON objects, lists,
-and status errors.
+## State and convergence
 
-`gr8s-store` persists desired Pod objects and their metadata as atomic JSON
-files. The store owns resource versions and generated UIDs, and exposes no
-containerd concepts.
+API writes persist desired state; accepting an object does not mean a container
+has started. Controllers and scheduling produce assignments. Agents reconcile
+those assignments with runtime state and report observations, from which the API
+publishes Pod conditions and status. Retries are idempotent and identities use UIDs,
+so a replacement object does not inherit an old object's runtime state by name.
 
-`gr8s-reconciler` compares stored desired state with observed runtime state. It
-creates, replaces, or removes runtime Pods and projects current container state
-into the API response.
+Standalone operation uses the local durable store. HA adds a Raft log and application
+checkpoints, replicates desired state and selected observations, and gates controller
+work on leadership. Events and some telemetry remain local. Followers can serve
+local reads, so a follower read alone is not proof of a quorum-confirmed latest value.
+See [HA consistency and recovery](high-availability.md) for the exact guarantees.
 
-`gr8s-runtime` is a protocol for observing and changing runtime Pods. The
-production adapter calls Kubernetes CRI v1 over a private Unix socket using
-ag-gRPC. A deterministic fake implementation supports unit and API tests.
+## Networking and identity
 
-The native image contains containerd, its runc-v2 shim, runc, the bridge,
-host-local, and loopback CNI plugins, and a Whistler-generated eBPF object. The
-chained CNI executable name is a symlink to the dumped gr8s image. It is not a
-separate program. Managed mode materializes these artifacts on a private tmpfs.
-It configures all mutable containerd and IPAM data under the gr8s
-state directory, supervises the daemon, and removes the tmpfs after shutdown.
-A private bpffs mounted at `containerd/bpf` keeps policy maps observable for
-exactly the managed-runtime lifetime. External mode can instead connect to an
-operator-provided CRI socket.
+Native agents create routed Pod interfaces and program Service forwarding,
+NetworkPolicy, and anti-spoofing through eBPF. Cross-node networking defaults to
+VXLAN; the adaptive WireGuard overlay is opt-in. Cluster DNS, Service publication,
+and Gateway/Ingress reconciliation are integrated. See [networking](networking.md).
 
-## Networking boundary
+The public API defaults to HTTPS on `0.0.0.0:6443`. Nodes enroll through a separate
+endpoint using a one-time token and pinned CA, then reconnect with node certificates
+and mutual TLS. Raft membership has a separate enrollment authority. See
+[certificate management](certificate-management.md) and
+[security deviations](security-deviations.md).
 
-Containerd invokes the embedded bridge and host-local plugins through CNI. The
-baseline network creates `gr8s0`, connects Pod network namespaces with veth
-pairs, and allocates addresses from `10.80.0.0/12`. Containerd supplies its
-internal loopback setup; the loopback binary remains in the complete embedded
-CNI toolset.
+## Reading the implementation
 
-Whistler supplies the policy layer. It compiles Lisp to eBPF, but it does not
-create network namespaces, links, or IP allocations. The same dumped gr8s
-image recognizes the `gr8s` CNI environment, invokes
-its Common Lisp CNI implementation, and loads the generated sched-cls program
-through Whistler's loader after the bridge stage has established the Pod
-interface. It attaches the program as a persistent TCX link. The
-current egress guard permits ARP and non-IPv4 traffic and rejects IPv4 frames
-that do not match the endpoint's agent-initialized address and MAC identity. Its `rejected_spoofs` array is pinned beneath
-the Pod sandbox container ID. Repeated ADD reuses the pinned map so its count
-survives link replacement; CHECK requires both the pinned link and map; DEL
-removes both, including late DEL calls with no remaining network namespace.
+Start with the [Kubernetes component map](kubernetes-users.md), then follow the
+[source map and apply-to-container walkthrough](development.md). Tests use fake
+runtimes for fast checks and disposable privileged VMs for real container and eBPF
+behavior; see [building and testing](building-and-testing.md).
 
-## Persistence and convergence
-
-The API writes desired state before asking the runtime to converge. Each Pod is
-stored under its UID and indexed by namespace/name. File replacement uses a
-temporary sibling followed by an atomic rename. A restart reloads desired state
-and resumes reconciliation.
-
-Reconciliation is idempotent. Runtime object labels establish ownership; gr8s
-does not mutate or delete unrelated containerd objects. Deletion removes the
-runtime sandbox before removing the persisted final record. Runtime failures
-appear in Pod status and are retried.
-
-## Compatibility contract
-
-The API implements Kubernetes discovery endpoints plus create, list, read,
-replace/patch, delete, status projection, and container logs for core v1 Pods.
-Namespaced routes accept only `default` in v1. JSON merge patch and the apply
-patch media type cover requests produced by the supported `kubectl` workflow;
-gr8s does not claim general server-side-apply semantics.
-
-The executable includes readiness and liveness endpoints. Tests exercise HTTP
-behavior against the fake runtime, persistence across store restarts,
-reconciliation idempotence, CRI request construction, embedded-runtime
-lifecycle, static payload validation, and an opt-in root-required end-to-end
-smoke path.
+The [original single-node Pod-only design](history/initial-design.md) is historical.
+Its unauthenticated loopback API and narrow resource scope do not describe the
+current implementation.

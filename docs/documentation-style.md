@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 This guide defines how gr8s documents its Common Lisp source. The codebase
 already follows it closely. Humans and agents should use the same conventions.
-When in doubt, read `src/host-firewall.lisp`. Its header and docstrings are the
+When in doubt, read `src/network/host-firewall.lisp`. Its header and docstrings are the
 reference.
 
 The main rule is simple: **document what the reader cannot recover from the
@@ -104,9 +104,9 @@ semantics for the host firewall. Two habits keep links useful:
 
 - Precise, declarative, present tense. Reads like prose, not notes.
 - Explain the *why* and the tradeoff; name the decision.
-- **Honest about limits.** The README's "gr8s has not passed Kubernetes
-  conformance, and it says so plainly" is the standard. State gaps; don't hedge or
-  market.
+- **Honest about limits.** Distinguish implemented behavior, measured validation,
+  and certification. State the tested build and topology for a conformance result;
+  state remaining gaps plainly. Mark historical limitations as historical.
 - Write for the next engineer who has to *change* this code, not for a tutorial
   reader.
 - No bare `TODO`s (file a bead and reference it), no "updated by…" noise, no
