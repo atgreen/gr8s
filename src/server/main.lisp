@@ -2263,6 +2263,13 @@ that home. The default API is loopback port 8080; the agent supervisor uses 7443
 An agent's --server HOST:PORT is the supervisor, not the Kubernetes API URL.
 `--runtime fake` is for development and does not prove real container/BPF health.
 
+The state directory must be owned by the user gr8s runs as and must not be
+writable by group or others; gr8s refuses a store it does not own and exits with
+`Unsafe store generation directory`. Pointing a root process at a directory
+owned by another user is the usual cause: use a root-owned path such as
+/var/lib/gr8s, or `sudo chown -R root STATE_DIR && sudo chmod 700 STATE_DIR`.
+`gr8s doctor` reports this as the \"store directory\" check.
+
 Record the launch arguments, service unit, runtime mode, overlay backend,
 node names, and state/log paths before changing a cluster. Check version and
 live patch level with `gr8s version --state-directory /var/lib/gr8s`.

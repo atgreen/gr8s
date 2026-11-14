@@ -52,6 +52,32 @@ service or a port range covering 53), so the gateway DNS would be rejected."
        (not (member "dns" services :test #'string=))
        (notany (lambda (spec) (doctor-port-spec-covers-p spec 53)) ports)))
 
+(defun doctor-state-directory-status (euid exists-p is-dir-p owner-uid mode)
+  "Decide the state-directory ownership check; return (values status detail hint).
+gr8s refuses a store it does not own or that others can write (check-store-
+generation-directory, applied to the state root with :metadata t: owned by the
+effective uid and not group/other-writable). A missing directory is fine -- gr8s
+creates it 0700. MODE/OWNER-UID are ignored when EXISTS-P is NIL."
+  (cond
+    ((not exists-p)
+     (values :ok "does not exist yet; gr8s will create it mode 0700" nil))
+    ((not is-dir-p)
+     (values :fail "exists but is not a directory"
+             "point --state-directory at a directory gr8s owns, or remove the conflicting file"))
+    ((/= euid owner-uid)
+     (values :fail
+             (format nil "owned by uid ~D, but gr8s runs as uid ~D" owner-uid euid)
+             (format nil "gr8s refuses a store it does not own; run as uid ~D, or ~
+                          'sudo chown -R ~D <dir> && sudo chmod 700 <dir>', or use a ~
+                          root-owned path such as /var/lib/gr8s under sudo" owner-uid euid)))
+    ((not (zerop (logand #o022 mode)))
+     (values :fail
+             (format nil "owned by uid ~D but mode ~3,'0O is group- or world-writable"
+                     owner-uid (logand #o777 mode))
+             "'sudo chmod 700 <dir>'; gr8s refuses a store other users can write"))
+    (t
+     (values :ok (format nil "owned by uid ~D, mode ~3,'0O" owner-uid (logand #o777 mode)) nil))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Data gathering (degrades gracefully; a probe failure becomes a warn).
 
@@ -145,6 +171,23 @@ program is missing.  Used for optional host tools like firewall-cmd."
       (format t "~&gr8s doctor — host environment checks~%~%")
 
       (incf fails (doctor-check-kubelet-endpoints))
+
+      ;; Store directory ownership: gr8s refuses a state dir it does not own or
+      ;; that others can write (check-store-generation-directory -> "Unsafe store
+      ;; generation directory"), a common first-run wall when a root process is
+      ;; pointed at a user-owned directory.
+      (handler-case
+          (let* ((path (string-right-trim "/" (namestring (uiop:ensure-directory-pathname state-directory))))
+                 (stat (ignore-errors (sb-posix:lstat path))))
+            (multiple-value-bind (status detail hint)
+                (doctor-state-directory-status
+                 (sb-posix:geteuid)
+                 (and stat t)
+                 (and stat (sb-posix:s-isdir (sb-posix:stat-mode stat)))
+                 (and stat (sb-posix:stat-uid stat))
+                 (and stat (sb-posix:stat-mode stat)))
+              (note status "store directory" (format nil "~A: ~A" path detail) hint)))
+        (error (c) (note :warn "store directory" (format nil "could not check: ~A" c))))
 
       ;; Kernel: TCX and cgroup/connect4 need a recent kernel.
       (handler-case
