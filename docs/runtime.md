@@ -19,7 +19,7 @@ directory for the lifetime of the managed runtime.
 The pinned containerd daemon, shim, and baseline CNI plugins are built from Go
 source with cgo disabled; the pinned static runc release is checksum-verified.
 Every embedded executable ELF is checked for dynamic interpreters and
-shared-library dependencies, and the Whistler classifier is checked as an eBPF ELF
+shared-library dependencies, and the [Whistler](https://github.com/atgreen/Whistler) classifier is checked as an eBPF ELF
 object. Build and verify the payload with:
 
 ```sh

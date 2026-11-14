@@ -1,7 +1,7 @@
 # Networking & the eBPF dataplane
 
 gr8s has **no kube-proxy and no iptables**. Packet handling lives in the kernel,
-programmed from Common Lisp through **Whistler**, which compiles s-expressions
+programmed from Common Lisp through **[Whistler](https://github.com/atgreen/Whistler)**, which compiles s-expressions
 directly to eBPF bytecode. It needs no LLVM, clang, `.c` file, or hand-written ELF. The
 eBPF compiler and loader live *inside* the agent. Native builds prepare the
 fixed endpoint bytecode templates before saving the executable; the agent loads
@@ -17,7 +17,7 @@ baseline ports needed to join nodes.
 
 ## The per-Pod egress guard
 
-The Whistler classifier attaches to each Pod's host-veth ingress (its egress
+The [Whistler](https://github.com/atgreen/Whistler) classifier attaches to each Pod's host-veth ingress (its egress
 path) as a persistent TCX link. It uses an agent-initialized map to check the
 exact IPAM IPv4 address and interface MAC, validates ARP sender identity, and
 drops malformed or unsupported frames. It counts accepted/dropped packets and
@@ -585,7 +585,7 @@ fresh authenticated WireGuard traffic, rate-limited, and owned by the server—n
 by an arbitrary node report.
 
 The agent continuously combines fresh WireGuard handshakes and returned bytes
-with active probes and passive Whistler/eBPF measurements: RTT, retransmits,
+with active probes and passive [Whistler](https://github.com/atgreen/Whistler)/eBPF measurements: RTT, retransmits,
 congestion window, active flows, and throughput. A broken selected endpoint fails
 over immediately. A healthy optimization needs repeated proof and a material cost
 improvement. Endpoint changes are trialled without deleting the last-known-good

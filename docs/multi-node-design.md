@@ -26,14 +26,14 @@ modify node routes.
 Each agent owns its node identity, managed containerd lifecycle, reconciliation
 of Pods assigned to that node, image and sandbox operations, observed Pod
 status, logs and exec, node heartbeats, local IPAM, veths, host routes, VXLAN
-peer state, embedded DNS, and Whistler programs and maps. The agent continues
+peer state, embedded DNS, and [Whistler](https://github.com/atgreen/Whistler) programs and maps. The agent continues
 reconciling its last acknowledged desired snapshot while temporarily
 disconnected.
 
 The CNI entry point is deliberately thin. It forwards CNI ADD, CHECK, and DEL
 requests over a mode-0600 Unix socket to the local agent and returns the
 agent's CNI result. The agent performs allocation, namespace and link changes,
-route installation, and Whistler attachment. If the agent is unavailable, the
+route installation, and [Whistler](https://github.com/atgreen/Whistler) attachment. If the agent is unavailable, the
 CNI operation fails rather than making an unrecorded network change.
 
 ## Agent protocol
@@ -117,10 +117,10 @@ ARP proxying, a bridge, or one gateway address per Pod.
 Cross-node traffic initially uses one ordinary Linux VXLAN device and one
 cluster VNI. Agents reconcile remote Node PodCIDR routes, VTEP peers, and FDB
 entries from revisioned control-plane topology. Linux performs encapsulation;
-Whistler does not implement a custom tunnel. VXLAN can later be replaced by
+[Whistler](https://github.com/atgreen/Whistler) does not implement a custom tunnel. VXLAN can later be replaced by
 native routing or WireGuard without changing local Pod attachment.
 
-Whistler initially enforces exact local Pod source ownership and validates
+[Whistler](https://github.com/atgreen/Whistler) initially enforces exact local Pod source ownership and validates
 that remote source addresses belong to the PodCIDR advertised by the
 encapsulating node. Persistent maps hold Pod-IP identity, Node PodCIDR/VTEP,
 policy, counters, and flow/drop telemetry. Security identity is derived from
