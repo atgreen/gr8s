@@ -39,6 +39,39 @@ the [component map](docs/kubernetes-users.md) explains where familiar components
 
 ## Why gr8s?
 
+gr8s is an experiment in **large systems programming in Common Lisp**. A
+Kubernetes implementation exercises concurrency, networking, storage, compilers,
+and distributed systems in one project. Common Lisp brings several advantages
+to that work:
+
+- **A stable language definition.** Common Lisp is defined by
+  [ANSI INCITS 226-1994](https://www.lispworks.com/documentation/common-lisp.html).
+  The core language has a fixed specification, so development can build on the
+  same foundation for decades. Compiler and library upgrades are separate from
+  changes to the language itself.
+- **A rich library ecosystem.** Common Lisp libraries cover HTTP, gRPC,
+  cryptography, parsing, concurrency, and foreign-function interfaces. gr8s
+  [builds on these libraries](gr8s.asd), with pinned dependencies managed through
+  [ocicl](https://github.com/ocicl/ocicl).
+- **Fast native code.** SBCL's optimizing compiler generates native machine code.
+  Common Lisp programs can outperform Go on some workloads, as illustrated by
+  the Benchmarks Game's [SBCL](https://benchmarksgame-team.pages.debian.net/benchmarksgame/measurements/sbcl.html)
+  and [Go](https://benchmarksgame-team.pages.debian.net/benchmarksgame/measurements/go.html)
+  results. Performance depends on the program and its optimization.
+- **Development inside the running system.** The dynamic language, REPL, and
+  image-based tooling keep the loaded program available for inspection and
+  experimentation. Inspect objects, redefine functions, and compile changes
+  interactively. SBCL can [save the loaded Lisp environment as an executable](https://www.sbcl.org/manual/#Saving-a-Core-Image),
+  which is how gr8s packages its native binary.
+- **Native fix-and-continue debugging.** Conditions, restarts, and the interactive
+  debugger let you inspect a failure in context, correct a definition, and resume
+  through an available restart. With suitable debugging settings, SBCL can
+  [restart a stack frame using the redefined function](https://www.sbcl.org/manual/).
+  This makes short, focused debugging sessions part of the normal development
+  workflow. gr8s exposes that environment through its authenticated Slynk tunnel.
+
+Those language capabilities support an integrated Kubernetes system:
+
 - **Explore the cluster in a browser.** The integrated Headlamp dashboard
   provides a Kubernetes web UI with live resource updates. Source builds need
   the [dashboard assets step](docs/building-and-testing.md#optional-dashboard-assets).
