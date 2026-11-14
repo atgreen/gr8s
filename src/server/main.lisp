@@ -2133,6 +2133,14 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                                           (if ha (gr8s.ha::ha-metrics-text ha) "")
                                           (reconciliation-worker-metrics-text worker)))
                            :leader-status-fn (when ha (lambda () (ha-control-plane-leader-status ha)))))
+                    ;; Serve the embedded dashboard on its own loopback listener
+                    ;; (the API ports are mutually authenticated; a browser is not).
+                    (when gr8s.apiserver::*dashboard-enabled*
+                      (let ((dashboard-port (getf options :dashboard-port
+                                                  gr8s.apiserver::+dashboard-default-port+)))
+                        (gr8s.apiserver::start-dashboard-server
+                         :port dashboard-port :store store :runtime runtime :reconciler reconciler)
+                        (format t "gr8s dashboard: http://127.0.0.1:~D/dashboard/~%" dashboard-port)))
                     (setf worker (start-reconciliation-worker reconciler
                                   :leader-gate (when ha (lambda () (ha-control-plane-leader-p ha)))
                                   :before-reconcile (lambda ()
@@ -2196,6 +2204,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                (when aggregator (stop-api-aggregator aggregator))
                (when worker (stop-reconciliation-worker worker))
                (when runtime (stop-runtime-deletions runtime))
+               (gr8s.apiserver::stop-dashboard-server)
                (when server (stop-server server))
                (when api-server (stop-server api-server))
                (when (or api-server service-network-created)

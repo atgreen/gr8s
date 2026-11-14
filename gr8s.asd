@@ -368,6 +368,7 @@
                                            (:file "dashboard")
                                            (:file "server")
                                            (:file "in-cluster-api")
+                                           (:file "dashboard-server")
                                            (:file "api-aggregation")
                                            (:file "kubelet-server")
                                            ))
