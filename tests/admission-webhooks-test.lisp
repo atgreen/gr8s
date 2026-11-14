@@ -97,9 +97,12 @@
                       stream))
     (force-output stream)))
 
-(defun admission-test-serve (stream handler)
-  "Answer one AdmissionReview on STREAM with the response HANDLER builds from its path and request."
-  (let* ((request-line (gr8s.apiserver::admission-read-line stream))
+(defun admission-test-serve (stream handler &optional first-octet)
+  "Answer one AdmissionReview on STREAM with the response HANDLER builds from its path and request.
+FIRST-OCTET, when given, is the request line's already-read first byte."
+  (let* ((request-line (concatenate 'string
+                                    (if first-octet (string (code-char first-octet)) "")
+                                    (gr8s.apiserver::admission-read-line stream)))
          (length (loop for line = (gr8s.apiserver::admission-read-line stream)
                        until (zerop (length line))
                        when (uiop:string-prefix-p "content-length:" (string-downcase line))
@@ -135,10 +138,14 @@
                    (lambda ()
                      (unwind-protect
                           (handler-case
-                              (admission-test-serve
-                               (pure-tls:make-tls-server-stream (usocket:socket-stream client)
-                                                                :certificate certificate :key key)
-                               handler)
+                              ;; The production webhook client reuses connections,
+                              ;; so serve keep-alive requests until the peer closes.
+                              (let ((tls (pure-tls:make-tls-server-stream
+                                          (usocket:socket-stream client)
+                                          :certificate certificate :key key)))
+                                (loop for first = (read-byte tls nil nil)
+                                      while first
+                                      do (admission-test-serve tls handler first)))
                             (error (condition)
                               (format *error-output* "~&Admission test backend: ~A~%" condition)))
                        (ignore-errors (usocket:socket-close client))))

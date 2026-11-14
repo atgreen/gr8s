@@ -242,8 +242,8 @@
         (is (equal "vendor.test/gpu=0" (gr8s.podresources.v1::name (first (gr8s.podresources.v1::cdi-devices device)))))))))
 
 (test independent-upstream-client-decodes-dra-podresources
-  (unless (probe-file #P"build/resource-management/resource-probe")
-    (skip "Build scripts/resource-probe for the independent upstream gRPC check"))
+  (if (not (probe-file #P"build/resource-management/resource-probe"))
+      (skip "Build scripts/resource-probe for the independent upstream gRPC check")
   (with-temporary-store (store path)
     (multiple-value-bind (pod dra prepared container) (podresources-dra-fixture store path)
       (declare (ignore container))
@@ -263,7 +263,7 @@
                (is (equal "gpu0" (gethash "device_name" device)))
                (is (equal "share-0" (gethash "share_id" device)))
                (is (equal "vendor.test/gpu=0" (gethash "name" (aref (gethash "cdi_devices" device) 0)))))
-          (gr8s.kubelet::stop-local-resource-server server))))))
+          (gr8s.kubelet::stop-local-resource-server server)))))))
 
 (test affinity-update-tolerates-exit-races-but-fails-closed-for-live-or-unobservable-containers
   (with-temporary-store (store path)

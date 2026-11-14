@@ -729,14 +729,14 @@
     (let* ((first-pod (create-pod store (node-log-test-pod "first")))
            (second-pod (create-pod store (node-log-test-pod "second")))
            (server (gr8s.apiserver::start-node-grpc-server store :host "127.0.0.1" :port 0))
-           (original (symbol-function 'gr8s.controllers::update-pod-observed-status))
+           (original (symbol-function 'gr8s.kubelet::save-pod-observation))
            (status (gr8s.kubelet::pod-status "Running")))
       (unwind-protect
            (progn
-             (setf (symbol-function 'gr8s.controllers::update-pod-observed-status)
-                   (lambda (store pod object)
+             (setf (symbol-function 'gr8s.kubelet::save-pod-observation)
+                   (lambda (store pod object &rest options)
                      (when (equal "first" (pod-name pod)) (error "one Pod's store write failed"))
-                     (funcall original store pod object)))
+                     (apply original store pod object options)))
              (gr8s.apiserver::handle-node-agent-envelope
               server "log-worker"
               (gr8s.protocol::make-agent-envelope
@@ -747,7 +747,7 @@
                             (gr8s.agent::pod-observed-status-message second-pod status)))))
              (is (null (gr8s.controllers::pod-observed-status store first-pod)))
              (is (equal "Running" (gethash "phase" (gr8s.controllers::pod-observed-status store second-pod)))))
-        (setf (symbol-function 'gr8s.controllers::update-pod-observed-status) original)
+        (setf (symbol-function 'gr8s.kubelet::save-pod-observation) original)
         (gr8s.apiserver::stop-node-grpc-server server)))))
 
 (test one-pods-removal-failure-keeps-the-node-session-connected

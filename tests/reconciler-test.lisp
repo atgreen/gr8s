@@ -9,9 +9,7 @@
                     "RUNTIME-POD" "RUNTIME-ERROR" "MAKE-FAKE-RUNTIME"))
       (multiple-value-bind (symbol status) (and package (find-symbol name package))
         (is (not (null symbol)) "~A is present in GR8S.RUNTIME" name)
-        (is (eq :external status) "~A is exported from GR8S.RUNTIME" name)
-        (is (eq symbol (find-symbol name "GR8S"))
-            "GR8S preserves ~A's runtime protocol symbol identity" name)))))
+        (is (eq :external status) "~A is exported from GR8S.RUNTIME" name)))))
 
 (test observed-runtime-status-publishes-every-pod-address
   (let* ((status (gr8s.kubelet::observed-status

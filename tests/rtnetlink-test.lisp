@@ -18,13 +18,13 @@
         (is (= 1 (cl-rtnetlink::rtnetlink-error-errno condition)))))))
 
 (test rtnetlink-rejects-truncated-and-malformed-replies
-  (signals gr8s.network::cni-error
+  (signals cl-rtnetlink:rtnetlink-protocol-error
     (cl-rtnetlink::parse-netlink-reply #(0 0 0) 3 1))
   (let ((message (cl-rtnetlink::netlink-message 2 0 #())))
-    (signals gr8s.network::cni-error
+    (signals cl-rtnetlink:rtnetlink-protocol-error
       (cl-rtnetlink::parse-netlink-reply message (length message) 1)))
   (let ((message (cl-rtnetlink::netlink-message 16 0 #(1 2 3 4))))
-    (signals gr8s.network::cni-error
+    (signals cl-rtnetlink:rtnetlink-protocol-error
       (cl-rtnetlink::parse-netlink-reply message (1- (length message)) 1))))
 
 (test rtnetlink-correlates-replies-and-keeps-data-before-ack
@@ -48,7 +48,8 @@
 
 (test rtnetlink-interface-names-and-addresses-are-validated
   (dolist (name '("" "." ".." "veth/unsafe" "a b" "1234567890123456"))
-    (signals gr8s.network::cni-error (cl-rtnetlink::validate-network-interface-name name)))
+    (signals cl-rtnetlink:rtnetlink-protocol-error
+      (cl-rtnetlink::validate-network-interface-name name)))
   (is (equalp #(192 0 2 17) (cl-rtnetlink::ipv4-network-octets "192.0.2.17"))))
 
 (test rtnetlink-encodes-both-ip-address-families

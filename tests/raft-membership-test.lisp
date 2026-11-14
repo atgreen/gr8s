@@ -73,6 +73,9 @@
     (configure-cluster sim '(("a" . :voter) ("l" . :learner)))
     (rsim-run sim 8)
     (let ((leader (rsim-node sim "a")))
+      ;; The simulator delivers the election barrier's applied receipt promptly;
+      ;; drop it to model a learner that has not yet proven application.
+      (clrhash (gr8s.raft::raft-node-peer-applied leader))
       (multiple-value-bind (index reason) (cl-raft::raft-propose-config leader :add "l" :role :voter)
         (is (null index)) (is (eq :learner-not-ready reason)))
       (cl-raft::raft-propose leader '(:set "barrier" "committed"))
@@ -133,7 +136,9 @@
       (cl-raft::raft-become-leader leader)
       (is (zerop (hash-table-count (gr8s.raft::raft-node-peer-applied leader))))
       (is (not (gr8s.raft::raft-peer-ready-for-promotion-p leader "l")))
-      (rsim-drain sim)
+      ;; Reacquiring evidence takes heartbeat rounds: retaking leadership
+      ;; appends a fresh term barrier whose applied receipt must return.
+      (rsim-run sim 3)
       (is-true (gr8s.raft::raft-peer-ready-for-promotion-p leader "l"))
       ;; Even a fresh receipt cannot substitute for a current-term commit.
       (incf (cl-raft::raft-node-current-term leader))
