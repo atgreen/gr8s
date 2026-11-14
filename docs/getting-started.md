@@ -81,7 +81,7 @@ after rollout, not uninterrupted traffic during it.
 
 | Symptom | First check |
 |---|---|
-| Build command missing or ASDF cannot find a system | Follow [host setup](building-and-testing.md#example-build-host-fedora-44); confirm OCICL setup and run `make deps` |
+| Build command missing or ASDF cannot find a system | Follow [host setup](building-and-testing.md#example-build-host-fedora-44); confirm ocicl setup and run `make deps` |
 | Cannot read kubeconfig | Use the `sudo kubectl` commands above; the file contains administrator credentials |
 | API connection refused | Keep `serve` running; inspect its first startup error and check for a port 6443 conflict |
 | Pod Pending or image pull failure | Run `describe pod` and inspect server output; check registry DNS, credentials, and connectivity |
