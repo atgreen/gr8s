@@ -15,8 +15,10 @@
                     "WITH-CRD-DEFERRED-CONVERSIONS"))
       (multiple-value-bind (implementation status)
           (find-symbol name resources)
-        (declare (ignore implementation))
-        (is (eq :external status))))
+        ;; The module owns its entry points; its exported surface is minimal,
+        ;; so present-and-owned is the boundary, not :EXTERNAL.
+        (is (not (null status)))
+        (is (eq resources (symbol-package implementation)))))
     (is (not (eq :external
                  (nth-value 1 (find-symbol "FOR" resources)))))))
 

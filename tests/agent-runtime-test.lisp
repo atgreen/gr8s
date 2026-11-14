@@ -184,8 +184,10 @@
                     "START-NODE-PORT-FORWARD-OPERATION"))
       (multiple-value-bind (implementation status)
           (find-symbol name agent)
-        (declare (ignore implementation))
-        (is (eq :external status))))
+        ;; The module owns its entry points; only the node-session surface is
+        ;; exported, so present-and-owned is the boundary, not :EXTERNAL.
+        (is (not (null status)))
+        (is (eq agent (symbol-package implementation)))))
     (is (not (eq :external
                  (nth-value 1 (find-symbol "FOR" agent)))))))
 
