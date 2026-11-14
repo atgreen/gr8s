@@ -72,7 +72,16 @@ dashboard-assets:
 	cd "$(HEADLAMP)/frontend/build" && \
 	  find . -type f ! -name '*.br' ! -name '*.map' -print0 | \
 	  cpio -pd0 --quiet "$(CURDIR)/assets/dashboard"
-	@echo "embedded $$(find assets/dashboard -type f | wc -l) dashboard asset files"
+	@# Pre-gzip the voluminous text assets (JS/CSS/JSON/SVG/WASM) so the image
+	@# embeds and the browser receives them compressed; each original is replaced
+	@# by its .gz, which dashboard-assets.lisp serves with Content-Encoding: gzip.
+	@# -n keeps the build reproducible (no name/mtime in the gzip header). HTML is
+	@# left raw because index.html is rewritten with the session base-url on serve.
+	cd "$(CURDIR)/assets/dashboard" && \
+	  find . -type f \( -name '*.js' -o -name '*.mjs' -o -name '*.css' \
+	    -o -name '*.json' -o -name '*.svg' -o -name '*.txt' -o -name '*.wasm' \) -print0 | \
+	  xargs -0 -r gzip -9 -n
+	@echo "embedded $$(find assets/dashboard -type f | wc -l) dashboard asset files ($$(du -sh assets/dashboard | cut -f1))"
 
 help:
 	@echo "gr8s targets:"

@@ -442,7 +442,7 @@
   :in-order-to ((test-op (test-op "gr8s/tests"))))
 
 (asdf:defsystem "gr8s/tests"
-  :depends-on ("gr8s" "drakma" "fiveam")
+  :depends-on ("gr8s" "drakma" "fiveam" "salza2")
   :serial t
   :components ((:module "tests"
                 :serial t

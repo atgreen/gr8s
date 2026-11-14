@@ -14,7 +14,12 @@
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (defvar *dashboard-assets* (make-hash-table :test 'equal)
     "Map of a dashboard asset's relative path (e.g. \"index.html\",
-\"static/js/main.js\") to its contents as a byte vector."))
+\"static/js/main.js\") to its contents as a byte vector. A path whose bytes are
+gzip-compressed (the voluminous text assets; see *DASHBOARD-ASSET-ENCODINGS*) is
+still keyed by its logical, uncompressed name.")
+  (defvar *dashboard-asset-encodings* (make-hash-table :test 'equal)
+    "Map of a dashboard asset's logical path to its Content-Encoding (\"gzip\") when
+its bytes in *DASHBOARD-ASSETS* are stored compressed; absent means identity."))
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (labels ((read-file-bytes (path)
@@ -24,8 +29,16 @@
                  bytes)))
            (collect (root directory)
              (dolist (file (uiop:directory-files directory))
-               (setf (gethash (enough-namestring file root) *dashboard-assets*)
-                     (read-file-bytes file)))
+               (let ((name (enough-namestring file root)))
+                 ;; A ".gz" file is a pre-compressed asset (the Makefile gzips the
+                 ;; text assets): key it by its logical, un-gzipped name and record
+                 ;; the gzip encoding, so the frontend's request for the plain name
+                 ;; finds it and we serve it with Content-Encoding: gzip.
+                 (if (uiop:string-suffix-p name ".gz")
+                     (let ((logical (subseq name 0 (- (length name) 3))))
+                       (setf (gethash logical *dashboard-assets*) (read-file-bytes file)
+                             (gethash logical *dashboard-asset-encodings*) "gzip"))
+                     (setf (gethash name *dashboard-assets*) (read-file-bytes file)))))
              (dolist (sub (uiop:subdirectories directory))
                (collect root sub))))
     (let ((root (merge-pathnames "assets/dashboard/"
@@ -66,3 +79,31 @@
 (defun dashboard-assets-present-p ()
   "True when a Headlamp frontend build is embedded in this image."
   (plusp (hash-table-count *dashboard-assets*)))
+
+(defun dashboard-asset-encoding (relative)
+  "The Content-Encoding of the embedded asset RELATIVE (\"gzip\"), or NIL when its
+stored bytes are the identity (uncompressed) representation."
+  (gethash relative *dashboard-asset-encodings*))
+
+(defun dashboard-negotiate-asset (relative bytes accept-encoding)
+  "Decide how to serve embedded asset RELATIVE given the client's ACCEPT-ENCODING
+header string (possibly NIL). Returns two values: the bytes to send and the
+Content-Encoding to set (NIL for identity). Stored gzip bytes pass through when the
+client accepts gzip (every browser does); otherwise they are decompressed so a
+client that cannot (e.g. a bare curl) still gets usable content."
+  (let ((encoding (dashboard-asset-encoding relative)))
+    (cond
+      ((null encoding) (values bytes nil))
+      ((and accept-encoding (search encoding (string-downcase accept-encoding)))
+       (values bytes encoding))
+      ((string= encoding "gzip") (values (chipz:decompress nil 'chipz:gzip bytes) nil))
+      (t (values bytes nil)))))
+
+(defun dashboard-serve-asset-bytes (relative bytes)
+  "Return the response bytes for the embedded asset RELATIVE, honouring its stored
+encoding and the current request's Accept-Encoding, and setting Content-Encoding
+when the compressed bytes are sent through."
+  (multiple-value-bind (out encoding)
+      (dashboard-negotiate-asset relative bytes (hunchentoot:header-in* :accept-encoding))
+    (when encoding (setf (hunchentoot:header-out :content-encoding) encoding))
+    out))

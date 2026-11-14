@@ -38,6 +38,11 @@ processes out.")
 (TARGET is the bare apiserver path+query). The `gr8s dashboard' command binds it
 to an mTLS reverse-proxy to the running cluster's API; NIL means no upstream.")
 
+(defvar *dashboard-multiplexer-fn* nil
+  "Function (REQUEST) that serves the /wsMultiplexer WebSocket: upgrade the
+connection and relay the frontend's watch subscriptions to the upstream cluster.
+The `gr8s dashboard' command binds it to an mTLS watch relay; NIL answers 501.")
+
 (defparameter +dashboard-cluster-name+ "gr8s"
   "The single cluster name the dashboard advertises; it appears in the frontend's
 /clusters/<name>/ request URLs and is discarded when proxying (gr8s is that one
@@ -150,7 +155,11 @@ is set. index.html is rewritten for the /dashboard base on the way out."
                                  (null (gethash relative *dashboard-assets*)))))
                 (setf (hunchentoot:content-type*)
                       (dashboard-content-type (if index-p "index.html" relative)))
-                (if index-p (dashboard-rewrite-index bytes) bytes))
+                ;; index.html is stored raw (it is rewritten per session); every
+                ;; other asset may be gzip in the image and is served accordingly.
+                (if index-p
+                    (dashboard-rewrite-index bytes)
+                    (dashboard-serve-asset-bytes relative bytes)))
               (dashboard-not-found))))))
 
 (defun dashboard-not-found ()
@@ -158,13 +167,100 @@ is set. index.html is rewritten for the /dashboard base on the way out."
         (hunchentoot:content-type*) "text/plain")
   "gr8s dashboard assets are not embedded in this build")
 
+;;; The /wsMultiplexer live-update protocol.
+;;;
+;;; The Headlamp frontend opens a single WebSocket (subprotocol
+;;; headlamp.multiplexer.k8s.io) and multiplexes every resource watch over it. A
+;;; client control message is JSON {clusterId, path, query, userId, type}: type
+;;; REQUEST starts a watch of the apiserver PATH?QUERY (QUERY already carries
+;;; watch=1 and a resourceVersion), CLOSE stops it. The server streams each watch
+;;; event back as a frame {clusterId, path, query, userId, type:"DATA", data} whose
+;;; data field is the watch-event JSON as a string. The frontend keys its
+;;; listeners on clusterId:path:query, so a DATA/COMPLETE/ERROR frame MUST echo
+;;; those three fields from the REQUEST verbatim or the update is dropped.
+;;;
+;;; These pieces are transport-agnostic (no sockets, no WebSocket framing) so they
+;;; can be unit-tested; the `gr8s dashboard' command drives them over the real
+;;; WebSocket and the mTLS watch stream via *DASHBOARD-MULTIPLEXER-FN*.
+
+(defparameter +dashboard-multiplexer-protocol+ "headlamp.multiplexer.k8s.io"
+  "The WebSocket subprotocol the Headlamp multiplexer negotiates.")
+
+(defstruct dashboard-mux-message
+  "One parsed /wsMultiplexer client control message."
+  cluster-id path query user-id type)
+
+(defun dashboard-parse-multiplexer-message (text)
+  "Parse a client multiplexer control message TEXT (JSON) into a
+DASHBOARD-MUX-MESSAGE, or NIL when it is not valid JSON or is missing a required
+routing field -- mirroring headlamp-server, which drops a message unless
+clusterId, path, userId and type are all present and non-empty."
+  (let ((json (ignore-errors (com.inuoe.jzon:parse text))))
+    (when (hash-table-p json)
+      (flet ((field (key) (let ((value (gethash key json)))
+                            (and (stringp value) value))))
+        (let ((cluster-id (field "clusterId"))
+              (path (field "path"))
+              (query (or (field "query") ""))
+              (user-id (field "userId"))
+              (type (field "type")))
+          (when (and cluster-id path user-id type
+                     (plusp (length cluster-id)) (plusp (length path))
+                     (plusp (length user-id)) (plusp (length type)))
+            (make-dashboard-mux-message
+             :cluster-id cluster-id :path path :query query
+             :user-id user-id :type type)))))))
+
+(defun dashboard-multiplexer-key (message)
+  "The connection key for MESSAGE: clusterId, path and userId, matching
+headlamp-server's createConnectionKey. Query is intentionally excluded so a fresh
+REQUEST (a newer resourceVersion) replaces the same watch rather than duplicating it."
+  (format nil "~A~C~A~C~A"
+          (dashboard-mux-message-cluster-id message) #\Nul
+          (dashboard-mux-message-path message) #\Nul
+          (dashboard-mux-message-user-id message)))
+
+(defun dashboard-multiplexer-frame (message type &optional data)
+  "Build a server->client multiplexer frame (a JSON string) of the given TYPE
+(DATA, COMPLETE or ERROR), echoing MESSAGE's routing fields verbatim so the
+frontend's clusterId:path:query listener matches. DATA (and ERROR) carry the
+payload string in the data field; the frontend JSON-parses it."
+  (com.inuoe.jzon:stringify
+   (apply #'core-object
+          "clusterId" (dashboard-mux-message-cluster-id message)
+          "path" (dashboard-mux-message-path message)
+          "query" (dashboard-mux-message-query message)
+          "userId" (dashboard-mux-message-user-id message)
+          "type" type
+          (when data (list "data" data)))))
+
+(defun dashboard-watch-upstream-target (path query)
+  "The bare apiserver path+query to watch upstream for a REQUEST's PATH and QUERY.
+PATH is normally already bare (e.g. /api/v1/pods); defensively strip an optional
+dashboard-base prefix and an optional /clusters/<name> prefix, then re-attach
+QUERY (which the frontend fills with watch=1 and a resourceVersion)."
+  (let* ((unbased (if (uiop:string-prefix-p *dashboard-base* path)
+                      (subseq path (length *dashboard-base*))
+                      path))
+         (clusters "/clusters/")
+         (bare (if (uiop:string-prefix-p clusters unbased)
+                   (let* ((rest (subseq unbased (length clusters)))
+                          (slash (position #\/ rest)))
+                     (if slash (subseq rest slash) "/"))
+                   unbased)))
+    (when (zerop (length bare)) (setf bare "/"))
+    (if (and query (plusp (length query)))
+        (concatenate 'string bare "?" query)
+        bare)))
+
 (defun dashboard-response (request)
   "Serve the dashboard mount, returning the response body, or NIL when PATH is not
 a dashboard request. Implements the read subset of the headlamp-server contract:
 the boot /config, an empty /plugins, the static SPA, and the /clusters/<name>/
 apiserver proxy -- which is handed to *dashboard-proxy-fn* (the `gr8s dashboard'
-command's mTLS reverse-proxy to the running cluster; /healthz and watches ride
-the same path). /wsMultiplexer is answered 501 until the multiplexer lands."
+command's mTLS reverse-proxy to the running cluster; /healthz rides the same
+path). /wsMultiplexer is handed to *DASHBOARD-MULTIPLEXER-FN* (the command's
+mTLS watch relay), or answered 501 when no relay is installed."
   (let ((path (request-route-path (hunchentoot:script-name request))))
     (when (dashboard-request-p path)
       (cond
@@ -175,9 +271,14 @@ the same path). /wsMultiplexer is answered 501 until the multiplexer lands."
          (setf (hunchentoot:content-type*) "application/json")
          "[]")
         ((string= path (dashboard-path "wsMultiplexer"))
-         (setf (hunchentoot:return-code*) hunchentoot:+http-not-implemented+
-               (hunchentoot:content-type*) "text/plain")
-         "gr8s dashboard live-update multiplexer is not yet implemented")
+         (if *dashboard-multiplexer-fn*
+             ;; The fn upgrades the connection and takes over the stream; its
+             ;; return value is unused (the 101 response is already on the wire).
+             (funcall *dashboard-multiplexer-fn* request)
+             (progn
+               (setf (hunchentoot:return-code*) hunchentoot:+http-not-implemented+
+                     (hunchentoot:content-type*) "text/plain")
+               "gr8s dashboard live-update multiplexer is not yet implemented")))
         ((dashboard-cluster-proxy-target-path path)
          (if *dashboard-proxy-fn*
              (funcall *dashboard-proxy-fn*

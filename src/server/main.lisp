@@ -1053,13 +1053,13 @@ transfer encoding (watch streams arrive chunked)."
       ((and transfer-encoding (search "chunked" (string-downcase transfer-encoding)))
        (let ((body (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
          (loop for size = (ignore-errors
-                            (parse-integer (gr8s.protocol::read-crlf-line stream)
+                            (parse-integer (gr8s.http-client::read-crlf-line stream)
                                            :radix 16 :junk-allowed t))
                while (and size (plusp size))
                do (let ((chunk (make-array size :element-type '(unsigned-byte 8))))
                     (read-sequence chunk stream)
                     (loop for octet across chunk do (vector-push-extend octet body))
-                    (gr8s.protocol::read-crlf-line stream)))
+                    (gr8s.http-client::read-crlf-line stream)))
          (coerce body '(simple-array (unsigned-byte 8) (*)))))
       ((and content-length (plusp (length content-length)))
        (let* ((length (parse-integer content-length))
@@ -1096,12 +1096,230 @@ METHOD is a keyword; TARGET is the apiserver path+query."
         (ignore-errors (close stream))
         (ignore-errors (usocket:socket-close socket))))))
 
+;;; The /wsMultiplexer live-update relay.
+;;;
+;;; The Headlamp frontend multiplexes every resource watch over one WebSocket.
+;;; This relay speaks that protocol on the browser side (see the contract in
+;;; src/apiserver/dashboard.lisp) and, per watch subscription, opens a classic
+;;; chunked HTTP watch (GET path?watch=1...) to the running cluster over the same
+;;; mTLS stream `gr8s debug slynk' uses, reframing each newline-delimited watch
+;;; event as a DATA frame to the browser. Each watch runs in its own thread so a
+;;; CLOSE (or the WebSocket dropping) can shut its upstream socket down and unblock
+;;; the read, exactly as the Slynk tunnel tears a relay down.
+
+(defstruct dashboard-watch
+  "One live upstream watch inside a /wsMultiplexer session."
+  key thread socket)
+
+(defun begin-dashboard-multiplexer (request)
+  "Complete the WebSocket upgrade handshake for the multiplexer on REQUEST and
+return the raw client stream (the connection is now in frames, not HTTP)."
+  (let ((key (hunchentoot:header-in :sec-websocket-key request)))
+    (setf (hunchentoot:return-code*) 101
+          (hunchentoot:content-type*) nil
+          (hunchentoot:header-out :connection) "Upgrade"
+          (hunchentoot:header-out :upgrade) "websocket"
+          (hunchentoot:header-out :sec-websocket-accept)
+          (gr8s.apiserver::websocket-accept-value key)
+          (hunchentoot:header-out :sec-websocket-protocol)
+          gr8s.apiserver::+dashboard-multiplexer-protocol+)
+    (let ((stream (hunchentoot::start-output 101 nil)))
+      (finish-output stream)
+      stream)))
+
+(defun stream-watch-events (stream headers emit alive-p)
+  "Read a Kubernetes watch response body from STREAM and call EMIT with each
+newline-delimited watch-event JSON string, until the stream ends or ALIVE-P
+returns NIL. Watch bodies arrive chunked; a single event may span chunks and a
+chunk may hold several events, so reassemble across chunk boundaries and split on
+LF. ALIVE-P is only consulted between chunks -- a CLOSE unblocks a blocked read by
+shutting the socket, which surfaces as an error to the caller."
+  (let ((chunked (let ((te (cdr (assoc :transfer-encoding headers))))
+                   (and te (search "chunked" (string-downcase te)))))
+        (pending (make-array 256 :element-type '(unsigned-byte 8)
+                                 :adjustable t :fill-pointer 0)))
+    (labels ((flush-lines ()
+               (loop for nl = (position 10 pending)
+                     while nl
+                     do (let ((line (subseq pending 0 nl))
+                              (tail (subseq pending (1+ nl))))
+                          (when (plusp (length line))
+                            (funcall emit (trivial-utf-8:utf-8-bytes-to-string line)))
+                          (setf (fill-pointer pending) 0)
+                          (loop for octet across tail do (vector-push-extend octet pending)))))
+             (absorb (buffer count)
+               (dotimes (i count) (vector-push-extend (aref buffer i) pending))
+               (flush-lines)))
+      (if chunked
+          (loop
+            (unless (funcall alive-p) (return))
+            (let ((size (ignore-errors
+                          (parse-integer (gr8s.http-client::read-crlf-line stream)
+                                         :radix 16 :junk-allowed t))))
+              (unless (and size (plusp size)) (return))
+              (let ((chunk (make-array size :element-type '(unsigned-byte 8))))
+                (unless (= (read-sequence chunk stream) size) (return))
+                (gr8s.http-client::read-crlf-line stream) ; trailing CRLF
+                (absorb chunk size))))
+          ;; Non-chunked (unusual for a watch): read until EOF in blocks.
+          (let ((block (make-array 4096 :element-type '(unsigned-byte 8))))
+            (loop
+              (unless (funcall alive-p) (return))
+              (let ((count (read-sequence block stream)))
+                (when (zerop count) (return))
+                (absorb block count))))))))
+
+(defun run-dashboard-watch (config message target watch send-frame alive-p claim forget)
+  "Relay one upstream watch to the browser. Open an mTLS stream for TARGET (the
+bare apiserver path+query), require a 200, then stream each watch event to the
+browser as a DATA frame built from MESSAGE, until the stream ends or ALIVE-P is
+NIL. On a non-200 send one ERROR frame; on a clean end send COMPLETE. CLAIM records
+this watch's socket under the session lock and reports whether the watch is still
+registered (a CLOSE during connect can have dropped it); FORGET removes the watch
+from the session however the relay ends."
+  (unwind-protect
+       (handler-case
+           (multiple-value-bind (stream socket host port base-path)
+               (open-debug-api-stream config)
+             ;; Publish the socket under the session lock so a concurrent CLOSE can
+             ;; shut it down; if the watch was already dropped, stop now.
+             (unless (funcall claim socket)
+               (ignore-errors (close stream))
+               (ignore-errors (usocket:socket-close socket))
+               (return-from run-dashboard-watch))
+             (unwind-protect
+                  (progn
+                    (write-dashboard-proxy-request
+                     stream "GET" host port (concatenate 'string base-path target)
+                     (getf config :token) nil nil)
+                    (multiple-value-bind (status headers)
+                        (gr8s.protocol::parse-http-response-head
+                         (gr8s.protocol::read-http-response-head stream))
+                      (if (= status 200)
+                          (progn
+                            (stream-watch-events
+                             stream headers
+                             (lambda (event)
+                               (funcall send-frame
+                                        (gr8s.apiserver::dashboard-multiplexer-frame
+                                         message "DATA" event)))
+                             alive-p)
+                            (when (funcall alive-p)
+                              (funcall send-frame
+                                       (gr8s.apiserver::dashboard-multiplexer-frame
+                                        message "COMPLETE"))))
+                          (funcall send-frame
+                                   (gr8s.apiserver::dashboard-multiplexer-frame
+                                    message "ERROR"
+                                    (format nil "{\"error\":\"upstream watch returned HTTP ~D\"}"
+                                            status))))))
+               (ignore-errors (close stream))
+               (ignore-errors (usocket:socket-close socket))))
+         (error () nil))
+    (funcall forget)))
+
+(defun serve-dashboard-multiplexer (config request)
+  "Serve the /wsMultiplexer WebSocket for the `gr8s dashboard' command: upgrade
+the connection, then read the frontend's REQUEST/CLOSE control frames and keep one
+upstream mTLS watch (built from the kubeconfig CONFIG) per subscription alive,
+relaying every watch event back. Returns when the WebSocket closes."
+  (unless (and (string-equal (hunchentoot:header-in :upgrade request) "websocket")
+               (hunchentoot:header-in :sec-websocket-key request))
+    (setf (hunchentoot:return-code*) hunchentoot:+http-bad-request+
+          (hunchentoot:content-type*) "text/plain")
+    (return-from serve-dashboard-multiplexer
+      "gr8s dashboard multiplexer requires a WebSocket upgrade"))
+  (let ((client (begin-dashboard-multiplexer request))
+        (write-lock (bt:make-lock "gr8s dashboard multiplexer writer"))
+        (watches (make-hash-table :test #'equal))
+        (watches-lock (bt:make-lock "gr8s dashboard multiplexer watches"))
+        (session-open t))
+    (labels ((send-frame (text)
+               (bt:with-lock-held (write-lock)
+                 (ignore-errors
+                  (gr8s.protocol::write-websocket-frame
+                   client 1 (trivial-utf-8:string-to-utf-8-bytes text)))))
+             (drop-watch (key watch)
+               ;; Remove WATCH only if it is still the one registered under KEY.
+               (bt:with-lock-held (watches-lock)
+                 (when (eq (gethash key watches) watch) (remhash key watches))))
+             (shut (socket)
+               (when socket
+                 (ignore-errors (usocket:socket-shutdown socket :io))
+                 (ignore-errors (usocket:socket-close socket))))
+             (stop-watch (key)
+               ;; Read the socket under the lock: the watch thread also publishes it
+               ;; there, so we never miss a socket that was just opened.
+               (shut (bt:with-lock-held (watches-lock)
+                       (let ((watch (gethash key watches)))
+                         (when watch (remhash key watches) (dashboard-watch-socket watch))))))
+             (stop-all ()
+               (let ((sockets (bt:with-lock-held (watches-lock)
+                                (prog1 (loop for w being the hash-values of watches
+                                             for s = (dashboard-watch-socket w)
+                                             when s collect s)
+                                  (clrhash watches)))))
+                 (mapc #'shut sockets)))
+             (start-watch (message)
+               (let* ((key (gr8s.apiserver::dashboard-multiplexer-key message))
+                      (target (gr8s.apiserver::dashboard-watch-upstream-target
+                               (gr8s.apiserver::dashboard-mux-message-path message)
+                               (gr8s.apiserver::dashboard-mux-message-query message)))
+                      (watch (make-dashboard-watch :key key)))
+                 ;; A re-REQUEST for the same key replaces the running watch.
+                 (stop-watch key)
+                 (bt:with-lock-held (watches-lock) (setf (gethash key watches) watch))
+                 (flet ((registered-p ()
+                          (and session-open
+                               (eq (bt:with-lock-held (watches-lock) (gethash key watches))
+                                   watch))))
+                   (setf (dashboard-watch-thread watch)
+                         (bt:make-thread
+                          (lambda ()
+                            (run-dashboard-watch
+                             config message target watch #'send-frame
+                             #'registered-p
+                             (lambda (socket) ; claim: publish socket, report liveness
+                               (bt:with-lock-held (watches-lock)
+                                 (setf (dashboard-watch-socket watch) socket)
+                                 (and session-open (eq (gethash key watches) watch))))
+                             (lambda () (drop-watch key watch))))
+                          :name "gr8s dashboard watch"))))))
+      (unwind-protect
+           (handler-case
+               (loop
+                 (multiple-value-bind (opcode payload fin-p masked-p)
+                     (gr8s.protocol::read-websocket-frame client)
+                   (declare (ignore fin-p masked-p))
+                   (case opcode
+                     ((1 2)             ; a client control message (text/binary)
+                      (let ((message (gr8s.apiserver::dashboard-parse-multiplexer-message
+                                      (trivial-utf-8:utf-8-bytes-to-string payload))))
+                        (when message
+                          (let ((type (gr8s.apiserver::dashboard-mux-message-type message)))
+                            (cond
+                              ((string= type "REQUEST") (start-watch message))
+                              ((string= type "CLOSE")
+                               (stop-watch (gr8s.apiserver::dashboard-multiplexer-key message))))))))
+                     (8 (return))       ; client close
+                     (9 (bt:with-lock-held (write-lock) ; ping -> pong
+                          (ignore-errors (gr8s.protocol::write-websocket-frame client 10 payload))))
+                     (10)               ; pong
+                     (otherwise nil))))
+             (error () nil))
+        (setf session-open nil)
+        (stop-all)
+        (ignore-errors (close client)))
+      "")))
+
 (defclass dashboard-command-acceptor (hunchentoot:easy-acceptor)
-  ((proxy-fn :initarg :proxy-fn :reader dashboard-acceptor-proxy-fn))
+  ((proxy-fn :initarg :proxy-fn :reader dashboard-acceptor-proxy-fn)
+   (multiplexer-fn :initarg :multiplexer-fn :reader dashboard-acceptor-multiplexer-fn))
   (:documentation "The loopback acceptor the `gr8s dashboard' command runs."))
 
 (defmethod hunchentoot:acceptor-dispatch-request ((acceptor dashboard-command-acceptor) request)
-  (let ((gr8s.apiserver::*dashboard-proxy-fn* (dashboard-acceptor-proxy-fn acceptor)))
+  (let ((gr8s.apiserver::*dashboard-proxy-fn* (dashboard-acceptor-proxy-fn acceptor))
+        (gr8s.apiserver::*dashboard-multiplexer-fn* (dashboard-acceptor-multiplexer-fn acceptor)))
     (or (gr8s.apiserver::dashboard-response request)
         (progn
           (setf (hunchentoot:return-code*) hunchentoot:+http-not-found+
@@ -1146,7 +1364,9 @@ opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
          (acceptor (make-instance 'dashboard-command-acceptor
                                   :address "127.0.0.1" :port port
                                   :proxy-fn (lambda (method target request)
-                                              (dashboard-proxy-forward config method target request)))))
+                                              (dashboard-proxy-forward config method target request))
+                                  :multiplexer-fn (lambda (request)
+                                                    (serve-dashboard-multiplexer config request)))))
     ;; Acceptor worker threads read the base globally, so set it (one-shot process).
     (setf gr8s.apiserver::*dashboard-base* (format nil "/dashboard/~A" token)
           *shutdown-requested* nil)
