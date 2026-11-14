@@ -111,7 +111,7 @@ leader loss, rejoin, full restart, preserved credentials and writes with a witne
 participating in quorum. That run disables agents and uses the fake runtime; it
 does not establish container, VM or conformance acceptance.
 
-## Current limits
+## Replication and recovery
 
 Core API resources and Pods replicate as per-key transactions. Pod changes are
 staged under the store lock, frozen into a command, and removed from the local
@@ -125,15 +125,16 @@ also advance this shared clock.
 Pod UID/version preconditions are checked at application time. Status-only
 commands cannot create desired objects, and unmentioned Pods are never removed.
 Forwarded writes carry the application conflict result separately from consensus
-commit. A single store operation can still propose core, Pod, and Node changes
-separately; this is not a general transaction across all resource families.
-Focused failover tests do not prove arbitrary crash/restart safety.
-Production startup restores the persisted application baseline and committed WAL
+commit. Core resources, Pods, and Nodes use their respective Raft command types.
+
+Startup restores the persisted application baseline and committed WAL
 suffix before opening application services. Raft remains available while a member
 waits for committed current-term recovery. A lone member of a saved three-voter
-cluster cannot become a new one-voter cluster by restarting. Witness recovery
-restores voting state without replicating application payloads. State ownership,
-endpoint checks and legacy-state refusal are described in
+cluster cannot become a new one-voter cluster by restarting. Witnesses recover
+voting state without restoring an application state machine. Their snapshots
+omit application artifacts, while ordinary replicated log entries can still carry
+application commands. State ownership, endpoint checks and legacy-state refusal
+are described in
 [Raft member recovery](raft-member-recovery.md).
 
 Node writes stage private records, defer file changes, and restore committed
@@ -156,7 +157,6 @@ Node set before writing any record. A stale proposal for a different Node cannot
 reuse an existing claim. One delta can release and transfer a claim atomically;
 conflicts leave files, revision clocks and watch events unchanged. Legacy
 version-1 replay retains its original behavior.
-These transactions do not provide cross-resource atomicity.
 
 The Raft core preserves its vote when stepping down within the same term, and
 persists new terms and votes before publishing them in memory. A failed storage
@@ -164,6 +164,8 @@ write leaves the preceding term, vote and role intact and sends no vote grant or
 election request. Production startup also restores durable state before serving,
 as described above; these primitive checks complement the production recovery
 validation.
+
+### Replication bounds
 
 Replication retries use bounded batches: at most 64 entries and a conservative
 1 MiB command-weight budget. A single oversized existing command travels alone.
@@ -181,29 +183,16 @@ does not reread discarded WAL history, and recovery disables reader evaluation.
 The [checkpoint validation record](evidence/raft-checkpoint-validation-2026-11-09.json)
 includes repeated reclamation, fault injection, and constrained-heap tail recovery.
 
-The core and peer transport support configured snapshot catch-up after explicit
+### Snapshot installation
+
+The core and peer transport support configured snapshot catch-up after log
 compaction. Snapshots preserve voter, witness and learner membership, peer
 addresses and API URLs. Installation retains a matching suffix or discards a
 conflicting one, persists the replacement before restoring application state,
 and acknowledges only after restore succeeds. Failed restore blocks voting and
 the logical clock until a retry succeeds; restore callbacks must be retryable.
 
-Capacity recovery tracks the refused log boundary rather than a moving leader
-checkpoint. Bounded cached-log replay uses normal follower admission checks;
-an active snapshot is retained until acknowledged progress covers it. The
-[full native recovery validation](evidence/capacity-recovery-full-validation-2026-11-11.json)
-passed 2,048 churn rounds with three 384 MiB mTLS processes, the full 96 MiB
-history window, final convergence, cold recovery, and obsolete-generation and
-artifact reclamation. This internal harness does not establish VM/runtime
-acceptance. See [member recovery](raft-member-recovery.md) for the protocol and
-its validation limits.
-
-The [production CLI recovery validation](evidence/production-recovery-current-validation-2026-11-11.json)
-also passed 2,048 churn rounds with one voter offline, followed by catch-up,
-leader loss and rejoin, full cold restart, witness restart and quorum writes.
-It preserved member identities and exact ConfigMap names, UIDs and contents.
-This uses the standard native `serve` and `witness` commands with a fake workload
-runtime and disabled agents; container, BPF and VM acceptance remain separate.
+### Snapshot transfer
 
 Transfer uses ordered chunks containing at most 64 KiB of file data, authenticated
 by the existing member mTLS connection. SHA-256 and header checks precede install.
@@ -221,6 +210,28 @@ covers process death, live-owner exclusion and native startup.
 The [snapshot-transfer validation record](evidence/raft-snapshot-transfer-validation-2026-11-09.json)
 covers interrupted mTLS transfer, voter/learner catch-up and leadership handoff
 with a witness. Run `make test-raft-snapshots` for the focused suite.
+
+## Validation coverage
+
+The following records identify the tested configuration and workload. Their scope
+is validation evidence, rather than a list of Kubernetes compatibility gaps.
+
+Capacity recovery tracks the refused log boundary rather than a moving leader
+checkpoint. Bounded cached-log replay uses normal follower admission checks;
+an active snapshot is retained until acknowledged progress covers it. The
+[full native recovery validation](evidence/capacity-recovery-full-validation-2026-11-11.json)
+passed 2,048 churn rounds with three 384 MiB mTLS processes, the full 96 MiB
+history window, final convergence, cold recovery, and obsolete-generation and
+artifact reclamation. This internal harness does not establish VM/runtime
+acceptance. See [member recovery](raft-member-recovery.md) for the protocol and
+its validation limits.
+
+The [production CLI recovery validation](evidence/production-recovery-current-validation-2026-11-11.json)
+also passed 2,048 churn rounds with one voter offline, followed by catch-up,
+leader loss and rejoin, full cold restart, witness restart and quorum writes.
+It preserved member identities and exact ConfigMap names, UIDs and contents.
+This uses the standard native `serve` and `witness` commands with a fake workload
+runtime and disabled agents; container, BPF and VM acceptance remain separate.
 
 ## Automatic checkpoints and heap sizing
 
@@ -273,6 +284,6 @@ restarting or removing files does not establish a safe recovery boundary.
 Application snapshots support Raft recovery; they are not an operator backup of
 cluster identity or signing/encryption keys. Capture/verify primitives exist,
 but a complete operator restore-to-live workflow remains separate work; see the
-[operational gap inventory](k3s-gap-inventory.md#operational-boundaries).
+[operational reference](k3s-gap-inventory.md#operational-reference).
 The [conformance result](CONFORMANCE.md) records a two-node Kubernetes test run;
 it does not establish arbitrary HA failure or recovery acceptance.
