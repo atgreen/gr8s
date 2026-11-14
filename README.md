@@ -6,6 +6,15 @@ gr8s puts a Kubernetes API server, controllers, scheduler, node agent,
 container runtime, networking, and datastore in one native executable. Use
 `kubectl` and standard Kubernetes manifests on one node or across a cluster.
 
+> [!WARNING]
+> **This is an experiment.** gr8s is for people interested in exploring and
+> developing a new Kubernetes implementation. It does not promise compatibility
+> stability or operational reliability. It may fail or behave incorrectly.
+>
+> The project also explores building a Kubernetes implementation through
+> human-guided AI development. It may never meet its goals. See
+> [Creation and development](#creation-and-development).
+
 **gr8s passed 100% of the upstream Kubernetes v1.37 `certified-conformance`
 tests: 462/462, zero failures**, in the recorded two-node Sonobuoy run on
 2026-11-11. See the [results and evidence](docs/CONFORMANCE.md).
@@ -18,12 +27,11 @@ trace selected Pods with [bpftrace programs](docs/design-gr8s-trace.md), and
 inspect running control-plane and agent processes through
 [Slynk](docs/building-and-testing.md#debugging-a-running-cluster).
 
-> **Project status:** gr8s is experimental software for exploration, development,
-> and testing. It is not yet a CNCF-submitted _Certified Kubernetes_ distribution.
-> See the [API coverage](docs/kubernetes-surface.md) and
-> [known gaps](docs/k3s-gap-inventory.md) for the current scope.
+gr8s is not yet a CNCF-submitted _Certified Kubernetes_ distribution. See the
+[API coverage](docs/kubernetes-surface.md) and
+[known gaps](docs/k3s-gap-inventory.md) for the current scope.
 
-The name **gr8s** is a portmanteau of *Green* — its author's surname — and
+The name **gr8s** is a portmanteau of *Green* — its creator's surname — and
 *k8s*, the usual contraction of *Kubernetes*: in short, "Green Kubernetes."
 
 Start with the [documentation guide](docs/index.md). If you already know Kubernetes,
@@ -273,6 +281,12 @@ A gr8s version combines the Kubernetes API version with a gr8s release suffix.
 For example: `v1.37.2-gr8s.0`. The API version identifies the compatibility
 target. It does not show Kubernetes conformance. `gr8s version` and the
 Kubernetes `/version` endpoint report the running build's version.
+
+## Creation and development
+
+Anthony Green is the creator of gr8s. He guides its architecture and development;
+AI assistants generate code, tests, and documentation under his direction.
+Automated tests help find defects, but do not establish correctness or security.
 
 ## License
 

@@ -6,7 +6,7 @@ live-process debugging.
 
 ## Requirements
 
-Build on Linux with SBCL, OCICL, GNU Make, Git, Go, curl, CA certificates,
+Build on Linux with SBCL, ocicl, GNU Make, Git, Go, curl, CA certificates,
 GNU coreutils (`sha256sum`, `install`), awk, grep, and binutils (`readelf`). The
 native payload build compiles containerd, its shim, and CNI plugins from pinned
 Go modules, and downloads a checksum-verified runc binary. It does not require
@@ -39,7 +39,7 @@ sudo dnf install -y sbcl make gcc git golang curl ca-certificates \
   coreutils gawk grep binutils python3 iproute util-linux nftables
 ```
 
-Install [OCICL](https://github.com/ocicl/ocicl#installation), for example from
+Install [ocicl](https://github.com/ocicl/ocicl#installation), for example from
 source as the ordinary build user:
 
 ```sh
