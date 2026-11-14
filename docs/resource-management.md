@@ -106,7 +106,7 @@ binary hash, upstream RPC results, kernel probe logs and server logs. This is
 a native resource-management integration test, not KubeVirt dedicated-CPU or
 NUMA conformance certification.
 
-The [native validation record](resource-management-native-2026-11-09.json)
+The [native validation record](evidence/resource-management-native-2026-11-09.json)
 contains the tested binary hash, live process/container identity, upstream RPC
 responses and host-suite comparison with clean main. An independent upstream
 client also checks DRA reporting against prepared-claim fixtures.

@@ -96,7 +96,7 @@ finalizers are handled by the corresponding API and controllers.
 
 ## Verification
 
-The [metadata rotation validation](secret-metadata-validation-2026-11-10.json)
+The [metadata rotation validation](evidence/secret-metadata-validation-2026-11-10.json)
 records prepare, promote, re-encrypt, finalize and cold reopening with a 1 MiB
 Secret and full retained history inside a 384 MiB Lisp heap. Metadata-only phases
 preserve the following journal. Build this internal probe with

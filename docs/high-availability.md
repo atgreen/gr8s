@@ -105,7 +105,7 @@ same identity and endpoints, including after an interrupted first startup. A
 changed configuration fails before startup instead of publishing a new address
 that other members cannot reach. This release has no endpoint migration command.
 
-The [production recovery validation](production-ha-recovery-validation-2026-11-10.json)
+The [production recovery validation](evidence/production-ha-recovery-validation-2026-11-10.json)
 uses three real CLI processes and a witness with authenticated Raft. It verifies
 leader loss, rejoin, full restart, preserved credentials and writes with a witness
 participating in quorum. That run disables agents and uses the fake runtime; it
@@ -141,14 +141,14 @@ pointers, revisions and watch journals before proposing to Raft. Committed delta
 publish Node watch transitions on every replica; lease-only renewals do not create
 client events. Runtime-down reports also replicate. Enrollment retries finish a
 previously failed Node file write before acknowledging success. See the
-[Node transaction validation](node-transactions-validation-2026-11-09.json).
+[Node transaction validation](evidence/node-transactions-validation-2026-11-09.json).
 Node deltas include their expected committed record. Apply rejects stale writes
 before changing any key, assigns successful public changes revisions in commit
 order, and returns those revisions to the author. Follower proposals return the
 application conflict result too. Exact retries do not duplicate watch events.
 Lease parsing during apply preserves committed readiness independently of replica
 wall clocks; the heartbeat monitor retries conflicts and unavailable consensus.
-The [concurrency validation](node-conflicts-validation-2026-11-09.json) covers these
+The [concurrency validation](evidence/node-conflicts-validation-2026-11-09.json) covers these
 paths. Legacy version-1 deltas remain readable; these guarantees require all
 members to run the updated implementation. Checked Node deltas also validate
 identity, underlay address and every assigned PodCIDR against the proposed final
@@ -170,7 +170,7 @@ Replication retries use bounded batches: at most 64 entries and a conservative
 Compaction/truncation release discarded backing-array references, and persistence
 errors leave their old in-memory log intact. Current-state snapshot callbacks must
 capture exactly the applied boundary. See the
-[primitive validation record](raft-memory-validation-2026-11-09.json).
+[primitive validation record](evidence/raft-memory-validation-2026-11-09.json).
 
 Explicit file-backed compaction replaces the WAL with the current hard state,
 snapshot, and retained suffix. The replacement is written to a private sibling
@@ -178,7 +178,7 @@ file, synchronized, renamed, and followed by a directory synchronization. Failur
 before rename preserves the old WAL. Failure after rename closes the backend;
 recovery must establish its durable outcome before further writes. The write path
 does not reread discarded WAL history, and recovery disables reader evaluation.
-The [checkpoint validation record](raft-checkpoint-validation-2026-11-09.json)
+The [checkpoint validation record](evidence/raft-checkpoint-validation-2026-11-09.json)
 includes repeated reclamation, fault injection, and constrained-heap tail recovery.
 
 The core and peer transport support configured snapshot catch-up after explicit
@@ -191,14 +191,14 @@ the logical clock until a retry succeeds; restore callbacks must be retryable.
 Capacity recovery tracks the refused log boundary rather than a moving leader
 checkpoint. Bounded cached-log replay uses normal follower admission checks;
 an active snapshot is retained until acknowledged progress covers it. The
-[full native recovery validation](capacity-recovery-full-validation-2026-11-11.json)
+[full native recovery validation](evidence/capacity-recovery-full-validation-2026-11-11.json)
 passed 2,048 churn rounds with three 384 MiB mTLS processes, the full 96 MiB
 history window, final convergence, cold recovery, and obsolete-generation and
 artifact reclamation. This internal harness does not establish VM/runtime
 acceptance. See [member recovery](raft-member-recovery.md) for the protocol and
 its validation limits.
 
-The [production CLI recovery validation](production-recovery-current-validation-2026-11-11.json)
+The [production CLI recovery validation](evidence/production-recovery-current-validation-2026-11-11.json)
 also passed 2,048 churn rounds with one voter offline, followed by catch-up,
 leader loss and rejoin, full cold restart, witness restart and quorum writes.
 It preserved member identities and exact ConfigMap names, UIDs and contents.
@@ -216,9 +216,9 @@ Transfer files live in private, versioned directories with lifetime ownership lo
 Startup and subsequent allocations reclaim abandoned directories while preserving
 live transfers. Cleanup does not follow symlinks or remove unknown contents;
 legacy unmarked directories are preserved. The
-[scratch cleanup validation](raft-snapshot-scratch-validation-2026-11-09.json)
+[scratch cleanup validation](evidence/raft-snapshot-scratch-validation-2026-11-09.json)
 covers process death, live-owner exclusion and native startup.
-The [snapshot-transfer validation record](raft-snapshot-transfer-validation-2026-11-09.json)
+The [snapshot-transfer validation record](evidence/raft-snapshot-transfer-validation-2026-11-09.json)
 covers interrupted mTLS transfer, voter/learner catch-up and leadership handoff
 with a witness. Run `make test-raft-snapshots` for the focused suite.
 
@@ -245,9 +245,9 @@ capacity hint; it does not raise the memory budget or bypass the recovery gate.
 Do not delete WALs, selected generations,
 metadata, credentials or snapshot artifacts to reclaim space by hand.
 
-[Constrained-heap validation](async-compaction-validation-2026-11-10.json) covers
+[Constrained-heap validation](evidence/async-compaction-validation-2026-11-10.json) covers
 large churn, bounded retention, catch-up and cold recovery in an internal
-three-process harness. The [production CLI validation](production-compaction-validation-2026-11-11.json)
+three-process harness. The [production CLI validation](evidence/production-compaction-validation-2026-11-11.json)
 passed 2,048 churn rounds (128 MiB of payload) with three 384 MiB heaps,
 disconnected-voter catch-up, exact ConfigMap UIDs and contents across full
 restart, leader loss and witness quorum operation. That run disables agents and

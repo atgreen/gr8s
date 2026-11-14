@@ -67,7 +67,7 @@ pass. The higher-level `gr8s.resources::validate-store-snapshot` also checks
 cross-record identities and relationships; use it before completing a staged
 generation. The materializer verifies the artifact checksum; live restore remains pending.
 The reader returns header, clocks and count without collecting the data records.
-The [reader validation record](store-snapshot-reader-validation-2026-11-09.json)
+The [reader validation record](evidence/store-snapshot-reader-validation-2026-11-09.json)
 covers malformed artifacts and constrained-heap capture plus validation.
 
 Run the capture and reader tests with the `store-snapshot` FiveAM suite. For the memory probe:
@@ -80,7 +80,7 @@ sbcl --dynamic-space-size 384 --noinform --non-interactive \
 The default probe captures and validates the artifact while keeping the source
 store resident. `GR8S_SNAPSHOT_RECORDS` controls the number of 64 KiB resource payloads. Setting
 `GR8S_SNAPSHOT_LEGACY=1` selects whole-state JSON materialization for comparison.
-The [validation record](store-snapshot-artifact-validation-2026-11-09.json)
+The [validation record](evidence/store-snapshot-artifact-validation-2026-11-09.json)
 distinguishes capture evidence from the remaining restore and transport work.
 
 ## Application generation selection
@@ -125,7 +125,7 @@ be visible, and neither completed generation is removed or rolled back. Power-lo
 recovery must inspect the durable selection and restore intent. Generation garbage
 collection is not enabled.
 
-The [generation selection validation](store-generation-validation-2026-11-09.json)
+The [generation selection validation](evidence/store-generation-validation-2026-11-09.json)
 covers reopen, write routing, credential preservation, publication failures and
 native startup/restart with a prebuilt generation. Reproduce the native check with
 `python3 scripts/test-store-generation-native.py --gr8s build/gr8s`.
@@ -155,7 +155,7 @@ The validator retains identity indexes proportional to object count, small CRD
 descriptors and distinct custom-object shapes. Record parsing remains bounded by
 the configured record limit. The constrained-heap probe now exercises this full
 validation pass with the source store still resident. The `store-snapshot-index`
-FiveAM suite covers these cross-record checks. The [validation evidence](store-snapshot-index-validation-2026-11-09.json)
+FiveAM suite covers these cross-record checks. The [validation evidence](evidence/store-snapshot-index-validation-2026-11-09.json)
 records the focused suites and constrained-heap probe. The materializer below
 consumes validated records. Coordination of restore intent with live reload and
 Raft/WAL recovery remains pending; this validator does not select or restore a generation.
@@ -189,7 +189,7 @@ publication files remain readable. Normal Pod deletion removes its publication.
 
 Run the `pod-publications` FiveAM suite for restart, consensus application,
 specification changes, deletion, stale records, unsafe links and write-failure
-coverage. The [publication validation evidence](pod-publication-validation-2026-11-09.json)
+coverage. The [publication validation evidence](evidence/pod-publication-validation-2026-11-09.json)
 includes a native API status/revision round trip across process restart, broader
 watch/status/failover checks and the constrained-heap probe. The materializer
 restores publication files; live restore intent remains pending.
@@ -235,7 +235,7 @@ validated marker visible even though the call reports an error. The active
 selector is unchanged in every case.
 
 Run the `store-snapshot-materialize` FiveAM suite for round-trip and failure tests.
-The [materialization evidence](store-snapshot-materialization-validation-2026-11-09.json)
+The [materialization evidence](evidence/store-snapshot-materialization-validation-2026-11-09.json)
 records round-trip/failure coverage and the heap result, including its cold-compilation
 setup limitation. To include materialization in the constrained-heap probe:
 
@@ -325,7 +325,7 @@ can be retried after a successful reload, but refuses to acknowledge an existing
 store object still pointing at another generation.
 
 The `store-restore-intent` suite exercises selection, reload and metadata failure
-boundaries. The [restore intent evidence](store-restore-intent-validation-2026-11-09.json)
+boundaries. The [restore intent evidence](evidence/store-restore-intent-validation-2026-11-09.json)
 records the focused checks, native pending-intent startup and heap probe. The native probe accepts `--pending-restore` to seed an intent instead
 of a selector, then checks startup recovery and the next process restart:
 
@@ -371,7 +371,7 @@ reload or automatic compaction is enabled by this access gate alone.
 
 Run the `store-access-gate` FiveAM suite for concurrent drain, rejected reads and
 writes, error cleanup, timeout recovery, generation checks and HTTP readiness.
-The [access gate evidence](store-access-gate-validation-2026-11-09.json) records the
+The [access gate evidence](evidence/store-access-gate-validation-2026-11-09.json) records the
 concurrency and HA proposal checks, adjacent suites, native smoke and heap probe.
 
 ## Reloading the existing store object
@@ -427,7 +427,7 @@ In reload mode, the old application is released before loading the target. The
 probe checks the restored resource count and a payload after reopening access;
 it does not claim that old and new full application heaps remain resident together.
 
-The [application reload evidence](store-application-reload-validation-2026-11-09.json)
+The [application reload evidence](evidence/store-application-reload-validation-2026-11-09.json)
 records the focused checks, same-object heap result, and the distinct scope of the
 native startup smoke. Production ingress and member/WAL integration remain pending.
 
@@ -498,7 +498,7 @@ validates, materializes and reloads the store. Verify reopens the persisted
 selected generation and compares each metainfo's size and SHA-256. The probe
 preserves its state and artifact for inspection.
 
-The [chunked metainfo validation](tracker-metainfo-chunks-validation-2026-11-11.json)
+The [chunked metainfo validation](evidence/tracker-metainfo-chunks-validation-2026-11-11.json)
 records the parser-limit baseline, publication allocation failure, corrected
 capture/reload and fresh-process verification, and the restore integration
 checks. Four 16 MiB metainfo payloads fit the probe's unchanged 384 MiB heap;
