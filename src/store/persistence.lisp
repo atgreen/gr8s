@@ -716,8 +716,12 @@ renewals use the same compact one-key delta without changing resourceVersion."
   (with-store-lock (store)
     (get-pod-unlocked store namespace name)))
 
-(defun list-pods (store &optional namespace)
-  "Return a consistent snapshot of Pods, optionally restricted to NAMESPACE."
+(defgeneric list-pods (store &optional namespace)
+  (:documentation "A consistent snapshot of Pods, optionally restricted to NAMESPACE.
+Part of the desired-state read seam: STORE is the gr8s store, or a foreign
+cluster's watch cache."))
+
+(defmethod list-pods ((store pod-store) &optional namespace)
   (with-store-lock (store)
     (loop for pod being the hash-values of (pod-store-pods store)
           when (or (null namespace) (string= namespace (pod-namespace pod)))
