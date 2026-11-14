@@ -122,3 +122,12 @@ cache update, so an agent can nudge its reconcilers."
                     ;; not hide every other Pod from policy resolution.
                     (error () nil))
         when pod collect pod))
+
+(defmethod gr8s.store:pod-reported-status ((view foreign-resource-view) pod)
+  "A foreign Pod's status travels inside the watched object itself."
+  (let ((object (handler-case
+                    (get-core-resource view "pods"
+                                       (gr8s.model:pod-namespace pod)
+                                       (gr8s.model:pod-name pod))
+                  (error () nil))))
+    (and object (gethash "status" object))))

@@ -1760,29 +1760,6 @@ while the server still assigns that UID at that version."
              (node-runtime-received-revision node-runtime)))
     (error 'pod-reconciliation-superseded)))
 
-(defun pod-ip-identity-map (store)
-  "Map each local Pod's IP to the np-pod its NetworkPolicy is resolved for."
-  (let ((map (make-hash-table :test #'equal)))
-    (dolist (pod (list-pods store) map)
-      (let* ((status (gethash (pod-uid pod) (pod-store-pod-observed-statuses store)))
-             (plural (and status (gethash "podIPs" status)))
-             (addresses (or (and (vectorp plural)
-                                 (loop for entry across plural
-                                       for address = (and (hash-table-p entry) (gethash "ip" entry))
-                                       when (stringp address) collect address))
-                            (let ((single (and status (gethash "podIP" status))))
-                              (and (stringp single) (list single)))))
-             (object (pod-object pod))
-             (metadata (gethash "metadata" object (make-hash-table :test #'equal))))
-        (when addresses
-          (let ((policy-pod
-                  (make-np-pod :name (pod-name pod) :namespace (pod-namespace pod)
-                               :labels (gethash "labels" metadata (make-hash-table :test #'equal))
-                               :ip (first addresses) :ips addresses
-                               :ports (np-container-ports object))))
-            (dolist (address addresses)
-              (setf (gethash address map) policy-pod))))))))
-
 (defvar *node-network-policy-lock* (bt:make-lock "gr8s node network policy")
   "Serializes writes of Pods' policies from snapshots and from new Pod addresses.")
 
@@ -1848,7 +1825,7 @@ A no-op unless the agent is managed with a store and known endpoints."
         ;; which must populate regardless.
         (let ((specs (network-policy-specs-from-objects
                       (list-core-resources store "networkpolicies")))
-              (ip-map (pod-ip-identity-map store)))
+              (ip-map (gr8s.network::pod-ip-identity-map store)))
           (funcall policy-converger
                    specs endpoints
                    :pod-finder (lambda (address) (gethash address ip-map))

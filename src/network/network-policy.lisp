@@ -283,7 +283,7 @@ Pods or Namespaces: defaulted policyTypes, and rules whose peers are only ipBloc
 (defun network-policy-cluster-pods (store)
   "Every nonterminal Pod with at least one address that policy can select."
   (loop for pod in (list-pods store)
-        for status = (pod-observed-status store pod)
+        for status = (gr8s.store:pod-reported-status store pod)
         for addresses = (and (hash-table-p status)
                              (let ((plural (gethash "podIPs" status)))
                                (or (and (vectorp plural)
@@ -598,6 +598,30 @@ untouched. OPEN/MAP-INFO/UPDATE/DELETE/KEYS/EXISTS/CLOSE are injectable for test
 policy is not rewritten on every snapshot.")
 
 (defvar *pod-network-policy-written-lock* (bt:make-lock "gr8s network policy writes"))
+
+(defun pod-ip-identity-map (store)
+  "Map each Pod's IP to the np-pod its NetworkPolicy is resolved for.
+Reads through the desired-state seam, so STORE may be a foreign cluster's view."
+  (let ((map (make-hash-table :test #'equal)))
+    (dolist (pod (list-pods store) map)
+      (let* ((status (gr8s.store:pod-reported-status store pod))
+             (plural (and status (gethash "podIPs" status)))
+             (addresses (or (and (vectorp plural)
+                                 (loop for entry across plural
+                                       for address = (and (hash-table-p entry) (gethash "ip" entry))
+                                       when (stringp address) collect address))
+                            (let ((single (and status (gethash "podIP" status))))
+                              (and (stringp single) (list single)))))
+             (object (pod-to-object pod))
+             (metadata (gethash "metadata" object (make-hash-table :test #'equal))))
+        (when addresses
+          (let ((policy-pod
+                  (make-np-pod :name (pod-name pod) :namespace (pod-namespace pod)
+                               :labels (gethash "labels" metadata (make-hash-table :test #'equal))
+                               :ip (first addresses) :ips addresses
+                               :ports (np-container-ports object))))
+            (dolist (address addresses)
+              (setf (gethash address map) policy-pod))))))))
 
 (defun converge-pod-network-policies
     (specs endpoints &key pod-finder directory-fn (writer #'write-pod-network-policy))

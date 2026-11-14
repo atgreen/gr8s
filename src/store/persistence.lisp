@@ -727,6 +727,15 @@ cluster's watch cache."))
           when (or (null namespace) (string= namespace (pod-namespace pod)))
             collect pod)))
 
+(defgeneric pod-reported-status (store pod)
+  (:documentation "POD's latest reported status object, or NIL.  Part of the
+desired-state read seam: the gr8s store keeps agent observations beside the Pod,
+while a foreign cluster carries status inside the watched Pod object."))
+
+(defmethod pod-reported-status ((store pod-store) pod)
+  (with-store-lock (store)
+    (gethash (pod-uid pod) (pod-store-pod-observed-statuses store))))
+
 (defun generate-pod-name (prefix)
   "Append five random characters to at most 58 prefix characters, matching upstream limits."
   (let ((alphabet "bcdfghjklmnpqrstvwxz2456789"))

@@ -274,6 +274,7 @@
                                            (:file "routed-cni")
                                            (:file "local-pod-delivery")
                                            (:file "host-redirect")
+                                           (:file "foreign-agent")
                                            ))
                              (:module "protocol-implementation"
                               :pathname "protocol/"
@@ -537,6 +538,7 @@
                              (:file "dashboard-test")
                              (:file "core-resource-http-test")
                              (:file "kube-client-test")
+                             (:file "foreign-agent-test")
                              (:file "api-defaults-test")
                              (:file "store-snapshot-test")
                              (:file "store-snapshot-index-test")

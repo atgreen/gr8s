@@ -42,6 +42,7 @@
    #:install-pod-state-delta
    #:install-pod-state-blob
    #:list-pods
+   #:pod-reported-status
    #:load-pod-status-state
    #:load-pod-revision
    #:local-replicated-pod-event-revision-unlocked
