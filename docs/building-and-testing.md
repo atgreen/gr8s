@@ -4,6 +4,56 @@ The [README](../README.md#getting-started) shows a quick single-node start. This
 guide covers requirements, multi-node clusters, the native payload, tests, and
 live-process debugging.
 
+## Release binaries
+
+[Build and Release](../.github/workflows/release.yml) builds native Linux amd64
+and arm64 executables on Ubuntu 24.04 runners. Pushing a `v*` tag builds both
+architectures and publishes a GitHub release only after both builds succeed.
+Running the workflow manually builds the selected ref and uploads artifacts
+without publishing a release. Use a clean, committed ref for either path.
+
+Each build includes the pinned containerd/runc/CNI payload, the Headlamp
+dashboard, and collected third-party license notices. It checks the executable's
+version, help, and embedded notices, verifies the runtime payload's static linkage,
+and tests artifact packaging. These checks do not run Pods or establish Kubernetes
+conformance; use the disposable-VM acceptance runners for that validation.
+
+Release downloads include:
+
+- `gr8s-linux-amd64` and `gr8s-linux-arm64`, with matching `.sha256` files. These
+  are the filenames used by `install.sh`.
+- `gr8s-<version>-linux-<arch>.tar.gz`, containing the executable as `gr8s`, the
+  installer and cleanup scripts, README, and license/notice files.
+- `install.sh`, `gr8s-killall.sh`, `gr8s-uninstall.sh`, `LICENSE`, `NOTICE`, and
+  `SHA256SUMS` for the complete download set.
+- Per-architecture CycloneDX and SPDX files from ocicl. These describe the
+  **Lisp dependencies**, rather than the entire native payload and web frontend.
+
+The main SBCL executable uses the build host's libc: Ubuntu 24.04 provides a
+glibc 2.39 baseline. The embedded runtime payload is static, but the gr8s executable
+is not a fully static or musl build. Hosts also need the libzstd shared library and
+the kernel/runtime requirements below.
+
+The workflow pins SBCL, ocicl, and Headlamp source commits and the GitHub Actions
+used to build them. Runtime versions remain pinned in
+[`install-containerd.sh`](../scripts/install-containerd.sh), and Lisp versions in
+`ocicl.csv`. Update these pins deliberately when changing the release toolchain.
+
+To assemble the same assets locally, install the workflow's toolchain, configure
+ocicl, check out the pinned Headlamp source, and run:
+
+```sh
+HEADLAMP=/path/to/headlamp scripts/build-release.sh
+```
+
+Artifacts appear in `build/release/`. The helper restores the pinned Lisp
+dependencies, rebuilds dashboard assets and the native image, and rejects a dirty
+version. Generated notices go to `build/release/NOTICES`, supplied to the image
+builder through `GR8S_NOTICES_FILE`; ordinary native builds still read `NOTICES`.
+Archive metadata is normalized to the source commit timestamp. This makes
+packaging repeatable for identical inputs; it does not promise reproducible SBCL,
+Go, or JavaScript builds.
+
 ## Requirements
 
 Build on Linux with SBCL, ocicl, GNU Make, Git, Go, curl, CA certificates,

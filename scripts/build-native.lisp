@@ -39,7 +39,7 @@
 ;; Embed a gzip of the collected third-party NOTICES (produced by `make
 ;; notices`) so the full attribution ships inside the single binary; `gr8s
 ;; notices` decompresses and prints it. salza2 is only needed here, at build.
-(let ((notices #P"NOTICES"))
+(let ((notices (pathname (or (uiop:getenv "GR8S_NOTICES_FILE") "NOTICES"))))
   (if (probe-file notices)
       (progn
         (asdf:load-system :salza2)

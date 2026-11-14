@@ -12,7 +12,7 @@
 set -eu
 
 output=${1:-NOTICES}
-project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+project_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$project_root"
 command -v ocicl >/dev/null 2>&1 || { echo "collect-notices: ocicl not found" >&2; exit 1; }
 
@@ -62,19 +62,26 @@ COMPONENTS
   # tree -- the exact bytes `gr8s dashboard` serves -- so the attribution
   # matches what ships. Absent when the dashboard assets are not vendored.
   assets_dir="$project_root/assets/dashboard"
-  if [ -n "$(find "$assets_dir" -name '*.LICENSE.txt' -type f -print -quit 2>/dev/null)" ]; then
+  license_text() {
+    case "$1" in
+      *.gz) gzip -cd -- "$1" ;;
+      *) cat -- "$1" ;;
+    esac
+  }
+  if [ -n "$(find "$assets_dir" -type f \( -name '*.LICENSE.txt' -o -name '*.LICENSE.txt.gz' \) -print -quit 2>/dev/null)" ]; then
     printf '================================================================================\n'
     printf 'EMBEDDED WEB UI (HEADLAMP DASHBOARD) THIRD-PARTY LICENSES\n'
     printf '================================================================================\n\n'
     printf 'License texts emitted by the Headlamp frontend build for the JavaScript it\n'
     printf 'bundles. Each distinct text is reproduced once, labeled by an emitting bundle.\n\n'
     seen=$(mktemp)
-    find "$assets_dir" -name '*.LICENSE.txt' -type f | sort | while IFS= read -r license; do
-      digest=$(sha256sum "$license" | cut -d' ' -f1)
+    find "$assets_dir" -type f \( -name '*.LICENSE.txt' -o -name '*.LICENSE.txt.gz' \) | sort | while IFS= read -r license; do
+      case "$license" in *.gz) gzip -t -- "$license" ;; esac
+      digest=$(license_text "$license" | sha256sum | cut -d' ' -f1)
       if ! grep -qx "$digest" "$seen" 2>/dev/null; then
         printf '%s\n' "$digest" >> "$seen"
         printf -- '-------- %s --------\n' "${license#"$assets_dir"/}"
-        cat "$license"
+        license_text "$license"
         printf '\n'
       fi
     done

@@ -1,0 +1,152 @@
+name: Build and Release
+
+on:
+  push:
+    tags: ['v*']
+  # Build the selected ref and retain artifacts, without publishing a release.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Linux ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - name: Check out gr8s and version tags
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install bootstrap compiler and build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sbcl build-essential curl ca-certificates \
+            binutils cpio gzip python3 libzstd-dev libssl-dev libffi-dev
+
+      # Build the same SBCL on both native architectures, rather than relying
+      # on different distro compiler versions or cross-compiling dumped images.
+      - name: Check out SBCL 2.6.10
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: sbcl/sbcl
+          ref: ee8952af37ab5a2a2408e7bddd966f2a903ffe9d
+          path: build/sbcl
+          persist-credentials: false
+
+      - name: Build and install SBCL
+        working-directory: build/sbcl
+        run: |
+          sh make.sh --fancy --prefix="$HOME/.local"
+          sh install.sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Check out ocicl 2.21.0
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ocicl/ocicl
+          ref: a8607c9b8c7bcc375d553cebd866b120022a23b3
+          path: build/ocicl-tool
+          persist-credentials: false
+
+      - name: Build and configure ocicl
+        working-directory: build/ocicl-tool
+        run: |
+          sbcl --noinform --non-interactive --load setup.lisp
+          ocicl setup > "$HOME/.sbclrc"
+
+      - name: Install Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Check out Headlamp 0.46.0
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: kubernetes-sigs/headlamp
+          ref: 825604fdadbe7ed94b8e61f615d7917c743e9083
+          path: build/headlamp
+          persist-credentials: false
+
+      - name: Test release packaging
+        run: python3 scripts/test_release_package.py
+
+      - name: Build, smoke-test, and package the native executable
+        env:
+          HEADLAMP: ${{ github.workspace }}/build/headlamp
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
+        run: scripts/build-release.sh
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-linux-${{ matrix.arch }}
+          path: |
+            build/release/gr8s-linux-*
+            build/release/gr8s-*-linux-*.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  release:
+    name: Publish tagged release
+    needs: build
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out installer scripts and license
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Download both architecture builds
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-linux-*
+          merge-multiple: true
+          path: release
+
+      - name: Verify assets and add installer scripts
+        run: |
+          cp -f install.sh gr8s-killall.sh gr8s-uninstall.sh LICENSE NOTICE release/
+          cd release
+          sha256sum -c gr8s-linux-amd64.sha256 gr8s-linux-arm64.sha256
+          sha256sum -- * > ../SHA256SUMS
+          mv -f ../SHA256SUMS .
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" --verify-tag --generate-notes release/*
