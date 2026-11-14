@@ -149,6 +149,61 @@
             (is (eql 0 (gethash "restartCount" status)))
             (is (gethash "running" (gethash "state" status)))))))))
 
+;; podster-983 / 0oc.10: a supersede that lands in the gap between CreateContainer
+;; returning and StartContainer must not abandon a created-but-never-started
+;; container -- containerd reports it exited, StopContainer skips it and
+;; RemoveContainer refuses it, so the Pod's deletion, and every later creation on the
+;; node, never end (podster-uqb.123). start-created-container defers cancellation
+;; across the whole Created-record/start/Started span, so an already-created
+;; container is always started (hence cleanable) before the supersede is honoured.
+(test supersede-between-create-and-start-still-starts-the-container
+  (with-temporary-store (store directory)
+    (let* ((pod (lifecycle-pod store "Never"))
+           (spec (aref (pod-containers pod) 0))
+           (runtime (gr8s.runtime.containerd::make-containerd-runtime :log-root directory))
+           (operation (gr8s.kubelet::make-running-pod-convergence
+                       :thread (bt:current-thread) :uid (pod-uid pod)))
+           (started nil)
+           (post-start-ran nil)
+           (originals nil))
+      (labels ((replace-function (symbol function)
+                 (push (cons symbol (symbol-function symbol)) originals)
+                 (setf (symbol-function symbol) function)))
+        (unwind-protect
+             (progn
+               ;; Simulate an async cancellation landing exactly on the Created event,
+               ;; the instant the container exists but is not yet started: run the real
+               ;; interrupt callback (reconciler.lisp cancel-running-pod-convergence) --
+               ;; it defers when the step is deferred, else throws the supersede at once.
+               ;; The lifecycle string is the REASON arg (5th), not the occurrence (4th).
+               (replace-function 'gr8s.kubelet::record-container-lifecycle-event
+                 (lambda (rt uid name occurrence reason &rest ignore)
+                   (declare (ignore rt uid name occurrence ignore))
+                   (when (equal reason "Created")
+                     (if gr8s.runtime:*running-pod-cancellation-deferred*
+                         (setf gr8s.runtime:*running-pod-cancellation-pending* t)
+                         (throw gr8s.runtime:*running-pod-convergence* :superseded)))))
+               (replace-function 'gr8s.runtime.containerd::cri-start-container
+                 (lambda (socket id &rest options)
+                   (declare (ignore socket id options))
+                   (setf started t)))
+               (replace-function 'gr8s.kubelet::start-container-post-start-hook
+                 (lambda (&rest ignore) (declare (ignore ignore)) (setf post-start-ran t)))
+               (let ((outcome
+                       (catch operation
+                         (let ((gr8s.runtime:*running-pod-convergence* operation))
+                           (gr8s.runtime.containerd::start-created-container
+                            runtime pod spec "same-sandbox" "main-0" 0 "/run/fixture.sock")
+                           :completed))))
+                 ;; The created container was started before the supersede was honoured,
+                 ;; so a later Stop/Remove can clean it up...
+                 (is-true started)
+                 ;; ...the supersede was still honoured once the container was safe...
+                 (is (eq :superseded outcome))
+                 ;; ...and the post-start hook, after the deferred span, did not run.
+                 (is-false post-start-ran)))
+          (dolist (pair originals) (setf (symbol-function (car pair)) (cdr pair))))))))
+
 (test start-abandoned-by-the-client-timeout-is-retried-too
   (with-temporary-store (store directory)
     (let* ((now 4000000000) (gr8s.kubelet::*container-lifecycle-clock* (lambda () now))
