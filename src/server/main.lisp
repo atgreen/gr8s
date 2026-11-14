@@ -1393,6 +1393,41 @@ opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
       (ignore-errors (hunchentoot:stop acceptor)))
     0))
 
+(defun parse-cni-agent-options (arguments)
+  "Parse `gr8s cni-agent` options: the foreign-cluster CNI node agent
+(docs/design-foreign-cluster-networking.md)."
+  (let ((options (list :command :cni-agent)))
+    (loop for (option value) on arguments by #'cddr
+          do (unless value (error "~A requires a value" option))
+             (cond ((equal option "--kubeconfig") (setf (getf options :kubeconfig) value))
+                   ((equal option "--node-name") (setf (getf options :node-name) value))
+                   ((equal option "--state-directory") (setf (getf options :state-directory) value))
+                   ((equal option "--bpf-root") (setf (getf options :bpf-root) value))
+                   ((equal option "--socket") (setf (getf options :socket-path) value))
+                   ((equal option "--mtu") (setf (getf options :mtu) (parse-integer value)))
+                   (t (error "unknown cni-agent option: ~A" option))))
+    options))
+
+(defun run-cni-agent-command (options)
+  "Run the foreign-cluster CNI agent until shutdown is requested."
+  (let ((cluster (if (getf options :kubeconfig)
+                     (gr8s.kube-client:cluster-from-kubeconfig (getf options :kubeconfig))
+                     (gr8s.kube-client:cluster-from-service-account)))
+        (node-name (or (getf options :node-name)
+                       (uiop:getenv "NODE_NAME")
+                       (machine-instance))))
+    (gr8s.network::run-foreign-cni-agent
+     cluster
+     :node-name node-name
+     :state-directory (uiop:ensure-directory-pathname
+                       (or (getf options :state-directory)
+                           (merge-pathnames "cni-agent/" (default-state-directory))))
+     :bpf-root (or (getf options :bpf-root) "/sys/fs/bpf/gr8s")
+     :socket-path (or (getf options :socket-path) "/run/gr8s/cni.sock")
+     :mtu (or (getf options :mtu) 1450)
+     :stop-predicate (lambda () *shutdown-requested*))
+    0))
+
 (defun parse-cli-options (arguments)
   "Dispatch ARGUMENTS to the matching subcommand option parser and return its
    options plist. No arguments, or help/version/notices, yield a bare :command
@@ -1435,6 +1470,8 @@ opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
      (parse-serve-options (rest arguments)))
     ((string= "agent" (first arguments))
      (parse-agent-options (rest arguments)))
+    ((string= "cni-agent" (first arguments))
+     (parse-cni-agent-options (rest arguments)))
     ((string= "join-token" (first arguments))
      (parse-join-token-options (rest arguments)))
     ((string= "witness" (first arguments))
@@ -3045,6 +3082,10 @@ No HA API may start from member-local certificate state before this converges."
                (setf *shutdown-requested* nil)
                (install-shutdown-handlers)
                (agent options))
+              (:cni-agent
+               (setf *shutdown-requested* nil)
+               (install-shutdown-handlers)
+               (run-cni-agent-command options))
               (:witness
                (setf *shutdown-requested* nil)
                (install-shutdown-handlers)
