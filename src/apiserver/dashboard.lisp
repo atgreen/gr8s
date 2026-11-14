@@ -27,8 +27,16 @@ whether a Headlamp frontend build was baked into this image.")
   "Optional development override: a directory of built Headlamp frontend assets to
 serve instead of the ones embedded in the image. NIL serves the embedded assets.")
 
-(defparameter +dashboard-base+ "/dashboard"
-  "URL mount point for the dashboard; must match the frontend bundle's base-url.")
+(defparameter *dashboard-base* "/dashboard"
+  "URL mount point for the dashboard, applied to the frontend as its base-url. The
+`gr8s dashboard' command sets it to /dashboard/<session-token> so the UI lives at
+an unguessable loopback path (as ICL's browser does), keeping other local
+processes out.")
+
+(defvar *dashboard-proxy-fn* nil
+  "Function (METHOD TARGET REQUEST) that answers a proxied Kubernetes call
+(TARGET is the bare apiserver path+query). The `gr8s dashboard' command binds it
+to an mTLS reverse-proxy to the running cluster's API; NIL means no upstream.")
 
 (defparameter +dashboard-cluster-name+ "gr8s"
   "The single cluster name the dashboard advertises; it appears in the frontend's
@@ -37,12 +45,12 @@ cluster).")
 
 (defun dashboard-path (&rest segments)
   "Return the dashboard URL for SEGMENTS, e.g. (dashboard-path \"config\")."
-  (format nil "~A~{/~A~}" +dashboard-base+ segments))
+  (format nil "~A~{/~A~}" *dashboard-base* segments))
 
 (defun dashboard-request-p (path)
   "True when PATH addresses the dashboard mount (/dashboard or /dashboard/...)."
-  (or (string= path +dashboard-base+)
-      (uiop:string-prefix-p (concatenate 'string +dashboard-base+ "/") path)))
+  (or (string= path *dashboard-base*)
+      (uiop:string-prefix-p (concatenate 'string *dashboard-base* "/") path)))
 
 (defun dashboard-cluster-proxy-target-path (path)
   "Return the bare apiserver path for a dashboard cluster-scoped PATH
@@ -50,13 +58,25 @@ cluster).")
 segment is discarded -- this backend serves exactly one cluster -- so
 /dashboard/clusters/gr8s/api/v1/pods yields /api/v1/pods, and a bare
 /dashboard/clusters/<name> yields /."
-  (let ((prefix (concatenate 'string +dashboard-base+ "/clusters/")))
+  (let ((prefix (concatenate 'string *dashboard-base* "/clusters/")))
     (when (uiop:string-prefix-p prefix path)
       (let* ((rest (subseq path (length prefix)))
              (slash (position #\/ rest)))
         (if (and slash (< (1+ slash) (length rest)))
             (subseq rest slash)
             "/")))))
+
+(defun dashboard-proxy-target-with-query (path request)
+  "The bare apiserver path+query to proxy for a dashboard cluster-scoped PATH:
+strip the /dashboard[/<token>]/clusters/<name> prefix and re-attach REQUEST's
+query string (so ?watch=1, labelSelector, resourceVersion, etc. survive)."
+  (let* ((api (request-route-path (dashboard-cluster-proxy-target-path path)))
+         (uri (hunchentoot:request-uri request))
+         (mark (position #\? uri))
+         (query (and mark (subseq uri (1+ mark)))))
+    (if (and query (plusp (length query)))
+        (concatenate 'string api "?" query)
+        api)))
 
 (defun dashboard-config-json ()
   "The boot /config document the Headlamp frontend fetches first. The snake_case
@@ -84,9 +104,9 @@ references under /dashboard. Returns the rewritten bytes."
            (cl-ppcre:regex-replace-all (cl-ppcre:quote-meta-chars needle) text replacement)))
     (let ((text (trivial-utf-8:utf-8-bytes-to-string bytes)))
       (setf text (literal "headlampBaseUrl = __baseUrl__"
-                          (format nil "headlampBaseUrl = '~A'" +dashboard-base+) text)
-            text (literal "./" (concatenate 'string +dashboard-base+ "/") text)
-            text (literal "url(" (concatenate 'string "url(" +dashboard-base+ "/") text))
+                          (format nil "headlampBaseUrl = '~A'" *dashboard-base*) text)
+            text (literal "./" (concatenate 'string *dashboard-base* "/") text)
+            text (literal "url(" (concatenate 'string "url(" *dashboard-base* "/") text))
       (trivial-utf-8:string-to-utf-8-bytes text))))
 
 (defun dashboard-safe-asset-path (relative)
@@ -103,7 +123,7 @@ if it escapes the root or does not exist. Refuses path traversal."
 to index.html (Headlamp is a single-page app with client-side routing). Assets
 come from the image embed, unless the development override *dashboard-static-root*
 is set. index.html is rewritten for the /dashboard base on the way out."
-  (let ((relative (string-left-trim "/" (subseq path (length +dashboard-base+)))))
+  (let ((relative (string-left-trim "/" (subseq path (length *dashboard-base*)))))
     (when (zerop (length relative))
       (setf relative "index.html"))
     (if *dashboard-static-root*
@@ -138,15 +158,15 @@ is set. index.html is rewritten for the /dashboard base on the way out."
         (hunchentoot:content-type*) "text/plain")
   "gr8s dashboard assets are not embedded in this build")
 
-(defun dashboard-response (store runtime reconciler request)
-  "Serve the dashboard mount when enabled, returning the response body, or NIL to
-let normal API routing proceed (when the dashboard is disabled or PATH is not a
-dashboard path). Implements the read subset of the headlamp-server contract: the
-boot /config, an empty /plugins, the /clusters/<name>/ apiserver proxy (dispatched
-internally through the full request pipeline), and the static SPA. /wsMultiplexer
-is answered 501 until the live-update multiplexer lands."
+(defun dashboard-response (request)
+  "Serve the dashboard mount, returning the response body, or NIL when PATH is not
+a dashboard request. Implements the read subset of the headlamp-server contract:
+the boot /config, an empty /plugins, the static SPA, and the /clusters/<name>/
+apiserver proxy -- which is handed to *dashboard-proxy-fn* (the `gr8s dashboard'
+command's mTLS reverse-proxy to the running cluster; /healthz and watches ride
+the same path). /wsMultiplexer is answered 501 until the multiplexer lands."
   (let ((path (request-route-path (hunchentoot:script-name request))))
-    (when (and *dashboard-enabled* (dashboard-request-p path))
+    (when (dashboard-request-p path)
       (cond
         ((string= path (dashboard-path "config"))
          (setf (hunchentoot:content-type*) "application/json")
@@ -159,11 +179,14 @@ is answered 501 until the live-update multiplexer lands."
                (hunchentoot:content-type*) "text/plain")
          "gr8s dashboard live-update multiplexer is not yet implemented")
         ((dashboard-cluster-proxy-target-path path)
-         (let ((target (request-route-path (dashboard-cluster-proxy-target-path path))))
-           ;; /healthz, /livez, /readyz are served at the acceptor level (before
-           ;; routing), which the internal proxy bypasses; serve them here so the
-           ;; Headlamp cluster-health check (GET /clusters/<name>/healthz) passes.
-           (or (health-response target store)
-               (handle-http-request store runtime reconciler request :path target))))
+         (if *dashboard-proxy-fn*
+             (funcall *dashboard-proxy-fn*
+                      (hunchentoot:request-method request)
+                      (dashboard-proxy-target-with-query path request)
+                      request)
+             (progn
+               (setf (hunchentoot:return-code*) hunchentoot:+http-bad-gateway+
+                     (hunchentoot:content-type*) "text/plain")
+               "gr8s dashboard has no upstream cluster API configured")))
         (t
          (dashboard-static-response path))))))

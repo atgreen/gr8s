@@ -999,23 +999,119 @@ The new identity takes effect when the node agent next starts."
     (finish-output output))
   0)
 
-(defun dashboard-browse-url (server)
-  "The dashboard page URL for a cluster API at SERVER: SERVER with any trailing
-slash dropped, plus /dashboard/ (where gr8s serves the Headlamp web UI)."
-  (format nil "~A/dashboard/" (string-right-trim "/" server)))
-
 (defun default-browser-opener ()
   "The platform command that opens a URL in the user's default browser."
   #+darwin "open"
   #-darwin "xdg-open")
 
+(defun dashboard-session-token ()
+  "A fresh unguessable URL-path token for one dashboard session (192 bits of hex)."
+  (format nil "~(~{~2,'0X~}~)" (coerce (secure-random-octets 24) 'list)))
+
+(defun dashboard-kubeconfig-config (path)
+  "Read kubeconfig PATH into a config plist for OPEN-DEBUG-API-STREAM, writing any
+inline certificate/key/CA data out to 0600 temp files."
+  (let ((raw (read-debug-kubeconfig path)))
+    (list :server (getf raw :server)
+          :token (getf raw :token)
+          :ca-file (or (getf raw :ca-file)
+                       (materialize-kubeconfig-data (getf raw :ca-data) "crt"))
+          :client-certificate (or (getf raw :client-certificate)
+                                  (materialize-kubeconfig-data (getf raw :client-certificate-data) "crt"))
+          :client-key (or (getf raw :client-key)
+                          (materialize-kubeconfig-data (getf raw :client-key-data) "key")))))
+
+(defun write-dashboard-proxy-request (stream method host port target token content-type body)
+  "Write one HTTP request to the cluster-API STREAM. The kubeconfig client
+certificate authenticates the mTLS stream; a Bearer TOKEN is added when the
+kubeconfig uses one instead."
+  (write-sequence
+   (gr8s.protocol::ascii-octets
+    (with-output-to-string (request)
+      (flet ((line (control &rest args)
+               (apply #'format request control args)
+               (write-string (format nil "~C~C" #\Return #\Linefeed) request)))
+        (line "~A ~A HTTP/1.1" method target)
+        (line "Host: ~A:~D" host port)
+        (line "Connection: close")
+        (line "Accept: application/json, */*")
+        (when token (line "Authorization: Bearer ~A" token))
+        (when (and content-type (plusp (length content-type)))
+          (line "Content-Type: ~A" content-type))
+        (line "Content-Length: ~D" (if body (length body) 0))
+        (line ""))))
+   stream)
+  (when (and body (plusp (length body))) (write-sequence body stream))
+  (finish-output stream))
+
+(defun read-dashboard-proxy-body (stream headers)
+  "Read a proxied response body from STREAM, honouring Content-Length or chunked
+transfer encoding (watch streams arrive chunked)."
+  (let ((content-length (cdr (assoc :content-length headers)))
+        (transfer-encoding (cdr (assoc :transfer-encoding headers))))
+    (cond
+      ((and transfer-encoding (search "chunked" (string-downcase transfer-encoding)))
+       (let ((body (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+         (loop for size = (ignore-errors
+                            (parse-integer (gr8s.protocol::read-crlf-line stream)
+                                           :radix 16 :junk-allowed t))
+               while (and size (plusp size))
+               do (let ((chunk (make-array size :element-type '(unsigned-byte 8))))
+                    (read-sequence chunk stream)
+                    (loop for octet across chunk do (vector-push-extend octet body))
+                    (gr8s.protocol::read-crlf-line stream)))
+         (coerce body '(simple-array (unsigned-byte 8) (*)))))
+      ((and content-length (plusp (length content-length)))
+       (let* ((length (parse-integer content-length))
+              (body (make-array length :element-type '(unsigned-byte 8))))
+         (read-sequence body stream)
+         body))
+      (t (make-array 0 :element-type '(unsigned-byte 8))))))
+
+(defun dashboard-proxy-forward (config method target request)
+  "Forward the browser REQUEST to the running cluster's API over an mTLS stream
+built from the kubeconfig CONFIG -- the same connection `gr8s debug slynk' uses --
+returning the upstream body as octets and copying its status and content type.
+METHOD is a keyword; TARGET is the apiserver path+query."
+  (let ((body (ignore-errors (hunchentoot:raw-post-data :force-binary t :request request))))
+    (multiple-value-bind (stream socket host port base-path) (open-debug-api-stream config)
+      (unwind-protect
+           (handler-case
+               (progn
+                 (write-dashboard-proxy-request
+                  stream (symbol-name method) host port
+                  (concatenate 'string base-path target) (getf config :token)
+                  (hunchentoot:header-in :content-type request) body)
+                 (multiple-value-bind (status headers)
+                     (gr8s.protocol::parse-http-response-head
+                      (gr8s.protocol::read-http-response-head stream))
+                   (setf (hunchentoot:return-code*) status
+                         (hunchentoot:content-type*)
+                         (or (cdr (assoc :content-type headers)) "application/json"))
+                   (read-dashboard-proxy-body stream headers)))
+             (error (condition)
+               (setf (hunchentoot:return-code*) hunchentoot:+http-bad-gateway+
+                     (hunchentoot:content-type*) "text/plain")
+               (format nil "gr8s dashboard upstream error: ~A" condition)))
+        (ignore-errors (close stream))
+        (ignore-errors (usocket:socket-close socket))))))
+
+(defclass dashboard-command-acceptor (hunchentoot:easy-acceptor)
+  ((proxy-fn :initarg :proxy-fn :reader dashboard-acceptor-proxy-fn))
+  (:documentation "The loopback acceptor the `gr8s dashboard' command runs."))
+
+(defmethod hunchentoot:acceptor-dispatch-request ((acceptor dashboard-command-acceptor) request)
+  (let ((gr8s.apiserver::*dashboard-proxy-fn* (dashboard-acceptor-proxy-fn acceptor)))
+    (or (gr8s.apiserver::dashboard-response request)
+        (progn
+          (setf (hunchentoot:return-code*) hunchentoot:+http-not-found+
+                (hunchentoot:content-type*) "text/plain")
+          "gr8s dashboard: not found"))))
+
 (defun parse-dashboard-options (arguments)
-  "Parse `gr8s dashboard` options: which cluster API to open, and how (or whether)
-to launch a browser."
+  "Parse `gr8s dashboard' options."
   (let ((options (list :command :dashboard
-                       :server "http://127.0.0.1:8080"
-                       :browser nil
-                       :no-launch nil))
+                       :kubeconfig nil :port 8080 :browser nil :no-launch nil))
         (rest arguments))
     (loop while (and rest (uiop:string-prefix-p "--" (first rest)))
           do (let ((option (pop rest)))
@@ -1025,32 +1121,54 @@ to launch a browser."
                   (unless rest (error "~A requires a value" option))
                   (let ((value (pop rest)))
                     (cond
-                      ((string= option "--server") (setf (getf options :server) value))
+                      ((string= option "--kubeconfig") (setf (getf options :kubeconfig) value))
+                      ((string= option "--port") (setf (getf options :port) (parse-port value)))
                       ((string= option "--browser") (setf (getf options :browser) value))
                       (t (error "unknown dashboard option: ~A" option))))))))
     (when rest
-      (error "usage: gr8s dashboard [--server URL] [--browser CMD] [--no-launch]"))
+      (error "usage: gr8s dashboard [--kubeconfig PATH] [--port N] [--browser CMD] [--no-launch]"))
     options))
 
 (defun run-dashboard-command (options)
-  "Open the gr8s dashboard -- the Headlamp web UI gr8s serves at /dashboard/ --
-in a browser, like `icl -b` opens its own. The page is pre-configured for this
-cluster: gr8s serves the frontend same-origin with its API, so no kubeconfig or
-token is needed. Requires a running `gr8s serve --dashboard DIR`; this command
-only points a browser at it."
-  (let ((url (dashboard-browse-url (getf options :server)))
-        (opener (or (getf options :browser) (default-browser-opener))))
-    (if (getf options :no-launch)
-        (format t "gr8s dashboard: ~A~%" url)
-        (progn
-          (format t "gr8s dashboard: ~A; opening in a browser ...~%" url)
-          (finish-output)
-          (handler-case
-              (uiop:launch-program (list opener url)
-                                   :output :interactive :error-output :interactive)
-            (error (condition)
-              (format t "could not launch ~A (~A). Open this URL manually:~%  ~A~%"
-                      opener condition url)))))
+  "Serve the embedded Kubernetes dashboard (Headlamp) and open it in a browser,
+like `icl -b'. A foreground process: it starts a loopback web server that serves
+the frontend and reverse-proxies the frontend's Kubernetes calls over mTLS to the
+running cluster (authenticating with the kubeconfig, as `gr8s debug slynk' does),
+opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
+/dashboard/<token> path so other local processes cannot reach it."
+  (unless (gr8s.apiserver::dashboard-assets-present-p)
+    (error "this gr8s build has no embedded dashboard; rebuild with 'make dashboard-assets'"))
+  (let* ((kubeconfig (or (getf options :kubeconfig) (default-client-kubeconfig)))
+         (config (dashboard-kubeconfig-config kubeconfig))
+         (port (getf options :port 8080))
+         (token (dashboard-session-token))
+         (url (format nil "http://127.0.0.1:~D/dashboard/~A/" port token))
+         (acceptor (make-instance 'dashboard-command-acceptor
+                                  :address "127.0.0.1" :port port
+                                  :proxy-fn (lambda (method target request)
+                                              (dashboard-proxy-forward config method target request)))))
+    ;; Acceptor worker threads read the base globally, so set it (one-shot process).
+    (setf gr8s.apiserver::*dashboard-base* (format nil "/dashboard/~A" token)
+          *shutdown-requested* nil)
+    (install-shutdown-handlers)
+    (hunchentoot:start acceptor)
+    (unwind-protect
+         (progn
+           (format t "gr8s dashboard: ~A~%  cluster API ~A (via ~A)~%"
+                   url (getf config :server) kubeconfig)
+           (if (getf options :no-launch)
+               (format t "Open the URL above. Press Ctrl-C to stop.~%")
+               (progn
+                 (handler-case
+                     (uiop:launch-program
+                      (list (or (getf options :browser) (default-browser-opener)) url)
+                      :output :interactive :error-output :interactive)
+                   (error (condition)
+                     (format t "could not launch a browser (~A); open the URL above.~%" condition)))
+                 (format t "Serving the dashboard. Press Ctrl-C to stop.~%")))
+           (finish-output)
+           (loop until *shutdown-requested* do (sleep 0.2)))
+      (ignore-errors (hunchentoot:stop acceptor)))
     0))
 
 (defun parse-cli-options (arguments)
@@ -2133,14 +2251,6 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                                           (if ha (gr8s.ha::ha-metrics-text ha) "")
                                           (reconciliation-worker-metrics-text worker)))
                            :leader-status-fn (when ha (lambda () (ha-control-plane-leader-status ha)))))
-                    ;; Serve the embedded dashboard on its own loopback listener
-                    ;; (the API ports are mutually authenticated; a browser is not).
-                    (when gr8s.apiserver::*dashboard-enabled*
-                      (let ((dashboard-port (getf options :dashboard-port
-                                                  gr8s.apiserver::+dashboard-default-port+)))
-                        (gr8s.apiserver::start-dashboard-server
-                         :port dashboard-port :store store :runtime runtime :reconciler reconciler)
-                        (format t "gr8s dashboard: http://127.0.0.1:~D/dashboard/~%" dashboard-port)))
                     (setf worker (start-reconciliation-worker reconciler
                                   :leader-gate (when ha (lambda () (ha-control-plane-leader-p ha)))
                                   :before-reconcile (lambda ()
@@ -2204,7 +2314,6 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                (when aggregator (stop-api-aggregator aggregator))
                (when worker (stop-reconciliation-worker worker))
                (when runtime (stop-runtime-deletions runtime))
-               (gr8s.apiserver::stop-dashboard-server)
                (when server (stop-server server))
                (when api-server (stop-server api-server))
                (when (or api-server service-network-created)
@@ -2472,11 +2581,12 @@ No HA API may start from member-local certificate state before this converges."
       ((equal path '("skill"))
        (simple "Print offline Markdown guidance for operators and AI agents" ""))
       ((equal path '("dashboard"))
-       (page "Open the Kubernetes dashboard (Headlamp) gr8s serves at /dashboard/"
+       (page "Serve the Kubernetes dashboard (Headlamp) and open it in a browser; runs until Ctrl-C"
              "[OPTIONS]"
-             :options '(("--server URL" "Cluster API to open (default http://127.0.0.1:8080)")
+             :options '(("--kubeconfig PATH" "Cluster kubeconfig (default $KUBECONFIG or ~/.kube/config)")
+                        ("--port N" "Loopback port to serve on (default 8080)")
                         ("--browser CMD" "Browser launcher (default xdg-open/open)")
-                        ("--no-launch" "Print the dashboard URL instead of launching")
+                        ("--no-launch" "Print the dashboard URL instead of launching a browser")
                         ("--help, -h" "show help"))))
       ((equal path '("serve"))
        (page "Run the control plane and local node agent" "[OPTIONS]"

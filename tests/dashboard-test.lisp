@@ -69,9 +69,10 @@
     (is-true (search "\"/dashboard/static/x.js\"" out))
     (is-true (search "url(/dashboard/fonts/f.woff2)" out))))
 
-(test dashboard-browse-url-targets-the-mount
-  (is (equal "http://127.0.0.1:8080/dashboard/"
-             (gr8s.server::dashboard-browse-url "http://127.0.0.1:8080")))
-  ;; A trailing slash on the server is not doubled.
-  (is (equal "https://host:6443/dashboard/"
-             (gr8s.server::dashboard-browse-url "https://host:6443/"))))
+(test dashboard-session-token-is-unguessable-and-unique
+  ;; icl-style URL-path secret: long hex, fresh each call.
+  (let ((a (gr8s.server::dashboard-session-token))
+        (b (gr8s.server::dashboard-session-token)))
+    (is (>= (length a) 32))
+    (is (every (lambda (c) (digit-char-p c 16)) a))
+    (is (not (equal a b)))))
