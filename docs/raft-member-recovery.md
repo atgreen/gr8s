@@ -559,7 +559,7 @@ writes and validates an artifact with a 384 MiB dynamic heap. It checks that a
 post-freeze write remains live but absent from the artifact. This does not test
 multi-member heartbeat availability or production `serve` startup.
 
-The [frozen-view validation](snapshot-freeze-validation-2026-11-10.json) retained
+The [frozen-view validation](evidence/snapshot-freeze-validation-2026-11-10.json) retained
 the full 100,656,464-byte history estimate at a 384 MiB dynamic heap, streamed and
 validated 1,978 history records, and excluded a later live write. The standalone
 probe passed in 29.86 seconds, including store load and artifact validation.
@@ -573,7 +573,7 @@ checkpoint writing and live delta encoding now use the existing recovery memory
 pressure policy: above two-thirds of dynamic-space usage, collect older garbage
 before allocating the next streamed record. This changes production allocation
 handling without changing the probe's heap, history, workload or WAL bounds.
-The [async-worker validation](async-compaction-validation-2026-11-10.json)
+The [async-worker validation](evidence/async-compaction-validation-2026-11-10.json)
 passes the complete single-member workload and both recovery phases: 128 MiB
 of churn, 79 checkpoints, sampled WAL below 6.4 MiB, and the full
 100,656,464-byte history estimate, all within a 384 MiB dynamic heap.
@@ -590,7 +590,7 @@ The failed run is retained in the async-worker evidence. It also exposed
 repeated snapshot catch-up on the delayed follower; full cluster acceptance
 remains open under `podster-ucm.11.3.9.10`.
 
-The [three-voter smoke validation](compaction-cluster-smoke-validation-2026-11-10.json)
+The [three-voter smoke validation](evidence/compaction-cluster-smoke-validation-2026-11-10.json)
 uses three separate 384 MiB processes and offline mTLS fixtures. It holds all
 three capture writers for two seconds, commits a new marker while they remain
 held, verifies unchanged election terms, then releases capture and restarts all
@@ -631,7 +631,7 @@ to once per monotonic second; successful progress permits the next batch.
 These checks preserve the existing retention limits and authenticated Raft
 reply validation. They do not change the persisted recovery format.
 
-The [full recovery validation](capacity-recovery-full-validation-2026-11-11.json)
+The [full recovery validation](evidence/capacity-recovery-full-validation-2026-11-11.json)
 completed 2,048 churn rounds using three 384 MiB native processes with mTLS.
 All members retained the full 96 MiB history window, converged at index 4,179
 without an unforced term change, and recovered after a cold restart with
@@ -658,8 +658,8 @@ a bound on checkpoint pauses or prove leadership stability.
 The disk window and frame-copy optimization passed full three-member churn,
 stable-leadership, and cold-recovery acceptance: all 2,048 rounds completed in
 the original term with 96 MiB retained history per member and 384 MiB heaps.
-The [validation record](async-compaction-validation-2026-11-10.json) preserves
-the full result; the [diagnostic record](compaction-phase-diagnostics-2026-11-10.json)
+The [validation record](evidence/async-compaction-validation-2026-11-10.json) preserves
+the full result; the [diagnostic record](evidence/compaction-phase-diagnostics-2026-11-10.json)
 records the earlier failures and the reduction from seconds to milliseconds.
 Production/VM acceptance remains separate; automatic compaction stays disabled
 by default.
@@ -668,7 +668,7 @@ Production HA startup reclaims recognized abandoned snapshot publication and
 capture scratch after validated WAL recovery and before listening. Cleanup
 requires state/WAL ownership and application barriers; unsafe or unknown files
 and all published artifacts are preserved. A
-[three-cycle SIGKILL validation](snapshot-startup-scratch-validation-2026-11-10.json)
+[three-cycle SIGKILL validation](evidence/snapshot-startup-scratch-validation-2026-11-10.json)
 checks live-owner protection, restart cleanup, and retained data/artifacts.
 
 Each HA `gr8s serve` starts its checkpoint worker with the normal thresholds
@@ -721,7 +721,7 @@ invokes GC itself. Production recovery retains its normal pressure collection
 and application-replacement collection policies. Running the native executable
 directly covers only the first phase.
 
-The [native retention validation](compaction-native-validation-2026-11-10.json)
+The [native retention validation](evidence/compaction-native-validation-2026-11-10.json)
 passes this workload and both recovery phases at a 384 MiB dynamic heap limit:
 93 checkpoints, sampled WAL below 3 MiB, at most two retained artifacts, and
 full watch-history retention before recovery. The cold input includes a
@@ -769,7 +769,7 @@ Production proposal timeouts remain unchanged. Private logs, binary identity
 and a JSON result are retained. This is internal plaintext store/transport
 acceptance; production serve, TLS and VM evidence have separate scope.
 
-The [native admission validation](proposal-admission-validation-2026-11-10.json)
+The [native admission validation](evidence/proposal-admission-validation-2026-11-10.json)
 records the bounded minority-write tail, forwarded refusal, quorum recovery,
 full member reopening, and plain/encrypted 1 MiB Secret boundary. The test uses
 four loopback members in one 384 MiB process; it does not certify production

@@ -11,10 +11,13 @@ The control plane and node agent are written from scratch in Common Lisp. The
 binary embeds containerd and runc, compiles its own eBPF networking programs,
 and includes a Raft datastore for high availability.
 
+The name **gr8s** is a portmanteau of *Green* — its author's surname — and
+*k8s*, the usual contraction of *Kubernetes*: in short, "Green Kubernetes."
+
 > **Project status:** gr8s is experimental. On a two-node cluster it **passes
 > every case of the upstream Kubernetes v1.37 `certified-conformance` end-to-end
 > suite — 462/462, 0 failures, run via Sonobuoy**
-> ([evidence](docs/conformance-full-v1.37-2026-11-11.json)). It is not yet a
+> ([evidence](docs/evidence/conformance-full-v1.37-2026-11-11.json)). It is not yet a
 > CNCF-submitted _Certified Kubernetes_ distribution, and remains intended for
 > exploration, development, and testing; evaluate its compatibility and
 > operational behavior before production use. See the
@@ -125,8 +128,22 @@ It covers verified upgrades, rollback, scoped cleanup, and uninstall.
 
 For multi-member operation, recovery, optional compaction and heap sizing, see
 [High availability](docs/high-availability.md).
-[In-process patching](docs/live-patching.md) covers the operator CLI, publisher
-trust, OCI distribution and patch authoring.
+
+## Dashboard
+
+`gr8s dashboard` opens a Kubernetes web UI in your browser. It serves the
+[Headlamp](https://headlamp.dev) frontend — embedded in the binary, with no
+separate install — and reverse-proxies the API over mutual TLS to the running
+cluster, with live resource updates.
+
+```sh
+# With a cluster running, from another terminal:
+sudo build/gr8s dashboard --kubeconfig /tmp/gr8s.kubeconfig
+```
+
+It serves on loopback `http://127.0.0.1:8080` by default (change with `--port`)
+and launches your browser; `--no-launch` prints the URL instead. The process
+runs in the foreground until Ctrl-C.
 
 ## Kubernetes capabilities
 
@@ -220,12 +237,11 @@ follow the [testing guide](docs/building-and-testing.md#test-matrix).
 - [Networking & the eBPF dataplane](docs/networking.md)
 - [Runtime & the container stack](docs/runtime.md)
 - [High availability](docs/high-availability.md)
-- [In-process patching](docs/live-patching.md)
 - [Design & compatibility boundary](docs/design.md)
 - [Multi-node design](docs/multi-node-design.md)
 - [Known compatibility gaps](docs/k3s-gap-inventory.md)
 - [Conformance results](docs/CONFORMANCE.md)
-- [v1.37 certified-conformance evidence (462/462)](docs/conformance-full-v1.37-2026-11-11.json)
+- [v1.37 certified-conformance evidence (462/462)](docs/evidence/conformance-full-v1.37-2026-11-11.json)
 
 ## Versioning
 

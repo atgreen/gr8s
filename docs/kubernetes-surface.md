@@ -24,13 +24,13 @@ collision retries. An explicit `metadata.name` takes precedence. Pod names accep
 DNS subdomains up to 253 characters, while runtime hostnames are limited to 63.
 Runtime admission validates the supported Pod feature set and rejects unsupported
 fields with HTTP 422. See the
-[generated-name record](generated-pod-names-validation-2026-11-04.json).
+[generated-name record](evidence/generated-pod-names-validation-2026-11-04.json).
 
 Pods support finalizers that retain API objects after actual runtime cleanup,
 including zero-grace deletion. Native validation covers real exit codes 0 and 137,
 restart recovery, UID reuse, unrelated execution during finalizer retention, and
 cancellation of a blocked Exec probe. See the
-[finalizer evidence](pod-finalizers-native-2026-11-04.json).
+[finalizer evidence](evidence/pod-finalizers-native-2026-11-04.json).
 
 **Conditions & probes.** Pods report PodScheduled, Initialized, ContainersReady,
 and Ready conditions. Readiness requires actual running, ready observations for
@@ -39,8 +39,8 @@ unavailable node/runtime observations report unknown readiness. Startup, readine
 and liveness probes execute real exec, HTTP(S), TCP, and standard gRPC Health
 checks. Startup success gates readiness and liveness. Consecutive thresholds control
 readiness and exact-container restart, preserving healthy siblings. See the
-[readiness record](pod-readiness-validation-2026-11-03.json) and the upstream and
-native [probe records](container-probes-upstream-2026-11-04.json).
+[readiness record](evidence/pod-readiness-validation-2026-11-03.json) and the upstream and
+native [probe records](evidence/container-probes-upstream-2026-11-04.json).
 
 **Init, sidecars & hooks.** Ordinary init containers execute in declaration order.
 restartable init sidecars start before later containers, restart per the Pod's
@@ -52,7 +52,7 @@ fallback.
 independently, preserving the sandbox and healthy siblings. Attempt history, last
 termination state, and exponential retry deadlines persist across server restarts,
 with separate logs per attempt. See the
-[restart record](container-restarts-validation-2026-11-04.json).
+[restart record](evidence/container-restarts-validation-2026-11-04.json).
 
 **Ephemeral & resize.** Ephemeral containers are added through
 `pods/ephemeralcontainers`; `pods/resize` changes CPU and memory in place, or
@@ -64,7 +64,7 @@ including interactive streams and nonzero exit status. `kubectl port-forward`
 works over its WebSocket tunnel and over plain SPDY, for Pods on any node, with a
 1 MiB window each way. Pod HTTP proxy forwards real bodies, status codes, and
 headers with separate `pods/proxy` authorization; connection upgrades return HTTP
-501 (tracked). See the [proxy record](pod-http-proxy-validation-2026-11-04.json).
+501 (tracked). See the [proxy record](evidence/pod-http-proxy-validation-2026-11-04.json).
 
 ## Config, identity & secrets
 
@@ -189,7 +189,7 @@ the node as the source; SCTP host ports are scheduled but not relayed.
   `unhealthyPodEvictionPolicy`, and marks the Pod with `DisruptionTarget`.
 
 Controller state survives restart through durable API objects and owner
-references. See the [workload record](workload-validation-2026-11-04.json).
+references. See the [workload record](evidence/workload-validation-2026-11-04.json).
 Custom finalizers on workloads remain unsupported.
 
 **Garbage collection.** Owner references are preserved on Pods and stored

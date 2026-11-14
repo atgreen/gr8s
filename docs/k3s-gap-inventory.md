@@ -34,7 +34,7 @@ evidence:
   retired.** gr8s passes every case of the upstream Kubernetes **v1.37
   `certified-conformance` suite — 462 of 462, 0 failures**, run via Sonobuoy against a
   native two-node cluster (build `v1.37.2-g6584550+dirty`). Evidence:
-  [conformance-full-v1.37-2026-11-11.json](conformance-full-v1.37-2026-11-11.json) and
+  [conformance-full-v1.37-2026-11-11.json](evidence/conformance-full-v1.37-2026-11-11.json) and
   [CONFORMANCE.md](CONFORMANCE.md). gr8s is **not yet a CNCF-submitted _Certified
   Kubernetes_ distribution**, so the trademark remains out of scope — but the inventory
   is no longer "source- and focused-test-based."
@@ -80,7 +80,7 @@ Source reconciliation found streamed checkpoints, per-key HA deltas, coalesced
 AppendEntries outboxes, and condition-variable waits already implemented. Journal
 recovery now streams records, trims history during replay, applies its byte budget,
 and collects older-generation garbage under heap pressure. A [constrained-heap
-recovery run](core-recovery-validation-2026-11-09.json) replays 512 MiB of journal
+recovery run](evidence/core-recovery-validation-2026-11-09.json) replays 512 MiB of journal
 within a 384 MiB heap using default retention settings. These changes address
 specific allocation paths. They do not establish an unrestricted cluster size.
 Replication retries now use bounded entry batches instead of serializing the
@@ -88,7 +88,7 @@ whole retained suffix. Compaction/truncation clear discarded backing-array slots
 and snapshot persistence precedes in-memory compaction. These primitive fixes do
 not enable production snapshotting by themselves. Explicit file-backed compaction
 now atomically replaces its WAL and reclaims discarded records. The
-[checkpoint validation](raft-checkpoint-validation-2026-11-09.json) covers repeated
+[checkpoint validation](evidence/raft-checkpoint-validation-2026-11-09.json) covers repeated
 reclamation, failure boundaries and tail recovery. Production HA has durable snapshot restore and committed-tail replay. Automatic
 application checkpoints are now **enabled by default** (`--no-raft-compaction` to
 disable), so the "compaction disabled by default" gate is removed; sustained
@@ -96,16 +96,16 @@ bounded-log operation still requires production acceptance before the P0 gap can
 Live disconnected-peer acceptance and the other HA correctness items also remain open.
 
 The core and peer transport now support configured snapshot catch-up with bounded
-chunks. A [four-member mTLS validation](raft-snapshot-transfer-validation-2026-11-09.json)
+chunks. A [four-member mTLS validation](evidence/raft-snapshot-transfer-validation-2026-11-09.json)
 covers an interrupted transfer, restored voter leadership and continued learner
 replication. Crash-abandoned transfer cleanup now preserves live owners, with
-[native startup and SIGKILL validation](raft-snapshot-scratch-validation-2026-11-09.json).
+[native startup and SIGKILL validation](evidence/raft-snapshot-scratch-validation-2026-11-09.json).
 An internal [streamed store artifact writer and reader](store-snapshot-artifacts.md) now exist.
-[Production durable recovery](production-ha-recovery-validation-2026-11-10.json)
+[Production durable recovery](evidence/production-ha-recovery-validation-2026-11-10.json)
 now covers three voters and a witness, including leader loss and a full restart
 with data and credentials preserved. The opt-in asynchronous compaction worker
 releases live locks during artifact I/O. Its
-[validation record](async-compaction-validation-2026-11-10.json) covers full
+[validation record](evidence/async-compaction-validation-2026-11-10.json) covers full
 single-member and three-member churn and recovery under constrained heaps.
 The three-member run completed 128 MiB of churn, caught up its delayed voter,
 and cold-loaded full retained history with data and credentials preserved.
@@ -116,26 +116,26 @@ and bounded heartbeat disruption remain required before closing the broader gap.
 Pod desired state and checkpoints now use per-key staged transactions instead of
 complete Pod-index serialization. Desired UID/version preconditions are checked at
 apply time, and status-only commands cannot resurrect deleted objects. A
-[validation record](pod-transactions-validation-2026-11-09.json) covers constrained
+[validation record](evidence/pod-transactions-validation-2026-11-09.json) covers constrained
 heap use, application conflicts, native leadership handoff and persisted Pod
 recovery. Node writes also stage private records and publish only after consensus.
-[validation](node-transactions-validation-2026-11-09.json) covers failed proposals,
+[validation](evidence/node-transactions-validation-2026-11-09.json) covers failed proposals,
 replica watch publication and enrollment persistence retries.
-[Concurrent Node write validation](node-conflicts-validation-2026-11-09.json) covers
+[Concurrent Node write validation](evidence/node-conflicts-validation-2026-11-09.json) covers
 stale-write conflicts, commit-ordered watch revisions, follower conflict responses
 and heartbeat monitor retries. Cross-Node claim uniqueness is now enforced at apply (conflicting claims are rejected
 during committed apply); general cross-resource transactions and production
 crash-recovery integration remain open.
 
-In-process patch trains now provide signed, journaled rolling Lisp updates. Full
-binary upgrades (including incorporation of installed patches), installation,
-service configuration, and uninstall remain separate lifecycle work.
+Rolling in-process (live) Lisp patching is not provided; updates are delivered
+as full binary upgrades. Upgrade incorporation, installation, service
+configuration, and uninstall remain separate lifecycle work.
 
 ## Required Kubernetes parity gaps
 
 | Area | Current difference | Evidence / tracking |
 |---|---|---|
-| Conformance | gr8s now passes the upstream Kubernetes **v1.37 `certified-conformance`** suite — **462/462, 0 failures** — run via Sonobuoy against a native two-node cluster (2026-11-11). The residual is not a technical gap: gr8s is **not yet a CNCF-submitted _Certified Kubernetes_ distribution**, and this is one tested configuration, not a claim of every topology. | [v1.37 evidence](conformance-full-v1.37-2026-11-11.json); [ledger](CONFORMANCE.md) |
+| Conformance | gr8s now passes the upstream Kubernetes **v1.37 `certified-conformance`** suite — **462/462, 0 failures** — run via Sonobuoy against a native two-node cluster (2026-11-11). The residual is not a technical gap: gr8s is **not yet a CNCF-submitted _Certified Kubernetes_ distribution**, and this is one tested configuration, not a claim of every topology. | [v1.37 evidence](evidence/conformance-full-v1.37-2026-11-11.json); [ledger](CONFORMANCE.md) |
 | IP families | Dual-stack and IPv6-only Service allocation, EndpointSlice/DNS publication, dual-family Pod CIDR enrollment, Pod IPAM, routed CNI interfaces, cross-node VXLAN/WireGuard transport, IPv6 Service load balancing, and stateful IPv6 NetworkPolicy are implemented and have focused native evidence. Combined IPv6-only/dual-stack acceptance and focused-upstream evidence still gate the end-to-end support claim. IPv6 extension-header transport matching and DNS interception are narrower follow-ups rather than broad family-support blockers. | `podster-n2iv`; remaining acceptance `.5`; follow-ups `podster-slt6` and `podster-yge` |
 
 Registry credentials and resource metrics are no longer gaps. Pod and
@@ -172,7 +172,7 @@ of code?":
 
 Certified-conformance evidence is no longer a confidence blocker: gr8s passes the
 upstream v1.37 `certified-conformance` suite 462/462 with zero failures (evidence
-[conformance-full-v1.37-2026-11-11.json](conformance-full-v1.37-2026-11-11.json)), so
+[conformance-full-v1.37-2026-11-11.json](evidence/conformance-full-v1.37-2026-11-11.json)), so
 this inventory is now grounded in a measured conformance result rather than inferred
 surface area. The remaining confidence item is procedural, not technical: gr8s has not
 been submitted to the CNCF for the official _Certified Kubernetes_ mark.

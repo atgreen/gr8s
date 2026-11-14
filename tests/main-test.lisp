@@ -211,7 +211,7 @@
 
 (test every-top-level-command-has-contextual-help
   (dolist (command '("serve" "agent" "witness" "join-token" "runtime"
-                     "patch" "kubeconfig" "doctor" "trace" "wireguard"
+                     "kubeconfig" "doctor" "trace" "wireguard"
                      "network" "certificate" "secrets-encrypt" "version"
                      "notices"))
     (let* ((arguments (list command "--help"))
@@ -245,13 +245,23 @@
     (is (search "--hypervisor" help))))
 
 (test bare-command-groups-show-contextual-help
-  (dolist (command '("runtime" "patch" "wireguard" "network"
+  (dolist (command '("runtime" "wireguard" "network"
                      "certificate" "secrets-encrypt"))
     (let ((output (with-output-to-string (*standard-output*)
                     (is (= 0 (gr8s.server::main-with-environment
                               (list command) (constantly nil) (constantly 99)))))))
       (is (search (format nil "gr8s ~A" command) output))
       (is (search "COMMANDS:" output)))))
+
+(test removed-patch-command-is-rejected
+  ;; Runtime patching was removed; the `patch` command must not survive as CLI
+  ;; scaffolding -- it is neither dispatched nor advertised in help.
+  (signals error (parse-cli-options '("patch")))
+  (signals error (parse-cli-options '("patch" "inspect" "some-image")))
+  (let ((help (with-output-to-string (*standard-output*)
+                (gr8s.server::print-help))))
+    (is-false (search "patch" help))
+    (is-false (search "Manage live patches" help))))
 
 (test secrets-encrypt-help-explains-each-stage
   (let ((help (with-output-to-string (*standard-output*)

@@ -364,6 +364,8 @@
                                            (:file "admission-policies")
                                            (:file "pod-security-admission")
                                            (:file "admission-http")
+                                           (:file "dashboard-assets")
+                                           (:file "dashboard")
                                            (:file "server")
                                            (:file "in-cluster-api")
                                            (:file "api-aggregation")
@@ -440,7 +442,7 @@
   :in-order-to ((test-op (test-op "gr8s/tests"))))
 
 (asdf:defsystem "gr8s/tests"
-  :depends-on ("gr8s" "drakma" "fiveam")
+  :depends-on ("gr8s" "drakma" "fiveam" "salza2")
   :serial t
   :components ((:module "tests"
                 :serial t
@@ -527,6 +529,7 @@
                              (:file "http-test")
                              (:file "http-client-test")
                              (:file "pod-http-proxy-test")
+                             (:file "dashboard-test")
                              (:file "core-resource-http-test")
                              (:file "api-defaults-test")
                              (:file "store-snapshot-test")

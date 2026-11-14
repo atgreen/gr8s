@@ -45,7 +45,7 @@ python3 scripts/probe-native-endpoint-startup.py --gr8s /root/gr8s \
 ```
 
 Two fresh cross-node native/Kata runs pass all 28 checks with zero CNI ADD
-timeouts on either node. See [the cold-start evidence](service-cni-startup-validation-2026-11-09.json).
+timeouts on either node. See [the cold-start evidence](evidence/service-cni-startup-validation-2026-11-09.json).
 
 Tests exercise the actual compiled bytecode on packet fixtures with both an
 interpreter and the Linux BPF test-run facility. The privileged native smoke
@@ -132,20 +132,20 @@ the endpoint, and Service map pins survive clean agent shutdown.
 This remains disabled by default. A real Kata guest has reached a same-node
 native backend through IPv4 TCP and UDP ClusterIP translation, with TC request
 and reply counters and guest source-IP preservation verified. See
-[the guest validation evidence](service-guest-validation-2026-11-09.json).
+[the guest validation evidence](evidence/service-guest-validation-2026-11-09.json).
 The two-node guest regression also verifies TCP/UDP traffic over VXLAN to a
 backend on another node, source-IP preservation, native socket acceleration,
 guest egress policy on backend addresses/ports, reply handling under default-deny
 guest ingress, and remote backend ingress denial/recovery. It uses two agents in
 separate mount/network namespaces within one disposable VM; physical-host and NIC
 offload behavior remains unverified. See
-[the cross-node validation evidence](service-guest-two-node-validation-2026-11-09.json).
+[the cross-node validation evidence](evidence/service-guest-two-node-validation-2026-11-09.json).
 On reopening pinned maps, the controller inventories all six IPv4/IPv6 Service
 control maps before reconciliation. It removes retained entries for Services
 deleted while the agent was offline, including sparse orphan backend slots.
 A native two-node restart regression verifies withdrawal, retained map IDs,
 unchanged Pod identities and recovered Service traffic. See
-[the restart validation evidence](service-map-restart-validation-2026-11-09.json).
+[the restart validation evidence](evidence/service-map-restart-validation-2026-11-09.json).
 An established guest TCP connection has also survived graceful restart of both
 agents without reconnecting; see the restart evidence below.
 Packet flows expire after 180 seconds of UDP inactivity, 120 seconds for pending
@@ -186,23 +186,23 @@ numbers or shorten their lifetime on FIN/RST. Newly observed connections use the
 current TCP tracker. The agent reports verified retained pipelines and logs
 enumeration/syscall failures; its dataplane tracks scanned, reclaimed, deferred
 and failed transactions. See
-[the expiry evidence](service-packet-expiry-validation-2026-11-09.json) and
-[the background collection evidence](service-packet-gc-validation-2026-11-09.json).
+[the expiry evidence](evidence/service-packet-expiry-validation-2026-11-09.json) and
+[the background collection evidence](evidence/service-packet-gc-validation-2026-11-09.json).
 BPF load diagnostics preserve the initial error, logging-retry errno and available
 verifier output. A real restart captured initial EAGAIN followed by a full-buffer
 ENOSPC; collection remained deferred until pipeline verification succeeded. See
-[the loader diagnostic evidence](service-bpf-load-diagnostics-validation-2026-11-09.json).
+[the loader diagnostic evidence](evidence/service-bpf-load-diagnostics-validation-2026-11-09.json).
 The loader makes at most five syscall attempts per initial or logging phase,
 retrying only transient EAGAIN. Other errors stop that phase immediately.
 Failure diagnostics retain every attempt's errno; successful transient recovery
 logs a compact message. See
-[the bounded retry evidence](service-bpf-load-retry-validation-2026-11-09.json).
-See [the program-upgrade evidence](service-packet-upgrade-validation-2026-11-09.json)
+[the bounded retry evidence](evidence/service-bpf-load-retry-validation-2026-11-09.json).
+See [the program-upgrade evidence](evidence/service-packet-upgrade-validation-2026-11-09.json)
 for kernel failure/recovery checks and actual guest connections across historical
 and interrupted pipeline upgrades.
 The generation and handshake stage is validated by an actual Kata guest reusing
 its source port after backend replacement; see
-[the TCP generation evidence](service-tcp-generation-validation-2026-11-09.json).
+[the TCP generation evidence](evidence/service-tcp-generation-validation-2026-11-09.json).
 FIN sequence ends and their acknowledgments are tracked in both directions.
 Half-closed connections retain the established lifetime so the peer can send its
 final data. After both FINs are acknowledged, the retained entry expires after
@@ -212,7 +212,7 @@ acknowledge the current SYN.
 Delayed packets still use the retained translation but do not refresh terminal
 metadata or timestamps. Invalid resets reach the endpoint for challenge-ACK
 handling without shortening the mapping's lifetime. See
-[the TCP close evidence](service-tcp-close-validation-2026-11-09.json) for bytecode,
+[the TCP close evidence](evidence/service-tcp-close-validation-2026-11-09.json) for bytecode,
 kernel GC and actual guest reset/graceful-close checks.
 The tracker parses bounded TCP options, negotiates window scaling in both
 directions, leaves SYN windows unscaled, and retains the largest advertised
@@ -227,25 +227,25 @@ sequence after closure; SYN-ACK timestamp echoes protect the new handshake.
 Retained entries from earlier agents keep compatibility tracking until a new
 SYN records option negotiation. The pinned TCP value remains 64 bytes with
 previously used field offsets preserved. See
-[the TCP option evidence](service-tcp-options-validation-2026-11-09.json).
+[the TCP option evidence](evidence/service-tcp-options-validation-2026-11-09.json).
 An actual guest regression keeps one TCP socket open across a selector change
 and both agents' graceful restarts. Fresh sockets reach the replacement backend;
 the established socket keeps its original backend, TCP initial sequences, map
 IDs and workload identity, exchanges data while each agent is stopped, and
 responds after fresh readiness returns. See
-[the established-flow restart evidence](service-established-restart-validation-2026-11-09.json).
+[the established-flow restart evidence](evidence/service-established-restart-validation-2026-11-09.json).
 The fixture also verifies the same held-connection behavior with SIGKILL of each
 agent, checking actual signal exit statuses and preserving the original TCP
 generation through both restarts. Bytecode and kernel checks cover early data in
 SYN/SYN-ACK packets, partial early-data acceptance, retransmission and closure.
 A refusal may acknowledge the SYN without all its payload; only ACKs within the
 observed SYN sequence range can shorten its lifetime. See
-[the early-data and abrupt-restart evidence](service-tcp-early-data-validation-2026-11-09.json).
+[the early-data and abrupt-restart evidence](evidence/service-tcp-early-data-validation-2026-11-09.json).
 Kernel packet tests also cover program lifetime. Source NAT/hairpin,
 return-tuple collision resolution, IPv6 packet translation and external Service
 replacement remain in development. Hairpin and conflicting return tuples
-currently drop safely. See [the engine validation scope](service-packet-engine-validation-2026-11-09.json)
-and [the guard integration evidence](service-packet-guard-validation-2026-11-09.json).
+currently drop safely. See [the engine validation scope](evidence/service-packet-engine-validation-2026-11-09.json)
+and [the guard integration evidence](evidence/service-packet-guard-validation-2026-11-09.json).
 
 To repeat the guest test in a disposable root VM with nested KVM, copy
 `scripts/test-service-guest.py` and `scripts/test-service-traffic.py` together,
@@ -413,14 +413,14 @@ Node-network snapshots carry these identities through readiness loss and agent
 restarts. Public Pod status and watches exclude the private record, and client
 status writes cannot set it. The route ownership journal recognizes validated
 private leases under the endpoint's existing veth owner. See
-[the identity validation evidence](service-translation-identity-validation-2026-11-09.json).
+[the identity validation evidence](evidence/service-translation-identity-validation-2026-11-09.json).
 CHECK verifies retained return routes and neighbors. Repeating ADD can restore
 missing state; partial ADD failures retain both leases, and DEL releases them
 after removing the owned link and its routes/neighbors. Existing private leases
 retain this handling if new allocation is disabled. Ordinary and IPv6-only
 endpoints keep their previous allocation behavior; CHECK does not invent leases
 for endpoints from older versions. See
-[the return-path validation evidence](service-return-path-validation-2026-11-09.json).
+[the return-path validation evidence](evidence/service-return-path-validation-2026-11-09.json).
 Packet source NAT, versioned flow ownership, policy identity normalization and
 receiving-node installation/readiness gating remain in progress.
 
@@ -452,7 +452,7 @@ traffic activation remain in progress.
 `make test-service-nat` runs its synthetic packet interpreter tests. The same
 fixture passed 42 packet cases and seven capacity/contention cases using real
 BPF programs in a disposable VM; see
-[the component validation evidence](service-nat-component-validation-2026-11-09.json).
+[the component validation evidence](evidence/service-nat-component-validation-2026-11-09.json).
 
 The component also has a SYN generation preflight and incarnation-keyed TCP
 metadata, with sequence/window checks, timestamps, handshake and closure
@@ -463,7 +463,7 @@ are interpreter-only). After a return claim is removed, unmatched traffic to a
 primary address passes unchanged without altering the new TCP state; unmatched
 private-alias replies are dropped. This remains synthetic component evidence,
 with no live workload or agent activation claim. See
-[the TCP validation evidence](service-nat-tcp-validation-2026-11-09.json).
+[the TCP validation evidence](evidence/service-nat-tcp-validation-2026-11-09.json).
 
 A separate maintenance program collects expired forward/return pairs and
 incarnation-keyed TCP orphans under the same tuple reservations. It preserves
@@ -475,7 +475,7 @@ component passed 56 collection checks in both engines, capacity recovery using
 actual one-entry kernel maps, and six concurrent calling threads. The latter
 observed no natural contention; deterministic reservation cases test contention
 separately. See
-[the collector validation evidence](service-nat-gc-validation-2026-11-09.json).
+[the collector validation evidence](evidence/service-nat-gc-validation-2026-11-09.json).
 
 Use `--cni-mode external --cni-conf-dir /etc/cni/net.d` to give ownership of
 Pod links, addresses, routes, IPAM, and cross-node transport to operator-supplied
@@ -690,7 +690,7 @@ Registered VXLAN peers retain their direct Pod CIDR routes while an agent's
 readiness lease expires. Existing Pods can keep exchanging traffic during an
 agent restart; readiness still expires for scheduling and Service endpoint
 selection. WireGuard gateway/transit readiness rules remain separate. The
-[restart regression](service-established-restart-validation-2026-11-09.json)
+[restart regression](evidence/service-established-restart-validation-2026-11-09.json)
 reproduces the previous route withdrawal and verifies established guest traffic
 through both agents' graceful restarts.
 

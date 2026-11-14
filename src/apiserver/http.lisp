@@ -1392,16 +1392,20 @@ Watches are long-running requests, which that filter leaves alone."
       (core-resource-error 400 "BadRequest" "invalid timeout specified in the request URL: time: invalid duration ~S"
                            timeout))))
 
-(defun handle-http-request (store runtime reconciler request)
-  "Answer the current API request, recording it for the API server's request metrics."
+(defun handle-http-request (store runtime reconciler request
+                            &key (path (request-route-path (hunchentoot:script-name request))))
+  "Answer the current API request, recording it for the API server's request metrics.
+PATH overrides the routed path, which lets the dashboard proxy re-dispatch a
+/dashboard/clusters/<name>/<api> request as <api> through this full pipeline."
   (call-recording-apiserver-request
-   (request-route-path (hunchentoot:script-name request)) (hunchentoot:request-method request)
-   (lambda () (answer-http-request store runtime reconciler request))))
+   path (hunchentoot:request-method request)
+   (lambda () (answer-http-request store runtime reconciler request :path path))))
 
-(defun answer-http-request (store runtime reconciler request)
+(defun answer-http-request (store runtime reconciler request
+                            &key (path (request-route-path (hunchentoot:script-name request))))
   "Route the current request and turn its failure into a Kubernetes Status response."
   (handler-case
-      (let ((path (progn (read-request-body request) (request-route-path (hunchentoot:script-name request))))
+      (let ((path (progn (read-request-body request) path))
             (method (hunchentoot:request-method request))
             (*crd-field-validation* (crd-request-field-validation)))
         (let ((*flowcontrol-request-level*

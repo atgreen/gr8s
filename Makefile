@@ -30,7 +30,7 @@ TEST_EVAL := --eval '(require :asdf)' --eval '(asdf:test-system :gr8s)'
 OCICL ?= ocicl
 OCICL_STAMP := ocicl/.ocicl-installed
 
-.PHONY: test-raft-snapshots test-raft-checkpoint-memory test-pod-transactions test-pod-transaction-memory test-core-recovery test-core-recovery-memory all help containerd-bundle generate-protocol test-protocol-generation test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api test-install-lifecycle check smoke smoke-two-node run kubeconfig notices native clean deps
+.PHONY: test-raft-snapshots test-raft-checkpoint-memory test-pod-transactions test-pod-transaction-memory test-core-recovery test-core-recovery-memory all help containerd-bundle dashboard-assets generate-protocol test-protocol-generation test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api test-install-lifecycle check smoke smoke-two-node run kubeconfig notices native clean deps
 
 all: native
 
@@ -69,9 +69,35 @@ $(CONTAINERD_BUNDLE_MARKER): scripts/install-containerd.sh
 
 containerd-bundle: $(CONTAINERD_BUNDLE_MARKER)
 
+# Embed the Headlamp frontend into the dashboard: build it in a local Headlamp
+# checkout and vendor the result (minus brotli/sourcemaps) into assets/dashboard/,
+# which src/apiserver/dashboard-assets.lisp bakes into the image at compile time.
+# A build without this step simply ships no dashboard. HEADLAMP points at the
+# checkout (git clone https://github.com/kubernetes-sigs/headlamp).
+HEADLAMP ?= $(HOME)/git/headlamp
+dashboard-assets:
+	npm --prefix "$(HEADLAMP)/frontend" ci
+	npm --prefix "$(HEADLAMP)/frontend" run build
+	rm -rf assets/dashboard
+	mkdir -p assets/dashboard
+	cd "$(HEADLAMP)/frontend/build" && \
+	  find . -type f ! -name '*.br' ! -name '*.map' -print0 | \
+	  cpio -pd0 --quiet "$(CURDIR)/assets/dashboard"
+	@# Pre-gzip the voluminous text assets (JS/CSS/JSON/SVG/WASM) so the image
+	@# embeds and the browser receives them compressed; each original is replaced
+	@# by its .gz, which dashboard-assets.lisp serves with Content-Encoding: gzip.
+	@# -n keeps the build reproducible (no name/mtime in the gzip header). HTML is
+	@# left raw because index.html is rewritten with the session base-url on serve.
+	cd "$(CURDIR)/assets/dashboard" && \
+	  find . -type f \( -name '*.js' -o -name '*.mjs' -o -name '*.css' \
+	    -o -name '*.json' -o -name '*.svg' -o -name '*.txt' -o -name '*.wasm' \) -print0 | \
+	  xargs -0 -r gzip -9 -n
+	@echo "embedded $$(find assets/dashboard -type f | wc -l) dashboard asset files ($$(du -sh assets/dashboard | cut -f1))"
+
 help:
 	@echo "gr8s targets:"
 	@echo "  containerd-bundle Build and verify pinned containerd, runc, and CNI binaries"
+	@echo "  dashboard-assets Build the Headlamp frontend (HEADLAMP=path) and embed it in the dashboard"
 	@echo "  generate-protocol Generate Common Lisp node-protocol bindings"
 	@echo "  test-protocol-generation Verify standalone protocol generation from a clean output"
 	@echo "  test          Run the unit and HTTP test suite"

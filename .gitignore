@@ -11,3 +11,6 @@ ocicl/
 __pycache__/
 *.pyc
 .beads/.auto-import-issues.jsonl
+
+# Vendored Headlamp frontend build embedded into the dashboard (make dashboard-assets)
+/assets/dashboard/

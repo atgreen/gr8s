@@ -61,7 +61,7 @@ checkpoints allocations, and passes device mappings and other allocation
 artifacts to containerd. Managed emptyDir volumes also use the standard kubelet
 paths that KubeVirt's handler needs to locate launcher sockets. See
 [KubeVirt on gr8s](kubevirt.md) for installation and the
-[native boot record](kubevirt-native-2026-11-09.json).
+[native boot record](evidence/kubevirt-native-2026-11-09.json).
 
 ## CPU, NUMA, hugepages and PodResources
 

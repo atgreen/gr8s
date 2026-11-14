@@ -13,7 +13,7 @@ run via Sonobuoy against a native gr8s cluster.
 > v1.37 `certified-conformance` suite — 462 of 462, 0 failures**, run via Sonobuoy
 > against a native two-node gr8s cluster (build `v1.37.2-g6584550+dirty`; the
 > tested changes are committed in `6584550..827ef7c6`). Machine-generated
-> evidence: [conformance-full-v1.37-2026-11-11.json](conformance-full-v1.37-2026-11-11.json),
+> evidence: [conformance-full-v1.37-2026-11-11.json](evidence/conformance-full-v1.37-2026-11-11.json),
 > produced by `scripts/e2e-two-node.sh report`. gr8s is not yet a CNCF-submitted
 > _Certified Kubernetes_ distribution.
 
@@ -32,12 +32,12 @@ read the JUnit and native log before acting on any single case.
 
 | Round | Date | Commit | Passed | Failed | Pass rate | Δ pass | Notes |
 |------:|------|--------|-------:|-------:|----------:|-------:|-------|
-| 1 | 2026-11-03 | — | 19 | 427 | 4.3% | — | First full baseline. PodTemplate support; predates Pod/Service protobuf and durable watches. [evidence](conformance-full-2026-11-03.json) |
-| 2 | 2026-11-03 | — | 43 | 403 | 9.6% | +24 | Pod/Service protobuf + durable stored-resource watches. [evidence](conformance-full-second-2026-11-03.json) |
-| 3 | 2026-11-04 | `660ce5c` | 48 | 398 | 10.8% | +5 | Typed ServiceAccount/RBAC, Event APIs, image-pull deadline, grouped DeleteOptions (PR22–25). [evidence](conformance-full-third-2026-11-04.json) |
-| 4 | 2026-11-04 | `84ec495` | 64 | 382 | 14.3% | +16 | Graceful termination, RBAC API-group defaults, Pod readiness/reconnect, generated Pod names (PR26–30). 16 newly passing, **0 regressions**. [evidence](conformance-full-fourth-2026-11-04.json) |
+| 1 | 2026-11-03 | — | 19 | 427 | 4.3% | — | First full baseline. PodTemplate support; predates Pod/Service protobuf and durable watches. [evidence](evidence/conformance-full-2026-11-03.json) |
+| 2 | 2026-11-03 | — | 43 | 403 | 9.6% | +24 | Pod/Service protobuf + durable stored-resource watches. [evidence](evidence/conformance-full-second-2026-11-03.json) |
+| 3 | 2026-11-04 | `660ce5c` | 48 | 398 | 10.8% | +5 | Typed ServiceAccount/RBAC, Event APIs, image-pull deadline, grouped DeleteOptions (PR22–25). [evidence](evidence/conformance-full-third-2026-11-04.json) |
+| 4 | 2026-11-04 | `84ec495` | 64 | 382 | 14.3% | +16 | Graceful termination, RBAC API-group defaults, Pod readiness/reconnect, generated Pod names (PR26–30). 16 newly passing, **0 regressions**. [evidence](evidence/conformance-full-fourth-2026-11-04.json) |
 
-A pre-baseline [bootstrap evidence record](conformance-bootstrap-2026-11-03.json)
+A pre-baseline [bootstrap evidence record](evidence/conformance-bootstrap-2026-11-03.json)
 (different schema) predates round 1 and documents first end-to-end suite
 execution.
 

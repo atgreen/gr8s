@@ -999,6 +999,398 @@ The new identity takes effect when the node agent next starts."
     (finish-output output))
   0)
 
+(defun default-browser-opener ()
+  "The platform command that opens a URL in the user's default browser."
+  #+darwin "open"
+  #-darwin "xdg-open")
+
+(defun dashboard-session-token ()
+  "A fresh unguessable URL-path token for one dashboard session (192 bits of hex)."
+  (format nil "~(~{~2,'0X~}~)" (coerce (secure-random-octets 24) 'list)))
+
+(defun dashboard-kubeconfig-config (path)
+  "Read kubeconfig PATH into a config plist for OPEN-DEBUG-API-STREAM, writing any
+inline certificate/key/CA data out to 0600 temp files."
+  (let ((raw (read-debug-kubeconfig path)))
+    (list :server (getf raw :server)
+          :token (getf raw :token)
+          :ca-file (or (getf raw :ca-file)
+                       (materialize-kubeconfig-data (getf raw :ca-data) "crt"))
+          :client-certificate (or (getf raw :client-certificate)
+                                  (materialize-kubeconfig-data (getf raw :client-certificate-data) "crt"))
+          :client-key (or (getf raw :client-key)
+                          (materialize-kubeconfig-data (getf raw :client-key-data) "key")))))
+
+(defun write-dashboard-proxy-request (stream method host port target token content-type body)
+  "Write one HTTP request to the cluster-API STREAM. The kubeconfig client
+certificate authenticates the mTLS stream; a Bearer TOKEN is added when the
+kubeconfig uses one instead."
+  (write-sequence
+   (gr8s.protocol::ascii-octets
+    (with-output-to-string (request)
+      (flet ((line (control &rest args)
+               (apply #'format request control args)
+               (write-string (format nil "~C~C" #\Return #\Linefeed) request)))
+        (line "~A ~A HTTP/1.1" method target)
+        (line "Host: ~A:~D" host port)
+        (line "Connection: close")
+        (line "Accept: application/json, */*")
+        (when token (line "Authorization: Bearer ~A" token))
+        (when (and content-type (plusp (length content-type)))
+          (line "Content-Type: ~A" content-type))
+        (line "Content-Length: ~D" (if body (length body) 0))
+        (line ""))))
+   stream)
+  (when (and body (plusp (length body))) (write-sequence body stream))
+  (finish-output stream))
+
+(defun read-dashboard-proxy-body (stream headers)
+  "Read a proxied response body from STREAM, honouring Content-Length or chunked
+transfer encoding (watch streams arrive chunked)."
+  (let ((content-length (cdr (assoc :content-length headers)))
+        (transfer-encoding (cdr (assoc :transfer-encoding headers))))
+    (cond
+      ((and transfer-encoding (search "chunked" (string-downcase transfer-encoding)))
+       (let ((body (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+         (loop for size = (ignore-errors
+                            (parse-integer (gr8s.http-client::read-crlf-line stream)
+                                           :radix 16 :junk-allowed t))
+               while (and size (plusp size))
+               do (let ((chunk (make-array size :element-type '(unsigned-byte 8))))
+                    (read-sequence chunk stream)
+                    (loop for octet across chunk do (vector-push-extend octet body))
+                    (gr8s.http-client::read-crlf-line stream)))
+         (coerce body '(simple-array (unsigned-byte 8) (*)))))
+      ((and content-length (plusp (length content-length)))
+       (let* ((length (parse-integer content-length))
+              (body (make-array length :element-type '(unsigned-byte 8))))
+         (read-sequence body stream)
+         body))
+      (t (make-array 0 :element-type '(unsigned-byte 8))))))
+
+(defun dashboard-proxy-forward (config method target request)
+  "Forward the browser REQUEST to the running cluster's API over an mTLS stream
+built from the kubeconfig CONFIG -- the same connection `gr8s debug slynk' uses --
+returning the upstream body as octets and copying its status and content type.
+METHOD is a keyword; TARGET is the apiserver path+query."
+  (let ((body (ignore-errors (hunchentoot:raw-post-data :force-binary t :request request))))
+    (multiple-value-bind (stream socket host port base-path) (open-debug-api-stream config)
+      (unwind-protect
+           (handler-case
+               (progn
+                 (write-dashboard-proxy-request
+                  stream (symbol-name method) host port
+                  (concatenate 'string base-path target) (getf config :token)
+                  (hunchentoot:header-in :content-type request) body)
+                 (multiple-value-bind (status headers)
+                     (gr8s.protocol::parse-http-response-head
+                      (gr8s.protocol::read-http-response-head stream))
+                   (setf (hunchentoot:return-code*) status
+                         (hunchentoot:content-type*)
+                         (or (cdr (assoc :content-type headers)) "application/json"))
+                   (read-dashboard-proxy-body stream headers)))
+             (error (condition)
+               (setf (hunchentoot:return-code*) hunchentoot:+http-bad-gateway+
+                     (hunchentoot:content-type*) "text/plain")
+               (format nil "gr8s dashboard upstream error: ~A" condition)))
+        (ignore-errors (close stream))
+        (ignore-errors (usocket:socket-close socket))))))
+
+;;; The /wsMultiplexer live-update relay.
+;;;
+;;; The Headlamp frontend multiplexes every resource watch over one WebSocket.
+;;; This relay speaks that protocol on the browser side (see the contract in
+;;; src/apiserver/dashboard.lisp) and, per watch subscription, opens a classic
+;;; chunked HTTP watch (GET path?watch=1...) to the running cluster over the same
+;;; mTLS stream `gr8s debug slynk' uses, reframing each newline-delimited watch
+;;; event as a DATA frame to the browser. Each watch runs in its own thread so a
+;;; CLOSE (or the WebSocket dropping) can shut its upstream socket down and unblock
+;;; the read, exactly as the Slynk tunnel tears a relay down.
+
+(defstruct dashboard-watch
+  "One live upstream watch inside a /wsMultiplexer session."
+  key thread socket)
+
+(defun begin-dashboard-multiplexer (request)
+  "Complete the WebSocket upgrade handshake for the multiplexer on REQUEST and
+return the raw client stream (the connection is now in frames, not HTTP)."
+  (let ((key (hunchentoot:header-in :sec-websocket-key request)))
+    (setf (hunchentoot:return-code*) 101
+          (hunchentoot:content-type*) nil
+          (hunchentoot:header-out :connection) "Upgrade"
+          (hunchentoot:header-out :upgrade) "websocket"
+          (hunchentoot:header-out :sec-websocket-accept)
+          (gr8s.apiserver::websocket-accept-value key)
+          (hunchentoot:header-out :sec-websocket-protocol)
+          gr8s.apiserver::+dashboard-multiplexer-protocol+)
+    (let ((stream (hunchentoot::start-output 101 nil)))
+      (finish-output stream)
+      stream)))
+
+(defun stream-watch-events (stream headers emit alive-p)
+  "Read a Kubernetes watch response body from STREAM and call EMIT with each
+newline-delimited watch-event JSON string, until the stream ends or ALIVE-P
+returns NIL. Watch bodies arrive chunked; a single event may span chunks and a
+chunk may hold several events, so reassemble across chunk boundaries and split on
+LF. ALIVE-P is only consulted between chunks -- a CLOSE unblocks a blocked read by
+shutting the socket, which surfaces as an error to the caller."
+  (let ((chunked (let ((te (cdr (assoc :transfer-encoding headers))))
+                   (and te (search "chunked" (string-downcase te)))))
+        (pending (make-array 256 :element-type '(unsigned-byte 8)
+                                 :adjustable t :fill-pointer 0)))
+    (labels ((flush-lines ()
+               (loop for nl = (position 10 pending)
+                     while nl
+                     do (let ((line (subseq pending 0 nl))
+                              (tail (subseq pending (1+ nl))))
+                          (when (plusp (length line))
+                            (funcall emit (trivial-utf-8:utf-8-bytes-to-string line)))
+                          (setf (fill-pointer pending) 0)
+                          (loop for octet across tail do (vector-push-extend octet pending)))))
+             (absorb (buffer count)
+               (dotimes (i count) (vector-push-extend (aref buffer i) pending))
+               (flush-lines)))
+      (if chunked
+          (loop
+            (unless (funcall alive-p) (return))
+            (let ((size (ignore-errors
+                          (parse-integer (gr8s.http-client::read-crlf-line stream)
+                                         :radix 16 :junk-allowed t))))
+              (unless (and size (plusp size)) (return))
+              (let ((chunk (make-array size :element-type '(unsigned-byte 8))))
+                (unless (= (read-sequence chunk stream) size) (return))
+                (gr8s.http-client::read-crlf-line stream) ; trailing CRLF
+                (absorb chunk size))))
+          ;; Non-chunked (unusual for a watch): read until EOF in blocks.
+          (let ((block (make-array 4096 :element-type '(unsigned-byte 8))))
+            (loop
+              (unless (funcall alive-p) (return))
+              (let ((count (read-sequence block stream)))
+                (when (zerop count) (return))
+                (absorb block count))))))))
+
+(defun run-dashboard-watch (config message target watch send-frame alive-p claim forget)
+  "Relay one upstream watch to the browser. Open an mTLS stream for TARGET (the
+bare apiserver path+query), require a 200, then stream each watch event to the
+browser as a DATA frame built from MESSAGE, until the stream ends or ALIVE-P is
+NIL. On a non-200 send one ERROR frame; on a clean end send COMPLETE. CLAIM records
+this watch's socket under the session lock and reports whether the watch is still
+registered (a CLOSE during connect can have dropped it); FORGET removes the watch
+from the session however the relay ends."
+  (unwind-protect
+       (handler-case
+           (multiple-value-bind (stream socket host port base-path)
+               (open-debug-api-stream config)
+             ;; Publish the socket under the session lock so a concurrent CLOSE can
+             ;; shut it down; if the watch was already dropped, stop now.
+             (unless (funcall claim socket)
+               (ignore-errors (close stream))
+               (ignore-errors (usocket:socket-close socket))
+               (return-from run-dashboard-watch))
+             (unwind-protect
+                  (progn
+                    (write-dashboard-proxy-request
+                     stream "GET" host port (concatenate 'string base-path target)
+                     (getf config :token) nil nil)
+                    (multiple-value-bind (status headers)
+                        (gr8s.protocol::parse-http-response-head
+                         (gr8s.protocol::read-http-response-head stream))
+                      (if (= status 200)
+                          (progn
+                            (stream-watch-events
+                             stream headers
+                             (lambda (event)
+                               (funcall send-frame
+                                        (gr8s.apiserver::dashboard-multiplexer-frame
+                                         message "DATA" event)))
+                             alive-p)
+                            (when (funcall alive-p)
+                              (funcall send-frame
+                                       (gr8s.apiserver::dashboard-multiplexer-frame
+                                        message "COMPLETE"))))
+                          (funcall send-frame
+                                   (gr8s.apiserver::dashboard-multiplexer-frame
+                                    message "ERROR"
+                                    (format nil "{\"error\":\"upstream watch returned HTTP ~D\"}"
+                                            status))))))
+               (ignore-errors (close stream))
+               (ignore-errors (usocket:socket-close socket))))
+         (error () nil))
+    (funcall forget)))
+
+(defun serve-dashboard-multiplexer (config request)
+  "Serve the /wsMultiplexer WebSocket for the `gr8s dashboard' command: upgrade
+the connection, then read the frontend's REQUEST/CLOSE control frames and keep one
+upstream mTLS watch (built from the kubeconfig CONFIG) per subscription alive,
+relaying every watch event back. Returns when the WebSocket closes."
+  (unless (and (string-equal (hunchentoot:header-in :upgrade request) "websocket")
+               (hunchentoot:header-in :sec-websocket-key request))
+    (setf (hunchentoot:return-code*) hunchentoot:+http-bad-request+
+          (hunchentoot:content-type*) "text/plain")
+    (return-from serve-dashboard-multiplexer
+      "gr8s dashboard multiplexer requires a WebSocket upgrade"))
+  (let ((client (begin-dashboard-multiplexer request))
+        (write-lock (bt:make-lock "gr8s dashboard multiplexer writer"))
+        (watches (make-hash-table :test #'equal))
+        (watches-lock (bt:make-lock "gr8s dashboard multiplexer watches"))
+        (session-open t))
+    (labels ((send-frame (text)
+               (bt:with-lock-held (write-lock)
+                 (ignore-errors
+                  (gr8s.protocol::write-websocket-frame
+                   client 1 (trivial-utf-8:string-to-utf-8-bytes text)))))
+             (drop-watch (key watch)
+               ;; Remove WATCH only if it is still the one registered under KEY.
+               (bt:with-lock-held (watches-lock)
+                 (when (eq (gethash key watches) watch) (remhash key watches))))
+             (shut (socket)
+               (when socket
+                 (ignore-errors (usocket:socket-shutdown socket :io))
+                 (ignore-errors (usocket:socket-close socket))))
+             (stop-watch (key)
+               ;; Read the socket under the lock: the watch thread also publishes it
+               ;; there, so we never miss a socket that was just opened.
+               (shut (bt:with-lock-held (watches-lock)
+                       (let ((watch (gethash key watches)))
+                         (when watch (remhash key watches) (dashboard-watch-socket watch))))))
+             (stop-all ()
+               (let ((sockets (bt:with-lock-held (watches-lock)
+                                (prog1 (loop for w being the hash-values of watches
+                                             for s = (dashboard-watch-socket w)
+                                             when s collect s)
+                                  (clrhash watches)))))
+                 (mapc #'shut sockets)))
+             (start-watch (message)
+               (let* ((key (gr8s.apiserver::dashboard-multiplexer-key message))
+                      (target (gr8s.apiserver::dashboard-watch-upstream-target
+                               (gr8s.apiserver::dashboard-mux-message-path message)
+                               (gr8s.apiserver::dashboard-mux-message-query message)))
+                      (watch (make-dashboard-watch :key key)))
+                 ;; A re-REQUEST for the same key replaces the running watch.
+                 (stop-watch key)
+                 (bt:with-lock-held (watches-lock) (setf (gethash key watches) watch))
+                 (flet ((registered-p ()
+                          (and session-open
+                               (eq (bt:with-lock-held (watches-lock) (gethash key watches))
+                                   watch))))
+                   (setf (dashboard-watch-thread watch)
+                         (bt:make-thread
+                          (lambda ()
+                            (run-dashboard-watch
+                             config message target watch #'send-frame
+                             #'registered-p
+                             (lambda (socket) ; claim: publish socket, report liveness
+                               (bt:with-lock-held (watches-lock)
+                                 (setf (dashboard-watch-socket watch) socket)
+                                 (and session-open (eq (gethash key watches) watch))))
+                             (lambda () (drop-watch key watch))))
+                          :name "gr8s dashboard watch"))))))
+      (unwind-protect
+           (handler-case
+               (loop
+                 (multiple-value-bind (opcode payload fin-p masked-p)
+                     (gr8s.protocol::read-websocket-frame client)
+                   (declare (ignore fin-p masked-p))
+                   (case opcode
+                     ((1 2)             ; a client control message (text/binary)
+                      (let ((message (gr8s.apiserver::dashboard-parse-multiplexer-message
+                                      (trivial-utf-8:utf-8-bytes-to-string payload))))
+                        (when message
+                          (let ((type (gr8s.apiserver::dashboard-mux-message-type message)))
+                            (cond
+                              ((string= type "REQUEST") (start-watch message))
+                              ((string= type "CLOSE")
+                               (stop-watch (gr8s.apiserver::dashboard-multiplexer-key message))))))))
+                     (8 (return))       ; client close
+                     (9 (bt:with-lock-held (write-lock) ; ping -> pong
+                          (ignore-errors (gr8s.protocol::write-websocket-frame client 10 payload))))
+                     (10)               ; pong
+                     (otherwise nil))))
+             (error () nil))
+        (setf session-open nil)
+        (stop-all)
+        (ignore-errors (close client)))
+      "")))
+
+(defclass dashboard-command-acceptor (hunchentoot:easy-acceptor)
+  ((proxy-fn :initarg :proxy-fn :reader dashboard-acceptor-proxy-fn)
+   (multiplexer-fn :initarg :multiplexer-fn :reader dashboard-acceptor-multiplexer-fn))
+  (:documentation "The loopback acceptor the `gr8s dashboard' command runs."))
+
+(defmethod hunchentoot:acceptor-dispatch-request ((acceptor dashboard-command-acceptor) request)
+  (let ((gr8s.apiserver::*dashboard-proxy-fn* (dashboard-acceptor-proxy-fn acceptor))
+        (gr8s.apiserver::*dashboard-multiplexer-fn* (dashboard-acceptor-multiplexer-fn acceptor)))
+    (or (gr8s.apiserver::dashboard-response request)
+        (progn
+          (setf (hunchentoot:return-code*) hunchentoot:+http-not-found+
+                (hunchentoot:content-type*) "text/plain")
+          "gr8s dashboard: not found"))))
+
+(defun parse-dashboard-options (arguments)
+  "Parse `gr8s dashboard' options."
+  (let ((options (list :command :dashboard
+                       :kubeconfig nil :port 8080 :browser nil :no-launch nil))
+        (rest arguments))
+    (loop while (and rest (uiop:string-prefix-p "--" (first rest)))
+          do (let ((option (pop rest)))
+               (cond
+                 ((string= option "--no-launch") (setf (getf options :no-launch) t))
+                 (t
+                  (unless rest (error "~A requires a value" option))
+                  (let ((value (pop rest)))
+                    (cond
+                      ((string= option "--kubeconfig") (setf (getf options :kubeconfig) value))
+                      ((string= option "--port") (setf (getf options :port) (parse-port value)))
+                      ((string= option "--browser") (setf (getf options :browser) value))
+                      (t (error "unknown dashboard option: ~A" option))))))))
+    (when rest
+      (error "usage: gr8s dashboard [--kubeconfig PATH] [--port N] [--browser CMD] [--no-launch]"))
+    options))
+
+(defun run-dashboard-command (options)
+  "Serve the embedded Kubernetes dashboard (Headlamp) and open it in a browser,
+like `icl -b'. A foreground process: it starts a loopback web server that serves
+the frontend and reverse-proxies the frontend's Kubernetes calls over mTLS to the
+running cluster (authenticating with the kubeconfig, as `gr8s debug slynk' does),
+opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
+/dashboard/<token> path so other local processes cannot reach it."
+  (unless (gr8s.apiserver::dashboard-assets-present-p)
+    (error "this gr8s build has no embedded dashboard; rebuild with 'make dashboard-assets'"))
+  (let* ((kubeconfig (or (getf options :kubeconfig) (default-client-kubeconfig)))
+         (config (dashboard-kubeconfig-config kubeconfig))
+         (port (getf options :port 8080))
+         (token (dashboard-session-token))
+         (url (format nil "http://127.0.0.1:~D/dashboard/~A/" port token))
+         (acceptor (make-instance 'dashboard-command-acceptor
+                                  :address "127.0.0.1" :port port
+                                  :proxy-fn (lambda (method target request)
+                                              (dashboard-proxy-forward config method target request))
+                                  :multiplexer-fn (lambda (request)
+                                                    (serve-dashboard-multiplexer config request)))))
+    ;; Acceptor worker threads read the base globally, so set it (one-shot process).
+    (setf gr8s.apiserver::*dashboard-base* (format nil "/dashboard/~A" token)
+          *shutdown-requested* nil)
+    (install-shutdown-handlers)
+    (hunchentoot:start acceptor)
+    (unwind-protect
+         (progn
+           (format t "gr8s dashboard: ~A~%  cluster API ~A (via ~A)~%"
+                   url (getf config :server) kubeconfig)
+           (if (getf options :no-launch)
+               (format t "Open the URL above. Press Ctrl-C to stop.~%")
+               (progn
+                 (handler-case
+                     (uiop:launch-program
+                      (list (or (getf options :browser) (default-browser-opener)) url)
+                      :output :interactive :error-output :interactive)
+                   (error (condition)
+                     (format t "could not launch a browser (~A); open the URL above.~%" condition)))
+                 (format t "Serving the dashboard. Press Ctrl-C to stop.~%")))
+           (finish-output)
+           (loop until *shutdown-requested* do (sleep 0.2)))
+      (ignore-errors (hunchentoot:stop acceptor)))
+    0))
+
 (defun parse-cli-options (arguments)
   "Dispatch ARGUMENTS to the matching subcommand option parser and return its
    options plist. No arguments, or help/version/notices, yield a bare :command
@@ -1021,7 +1413,7 @@ The new identity takes effect when the node agent next starts."
                                  arguments)))
     ((and (null (rest arguments))
           (member (first arguments)
-                  '("runtime" "patch" "wireguard" "network" "debug"
+                  '("runtime" "wireguard" "network" "debug"
                     "certificate" "secrets-encrypt")
                   :test #'string=))
      (list :command :help :help-path arguments))
@@ -1063,6 +1455,8 @@ The new identity takes effect when the node agent next starts."
      (parse-secrets-encrypt-options (rest arguments)))
     ((string= "doctor" (first arguments))
      (parse-doctor-options (rest arguments)))
+    ((string= "dashboard" (first arguments))
+     (parse-dashboard-options (rest arguments)))
     (t (error "unknown command: ~A" (first arguments))))))
 
 (defun parse-trace-duration (text)
@@ -1812,7 +2206,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
   (call-with-serve-state-ownership options (lambda () (serve-owned options))))
 
 (defun run-serve-command (options)
-  "Own state before evaluating startup patches, through patch shutdown."
+  "Own state before any application/PKI initialization, through final teardown."
   (call-with-serve-state-ownership
    options
    (lambda ()
@@ -1868,7 +2262,6 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
          (local-agent nil)
          (pki-authority-observer nil)
          (kubeconfig-path nil))
-    (declare (ignore patch-policy-checked))
     (setf *shutdown-requested* nil)
     (install-shutdown-handlers)
     (unwind-protect
@@ -2271,8 +2664,8 @@ owned by another user is the usual cause: use a root-owned path such as
 `gr8s doctor` reports this as the \"store directory\" check.
 
 Record the launch arguments, service unit, runtime mode, overlay backend,
-node names, and state/log paths before changing a cluster. Check version and
-live patch level with `gr8s version --state-directory /var/lib/gr8s`.
+node names, and state/log paths before changing a cluster. Check version
+with `gr8s version --state-directory /var/lib/gr8s`.
 
 ## First response to a failure
 
@@ -2356,8 +2749,7 @@ back it up using the deployment's recovery procedure before upgrades. Do not
 remove state, BPF pins, namespaces, or runtime files as a first troubleshooting
 step. Stop gr8s cooperatively before offline maintenance.
 
-Discover signed live patch inspection, planning, status, and history with
-`gr8s patch --help`; runtime inventory with `gr8s runtime list`; and node enrollment
+Discover runtime inventory with `gr8s runtime list`; and node enrollment
 with `gr8s join-token --help`. Join tokens and CA pins belong to the existing
 cluster: do not bootstrap a replacement state directory to repair enrollment.
 
@@ -2389,7 +2781,7 @@ No HA API may start from member-local certificate state before this converges."
   '(("serve" "Run the control plane and local node agent")
     ("agent" "Run a node agent") ("witness" "Run an HA quorum witness")
     ("join-token" "Print a cluster join token")
-    ("runtime" "Manage sandbox runtimes") ("patch" "Manage live patches")
+    ("runtime" "Manage sandbox runtimes")
     ("kubeconfig" "Print or write a cluster kubeconfig")
     ("doctor" "Diagnose a node state directory")
     ("debug" "Open an authenticated on-demand debugger tunnel")
@@ -2397,6 +2789,7 @@ No HA API may start from member-local certificate state before this converges."
     ("network" "Inspect cluster networking") ("certificate" "Manage certificates")
     ("secrets-encrypt" "Manage secrets encryption")
     ("skill" "Print guidance for operators and AI agents")
+    ("dashboard" "Open the Kubernetes dashboard (Headlamp) in a browser")
     ("version" "Print version information") ("notices" "Print license notices")))
 
 (defun print-help-rows (rows)
@@ -2412,6 +2805,14 @@ No HA API may start from member-local certificate state before this converges."
     (cond
       ((equal path '("skill"))
        (simple "Print offline Markdown guidance for operators and AI agents" ""))
+      ((equal path '("dashboard"))
+       (page "Serve the Kubernetes dashboard (Headlamp) and open it in a browser; runs until Ctrl-C"
+             "[OPTIONS]"
+             :options '(("--kubeconfig PATH" "Cluster kubeconfig (default $KUBECONFIG or ~/.kube/config)")
+                        ("--port N" "Loopback port to serve on (default 8080)")
+                        ("--browser CMD" "Browser launcher (default xdg-open/open)")
+                        ("--no-launch" "Print the dashboard URL instead of launching a browser")
+                        ("--help, -h" "show help"))))
       ((equal path '("serve"))
        (page "Run the control plane and local node agent" "[OPTIONS]"
              :options '(("--state-directory DIR" "Folder holding cluster state")
@@ -2470,14 +2871,6 @@ No HA API may start from member-local certificate state before this converges."
                         ("--kubeconfig FILE" "Authentication and API endpoint")
                         ("--local-port PORT" "Loopback port (default 4005)")
                         ("--help, -h" "show help"))))
-      ((equal path '("patch"))
-       (page "Manage live patches" "COMMAND [OPTIONS]"
-             :commands '( ("inspect IMAGE" "Inspect a patch image") ("plan IMAGE" "Plan a rollout")
-                         ("apply PLAN" "Apply a rollout plan") ("status [PLAN]" "Show rollout status")
-                         ("pause|resume|abort PLAN" "Control a rollout")
-                         ("history --node NODE" "Show node patch history")
-                         ("import OCI-LAYOUT" "Import an offline patch"))
-             :options '(("--help, -h" "show help"))))
       ((equal path '("wireguard"))
        (page "Manage WireGuard identity" "COMMAND [OPTIONS]"
              :commands '(("rotate-key" "Replace this node's identity on its next start"))
@@ -2519,7 +2912,7 @@ No HA API may start from member-local certificate state before this converges."
       ((and (= (length path) 1) (assoc (first path) +cli-commands+ :test #'string=))
        (simple (second (assoc (first path) +cli-commands+ :test #'string=))))
       ((and (> (length path) 1)
-            (member (first path) '("patch" "wireguard" "network" "debug" "certificate" "secrets-encrypt")
+            (member (first path) '("wireguard" "network" "debug" "certificate" "secrets-encrypt")
                     :test #'string=))
        (simple (format nil "Run the ~{~A~^ ~} command" path)))
       (t (error "no help for command: ~{~A~^ ~}" path)))))
@@ -2607,6 +3000,7 @@ No HA API may start from member-local certificate state before this converges."
                (print-runtime-list (getf options :state-directory))
                0)
               (:trace (run-trace-command options))
+              (:dashboard (run-dashboard-command options))
               (:debug-slynk (run-debug-slynk-command options))
               (:wireguard-rotate-key
                (rotate-wireguard-node-key options))
