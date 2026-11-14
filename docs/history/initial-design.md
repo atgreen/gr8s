@@ -45,7 +45,7 @@ production adapter calls Kubernetes CRI v1 over a private Unix socket using
 ag-gRPC. A deterministic fake implementation supports unit and API tests.
 
 The native image contains containerd, its runc-v2 shim, runc, the bridge,
-host-local, and loopback CNI plugins, and a Whistler-generated eBPF object. The
+host-local, and loopback CNI plugins, and a [Whistler](https://github.com/atgreen/Whistler)-generated eBPF object. The
 chained CNI executable name is a symlink to the dumped gr8s image. It is not a
 separate program. Managed mode materializes these artifacts on a private tmpfs.
 It configures all mutable containerd and IPAM data under the gr8s
@@ -62,11 +62,11 @@ pairs, and allocates addresses from `10.80.0.0/12`. Containerd supplies its
 internal loopback setup; the loopback binary remains in the complete embedded
 CNI toolset.
 
-Whistler supplies the policy layer. It compiles Lisp to eBPF, but it does not
+[Whistler](https://github.com/atgreen/Whistler) supplies the policy layer. It compiles Lisp to eBPF, but it does not
 create network namespaces, links, or IP allocations. The same dumped gr8s
 image recognizes the `gr8s` CNI environment, invokes
 its Common Lisp CNI implementation, and loads the generated sched-cls program
-through Whistler's loader after the bridge stage has established the Pod
+through [Whistler](https://github.com/atgreen/Whistler)'s loader after the bridge stage has established the Pod
 interface. It attaches the program as a persistent TCX link. The
 current egress guard permits ARP and non-IPv4 traffic and rejects IPv4 frames
 that do not match the endpoint's agent-initialized address and MAC identity. Its `rejected_spoofs` array is pinned beneath

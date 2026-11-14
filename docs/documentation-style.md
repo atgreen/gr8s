@@ -92,7 +92,7 @@ the mechanism.
 Link the **authoritative source** when the code conforms to someone else's
 contract and a reader would otherwise have to guess whose rules these are:
 Kubernetes API semantics (kubernetes.io), the Raft paper for `raft*.lisp`, RFC
-7348 for VXLAN, the eBPF helper docs for Whistler programs, nftables/firewalld
+7348 for VXLAN, the eBPF helper docs for [Whistler](https://github.com/atgreen/Whistler) programs, nftables/firewalld
 semantics for the host firewall. Two habits keep links useful:
 
 - **Name the concept or section in prose** ("Raft §5.4, log matching"; "RFC 7348

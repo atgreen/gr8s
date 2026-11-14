@@ -251,7 +251,7 @@ The following differences are design choices, not missing functionality by
 themselves:
 
 - Pure-Lisp Raft replaces SQLite/Kine/etcd for durable control-plane state.
-- The Whistler eBPF dataplane replaces Flannel plus kube-proxy/iptables.
+- The [Whistler](https://github.com/atgreen/Whistler) eBPF dataplane replaces Flannel plus kube-proxy/iptables.
 - In-process DNS replaces the CoreDNS deployment.
 - The in-agent Gateway and Ingress implementation replaces the default Traefik path.
 - In-process local-path, NFS, Service, EndpointSlice, scheduler, and workload

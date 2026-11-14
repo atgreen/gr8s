@@ -5,7 +5,7 @@
 `gr8s trace` runs an ephemeral bpftrace program against Pods selected through
 the Kubernetes API. It sends the request to every node that hosts a match and
 streams node-labelled output. The stream ends when its duration expires or the
-client disconnects. The node agent uses Whistler to compile, load, attach, and
+client disconnects. The node agent uses [Whistler](https://github.com/atgreen/Whistler) to compile, load, attach, and
 remove the BPF program in-process. It needs no bpftrace binary, compiler
 toolchain, or DaemonSet.
 
@@ -61,7 +61,7 @@ omitted.
 The node agent resolves each requested Pod UID to all live container and sandbox
 cgroups.  It derives their cgroup-v2 IDs from each directory's inode (the same
 identity returned by `bpf_get_current_cgroup_id`) and injects this predicate into every
-kernel probe before Whistler code generation:
+kernel probe before [Whistler](https://github.com/atgreen/Whistler) code generation:
 
 ```text
 cgroup == ID1 || cgroup == ID2 || ...
@@ -77,7 +77,7 @@ can start another trace to include its new cgroup.
 Compilation and runtime output are redirected into an operation-owned stream.
 The operation emits `ACCEPTED` only after compilation and all attachments have
 succeeded.  A worker drains output with the existing acknowledgement window.
-Cancellation interrupts the Whistler polling thread; its `unwind-protect`
+Cancellation interrupts the [Whistler](https://github.com/atgreen/Whistler) polling thread; its `unwind-protect`
 detaches links and closes every map and program descriptor before the terminal
 response is emitted.
 
@@ -93,7 +93,7 @@ tests):
 - kprobe, kretprobe, tracepoint, kfunc, kretfunc, profile, and interval probes;
 - no persistent trace resources or historical output.
 
-Whistler verifier rejection and attach errors are returned verbatim but do not
+[Whistler](https://github.com/atgreen/Whistler) verifier rejection and attach errors are returned verbatim but do not
 leave partial attachments behind.  The server records requester identity,
 selector, participating nodes, start/end time, and terminal status in the audit
 path without recording potentially sensitive trace output.

@@ -1,53 +1,63 @@
 # gr8s
 
-**A self-contained Kubernetes implementation in Common Lisp, with an eBPF dataplane.**
+**Kubernetes, built from scratch in Common Lisp, with an eBPF dataplane.**
 
 gr8s puts a Kubernetes API server, controllers, scheduler, node agent,
-container runtime, networking, and datastore in one native executable. It uses
-`kubectl` and standard Kubernetes manifests. You can run it on one node or
-across a cluster.
+container runtime, networking, and datastore in one native executable. Use
+`kubectl` and standard Kubernetes manifests on one node or across a cluster.
 
-The control plane and node agent are written from scratch in Common Lisp. The
-binary embeds containerd and runc, compiles its own eBPF networking programs,
-and includes a Raft datastore for high availability.
+**gr8s passed 100% of the upstream Kubernetes v1.37 `certified-conformance`
+tests: 462/462, zero failures**, in the recorded two-node Sonobuoy run on
+2026-11-11. See the [results and evidence](docs/CONFORMANCE.md).
+
+Run containers with embedded containerd/runc, choose
+[Kata Containers or gVisor](docs/runtime.md#runtimeclass--pluggable-runtimes)
+through `RuntimeClass`, or run virtual machines with [KubeVirt](docs/kubevirt.md).
+Explore the cluster through its integrated [Headlamp dashboard](#dashboard),
+trace selected Pods with [bpftrace programs](docs/design-gr8s-trace.md), and
+inspect running control-plane and agent processes through
+[Slynk](docs/building-and-testing.md#debugging-a-running-cluster).
+
+> **Project status:** gr8s is experimental software for exploration, development,
+> and testing. It is not yet a CNCF-submitted _Certified Kubernetes_ distribution.
+> See the [API coverage](docs/kubernetes-surface.md) and
+> [known gaps](docs/k3s-gap-inventory.md) for the current scope.
 
 The name **gr8s** is a portmanteau of *Green* — its author's surname — and
 *k8s*, the usual contraction of *Kubernetes*: in short, "Green Kubernetes."
-
-> **Project status:** gr8s is experimental. On a two-node cluster it **passes
-> every case of the upstream Kubernetes v1.37 `certified-conformance` end-to-end
-> suite — 462/462, 0 failures, run via Sonobuoy**
-> ([evidence](docs/evidence/conformance-full-v1.37-2026-11-11.json)). It is not yet a
-> CNCF-submitted _Certified Kubernetes_ distribution, and remains intended for
-> exploration, development, and testing; evaluate its compatibility and
-> operational behavior before production use. See the
-> [API coverage](docs/kubernetes-surface.md) and
-> [known gaps](docs/k3s-gap-inventory.md) for the current scope.
 
 Start with the [documentation guide](docs/index.md). If you already know Kubernetes,
 the [component map](docs/kubernetes-users.md) explains where familiar components live.
 
 ## Why gr8s?
 
+- **Explore the cluster in a browser.** The integrated Headlamp dashboard
+  provides a Kubernetes web UI with live resource updates. Source builds need
+  the [dashboard assets step](docs/building-and-testing.md#optional-dashboard-assets).
+- **Trace workloads in the kernel.** `gr8s trace` runs ephemeral bpftrace programs
+  on nodes hosting Pods selected through the Kubernetes API. The agent uses
+  [Whistler](https://github.com/atgreen/Whistler) to compile and attach them
+  in-process, without a separate bpftrace binary or tracing DaemonSet.
+- **Inspect the running implementation.** The API, controllers, agent,
+  networking compiler, and datastore use Common Lisp. An authenticated Slynk
+  tunnel lets you inspect live control-plane and agent processes.
+- **Program the dataplane directly from Lisp.** The kernel handles Service load
+  balancing, NetworkPolicy, same-node forwarding, and Pod anti-spoofing.
+  [Whistler](https://github.com/atgreen/Whistler) compiles eBPF directly from Lisp,
+  without clang or LLVM.
 - The same executable can run a complete single-node cluster, a control plane,
-  or a worker agent. It includes its container runtime and CNI integration. It
-  also supports preloaded images for airgapped nodes.
+  or a worker agent. It embeds containerd and runc, includes CNI integration,
+  and supports preloaded images for airgapped nodes.
 - The Kubernetes API provides workload controllers, scheduling, RBAC, Services,
   persistent storage, and custom resources. The
-  [compatibility reference](docs/kubernetes-surface.md) lists the supported
-  behavior and limitations.
-- The kernel handles Service load balancing, NetworkPolicy, same-node
-  forwarding, and Pod anti-spoofing. The agent uses
-  [Whistler](https://github.com/atgreen/Whistler) to compile eBPF directly from
-  Lisp, without clang or LLVM.
+  [compatibility reference](docs/kubernetes-surface.md) lists supported behavior
+  and limitations.
 - Raft replicates control-plane state without an external database. Certificates
   authenticate node enrollment and internal communication.
 - Cross-node traffic uses VXLAN by default. An optional adaptive WireGuard
-  overlay selects paths between nodes. Authenticated
-  BitTorrent v2 peers share verified image blobs. This avoids repeated registry
-  downloads during multi-node rollouts.
-- The API, controllers, agent, networking compiler, and datastore use Common
-  Lisp. An optional Slynk endpoint lets you inspect a live development system.
+  overlay selects paths between nodes. Authenticated BitTorrent v2 peers share
+  verified image blobs, avoiding repeated registry downloads during multi-node
+  rollouts.
 
 Run `gr8s skill` for built-in operator and AI agent guidance, including first-response
 checks, live Slynk inspection, and selector-scoped kernel tracing. It works offline
@@ -55,11 +65,11 @@ and can be saved with `gr8s skill > gr8s-guide.md`.
 
 ## How is gr8s different from k3s?
 
-Both provide a Kubernetes-compatible cluster that you can operate with
-`kubectl`. k3s is a packaged Kubernetes distribution built from upstream
-components and familiar ecosystem add-ons. gr8s is an independent
-implementation: one native Common Lisp executable runs the API, controllers,
-scheduler, node agent, and embedded runtime. It uses its own Raft datastore and
+k3s is the closest comparison to gr8s. Both provide a Kubernetes-compatible
+cluster that you can operate with `kubectl`. k3s is a packaged Kubernetes
+distribution built from upstream components and familiar ecosystem add-ons.
+gr8s is an independent implementation: one native Common Lisp executable runs
+the API, controllers, scheduler, node agent, and embedded runtime. It uses its own Raft datastore and
 an eBPF dataplane rather than assembling the usual separate control-plane and
 networking components.
 
@@ -70,7 +80,7 @@ k3s. gr8s passes the upstream Kubernetes v1.37 `certified-conformance` suite,
 but is experimental and does not yet provide every k3s add-on or operational
 workflow. Check the
 [compatibility gaps](docs/k3s-gap-inventory.md), [API coverage](docs/kubernetes-surface.md),
-and [conformance results](docs/CONFORMANCE.md) before choosing it for a workload.
+and [conformance results](docs/CONFORMANCE.md) for supported behavior and limitations.
 
 ## Getting started
 

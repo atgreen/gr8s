@@ -3,7 +3,7 @@
 gr8s implements a Kubernetes control plane and node agent in Common Lisp. One
 native executable supplies a combined server/node, a worker agent, a control-plane-only
 server, or a Raft witness. It embeds containerd/runc for container execution and
-Whistler for compiling and loading its eBPF dataplane.
+[Whistler](https://github.com/atgreen/Whistler) for compiling and loading its eBPF dataplane.
 
 The user-facing contract is the Kubernetes API: authenticated HTTPS, standard
 manifests, discovery, workload controllers, scheduling, RBAC, storage, and custom
