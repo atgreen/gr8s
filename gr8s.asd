@@ -20,8 +20,9 @@
                "cl-torrent" "cl-wireguard-overlay"
                "cl-work-queue" "cl-safe-yaml" "cl-cronexpr"
                "com.inuoe.jzon" "flexi-streams" "hunchentoot" "cl-ppcre"
-               "pure-tls/acme" "drakma" "ironclad"
-               "sb-posix" "slynk" "trivial-utf-8" "usocket" "version-string"
+               "pure-tls/acme" "drakma" "ironclad" "puri"
+               "sb-posix" "slynk" "trivial-gray-streams" "trivial-utf-8"
+               "usocket" "version-string"
                "whistler/loader" "whistler/bpftrace")
   :serial t
   :components ((:static-file "schema/podtemplate-v1.json")
@@ -71,6 +72,10 @@
                              ;; cl-cancel).  No gr8s dependencies; loaded early so the
                              ;; request/response callers below can use it.
                              (:file "protocol/http-client")
+                             ;; Kubernetes API client for foreign clusters:
+                             ;; list+watch informers and Lease leader election
+                             ;; (docs/design-foreign-cluster-networking.md).
+                             (:file "protocol/kube-client")
                              (:module "image-distribution"
                               :serial t
                               :components ((:file "package")
@@ -162,6 +167,7 @@
                               :components ((:file "integration")
                                            (:file "secret-encryption")
                                            (:file "core-resources")
+                                           (:file "foreign-view")
                                            (:file "pki-authority")
                                            (:file "store-snapshot")
                                            (:file "tracker-metainfo-stream")
@@ -530,6 +536,7 @@
                              (:file "pod-http-proxy-test")
                              (:file "dashboard-test")
                              (:file "core-resource-http-test")
+                             (:file "kube-client-test")
                              (:file "api-defaults-test")
                              (:file "store-snapshot-test")
                              (:file "store-snapshot-index-test")

@@ -30,6 +30,7 @@
 (defpackage #:gr8s.http-client
   (:use #:cl)
   (:export #:https-request
+           #:call-with-http-response
            #:http-client-error
            #:http-client-error-message
            #:http-response-too-large
@@ -364,3 +365,119 @@ returned, never retried."
                (if (and (< attempt max-attempts) (retryable-p condition))
                    (when (plusp retry-interval) (cl-cancel:sleep-fractional retry-interval))
                    (error condition))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Streaming responses
+;;;
+;;; A Kubernetes watch is one HTTP response whose body never ends: newline-
+;;; delimited JSON events over chunked transfer encoding.  These body streams
+;;; let a caller read such a response incrementally; the connection belongs to
+;;; the one response and always closes afterward, so they never meet the pool.
+
+(defclass bounded-body-stream (trivial-gray-streams:fundamental-binary-input-stream)
+  ((source :initarg :source)
+   (remaining :initarg :remaining))
+  (:documentation "The body octets promised by Content-Length, then end of file."))
+
+(defmethod trivial-gray-streams:stream-read-byte ((stream bounded-body-stream))
+  (with-slots (source remaining) stream
+    (if (plusp remaining)
+        (let ((byte (read-byte source nil nil)))
+          (cond (byte (decf remaining) byte)
+                (t :eof)))
+        :eof)))
+
+(defclass chunked-body-stream (trivial-gray-streams:fundamental-binary-input-stream)
+  ((source :initarg :source)
+   (remaining :initform 0)
+   (done :initform nil))
+  (:documentation "Transfer-Encoding: chunked, decoded; trailers are consumed and dropped."))
+
+(defmethod trivial-gray-streams:stream-read-byte ((stream chunked-body-stream))
+  (with-slots (source remaining done) stream
+    (loop
+      (cond
+        (done (return :eof))
+        ((plusp remaining)
+         (let ((byte (read-byte source nil nil)))
+           (when (null byte) (setf done t) (return :eof))
+           (decf remaining)
+           (when (zerop remaining) (read-crlf-line source))
+           (return byte)))
+        (t
+         (let* ((line (read-crlf-line source))
+                (size (parse-integer line :end (or (position #\; line) (length line))
+                                          :radix 16)))
+           (if (zerop size)
+               (progn (loop until (zerop (length (read-crlf-line source))))
+                      (setf done t))
+               (setf remaining size))))))))
+
+(defun response-body-stream (stream headers)
+  "Wrap STREAM so reading it yields exactly the one response body HEADERS frame."
+  (let ((length-text (cdr (assoc "content-length" headers :test #'string=)))
+        (chunked (search "chunked"
+                         (string-downcase
+                          (or (cdr (assoc "transfer-encoding" headers :test #'string=)) "")))))
+    (cond (chunked (make-instance 'chunked-body-stream :source stream))
+          (length-text (make-instance 'bounded-body-stream :source stream
+                                      :remaining (parse-integer length-text)))
+          (t stream))))
+
+(defun call-with-http-response
+    (function &key host port server-name host-header (method :get) target headers body
+                   trust-certificates (auto-load-system-ca nil) (insecure nil) plain
+                   client-certificate client-key (connect-timeout 10) timeout
+                   (context cl-cancel:*current-cancel-context*) on-connect)
+  "Send one request and call FUNCTION with (code headers body-stream), the body
+readable incrementally while the response arrives.  PLAIN skips TLS entirely (an
+http:// endpoint); otherwise the chain verifies like HTTPS-REQUEST.  TIMEOUT, when
+given, bounds the whole call through a cl-cancel deadline whose monitor closes the
+socket; a watch passes NIL and lives until the server or ON-CONNECT's closer ends
+it.  ON-CONNECT, when given, receives a function that closes the connection from
+another thread.  The connection always closes when FUNCTION returns or unwinds."
+  (let ((server-name (or server-name host)))
+    (multiple-value-bind (socket stream)
+        ;; usocket's :timeout becomes the socket's read timeout, which would end
+        ;; an idle watch; bound only the dial and handshake with a deadline.
+        (handler-case
+            (sb-sys:with-deadline (:seconds connect-timeout)
+              (if plain
+                  (let ((socket (usocket:socket-connect host port :element-type '(unsigned-byte 8)
+                                                                  :nodelay t)))
+                    (values socket (usocket:socket-stream socket)))
+                  (open-connection host port server-name insecure trust-certificates
+                                   auto-load-system-ca client-certificate client-key nil)))
+          (sb-sys:deadline-timeout ()
+            (error 'http-client-error :message "connection setup timed out")))
+      (unwind-protect
+           (flet ((converse ()
+                    (when on-connect
+                      (funcall on-connect
+                               ;; Shutdown only, never close: closing here frees
+                               ;; the descriptor while the reading thread may be
+                               ;; between reads, and a reused descriptor number
+                               ;; would leave it blocked on an unrelated socket.
+                               ;; Shutdown wakes or pre-empts the reader with end
+                               ;; of file, and the reader's own unwind closes.
+                               (lambda ()
+                                 (ignore-errors (usocket:socket-shutdown socket :io)))))
+                    (write-request stream method target
+                                   (or host-header (format nil "~A:~D" server-name port))
+                                   headers (or body #()) nil)
+                    (multiple-value-bind (code response-headers) (read-response-head stream)
+                      (funcall function code response-headers
+                               (response-body-stream stream response-headers)))))
+             (if timeout
+                 (cl-cancel:with-timeout-context (ctx timeout (cl-cancel:ensure-cancellable context))
+                   (let ((monitor (cl-cancel:close-stream-on-cancel (usocket:socket-stream socket) ctx)))
+                     (unwind-protect
+                          (handler-bind ((error (lambda (condition)
+                                                  (declare (ignore condition))
+                                                  (when (cl-cancel:done-p ctx)
+                                                    (cl-cancel:check-cancellation ctx)))))
+                            (converse))
+                       (funcall monitor))))
+                 (converse)))
+        (ignore-errors (close stream))
+        (ignore-errors (usocket:socket-close socket))))))

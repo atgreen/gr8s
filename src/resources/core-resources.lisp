@@ -1089,20 +1089,26 @@ before any state is published."
   (or (gethash (core-resource-key resource namespace name) (pod-store-resources store))
       (core-resource-error 404 "NotFound" "~A ~A/~A was not found" (core-resource-kind resource) namespace name)))
 
-(defun get-core-resource (store resource namespace name)
-  "Return a private copy of the stored object for RESOURCE NAMESPACE NAME, or signal
-   a 404. Takes the store lock, checks the CRD request context, and expires due
-   events first."
+(defgeneric get-core-resource (store resource namespace name)
+  (:documentation "Return a private copy of the object for RESOURCE NAMESPACE NAME,
+   or signal a 404.  The desired-state read seam: STORE is the gr8s store, or a
+   foreign cluster's watch cache (foreign-resource-view)."))
+
+(defmethod get-core-resource ((store gr8s.store:pod-store) resource namespace name)
+  "Takes the store lock, checks the CRD request context, and expires due events first."
   (with-store-lock (store)
     (check-crd-resource-context-unlocked store resource)
     (expire-core-events-unlocked store)
     (copy-core-object (get-core-resource-unlocked store resource namespace name))))
 
-(defun list-core-resources (store resource &optional namespace)
-  "Return (values OBJECTS RESOURCE-VERSION): private copies of every stored object
-   in collection RESOURCE, optionally restricted to NAMESPACE, sorted by
-   namespace/name, and the store's current resource revision as a string. Takes the
-   store lock and expires due events first."
+(defgeneric list-core-resources (store resource &optional namespace)
+  (:documentation "Return (values OBJECTS RESOURCE-VERSION): every object in
+   collection RESOURCE, optionally restricted to NAMESPACE, sorted by
+   namespace/name, with the collection's revision as a string.  The desired-state
+   read seam alongside GET-CORE-RESOURCE."))
+
+(defmethod list-core-resources ((store gr8s.store:pod-store) resource &optional namespace)
+  "Private copies under the store lock, expiring due events first."
   (with-store-lock (store)
     (expire-core-events-unlocked store)
     (values
