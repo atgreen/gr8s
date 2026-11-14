@@ -2,17 +2,17 @@
 
 ## Goal
 
-`gr8s trace` runs an ephemeral bpftrace program against Pods selected through
-the Kubernetes API. It sends the request to every node that hosts a match and
-streams node-labelled output. The stream ends when its duration expires or the
-client disconnects. The node agent uses [Whistler](https://github.com/atgreen/Whistler) to compile, load, attach, and
-remove the BPF program in-process. It needs no bpftrace binary, compiler
-toolchain, or DaemonSet.
+`gr8s debug trace` accepts programs written in a bpftrace-compatible language and
+sends them to nodes hosting Pods selected through the Kubernetes API. The node
+agent uses [Whistler](https://github.com/atgreen/Whistler) to JIT-compile the source
+to eBPF, load it, and attach its probes in-process. It streams node-labelled
+output and removes the probes when the duration expires or the client disconnects.
+No separate bpftrace binary, compiler toolchain, or DaemonSet is needed.
 
 The first supported command shape is:
 
 ```text
-gr8s trace --server URL --namespace default --selector app=api \
+gr8s debug trace --server URL --namespace default --selector app=api \
   --duration 30s 'kprobe:tcp_sendmsg { @[comm] = count(); }'
 ```
 
@@ -24,13 +24,12 @@ need direct access to a control-plane process. The endpoint is the namespaced
 on the wire but is authorized as `create`, like Kubernetes exec and port-forward.
 The first client WebSocket frame carries the request body and source, not the URL.
 The API uses the same certificate or bearer-token authentication as the
-Kubernetes listener. Authorization
-authorization requires the `create` verb on `traces` in the requested
+Kubernetes listener. Authorization requires the `create` verb on `traces` in the requested
 namespace.  Trace requests are ephemeral and are never stored as API objects.
 The CLI accepts a bearer token and CA file directly in the first cut; kubeconfig
 credential loading can be added without changing the server protocol.
 
-The request contains a namespace, Kubernetes label selector, bpftrace source,
+The request contains a namespace, Kubernetes label selector, bpftrace-compatible source,
 and duration.  The server enforces source and duration limits before dispatch.
 The CLI prints every received UTF-8 record, prefixing it with the node name when
 more than one node participates.  A terminal summary reports nodes that
@@ -101,7 +100,7 @@ path without recording potentially sensitive trace output.
 ## Protocol changes
 
 The node protocol gains `OPERATION_KIND_TRACE` and trace-specific request fields:
-bpftrace source, repeated Pod UIDs, and duration milliseconds.  Trace output
+bpftrace-compatible source, repeated Pod UIDs, and duration milliseconds.  Trace output
 uses the existing stdout/stderr `OperationStream` channels, acknowledgement
 window, `OperationCancel`, HA `RelayOperation`, and terminal
 `OperationResponse`; no second streaming protocol is introduced.

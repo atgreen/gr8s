@@ -211,7 +211,7 @@
 
 (test every-top-level-command-has-contextual-help
   (dolist (command '("serve" "agent" "witness" "join-token" "runtime"
-                     "kubeconfig" "doctor" "trace" "wireguard"
+                     "kubeconfig" "doctor" "debug" "wireguard"
                      "network" "certificate" "secrets-encrypt" "version"
                      "notices"))
     (let* ((arguments (list command "--help"))
@@ -324,7 +324,7 @@
 (test trace-command-parses-auth-scope-duration-and-source
   (let ((options
           (parse-cli-options
-           '("trace" "--server" "https://cp:6443" "--namespace" "alpha"
+           '("debug" "trace" "--server" "https://cp:6443" "--namespace" "alpha"
              "--selector" "app=api" "--duration" "30s" "--token" "secret"
              "--ca-file" "/tmp/ca.crt"
              "kprobe:tcp_sendmsg { @[comm] = count(); }"))))
@@ -334,8 +334,19 @@
     (is (= 30000 (getf options :duration-milliseconds)))
     (is (equal "secret" (getf options :token)))
     (is (search "tcp_sendmsg" (getf options :source))))
-  (signals error (parse-cli-options '("trace" "--selector" "app=api")))
-  (signals error (parse-cli-options '("trace" "--duration" "301s" "kprobe:vfs_read {}"))))
+  (signals error (parse-cli-options '("debug" "trace" "--selector" "app=api")))
+  (signals error (parse-cli-options '("debug" "trace" "--duration" "301s" "kprobe:vfs_read {}"))))
+
+(test debug-trace-help-describes-source-and-scope
+  (let ((help (with-output-to-string (*standard-output*)
+                (gr8s.server::print-help '("debug" "trace"))))
+        (group-help (with-output-to-string (*standard-output*)
+                      (gr8s.server::print-help '("debug")))))
+    (is (search "trace" group-help))
+    (is (search "gr8s debug trace [OPTIONS] BPFTRACE-SOURCE" help))
+    (dolist (option '("--server" "--namespace" "--selector" "--duration" "--token" "--ca-file"))
+      (is (search option help))))
+  (signals error (parse-cli-options '("trace" "kprobe:vfs_read {}"))))
 
 (test cli-options-describe-a-loopback-containerd-server
   (let ((options
@@ -753,7 +764,7 @@
                             '("skill") (constantly nil) (constantly 99)))))))
     (is (search "# gr8s operator and agent guide" output))
     (is (search "gr8s debug slynk" output))
-    (is (search "gr8s trace --server" output))
+    (is (search "gr8s debug trace --server" output))
     (is (search "gr8s doctor" output)))
   (dolist (arguments '(("help") ("skill" "--help") ("help" "skill")))
     (let ((output (with-output-to-string (*standard-output*)
