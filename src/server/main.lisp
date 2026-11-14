@@ -609,7 +609,9 @@
       (namestring (merge-pathnames ".kube/config" (user-homedir-pathname)))))
 
 (defun parse-debug-options (arguments)
-  "Parse `gr8s debug slynk' target and local tunnel options."
+  "Parse a debug subcommand and its options."
+  (when (equal "trace" (first arguments))
+    (return-from parse-debug-options (parse-trace-options (rest arguments))))
   (unless (equal "slynk" (first arguments))
     (error "unknown debug subcommand: ~A" (or (first arguments) "")))
   (let ((options (list :command :debug-slynk :local-port 4005
@@ -1441,8 +1443,6 @@ opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
      (parse-kubeconfig-options (rest arguments)))
     ((string= "runtime" (first arguments))
      (parse-runtime-options (rest arguments)))
-    ((string= "trace" (first arguments))
-     (parse-trace-options (rest arguments)))
     ((string= "debug" (first arguments))
      (parse-debug-options (rest arguments)))
     ((string= "wireguard" (first arguments))
@@ -1475,7 +1475,7 @@ opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
     milliseconds))
 
 (defun parse-trace-options (arguments)
-  "Parse `gr8s trace` selector, authentication and bpftrace source options."
+  "Parse `gr8s debug trace` selector, authentication and bpftrace-compatible source options."
   (let ((options (list :command :trace :server "https://127.0.0.1:6443"
                        :namespace "default" :selector "" :duration-milliseconds 30000))
         (rest arguments))
@@ -1492,7 +1492,7 @@ opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
                        ((string= option "--ca-file") (setf (getf options :ca-file) value))
                        (t (error "unknown trace option: ~A" option))))))
     (unless (= 1 (length rest))
-      (error "usage: gr8s trace [options] BPFTRACE-SOURCE"))
+      (error "usage: gr8s debug trace [options] BPFTRACE-SOURCE"))
     (setf (getf options :source) (first rest))
     options))
 
@@ -2722,12 +2722,13 @@ shutdown so runtime work can finish.
 
 ## Selector-scoped kernel tracing
 
-`gr8s trace` sends an ephemeral bpftrace program to nodes hosting matching Pods.
-Whistler compiles and attaches it in-process: no bpftrace binary, compiler
-installation, or DaemonSet is needed. Kernel probes are constrained to the
-selected Pods' container/sandbox cgroups.
+`gr8s debug trace` sends a program written in a bpftrace-compatible language to nodes
+hosting matching Pods. [Whistler](https://github.com/atgreen/Whistler) JIT-compiles
+it to eBPF, then loads and attaches it in-process. No separate bpftrace binary,
+compiler installation, or DaemonSet is needed. Kernel probes are constrained to
+the selected Pods' container/sandbox cgroups.
 
-    gr8s trace --server https://API_HOST:PORT --ca-file /path/to/ca.crt --token TOKEN --namespace default --selector app=api --duration 10s 'kprobe:tcp_sendmsg { @[comm] = count(); }'
+    gr8s debug trace --server https://API_HOST:PORT --ca-file /path/to/ca.crt --token TOKEN --namespace default --selector app=api --duration 10s 'kprobe:tcp_sendmsg { @[comm] = count(); }'
 
 Use your actual API endpoint and credentials. Unlike debug slynk, trace currently
 accepts --token and --ca-file directly, not --kubeconfig. HTTPS requires the CA
@@ -2784,8 +2785,8 @@ No HA API may start from member-local certificate state before this converges."
     ("runtime" "Manage sandbox runtimes")
     ("kubeconfig" "Print or write a cluster kubeconfig")
     ("doctor" "Diagnose a node state directory")
-    ("debug" "Open an authenticated on-demand debugger tunnel")
-    ("trace" "Trace Pods with bpftrace") ("wireguard" "Manage WireGuard identity")
+    ("debug" "Inspect live processes and trace Pods")
+    ("wireguard" "Manage WireGuard identity")
     ("network" "Inspect cluster networking") ("certificate" "Manage certificates")
     ("secrets-encrypt" "Manage secrets encryption")
     ("skill" "Print guidance for operators and AI agents")
@@ -2860,9 +2861,19 @@ No HA API may start from member-local certificate state before this converges."
       ((equal path '("runtime" "list"))
        (simple "List embedded assets and installed runtime addons" "[--state-directory DIR]"))
       ((equal path '("debug"))
-       (page "Open authenticated on-demand debugger tunnels" "COMMAND [OPTIONS]"
-             :commands '(("slynk" "Open Slynk to one node or control-plane member"))
+       (page "Inspect live processes and trace Pods" "COMMAND [OPTIONS]"
+             :commands '(("slynk" "Open Slynk to one node or control-plane member")
+                         ("trace" "Trace Pods with a bpftrace-compatible language"))
              :options '(("--help, -h" "show help"))))
+      ((equal path '("debug" "trace"))
+       (page "Trace selected Pods with a bpftrace-compatible language" "[OPTIONS] BPFTRACE-SOURCE"
+             :options '(("--server URL" "API endpoint (default https://127.0.0.1:6443)")
+                        ("--namespace NAME" "Pod namespace (default default)")
+                        ("--selector LABELS" "Select Pods by Kubernetes labels")
+                        ("--duration TIME" "Duration from 1ms to 300s (default 30s)")
+                        ("--token TOKEN" "API bearer token")
+                        ("--ca-file FILE" "CA certificate required for HTTPS")
+                        ("--help, -h" "show help"))))
       ((equal path '("debug" "slynk"))
        (page "Open a lifetime-bound Slynk tunnel" "(--node NAME | --selector LABELS | --member ID) [OPTIONS]"
              :options '(("--node NAME" "Target one exact Kubernetes node")

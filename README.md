@@ -22,10 +22,11 @@ tests: 462/462, zero failures**, in the recorded two-node Sonobuoy run on
 Run containers with embedded containerd/runc, choose
 [Kata Containers or gVisor](docs/runtime.md#runtimeclass--pluggable-runtimes)
 through `RuntimeClass`, or run virtual machines with [KubeVirt](docs/kubevirt.md).
-Explore the cluster through its integrated [Headlamp dashboard](#dashboard),
-trace selected Pods with [bpftrace programs](docs/design-gr8s-trace.md), and
-inspect running control-plane and agent processes through
-[Slynk](docs/building-and-testing.md#debugging-a-running-cluster).
+Explore the cluster through its integrated [Headlamp dashboard](#dashboard).
+[Whistler](https://github.com/atgreen/Whistler) JIT-compiles and loads programs
+written in a [bpftrace-compatible language](docs/design-gr8s-trace.md) for live
+kernel tracing of selected Pods. Inspect running control-plane and agent
+processes through [Slynk](docs/building-and-testing.md#debugging-a-running-cluster).
 
 gr8s is not yet a CNCF-submitted _Certified Kubernetes_ distribution. See the
 [API coverage](docs/kubernetes-surface.md) and
@@ -75,10 +76,11 @@ Those language capabilities support an integrated Kubernetes system:
 - **Explore the cluster in a browser.** The integrated Headlamp dashboard
   provides a Kubernetes web UI with live resource updates. Source builds need
   the [dashboard assets step](docs/building-and-testing.md#optional-dashboard-assets).
-- **Trace workloads in the kernel.** `gr8s trace` runs ephemeral bpftrace programs
-  on nodes hosting Pods selected through the Kubernetes API. The agent uses
-  [Whistler](https://github.com/atgreen/Whistler) to compile and attach them
-  in-process, without a separate bpftrace binary or tracing DaemonSet.
+- **Trace workloads in the kernel.** `gr8s debug trace` sends programs written in a
+  bpftrace-compatible language to nodes hosting Pods selected through the
+  Kubernetes API. [Whistler](https://github.com/atgreen/Whistler) JIT-compiles them
+  to eBPF, then loads and attaches them in the agent process. No separate
+  bpftrace binary or tracing DaemonSet is needed.
 - **Inspect the running implementation.** The API, controllers, agent,
   networking compiler, and datastore use Common Lisp. An authenticated Slynk
   tunnel lets you inspect live control-plane and agent processes.
