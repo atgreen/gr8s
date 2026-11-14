@@ -1413,7 +1413,7 @@ opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
                                  arguments)))
     ((and (null (rest arguments))
           (member (first arguments)
-                  '("runtime" "patch" "wireguard" "network" "debug"
+                  '("runtime" "wireguard" "network" "debug"
                     "certificate" "secrets-encrypt")
                   :test #'string=))
      (list :command :help :help-path arguments))
@@ -2206,7 +2206,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
   (call-with-serve-state-ownership options (lambda () (serve-owned options))))
 
 (defun run-serve-command (options)
-  "Own state before evaluating startup patches, through patch shutdown."
+  "Own state before any application/PKI initialization, through final teardown."
   (call-with-serve-state-ownership
    options
    (lambda ()
@@ -2262,7 +2262,6 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
          (local-agent nil)
          (pki-authority-observer nil)
          (kubeconfig-path nil))
-    (declare (ignore patch-policy-checked))
     (setf *shutdown-requested* nil)
     (install-shutdown-handlers)
     (unwind-protect
@@ -2658,8 +2657,8 @@ An agent's --server HOST:PORT is the supervisor, not the Kubernetes API URL.
 `--runtime fake` is for development and does not prove real container/BPF health.
 
 Record the launch arguments, service unit, runtime mode, overlay backend,
-node names, and state/log paths before changing a cluster. Check version and
-live patch level with `gr8s version --state-directory /var/lib/gr8s`.
+node names, and state/log paths before changing a cluster. Check version
+with `gr8s version --state-directory /var/lib/gr8s`.
 
 ## First response to a failure
 
@@ -2743,8 +2742,7 @@ back it up using the deployment's recovery procedure before upgrades. Do not
 remove state, BPF pins, namespaces, or runtime files as a first troubleshooting
 step. Stop gr8s cooperatively before offline maintenance.
 
-Discover signed live patch inspection, planning, status, and history with
-`gr8s patch --help`; runtime inventory with `gr8s runtime list`; and node enrollment
+Discover runtime inventory with `gr8s runtime list`; and node enrollment
 with `gr8s join-token --help`. Join tokens and CA pins belong to the existing
 cluster: do not bootstrap a replacement state directory to repair enrollment.
 
@@ -2776,7 +2774,7 @@ No HA API may start from member-local certificate state before this converges."
   '(("serve" "Run the control plane and local node agent")
     ("agent" "Run a node agent") ("witness" "Run an HA quorum witness")
     ("join-token" "Print a cluster join token")
-    ("runtime" "Manage sandbox runtimes") ("patch" "Manage live patches")
+    ("runtime" "Manage sandbox runtimes")
     ("kubeconfig" "Print or write a cluster kubeconfig")
     ("doctor" "Diagnose a node state directory")
     ("debug" "Open an authenticated on-demand debugger tunnel")
@@ -2866,14 +2864,6 @@ No HA API may start from member-local certificate state before this converges."
                         ("--kubeconfig FILE" "Authentication and API endpoint")
                         ("--local-port PORT" "Loopback port (default 4005)")
                         ("--help, -h" "show help"))))
-      ((equal path '("patch"))
-       (page "Manage live patches" "COMMAND [OPTIONS]"
-             :commands '( ("inspect IMAGE" "Inspect a patch image") ("plan IMAGE" "Plan a rollout")
-                         ("apply PLAN" "Apply a rollout plan") ("status [PLAN]" "Show rollout status")
-                         ("pause|resume|abort PLAN" "Control a rollout")
-                         ("history --node NODE" "Show node patch history")
-                         ("import OCI-LAYOUT" "Import an offline patch"))
-             :options '(("--help, -h" "show help"))))
       ((equal path '("wireguard"))
        (page "Manage WireGuard identity" "COMMAND [OPTIONS]"
              :commands '(("rotate-key" "Replace this node's identity on its next start"))
@@ -2915,7 +2905,7 @@ No HA API may start from member-local certificate state before this converges."
       ((and (= (length path) 1) (assoc (first path) +cli-commands+ :test #'string=))
        (simple (second (assoc (first path) +cli-commands+ :test #'string=))))
       ((and (> (length path) 1)
-            (member (first path) '("patch" "wireguard" "network" "debug" "certificate" "secrets-encrypt")
+            (member (first path) '("wireguard" "network" "debug" "certificate" "secrets-encrypt")
                     :test #'string=))
        (simple (format nil "Run the ~{~A~^ ~} command" path)))
       (t (error "no help for command: ~{~A~^ ~}" path)))))
