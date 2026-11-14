@@ -2,9 +2,9 @@
 
 ## Goal
 
-gr8s becomes a small multi-node Kubernetes-compatible Pod control plane without
-giving up its single-binary deployment. One dumped native image supplies three
-roles:
+gr8s runs a multi-node Kubernetes-compatible control plane and node agents from
+one native executable. Its server and worker entry points also supply the native
+CNI integration:
 
 - `gr8s serve` runs the Kubernetes API and cluster control plane.
 - `gr8s agent` runs the node-local runtime and networking control loop.
@@ -50,11 +50,12 @@ stream over TLS carries:
 - correlated log and exec requests, output, input, resize, exit, and cancel
   messages.
 
-The initial protocol sends full snapshots rather than a subtle delta/watch
-protocol. Every snapshot has a monotonically increasing revision. Agents apply
-messages idempotently and acknowledge the highest fully persisted revision.
-After reconnect, the agent registers its last acknowledged revisions and the
-server resends current snapshots when necessary.
+The protocol sends revisioned snapshots and negotiates desired-state deltas for
+agents advertising that capability. Agents reconstruct and apply desired state
+idempotently, acknowledging the highest fully applied revision. After reconnect,
+the agent registers its last acknowledged revisions and the server sends current
+state as needed. See [`node-session.lisp`](../src/apiserver/node-session.lisp)
+for capability negotiation and snapshot/delta construction.
 
 The authenticated Kubernetes HTTPS API remains the user-facing compatibility surface. The
 private agent protocol is not presented as a Kubernetes kubelet API.

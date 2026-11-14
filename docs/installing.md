@@ -17,26 +17,59 @@ and its unit to `/etc/systemd/system`. Runtime and cluster data belong under
 
 ## Install from a local binary
 
-Build or obtain an executable gr8s binary, then run the installer with the full
-command line that systemd should preserve:
+Build the binary using the [host setup guide](building-and-testing.md#requirements),
+or obtain a verified binary. Both server and worker hosts need the
+[runtime prerequisites and network access](building-and-testing.md#network-access).
+Replace `192.0.2.10` with the server's reachable address. Run the installer with
+the full command line that systemd should preserve:
 
 ```sh
 sudo env \
   INSTALL_GR8S_BINARY="$PWD/build/gr8s" \
   INSTALL_GR8S_MODE=server \
-  INSTALL_GR8S_EXEC_ARGS='serve --state-directory /var/lib/gr8s/server --kubeconfig /etc/gr8s/kubeconfig' \
+  INSTALL_GR8S_EXEC_ARGS='serve --state-directory /var/lib/gr8s/server --kubeconfig /etc/gr8s/kubeconfig --node-listen 192.0.2.10 --node-address 192.0.2.10' \
   ./install.sh
 ```
 
-An agent uses `INSTALL_GR8S_MODE=agent` and arguments beginning with `agent`:
+The server example exposes its node endpoint on TCP 7443. For a machine that
+will never accept remote workers, omit `--node-listen` and `--node-address` to
+keep that endpoint on loopback. VXLAN uses UDP 4789 between nodes by default.
+
+On the running server, create a one-time token for this worker identity:
 
 ```sh
+sudo /usr/local/bin/gr8s join-token --state-directory /var/lib/gr8s/server \
+  --node-name worker-1
+```
+
+On the worker, set `TOKEN` and `CA_PIN` to the returned JSON `token` and `caPin`
+values. Set `192.0.2.11` to the worker's reachable address. Run from a checkout
+containing the installer and lifecycle scripts plus the binary:
+
+```sh
+TOKEN='REPLACE_WITH_TOKEN'
+CA_PIN='REPLACE_WITH_CA_PIN'
 sudo env \
   INSTALL_GR8S_BINARY="$PWD/build/gr8s" \
   INSTALL_GR8S_MODE=agent \
-  INSTALL_GR8S_EXEC_ARGS='agent --server 192.0.2.10:18090 --node-name worker-1 --state-directory /var/lib/gr8s/agent' \
+  INSTALL_GR8S_EXEC_ARGS="agent --server 192.0.2.10:7443 --node-name worker-1 --state-directory /var/lib/gr8s/agent --node-address 192.0.2.11 --token $TOKEN --ca-pin $CA_PIN" \
   ./install.sh
+unset TOKEN CA_PIN
 ```
+
+The worker persists its own key and certificate in its state directory. Subsequent
+starts use that identity rather than consuming the token again. If first enrollment
+fails after a token is consumed, inspect the worker's state and logs before issuing
+a replacement. On the server, check that both nodes become Ready:
+
+```sh
+sudo kubectl --kubeconfig /etc/gr8s/kubeconfig get nodes -o wide
+sudo systemctl status gr8s-server.service --no-pager
+```
+
+Use `sudo systemctl status gr8s-agent.service --no-pager` and
+`sudo journalctl -u gr8s-agent.service -n 100 --no-pager` on the worker to diagnose
+startup or enrollment failures.
 
 `INSTALL_GR8S_EXEC_ARGS` is stored in a systemd environment file. Quotes,
 backslashes, tabs, and newlines are rejected instead of being reinterpreted.

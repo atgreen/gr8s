@@ -7,9 +7,15 @@ Networking (Services, Gateway API, NetworkPolicy, DNS) lives in
 [runtime.md](runtime.md); high availability lives in
 [high-availability.md](high-availability.md).
 
-> **gr8s has not passed Kubernetes conformance.** The focused and native
-> validation records below demonstrate specific behaviors. They do not establish
-> certification. See [CONFORMANCE.md](CONFORMANCE.md).
+> The recorded two-node run passed all **462 upstream Kubernetes v1.37
+> `certified-conformance` cases** on 2026-11-11. gr8s has not been submitted for
+> CNCF certification. See [the result and its scope](CONFORMANCE.md).
+
+This reference was reconciled with the source on 2026-11-14. A feature described
+as implemented is not necessarily covered by native acceptance; dated evidence
+links retain the scope of their original run. For reader paths and component
+names, start with the [documentation guide](index.md) and
+[Kubernetes component map](kubernetes-users.md).
 
 ## Pods & lifecycle
 
@@ -56,8 +62,11 @@ with separate logs per attempt. See the
 
 **Ephemeral & resize.** Ephemeral containers are added through
 `pods/ephemeralcontainers`; `pods/resize` changes CPU and memory in place, or
-restarts the container under a RestartContainer policy. Readiness gates and a
-Pod's own `resources` field remain unsupported.
+restarts the container under a RestartContainer policy. Readiness gates hold
+Ready false until the named custom conditions are true. Pod-level `spec.resources`
+supports CPU, memory, and hugepage requests/limits, with validation, scheduling,
+quota, and runtime resource accounting. See
+[`pod-level-resources.lisp`](../src/resources/pod-level-resources.lisp).
 
 **Logs, exec & proxy.** Pod logs and exec run through correlated agent operations,
 including interactive streams and nonzero exit status. `kubectl port-forward`
@@ -75,8 +84,11 @@ referenced ConfigMaps, Secrets, and disk-backed emptyDir volumes; the control
 plane sends only referenced objects to the assigned node over mTLS, and the agent
 projects files into private host directories, mapping numeric user, group, and
 fsGroup settings to containerd. Downward environment fields include Pod identity,
-node name, and Pod IP. Projected data is applied during Pod setup; live refresh is
-not yet implemented.
+node name, and Pod IP. Projected ConfigMap, Secret, and token files are refreshed
+during reconciliation. Refresh errors are logged and retried; updates are not a
+transaction over all files in a projection. Existing `subPath` bind mounts do not
+follow replacement files. See
+[`pod-volume-projection.lisp`](../src/kubelet/pod-volume-projection.lisp).
 
 Pods mount signed ES256 ServiceAccount tokens bound to the Pod and its node,
 renewed by the control plane after 80% of their lifetime. TokenRequest,
@@ -102,10 +114,12 @@ kubelet semantics; the cluster signing key never leaves the control plane.
 
 Bootstrap APIs store Namespaces, ServiceAccounts, Roles, RoleBindings,
 ClusterRoles, and ClusterRoleBindings with durable metadata and optimistic
-updates. Managed native clusters expose a separate HTTPS API at `10.96.0.1:443`,
-authenticated with issued ServiceAccount tokens and authorized against live
-RoleBindings and ClusterRoleBindings. The local administrative HTTP API remains
-loopback-only and refuses non-loopback listener addresses.
+updates. The Kubernetes API defaults to authenticated HTTPS on `0.0.0.0:6443`,
+using client certificates or bearer tokens and live RBAC bindings. Managed clusters
+publish the in-cluster `kubernetes` Service at `10.96.0.1:443`. Its backing listener
+can share the public API listener; there is no separate unauthenticated
+administrative API. The generated owner-only kubeconfig embeds the cluster CA
+and an administrative client certificate.
 
 CSR and certificate issuance are served and replicated; see the
 [client-certificate docs](api-client-certificates.md) and the
@@ -125,15 +139,16 @@ than replacing it.
 AdmissionReview on API writes and Pod connections, over TLS verified against the
 `caBundle` and within `timeoutSeconds`, with rules, selectors, `failurePolicy`,
 ordered JSON patches, and `reinvocationPolicy` applied as upstream does. A Service
-backend is reached directly at a ready endpoint. `matchConditions` run a bounded
-CEL subset (`src/admission-cel.lisp`): unsupported CEL (`authorizer`, `matches`,
-uint, bytes, …) fails at registration instead of being misjudged.
+backend is reached directly at a ready endpoint. `matchConditions` use the
+`cl-cel` expression implementation, including authorization checks against RBAC.
 
 ValidatingAdmissionPolicy and MutatingAdmissionPolicy evaluate CEL on the
-admission path, though `status.typeChecking`, audit annotations, and the
-`authorizer` variable are not implemented. Objects written by in-process
-controllers do not yet pass through webhooks; EndpointSlices, bootstrap objects,
-and status writes are also exempt for now.
+admission path. Policy support includes variables, parameter selection, audit
+annotations, the `authorizer` environment, and reported `status.typeChecking`.
+See [`admission-policies.lisp`](../src/apiserver/admission-policies.lisp).
+Controller-created Pods use the admission path too. Internal writes have explicit
+entry points in [`admission-http.lisp`](../src/apiserver/admission-http.lisp);
+do not assume every internal mutation is equivalent to an external API request.
 
 ## Scheduling & resource governance
 
@@ -183,6 +198,10 @@ the node as the source; SCTP host ports are scheduled but not relayed.
 - **DaemonSets** — one Pod on every node their template selects, following node
   labels, recording `apps/v1` ControllerRevisions. RollingUpdate respects
   `maxUnavailable`/`maxSurge`; OnDelete leaves running Pods alone.
+- **Jobs & CronJobs** — controllers create and account for Job Pods, retry or
+  complete work according to the Job policy, and create scheduled Jobs from
+  CronJobs. See [`job-controller.lisp`](../src/controllers/job-controller.lisp)
+  and [`cronjob-controller.lisp`](../src/controllers/cronjob-controller.lisp).
 - **PodDisruptionBudgets** — `policy/v1` with a `status` subresource and a
   controller using upstream's arithmetic. The Pod `eviction` subresource spends a
   budget atomically, answers 429 with the `DisruptionBudget` cause, honors
@@ -190,7 +209,9 @@ the node as the source; SCTP host ports are scheduled but not relayed.
 
 Controller state survives restart through durable API objects and owner
 references. See the [workload record](evidence/workload-validation-2026-11-04.json).
-Custom finalizers on workloads remain unsupported.
+Custom finalizers retain deleting workload objects until a client removes them;
+foreground/orphan deletion also coordinates owner/dependent cleanup. See
+[`workload-deletion.lisp`](../src/controllers/workload-deletion.lisp).
 
 **Garbage collection.** Owner references are preserved on Pods and stored
 resources; the control plane collects dependents after all known owners disappear,
@@ -244,17 +265,24 @@ Events share durable identities and revisions between core `v1` and
 `events.k8s.io/v1`. Both support JSON/protobuf CRUD, patches, field/label
 selectors, collection deletion, consistent pagination, and resumable watches.
 Timestamps preserve microseconds; submitted Events expire one hour after their last
-write, producing real deletion events. Native runtime event emission remains
-pending.
+write, producing real deletion events. Nodes report probe and container lifecycle
+occurrences, which become Events after the server validates Pod UID, assignment,
+and desired revision. Replayed cumulative counts do not duplicate occurrences;
+see [`node-runtime-events.lisp`](../src/resources/node-runtime-events.lisp).
 
 ## Namespaces, quotas & lifecycle
 
 A deleted Namespace turns Terminating and refuses new content while its Pods drain
 first, then its other objects, until its finalizers are released. Lease, flow
-control, dynamic resource allocation, and admission policy objects are served with
-protobuf requests, selectors, watches, status subresources, and finalizers —
-though for most of them only the API exists (no flow-control limiting, no
-ResourceClaim allocator).
+control, dynamic resource allocation, and admission policy objects have typed APIs.
+API Priority and Fairness classifies requests by FlowSchema and applies per-priority
+seat limits with bounded waiting/refusal; see
+[`flowcontrol.lisp`](../src/apiserver/flowcontrol.lisp).
+Dynamic Resource Allocation includes ResourceClaim allocation and scheduling,
+node plugin registration, durable prepare/unprepare, and CDI device injection;
+see the [resource management guide](resource-management.md) and
+[`dra-node.lisp`](../src/kubelet/dra-node.lisp). API availability alone should not
+be read as support for every optional upstream feature.
 
 ## API machinery — watches, lists & pagination
 
@@ -267,8 +295,10 @@ timeouts, bookmarks, and initial events; a running server resumes a watch from u
 to ten minutes back (16,384 stored-resource, 16,384 Pod, and 4,096 Node changes
 held at most), ending older watches with a 410 Expired for clients to relist. The
 expanded journal uses storage format 2, which older executables reject; downgrading
-requires restoring a pre-upgrade state backup. **Pod and Node watches remain
-pending.**
+requires restoring a pre-upgrade state backup. Pod and Node list/watch paths are
+implemented alongside stored-resource watches; see
+[`pod-watch.lisp`](../src/apiserver/pod-watch.lisp) and
+[`node-watch.lisp`](../src/apiserver/node-watch.lisp).
 
 ## Metrics & autoscaling
 
@@ -294,6 +324,10 @@ including label and field selectors and ordinary Kubernetes RBAC. This powers
 `kubectl top` and the CPU/MEM columns of k9s and Headlamp without a metrics-server
 Pod, Service, or APIService. A standalone `gr8s agent` doesn't serve the kubelet
 endpoints yet.
+
+Additional authenticated `/metrics` families cover Lisp heap/GC, Raft/checkpoint
+health, datastore and filesystem capacity, and reconciliation convergence. See
+[control-plane metrics](control-plane-metrics.md) for labels and sampling limits.
 
 A HorizontalPodAutoscaler controller scales Deployments, ReplicaSets,
 ReplicationControllers, and StatefulSets on Resource and ContainerResource metrics,

@@ -6,15 +6,102 @@ live-process debugging.
 
 ## Requirements
 
-- Linux and SBCL for building
-- ASDF dependencies from `gr8s.asd` (this checkout includes an OCICL lockfile and
-  dependency tree)
-- `kubectl` for client-side smoke testing
-- root privileges and working cgroup delegation for running real Pods
-- Linux 6.6 or newer with TCX eBPF support and BPF/network-administration
-  privileges for the Whistler CNI stage
-- Python 3, `ip`, `nsenter`, `nft`, and a non-loopback upstream resolver for the
-  privileged two-node smoke
+Build on Linux with SBCL, OCICL, GNU Make, Git, Go, curl, CA certificates,
+GNU coreutils (`sha256sum`, `install`), awk, grep, and binutils (`readelf`). The
+native payload build compiles containerd, its shim, and CNI plugins from pinned
+Go modules, and downloads a checksum-verified runc binary. It does not require
+clang or LLVM. The payload installer supports x86-64 and AArch64.
+
+The checkout includes `ocicl.csv`, a lockfile, **not** the dependency source tree.
+`make deps` restores the pinned Lisp systems into `ocicl/`; `make native` also
+invokes that dependency step automatically. Initial builds need access to GitHub,
+the OCI dependency registry, Go modules/toolchains, and release downloads. An
+airgap runtime payload does not make a fresh source build offline.
+
+Running real Pods requires root, working cgroup v2, mount/network namespace
+support, and Linux 6.6+ with TCX eBPF support. Install `kubectl` for the walkthrough.
+The native build reserves a 2 GiB SBCL dynamic heap; leave additional host memory
+for compilation and the Go build. This reservation is not a measured minimum RAM
+requirement or cluster sizing recommendation.
+
+The privileged Python runners also use Python 3, `ip`, `nsenter`, `nft`, and a
+non-loopback upstream resolver. Run real-container/BPF tests in disposable root
+VMs; ordinary unit tests do not need root.
+
+### Example build host: Fedora 44
+
+Fedora 44 is the guest OS used by the project's native acceptance VMs. The VMs
+receive an already-built binary; the commands below describe source-build setup,
+not an assertion that a fresh Fedora build has been acceptance-tested.
+
+```sh
+sudo dnf install -y sbcl make gcc git golang curl ca-certificates \
+  coreutils gawk grep binutils python3 iproute util-linux nftables
+```
+
+Install [OCICL](https://github.com/ocicl/ocicl#installation), for example from
+source as the ordinary build user:
+
+```sh
+git clone https://github.com/ocicl/ocicl.git /tmp/gr8s-ocicl
+(cd /tmp/gr8s-ocicl && sbcl --load setup.lisp)
+export PATH="$HOME/.local/bin:$PATH"
+ocicl setup
+```
+
+Apply the Lisp startup configuration printed by `ocicl setup` to `~/.sbclrc`.
+For this build shell, also make the project and restored systems visible to ASDF:
+
+```sh
+# Run from the gr8s repository root.
+export CL_SOURCE_REGISTRY="$PWD/:$PWD/ocicl//:"
+command -v sbcl ocicl go make curl readelf
+sbcl --version
+ocicl version
+go version
+make deps
+make native
+```
+
+Go may select/download a newer toolchain required by the pinned modules; see
+[Go toolchain selection](https://go.dev/doc/toolchain). If toolchain downloads
+are disabled, install a sufficiently new Go toolchain explicitly. Install
+[`kubectl`](https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/) before
+starting the workload walkthrough.
+
+### Optional dashboard assets
+
+The dashboard command serves embedded Headlamp frontend assets. A source build
+without those assets does not include a working frontend. This step additionally
+needs Node.js/npm, `cpio`, and `gzip`; use a Headlamp checkout compatible with its
+own frontend build requirements. From the gr8s repository root:
+
+```sh
+git clone https://github.com/kubernetes-sigs/headlamp.git /tmp/gr8s-headlamp
+make dashboard-assets HEADLAMP=/tmp/gr8s-headlamp
+make native
+```
+
+The asset target runs `npm ci` and the frontend build, then copies and compresses
+assets for embedding. It is optional for API/CLI operation. See
+[the dashboard command](../README.md#dashboard) for usage.
+
+### Network access
+
+| Traffic | Default | When needed |
+|---|---|---|
+| Client → server | TCP 6443, authenticated HTTPS, listens on `0.0.0.0` | Kubernetes API |
+| Agent → server | TCP 7443, mutual TLS after enrollment, listens on loopback until configured | Remote workers; set `--node-listen` |
+| Node ↔ node | UDP 4789 | Default VXLAN overlay |
+| Raft member ↔ member | TCP 7000, loopback until configured | HA only; set `--raft-listen` |
+| Node kubelet-compatible API | TCP 10250 | Metrics/stats clients where the endpoint is enabled |
+| Node → registries/resolvers | Registry HTTPS and DNS | Image pulls and upstream DNS |
+
+WireGuard is opt-in with `--overlay-backend wireguard`. Allow the advertised UDP
+endpoint ports; optional relaying also needs its configured UDP port range. See
+[WireGuard configuration](networking.md#self-tuning-wireguard-overlay). These
+replace VXLAN transport requirements for that backend. Gateway/Ingress, NodePort,
+and LoadBalancer listeners additionally need the workload's configured ports.
 
 ## Build & run the self-contained server
 
@@ -33,14 +120,10 @@ kubeconfig to standard output, or writes it with `--output FILE`. No system
 containerd or host glibc is used by the embedded payload. Root is still required
 for mounts, namespaces, cgroups, and the overlay snapshotter.
 
-Then, from another terminal:
-
-```sh
-kubectl --kubeconfig /tmp/gr8s.kubeconfig apply -f pod.yaml
-kubectl --kubeconfig /tmp/gr8s.kubeconfig get pods
-kubectl --kubeconfig /tmp/gr8s.kubeconfig describe pod POD_NAME
-kubectl --kubeconfig /tmp/gr8s.kubeconfig delete pod POD_NAME
-```
+Continue with [Your first workload](getting-started.md), which includes the
+complete manifest, node readiness, Deployment/Service/DNS checks, rollout, and
+cleanup. Its `kubectl` commands use `sudo` because the generated kubeconfig is
+owner-only and contains administrative credentials.
 
 ### Entry paths
 
@@ -56,13 +139,17 @@ kubectl --kubeconfig /tmp/gr8s.kubeconfig delete pod POD_NAME
   when `CNI_COMMAND` is present.
 
 The node endpoint defaults to loopback port 7443. Set `--node-listen` and
-`--node-port` for a node-facing address. The Kubernetes HTTP API stays on
-loopback. Agents advertise the source IPv4 address of their control connection for
+`--node-port` for a node-facing address. The Kubernetes API defaults to
+HTTPS on `0.0.0.0:6443`; `--listen` and `--port` change its binding.
+Agents advertise the source IPv4 address of their control connection for
 VXLAN, or use an explicit `--node-address` on multi-interface hosts.
 
 ## A second node
 
-Start `serve` bound to the control node's reachable IPv4 address:
+Use two machines meeting the runtime requirements above, each with the native
+binary. Replace the documentation addresses `192.0.2.10` and `192.0.2.11` with
+reachable addresses on your machines. Start the server with its node endpoint
+bound to the control node's reachable address:
 
 ```sh
 sudo build/gr8s serve --state-directory /var/lib/gr8s-control \
@@ -85,8 +172,11 @@ sudo build/gr8s agent --server 192.0.2.10:7443 --node-name worker-b \
   --token TOKEN --ca-pin CA_PIN
 ```
 
-The two nodes need underlay connectivity for the node endpoint and VXLAN UDP port
-4789. Each agent receives its own Pod CIDR and the peer route set. No bridge or
+The two nodes need underlay connectivity for TCP 7443 and VXLAN UDP 4789.
+The default overlay is VXLAN; WireGuard requires an explicit server option.
+After enrollment, `sudo kubectl --kubeconfig /var/lib/gr8s-control/kubeconfig get nodes`
+on the control node should show `gr8s-local` and `worker-b` becoming Ready.
+Each agent receives its own Pod CIDR and the peer route set. No bridge or
 host-local CNI configuration is required. Enrollment verifies the server
 certificate against `--ca-pin` before sending the token, generates the private key
 on the node, and stores `node.key`, `node.crt`, `ca.crt`, the assigned Pod CIDR,

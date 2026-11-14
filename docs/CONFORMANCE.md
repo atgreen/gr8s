@@ -2,27 +2,35 @@
 SPDX-FileCopyrightText: 2026 Anthony Green
 SPDX-License-Identifier: Apache-2.0
 -->
-# Kubernetes v1.36 Conformance
+# Kubernetes conformance results
 
-gr8s is a from-scratch Kubernetes-compatible control plane written in Common
-Lisp. This document is the running ledger of conformance progress against the
-**official upstream v1.36 `certified-conformance` suite** (446 selected cases),
-run via Sonobuoy against a native gr8s cluster.
+## Current recorded result
 
-> **Milestone (2026-11-11):** gr8s **passes every case of the upstream Kubernetes
-> v1.37 `certified-conformance` suite — 462 of 462, 0 failures**, run via Sonobuoy
-> against a native two-node gr8s cluster (build `v1.37.2-g6584550+dirty`; the
-> tested changes are committed in `6584550..827ef7c6`). Machine-generated
-> evidence: [conformance-full-v1.37-2026-11-11.json](evidence/conformance-full-v1.37-2026-11-11.json),
-> produced by `scripts/e2e-two-node.sh report`. gr8s is not yet a CNCF-submitted
-> _Certified Kubernetes_ distribution.
+The native two-node run on **2026-11-11** passed every selected case of the
+upstream Kubernetes **v1.37 `certified-conformance` suite: 462/462, 0 failures**.
+It ran via Sonobuoy v0.57.3 using `scripts/e2e-two-node.sh`, with build
+`v1.37.2-g6584550+dirty`. The tested changes are recorded as committed in
+`6584550..827ef7c6`.
 
-This document reports results as-is. Each row links to the committed evidence
-JSON for that run (JUnit archive, gr8s request log, and artifact hashes). The
-round ledger below is the earlier **v1.36** (446-case) progression that led to
-the v1.37 milestone above.
+[Machine-generated evidence](evidence/conformance-full-v1.37-2026-11-11.json) records the
+executed cases, hooks, skipped cases, artifact hashes, and run details. The
+462 count excludes suite hooks and unselected tests. This is a result for that
+build and two-node configuration, not a fresh run of every later checkout or a
+claim about all optional Kubernetes features and topologies.
 
-## Round ledger
+gr8s is **not yet a CNCF-submitted Certified Kubernetes distribution**. Passing
+the upstream selection and obtaining certification are separate claims.
+The [API reference](kubernetes-surface.md) describes current implementation
+scope; the [gap inventory](k3s-gap-inventory.md) covers operational limits beyond
+this test selection.
+
+## Historical v1.36 progression
+
+The following ledger is an archived account of early development against the
+upstream v1.36 selection (446 cases). Its failure taxonomy describes the round-4
+binary, not today's API support. Each row links to the evidence for that run.
+
+### Early round ledger
 
 Every full run is a numbered round. "Passed/Failed" are measured case outcomes
 out of 446; pass rate is `passed / 446`. Per gr8s's own interpretation note, a
@@ -41,13 +49,13 @@ A pre-baseline [bootstrap evidence record](evidence/conformance-bootstrap-2026-1
 (different schema) predates round 1 and documents first end-to-end suite
 execution.
 
-**Current best: round 4 — 64/446 (14.3%).** Trend: monotonic, no regressions
-across rounds 1→4.
+**Best in this early ledger: round 4 — 64/446 (14.3%).** The later v1.37
+462/462 result above supersedes this as the current recorded milestone.
 
-## Failure taxonomy for round 4
+### Historical failure taxonomy for round 4
 
-Failing cases by SIG, from `countsBySIG` in the round-4 evidence. This is the
-hit-list: biggest buckets first.
+Failing cases by SIG, from `countsBySIG` in the round-4 evidence. These were the
+failure buckets at that stage, largest first.
 
 | SIG | Passing | Failing | Pass trend (R1→R4) |
 |-----|--------:|--------:|--------------------|
@@ -63,27 +71,27 @@ hit-list: biggest buckets first.
 | sig-instrumentation | 4 | 0 ✅ | 0 → 0 → 4 → 4 |
 | **Total** | **64** | **382** | |
 
-### Highest-impact gaps
+### Gaps in the historical round-4 binary
 
-- **sig-apps (60 failing, 0 passing)** — the whole group is unimplemented:
+- **sig-apps (60 failing, 0 passing)** — the group was unimplemented in that binary:
   Deployment, ReplicaSet, StatefulSet, DaemonSet, Job, CronJob controllers.
-  This is the single largest contiguous block. (The round-4 binary predates the
-  Deployment/ReplicaSet controllers landing in PR33/35, so expect a step change
-  here in the next round.)
-- **sig-api-machinery (88)** and **sig-node (86)** are the next-largest. Node
-  has moved the most in absolute terms (5→20) and is where lifecycle, probes,
+  This was the largest contiguous block. The round-4 binary predated the
+  Deployment/ReplicaSet controllers landing in PR33/35.
+- **sig-api-machinery (88)** and **sig-node (86)** were the next-largest. Node
+  had moved the most in absolute terms (5→20) and covered lifecycle, probes,
   exec/attach, and container-runtime semantics live.
-- **sig-storage (72 failing)** is improving fastest proportionally (2→19) as the
-  PV/PVC/StorageClass path fills in.
-- **sig-scheduling (11, 0 passing)** and **sig-architecture (1)** are small,
-  self-contained wins.
-- **sig-instrumentation is fully passing** — keep it green.
+- **sig-storage (72 failing)** had improved fastest proportionally (2→19) as the
+  PV/PVC/StorageClass path filled in.
+- **sig-scheduling (11, 0 passing)** and **sig-architecture (1)** were smaller
+  outstanding groups.
+- **sig-instrumentation was fully passing** in that run.
 
-## Methodology
+## Reproducing and recording results
 
-- **Suite**: official upstream v1.36 `certified-conformance` selection (446
-  cases). Seven passing Sonobuoy suite hooks are counted separately from cases.
-- **Sonobuoy**: v0.57.5. Command shape:
+- **Historical suite**: upstream v1.36 selection (446 cases), Sonobuoy v0.57.5.
+  The current recorded v1.37 run uses v0.57.3 and 462 cases; use its evidence
+  for exact command and configuration. Hooks are counted separately from cases.
+- **Direct Sonobuoy command shape**:
   ```
   sonobuoy run --kubeconfig <rundir>/kubeconfig --dns-pod-labels= \
     --plugin=e2e --mode=certified-conformance
@@ -118,9 +126,10 @@ See that script's header for details.
 ### Adding a round to this ledger
 
 1. Commit the run's summary JSON to `docs/conformance-full-<ordinal>-<date>.json`.
-2. Add a row to the **Round ledger** (date, commit, passed/failed, Δ pass, a
-   one-line note on what landed since the previous round).
-3. Refresh the **Failure taxonomy** table from the new run's `countsBySIG`, and
-   update the pass-trend column.
+2. Update **Current recorded result** with the suite version, executed/pass/fail
+   counts, build identity, topology, runner, and evidence link. Keep earlier
+   results clearly labelled as historical; never mix denominators across versions.
+3. For a failing run, include its own failure taxonomy from `countsBySIG` rather
+   than presenting an old taxonomy as current.
 4. If any previously-passing case now fails, call out the **regression**
    explicitly in the notes — that is the signal this ledger exists to catch.
