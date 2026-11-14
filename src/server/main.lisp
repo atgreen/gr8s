@@ -999,6 +999,60 @@ The new identity takes effect when the node agent next starts."
     (finish-output output))
   0)
 
+(defun dashboard-browse-url (server)
+  "The dashboard page URL for a cluster API at SERVER: SERVER with any trailing
+slash dropped, plus /dashboard/ (where gr8s serves the Headlamp web UI)."
+  (format nil "~A/dashboard/" (string-right-trim "/" server)))
+
+(defun default-browser-opener ()
+  "The platform command that opens a URL in the user's default browser."
+  #+darwin "open"
+  #-darwin "xdg-open")
+
+(defun parse-dashboard-options (arguments)
+  "Parse `gr8s dashboard` options: which cluster API to open, and how (or whether)
+to launch a browser."
+  (let ((options (list :command :dashboard
+                       :server "http://127.0.0.1:8080"
+                       :browser nil
+                       :no-launch nil))
+        (rest arguments))
+    (loop while (and rest (uiop:string-prefix-p "--" (first rest)))
+          do (let ((option (pop rest)))
+               (cond
+                 ((string= option "--no-launch") (setf (getf options :no-launch) t))
+                 (t
+                  (unless rest (error "~A requires a value" option))
+                  (let ((value (pop rest)))
+                    (cond
+                      ((string= option "--server") (setf (getf options :server) value))
+                      ((string= option "--browser") (setf (getf options :browser) value))
+                      (t (error "unknown dashboard option: ~A" option))))))))
+    (when rest
+      (error "usage: gr8s dashboard [--server URL] [--browser CMD] [--no-launch]"))
+    options))
+
+(defun run-dashboard-command (options)
+  "Open the gr8s dashboard -- the Headlamp web UI gr8s serves at /dashboard/ --
+in a browser, like `icl -b` opens its own. The page is pre-configured for this
+cluster: gr8s serves the frontend same-origin with its API, so no kubeconfig or
+token is needed. Requires a running `gr8s serve --dashboard DIR`; this command
+only points a browser at it."
+  (let ((url (dashboard-browse-url (getf options :server)))
+        (opener (or (getf options :browser) (default-browser-opener))))
+    (if (getf options :no-launch)
+        (format t "gr8s dashboard: ~A~%" url)
+        (progn
+          (format t "gr8s dashboard: ~A; opening in a browser ...~%" url)
+          (finish-output)
+          (handler-case
+              (uiop:launch-program (list opener url)
+                                   :output :interactive :error-output :interactive)
+            (error (condition)
+              (format t "could not launch ~A (~A). Open this URL manually:~%  ~A~%"
+                      opener condition url)))))
+    0))
+
 (defun parse-cli-options (arguments)
   "Dispatch ARGUMENTS to the matching subcommand option parser and return its
    options plist. No arguments, or help/version/notices, yield a bare :command
@@ -1063,6 +1117,8 @@ The new identity takes effect when the node agent next starts."
      (parse-secrets-encrypt-options (rest arguments)))
     ((string= "doctor" (first arguments))
      (parse-doctor-options (rest arguments)))
+    ((string= "dashboard" (first arguments))
+     (parse-dashboard-options (rest arguments)))
     (t (error "unknown command: ~A" (first arguments))))))
 
 (defun parse-trace-duration (text)
@@ -2390,6 +2446,7 @@ No HA API may start from member-local certificate state before this converges."
     ("network" "Inspect cluster networking") ("certificate" "Manage certificates")
     ("secrets-encrypt" "Manage secrets encryption")
     ("skill" "Print guidance for operators and AI agents")
+    ("dashboard" "Open the Kubernetes dashboard (Headlamp) in a browser")
     ("version" "Print version information") ("notices" "Print license notices")))
 
 (defun print-help-rows (rows)
@@ -2405,6 +2462,13 @@ No HA API may start from member-local certificate state before this converges."
     (cond
       ((equal path '("skill"))
        (simple "Print offline Markdown guidance for operators and AI agents" ""))
+      ((equal path '("dashboard"))
+       (page "Open the Kubernetes dashboard (Headlamp) gr8s serves at /dashboard/"
+             "[OPTIONS]"
+             :options '(("--server URL" "Cluster API to open (default http://127.0.0.1:8080)")
+                        ("--browser CMD" "Browser launcher (default xdg-open/open)")
+                        ("--no-launch" "Print the dashboard URL instead of launching")
+                        ("--help, -h" "show help"))))
       ((equal path '("serve"))
        (page "Run the control plane and local node agent" "[OPTIONS]"
              :options '(("--state-directory DIR" "Folder holding cluster state")
@@ -2600,6 +2664,7 @@ No HA API may start from member-local certificate state before this converges."
                (print-runtime-list (getf options :state-directory))
                0)
               (:trace (run-trace-command options))
+              (:dashboard (run-dashboard-command options))
               (:debug-slynk (run-debug-slynk-command options))
               (:wireguard-rotate-key
                (rotate-wireguard-node-key options))

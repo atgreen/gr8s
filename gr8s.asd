@@ -364,6 +364,7 @@
                                            (:file "admission-policies")
                                            (:file "pod-security-admission")
                                            (:file "admission-http")
+                                           (:file "dashboard-assets")
                                            (:file "dashboard")
                                            (:file "server")
                                            (:file "in-cluster-api")

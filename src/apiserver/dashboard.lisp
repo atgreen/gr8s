@@ -19,12 +19,13 @@
 
 (in-package #:gr8s.apiserver)
 
-(defparameter *dashboard-enabled* nil
-  "When true, the API acceptor serves the embedded dashboard under /dashboard/.")
+(defparameter *dashboard-enabled* (dashboard-assets-present-p)
+  "When true, the API acceptor serves the dashboard under /dashboard/. Defaults to
+whether a Headlamp frontend build was baked into this image.")
 
 (defparameter *dashboard-static-root* nil
-  "Directory holding the built Headlamp frontend assets (built with base-url
-/dashboard). NIL serves no static assets; the backend endpoints still answer.")
+  "Optional development override: a directory of built Headlamp frontend assets to
+serve instead of the ones embedded in the image. NIL serves the embedded assets.")
 
 (defparameter +dashboard-base+ "/dashboard"
   "URL mount point for the dashboard; must match the frontend bundle's base-url.")
@@ -74,10 +75,23 @@ keys meta_data and auth_type are load-bearing: the frontend reads them verbatim.
     "defaultNodeShellNamespace" ""
     "oidcAutoLogin" nil)))
 
+(defun dashboard-rewrite-index (bytes)
+  "Apply Headlamp's base-url substitutions to the index.html BYTES for the
+/dashboard base, exactly as headlamp-server's makeBaseURLReplacements does: set
+the headlampBaseUrl script variable and rebase the relative asset and CSS-url
+references under /dashboard. Returns the rewritten bytes."
+  (flet ((literal (needle replacement text)
+           (cl-ppcre:regex-replace-all (cl-ppcre:quote-meta-chars needle) text replacement)))
+    (let ((text (trivial-utf-8:utf-8-bytes-to-string bytes)))
+      (setf text (literal "headlampBaseUrl = __baseUrl__"
+                          (format nil "headlampBaseUrl = '~A'" +dashboard-base+) text)
+            text (literal "./" (concatenate 'string +dashboard-base+ "/") text)
+            text (literal "url(" (concatenate 'string "url(" +dashboard-base+ "/") text))
+      (trivial-utf-8:string-to-utf-8-bytes text))))
+
 (defun dashboard-safe-asset-path (relative)
-  "Resolve RELATIVE under *dashboard-static-root*, or NIL if it escapes the root
-or does not exist. Refuses path traversal so a crafted URL cannot read outside
-the asset directory."
+  "Resolve RELATIVE under the development override *dashboard-static-root*, or NIL
+if it escapes the root or does not exist. Refuses path traversal."
   (let ((root (ignore-errors (truename (uiop:ensure-directory-pathname *dashboard-static-root*)))))
     (when root
       (let ((candidate (ignore-errors (truename (merge-pathnames relative root)))))
@@ -85,24 +99,44 @@ the asset directory."
           candidate)))))
 
 (defun dashboard-static-response (path)
-  "Serve a built Headlamp asset for the dashboard PATH, falling back to the SPA's
-index.html for client-side routes, or 404 when no asset root is configured."
-  (if (null *dashboard-static-root*)
-      (progn
-        (setf (hunchentoot:return-code*) hunchentoot:+http-not-found+
-              (hunchentoot:content-type*) "text/plain")
-        "gr8s dashboard static assets are not configured")
-      (let* ((relative (string-left-trim "/" (subseq path (length +dashboard-base+))))
-             (asset (and (plusp (length relative)) (dashboard-safe-asset-path relative))))
-        (if asset
-            (hunchentoot:handle-static-file asset)
-            (let ((index (dashboard-safe-asset-path "index.html")))
-              (if index
-                  (hunchentoot:handle-static-file index)
-                  (progn
-                    (setf (hunchentoot:return-code*) hunchentoot:+http-not-found+
-                          (hunchentoot:content-type*) "text/plain")
-                    "gr8s dashboard index.html not found")))))))
+  "Serve the Headlamp frontend for the dashboard PATH. A missing asset falls back
+to index.html (Headlamp is a single-page app with client-side routing). Assets
+come from the image embed, unless the development override *dashboard-static-root*
+is set. index.html is rewritten for the /dashboard base on the way out."
+  (let ((relative (string-left-trim "/" (subseq path (length +dashboard-base+)))))
+    (when (zerop (length relative))
+      (setf relative "index.html"))
+    (if *dashboard-static-root*
+        ;; Development override: serve from disk (index.html still rebased).
+        (let ((asset (or (dashboard-safe-asset-path relative)
+                         (dashboard-safe-asset-path "index.html"))))
+          (if asset
+              (progn
+                (setf (hunchentoot:content-type*)
+                      (dashboard-content-type (file-namestring asset)))
+                (let ((bytes (with-open-file (in asset :element-type '(unsigned-byte 8))
+                               (let ((b (make-array (file-length in)
+                                                    :element-type '(unsigned-byte 8))))
+                                 (read-sequence b in) b))))
+                  (if (string= (file-namestring asset) "index.html")
+                      (dashboard-rewrite-index bytes)
+                      bytes)))
+              (dashboard-not-found)))
+        ;; Default: serve the assets baked into the image.
+        (let ((bytes (or (gethash relative *dashboard-assets*)
+                         (gethash "index.html" *dashboard-assets*))))
+          (if bytes
+              (let ((index-p (or (string= relative "index.html")
+                                 (null (gethash relative *dashboard-assets*)))))
+                (setf (hunchentoot:content-type*)
+                      (dashboard-content-type (if index-p "index.html" relative)))
+                (if index-p (dashboard-rewrite-index bytes) bytes))
+              (dashboard-not-found))))))
+
+(defun dashboard-not-found ()
+  (setf (hunchentoot:return-code*) hunchentoot:+http-not-found+
+        (hunchentoot:content-type*) "text/plain")
+  "gr8s dashboard assets are not embedded in this build")
 
 (defun dashboard-response (store runtime reconciler request)
   "Serve the dashboard mount when enabled, returning the response body, or NIL to
