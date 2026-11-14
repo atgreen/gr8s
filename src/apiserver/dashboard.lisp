@@ -159,8 +159,11 @@ is answered 501 until the live-update multiplexer lands."
                (hunchentoot:content-type*) "text/plain")
          "gr8s dashboard live-update multiplexer is not yet implemented")
         ((dashboard-cluster-proxy-target-path path)
-         (handle-http-request store runtime reconciler request
-                              :path (request-route-path
-                                     (dashboard-cluster-proxy-target-path path))))
+         (let ((target (request-route-path (dashboard-cluster-proxy-target-path path))))
+           ;; /healthz, /livez, /readyz are served at the acceptor level (before
+           ;; routing), which the internal proxy bypasses; serve them here so the
+           ;; Headlamp cluster-health check (GET /clusters/<name>/healthz) passes.
+           (or (health-response target store)
+               (handle-http-request store runtime reconciler request :path target))))
         (t
          (dashboard-static-response path))))))
