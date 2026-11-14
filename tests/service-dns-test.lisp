@@ -87,7 +87,7 @@
     (0conf:encode-message (0conf:make-dns-message :id 42 :flags #x0100
                            :questions (list (0conf:make-question :name name :qtype type :qclass 1))))
     (lambda (packet) (declare (ignore packet)) (error "cluster query leaked upstream"))
-    (gr8s.kubelet::store-service-dns-resolver store))))
+    (gr8s.kubelet::make-cluster-dns-resolver store))))
 
 (test service-dns-public-projection-and-durable-withdrawal
   (with-temporary-store (store directory)
@@ -261,7 +261,7 @@
   (with-temporary-store (store directory)
     (gr8s.resources::create-core-resource store "services" (service-test-object "web") "alpha")
     (let ((server (cl-dns-proxy::start-dns-server :address "127.0.0.1" :port 0 :upstreams nil
-                                        :service-resolver (gr8s.kubelet::store-service-dns-resolver store))))
+                                        :resolver (gr8s.kubelet::make-cluster-dns-resolver store))))
       (unwind-protect
            (progn
              (is (equalp #(10 96 0 10) (dns-first-a-address

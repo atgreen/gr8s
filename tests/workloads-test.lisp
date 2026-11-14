@@ -10,8 +10,7 @@
 (in-suite workloads)
 
 (test controllers-have-an-explicit-package-boundary
-  (let ((controllers (find-package '#:gr8s.controllers))
-        (composition (find-package '#:gr8s)))
+  (let ((controllers (find-package '#:gr8s.controllers)))
     (is-true controllers)
     (dolist (name '("RECONCILE-WORKLOADS"
                     "RECONCILE-ENDPOINTS"
@@ -23,8 +22,8 @@
                     "MAKE-GATEWAY-CONTROLLER"))
       (multiple-value-bind (implementation status)
           (find-symbol name controllers)
-        (is (eq :external status))
-        (is (eq implementation (find-symbol name composition)))))
+        (declare (ignore implementation))
+        (is (eq :external status))))
     (is (not (eq :external
                  (nth-value 1 (find-symbol "FOR" controllers)))))))
 

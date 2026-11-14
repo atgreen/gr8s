@@ -30,7 +30,7 @@
         (skip "dig is required for actual DNS shell probe")
         (with-temporary-store (store directory)
       (let ((server (cl-dns-proxy::start-dns-server :address "127.0.0.1" :port 0 :upstreams nil
-                                          :service-resolver (gr8s.kubelet::store-service-dns-resolver store))))
+                                          :resolver (gr8s.kubelet::make-cluster-dns-resolver store))))
         (unwind-protect
              (let* ((port (cl-dns-proxy::dns-server-port server))
                     (missing (format nil "check=\"$$(~A @127.0.0.1 -p ~D +time=1 +tries=1 +notcp +noall +answer missing.alpha.svc.cluster.local A)\"; test -n \"$$check\" && printf OK" dig port))

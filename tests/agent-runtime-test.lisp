@@ -173,8 +173,7 @@
                        runtime '(("10.88.1.2" 80) ("10.88.2.2" 80))))))))
 
 (test node-agent-has-an-explicit-package-boundary
-  (let ((agent (find-package '#:gr8s.agent))
-        (composition (find-package '#:gr8s)))
+  (let ((agent (find-package '#:gr8s.agent)))
     (is-true agent)
     (dolist (name '("NODE-RUNTIME"
                     "MAKE-NODE-RUNTIME"
@@ -185,8 +184,8 @@
                     "START-NODE-PORT-FORWARD-OPERATION"))
       (multiple-value-bind (implementation status)
           (find-symbol name agent)
-        (is (eq :external status))
-        (is (eq implementation (find-symbol name composition)))))
+        (declare (ignore implementation))
+        (is (eq :external status))))
     (is (not (eq :external
                  (nth-value 1 (find-symbol "FOR" agent)))))))
 

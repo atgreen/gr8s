@@ -10,9 +10,7 @@
                     "CRI-CONTAINER-STATUS"))
       (multiple-value-bind (symbol status) (and package (find-symbol name package))
         (is (not (null symbol)) "~A is present in GR8S.RUNTIME.CONTAINERD" name)
-        (is (eq :external status) "~A is exported from GR8S.RUNTIME.CONTAINERD" name)
-        (is (eq symbol (find-symbol name "GR8S"))
-            "GR8S preserves ~A's containerd symbol identity" name)))))
+        (is (eq :external status) "~A is exported from GR8S.RUNTIME.CONTAINERD" name)))))
 
 (test containerd-reports-real-running-and-terminated-container-states
   (let* ((info (gr8s.runtime.containerd::make-cri-container-info

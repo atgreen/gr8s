@@ -53,9 +53,10 @@
       (signals error (gr8s.security::ensure-wireguard-key-pair directory))
       (is (string= "not-a-wireguard-key\n" (uiop:read-file-string path))))))
 
-(defun profile-test-issued-csr (store directory pki subject signer usages sans)
+(defun profile-test-issued-csr (store directory pki subject signer usages sans
+                                &optional (algorithm "ec"))
   "Create and explicitly approve a real request before running the genuine signer."
-  (let ((request (csr-crypto-fixture directory "ec" :subject subject :sans sans)))
+  (let ((request (csr-crypto-fixture directory algorithm :subject subject :sans sans)))
     (gr8s.resources::create-core-resource store "certificatesigningrequests" (csr-fixture request :signer signer :usages usages) nil)
     (approve-csr-fixture store "example-csr")
     (gr8s.resources::reconcile-certificate-signing-requests store pki)
@@ -75,8 +76,10 @@
            (progn
              (gr8s.agent::enroll-node-over-grpc "127.0.0.1" (gr8s.apiserver::node-grpc-server-port server) "profile-worker"
                (gr8s.security::create-join-token pki "profile-worker") pin legacy-key legacy-cert legacy-ca)
+             ;; An RSA key keeps the hello's certificate request constructible,
+             ;; so the rejection under test is the server's profile check.
              (let* ((pem (profile-test-issued-csr store directory pki "/CN=profile-worker/O=api-users"
-                           "kubernetes.io/kube-apiserver-client" #("digital signature" "client auth") nil))
+                           "kubernetes.io/kube-apiserver-client" #("digital signature" "client auth") nil "rsa"))
                     (certificate (gr8s.security::certificate-from-pem pem)))
                (is-true (gr8s.security::api-csr-profile-certificate-p certificate))
                (is-true (pure-tls::verify-certificate-chain (list certificate) (list (gr8s.security::cluster-pki-ca-certificate pki)) :purpose :client-auth :trust-anchor-mode :replace))
@@ -90,7 +93,7 @@
                                 (gr8s.agent::run-node-session "127.0.0.1" (gr8s.apiserver::node-grpc-server-port server) "profile-worker"
                                   (merge-pathnames "api-identity.json" directory) (lambda (snapshot) (declare (ignore snapshot)))
                                   :ca-certificate-path legacy-ca :certificate-path api-cert
-                                  :private-key-path (merge-pathnames "ec-key.pem" directory) :max-sessions 1)
+                                  :private-key-path (merge-pathnames "rsa-key.pem" directory) :max-sessions 1)
                                 (error (condition) condition))))
                  (is-true failure)
                  (is (search "PROTOCOL-ERROR" (princ-to-string failure))))

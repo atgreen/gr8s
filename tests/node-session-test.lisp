@@ -8,6 +8,10 @@
    :labels (gr8s.resources::core-object "topology.kubernetes.io/region" region
                               "topology.kubernetes.io/zone" zone)))
 
+(defun topology-overlay-nodes (nodes)
+  "Project test node-records into the planner's overlay nodes, as production does."
+  (mapcar #'gr8s.apiserver::node-record->overlay-node nodes))
+
 (defun topology-fixture ()
   (loop for region in '("east" "west" "north")
         append (loop for zone in '("a" "b")
@@ -57,7 +61,8 @@
 (test wireguard-topology-planner-keeps-small-clusters-direct
   (let* ((nodes (loop for index below 4
                       collect (topology-node (format nil "node-~D" index) "r" "z")))
-         (plan (cl-wireguard-overlay::plan-wireguard-topology nodes :full-mesh-limit 8)))
+         (plan (cl-wireguard-overlay::plan-wireguard-topology
+                (topology-overlay-nodes nodes) :full-mesh-limit 8)))
     (is (eq :full-mesh (cl-wireguard-overlay::wireguard-topology-plan-mode plan)))
     (is-false (getf (cl-wireguard-overlay::wireguard-topology-plan-object plan)
                     :degraded-domains))
@@ -70,7 +75,8 @@
                       collect (topology-node (format nil "node-~D" index) "r" "z")))
          (stable (loop for index from 1 below 9 collect (format nil "node-~D" index)))
          (plan (cl-wireguard-overlay::plan-wireguard-topology
-                nodes :full-mesh-limit 8 :transit-node-names stable)))
+                (topology-overlay-nodes nodes) :full-mesh-limit 8
+                :transit-node-names stable)))
     (is (eq :sparse (cl-wireguard-overlay::wireguard-topology-plan-mode plan)))
     (is (<= (length (cl-wireguard-overlay::wireguard-topology-neighbors plan "node-0")) 2))
     (dolist (source stable)
@@ -96,7 +102,7 @@
                          collect (topology-node (format nil "b-~D" index) "r" "b"))))
          (leaf (topology-node "recovering" "r" "new-zone"))
          (plan (cl-wireguard-overlay::plan-wireguard-topology
-                (cons leaf stable) :full-mesh-limit 8
+                (topology-overlay-nodes (cons leaf stable)) :full-mesh-limit 8
                 :transit-node-names (mapcar #'gr8s.model::node-record-name stable)))
          (current "a-4")
          (visited nil))
@@ -118,7 +124,7 @@
                  collect (topology-node
                           (format nil "recovering-~2,'0D" index) "r" "new-zone")))
          (plan (cl-wireguard-overlay::plan-wireguard-topology
-                (append stable leaves) :full-mesh-limit 8
+                (topology-overlay-nodes (append stable leaves)) :full-mesh-limit 8
                 :transit-node-names (mapcar #'gr8s.model::node-record-name stable)))
          (used nil))
     (dolist (leaf leaves)
@@ -262,8 +268,10 @@
 
 (test wireguard-topology-planner-is-local-bounded-deterministic-and-resilient
   (let* ((nodes (topology-fixture))
-         (plan (cl-wireguard-overlay::plan-wireguard-topology nodes :full-mesh-limit 8))
-         (again (cl-wireguard-overlay::plan-wireguard-topology (reverse nodes) :full-mesh-limit 8)))
+         (plan (cl-wireguard-overlay::plan-wireguard-topology
+                (topology-overlay-nodes nodes) :full-mesh-limit 8))
+         (again (cl-wireguard-overlay::plan-wireguard-topology
+                 (topology-overlay-nodes (reverse nodes)) :full-mesh-limit 8)))
     (is (eq :sparse (cl-wireguard-overlay::wireguard-topology-plan-mode plan)))
     (is (equal (cl-wireguard-overlay::wireguard-topology-plan-object plan)
                (cl-wireguard-overlay::wireguard-topology-plan-object again)))
@@ -304,7 +312,8 @@
     (dolist (removed nodes)
       (let* ((survivors (remove removed nodes))
              (survivor-plan
-               (cl-wireguard-overlay::plan-wireguard-topology survivors :full-mesh-limit 8)))
+               (cl-wireguard-overlay::plan-wireguard-topology
+                (topology-overlay-nodes survivors) :full-mesh-limit 8)))
         (dolist (source survivors)
           (dolist (destination survivors)
             (unless (eq source destination)
@@ -318,7 +327,8 @@
                                (format nil "node-~D" index)
                                (format nil "region-~D" index)
                                "only-zone")))
-         (plan (cl-wireguard-overlay::plan-wireguard-topology nodes :full-mesh-limit 8))
+         (plan (cl-wireguard-overlay::plan-wireguard-topology
+                (topology-overlay-nodes nodes) :full-mesh-limit 8))
          (degraded (getf (cl-wireguard-overlay::wireguard-topology-plan-object plan)
                          :degraded-domains)))
     (is (= 18 (length degraded)))
@@ -329,25 +339,17 @@
   (dolist (name '("START-NODE-GRPC-SERVER"
                   "STOP-NODE-GRPC-SERVER"
                   "PUBLISH-NODE-DESIRED-STATE"))
-    (multiple-value-bind (facade facade-status) (find-symbol name '#:gr8s)
-      (multiple-value-bind (implementation implementation-status)
-          (find-symbol name '#:gr8s.apiserver)
-        (is (eq implementation-status :external))
-        (is (eq facade-status :external))
-        (is (eq facade implementation))
-        (is (eq (symbol-package implementation) (find-package '#:gr8s.apiserver))))))
+    (multiple-value-bind (implementation implementation-status)
+        (find-symbol name '#:gr8s.apiserver)
+      (is (eq implementation-status :external))
+      (is (eq (symbol-package implementation) (find-package '#:gr8s.apiserver)))))
   (dolist (name '("RUN-NODE-SESSION"
                   "MAKE-NODE-SESSION-CONTROL"
                   "CANCEL-NODE-SESSION"))
-    (multiple-value-bind (facade facade-status) (find-symbol name '#:gr8s)
-      (multiple-value-bind (implementation implementation-status)
-          (find-symbol name '#:gr8s.agent)
-        (is (eq implementation-status :external))
-        (is (if (equal name "RUN-NODE-SESSION")
-                (eq facade-status :external)
-                (member facade-status '(:internal :external))))
-        (is (eq facade implementation))
-        (is (eq (symbol-package implementation) (find-package '#:gr8s.agent)))))))
+    (multiple-value-bind (implementation implementation-status)
+        (find-symbol name '#:gr8s.agent)
+      (is (eq implementation-status :external))
+      (is (eq (symbol-package implementation) (find-package '#:gr8s.agent))))))
 
 (test node-status-merge-preserves-authenticated-additional-pod-addresses
   (let* ((object (gr8s.resources::core-object

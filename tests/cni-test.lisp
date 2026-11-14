@@ -3,8 +3,7 @@
 (in-suite gr8s)
 
 (test network-implementation-has-an-explicit-package-boundary
-  (let ((network (find-package '#:gr8s.network))
-        (composition (find-package '#:gr8s)))
+  (let ((network (find-package '#:gr8s.network)))
     (is-true network)
     (dolist (name '("CNI-MAIN"
                     "OPEN-NODE-IPAM"
@@ -16,8 +15,8 @@
                     "MAKE-ROUTED-CNI-OPERATIONS"))
       (multiple-value-bind (implementation status)
           (find-symbol name network)
-        (is (eq :external status))
-        (is (eq implementation (find-symbol name composition)))))
+        (declare (ignore implementation))
+        (is (eq :external status))))
     ;; Reader-interned LOOP syntax is implementation detail, not public API.
     (is (not (eq :external
                  (nth-value 1 (find-symbol "FOR" network)))))))

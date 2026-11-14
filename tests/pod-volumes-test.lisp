@@ -78,6 +78,29 @@
       (is (= 1 (length (slot-value (gr8s.controllers::pod-assignment missing store) 'gr8s.node.v1::resource-objects-json))))
       (is (= 2 (length (slot-value (gr8s.controllers::node-desired-state-snapshot store "node-a") 'gr8s.node.v1::pods)))))))
 
+(defmacro with-fake-pod-mounts ((mounted mount-options directory) &body body)
+  "Run BODY with tmpfs operations recorded against a fake mountinfo file in DIRECTORY."
+  (let ((table (gensym "TABLE")))
+    `(let* ((,mounted nil) (,mount-options nil)
+            (,table (merge-pathnames "mountinfo" ,directory)))
+       (flet ((write-table ()
+                (with-open-file (stream ,table :direction :output :if-exists :supersede)
+                  (format stream "22 1 0:21 / /proc rw - proc proc rw~%")
+                  (dolist (target ,mounted)
+                    (format stream "90 1 0:50 / ~A rw - tmpfs gr8s-pod-volume rw~%"
+                            (string-right-trim "/" target))))))
+         (write-table)
+         (let ((gr8s.kubelet::*pod-mount-table-path* ,table)
+               (gr8s.kubelet::*pod-tmpfs-mount*
+                 (lambda (target requested)
+                   (push target ,mounted) (push requested ,mount-options) (write-table) 0))
+               (gr8s.kubelet::*pod-tmpfs-unmount*
+                 (lambda (target)
+                   (setf ,mounted (remove (string-right-trim "/" target) ,mounted :test #'equal
+                                          :key (lambda (item) (string-right-trim "/" item))))
+                   (write-table) 0)))
+           ,@body)))))
+
 (test projected-files-and-emptydir-have-real-mount-content
   (with-temporary-store (store directory)
    ;; Secret/projected volumes are tmpfs-backed in production, which needs root;
@@ -256,29 +279,6 @@
 (defun memory-volume-test-pod (&optional (source "{\"medium\":\"Memory\",\"sizeLimit\":\"64Mi\"}"))
   "Return a Pod with one Memory emptyDir built from the JSON SOURCE."
   (parse-pod (format nil "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"memory\",\"uid\":\"memory-uid\"},\"spec\":{\"volumes\":[{\"name\":\"scratch\",\"emptyDir\":~A}],\"containers\":[{\"name\":\"c\",\"image\":\"busybox:latest\",\"volumeMounts\":[{\"name\":\"scratch\",\"mountPath\":\"/scratch\"}]}]}}" source)))
-
-(defmacro with-fake-pod-mounts ((mounted mount-options directory) &body body)
-  "Run BODY with tmpfs operations recorded against a fake mountinfo file in DIRECTORY."
-  (let ((table (gensym "TABLE")))
-    `(let* ((,mounted nil) (,mount-options nil)
-            (,table (merge-pathnames "mountinfo" ,directory)))
-       (flet ((write-table ()
-                (with-open-file (stream ,table :direction :output :if-exists :supersede)
-                  (format stream "22 1 0:21 / /proc rw - proc proc rw~%")
-                  (dolist (target ,mounted)
-                    (format stream "90 1 0:50 / ~A rw - tmpfs gr8s-pod-volume rw~%"
-                            (string-right-trim "/" target))))))
-         (write-table)
-         (let ((gr8s.kubelet::*pod-mount-table-path* ,table)
-               (gr8s.kubelet::*pod-tmpfs-mount*
-                 (lambda (target requested)
-                   (push target ,mounted) (push requested ,mount-options) (write-table) 0))
-               (gr8s.kubelet::*pod-tmpfs-unmount*
-                 (lambda (target)
-                   (setf ,mounted (remove (string-right-trim "/" target) ,mounted :test #'equal
-                                          :key (lambda (item) (string-right-trim "/" item))))
-                   (write-table) 0)))
-           ,@body)))))
 
 (defun memory-volume-object (pod)
   "Return POD's single declared volume object."

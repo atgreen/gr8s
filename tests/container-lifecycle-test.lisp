@@ -72,6 +72,8 @@
                         (error "Absent fixture container ~A" id))))
                 (replace-function 'gr8s.runtime.containerd::cri-pod-sandbox-ip
                   (lambda (&rest options) (declare (ignore options)) "10.88.0.2"))
+                (replace-function 'gr8s.runtime.containerd::cri-pod-sandbox-ips
+                  (lambda (&rest options) (declare (ignore options)) #("10.88.0.2")))
                 (replace-function 'gr8s.runtime.containerd::containerd-create-container
                   (lambda (runtime desired sandbox config spec &key (attempt 0))
                     (declare (ignore runtime desired config))

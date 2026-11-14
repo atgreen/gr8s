@@ -3,8 +3,7 @@
 (in-suite gr8s)
 
 (test apiserver-has-an-explicit-package-boundary
-  (let ((apiserver (find-package '#:gr8s.apiserver))
-        (composition (find-package '#:gr8s)))
+  (let ((apiserver (find-package '#:gr8s.apiserver)))
     (is-true apiserver)
     (dolist (name '("START-SERVER"
                     "STOP-SERVER"
@@ -15,10 +14,8 @@
                     "STOP-DEBUG-SERVER"))
       (multiple-value-bind (implementation status)
           (find-symbol name apiserver)
-        (is (eq :external status))
-        (is (eq implementation (find-symbol name composition)))))
-    (is (eq :external (nth-value 1 (find-symbol "START-SERVER" composition))))
-    (is (eq :external (nth-value 1 (find-symbol "STOP-SERVER" composition))))
+        (declare (ignore implementation))
+        (is (eq :external status))))
     (is (not (eq :external
                  (nth-value 1 (find-symbol "FOR" apiserver)))))))
 

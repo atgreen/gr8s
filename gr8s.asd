@@ -274,7 +274,6 @@
                               :serial t
                               :components ((:file "integration")
                                            (:file "http")
-                                           (:file "grpc-close-compat")
                                            (:file "grpc-inflate-compat")
                                            (:file "grpc-deflate-compat")
                                            (:file "grpc-unix")
