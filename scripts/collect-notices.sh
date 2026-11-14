@@ -36,6 +36,12 @@ CNI plugins: bridge, host-local, loopback, firewall  (embedded)  -  Apache-2.0
     Copyright The CNI Authors
     https://github.com/containernetworking/plugins
 
+Headlamp  (embedded web UI, served by 'gr8s dashboard')  -  Apache-2.0
+    Copyright The Headlamp Authors
+    https://github.com/kubernetes-sigs/headlamp
+    The frontend bundles third-party JavaScript whose own license texts
+    are reproduced in the EMBEDDED WEB UI section below.
+
 libzstd  (linked at runtime)  -  BSD-3-Clause
     Copyright Meta Platforms, Inc.
     https://github.com/facebook/zstd
@@ -49,6 +55,35 @@ Kata Containers  (optional, fetched by 'gr8s runtime install kata')  -  Apache-2
     https://github.com/kata-containers/kata-containers
 COMPONENTS
   printf '\n\n'
+
+  # Third-party license texts the Headlamp webpack build emits next to the
+  # bundled JavaScript (one *.LICENSE.txt per chunk; many are byte-identical,
+  # so reproduce each distinct text once). Collected from the embedded frontend
+  # tree -- the exact bytes `gr8s dashboard` serves -- so the attribution
+  # matches what ships. Absent when the dashboard assets are not vendored.
+  assets_dir="$project_root/assets/dashboard"
+  if [ -n "$(find "$assets_dir" -name '*.LICENSE.txt' -type f -print -quit 2>/dev/null)" ]; then
+    printf '================================================================================\n'
+    printf 'EMBEDDED WEB UI (HEADLAMP DASHBOARD) THIRD-PARTY LICENSES\n'
+    printf '================================================================================\n\n'
+    printf 'License texts emitted by the Headlamp frontend build for the JavaScript it\n'
+    printf 'bundles. Each distinct text is reproduced once, labeled by an emitting bundle.\n\n'
+    seen=$(mktemp)
+    find "$assets_dir" -name '*.LICENSE.txt' -type f | sort | while IFS= read -r license; do
+      digest=$(sha256sum "$license" | cut -d' ' -f1)
+      if ! grep -qx "$digest" "$seen" 2>/dev/null; then
+        printf '%s\n' "$digest" >> "$seen"
+        printf -- '-------- %s --------\n' "${license#"$assets_dir"/}"
+        cat "$license"
+        printf '\n'
+      fi
+    done
+    rm -f "$seen"
+    printf '\n\n'
+  else
+    echo "collect-notices: no vendored dashboard assets; skipping web UI licenses" >&2
+  fi
+
   ocicl collect-licenses
 } > "$output"
 
