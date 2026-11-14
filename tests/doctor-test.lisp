@@ -25,6 +25,21 @@
   (is (not (gr8s.server::doctor-port-spec-covers-p "1025-65535/udp" 53)))
   (is (not (gr8s.server::doctor-port-spec-covers-p "80/tcp" 53))))
 
+(test doctor-state-directory-ownership-decision
+  (flet ((status (&rest args) (values (apply #'gr8s.server::doctor-state-directory-status args))))
+    ;; Missing directory is fine -- gr8s will create it 0700.
+    (is (eq :ok (status 0 nil nil nil nil)))
+    ;; Owned by the running uid and not group/other-writable -> ok.
+    (is (eq :ok (status 0 t t 0 #o40700)))
+    (is (eq :ok (status 1000 t t 1000 #o40755)))
+    ;; Root pointed at a user-owned directory (the reported first-run wall) -> fail.
+    (is (eq :fail (status 0 t t 1000 #o40755)))
+    ;; Owned by the running uid but group/other-writable -> fail.
+    (is (eq :fail (status 0 t t 0 #o40777)))
+    (is (eq :fail (status 0 t t 0 #o40702)))
+    ;; Exists but is not a directory -> fail.
+    (is (eq :fail (status 0 t nil 0 #o100600)))))
+
 (test doctor-firewall-dns-decision
   ;; No active firewall -> not blocked.
   (is (not (gr8s.server::doctor-firewall-blocks-dns-p nil nil nil)))

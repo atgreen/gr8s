@@ -79,6 +79,19 @@ The independent patch lock also excludes agent and witness patch managers."
                      (ignore-errors (gr8s.network::host-ipv4-addresses)))
         "127.0.0.1")))
 
+(defun serve-local-kubeconfig-address (options)
+  "Return the address the locally generated admin kubeconfig should target. Like
+k3s, prefer loopback: the kubeconfig is written on the same host as the server
+and used by its operator, so it should not depend on which external interface the
+server happened to advertise (podster-1v6). Only a listener pinned to a specific
+non-wildcard address makes loopback unreachable, so use that address then. For a
+remote-usable kubeconfig, generate one with 'gr8s kubeconfig --server
+https://ADDRESS:PORT' against an address the API certificate now covers."
+  (let ((listen (getf options :listen "0.0.0.0")))
+    (if (member listen '("0.0.0.0" "::" "[::]") :test #'equal)
+        "127.0.0.1"
+        listen)))
+
 (defun external-api-covers-in-cluster-endpoint-p
     (listen-address listen-port advertise-address in-cluster-port)
   "True when the external control-plane API listener (LISTEN-ADDRESS:LISTEN-PORT)

@@ -2515,7 +2515,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                                       (when service-network-created
                                         (run (ensure-in-cluster-network pki)))))))
                     (let* ((kubeconfig (or (getf options :kubeconfig) (default-kubeconfig-path options)))
-                           (client-address (serve-api-advertise-address options)))
+                           (client-address (serve-local-kubeconfig-address options)))
                       (setf kubeconfig-path kubeconfig)
                       ;; A file the user named keeps its usual mode, as they may read it as another user.
                       (multiple-value-bind (admin-certificate admin-key)
@@ -2655,6 +2655,13 @@ directory, gr8s uses $XDG_STATE_HOME/gr8s or ~/.local/state/gr8s; sudo can chang
 that home. The default API is loopback port 8080; the agent supervisor uses 7443.
 An agent's --server HOST:PORT is the supervisor, not the Kubernetes API URL.
 `--runtime fake` is for development and does not prove real container/BPF health.
+
+The state directory must be owned by the user gr8s runs as and must not be
+writable by group or others; gr8s refuses a store it does not own and exits with
+`Unsafe store generation directory`. Pointing a root process at a directory
+owned by another user is the usual cause: use a root-owned path such as
+/var/lib/gr8s, or `sudo chown -R root STATE_DIR && sudo chmod 700 STATE_DIR`.
+`gr8s doctor` reports this as the \"store directory\" check.
 
 Record the launch arguments, service unit, runtime mode, overlay backend,
 node names, and state/log paths before changing a cluster. Check version
