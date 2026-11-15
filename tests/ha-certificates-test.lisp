@@ -303,10 +303,17 @@
                          :timeout 5)
                      (ignore-errors (ag-grpc:channel-close channel))))))
               "no certificate")
-          (is (gr8s.raft.transport::raft-cluster-remove-member (gr8s.ha::ha-control-plane-member founder) "w1"))
-          (is (poll-until (lambda ()
-                            (null (assoc "w1" (gr8s.raft.transport::raft-cluster-members (gr8s.ha::ha-control-plane-member founder))
-                                         :test #'equal)))
-                          :timeout 15))
+          ;; Removal is leader-only. A TLS request above can span a leadership
+          ;; change, so retry until committed membership reflects the removal.
+          (let ((member (gr8s.ha::ha-control-plane-member founder)))
+            (is (poll-until
+                 (lambda ()
+                   (or (null (assoc "w1" (gr8s.raft.transport::raft-cluster-members member)
+                                    :test #'equal))
+                       (progn
+                         (gr8s.raft.transport::raft-cluster-remove-member member "w1")
+                         nil)))
+                 :timeout 15)
+                "membership removal must commit before checking renewal denial"))
           (is (rejected-p (lambda () (request-renewal credentials port "w1" key)))
               "a removed member's certificate must be left to run out"))))))
