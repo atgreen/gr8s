@@ -60,8 +60,11 @@
   "Write every local Pod's resolved NetworkPolicy into its pinned guard maps."
   (let* ((view (foreign-cni-agent-view agent))
          (root (foreign-cni-agent-bpf-root agent))
+         ;; Resolve selectors against the cluster's Pods and Namespaces first,
+         ;; exactly as the control plane does before projecting to gr8s nodes:
+         ;; a raw policy's peers carry no addresses the guards could match.
          (specs (network-policy-specs-from-objects
-                 (gr8s.resources::list-core-resources view "networkpolicies")))
+                 (network-policy-projection view)))
          (ip-map (pod-ip-identity-map view)))
     (funcall (foreign-cni-agent-policy-converger agent)
              specs (foreign-agent-endpoints agent)
