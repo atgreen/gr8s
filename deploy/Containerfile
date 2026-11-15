@@ -1,9 +1,37 @@
 # SPDX-FileCopyrightText: 2026 Anthony Green
 # SPDX-License-Identifier: Apache-2.0
 #
-# The gr8s foreign-cluster networking image: one static-ish binary that is the
-# CNI plugin, the node agent, and the Gateway controller.  Build the binary
-# first (`make native`), then: podman build -f deploy/Containerfile -t gr8s-net .
-FROM registry.fedoraproject.org/fedora-minimal:44
-COPY build/gr8s /usr/local/bin/gr8s
+# The gr8s foreign-cluster networking image: one binary that is the CNI plugin,
+# the node agent, and the Gateway controller. Build the binary first
+# (`make native`), then: podman build -f deploy/Containerfile -t gr8s-net .
+#
+# Distroless: a Fedora builder supplies baseline-ISA glibc + libzstd, and the
+# final image is FROM scratch with only the shared objects gr8s loads -- no
+# shell, no package manager, no coreutils, no util-linux (the initContainer runs
+# `gr8s cni-install` instead of a shell script). Fedora, not UBI, because the
+# binary needs glibc >= 2.38 (so UBI 9's 2.34 is too old) and must stay x86-64
+# baseline-portable (so UBI 10, which requires x86-64-v3, is out). Fedora x86_64
+# is baseline (v1) and ships a new-enough glibc.
+FROM registry.fedoraproject.org/fedora:44 AS build
+COPY build/gr8s /src/gr8s
+# Stage exactly the files the distroless image needs. cp -L resolves the symlink
+# chains (e.g. libzstd.so.1 -> libzstd.so.1.5.x) so the final image carries real
+# files under the names the binary's DT_NEEDED entries look for. /lib64 is also
+# mirrored at /usr/lib64 for the usr-merge layout. /var/run -> /run matches a
+# normal distro so the agent can resolve the netns path CNI passes
+# (/var/run/netns/cni-...); without it the ADD fails with ENOENT.
+RUN set -eu; \
+    mkdir -p /out/lib64 /out/usr/lib64 /out/usr/local/bin /out/etc/pki/tls/certs \
+             /out/var /out/tmp /out/run; \
+    ln -sf /run /out/var/run; \
+    for lib in ld-linux-x86-64.so.2 libc.so.6 libm.so.6 libzstd.so.1 \
+               libnss_files.so.2 libnss_dns.so.2 libresolv.so.2; do \
+      cp -L "/lib64/$lib" /out/lib64/ && cp -L "/lib64/$lib" /out/usr/lib64/ || true; \
+    done; \
+    cp /etc/nsswitch.conf /out/etc/ 2>/dev/null || true; \
+    cp -L /etc/pki/tls/certs/ca-bundle.crt /out/etc/pki/tls/certs/ 2>/dev/null || true; \
+    install -m0755 /src/gr8s /out/usr/local/bin/gr8s
+
+FROM scratch
+COPY --from=build /out/ /
 ENTRYPOINT ["/usr/local/bin/gr8s"]
