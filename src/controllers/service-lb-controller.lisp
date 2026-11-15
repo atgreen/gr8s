@@ -154,7 +154,7 @@ Services naming another loadBalancerClass remain entirely under that controller'
              (client (and (hash-table-p config) (gethash "clientIP" config))))
         (or (and (hash-table-p client) (gethash "timeoutSeconds" client)) 10800)))))
 
-(defun service-lb-plan (services endpoints-of)
+(defun service-lb-plan (services endpoints-of &optional host-port-targets)
   "Pack SERVICES into load-balancer map entries.
 ENDPOINTS-OF is a function of (service port-object) returning two lists of (address
 target-port) pairs: the backends for the ClusterIP, and those for the Service's
@@ -206,6 +206,25 @@ order; a port's external addresses share its ClusterIP's slots when the backends
                                     (lambda (endpoint)
                                       (service-address-family-matches-p vip (first endpoint)))
                                     external)))))))))))
+    ;; Pod hostPorts become single-backend VIPs keyed on the host address, so the
+    ;; connect4 hook rewrites a host- or Pod-origin connect to hostIP:hostPort
+    ;; straight to the Pod. This is the node-local hostPort path (a socket hook is
+    ;; unreachable by off-node packets); HOST-PORT-TARGETS is an alist of
+    ;; ((protocol hostIP . hostPort) . (podIP . containerPort)), each with a
+    ;; concrete hostIP (a wildcard "" is left to the userspace forwarder).
+    (dolist (target (sort (copy-list host-port-targets) #'string<
+                          :key (lambda (e) (format nil "~A|~A|~A"
+                                                   (first (car e)) (second (car e)) (cddr (car e))))))
+      (destructuring-bind ((protocol hostip . hostport) podip . container-port) target
+        (when (and (stringp hostip) (plusp (length hostip))
+                   (integerp hostport) (integerp container-port))
+          (multiple-value-bind (vip-key service-value packed indexed)
+              (service-lb-entries hostip hostport slot (list (cons podip container-port))
+                                  :protocol protocol)
+            (push (cons vip-key service-value) service-entries)
+            (dolist (entry indexed) (push entry index-entries))
+            (dolist (entry packed) (push entry backend-entries))
+            (incf slot)))))
     (values (nreverse service-entries) (nreverse backend-entries) slot (nreverse index-entries))))
 
 (defun service-risk-raw-backends (store service port)
@@ -396,7 +415,15 @@ grant and exact owner/receiver incarnations."
                  (let ((steer (service-lb-controller-endpoint-steerer controller)))
                    (values (if steer (funcall steer internal) internal)
                            (if steer (funcall steer local-origin) local-origin)
-                           (not any))))))))
+                           (not any)))))))
+          (list-host-ports
+           (let ((store (service-lb-controller-store controller))
+                 (node-name (service-lb-controller-node-name controller)))
+             (lambda ()
+               (loop for key being the hash-keys
+                       of (gr8s.network::desired-host-port-targets store :node-name node-name)
+                       using (hash-value value)
+                     collect (cons key value))))))
   "Recompute the desired LB table and apply the difference to the maps.
 Writes every backend before the service that references it (so the program never
 reads a VIP whose slots are missing), then removes freed backend slots and
@@ -415,7 +442,7 @@ A plan identical to the last applied one writes nothing."
            (old-signature (service-lb-controller-applied-signature controller)))
      (multiple-value-bind (desired-services desired-backends desired-slot-count desired-indices)
       (if publish-services-p
-          (service-lb-plan services endpoints-of)
+          (service-lb-plan services endpoints-of (funcall list-host-ports))
           (values nil nil 0 nil))
       (let* ((retained-p
                (and (eq publish-services-p :retain) old-signature
