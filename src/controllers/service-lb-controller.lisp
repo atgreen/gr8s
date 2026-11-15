@@ -98,7 +98,7 @@ load balancer ingress addresses, except ones whose ipMode Proxy says the balance
 (defun service-load-balancer-listener-keys (service)
   "Return the protocol/Service-port listeners SERVICE needs on every advertised node."
   (remove-duplicates
-   (loop for port across (gethash "ports" (gethash "spec" service) #())
+   (loop for port across (json-array (gethash "ports" (gethash "spec" service) #()))
          collect (cons (gethash "protocol" port "TCP") (gethash "port" port)))
    :test #'equal))
 
@@ -171,7 +171,7 @@ order; a port's external addresses share its ClusterIP's slots when the backends
       (let ((addresses (service-cluster-addresses service))
             (external-addresses (service-external-addresses service))
             (timeout (service-affinity-timeout service)))
-        (loop for port across (gethash "ports" (gethash "spec" service))
+        (loop for port across (json-array (gethash "ports" (gethash "spec" service)))
               for number = (gethash "port" port)
               for protocol = (gethash "protocol" port "TCP")
               do (multiple-value-bind (internal external none) (funcall endpoints-of service port)
@@ -230,7 +230,7 @@ Deduplicate across VIPs and keep iteration deterministic for reconciliation."
   (sort
    (remove-duplicates
     (loop for service in services when (service-lb-eligible-p service)
-          append (loop for port across (gethash "ports" (gethash "spec" service) #())
+          append (loop for port across (json-array (gethash "ports" (gethash "spec" service) #()))
                        for protocol = (gethash "protocol" port "TCP")
                        when (member protocol '("TCP" "UDP") :test #'equal)
                          append (loop for (address target-port) in (funcall raw-backends-of service port)

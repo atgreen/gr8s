@@ -401,6 +401,8 @@ since gr8s itself creates the interface."
                  (first (bt:with-lock-held (fabric-lock) (last fabric-calls)))
                (is (null previous))
                (is (equal "192.0.2.80" (gethash "underlayAddress" network)))
+               (is (equal "10.88.7.0/24" (gethash "nodePodCIDR" network)))
+               (is (= 42 (gethash "vni" network)))
                (let ((route (aref (gethash "routes" network) 0)))
                  (is (equal "worker-g" (gethash "nodeID" route)))
                  (is (equal "10.88.9.0/24" (gethash "podCIDR" route)))

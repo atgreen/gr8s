@@ -22,7 +22,7 @@
   (pending t) (running t)
   converge-thread policy-converger policy-writer
   ;; The last applied fabric intent, so peer retirement knows what to undo.
-  last-network fabric-reconciler
+  last-network fabric-reconciler (mtu 1450)
   ;; A higher layer's convergence and teardown, run with the agent's: the
   ;; Gateway controller lives above this module, so it arrives as functions.
   extra-converger extra-stopper)
@@ -54,24 +54,29 @@
     (bt:condition-notify (foreign-cni-agent-wake agent))))
 
 (defun foreign-node-internal-address (node)
-  (loop for entry across (gethash "addresses"
-                                  (gethash "status" node (make-hash-table :test 'equal))
-                                  #())
+  (loop for entry across (let ((addresses
+                                 (gethash "addresses"
+                                          (gethash "status" node
+                                                   (make-hash-table :test 'equal)))))
+                           ;; jzon parses JSON null as the symbol NULL, which
+                           ;; defeats the GETHASH default.
+                           (if (vectorp addresses) addresses #()))
         when (equal "InternalIP" (gethash "type" entry))
           return (gethash "address" entry)))
 
-(defun foreign-node-network (view node-name)
+(defun foreign-node-network (view node-name &key (mtu 1450))
   "Project the watched Nodes into the VXLAN reconciler's network intent: this
 node's underlay address, and one route per peer Node carrying its podCIDRs --
 the multi-node fabric, driven by the same objects every kubelet reports."
-  (let ((local "") (routes '()))
+  (let ((local "") (local-cidrs nil) (routes '()))
     (dolist (node (gr8s.resources::list-core-resources view "nodes"))
       (let* ((metadata (gethash "metadata" node))
              (name (gethash "name" metadata))
              (address (foreign-node-internal-address node))
              (cidrs (ignore-errors (foreign-node-pod-cidrs node))))
         (cond ((equal name node-name)
-               (when address (setf local address)))
+               (when address (setf local address))
+               (setf local-cidrs cidrs))
               ((and address cidrs)
                (push (json-object "nodeID" name
                                   "podCIDR" (first cidrs)
@@ -79,6 +84,11 @@ the multi-node fabric, driven by the same objects every kubelet reports."
                                   "underlayAddress" address)
                      routes)))))
     (json-object "underlayAddress" local
+                 "nodePodCIDR" (or (first local-cidrs) "")
+                 "nodePodCIDRs" (coerce local-cidrs 'vector)
+                 ;; The VNI every gr8s node fabric uses.
+                 "vni" 42
+                 "mtu" mtu
                  "routes" (coerce (nreverse routes) 'vector))))
 
 (defun foreign-agent-converge-fabric (agent)
@@ -87,7 +97,8 @@ peer exists (or existed) does the overlay device appear; a lone node keeps its
 host networking untouched."
   (let ((view (foreign-cni-agent-view agent))
         (previous (foreign-cni-agent-last-network agent)))
-    (let ((network (foreign-node-network view (foreign-cni-agent-node-name agent))))
+    (let ((network (foreign-node-network view (foreign-cni-agent-node-name agent)
+                                         :mtu (foreign-cni-agent-mtu agent))))
       (when (and (not (equalp network previous))
                  (or (plusp (length (gethash "routes" network)))
                      (and previous (plusp (length (gethash "routes" previous))))))
@@ -162,7 +173,7 @@ and the convergence loop."
   (let* ((agent (%make-foreign-cni-agent
                  :node-name node-name :bpf-root bpf-root
                  :policy-converger policy-converger :policy-writer policy-writer
-                 :fabric-reconciler fabric-reconciler))
+                 :fabric-reconciler fabric-reconciler :mtu mtu))
          (view (gr8s.resources::make-foreign-resource-view
                 cluster
                 ;; Every followed resource feeds either policy or the gateway

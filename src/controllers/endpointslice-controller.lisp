@@ -34,7 +34,7 @@
 (defun endpointslice-pod-ports (pod service)
   "Resolve every Service target port against this Pod; partition heterogeneous named targets."
   (let ((result nil))
-    (loop for port across (gethash "ports" (gethash "spec" service))
+    (loop for port across (json-array (gethash "ports" (gethash "spec" service)))
           for target = (service-port-target pod port)
           do (when target
                (let ((entry (core-object "name" (gethash "name" port "") "protocol" (gethash "protocol" port "TCP") "port" target)))
@@ -240,7 +240,7 @@ terminating, as upstream's proxy reads them."
           (when (and target (integerp (gethash "port" target))
                      (not (and proxy (nth-value 1 (gethash "service.kubernetes.io/headless"
                                                             (gethash "labels" (gethash "metadata" slice) (core-object)))))))
-            (loop for endpoint across (gethash "endpoints" slice #())
+            (loop for endpoint across (json-array (gethash "endpoints" slice #()))
                   for conditions = (gethash "conditions" endpoint (core-object))
                   for hints = (gethash "hints" endpoint)
                   do (flet ((condition-true-p (key default)
@@ -248,7 +248,7 @@ terminating, as upstream's proxy reads them."
                                 (if (and present (not (eq value 'null))) (eq value t) default)))
                             (hint-names (key)
                               (and (hash-table-p hints)
-                                   (loop for hint across (gethash key hints #()) collect (gethash "name" hint)))))
+                                   (loop for hint across (json-array (gethash key hints #())) collect (gethash "name" hint)))))
                        (let ((record (list :port (gethash "port" target)
                                            :ready (condition-true-p "ready" t)
                                            :serving (condition-true-p "serving" t)
@@ -257,7 +257,7 @@ terminating, as upstream's proxy reads them."
                                            :zone (gethash "zone" endpoint)
                                            :zone-hints (hint-names "forZones")
                                            :node-hints (hint-names "forNodes"))))
-                         (loop for address across (gethash "addresses" endpoint)
+                         (loop for address across (json-array (gethash "addresses" endpoint))
                                unless (find-if (lambda (seen) (and (equal address (getf seen :address))
                                                                    (eql (getf record :port) (getf seen :port))))
                                                result)
@@ -322,7 +322,7 @@ node, as a selectorless manual one, is never local. Each list holds (address por
 without a zone kube-proxy, too, ignores zone hints."
   (when node-name
     (dolist (slice (list-core-resources store "endpointslices"))
-      (loop for endpoint across (gethash "endpoints" slice #())
+      (loop for endpoint across (json-array (gethash "endpoints" slice #()))
             when (and (equal node-name (gethash "nodeName" endpoint)) (stringp (gethash "zone" endpoint)))
               do (return-from service-node-zone (gethash "zone" endpoint))))))
 
