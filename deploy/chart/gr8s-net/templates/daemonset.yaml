@@ -13,7 +13,9 @@ spec:
     spec:
       serviceAccountName: gr8s-net
       hostNetwork: true
-      hostPID: true
+      # No hostPID: the agent enters a Pod's netns by the CNI-provided path under
+      # /run/netns (mounted below) and setns, never via /proc/<host-pid>/ns/net,
+      # so it does not need to see host processes.
       dnsPolicy: ClusterFirstWithHostNet
       tolerations:
         - operator: Exists

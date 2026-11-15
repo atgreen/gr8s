@@ -33,3 +33,9 @@ apiServer:
 gateway:
   # Serve the Gateway API (GatewayClass gr8s.io/gateway-controller) from every node.
   enabled: false
+  tls:
+    # Grant the agent cluster-wide read on Secrets, for TLS listener certificates.
+    # This is the one grant that turns a node compromise into cluster-wide secret
+    # exposure, so it is off by default; enable it only if you run Gateways (or
+    # Ingresses) that terminate TLS. Non-TLS Gateways need no Secret access.
+    enabled: false
