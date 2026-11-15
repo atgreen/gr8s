@@ -1432,7 +1432,8 @@ opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
      :extra-factory (when (getf options :gateway)
                       (lambda (view)
                         (gr8s.controllers:start-foreign-gateway
-                         view :cert-dir (merge-pathnames "gateway-certs/" state-directory))))
+                         view :cert-dir (merge-pathnames "gateway-certs/" state-directory)
+                         :cluster cluster :node-name node-name)))
      :stop-predicate (lambda () *shutdown-requested*))
     0))
 
