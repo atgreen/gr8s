@@ -432,6 +432,21 @@ again).  Bookmarks advance the returned revision without reaching ON-EVENT."
                             (when last (setf revision last
                                              (informer-resource-version informer) last))
                             (when (eq exit :expired) (return)))))
+             (kube-error (condition)
+               ;; A 404 collection is not an error to wait out: the resource's
+               ;; CRD simply is not installed, and the correct cache is empty.
+               ;; Report synced so consumers proceed, and look again rarely in
+               ;; case the CRD arrives later.
+               (cond
+                 ((eql 404 (kube-error-status condition))
+                  (bt:with-lock-held ((informer-lock informer))
+                    (setf (informer-synced informer) t))
+                  (loop repeat 30 while (informer-running informer) do (sleep 1)))
+                 (t
+                  (when (informer-running informer)
+                    (format *error-output* "~&gr8s informer ~A: ~A; re-establishing~%"
+                            (informer-path informer) condition)
+                    (sleep 1)))))
              (error (condition)
                (when (informer-running informer)
                  (format *error-output* "~&gr8s informer ~A: ~A; re-establishing~%"
