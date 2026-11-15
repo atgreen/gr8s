@@ -1,0 +1,6 @@
+apiVersion: v2
+name: gr8s-net
+description: gr8s Whistler eBPF networking for any Kubernetes cluster - CNI, NetworkPolicy, Gateway API
+type: application
+version: 0.1.0
+appVersion: "1.37.2"

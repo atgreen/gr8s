@@ -20,7 +20,10 @@
   (lock (bt:make-lock "gr8s foreign CNI agent"))
   (wake (bt:make-condition-variable :name "gr8s foreign CNI agent wake"))
   (pending t) (running t)
-  converge-thread policy-converger policy-writer)
+  converge-thread policy-converger policy-writer
+  ;; A higher layer's convergence and teardown, run with the agent's: the
+  ;; Gateway controller lives above this module, so it arrives as functions.
+  extra-converger extra-stopper)
 
 (defun foreign-node-pod-cidrs (node)
   "NODE's podCIDRs, from the plural field when present, else the singular."
@@ -84,30 +87,45 @@
              (handler-case (foreign-agent-converge agent)
                (error (condition)
                  (format *error-output* "~&gr8s foreign CNI agent: policy convergence failed: ~A~%"
-                         condition))))))
+                         condition)))
+             (let ((extra (foreign-cni-agent-extra-converger agent)))
+               (when extra
+                 (handler-case (funcall extra)
+                   (error (condition)
+                     (format *error-output* "~&gr8s foreign CNI agent: gateway convergence failed: ~A~%"
+                             condition))))))))
 
 (defun start-foreign-cni-agent
     (cluster &key node-name state-directory bpf-root socket-path
                   (mtu 1450) operations-factory
                   (policy-converger #'converge-pod-network-policies)
                   (policy-writer #'write-pod-network-policy)
+                  extra-factory
                   (stop-predicate (constantly nil)))
   "Start the foreign-cluster CNI agent against CLUSTER and return it, serving CNI
 requests on SOCKET-PATH with addresses from this node's podCIDR and NetworkPolicy
 converged into the guard maps under BPF-ROOT.  OPERATIONS-FACTORY receives the
 agent's IPAM and returns the CNI operations, overriding the routed dataplane
-(tests); POLICY-CONVERGER and POLICY-WRITER override the map writes."
+(tests); POLICY-CONVERGER and POLICY-WRITER override the map writes.
+EXTRA-FACTORY receives the agent's resource view and returns (values CONVERGER
+STOPPER) for a higher layer -- the Gateway controller -- that shares the view
+and the convergence loop."
   (let* ((agent (%make-foreign-cni-agent
                  :node-name node-name :bpf-root bpf-root
                  :policy-converger policy-converger :policy-writer policy-writer))
          (view (gr8s.resources::make-foreign-resource-view
                 cluster
+                ;; Every followed resource feeds either policy or the gateway
+                ;; plan; convergence is cheap and idempotent, so any change
+                ;; nudges one pass rather than maintaining a resource roster.
                 :on-change (lambda (resource change key object)
-                             (declare (ignore change key object))
-                             (when (member resource '("pods" "namespaces" "networkpolicies")
-                                           :test #'equal)
-                               (foreign-agent-nudge agent))))))
+                             (declare (ignore resource change key object))
+                             (foreign-agent-nudge agent)))))
     (setf (foreign-cni-agent-view agent) view)
+    (when extra-factory
+      (multiple-value-bind (converger stopper) (funcall extra-factory view)
+        (setf (foreign-cni-agent-extra-converger agent) converger
+              (foreign-cni-agent-extra-stopper agent) stopper)))
     (let ((node (foreign-agent-wait-for-node view node-name stop-predicate)))
       (unless node
         (gr8s.resources::stop-foreign-resource-view view)
@@ -151,6 +169,8 @@ agent's IPAM and returns the CNI operations, overriding the routed dataplane
   (let ((thread (foreign-cni-agent-converge-thread agent)))
     (when (and thread (bt:thread-alive-p thread))
       (ignore-errors (bt:join-thread thread))))
+  (let ((stopper (foreign-cni-agent-extra-stopper agent)))
+    (when stopper (ignore-errors (funcall stopper))))
   (let ((view (foreign-cni-agent-view agent)))
     (when view (ignore-errors (gr8s.resources::stop-foreign-resource-view view))))
   nil)

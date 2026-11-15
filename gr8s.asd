@@ -396,6 +396,7 @@
                                            (:file "gateway-l4")
                                            (:file "gateway-sklookup")
                                            (:file "gateway-controller")
+                                           (:file "foreign-gateway")
                                            (:file "cert-manager")
                                            (:file "garbage-collection")
                                            (:file "crd-garbage-collection")

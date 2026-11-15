@@ -10,6 +10,7 @@
    #:control-plane-runtime
    #:make-control-plane-runtime
    #:make-gateway-controller
+   #:start-foreign-gateway
    #:make-service-lb-controller
    #:reconcile-certificates
    #:reconcile-cronjobs
@@ -35,6 +36,7 @@
    #:control-plane-runtime
    #:make-control-plane-runtime
    #:make-gateway-controller
+   #:start-foreign-gateway
    #:make-service-lb-controller
    #:service-lb-risk-published-p
    #:reconcile-certificates

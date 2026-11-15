@@ -1405,6 +1405,9 @@ opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
                    ((equal option "--bpf-root") (setf (getf options :bpf-root) value))
                    ((equal option "--socket") (setf (getf options :socket-path) value))
                    ((equal option "--mtu") (setf (getf options :mtu) (parse-integer value)))
+                   ((equal option "--gateway")
+                    ;; A flag with an explicit value keeps the pairwise parse.
+                    (setf (getf options :gateway) (string= value "true")))
                    (t (error "unknown cni-agent option: ~A" option))))
     options))
 
@@ -1415,16 +1418,21 @@ opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
                      (gr8s.kube-client:cluster-from-service-account)))
         (node-name (or (getf options :node-name)
                        (uiop:getenv "NODE_NAME")
-                       (machine-instance))))
+                       (machine-instance)))
+        (state-directory (uiop:ensure-directory-pathname
+                          (or (getf options :state-directory)
+                              (merge-pathnames "cni-agent/" (default-state-directory))))))
     (gr8s.network::run-foreign-cni-agent
      cluster
      :node-name node-name
-     :state-directory (uiop:ensure-directory-pathname
-                       (or (getf options :state-directory)
-                           (merge-pathnames "cni-agent/" (default-state-directory))))
+     :state-directory state-directory
      :bpf-root (or (getf options :bpf-root) "/sys/fs/bpf/gr8s")
      :socket-path (or (getf options :socket-path) "/run/gr8s/cni.sock")
      :mtu (or (getf options :mtu) 1450)
+     :extra-factory (when (getf options :gateway)
+                      (lambda (view)
+                        (gr8s.controllers:start-foreign-gateway
+                         view :cert-dir (merge-pathnames "gateway-certs/" state-directory))))
      :stop-predicate (lambda () *shutdown-requested*))
     0))
 

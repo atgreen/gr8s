@@ -1,0 +1,8 @@
+{{- if .Values.gateway.enabled }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: gr8s
+spec:
+  controllerName: gr8s.io/gateway-controller
+{{- end }}
