@@ -301,7 +301,7 @@ the per-Gateway LoadBalancer Services.  RESOLVER overrides backend resolution
                                     (start-l4-listener :address "0.0.0.0" :port port
                                                        :mode mode :dispatcher dispatcher
                                                        :resolver resolver))))
-        (leader nil) (stopping nil) (lease-thread nil))
+        (leader nil) (stopping nil) (lease-thread nil) (status-thread nil))
     (when (and cluster node-name)
       (setf lease-thread
             (bt:make-thread
@@ -313,16 +313,29 @@ the per-Gateway LoadBalancer Services.  RESOLVER overrides backend resolution
                 :on-gained (lambda () (setf leader t))
                 :on-lost (lambda () (setf leader nil))
                 :stop-predicate (lambda () stopping)))
-             :name "gr8s gateway lease")))
+             :name "gr8s gateway lease"))
+      ;; Status writes and Service provisioning make slow cluster-wide API
+      ;; calls; run them on their own cadence so they never delay the fast,
+      ;; local listener convergence below (a blocked status pass otherwise left
+      ;; the node's listeners unbound for tens of seconds).
+      (setf status-thread
+            (bt:make-thread
+             (lambda ()
+               (loop until stopping do
+                 (when leader
+                   (handler-case (foreign-gateway-publish view cluster)
+                     (error (condition)
+                       (format *error-output* "~&gr8s gateway status pass failed: ~A~%"
+                               condition))))
+                 (sleep 2)))
+             :name "gr8s gateway status")))
     (values
+     ;; The agent loop's converger: only the fast, local listener plans.
      (lambda ()
        (converge-gateway-listeners controller)
-       (converge-gateway-l4-listeners controller)
-       (when (and leader cluster)
-         (handler-case (foreign-gateway-publish view cluster)
-           (error (condition)
-             (format *error-output* "~&gr8s gateway status pass failed: ~A~%" condition)))))
+       (converge-gateway-l4-listeners controller))
      (lambda ()
        (setf stopping t)
        (when lease-thread (ignore-errors (bt:join-thread lease-thread)))
+       (when status-thread (ignore-errors (bt:join-thread status-thread)))
        (stop-gateway-controller controller)))))
