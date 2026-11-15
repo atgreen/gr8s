@@ -114,6 +114,41 @@ Returns quietly on write conflicts; the next pass retries."
                                     "gatewayclasses" nil (gethash "name" metadata)
                                     status)))))
 
+(defun foreign-gateway-listener-supported-kinds (protocol)
+  "The RouteGroupKinds gr8s serves on a listener of PROTOCOL."
+  (mapcar (lambda (name)
+            (let ((kind (make-hash-table :test 'equal)))
+              (setf (gethash "group" kind) "gateway.networking.k8s.io"
+                    (gethash "kind" kind) name)
+              kind))
+          (cond ((member protocol '("HTTP" "HTTPS") :test #'equal) '("HTTPRoute" "GRPCRoute"))
+                ((equal protocol "TCP") '("TCPRoute"))
+                ((equal protocol "TLS") '("TLSRoute"))
+                (t '()))))
+
+(defun foreign-gateway-listener-route-kinds (listener)
+  "The listener's resolved supportedKinds and whether every allowedRoutes kind
+is among them.  Returns (values supported-kind-objects all-allowed-supported-p)."
+  (let* ((protocol (gethash "protocol" listener))
+         (supported (foreign-gateway-listener-supported-kinds protocol))
+         (supported-names (mapcar (lambda (k) (gethash "kind" k)) supported))
+         (allowed (gethash "kinds"
+                           (gethash "allowedRoutes" listener (make-hash-table :test 'equal)))))
+    (if (and (vectorp allowed) (plusp (length allowed)))
+        ;; Only the allowed kinds gr8s actually serves are supported; an allowed
+        ;; kind it does not serve makes the listener's refs unresolved.
+        (let ((intersection
+                (loop for entry across allowed
+                      for name = (gethash "kind" entry)
+                      when (member name supported-names :test #'equal)
+                        collect (let ((k (make-hash-table :test 'equal)))
+                                  (setf (gethash "group" k)
+                                        (or (gethash "group" entry) "gateway.networking.k8s.io")
+                                        (gethash "kind" k) name)
+                                  k))))
+          (values intersection (= (length intersection) (length allowed))))
+        (values supported t))))
+
 (defun foreign-gateway-service-name (gateway-name)
   (concatenate 'string "gr8s-gateway-" gateway-name))
 
@@ -181,36 +216,37 @@ Selectorless: the listeners answer on every node's host network."
                                       (gethash "listeners" (gethash "spec" gateway)))
                  collect
                  (let ((entry (make-hash-table :test 'equal))
-                       (kind (make-hash-table :test 'equal))
                        (existing-listener
                          (find (gethash "name" listener)
                                (coerce (gethash "listeners" existing-status #()) 'list)
                                :test #'equal
                                :key (lambda (candidate) (gethash "name" candidate)))))
-                   (setf (gethash "group" kind) "gateway.networking.k8s.io"
-                         (gethash "kind" kind) "HTTPRoute"
-                         (gethash "name" entry) (gethash "name" listener)
-                         (gethash "supportedKinds" entry) (vector kind)
-                         (gethash "attachedRoutes" entry) (length attached)
-                         (gethash "conditions" entry)
-                         ;; The spec requires a listener to report Accepted,
-                         ;; Programmed and ResolvedRefs; the conformance suite
-                         ;; waits on ResolvedRefs before sending traffic.
-                         (vector (foreign-gateway-condition
-                                  "Accepted" "True" "Accepted"
-                                  :generation generation
-                                  :existing (and existing-listener
-                                                 (gethash "conditions" existing-listener)))
-                                 (foreign-gateway-condition
-                                  "Programmed" "True" "Programmed"
-                                  :generation generation
-                                  :existing (and existing-listener
-                                                 (gethash "conditions" existing-listener)))
-                                 (foreign-gateway-condition
-                                  "ResolvedRefs" "True" "ResolvedRefs"
-                                  :generation generation
-                                  :existing (and existing-listener
-                                                 (gethash "conditions" existing-listener)))))
+                   (multiple-value-bind (supported-kinds kinds-ok)
+                       (foreign-gateway-listener-route-kinds listener)
+                     (setf (gethash "name" entry) (gethash "name" listener)
+                           (gethash "supportedKinds" entry) (coerce supported-kinds 'vector)
+                           (gethash "attachedRoutes" entry) (length attached)
+                           (gethash "conditions" entry)
+                           ;; The spec requires Accepted, Programmed and
+                           ;; ResolvedRefs; ResolvedRefs is False with reason
+                           ;; InvalidRouteKinds when an allowedRoutes kind is one
+                           ;; this listener's protocol does not serve.
+                           (vector (foreign-gateway-condition
+                                    "Accepted" "True" "Accepted"
+                                    :generation generation
+                                    :existing (and existing-listener
+                                                   (gethash "conditions" existing-listener)))
+                                   (foreign-gateway-condition
+                                    "Programmed" "True" "Programmed"
+                                    :generation generation
+                                    :existing (and existing-listener
+                                                   (gethash "conditions" existing-listener)))
+                                   (foreign-gateway-condition
+                                    "ResolvedRefs" (if kinds-ok "True" "False")
+                                    (if kinds-ok "ResolvedRefs" "InvalidRouteKinds")
+                                    :generation generation
+                                    :existing (and existing-listener
+                                                   (gethash "conditions" existing-listener))))))
                    entry))
            'vector))
     (foreign-gateway-put-status cluster "gateway.networking.k8s.io" "v1" "gateways"
