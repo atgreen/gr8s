@@ -24,16 +24,20 @@ rules:
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
     verbs: [get, create, update]
-  {{- if .Values.gateway.enabled }}
-  # Gateway controller only. These are the sensitive grants -- cluster-wide
-  # secrets (for listener TLS) and Service writes (LoadBalancer provisioning) --
-  # so they are granted only when the Gateway controller actually runs, keeping
-  # the privileged DaemonSet's ServiceAccount read-only and secret-free on a
-  # dataplane-only install. (Until the controller is split into its own
-  # unprivileged Deployment, these still land on the DaemonSet's account.)
+  {{- if and .Values.gateway.enabled .Values.gateway.tls.enabled }}
+  # TLS listeners only. Reading Secrets is cluster-wide, so it is the one grant
+  # that meaningfully widens a compromised node's blast radius (node-local secrets
+  # -> every secret in the cluster). It is needed only to terminate TLS on each
+  # node, so it is gated behind gateway.tls.enabled and left off entirely for
+  # non-TLS Gateways.
   - apiGroups: [""]
     resources: [secrets]
     verbs: [get, list, watch]
+  {{- end }}
+  {{- if .Values.gateway.enabled }}
+  # Gateway controller. The remaining grants are low marginal risk: Service writes
+  # (LoadBalancer provisioning) and Gateway status writes, done by a single
+  # leader-elected holder. Granted only when the Gateway controller runs.
   - apiGroups: [networking.k8s.io]
     resources: [ingresses, ingressclasses]
     verbs: [get, list, watch]
