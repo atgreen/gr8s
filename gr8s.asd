@@ -255,6 +255,7 @@
                                            (:file "egress-guard")
                                            (:file "service-lb-program")
                                            (:file "service-packet-program")
+                                           (:file "service-sctp-nat")
                                            (:file "service-nat-program")
                                            (:file "service-nat-policy")
                                            (:file "service-nat-guard")
