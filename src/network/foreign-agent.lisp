@@ -16,13 +16,16 @@
 
 (defstruct (foreign-cni-agent (:constructor %make-foreign-cni-agent))
   "One node's foreign-cluster CNI service and its policy convergence loop."
-  view node-name ipam bpf-root server
+  view node-name ipam bpf-root server cluster
   (lock (bt:make-lock "gr8s foreign CNI agent"))
   (wake (bt:make-condition-variable :name "gr8s foreign CNI agent wake"))
   (pending t) (running t)
   converge-thread policy-converger policy-writer
   ;; The last applied fabric intent, so peer retirement knows what to undo.
   last-network fabric-reconciler (mtu 1450)
+  ;; WireGuard overlay: this node's durable public key (octets) and the shared
+  ;; UDP listen port, published and discovered as peer Node annotations.
+  (overlay-backend "vxlan") wireguard-public-key (wireguard-listen-port 51820)
   (host-port-forwarders (make-hash-table :test #'equal))
   ;; A higher layer's convergence and teardown, run with the agent's: the
   ;; Gateway controller lives above this module, so it arrives as functions.
@@ -92,14 +95,92 @@ the multi-node fabric, driven by the same objects every kubelet reports."
                  "mtu" mtu
                  "routes" (coerce (nreverse routes) 'vector))))
 
+(defparameter +wireguard-public-key-annotation+ "gr8s.io/wireguard-public-key"
+  "The Node annotation each gr8s agent publishes its WireGuard public key under,
+so peers can discover it from the host cluster API -- the foreign-cluster analog
+of the native node-session gRPC key exchange (Cilium's network.cilium.io model).")
+
+(defun foreign-node-wireguard-public-key (node)
+  "NODE's advertised WireGuard public key (base64), or NIL if it has not
+published one yet (it then simply stays out of the encrypted fabric)."
+  (let* ((metadata (gethash "metadata" node))
+         (annotations (and metadata (gethash "annotations" metadata))))
+    (when (hash-table-p annotations)
+      (let ((key (gethash +wireguard-public-key-annotation+ annotations)))
+        (when (and (stringp key) (plusp (length key))) key)))))
+
+(defun foreign-node-wireguard-network (view node-name &key (mtu 1450) (listen-port 51820))
+  "Project the watched Nodes into the WireGuard reconciler's intent.  Like
+FOREIGN-NODE-NETWORK, but each peer route also carries the peer's published
+WireGuard public key and the shared listen port; a peer that has not yet
+advertised a key is skipped until it does.  Only Pod-CIDR destinations route
+through the tunnel, so node and API-server traffic stays unencrypted and the
+agent can still bootstrap against the host cluster (the Antrea/Cilium model)."
+  (let ((local "") (local-cidrs nil) (routes '()))
+    (dolist (node (gr8s.resources::list-core-resources view "nodes"))
+      (let* ((metadata (gethash "metadata" node))
+             (name (gethash "name" metadata))
+             (address (foreign-node-internal-address node))
+             (cidrs (ignore-errors (foreign-node-pod-cidrs node))))
+        (cond ((equal name node-name)
+               (when address (setf local address))
+               (setf local-cidrs cidrs))
+              ((and address cidrs)
+               (let ((public-key (foreign-node-wireguard-public-key node)))
+                 (when public-key
+                   (push (json-object "nodeID" name
+                                      "podCIDR" (first cidrs)
+                                      "podCIDRs" (coerce cidrs 'vector)
+                                      "underlayAddress" address
+                                      "wireguardPublicKey" public-key
+                                      "wireguardListenPort" listen-port)
+                         routes)))))))
+    (json-object "overlayBackend" "wireguard"
+                 "underlayAddress" local
+                 "nodePodCIDR" (or (first local-cidrs) "")
+                 "nodePodCIDRs" (coerce local-cidrs 'vector)
+                 "wireguardListenPort" listen-port
+                 "mtu" mtu
+                 "routes" (coerce (nreverse routes) 'vector))))
+
+(defun foreign-agent-publish-wireguard-identity (agent)
+  "Publish this node's WireGuard public key as a Node annotation, idempotently:
+patch only when the live annotation differs from this node's key, so a steady
+state produces no API writes and no watch churn."
+  (let* ((node-name (foreign-cni-agent-node-name agent))
+         (public-key (foreign-cni-agent-wireguard-public-key agent))
+         (encoded (ag-grpc:base64-encode public-key))
+         (node (ignore-errors
+                 (gr8s.resources::get-core-resource
+                  (foreign-cni-agent-view agent) "nodes" nil node-name))))
+    (when (and node (not (equal encoded (foreign-node-wireguard-public-key node))))
+      (gr8s.kube-client:kube-patch
+       (foreign-cni-agent-cluster agent)
+       (gr8s.kube-client:resource-path "" "v1" "nodes" :name node-name)
+       (json-object "metadata"
+                    (json-object "annotations"
+                                 (json-object +wireguard-public-key-annotation+ encoded)))))))
+
+(defun foreign-agent-fabric-intent (agent view)
+  "Project this node's fabric intent for the selected overlay backend."
+  (if (string= (foreign-cni-agent-overlay-backend agent) "wireguard")
+      (foreign-node-wireguard-network
+       view (foreign-cni-agent-node-name agent)
+       :mtu (foreign-cni-agent-mtu agent)
+       :listen-port (foreign-cni-agent-wireguard-listen-port agent))
+      (foreign-node-network view (foreign-cni-agent-node-name agent)
+                            :mtu (foreign-cni-agent-mtu agent))))
+
 (defun foreign-agent-converge-fabric (agent)
-  "Reconcile the VXLAN fabric when the projected intent changed.  Only once a
+  "Reconcile the overlay fabric when the projected intent changed.  Only once a
 peer exists (or existed) does the overlay device appear; a lone node keeps its
-host networking untouched."
+host networking untouched.  In WireGuard mode this node first advertises its
+public key so peers can authenticate it."
   (let ((view (foreign-cni-agent-view agent))
         (previous (foreign-cni-agent-last-network agent)))
-    (let ((network (foreign-node-network view (foreign-cni-agent-node-name agent)
-                                         :mtu (foreign-cni-agent-mtu agent))))
+    (when (string= (foreign-cni-agent-overlay-backend agent) "wireguard")
+      (foreign-agent-publish-wireguard-identity agent))
+    (let ((network (foreign-agent-fabric-intent agent view)))
       (when (and (not (equalp network previous))
                  (or (plusp (length (gethash "routes" network)))
                      (and previous (plusp (length (gethash "routes" previous))))))
@@ -168,7 +249,9 @@ host networking untouched."
                   (mtu 1450) operations-factory
                   (policy-converger #'converge-pod-network-policies)
                   (policy-writer #'write-pod-network-policy)
-                  (fabric-reconciler #'reconcile-node-vxlan-network)
+                  fabric-reconciler
+                  (overlay-backend "vxlan")
+                  wireguard-private-key wireguard-public-key (wireguard-listen-port 51820)
                   extra-factory
                   (stop-predicate (constantly nil)))
   "Start the foreign-cluster CNI agent against CLUSTER and return it, serving CNI
@@ -179,10 +262,25 @@ agent's IPAM and returns the CNI operations, overriding the routed dataplane
 EXTRA-FACTORY receives the agent's resource view and returns (values CONVERGER
 STOPPER) for a higher layer -- the Gateway controller -- that shares the view
 and the convergence loop."
+  (when (string= overlay-backend "wireguard")
+    (unless (and wireguard-private-key wireguard-public-key)
+      (error "WireGuard overlay backend requires a node key pair")))
+  ;; Default the datapath reconciler per backend, keeping the caller's override
+  ;; (tests) intact. The WireGuard reconciler needs the private key, wrapped so
+  ;; the convergence loop keeps the uniform (network previous) fabric contract.
+  (unless fabric-reconciler
+    (setf fabric-reconciler
+          (if (string= overlay-backend "wireguard")
+              (lambda (network previous)
+                (reconcile-node-overlay-network network previous wireguard-private-key))
+              #'reconcile-node-vxlan-network)))
   (let* ((agent (%make-foreign-cni-agent
-                 :node-name node-name :bpf-root bpf-root
+                 :node-name node-name :bpf-root bpf-root :cluster cluster
                  :policy-converger policy-converger :policy-writer policy-writer
-                 :fabric-reconciler fabric-reconciler :mtu mtu))
+                 :fabric-reconciler fabric-reconciler :mtu mtu
+                 :overlay-backend overlay-backend
+                 :wireguard-public-key wireguard-public-key
+                 :wireguard-listen-port wireguard-listen-port))
          (view (gr8s.resources::make-foreign-resource-view
                 cluster
                 ;; Every followed resource feeds either policy or the gateway

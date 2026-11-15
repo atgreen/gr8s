@@ -14,6 +14,17 @@ paths:
 # Pod interface MTU (lower it when an encapsulating underlay needs headroom).
 mtu: 1450
 
+overlay:
+  # The node-to-node Pod fabric. "vxlan" tunnels Pod traffic unencrypted;
+  # "wireguard" encrypts Pod-CIDR-to-Pod-CIDR traffic (only -- node and
+  # API-server traffic stays in the clear, so the agent still bootstraps). Each
+  # agent generates its own key pair and publishes the public key as a Node
+  # annotation (gr8s.io/wireguard-public-key); peers discover one another from
+  # the watched Node objects. WireGuard needs the `nodes` patch RBAC grant below.
+  backend: vxlan
+  # The shared UDP port WireGuard listens on, on every node's host network.
+  wireguardListenPort: 51820
+
 serviceLb:
   # Replace kube-proxy: serve Services (ClusterIP and NodePort), hostPort, and the
   # eBPF socket load balancer on every node. This is the core of the CNI, so it is

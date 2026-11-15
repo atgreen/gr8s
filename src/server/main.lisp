@@ -1405,6 +1405,12 @@ opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
                    ((equal option "--bpf-root") (setf (getf options :bpf-root) value))
                    ((equal option "--socket") (setf (getf options :socket-path) value))
                    ((equal option "--mtu") (setf (getf options :mtu) (parse-integer value)))
+                   ((equal option "--overlay-backend")
+                    (unless (member value '("vxlan" "wireguard") :test #'string=)
+                      (error "overlay backend must be vxlan or wireguard"))
+                    (setf (getf options :overlay-backend) value))
+                   ((equal option "--wireguard-listen-port")
+                    (setf (getf options :wireguard-listen-port) (parse-integer value)))
                    ((equal option "--gateway")
                     ;; A flag with an explicit value keeps the pairwise parse.
                     (setf (getf options :gateway) (string= value "true")))
@@ -1423,7 +1429,13 @@ opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
                        (machine-instance)))
         (state-directory (uiop:ensure-directory-pathname
                           (or (getf options :state-directory)
-                              (merge-pathnames "cni-agent/" (default-state-directory))))))
+                              (merge-pathnames "cni-agent/" (default-state-directory)))))
+        (overlay-backend (or (getf options :overlay-backend) "vxlan")))
+    ;; WireGuard mode generates/loads a durable node key pair up front, exactly
+    ;; as native gr8s does, and advertises the public key via a Node annotation.
+    (multiple-value-bind (wireguard-private-key wireguard-public-key)
+        (when (string= overlay-backend "wireguard")
+          (ensure-wireguard-key-pair state-directory))
     (gr8s.network::run-foreign-cni-agent
      cluster
      :node-name node-name
@@ -1431,6 +1443,10 @@ opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
      :bpf-root (or (getf options :bpf-root) "/sys/fs/bpf/gr8s")
      :socket-path (or (getf options :socket-path) "/run/gr8s/cni.sock")
      :mtu (or (getf options :mtu) 1450)
+     :overlay-backend overlay-backend
+     :wireguard-private-key wireguard-private-key
+     :wireguard-public-key wireguard-public-key
+     :wireguard-listen-port (or (getf options :wireguard-listen-port) 51820)
      :extra-factory
      (when (or (getf options :gateway) (getf options :service-lb))
        (lambda (view)
@@ -1469,7 +1485,7 @@ opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
                    (let ((ordered (nreverse stoppers)))
                      (lambda () (mapc #'funcall ordered)))))))
      :stop-predicate (lambda () *shutdown-requested*))
-    0))
+    0)))
 
 (defun parse-cni-install-options (arguments)
   "Parse `gr8s cni-install` options: the shell-free initContainer step that
