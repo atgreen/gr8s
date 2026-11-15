@@ -24,6 +24,15 @@ rules:
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
     verbs: [get, create, update]
+  {{- if eq .Values.overlay.backend "wireguard" }}
+  # WireGuard overlay only. The agent publishes this node's WireGuard public key
+  # as an annotation on its own Node object so peers can discover it; that needs
+  # patch on nodes. It is a node-object write (not secrets), scoped to a field
+  # the agent owns, and granted only when the encrypted fabric is in use.
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [patch]
+  {{- end }}
   {{- if and .Values.gateway.enabled .Values.gateway.tls.enabled }}
   # TLS listeners only. Reading Secrets is cluster-wide, so it is the one grant
   # that meaningfully widens a compromised node's blast radius (node-local secrets

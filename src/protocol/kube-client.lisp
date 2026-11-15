@@ -33,6 +33,7 @@
            #:kube-create
            #:kube-replace
            #:kube-delete
+           #:kube-patch
            #:kube-watch
            #:informer
            #:start-informer
@@ -240,13 +241,22 @@ sequence and the natural absent value.  Returns the normalized VALUE."
 (defparameter +response-limit+ (* 64 1024 1024)
   "Largest accepted API response; a big cluster's Pod list is tens of megabytes.")
 
-(defun call-with-cluster-response (cluster function &key (method :get) target body timeout on-connect)
+(defun override-content-type (headers content-type)
+  "Return HEADERS with Content-Type replaced by CONTENT-TYPE (a PATCH needs a
+specific media type, e.g. application/merge-patch+json, not application/json)."
+  (if content-type
+      (cons (cons "Content-Type" content-type)
+            (remove "Content-Type" headers :key #'car :test #'string-equal))
+      headers))
+
+(defun call-with-cluster-response (cluster function &key (method :get) target body
+                                                         timeout on-connect content-type)
   (gr8s.http-client:call-with-http-response
    function
    :host (kube-cluster-host cluster) :port (kube-cluster-port cluster)
    :server-name (kube-cluster-server-name cluster)
    :method method :target target
-   :headers (cluster-headers cluster)
+   :headers (override-content-type (cluster-headers cluster) content-type)
    :body (and body (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify body)))
    :plain (kube-cluster-plain cluster)
    :insecure (kube-cluster-insecure cluster)
@@ -255,7 +265,7 @@ sequence and the natural absent value.  Returns the normalized VALUE."
    :client-key (kube-cluster-client-key-path cluster)
    :timeout timeout :on-connect on-connect))
 
-(defun kube-request (cluster method path &key body query (timeout 30) (errorp t))
+(defun kube-request (cluster method path &key body query (timeout 30) (errorp t) content-type)
   "One API request; the parsed JSON body and status code.  With ERRORP (the
 default) a non-2xx answer signals a KUBE-ERROR carrying the parsed Status."
   (call-with-cluster-response
@@ -269,7 +279,8 @@ default) a non-2xx answer signals a KUBE-ERROR carrying the parsed Status."
        (when (and errorp (not (<= 200 code 299)))
          (error 'kube-error :status code :body parsed))
        (values parsed code)))
-   :method method :target (query-target path query) :body body :timeout timeout))
+   :method method :target (query-target path query) :body body :timeout timeout
+   :content-type content-type))
 
 (defun kube-get (cluster path &key query (timeout 30))
   (kube-request cluster :get path :query query :timeout timeout))
@@ -288,6 +299,13 @@ default) a non-2xx answer signals a KUBE-ERROR carrying the parsed Status."
 
 (defun kube-delete (cluster path &key (timeout 30) (errorp t))
   (kube-request cluster :delete path :timeout timeout :errorp errorp))
+
+(defun kube-patch (cluster path patch &key (timeout 30) (errorp t))
+  "Apply a JSON merge PATCH (RFC 7386) to the object at PATH.  A merge patch
+touches only the fields it names, so publishing one node annotation never races
+the kubelet's status writes the way a full PUT would."
+  (kube-request cluster :patch path :body patch :timeout timeout :errorp errorp
+                        :content-type "application/merge-patch+json"))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Watching

@@ -53,6 +53,12 @@ spec:
             - "{{ .Values.paths.state }}"
             - --mtu
             - "{{ .Values.mtu }}"
+            - --overlay-backend
+            - "{{ .Values.overlay.backend }}"
+            {{- if eq .Values.overlay.backend "wireguard" }}
+            - --wireguard-listen-port
+            - "{{ .Values.overlay.wireguardListenPort }}"
+            {{- end }}
             {{- if .Values.serviceLb.enabled }}
             - --service-lb
             - "true"

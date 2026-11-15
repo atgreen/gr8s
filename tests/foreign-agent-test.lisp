@@ -409,6 +409,81 @@ since gr8s itself creates the interface."
                  (is (equal "192.0.2.80" (gethash "underlayAddress" route))))))
         (gr8s.network::stop-foreign-cni-agent agent)))))
 
+(test foreign-fabric-encrypts-with-wireguard-and-publishes-its-key
+  (with-core-api (store path)
+    (values path)
+    (foreign-agent-test-node store "worker-f" "10.88.7.0/24")
+    (multiple-value-bind (private-key public-key)
+        (gr8s.security::write-wireguard-key-pair (merge-pathnames "wg-keys/" path))
+      (let* ((cluster (kube-test-cluster))
+             (peer-key (multiple-value-bind (ignored peer-public)
+                           (gr8s.security::write-wireguard-key-pair
+                            (merge-pathnames "wg-peer-keys/" path))
+                         (declare (ignore ignored))
+                         (ag-grpc:base64-encode peer-public)))
+             (fabric-calls nil) (fabric-lock (bt:make-lock))
+             (agent
+               (gr8s.network::start-foreign-cni-agent
+                cluster :node-name "worker-f"
+                :overlay-backend "wireguard"
+                :wireguard-private-key private-key
+                :wireguard-public-key public-key
+                :wireguard-listen-port 51999
+                :state-directory (merge-pathnames "wg-cni-agent/" path)
+                :bpf-root (namestring path)
+                :socket-path (namestring (merge-pathnames "cni-wg.sock" path))
+                :policy-converger (lambda (&rest arguments) (declare (ignore arguments)) nil)
+                :fabric-reconciler
+                (lambda (network previous)
+                  (bt:with-lock-held (fabric-lock)
+                    (push (list network previous) fabric-calls))))))
+        (is (not (null agent)))
+        (unwind-protect
+             (progn
+               ;; The agent advertises its own public key on its own Node, so
+               ;; peers can discover and authenticate it from the host API.
+               (is (poll-until
+                    (lambda ()
+                      (ignore-errors
+                        (equal (ag-grpc:base64-encode public-key)
+                               (gethash "gr8s.io/wireguard-public-key"
+                                        (gethash "annotations"
+                                                 (gethash "metadata"
+                                                          (gr8s.kube-client:kube-get
+                                                           cluster (gr8s.kube-client:resource-path
+                                                                    nil "v1" "nodes" :name "worker-f"))))))))
+                    :timeout 20)
+                   "the agent publishes its WireGuard public key annotation")
+               ;; A peer that has published its key joins the encrypted fabric;
+               ;; the projected intent carries the peer's authenticated identity.
+               (gr8s.controllers::register-node
+                store (gr8s.model::make-node-record
+                       :id "worker-g" :name "worker-g" :pod-cidr "10.88.9.0/24"
+                       :underlay-address "192.0.2.90"
+                       :annotations (gr8s.resources::core-object
+                                     "gr8s.io/wireguard-public-key" peer-key)))
+               (flet ((routed-call ()
+                        (bt:with-lock-held (fabric-lock)
+                          (find-if (lambda (call)
+                                     (plusp (length (gethash "routes" (first call)))))
+                                   (reverse fabric-calls)))))
+                 (is (poll-until #'routed-call))
+                 (destructuring-bind (network previous) (routed-call)
+                   (declare (ignore previous))
+                   (is (equal "wireguard" (gethash "overlayBackend" network)))
+                   (is (equal "192.0.2.80" (gethash "underlayAddress" network)))
+                   (is (equal "10.88.7.0/24" (gethash "nodePodCIDR" network)))
+                   (is (= 51999 (gethash "wireguardListenPort" network)))
+                   ;; No VXLAN VNI: this is the encrypted backend.
+                   (is (null (gethash "vni" network)))
+                   (let ((route (aref (gethash "routes" network) 0)))
+                     (is (equal "worker-g" (gethash "nodeID" route)))
+                     (is (equal "10.88.9.0/24" (gethash "podCIDR" route)))
+                     (is (equal "192.0.2.90" (gethash "underlayAddress" route)))
+                     (is (equal peer-key (gethash "wireguardPublicKey" route)))
+                     (is (= 51999 (gethash "wireguardListenPort" route)))))))
+          (gr8s.network::stop-foreign-cni-agent agent))))))
+
 (test host-port-targets-filter-by-node-and-read-through-the-seam
   ;; The host-port path now reads status through the desired-state seam and can
   ;; restrict to one node's Pods, so the foreign agent serves only its own.
