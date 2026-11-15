@@ -14,6 +14,22 @@ paths:
 # Pod interface MTU (lower it when an encapsulating underlay needs headroom).
 mtu: 1450
 
+serviceLb:
+  # Replace kube-proxy: serve Services (ClusterIP and NodePort), hostPort, and the
+  # eBPF socket load balancer on every node. This is the core of the CNI, so it is
+  # on by default; turn it off only when another proxy still handles Services.
+  enabled: true
+
+apiServer:
+  # When gr8s replaces kube-proxy (serviceLb.enabled), the agent cannot reach the
+  # API server through the kubernetes Service ClusterIP: that path needs the
+  # socket LB the agent is itself bringing up. Point these at the real API server
+  # address the nodes reach over the host network (e.g. the control-plane node IP,
+  # or a load-balanced endpoint) and its port. Required with serviceLb.enabled and
+  # no other proxy; leave empty only if something already serves the ClusterIP.
+  host: ""
+  port: 6443
+
 gateway:
   # Serve the Gateway API (GatewayClass gr8s.io/gateway-controller) from every node.
   enabled: false
