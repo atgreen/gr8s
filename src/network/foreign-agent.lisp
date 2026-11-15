@@ -211,7 +211,15 @@ and the convergence loop."
                               (funcall operations-factory (foreign-cni-agent-ipam agent))
                               (make-routed-cni-operations
                                (foreign-cni-agent-ipam agent)
-                               :node-id node-name :mtu mtu))))
+                               :node-id node-name :mtu mtu
+                               ;; The socket LB pins its Service maps here; the
+                               ;; per-Pod SCTP classifiers read them to steer
+                               ;; SCTP, which the connect4 socket LB cannot.
+                               :sctp-nat-pin-directory
+                               (when bpf-root
+                                 (namestring (merge-pathnames
+                                              "service-lb/"
+                                              (uiop:ensure-directory-pathname bpf-root))))))))
                     (start-agent-cni-server
                      socket-path
                      (lambda (request)
