@@ -23,6 +23,7 @@
   converge-thread policy-converger policy-writer
   ;; The last applied fabric intent, so peer retirement knows what to undo.
   last-network fabric-reconciler (mtu 1450)
+  (host-port-forwarders (make-hash-table :test #'equal))
   ;; A higher layer's convergence and teardown, run with the agent's: the
   ;; Gateway controller lives above this module, so it arrives as functions.
   extra-converger extra-stopper)
@@ -147,6 +148,14 @@ host networking untouched."
                (error (condition)
                  (format *error-output* "~&gr8s foreign CNI agent: policy convergence failed: ~A~%"
                          condition)))
+             (handler-case
+                 (converge-host-port-forwarders
+                  (foreign-cni-agent-host-port-forwarders agent)
+                  (foreign-cni-agent-view agent)
+                  :node-name (foreign-cni-agent-node-name agent))
+               (error (condition)
+                 (format *error-output* "~&gr8s foreign CNI agent: host port convergence failed: ~A~%"
+                         condition)))
              (let ((extra (foreign-cni-agent-extra-converger agent)))
                (when extra
                  (handler-case (funcall extra)
@@ -230,6 +239,7 @@ and the convergence loop."
   (let ((thread (foreign-cni-agent-converge-thread agent)))
     (when (and thread (bt:thread-alive-p thread))
       (ignore-errors (bt:join-thread thread))))
+  (ignore-errors (stop-host-port-forwarders (foreign-cni-agent-host-port-forwarders agent)))
   (let ((stopper (foreign-cni-agent-extra-stopper agent)))
     (when stopper (ignore-errors (funcall stopper))))
   (let ((view (foreign-cni-agent-view agent)))

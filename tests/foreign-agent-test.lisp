@@ -408,3 +408,34 @@ since gr8s itself creates the interface."
                  (is (equal "10.88.9.0/24" (gethash "podCIDR" route)))
                  (is (equal "192.0.2.80" (gethash "underlayAddress" route))))))
         (gr8s.network::stop-foreign-cni-agent agent)))))
+
+(test host-port-targets-filter-by-node-and-read-through-the-seam
+  ;; The host-port path now reads status through the desired-state seam and can
+  ;; restrict to one node's Pods, so the foreign agent serves only its own.
+  (with-core-api (store path)
+    (values path)
+    (flet ((host-port-pod (name node ip proto address)
+             (let ((pod (create-pod store
+                         (parse-pod (format nil "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",~
+\"metadata\":{\"name\":\"~A\",\"uid\":\"~A-uid\"},~
+\"spec\":{\"nodeName\":\"~A\",\"containers\":[{\"name\":\"c\",\"image\":\"busybox\",~
+\"ports\":[{\"containerPort\":8080,\"hostPort\":30080,\"hostIP\":\"~A\",\"protocol\":\"~A\"}]}]}}"
+                                             name name node ip proto)))))
+               (gr8s.kubelet::save-pod-observation
+                store pod (gr8s.resources::core-object "phase" "Running" "podIP" address)))))
+      (host-port-pod "aaa" "worker-f" "127.0.0.1" "TCP" "10.42.0.1")
+      (host-port-pod "bb" "worker-f" "192.0.2.50" "UDP" "10.42.0.2")
+      ;; The peer-node Pod shares this node's (TCP 127.0.0.1 30080) key exactly,
+      ;; which is why each agent must filter to its own node before binding.
+      (host-port-pod "c" "other-node" "127.0.0.1" "TCP" "10.42.1.1"))
+    ;; Only this node's two Pods, disambiguated by (protocol hostIP . port);
+    ;; the peer-node Pod shares (TCP 127.0.0.1 30080) but is excluded.
+    (let ((targets (gr8s.network::desired-host-port-targets store :node-name "worker-f")))
+      (is (= 2 (hash-table-count targets)))
+      (is (equal "10.42.0.1" (car (gethash (list* "TCP" "127.0.0.1" 30080) targets))))
+      (is (gethash (list* "UDP" "192.0.2.50" 30080) targets)))
+    ;; Without a node filter (the native path, one node's own Pods) the two
+    ;; same-keyed Pods would collide -- the filter is what keeps them apart.
+    (let ((unfiltered (gr8s.network::desired-host-port-targets store)))
+      (is (= 2 (hash-table-count unfiltered)))
+      (is (gethash (list* "TCP" "127.0.0.1" 30080) unfiltered)))))
