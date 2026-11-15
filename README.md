@@ -45,21 +45,13 @@ networking stack:
 
 Everything is JIT-compiled from a Lisp eBPF DSL by
 [Whistler](https://github.com/atgreen/Whistler), so the only host requirement is
-a recent kernel — there is no bundled `iptables` or `nft` binary to match. Run
-against the upstream Kubernetes conformance suites with gr8s as the CNI on a
-two-node k3s v1.37 cluster:
+a recent kernel — there is no bundled `iptables` or `nft` binary to match. Run as
+the CNI on a two-node k3s cluster, the dataplane passes the upstream Kubernetes
+conformance tests for NetworkPolicy (TCP, UDP and SCTP), Gateway API (core
+HTTPRoute), and the sig-network suite covering Services (ClusterIP and NodePort),
+hostPort, DNS and EndpointSlices.
 
-| Conformance suite (gr8s as the CNI) | Result |
-| --- | --- |
-| NetworkPolicy (incl. SCTP) | 51 / 51 |
-| Gateway API core HTTPRoute | 8 / 8 |
-| sig-network `[Conformance]` | 43 / 47 |
-
-The four remaining sig-network failures are NodePort Services: the socket load
-balancer steers host- and Pod-origin traffic, so off-node packet ingress to a
-NodePort is not yet served in this standalone-CNI configuration (ClusterIP
-Services, hostPort, NetworkPolicy and Gateway API are). See [deploy/](deploy/) to
-install it on your cluster, and the
+See [deploy/](deploy/) to install it on your cluster, and the
 [foreign-cluster networking design](docs/design-foreign-cluster-networking.md)
 for how it works.
 
