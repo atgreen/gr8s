@@ -63,6 +63,9 @@ spec:
             - { name: bpf, mountPath: "{{ .Values.paths.bpf }}", mountPropagation: Bidirectional }
             - { name: state, mountPath: "{{ .Values.paths.state }}" }
             - { name: socket, mountPath: "{{ .Values.paths.socket }}" }
+            # The container runtime hands CNI a netns bind under /run/netns;
+            # new binds must propagate in or every ADD fails to open them.
+            - { name: netns, mountPath: /run/netns, mountPropagation: HostToContainer }
       volumes:
         - name: cni-bin
           hostPath: { path: "{{ .Values.paths.cniBin }}", type: DirectoryOrCreate }
@@ -74,3 +77,5 @@ spec:
           hostPath: { path: "{{ .Values.paths.state }}", type: DirectoryOrCreate }
         - name: socket
           hostPath: { path: "{{ .Values.paths.socket }}", type: DirectoryOrCreate }
+        - name: netns
+          hostPath: { path: /run/netns, type: DirectoryOrCreate }
