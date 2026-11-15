@@ -51,3 +51,23 @@ with gr8s as the sole CNI, the following passed live (see the epic
 
 The `network` suite above extends this to the upstream sig-network Conformance
 set; `full` and `gateway` complete the formal profiles.
+
+## Gateway API conformance
+
+Run the Gateway API conformance suite (`kubernetes-sigs/gateway-api`, matching
+the installed CRD bundle version) with `--gateway-class=gr8s`. Run it **from
+inside the cluster network** (on a node), because a gr8s Gateway advertises the
+node addresses and the suite connects to them directly:
+
+```
+go test -c ./conformance -o gwconf.test        # build once, on a machine with Go
+scp gwconf.test <node>:/root/                   # copy the static binary to a node
+ssh <node> 'KUBECONFIG=/etc/rancher/k3s/k3s.yaml /root/gwconf.test \
+  -test.run TestConformance -gateway-class=gr8s \
+  -supported-features=Gateway,HTTPRoute,ReferenceGrant'
+```
+
+Verified passing against v1.6.3 with GatewayClass gr8s: HTTPRouteSimpleSameNamespace,
+HTTPRouteCrossNamespace, HTTPRouteHeaderMatching, HTTPRouteMatching,
+HTTPRouteMatchingAcrossRoutes, GatewayObservedGenerationBump. Known gaps:
+HTTPRoute path-match ordering and invalid-route-kind listener status.
