@@ -153,14 +153,23 @@
         (format out "apiVersion: v1~%kind: Config~%current-context: main~%~
 contexts:~%- name: main~%  context:~%    cluster: test~%    user: admin~%    namespace: web~%~
 clusters:~%- name: test~%  cluster:~%    server: https://cluster.example:6443~%    insecure-skip-tls-verify: true~%~
-users:~%- name: admin~%  user:~%    token: sekrit~%"))
+users:~%- name: admin~%  user:~%    token: sekrit~%    client-certificate-data: ~A~%    client-key-data: ~A~%"
+                (ag-grpc:base64-encode (trivial-utf-8:string-to-utf-8-bytes "CERT-PEM"))
+                (ag-grpc:base64-encode (trivial-utf-8:string-to-utf-8-bytes "KEY-PEM"))))
       (let ((cluster (gr8s.kube-client:cluster-from-kubeconfig path)))
         (is (equal "cluster.example" (gr8s.kube-client:kube-cluster-host cluster)))
         (is (= 6443 (gr8s.kube-client:kube-cluster-port cluster)))
         (is (equal "web" (gr8s.kube-client:kube-cluster-namespace cluster)))
         (is (equal "sekrit" (funcall (gr8s.kube-client::kube-cluster-token-function cluster))))
         (is (gr8s.kube-client::kube-cluster-insecure cluster))
-        (is (not (gr8s.kube-client::kube-cluster-plain cluster)))))))
+        (is (not (gr8s.kube-client::kube-cluster-plain cluster)))
+        ;; Inline credentials (the k3s style) materialize to private files.
+        (let ((certificate (gr8s.kube-client::kube-cluster-client-certificate-path cluster))
+              (key (gr8s.kube-client::kube-cluster-client-key-path cluster)))
+          (is (equal "CERT-PEM" (uiop:read-file-string certificate)))
+          (is (equal "KEY-PEM" (uiop:read-file-string key)))
+          (ignore-errors (delete-file certificate))
+          (ignore-errors (delete-file key)))))))
 
 (test kube-client-lease-leadership-is-exclusive-and-taken-over-after-expiry
   (with-core-api (store path)

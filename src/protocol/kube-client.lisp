@@ -105,6 +105,23 @@ local proxy); otherwise the chain verifies against TRUST-CERTIFICATES."
         (let ((path (gethash path-key table)))
           (and path (uiop:read-file-string path))))))
 
+(defun kubeconfig-credential-path (table data-key path-key what)
+  "A file path for a kubeconfig credential: the named path, or inline data
+materialized to a private file (TLS clients take key material by path)."
+  (or (gethash path-key table)
+      (let ((data (gethash data-key table)))
+        (when data
+          (let ((path (merge-pathnames
+                       (format nil "gr8s-kubeconfig-~A-~36R.pem" what
+                               (random most-positive-fixnum (make-random-state t)))
+                       (uiop:temporary-directory))))
+            (uiop:with-output-file (out path :if-exists :supersede)
+              (write-string (trivial-utf-8:utf-8-bytes-to-string
+                             (ag-grpc:base64-decode data))
+                            out))
+            #+sbcl (sb-posix:chmod (namestring path) #o600)
+            (namestring path))))))
+
 (defun cluster-from-kubeconfig (path &key context)
   "Read a kubeconfig file: CONTEXT by name, or its current-context."
   (let* ((config (cl-safe-yaml:parse-yaml (uiop:read-file-string path)))
@@ -130,8 +147,11 @@ local proxy); otherwise the chain verifies against TRUST-CERTIFICATES."
      :insecure (eq t (gethash "insecure-skip-tls-verify" cluster))
      :trust-certificates (and ca-text (parse-pem-certificates ca-text))
      :token-function (and token (constantly token))
-     :client-certificate-path (and user (gethash "client-certificate" user))
-     :client-key-path (and user (gethash "client-key" user))
+     :client-certificate-path
+     (and user (kubeconfig-credential-path user "client-certificate-data"
+                                           "client-certificate" "certificate"))
+     :client-key-path
+     (and user (kubeconfig-credential-path user "client-key-data" "client-key" "key"))
      :namespace (or (and selected (gethash "namespace" selected)) "default"))))
 
 ;;; ---------------------------------------------------------------------------

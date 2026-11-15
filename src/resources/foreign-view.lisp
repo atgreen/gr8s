@@ -110,18 +110,22 @@ cache update, so an agent can nudge its reconcilers."
      (or (gr8s.kube-client::informer-resource-version informer) "0"))))
 
 (defmethod gr8s.store:list-pods ((view foreign-resource-view) &optional namespace)
-  "The foreign cluster's Pods as gr8s model Pods, for the NetworkPolicy planner."
+  "The foreign cluster's Pods as model Pods carrying their watched objects.
+The strict parser validates Pods as submitted for creation and rejects fields
+every live cluster sets (status, projected volumes, scheduling detail), which
+would silently starve policy resolution of real Pods.  The network consumers
+read identity and the authoritative object only, so build exactly that."
   (loop for object in (list-core-resources view "pods" namespace)
-        for pod = (handler-case
-                      ;; The parser validates a Pod as submitted for creation,
-                      ;; where status must be empty; a watched Pod carries one.
-                      ;; Status reaches consumers separately (the watch cache).
-                      (progn (remhash "status" object)
-                             (gr8s.store::store-parse-pod object))
-                    ;; A foreign Pod using a feature gr8s's parser rejects must
-                    ;; not hide every other Pod from policy resolution.
-                    (error () nil))
-        when pod collect pod))
+        for metadata = (gethash "metadata" object)
+        for spec = (gethash "spec" object)
+        when (and metadata (gethash "name" metadata))
+          collect (gr8s.model::make-pod
+                   :name (gethash "name" metadata)
+                   :namespace (or (gethash "namespace" metadata) "default")
+                   :uid (gethash "uid" metadata)
+                   :resource-version (gethash "resourceVersion" metadata)
+                   :node-name (and spec (gethash "nodeName" spec))
+                   :object object)))
 
 (defmethod gr8s.store:pod-reported-status ((view foreign-resource-view) pod)
   "A foreign Pod's status travels inside the watched object itself."
