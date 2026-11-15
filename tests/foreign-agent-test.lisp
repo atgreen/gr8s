@@ -207,6 +207,7 @@ since gr8s itself creates the interface."
                   (let ((real (gr8s.controllers::make-service-backend-resolver view)))
                     (gr8s.controllers:start-foreign-gateway
                      view :cert-dir (merge-pathnames "gateway-certs/" path)
+                     :cluster cluster :node-name "worker-f" :lease-namespace "default"
                      :resolver (lambda (backend)
                                  (multiple-value-bind (address port) (funcall real backend)
                                    (when address (setf resolved-address address))
@@ -267,6 +268,51 @@ since gr8s itself creates the interface."
                     :timeout 30)
                    "the gateway listener routes to the Service's endpoint")
                (is (equal "192.0.2.9" resolved-address)
-                   "the backend resolved through the Service's EndpointSlice"))
+                   "the backend resolved through the Service's EndpointSlice")
+               ;; The lease-holder publishes statuses and the fronting Service.
+               (flet ((condition-true-p (conditions type)
+                        (find-if (lambda (entry)
+                                   (and (equal type (gethash "type" entry))
+                                        (equal "True" (gethash "status" entry))))
+                                 (coerce (or conditions #()) 'list))))
+                 (is (poll-until
+                      (lambda ()
+                        (ignore-errors
+                          (let ((gateway (gr8s.kube-client:kube-get
+                                          cluster (gr8s.kube-client:resource-path
+                                                   "gateway.networking.k8s.io" "v1" "gateways"
+                                                   :namespace "default" :name "web"))))
+                            (and (condition-true-p
+                                  (gethash "conditions" (gethash "status" gateway)) "Programmed")
+                                 (plusp (length (gethash "addresses"
+                                                         (gethash "status" gateway) #())))))))
+                      :timeout 30)
+                     "the lease-holder programs Gateway status with node addresses")
+                 (is (poll-until
+                      (lambda ()
+                        (ignore-errors
+                          (let ((route (gr8s.kube-client:kube-get
+                                        cluster (gr8s.kube-client:resource-path
+                                                 "gateway.networking.k8s.io" "v1" "httproutes"
+                                                 :namespace "default" :name "app"))))
+                            (condition-true-p
+                             (gethash "conditions"
+                                      (aref (gethash "parents" (gethash "status" route)) 0))
+                             "Accepted"))))
+                      :timeout 30)
+                     "the HTTPRoute's parent is accepted")
+                 (is (poll-until
+                      (lambda ()
+                        (ignore-errors
+                          (equal "LoadBalancer"
+                                 (gethash "type"
+                                          (gethash "spec"
+                                                   (gr8s.kube-client:kube-get
+                                                    cluster (gr8s.kube-client:resource-path
+                                                             nil "v1" "services"
+                                                             :namespace "default"
+                                                             :name "gr8s-gateway-web")))))))
+                      :timeout 30)
+                     "the lease-holder provisions the fronting LoadBalancer Service")))
           (gr8s.network::stop-foreign-cni-agent agent)
           (funcall stop-origin))))))
