@@ -1,6 +1,6 @@
 # gr8s
 
-**Kubernetes, built from scratch in Common Lisp, with an eBPF dataplane.**
+**Kubernetes, built from scratch in Common Lisp — with an eBPF dataplane you can run on its own.**
 
 gr8s puts a Kubernetes API server, controllers, scheduler, node agent,
 container runtime, networking, and datastore in one native executable. Use
@@ -27,6 +27,41 @@ Explore the cluster through its integrated [Headlamp dashboard](#dashboard).
 written in a [bpftrace-compatible language](docs/design-gr8s-trace.md) for live
 kernel tracing of selected Pods. Inspect running control-plane and agent
 processes through [Slynk](docs/building-and-testing.md#debugging-a-running-cluster).
+
+## Use the gr8s dataplane with your own Kubernetes
+
+gr8s is more than a Kubernetes distribution. Its eBPF dataplane also installs as
+a standalone DaemonSet on a cluster you already run — no gr8s control plane
+required. On a k3s cluster with `kube-proxy`, flannel, and the built-in
+NetworkPolicy controller disabled, gr8s provides a complete, Cilium-class
+networking stack:
+
+- **Pod networking and IPAM** over a VXLAN fabric (cross-node Pod-to-Pod).
+- **Services** — a kube-proxy replacement in the Whistler eBPF socket and packet
+  load balancer.
+- **NetworkPolicy** enforced in eBPF, for TCP, UDP, and SCTP.
+- **Gateway API** — HTTPRoute routing, status, and LoadBalancer Services.
+- **hostPort** (in-kernel DNAT at the socket hook) and cluster **DNS** reachability.
+
+Everything is JIT-compiled from a Lisp eBPF DSL by
+[Whistler](https://github.com/atgreen/Whistler), so the only host requirement is
+a recent kernel — there is no bundled `iptables` or `nft` binary to match. Run
+against the upstream Kubernetes conformance suites with gr8s as the CNI on a
+two-node k3s v1.37 cluster:
+
+| Conformance suite (gr8s as the CNI) | Result |
+| --- | --- |
+| NetworkPolicy (incl. SCTP) | 51 / 51 |
+| Gateway API core HTTPRoute | 8 / 8 |
+| sig-network `[Conformance]` | 43 / 47 |
+
+The four remaining sig-network failures are NodePort Services: the socket load
+balancer steers host- and Pod-origin traffic, so off-node packet ingress to a
+NodePort is not yet served in this standalone-CNI configuration (ClusterIP
+Services, hostPort, NetworkPolicy and Gateway API are). See [deploy/](deploy/) to
+install it on your cluster, and the
+[foreign-cluster networking design](docs/design-foreign-cluster-networking.md)
+for how it works.
 
 gr8s is not yet a CNCF-submitted _Certified Kubernetes_ distribution. See the
 [API coverage](docs/kubernetes-surface.md) and
