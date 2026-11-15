@@ -23,6 +23,8 @@
     ("configmaps"      ""                           "v1"       t)
     ("endpointslices"  "discovery.k8s.io"           "v1"       t)
     ("networkpolicies" "networking.k8s.io"          "v1"       t)
+    ("ingresses"       "networking.k8s.io"          "v1"       t)
+    ("ingressclasses"  "networking.k8s.io"          "v1"       nil)
     ("gatewayclasses"  "gateway.networking.k8s.io"  "v1"       nil)
     ("gateways"        "gateway.networking.k8s.io"  "v1"       t)
     ("httproutes"      "gateway.networking.k8s.io"  "v1"       t)

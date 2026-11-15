@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gr8s-net
+  namespace: {{ .Release.Namespace }}
+  labels: { app.kubernetes.io/name: gr8s-net }
+spec:
+  selector:
+    matchLabels: { app.kubernetes.io/name: gr8s-net }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: gr8s-net }
+    spec:
+      serviceAccountName: gr8s-net
+      hostNetwork: true
+      hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
+      tolerations:
+        - operator: Exists
+      initContainers:
+        # Install the CNI plugin binary and conflist, and mount the agent's bpffs.
+        - name: install
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          command: [/bin/sh, -c]
+          args:
+            - |
+              set -e
+              cp /usr/local/bin/gr8s /host-cni-bin/gr8s.tmp && mv /host-cni-bin/gr8s.tmp /host-cni-bin/gr8s
+              mountpoint -q /host-bpf || mount -t bpf bpf /host-bpf
+              cat > /host-cni-conf/05-gr8s.conflist.tmp <<CONF
+              {"cniVersion":"1.0.0","name":"gr8s","plugins":[{"type":"gr8s","socket":"{{ .Values.paths.socket }}/cni.sock","direction":"egress","mapPinRoot":"{{ .Values.paths.bpf }}"}]}
+              CONF
+              mv /host-cni-conf/05-gr8s.conflist.tmp /host-cni-conf/05-gr8s.conflist
+          securityContext: { privileged: true }
+          volumeMounts:
+            - { name: cni-bin, mountPath: /host-cni-bin }
+            - { name: cni-conf, mountPath: /host-cni-conf }
+            - { name: bpf, mountPath: /host-bpf, mountPropagation: Bidirectional }
+      containers:
+        - name: agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          args:
+            - cni-agent
+            - --node-name
+            - $(NODE_NAME)
+            - --socket
+            - "{{ .Values.paths.socket }}/cni.sock"
+            - --bpf-root
+            - "{{ .Values.paths.bpf }}"
+            - --state-directory
+            - "{{ .Values.paths.state }}"
+            - --mtu
+            - "{{ .Values.mtu }}"
+            {{- if .Values.gateway.enabled }}
+            - --gateway
+            - "true"
+            {{- end }}
+          env:
+            - name: NODE_NAME
+              valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+          securityContext: { privileged: true }
+          volumeMounts:
+            - { name: bpf, mountPath: "{{ .Values.paths.bpf }}", mountPropagation: Bidirectional }
+            - { name: state, mountPath: "{{ .Values.paths.state }}" }
+            - { name: socket, mountPath: "{{ .Values.paths.socket }}" }
+      volumes:
+        - name: cni-bin
+          hostPath: { path: "{{ .Values.paths.cniBin }}", type: DirectoryOrCreate }
+        - name: cni-conf
+          hostPath: { path: "{{ .Values.paths.cniConf }}", type: DirectoryOrCreate }
+        - name: bpf
+          hostPath: { path: "{{ .Values.paths.bpf }}", type: DirectoryOrCreate }
+        - name: state
+          hostPath: { path: "{{ .Values.paths.state }}", type: DirectoryOrCreate }
+        - name: socket
+          hostPath: { path: "{{ .Values.paths.socket }}", type: DirectoryOrCreate }

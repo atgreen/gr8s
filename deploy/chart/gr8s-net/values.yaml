@@ -1,0 +1,19 @@
+image:
+  repository: ghcr.io/atgreen/gr8s-net
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# Host paths the agent owns.
+paths:
+  cniBin: /opt/cni/bin
+  cniConf: /etc/cni/net.d
+  bpf: /run/gr8s/bpf
+  state: /var/lib/gr8s-cni
+  socket: /run/gr8s
+
+# Pod interface MTU (lower it when an encapsulating underlay needs headroom).
+mtu: 1450
+
+gateway:
+  # Serve the Gateway API (GatewayClass gr8s.io/gateway-controller) from every node.
+  enabled: false

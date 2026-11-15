@@ -142,3 +142,131 @@ since gr8s itself creates the interface."
       (setf stop t)
       (bt:join-thread thread)
       (is (null result)))))
+
+(defun foreign-gateway-test-origin ()
+  "A one-reply-per-connection HTTP origin; returns (values port stopper)."
+  (let* ((listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t
+                                          :element-type '(unsigned-byte 8)))
+         (stopping nil)
+         (thread
+           (bt:make-thread
+            (lambda ()
+              (loop
+                (let ((client (handler-case (usocket:socket-accept listener)
+                                (error () (return)))))
+                  (when stopping
+                    (ignore-errors (usocket:socket-close client))
+                    (return))
+                  (ignore-errors
+                    (let* ((stream (usocket:socket-stream client))
+                           (text (flexi-streams:make-flexi-stream stream)))
+                      (loop for line = (read-line text nil "")
+                            until (zerop (length (string-trim '(#\Return) line))))
+                      (write-sequence
+                       (trivial-utf-8:string-to-utf-8-bytes
+                        (format nil "HTTP/1.1 200 OK~C~CContent-Length: 9~C~CConnection: close~C~C~C~Corigin-ok"
+                                #\Return #\Linefeed #\Return #\Linefeed
+                                #\Return #\Linefeed #\Return #\Linefeed))
+                       stream)
+                      (force-output stream)))
+                  (ignore-errors (usocket:socket-close client)))))
+            :name "foreign gateway test origin")))
+    (values (usocket:get-local-port listener)
+            (lambda ()
+              (setf stopping t)
+              (ignore-errors (usocket:socket-close
+                              (usocket:socket-connect "127.0.0.1"
+                                                      (usocket:get-local-port listener))))
+              (ignore-errors (bt:join-thread thread))
+              (ignore-errors (usocket:socket-close listener))))))
+
+(defun foreign-gateway-free-port ()
+  (let ((probe (usocket:socket-listen "127.0.0.1" 0 :reuse-address t)))
+    (prog1 (usocket:get-local-port probe)
+      (usocket:socket-close probe))))
+
+(test foreign-gateway-routes-httproute-traffic-to-service-backends
+  (with-core-api (store path)
+    (foreign-agent-test-node store "worker-f" "10.88.8.0/24")
+    (multiple-value-bind (origin-port stop-origin) (foreign-gateway-test-origin)
+      (let* ((cluster (kube-test-cluster))
+             (gateway-port (foreign-gateway-free-port))
+             (resolved-address nil)
+             (agent
+               (gr8s.network::start-foreign-cni-agent
+                cluster :node-name "worker-f"
+                :state-directory (merge-pathnames "cni-agent/" path)
+                :bpf-root (namestring path)
+                :socket-path (namestring (merge-pathnames "cni.sock" path))
+                :policy-converger (lambda (&rest arguments) (declare (ignore arguments)) nil)
+                :extra-factory
+                (lambda (view)
+                  ;; Slice resolution runs for real; the documented TEST-NET
+                  ;; address is then dialed as the local origin, since the API
+                  ;; (rightly) refuses loopback endpoint addresses.
+                  (let ((real (gr8s.controllers::make-service-backend-resolver view)))
+                    (gr8s.controllers:start-foreign-gateway
+                     view :cert-dir (merge-pathnames "gateway-certs/" path)
+                     :resolver (lambda (backend)
+                                 (multiple-value-bind (address port) (funcall real backend)
+                                   (when address (setf resolved-address address))
+                                   (values (and address "127.0.0.1") port)))))))))
+        (is (not (null agent)))
+        (unwind-protect
+             (progn
+               (gr8s.kube-client:kube-create
+                cluster "/api/v1/namespaces/default/services"
+                (gr8s.resources::core-object
+                 "apiVersion" "v1" "kind" "Service"
+                 "metadata" (gr8s.resources::core-object "name" "app-svc")
+                 "spec" (gr8s.resources::core-object
+                         "ports" (vector (gr8s.resources::core-object "port" 80)))))
+               (gr8s.kube-client:kube-create
+                cluster (gr8s.kube-client:resource-path
+                         "discovery.k8s.io" "v1" "endpointslices" :namespace "default")
+                (gr8s.resources::core-object
+                 "apiVersion" "discovery.k8s.io/v1" "kind" "EndpointSlice"
+                 "metadata" (gr8s.resources::core-object
+                             "name" "app-svc-1"
+                             "labels" (gr8s.resources::core-object
+                                       "kubernetes.io/service-name" "app-svc"))
+                 "addressType" "IPv4"
+                 "endpoints" (vector (gr8s.resources::core-object
+                                      "addresses" #("192.0.2.9")
+                                      "conditions" (gr8s.resources::core-object "ready" t)))
+                 "ports" (vector (gr8s.resources::core-object "port" origin-port))))
+               (gr8s.kube-client:kube-create
+                cluster (gr8s.kube-client:resource-path
+                         "gateway.networking.k8s.io" "v1" "gatewayclasses")
+                (com.inuoe.jzon:parse
+                 "{\"apiVersion\":\"gateway.networking.k8s.io/v1\",\"kind\":\"GatewayClass\",
+\"metadata\":{\"name\":\"gr8s\"},\"spec\":{\"controllerName\":\"gr8s.io/gateway-controller\"}}"))
+               (gr8s.kube-client:kube-create
+                cluster (gr8s.kube-client:resource-path
+                         "gateway.networking.k8s.io" "v1" "gateways" :namespace "default")
+                (com.inuoe.jzon:parse
+                 (format nil "{\"apiVersion\":\"gateway.networking.k8s.io/v1\",\"kind\":\"Gateway\",~
+\"metadata\":{\"name\":\"web\",\"namespace\":\"default\"},~
+\"spec\":{\"gatewayClassName\":\"gr8s\",\"listeners\":[{\"name\":\"http\",\"port\":~D,\"protocol\":\"HTTP\"}]}}"
+                         gateway-port)))
+               (gr8s.kube-client:kube-create
+                cluster (gr8s.kube-client:resource-path
+                         "gateway.networking.k8s.io" "v1" "httproutes" :namespace "default")
+                (com.inuoe.jzon:parse
+                 "{\"apiVersion\":\"gateway.networking.k8s.io/v1\",\"kind\":\"HTTPRoute\",
+\"metadata\":{\"name\":\"app\",\"namespace\":\"default\"},
+\"spec\":{\"parentRefs\":[{\"name\":\"web\"}],\"rules\":[{\"backendRefs\":[{\"name\":\"app-svc\",\"port\":80}]}]}}"))
+               (is (poll-until
+                    (lambda ()
+                      (ignore-errors
+                        (equal "origin-ok"
+                               (map 'string #'code-char
+                                    (drakma:http-request
+                                     (format nil "http://127.0.0.1:~D/" gateway-port)
+                                     :force-binary t)))))
+                    :timeout 30)
+                   "the gateway listener routes to the Service's endpoint")
+               (is (equal "192.0.2.9" resolved-address)
+                   "the backend resolved through the Service's EndpointSlice"))
+          (gr8s.network::stop-foreign-cni-agent agent)
+          (funcall stop-origin))))))

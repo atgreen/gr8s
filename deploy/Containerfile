@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: 2026 Anthony Green
+# SPDX-License-Identifier: Apache-2.0
+#
+# The gr8s foreign-cluster networking image: one static-ish binary that is the
+# CNI plugin, the node agent, and the Gateway controller.  Build the binary
+# first (`make native`), then: podman build -f deploy/Containerfile -t gr8s-net .
+FROM registry.fedoraproject.org/fedora-minimal:44
+COPY build/gr8s /usr/local/bin/gr8s
+ENTRYPOINT ["/usr/local/bin/gr8s"]
