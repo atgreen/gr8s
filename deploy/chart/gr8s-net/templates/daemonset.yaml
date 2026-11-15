@@ -51,6 +51,10 @@ spec:
             - "{{ .Values.paths.state }}"
             - --mtu
             - "{{ .Values.mtu }}"
+            {{- if .Values.serviceLb.enabled }}
+            - --service-lb
+            - "true"
+            {{- end }}
             {{- if .Values.gateway.enabled }}
             - --gateway
             - "true"

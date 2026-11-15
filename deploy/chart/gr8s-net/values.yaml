@@ -14,6 +14,12 @@ paths:
 # Pod interface MTU (lower it when an encapsulating underlay needs headroom).
 mtu: 1450
 
+serviceLb:
+  # Replace kube-proxy: serve Services (ClusterIP and NodePort), hostPort, and the
+  # eBPF socket load balancer on every node. This is the core of the CNI, so it is
+  # on by default; turn it off only when another proxy still handles Services.
+  enabled: true
+
 gateway:
   # Serve the Gateway API (GatewayClass gr8s.io/gateway-controller) from every node.
   enabled: false
