@@ -104,6 +104,31 @@
       (is (equal "/" (gr8s.controllers::gw-match-path match)))
       (is (equal 1 (gr8s.controllers::gw-backend-weight (first (gr8s.controllers::gw-rule-backends rule2))))))))
 
+(test gateway-router-prefix-trailing-slash-matches-segments
+  ;; Mirrors the Gateway-API HTTPRoutePathMatchOrder conformance route, whose
+  ;; PathPrefix values carry a trailing slash ("/match/", "/match/prefix/").
+  ;; Per spec the trailing slash is not significant and matching is on segment
+  ;; boundaries, so "/match/any" must reach the "/match/" prefix backend.
+  (let* ((object (com.inuoe.jzon:parse
+                  "{\"metadata\":{\"name\":\"path-matching-order\",\"namespace\":\"infra\"},
+                    \"spec\":{\"rules\":[
+                      {\"matches\":[{\"path\":{\"type\":\"Exact\",\"value\":\"/match\"}}],\"backendRefs\":[{\"name\":\"v1\",\"port\":80}]},
+                      {\"matches\":[{\"path\":{\"type\":\"Exact\",\"value\":\"/match/exact\"}}],\"backendRefs\":[{\"name\":\"v2\",\"port\":80}]},
+                      {\"matches\":[{\"path\":{\"type\":\"Exact\",\"value\":\"/match/exact/one\"}}],\"backendRefs\":[{\"name\":\"v3\",\"port\":80}]},
+                      {\"matches\":[{\"path\":{\"type\":\"PathPrefix\",\"value\":\"/match/\"}}],\"backendRefs\":[{\"name\":\"v3\",\"port\":80}]},
+                      {\"matches\":[{\"path\":{\"type\":\"PathPrefix\",\"value\":\"/match/prefix/\"}}],\"backendRefs\":[{\"name\":\"v1\",\"port\":80}]},
+                      {\"matches\":[{\"path\":{\"type\":\"PathPrefix\",\"value\":\"/match/prefix/one\"}}],\"backendRefs\":[{\"name\":\"v2\",\"port\":80}]}]}}"))
+         (router (gr8s.controllers::compile-gateway-router (list (gr8s.controllers::parse-httproute object)))))
+    (flet ((route (path) (let ((d (funcall router "any" path "GET" '()))) (and d (gwr-dispatch-name d)))))
+      (is (equal "v1" (route "/match")))            ; exact
+      (is (equal "v2" (route "/match/exact")))       ; exact beats prefix
+      (is (equal "v3" (route "/match/exact/one")))   ; most specific exact
+      (is (equal "v3" (route "/match/any")))         ; trailing-slash prefix "/match/" on a deeper path
+      (is (equal "v3" (route "/match/exact/two")))   ; falls to "/match/" prefix, not the exact
+      (is (equal "v1" (route "/match/prefix/any")))  ; longer prefix "/match/prefix/" wins
+      (is (equal "v2" (route "/match/prefix/one")))  ; longest prefix "/match/prefix/one"
+      (is (equal "v2" (route "/match/prefix/one/x"))))))
+
 (test gateway-router-parse-and-compile-end-to-end
   (let* ((object (com.inuoe.jzon:parse
                   "{\"metadata\":{\"name\":\"app\",\"namespace\":\"shop\"},
