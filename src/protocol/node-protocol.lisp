@@ -61,7 +61,8 @@ Framing keeps different object boundaries from sharing the same digest input."
     (:status . gr8s.node.v1::node-status)
     (:operation-response . gr8s.node.v1::operation-response)
     (:operation-stream . gr8s.node.v1::operation-stream)
-    (:credential-token-request . gr8s.node.v1::credential-token-request)))
+    (:credential-token-request . gr8s.node.v1::credential-token-request)
+    (:gateway-config-ack . gr8s.node.v1::gateway-config-ack)))
 
 (defparameter +server-envelope-variants+
   '((:hello . gr8s.node.v1::server-hello)
@@ -70,7 +71,8 @@ Framing keeps different object boundaries from sharing the same digest input."
     (:operation-input . gr8s.node.v1::operation-input)
     (:operation-cancel . gr8s.node.v1::operation-cancel)
     (:protocol-error . gr8s.node.v1::protocol-error)
-    (:credential-token-response . gr8s.node.v1::credential-token-response)))
+    (:credential-token-response . gr8s.node.v1::credential-token-response)
+    (:gateway-config . gr8s.node.v1::gateway-config-update)))
 
 (defun make-node-envelope (class variants variant payload sequence protocol-version)
   "Build an envelope of CLASS carrying VARIANT's PAYLOAD at PROTOCOL-VERSION and

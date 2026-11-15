@@ -153,7 +153,7 @@
               (cons (core-resource-key resource namespace name)
                     (normalize-core-resource resource object namespace name)))))))
 
-(defun install-assigned-resource-objects (store assignments &optional service-discovery)
+(defun install-assigned-resource-objects (store assignments &optional service-discovery &key public-resources)
   "Atomically install Pod-scoped references, exact PVC/PV bindings and public Service discovery."
   (let ((resources (make-hash-table :test #'equal)))
     (dolist (assignment assignments)
@@ -167,9 +167,11 @@
           (format *error-output* "gr8s Pod ~A/~A assignment rejected: ~A~%"
                   (slot-value assignment 'gr8s.node.v1::namespace)
                   (slot-value assignment 'gr8s.node.v1::name) condition))))
-    (install-service-discovery-projection resources service-discovery)
+    (if public-resources
+        (maphash (lambda (key object) (setf (gethash key resources) object)) public-resources)
+        (install-service-discovery-projection resources service-discovery))
     (with-store-lock (store)
-      (unless (equalp resources (pod-store-resources store))
+      (unless (gr8s.store::json-value-equal-p resources (pod-store-resources store))
         (commit-core-resources store resources (1+ (pod-store-resource-revision store)))))))
 
 (defun pod-volume-directory (runtime pod name)

@@ -358,19 +358,71 @@ agent — **no Envoy, no sidecars, no kube-proxy, no iptables**. `GatewayClass`,
 durable `gateway.networking.k8s.io/v1` objects and projected to the node that
 runs them. Two things set it apart.
 
-**The routing table is compiled, not interpreted.** When HTTPRoutes change, SBCL
-JIT-compiles the match table into a native Lisp dispatch function — hostnames
-(exact and `*.suffix`), path `Exact`/`PathPrefix`, method and exact-header
-matches, and weighted backends — with the route constants inlined and
-Gateway-API match precedence baked into the `cond` branch order. A route change
-recompiles in microseconds; there is no per-request walk of a rules table.
+**Routing updates build immutable hostname indexes.** Matching code is compiled
+once with gr8s. HTTPRoute changes build a replacement table of exact-host and
+wildcard-suffix buckets containing precedence-ordered match records. Requests
+check only the applicable host buckets, with path `Exact`/`PathPrefix`, method
+and exact-header matching, filters, and weighted backend selection. The agent
+hot-swaps the complete dispatcher; in-flight requests retain their old table.
+Unchanged routing content reuses the existing dispatcher. Route updates do not
+invoke the Lisp compiler.
+
+Committed configuration changes wake the control-plane reconciliation worker.
+A fixed 5 ms window coalesces pending changes, and writes arriving during a pass
+request a follow-up pass. Status-only updates, resource-version bookkeeping,
+Events, and Leases do not trigger these wakeups. The one-second periodic repair
+pass remains, as does the HA leader gate. Pod and node state transitions retain
+their periodic reconciliation path.
+
+Changes confined to Gateway configuration publish keyed additions, replacements,
+and deletions over the negotiated `gateway-config-delta-v1` node-session channel.
+The publisher captures changed rows directly from committed state; it includes
+newly referenced TLS Secrets with Gateway edits. Gateway status and attached-route
+counts remain on the periodic full controller pass. Targeted publications do not
+postpone that repair deadline, and a newly active leader runs a full pass first.
+Older agents continue receiving full node snapshots.
+
+Each batch names its full-node baseline and previous Gateway revision. Agents
+reject stale, skipped, or malformed batches. A dependency revision fences changes
+to Services, endpoints, policy, and other node configuration: those changes require
+a full snapshot before later Gateway batches can activate. Gateway acknowledgments
+do not satisfy node-snapshot acknowledgments or Service readiness grants.
+
+The agent keeps a derived, immutable Gateway view in memory. HTTPRoute edits parse
+only changed routes and replace affected hostname buckets; untouched candidate
+vectors are shared with the previous table. Each published backend retains the
+resolver for its view, so in-flight requests use a coherent endpoint version.
+Listener and certificate changes use full listener planning. Service receiver,
+risk, and selection checks remain prerequisites for applying a Gateway batch.
+
+Gateway batches do not journal node desired state or run Pod/network reconciliation.
+The control plane retains durable desired state. On disconnect the agent clears
+its Gateway synchronization state; a new session must install a full baseline
+before accepting batches or reporting synchronized Gateway observations. After a
+process restart the agent rebuilds the derived view from full synchronization.
+Full snapshots remain the initial-sync, reconnect, dependency-change, and periodic
+repair path, and retain the existing node durability rules.
+
+The [incremental Gateway evidence](evidence/gateway-incremental-validation-2026-11-15.json)
+records the 3,000-route measurements and native recovery scope. A native agent
+restored an unjournaled route after VM reboot through full synchronization, using
+an external backend without Pod reservations. Restarting the complete benchmark
+workload hit the existing resource-manager checkpoint rejection tracked as
+`podster-z3h`, before Gateway synchronization could start.
+
+Full discovery projection and attached-route counting read immutable captured
+resource rows directly, avoiding redundant deep copies. Public resource reads
+continue returning private copies. The evidence also separates the instrumented
+2 GiB/4 GiB heap experiment from the uninstrumented route measurements: a larger
+heap reduced GC time, while repeated full reconciliation still allocated substantial
+temporary data. Heap sizing is unchanged by this implementation.
 
 **The agent is the gateway.** An eBPF `sk_lookup` program (compiled from Lisp,
 keyed by destination port through a `SOCKHASH`) steers an inbound connection for a
 gateway port straight onto the agent's own listening socket — a port the agent
 never bound — with `bpf_sk_assign`, so there is no kube-proxy hop and no iptables.
 The in-agent L7 proxy then terminates the request and dispatches through the
-compiled router to a ready backend Pod endpoint.
+indexed router to a ready backend Pod endpoint.
 
 Supported today:
 
@@ -385,6 +437,21 @@ Supported today:
 - **Per-route observability and protection**:
   `gr8s_gateway_requests_total{gateway,route,code}` on `/metrics`, and a per-route
   token-bucket rate limiter (`gr8s.io/rate-limit-rps` → HTTP 429).
+
+GatewayClass and Gateway expose `/status` subresources. The control plane
+publishes Gateway addresses only after a ready node reports that the current
+Gateway UID and spec generation have running listeners. `Accepted` describes
+configuration ownership and support; `Programmed` describes observed listener
+readiness. Expired reports and replaced node connections cannot keep a Gateway
+programmed. Each listener reports its supported route kinds, `attachedRoutes`,
+and conditions; attachment counts follow parent references and `allowedRoutes`.
+Status updates do not change the spec generation or the node configuration digest.
+
+Wait for `Programmed=True` before sending traffic. HTTP listeners return 404
+before the first matching route and remain available after the last route is
+removed. `scripts/test-gateway-native.py --binary /path/to/gr8s` verifies this
+lifecycle, controller-published addresses, attachment counts, and spec-generation
+changes with real containers; run it as root in a disposable test VM.
 
 `make smoke` creates a Gateway, an HTTPRoute, and a backend Service + Pod, then
 proves a host/path request routes end-to-end through the in-agent proxy to the

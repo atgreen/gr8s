@@ -1080,7 +1080,7 @@
 
 (defun make-fake-lb-controller ()
   (gr8s.controllers::make-service-lb-controller
-   nil
+   (gr8s.store::make-pod-store nil)
    (gr8s.network::%make-service-lb-dataplane
     :maps (list (fake-lb-map "gr8s_service_v4" 1) (fake-lb-map "gr8s_backend_v4" 2)))))
 
@@ -1112,7 +1112,7 @@
                                  (fake-lb-map "gr8s_service_v6" 4)
                                  (fake-lb-map "gr8s_backend_v6" 5)
                                  (fake-lb-map "gr8s_backend_index_v6" 6))))
-         (controller (gr8s.controllers::make-service-lb-controller nil dataplane))
+         (controller (gr8s.controllers::make-service-lb-controller (gr8s.store::make-pod-store nil) dataplane))
          (service (fake-lb-service "10.96.0.10"))
          (writes nil))
     (setf (gethash "clusterIPs" (gethash "spec" service))
@@ -1174,7 +1174,7 @@
                      for fd from 1 collect (fake-lb-map name fd))))
     (flet ((key (map bytes) (list (whistler/loader:map-info-name map) (copy-seq bytes))))
       (values
-       (gr8s.controllers::make-service-lb-controller nil (gr8s.network::%make-service-lb-dataplane :maps maps))
+       (gr8s.controllers::make-service-lb-controller (gr8s.store::make-pod-store nil) (gr8s.network::%make-service-lb-dataplane :maps maps))
        entries
        (lambda (map bytes value) (setf (gethash (key map bytes) entries) (copy-seq value)))
        (lambda (map bytes)
@@ -1264,7 +1264,7 @@
                      (fake-lb-map "gr8s_backend_index_v4" 3)
                      (fake-lb-map "gr8s_nat_risk_v2" 4)))
          (dataplane (gr8s.network::%make-service-lb-dataplane :maps maps))
-         (controller (gr8s.controllers::make-service-lb-controller nil dataplane))
+         (controller (gr8s.controllers::make-service-lb-controller (gr8s.store::make-pod-store nil) dataplane))
          (service (fake-lb-service "10.96.0.10"))
          (writes nil)
          (update (lambda (map key value)
@@ -1312,7 +1312,7 @@
     ;; Retain risk until old return-state owners can be proved drained.
     (is (= 2 (hash-table-count entries)))
     (setf (gr8s.network::service-lb-dataplane-reopened-p dataplane) t)
-    (let ((reopened (gr8s.controllers::make-service-lb-controller nil dataplane)))
+    (let ((reopened (gr8s.controllers::make-service-lb-controller (gr8s.store::make-pod-store nil) dataplane)))
       (setf writes nil)
       (gr8s.controllers::converge-service-lb-controller
        reopened :list-services (constantly (list service))
@@ -1329,7 +1329,7 @@
                                  (fake-lb-map "gr8s_backend_v4" 2)
                                  (fake-lb-map "gr8s_backend_index_v4" 3)
                                  (fake-lb-map "gr8s_nat_risk_v2" 4))))
-         (controller (gr8s.controllers::make-service-lb-controller nil dataplane))
+         (controller (gr8s.controllers::make-service-lb-controller (gr8s.store::make-pod-store nil) dataplane))
          (service (fake-lb-service "10.96.0.10"))
          (writes nil)
          (fail-risk nil)
@@ -1387,7 +1387,7 @@
                                  (fake-lb-map "gr8s_backend_v4" 2)
                                  (fake-lb-map "gr8s_backend_index_v4" 3)
                                  (fake-lb-map "gr8s_nat_risk_v2" 4))))
-         (controller (gr8s.controllers::make-service-lb-controller nil dataplane))
+         (controller (gr8s.controllers::make-service-lb-controller (gr8s.store::make-pod-store nil) dataplane))
          (service (fake-lb-service "10.96.0.10"))
          (backends '(("10.88.1.5" 8080) ("10.88.1.6" 8080)))
          (update (lambda (map key value)
@@ -1508,7 +1508,7 @@
                                  (fake-lb-map "gr8s_backend_v4" 2)
                                  (fake-lb-map "gr8s_backend_index_v4" 3)
                                  (fake-lb-map "gr8s_nat_risk_v2" 4))))
-         (controller (gr8s.controllers::make-service-lb-controller nil dataplane))
+         (controller (gr8s.controllers::make-service-lb-controller (gr8s.store::make-pod-store nil) dataplane))
          (other-writes nil))
     (signals whistler/loader:bpf-error
       (gr8s.controllers::converge-service-lb-controller
@@ -1541,7 +1541,7 @@
                  (gr8s.network::service-lb-backend-key #xffffffff) #(0)))
       (is (= 8 (hash-table-count entries)))
       (setf (gr8s.network::service-lb-dataplane-reopened-p dataplane) t)
-      (let ((controller (gr8s.controllers::make-service-lb-controller nil dataplane))
+      (let ((controller (gr8s.controllers::make-service-lb-controller (gr8s.store::make-pod-store nil) dataplane))
             (touched nil))
         (is-false (gr8s.controllers::service-lb-controller-map-state-adopted-p controller))
         ;; A failure after the first map was read must publish no inventory,
@@ -1723,7 +1723,7 @@
 (test service-lb-converge-retires-index-entries-of-departed-backends
   (let* ((index-map (fake-lb-map "gr8s_backend_index_v4" 3))
          (controller (gr8s.controllers::make-service-lb-controller
-                      nil (gr8s.network::%make-service-lb-dataplane
+                      (gr8s.store::make-pod-store nil) (gr8s.network::%make-service-lb-dataplane
                            :maps (list (fake-lb-map "gr8s_service_v4" 1) (fake-lb-map "gr8s_backend_v4" 2) index-map))))
          (service (fake-lb-service "10.96.0.10" :ports '(80))))
     (setf (gethash "sessionAffinity" (gethash "spec" service)) "ClientIP")

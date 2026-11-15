@@ -51,6 +51,7 @@
   (let* ((http (gethash "http" rule))
          (paths (and http (gethash "paths" http))))
     (make-gw-route
+     :kind :ingress
      :namespace namespace
      :name (gethash "name" (gethash "metadata" ingress))
      :rate-limit (gw-parse-rate-limit (gethash "annotations" (gethash "metadata" ingress)))
@@ -64,6 +65,7 @@
 (defun ingress-default-route (ingress namespace backend)
   "Normalize INGRESS's default BACKEND into a hostless catch-all route."
   (make-gw-route
+   :kind :ingress
    :namespace namespace
    :name (gethash "name" (gethash "metadata" ingress))
    :rate-limit (gw-parse-rate-limit (gethash "annotations" (gethash "metadata" ingress)))

@@ -463,6 +463,7 @@
                      ;; resource whose status (certificateChain) the external
                      ;; signer writes via /status (KEP-4317).
                      (equal "podcertificaterequests" (first route))
+                     (gateway-status-resource-p (first route))
                      (and (typed-api-resource-p (first route)) (typed-api-trait-p (first route) :status))))
         route))))
 

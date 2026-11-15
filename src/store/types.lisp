@@ -19,7 +19,9 @@
   (pods (make-hash-table :test #'equal))
   (nodes (make-hash-table :test #'equal))
   (resources (make-hash-table :test #'equal))
+  (core-change-observers nil)          ; nonblocking callbacks under the store lock
   (resource-revision 0)
+  (gateway-dependency-revision 0)      ; process-local fence for non-Gateway desired changes
   template-history
   (template-history-recent nil)
   (template-history-maintained-at 0)

@@ -4,7 +4,7 @@
 ;;;; Purpose:
 ;;;; The in-agent Lisp L7 proxy for the Gateway API data plane (podster-43k.4).
 ;;;; A Gateway listener is a Hunchentoot acceptor that terminates HTTP, dispatches
-;;;; each request through the JIT-compiled router (gateway-router.lisp) to pick a
+;;;; each request through the hostname-indexed router (gateway-router.lisp) to pick a
 ;;;; backend, resolves that backend to an address, and proxies the exchange to it
 ;;;; -- no Envoy, no sidecar. The compiled router is swappable so a route change
 ;;;; recompiles and hot-swaps without dropping the listener. Request/response
@@ -50,8 +50,7 @@
 
 (defun gateway-resolve-backend (acceptor backend)
   "Resolve BACKEND to (values host port) via the listener's resolver, or NIL."
-  (let ((resolver (gateway-acceptor-resolver acceptor)))
-    (when resolver (funcall resolver backend))))
+  (resolve-gateway-backend backend (gateway-acceptor-resolver acceptor)))
 
 (defun gateway-error-response (code fmt &rest args)
   "Emit a minimal text error unless the response has already been committed."

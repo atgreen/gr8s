@@ -192,6 +192,7 @@ complete snapshot to the next one."
                   (make-instance
                    'gr8s.node.v1::desired-state-snapshot
                    :revision (slot-value snapshot 'gr8s.node.v1::revision)
+                   :gateway-dependency-revision (slot-value snapshot 'gr8s.node.v1::gateway-dependency-revision)
                    :network (slot-value snapshot 'gr8s.node.v1::network)
                    :routes (slot-value snapshot 'gr8s.node.v1::routes)
                    :service-risk-grant-digest
@@ -370,6 +371,16 @@ applicable method for NIL rather than finding a closed connection."
      (make-instance 'gr8s.node.v1::snapshot-ack
                     :revision revision :applied t))))
 
+(defun apply-gateway-config-and-respond (session update apply-gateway-config)
+  "Apply derived Gateway state without persisting or acknowledging node state."
+  (unless apply-gateway-config (error "Agent has no Gateway configuration handler"))
+  (funcall apply-gateway-config update)
+  (send-agent-session-envelope
+   session :gateway-config-ack
+   (make-instance 'gr8s.node.v1::gateway-config-ack
+                  :base-node-revision (slot-value update 'gr8s.node.v1::base-node-revision)
+                  :revision (slot-value update 'gr8s.node.v1::revision) :applied t)))
+
 (defun handle-node-server-envelope
     (session envelope identity identity-path apply-snapshot operation-handler &optional snapshot-worker)
   "Agent-side dispatch of one server ENVELOPE after a protocol-version check: a
@@ -380,6 +391,9 @@ applicable method for NIL rather than finding a closed connection."
   (ensure-node-protocol-version
    (slot-value envelope 'gr8s.node.v1::protocol-version))
   (case (slot-value envelope 'gr8s.node.v1::payload-case)
+    (:gateway-config
+     (unless snapshot-worker (error "Gateway configuration requires an ordered session worker"))
+     (queue-agent-gateway-work snapshot-worker (slot-value envelope 'gr8s.node.v1::gateway-config)))
     (:desired-state
      (let ((snapshot (assemble-node-snapshot session (slot-value envelope 'gr8s.node.v1::desired-state))))
        (if snapshot-worker
@@ -573,6 +587,8 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
 (defstruct (agent-snapshot-worker (:constructor %make-agent-snapshot-worker))
   "Apply snapshots serially while the session owner continues receiving operations."
   function
+  gateway-function
+  (gateway-received-revision 0)
   receive-snapshot
   finish-session
   thread
@@ -588,15 +604,26 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
 (defun retry-agent-snapshot-work (worker work &key (delay .1))
   "Retry an incomplete latest projection without growing a queue or acknowledging it."
   (bt:with-lock-held ((agent-snapshot-worker-lock worker))
-    (when (and (not (agent-snapshot-worker-stopping-p worker))
-               (null (agent-snapshot-worker-pending worker))
-               (= (slot-value (car work) 'gr8s.node.v1::revision)
-                  (agent-snapshot-worker-highest-revision worker)))
-      (setf (agent-snapshot-worker-pending worker) (list work))
+    (let* ((payload (car work))
+           (gateway-p (typep payload 'gr8s.node.v1::gateway-config-update))
+           (node-revision (slot-value payload (if gateway-p 'gr8s.node.v1::base-node-revision
+                                                 'gr8s.node.v1::revision)))
+           (pending (agent-snapshot-worker-pending worker)))
+      (when (and (not (agent-snapshot-worker-stopping-p worker))
+                 (= node-revision (agent-snapshot-worker-highest-revision worker))
+                 (or (null pending)
+                     (typep (caar pending) 'gr8s.node.v1::gateway-config-update)))
+        (setf (agent-snapshot-worker-pending worker)
+              (if gateway-p
+                  (list (cons (if pending
+                                  (gr8s.protocol::coalesce-gateway-config-updates payload (caar pending))
+                                  payload) nil))
+                  ;; A queued Gateway batch depends on this full apply succeeding.
+                  (cons work pending)))
       ;; Async runtime deletion needs a later observation before admission can
       ;; resume. Yield instead of spinning; new snapshots and stop wake us.
       (bt:condition-wait (agent-snapshot-worker-changed worker)
-                         (agent-snapshot-worker-lock worker) :timeout delay))))
+                           (agent-snapshot-worker-lock worker) :timeout delay)))))
 
 (defun run-agent-snapshot-work (worker)
   "Apply ordered work and close the session on failure without acknowledging pending revisions."
@@ -619,11 +646,14 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
                     (pop (agent-snapshot-worker-pending worker)))))
             (handler-case
                 (progn
-                  (funcall (agent-snapshot-worker-function worker) (car work) (cdr work))
-                  (bt:with-lock-held ((agent-snapshot-worker-lock worker))
-                    (when (eql (slot-value (car work) 'gr8s.node.v1::revision)
-                               (agent-snapshot-worker-replay-revision worker))
-                      (setf (agent-snapshot-worker-replay-revision worker) nil))))
+                  (if (typep (car work) 'gr8s.node.v1::gateway-config-update)
+                      (funcall (agent-snapshot-worker-gateway-function worker) (car work))
+                      (progn
+                        (funcall (agent-snapshot-worker-function worker) (car work) (cdr work))
+                        (bt:with-lock-held ((agent-snapshot-worker-lock worker))
+                          (when (eql (slot-value (car work) 'gr8s.node.v1::revision)
+                                     (agent-snapshot-worker-replay-revision worker))
+                            (setf (agent-snapshot-worker-replay-revision worker) nil))))))
               ;; Durable urgent intent superseded this application.
               ;; Its revision was not applied and must not be acked.
               (pod-reconciliation-superseded () (retry-agent-snapshot-work worker work))
@@ -638,10 +668,11 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
                 (agent-snapshot-worker-pending worker) nil))
         (funcall (agent-snapshot-worker-finish-session worker))))))
 
-(defun start-agent-snapshot-worker (function finish-session &key receive-snapshot)
+(defun start-agent-snapshot-worker (function finish-session &key receive-snapshot gateway-function)
   "Start a session-owned ordered snapshot executor."
   (let ((worker (%make-agent-snapshot-worker :function function :finish-session finish-session
-                                             :receive-snapshot receive-snapshot))
+                                             :receive-snapshot receive-snapshot
+                                             :gateway-function gateway-function))
         (ready nil))
     (unwind-protect
          (progn
@@ -674,9 +705,31 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
         ;; application ordered, and replace only work which has not started.
         (when replay (setf (agent-snapshot-worker-replay-revision worker) revision))
         (setf (agent-snapshot-worker-highest-revision worker) revision
+              (agent-snapshot-worker-gateway-received-revision worker) 0
               (agent-snapshot-worker-pending worker)
               (list (cons snapshot (or replay (eql revision (agent-snapshot-worker-replay-revision worker))))))
         (bt:condition-notify (agent-snapshot-worker-changed worker)))))
+  worker)
+
+(defun queue-agent-gateway-work (worker update)
+  "Queue an ordered Gateway batch, composing adjacent pending changes by key."
+  (bt:with-lock-held ((agent-snapshot-worker-lock worker))
+    (unless (agent-snapshot-worker-gateway-function worker)
+      (error "Agent has no Gateway configuration handler"))
+    (unless (agent-snapshot-worker-stopping-p worker)
+      (gr8s.protocol::validate-gateway-config-update
+       update (agent-snapshot-worker-highest-revision worker)
+       (agent-snapshot-worker-gateway-received-revision worker))
+      (let* ((pending (agent-snapshot-worker-pending worker))
+             (last (last pending)))
+        (if (and last (typep (caar last) 'gr8s.node.v1::gateway-config-update))
+            (setf (car last)
+                  (cons (gr8s.protocol::coalesce-gateway-config-updates (caar last) update) nil))
+            (setf (agent-snapshot-worker-pending worker)
+                  (append pending (list (cons update nil))))))
+      (setf (agent-snapshot-worker-gateway-received-revision worker)
+            (slot-value update 'gr8s.node.v1::revision))
+      (bt:condition-notify (agent-snapshot-worker-changed worker))))
   worker)
 
 (defun stop-agent-snapshot-worker (worker)
@@ -713,12 +766,22 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
         (canonical-node-underlay-address (format nil "~{~D~^.~}" (coerce address 'list)))
         "")))
 
+(defun node-session-capabilities (capabilities gateway-handler one-shot-p)
+  "Offer Gateway deltas only when this session can apply ordered derived state."
+  (remove-duplicates
+   (append (list +desired-state-delta-capability+)
+           (when (and gateway-handler (not one-shot-p))
+             (list gr8s.protocol::+gateway-config-delta-capability+))
+           (remove gr8s.protocol::+gateway-config-delta-capability+ capabilities :test #'equal))
+   :test #'equal))
+
 (defun run-one-node-session
     (host port node-name identity-path apply-snapshot operation-handler
      one-shot-p control stop-predicate underlay-address status-provider
      ca-certificate-path certificate-path private-key-path &optional snapshot-observer (kubelet-port 0)
                                                                      runtime-health credential-token-function-setter
-                                                                     wireguard-public-key wireguard-endpoints capabilities)
+                                                                     wireguard-public-key wireguard-endpoints capabilities
+                                                                     gateway-config-handler gateway-session-reset)
   "Run one agent session to the control plane at HOST:PORT from connect to close:
    dial (TLS when a CA path is given), send the hello and first heartbeat, perform
    the ServerHello handshake, then apply the initial and subsequent snapshots in
@@ -783,6 +846,7 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
                             (gr8s.node.v1::node-service-connect
                              stub :timeout session-timeout)))
                   (session (make-agent-node-session stream)))
+             (when gateway-session-reset (funcall gateway-session-reset))
              (when credential-token-function-setter
                (funcall credential-token-function-setter
                         (lambda (pod audience required optional)
@@ -799,9 +863,7 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
                               :agent-version "gr8s"
                               :underlay-address
                               (or underlay-address (node-channel-underlay-address channel))
-                              :capabilities (remove-duplicates
-                                             (cons +desired-state-delta-capability+ capabilities)
-                                             :test #'equal)
+                              :capabilities (node-session-capabilities capabilities gateway-config-handler one-shot-p)
                               :capacity (node-reported-capacity-entries)
                               :kubelet-port kubelet-port
                               :wireguard-public-key (or wireguard-public-key #())
@@ -889,6 +951,10 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
                                 (apply-node-snapshot-and-respond
                                  session identity identity-path snapshot apply-snapshot :replay replay))
                               #'finish-session
+                              :gateway-function
+                              (when gateway-config-handler
+                                (lambda (update)
+                                  (apply-gateway-config-and-respond session update gateway-config-handler)))
                               :receive-snapshot
                               (lambda (snapshot)
                                 (validate-node-snapshot-identity identity snapshot)
@@ -904,6 +970,7 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
       (when credential-token-function-setter
         (funcall credential-token-function-setter nil))
       (stop-agent-snapshot-worker snapshot-worker)
+      (when gateway-session-reset (funcall gateway-session-reset))
       (when (and operation-session-p operation-handler)
         ;; Operation emitters close over this gRPC session.  Give the agent a
         ;; lifecycle edge on every disconnect so it can close upstream
@@ -929,6 +996,7 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
                            wireguard-public-key
                            wireguard-endpoints
                            capabilities
+                           gateway-config-handler gateway-session-reset
                            (stop-predicate (constantly nil)))
   "Maintain the agent's session to the control plane, reconnecting on loss. With
    ENDPOINTS (a list of (host port)) the agent rotates through the control-plane
@@ -952,7 +1020,8 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
                                                  ca-certificate-path certificate-path private-key-path
                                                  snapshot-observer kubelet-port runtime-health
                                                  credential-token-function-setter
-                                                 wireguard-public-key wireguard-endpoints capabilities))
+                                                 wireguard-public-key wireguard-endpoints capabilities
+                                                 gateway-config-handler gateway-session-reset))
                        (unless (or (node-session-cancelled-p control) (funcall stop-predicate))
                          (format *error-output* "gr8s node session to ~A:~A ended; reconnecting~%"
                                  try-host try-port))

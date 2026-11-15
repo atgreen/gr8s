@@ -80,16 +80,261 @@
       ;; First convergence starts the listener on 8080.
       (gr8s.controllers::converge-gateway-listeners controller)
       (is (equal '((:start 8080)) actions))
-      ;; Second convergence hot-swaps the router (no new start).
+      ;; An unchanged plan leaves the published router untouched.
       (setf actions '())
       (gr8s.controllers::converge-gateway-listeners controller)
-      (is (equal '((:swap (:handle 8080))) actions))
+      (is (null actions))
       ;; Removing the Gateway stops the listener.
       (setf actions '())
       (gr8s.resources::delete-core-resource store "gateways" "default" "web")
       (gr8s.controllers::converge-gateway-listeners controller)
       (is (equal '((:stop (:handle 8080))) actions))
       (is (zerop (hash-table-count (gr8s.controllers::gateway-controller-listeners controller)))))))
+
+(test gateway-listeners-exist-without-attached-routes
+  (with-temporary-store (store directory)
+    (values directory)
+    (gwc-seed store)
+    (gr8s.resources::delete-core-resource store "httproutes" "default" "app")
+    (let ((plan (gr8s.controllers::gateway-listener-plan
+                 (gr8s.resources::list-core-resources store "gateways") nil
+                 (lambda (gateway) (gr8s.controllers::gateway-controlled-p store gateway)))))
+      (is (= 1 (length plan)))
+      (is (eql 8080 (getf (first plan) :port)))
+      (is (null (getf (first plan) :routes))))
+    (let* ((starts 0) (stops 0)
+           (controller (gr8s.controllers::make-gateway-controller
+                        store :start-fn (lambda (&rest ignored)
+                                          (declare (ignore ignored)) (incf starts))
+                        :stop-fn (lambda (handle) (declare (ignore handle)) (incf stops))
+                        :swap-fn (lambda (&rest ignored) (declare (ignore ignored))))))
+      (gr8s.controllers::converge-gateway-listeners controller)
+      (is (= 1 starts))
+      (gr8s.resources::create-core-resource store "httproutes"
+                                           (com.inuoe.jzon:parse *httproute-json*) "default")
+      (gr8s.controllers::converge-gateway-listeners controller)
+      (gr8s.resources::delete-core-resource store "httproutes" "default" "app")
+      (gr8s.controllers::converge-gateway-listeners controller)
+      (is (= 1 starts))
+      (is (zerop stops)))))
+
+(test gateway-empty-tcp-listener-retains-its-protocol
+  (with-temporary-store (store directory)
+    (values directory)
+    (gwc-seed store)
+    (gr8s.resources::update-core-resource
+     store "gateways" "default" "web"
+     (lambda (gateway)
+       (setf (gethash "protocol" (aref (gethash "listeners" (gethash "spec" gateway)) 0)) "TCP")
+       gateway))
+    (let ((plan (gr8s.controllers::gateway-l4-plan
+                 (gr8s.resources::list-core-resources store "gateways") nil nil nil
+                 (lambda (gateway) (gr8s.controllers::gateway-controlled-p store gateway)))))
+      (is (= 1 (length plan)))
+      (is (eq :tcp (getf (first plan) :mode)))
+      (is (null (getf (first plan) :tcp-routes))))))
+
+(test gateway-listener-observations-reflect-current-running-listeners
+  (with-temporary-store (store directory)
+    (values directory)
+    (gwc-seed store)
+    (let* ((controller (gr8s.controllers::make-gateway-controller
+                        store :start-fn (lambda (&rest ignored) (declare (ignore ignored)) :listener)
+                        :stop-fn (lambda (handle) (declare (ignore handle)))
+                        :swap-fn (lambda (&rest ignored) (declare (ignore ignored)))))
+           (before (first (gr8s.controllers::gateway-controller-observations controller))))
+      (is (equal "web" (slot-value before 'gr8s.node.v1::name)))
+      (is-false (slot-value (first (slot-value before 'gr8s.node.v1::listeners))
+                            'gr8s.node.v1::programmed))
+      (gr8s.controllers::converge-gateway-listeners controller)
+      (let* ((after (first (gr8s.controllers::gateway-controller-observations controller)))
+             (roundtrip (roundtrip-node-message
+                         (make-instance 'gr8s.node.v1::node-status
+                                        :gateway-report-present t :gateways (list after))
+                         'gr8s.node.v1::node-status)))
+        (is (slot-value roundtrip 'gr8s.node.v1::gateway-report-present))
+        (is (= 1 (length (slot-value roundtrip 'gr8s.node.v1::gateways))))
+        (is (slot-value (first (slot-value after 'gr8s.node.v1::listeners))
+                        'gr8s.node.v1::programmed)))
+      (gr8s.controllers::stop-gateway-controller controller)
+      (is-false (slot-value
+                 (first (slot-value
+                         (first (gr8s.controllers::gateway-controller-observations controller))
+                         'gr8s.node.v1::listeners)) 'gr8s.node.v1::programmed)))))
+
+(defun gateway-test-condition (object type)
+  (find type (gethash "conditions" (gethash "status" object) #())
+        :test #'equal :key (lambda (condition) (gethash "type" condition))))
+
+(test gateway-attached-route-counts-follow-listener-selection
+  (with-temporary-store (store directory)
+    (values directory)
+    (gwc-seed store)
+    (gr8s.resources::create-core-resource
+     store "namespaces"
+     (gw-parse "{\"apiVersion\":\"v1\",\"kind\":\"Namespace\",\"metadata\":{\"name\":\"tenant\",\"labels\":{\"team\":\"blue\"}}}") nil)
+    (let ((route (gw-parse *httproute-json*)))
+      (setf (gethash "parentRefs" (gethash "spec" route))
+            (vector (gr8s.resources::core-object "name" "web" "namespace" "default")
+                    (gr8s.resources::core-object "name" "web" "namespace" "default")))
+      (gr8s.resources::create-core-resource store "httproutes" route "tenant"))
+    (let* ((gateway (gr8s.resources::get-core-resource store "gateways" "default" "web"))
+           (listener (aref (gethash "listeners" (gethash "spec" gateway)) 0)))
+      (labels ((count-routes ()
+                 (gr8s.apiserver::gateway-listener-attached-routes
+                  store gateway listener (gr8s.apiserver::gateway-listener-supported-kinds listener))))
+        (is (= 1 (count-routes)))
+        (setf (gethash "allowedRoutes" listener)
+              (gw-parse "{\"namespaces\":{\"from\":\"All\"}}"))
+        (is (= 2 (count-routes)))
+        (setf (gethash "allowedRoutes" listener)
+              (gw-parse "{\"namespaces\":{\"from\":\"Selector\",\"selector\":{\"matchLabels\":{\"team\":\"blue\"}}}}"))
+        (is (= 1 (count-routes)))
+        (setf (gethash "kinds" (gethash "allowedRoutes" listener))
+              (vector (gr8s.resources::core-object "kind" "TCPRoute")))
+        (is (zerop (count-routes)))))))
+
+(test gateway-status-rejects-unsupported-route-kind-references
+  (with-temporary-store (store directory)
+    (values directory)
+    (gwc-seed store)
+    (let* ((gateway (gr8s.resources::get-core-resource store "gateways" "default" "web"))
+           (listener (aref (gethash "listeners" (gethash "spec" gateway)) 0)))
+      (setf (gethash "allowedRoutes" listener)
+            (gw-parse "{\"kinds\":[{\"group\":\"gateway.networking.k8s.io\",\"kind\":\"TCPRoute\"}]}"))
+      (let* ((status (gr8s.apiserver::gateway-listener-status-object
+                      store gateway listener nil (gr8s.resources::core-object)))
+             (condition (find "ResolvedRefs" (gethash "conditions" status) :test #'equal
+                              :key (lambda (entry) (gethash "type" entry)))))
+        (is (equal "False" (gethash "status" condition)))
+        (is (equal "InvalidRouteKinds" (gethash "reason" condition)))
+        (is (zerop (length (gethash "supportedKinds" status))))))))
+
+(test malformed-gateway-status-input-does-not-starve-other-gateways
+  (with-temporary-store (store directory)
+    (values directory)
+    (gwc-seed store)
+    (gr8s.resources::create-core-resource
+     store "gateways" (gw-parse "{\"apiVersion\":\"gateway.networking.k8s.io/v1\",\"kind\":\"Gateway\",\"metadata\":{\"name\":\"malformed\"},\"spec\":{\"gatewayClassName\":\"gr8s\",\"listeners\":[{\"name\":\"http\",\"port\":8181,\"protocol\":\"HTTP\",\"allowedRoutes\":\"invalid\"}]}}") "default")
+    (gr8s.apiserver::reconcile-gateway-status (gr8s.apiserver::%make-node-grpc-server :store store))
+    (dolist (name '("web" "malformed"))
+      (let ((gateway (gr8s.resources::get-core-resource store "gateways" "default" name)))
+        (is (equal "False" (gethash "status" (gateway-test-condition gateway "Programmed"))))))))
+
+(test gateway-observations-do-not-reuse-a-replaced-tls-secret
+  (with-temporary-store (store directory)
+    (gwc-seed store)
+    (gr8s.resources::create-core-resource
+     store "secrets" (gw-parse "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"tls\"},\"type\":\"kubernetes.io/tls\",\"data\":{\"tls.crt\":\"Y2VydA==\",\"tls.key\":\"a2V5\"}}") "default")
+    (gr8s.resources::update-core-resource
+     store "gateways" "default" "web"
+     (lambda (gateway)
+       (let ((listener (aref (gethash "listeners" (gethash "spec" gateway)) 0)))
+         (setf (gethash "protocol" listener) "HTTPS"
+               (gethash "tls" listener)
+               (gr8s.resources::core-object "certificateRefs"
+                                            (vector (gr8s.resources::core-object "name" "tls")))))
+       gateway))
+    (let ((controller (gr8s.controllers::make-gateway-controller
+                       store :cert-dir directory
+                       :start-fn (lambda (&rest ignored) (declare (ignore ignored)) :tls-listener)
+                       :stop-fn (lambda (handle) (declare (ignore handle)))
+                       :swap-fn (lambda (&rest ignored) (declare (ignore ignored))))))
+      (labels ((programmed ()
+                 (slot-value (first (slot-value (first (gr8s.controllers::gateway-controller-observations controller))
+                                                'gr8s.node.v1::listeners)) 'gr8s.node.v1::programmed)))
+        (gr8s.controllers::converge-gateway-listeners controller)
+        (is (programmed))
+        (gr8s.resources::update-core-resource
+         store "secrets" "default" "tls"
+         (lambda (secret) (setf (gethash "tls.crt" (gethash "data" secret)) "bmV3LWNlcnQ=") secret))
+        (is-false (programmed))
+        (gr8s.controllers::converge-gateway-listeners controller)
+        (is (programmed))))))
+
+(test gateway-failed-registration-closes-the-unpublished-listener
+  (with-temporary-store (store directory)
+    (values directory)
+    (gwc-seed store)
+    (let* ((stops 0)
+           (controller (gr8s.controllers::make-gateway-controller
+                        store :start-fn (lambda (&rest ignored) (declare (ignore ignored)) :listener)
+                        :stop-fn (lambda (handle) (declare (ignore handle)) (incf stops))
+                        :register-fn (lambda (&rest ignored) (declare (ignore ignored)) (error "injected registration failure")))))
+      (signals error (gr8s.controllers::converge-gateway-listeners controller))
+      (is (= 1 stops))
+      (is (zerop (hash-table-count (gr8s.controllers::gateway-controller-listeners controller)))))))
+
+(test gateway-status-requires-fresh-current-session-listener-evidence
+  (with-temporary-store (store directory)
+    (values directory)
+    (gwc-seed store)
+    (let* ((now 1000)
+           (server (gr8s.apiserver::%make-node-grpc-server
+                    :store store :clock (lambda () now) :heartbeat-timeout-seconds 30))
+           (session (gr8s.apiserver::make-node-agent-session nil))
+           (controller (gr8s.controllers::make-gateway-controller
+                        store :start-fn (lambda (&rest ignored) (declare (ignore ignored)) :listener)
+                        :stop-fn (lambda (handle) (declare (ignore handle)))
+                        :swap-fn (lambda (&rest ignored) (declare (ignore ignored))))))
+      (gr8s.controllers::register-node
+       store (gr8s.model::make-node-record :id "worker" :name "worker"
+                                          :underlay-address "192.0.2.10" :pod-cidr "10.88.0.0/24"))
+      (gr8s.controllers::mark-node-ready store "worker" now :lease-duration 1000)
+      (setf (gr8s.apiserver::node-agent-session-node-id session) "worker"
+            (gethash "worker" (gr8s.apiserver::node-grpc-server-sessions server)) session)
+      (labels ((gateway () (gr8s.resources::get-core-resource store "gateways" "default" "web"))
+               (reconcile () (gr8s.apiserver::reconcile-gateway-status server))
+               (report (&optional (sender session))
+                 (gr8s.apiserver::note-node-gateway-status
+                  server "worker" (make-instance
+                                   'gr8s.node.v1::node-status :gateway-report-present t
+                                   :gateways (gr8s.controllers::gateway-controller-observations controller)) sender))
+               (programmed () (gethash "status" (gateway-test-condition (gateway) "Programmed"))))
+        (let ((projection (gr8s.kubelet::service-discovery-projection store)))
+          (reconcile)
+          (is (equalp projection (gr8s.kubelet::service-discovery-projection store))
+              "Controller status changes must not invalidate the node's desired projection"))
+        (is (equal "False" (programmed)))
+        (is (zerop (length (gethash "addresses" (gethash "status" (gateway))))))
+        (gr8s.controllers::converge-gateway-listeners controller)
+        (report)
+        (reconcile)
+        (is (equal "True" (programmed)))
+        (is (equal "192.0.2.10" (gethash "value" (aref (gethash "addresses" (gethash "status" (gateway))) 0))))
+        (is (= 1 (gethash "attachedRoutes" (aref (gethash "listeners" (gethash "status" (gateway))) 0))))
+        (let ((revision (gr8s.resources::pod-store-resource-revision store)))
+          (reconcile)
+          (is (= revision (gr8s.resources::pod-store-resource-revision store))))
+        (gr8s.resources::delete-core-resource store "httproutes" "default" "app")
+        (reconcile)
+        (is (= 0 (gethash "attachedRoutes" (aref (gethash "listeners" (gethash "status" (gateway))) 0))))
+        (is (equal "True" (programmed)))
+        ;; A spec change cannot inherit an older generation's programmed report.
+        (gr8s.resources::update-core-resource
+         store "gateways" "default" "web"
+         (lambda (current)
+           (setf (gethash "port" (aref (gethash "listeners" (gethash "spec" current)) 0)) 8081)
+           current))
+        (reconcile)
+        (is (equal "False" (programmed)))
+        (gr8s.controllers::converge-gateway-listeners controller)
+        (report)
+        (reconcile)
+        (is (equal "True" (programmed)))
+        (incf now 31)
+        (reconcile)
+        (is (equal "False" (programmed)))
+        (report)
+        (reconcile)
+        (is (equal "True" (programmed)))
+        ;; An old connection cannot refresh readiness after a reconnect.
+        (setf (gethash "worker" (gr8s.apiserver::node-grpc-server-sessions server))
+              (gr8s.apiserver::make-node-agent-session nil))
+        (report session)
+        (reconcile)
+        (is (equal "False" (programmed)))
+        (is-false (gethash "status" (gr8s.resources::get-core-resource store "gateways" "default" "unmanaged")))))))
 
 (test gateway-controller-plans-and-converges-l4-listeners
   (with-temporary-store (store directory)
@@ -173,3 +418,78 @@
         (is (stringp (getf tls :certificate)))
         (is (probe-file (getf tls :certificate)))        ; cert materialized on disk
         (is (probe-file (getf tls :key)))))))
+
+(test gateway-controller-reuses-only-unchanged-routing-content
+  (with-temporary-store (store directory)
+    (values directory)
+    (gwc-seed store)
+    (let* ((published nil) (swaps 0)
+           (controller (gr8s.controllers::make-gateway-controller
+                        store
+                        :start-fn (lambda (port router resolver tls)
+                                    (declare (ignore port resolver tls))
+                                    (setf published router) :listener)
+                        :swap-fn (lambda (handle router)
+                                   (declare (ignore handle))
+                                   (incf swaps) (setf published router))
+                        :stop-fn (lambda (handle) (declare (ignore handle))))))
+      (gr8s.controllers::converge-gateway-listeners controller)
+      (let ((old published))
+        (gr8s.controllers::converge-gateway-listeners controller)
+        (is (= 0 swaps))
+        (is (eq old published))
+        ;; Resource metadata changes do not change matching content.
+        (gr8s.resources::update-core-resource
+         store "httproutes" "default" "app"
+         (lambda (route) (setf (gethash "status" route) (make-hash-table)) route))
+        (gr8s.controllers::converge-gateway-listeners controller)
+        (is (= 0 swaps))
+        (flet ((set-path (path)
+                 (gr8s.resources::update-core-resource
+                  store "httproutes" "default" "app"
+                  (lambda (route)
+                    (setf (gethash "matches" (aref (gethash "rules" (gethash "spec" route)) 0))
+                          (vector (let ((match (make-hash-table)) (value (make-hash-table)))
+                                    (setf (gethash "type" value) "Exact"
+                                          (gethash "value" value) path
+                                          (gethash "path" match) value)
+                                    match)))
+                    route))))
+          (set-path "/UP")
+          (gr8s.controllers::converge-gateway-listeners controller)
+          (is (= 1 swaps))
+          (is (not (eq old published)))
+          (is (null (funcall published "app.example.com" "/up" "GET" nil)))
+          (is (funcall old "app.example.com" "/up" "GET" nil))
+          ;; EQUALP on normalized structs would incorrectly reuse this table.
+          (set-path "/up")
+          (gr8s.controllers::converge-gateway-listeners controller)
+          (is (= 2 swaps))
+          (is (funcall published "app.example.com" "/up" "GET" nil))
+          (is (null (funcall published "app.example.com" "/UP" "GET" nil))))))))
+
+(test gateway-controller-retries-failed-router-publication
+  (with-temporary-store (store directory)
+    (values directory)
+    (gwc-seed store)
+    (let* ((fail t) (attempts 0) (published nil)
+           (controller (gr8s.controllers::make-gateway-controller
+                        store
+                        :start-fn (lambda (port router resolver tls)
+                                    (declare (ignore port resolver tls))
+                                    (setf published router) :listener)
+                        :stop-fn (lambda (handle) (declare (ignore handle)))
+                        :swap-fn (lambda (handle router)
+                                   (declare (ignore handle))
+                                   (incf attempts)
+                                   (when fail (error "injected publication failure"))
+                                   (setf published router)))))
+      (gr8s.controllers::converge-gateway-listeners controller)
+      (let ((old published))
+        (gr8s.resources::delete-core-resource store "httproutes" "default" "app")
+        (signals error (gr8s.controllers::converge-gateway-listeners controller))
+        (is (eq old published))
+        (setf fail nil)
+        (gr8s.controllers::converge-gateway-listeners controller)
+        (is (= 2 attempts))
+        (is (null (funcall published "app.example.com" "/" "GET" nil)))))))
