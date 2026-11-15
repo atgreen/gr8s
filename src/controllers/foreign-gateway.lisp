@@ -288,7 +288,19 @@ listener plans; with CLUSTER and NODE-NAME it also contends for the
 gr8s-gateway Lease, and the holder writes Gateway API statuses and provisions
 the per-Gateway LoadBalancer Services.  RESOLVER overrides backend resolution
 (tests)."
-  (let ((controller (make-gateway-controller view :cert-dir cert-dir :resolver resolver))
+  (let ((controller (make-gateway-controller
+                     view :cert-dir cert-dir :resolver resolver
+                     ;; A foreign Gateway advertises the node addresses, so its
+                     ;; listeners bind every interface -- unlike the native node,
+                     ;; where sk_lookup steers the VIP to a loopback listener.
+                     :start-fn (lambda (port router resolver tls)
+                                 (start-gateway-listener :address "0.0.0.0" :port port
+                                                         :router router :resolver resolver
+                                                         :tls tls))
+                     :l4-start-fn (lambda (port mode dispatcher resolver)
+                                    (start-l4-listener :address "0.0.0.0" :port port
+                                                       :mode mode :dispatcher dispatcher
+                                                       :resolver resolver))))
         (leader nil) (stopping nil) (lease-thread nil))
     (when (and cluster node-name)
       (setf lease-thread
