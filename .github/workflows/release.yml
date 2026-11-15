@@ -56,6 +56,9 @@ jobs:
       - name: Build and install SBCL
         working-directory: build/sbcl
         run: |
+          # The pinned checkout is a bare commit, so SBCL's build cannot `git
+          # describe` a version; supply the one the pin corresponds to.
+          echo '"2.6.10"' > version.lisp-expr
           sh make.sh --fancy --prefix="$HOME/.local"
           sh install.sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
