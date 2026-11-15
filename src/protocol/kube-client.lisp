@@ -203,6 +203,29 @@ materialized to a private file (TLS clients take key material by path)."
             (when token (list (cons "Authorization"
                                     (concatenate 'string "Bearer " token)))))))
 
+(defun normalize-json-nulls (value)
+  "Replace jzon's JSON-null (the symbol CL:NULL) with NIL throughout VALUE, in
+place for hash tables and vectors.  A foreign cluster leaves fields explicitly
+null where gr8s's own serialization omits them; CL:NULL is a truthy, non-sequence
+symbol that breaks array reads and OR-defaults, while NIL is a valid empty
+sequence and the natural absent value.  Returns the normalized VALUE."
+  (cond
+    ((eq value 'null) nil)
+    ((hash-table-p value)
+     (maphash (lambda (key inner)
+                (setf (gethash key value) (normalize-json-nulls inner)))
+              value)
+     value)
+    ((and (vectorp value) (not (stringp value)))
+     (dotimes (index (length value) value)
+       (setf (aref value index) (normalize-json-nulls (aref value index)))))
+    (t value)))
+
+(defun parse-kube-json (text)
+  "Parse a Kubernetes API JSON response, with JSON null normalized to NIL."
+  (normalize-json-nulls
+   (com.inuoe.jzon:parse text :max-string-length +response-limit+)))
+
 (defun read-stream-octets (stream limit)
   "Read STREAM to its end into an octet vector of at most LIMIT octets."
   (let ((body (make-array 4096 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
@@ -242,8 +265,7 @@ default) a non-2xx answer signals a KUBE-ERROR carrying the parsed Status."
      (let* ((octets (read-stream-octets stream +response-limit+))
             (parsed (when (plusp (length octets))
                       (ignore-errors
-                        (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string octets)
-                                              :max-string-length +response-limit+)))))
+                        (parse-kube-json (trivial-utf-8:utf-8-bytes-to-string octets))))))
        (when (and errorp (not (<= 200 code 299)))
          (error 'kube-error :status code :body parsed))
        (values parsed code)))
@@ -299,7 +321,7 @@ again).  Bookmarks advance the returned revision without reaching ON-EVENT."
        (declare (ignore headers))
        (unless (= code 200)
          (let ((body (ignore-errors
-                       (com.inuoe.jzon:parse
+                       (parse-kube-json
                         (trivial-utf-8:utf-8-bytes-to-string
                          (read-stream-octets stream +response-limit+))))))
            (when (eql code 410) (return-from kube-watch (values nil :expired)))
@@ -312,7 +334,7 @@ again).  Bookmarks advance the returned revision without reaching ON-EVENT."
                             nil))
              while line
              do (when (plusp (length line))
-                  (let* ((event (com.inuoe.jzon:parse line :max-string-length +response-limit+))
+                  (let* ((event (parse-kube-json line))
                          (type (gethash "type" event))
                          (object (gethash "object" event)))
                     (cond

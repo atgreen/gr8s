@@ -1457,7 +1457,15 @@ opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
                       view dataplane :node-name node-name)
                    (push converger convergers) (push stopper stoppers)))))
            (values (let ((ordered (nreverse convergers)))
-                     (lambda () (mapc #'funcall ordered)))
+                     (lambda ()
+                       ;; Each layer fails soft on its own: a gateway pass
+                       ;; tripping over one object must not starve the LB.
+                       (dolist (converger ordered)
+                         (handler-case (funcall converger)
+                           (error (condition)
+                             (format *error-output*
+                                     "~&gr8s cni-agent extra layer failed: ~A~%"
+                                     condition))))))
                    (let ((ordered (nreverse stoppers)))
                      (lambda () (mapc #'funcall ordered)))))))
      :stop-predicate (lambda () *shutdown-requested*))

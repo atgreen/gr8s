@@ -17,6 +17,11 @@
 
 (in-package #:gr8s.controllers)
 
+(defun foreign-gateway-vector (value)
+  "A JSON array as a vector; an absent or JSON-null field is empty.
+jzon parses null as the symbol NULL, which defeats GETHASH defaults."
+  (if (vectorp value) value #()))
+
 (defun foreign-gateway-now ()
   (gr8s.kube-client::rfc3339-micro (get-universal-time)))
 
@@ -40,9 +45,10 @@
 (defun foreign-gateway-node-addresses (view)
   "Every node's InternalIP: the per-node listeners answer on all of them."
   (loop for node in (list-core-resources view "nodes")
-        append (loop for entry across (gethash "addresses"
-                                              (gethash "status" node (make-hash-table :test 'equal))
-                                              #())
+        append (loop for entry across (foreign-gateway-vector
+                                        (gethash "addresses"
+                                                 (gethash "status" node
+                                                          (make-hash-table :test 'equal))))
                      when (equal "InternalIP" (gethash "type" entry))
                        collect (gethash "address" entry))))
 
@@ -74,7 +80,8 @@ Returns quietly on write conflicts; the next pass retries."
                 resource name condition)))))
 
 (defun foreign-gateway-route-parents (route)
-  (coerce (gethash "parentRefs" (gethash "spec" route (make-hash-table :test 'equal)) #())
+  (coerce (foreign-gateway-vector
+           (gethash "parentRefs" (gethash "spec" route (make-hash-table :test 'equal))))
           'list))
 
 (defun foreign-gateway-attached-routes (gateway routes)
@@ -132,7 +139,8 @@ Selectorless: the listeners answer on every node's host network."
                   (gethash "type" spec) "LoadBalancer"
                   (gethash "ports" spec)
                   (coerce
-                   (loop for listener across (gethash "listeners" (gethash "spec" gateway) #())
+                   (loop for listener across (foreign-gateway-vector
+                                              (gethash "listeners" (gethash "spec" gateway)))
                          collect (let ((port (make-hash-table :test 'equal)))
                                    (setf (gethash "name" port) (gethash "name" listener)
                                          (gethash "port" port) (gethash "port" listener)
@@ -169,7 +177,8 @@ Selectorless: the listeners answer on every node's host network."
                                              :existing (gethash "conditions" existing-status)))
           (gethash "listeners" status)
           (coerce
-           (loop for listener across (gethash "listeners" (gethash "spec" gateway) #())
+           (loop for listener across (foreign-gateway-vector
+                                      (gethash "listeners" (gethash "spec" gateway)))
                  collect
                  (let ((entry (make-hash-table :test 'equal))
                        (kind (make-hash-table :test 'equal))
@@ -213,7 +222,8 @@ Selectorless: the listeners answer on every node's host network."
                    collect (let ((entry (make-hash-table :test 'equal))
                                  (existing-parent
                                    (find (gethash "name" parent)
-                                         (coerce (gethash "parents" existing #()) 'list)
+                                         (coerce (foreign-gateway-vector
+                                                  (gethash "parents" existing)) 'list)
                                          :test #'equal
                                          :key (lambda (candidate)
                                                 (gethash "name"

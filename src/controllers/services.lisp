@@ -11,6 +11,12 @@
 
 (in-package #:gr8s.controllers)
 
+(defun json-array (value)
+  "A JSON array as a vector; absent or JSON-null (which jzon parses as the symbol
+NULL, defeating a GETHASH default) both read as empty.  A foreign cluster leaves
+array fields explicitly null where gr8s's own serialization omits them."
+  (if (vectorp value) value #()))
+
 (defparameter +ip-address-manager+ "ipallocator.k8s.io"
   "The manager label upstream's ClusterIP allocator puts on the IPAddress objects it owns.")
 
@@ -74,7 +80,7 @@ ServiceCIDR, as before the default one is published, the native default range."
     (loop for object being the hash-values of (pod-store-resources store)
           for metadata = (gethash "metadata" object)
           when (and (equal "ServiceCIDR" (gethash "kind" object)) (not (gethash "deletionTimestamp" metadata)))
-            do (loop for cidr across (gethash "cidrs" (gethash "spec" object) #())
+            do (loop for cidr across (json-array (gethash "cidrs" (gethash "spec" object) #()))
                      when (position #\/ cidr)
                        do (multiple-value-bind (family network prefix) (parse-service-cidr cidr)
                             (push (list (gethash "name" metadata) family network prefix) result))))
@@ -156,7 +162,7 @@ An address is taken by a Service or by an IPAddress object that isn't a stale on
   (let ((used (make-hash-table :test #'equal)))
     (loop for object being the hash-values of (pod-store-resources store)
           do (cond ((equal "Service" (gethash "kind" object))
-                    (loop for address across (gethash "clusterIPs" (gethash "spec" object) #())
+                    (loop for address across (json-array (gethash "clusterIPs" (gethash "spec" object) #()))
                           do (setf (gethash address used) t)))
                    ((and (equal "IPAddress" (gethash "kind" object)) (not (ip-address-stale-p store object)))
                     (setf (gethash (gethash "name" (gethash "metadata" object)) used) t))))
@@ -216,7 +222,7 @@ An address someone else's IPAddress already names is left alone."
            (unclaimed (loop for object being the hash-values of index
                             when (and (equal "Service" (gethash "kind" object))
                                       (not (service-external-name-p object))
-                                      (loop for address across (gethash "clusterIPs" (gethash "spec" object) #())
+                                      (loop for address across (json-array (gethash "clusterIPs" (gethash "spec" object) #()))
                                             thereis (and (not (equal address "None"))
                                                          (or (member address stale :test #'equal)
                                                              (null (gethash (core-resource-key "ipaddresses" nil address) index))))))
@@ -262,7 +268,7 @@ An address someone else's IPAddress already names is left alone."
                      "healthCheckNodePort"))
       (remhash field spec))
     (setf (gethash "sessionAffinity" spec) "None")
-    (loop for port across (gethash "ports" spec #()) do (remhash "nodePort" port))
+    (loop for port across (json-array (gethash "ports" spec #())) do (remhash "nodePort" port))
     (setf (gethash "type" spec) "ExternalName" (gethash "externalName" spec) name
           (gethash "status" object) (core-object "loadBalancer" (core-object)))
     object))
@@ -285,7 +291,7 @@ An address someone else's IPAddress already names is left alone."
           when (and (equal "Service" (gethash "kind" object))
                     (not (and (equal namespace (gethash "namespace" metadata))
                               (equal name (gethash "name" metadata)))))
-            do (loop for port across (gethash "ports" (gethash "spec" object) #())
+            do (loop for port across (json-array (gethash "ports" (gethash "spec" object) #()))
                      when (integerp (gethash "nodePort" port))
                        do (setf (gethash (gethash "nodePort" port) used) t))
                ;; A health check node port comes from the same range.
@@ -470,7 +476,7 @@ It is needed only by an externalTrafficPolicy Local LoadBalancer, and immutable 
              (invalid-pod "spec.healthCheckNodePort: Invalid value: ~S: must be between 1 and 65535, inclusive" requested))
            (unless store (invalid-pod "Service allocation requires the control-plane store"))
            (let ((used (service-node-ports-in-use-unlocked store namespace name)))
-             (loop for port across (gethash "ports" spec #())
+             (loop for port across (json-array (gethash "ports" spec #()))
                    when (integerp (gethash "nodePort" port)) do (setf (gethash (gethash "nodePort" port) used) t))
              (let ((port (or requested old)))
                (cond ((and old (eql port old)))
@@ -731,7 +737,7 @@ containers' and, as upstream's FindPort does, its restartable (sidecar) init con
         (loop for container across (concatenate 'vector (gethash "containers" spec #())
                                                 (remove-if-not (lambda (init) (equal "Always" (gethash "restartPolicy" init)))
                                                                (gethash "initContainers" spec #())))
-              thereis (loop for declared across (gethash "ports" container #())
+              thereis (loop for declared across (json-array (gethash "ports" container #()))
                             when (and (equal target (gethash "name" declared))
                                       (equal (gethash "protocol" port "TCP") (gethash "protocol" declared "TCP")))
                               return (gethash "containerPort" declared))))))

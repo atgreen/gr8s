@@ -280,3 +280,17 @@ users:~%- name: admin~%  user:~%    token: sekrit~%    client-certificate-data: 
              (is (poll-until (lambda () (gr8s.kube-client:informer-synced-p informer))))
              (is (null (gr8s.kube-client:informer-objects informer))))
         (gr8s.kube-client:stop-informer informer)))))
+
+(test kube-client-normalizes-json-null-to-nil-throughout
+  ;; A foreign cluster sends array fields as explicit null where gr8s omits
+  ;; them; CL:NULL is truthy and breaks sequence ops and OR-defaults, so the
+  ;; client normalizes it to NIL everywhere.
+  (let ((object (gr8s.kube-client::parse-kube-json
+                 "{\"a\":null,\"b\":[1,null,3],\"c\":{\"d\":null},\"e\":\"x\"}")))
+    (is (null (gethash "a" object)))
+    (is (equalp #(1 nil 3) (gethash "b" object)))
+    (is (null (gethash "d" (gethash "c" object))))
+    (is (equal "x" (gethash "e" object)))
+    ;; The whole point: a null-valued array field is a usable empty sequence.
+    (is (null (loop for x across (coerce '() 'vector) collect x)))
+    (is (zerop (length (or (gethash "a" object) #()))))))
