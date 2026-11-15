@@ -2104,3 +2104,27 @@ sentinel is substituted away (no stray symbol left in the program)."
         (is (plusp (length (getf spec :insns)))
             "~A compiled to a non-empty program" (getf spec :name))))))
 
+
+(test service-lb-plan-places-host-ports-as-single-backend-vips
+  "A Pod hostPort becomes a VIP keyed on the host address with the Pod as its lone
+backend, so the connect4 hook rewrites a connect to hostIP:hostPort to the Pod."
+  (multiple-value-bind (service-entries backend-entries slot)
+      (gr8s.controllers::service-lb-plan
+       nil (lambda (s p) (declare (ignore s p)) nil)
+       '((("TCP" "127.0.0.1" . 54323) "10.42.1.3" . 8080)
+         (("UDP" "192.168.76.2" . 54323) "10.42.1.4" . 53)))
+    (is (= 2 slot))
+    (is (member (gr8s.network::service-lb-vip-key "127.0.0.1" 54323 "TCP")
+                (mapcar #'car service-entries) :test #'equalp))
+    (is (member (gr8s.network::service-lb-vip-key "192.168.76.2" 54323 "UDP")
+                (mapcar #'car service-entries) :test #'equalp))
+    (is (member (gr8s.network::service-lb-backend-value "10.42.1.3" 8080)
+                (mapcar #'cdr backend-entries) :test #'equalp))
+    ;; A wildcard hostIP ("") is left to the userspace forwarder, not placed here.
+    (multiple-value-bind (se be s)
+        (gr8s.controllers::service-lb-plan
+         nil (lambda (s p) (declare (ignore s p)) nil)
+         '((("TCP" "" . 30080) "10.42.1.9" . 80)))
+      (declare (ignore be))
+      (is (= 0 s))
+      (is (null se)))))
