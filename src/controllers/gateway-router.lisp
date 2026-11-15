@@ -85,8 +85,18 @@
         (let ((type (or (gethash "type" path) "PathPrefix"))
               (value (or (gethash "value" path) "/")))
           (cond ((equal type "Exact") (values :exact value))
-                ((equal type "PathPrefix") (values :prefix value))
+                ((equal type "PathPrefix") (values :prefix (gw-canonical-prefix value)))
                 (t (gw-route-error "unsupported HTTPRoute path match type ~S" type)))))))
+
+(defun gw-canonical-prefix (value)
+  "Gateway-API PathPrefix matching is on path-segment boundaries, and a trailing
+   slash in the prefix is not significant: \"/match/\" is equivalent to \"/match\".
+   Strip a single trailing slash so segment-boundary matching behaves identically
+   for both spellings; the root prefix \"/\" is left intact."
+  (let ((len (length value)))
+    (if (and (> len 1) (char= (char value (1- len)) #\/))
+        (subseq value 0 (1- len))
+        value)))
 
 (defun gw-parse-headers (match-object)
   "Return an alist of (name . value) from a match's exact header matches."
