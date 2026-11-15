@@ -36,7 +36,9 @@ required. On a k3s cluster with `kube-proxy`, flannel, and the built-in
 NetworkPolicy controller disabled, gr8s provides a complete, Cilium-class
 networking stack:
 
-- **Pod networking and IPAM** over a VXLAN fabric (cross-node Pod-to-Pod).
+- **Pod networking and IPAM** over a VXLAN fabric (cross-node Pod-to-Pod), or an
+  **encrypted WireGuard fabric** (`overlay.backend=wireguard`) that transparently
+  encrypts Pod-to-Pod traffic while leaving node and API traffic in the clear.
 - **Services** — a kube-proxy replacement in the Whistler eBPF socket and packet
   load balancer.
 - **NetworkPolicy** enforced in eBPF, for TCP, UDP, and SCTP.
