@@ -154,7 +154,26 @@ Services naming another loadBalancerClass remain entirely under that controller'
              (client (and (hash-table-p config) (gethash "clientIP" config))))
         (or (and (hash-table-p client) (gethash "timeoutSeconds" client)) 10800)))))
 
-(defun service-lb-plan (services endpoints-of &optional host-port-targets)
+(defun service-lb-node-addresses (store)
+  "Every node's InternalIP plus loopback, as dotted address strings. A NodePort is
+reachable on any node's address, so a local-origin connect to one of these at a
+Service's nodePort is steered by the connect4 hook. Non-vector address lists (a
+JSON null parsed as a symbol) are skipped."
+  (let ((addresses nil))
+    (dolist (node (list-core-resources store "nodes"))
+      (let ((status (gethash "status" node)))
+        (when (hash-table-p status)
+          (let ((entries (gethash "addresses" status)))
+            (when (vectorp entries)
+              (loop for entry across entries
+                    when (and (hash-table-p entry)
+                              (equal "InternalIP" (gethash "type" entry))
+                              (stringp (gethash "address" entry)))
+                      do (pushnew (gethash "address" entry) addresses :test #'equal)))))))
+    (pushnew "127.0.0.1" addresses :test #'equal)
+    (nreverse addresses)))
+
+(defun service-lb-plan (services endpoints-of &optional host-port-targets node-addresses)
   "Pack SERVICES into load-balancer map entries.
 ENDPOINTS-OF is a function of (service port-object) returning two lists of (address
 target-port) pairs: the backends for the ClusterIP, and those for the Service's
@@ -179,11 +198,12 @@ order; a port's external addresses share its ClusterIP's slots when the backends
                             ;; Sorted so a client's backend offset means the same thing on every plan.
                             (sort (mapcar (lambda (endpoint) (cons (first endpoint) (second endpoint))) endpoints)
                                   #'string< :key #'prin1-to-string)))
-                     (let ((placed nil))
-                       (flet ((place (vip backends)
+                     (let ((placed nil)
+                           (node-port (gethash "nodePort" port)))
+                       (flet ((place (vip port-number backends)
                                 (let ((shared (assoc backends placed :test #'equal)))
                                   (multiple-value-bind (vip-key service-value packed indexed)
-                                      (service-lb-entries vip number (if shared (cdr shared) slot) backends
+                                      (service-lb-entries vip port-number (if shared (cdr shared) slot) backends
                                                           :protocol protocol :affinity-timeout timeout
                                                           :refuse none)
                                     (push (cons vip-key service-value) service-entries)
@@ -191,21 +211,31 @@ order; a port's external addresses share its ClusterIP's slots when the backends
                                     (unless shared
                                       (push (cons backends slot) placed)
                                       (dolist (entry packed) (push entry backend-entries))
-                                      (incf slot (length backends)))))))
+                                      (incf slot (length backends))))))
+                              (external-family (vip)
+                                (ordered
+                                 (remove-if-not
+                                  (lambda (endpoint)
+                                    (service-address-family-matches-p vip (first endpoint)))
+                                  external))))
                          (dolist (address addresses)
                            (let ((family-backends
                                    (remove-if-not
                                     (lambda (endpoint)
                                       (service-address-family-matches-p address (first endpoint)))
                                     internal)))
-                             (place address (ordered family-backends))))
+                             (place address number (ordered family-backends))))
                          (dolist (vip external-addresses)
-                           (place vip
-                                  (ordered
-                                   (remove-if-not
-                                    (lambda (endpoint)
-                                      (service-address-family-matches-p vip (first endpoint)))
-                                    external)))))))))))
+                           (place vip number (external-family vip)))
+                         ;; A NodePort is reachable on every node's address, from
+                         ;; this node's host and Pods, so the connect4 hook steers
+                         ;; a local-origin connect to <nodeIP>:<nodePort> to a
+                         ;; backend. It uses the external (local-origin) backend
+                         ;; set, so externalTrafficPolicy and affinity carry over;
+                         ;; off-node packet ingress to the NodePort is unaffected.
+                         (when (and (integerp node-port) (plusp node-port))
+                           (dolist (node-ip node-addresses)
+                             (place node-ip node-port (external-family node-ip)))))))))))
     ;; Pod hostPorts become single-backend VIPs keyed on the host address, so the
     ;; connect4 hook rewrites a host- or Pod-origin connect to hostIP:hostPort
     ;; straight to the Pod. This is the node-local hostPort path (a socket hook is
@@ -423,7 +453,10 @@ grant and exact owner/receiver incarnations."
                (loop for key being the hash-keys
                        of (gr8s.network::desired-host-port-targets store :node-name node-name)
                        using (hash-value value)
-                     collect (cons key value))))))
+                     collect (cons key value)))))
+          (list-node-addresses
+           (let ((store (service-lb-controller-store controller)))
+             (lambda () (service-lb-node-addresses store)))))
   "Recompute the desired LB table and apply the difference to the maps.
 Writes every backend before the service that references it (so the program never
 reads a VIP whose slots are missing), then removes freed backend slots and
@@ -442,7 +475,8 @@ A plan identical to the last applied one writes nothing."
            (old-signature (service-lb-controller-applied-signature controller)))
      (multiple-value-bind (desired-services desired-backends desired-slot-count desired-indices)
       (if publish-services-p
-          (service-lb-plan services endpoints-of (funcall list-host-ports))
+          (service-lb-plan services endpoints-of (funcall list-host-ports)
+                           (funcall list-node-addresses))
           (values nil nil 0 nil))
       (let* ((retained-p
                (and (eq publish-services-p :retain) old-signature
