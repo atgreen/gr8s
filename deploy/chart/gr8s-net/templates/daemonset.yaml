@@ -20,19 +20,18 @@ spec:
       tolerations:
         - operator: Exists
       initContainers:
-        # Install the CNI plugin binary and conflist, and mount the agent's bpffs.
+        # Install the CNI plugin binary and conflist, and mount the agent's bpffs
+        # -- done by the gr8s binary itself (cni-install), so the image needs no
+        # shell/coreutils/util-linux and can be distroless.
         - name: install
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          command: [/bin/sh, -c]
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
-            - |
-              set -e
-              cp /usr/local/bin/gr8s /host-cni-bin/gr8s.tmp && mv /host-cni-bin/gr8s.tmp /host-cni-bin/gr8s
-              mountpoint -q /host-bpf || mount -t bpf bpf /host-bpf
-              cat > /host-cni-conf/05-gr8s.conflist.tmp <<CONF
-              {"cniVersion":"1.0.0","name":"gr8s","plugins":[{"type":"gr8s","socket":"{{ .Values.paths.socket }}/cni.sock","direction":"egress","mapPinRoot":"{{ .Values.paths.bpf }}"}]}
-              CONF
-              mv /host-cni-conf/05-gr8s.conflist.tmp /host-cni-conf/05-gr8s.conflist
+            - cni-install
+            - --socket
+            - "{{ .Values.paths.socket }}/cni.sock"
+            - --map-pin-root
+            - "{{ .Values.paths.bpf }}"
           securityContext: { privileged: true }
           volumeMounts:
             - { name: cni-bin, mountPath: /host-cni-bin }
@@ -41,6 +40,7 @@ spec:
       containers:
         - name: agent
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - cni-agent
             - --node-name

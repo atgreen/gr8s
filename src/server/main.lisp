@@ -1471,6 +1471,69 @@ opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
      :stop-predicate (lambda () *shutdown-requested*))
     0))
 
+(defun parse-cni-install-options (arguments)
+  "Parse `gr8s cni-install` options: the shell-free initContainer step that
+installs this binary as the node's CNI plugin, mounts the bpffs, and writes the
+gr8s CNI conflist. Defaults match the gr8s-net chart's mount paths, so a
+distroless image needs no /bin/sh, coreutils or util-linux."
+  (let ((options (list :command :cni-install
+                       :cni-bin-dir "/host-cni-bin"
+                       :cni-conf-dir "/host-cni-conf"
+                       :bpf-mount "/host-bpf"
+                       :conflist "05-gr8s.conflist"
+                       :cni-name "gr8s"
+                       :socket "/run/gr8s/cni.sock"
+                       :map-pin-root "/run/gr8s/bpf"
+                       :direction "egress")))
+    (loop for (option value) on arguments by #'cddr
+          do (unless value (error "~A requires a value" option))
+             (cond ((equal option "--cni-bin-dir") (setf (getf options :cni-bin-dir) value))
+                   ((equal option "--cni-conf-dir") (setf (getf options :cni-conf-dir) value))
+                   ((equal option "--bpf-mount") (setf (getf options :bpf-mount) value))
+                   ((equal option "--conflist") (setf (getf options :conflist) value))
+                   ((equal option "--cni-name") (setf (getf options :cni-name) value))
+                   ((equal option "--socket") (setf (getf options :socket) value))
+                   ((equal option "--map-pin-root") (setf (getf options :map-pin-root) value))
+                   ((equal option "--direction") (setf (getf options :direction) value))
+                   (t (error "unknown cni-install option: ~A" option))))
+    options))
+
+(defun run-cni-install-command (options)
+  "Install the gr8s CNI plugin on the node without a shell: copy this running
+executable into the host CNI bin directory, mount a bpffs where Pod maps and TCX
+links are pinned, and write the CNI conflist -- each file write atomic (temp +
+rename), the mount idempotent. This is what the initContainer runs, so the image
+needs no shell/coreutils/util-linux. Returns 0."
+  (let* ((bin-dir (uiop:ensure-directory-pathname (getf options :cni-bin-dir)))
+         (conf-dir (uiop:ensure-directory-pathname (getf options :cni-conf-dir)))
+         (bin-target (merge-pathnames "gr8s" bin-dir))
+         (conflist (merge-pathnames (getf options :conflist) conf-dir)))
+    (ensure-directories-exist bin-dir)
+    (ensure-directories-exist conf-dir)
+    ;; Copy this running binary into place atomically, keeping the exec bit.
+    ;; /proc/self/exe is the full executable (SBCL core appended), which the
+    ;; kubelet invokes as the "gr8s" CNI plugin.
+    ;; Copy straight to the final name, not via a temp + rename: on a hostPath
+    ;; the data copy surfaces on the host but the in-container rename does not, so
+    ;; a temp+rename leaves "gr8s.tmp" on the node and no "gr8s". Atomicity is not
+    ;; needed here -- the init step completes before the agent starts and before
+    ;; any Pod that would invoke the plugin is scheduled. Unlink any stale binary
+    ;; first so a replacement never hits ETXTBSY against a running copy.
+    (uiop:delete-file-if-exists bin-target)
+    (uiop:copy-file #P"/proc/self/exe" bin-target)
+    (sb-posix:chmod (namestring bin-target) #o755)
+    ;; Mount the bpffs (idempotent: a surviving mount is reused, not overmounted).
+    (gr8s.kubelet::mount-managed-bpffs (getf options :bpf-mount))
+    ;; Write the conflist directly (see the binary note on hostPath renames).
+    (with-open-file (stream conflist :direction :output
+                                     :if-exists :supersede :if-does-not-exist :create)
+      (format stream "{\"cniVersion\":\"1.0.0\",\"name\":\"~A\",\"plugins\":[{\"type\":\"gr8s\",\"socket\":\"~A\",\"direction\":\"~A\",\"mapPinRoot\":\"~A\"}]}~%"
+              (getf options :cni-name) (getf options :socket)
+              (getf options :direction) (getf options :map-pin-root)))
+    (format t "~&gr8s cni-install: plugin ~A, bpffs ~A, conflist ~A~%"
+            bin-target (getf options :bpf-mount) conflist)
+    0))
+
 (defun parse-cli-options (arguments)
   "Dispatch ARGUMENTS to the matching subcommand option parser and return its
    options plist. No arguments, or help/version/notices, yield a bare :command
@@ -1515,6 +1578,8 @@ opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
      (parse-agent-options (rest arguments)))
     ((string= "cni-agent" (first arguments))
      (parse-cni-agent-options (rest arguments)))
+    ((string= "cni-install" (first arguments))
+     (parse-cni-install-options (rest arguments)))
     ((string= "join-token" (first arguments))
      (parse-join-token-options (rest arguments)))
     ((string= "witness" (first arguments))
@@ -3129,6 +3194,8 @@ No HA API may start from member-local certificate state before this converges."
                (setf *shutdown-requested* nil)
                (install-shutdown-handlers)
                (run-cni-agent-command options))
+              (:cni-install
+               (run-cni-install-command options))
               (:witness
                (setf *shutdown-requested* nil)
                (install-shutdown-handlers)
