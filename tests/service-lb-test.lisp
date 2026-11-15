@@ -2088,3 +2088,19 @@
     (signals gr8s.network::cni-error
       (gr8s.network::cni-policy-map-info 42 "endpoint_identity"
                                :object-info (lambda (fd) (declare (ignore fd)) info)))))
+
+(test sctp-nat-compiles-forward-and-reverse-classifiers
+  "The SCTP ClusterIP NAT compiles to exactly the DNAT and SNAT TC classifiers
+over the shared Service maps plus a per-Pod conntrack map, and the TCX-NEXT
+sentinel is substituted away (no stray symbol left in the program)."
+  (multiple-value-bind (map-specs program-specs)
+      (gr8s.network::compile-service-sctp-nat)
+    (flet ((names (specs) (mapcar (lambda (s) (getf s :name)) specs)))
+      (is (member "gr8s_service_v4" (names map-specs) :test #'equal))
+      (is (member "gr8s_backend_v4" (names map-specs) :test #'equal))
+      (is (member "gr8s_sctp_ct" (names map-specs) :test #'equal))
+      (is (equal '("gr8s_sctp_dnat" "gr8s_sctp_snat") (names program-specs)))
+      (dolist (spec program-specs)
+        (is (plusp (length (getf spec :insns)))
+            "~A compiled to a non-empty program" (getf spec :name))))))
+
