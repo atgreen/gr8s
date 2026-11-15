@@ -90,7 +90,12 @@
                       (let* ((prefix (concatenate 'string "gr8s_datastore_filesystem_" suffix " "))
                              (line (find-if (lambda (line) (uiop:string-prefix-p prefix line))
                                             (uiop:split-string text :separator '(#\Newline))))
-                             (*read-eval* nil))
+                             (*read-eval* nil)
+                             ;; Large counts render in scientific notation, which
+                             ;; must read back as the doubles that produced them:
+                             ;; a single-float read loses integer exactness past
+                             ;; 2^24, breaking the inode identity on big disks.
+                             (*read-default-float-format* 'double-float))
                         (read-from-string (subseq line (length prefix))))))
                (is (= 1 (sample "stats_available")))
                (is (plusp (sample "capacity_bytes")))
