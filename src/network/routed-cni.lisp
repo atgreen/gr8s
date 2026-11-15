@@ -192,8 +192,12 @@ partial failure retains the IPAM lease until DEL removes the endpoint."
             (publish-service-owner #'publish-cni-service-nat-owner)
             (check-service-owner #'check-cni-service-nat-owner)
             (withdraw-service-owner #'withdraw-cni-service-nat-owner)
+            sctp-nat-pin-directory
             (policy (make-cni-operations)))
-  "Bind a CNI lifecycle to agent-owned IPAM; never trust client IPAM settings."
+  "Bind a CNI lifecycle to agent-owned IPAM; never trust client IPAM settings.
+When SCTP-NAT-PIN-DIRECTORY names the socket LB's pinned Service maps, each Pod
+also gets the SCTP ClusterIP DNAT/SNAT classifiers (the socket LB cannot steer
+SCTP). It is best-effort: a missing or empty dataplane never fails Pod setup."
   (make-cni-operations
    :prepare
    (lambda (configuration context)
@@ -248,6 +252,12 @@ partial failure retains the IPAM lease until DEL removes the endpoint."
            (progn
              (funcall (cni-operations-add policy)
                       configuration context map-path link-path)
+             (when sctp-nat-pin-directory
+               ;; Best-effort: a Pod must still come up if the socket LB is
+               ;; absent or its Service maps are not pinned yet.
+               (handler-case (install-cni-sctp-nat configuration context
+                                                   sctp-nat-pin-directory link-path)
+                 (error () nil)))
              (when return-address (funcall install-service-return context return-address))))
        (setf (cni-configuration-previous-result configuration)
              (routed-cni-result configuration context host addresses dns-address))))
@@ -302,6 +312,8 @@ partial failure retains the IPAM lease until DEL removes the endpoint."
                     (funcall withdraw-service-owner configuration context addresses alias))))
               (funcall (cni-operations-delete policy)
                        configuration context map-path link-path directory)
+              (when sctp-nat-pin-directory
+                (handler-case (remove-cni-sctp-nat link-path) (error () nil)))
               (funcall remove-link context)
               (release-pod-address ipam (cni-context-container-id context)
                                    (cni-context-interface-name context))))
