@@ -301,7 +301,23 @@ the per-Gateway LoadBalancer Services.  RESOLVER overrides backend resolution
                                     (start-l4-listener :address "0.0.0.0" :port port
                                                        :mode mode :dispatcher dispatcher
                                                        :resolver resolver))))
-        (leader nil) (stopping nil) (lease-thread nil) (status-thread nil))
+        (leader nil) (stopping nil) (lease-thread nil) (status-thread nil)
+        (listener-thread nil))
+    ;; Converge the listener plans on their own responsive cadence rather than
+    ;; behind the agent's shared nudge loop, where a burst of unrelated object
+    ;; churn delayed a new Gateway's listener from binding for tens of seconds.
+    (setf listener-thread
+          (bt:make-thread
+           (lambda ()
+             (loop until stopping do
+               (handler-case
+                   (progn (converge-gateway-listeners controller)
+                          (converge-gateway-l4-listeners controller))
+                 (error (condition)
+                   (format *error-output* "~&gr8s gateway listener convergence failed: ~A~%"
+                           condition)))
+               (sleep 1)))
+           :name "gr8s gateway listeners"))
     (when (and cluster node-name)
       (setf lease-thread
             (bt:make-thread
@@ -330,12 +346,15 @@ the per-Gateway LoadBalancer Services.  RESOLVER overrides backend resolution
                  (sleep 2)))
              :name "gr8s gateway status")))
     (values
-     ;; The agent loop's converger: only the fast, local listener plans.
+     ;; Listener convergence runs in its own thread above; the agent loop's
+     ;; converger need do nothing, but converge once more so a nudge still
+     ;; takes effect immediately rather than waiting for the next tick.
      (lambda ()
-       (converge-gateway-listeners controller)
-       (converge-gateway-l4-listeners controller))
+       (ignore-errors (converge-gateway-listeners controller))
+       (ignore-errors (converge-gateway-l4-listeners controller)))
      (lambda ()
        (setf stopping t)
+       (when listener-thread (ignore-errors (bt:join-thread listener-thread)))
        (when lease-thread (ignore-errors (bt:join-thread lease-thread)))
        (when status-thread (ignore-errors (bt:join-thread status-thread)))
        (stop-gateway-controller controller)))))
