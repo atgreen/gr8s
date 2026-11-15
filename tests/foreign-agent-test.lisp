@@ -368,3 +368,41 @@ since gr8s itself creates the interface."
                (is (equal '(2 1) (nreverse writes))
                    "watched Service and EndpointSlice became LB map writes")))
         (gr8s.resources::stop-foreign-resource-view view)))))
+
+(test foreign-fabric-projects-peer-nodes-into-vxlan-intent
+  (with-core-api (store path)
+    (values path)
+    (foreign-agent-test-node store "worker-f" "10.88.7.0/24")
+    (let* ((cluster (kube-test-cluster))
+           (fabric-calls nil) (fabric-lock (bt:make-lock))
+           (agent
+             (gr8s.network::start-foreign-cni-agent
+              cluster :node-name "worker-f"
+              :state-directory (merge-pathnames "cni-agent/" path)
+              :bpf-root (namestring path)
+              :socket-path (namestring (merge-pathnames "cni-fabric.sock" path))
+              :policy-converger (lambda (&rest arguments) (declare (ignore arguments)) nil)
+              :fabric-reconciler
+              (lambda (network previous)
+                (bt:with-lock-held (fabric-lock)
+                  (push (list network previous) fabric-calls))))))
+      (is (not (null agent)))
+      (unwind-protect
+           (progn
+             ;; A lone node never creates the overlay device.
+             (sleep 1)
+             (is (null (bt:with-lock-held (fabric-lock) fabric-calls)))
+             ;; A peer joining the cluster produces the fabric intent: this
+             ;; node's underlay plus the peer's route.
+             (foreign-agent-test-node store "worker-g" "10.88.9.0/24")
+             (is (poll-until
+                  (lambda () (bt:with-lock-held (fabric-lock) fabric-calls))))
+             (destructuring-bind (network previous)
+                 (first (bt:with-lock-held (fabric-lock) (last fabric-calls)))
+               (is (null previous))
+               (is (equal "192.0.2.80" (gethash "underlayAddress" network)))
+               (let ((route (aref (gethash "routes" network) 0)))
+                 (is (equal "worker-g" (gethash "nodeID" route)))
+                 (is (equal "10.88.9.0/24" (gethash "podCIDR" route)))
+                 (is (equal "192.0.2.80" (gethash "underlayAddress" route))))))
+        (gr8s.network::stop-foreign-cni-agent agent)))))

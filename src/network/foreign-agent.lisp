@@ -21,6 +21,8 @@
   (wake (bt:make-condition-variable :name "gr8s foreign CNI agent wake"))
   (pending t) (running t)
   converge-thread policy-converger policy-writer
+  ;; The last applied fabric intent, so peer retirement knows what to undo.
+  last-network fabric-reconciler
   ;; A higher layer's convergence and teardown, run with the agent's: the
   ;; Gateway controller lives above this module, so it arrives as functions.
   extra-converger extra-stopper)
@@ -50,6 +52,48 @@
   (bt:with-lock-held ((foreign-cni-agent-lock agent))
     (setf (foreign-cni-agent-pending agent) t)
     (bt:condition-notify (foreign-cni-agent-wake agent))))
+
+(defun foreign-node-internal-address (node)
+  (loop for entry across (gethash "addresses"
+                                  (gethash "status" node (make-hash-table :test 'equal))
+                                  #())
+        when (equal "InternalIP" (gethash "type" entry))
+          return (gethash "address" entry)))
+
+(defun foreign-node-network (view node-name)
+  "Project the watched Nodes into the VXLAN reconciler's network intent: this
+node's underlay address, and one route per peer Node carrying its podCIDRs --
+the multi-node fabric, driven by the same objects every kubelet reports."
+  (let ((local "") (routes '()))
+    (dolist (node (gr8s.resources::list-core-resources view "nodes"))
+      (let* ((metadata (gethash "metadata" node))
+             (name (gethash "name" metadata))
+             (address (foreign-node-internal-address node))
+             (cidrs (ignore-errors (foreign-node-pod-cidrs node))))
+        (cond ((equal name node-name)
+               (when address (setf local address)))
+              ((and address cidrs)
+               (push (json-object "nodeID" name
+                                  "podCIDR" (first cidrs)
+                                  "podCIDRs" (coerce cidrs 'vector)
+                                  "underlayAddress" address)
+                     routes)))))
+    (json-object "underlayAddress" local
+                 "routes" (coerce (nreverse routes) 'vector))))
+
+(defun foreign-agent-converge-fabric (agent)
+  "Reconcile the VXLAN fabric when the projected intent changed.  Only once a
+peer exists (or existed) does the overlay device appear; a lone node keeps its
+host networking untouched."
+  (let ((view (foreign-cni-agent-view agent))
+        (previous (foreign-cni-agent-last-network agent)))
+    (let ((network (foreign-node-network view (foreign-cni-agent-node-name agent))))
+      (when (and (not (equalp network previous))
+                 (or (plusp (length (gethash "routes" network)))
+                     (and previous (plusp (length (gethash "routes" previous))))))
+        (funcall (foreign-cni-agent-fabric-reconciler agent)
+                 network (when previous (list previous)))
+        (setf (foreign-cni-agent-last-network agent) network)))))
 
 (defun foreign-agent-endpoints (agent)
   "Every local Pod endpoint (SANDBOX INTERFACE ADDRESS) the agent's IPAM holds."
@@ -84,6 +128,10 @@
                                          (foreign-cni-agent-lock agent)))
              (setf (foreign-cni-agent-pending agent) nil))
            (when (foreign-cni-agent-running agent)
+             (handler-case (foreign-agent-converge-fabric agent)
+               (error (condition)
+                 (format *error-output* "~&gr8s foreign CNI agent: fabric convergence failed: ~A~%"
+                         condition)))
              (handler-case (foreign-agent-converge agent)
                (error (condition)
                  (format *error-output* "~&gr8s foreign CNI agent: policy convergence failed: ~A~%"
@@ -100,6 +148,7 @@
                   (mtu 1450) operations-factory
                   (policy-converger #'converge-pod-network-policies)
                   (policy-writer #'write-pod-network-policy)
+                  (fabric-reconciler #'reconcile-node-vxlan-network)
                   extra-factory
                   (stop-predicate (constantly nil)))
   "Start the foreign-cluster CNI agent against CLUSTER and return it, serving CNI
@@ -112,7 +161,8 @@ STOPPER) for a higher layer -- the Gateway controller -- that shares the view
 and the convergence loop."
   (let* ((agent (%make-foreign-cni-agent
                  :node-name node-name :bpf-root bpf-root
-                 :policy-converger policy-converger :policy-writer policy-writer))
+                 :policy-converger policy-converger :policy-writer policy-writer
+                 :fabric-reconciler fabric-reconciler))
          (view (gr8s.resources::make-foreign-resource-view
                 cluster
                 ;; Every followed resource feeds either policy or the gateway
