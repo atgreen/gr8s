@@ -2128,3 +2128,27 @@ backend, so the connect4 hook rewrites a connect to hostIP:hostPort to the Pod."
       (declare (ignore be))
       (is (= 0 s))
       (is (null se)))))
+
+(test service-lb-plan-places-node-ports-on-every-node-address
+  "A NodePort Service gets a VIP entry on each node address at its nodePort (plus
+the ClusterIP entry), so the connect4 hook steers a local-origin connect to
+<nodeIP>:<nodePort> to a backend over the external (local-origin) backend set."
+  (let ((service (fake-lb-service "10.96.0.10" :ports '(80))))
+    (setf (gethash "nodePort" (aref (gethash "ports" (gethash "spec" service)) 0)) 31234)
+    (let* ((keys (mapcar #'car
+                         (gr8s.controllers::service-lb-plan
+                          (list service)
+                          (lambda (s p) (declare (ignore s p))
+                            (values '(("10.88.1.5" 8080)) '(("10.88.1.5" 8080)) nil))
+                          nil
+                          '("192.168.1.10" "192.168.1.11")))))
+      (is (member (gr8s.network::service-lb-vip-key "10.96.0.10" 80 "TCP") keys :test #'equalp))
+      (is (member (gr8s.network::service-lb-vip-key "192.168.1.10" 31234 "TCP") keys :test #'equalp))
+      (is (member (gr8s.network::service-lb-vip-key "192.168.1.11" 31234 "TCP") keys :test #'equalp)))
+    ;; A ClusterIP Service (no nodePort) places no node-address entries.
+    (let ((keys (mapcar #'car
+                        (gr8s.controllers::service-lb-plan
+                         (list (fake-lb-service "10.96.0.11" :ports '(80)))
+                         (lambda (s p) (declare (ignore s p)) '(("10.88.1.6" 8080)))
+                         nil '("192.168.1.10")))))
+      (is (null (member (gr8s.network::service-lb-vip-key "192.168.1.10" 80 "TCP") keys :test #'equalp))))))
