@@ -124,7 +124,10 @@ agent's IPAM and returns the CNI operations, overriding the routed dataplane
                     (start-agent-cni-server
                      socket-path
                      (lambda (request)
-                       (prog1 (handle-agent-cni-request request :operations operations)
+                       ;; gr8s is the sole plugin here -- it creates the
+                       ;; interface itself, so no prevResult can exist.
+                       (prog1 (handle-agent-cni-request request :operations operations
+                                                                :chained nil)
                          ;; A new or departed endpoint changes which guards exist.
                          (foreign-agent-nudge agent)))))
                   (foreign-cni-agent-converge-thread agent)

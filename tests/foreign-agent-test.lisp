@@ -19,12 +19,12 @@
                                        :underlay-address "192.0.2.80")))
 
 (defun foreign-agent-test-config (root)
-  "A chained CNI configuration naming ROOT as the pin directory."
+  "The sole-plugin CNI configuration the foreign conflist carries: no prevResult,
+since gr8s itself creates the interface."
   (com.inuoe.jzon:stringify
    (gr8s.resources::core-object
     "cniVersion" "1.0.0" "name" "gr8s" "type" "gr8s"
-    "mapPinRoot" (namestring root)
-    "prevResult" (gr8s.resources::core-object "ips" #()))))
+    "mapPinRoot" (namestring root))))
 
 (defun foreign-agent-cni-call (socket-path command config container)
   "One CNI command through the real agent socket protocol."
