@@ -5,8 +5,8 @@
 Package gr8s's Whistler eBPF networking so it installs on any conformant
 Kubernetes cluster, as two features of one product:
 
-1. **A full-dataplane CNI**: Pod connectivity (routed veth / VXLAN fabric,
-   IPAM from `node.spec.podCIDR`), NetworkPolicy enforcement through the
+1. **A full-dataplane CNI**: Pod connectivity (routed veth / VXLAN or
+   encrypted WireGuard fabric, IPAM from `node.spec.podCIDR`), NetworkPolicy enforcement through the
    per-Pod Whistler TCX guards, and a kube-proxy replacement built on the
    Whistler service NAT/LB programs.
 2. **A Gateway API implementation**: the existing GatewayClass/Gateway/
@@ -90,5 +90,29 @@ lifts out into an operator mechanically.
 - Cloud-provider IPAM (ENI and friends); `podCIDR` only.
 - A Deployment+Service gateway topology; the proxy is per-node, addressed
   through the auto-provisioned LoadBalancer Service.
-- WireGuard overlay encryption as a foreign-cluster feature flag.
 - Multi-cluster, Windows nodes.
+
+## WireGuard overlay (shipped)
+
+The cross-node Pod fabric encrypts with WireGuard when the agent runs with
+`cni-agent --overlay-backend wireguard` (Helm: `overlay.backend=wireguard`).
+The datapath reuses the native `reconcile-node-wireguard-network`; the
+foreign-cluster additions are key management and peer discovery over the host
+API, since the native node-session gRPC key exchange is unavailable here:
+
+- Each agent generates and persists a Curve25519 key pair in its state
+  directory (`ensure-wireguard-key-pair`) and publishes its public key on its
+  own Node as the `gr8s.io/wireguard-public-key` annotation (needs the
+  `nodes: patch` grant, gated on the backend in the chart RBAC).
+- Peers are projected from the watched Node objects exactly as the VXLAN
+  fabric is: each peer's annotation pubkey, `InternalIP` endpoint, and
+  `podCIDR` become one WireGuard peer with the peer Pod CIDR as its only
+  AllowedIPs.
+- **Only Pod-CIDR-to-Pod-CIDR traffic is encrypted.** Node and API-server
+  traffic stays in the clear, so the agent still bootstraps against the host
+  cluster before the fabric exists -- the Antrea/Cilium pod-only model, which
+  avoids the encryption-bootstrap deadlock a node-to-node mode would hit.
+
+Verified on a two-node k3s: handshakes complete, cross-node Pod traffic rides
+WireGuard UDP on the underlay with no cleartext Pod packets, and the node
+underlay itself stays unencrypted.
