@@ -193,8 +193,21 @@ Selectorless: the listeners answer on every node's host network."
                          (gethash "supportedKinds" entry) (vector kind)
                          (gethash "attachedRoutes" entry) (length attached)
                          (gethash "conditions" entry)
+                         ;; The spec requires a listener to report Accepted,
+                         ;; Programmed and ResolvedRefs; the conformance suite
+                         ;; waits on ResolvedRefs before sending traffic.
                          (vector (foreign-gateway-condition
+                                  "Accepted" "True" "Accepted"
+                                  :generation generation
+                                  :existing (and existing-listener
+                                                 (gethash "conditions" existing-listener)))
+                                 (foreign-gateway-condition
                                   "Programmed" "True" "Programmed"
+                                  :generation generation
+                                  :existing (and existing-listener
+                                                 (gethash "conditions" existing-listener)))
+                                 (foreign-gateway-condition
+                                  "ResolvedRefs" "True" "ResolvedRefs"
                                   :generation generation
                                   :existing (and existing-listener
                                                  (gethash "conditions" existing-listener)))))
@@ -232,12 +245,17 @@ Selectorless: the listeners answer on every node's host network."
                              (setf (gethash "parentRef" entry) parent
                                    (gethash "controllerName" entry) *gateway-controller-name*
                                    (gethash "conditions" entry)
+                                   ;; observedGeneration must track the route's
+                                   ;; metadata.generation, which the conformance
+                                   ;; suite waits to see on every condition.
                                    (vector (foreign-gateway-condition
                                             "Accepted" "True" "Accepted"
+                                            :generation (gethash "generation" metadata)
                                             :existing (and existing-parent
                                                            (gethash "conditions" existing-parent)))
                                            (foreign-gateway-condition
                                             "ResolvedRefs" "True" "ResolvedRefs"
+                                            :generation (gethash "generation" metadata)
                                             :existing (and existing-parent
                                                            (gethash "conditions" existing-parent)))))
                              entry))))
