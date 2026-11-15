@@ -266,15 +266,20 @@ then RELEASE what keeping the client's address took."
   (ignore-errors (bt:join-thread (host-port-forwarder-thread forwarder)))
   (ignore-errors (sb-bsd-sockets:socket-close (host-port-forwarder-listener forwarder))))
 
-(defun desired-host-port-targets (store)
-  "Map (protocol ip . port) to (pod-address . container-port) for STORE's addressed, undeleted Pods."
+(defun desired-host-port-targets (store &key node-name)
+  "Map (protocol ip . port) to (pod-address . container-port) for STORE's addressed,
+undeleted Pods.  Status is read through the desired-state seam, so STORE may be a
+foreign cluster's view; with NODE-NAME, only Pods scheduled on that node are
+served -- a foreign view lists the whole cluster, where the control-plane store
+carries only this node's Pods."
   (let ((targets (make-hash-table :test #'equal)))
     (dolist (pod (list-pods store) targets)
-      (let* ((status (with-store-lock (store) (gethash (pod-uid pod) (pod-store-pod-observed-statuses store))))
+      (let* ((status (gr8s.store:pod-reported-status store pod))
              (address (and status (gethash "podIP" status))))
         ;; A hostNetwork Pod binds its host ports itself.
         (when (and (stringp address) (plusp (length address)) (not (deletion-requested-p pod))
                    (not (pod-host-network-p pod))
+                   (or (null node-name) (equal node-name (pod-node-name pod)))
                    (not (terminal-pod-phase-p (gethash "phase" status ""))))
           (loop for container across (gethash "containers" (gethash "spec" (pod-to-object pod)) #())
                 do (loop for port across (gethash "ports" container #())
@@ -329,9 +334,12 @@ address answers from the address the client used. Without addresses TARGETS is u
                (setf (gethash (list* "UDP" address (cddr key)) targets) target))))
   targets)
 
-(defun converge-host-port-forwarders (forwarders store)
-  "Make the FORWARDERS table match the host ports of STORE's Pods."
-  (converge-port-forwarders forwarders (bind-udp-ports-per-address (desired-host-port-targets store))))
+(defun converge-host-port-forwarders (forwarders store &key node-name)
+  "Make the FORWARDERS table match the host ports of STORE's Pods.  With
+NODE-NAME, only Pods scheduled on that node, for the foreign-cluster agent."
+  (converge-port-forwarders forwarders
+                            (bind-udp-ports-per-address
+                             (desired-host-port-targets store :node-name node-name))))
 
 ;;; Service node ports
 
