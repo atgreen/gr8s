@@ -2,9 +2,9 @@
 ;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Purpose:
-;;;; Exercise the JIT-compiled Gateway API router: parsing stored HTTPRoute
+;;;; Exercise the hostname-indexed Gateway API router: parsing stored HTTPRoute
 ;;;; objects into the normalized model, Gateway-API match precedence in the
-;;;; compiled dispatch, weighted backend selection, and fail-closed rejection of
+;;;; table dispatch, weighted backend selection, and fail-closed rejection of
 ;;;; unsupported match constructs.
 
 (in-package #:gr8s/tests)
@@ -39,7 +39,7 @@
             (gwr-route "default" '("*.example.com")
                        (gwr-rule (list (gr8s.controllers::make-gw-match :path-type :prefix :path "/"))
                                  (list (gwr-backend "wildcard-svc"))))))
-         (router (gr8s.controllers::compile-gateway-router routes)))
+         (router (gr8s.controllers::build-gateway-router routes)))
     (flet ((route (host path method) (gwr-dispatch-name (funcall router host path method '()))))
       (is (equal "health-svc"      (route "api.example.com" "/health" "GET")))
       (is (equal "api-default-svc" (route "api.example.com" "/health" "POST"))) ; non-GET falls through
@@ -55,7 +55,7 @@
                                   (gwr-rule (list (gr8s.controllers::make-gw-match :path-type :prefix :path "/"))
                                             (list (gwr-backend "v2" :weight 3)
                                                   (gwr-backend "v1" :weight 1))))))
-         (router (gr8s.controllers::compile-gateway-router routes)))
+         (router (gr8s.controllers::build-gateway-router routes)))
     (let ((gr8s.controllers::*gw-weighted-pick* (lambda (total) (declare (ignore total)) 0)))
       (is (equal "v2" (gwr-dispatch-name (funcall router "split.example.com" "/a" "GET" '())))))
     (let ((gr8s.controllers::*gw-weighted-pick* (lambda (total) (declare (ignore total)) 3)))
@@ -67,7 +67,7 @@
                                                    :path-type :prefix :path "/"
                                                    :headers '(("x-canary" . "yes"))))
                                             (list (gwr-backend "canary-svc"))))))
-         (router (gr8s.controllers::compile-gateway-router routes)))
+         (router (gr8s.controllers::build-gateway-router routes)))
     (is (equal "canary-svc"
                (gwr-dispatch-name (funcall router "h.example.com" "/x" "GET" '(("X-Canary" . "yes"))))))
     (is (null (funcall router "h.example.com" "/x" "GET" '(("x-canary" . "no")))))
@@ -118,7 +118,7 @@
                       {\"matches\":[{\"path\":{\"type\":\"PathPrefix\",\"value\":\"/match/\"}}],\"backendRefs\":[{\"name\":\"v3\",\"port\":80}]},
                       {\"matches\":[{\"path\":{\"type\":\"PathPrefix\",\"value\":\"/match/prefix/\"}}],\"backendRefs\":[{\"name\":\"v1\",\"port\":80}]},
                       {\"matches\":[{\"path\":{\"type\":\"PathPrefix\",\"value\":\"/match/prefix/one\"}}],\"backendRefs\":[{\"name\":\"v2\",\"port\":80}]}]}}"))
-         (router (gr8s.controllers::compile-gateway-router (list (gr8s.controllers::parse-httproute object)))))
+         (router (gr8s.controllers::build-gateway-router (list (gr8s.controllers::parse-httproute object)))))
     (flet ((route (path) (let ((d (funcall router "any" path "GET" '()))) (and d (gwr-dispatch-name d)))))
       (is (equal "v1" (route "/match")))            ; exact
       (is (equal "v2" (route "/match/exact")))       ; exact beats prefix
@@ -129,14 +129,14 @@
       (is (equal "v2" (route "/match/prefix/one")))  ; longest prefix "/match/prefix/one"
       (is (equal "v2" (route "/match/prefix/one/x"))))))
 
-(test gateway-router-parse-and-compile-end-to-end
+(test gateway-router-parse-and-build-end-to-end
   (let* ((object (com.inuoe.jzon:parse
                   "{\"metadata\":{\"name\":\"app\",\"namespace\":\"shop\"},
                     \"spec\":{\"hostnames\":[\"shop.example.com\"],
                              \"rules\":[{\"matches\":[{\"path\":{\"type\":\"Exact\",\"value\":\"/health\"}}],
                                          \"backendRefs\":[{\"name\":\"health\",\"port\":80}]},
                                         {\"backendRefs\":[{\"name\":\"web\",\"port\":80}]}]}}"))
-         (router (gr8s.controllers::compile-gateway-router (list (gr8s.controllers::parse-httproute object)))))
+         (router (gr8s.controllers::build-gateway-router (list (gr8s.controllers::parse-httproute object)))))
     (is (equal "health" (gwr-dispatch-name (funcall router "shop.example.com" "/health" "GET" '()))))
     (is (equal "web"    (gwr-dispatch-name (funcall router "shop.example.com" "/other" "GET" '()))))
     (is (null (funcall router "nope.example.com" "/health" "GET" '())))))
@@ -170,7 +170,7 @@
          (route (gr8s.controllers::parse-httproute object)))
     (is (equal "shop" (gr8s.controllers::gw-route-name route)))
     (is (equal 50 (gr8s.controllers::gw-route-rate-limit route)))
-    (let ((dispatch (funcall (gr8s.controllers::compile-gateway-router (list route)) "any" "/x" "GET" '())))
+    (let ((dispatch (funcall (gr8s.controllers::build-gateway-router (list route)) "any" "/x" "GET" '())))
       (is (equal "shop" (gr8s.controllers::gw-dispatch-route-name dispatch)))
       (is (equal "store/shop" (gr8s.controllers::gw-dispatch-route-key dispatch)))
       (is (equal 50 (gr8s.controllers::gw-dispatch-rate-limit dispatch))))))
@@ -187,3 +187,41 @@
      (com.inuoe.jzon:parse
       "{\"metadata\":{\"name\":\"r\",\"namespace\":\"d\"},
         \"spec\":{\"rules\":[{\"backendRefs\":[{\"name\":\"s\"}]}]}}"))))  ; backendRef without a port
+
+(test gateway-router-falls-through-host-buckets
+  (let* ((routes
+           (loop for (hosts path method headers backend) in
+                 '((("api.team.example.com") "/exact" "POST" (("x-mode" . "on")) "exact")
+                   (("*.team.example.com") "/team" nil nil "team")
+                   (("*.example.com") "/wide" nil nil "wide")
+                   (nil "/" nil nil "default"))
+                 collect (gwr-route "default" hosts
+                           (gwr-rule (list (gr8s.controllers::make-gw-match
+                                            :path path :method method :headers headers))
+                                     (list (gwr-backend backend))))))
+         (router (gr8s.controllers::build-gateway-router routes)))
+    (flet ((pick (host path &optional (method "GET") headers)
+             (gwr-dispatch-name (funcall router host path method headers))))
+      (is (equal "exact" (pick "api.team.example.com" "/exact" "post" '(("X-Mode" . "on")))))
+      (is (equal "default" (pick "api.team.example.com" "/exact" "POST" '(("x-mode" . "ON")))))
+      (is (equal "team" (pick "api.team.example.com" "/team")))
+      (is (equal "wide" (pick "api.team.example.com" "/wide")))
+      (is (equal "wide" (pick "team.example.com" "/wide")))
+      (is (equal "default" (pick "example.com" "/wide")))
+      (is (equal "default" (pick "team.example.com" "/team")))
+      (is (equal "default" (pick "api.team.example.com" "/teamwork")))
+      (is (equal "default" (pick "unrelated.org" "/anything"))))))
+
+(test gateway-router-preserves-ties-and-independent-tables
+  (let* ((first (gwr-route "d" '("a.example.com" "b.example.com")
+                 (gwr-rule (list (gr8s.controllers::make-gw-match)) (list (gwr-backend "first")))))
+         (second (gwr-route "d" '("a.example.com")
+                  (gwr-rule (list (gr8s.controllers::make-gw-match)) (list (gwr-backend "second")))))
+         (old (gr8s.controllers::build-gateway-router (list first second)))
+         (new (gr8s.controllers::build-gateway-router (list second)))
+         (empty (gr8s.controllers::build-gateway-router nil)))
+    (is (equal "first" (gwr-dispatch-name (funcall old "a.example.com" "/" "GET" nil))))
+    (is (equal "first" (gwr-dispatch-name (funcall old "b.example.com" "/" "GET" nil))))
+    (is (equal "second" (gwr-dispatch-name (funcall new "a.example.com" "/" "GET" nil))))
+    (is (null (funcall new "b.example.com" "/" "GET" nil)))
+    (is (null (funcall empty "a.example.com" "/" "GET" nil)))))

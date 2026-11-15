@@ -31,6 +31,41 @@
 
 (defun gw-parse (json) (com.inuoe.jzon:parse json))
 
+(test gateway-status-subresource-is-isolated-and-versioned
+  (with-core-api (store directory)
+    (values store directory)
+    (let* ((url "/apis/gateway.networking.k8s.io/v1/gatewayclasses/gr8s")
+           (input (gw-parse *gateway-class-json*)))
+      (setf (gethash "status" input) (gr8s.resources::core-object "injected" t))
+      (let ((created (check-core-status 201 "/apis/gateway.networking.k8s.io/v1/gatewayclasses"
+                                        :method :post :object input)))
+        (is-false (gethash "status" created))
+        (is (eql 1 (gethash "generation" (gethash "metadata" created)))))
+      (check-core-status 200 (concatenate 'string url "/status"))
+      (let* ((patched (check-core-status
+                       200 (concatenate 'string url "/status") :method :patch :content-type "application/merge-patch+json"
+                       :object (gr8s.resources::core-object
+                                "spec" (gr8s.resources::core-object "controllerName" "injected/controller")
+                                "status" (gr8s.resources::core-object "conditions" #()))))
+             (metadata (gethash "metadata" patched)))
+        (is (equal "gr8s.io/gateway-controller" (gethash "controllerName" (gethash "spec" patched))))
+        (is (eql 1 (gethash "generation" metadata)))
+        (check-core-status 409 (concatenate 'string url "/status") :method :patch :content-type "application/merge-patch+json"
+                           :object (gr8s.resources::core-object
+                                    "metadata" (gr8s.resources::core-object "resourceVersion" "0")
+                                    "status" (gr8s.resources::core-object)))
+        (check-core-status 200 (concatenate 'string url "/status?dryRun=All") :method :patch :content-type "application/merge-patch+json"
+                           :object (gr8s.resources::core-object
+                                    "status" (gr8s.resources::core-object "dryRunMarker" t)))
+        (is-false (gethash "dryRunMarker" (gethash "status" (check-core-status 200 url))))
+        (let ((changed (check-core-status
+                        200 url :method :patch :content-type "application/merge-patch+json"
+                        :object (gr8s.resources::core-object
+                                 "spec" (gr8s.resources::core-object "controllerName" "another/controller")
+                                 "status" (gr8s.resources::core-object "injected" t)))))
+          (is (eql 2 (gethash "generation" (gethash "metadata" changed))))
+          (is-false (gethash "injected" (gethash "status" changed))))))))
+
 (test gateway-objects-persist-and-discover
   (with-core-api (store directory)
     ;; A namespace to host the namespaced objects.
@@ -71,8 +106,9 @@
     (let* ((discovery (check-core-status 200 "/apis/gateway.networking.k8s.io/v1"))
            (resources (gethash "resources" discovery))
            (names (map 'list (lambda (r) (gethash "name" r)) resources)))
-      (is (= 6 (length resources)))
-      (dolist (n '("gatewayclasses" "gateways" "httproutes" "tcproutes" "tlsroutes" "grpcroutes"))
+      (is (= 8 (length resources)))
+      (dolist (n '("gatewayclasses" "gateways" "httproutes" "tcproutes" "tlsroutes" "grpcroutes"
+                   "gatewayclasses/status" "gateways/status"))
         (is (member n names :test #'equal))))))
 
 (test gateway-validation-fails-closed-on-missing-required-fields

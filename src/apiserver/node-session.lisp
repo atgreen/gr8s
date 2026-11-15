@@ -84,7 +84,10 @@ planner groups by: its name and its region/zone."
   (image-tracker (gr8s.image-distribution::make-image-tracker))
   (revisions (make-hash-table :test #'equal))
   (snapshots (make-hash-table :test #'equal))
+  (publication-locks (make-hash-table :test #'equal))
   (statuses (make-hash-table :test #'equal))
+  ;; Complete Gateway observations, bound to the reporting session and receipt time.
+  (gateway-reports (make-hash-table :test #'equal))
   (acknowledged-revisions (make-hash-table :test #'equal))
   ;; Latest validated complete local receiver report:
   ;; (session revision proofs owner-projection).
@@ -136,7 +139,12 @@ planner groups by: its name and its region/zone."
   ;; Whether the agent applies desired-state deltas, and the last snapshot this
   ;; session delivered, which the next delta changes (podster-uqb.139).
   deltas-p
-  delivered)
+  delivered
+  gateway-deltas-p
+  (gateway-revision 0)
+  (gateway-acknowledged-revision 0)
+  gateway-resources
+  gateway-dependency-epoch)
 
 (defparameter +desired-state-delta-capability+ "desired-state-delta"
   "The NodeHello capability of an agent that rebuilds snapshots from deltas.")
@@ -178,6 +186,7 @@ planner groups by: its name and its region/zone."
      'gr8s.node.v1::desired-state-snapshot
      :revision (slot-value snapshot 'gr8s.node.v1::revision)
      :base-revision (slot-value base 'gr8s.node.v1::revision)
+     :gateway-dependency-revision (slot-value snapshot 'gr8s.node.v1::gateway-dependency-revision)
      :network (slot-value snapshot 'gr8s.node.v1::network)
      :routes (slot-value snapshot 'gr8s.node.v1::routes)
      :pods (remove-if (lambda (pod)
@@ -194,6 +203,21 @@ planner groups by: its name and its region/zone."
      (when service-discovery-changed
        (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json)))))
 
+(defvar *node-publications* nil)
+
+(defun call-with-node-publication (server node-name function)
+  "Order capture and delivery for this node, permitting nested publication helpers."
+  (let ((key (cons server node-name)))
+    (if (member key *node-publications* :test #'equal)
+        (funcall function)
+        (let ((lock (bt:with-lock-held ((node-grpc-server-lock server))
+                      (or (gethash node-name (node-grpc-server-publication-locks server))
+                          (setf (gethash node-name (node-grpc-server-publication-locks server))
+                                (bt:make-lock (format nil "gr8s configuration publication ~A" node-name)))))))
+          (bt:with-lock-held (lock)
+            (let ((*node-publications* (cons key *node-publications*)))
+              (funcall function)))))))
+
 (defun deliver-node-snapshot (session snapshot)
   "Send SNAPSHOT on SESSION, as a delta when the agent takes them, unless it already has a newer one.
 Deltas are computed against what this session delivered, under its send lock, so
@@ -209,7 +233,58 @@ concurrent publications cannot reorder a delta ahead of its base."
                                    (node-snapshot-delta delivered snapshot)
                                    snapshot)
                                :sequence 0))
-        (setf (node-agent-session-delivered session) snapshot)))))
+        (setf (node-agent-session-delivered session) snapshot)
+        (install-node-gateway-baseline session snapshot)))))
+
+(defun install-node-gateway-baseline
+    (session snapshot &optional (dependency-epoch (slot-value snapshot 'gr8s.node.v1::gateway-dependency-revision)))
+  "Reset the derived view after full node delivery, with SESSION's send lock held."
+  (when (node-agent-session-gateway-deltas-p session)
+    (let ((resources (make-hash-table :test #'equal)))
+      (dolist (bytes (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json))
+        (let ((key (car (gr8s.kubelet::decode-service-discovery-entry bytes))))
+          (when (member (first key) gr8s.protocol::+gateway-config-resources+ :test #'equal)
+            (setf (gethash key resources) bytes))))
+      (setf (node-agent-session-gateway-resources session) resources
+            (node-agent-session-gateway-revision session) 0
+            (node-agent-session-gateway-acknowledged-revision session) 0
+            (node-agent-session-gateway-dependency-epoch session) dependency-epoch))))
+
+(defun deliver-node-gateway-config
+    (session changes &key (dependency-epoch (node-agent-session-gateway-dependency-epoch session)))
+  "Send only changed rows, committing the session base after a successful send."
+  (bt:with-lock-held ((node-agent-session-lock session))
+    (let ((snapshot (node-agent-session-delivered session))
+          (resources (node-agent-session-gateway-resources session)))
+      (unless (node-agent-session-gateway-deltas-p session)
+        (return-from deliver-node-gateway-config (values nil :unsupported)))
+      (unless (and snapshot resources
+                   (eql dependency-epoch (node-agent-session-gateway-dependency-epoch session)))
+        (return-from deliver-node-gateway-config (values nil :baseline-required)))
+      (let* ((changed
+               (remove-if
+                (lambda (change)
+                  (let* ((key (gr8s.protocol::gateway-resource-change-key change))
+                         (old (gethash key resources)))
+                    (if (slot-value change 'gr8s.node.v1::deleted)
+                        (null old)
+                        (equalp old (slot-value change 'gr8s.node.v1::object-json))))) changes))
+             (base (node-agent-session-gateway-revision session)))
+        (unless changed (return-from deliver-node-gateway-config (values nil :unchanged)))
+        (let ((update (make-instance 'gr8s.node.v1::gateway-config-update
+                                     :base-node-revision (slot-value snapshot 'gr8s.node.v1::revision)
+                                     :base-revision base :revision (1+ base) :changes changed)))
+          (gr8s.protocol::validate-gateway-config-update
+           update (slot-value snapshot 'gr8s.node.v1::revision) base)
+          (ag-grpc:stream-send (node-agent-session-stream session)
+                               (make-server-envelope :gateway-config update))
+          (dolist (change changed)
+            (let ((key (gr8s.protocol::gateway-resource-change-key change)))
+              (if (slot-value change 'gr8s.node.v1::deleted)
+                  (remhash key resources)
+                  (setf (gethash key resources) (slot-value change 'gr8s.node.v1::object-json)))))
+          (setf (node-agent-session-gateway-revision session) (1+ base))
+          (values update :sent))))))
 
 (defvar *node-session-stall-seconds* 30
   "Silence after which either end of a node session treats it as wedged.")
@@ -920,12 +995,15 @@ the node the operation was addressed to."
   (dolist (node (list-nodes (node-grpc-server-store server)))
     (let ((name (node-record-name node)))
       (unless (string= name changed-node)
-        (let ((snapshot (attach-node-topology
+        (call-with-node-publication
+         server name
+         (lambda ()
+          (let ((snapshot (attach-node-topology
                          server name
                          (node-desired-state-snapshot (node-grpc-server-store server) name))))
           (unless (same-node-snapshot-topology-p
                    (current-node-snapshot server name) snapshot)
-            (publish-node-desired-state server name snapshot)))))))
+            (publish-node-desired-state server name snapshot)))))))))
 
 (defun merge-wireguard-reflexive-endpoint (endpoints address port)
   "Replace the kernel-observed NAT candidate without disturbing manual candidates."
@@ -1009,7 +1087,9 @@ candidates; agents still require their transactional handshake/probe gates."
    already moved past."
   ;; Rebuild from durable desired state after a control-plane restart. Revision
   ;; counters in memory must never strand an agent ahead of its new server.
-  (let ((snapshot (node-desired-state-snapshot
+  (call-with-node-publication server node-name
+   (lambda ()
+    (let ((snapshot (node-desired-state-snapshot
                    (node-grpc-server-store server) node-name)))
     (attach-node-topology server node-name snapshot)
     (bt:with-lock-held ((node-grpc-server-lock server))
@@ -1022,7 +1102,7 @@ candidates; agents still require their transactional handshake/probe gates."
                                             (node-grpc-server-revisions server) 0)))))
             (setf (slot-value snapshot 'gr8s.node.v1::revision) revision
                   (gethash node-name (node-grpc-server-revisions server)) revision
-                  (gethash node-name (node-grpc-server-snapshots server)) snapshot)))))))
+                  (gethash node-name (node-grpc-server-snapshots server)) snapshot)))))))))
 
 (defun current-node-snapshot (server node-name)
   "The snapshot currently published to NODE-NAME, or a fresh empty
@@ -1052,6 +1132,21 @@ candidates; agents still require their transactional handshake/probe gates."
             (setf (gethash node-name
                            (node-grpc-server-acknowledged-revisions server))
                   revision)))))))
+
+(defun note-node-gateway-config-ack (server node-name ack session)
+  "Record only this session's Gateway progress, never node/Service convergence."
+  (bt:with-lock-held ((node-agent-session-lock session))
+    (bt:with-lock-held ((node-grpc-server-lock server))
+      (let ((snapshot (node-agent-session-delivered session))
+            (revision (slot-value ack 'gr8s.node.v1::revision)))
+        (when (and (eq session (gethash node-name (node-grpc-server-sessions server)))
+                   (slot-value ack 'gr8s.node.v1::applied)
+                   snapshot
+                   (= (slot-value ack 'gr8s.node.v1::base-node-revision)
+                      (slot-value snapshot 'gr8s.node.v1::revision))
+                   (< (node-agent-session-gateway-acknowledged-revision session) revision)
+                   (<= revision (node-agent-session-gateway-revision session)))
+          (setf (node-agent-session-gateway-acknowledged-revision session) revision))))))
 
 (defun canonical-node-service-receiver-proofs (server node-name status &optional session)
   "Accept only complete receiver reports for the current ACKed assignment.
@@ -1232,8 +1327,12 @@ An explicit unready or malformed current report withdraws its prior proof."
      (note-node-snapshot-ack
       server node-name
       (slot-value envelope 'gr8s.node.v1::snapshot-ack) session))
+    (:gateway-config-ack
+     (note-node-gateway-config-ack
+      server node-name (slot-value envelope 'gr8s.node.v1::gateway-config-ack) session))
     (:status
      (let ((status (slot-value envelope 'gr8s.node.v1::status)))
+       (note-node-gateway-status server node-name status session)
        (multiple-value-bind (receivers valid-p)
            (note-node-service-receiver-status server node-name status session)
          (setf (slot-value status 'gr8s.node.v1::service-receivers) receivers
@@ -1457,6 +1556,9 @@ An explicit unready or malformed current report withdraws its prior proof."
                               (member +desired-state-delta-capability+
                                       (slot-value hello 'gr8s.node.v1::capabilities)
                                       :test #'equal)
+                              (node-agent-session-gateway-deltas-p session)
+                              (member gr8s.protocol::+gateway-config-delta-capability+
+                                      (slot-value hello 'gr8s.node.v1::capabilities) :test #'equal)
                               (node-agent-session-service-risk-v2-p session)
                               (member "service-risk-v2"
                                       (slot-value hello 'gr8s.node.v1::capabilities)
@@ -1509,6 +1611,7 @@ An explicit unready or malformed current report withdraws its prior proof."
                  (ag-grpc:stream-send
                   stream (make-server-envelope :desired-state snapshot :sequence 2))
                  (setf (node-agent-session-delivered session) snapshot)
+                 (install-node-gateway-baseline session snapshot)
                  (loop for operation in operations for sequence from 3
                        do (setf (pending-node-operation-session operation) session)
                           (ag-grpc:stream-send
@@ -2040,6 +2143,8 @@ socket are released rather than leaked. Safe to call more than once."
 (defun same-node-desired-content-p (left right)
   "Compare workload assignments and topology independently of envelope revision."
   (and left right (same-node-snapshot-topology-p left right)
+       (= (slot-value left 'gr8s.node.v1::gateway-dependency-revision)
+          (slot-value right 'gr8s.node.v1::gateway-dependency-revision))
        (equalp (slot-value left 'gr8s.node.v1::service-discovery-objects-json)
                (slot-value right 'gr8s.node.v1::service-discovery-objects-json))
        (equalp (slot-value left 'gr8s.node.v1::service-risk-grant-digest)
@@ -2240,6 +2345,12 @@ check that selection against the current Service plan before preserving it."
       (copy-seq digest))))
 
 (defun publish-node-desired-state (server node-name snapshot &key deduplicate)
+  "Publish caller-supplied desired state in the node's ordered delivery domain."
+  (call-with-node-publication
+   server node-name
+   (lambda () (publish-node-desired-state-locked server node-name snapshot :deduplicate deduplicate))))
+
+(defun publish-node-desired-state-locked (server node-name snapshot &key deduplicate)
   "Publish SNAPSHOT as NODE-NAME's new desired state: attach topology, assign the
    next revision, store it, and deliver it to the live session if any (fail-soft).
    With DEDUPLICATE, returns the existing revision unchanged when the content is
@@ -2272,7 +2383,7 @@ check that selection against the current Service plan before preserving it."
                 (make-array 0 :element-type '(unsigned-byte 8))))
       (let ((existing (gethash node-name (node-grpc-server-snapshots server))))
         (when (and deduplicate (same-node-desired-content-p existing snapshot))
-          (return-from publish-node-desired-state (slot-value existing 'gr8s.node.v1::revision))))
+          (return-from publish-node-desired-state-locked (slot-value existing 'gr8s.node.v1::revision))))
       (setf revision
             (1+ (gethash node-name (node-grpc-server-revisions server) 0)))
       (setf (slot-value snapshot 'gr8s.node.v1::revision) revision
@@ -2281,7 +2392,11 @@ check that selection against the current Service plan before preserving it."
             session (gethash node-name (node-grpc-server-sessions server))))
     (when session
       (handler-case (deliver-node-snapshot session snapshot)
-        (error () nil)))
+        (error (condition)
+          (format *error-output* "gr8s full configuration delivery for ~A failed: ~A~%" node-name condition)
+          ;; The canonical snapshot already advanced. Reconnect must resend it
+          ;; in full even if the next repair finds no further desired changes.
+          (close-node-agent-session session))))
     revision))
 
 (defun node-session-acknowledged-revision (server node-name)

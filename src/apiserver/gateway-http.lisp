@@ -23,4 +23,14 @@
   "Advertise the actual Gateway API operations from the durable registry."
   (json-response (core-object "apiVersion" "v1" "kind" "APIResourceList"
                               "groupVersion" "gateway.networking.k8s.io/v1"
-                              "resources" (stored-resource-discovery "gateway.networking.k8s.io/v1"))))
+                              "resources"
+                              (concatenate
+                               'vector (stored-resource-discovery "gateway.networking.k8s.io/v1")
+                               (map 'vector
+                                    (lambda (resource)
+                                      (core-object "name" (concatenate 'string resource "/status")
+                                                   "singularName" ""
+                                                   "namespaced" (core-resource-namespaced-p resource)
+                                                   "kind" (core-resource-kind resource)
+                                                   "verbs" #("get" "patch" "update")))
+                                    '("gatewayclasses" "gateways"))))))

@@ -79,6 +79,25 @@
   (unless (and (integerp value) (<= 1 value 65535))
     (core-resource-error 422 "Invalid" "~A must be a port number in 1..65535" context)))
 
+(defun gateway-status-resource-p (resource)
+  "True for Gateway API collections with controller-owned status."
+  (member resource '("gateways" "gatewayclasses") :test #'equal))
+
+(defun normalize-gateway-status (resource object name namespace store)
+  "Keep status writes separate from desired state and stamp spec generations."
+  (let* ((metadata (gethash "metadata" object))
+         (old (and name store
+                   (gethash (core-resource-key resource namespace name) (pod-store-resources store))))
+         (generation (if old (gethash "generation" (gethash "metadata" old) 1) 1)))
+    (unless *typed-api-status-write*
+      (if (and old (gethash "status" old))
+          (setf (gethash "status" object) (copy-core-object (gethash "status" old)))
+          (remhash "status" object)))
+    (setf (gethash "generation" metadata)
+          (if (and old (not (core-json-equal-p (gethash "spec" old) (gethash "spec" object))))
+              (1+ generation) generation)))
+  object)
+
 (defun validate-gateway-resource (resource object)
   "Validate a gateway.networking.k8s.io/v1 object's spec against the subset of
    the Gateway API gr8s implements. Fails closed (422) on missing required
@@ -307,7 +326,9 @@
            (validate-network-policy-spec spec))))
       ((member resource '("gatewayclasses" "gateways" "httproutes"
                           "tcproutes" "tlsroutes" "grpcroutes") :test #'equal)
-       (validate-gateway-resource resource object))
+       (validate-gateway-resource resource object)
+       (when (gateway-status-resource-p resource)
+         (normalize-gateway-status resource object name namespace store)))
       ((member resource '("issuers" "clusterissuers" "certificates" "certificaterequests")
                :test #'equal)
        (validate-cert-manager-resource resource object))

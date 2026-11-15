@@ -2,14 +2,10 @@
 ;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Purpose:
-;;;; The Gateway API routing table, JIT-compiled into a native dispatch function.
-;;;; A set of HTTPRoutes (normalized from their stored gateway.networking.k8s.io
-;;;; /v1 objects) becomes a Lisp COND whose clauses are ordered by Gateway-API
-;;;; match precedence and whose route constants are inlined, then handed to
-;;;; (compile nil form) -- so the per-request hot path is native code, not an
-;;;; interpreted walk of the table. Routes change -> recompile (microseconds, no
-;;;; restart). Proven in scripts/spike-gateway-router.lisp (podster-43k.1); this
-;;;; is the production module it became.
+;;;; The Gateway API routing table: immutable hostname indexes and ordered match
+;;;; records, dispatched by code compiled once with gr8s. Route updates build a
+;;;; replacement table without invoking the Lisp compiler. Exact hosts, matching
+;;;; wildcard suffixes and catch-all candidates retain Gateway API precedence.
 ;;;;
 ;;;; Scope here (podster-43k.4): hostnames (exact + "*.suffix" wildcard), path
 ;;;; Exact/PathPrefix, method, exact header matches, and weighted backends. TLS,
@@ -25,7 +21,8 @@
   (name "" :type string)
   (namespace nil)                       ; nil = the route's own namespace
   (port 0 :type (or integer string))
-  (weight 1 :type integer))
+  (weight 1 :type integer)
+  resolver)                            ; per-dispatch immutable dependency view, or NIL
 
 (defstruct gw-match
   (path-type :prefix)                   ; :prefix | :exact
@@ -55,7 +52,29 @@
   (name nil)                            ; the HTTPRoute's name (metrics label)
   (rate-limit nil)                      ; requests/sec cap from gr8s.io/rate-limit-rps, or NIL
   (hostnames '() :type list)            ; "api.example.com" / "*.example.com"; () = all
-  (rules '() :type list))               ; list of GW-RULE
+  (rules '() :type list)                ; list of GW-RULE
+  (kind :httproute))
+
+(defun bind-gateway-backend (backend resolver)
+  "Bind a request's backend to its configuration view without changing candidates."
+  (when backend
+    (let ((bound (copy-gw-backend backend)))
+      (setf (gw-backend-resolver bound) resolver)
+      bound)))
+
+(defun resolve-gateway-backend (backend fallback-resolver)
+  (let ((resolver (or (gw-backend-resolver backend) fallback-resolver)))
+    (when resolver (funcall resolver backend))))
+
+(defun bind-gateway-http-dispatcher (dispatcher resolver)
+  (lambda (host path method headers)
+    (let ((dispatch (funcall dispatcher host path method headers)))
+      (when dispatch
+        (setf (gw-dispatch-backend dispatch) (bind-gateway-backend (gw-dispatch-backend dispatch) resolver))
+        dispatch))))
+
+(defun bind-gateway-l4-dispatcher (dispatcher resolver)
+  (lambda (sni) (bind-gateway-backend (funcall dispatcher sni) resolver)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Parse a stored HTTPRoute object (jzon hash-table) into a GW-ROUTE.
@@ -212,8 +231,7 @@
      :rules (when rules (map 'list (lambda (r) (gw-parse-rule r namespace)) rules)))))
 
 ;;; ---------------------------------------------------------------------------
-;;; Runtime helpers (compiled once; the generated dispatch inlines the route
-;;; constants at the call sites and calls these).
+;;; Runtime matching and backend selection, compiled once with gr8s.
 
 (declaim (inline gw-path-prefix-match-p))
 (defun gw-path-prefix-match-p (path prefix)
@@ -248,7 +266,7 @@ NIL uses cl:random.")
 
 ;;; ---------------------------------------------------------------------------
 ;;; Precedence. Each (route, rule, match, host) is a candidate; candidates are
-;;; ordered by Gateway-API precedence so the generated COND tries them in order
+;;; ordered by Gateway-API precedence so the dispatcher tries them in order
 ;;; and the first hit wins.
 
 (defun gw-host-tier (hostname)          ; higher = more specific
@@ -266,7 +284,10 @@ NIL uses cl:random.")
         (t (length hostname))))
 
 (defstruct gw-candidate hostname match filters backends key
-  route-name route-key rate-limit)
+  route-name route-key rate-limit source-key)
+
+(defun gateway-route-source-key (route)
+  (list (gw-route-kind route) (gw-route-namespace route) (gw-route-name route)))
 
 (defun gw-candidate-precedence (hostname match)
   "Descending-sort key per Gateway-API precedence: hostname specificity, then
@@ -289,7 +310,7 @@ path (Exact > longer PathPrefix), then method present, then #headers."
 (defun gw-route-candidates (routes)
   "Expand ROUTES into one GW-CANDIDATE per (route, rule, match, hostname) and
    return them sorted by descending Gateway-API precedence, so the first match
-   in the generated dispatch wins. The sort is stable, preserving source order
+   in the dispatcher wins. The sort is stable, preserving source order
    among equal-precedence candidates."
   (let ((cands '()))
     (dolist (route routes)
@@ -303,59 +324,107 @@ path (Exact > longer PathPrefix), then method present, then #headers."
                                        :backends (gw-rule-backends rule)
                                        :route-name (gw-route-name route)
                                        :route-key route-key
+                                       :source-key (gateway-route-source-key route)
                                        :rate-limit (gw-route-rate-limit route)
                                        :key (gw-candidate-precedence host m))
                     cands))))))
     (stable-sort (nreverse cands) #'gw-key> :key #'gw-candidate-key)))
 
 ;;; ---------------------------------------------------------------------------
-;;; The compiler: candidates -> a Lisp form -> a NATIVE function via (compile).
+;;; Immutable hostname indexes. Candidate vectors retain the global precedence
+;;; order; matching host buckets are visited from most specific to catch-all.
 
-(defun gw-host-test-form (hostname)
-  "Return a Lisp form testing the request variable HOST against HOSTNAME: T for
-   no host, a suffix comparison for a \"*.\" wildcard, or a STRING= for an exact
-   host. Spliced into the compiled router."
-  (cond ((null hostname) t)
-        ((= 1 (gw-host-tier hostname))
-         (let ((suffix (subseq hostname 1)))  ; "*.example.com" -> ".example.com"
-           `(let ((h host))
-              (and (> (length h) ,(length suffix))
-                   (string= h ,suffix :start1 (- (length h) ,(length suffix)))))))
-        (t `(string= host ,hostname))))
+(defstruct gw-routing-table
+  (exact (make-hash-table :test 'equal))
+  (wildcard (make-hash-table :test 'equal))
+  (fallback #()))
 
-(defun gw-match-test-form (match)
-  "Return a Lisp form, over the request variables PATH, METHOD and HEADERS, that
-   is true when MATCH's path, its optional method, and all its header matches
-   hold. Spliced into the compiled router."
-  `(and ,(ecase (gw-match-path-type match)
-           (:exact `(string= path ,(gw-match-path match)))
-           (:prefix `(gw-path-prefix-match-p path ,(gw-match-path match))))
-        ,@(when (gw-match-method match) `((string-equal method ,(gw-match-method match))))
-        ,@(loop for (name . value) in (gw-match-headers match)
-                collect `(gw-header-match-p headers ,name ,value))))
+(defun gateway-host-bucket (table host)
+  (cond ((null host) (gw-routing-table-fallback table))
+        ((= 1 (gw-host-tier host)) (gethash (subseq host 1) (gw-routing-table-wildcard table) #()))
+        (t (gethash host (gw-routing-table-exact table) #()))))
 
-(defun gw-candidate-clause (candidate)
-  "Return a COND clause for CANDIDATE: when its host and match tests pass, build
-   a GW-DISPATCH carrying the rule's filters, the matched GW-MATCH, the route
-   identity and the rate limit. Spliced into the compiled router; the weighted
-   backend pick runs at dispatch time, once per request."
-  `((and ,(gw-host-test-form (gw-candidate-hostname candidate))
-         ,(gw-match-test-form (gw-candidate-match candidate)))
-    (make-gw-dispatch :backend (gw-pick-weighted ',(gw-candidate-backends candidate))
-                      :filters ',(gw-candidate-filters candidate)
-                      :match ',(gw-candidate-match candidate)
-                      :route-name ',(gw-candidate-route-name candidate)
-                      :route-key ',(gw-candidate-route-key candidate)
-                      :rate-limit ',(gw-candidate-rate-limit candidate))))
+(defun (setf gateway-host-bucket) (candidates table host)
+  (if (null host)
+      (setf (gw-routing-table-fallback table) candidates)
+      (let ((index (if (= 1 (gw-host-tier host)) (gw-routing-table-wildcard table)
+                       (gw-routing-table-exact table)))
+            (key (if (= 1 (gw-host-tier host)) (subseq host 1) host)))
+        (if (zerop (length candidates)) (remhash key index) (setf (gethash key index) candidates))))
+  candidates)
 
-(defun compile-gateway-router (routes)
-  "Compile ROUTES (a list of GW-ROUTE) into a native function
-   (host path method headers) -> a GW-DISPATCH (chosen backend + the matched
-   rule's filters + matched GW-MATCH), or NIL when nothing matches (the caller
-   serves 404). HEADERS is an alist of (name . value)."
-  (let ((form `(lambda (host path method headers)
-                 (declare (ignorable host path method headers)
-                          (optimize (speed 2) (safety 1)))
-                 (cond ,@(mapcar #'gw-candidate-clause (gw-route-candidates routes))
-                       (t nil)))))
-    (values (compile nil form) form)))
+(defun update-gateway-routing-table (table removed added candidate-before)
+  "Replace changed routes, sharing untouched candidate vectors with the old table."
+  (let ((next (copy-gw-routing-table table))
+        (new-by-host (make-hash-table :test #'equal)))
+    (setf (gw-routing-table-exact next) (alexandria:copy-hash-table (gw-routing-table-exact table))
+          (gw-routing-table-wildcard next) (alexandria:copy-hash-table (gw-routing-table-wildcard table)))
+    (dolist (route removed)
+      (let ((key (gateway-route-source-key route)))
+        (dolist (host (or (gw-route-hostnames route) (list nil)))
+          (setf (gateway-host-bucket next host)
+                (remove-if (lambda (candidate) (equal key (gw-candidate-source-key candidate)))
+                           (gateway-host-bucket next host))))))
+    (dolist (candidate (gw-route-candidates added))
+      (push candidate (gethash (gw-candidate-hostname candidate) new-by-host)))
+    (maphash (lambda (host candidates)
+               (setf (gateway-host-bucket next host)
+                     (coerce (stable-sort (append (coerce (gateway-host-bucket next host) 'list)
+                                                 (nreverse candidates)) candidate-before) 'vector)))
+             new-by-host)
+    next))
+
+(defun gw-match-request-p (match path method headers)
+  (and (ecase (gw-match-path-type match)
+         (:exact (string= path (gw-match-path match)))
+         (:prefix (gw-path-prefix-match-p path (gw-match-path match))))
+       (or (null (gw-match-method match))
+           (string-equal method (gw-match-method match)))
+       (loop for (name . value) in (gw-match-headers match)
+             always (gw-header-match-p headers name value))))
+
+(defun gw-dispatch-candidates (candidates path method headers)
+  (loop for candidate across candidates
+        when (gw-match-request-p (gw-candidate-match candidate) path method headers)
+          return (make-gw-dispatch
+                  :backend (gw-pick-weighted (gw-candidate-backends candidate))
+                  :filters (gw-candidate-filters candidate)
+                  :match (gw-candidate-match candidate)
+                  :route-name (gw-candidate-route-name candidate)
+                  :route-key (gw-candidate-route-key candidate)
+                  :rate-limit (gw-candidate-rate-limit candidate))))
+
+(defun gw-dispatch-request (table host path method headers)
+  (or (gw-dispatch-candidates (gethash host (gw-routing-table-exact table) #())
+                              path method headers)
+      ;; A wildcard requires a nonempty prefix before its dot. Visit suffixes
+      ;; longest first, allowing a less specific bucket when no rule matches.
+      (when (plusp (hash-table-count (gw-routing-table-wildcard table)))
+        (loop for dot = (position #\. host :start 1)
+                then (position #\. host :start (1+ dot))
+              while dot
+              thereis (gw-dispatch-candidates
+                       (gethash (subseq host dot) (gw-routing-table-wildcard table) #())
+                       path method headers)))
+      (gw-dispatch-candidates (gw-routing-table-fallback table) path method headers)))
+
+(defun gateway-router-from-table (table)
+  (lambda (host path method headers) (gw-dispatch-request table host path method headers)))
+
+(defun build-gateway-router (routes)
+  "Build a request dispatcher over an immutable hostname-indexed routing table.
+Matching code is compiled with gr8s; changing ROUTES never invokes the compiler.
+The returned function owns its indexes; later builds do not mutate them."
+  (let ((table (make-gw-routing-table)) (fallback nil))
+    (dolist (candidate (gw-route-candidates routes))
+      (let ((host (gw-candidate-hostname candidate)))
+        (cond ((null host) (push candidate fallback))
+              ((= 1 (gw-host-tier host))
+               (push candidate (gethash (subseq host 1) (gw-routing-table-wildcard table))))
+              (t (push candidate (gethash host (gw-routing-table-exact table)))))))
+    (dolist (index (list (gw-routing-table-exact table) (gw-routing-table-wildcard table)))
+      (maphash (lambda (host candidates)
+                 (setf (gethash host index) (coerce (nreverse candidates) 'vector)))
+               index))
+    (setf (gw-routing-table-fallback table) (coerce (nreverse fallback) 'vector))
+    (values (gateway-router-from-table table) table)))

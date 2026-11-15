@@ -127,7 +127,7 @@
 (defun l4-connect-backend (resolver backend)
   "Resolve BACKEND and open a socket to it, or NIL."
   (when backend
-    (multiple-value-bind (host port) (funcall resolver backend)
+    (multiple-value-bind (host port) (resolve-gateway-backend backend resolver)
       (when host
         (handler-case
             (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))

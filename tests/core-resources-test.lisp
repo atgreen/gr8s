@@ -302,3 +302,17 @@
                                  (gethash "name" (gethash "metadata" result))))) 0))))))
 
 (in-suite gr8s)
+
+(test copied-json-objects-remain-private-at-every-level
+  (let* ((source (com.inuoe.jzon:parse "{\"name\":\"source\",\"nested\":{\"a\":1,\"b\":2,\"c\":3,\"d\":4,\"e\":5,\"f\":6,\"g\":7,\"h\":8,\"i\":9},\"array\":[{\"text\":\"original\"}]}"))
+         (copy (gr8s.resources::copy-core-object source)))
+    (is (gr8s.store::json-value-equal-p source copy))
+    (setf (char (gethash "name" copy) 0) #\X
+          (gethash "a" (gethash "nested" copy)) 99
+          (gethash "text" (aref (gethash "array" copy) 0)) "changed")
+    (is (string= "source" (gethash "name" source)))
+    (is (= 1 (gethash "a" (gethash "nested" source))))
+    (is (string= "original" (gethash "text" (aref (gethash "array" source) 0)))))
+  (let ((object (gr8s.resources::core-object "a" 1 "b" 2 "a" 3)))
+    (is (= 2 (hash-table-count object)))
+    (is (= 3 (gethash "a" object)))))

@@ -22,6 +22,9 @@
              (:constructor make-control-plane-runtime (store node-server)))
   store
   node-server
+  (gateway-dirty (make-hash-table :test #'equal))
+  (gateway-change-sequence 0)
+  (gateway-dirty-lock (bt:make-lock "gr8s Gateway committed changes"))
   (resource-metrics-summaries #())
   (container-metrics (make-hash-table :test #'equal))
   (resource-metrics-at 0)
@@ -58,9 +61,11 @@
   "Build NODE-NAME's desired-state snapshot from STORE: the service-discovery
    projection and a POD-ASSIGNMENT for each admitted Pod assigned to NODE-NAME,
    skipping EXCLUDED-UID, ordered by namespace/name."
-  (make-instance
+  (multiple-value-bind (discovery dependency-revision) (service-discovery-projection store)
+    (make-instance
    'gr8s.node.v1::desired-state-snapshot
-   :service-discovery-objects-json (service-discovery-projection store)
+   :service-discovery-objects-json discovery
+   :gateway-dependency-revision dependency-revision
    :pods
    (mapcar
     (lambda (pod) (pod-assignment pod store))
@@ -71,25 +76,30 @@
             (and excluded-uid (string= excluded-uid (pod-uid pod)))
             (not (admit-assigned-pod store pod))))
       (list-pods store))
-     #'string< :key (lambda (pod) (format nil "~A/~A" (pod-namespace pod) (pod-name pod)))))))
+     #'string< :key (lambda (pod) (format nil "~A/~A" (pod-namespace pod) (pod-name pod))))))))
 
 (defun publish-node-snapshot (runtime node-name &key excluded-uid)
   "Build NODE-NAME's desired-state snapshot and publish it to that agent over the
    node server, deduplicating against the last snapshot sent."
-  (publish-node-desired-state
+  (gr8s.apiserver::call-with-node-publication
+   (control-plane-runtime-node-server runtime) node-name
+   (lambda ()
+    (publish-node-desired-state
    (control-plane-runtime-node-server runtime)
    node-name
    (node-desired-state-snapshot
     (control-plane-runtime-store runtime) node-name
     :excluded-uid excluded-uid)
-   :deduplicate t))
+   :deduplicate t))))
 
 (defun publish-service-discovery-snapshots (runtime)
   "Deliver discovery and advance the two-phase v2 Service publication grant."
-  (gr8s.apiserver::refresh-cluster-service-risk-grant
-   (control-plane-runtime-node-server runtime))
-  (dolist (node (list-nodes (control-plane-runtime-store runtime)))
-    (publish-node-snapshot runtime (node-record-name node))))
+  (let ((watermark (gateway-dirty-watermark runtime)))
+    (gr8s.apiserver::refresh-cluster-service-risk-grant
+     (control-plane-runtime-node-server runtime))
+    (dolist (node (list-nodes (control-plane-runtime-store runtime)))
+      (publish-node-snapshot runtime (node-record-name node)))
+    (clear-gateway-dirty-through runtime watermark)))
 
 (defun control-plane-observation (runtime pod)
   "Build the RUNTIME-POD observation for POD from RUNTIME's store: its observed

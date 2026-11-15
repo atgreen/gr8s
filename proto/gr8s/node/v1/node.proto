@@ -71,6 +71,7 @@ message AgentEnvelope {
     OperationResponse operation_response = 14;
     OperationStream operation_stream = 15;
     CredentialTokenRequest credential_token_request = 16;
+    GatewayConfigAck gateway_config_ack = 17;
   }
 }
 
@@ -85,7 +86,33 @@ message ServerEnvelope {
     OperationCancel operation_cancel = 14;
     ProtocolError protocol_error = 15;
     CredentialTokenResponse credential_token_response = 16;
+    GatewayConfigUpdate gateway_config = 17;
   }
+}
+
+// A session-local derived Gateway view. This channel never acknowledges node
+// state or advances last_applied_revision. Each full node snapshot resets its
+// Gateway revision to zero; a reconnect always starts with a full snapshot.
+message GatewayConfigUpdate {
+  uint64 base_node_revision = 1;
+  uint64 base_revision = 2;
+  uint64 revision = 3;
+  repeated GatewayResourceChange changes = 4;
+}
+
+message GatewayResourceChange {
+  string resource = 1;
+  string namespace = 2;
+  string name = 3;
+  bytes object_json = 4;
+  bool deleted = 5;
+}
+
+message GatewayConfigAck {
+  uint64 base_node_revision = 1;
+  uint64 revision = 2;
+  bool applied = 3;
+  string error_message = 4;
 }
 
 // A node asks the control plane for a short-lived token bound to a Pod whose
@@ -185,6 +212,25 @@ message NodeStatus {
   // True for the periodic complete report, including an empty/unready set.
   // Short Pod status updates leave this false and do not alter the last report.
   bool service_receiver_report_present = 12;
+  // Complete local Gateway listener inventory, including an empty report.
+  // UID and generation prevent stale configuration from being marked programmed.
+  repeated GatewayObservation gateways = 13;
+  bool gateway_report_present = 14;
+}
+
+message GatewayObservation {
+  string namespace = 1;
+  string name = 2;
+  string uid = 3;
+  uint64 generation = 4;
+  repeated GatewayListenerObservation listeners = 5;
+}
+
+message GatewayListenerObservation {
+  string name = 1;
+  bool programmed = 2;
+  string reason = 3;
+  string message = 4;
 }
 
 message ServiceReceiverProof {
@@ -321,6 +367,9 @@ message DesiredStateSnapshot {
   // Complete receiver set validated from authenticated node reports. A node
   // publishes remote owner readiness from this set before ACKing the snapshot.
   repeated ServiceReceiverProof service_receivers = 10;
+  // Process-local control-plane dependency fence for Gateway delta delivery.
+  // This does not replace node revision or Service risk acknowledgements.
+  uint64 gateway_dependency_revision = 11;
 }
 
 message PodAssignment {

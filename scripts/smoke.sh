@@ -225,7 +225,7 @@ wait_for_counter gr8s_endpoint_rejected_spoofs_total
 # --- Gateway API: host/path request routes end-to-end to a Pod (podster-43k.10) ---
 # A backend web Pod + Service, a Gateway listener and an HTTPRoute. The in-agent
 # L7 proxy must terminate an HTTP request on the gateway port and proxy it to the
-# backend Pod, proving the JIT-compiled-router data plane end to end. Runs before
+# backend Pod, proving the hostname-indexed-router data plane end to end. Runs before
 # the default-deny egress policy below, which would otherwise block the backend.
 cat >"$work_directory/gw-web.yaml" <<'YAML'
 apiVersion: v1

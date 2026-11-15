@@ -126,7 +126,7 @@
                    :rules (list (gr8s.controllers::make-gw-rule
                                  :matches (list (gr8s.controllers::make-gw-match :path-type :prefix :path "/"))
                                  :backends (list (gr8s.controllers::make-gw-backend :name "missing" :port 1)))))))
-         (router (gr8s.controllers::compile-gateway-router routes))
+         (router (gr8s.controllers::build-gateway-router routes))
          (resolver (lambda (backend)
                      (when (equal (gr8s.controllers::gw-backend-name backend) "echo")
                        (values "127.0.0.1" backend-port))))
@@ -168,7 +168,7 @@
                         :rules (list (gr8s.controllers::make-gw-rule
                                       :matches (list (gr8s.controllers::make-gw-match :path-type :prefix :path "/"))
                                       :backends (list (gr8s.controllers::make-gw-backend :name "echo" :port backend-port)))))))
-         (router (gr8s.controllers::compile-gateway-router routes))
+         (router (gr8s.controllers::build-gateway-router routes))
          (resolver (lambda (b) (declare (ignore b)) (values "127.0.0.1" backend-port)))
          (gateway (gr8s.controllers::start-gateway-listener :port 0
                                                 :router router :resolver resolver :name "rl-gw"))
@@ -228,7 +228,7 @@
                                                  :type :redirect
                                                  :data (list :scheme "https" :status-code 301
                                                              :hostname nil :port nil :path nil))))))))
-         (router (gr8s.controllers::compile-gateway-router routes))
+         (router (gr8s.controllers::build-gateway-router routes))
          (resolver (lambda (b) (declare (ignore b)) (values "127.0.0.1" backend-port)))
          (gateway (gr8s.controllers::start-gateway-listener :port 0
                                                 :router router :resolver resolver :name "filters"))

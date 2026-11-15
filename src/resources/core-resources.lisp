@@ -667,6 +667,62 @@ An object is streamed to the file, never held as one string as large as the stor
       (> (pod-store-core-journal-bytes store)
          (max *core-journal-checkpoint-bytes* (pod-store-core-checkpoint-bytes store)))))
 
+(defun add-core-resource-change-observer (store function)
+  "Subscribe a nonblocking signal callback to committed desired-resource changes.
+Callbacks run under the store lock and must not read or write the store."
+  (bt:with-lock-held ((pod-store-lock store))
+    (pushnew function (gr8s.store::pod-store-core-change-observers store) :test #'eq))
+  function)
+
+(defun remove-core-resource-change-observer (store function)
+  (bt:with-lock-held ((pod-store-lock store))
+    (setf (gr8s.store::pod-store-core-change-observers store)
+          (remove function (gr8s.store::pod-store-core-change-observers store) :test #'eq)))
+  nil)
+
+(defun core-reconciliation-content (object)
+  "Compare desired content independently of status and storage bookkeeping."
+  (when (hash-table-p object)
+    (let ((view (alexandria:copy-hash-table object))
+          (metadata (alexandria:copy-hash-table (gethash "metadata" object))))
+      (remhash "status" view)
+      (dolist (key '("resourceVersion" "managedFields" "generation")) (remhash key metadata))
+      (setf (gethash "metadata" view) metadata)
+      view)))
+
+(defun core-reconciliation-change-p (resource old new)
+  (and (not (member resource '("events" "leases") :test #'equal))
+       (not (gr8s.store::json-value-equal-p (core-reconciliation-content old)
+                                           (core-reconciliation-content new)))))
+
+(defvar *core-resource-change-scope* :full
+  "Dynamically bound notification scope for synchronous change observers.")
+
+(defvar *core-resource-changes* nil
+  "The committed desired changes visible only during synchronous notification.")
+
+(defun notify-core-resource-changes (store changes)
+  "Signal once per commit; classify a batch conservatively before notifying."
+  (let ((desired (remove-if-not
+                    (lambda (entry)
+                      (core-reconciliation-change-p (gethash "resource" entry)
+                                                    (gethash "old" entry) (gethash "new" entry)))
+                    changes)))
+      (when desired
+        (let ((*core-resource-change-scope*
+                (if (every (lambda (entry)
+                             (member (gethash "resource" entry)
+                                     '("gatewayclasses" "gateways" "httproutes" "tcproutes" "tlsroutes" "grpcroutes")
+                                     :test #'equal)) desired)
+                    :gateway :full))
+              (*core-resource-changes* desired))
+          (when (eq *core-resource-change-scope* :full)
+            (incf (gr8s.store::pod-store-gateway-dependency-revision store)))
+          (dolist (observer (gr8s.store::pod-store-core-change-observers store))
+            (handler-case (funcall observer)
+              (error (condition)
+                (format *error-output* "gr8s resource change observer failed: ~A~%" condition))))))))
+
 (defun commit-core-resources (store resources revision
                               &key (workload-deletions (pod-store-workload-deletions store))
                                 (job-controller-states (pod-store-job-controller-states store)))
@@ -708,7 +764,8 @@ An object is streamed to the file, never held as one string as large as the stor
                      collect entry)
                (pod-store-template-history-floor store) floor
                (pod-store-template-token-key store) token-key
-               (pod-store-event-expirations store) event-expirations))))))
+               (pod-store-event-expirations store) event-expirations)
+         (notify-core-resource-changes store added))))))
 
 (defun install-core-state-blob (store json)
   "Install a replicated core-resource state JSON blob on this replica: write it to
@@ -719,19 +776,30 @@ An object is streamed to the file, never held as one string as large as the stor
    would deadlock. Local-plane resources (events) are not in the blob, so this
    member's own ones are carried across the reload rather than dropped (8ia.3)."
   (bt:with-lock-held ((pod-store-lock store))
-    (let ((local (loop for key being the hash-keys of (pod-store-resources store)
+    (let ((previous (when (gr8s.store::pod-store-core-change-observers store)
+                      (alexandria:copy-hash-table (pod-store-resources store))))
+          (local (loop for key being the hash-keys of (pod-store-resources store)
                          using (hash-value object)
                        when (local-plane-resource-p (first key))
                          collect (cons key object))))
       ;; The blob replaces the checkpoint, so no older journal may be replayed over it.
       (write-core-checkpoint store json)
-      (clrhash (pod-store-resources store))
+      (setf (pod-store-resources store) (make-hash-table :test #'equal))
       (load-core-resources store)
       (loop for (key . object) in local
             unless (gethash key (pod-store-resources store))
               do (setf (gethash key (pod-store-resources store)) object))
       ;; The carried objects are only in memory: the next commit writes them all.
-      (setf (pod-store-core-checkpoint-needed store) t))))
+      (setf (pod-store-core-checkpoint-needed store) t)
+      (when previous
+        (let ((changes nil) (current (pod-store-resources store)))
+          (maphash (lambda (key old)
+                     (push (core-object "resource" (first key) "old" old "new" (gethash key current))
+                           changes)) previous)
+          (maphash (lambda (key new)
+                     (unless (gethash key previous)
+                       (push (core-object "resource" (first key) "new" new) changes))) current)
+          (notify-core-resource-changes store changes))))))
 
 (defun core-replicated-state-equal-p (left right)
   "Compare committed object identity/content independently of local revision epochs."

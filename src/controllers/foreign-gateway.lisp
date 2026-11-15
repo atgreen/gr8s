@@ -338,7 +338,8 @@ the per-Gateway LoadBalancer Services.  RESOLVER overrides backend resolution
                                                        :mode mode :dispatcher dispatcher
                                                        :resolver resolver))))
         (leader nil) (stopping nil) (lease-thread nil) (status-thread nil)
-        (listener-thread nil))
+        (listener-thread nil)
+        (convergence-lock (bt:make-lock "gr8s foreign Gateway convergence")))
     ;; Converge the listener plans on their own responsive cadence rather than
     ;; behind the agent's shared nudge loop, where a burst of unrelated object
     ;; churn delayed a new Gateway's listener from binding for tens of seconds.
@@ -347,8 +348,9 @@ the per-Gateway LoadBalancer Services.  RESOLVER overrides backend resolution
            (lambda ()
              (loop until stopping do
                (handler-case
-                   (progn (converge-gateway-listeners controller)
-                          (converge-gateway-l4-listeners controller))
+                   (bt:with-lock-held (convergence-lock)
+                     (converge-gateway-listeners controller)
+                     (converge-gateway-l4-listeners controller))
                  (error (condition)
                    (format *error-output* "~&gr8s gateway listener convergence failed: ~A~%"
                            condition)))
@@ -384,13 +386,17 @@ the per-Gateway LoadBalancer Services.  RESOLVER overrides backend resolution
     (values
      ;; Listener convergence runs in its own thread above; the agent loop's
      ;; converger need do nothing, but converge once more so a nudge still
-     ;; takes effect immediately rather than waiting for the next tick.
+     ;; takes effect immediately rather than waiting for the next tick. Both
+     ;; entry points serialize the whole HTTP/L4 pass over this controller.
      (lambda ()
-       (ignore-errors (converge-gateway-listeners controller))
-       (ignore-errors (converge-gateway-l4-listeners controller)))
+       (bt:with-lock-held (convergence-lock)
+         (unless stopping
+           (ignore-errors (converge-gateway-listeners controller))
+           (ignore-errors (converge-gateway-l4-listeners controller)))))
      (lambda ()
        (setf stopping t)
        (when listener-thread (ignore-errors (bt:join-thread listener-thread)))
        (when lease-thread (ignore-errors (bt:join-thread lease-thread)))
        (when status-thread (ignore-errors (bt:join-thread status-thread)))
-       (stop-gateway-controller controller)))))
+       (bt:with-lock-held (convergence-lock)
+         (stop-gateway-controller controller))))))

@@ -305,3 +305,13 @@
       (is (eql 8080 (gr8s.controllers::service-port-target pod (gr8s.resources::core-object "port" 80 "targetPort" "http-sidecar"))))
       ;; An ordinary init container has finished by the time traffic arrives.
       (is (null (gr8s.controllers::service-port-target pod (gr8s.resources::core-object "port" 80 "targetPort" "setup-port")))))))
+
+(test canonical-json-orders-nested-keys-without-changing-values-or-source
+  (let* ((object (com.inuoe.jzon:parse "{\"z\":[true,false,null,{\"b\":\"line\\nquote\\\"\",\"a\":-2.5}],\"a\":{\"k\":1,\"K\":\"Ω\"}}"))
+         (before (gr8s.resources::copy-core-object object)))
+    (is (string= "{\"a\":{\"K\":\"Ω\",\"k\":1},\"z\":[true,false,null,{\"a\":-2.5,\"b\":\"line\\nquote\\\"\"}]}"
+                 (gr8s.controllers::endpointslice-canonical-json object)))
+    (is (gr8s.store::json-value-equal-p object before))
+    (is (string= "{\"a\":[],\"b\":{}}"
+                 (gr8s.controllers::endpointslice-canonical-json
+                  (com.inuoe.jzon:parse "{\"b\":{},\"a\":[]}"))))))

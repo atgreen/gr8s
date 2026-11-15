@@ -75,6 +75,11 @@
        ;; The agent's Gateway controller reconciles these into L7 proxy listeners,
        ;; so it needs the full spec (controllerName / listeners / parentRefs+rules).
        (setf (gethash "spec" result) (copy-core-object (gethash "spec" object)))
+       (when (member kind '("Gateway" "GatewayClass") :test #'equal)
+         ;; Desired spec identity is UID + generation. Status writes must not
+         ;; invalidate discovery digests or force another dataplane snapshot.
+         (remhash "resourceVersion" metadata)
+         (setf (gethash "generation" metadata) (gethash "generation" source 1)))
        (when (equal kind "Ingress")
          (let ((annotations (gethash "annotations" source)) (kept (core-object)))
            (when (hash-table-p annotations)
@@ -141,7 +146,8 @@
                              (setf (gethash (cons namespace name) seen) t)
                              (let ((secret (ignore-errors
                                             (get-core-resource store "secrets" namespace name))))
-                               (when secret (push secret secrets)))))))))))
+                               (when (and secret (equal "kubernetes.io/tls" (gethash "type" secret)))
+                                 (push secret secrets)))))))))))
     (nreverse secrets)))
 
 (defun ingress-referenced-tls-secrets (store)
@@ -159,38 +165,86 @@
                   do (setf (gethash key seen) t)
                      (let ((secret (ignore-errors
                                     (get-core-resource store "secrets" namespace name))))
-                       (when secret (push secret secrets)))))))
+                       (when (and secret (equal "kubernetes.io/tls" (gethash "type" secret)))
+                         (push secret secrets)))))))
     (nreverse secrets)))
 
-(defun service-discovery-projection (store)
-  "Serialize each public Service and EndpointSlice once in stable key order."
-  (mapcar (lambda (object)
-            (trivial-utf-8:string-to-utf-8-bytes
-             (endpointslice-canonical-json (service-discovery-public-object object))))
-          (sort (append (list-core-resources store "services")
-                        (list-core-resources store "endpointslices")
-                        ;; Resolved against the cluster's Pods and Namespaces, which nodes do not see.
-                        (network-policy-projection store)
-                        (list-core-resources store "ingressclasses")
-                        (list-core-resources store "ingresses")
-                        (list-core-resources store "gatewayclasses")
-                        (list-core-resources store "gateways")
-                        (list-core-resources store "httproutes")
-                        (list-core-resources store "tcproutes")
-                        (list-core-resources store "tlsroutes")
-                        (list-core-resources store "grpcroutes")
-                        (list-core-resources store "clustertrustbundles")
-                        (list-core-resources store "podcertificaterequests")
-                        (gateway-referenced-tls-secrets store)
-                        (ingress-referenced-tls-secrets store))
-                #'string< :key (lambda (object)
-                                 (let ((metadata (gethash "metadata" object)))
-                                   (format nil "~A/~A/~A" (gethash "kind" object)
-                                           (gethash "namespace" metadata) (gethash "name" metadata)))))))
+(defun build-service-discovery-projection (store)
+  "Serialize public objects from a captured immutable store in stable key order."
+  (labels ((objects (resource)
+             (loop for key being the hash-keys of (pod-store-resources store)
+                   using (hash-value object)
+                   when (equal resource (first key)) collect object)))
+    (mapcar (lambda (object)
+              (trivial-utf-8:string-to-utf-8-bytes
+               (endpointslice-canonical-json (service-discovery-public-object object))))
+            (sort (append (objects "services")
+                          (objects "endpointslices")
+                          ;; Resolved against the cluster's Pods and Namespaces, which nodes do not see.
+                          (network-policy-projection store)
+                          (objects "ingressclasses")
+                          (objects "ingresses")
+                          (objects "gatewayclasses")
+                          (objects "gateways")
+                          (objects "httproutes")
+                          (objects "tcproutes")
+                          (objects "tlsroutes")
+                          (objects "grpcroutes")
+                          (objects "clustertrustbundles")
+                          (objects "podcertificaterequests")
+                          (gateway-referenced-tls-secrets store)
+                          (ingress-referenced-tls-secrets store))
+                  #'string< :key (lambda (object)
+                                   (let ((metadata (gethash "metadata" object)))
+                                     (format nil "~A/~A/~A" (gethash "kind" object)
+                                             (gethash "namespace" metadata) (gethash "name" metadata))))))))
 
-(defun install-service-discovery-projection (resources projection)
-  "Validate public discovery entries and add them to the same atomic resource index."
-  (dolist (bytes projection)
+(defvar *discovery-projection-cache* nil)
+
+(defun call-with-discovery-projection-cache (function)
+  "Share immutable projection bytes only within this consistent controller pass."
+  (let ((*discovery-projection-cache* (or *discovery-projection-cache* (make-hash-table :test 'eq))))
+    (funcall function)))
+
+(defun discovery-projection-stamp (store)
+  (with-store-lock (store)
+    (list (pod-store-resources store) (pod-store-resource-revision store)
+          (gr8s.store::pod-store-pod-revision store))))
+
+(defun capture-service-discovery-store (store)
+  "Capture immutable resource rows and the Pod indexes needed for policy resolution."
+  (with-store-lock (store)
+    (let ((view (gr8s.store::make-pod-store nil)))
+      (setf (pod-store-resources view) (pod-store-resources store)
+            (pod-store-resource-revision view) (pod-store-resource-revision store)
+            (gr8s.store::pod-store-gateway-dependency-revision view)
+            (gr8s.store::pod-store-gateway-dependency-revision store)
+            (gr8s.store::pod-store-pods view) (alexandria:copy-hash-table (gr8s.store::pod-store-pods store))
+            (gr8s.store::pod-store-nodes view) (alexandria:copy-hash-table (gr8s.store::pod-store-nodes store))
+            (gr8s.store::pod-store-pod-revision view) (gr8s.store::pod-store-pod-revision store)
+            (gr8s.store::pod-store-pod-observed-statuses view)
+            (alexandria:copy-hash-table (gr8s.store::pod-store-pod-observed-statuses store))
+            (gr8s.store::pod-store-pod-observed-phases view)
+            (alexandria:copy-hash-table (gr8s.store::pod-store-pod-observed-phases store))
+            (gr8s.store::pod-store-pod-observed-resource-versions view)
+            (alexandria:copy-hash-table (gr8s.store::pod-store-pod-observed-resource-versions store)))
+      view)))
+
+(defun service-discovery-projection (store)
+  "Reuse serialization within a pass while both core and Pod input clocks agree."
+  (let* ((stamp (discovery-projection-stamp store))
+         (cached (and *discovery-projection-cache* (gethash store *discovery-projection-cache*))))
+    (if (and cached (equal stamp (car cached)))
+        (values (second cached) (third cached))
+        (let* ((view (capture-service-discovery-store store))
+               (dependency-revision (gr8s.store::pod-store-gateway-dependency-revision view))
+               (projection (build-service-discovery-projection view)))
+          (when (and *discovery-projection-cache* (equal stamp (discovery-projection-stamp store)))
+            (setf (gethash store *discovery-projection-cache*) (list stamp projection dependency-revision)))
+          (values projection dependency-revision)))))
+
+(defun decode-service-discovery-entry (bytes)
+  "Validate one public discovery entry and return its resource key and object."
     (let* ((object (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string bytes)
                                        :max-string-length (* 2 1024 1024)))
            (public (service-discovery-public-object object))
@@ -216,7 +270,25 @@
                    (if (member resource '("gatewayclasses" "ingressclasses" "clustertrustbundles") :test #'equal)
                        (null namespace) (dns-label-p namespace)))
         (invalid-pod "public Service discovery metadata is invalid"))
-      (setf (gethash (core-resource-key resource namespace name) resources) public))))
+      (cons (core-resource-key resource namespace name) public)))
+
+(defun decode-service-discovery-projection (projection &optional cache)
+  "Return validated resources and a decoding cache bounded to this projection.
+Exact octets are the keys; strings inside JSON never receive case-folded lookup."
+  (let ((resources (make-hash-table :test 'equal))
+        (next-cache (make-hash-table :test 'equalp)))
+    (dolist (bytes projection)
+      (check-type bytes (vector (unsigned-byte 8)))
+      (let ((entry (or (and cache (gethash bytes cache)) (decode-service-discovery-entry bytes))))
+        (setf (gethash (car entry) resources) (cdr entry)
+              (gethash bytes next-cache) entry)))
+    (values resources next-cache)))
+
+(defun install-service-discovery-projection (resources projection)
+  "Validate discovery entries and merge them into the atomic resource index."
+  (maphash (lambda (key object) (setf (gethash key resources) object))
+           (decode-service-discovery-projection projection))
+  nil)
 
 (defun service-dns-address-answer (question address)
   "Build an A or AAAA answer matching the requested family, or return NIL."

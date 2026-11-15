@@ -69,6 +69,14 @@
   (state-changed (bt:make-condition-variable :name "gr8s node runtime state"))
   (apply-lock (bt:make-lock "gr8s node snapshot application"))
   (received-revision -1)
+  applied-snapshot
+  full-snapshot-applied-at
+  discovery-resources
+  discovery-cache
+  gateway-base-revision
+  (gateway-config-revision 0)
+  gateway-view-store
+  (gateway-synchronized-p nil)
   (arrival-lock (bt:make-lock "gr8s node snapshot arrival"))
   ;; In-kernel ClusterIP socket load balancer, owned by the agent (which holds
   ;; the bpffs and the Pod cgroups). NIL when unavailable (falls back to the
@@ -1634,6 +1642,12 @@ while the server still assigns that UID at that version."
                           (node-runtime-service-receiver-report node-runtime))))
     (make-instance
      'gr8s.node.v1::node-status
+     :gateway-report-present t
+     :gateways (bt:with-lock-held ((node-runtime-apply-lock node-runtime))
+                 (when (and (node-runtime-gateway-synchronized-p node-runtime)
+                            (node-runtime-gateway-controller node-runtime))
+                   (gr8s.controllers::gateway-controller-observations
+                    (node-runtime-gateway-controller node-runtime))))
      :service-receivers (first receiver-report)
      :service-receiver-revision (second receiver-report)
      :service-receiver-report-present t
@@ -1835,6 +1849,56 @@ A no-op unless the agent is managed with a store and known endpoints."
 (defvar *runtime-outage-snapshot-wait-seconds* 2
   "How long a snapshot waits for a restarting container runtime before giving up this attempt.")
 
+(defun gateway-discovery-resources-p (resource)
+  (member resource '("gatewayclasses" "gateways" "httproutes" "tcproutes" "tlsroutes" "grpcroutes")
+          :test #'equal))
+
+(defun unchanged-non-gateway-discovery-p (previous current)
+  (and previous current
+       (every (lambda (index)
+                (loop for key being the hash-keys of index
+                      always (or (gateway-discovery-resources-p (first key))
+                                 (let ((old (gethash key previous)) (new (gethash key current)))
+                                   (or (eq old new) (gr8s.store::json-value-equal-p old new))))))
+              (list previous current))))
+
+(defun gateway-node-cached-statuses (node-runtime assignments)
+  "Return exact-version observations and whether every assigned Pod is covered."
+  (bt:with-lock-held ((node-runtime-observed-lock node-runtime))
+    (let ((statuses nil))
+      (dolist (assignment assignments (values (nreverse statuses) t))
+        (let* ((uid (slot-value assignment 'gr8s.node.v1::uid))
+               (version (slot-value assignment 'gr8s.node.v1::resource-version))
+               (status (gethash uid (node-runtime-observed-statuses node-runtime))))
+          (unless (and status
+                       (equal version (gethash uid (node-runtime-assigned-versions node-runtime)))
+                       (equal uid (slot-value status 'gr8s.node.v1::uid))
+                       (equal version (slot-value status 'gr8s.node.v1::resource-version)))
+            (return-from gateway-node-cached-statuses (values nil nil)))
+          (push status statuses))))))
+
+(defun node-gateway-update-p (node-runtime snapshot resources &optional (now (get-internal-real-time)))
+  "Only skip unrelated work after success and with byte-identical node inputs.
+Service grant and receiver envelope changes still run their original safety path."
+  (let* ((previous (node-runtime-applied-snapshot node-runtime))
+         (full-at (node-runtime-full-snapshot-applied-at node-runtime))
+         (network (slot-value snapshot 'gr8s.node.v1::network))
+         (assignments (slot-value snapshot 'gr8s.node.v1::pods)))
+    (and previous full-at (<= 0 (- now full-at)) (< (- now full-at) internal-time-units-per-second)
+         (or network (null (node-runtime-manager node-runtime)))
+         (equalp (when network (ag-proto:serialize-to-bytes network))
+                 (let ((old (slot-value previous 'gr8s.node.v1::network)))
+                   (when old (ag-proto:serialize-to-bytes old))))
+         (equalp (mapcar #'ag-proto:serialize-to-bytes (slot-value previous 'gr8s.node.v1::routes))
+                 (mapcar #'ag-proto:serialize-to-bytes (slot-value snapshot 'gr8s.node.v1::routes)))
+         (= (length assignments) (length (slot-value previous 'gr8s.node.v1::pods)))
+         (every #'gr8s.apiserver::same-pod-assignment-p assignments (slot-value previous 'gr8s.node.v1::pods))
+         (unchanged-non-gateway-discovery-p (node-runtime-discovery-resources node-runtime) resources)
+         ;; An unchanged snapshot can be a request to refresh live Pod observations.
+         ;; Only an actual Gateway configuration change authorizes cached observations.
+         (not (gr8s.store::json-value-equal-p (node-runtime-discovery-resources node-runtime) resources))
+         (nth-value 1 (gateway-node-cached-statuses node-runtime assignments)))))
+
 (defun reconcile-node-snapshot (node-runtime snapshot)
   "Apply one control-plane SNAPSHOT to this node and return the assigned Pods' observed
 statuses. Errors unless the runtime is running, and waits briefly for a restarting
@@ -1861,154 +1925,173 @@ so the revision is retried."
                                   (or (runtime-unavailable-message runtime) "container runtime is down")))))))
   (bt:with-lock-held ((node-runtime-apply-lock node-runtime))
     (ensure-node-snapshot-current node-runtime snapshot)
-    (bt:with-lock-held ((node-runtime-arrival-lock node-runtime))
-      (setf (node-runtime-service-risk-ready-revision node-runtime) nil
-            (node-runtime-service-selection-ready-revision node-runtime) nil))
-    (apply-node-runtime-network node-runtime snapshot)
-    (publish-node-snapshot-service-receivers node-runtime snapshot)
-    (ensure-node-snapshot-service-receivers-ready node-runtime snapshot)
-    (let ((assignments (slot-value snapshot 'gr8s.node.v1::pods))
-          (failed nil))
-      (bt:with-lock-held ((node-runtime-observed-lock node-runtime))
-        (clrhash (node-runtime-assigned-versions node-runtime))
-        (dolist (assignment assignments)
-          (setf (gethash (slot-value assignment 'gr8s.node.v1::uid)
-                         (node-runtime-assigned-versions node-runtime))
-                (slot-value assignment 'gr8s.node.v1::resource-version))))
-      (remove-unassigned-pods
-       node-runtime assignments
-       :on-failure
-       (lambda (pod condition)
-         ;; Deletion intent is durable, so the reconciliation worker keeps retrying
-         ;; this Pod. Only a lost intent has to hold back the acknowledgement.
-         (unless (and (typep condition 'kubernetes-error)
-                      (member (kubernetes-error-status-code condition) '(404 409)))
-           (format *error-output* "gr8s Pod ~A/~A removal failed: ~A~%"
-                   (pod-namespace pod) (pod-name pod) condition))
-         (unless (withdrawal-durable-p node-runtime pod)
-           (push pod failed))))
-      (install-assigned-resource-objects
-       (node-runtime-store node-runtime) assignments
-       (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json))
-      ;; Converge the socket LB from the just-installed Service/EndpointSlice
-      ;; discovery data. A transient map error must not abort Pod reconciliation;
-      ;; the v2 snapshot acknowledgement is withheld below until risk readback.
-      (when (node-runtime-service-lb-controller node-runtime)
+    (multiple-value-bind (public-resources next-cache)
         (handler-case
-            (let* ((controller (node-runtime-service-lb-controller node-runtime))
-                   (risk-map (service-lb-map (node-runtime-service-lb node-runtime)
-                                             "gr8s_nat_risk_v2"))
-                   (grant-mode (node-snapshot-service-grant-mode node-runtime snapshot)))
-              (converge-node-runtime-service-lb
-               node-runtime :publish-services-p
-               (cond ((null risk-map) t)
-                     ((and grant-mode
-                           (node-runtime-service-selection-grant-digest node-runtime))
-                      :retain)
-                     (t nil)))
-              (when (gr8s.controllers:service-lb-risk-published-p controller)
-                (bt:with-lock-held ((node-runtime-arrival-lock node-runtime))
-                  (when (= (node-runtime-received-revision node-runtime)
-                           (slot-value snapshot 'gr8s.node.v1::revision))
-                    (setf (node-runtime-service-risk-ready-revision node-runtime)
-                          (slot-value snapshot 'gr8s.node.v1::revision)))))
-              (when (and (eq grant-mode :current)
-                         (node-runtime-local-risk-ready-p node-runtime))
-                (converge-node-runtime-service-lb node-runtime :publish-services-p t)
-                (bt:with-lock-held ((node-runtime-arrival-lock node-runtime))
-                  (when (= (node-runtime-received-revision node-runtime)
-                           (slot-value snapshot 'gr8s.node.v1::revision))
-                    (setf (node-runtime-service-selection-ready-revision node-runtime)
-                          (slot-value snapshot 'gr8s.node.v1::revision)
-                          (node-runtime-service-selection-grant-digest node-runtime)
-                          (copy-seq (slot-value snapshot
-                                                'gr8s.node.v1::service-risk-grant-digest)))))))
+            (gr8s.kubelet::decode-service-discovery-projection
+             (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json)
+             (node-runtime-discovery-cache node-runtime))
           (error (condition)
-            (format *error-output* "gr8s: Service LB convergence failed: ~A~%" condition))))
-      (handler-case
-          (progn
-            (converge-node-port-forwarders (node-runtime-node-port-forwarders node-runtime)
-                                           (node-runtime-store node-runtime)
-                                           :node-name (node-runtime-node-name node-runtime)
-                                           :node-address
-                                           (ignore-errors (containerd-node-address
-                                                           (node-runtime-runtime node-runtime))))
-            (converge-health-check-servers (node-runtime-health-check-servers node-runtime)
-                                           (node-runtime-store node-runtime)
-                                           :node-name (node-runtime-node-name node-runtime)))
-        (error (condition)
-          (format *error-output* "gr8s: node port convergence failed: ~A~%" condition)))
-      ;; Attach per-Pod NetworkPolicy classifiers from the just-installed policy
-      ;; objects. Fail-soft, like the Service LB above.
-      (when (node-runtime-manager node-runtime)
-        (handler-case
-            (converge-node-network-policies node-runtime)
-          (error (condition)
-            (format *error-output* "gr8s: NetworkPolicy convergence failed: ~A~%" condition))))
-      ;; Reconcile Gateway API L7 proxy listeners from the stored Gateway and
-      ;; HTTPRoute objects. Created lazily; fail-soft like the convergences above.
-      (handler-case
-          (progn
-            (unless (node-runtime-gateway-controller node-runtime)
-              (setf (node-runtime-gateway-controller node-runtime)
-                    (let ((steering (node-runtime-gateway-steering node-runtime)))
-                      (make-gateway-controller
-                       (node-runtime-store node-runtime)
-                       :cert-dir (merge-pathnames "gateway-certs/"
-                                                  (node-runtime-state-directory node-runtime))
-                       :register-fn
-                       (lambda (port listener)
-                         (when steering
-                           (gateway-steering-register
-                            steering port (gateway-listener-socket-fd listener)))
-                         (ensure-gateway-listener-firewall port))
-                       :unregister-fn
-                       (lambda (port)
-                         (remove-gateway-listener-firewall port)
-                         (when steering (gateway-steering-unregister steering port)))))))
-            (converge-gateway-listeners (node-runtime-gateway-controller node-runtime))
-            (converge-gateway-l4-listeners (node-runtime-gateway-controller node-runtime)))
-        (error (condition)
-          (format *error-output* "gr8s: Gateway convergence failed: ~A~%" condition)))
-      (let* ((parsed (mapcar #'parse-node-assignment assignments))
-             (statuses
-               (loop for pod in (stable-sort (remove nil parsed)
-                                             (lambda (left right)
-                                               (and (deletion-requested-p left)
-                                                    (not (deletion-requested-p right)))))
-                     for status = (handler-case
-                                      (progn
-                                        (ensure-node-snapshot-current node-runtime snapshot)
-                                        (put-assigned-pod (node-runtime-store node-runtime) pod)
-                                        (ensure-node-snapshot-current node-runtime snapshot)
-                                        (let* ((started (get-internal-real-time))
-                                               (status (reconcile-pod (node-runtime-reconciler node-runtime)
-                                                                      (pod-namespace pod) (pod-name pod))))
-                                          ;; As the kubelet's pod workers and start latency measure them.
-                                          (ignore-errors
-                                           (note-pod-sync (pod-uid pod) (pod-resource-version pod) (deletion-requested-p pod)
-                                                          (/ (- (get-internal-real-time) started) internal-time-units-per-second))
-                                           (note-pod-phase (pod-uid pod) (gethash "phase" status)))
-                                          (cache-node-observation node-runtime pod status)))
-                                    ;; The next Pod still has to run. Cancellation and
-                                    ;; supersession aren't errors, so they still unwind this.
-                                    (error (condition)
-                                      (format *error-output* "gr8s Pod ~A/~A assignment failed: ~A~%"
-                                              (pod-namespace pod) (pod-name pod) condition)
-                                      (push pod failed)
-                                      nil))
-                     when status collect status)))
-        (ensure-node-snapshot-current node-runtime snapshot)
-        (bt:with-lock-held ((node-runtime-observed-lock node-runtime))
-          (forget-unassigned-pod-records (node-runtime-assigned-versions node-runtime)))
-        (when (or failed (member nil parsed))
-          (error 'node-snapshot-incomplete
-                 :message (format nil "~D Pod assignment~:P not applied"
-                                  (+ (length failed) (count nil parsed)))))
-        (ensure-node-snapshot-service-risk-ready node-runtime)
+            (setf (node-runtime-applied-snapshot node-runtime) nil)
+            (error condition)))
+      (let ((gateway-update (node-gateway-update-p node-runtime snapshot public-resources))
+            (convergence-ready t))
+        ;; A partial failed apply must never authorize skipping work on a retry.
+        (setf (node-runtime-applied-snapshot node-runtime) nil)
+        (setf (node-runtime-gateway-synchronized-p node-runtime) nil)
+        (bt:with-lock-held ((node-runtime-arrival-lock node-runtime))
+          (setf (node-runtime-service-risk-ready-revision node-runtime) nil
+                (node-runtime-service-selection-ready-revision node-runtime) nil))
+        (unless gateway-update (apply-node-runtime-network node-runtime snapshot))
+        (publish-node-snapshot-service-receivers node-runtime snapshot)
         (ensure-node-snapshot-service-receivers-ready node-runtime snapshot)
-        (ensure-node-snapshot-service-selection-ready node-runtime snapshot)
-        statuses))))
+        (let ((assignments (slot-value snapshot 'gr8s.node.v1::pods))
+              (failed nil))
+          (unless gateway-update
+            (bt:with-lock-held ((node-runtime-observed-lock node-runtime))
+              (clrhash (node-runtime-assigned-versions node-runtime))
+              (dolist (assignment assignments)
+                (setf (gethash (slot-value assignment 'gr8s.node.v1::uid)
+                               (node-runtime-assigned-versions node-runtime))
+                      (slot-value assignment 'gr8s.node.v1::resource-version))))
+            (remove-unassigned-pods
+             node-runtime assignments
+             :on-failure
+             (lambda (pod condition)
+               ;; Deletion intent is durable, so the reconciliation worker keeps retrying
+               ;; this Pod. Only a lost intent has to hold back the acknowledgement.
+               (unless (and (typep condition 'kubernetes-error)
+                            (member (kubernetes-error-status-code condition) '(404 409)))
+                 (format *error-output* "gr8s Pod ~A/~A removal failed: ~A~%"
+                         (pod-namespace pod) (pod-name pod) condition))
+               (unless (withdrawal-durable-p node-runtime pod)
+                 (push pod failed)))))
+          (install-assigned-resource-objects
+           (node-runtime-store node-runtime) assignments
+           (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json)
+           :public-resources public-resources)
+          ;; Converge the socket LB from the just-installed Service/EndpointSlice
+          ;; discovery data. A transient map error must not abort Pod reconciliation;
+          ;; the v2 snapshot acknowledgement is withheld below until risk readback.
+          (when (node-runtime-service-lb-controller node-runtime)
+            (handler-case
+                (let* ((controller (node-runtime-service-lb-controller node-runtime))
+                       (risk-map (service-lb-map (node-runtime-service-lb node-runtime)
+                                                 "gr8s_nat_risk_v2"))
+                       (grant-mode (node-snapshot-service-grant-mode node-runtime snapshot)))
+                  (converge-node-runtime-service-lb
+                   node-runtime :publish-services-p
+                   (cond ((null risk-map) t)
+                         ((and grant-mode
+                               (node-runtime-service-selection-grant-digest node-runtime))
+                          :retain)
+                         (t nil)))
+                  (when (gr8s.controllers:service-lb-risk-published-p controller)
+                    (bt:with-lock-held ((node-runtime-arrival-lock node-runtime))
+                      (when (= (node-runtime-received-revision node-runtime)
+                               (slot-value snapshot 'gr8s.node.v1::revision))
+                        (setf (node-runtime-service-risk-ready-revision node-runtime)
+                              (slot-value snapshot 'gr8s.node.v1::revision)))))
+                  (when (and (eq grant-mode :current)
+                             (node-runtime-local-risk-ready-p node-runtime))
+                    (converge-node-runtime-service-lb node-runtime :publish-services-p t)
+                    (bt:with-lock-held ((node-runtime-arrival-lock node-runtime))
+                      (when (= (node-runtime-received-revision node-runtime)
+                               (slot-value snapshot 'gr8s.node.v1::revision))
+                        (setf (node-runtime-service-selection-ready-revision node-runtime)
+                              (slot-value snapshot 'gr8s.node.v1::revision)
+                              (node-runtime-service-selection-grant-digest node-runtime)
+                              (copy-seq (slot-value snapshot
+                                                    'gr8s.node.v1::service-risk-grant-digest)))))))
+              (error (condition)
+                (setf convergence-ready nil)
+                (format *error-output* "gr8s: Service LB convergence failed: ~A~%" condition))))
+          (unless gateway-update
+            (handler-case
+                (progn
+                  (converge-node-port-forwarders (node-runtime-node-port-forwarders node-runtime)
+                                                 (node-runtime-store node-runtime)
+                                                 :node-name (node-runtime-node-name node-runtime)
+                                                 :node-address
+                                                 (ignore-errors (containerd-node-address
+                                                                 (node-runtime-runtime node-runtime))))
+                  (converge-health-check-servers (node-runtime-health-check-servers node-runtime)
+                                                 (node-runtime-store node-runtime)
+                                                 :node-name (node-runtime-node-name node-runtime)))
+              (error (condition)
+                (setf convergence-ready nil)
+                (format *error-output* "gr8s: node port convergence failed: ~A~%" condition)))
+            ;; Attach per-Pod NetworkPolicy classifiers from the just-installed policy
+            ;; objects. Fail-soft, like the Service LB above.
+            (when (node-runtime-manager node-runtime)
+              (handler-case
+                  (converge-node-network-policies node-runtime)
+                (error (condition)
+                  (setf convergence-ready nil)
+                  (format *error-output* "gr8s: NetworkPolicy convergence failed: ~A~%" condition)))))
+          ;; Reconcile Gateway API L7 proxy listeners from the stored Gateway and
+          ;; HTTPRoute objects. Created lazily; fail-soft like the convergences above.
+          (handler-case
+              (install-node-gateway-view node-runtime public-resources)
+            (error (condition)
+              (setf convergence-ready nil)
+              (format *error-output* "gr8s: Gateway convergence failed: ~A~%" condition)))
+          (when gateway-update
+            (ensure-node-snapshot-current node-runtime snapshot)
+            (ensure-node-snapshot-service-risk-ready node-runtime)
+            (ensure-node-snapshot-service-receivers-ready node-runtime snapshot)
+            (ensure-node-snapshot-service-selection-ready node-runtime snapshot)
+            (multiple-value-bind (statuses complete) (gateway-node-cached-statuses node-runtime assignments)
+              (unless complete
+                (error 'node-snapshot-incomplete :message "Pod observations changed during Gateway update"))
+              (setf (node-runtime-applied-snapshot node-runtime) (and convergence-ready snapshot)
+                    (node-runtime-discovery-resources node-runtime) public-resources
+                    (node-runtime-discovery-cache node-runtime) next-cache)
+              (record-node-gateway-baseline node-runtime snapshot convergence-ready)
+              (return-from reconcile-node-snapshot statuses)))
+          (let* ((parsed (mapcar #'parse-node-assignment assignments))
+                 (statuses
+                  (loop for pod in (stable-sort (remove nil parsed)
+                                                (lambda (left right)
+                                                  (and (deletion-requested-p left)
+                                                       (not (deletion-requested-p right)))))
+                        for status = (handler-case
+                                         (progn
+                                           (ensure-node-snapshot-current node-runtime snapshot)
+                                           (put-assigned-pod (node-runtime-store node-runtime) pod)
+                                           (ensure-node-snapshot-current node-runtime snapshot)
+                                           (let* ((started (get-internal-real-time))
+                                                  (status (reconcile-pod (node-runtime-reconciler node-runtime)
+                                                                         (pod-namespace pod) (pod-name pod))))
+                                             ;; As the kubelet's pod workers and start latency measure them.
+                                             (ignore-errors
+                                               (note-pod-sync (pod-uid pod) (pod-resource-version pod) (deletion-requested-p pod)
+                                                              (/ (- (get-internal-real-time) started) internal-time-units-per-second))
+                                               (note-pod-phase (pod-uid pod) (gethash "phase" status)))
+                                             (cache-node-observation node-runtime pod status)))
+                                       ;; The next Pod still has to run. Cancellation and
+                                       ;; supersession aren't errors, so they still unwind this.
+                                       (error (condition)
+                                         (format *error-output* "gr8s Pod ~A/~A assignment failed: ~A~%"
+                                                 (pod-namespace pod) (pod-name pod) condition)
+                                         (push pod failed)
+                                         nil))
+                        when status collect status)))
+            (ensure-node-snapshot-current node-runtime snapshot)
+            (bt:with-lock-held ((node-runtime-observed-lock node-runtime))
+              (forget-unassigned-pod-records (node-runtime-assigned-versions node-runtime)))
+            (when (or failed (member nil parsed))
+              (error 'node-snapshot-incomplete
+                     :message (format nil "~D Pod assignment~:P not applied"
+                                      (+ (length failed) (count nil parsed)))))
+            (ensure-node-snapshot-service-risk-ready node-runtime)
+            (ensure-node-snapshot-service-receivers-ready node-runtime snapshot)
+            (ensure-node-snapshot-service-selection-ready node-runtime snapshot)
+            (setf (node-runtime-applied-snapshot node-runtime) (and convergence-ready snapshot)
+                  (node-runtime-full-snapshot-applied-at node-runtime) (and convergence-ready (get-internal-real-time))
+                  (node-runtime-discovery-resources node-runtime) public-resources
+                  (node-runtime-discovery-cache node-runtime) next-cache)
+            (record-node-gateway-baseline node-runtime snapshot convergence-ready)
+            statuses))))))
 
 (defun node-operation-response (request status &key (exit-code 0) (message ""))
   "Build an OPERATION-RESPONSE for REQUEST carrying STATUS, exit code and message."

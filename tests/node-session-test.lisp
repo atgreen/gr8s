@@ -532,99 +532,106 @@
       (is-false (gr8s.apiserver::cluster-service-risk-published-p server)))))
 
 (test cluster-service-risk-grant-requires-all-acks-and-revokes-on-session-change
-  (with-temporary-store (store path)
-    (declare (ignore path))
-    (dolist (entry '(("worker-a" "10.88.0.0/24")
-                     ("worker-b" "10.88.1.0/24")))
-      (gr8s.controllers::register-node
-       store (gr8s.model::make-node-record :id (first entry) :name (first entry)
-                                    :pod-cidr (second entry))))
-    (let* ((server (gr8s.apiserver::%make-node-grpc-server
-                    :store store :cluster-pod-cidr "10.88.0.0/16"))
-           (runtime (gr8s.controllers::make-control-plane-runtime store server))
-           (sessions (gr8s.apiserver::node-grpc-server-sessions server))
-           (acks (gr8s.apiserver::node-grpc-server-acknowledged-revisions server)))
-      (dolist (name '("worker-a" "worker-b"))
-        (let ((session (gr8s.apiserver::make-node-agent-session nil)))
-          (setf (gr8s.apiserver::node-agent-session-node-id session) name
-                (gr8s.apiserver::node-agent-session-service-risk-v2-p session) t
-                (gethash name sessions) session)))
-      (gr8s.controllers::publish-service-discovery-snapshots runtime)
-      (let ((first (gr8s.apiserver::current-node-snapshot server "worker-a"))
-            (second (gr8s.apiserver::current-node-snapshot server "worker-b")))
-        (is (= 0 (length (slot-value first 'gr8s.node.v1::service-risk-grant-digest))))
-        (is (= 0 (length (slot-value second 'gr8s.node.v1::service-risk-grant-digest))))
-        (setf (gethash "worker-a" acks) (slot-value first 'gr8s.node.v1::revision))
-        (gr8s.apiserver::note-node-service-receiver-status
-         server "worker-a"
-         (make-instance 'gr8s.node.v1::node-status
-                        :service-receiver-report-present t
-                        :service-receiver-revision (slot-value first 'gr8s.node.v1::revision))
-         (gethash "worker-a" sessions)))
-      (gr8s.controllers::publish-service-discovery-snapshots runtime)
-      (is-false (gr8s.apiserver::node-grpc-server-service-risk-grant-digest server))
-      (let ((second (gr8s.apiserver::current-node-snapshot server "worker-b")))
-        (setf (gethash "worker-b" acks) (slot-value second 'gr8s.node.v1::revision))
-        (gr8s.apiserver::note-node-service-receiver-status
-         server "worker-b"
-         (make-instance 'gr8s.node.v1::node-status
-                        :service-receiver-report-present t
-                        :service-receiver-revision (slot-value second 'gr8s.node.v1::revision))
-         (gethash "worker-b" sessions)))
-      (gr8s.controllers::publish-service-discovery-snapshots runtime)
-      (let ((digest (gr8s.apiserver::node-grpc-server-service-risk-grant-digest server)))
-        (is (= 32 (length digest)))
-        (dolist (name '("worker-a" "worker-b"))
-          (let ((snapshot (gr8s.apiserver::current-node-snapshot server name)))
-            (is (= 2 (slot-value snapshot 'gr8s.node.v1::revision)))
-            (is (equalp digest
-                        (slot-value snapshot 'gr8s.node.v1::service-risk-grant-digest)))))
-        (let* ((snapshot (gr8s.apiserver::current-node-snapshot server "worker-a"))
-               (network (slot-value snapshot 'gr8s.node.v1::network))
-               (owners (slot-value network 'gr8s.node.v1::service-translations)))
-          (setf (slot-value network 'gr8s.node.v1::service-translations)
-                (list (make-instance 'gr8s.node.v1::service-translation-identity
-                                     :pod-uid "unexpected")))
-          (bt:with-lock-held ((gr8s.apiserver::node-grpc-server-lock server))
-            (is-false (gr8s.apiserver::service-risk-grant-for-snapshot-locked
-                       server "worker-a" snapshot)))
-          (setf (slot-value network 'gr8s.node.v1::service-translations) owners))
-        ;; A grant revision leaves the old ACK behind; the grant remains valid
-        ;; for the same digest and authenticated sessions.
-        (gr8s.controllers::publish-service-discovery-snapshots runtime)
-        (is (equalp digest (gr8s.apiserver::node-grpc-server-service-risk-grant-digest server)))
-        (let ((replacement (gr8s.apiserver::make-node-agent-session nil)))
-          (setf (gr8s.apiserver::node-agent-session-node-id replacement) "worker-b"
-                (gr8s.apiserver::node-agent-session-service-risk-v2-p replacement) t
-                (gethash "worker-b" sessions) replacement)
-          (gr8s.controllers::publish-service-discovery-snapshots runtime)
-          (is-false (gr8s.apiserver::node-grpc-server-service-risk-grant-digest server))
-          (dolist (name '("worker-a" "worker-b"))
-            (let ((snapshot (gr8s.apiserver::current-node-snapshot server name)))
-              (is (= 3 (slot-value snapshot 'gr8s.node.v1::revision)))
-              (is (= 0 (length
-                         (slot-value snapshot 'gr8s.node.v1::service-risk-grant-digest)))))
-            (setf (gethash name acks)
-                  (slot-value (gr8s.apiserver::current-node-snapshot server name)
-                              'gr8s.node.v1::revision)))
-          (gr8s.apiserver::note-node-service-receiver-status
-           server "worker-b"
-           (make-instance 'gr8s.node.v1::node-status
-                          :service-receiver-report-present t
-                          :service-receiver-revision
-                          (gethash "worker-b" acks))
-           replacement)
-          (gr8s.controllers::publish-service-discovery-snapshots runtime)
-          (is (= 32 (length (gr8s.apiserver::node-grpc-server-service-risk-grant-digest server))))
-          ;; A newly registered node invalidates the old cluster grant even
-          ;; before the next full discovery reconciliation tick.
-          (gr8s.controllers::register-node
-           store (gr8s.model::make-node-record :id "worker-c" :name "worker-c"
-                                        :pod-cidr "10.88.2.0/24"))
-          (gr8s.controllers::publish-node-snapshot runtime "worker-a")
-          (is (= 0 (length
-                     (slot-value (gr8s.apiserver::current-node-snapshot server "worker-a")
-                                 'gr8s.node.v1::service-risk-grant-digest)))))))))
+  ;; This test supplies synthetic sessions; model successful transport explicitly.
+  (let ((send (symbol-function 'ag-grpc:stream-send)))
+    (unwind-protect
+         (progn
+           (setf (symbol-function 'ag-grpc:stream-send)
+                 (lambda (stream envelope) (declare (ignore stream envelope))))
+           (with-temporary-store (store path)
+             (declare (ignore path))
+             (dolist (entry '(("worker-a" "10.88.0.0/24")
+                              ("worker-b" "10.88.1.0/24")))
+               (gr8s.controllers::register-node
+                store (gr8s.model::make-node-record :id (first entry) :name (first entry)
+                                             :pod-cidr (second entry))))
+             (let* ((server (gr8s.apiserver::%make-node-grpc-server
+                             :store store :cluster-pod-cidr "10.88.0.0/16"))
+                    (runtime (gr8s.controllers::make-control-plane-runtime store server))
+                    (sessions (gr8s.apiserver::node-grpc-server-sessions server))
+                    (acks (gr8s.apiserver::node-grpc-server-acknowledged-revisions server)))
+               (dolist (name '("worker-a" "worker-b"))
+                 (let ((session (gr8s.apiserver::make-node-agent-session nil)))
+                   (setf (gr8s.apiserver::node-agent-session-node-id session) name
+                         (gr8s.apiserver::node-agent-session-service-risk-v2-p session) t
+                         (gethash name sessions) session)))
+               (gr8s.controllers::publish-service-discovery-snapshots runtime)
+               (let ((first (gr8s.apiserver::current-node-snapshot server "worker-a"))
+                     (second (gr8s.apiserver::current-node-snapshot server "worker-b")))
+                 (is (= 0 (length (slot-value first 'gr8s.node.v1::service-risk-grant-digest))))
+                 (is (= 0 (length (slot-value second 'gr8s.node.v1::service-risk-grant-digest))))
+                 (setf (gethash "worker-a" acks) (slot-value first 'gr8s.node.v1::revision))
+                 (gr8s.apiserver::note-node-service-receiver-status
+                  server "worker-a"
+                  (make-instance 'gr8s.node.v1::node-status
+                                 :service-receiver-report-present t
+                                 :service-receiver-revision (slot-value first 'gr8s.node.v1::revision))
+                  (gethash "worker-a" sessions)))
+               (gr8s.controllers::publish-service-discovery-snapshots runtime)
+               (is-false (gr8s.apiserver::node-grpc-server-service-risk-grant-digest server))
+               (let ((second (gr8s.apiserver::current-node-snapshot server "worker-b")))
+                 (setf (gethash "worker-b" acks) (slot-value second 'gr8s.node.v1::revision))
+                 (gr8s.apiserver::note-node-service-receiver-status
+                  server "worker-b"
+                  (make-instance 'gr8s.node.v1::node-status
+                                 :service-receiver-report-present t
+                                 :service-receiver-revision (slot-value second 'gr8s.node.v1::revision))
+                  (gethash "worker-b" sessions)))
+               (gr8s.controllers::publish-service-discovery-snapshots runtime)
+               (let ((digest (gr8s.apiserver::node-grpc-server-service-risk-grant-digest server)))
+                 (is (= 32 (length digest)))
+                 (dolist (name '("worker-a" "worker-b"))
+                   (let ((snapshot (gr8s.apiserver::current-node-snapshot server name)))
+                     (is (= 2 (slot-value snapshot 'gr8s.node.v1::revision)))
+                     (is (equalp digest
+                                 (slot-value snapshot 'gr8s.node.v1::service-risk-grant-digest)))))
+                 (let* ((snapshot (gr8s.apiserver::current-node-snapshot server "worker-a"))
+                        (network (slot-value snapshot 'gr8s.node.v1::network))
+                        (owners (slot-value network 'gr8s.node.v1::service-translations)))
+                   (setf (slot-value network 'gr8s.node.v1::service-translations)
+                         (list (make-instance 'gr8s.node.v1::service-translation-identity
+                                              :pod-uid "unexpected")))
+                   (bt:with-lock-held ((gr8s.apiserver::node-grpc-server-lock server))
+                     (is-false (gr8s.apiserver::service-risk-grant-for-snapshot-locked
+                                server "worker-a" snapshot)))
+                   (setf (slot-value network 'gr8s.node.v1::service-translations) owners))
+                 ;; A grant revision leaves the old ACK behind; the grant remains valid
+                 ;; for the same digest and authenticated sessions.
+                 (gr8s.controllers::publish-service-discovery-snapshots runtime)
+                 (is (equalp digest (gr8s.apiserver::node-grpc-server-service-risk-grant-digest server)))
+                 (let ((replacement (gr8s.apiserver::make-node-agent-session nil)))
+                   (setf (gr8s.apiserver::node-agent-session-node-id replacement) "worker-b"
+                         (gr8s.apiserver::node-agent-session-service-risk-v2-p replacement) t
+                         (gethash "worker-b" sessions) replacement)
+                   (gr8s.controllers::publish-service-discovery-snapshots runtime)
+                   (is-false (gr8s.apiserver::node-grpc-server-service-risk-grant-digest server))
+                   (dolist (name '("worker-a" "worker-b"))
+                     (let ((snapshot (gr8s.apiserver::current-node-snapshot server name)))
+                       (is (= 3 (slot-value snapshot 'gr8s.node.v1::revision)))
+                       (is (= 0 (length
+                                  (slot-value snapshot 'gr8s.node.v1::service-risk-grant-digest)))))
+                     (setf (gethash name acks)
+                           (slot-value (gr8s.apiserver::current-node-snapshot server name)
+                                       'gr8s.node.v1::revision)))
+                   (gr8s.apiserver::note-node-service-receiver-status
+                    server "worker-b"
+                    (make-instance 'gr8s.node.v1::node-status
+                                   :service-receiver-report-present t
+                                   :service-receiver-revision
+                                   (gethash "worker-b" acks))
+                    replacement)
+                   (gr8s.controllers::publish-service-discovery-snapshots runtime)
+                   (is (= 32 (length (gr8s.apiserver::node-grpc-server-service-risk-grant-digest server))))
+                   ;; A newly registered node invalidates the old cluster grant even
+                   ;; before the next full discovery reconciliation tick.
+                   (gr8s.controllers::register-node
+                    store (gr8s.model::make-node-record :id "worker-c" :name "worker-c"
+                                                 :pod-cidr "10.88.2.0/24"))
+                   (gr8s.controllers::publish-node-snapshot runtime "worker-a")
+                   (is (= 0 (length
+                              (slot-value (gr8s.apiserver::current-node-snapshot server "worker-a")
+                                          'gr8s.node.v1::service-risk-grant-digest)))))))))
+      (setf (symbol-function 'ag-grpc:stream-send) send))))
 
 (test receiver-status-proofs-bind-to-current-acked-owner-and-session
   (let* ((server (gr8s.apiserver::%make-node-grpc-server))
