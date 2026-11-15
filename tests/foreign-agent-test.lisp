@@ -316,3 +316,55 @@ since gr8s itself creates the interface."
                      "the lease-holder provisions the fronting LoadBalancer Service")))
           (gr8s.network::stop-foreign-cni-agent agent)
           (funcall stop-origin))))))
+
+(defun foreign-lb-fake-map (name fd)
+  (cons name (whistler/loader::make-map-info
+              :name name :type 2 :key-size 8 :value-size 8
+              :max-entries 1 :flags 0 :fd fd)))
+
+(test foreign-service-lb-plans-cluster-ips-from-watched-services
+  (with-core-api (store path)
+    (values store path)
+    (let* ((cluster (kube-test-cluster))
+           (view (gr8s.resources::make-foreign-resource-view cluster)))
+      (unwind-protect
+           (progn
+             (gr8s.kube-client:kube-create
+              cluster "/api/v1/namespaces/default/services"
+              (gr8s.resources::core-object
+               "apiVersion" "v1" "kind" "Service"
+               "metadata" (gr8s.resources::core-object "name" "lb-svc")
+               "spec" (gr8s.resources::core-object
+                       "ports" (vector (gr8s.resources::core-object "port" 80)))))
+             (gr8s.kube-client:kube-create
+              cluster (gr8s.kube-client:resource-path
+                       "discovery.k8s.io" "v1" "endpointslices" :namespace "default")
+              (gr8s.resources::core-object
+               "apiVersion" "discovery.k8s.io/v1" "kind" "EndpointSlice"
+               "metadata" (gr8s.resources::core-object
+                           "name" "lb-svc-1"
+                           "labels" (gr8s.resources::core-object
+                                     "kubernetes.io/service-name" "lb-svc"))
+               "addressType" "IPv4"
+               "endpoints" (vector (gr8s.resources::core-object
+                                    "addresses" #("192.0.2.31")
+                                    "conditions" (gr8s.resources::core-object "ready" t)))
+               "ports" (vector (gr8s.resources::core-object "port" 9999))))
+             ;; The kube-proxy replacement's own planner, fed by the watch
+             ;; caches through the seam's default readers, writing the fake maps.
+             (let* ((dataplane (gr8s.network::%make-service-lb-dataplane
+                                :maps (list (foreign-lb-fake-map "gr8s_service_v4" 1)
+                                            (foreign-lb-fake-map "gr8s_backend_v4" 2))))
+                    (controller (gr8s.controllers::make-service-lb-controller
+                                 view dataplane "worker-f"))
+                    (writes nil))
+               (gr8s.controllers::converge-service-lb-controller
+                controller
+                :update (lambda (map key value)
+                          (declare (ignore key value))
+                          (push (whistler/loader:map-info-fd map) writes))
+                :delete (lambda (map key) (declare (ignore map key)) nil))
+               ;; The slice's one backend lands before its one service entry.
+               (is (equal '(2 1) (nreverse writes))
+                   "watched Service and EndpointSlice became LB map writes")))
+        (gr8s.resources::stop-foreign-resource-view view)))))

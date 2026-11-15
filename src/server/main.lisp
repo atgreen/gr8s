@@ -1408,6 +1408,8 @@ opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
                    ((equal option "--gateway")
                     ;; A flag with an explicit value keeps the pairwise parse.
                     (setf (getf options :gateway) (string= value "true")))
+                   ((equal option "--service-lb")
+                    (setf (getf options :service-lb) (string= value "true")))
                    (t (error "unknown cni-agent option: ~A" option))))
     options))
 
@@ -1429,11 +1431,35 @@ opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
      :bpf-root (or (getf options :bpf-root) "/sys/fs/bpf/gr8s")
      :socket-path (or (getf options :socket-path) "/run/gr8s/cni.sock")
      :mtu (or (getf options :mtu) 1450)
-     :extra-factory (when (getf options :gateway)
-                      (lambda (view)
-                        (gr8s.controllers:start-foreign-gateway
-                         view :cert-dir (merge-pathnames "gateway-certs/" state-directory)
-                         :cluster cluster :node-name node-name)))
+     :extra-factory
+     (when (or (getf options :gateway) (getf options :service-lb))
+       (lambda (view)
+         (let ((convergers '()) (stoppers '()))
+           (when (getf options :gateway)
+             (multiple-value-bind (converger stopper)
+                 (gr8s.controllers:start-foreign-gateway
+                  view :cert-dir (merge-pathnames "gateway-certs/" state-directory)
+                  :cluster cluster :node-name node-name)
+               (push converger convergers) (push stopper stoppers)))
+           (when (getf options :service-lb)
+             ;; Attaching needs CAP_BPF, a bpffs and a modern kernel; without
+             ;; them the cluster keeps whatever Service proxy it already runs.
+             (let ((dataplane (gr8s.network::try-start-service-lb-dataplane
+                               "/sys/fs/cgroup"
+                               (namestring
+                                (merge-pathnames
+                                 "service-lb/"
+                                 (uiop:ensure-directory-pathname
+                                  (or (getf options :bpf-root) "/sys/fs/bpf/gr8s")))))))
+               (when dataplane
+                 (multiple-value-bind (converger stopper)
+                     (gr8s.controllers:start-foreign-service-lb
+                      view dataplane :node-name node-name)
+                   (push converger convergers) (push stopper stoppers)))))
+           (values (let ((ordered (nreverse convergers)))
+                     (lambda () (mapc #'funcall ordered)))
+                   (let ((ordered (nreverse stoppers)))
+                     (lambda () (mapc #'funcall ordered)))))))
      :stop-predicate (lambda () *shutdown-requested*))
     0))
 

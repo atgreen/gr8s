@@ -397,6 +397,7 @@
                                            (:file "gateway-sklookup")
                                            (:file "gateway-controller")
                                            (:file "foreign-gateway")
+                                           (:file "foreign-service-lb")
                                            (:file "cert-manager")
                                            (:file "garbage-collection")
                                            (:file "crd-garbage-collection")
