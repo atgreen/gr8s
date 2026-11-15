@@ -267,3 +267,16 @@ users:~%- name: admin~%  user:~%    token: sekrit~%    client-certificate-data: 
                          (bt:with-lock-held (changes-lock) changes)
                          :test #'equal)))
         (gr8s.resources::stop-foreign-resource-view view)))))
+
+(test informer-treats-an-absent-collection-as-synced-and-empty
+  (with-core-api (store path)
+    (values store path)
+    ;; A resource whose CRD is not installed must not stall consumers: the
+    ;; correct cache for an absent collection is empty, immediately.
+    (let ((informer (gr8s.kube-client:start-informer
+                     (kube-test-cluster) "/apis/absent.example.com/v1/widgets")))
+      (unwind-protect
+           (progn
+             (is (poll-until (lambda () (gr8s.kube-client:informer-synced-p informer))))
+             (is (null (gr8s.kube-client:informer-objects informer))))
+        (gr8s.kube-client:stop-informer informer)))))
