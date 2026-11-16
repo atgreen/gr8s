@@ -5,9 +5,12 @@
 
 **Kubernetes, built from scratch in Common Lisp — with an eBPF dataplane you can run on its own.**
 
-gr8s puts a Kubernetes API server, controllers, scheduler, node agent,
-container runtime, networking, and datastore in one native executable. Use
-`kubectl` and standard Kubernetes manifests on one node or across a cluster.
+**One file is the whole cluster.** gr8s puts a Kubernetes API server,
+controllers, scheduler, node agent, container runtime, networking, DNS,
+ingress, storage, metrics, a dashboard, and the datastore in one native
+executable. Copy it to a Linux machine, run `gr8s serve`, and use `kubectl` and
+standard Kubernetes manifests. Add nodes by running the same file as
+`gr8s agent`.
 
 > [!WARNING]
 > **This is an experiment.** gr8s is for people interested in exploring and
@@ -37,6 +40,44 @@ see [debugging a running cluster](docs/building-and-testing.md#debugging-a-runni
 
 Start with the [documentation guide](docs/index.md). If you already know Kubernetes,
 the [component map](docs/kubernetes-users.md) explains where familiar components live.
+
+## One binary, every feature
+
+A gr8s cluster has nothing else to install, version, or keep in step. The
+release binary carries its own statically linked container runtime and CNI
+plugins, so it needs no system containerd, runc, CNI plugin binaries,
+`iptables`, or add-on manifests. On the host it needs only a recent kernel,
+glibc 2.39 or later, and libzstd. Every node runs the same file, so there is no
+version skew between components.
+
+| You would normally deploy | In gr8s |
+|---|---|
+| kube-apiserver, kube-controller-manager, kube-scheduler | Built in |
+| etcd | Built-in Raft datastore, with automatic checkpoints and `gr8s backup` / `gr8s restore` |
+| kubelet, containerd, runc, CNI plugins | Built in; containerd, runc, and CNI plugins are embedded and started on demand |
+| CNI, kube-proxy, NetworkPolicy controller | Built-in eBPF dataplane, with VXLAN or WireGuard between nodes |
+| CoreDNS | Built-in node-local cluster DNS |
+| Ingress controller, Gateway API implementation, LoadBalancer provider | Built in |
+| local-path provisioner, NFS volumes | Built in; CSI drivers still work |
+| metrics-server, cAdvisor | Built in; `kubectl top` and Prometheus scrapes work |
+| Kubernetes dashboard | Built-in Headlamp UI: `gr8s dashboard` |
+| Certificate management | Automatic leaf renewal, staged CA rotation, one-time join tokens |
+| bpftrace, debug tooling | `gr8s debug trace` and a live Lisp REPL into any node |
+| Image distribution | Authenticated peer-to-peer sharing of image blobs between nodes |
+
+The same file takes every role:
+
+```sh
+gr8s serve       # control plane plus a local node: a complete cluster
+gr8s agent       # a worker node joining that cluster
+gr8s witness     # a tie-breaking Raft member for two-node high availability
+gr8s net-agent   # just the eBPF dataplane, on a Kubernetes cluster you already run
+```
+
+Upgrading is replacing one file. The [systemd installer](docs/installing.md)
+verifies the new binary, restarts the service, and rolls back automatically if
+it does not become ready. Optional sandboxed runtimes are one command away:
+`gr8s runtime install gvisor` or `gr8s runtime install kata`.
 
 ## Use the gr8s dataplane with your own Kubernetes
 
@@ -172,28 +213,37 @@ and [conformance results](docs/CONFORMANCE.md) for supported behavior and limita
 
 ## Getting started
 
-Build gr8s on Linux with **SBCL** and the project's ASDF dependencies. To run a
-cluster, you need **Linux 6.6+ with TCX eBPF support**, **root privileges**, and
-working cgroups. Install **`kubectl`** to use the Kubernetes API. See the
-[build requirements](docs/building-and-testing.md#requirements) and
-[runtime payload details](docs/runtime.md#the-self-contained-payload) for the
-full setup. Start with a disposable Linux VM.
+To run a cluster, you need **Linux 6.6+ with TCX eBPF support**, **root
+privileges**, and working cgroups. Install **`kubectl`** to use the Kubernetes
+API. Start with a disposable Linux VM.
 
-Like k3s and k0s, `gr8s serve` exposes one authenticated HTTPS Kubernetes API.
-It listens on `0.0.0.0:6443` by default; there is no separate unauthenticated
-localhost HTTP API. The generated owner-only kubeconfig embeds the cluster CA
-and an administrative client certificate.
-
-From the repository root:
+Download the binary from the
+[latest release](https://github.com/atgreen/gr8s/releases) (`amd64` or `arm64`),
+check it, and start a single-node cluster:
 
 ```sh
-make native
+VERSION=v1.37.2-gr8s.0 ARCH=amd64
+curl -fLO https://github.com/atgreen/gr8s/releases/download/$VERSION/gr8s-linux-$ARCH
+curl -fLO https://github.com/atgreen/gr8s/releases/download/$VERSION/gr8s-linux-$ARCH.sha256
+sha256sum -c gr8s-linux-$ARCH.sha256
+sudo install -m 0755 gr8s-linux-$ARCH /usr/local/bin/gr8s
 
 # Start a single-node cluster; leave this running.
-sudo build/gr8s serve \
+sudo gr8s serve \
   --state-directory /tmp/gr8s-state \
   --kubeconfig /tmp/gr8s.kubeconfig
 ```
+
+That is the whole installation. To build the binary yourself instead, install
+**SBCL** and run `make native` from the repository root; see the
+[build requirements](docs/building-and-testing.md#requirements) and the
+[runtime payload details](docs/runtime.md#the-self-contained-payload). Commands
+below that use `gr8s` work the same with `build/gr8s`.
+
+`gr8s serve` exposes one authenticated HTTPS Kubernetes API. It listens on
+`0.0.0.0:6443` by default; there is no separate unauthenticated localhost HTTP
+API. The generated owner-only kubeconfig embeds the cluster CA and an
+administrative client certificate.
 
 In another terminal, deploy the [example](examples/getting-started.yaml). The
 server creates an owner-only kubeconfig, so these commands use `sudo` to read it.
@@ -244,7 +294,7 @@ cluster, with live resource updates.
 
 ```sh
 # With a cluster running, from another terminal:
-sudo build/gr8s dashboard --kubeconfig /tmp/gr8s.kubeconfig
+sudo gr8s dashboard --kubeconfig /tmp/gr8s.kubeconfig
 ```
 
 It serves on loopback `http://127.0.0.1:8080` by default (change with `--port`)
