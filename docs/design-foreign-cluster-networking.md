@@ -53,7 +53,8 @@ The new work is therefore concentrated in three pieces:
 
 Every node runs the same agent. The small amount of cluster-scoped work —
 provisioning one LoadBalancer Service per Gateway (so
-`Gateway.status.addresses` carries a real LB/VIP address, Cilium-style) and
+`Gateway.status.addresses` carries a real LB/VIP address, as other
+implementations do) and
 writing Gateway/HTTPRoute status — is done by whichever agent holds a
 `coordination.k8s.io` Lease. The writes are idempotent create-or-update
 under optimistic concurrency, so leadership handoff mid-write is safe.
@@ -115,7 +116,7 @@ API, since the native node-session gRPC key exchange is unavailable here:
   AllowedIPs.
 - **Only Pod-CIDR-to-Pod-CIDR traffic is encrypted.** Node and API-server
   traffic stays in the clear, so the agent still bootstraps against the host
-  cluster before the fabric exists -- the Antrea/Cilium pod-only model, which
+  cluster before the fabric exists -- the pod-only encryption model, which
   avoids the encryption-bootstrap deadlock a node-to-node mode would hit.
 
 Verified on a two-node k3s: handshakes complete, cross-node Pod traffic rides

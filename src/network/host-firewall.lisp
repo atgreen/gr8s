@@ -11,7 +11,7 @@
 ;;;; lets the kernel route cross-node traffic normally (conntrack sees both
 ;;;; directions) and, when an active host firewalld would otherwise drop it,
 ;;;; programs a small, overlay-scoped set of ACCEPTs -- the same coexistence
-;;;; approach Cilium takes with its CILIUM_FORWARD rules, but narrower:
+;;;; approach other eBPF CNIs take with their forward-accept rules, but narrower:
 ;;;;
 ;;;;   * the selected overlay device in an ACCEPT zone -> decrypted/decapsulated traffic
 ;;;;   * this node's Pod CIDR as a zone source -> local Pod egress/forward (NEW)

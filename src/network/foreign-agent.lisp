@@ -106,7 +106,7 @@ the multi-node fabric, driven by the same objects every kubelet reports."
 (defparameter +wireguard-public-key-annotation+ "gr8s.io/wireguard-public-key"
   "The Node annotation each gr8s agent publishes its WireGuard public key under,
 so peers can discover it from the host cluster API -- the foreign-cluster analog
-of the native node-session gRPC key exchange (Cilium's network.cilium.io model).")
+of the native node-session gRPC key exchange.")
 
 (defun foreign-node-wireguard-public-key (node)
   "NODE's advertised WireGuard public key (base64), or NIL if it has not
@@ -123,7 +123,8 @@ FOREIGN-NODE-NETWORK, but each peer route also carries the peer's published
 WireGuard public key and the shared listen port; a peer that has not yet
 advertised a key is skipped until it does.  Only Pod-CIDR destinations route
 through the tunnel, so node and API-server traffic stays unencrypted and the
-agent can still bootstrap against the host cluster (the Antrea/Cilium model)."
+agent can still bootstrap against the host cluster (the pod-only encryption
+model)."
   (let ((local "") (local-cidrs nil) (routes '()))
     (dolist (node (gr8s.resources::list-core-resources view "nodes"))
       (let* ((metadata (gethash "metadata" node))

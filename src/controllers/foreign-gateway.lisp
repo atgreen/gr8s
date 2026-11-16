@@ -11,8 +11,8 @@
 ;;;; CNI agent's convergence loop, and adds the once-per-cluster work every
 ;;;; node must not repeat: whichever agent holds the coordination.k8s.io Lease
 ;;;; writes GatewayClass/Gateway/HTTPRoute status and provisions one
-;;;; LoadBalancer Service per Gateway fronting the per-node listeners
-;;;; (Cilium-style addressing).  Status is written only when it would change,
+;;;; LoadBalancer Service per Gateway fronting the per-node listeners.
+;;;; Status is written only when it would change,
 ;;;; since a write wakes every watcher -- including our own nudge loop.
 
 (in-package #:gr8s.controllers)
