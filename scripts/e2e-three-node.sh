@@ -11,7 +11,7 @@
 #   vm1 (gr8s-ha-1) : founder  -- `serve --raft-init`. Wins the initial election,
 #         performs the one-shot cluster bootstrap writes (namespaces, default
 #         roles, the kubernetes Service), then leads the Raft group.
-#   vm2,vm3         : joiners  -- `serve --raft-join vm1:RAFT_PORT` with a
+#   vm2,vm3         : joiners  -- `serve --join vm1:RAFT_PORT` with a
 #         control-plane join token minted on vm1. They receive the bootstrap
 #         state by Raft replication (they do NOT re-run the bootstrap writes --
 #         see podster-40i) and each brings up its own node agent + in-cluster API
@@ -212,7 +212,7 @@ founder_up() {  # ip name -- start the --raft-init founder and wait for its API 
   log "starting HA founder on $name ($ip): serve --raft-init (raft $ip:$RAFT_PORT)"
   ssh_n "$ip" "systemctl reset-failed gr8s 2>/dev/null; sysctl -w net.ipv4.ip_forward=1 >/dev/null
     systemd-run --unit gr8s --collect /usr/local/bin/gr8s serve \
-      --raft-init --raft-id $name --raft-node-name $name --raft-listen $ip --raft-port $RAFT_PORT \
+      --raft-init --raft-id $name --raft-listen $ip --raft-port $RAFT_PORT \
       --listen 127.0.0.1 --port $CP_API_PORT \
       --node-listen $ip --node-port $CP_NODE_PORT --node-address $ip \
       --overlay-backend $OVERLAY_BACKEND \
@@ -232,8 +232,8 @@ member_up() {  # ip name founder_ip -- join an existing quorum as a control-plan
   log "joining HA member $name ($ip) -> $founder:$RAFT_PORT"
   ssh_n "$ip" "systemctl reset-failed gr8s 2>/dev/null; sysctl -w net.ipv4.ip_forward=1 >/dev/null
     systemd-run --unit gr8s --collect /usr/local/bin/gr8s serve \
-      --raft-join $founder:$RAFT_PORT --raft-id $name --raft-node-name $name \
-      --raft-listen $ip --raft-port $RAFT_PORT --raft-token $tok --raft-ca-pin $capin \
+      --join $founder:$RAFT_PORT --raft-id $name \
+      --raft-listen $ip --raft-port $RAFT_PORT --token $tok --ca-pin $capin \
       --listen 127.0.0.1 --port $CP_API_PORT \
       --node-listen $ip --node-port $CP_NODE_PORT --node-address $ip \
       --overlay-backend $OVERLAY_BACKEND \

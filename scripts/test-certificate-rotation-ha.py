@@ -84,9 +84,9 @@ class Cluster:
                      "--node-name", node["id"], "--raft-id", node["id"],
                      "--raft-port", node["raft"], "--kubeconfig", node["state"] / "kubeconfig"]
         if join:
-            arguments += ["--raft-join", f"127.0.0.1:{join_via['raft']}",
-                          "--raft-node-name", node["id"], "--raft-token", join["token"],
-                          "--raft-ca-pin", join["caPin"]]
+            arguments += ["--join", f"127.0.0.1:{join_via['raft']}",
+                          "--token", join["token"],
+                          "--ca-pin", join["caPin"]]
         else:
             arguments += ["--raft-init"]
         child = subprocess.Popen([str(self.binary), *map(str, arguments)], stdout=log,

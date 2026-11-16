@@ -875,14 +875,24 @@
 (test serve-compaction-defaults-to-ha-and-supports-explicit-overrides
   (is-false (getf (gr8s.server::parse-serve-options nil) :raft-compaction))
   (is-true (getf (gr8s.server::parse-serve-options '("--raft-init")) :raft-compaction))
-  (is-true (getf (gr8s.server::parse-serve-options '("--raft-join" "127.0.0.1:7449")) :raft-compaction))
+  (is-true (getf (gr8s.server::parse-serve-options '("--join" "127.0.0.1:7449")) :raft-compaction))
   (is-false (getf (gr8s.server::parse-serve-options '("--raft-init" "--no-raft-compaction")) :raft-compaction))
   (is-false (getf (gr8s.server::parse-serve-options '("--no-raft-compaction")) :raft-compaction))
   (is-false (getf (gr8s.server::parse-serve-options '("--raft-init" "--raft-compaction" "--no-raft-compaction")) :raft-compaction))
   (is-true (getf (gr8s.server::parse-serve-options '("--raft-init" "--no-raft-compaction" "--raft-compaction")) :raft-compaction))
   (is-true (getf (gr8s.server::parse-serve-options '("--raft-init" "--raft-compaction")) :raft-compaction))
-  (is-true (getf (gr8s.server::parse-serve-options '("--raft-compaction" "--raft-join" "127.0.0.1:7449")) :raft-compaction))
+  (is-true (getf (gr8s.server::parse-serve-options '("--raft-compaction" "--join" "127.0.0.1:7449")) :raft-compaction))
   (signals error (gr8s.server::parse-serve-options '("--raft-compaction"))))
+
+(test serve-joins-with-the-agent-flag-names
+  (let ((options (gr8s.server::parse-serve-options
+                  '("--join" "10.0.0.1:7000" "--node-name" "cp2" "--token" "secret" "--ca-pin" "sha256:ab"))))
+    (is (equal "10.0.0.1:7000" (getf options :raft-join)))
+    (is (equal "cp2" (getf options :node-name)))
+    (is (equal "secret" (getf options :raft-token)))
+    (is (equal "sha256:ab" (getf options :raft-ca-pin))))
+  (dolist (old '("--raft-join" "--raft-token" "--raft-ca-pin" "--raft-node-name"))
+    (signals error (gr8s.server::parse-serve-options (list old "x")))))
 
 (test production-ha-startup-forwards-default-and-explicit-compaction
   (dolist (enabled '(nil t))

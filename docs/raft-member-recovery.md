@@ -150,7 +150,7 @@ cannot acquire ownership. The stable `.gr8s-serve.lock` file remains in place:
 do not delete it to bypass an active owner.
 
 `metadata/server-mode.json` records standalone or HA intent atomically before
-application initialization. Explicit `--raft-init` or `--raft-join` can transition
+application initialization. Explicit `--raft-init` or `--join` can transition
 standalone state to HA. Once HA intent is recorded, restart with the appropriate
 Raft options; omitting them is refused, including after failed HA initialization.
 Existing Raft WAL, bootstrap or PKI evidence also prevents standalone fallback.
@@ -674,7 +674,7 @@ checks live-owner protection, restart cleanup, and retained data/artifacts.
 Each HA `gr8s serve` starts its checkpoint worker with the normal thresholds
 and a one-second check interval. `--raft-compaction` explicitly enables the same
 behavior; `--no-raft-compaction` disables scheduling for diagnostics. Explicit
-enabling requires `--raft-init` or `--raft-join HOST:PORT`; standalone startup
+enabling requires `--raft-init` or `--join HOST:PORT`; standalone startup
 has no worker. With scheduling disabled, retained logs can grow without a
 checkpoint bound. Changing this setting preserves the original state directory,
 identity and endpoints. Native acceptance covers the fake-runtime production
