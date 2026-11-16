@@ -592,6 +592,7 @@
                              (:file "cert-manager-test")
                              (:file "port-forward-test")
                              (:file "pod-volumes-test")
+                             (:file "pod-failure-reporting-test")
                              (:file "image-pull-credentials-test")
                              (:file "pod-volume-projection-test")
                              (:file "pod-certificate-test")

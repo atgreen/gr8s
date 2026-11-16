@@ -102,6 +102,19 @@ True (with the kubelet reason) for a signal its heartbeat reported."
       (is (equal "True" (gethash "status" condition)))
       (is (equal "KubeletHasInsufficientMemory" (gethash "reason" condition))))))
 
+(test node-pressure-conditions-carry-the-kubelets-messages
+  (let ((node (gr8s.model::make-node-record :id "m" :name "mnode" :pod-cidr "10.88.1.0/24")))
+    (flet ((message (type) (gethash "message" (node-condition-of-type (gr8s.resources::node-api-object node) type))))
+      (is (equal "kubelet has sufficient memory available" (message "MemoryPressure")))
+      (is (equal "kubelet has no disk pressure" (message "DiskPressure")))
+      (is (equal "kubelet has sufficient PID available" (message "PIDPressure")))
+      (setf (gr8s.model::node-record-memory-pressure node) t
+            (gr8s.model::node-record-disk-pressure node) t
+            (gr8s.model::node-record-pid-pressure node) t)
+      (is (equal "kubelet has insufficient memory available" (message "MemoryPressure")))
+      (is (equal "kubelet has disk pressure" (message "DiskPressure")))
+      (is (equal "kubelet has insufficient PID available" (message "PIDPressure"))))))
+
 (test note-node-pressure-updates-the-published-condition
   "A heartbeat's memory-pressure signal flips the Node's MemoryPressure condition
 through the served API, and clears when the next heartbeat reports none."

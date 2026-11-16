@@ -292,6 +292,8 @@ finishes stops the node starting Pods, and nothing else reports it (podster-uqb.
 (defun evict-pod-for-storage (reconciler pod message)
   "Stop POD and durably record the eviction, so reconciliation never starts it again."
   (remhash (pod-uid pod) (reconciler-storage-measurements reconciler))
+  ;; Recorded first, as a kubelet's eviction manager does, and kept until the next status report.
+  (gr8s.runtime:runtime-record-pod-event (reconciler-runtime reconciler) (pod-uid pod) "Evicted" message "Warning")
   (runtime-delete (reconciler-runtime reconciler) (pod-uid pod))
   (let ((status (pod-status "Failed" :reason "Evicted" :message message)))
     (save-pod-observation (reconciler-store reconciler) pod status)

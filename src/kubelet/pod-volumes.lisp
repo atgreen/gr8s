@@ -369,6 +369,32 @@ The Pod's user namespace block is free again once nothing it owns remains."
         (error 'runtime-error :message (format nil "Pod volumes under ~A are still mounted" directory)))
       (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))
 
+(defun volume-setup-failure-cause (volume condition)
+  "Return what stops VOLUME being set up, worded as a kubelet words it."
+  (let ((missing (and (typep condition 'gr8s.model:kubernetes-error)
+                      (= 404 (gr8s.model:kubernetes-error-status-code condition)))))
+    (cond
+      ((and missing (gethash "configMap" volume))
+       (format nil "configmap ~S not found" (gethash "name" (gethash "configMap" volume))))
+      ((and missing (gethash "secret" volume))
+       (format nil "secret ~S not found" (gethash "secretName" (gethash "secret" volume))))
+      ((typep condition 'gr8s.runtime:runtime-error) (gr8s.runtime:runtime-error-message condition))
+      (t (princ-to-string condition)))))
+
+(defun materialize-mount-volume (runtime pod volume)
+  "Materialize VOLUME for a container, or signal why its container must wait for it.
+As with a kubelet, a volume that can't be set up yet keeps the container in ContainerCreating
+with a FailedMount Event, rather than failing the Pod's whole sync and saying nothing."
+  (handler-case (materialize-pod-volume runtime pod volume)
+    ;; These already explain themselves, or aren't about this volume at all.
+    ((or gr8s.runtime:container-config-error gr8s.runtime:runtime-unavailable) (condition)
+      (error condition))
+    ((or gr8s.model:kubernetes-error gr8s.runtime:runtime-error) (condition)
+      (error 'gr8s.runtime:volume-mount-error
+             :volume (gethash "name" volume)
+             :message (format nil "MountVolume.SetUp failed for volume ~S : ~A"
+                              (gethash "name" volume) (volume-setup-failure-cause volume condition))))))
+
 (defun materialize-pod-volume (runtime pod volume)
   "Create a volume's directories and projected files with enforced fsGroup access."
   (when (gethash "hostPath" volume)
@@ -470,7 +496,7 @@ A runtime that cannot honour Enabled then fails the container, as a kubelet woul
                              :key (lambda (volume) (gethash "name" volume)))
           collect (if (gethash "image" volume)
                       (container-image-volume-mount runtime pod container mount (gethash "image" volume) environment)
-                      (multiple-value-bind (path forced-readonly) (materialize-pod-volume runtime pod volume)
+                      (multiple-value-bind (path forced-readonly) (materialize-mount-volume runtime pod volume)
                         (let ((relative (container-mount-subpath mount environment)))
                           (when (plusp (length relative))
                             ;; As the kubelet does, a subPath that can't be prepared, such as one

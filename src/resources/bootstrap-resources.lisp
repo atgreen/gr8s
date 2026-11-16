@@ -461,13 +461,24 @@ api/discovery. Clients resolve `kubectl get ns` and `kubectl get all` through th
         (maphash (lambda (name value) (setf (gethash name list) value)) source)))
     list))
 
+(defparameter +node-pressure-messages+
+  '(("KubeletHasInsufficientMemory" . "kubelet has insufficient memory available")
+    ("KubeletHasSufficientMemory" . "kubelet has sufficient memory available")
+    ("KubeletHasDiskPressure" . "kubelet has disk pressure")
+    ("KubeletHasNoDiskPressure" . "kubelet has no disk pressure")
+    ("KubeletHasInsufficientPID" . "kubelet has insufficient PID available")
+    ("KubeletHasSufficientPID" . "kubelet has sufficient PID available"))
+  "The message a kubelet gives each node-pressure reason.")
+
 (defun node-pressure-condition (type pressured true-reason false-reason)
   "A kubelet node-pressure condition (MemoryPressure/DiskPressure/PIDPressure):
 True with TRUE-REASON when the agent reports PRESSURED, False with FALSE-REASON
-otherwise, matching the reasons upstream kubelet uses."
-  (core-object "type" type
-               "status" (if pressured "True" "False")
-               "reason" (if pressured true-reason false-reason)))
+otherwise, with the reasons and messages upstream kubelet uses."
+  (let ((reason (if pressured true-reason false-reason)))
+    (core-object "type" type
+                 "status" (if pressured "True" "False")
+                 "reason" reason
+                 "message" (cdr (assoc reason +node-pressure-messages+ :test #'equal)))))
 
 (defun node-api-object (node)
   "Serialize a registered worker with readiness taken from its live lease."

@@ -409,7 +409,8 @@ A container running as any user can write here, and a user mount at the path tak
       (ensure-container-image runtime (container-spec-image spec) policy
                               (lambda ()
                                 (pod-image-pull-credentials runtime pod (container-spec-name spec)
-                                                            (container-spec-image spec)))))
+                                                            (container-spec-image spec)))
+                              (list (pod-uid pod) (container-spec-name spec))))
     (let* ((allocation (when (containerd-runtime-device-plugin-allocation-function runtime)
                          (funcall (containerd-runtime-device-plugin-allocation-function runtime)
                                   pod (pod-runtime-container-object pod spec))))
@@ -427,6 +428,9 @@ A container running as any user can write here, and a user mount at the path tak
                (list (cons +gr8s-termination-file-label+ (namestring (car termination)))
                      (cons +gr8s-termination-policy-label+ (cdr termination)))))
            (container-id
+            ;; As a kubelet reports CreateContainerError, the container waits and a later pass
+            ;; retries, rather than the whole Pod's sync failing on this one refusal.
+            (handler-case
             (cri-create-container
              socket sandbox-id sandbox-config
              :name (container-spec-name spec)
@@ -458,7 +462,15 @@ A container running as any user can write here, and a user mount at the path tak
                      (getf allocation :cdi-device-ids))
              :attempt attempt
              :labels termination-labels
-             :log-path (container-attempt-log-path (container-spec-name spec) attempt))))
+             :log-path (container-attempt-log-path (container-spec-name spec) attempt))
+              ;; A timed-out call may still have created it, which a later pass finds and starts,
+              ;; and a runtime that's down is no refusal of this container.
+              ((or cri-command-timeout gr8s.runtime:runtime-unavailable) (condition) (error condition))
+              (error (condition)
+                (error 'gr8s.runtime:container-create-error
+                       :message (if (typep condition 'gr8s.runtime:runtime-error)
+                                    (gr8s.runtime:runtime-error-message condition)
+                                    (princ-to-string condition)))))))
       (start-created-container runtime pod spec sandbox-id container-id attempt socket))))
 
 (defun start-created-container (runtime pod spec sandbox-id container-id attempt socket)

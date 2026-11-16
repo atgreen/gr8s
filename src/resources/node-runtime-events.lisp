@@ -10,20 +10,31 @@
 (in-package #:gr8s.resources)
 
 (defparameter +container-lifecycle-event-reasons+
-  '("Created" "Started" "Killing" "Failed" "FailedPostStartHook" "FailedPreStopHook")
+  '("Created" "Started" "Killing" "Failed" "FailedPostStartHook" "FailedPreStopHook"
+    "BackOff" "FailedMount" "ErrImageNeverPull" "FailedToRetrieveImagePullSecret"
+    "RestartingAllContainers")
   "The container occurrences a node reports besides its probes' results.")
+
+(defparameter +pod-runtime-event-reasons+ '("Evicted")
+  "The occurrences a node reports about a Pod as a whole, with no container to name.")
+
+(defun node-runtime-event-reasons (kind)
+  "Return the reasons a node may report for an Event of KIND."
+  (cond ((equal kind "lifecycle") +container-lifecycle-event-reasons+)
+        ((equal kind "pod") +pod-runtime-event-reasons+)
+        (t '("Unhealthy" "ProbeWarning"))))
 
 (defun record-node-runtime-events (store pod node-name events)
   "Publish bounded same-Pod cumulative pages; ignore malformed or expired records."
   (when (and (vectorp events) (not (stringp events)))
     (loop for event across events for index below 4096
+          for pod-level = (and (hash-table-p event) (equal "pod" (gethash "kind" event)))
           when (and (hash-table-p event) (stringp (gethash "id" event)) (<= 1 (length (gethash "id" event)) 128)
-                    (member (gethash "kind" event) '("startupProbe" "readinessProbe" "livenessProbe" "lifecycle") :test #'equal)
-                    (member (gethash "reason" event) (if (equal "lifecycle" (gethash "kind" event))
-                                                         +container-lifecycle-event-reasons+
-                                                         '("Unhealthy" "ProbeWarning"))
+                    (member (gethash "kind" event) '("startupProbe" "readinessProbe" "livenessProbe" "lifecycle" "pod")
                             :test #'equal)
-                    (find (gethash "container" event) (pod-all-containers pod) :test #'equal :key #'container-spec-name)
+                    (member (gethash "reason" event) (node-runtime-event-reasons (gethash "kind" event)) :test #'equal)
+                    (or pod-level
+                        (find (gethash "container" event) (pod-all-containers pod) :test #'equal :key #'container-spec-name))
                     (typep (gethash "count" event) '(integer 1 2147483647))
                     (stringp (gethash "message" event))
                     (<= (length (trivial-utf-8:string-to-utf-8-bytes (gethash "message" event))) 1024)
@@ -49,9 +60,14 @@
                                        (gethash "message" old) (gethash "message" event)) old)))
                            (create-core-resource store "events"
                              (core-object "apiVersion" "v1" "kind" "Event" "metadata" (core-object "name" name)
-                                          "involvedObject" (core-object "apiVersion" "v1" "kind" "Pod" "namespace" (pod-namespace pod)
-                                                                        "name" (pod-name pod) "uid" (pod-uid pod)
-                                                                        "fieldPath" (format nil "spec.containers{~A}" (gethash "container" event)))
+                                          "involvedObject" (let ((object (core-object "apiVersion" "v1" "kind" "Pod"
+                                                                                      "namespace" (pod-namespace pod)
+                                                                                      "name" (pod-name pod) "uid" (pod-uid pod))))
+                                                             ;; An Event about the whole Pod names no container.
+                                                             (unless pod-level
+                                                               (setf (gethash "fieldPath" object)
+                                                                     (format nil "spec.containers{~A}" (gethash "container" event))))
+                                                             object)
                                           "reason" (gethash "reason" event) "message" (gethash "message" event)
                                           "type" (if (equal "Normal" (gethash "type" event)) "Normal" "Warning")
                                           "count" (gethash "count" event) "firstTimestamp" (gethash "firstTimestamp" event)

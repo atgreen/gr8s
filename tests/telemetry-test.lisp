@@ -16,11 +16,13 @@
                       (lambda (root sandbox)
                         (is (search "containerd/bpf" root))
                         (is (string= "sandbox-telemetry" sandbox))
-                        (gr8s.foundation::json-object "allowedPackets" 42 "droppedPackets" 3 "rejectedSpoofs" 2))))
+                        (gr8s.foundation::json-object "allowedPackets" 42 "droppedPackets" 3 "rejectedSpoofs" 2
+                                                      "policyDrops" 5))))
              (endpoint (first (slot-value status 'gr8s.node.v1::endpoints))))
         (is (string= "10.88.8.1" (slot-value endpoint 'gr8s.node.v1::pod-ip)))
         (is (= 42 (slot-value endpoint 'gr8s.node.v1::allowed-packets)))
         (is (= 3 (slot-value endpoint 'gr8s.node.v1::dropped-packets)))
+        (is (= 5 (slot-value endpoint 'gr8s.node.v1::policy-drops)) "policy drops reach the control plane")
         (is (= 2 (slot-value endpoint 'gr8s.node.v1::rejected-spoofs))))
       (let* ((status (gr8s.agent::node-runtime-status
                       runtime :counter-reader (lambda (&rest args)
@@ -28,6 +30,38 @@
                                                 (error "pinned map is unavailable"))))
              (endpoint (first (slot-value status 'gr8s.node.v1::endpoints))))
         (is (search "unavailable" (slot-value endpoint 'gr8s.node.v1::error-message)))))))
+
+(test the-policy-drop-counter-is-read-from-its-pinned-map
+  ;; Index 6 of traffic_stats is the guards' NetworkPolicy counter, which was never read.
+  (let* ((reads nil) (closed nil)
+         (counters (gr8s.network::read-cni-policy-counters
+                    "/root" "sandbox"
+                    :open-pinned (lambda (path) (declare (ignore path)) 99)
+                    :map-info (lambda (fd name) (declare (ignore fd)) name)
+                    :lookup (lambda (map index) (push (list map index) reads) (+ 100 index))
+                    :close-fd (lambda (fd) (push fd closed)))))
+    (is (= 106 (gethash "policyDrops" counters)))
+    (is (= 102 (gethash "droppedPackets" counters)))
+    (is (member '("traffic_stats" 6) reads :test #'equal))
+    (is (equal '(99 99) closed) "both maps are closed")))
+
+(test both-guard-directions-count-policy-drops-as-drops
+  ;; Egress always did; ingress counted only the policy counter, so inbound
+  ;; refusals were missing from dropped_packets.
+  (labels ((policy-drop-sites (tree)
+             (cond ((atom tree) 0)
+                   ((equal tree '(whistler::drop-pod-packet :policy)) 1)
+                   (t (reduce #'+ (mapcar #'policy-drop-sites tree)))))
+           (bare-policy-counts (tree)
+             (cond ((atom tree) 0)
+                   ((equal tree '(whistler::add-pod-counter whistler::policy-drops 1)) 1)
+                   (t (reduce #'+ (mapcar #'bare-policy-counts tree))))))
+    (destructuring-bind (egress ingress) gr8s.network::*egress-guard-program-forms*
+      (is (= 4 (policy-drop-sites egress)))
+      (is (= 4 (policy-drop-sites ingress)))
+      (is (zerop (bare-policy-counts ingress)) "no inbound refusal skips the general drop counters")))
+  (finishes (gr8s.network::compile-egress-guard))
+  (finishes (gr8s.network::compile-egress-guard :service-packets t)))
 
 (test endpoint-counters-roundtrip-with-64-bit-values
   (let* ((message (make-instance 'gr8s.node.v1::node-status
@@ -76,6 +110,7 @@
                                                         :sandbox-id "sandbox-metrics"
                                                         :interface-name "eth0" :pod-ip "10.88.1.1"
                                                         :allowed-packets sample
+                                                        :policy-drops 4
                                                         :error-message (if available "" "map unavailable")))))
                            status))
                        :control control :reconnect-delay 0.01))))
@@ -99,7 +134,8 @@
                (multiple-value-bind (body code headers) (request "/metrics")
                  (is (= 200 code))
                  (is (search "text/plain" (cdr (assoc :content-type headers))))
-                 (is (search "gr8s_endpoint_allowed_packets_total{node=\"worker-a\",sandbox=\"sandbox-metrics\",interface=\"eth0\",pod_ip=\"10.88.1.1\"} 12" body)))
+                 (is (search "gr8s_endpoint_allowed_packets_total{node=\"worker-a\",sandbox=\"sandbox-metrics\",interface=\"eth0\",pod_ip=\"10.88.1.1\"} 12" body))
+                 (is (search "gr8s_endpoint_policy_drops_total{node=\"worker-a\",sandbox=\"sandbox-metrics\",interface=\"eth0\",pod_ip=\"10.88.1.1\"} 4" body)))
                (bt:with-lock-held (lock) (setf available nil))
                (is-true (wait-until
                          (lambda ()
