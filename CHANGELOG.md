@@ -9,6 +9,11 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- `gr8s backup` (`keygen`, `save`, `verify`) and `gr8s restore`: offline
+  operator backup of a control-plane state directory — cluster identity,
+  keys, and the Raft store — into one encrypted, authenticated bundle,
+  and verify-then-publish restore into a fresh state directory
+  ([guide](docs/backup-restore.md)).
 - RPM and DEB packages for amd64 and arm64, attached to each release. They
   install `/usr/bin/gr8s`, `gr8s-killall.sh`, and disabled `gr8s-server` /
   `gr8s-agent` systemd units configured through `/etc/gr8s/*.env`. A tag

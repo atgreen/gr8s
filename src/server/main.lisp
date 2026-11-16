@@ -1625,7 +1625,7 @@ needs no shell/coreutils/util-linux. Returns 0."
     ((and (null (rest arguments))
           (member (first arguments)
                   '("runtime" "wireguard" "network" "debug"
-                    "certificate" "secrets-encrypt")
+                    "certificate" "secrets-encrypt" "backup")
                   :test #'string=))
      (list :command :help :help-path arguments))
     ((member (first arguments) '("version" "--version" "-v") :test #'string=)
@@ -1666,6 +1666,10 @@ needs no shell/coreutils/util-linux. Returns 0."
      (parse-certificate-options (rest arguments)))
     ((string= "secrets-encrypt" (first arguments))
      (parse-secrets-encrypt-options (rest arguments)))
+    ((string= "backup" (first arguments))
+     (parse-backup-options (rest arguments)))
+    ((string= "restore" (first arguments))
+     (parse-restore-options (rest arguments)))
     ((string= "doctor" (first arguments))
      (parse-doctor-options (rest arguments)))
     ((string= "dashboard" (first arguments))
@@ -3069,6 +3073,12 @@ Capture timestamps, affected namespace/Pod UID/node, exact commands, exit codes,
 and relevant logs. Redact tokens, keys, kubeconfigs, and Secret values. Distinguish
 observations from hypotheses; verify recovery against the original symptom.
 
+Before risky maintenance, take an offline backup: stop the server, then
+`gr8s backup save --state-directory DIR --output FILE --key-file KEY` (create the
+key once with `gr8s backup keygen`). The encrypted bundle captures cluster
+identity, keys, and the Raft store; `gr8s backup verify` authenticates it and
+`gr8s restore` rebuilds a fresh state directory from it. See docs/backup-restore.md.
+
 ## Live Lisp inspection with Slynk
 
 You can inspect a running process without restarting it or installing a debug
@@ -3175,6 +3185,8 @@ No HA API may start from member-local certificate state before this converges."
     ("wireguard" "Manage WireGuard identity")
     ("network" "Inspect cluster networking") ("certificate" "Manage certificates")
     ("secrets-encrypt" "Manage secrets encryption")
+    ("backup" "Capture and verify encrypted state backups")
+    ("restore" "Restore a state backup into a fresh state directory")
     ("skill" "Print guidance for operators and AI agents")
     ("dashboard" "Open the Kubernetes dashboard (Headlamp) in a browser")
     ("version" "Print version information") ("notices" "Print license notices")))
@@ -3345,10 +3357,26 @@ No HA API may start from member-local certificate state before this converges."
                          ("reencrypt" "Rewrite all Secrets with the active key")
                          ("finalize" "Discard superseded encryption keys"))
              :options '(("--help, -h" "show help"))))
+      ((equal path '("backup"))
+       (page "Capture and verify encrypted state backups" "COMMAND [OPTIONS]"
+             :commands '(("keygen" "Create a private backup key file")
+                         ("save" "Capture an offline state directory into an encrypted bundle")
+                         ("verify" "Authenticate a bundle end to end without restoring it"))
+             :options '(("--key-file FILE" "Private key file of 64 hexadecimal characters")
+                        ("--state-directory PATH" "State directory to capture (save; default system path)")
+                        ("--output FILE" "Bundle to create (save); an existing file is never overwritten")
+                        ("--input FILE" "Bundle to read (verify)")
+                        ("--help, -h" "show help"))))
+      ((equal path '("restore"))
+       (page "Restore a state backup into a fresh state directory" "[OPTIONS]"
+             :options '(("--input FILE" "Bundle to restore")
+                        ("--state-directory PATH" "Target directory; must not exist (default system path)")
+                        ("--key-file FILE" "Private key file of 64 hexadecimal characters")
+                        ("--help, -h" "show help"))))
       ((and (= (length path) 1) (assoc (first path) +cli-commands+ :test #'string=))
        (simple (second (assoc (first path) +cli-commands+ :test #'string=))))
       ((and (> (length path) 1)
-            (member (first path) '("wireguard" "network" "debug" "certificate" "secrets-encrypt")
+            (member (first path) '("wireguard" "network" "debug" "certificate" "secrets-encrypt" "backup")
                     :test #'string=))
        (simple (format nil "Run the ~{~A~^ ~} command" path)))
       (t (error "no help for command: ~{~A~^ ~}" path)))))
@@ -3457,6 +3485,9 @@ No HA API may start from member-local certificate state before this converges."
                 :secrets-encrypt-promote :secrets-encrypt-reencrypt
                 :secrets-encrypt-finalize)
                (run-secrets-encrypt-command options))
+              ((:backup-keygen :backup-save :backup-verify)
+               (run-backup-command options))
+              (:restore (run-restore-command options))
               (:doctor
                (if (plusp (apply #'run-doctor
                                  (append
