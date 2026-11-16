@@ -38,11 +38,16 @@ The new work is therefore concentrated in three pieces:
    read through a narrow interface with two implementations: the gr8s store
    (today's behavior, unchanged) and the watch client's cache. The planners
    and dataplane code do not change.
-3. **`gr8s cni-agent`** (new mode). The DaemonSet entry point: starts the
-   CNI control socket, watches Nodes, Pods, NetworkPolicies, Services,
+3. **`gr8s net-agent`** (new mode; first shipped as `cni-agent`). The
+   DaemonSet entry point: watches Nodes, Pods, NetworkPolicies, Services,
    EndpointSlices — and, when the gateway flag is set, GatewayClasses,
    Gateways, HTTPRoutes and ReferenceGrants — and drives the existing
-   dataplane from the watch cache.
+   dataplane from the watch cache. Its features are independently
+   selectable: `--cni` (the CNI control socket, IPAM, overlay fabric and
+   NetworkPolicy guards; on by default), `--service-lb`, and `--gateway`.
+   With `--cni false` the agent leaves the incumbent CNI in place and runs
+   only the service LB and/or Gateway over it, requiring just that Pod IPs
+   are reachable from the host network.
 
 ## Topology: one DaemonSet, no operator
 
@@ -95,7 +100,7 @@ lifts out into an operator mechanically.
 ## WireGuard overlay (shipped)
 
 The cross-node Pod fabric encrypts with WireGuard when the agent runs with
-`cni-agent --overlay-backend wireguard` (Helm: `overlay.backend=wireguard`).
+`net-agent --overlay-backend wireguard` (Helm: `overlay.backend=wireguard`).
 The datapath reuses the native `reconcile-node-wireguard-network`; the
 foreign-cluster additions are key management and peer discovery over the host
 API, since the native node-session gRPC key exchange is unavailable here:

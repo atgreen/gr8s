@@ -1,6 +1,6 @@
 # Conformance for gr8s-as-CNI
 
-gr8s networks a foreign cluster from a DaemonSet of `gr8s cni-agent` pods
+gr8s networks a foreign cluster from a DaemonSet of `gr8s net-agent` pods
 (see `../chart/gr8s-net`), replacing the stock CNI, kube-proxy and any
 built-in NetworkPolicy controller. These are the upstream suites that prove
 the result conforms, and how to run them.
@@ -20,7 +20,7 @@ curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server \
   --flannel-backend=none --disable-network-policy \
   --disable-kube-proxy --disable=traefik --disable=servicelb" sh -
 helm install gr8s-net deploy/chart/gr8s-net -n kube-system \
-  --set gateway.enabled=true   # add --set serviceLb=true where wired
+  --set gateway.enabled=true   # cni and serviceLb features default on
 ```
 
 Join more nodes with `k3s agent` on a shared underlay and the same chart; the

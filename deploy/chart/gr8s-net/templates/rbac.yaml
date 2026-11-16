@@ -24,7 +24,7 @@ rules:
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
     verbs: [get, create, update]
-  {{- if eq .Values.overlay.backend "wireguard" }}
+  {{- if and .Values.cni.enabled (eq .Values.overlay.backend "wireguard") }}
   # WireGuard overlay only. The agent publishes this node's WireGuard public key
   # as an annotation on its own Node object so peers can discover it; that needs
   # patch on nodes. It is a node-object write (not secrets), scoped to a field

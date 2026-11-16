@@ -14,8 +14,18 @@ paths:
 # Pod interface MTU (lower it when an encapsulating underlay needs headroom).
 mtu: 1450
 
+cni:
+  # Pod networking: the CNI plugin and conflist install, IPAM from each node's
+  # podCIDR, the overlay fabric, NetworkPolicy enforcement, and hostPort. This
+  # is the feature that replaces the cluster's CNI and NetworkPolicy
+  # controller; turn it off to run only the service LB and/or Gateway on top
+  # of the incumbent CNI (they need Pod IPs reachable from the host network,
+  # which most CNIs provide). At least one of the three features must be on.
+  enabled: true
+
 overlay:
-  # The node-to-node Pod fabric. "vxlan" tunnels Pod traffic unencrypted;
+  # The node-to-node Pod fabric (cni feature only).
+  # "vxlan" tunnels Pod traffic unencrypted;
   # "wireguard" encrypts Pod-CIDR-to-Pod-CIDR traffic (only -- node and
   # API-server traffic stays in the clear, so the agent still bootstraps). Each
   # agent generates its own key pair and publishes the public key as a Node
@@ -27,8 +37,8 @@ overlay:
 
 serviceLb:
   # Replace kube-proxy: serve Services (ClusterIP and NodePort), hostPort, and the
-  # eBPF socket load balancer on every node. This is the core of the CNI, so it is
-  # on by default; turn it off only when another proxy still handles Services.
+  # eBPF socket load balancer on every node. On by default; turn it off only when
+  # another proxy still handles Services.
   enabled: true
 
 apiServer:

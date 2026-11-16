@@ -765,12 +765,32 @@
     (is (search "# gr8s operator and agent guide" output))
     (is (search "gr8s debug slynk" output))
     (is (search "gr8s debug trace --server" output))
-    (is (search "gr8s doctor" output)))
+    (is (search "gr8s doctor" output))
+    (is (search "gr8s net-agent" output))
+    (is (search "deploy/chart/gr8s-net" output)))
   (dolist (arguments '(("help") ("skill" "--help") ("help" "skill")))
     (let ((output (with-output-to-string (*standard-output*)
                     (is (= 0 (gr8s.server::main-with-environment
                               arguments (constantly nil) (constantly 99)))))))
       (is (search "skill" output)))))
+
+(test net-agent-features-are-independently-selectable
+  (let ((options (gr8s.server::parse-net-agent-options nil)))
+    (is (eq :net-agent (getf options :command)))
+    (is-true (getf options :cni))
+    (is-false (getf options :gateway))
+    (is-false (getf options :service-lb)))
+  (let ((options (gr8s.server::parse-net-agent-options
+                  '("--cni" "false" "--gateway" "true"))))
+    (is-false (getf options :cni))
+    (is-true (getf options :gateway)))
+  (is-true (getf (gr8s.server::parse-net-agent-options
+                  '("--cni" "false" "--service-lb" "true"))
+                 :service-lb))
+  ;; An agent with every feature off would only watch and do nothing.
+  (signals error (gr8s.server::parse-net-agent-options '("--cni" "false")))
+  (signals error (gr8s.server::parse-net-agent-options '("--cni")))
+  (signals error (gr8s.server::parse-net-agent-options '("--unknown" "x"))))
 
 
 (test serve-compaction-defaults-to-ha-and-supports-explicit-overrides

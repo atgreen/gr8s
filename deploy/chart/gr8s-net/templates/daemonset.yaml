@@ -19,10 +19,12 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       tolerations:
         - operator: Exists
+      {{- if .Values.cni.enabled }}
       initContainers:
         # Install the CNI plugin binary and conflist, and mount the agent's bpffs
         # -- done by the gr8s binary itself (cni-install), so the image needs no
-        # shell/coreutils/util-linux and can be distroless.
+        # shell/coreutils/util-linux and can be distroless. Only the cni feature
+        # takes over the node's CNI; without it the incumbent CNI stays.
         - name: install
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -37,12 +39,13 @@ spec:
             - { name: cni-bin, mountPath: /host-cni-bin }
             - { name: cni-conf, mountPath: /host-cni-conf }
             - { name: bpf, mountPath: /host-bpf, mountPropagation: Bidirectional }
+      {{- end }}
       containers:
         - name: agent
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
-            - cni-agent
+            - net-agent
             - --node-name
             - $(NODE_NAME)
             - --socket
@@ -53,6 +56,8 @@ spec:
             - "{{ .Values.paths.state }}"
             - --mtu
             - "{{ .Values.mtu }}"
+            - --cni
+            - "{{ .Values.cni.enabled }}"
             - --overlay-backend
             - "{{ .Values.overlay.backend }}"
             {{- if eq .Values.overlay.backend "wireguard" }}
@@ -82,19 +87,25 @@ spec:
             - { name: bpf, mountPath: "{{ .Values.paths.bpf }}", mountPropagation: Bidirectional }
             - { name: state, mountPath: "{{ .Values.paths.state }}" }
             - { name: socket, mountPath: "{{ .Values.paths.socket }}" }
+            {{- if .Values.cni.enabled }}
             # The container runtime hands CNI a netns bind under /run/netns;
             # new binds must propagate in or every ADD fails to open them.
             - { name: netns, mountPath: /run/netns, mountPropagation: HostToContainer }
+            {{- end }}
       volumes:
+        {{- if .Values.cni.enabled }}
         - name: cni-bin
           hostPath: { path: "{{ .Values.paths.cniBin }}", type: DirectoryOrCreate }
         - name: cni-conf
           hostPath: { path: "{{ .Values.paths.cniConf }}", type: DirectoryOrCreate }
+        {{- end }}
         - name: bpf
           hostPath: { path: "{{ .Values.paths.bpf }}", type: DirectoryOrCreate }
         - name: state
           hostPath: { path: "{{ .Values.paths.state }}", type: DirectoryOrCreate }
         - name: socket
           hostPath: { path: "{{ .Values.paths.socket }}", type: DirectoryOrCreate }
+        {{- if .Values.cni.enabled }}
         - name: netns
           hostPath: { path: /run/netns, type: DirectoryOrCreate }
+        {{- end }}

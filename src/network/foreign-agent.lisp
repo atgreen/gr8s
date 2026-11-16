@@ -1,24 +1,32 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
 ;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
-;;;; The foreign-cluster CNI node agent (docs/design-foreign-cluster-networking.md,
-;;;; podster-982.3).
+;;;; The foreign-cluster network services agent (podster-982.3, podster-982.14,
+;;;; docs/design-foreign-cluster-networking.md).
 ;;;;
 ;;;; On a cluster whose kubelet and container runtime are not gr8s's, this agent
-;;;; owns only the network slice of a node: it serves the gr8s CNI plugin's Unix
-;;;; socket, allocates Pod addresses from the node's own podCIDR, wires routed
-;;;; veths, and keeps every local Pod's Whistler NetworkPolicy guard maps fed
-;;;; from the cluster's NetworkPolicies, Namespaces and Pods -- all read through
-;;;; the desired-state seam over a FOREIGN-RESOURCE-VIEW.  It never creates,
-;;;; deletes or observes Pods; the foreign kubelet owns their lifecycle.
+;;;; owns only the network slice of a node, as independently selectable
+;;;; features over one shared FOREIGN-RESOURCE-VIEW.  The CNI feature serves
+;;;; the gr8s CNI plugin's Unix socket, allocates Pod addresses from the node's
+;;;; own podCIDR, wires routed veths, reconciles the overlay fabric, and keeps
+;;;; every local Pod's Whistler NetworkPolicy guard maps fed from the cluster's
+;;;; NetworkPolicies, Namespaces and Pods.  The service LB and Gateway features
+;;;; arrive as EXTRA-FACTORY layers sharing the view and convergence loop; they
+;;;; run with or without the CNI, since they only need Pod IPs the host can
+;;;; reach, however they were assigned.  It never creates, deletes or observes
+;;;; Pods; the foreign kubelet owns their lifecycle.
 
 (in-package #:gr8s.network)
 
-(defstruct (foreign-cni-agent (:constructor %make-foreign-cni-agent))
-  "One node's foreign-cluster CNI service and its policy convergence loop."
+(defstruct (foreign-net-agent (:constructor %make-foreign-net-agent))
+  "One node's foreign-cluster network services and their convergence loop."
+  ;; CNI is a feature, not the essence: NIL skips the CNI socket, IPAM,
+  ;; overlay fabric, NetworkPolicy guards and hostPort relays, leaving the
+  ;; extra layers (service LB, Gateway) to drive the loop alone.
+  (cni t)
   view node-name ipam bpf-root server cluster
-  (lock (bt:make-lock "gr8s foreign CNI agent"))
-  (wake (bt:make-condition-variable :name "gr8s foreign CNI agent wake"))
+  (lock (bt:make-lock "gr8s foreign net agent"))
+  (wake (bt:make-condition-variable :name "gr8s foreign net agent wake"))
   (pending t) (running t)
   converge-thread policy-converger policy-writer
   ;; The last applied fabric intent, so peer retirement knows what to undo.
@@ -53,9 +61,9 @@
     (sleep 1)))
 
 (defun foreign-agent-nudge (agent)
-  (bt:with-lock-held ((foreign-cni-agent-lock agent))
-    (setf (foreign-cni-agent-pending agent) t)
-    (bt:condition-notify (foreign-cni-agent-wake agent))))
+  (bt:with-lock-held ((foreign-net-agent-lock agent))
+    (setf (foreign-net-agent-pending agent) t)
+    (bt:condition-notify (foreign-net-agent-wake agent))))
 
 (defun foreign-node-internal-address (node)
   (loop for entry across (let ((addresses
@@ -147,15 +155,15 @@ agent can still bootstrap against the host cluster (the Antrea/Cilium model)."
   "Publish this node's WireGuard public key as a Node annotation, idempotently:
 patch only when the live annotation differs from this node's key, so a steady
 state produces no API writes and no watch churn."
-  (let* ((node-name (foreign-cni-agent-node-name agent))
-         (public-key (foreign-cni-agent-wireguard-public-key agent))
+  (let* ((node-name (foreign-net-agent-node-name agent))
+         (public-key (foreign-net-agent-wireguard-public-key agent))
          (encoded (ag-grpc:base64-encode public-key))
          (node (ignore-errors
                  (gr8s.resources::get-core-resource
-                  (foreign-cni-agent-view agent) "nodes" nil node-name))))
+                  (foreign-net-agent-view agent) "nodes" nil node-name))))
     (when (and node (not (equal encoded (foreign-node-wireguard-public-key node))))
       (gr8s.kube-client:kube-patch
-       (foreign-cni-agent-cluster agent)
+       (foreign-net-agent-cluster agent)
        (gr8s.kube-client:resource-path "" "v1" "nodes" :name node-name)
        (json-object "metadata"
                     (json-object "annotations"
@@ -163,34 +171,34 @@ state produces no API writes and no watch churn."
 
 (defun foreign-agent-fabric-intent (agent view)
   "Project this node's fabric intent for the selected overlay backend."
-  (if (string= (foreign-cni-agent-overlay-backend agent) "wireguard")
+  (if (string= (foreign-net-agent-overlay-backend agent) "wireguard")
       (foreign-node-wireguard-network
-       view (foreign-cni-agent-node-name agent)
-       :mtu (foreign-cni-agent-mtu agent)
-       :listen-port (foreign-cni-agent-wireguard-listen-port agent))
-      (foreign-node-network view (foreign-cni-agent-node-name agent)
-                            :mtu (foreign-cni-agent-mtu agent))))
+       view (foreign-net-agent-node-name agent)
+       :mtu (foreign-net-agent-mtu agent)
+       :listen-port (foreign-net-agent-wireguard-listen-port agent))
+      (foreign-node-network view (foreign-net-agent-node-name agent)
+                            :mtu (foreign-net-agent-mtu agent))))
 
 (defun foreign-agent-converge-fabric (agent)
   "Reconcile the overlay fabric when the projected intent changed.  Only once a
 peer exists (or existed) does the overlay device appear; a lone node keeps its
 host networking untouched.  In WireGuard mode this node first advertises its
 public key so peers can authenticate it."
-  (let ((view (foreign-cni-agent-view agent))
-        (previous (foreign-cni-agent-last-network agent)))
-    (when (string= (foreign-cni-agent-overlay-backend agent) "wireguard")
+  (let ((view (foreign-net-agent-view agent))
+        (previous (foreign-net-agent-last-network agent)))
+    (when (string= (foreign-net-agent-overlay-backend agent) "wireguard")
       (foreign-agent-publish-wireguard-identity agent))
     (let ((network (foreign-agent-fabric-intent agent view)))
       (when (and (not (equalp network previous))
                  (or (plusp (length (gethash "routes" network)))
                      (and previous (plusp (length (gethash "routes" previous))))))
-        (funcall (foreign-cni-agent-fabric-reconciler agent)
+        (funcall (foreign-net-agent-fabric-reconciler agent)
                  network (when previous (list previous)))
-        (setf (foreign-cni-agent-last-network agent) network)))))
+        (setf (foreign-net-agent-last-network agent) network)))))
 
 (defun foreign-agent-endpoints (agent)
   "Every local Pod endpoint (SANDBOX INTERFACE ADDRESS) the agent's IPAM holds."
-  (let ((ipam (foreign-cni-agent-ipam agent)))
+  (let ((ipam (foreign-net-agent-ipam agent)))
     (bt:with-lock-held ((node-ipam-lock ipam))
       (loop for key being the hash-keys of (node-ipam-allocations ipam)
               using (hash-value addresses)
@@ -198,54 +206,55 @@ public key so peers can authenticate it."
 
 (defun foreign-agent-converge (agent)
   "Write every local Pod's resolved NetworkPolicy into its pinned guard maps."
-  (let* ((view (foreign-cni-agent-view agent))
-         (root (foreign-cni-agent-bpf-root agent))
+  (let* ((view (foreign-net-agent-view agent))
+         (root (foreign-net-agent-bpf-root agent))
          ;; Resolve selectors against the cluster's Pods and Namespaces first,
          ;; exactly as the control plane does before projecting to gr8s nodes:
          ;; a raw policy's peers carry no addresses the guards could match.
          (specs (network-policy-specs-from-objects
                  (network-policy-projection view)))
          (ip-map (pod-ip-identity-map view)))
-    (funcall (foreign-cni-agent-policy-converger agent)
+    (funcall (foreign-net-agent-policy-converger agent)
              specs (foreign-agent-endpoints agent)
              :pod-finder (lambda (address) (gethash address ip-map))
              :directory-fn (lambda (sandbox) (nth-value 2 (cni-pin-paths root sandbox)))
-             :writer (foreign-cni-agent-policy-writer agent))))
+             :writer (foreign-net-agent-policy-writer agent))))
 
 (defun foreign-agent-converge-loop (agent)
-  (loop while (foreign-cni-agent-running agent)
-        do (bt:with-lock-held ((foreign-cni-agent-lock agent))
-             (loop until (or (foreign-cni-agent-pending agent)
-                             (not (foreign-cni-agent-running agent)))
-                   do (bt:condition-wait (foreign-cni-agent-wake agent)
-                                         (foreign-cni-agent-lock agent)))
-             (setf (foreign-cni-agent-pending agent) nil))
-           (when (foreign-cni-agent-running agent)
-             (handler-case (foreign-agent-converge-fabric agent)
-               (error (condition)
-                 (format *error-output* "~&gr8s foreign CNI agent: fabric convergence failed: ~A~%"
-                         condition)))
-             (handler-case (foreign-agent-converge agent)
-               (error (condition)
-                 (format *error-output* "~&gr8s foreign CNI agent: policy convergence failed: ~A~%"
-                         condition)))
-             (handler-case
-                 (converge-host-port-forwarders
-                  (foreign-cni-agent-host-port-forwarders agent)
-                  (foreign-cni-agent-view agent)
-                  :node-name (foreign-cni-agent-node-name agent))
-               (error (condition)
-                 (format *error-output* "~&gr8s foreign CNI agent: host port convergence failed: ~A~%"
-                         condition)))
-             (let ((extra (foreign-cni-agent-extra-converger agent)))
+  (loop while (foreign-net-agent-running agent)
+        do (bt:with-lock-held ((foreign-net-agent-lock agent))
+             (loop until (or (foreign-net-agent-pending agent)
+                             (not (foreign-net-agent-running agent)))
+                   do (bt:condition-wait (foreign-net-agent-wake agent)
+                                         (foreign-net-agent-lock agent)))
+             (setf (foreign-net-agent-pending agent) nil))
+           (when (foreign-net-agent-running agent)
+             (when (foreign-net-agent-cni agent)
+               (handler-case (foreign-agent-converge-fabric agent)
+                 (error (condition)
+                   (format *error-output* "~&gr8s foreign net agent: fabric convergence failed: ~A~%"
+                           condition)))
+               (handler-case (foreign-agent-converge agent)
+                 (error (condition)
+                   (format *error-output* "~&gr8s foreign net agent: policy convergence failed: ~A~%"
+                           condition)))
+               (handler-case
+                   (converge-host-port-forwarders
+                    (foreign-net-agent-host-port-forwarders agent)
+                    (foreign-net-agent-view agent)
+                    :node-name (foreign-net-agent-node-name agent))
+                 (error (condition)
+                   (format *error-output* "~&gr8s foreign net agent: host port convergence failed: ~A~%"
+                           condition))))
+             (let ((extra (foreign-net-agent-extra-converger agent)))
                (when extra
                  (handler-case (funcall extra)
                    (error (condition)
-                     (format *error-output* "~&gr8s foreign CNI agent: gateway convergence failed: ~A~%"
+                     (format *error-output* "~&gr8s foreign net agent: gateway convergence failed: ~A~%"
                              condition))))))))
 
-(defun start-foreign-cni-agent
-    (cluster &key node-name state-directory bpf-root socket-path
+(defun start-foreign-net-agent
+    (cluster &key (cni t) node-name state-directory bpf-root socket-path
                   (mtu 1450) operations-factory
                   (policy-converger #'converge-pod-network-policies)
                   (policy-writer #'write-pod-network-policy)
@@ -254,15 +263,18 @@ public key so peers can authenticate it."
                   wireguard-private-key wireguard-public-key (wireguard-listen-port 51820)
                   extra-factory
                   (stop-predicate (constantly nil)))
-  "Start the foreign-cluster CNI agent against CLUSTER and return it, serving CNI
-requests on SOCKET-PATH with addresses from this node's podCIDR and NetworkPolicy
-converged into the guard maps under BPF-ROOT.  OPERATIONS-FACTORY receives the
-agent's IPAM and returns the CNI operations, overriding the routed dataplane
-(tests); POLICY-CONVERGER and POLICY-WRITER override the map writes.
-EXTRA-FACTORY receives the agent's resource view and returns (values CONVERGER
-STOPPER) for a higher layer -- the Gateway controller -- that shares the view
+  "Start the foreign-cluster network services agent against CLUSTER and return
+it.  With CNI (the default) it serves CNI requests on SOCKET-PATH with
+addresses from this node's podCIDR, reconciles the overlay fabric, and
+converges NetworkPolicy into the guard maps under BPF-ROOT; with CNI NIL it
+skips all of that -- it does not wait for a podCIDR -- and runs only the
+EXTRA-FACTORY layers over the view.  OPERATIONS-FACTORY receives the agent's
+IPAM and returns the CNI operations, overriding the routed dataplane (tests);
+POLICY-CONVERGER and POLICY-WRITER override the map writes.  EXTRA-FACTORY
+receives the agent's resource view and returns (values CONVERGER STOPPER) for
+higher layers -- the service LB and Gateway controllers -- that share the view
 and the convergence loop."
-  (when (string= overlay-backend "wireguard")
+  (when (and cni (string= overlay-backend "wireguard"))
     (unless (and wireguard-private-key wireguard-public-key)
       (error "WireGuard overlay backend requires a node key pair")))
   ;; Default the datapath reconciler per backend, keeping the caller's override
@@ -274,7 +286,8 @@ and the convergence loop."
               (lambda (network previous)
                 (reconcile-node-overlay-network network previous wireguard-private-key))
               #'reconcile-node-vxlan-network)))
-  (let* ((agent (%make-foreign-cni-agent
+  (let* ((agent (%make-foreign-net-agent
+                 :cni cni
                  :node-name node-name :bpf-root bpf-root :cluster cluster
                  :policy-converger policy-converger :policy-writer policy-writer
                  :fabric-reconciler fabric-reconciler :mtu mtu
@@ -289,73 +302,75 @@ and the convergence loop."
                 :on-change (lambda (resource change key object)
                              (declare (ignore resource change key object))
                              (foreign-agent-nudge agent)))))
-    (setf (foreign-cni-agent-view agent) view)
+    (setf (foreign-net-agent-view agent) view)
     (when extra-factory
       (multiple-value-bind (converger stopper) (funcall extra-factory view)
-        (setf (foreign-cni-agent-extra-converger agent) converger
-              (foreign-cni-agent-extra-stopper agent) stopper)))
-    (let ((node (foreign-agent-wait-for-node view node-name stop-predicate)))
-      (unless node
+        (setf (foreign-net-agent-extra-converger agent) converger
+              (foreign-net-agent-extra-stopper agent) stopper)))
+    (let ((node (when cni
+                  (foreign-agent-wait-for-node view node-name stop-predicate))))
+      (when (and cni (not node))
         (gr8s.resources::stop-foreign-resource-view view)
-        (return-from start-foreign-cni-agent nil))
+        (return-from start-foreign-net-agent nil))
       (handler-case
           (progn
-            (setf (foreign-cni-agent-ipam agent)
-                  (open-node-ipam (uiop:ensure-directory-pathname state-directory)
-                                  (foreign-node-pod-cidrs node))
-                  (foreign-cni-agent-server agent)
-                  (let ((operations
-                          (if operations-factory
-                              (funcall operations-factory (foreign-cni-agent-ipam agent))
-                              (make-routed-cni-operations
-                               (foreign-cni-agent-ipam agent)
-                               :node-id node-name :mtu mtu
-                               ;; The socket LB pins its Service maps here; the
-                               ;; per-Pod SCTP classifiers read them to steer
-                               ;; SCTP, which the connect4 socket LB cannot.
-                               :sctp-nat-pin-directory
-                               (when bpf-root
-                                 (namestring (merge-pathnames
-                                              "service-lb/"
-                                              (uiop:ensure-directory-pathname bpf-root))))))))
-                    (start-agent-cni-server
-                     socket-path
-                     (lambda (request)
-                       ;; gr8s is the sole plugin here -- it creates the
-                       ;; interface itself, so no prevResult can exist.
-                       (prog1 (handle-agent-cni-request request :operations operations
-                                                                :chained nil)
-                         ;; A new or departed endpoint changes which guards exist.
-                         (foreign-agent-nudge agent)))))
-                  (foreign-cni-agent-converge-thread agent)
+            (when cni
+              (setf (foreign-net-agent-ipam agent)
+                    (open-node-ipam (uiop:ensure-directory-pathname state-directory)
+                                    (foreign-node-pod-cidrs node))
+                    (foreign-net-agent-server agent)
+                    (let ((operations
+                            (if operations-factory
+                                (funcall operations-factory (foreign-net-agent-ipam agent))
+                                (make-routed-cni-operations
+                                 (foreign-net-agent-ipam agent)
+                                 :node-id node-name :mtu mtu
+                                 ;; The socket LB pins its Service maps here; the
+                                 ;; per-Pod SCTP classifiers read them to steer
+                                 ;; SCTP, which the connect4 socket LB cannot.
+                                 :sctp-nat-pin-directory
+                                 (when bpf-root
+                                   (namestring (merge-pathnames
+                                                "service-lb/"
+                                                (uiop:ensure-directory-pathname bpf-root))))))))
+                      (start-agent-cni-server
+                       socket-path
+                       (lambda (request)
+                         ;; gr8s is the sole plugin here -- it creates the
+                         ;; interface itself, so no prevResult can exist.
+                         (prog1 (handle-agent-cni-request request :operations operations
+                                                                  :chained nil)
+                           ;; A new or departed endpoint changes which guards exist.
+                           (foreign-agent-nudge agent)))))))
+            (setf (foreign-net-agent-converge-thread agent)
                   (bt:make-thread (lambda () (foreign-agent-converge-loop agent))
-                                  :name "gr8s foreign CNI agent policy"))
+                                  :name "gr8s foreign net agent policy"))
             agent)
         (error (condition)
-          (stop-foreign-cni-agent agent)
+          (stop-foreign-net-agent agent)
           (error condition))))))
 
-(defun stop-foreign-cni-agent (agent)
+(defun stop-foreign-net-agent (agent)
   "Stop AGENT's CNI server, convergence loop and informers."
-  (bt:with-lock-held ((foreign-cni-agent-lock agent))
-    (setf (foreign-cni-agent-running agent) nil)
-    (bt:condition-notify (foreign-cni-agent-wake agent)))
-  (let ((server (foreign-cni-agent-server agent)))
+  (bt:with-lock-held ((foreign-net-agent-lock agent))
+    (setf (foreign-net-agent-running agent) nil)
+    (bt:condition-notify (foreign-net-agent-wake agent)))
+  (let ((server (foreign-net-agent-server agent)))
     (when server (ignore-errors (stop-agent-cni-server server))))
-  (let ((thread (foreign-cni-agent-converge-thread agent)))
+  (let ((thread (foreign-net-agent-converge-thread agent)))
     (when (and thread (bt:thread-alive-p thread))
       (ignore-errors (bt:join-thread thread))))
-  (ignore-errors (stop-host-port-forwarders (foreign-cni-agent-host-port-forwarders agent)))
-  (let ((stopper (foreign-cni-agent-extra-stopper agent)))
+  (ignore-errors (stop-host-port-forwarders (foreign-net-agent-host-port-forwarders agent)))
+  (let ((stopper (foreign-net-agent-extra-stopper agent)))
     (when stopper (ignore-errors (funcall stopper))))
-  (let ((view (foreign-cni-agent-view agent)))
+  (let ((view (foreign-net-agent-view agent)))
     (when view (ignore-errors (gr8s.resources::stop-foreign-resource-view view))))
   nil)
 
-(defun run-foreign-cni-agent (cluster &rest options &key stop-predicate &allow-other-keys)
-  "Run the foreign CNI agent until STOP-PREDICATE returns true."
-  (let ((agent (apply #'start-foreign-cni-agent cluster options)))
+(defun run-foreign-net-agent (cluster &rest options &key stop-predicate &allow-other-keys)
+  "Run the foreign net agent until STOP-PREDICATE returns true."
+  (let ((agent (apply #'start-foreign-net-agent cluster options)))
     (when agent
       (unwind-protect
            (loop until (funcall stop-predicate) do (sleep 1))
-        (stop-foreign-cni-agent agent)))))
+        (stop-foreign-net-agent agent)))))

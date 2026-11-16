@@ -4,7 +4,7 @@
 #
 # Run upstream conformance against a cluster using gr8s as its CNI
 # (docs/design-foreign-cluster-networking.md, podster-982.7).  Run this ON a
-# control-plane node of a cluster already networked by the gr8s cni-agent, with
+# control-plane node of a cluster already networked by the gr8s net-agent, with
 # kube-proxy, the stock CNI and any built-in NetworkPolicy controller disabled.
 # It drives sonobuoy's upstream e2e plugin; GitHub-hosted runners cannot host
 # such a cluster, so this is the reproducible harness rather than a CI job.

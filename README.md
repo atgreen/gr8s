@@ -45,6 +45,11 @@ networking stack:
 - **Gateway API** — HTTPRoute routing, status, and LoadBalancer Services.
 - **hostPort** (in-kernel DNAT at the socket hook) and cluster **DNS** reachability.
 
+Each piece is an independently selectable feature of the `gr8s net-agent`
+DaemonSet: run the full stack, or turn the CNI feature off and add just the
+Gateway or the kube-proxy replacement on top of the CNI you already run — they
+only need Pod IPs reachable from the host network, which most CNIs provide.
+
 Everything is JIT-compiled from a Lisp eBPF DSL by
 [Whistler](https://github.com/atgreen/Whistler), so the only host requirement is
 a recent kernel — there is no bundled `iptables` or `nft` binary to match. Run as
