@@ -791,12 +791,17 @@
   (signals error (gr8s.server::parse-net-agent-options '("--cni" "false")))
   (signals error (gr8s.server::parse-net-agent-options '("--cni")))
   (signals error (gr8s.server::parse-net-agent-options '("--unknown" "x")))
-  ;; The command is discoverable: top-level usage and its own help page.
+  ;; The commands are discoverable: top-level usage and their own help pages.
   (dolist (arguments '(("help") ("help" "net-agent") ("net-agent" "--help")))
     (let ((output (with-output-to-string (*standard-output*)
                     (is (= 0 (gr8s.server::main-with-environment
                               arguments (constantly nil) (constantly 99)))))))
-      (is (search "net-agent" output)))))
+      (is (search "net-agent" output))))
+  (dolist (arguments '(("help") ("help" "cni-install") ("cni-install" "--help")))
+    (let ((output (with-output-to-string (*standard-output*)
+                    (is (= 0 (gr8s.server::main-with-environment
+                              arguments (constantly nil) (constantly 99)))))))
+      (is (search "cni-install" output)))))
 
 (test debug-icl-parses-targets-and-launch-options
   ;; icl rides the slynk tunnel: same command plist, plus launch options and a
