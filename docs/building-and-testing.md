@@ -26,6 +26,15 @@ Release downloads include:
   installer and cleanup scripts (`install.sh`, `gr8s-killall.sh`,
   `gr8s-uninstall.sh`), README, and license/notice files. The scripts ship only
   inside the tarball, not as loose release assets.
+- RPM and DEB packages for both architectures, built by
+  [`releng/build-packages.sh`](../releng/build-packages.sh) from the release
+  binaries. A tag `v<k8s>-gr8s.<n>` becomes package version `<k8s>+gr8s.<n>`
+  in both formats (RPM forbids `-` in versions); the package revision (`-1`)
+  is the packaging revision alone, bumped only to respin unchanged upstream
+  content. Packages install `/usr/bin/gr8s`, `gr8s-killall.sh`, and disabled
+  `gr8s-server`/`gr8s-agent` systemd units driven by `/etc/gr8s/*.env`;
+  `install.sh` and the packages are alternatives, not layers — don't mix them
+  on one host.
 - `LICENSE`, `NOTICE`, and `SHA256SUMS` for the complete download set.
 - Per-architecture CycloneDX and SPDX files from ocicl. These describe the
   **Lisp dependencies**, rather than the entire native payload and web frontend.
