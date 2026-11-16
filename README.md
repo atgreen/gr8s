@@ -32,7 +32,8 @@ Explore the cluster through its integrated [Headlamp dashboard](#dashboard).
 [Whistler](https://github.com/atgreen/Whistler) JIT-compiles and loads programs
 written in a [bpftrace-compatible language](docs/design-gr8s-trace.md) for live
 kernel tracing of selected Pods. Inspect running control-plane and agent
-processes through [Slynk](docs/building-and-testing.md#debugging-a-running-cluster).
+processes through [Slynk](https://github.com/joaotavora/sly), the Sly server —
+see [debugging a running cluster](docs/building-and-testing.md#debugging-a-running-cluster).
 
 Start with the [documentation guide](docs/index.md). If you already know Kubernetes,
 the [component map](docs/kubernetes-users.md) explains where familiar components live.
@@ -112,7 +113,8 @@ to that work:
   through an available restart. With suitable debugging settings, SBCL can
   [restart a stack frame using the redefined function](https://www.sbcl.org/manual/).
   This makes short, focused debugging sessions part of the normal development
-  workflow. gr8s exposes that environment through its authenticated Slynk tunnel.
+  workflow. gr8s exposes that environment through its authenticated
+  [Slynk](https://github.com/joaotavora/sly) tunnel.
 
 Those language capabilities support an integrated Kubernetes system:
 
