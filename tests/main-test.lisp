@@ -792,6 +792,28 @@
   (signals error (gr8s.server::parse-net-agent-options '("--cni")))
   (signals error (gr8s.server::parse-net-agent-options '("--unknown" "x"))))
 
+(test debug-icl-parses-targets-and-launch-options
+  ;; icl rides the slynk tunnel: same command plist, plus launch options and a
+  ;; positional-node shorthand. A random local port (0) is fine because the
+  ;; port is handed to icl rather than printed for a human.
+  (let ((options (gr8s.server::parse-debug-options '("icl" "worker-1"))))
+    (is (eq :debug-slynk (getf options :command)))
+    (is-true (getf options :icl))
+    (is (equal "worker-1" (getf options :node)))
+    (is (zerop (getf options :local-port))))
+  (let ((options (gr8s.server::parse-debug-options
+                  '("icl" "--member" "m1" "--no-launch" "--icl-binary" "/opt/icl"))))
+    (is-true (getf options :no-launch))
+    (is (equal "/opt/icl" (getf options :icl-binary)))
+    (is (equal "m1" (getf options :member))))
+  ;; slynk keeps its contract: no launch, human-friendly default port.
+  (let ((options (gr8s.server::parse-debug-options '("slynk" "--node" "worker-1"))))
+    (is-false (getf options :icl))
+    (is (= 4005 (getf options :local-port))))
+  (signals error (gr8s.server::parse-debug-options '("icl")))
+  (signals error (gr8s.server::parse-debug-options '("icl" "worker-1" "--member" "m1")))
+  (signals error (gr8s.server::parse-debug-options '("repl" "worker-1"))))
+
 
 (test serve-compaction-defaults-to-ha-and-supports-explicit-overrides
   (is-false (getf (gr8s.server::parse-serve-options nil) :raft-compaction))

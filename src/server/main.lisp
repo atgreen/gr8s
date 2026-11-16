@@ -609,33 +609,50 @@
       (namestring (merge-pathnames ".kube/config" (user-homedir-pathname)))))
 
 (defun parse-debug-options (arguments)
-  "Parse a debug subcommand and its options."
+  "Parse a debug subcommand and its options. The icl subcommand opens the same
+authenticated tunnel as slynk and launches ICL's browser mode (icl -b
+--connect) against it; slynk opens the tunnel for a manual SLY connect."
   (when (equal "trace" (first arguments))
     (return-from parse-debug-options (parse-trace-options (rest arguments))))
-  (unless (equal "slynk" (first arguments))
-    (error "unknown debug subcommand: ~A" (or (first arguments) "")))
-  (let ((options (list :command :debug-slynk :local-port 4005
-                       :kubeconfig (default-client-kubeconfig)))
-        (rest (rest arguments)))
+  (let ((sub (first arguments)))
+    (unless (member sub '("slynk" "icl") :test #'equal)
+      (error "unknown debug subcommand: ~A" (or sub ""))))
+  (let* ((icl (equal "icl" (first arguments)))
+         (options (list :command :debug-slynk
+                        :icl icl
+                        :icl-binary "icl"
+                        ;; ICL is handed the port we pick, so a random port is fine;
+                        ;; slynk prints the port for a human to point SLY at 4005.
+                        :local-port (if icl 0 4005)
+                        :kubeconfig (default-client-kubeconfig)))
+         (rest (rest arguments)))
+    ;; A bare positional name is shorthand for --node, so `gr8s debug icl <node>`.
+    (when (and rest (not (uiop:string-prefix-p "-" (first rest))))
+      (setf (getf options :node) (pop rest)))
     (loop while rest
           for option = (pop rest)
-          do (unless rest (error "~A requires a value" option))
-             (let ((value (pop rest)))
-               (cond ((equal option "--node") (setf (getf options :node) value))
-                     ((equal option "--selector") (setf (getf options :selector) value))
-                     ((equal option "--member") (setf (getf options :member) value))
-                     ((equal option "--kubeconfig") (setf (getf options :kubeconfig) value))
-                     ((equal option "--local-port")
-                      (setf (getf options :local-port)
-                            (parse-integer value :junk-allowed nil)))
-                     (t (error "unknown debug slynk option: ~A" option)))))
+          do (cond
+               ((equal option "--no-launch") (setf (getf options :no-launch) t))
+               ((equal option "--unsafe-visualizations") (setf (getf options :unsafe-visualizations) t))
+               (t
+                (unless rest (error "~A requires a value" option))
+                (let ((value (pop rest)))
+                  (cond ((equal option "--node") (setf (getf options :node) value))
+                        ((equal option "--selector") (setf (getf options :selector) value))
+                        ((equal option "--member") (setf (getf options :member) value))
+                        ((equal option "--kubeconfig") (setf (getf options :kubeconfig) value))
+                        ((equal option "--icl-binary") (setf (getf options :icl-binary) value))
+                        ((equal option "--local-port")
+                         (setf (getf options :local-port) (parse-integer value :junk-allowed nil)))
+                        (t (error "unknown debug ~A option: ~A" (if icl "icl" "slynk") option)))))))
     (unless (= 1 (count-if (lambda (key) (getf options key)) '(:node :selector :member)))
-      (error "debug slynk requires exactly one of --node, --selector, or --member"))
-    (unless (<= 1 (getf options :local-port) 65535)
-      (error "debug slynk --local-port must be 1..65535"))
+      (error "debug ~A requires exactly one target: a node name, or --node/--selector/--member"
+             (if icl "icl" "slynk")))
+    (unless (<= 0 (getf options :local-port) 65535)
+      (error "debug --local-port must be 0..65535 (0 picks a free port)"))
     (dolist (key '(:node :member))
       (when (and (getf options key) (not (path-segment-name-p (getf options key))))
-        (error "debug slynk target must be a valid Kubernetes name")))
+        (error "debug target must be a valid Kubernetes name")))
     options))
 
 (defun selected-ready-node-name (items selector)
@@ -820,6 +837,7 @@
   (let ((target (debug-slynk-target options config)))
     (multiple-value-bind (remote remote-socket) (open-debug-websocket config target)
       (let ((listener nil) (local-socket nil) (local nil) (writer nil)
+            (icl-process nil)
             (local-disconnected nil)
             (write-lock (bt:make-lock "gr8s debug Slynk websocket writer")))
         (unwind-protect
@@ -827,10 +845,35 @@
                (setf listener (usocket:socket-listen "127.0.0.1" (getf options :local-port)
                                                      :reuse-address t
                                                      :element-type '(unsigned-byte 8)))
-               (format t "gr8s Slynk tunnel: 127.0.0.1:~D -> ~A~%"
-                       (usocket:get-local-port listener) target)
-               (format t "Connect SLY now; Ctrl-C closes the local and remote debugger.~%")
-               (finish-output)
+               (let ((port (usocket:get-local-port listener)))
+                 (cond
+                   ((not (getf options :icl))
+                    (format t "gr8s Slynk tunnel: 127.0.0.1:~D -> ~A~%~
+                               Connect SLY now; Ctrl-C closes the local and remote debugger.~%"
+                            port target))
+                   ((getf options :no-launch)
+                    (format t "gr8s icl tunnel: 127.0.0.1:~D -> ~A~%~
+                               Run:  ~A -b --connect 127.0.0.1:~D~%~
+                               Ctrl-C closes the tunnel and the remote debugger.~%"
+                            port target (getf options :icl-binary) port))
+                   (t
+                    (format t "gr8s icl: 127.0.0.1:~D -> ~A; launching ~A ...~%"
+                            port target (getf options :icl-binary))
+                    (finish-output)
+                    (handler-case
+                        (setf icl-process
+                              (uiop:launch-program
+                               (append (list (getf options :icl-binary) "-b"
+                                             "--connect" (format nil "127.0.0.1:~D" port))
+                                       (when (getf options :unsafe-visualizations)
+                                         (list "--unsafe-visualizations")))
+                               :output :interactive :error-output :interactive :input :interactive))
+                      (error (condition)
+                        (format t "could not launch ~A (~A). Connect it manually:~%  ~
+                                   ~A -b --connect 127.0.0.1:~D~%"
+                                (getf options :icl-binary) condition
+                                (getf options :icl-binary) port)))))
+                 (finish-output))
                (setf local-socket (usocket:socket-accept listener)
                      local (usocket:socket-stream local-socket)
                      writer (bt:make-thread
@@ -854,6 +897,7 @@
                    (unless (bt:with-lock-held (write-lock) local-disconnected)
                      (error condition))))
                0)
+          (when icl-process (ignore-errors (uiop:terminate-process icl-process)))
           (when writer (stop-exec-input-reader writer))
           (when writer (ignore-errors (bt:join-thread writer)))
           (when local-socket (ignore-errors (usocket:socket-close local-socket)))
@@ -3036,6 +3080,11 @@ Alternatively use --selector LABELS (must match exactly one Ready node) or
 printed loopback endpoint while the tunnel command remains running. This path
 does not require starting gr8s with --debug-slynk-port.
 
+`gr8s debug icl NODE` opens the same tunnel and launches the ICL browser IDE
+(https://atgreen.github.io/icl) against it on the operator machine; nothing
+ICL-related runs on the node. --no-launch prints the `icl -b --connect` line
+instead, for when icl is not installed or to compose another Slynk client.
+
 In the GR8S package, useful forms include (debug-threads), (debug-backtraces),
 (debug-pod \"default\" \"web\"), and (debug-journal 20). These helpers inspect the
 target process's local context; choose the node/member relevant to the failure.
@@ -3197,6 +3246,7 @@ No HA API may start from member-local certificate state before this converges."
       ((equal path '("debug"))
        (page "Inspect live processes and trace Pods" "COMMAND [OPTIONS]"
              :commands '(("slynk" "Open Slynk to one node or control-plane member")
+                         ("icl" "Open ICL's browser IDE on one node or member")
                          ("trace" "Trace Pods with a bpftrace-compatible language"))
              :options '(("--help, -h" "show help"))))
       ((equal path '("debug" "trace"))
@@ -3215,6 +3265,18 @@ No HA API may start from member-local certificate state before this converges."
                         ("--member ID" "Target one exact HA control-plane member")
                         ("--kubeconfig FILE" "Authentication and API endpoint")
                         ("--local-port PORT" "Loopback port (default 4005)")
+                        ("--help, -h" "show help"))))
+      ((equal path '("debug" "icl"))
+       (page "Tunnel to a node's live image and open ICL's browser IDE on it"
+             "[NODE | --node NAME | --selector LABELS | --member ID] [OPTIONS]"
+             :options '(("NODE" "Target node name (positional shorthand for --node)")
+                        ("--node NAME" "Target one exact Kubernetes node")
+                        ("--selector LABELS" "Require exactly one Ready matching node")
+                        ("--member ID" "Target one exact HA control-plane member")
+                        ("--kubeconfig FILE" "Authentication and API endpoint")
+                        ("--no-launch" "Print the icl --connect line instead of launching")
+                        ("--icl-binary PATH" "icl executable to launch (default: icl)")
+                        ("--unsafe-visualizations" "Allow JavaScript in ICL visualizations")
                         ("--help, -h" "show help"))))
       ((equal path '("wireguard"))
        (page "Manage WireGuard identity" "COMMAND [OPTIONS]"

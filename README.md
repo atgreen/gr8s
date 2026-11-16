@@ -165,10 +165,12 @@ REPL while it runs.
   `icl --connect 127.0.0.1:4005`. Built-in helpers in the `GR8S` package —
   `(debug-threads)`, `(debug-backtraces)`, `(debug-pod "default" "web")`,
   `(debug-journal 20)` — inspect the node's local context.
-- **A modern REPL on the cluster.** [ICL](https://atgreen.github.io/icl)
-  brings syntax highlighting, completion, a TUI object inspector, a browser
-  IDE with package and class browsers, flame-graph profiling, and notebooks
-  to the same Slynk connection.
+- **A modern REPL on the cluster.** `gr8s debug icl NODE` opens the same
+  tunnel and launches [ICL](https://atgreen.github.io/icl)'s browser IDE
+  against the node's live image in one step (`--no-launch` prints the
+  `icl -b --connect` line instead). ICL brings syntax highlighting,
+  completion, a TUI object inspector, package and class browsers,
+  flame-graph profiling, and notebooks to the same Slynk connection.
 - **eBPF written in Lisp.** [Whistler](https://github.com/atgreen/Whistler)
   compiles the entire dataplane — Service load balancing, NetworkPolicy,
   tracing probes — from a Lisp DSL to eBPF at runtime, with no clang or LLVM.
