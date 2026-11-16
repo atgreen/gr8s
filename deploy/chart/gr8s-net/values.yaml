@@ -1,6 +1,7 @@
 image:
   repository: ghcr.io/atgreen/gr8s-net
-  tag: latest
+  # The release build publishes this exact tag; a tag push does not move :latest.
+  tag: v1.37.2-gr8s.0
   pullPolicy: IfNotPresent
 
 # Host paths the agent owns.
