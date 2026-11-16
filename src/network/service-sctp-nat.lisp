@@ -16,8 +16,8 @@
 ;;;; destination (or source, on the reverse path) address leaves the checksum
 ;;;; valid and needs no recomputation. A Service whose port differs from its
 ;;;; targetPort would require rewriting a port inside the checksummed region; that
-;;;; CRC32c case is deferred and such packets are dropped, which matches Cilium's
-;;;; documented SCTP behaviour ("targetPort MUST equal the port").
+;;;; CRC32c case is deferred and such packets are dropped, which matches the
+;;;; SCTP behaviour documented by other eBPF dataplanes ("targetPort MUST equal the port").
 ;;;;
 ;;;; Forward (egress, client -> VIP): look the VIP up, pick a backend, record a
 ;;;; conntrack entry keyed by the post-DNAT tuple, rewrite the destination to the

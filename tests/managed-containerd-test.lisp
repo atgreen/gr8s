@@ -164,7 +164,7 @@
             :executable "/opt/gr8s/bin/containerd"
             :oci-runtime "/opt/gr8s/bin/runc"
             :cni-bin-directory "/opt/gr8s/bin/cni/"
-            :cni-bin-directories '("/opt/cni/bin/" "/var/lib/cilium/bin/")
+            :cni-bin-directories '("/opt/cni/bin/" "/var/lib/example-cni/bin/")
             :cni-mode "external"
             :cni-config-directory config-directory
             :platform "linux/amd64")))
@@ -175,7 +175,7 @@
              (write-string "operator-owned" stream))
            (gr8s.kubelet::write-managed-containerd-config manager)
            (let ((config (gr8s.kubelet::managed-containerd-config-text manager)))
-             (is (search "bin_dirs = [\"/opt/gr8s/bin/cni/\", \"/opt/cni/bin/\", \"/var/lib/cilium/bin/\"]"
+             (is (search "bin_dirs = [\"/opt/gr8s/bin/cni/\", \"/opt/cni/bin/\", \"/var/lib/example-cni/bin/\"]"
                          config))
              (is (search (format nil "conf_dir = '~A'" (namestring config-directory)) config)))
            (is (string= "operator-owned" (uiop:read-file-string sentinel)))

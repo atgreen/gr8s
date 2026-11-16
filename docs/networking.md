@@ -102,7 +102,7 @@ membership check refuses the attempt; later attempts recover after convergence.
 boundaries. The same fixture can be tested with actual attached socket hooks using
 `scripts/test-service-lb-program.py FIXTURE --kernel` inside a disposable root VM.
 Host socket hooks do not intercept connections initiated inside a guest kernel.
-The selected Service architecture follows Cilium's ordinary split: keep socket
+The selected Service architecture follows the split common to eBPF dataplanes: keep socket
 load balancing for native Pod connections and use the TC packet path for guest
 interfaces and traffic that bypasses socket hooks. Ordinary Service traffic does
 not require an additional identity envelope or Service-specific tunnel. This is
@@ -111,8 +111,8 @@ by default or that all kube-proxy Service modes are complete.
 
 The packet path currently keys return translation on transport tuples. If the
 same backend is exposed through multiple Service VIPs and independent flows
-produce indistinguishable tuples, Service identity can be ambiguous. Cilium
-documents this [multiple-VIP collision][cilium-lb]. The next packet-path
+produce indistinguishable tuples, Service identity can be ambiguous: the
+known multiple-VIP collision of tuple-keyed load balancers. The next packet-path
 increment will adapt Calico's [collision-triggered source-port NAT][calico-nat]
 where a reserved port and return route can be proved unique for the flow. Normal
 flows should keep their source address and port. An unresolved collision must
@@ -121,7 +121,6 @@ a claim about the current opt-in packet pipeline. The
 [experimental identity envelope](service-wire-protocol.md) is retained as
 research and is not part of the default dataplane.
 
-[cilium-lb]: https://docs.cilium.io/en/latest/network/kubernetes/kubeproxy-free/
 [calico-nat]: https://github.com/projectcalico/calico/blob/master/felix/design/bpf-services.md
 
 The experimental IPv4 TCP/UDP TC Service pipeline can be enabled with
@@ -555,7 +554,7 @@ the bundled gr8s plugin directory remains available. In external mode gr8s
 points its managed containerd at the supplied directory but neither creates nor
 overwrites a conflist, and it does not apply the native Pod CIDR, VXLAN, routes,
 or IPAM. This is the ownership boundary needed by primary plugins such as
-Calico, Cilium, Canal, or a Multus-selected default network.
+Calico, Canal, Flannel, or a Multus-selected default network.
 
 The gr8s policy plugin may optionally supplement an external primary plugin by
 appearing after it in the same conflist. Its entry needs `type: "gr8s"`, the

@@ -124,10 +124,10 @@
            '("agent" "--server" "10.0.0.1:7443" "--token" "t" "--ca-pin" "p"
              "--node-name" "worker-a" "--state-directory" "/var/lib/gr8s"
              "--cni-mode" "external" "--cni-conf-dir" "/etc/cni/net.d"
-             "--cni-bin-dir" "/opt/cni/bin" "--cni-bin-dir" "/var/lib/cilium/bin"))))
+             "--cni-bin-dir" "/opt/cni/bin" "--cni-bin-dir" "/var/lib/example-cni/bin"))))
     (is (string= "external" (getf options :cni-mode)))
     (is (string= "/etc/cni/net.d" (getf options :cni-conf-dir)))
-    (is (equal '("/opt/cni/bin" "/var/lib/cilium/bin") (getf options :cni-bin-dirs))))
+    (is (equal '("/opt/cni/bin" "/var/lib/example-cni/bin") (getf options :cni-bin-dirs))))
   (signals error (parse-cli-options '("serve" "--cni-mode" "external")))
   (signals error (parse-cli-options '("serve" "--cni-mode" "native"
                                      "--cni-conf-dir" "/etc/cni/net.d")))

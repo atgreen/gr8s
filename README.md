@@ -33,7 +33,7 @@ processes through [Slynk](docs/building-and-testing.md#debugging-a-running-clust
 gr8s is more than a Kubernetes distribution. Its eBPF dataplane also installs as
 a standalone DaemonSet on a cluster you already run — no gr8s control plane
 required. On a k3s cluster with `kube-proxy`, flannel, and the built-in
-NetworkPolicy controller disabled, gr8s provides a complete, Cilium-class
+NetworkPolicy controller disabled, gr8s provides a complete eBPF
 networking stack:
 
 - **Pod networking and IPAM** over a VXLAN fabric (cross-node Pod-to-Pod), or an
@@ -42,7 +42,9 @@ networking stack:
 - **Services** — a kube-proxy replacement in the Whistler eBPF socket and packet
   load balancer.
 - **NetworkPolicy** enforced in eBPF, for TCP, UDP, and SCTP.
-- **Gateway API** — HTTPRoute routing, status, and LoadBalancer Services.
+- **Gateway API** — HTTPRoute routing, status, and LoadBalancer Services — and
+  `networking.k8s.io/v1` **Ingress** (IngressClass `gr8s.io/ingress-controller`)
+  served by the same proxy.
 - **hostPort** (in-kernel DNAT at the socket hook) and cluster **DNS** reachability.
 
 Each piece is an independently selectable feature of the `gr8s net-agent`

@@ -2948,7 +2948,8 @@ three independently selectable features from the Whistler eBPF dataplane:
   DNS reachability through the eBPF socket/packet load balancer.
 - `gateway` (Helm `gateway.enabled`, off by default): the Gateway API
   (GatewayClass `gr8s.io/gateway-controller`) -- HTTPRoute routing, status,
-  and per-Gateway LoadBalancer Services.
+  and per-Gateway LoadBalancer Services -- and `networking.k8s.io/v1` Ingress
+  (IngressClass `gr8s.io/ingress-controller`) served by the same proxy.
 
 With the cni feature off, the gateway and service LB run alongside the
 cluster's incumbent CNI; they only require that Pod IPs are reachable from
