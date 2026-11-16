@@ -55,6 +55,21 @@ Archive metadata is normalized to the source commit timestamp. This makes
 packaging repeatable for identical inputs; it does not promise reproducible SBCL,
 Go, or JavaScript builds.
 
+### Cutting a release
+
+1. Move the **Unreleased** entries in [`CHANGELOG.md`](../CHANGELOG.md) into a
+   dated section for the new version, and add its compare link.
+2. Pin the `gr8s-net` chart to the new image tag — `image.tag` in
+   [`deploy/chart/gr8s-net/values.yaml`](../deploy/chart/gr8s-net/values.yaml)
+   and `appVersion` in `Chart.yaml` — because a tag build publishes
+   `ghcr.io/atgreen/gr8s-net:<tag>` without moving `:latest`.
+3. Tag the release commit with the exact version and push the tag. The build
+   fails unless `gr8s version` of the built binary equals the tag, and the tag
+   must point at a clean, committed ref.
+4. After both architecture builds succeed, the workflow publishes the GitHub
+   release and the container image. Mark a trial with
+   `gh release edit TAG --prerelease`.
+
 ## Requirements
 
 Build on Linux with SBCL, ocicl, GNU Make, Git, Go, curl, CA certificates,
