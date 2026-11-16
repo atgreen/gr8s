@@ -413,7 +413,9 @@ Bug reports, questions, and pull requests are welcome through
 [source map and developer walkthrough](docs/development.md) explains how the
 code is organized; [Building, running & testing](docs/building-and-testing.md)
 covers the toolchain and `make test`. Run eBPF and container tests only in a
-disposable VM.
+disposable VM. Report suspected vulnerabilities privately per
+[SECURITY.md](SECURITY.md); releases are summarized in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
