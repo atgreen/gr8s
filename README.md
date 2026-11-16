@@ -1,5 +1,8 @@
 # gr8s
 
+[![CI](https://github.com/atgreen/gr8s/actions/workflows/test.yml/badge.svg)](https://github.com/atgreen/gr8s/actions/workflows/test.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 **Kubernetes, built from scratch in Common Lisp — with an eBPF dataplane you can run on its own.**
 
 gr8s puts a Kubernetes API server, controllers, scheduler, node agent,
@@ -17,7 +20,10 @@ container runtime, networking, and datastore in one native executable. Use
 
 **gr8s passed 100% of the upstream Kubernetes v1.37 `certified-conformance`
 tests: 462/462, zero failures**, in the recorded two-node Sonobuoy run on
-2026-11-11. See the [results and evidence](docs/CONFORMANCE.md).
+2026-11-11. See the [results and evidence](docs/CONFORMANCE.md). It is not yet
+a CNCF-submitted _Certified Kubernetes_ distribution; see the
+[API coverage](docs/kubernetes-surface.md) and
+[known gaps](docs/k3s-gap-inventory.md) for the current scope.
 
 Run containers with embedded containerd/runc, choose
 [Kata Containers or gVisor](docs/runtime.md#runtimeclass--pluggable-runtimes)
@@ -27,6 +33,9 @@ Explore the cluster through its integrated [Headlamp dashboard](#dashboard).
 written in a [bpftrace-compatible language](docs/design-gr8s-trace.md) for live
 kernel tracing of selected Pods. Inspect running control-plane and agent
 processes through [Slynk](docs/building-and-testing.md#debugging-a-running-cluster).
+
+Start with the [documentation guide](docs/index.md). If you already know Kubernetes,
+the [component map](docs/kubernetes-users.md) explains where familiar components live.
 
 ## Use the gr8s dataplane with your own Kubernetes
 
@@ -60,19 +69,17 @@ conformance tests for NetworkPolicy (TCP, UDP and SCTP), Gateway API (core
 HTTPRoute), and the sig-network suite covering Services (ClusterIP and NodePort),
 hostPort, DNS and EndpointSlices.
 
-See [deploy/](deploy/) to install it on your cluster, and the
+Install it with the Helm chart (point `apiServer.host` at an API server
+address nodes reach over the host network):
+
+```sh
+helm install gr8s-net deploy/chart/gr8s-net -n kube-system \
+  --set apiServer.host=CONTROL_PLANE_IP
+```
+
+See [deploy/](deploy/) for the chart and conformance harness, and the
 [foreign-cluster networking design](docs/design-foreign-cluster-networking.md)
 for how it works.
-
-gr8s is not yet a CNCF-submitted _Certified Kubernetes_ distribution. See the
-[API coverage](docs/kubernetes-surface.md) and
-[known gaps](docs/k3s-gap-inventory.md) for the current scope.
-
-The name **gr8s** is a portmanteau of *Green* — its creator's surname — and
-*k8s*, the usual contraction of *Kubernetes*: in short, "Green Kubernetes."
-
-Start with the [documentation guide](docs/index.md). If you already know Kubernetes,
-the [component map](docs/kubernetes-users.md) explains where familiar components live.
 
 ## Why gr8s?
 
@@ -358,6 +365,18 @@ Kubernetes `/version` endpoint report the running build's version.
 Anthony Green is the creator of gr8s. He guides its architecture and development;
 AI assistants generate code, tests, and documentation under his direction.
 Automated tests help find defects, but do not establish correctness or security.
+
+The name **gr8s** is a portmanteau of *Green* — its creator's surname — and
+*k8s*, the usual contraction of *Kubernetes*: in short, "Green Kubernetes."
+
+## Contributing
+
+Bug reports, questions, and pull requests are welcome through
+[GitHub Issues](https://github.com/atgreen/gr8s/issues). The
+[source map and developer walkthrough](docs/development.md) explains how the
+code is organized; [Building, running & testing](docs/building-and-testing.md)
+covers the toolchain and `make test`. Run eBPF and container tests only in a
+disposable VM.
 
 ## License
 
