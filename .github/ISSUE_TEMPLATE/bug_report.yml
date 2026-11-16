@@ -1,0 +1,47 @@
+name: Bug report
+description: Something failed or behaved incorrectly
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: gr8s version
+      description: Output of `gr8s version` (or `gr8s version --state-directory DIR` for a running install).
+      placeholder: v1.37.2-gr8s.0
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Deployment mode
+      options:
+        - Single node (gr8s serve)
+        - Multi-node (serve + agents)
+        - HA control plane
+        - net-agent on a foreign cluster (gr8s-net chart)
+        - Building from source
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: Host kernel and distribution
+      description: "`uname -r` and the distribution. Real workloads need Linux 6.6+ with TCX eBPF."
+      placeholder: 6.8.0-45-generic, Ubuntu 24.04
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Reproduction steps, what you expected, and what you observed instead.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: >-
+        Where relevant: `sudo gr8s doctor --state-directory DIR` output,
+        `kubectl get events`, Pod and gr8s process logs. **Redact tokens,
+        kubeconfigs, and Secret values before posting.**
+      render: text

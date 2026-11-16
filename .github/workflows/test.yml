@@ -91,6 +91,69 @@ jobs:
           make test-service-packet-program
           make test-service-packet-guard
 
+  packages:
+    name: RPM/DEB packaging
+    # Builds the packages from stand-in binaries so every PR validates the
+    # nfpm configuration, version mapping, and scriptlets without the
+    # 25-minute release build; the release workflow repeats this with the
+    # real binaries and checks `gr8s version` after install.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nfpm 2.48.0 and rpm
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm
+          curl -fsSL --retry 3 -o /tmp/nfpm.tar.gz \
+            https://github.com/goreleaser/nfpm/releases/download/v2.48.0/nfpm_2.48.0_Linux_x86_64.tar.gz
+          echo "6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750  /tmp/nfpm.tar.gz" | sha256sum -c -
+          sudo tar -C /usr/local/bin -xzf /tmp/nfpm.tar.gz nfpm
+
+      - name: Build packages from stand-in binaries
+        run: |
+          mkdir -p build/release
+          printf '#!/bin/sh\necho v0.0.0-gr8s.0\n' > build/release/gr8s-linux-amd64
+          cp build/release/gr8s-linux-amd64 build/release/gr8s-linux-arm64
+          PKG_OUTPUT_DIRECTORY=build/packages releng/build-packages.sh
+          for package in gr8s-0.0.0+gr8s.0-1.x86_64.rpm \
+                         gr8s-0.0.0+gr8s.0-1.aarch64.rpm \
+                         gr8s_0.0.0+gr8s.0-1_amd64.deb \
+                         gr8s_0.0.0+gr8s.0-1_arm64.deb; do
+            test -f "build/packages/$package"
+          done
+
+      - name: Reject a malformed tag
+        run: |
+          if RELEASE_TAG=v1.37-bad releng/build-packages.sh 2>/dev/null; then
+            echo "build-packages.sh accepted a malformed tag" >&2
+            exit 1
+          fi
+
+      - name: Check RPM version metadata
+        run: |
+          test "$(rpm -qp --queryformat '%{VERSION} %{RELEASE}' \
+            build/packages/gr8s-0.0.0+gr8s.0-1.x86_64.rpm 2>/dev/null)" = "0.0.0+gr8s.0 1"
+
+      - name: Install, inspect, and purge the amd64 DEB
+        run: |
+          sudo dpkg -i build/packages/gr8s_0.0.0+gr8s.0-1_amd64.deb
+          test "$(gr8s version)" = v0.0.0-gr8s.0
+          test -x /usr/bin/gr8s-killall.sh
+          test -f /usr/lib/systemd/system/gr8s-server.service
+          test -f /usr/lib/systemd/system/gr8s-agent.service
+          test "$(stat -c %a /etc/gr8s/server.env)" = 600
+          test "$(stat -c %a /etc/gr8s/agent.env)" = 600
+          test "$(systemctl is-enabled gr8s-server.service || true)" = disabled
+          test "$(systemctl is-enabled gr8s-agent.service || true)" = disabled
+          sudo dpkg -P gr8s
+          test ! -e /usr/bin/gr8s
+          test ! -e /usr/bin/gr8s-killall.sh
+          test ! -e /etc/gr8s/server.env
+          test ! -e /usr/lib/systemd/system/gr8s-server.service
+
   privileged:
     name: privileged dataplane (self-hosted, opt-in)
     # Hosted runners cannot load BPF/cgroups/veths. Trigger this by hand

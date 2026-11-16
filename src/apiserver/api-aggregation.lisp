@@ -6,7 +6,9 @@
 ;;;; does: publish the request-header trust they read from kube-system, track each
 ;;;; one's availability, serve its group in discovery, and proxy its version's
 ;;;; requests over TLS with the caller's identity in front-proxy headers.
-;;;; OpenAPI is not merged, so kubectl explain doesn't cover aggregated types.
+;;;; Available servers' OpenAPI v2 is merged into /openapi/v2 (local entries
+;;;; win collisions) and v3 group documents are proxied per APIService, so
+;;;; kubectl explain covers aggregated types.
 
 (in-package #:gr8s.apiserver)
 

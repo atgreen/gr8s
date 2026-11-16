@@ -16,8 +16,9 @@
   "How long a finished pull satisfies pull policy Always, so a Pod's containers share one.")
 
 (defstruct image-pull-job
-  "Track the one background pull of an image: :pulling, :done or :failed."
-  (state :pulling) message finished-at thread)
+  "Track the one background pull of an image: :pulling, :done or :failed.
+REPORTED holds the containers already told of its failure, which then see a back-off."
+  (state :pulling) message finished-at thread (reported (make-hash-table :test #'equal)))
 
 (defstruct image-pull-manager
   "Own one runtime's background image pulls by image name."
@@ -69,15 +70,17 @@ which an image naming neither a tag nor a digest has (parsers.ParseImageName), e
          (tag (and colon (subseq name (1+ colon)))))
     (if (or (equal tag "latest") (and (null tag) (null at))) "Always" "IfNotPresent")))
 
-(defun ensure-container-image (runtime image policy &optional (credentials (constantly nil)))
+(defun ensure-container-image (runtime image policy &optional (credentials (constantly nil)) requester)
   "Return once IMAGE may be used under pull POLICY, or signal why its container must wait.
-CREDENTIALS is called for the registry credentials only if a pull is needed."
+CREDENTIALS is called for the registry credentials only if a pull is needed. A failed pull is
+reported to REQUESTER, its container, as ErrImagePull once and then as ImagePullBackOff until
+the next pull, as a kubelet reports it."
   (let ((socket (containerd-runtime-socket-path runtime)))
     (when (or (equal policy "Never")
               (and (equal policy "IfNotPresent") (cri-image-present-p socket image)))
       (when (and (equal policy "Never") (not (cri-image-present-p socket image)))
-        (error 'container-config-error
-               :message (format nil "Image ~S is not present with pull policy of Never" image)))
+        (error 'gr8s.runtime:container-image-never-pull
+               :message (format nil "Container image ~S is not present with pull policy of Never" image)))
       (return-from ensure-container-image t))
     (let ((manager (containerd-runtime-images runtime)) (now (funcall *container-lifecycle-clock*))
           (credentials (funcall credentials)))
@@ -92,6 +95,13 @@ CREDENTIALS is called for the registry credentials only if a pull is needed."
                (return-from ensure-container-image t))
              (start-image-pull runtime manager image credentials))
             ((< age +image-pull-backoff-seconds+)
-             (error 'container-image-pull-error :message (image-pull-job-message job)))
+             (let ((reported (and requester (gethash requester (image-pull-job-reported job)))))
+               (when requester (setf (gethash requester (image-pull-job-reported job)) t))
+               (if reported
+                   (error 'gr8s.runtime:container-image-pull-backoff
+                          :image image
+                          :message (format nil "Back-off pulling image ~S: ErrImagePull: ~A"
+                                           image (image-pull-job-message job)))
+                   (error 'container-image-pull-error :image image :message (image-pull-job-message job)))))
             (t (start-image-pull runtime manager image credentials)))))
       (error 'container-image-pending :message (format nil "Pulling image ~S" image)))))

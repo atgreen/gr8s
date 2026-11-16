@@ -65,10 +65,14 @@ than requiring a new program for each policy.
 
 Policy supports `podSelector`, `namespaceSelector`, combined selectors,
 `ipBlock` with `except`, protocol/port ranges, and direction-specific default deny.
-Connection state permits reply traffic for allowed flows. Counters report policy
-drops alongside endpoint identity/anti-spoofing telemetry. See
-[`network-policy.lisp`](../src/network/network-policy.lisp) and
-[`network-policy-program.lisp`](../src/network/network-policy-program.lisp).
+Connection state permits reply traffic for allowed flows. A refused packet is dropped
+silently, with no reset or ICMP reply, so a client sees a timeout rather than an
+error. Each Pod endpoint counts the packets policy refused, in both directions, as
+`gr8s_endpoint_policy_drops_total`; they are also included in
+`gr8s_endpoint_dropped_packets_total`. The counter says how many packets a Pod lost to
+policy, not which policy refused them. See
+[`network-policy.lisp`](../src/network/network-policy.lisp) and the enforcing guards in
+[`egress-guard-program.lisp`](../src/network/egress-guard-program.lisp).
 
 The original native smoke demonstrated egress default-deny on a live Pod.
 Current source implements both directions and dual-family policy paths; the
@@ -787,7 +791,7 @@ host-local CNI configuration is required.
 
 Agents sample the pinned counters and publish endpoint telemetry through their
 node sessions. The loopback control-plane `/metrics` endpoint exposes accepted and
-dropped packets/bytes, spoof rejections, malformed/unsupported packets, sample
-timestamps, and node readiness. An unreadable map sets
+dropped packets/bytes, NetworkPolicy drops (`gr8s_endpoint_policy_drops_total`), spoof
+rejections, malformed/unsupported packets, sample timestamps, and node readiness. An unreadable map sets
 `gr8s_endpoint_telemetry_available` to zero and omits its counter series instead
 of reporting false zero traffic.

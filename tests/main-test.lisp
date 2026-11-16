@@ -790,7 +790,60 @@
   ;; An agent with every feature off would only watch and do nothing.
   (signals error (gr8s.server::parse-net-agent-options '("--cni" "false")))
   (signals error (gr8s.server::parse-net-agent-options '("--cni")))
-  (signals error (gr8s.server::parse-net-agent-options '("--unknown" "x"))))
+  (signals error (gr8s.server::parse-net-agent-options '("--unknown" "x")))
+  ;; The commands are discoverable: top-level usage and their own help pages.
+  (dolist (arguments '(("help") ("help" "net-agent") ("net-agent" "--help")))
+    (let ((output (with-output-to-string (*standard-output*)
+                    (is (= 0 (gr8s.server::main-with-environment
+                              arguments (constantly nil) (constantly 99)))))))
+      (is (search "net-agent" output))))
+  (dolist (arguments '(("help") ("help" "cni-install") ("cni-install" "--help")))
+    (let ((output (with-output-to-string (*standard-output*)
+                    (is (= 0 (gr8s.server::main-with-environment
+                              arguments (constantly nil) (constantly 99)))))))
+      (is (search "cni-install" output)))))
+
+(test backup-and-restore-commands-parse-and-are-discoverable
+  (let ((options (gr8s.server::parse-backup-options
+                  '("save" "--state-directory" "/s" "--output" "/b/out.bin" "--key-file" "/k"))))
+    (is (eq :backup-save (getf options :command)))
+    (is (equal "/s" (getf options :state-directory)))
+    (is (equal "/b/out.bin" (getf options :output)))
+    (is (equal "/k" (getf options :key-file))))
+  (let ((options (gr8s.server::parse-backup-options
+                  '("verify" "--input" "/b/out.bin" "--key-file" "/k"))))
+    (is (eq :backup-verify (getf options :command)))
+    (is (equal "/b/out.bin" (getf options :input))))
+  (is (eq :backup-keygen
+          (getf (gr8s.server::parse-backup-options '("keygen" "--key-file" "/k")) :command)))
+  ;; Each subcommand insists on the pieces it cannot guess.
+  (signals error (gr8s.server::parse-backup-options nil))
+  (signals error (gr8s.server::parse-backup-options '("snapshot")))
+  (signals error (gr8s.server::parse-backup-options '("save" "--key-file" "/k")))
+  (signals error (gr8s.server::parse-backup-options '("save" "--output" "/b")))
+  (signals error (gr8s.server::parse-backup-options '("verify" "--key-file" "/k")))
+  (signals error (gr8s.server::parse-backup-options '("keygen")))
+  ;; verify does not capture, so it refuses save-only options.
+  (signals error (gr8s.server::parse-backup-options
+                  '("verify" "--input" "/b" "--key-file" "/k" "--output" "/x")))
+  (let ((options (gr8s.server::parse-restore-options
+                  '("--input" "/b/out.bin" "--state-directory" "/fresh" "--key-file" "/k"))))
+    (is (eq :restore (getf options :command)))
+    (is (equal "/fresh" (getf options :state-directory))))
+  (signals error (gr8s.server::parse-restore-options '("--key-file" "/k")))
+  (signals error (gr8s.server::parse-restore-options '("--input" "/b")))
+  (signals error (gr8s.server::parse-restore-options '("--unknown" "x")))
+  ;; The commands are discoverable: top-level usage and their own help pages.
+  (dolist (arguments '(("help") ("help" "backup") ("backup" "--help") ("backup")))
+    (let ((output (with-output-to-string (*standard-output*)
+                    (is (= 0 (gr8s.server::main-with-environment
+                              arguments (constantly nil) (constantly 99)))))))
+      (is (search "backup" output))))
+  (dolist (arguments '(("help") ("help" "restore") ("restore" "--help")))
+    (let ((output (with-output-to-string (*standard-output*)
+                    (is (= 0 (gr8s.server::main-with-environment
+                              arguments (constantly nil) (constantly 99)))))))
+      (is (search "restore" output)))))
 
 (test debug-icl-parses-targets-and-launch-options
   ;; icl rides the slynk tunnel: same command plist, plus launch options and a
@@ -822,14 +875,24 @@
 (test serve-compaction-defaults-to-ha-and-supports-explicit-overrides
   (is-false (getf (gr8s.server::parse-serve-options nil) :raft-compaction))
   (is-true (getf (gr8s.server::parse-serve-options '("--raft-init")) :raft-compaction))
-  (is-true (getf (gr8s.server::parse-serve-options '("--raft-join" "127.0.0.1:7449")) :raft-compaction))
+  (is-true (getf (gr8s.server::parse-serve-options '("--join" "127.0.0.1:7449")) :raft-compaction))
   (is-false (getf (gr8s.server::parse-serve-options '("--raft-init" "--no-raft-compaction")) :raft-compaction))
   (is-false (getf (gr8s.server::parse-serve-options '("--no-raft-compaction")) :raft-compaction))
   (is-false (getf (gr8s.server::parse-serve-options '("--raft-init" "--raft-compaction" "--no-raft-compaction")) :raft-compaction))
   (is-true (getf (gr8s.server::parse-serve-options '("--raft-init" "--no-raft-compaction" "--raft-compaction")) :raft-compaction))
   (is-true (getf (gr8s.server::parse-serve-options '("--raft-init" "--raft-compaction")) :raft-compaction))
-  (is-true (getf (gr8s.server::parse-serve-options '("--raft-compaction" "--raft-join" "127.0.0.1:7449")) :raft-compaction))
+  (is-true (getf (gr8s.server::parse-serve-options '("--raft-compaction" "--join" "127.0.0.1:7449")) :raft-compaction))
   (signals error (gr8s.server::parse-serve-options '("--raft-compaction"))))
+
+(test serve-joins-with-the-agent-flag-names
+  (let ((options (gr8s.server::parse-serve-options
+                  '("--join" "10.0.0.1:7000" "--node-name" "cp2" "--token" "secret" "--ca-pin" "sha256:ab"))))
+    (is (equal "10.0.0.1:7000" (getf options :raft-join)))
+    (is (equal "cp2" (getf options :node-name)))
+    (is (equal "secret" (getf options :raft-token)))
+    (is (equal "sha256:ab" (getf options :raft-ca-pin))))
+  (dolist (old '("--raft-join" "--raft-token" "--raft-ca-pin" "--raft-node-name"))
+    (signals error (gr8s.server::parse-serve-options (list old "x")))))
 
 (test production-ha-startup-forwards-default-and-explicit-compaction
   (dolist (enabled '(nil t))

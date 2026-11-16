@@ -117,16 +117,13 @@ jobs:
           compression-level: 0
           retention-days: 7
 
-  release:
-    name: Publish tagged release
+  packages:
+    name: Build RPM and DEB packages
     needs: build
-    if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: write
+    timeout-minutes: 15
     steps:
-      - name: Check out installer scripts and license
+      - name: Check out packaging sources
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -136,15 +133,89 @@ jobs:
         with:
           pattern: release-linux-*
           merge-multiple: true
+          path: build/release
+
+      - name: Install nfpm 2.48.0
+        run: |
+          curl -fsSL --retry 3 -o /tmp/nfpm.tar.gz \
+            https://github.com/goreleaser/nfpm/releases/download/v2.48.0/nfpm_2.48.0_Linux_x86_64.tar.gz
+          echo "6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750  /tmp/nfpm.tar.gz" | sha256sum -c -
+          sudo tar -C /usr/local/bin -xzf /tmp/nfpm.tar.gz nfpm
+
+      - name: Build packages
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || 'v0.0.0-gr8s.0' }}
+        run: |
+          PKG_OUTPUT_DIRECTORY=build/packages releng/build-packages.sh
+          ls -l build/packages
+
+      - name: Smoke-test the amd64 DEB
+        run: |
+          sudo dpkg -i build/packages/gr8s_*_amd64.deb
+          gr8s version
+          test -f /usr/lib/systemd/system/gr8s-server.service
+          test -f /usr/lib/systemd/system/gr8s-agent.service
+          test "$(stat -c %a /etc/gr8s/server.env)" = 600
+          test "$(systemctl is-enabled gr8s-server.service || true)" = disabled
+          sudo dpkg -P gr8s
+          test ! -e /usr/bin/gr8s
+          test ! -e /etc/gr8s/server.env
+
+      - name: Upload package assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-packages
+          path: build/packages/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  release:
+    name: Publish tagged release
+    needs: [build, packages]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out license files
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Download binaries, tarballs, and packages
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          merge-multiple: true
           path: release
 
-      - name: Verify assets and add installer scripts
+      # The installer and lifecycle scripts ship inside the tarballs, not as
+      # loose release assets.
+      - name: Verify assets and add license files
         run: |
-          cp -f install.sh gr8s-killall.sh gr8s-uninstall.sh LICENSE NOTICE release/
+          cp -f LICENSE NOTICE release/
           cd release
           sha256sum -c gr8s-linux-amd64.sha256 gr8s-linux-arm64.sha256
           sha256sum -- * > ../SHA256SUMS
           mv -f ../SHA256SUMS .
+
+      # The tag's CHANGELOG.md section becomes the release notes; a tag
+      # without one is a release-checklist miss, so the publish fails loudly
+      # rather than falling back to auto-generated commit lists.
+      - name: Extract release notes from CHANGELOG.md
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          awk -v tag="$RELEASE_TAG" '
+            $0 ~ "^## \\[" tag "\\]" {found=1; next}
+            found && (/^## \[/ || /^\[/) {exit}
+            found {print}
+          ' CHANGELOG.md \
+            | sed -E "s#\]\((docs|deploy|examples|src|tests|scripts)/#](https://github.com/${GITHUB_REPOSITORY}/blob/${RELEASE_TAG}/\1/#g" \
+            > release-notes.md
+          test -s release-notes.md
 
       - name: Publish release
         env:
@@ -152,7 +223,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$RELEASE_TAG" --verify-tag --generate-notes release/*
+          gh release create "$RELEASE_TAG" --verify-tag --notes-file release-notes.md release/*
 
   image:
     name: Publish gr8s-net container image

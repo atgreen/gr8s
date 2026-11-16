@@ -23,9 +23,19 @@ Release downloads include:
 - `gr8s-linux-amd64` and `gr8s-linux-arm64`, with matching `.sha256` files. These
   are the filenames used by `install.sh`.
 - `gr8s-<version>-linux-<arch>.tar.gz`, containing the executable as `gr8s`, the
-  installer and cleanup scripts, README, and license/notice files.
-- `install.sh`, `gr8s-killall.sh`, `gr8s-uninstall.sh`, `LICENSE`, `NOTICE`, and
-  `SHA256SUMS` for the complete download set.
+  installer and cleanup scripts (`install.sh`, `gr8s-killall.sh`,
+  `gr8s-uninstall.sh`), README, and license/notice files. The scripts ship only
+  inside the tarball, not as loose release assets.
+- RPM and DEB packages for both architectures, built by
+  [`releng/build-packages.sh`](../releng/build-packages.sh) from the release
+  binaries. A tag `v<k8s>-gr8s.<n>` becomes package version `<k8s>+gr8s.<n>`
+  in both formats (RPM forbids `-` in versions); the package revision (`-1`)
+  is the packaging revision alone, bumped only to respin unchanged upstream
+  content. Packages install `/usr/bin/gr8s`, `gr8s-killall.sh`, and disabled
+  `gr8s-server`/`gr8s-agent` systemd units driven by `/etc/gr8s/*.env`;
+  `install.sh` and the packages are alternatives, not layers — don't mix them
+  on one host.
+- `LICENSE`, `NOTICE`, and `SHA256SUMS` for the complete download set.
 - Per-architecture CycloneDX and SPDX files from ocicl. These describe the
   **Lisp dependencies**, rather than the entire native payload and web frontend.
 
@@ -53,6 +63,23 @@ builder through `GR8S_NOTICES_FILE`; ordinary native builds still read `NOTICES`
 Archive metadata is normalized to the source commit timestamp. This makes
 packaging repeatable for identical inputs; it does not promise reproducible SBCL,
 Go, or JavaScript builds.
+
+### Cutting a release
+
+1. Move the **Unreleased** entries in [`CHANGELOG.md`](../CHANGELOG.md) into a
+   dated section for the new version, and add its compare link. That section
+   becomes the GitHub release notes; the publish job fails if the tag has no
+   section.
+2. Pin the `gr8s-net` chart to the new image tag — `image.tag` in
+   [`deploy/chart/gr8s-net/values.yaml`](../deploy/chart/gr8s-net/values.yaml)
+   and `appVersion` in `Chart.yaml` — because a tag build publishes
+   `ghcr.io/atgreen/gr8s-net:<tag>` without moving `:latest`.
+3. Tag the release commit with the exact version and push the tag. The build
+   fails unless `gr8s version` of the built binary equals the tag, and the tag
+   must point at a clean, committed ref.
+4. After both architecture builds succeed, the workflow publishes the GitHub
+   release and the container image. Mark a trial with
+   `gh release edit TAG --prerelease`.
 
 ## Requirements
 
@@ -179,7 +206,7 @@ owner-only and contains administrative credentials.
 
 - `gr8s serve` runs the authenticated HTTPS control plane and a private gRPC
   node endpoint, and
-  optionally joins a Raft cluster with `--raft-init`/`--raft-join` (see
+  optionally joins a Raft cluster with `--raft-init`/`--join` (see
   [high availability](high-availability.md)). It starts a local agent named
   `gr8s-local` by default. `--disable-agent` runs a control-plane-only process.
 - `gr8s agent` enrolls with a one-time token, persists its node key and

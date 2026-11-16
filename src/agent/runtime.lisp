@@ -1519,6 +1519,7 @@ absent field defaults to 0) and an ERROR string (\"\" on success)."
    :rejected-spoofs (gethash "rejectedSpoofs" counters 0)
    :malformed-packets (gethash "malformedPackets" counters 0)
    :unsupported-packets (gethash "unsupportedPackets" counters 0)
+   :policy-drops (gethash "policyDrops" counters 0)
    :error-message error))
 
 (defun node-runtime-endpoint-telemetry (node-runtime counter-reader)

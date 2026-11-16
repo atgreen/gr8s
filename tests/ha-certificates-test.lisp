@@ -187,6 +187,29 @@
         (is (null (probe-file (gr8s.security::raft-member-certificate-path (merge-pathnames "raft/" root))))
             "a refused member isn't left half enrolled")))))
 
+(test serve-join-flags-enroll-under-the-node-name
+  ;; The token is bound to the name in --node-name; there is no separate Raft node name.
+  (with-founded-cluster (founder)
+    (let* ((raft-pki (member-raft-pki founder))
+           (join (format nil "127.0.0.1:~D" (control-plane-port founder)))
+           (pin (gr8s.security::cluster-pki-ca-fingerprint raft-pki)))
+      (with-temporary-store (store path)
+        (declare (ignorable store))
+        (let ((state (uiop:ensure-directory-pathname path)))
+          (gr8s.server::ensure-control-plane-pki
+           state (gr8s.server::parse-serve-options
+                  (list "--join" join "--node-name" "cp2" "--ca-pin" pin
+                        "--token" (gr8s.security::create-join-token raft-pki "cp2" :role :voter))))
+          (is (probe-file (gr8s.security::raft-member-certificate-path (merge-pathnames "pki/raft/" state))))))
+      (with-temporary-store (store path)
+        (declare (ignorable store))
+        (signals error
+          (gr8s.server::ensure-control-plane-pki
+           (uiop:ensure-directory-pathname path)
+           (gr8s.server::parse-serve-options
+            (list "--join" join "--node-name" "cp4" "--ca-pin" pin
+                  "--token" (gr8s.security::create-join-token raft-pki "cp3" :role :voter)))))))))
+
 (test the-same-node-ca-can-be-installed-again
   (with-temporary-store (store path)
     (declare (ignorable store))

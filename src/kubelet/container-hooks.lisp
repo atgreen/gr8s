@@ -30,6 +30,18 @@
     (bt:with-lock-held ((container-probe-manager-lock manager))
       (retain-container-probe-event manager uid event))))
 
+(defmethod gr8s.runtime:runtime-record-pod-event
+    ((runtime gr8s.runtime.containerd::containerd-runtime) uid reason message &optional (type "Warning"))
+  "Queue an Event about Pod UID as a whole. It survives the Pod's deletion until sent."
+  (let* ((manager (ensure-container-probe-manager runtime))
+         (now (current-timestamp (floor (funcall (container-probe-manager-clock manager)))))
+         (event (core-object "id" (format nil "pod-~A" reason)
+                             "kind" "pod" "reason" reason "type" type
+                             "message" (bounded-probe-event-message message) "count" 1
+                             "firstTimestamp" now "lastTimestamp" now)))
+    (bt:with-lock-held ((container-probe-manager-lock manager))
+      (retain-container-probe-event manager uid event))))
+
 (defun validate-container-lifecycle-handler (handler context)
   "Validate one lifecycle handler: exactly one of exec, httpGet and sleep."
   (drop-null-fields (require-object handler context))

@@ -97,6 +97,52 @@ oom 0
         ;; An application container reports no network statistics.
         (is (not (search "container_network" text)))))))
 
+(test oom-kills-and-pressure-stalls-render-as-cadvisor-names-them
+  (with-cgroup-fixture (directory '(("cpu.stat" . "usage_usec 1000000
+")
+                                    ("memory.current" . "1048576
+")
+                                    ("memory.stat" . "anon 1048576
+")
+                                    ("memory.events" . "low 0
+high 2
+max 5
+oom 3
+oom_kill 2
+oom_group_kill 0
+")
+                                    ("cpu.pressure" . "some avg10=1.50 avg60=0.40 avg300=0.10 total=2500000
+full avg10=0.00 avg60=0.00 avg300=0.00 total=500000
+")
+                                    ("memory.pressure" . "some avg10=0.00 avg60=0.00 avg300=0.00 total=1200000
+full avg10=0.00 avg60=0.00 avg300=0.00 total=800000
+")
+                                    ;; An older kernel's cpu.pressure has no full line.
+                                    ("io.pressure" . "some avg10=0.00 avg60=0.00 avg300=0.00 total=300000
+")))
+    (let* ((entry (gr8s.kubelet::make-cadvisor-entry :id "/k8s.io/abc" :name "abc" :image "busybox:1.36" :pod "web"
+                                                     :namespace "default" :container "app" :directory (namestring directory)
+                                                     :started 1700000002000000000))
+           (text (gr8s.kubelet::kubelet-cadvisor-metrics-text (list entry) :root-p nil :now 1700000010000000000))
+           (labels "container=\"app\",id=\"/k8s.io/abc\",image=\"busybox:1.36\",name=\"abc\",namespace=\"default\",pod=\"web\""))
+      (flet ((has (line) (search (format nil "~A~%" line) text)))
+        (is (has "# TYPE container_oom_events_total counter"))
+        (is (has (format nil "container_oom_events_total{~A} 2 1700000010000" labels)) "oom_kill, not oom")
+        (is (has (format nil "container_pressure_cpu_waiting_seconds_total{~A} 2.5 1700000010000" labels)))
+        (is (has (format nil "container_pressure_cpu_stalled_seconds_total{~A} 0.5 1700000010000" labels)))
+        (is (has (format nil "container_pressure_memory_waiting_seconds_total{~A} 1.2 1700000010000" labels)))
+        (is (has (format nil "container_pressure_memory_stalled_seconds_total{~A} 0.8 1700000010000" labels)))
+        (is (has (format nil "container_pressure_io_waiting_seconds_total{~A} 0.3 1700000010000" labels)))
+        (is (not (search "container_pressure_io_stalled_seconds_total{" text)) "no full line, no series")))))
+
+(test pressure-files-parse-as-the-kernel-writes-them
+  (is (equal '(2500000 500000)
+             (multiple-value-list
+              (gr8s.kubelet::parse-pressure-totals
+               (format nil "some avg10=1.50 avg60=0.40 avg300=0.10 total=2500000~%full avg10=0.00 avg60=0.00 avg300=0.00 total=500000~%")))))
+  (is (equal '(nil nil) (multiple-value-list (gr8s.kubelet::parse-pressure-totals nil))) "no file, no PSI")
+  (is (equal '(7 nil) (multiple-value-list (gr8s.kubelet::parse-pressure-totals (format nil "some total=7~%garbage~%"))))))
+
 (test sandbox-reports-network-and-unthrottled-cgroups-no-cfs
   (with-cgroup-fixture (directory '(("cpu.stat" . "usage_usec 1000
 nr_periods 0

@@ -50,8 +50,28 @@
 (define-condition container-image-pending (runtime-error) ()
   (:documentation "Report that a container's image is still being pulled, so its creation must wait."))
 
-(define-condition container-image-pull-error (container-config-error) ()
+(define-condition container-image-pull-error (container-config-error)
+  ((image :initarg :image :initform nil :reader container-image-pull-error-image))
   (:documentation "Report that a container's image could not be pulled; a later pass retries it."))
+
+(define-condition container-image-pull-backoff (container-image-pull-error) ()
+  (:documentation "Report a failed pull that is waiting out its back-off before the next one."))
+
+(define-condition container-image-never-pull (container-config-error) ()
+  (:documentation "Report a missing image that pull policy Never forbids pulling."))
+
+(define-condition volume-mount-error (container-config-error)
+  ((volume :initarg :volume :reader volume-mount-error-volume))
+  (:documentation "Report a volume that can't be set up yet, which keeps its container waiting."))
+
+(define-condition container-create-error (container-config-error) ()
+  (:documentation "Report a container the runtime refused to create; a later pass retries it."))
+
+(defgeneric runtime-record-pod-event (runtime uid reason message &optional type)
+  (:documentation "Queue an Event about the Pod UID itself, sent with its next status report.")
+  (:method (runtime uid reason message &optional type)
+    (declare (ignore runtime uid reason message type))
+    nil))
 
 (defparameter +gr8s-termination-file-label+ "io.gr8s.termination-file")
 (defparameter +gr8s-termination-policy-label+ "io.gr8s.termination-policy")

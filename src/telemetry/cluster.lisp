@@ -56,6 +56,7 @@
                         ("dropped_bytes" gr8s.node.v1::dropped-bytes)
                         ("rejected_spoofs" gr8s.node.v1::rejected-spoofs)
                         ("malformed_packets" gr8s.node.v1::malformed-packets)
-                        ("unsupported_packets" gr8s.node.v1::unsupported-packets))
+                        ("unsupported_packets" gr8s.node.v1::unsupported-packets)
+                        ("policy_drops" gr8s.node.v1::policy-drops))
                       do (format stream "gr8s_endpoint_~A_total{~A} ~D~%"
                                  name labels (slot-value endpoint slot)))))))))))

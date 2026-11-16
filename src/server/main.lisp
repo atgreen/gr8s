@@ -322,13 +322,13 @@
                       (setf (getf options :raft-listen) value))
                      ((string= option "--raft-port")
                       (setf (getf options :raft-port) (parse-port value)))
-                     ((string= option "--raft-join")
+                     ;; Joining takes the agent's and witness's flag names; the
+                     ;; one-time token is bound to --node-name.
+                     ((string= option "--join")
                       (setf (getf options :raft-join) value))
-                     ((string= option "--raft-node-name")
-                      (setf (getf options :raft-node-name) value))
-                     ((string= option "--raft-token")
+                     ((string= option "--token")
                       (setf (getf options :raft-token) value))
-                     ((string= option "--raft-ca-pin")
+                     ((string= option "--ca-pin")
                       (setf (getf options :raft-ca-pin) value))
                      ((string= option "--local-storage-path")
                       (unless (storage-absolute-path-p value)
@@ -340,7 +340,7 @@
                    (setf arguments (cddr arguments)))))
     (when (and (eq t (getf options :raft-compaction))
                (not (or (getf options :raft-init) (getf options :raft-join))))
-      (error "--raft-compaction requires --raft-init or --raft-join"))
+      (error "--raft-compaction requires --raft-init or --join"))
     (when (eq :auto (getf options :raft-compaction))
       (setf (getf options :raft-compaction)
             (not (null (or (getf options :raft-init) (getf options :raft-join))))))
@@ -1625,7 +1625,7 @@ needs no shell/coreutils/util-linux. Returns 0."
     ((and (null (rest arguments))
           (member (first arguments)
                   '("runtime" "wireguard" "network" "debug"
-                    "certificate" "secrets-encrypt")
+                    "certificate" "secrets-encrypt" "backup")
                   :test #'string=))
      (list :command :help :help-path arguments))
     ((member (first arguments) '("version" "--version" "-v") :test #'string=)
@@ -1666,6 +1666,10 @@ needs no shell/coreutils/util-linux. Returns 0."
      (parse-certificate-options (rest arguments)))
     ((string= "secrets-encrypt" (first arguments))
      (parse-secrets-encrypt-options (rest arguments)))
+    ((string= "backup" (first arguments))
+     (parse-backup-options (rest arguments)))
+    ((string= "restore" (first arguments))
+     (parse-restore-options (rest arguments)))
     ((string= "doctor" (first arguments))
      (parse-doctor-options (rest arguments)))
     ((string= "dashboard" (first arguments))
@@ -2765,7 +2769,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                     ;; through Raft and 503 ("not the Raft leader") until this
                     ;; member has won election, so they must wait for leadership.
                     ;; The founder (--raft-init) waits briefly to win it; a joiner
-                    ;; (--raft-join) never performs them -- the leader's writes
+                    ;; (--join) never performs them -- the leader's writes
                     ;; replicate to it. Per-member runtime (the aggregator, the
                     ;; service VIP, and this member's own in-cluster API listener)
                     ;; still comes up on every member, leader or not.
@@ -2949,13 +2953,13 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
     (if (getf options :raft-join)
         (multiple-value-bind (host port) (parse-agent-server (getf options :raft-join))
           (ensure-joining-control-plane-pki root (or (getf options :raft-id) (getf options :node-name)) host port
-                                            :node-name (getf options :raft-node-name)
+                                            :node-name (getf options :node-name)
                                             :token (getf options :raft-token)
                                             :ca-pin (getf options :raft-ca-pin)))
         (ensure-cluster-pki root))))
 
 (defun maybe-start-ha-control-plane (store pki options)
-  "Start a Raft-replicated control plane when --raft-init or --raft-join was
+  "Start a Raft-replicated control plane when --raft-init or --join was
    given, else NIL (single-node)."
   (when (or (getf options :raft-init) (getf options :raft-join))
     (let ((id (or (getf options :raft-id) (getf options :node-name)))
@@ -2977,7 +2981,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
              (require-serve-state-ownership options)
              (gr8s.resources::reap-store-snapshot-startup-temporaries-unlocked member store)))
          :join-host join-host :join-port join-port
-         :node-name (getf options :raft-node-name)
+         :node-name (getf options :node-name)
          :token (getf options :raft-token)
          :ca-pin (getf options :raft-ca-pin)
          :api-url (format nil "https://~A:~D" (serve-api-advertise-address options)
@@ -3136,6 +3140,12 @@ Capture timestamps, affected namespace/Pod UID/node, exact commands, exit codes,
 and relevant logs. Redact tokens, keys, kubeconfigs, and Secret values. Distinguish
 observations from hypotheses; verify recovery against the original symptom.
 
+Before risky maintenance, take an offline backup: stop the server, then
+`gr8s backup save --state-directory DIR --output FILE --key-file KEY` (create the
+key once with `gr8s backup keygen`). The encrypted bundle captures cluster
+identity, keys, and the Raft store; `gr8s backup verify` authenticates it and
+`gr8s restore` rebuilds a fresh state directory from it. See docs/backup-restore.md.
+
 ## Live Lisp inspection with Slynk
 
 You can inspect a running process without restarting it or installing a debug
@@ -3232,6 +3242,8 @@ No HA API may start from member-local certificate state before this converges."
 (defparameter +cli-commands+
   '(("serve" "Run the control plane and local node agent")
     ("agent" "Run a node agent") ("witness" "Run an HA quorum witness")
+    ("net-agent" "Provide network services to a foreign cluster")
+    ("cni-install" "Install this binary as the node's CNI plugin")
     ("join-token" "Print a cluster join token")
     ("runtime" "Manage sandbox runtimes")
     ("kubeconfig" "Print or write a cluster kubeconfig")
@@ -3240,6 +3252,8 @@ No HA API may start from member-local certificate state before this converges."
     ("wireguard" "Manage WireGuard identity")
     ("network" "Inspect cluster networking") ("certificate" "Manage certificates")
     ("secrets-encrypt" "Manage secrets encryption")
+    ("backup" "Capture and verify encrypted state backups")
+    ("restore" "Restore a state backup into a fresh state directory")
     ("skill" "Print guidance for operators and AI agents")
     ("dashboard" "Open the Kubernetes dashboard (Headlamp) in a browser")
     ("version" "Print version information") ("notices" "Print license notices")))
@@ -3272,7 +3286,9 @@ No HA API may start from member-local certificate state before this converges."
                         ("--node-port PORT" "Agent supervisor port") ("--node-name NAME" "Node name")
                         ("--disable-agent" "Run only the control plane")
                         ("--raft-init" "Found an HA control-plane cluster")
-                        ("--raft-join HOST:PORT" "Join an HA control-plane cluster")
+                        ("--join HOST:PORT" "Join an HA control-plane cluster through a member's Raft address")
+                        ("--token TOKEN" "Control-plane join token for --node-name")
+                        ("--ca-pin SHA256" "Raft CA fingerprint the joined member must present")
                         ("--raft-compaction" "Enable automatic HA checkpoints (the HA default)")
                         ("--no-raft-compaction" "Disable automatic HA checkpoints for diagnostics")
                         ("--overlay-backend NAME" "vxlan or wireguard")
@@ -3296,6 +3312,32 @@ No HA API may start from member-local certificate state before this converges."
                         ("--runtime NAME" "containerd or fake")
                         ("--containerd-mode MODE" "managed or external")
                         ("--cni-mode MODE" "native or external")
+                        ("--help, -h" "show help"))))
+      ((equal path '("net-agent"))
+       (page "Provide network services to a foreign cluster" "[OPTIONS]"
+             :options '(("--cni BOOL" "CNI, IPAM, overlay, NetworkPolicy, hostPort (default true)")
+                        ("--service-lb BOOL" "Replace kube-proxy with the eBPF socket LB")
+                        ("--gateway BOOL" "Serve the Gateway API and Ingress")
+                        ("--kubeconfig FILE" "Host cluster access (default: in-cluster ServiceAccount)")
+                        ("--node-name NAME" "This node's Kubernetes name (default: $NODE_NAME)")
+                        ("--state-directory DIR" "Folder holding IPAM and key state")
+                        ("--bpf-root DIR" "bpffs pin root (default /sys/fs/bpf/gr8s)")
+                        ("--socket PATH" "CNI control socket (default /run/gr8s/cni.sock)")
+                        ("--mtu N" "Pod interface MTU (default 1450)")
+                        ("--overlay-backend NAME" "vxlan or wireguard (default vxlan)")
+                        ("--wireguard-listen-port PORT" "Shared WireGuard UDP port (default 51820)")
+                        ("--help, -h" "show help"))))
+      ((equal path '("cni-install"))
+       (page "Install this binary as the node's CNI plugin (the net-agent init step)"
+             "[OPTIONS]"
+             :options '(("--cni-bin-dir DIR" "Host CNI bin mount (default /host-cni-bin)")
+                        ("--cni-conf-dir DIR" "Host CNI conf mount (default /host-cni-conf)")
+                        ("--bpf-mount DIR" "bpffs mount point (default /host-bpf)")
+                        ("--conflist NAME" "Conflist filename (default 05-gr8s.conflist)")
+                        ("--cni-name NAME" "CNI network name (default gr8s)")
+                        ("--socket PATH" "Agent socket in the conflist (default /run/gr8s/cni.sock)")
+                        ("--map-pin-root DIR" "Map pin root in the conflist (default /run/gr8s/bpf)")
+                        ("--direction NAME" "Guard attach direction (default egress)")
                         ("--help, -h" "show help"))))
       ((equal path '("runtime"))
        (page "Manage sandbox runtimes" "COMMAND [OPTIONS]"
@@ -3384,10 +3426,26 @@ No HA API may start from member-local certificate state before this converges."
                          ("reencrypt" "Rewrite all Secrets with the active key")
                          ("finalize" "Discard superseded encryption keys"))
              :options '(("--help, -h" "show help"))))
+      ((equal path '("backup"))
+       (page "Capture and verify encrypted state backups" "COMMAND [OPTIONS]"
+             :commands '(("keygen" "Create a private backup key file")
+                         ("save" "Capture an offline state directory into an encrypted bundle")
+                         ("verify" "Authenticate a bundle end to end without restoring it"))
+             :options '(("--key-file FILE" "Private key file of 64 hexadecimal characters")
+                        ("--state-directory PATH" "State directory to capture (save; default system path)")
+                        ("--output FILE" "Bundle to create (save); an existing file is never overwritten")
+                        ("--input FILE" "Bundle to read (verify)")
+                        ("--help, -h" "show help"))))
+      ((equal path '("restore"))
+       (page "Restore a state backup into a fresh state directory" "[OPTIONS]"
+             :options '(("--input FILE" "Bundle to restore")
+                        ("--state-directory PATH" "Target directory; must not exist (default system path)")
+                        ("--key-file FILE" "Private key file of 64 hexadecimal characters")
+                        ("--help, -h" "show help"))))
       ((and (= (length path) 1) (assoc (first path) +cli-commands+ :test #'string=))
        (simple (second (assoc (first path) +cli-commands+ :test #'string=))))
       ((and (> (length path) 1)
-            (member (first path) '("wireguard" "network" "debug" "certificate" "secrets-encrypt")
+            (member (first path) '("wireguard" "network" "debug" "certificate" "secrets-encrypt" "backup")
                     :test #'string=))
        (simple (format nil "Run the ~{~A~^ ~} command" path)))
       (t (error "no help for command: ~{~A~^ ~}" path)))))
@@ -3496,6 +3554,9 @@ No HA API may start from member-local certificate state before this converges."
                 :secrets-encrypt-promote :secrets-encrypt-reencrypt
                 :secrets-encrypt-finalize)
                (run-secrets-encrypt-command options))
+              ((:backup-keygen :backup-save :backup-verify)
+               (run-backup-command options))
+              (:restore (run-restore-command options))
               (:doctor
                (if (plusp (apply #'run-doctor
                                  (append

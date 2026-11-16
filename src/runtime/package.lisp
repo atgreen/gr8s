@@ -23,6 +23,13 @@
    #:container-config-error
    #:container-image-pending
    #:container-image-pull-error
+   #:container-image-pull-backoff
+   #:container-image-pull-error-image
+   #:container-image-never-pull
+   #:container-create-error
+   #:volume-mount-error
+   #:volume-mount-error-volume
+   #:runtime-record-pod-event
    #:copy-runtime-exec-result
    #:copy-runtime-pod
    #:fake-runtime
