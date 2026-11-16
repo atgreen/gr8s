@@ -790,7 +790,13 @@
   ;; An agent with every feature off would only watch and do nothing.
   (signals error (gr8s.server::parse-net-agent-options '("--cni" "false")))
   (signals error (gr8s.server::parse-net-agent-options '("--cni")))
-  (signals error (gr8s.server::parse-net-agent-options '("--unknown" "x"))))
+  (signals error (gr8s.server::parse-net-agent-options '("--unknown" "x")))
+  ;; The command is discoverable: top-level usage and its own help page.
+  (dolist (arguments '(("help") ("help" "net-agent") ("net-agent" "--help")))
+    (let ((output (with-output-to-string (*standard-output*)
+                    (is (= 0 (gr8s.server::main-with-environment
+                              arguments (constantly nil) (constantly 99)))))))
+      (is (search "net-agent" output)))))
 
 (test debug-icl-parses-targets-and-launch-options
   ;; icl rides the slynk tunnel: same command plist, plus launch options and a

@@ -3164,6 +3164,7 @@ No HA API may start from member-local certificate state before this converges."
 (defparameter +cli-commands+
   '(("serve" "Run the control plane and local node agent")
     ("agent" "Run a node agent") ("witness" "Run an HA quorum witness")
+    ("net-agent" "Provide network services to a foreign cluster")
     ("join-token" "Print a cluster join token")
     ("runtime" "Manage sandbox runtimes")
     ("kubeconfig" "Print or write a cluster kubeconfig")
@@ -3228,6 +3229,20 @@ No HA API may start from member-local certificate state before this converges."
                         ("--runtime NAME" "containerd or fake")
                         ("--containerd-mode MODE" "managed or external")
                         ("--cni-mode MODE" "native or external")
+                        ("--help, -h" "show help"))))
+      ((equal path '("net-agent"))
+       (page "Provide network services to a foreign cluster" "[OPTIONS]"
+             :options '(("--cni BOOL" "CNI, IPAM, overlay, NetworkPolicy, hostPort (default true)")
+                        ("--service-lb BOOL" "Replace kube-proxy with the eBPF socket LB")
+                        ("--gateway BOOL" "Serve the Gateway API and Ingress")
+                        ("--kubeconfig FILE" "Host cluster access (default: in-cluster ServiceAccount)")
+                        ("--node-name NAME" "This node's Kubernetes name (default: $NODE_NAME)")
+                        ("--state-directory DIR" "Folder holding IPAM and key state")
+                        ("--bpf-root DIR" "bpffs pin root (default /sys/fs/bpf/gr8s)")
+                        ("--socket PATH" "CNI control socket (default /run/gr8s/cni.sock)")
+                        ("--mtu N" "Pod interface MTU (default 1450)")
+                        ("--overlay-backend NAME" "vxlan or wireguard (default vxlan)")
+                        ("--wireguard-listen-port PORT" "Shared WireGuard UDP port (default 51820)")
                         ("--help, -h" "show help"))))
       ((equal path '("runtime"))
        (page "Manage sandbox runtimes" "COMMAND [OPTIONS]"
