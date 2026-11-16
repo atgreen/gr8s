@@ -82,10 +82,10 @@ class Node:
         if self.name == "cp1":
             args += ["--raft-init"]
         else:
-            args += ["--raft-join", f"127.0.0.1:{seed}"]
+            args += ["--join", f"127.0.0.1:{seed}"]
         if enrollment:
-            args += ["--raft-node-name", self.name, "--raft-token", enrollment["token"],
-                     "--raft-ca-pin", enrollment["caPin"]]
+            args += ["--token", enrollment["token"],
+                     "--ca-pin", enrollment["caPin"]]
         if self.compaction and not self.default_compaction:
             args += ["--raft-compaction"]
         self.http = None

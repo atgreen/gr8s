@@ -322,13 +322,13 @@
                       (setf (getf options :raft-listen) value))
                      ((string= option "--raft-port")
                       (setf (getf options :raft-port) (parse-port value)))
-                     ((string= option "--raft-join")
+                     ;; Joining takes the agent's and witness's flag names; the
+                     ;; one-time token is bound to --node-name.
+                     ((string= option "--join")
                       (setf (getf options :raft-join) value))
-                     ((string= option "--raft-node-name")
-                      (setf (getf options :raft-node-name) value))
-                     ((string= option "--raft-token")
+                     ((string= option "--token")
                       (setf (getf options :raft-token) value))
-                     ((string= option "--raft-ca-pin")
+                     ((string= option "--ca-pin")
                       (setf (getf options :raft-ca-pin) value))
                      ((string= option "--local-storage-path")
                       (unless (storage-absolute-path-p value)
@@ -340,7 +340,7 @@
                    (setf arguments (cddr arguments)))))
     (when (and (eq t (getf options :raft-compaction))
                (not (or (getf options :raft-init) (getf options :raft-join))))
-      (error "--raft-compaction requires --raft-init or --raft-join"))
+      (error "--raft-compaction requires --raft-init or --join"))
     (when (eq :auto (getf options :raft-compaction))
       (setf (getf options :raft-compaction)
             (not (null (or (getf options :raft-init) (getf options :raft-join))))))
@@ -2702,7 +2702,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                     ;; through Raft and 503 ("not the Raft leader") until this
                     ;; member has won election, so they must wait for leadership.
                     ;; The founder (--raft-init) waits briefly to win it; a joiner
-                    ;; (--raft-join) never performs them -- the leader's writes
+                    ;; (--join) never performs them -- the leader's writes
                     ;; replicate to it. Per-member runtime (the aggregator, the
                     ;; service VIP, and this member's own in-cluster API listener)
                     ;; still comes up on every member, leader or not.
@@ -2886,13 +2886,13 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
     (if (getf options :raft-join)
         (multiple-value-bind (host port) (parse-agent-server (getf options :raft-join))
           (ensure-joining-control-plane-pki root (or (getf options :raft-id) (getf options :node-name)) host port
-                                            :node-name (getf options :raft-node-name)
+                                            :node-name (getf options :node-name)
                                             :token (getf options :raft-token)
                                             :ca-pin (getf options :raft-ca-pin)))
         (ensure-cluster-pki root))))
 
 (defun maybe-start-ha-control-plane (store pki options)
-  "Start a Raft-replicated control plane when --raft-init or --raft-join was
+  "Start a Raft-replicated control plane when --raft-init or --join was
    given, else NIL (single-node)."
   (when (or (getf options :raft-init) (getf options :raft-join))
     (let ((id (or (getf options :raft-id) (getf options :node-name)))
@@ -2914,7 +2914,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
              (require-serve-state-ownership options)
              (gr8s.resources::reap-store-snapshot-startup-temporaries-unlocked member store)))
          :join-host join-host :join-port join-port
-         :node-name (getf options :raft-node-name)
+         :node-name (getf options :node-name)
          :token (getf options :raft-token)
          :ca-pin (getf options :raft-ca-pin)
          :api-url (format nil "https://~A:~D" (serve-api-advertise-address options)
@@ -3219,7 +3219,9 @@ No HA API may start from member-local certificate state before this converges."
                         ("--node-port PORT" "Agent supervisor port") ("--node-name NAME" "Node name")
                         ("--disable-agent" "Run only the control plane")
                         ("--raft-init" "Found an HA control-plane cluster")
-                        ("--raft-join HOST:PORT" "Join an HA control-plane cluster")
+                        ("--join HOST:PORT" "Join an HA control-plane cluster through a member's Raft address")
+                        ("--token TOKEN" "Control-plane join token for --node-name")
+                        ("--ca-pin SHA256" "Raft CA fingerprint the joined member must present")
                         ("--raft-compaction" "Enable automatic HA checkpoints (the HA default)")
                         ("--no-raft-compaction" "Disable automatic HA checkpoints for diagnostics")
                         ("--overlay-backend NAME" "vxlan or wireguard")

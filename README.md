@@ -5,12 +5,14 @@
 
 **Kubernetes, built from scratch in Common Lisp — with an eBPF dataplane you can run on its own.**
 
-**One file is the whole cluster.** gr8s puts a Kubernetes API server,
-controllers, scheduler, node agent, container runtime, networking, DNS,
-ingress, storage, metrics, a dashboard, and the datastore in one native
-executable. Copy it to a Linux machine, run `gr8s serve`, and use `kubectl` and
-standard Kubernetes manifests. Add nodes by running the same file as
-`gr8s agent`.
+**One executable provides a complete Kubernetes-compatible experience.** gr8s
+puts a Kubernetes API server, controllers, scheduler, node agent, container
+runtime, networking, DNS, ingress, storage, metrics, a dashboard, and the
+datastore into a single native binary. Copy it to a Linux machine, run `gr8s serve`, and use `kubectl` and
+standard Kubernetes manifests. The same file scales out: run it as
+`gr8s agent` to add worker nodes, or as `gr8s serve --join` to add
+control-plane members for a [highly available](docs/high-availability.md),
+Raft-replicated control plane.
 
 > [!WARNING]
 > **This is an experiment.** gr8s is for people interested in exploring and
@@ -21,10 +23,9 @@ standard Kubernetes manifests. Add nodes by running the same file as
 > human-guided AI development. It may never meet its goals. See
 > [Creation and development](#creation-and-development).
 
-**gr8s passed 100% of the upstream Kubernetes v1.37 `certified-conformance`
-tests: 462/462, zero failures**, in the recorded two-node Sonobuoy run on
-2026-11-11. See the [results and evidence](docs/CONFORMANCE.md). It is not yet
-a CNCF-submitted _Certified Kubernetes_ distribution; see the
+**gr8s passed 100% of the upstream Kubernetes v1.37 conformance tests:
+462/462, zero failures**, in the recorded two-node Sonobuoy run on 2026-11-11.
+See the [results and evidence](docs/CONFORMANCE.md), and the
 [API coverage](docs/kubernetes-surface.md) and
 [known gaps](docs/k3s-gap-inventory.md) for the current scope.
 
@@ -68,10 +69,11 @@ version skew between components.
 The same file takes every role:
 
 ```sh
-gr8s serve       # control plane plus a local node: a complete cluster
-gr8s agent       # a worker node joining that cluster
-gr8s witness     # a tie-breaking Raft member for two-node high availability
-gr8s net-agent   # just the eBPF dataplane, on a Kubernetes cluster you already run
+gr8s serve              # control plane plus a local node: a complete cluster
+gr8s serve --join       # another control-plane member, for high availability
+gr8s agent              # a worker node joining that cluster
+gr8s witness            # a tie-breaking Raft member for two-node high availability
+gr8s net-agent          # just the eBPF dataplane, on a Kubernetes cluster you already run
 ```
 
 Upgrading is replacing one file. The [systemd installer](docs/installing.md)
@@ -205,8 +207,7 @@ networking components.
 That architecture gives gr8s an integrated system to explore and develop,
 with features such as live Lisp inspection and a directly compiled eBPF
 dataplane. It also means its compatibility and operational behavior differ from
-k3s. gr8s passes the upstream Kubernetes v1.37 `certified-conformance` suite,
-but is experimental and does not yet provide every k3s add-on or operational
+k3s. gr8s passes the upstream Kubernetes v1.37 conformance tests, but is experimental and does not yet provide every k3s add-on or operational
 workflow. Check the
 [compatibility gaps](docs/k3s-gap-inventory.md), [API coverage](docs/kubernetes-surface.md),
 and [conformance results](docs/CONFORMANCE.md) for supported behavior and limitations.
@@ -438,7 +439,7 @@ follow the [testing guide](docs/building-and-testing.md#test-matrix).
 - [Multi-node design](docs/multi-node-design.md)
 - [Known compatibility gaps](docs/k3s-gap-inventory.md)
 - [Conformance results](docs/CONFORMANCE.md)
-- [v1.37 certified-conformance evidence (462/462)](docs/evidence/conformance-full-v1.37-2026-11-11.json)
+- [v1.37 conformance evidence (462/462)](docs/evidence/conformance-full-v1.37-2026-11-11.json)
 
 ## Versioning
 

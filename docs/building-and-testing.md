@@ -206,7 +206,7 @@ owner-only and contains administrative credentials.
 
 - `gr8s serve` runs the authenticated HTTPS control plane and a private gRPC
   node endpoint, and
-  optionally joins a Raft cluster with `--raft-init`/`--raft-join` (see
+  optionally joins a Raft cluster with `--raft-init`/`--join` (see
   [high availability](high-availability.md)). It starts a local agent named
   `gr8s-local` by default. `--disable-agent` runs a control-plane-only process.
 - `gr8s agent` enrolls with a one-time token, persists its node key and

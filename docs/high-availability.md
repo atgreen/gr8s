@@ -58,15 +58,15 @@ PodCIDR. Events are deliberately local.
 
 ```sh
 # Found a cluster.
-gr8s serve --raft-init --raft-id cp1 --raft-listen 10.0.0.1 --raft-port 7000 ...
+gr8s serve --raft-init --node-name cp1 --raft-listen 10.0.0.1 --raft-port 7000 ...
 
 # On cp1, create a token for each new member. This prints its token and caPin.
 gr8s join-token --role control-plane --node-name cp2
 
 # Join through the member that created the token.
-gr8s serve --raft-join 10.0.0.1:7000 --raft-id cp2 \
+gr8s serve --join 10.0.0.1:7000 --node-name cp2 \
   --raft-listen 10.0.0.2 --raft-port 7000 \
-  --raft-node-name cp2 --raft-token "$TOKEN" --raft-ca-pin "$CA_PIN" ...
+  --token "$TOKEN" --ca-pin "$CA_PIN" ...
 
 # On cp1, create a separate witness token. Use its token and caPin below.
 gr8s join-token --role witness --node-name arb
@@ -81,7 +81,8 @@ The addresses above are examples; use each machine's reachable address and allow
 member-to-member traffic on the chosen Raft ports. Run token creation against the
 same state directory as the issuing member (add `--state-directory PATH` if it
 uses a nondefault directory). Each token is bound to its role and node name and
-can be used only once.
+can be used only once; the joiner's `--node-name` must match. A member's Raft ID
+is its `--node-name` unless `--raft-id` sets another.
 
 Requested voters first join as learners. Existing voters keep their quorum while
 the learner installs application state and catches up. The leader automatically
@@ -91,7 +92,7 @@ asynchronously. Repeating the same Join preserves an already promoted voter;
 conflicting endpoints are refused.
 
 HA is **opt-in** for a fresh state directory. Once HA intent is persisted,
-restart with the appropriate `--raft-init` or `--raft-join` options; omitting them
+restart with the appropriate `--raft-init` or `--join` options; omitting them
 is refused before application initialization.
 
 The production Raft port defaults to **7000** and the listening address defaults
@@ -236,7 +237,7 @@ runtime and disabled agents; container, BPF and VM acceptance remain separate.
 ## Automatic checkpoints and heap sizing
 
 Automatic checkpointing starts by default for `gr8s serve --raft-init` and
-`gr8s serve --raft-join`. Retain each member's original state directory, identity
+`gr8s serve --join`. Retain each member's original state directory, identity
 and endpoints. `--raft-compaction` remains an explicit enable switch;
 `--no-raft-compaction` disables scheduling for diagnostics. Disabling it allows
 retained log data to grow with writes, so monitor WAL and heap usage while it is

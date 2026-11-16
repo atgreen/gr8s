@@ -20,6 +20,14 @@ the Kubernetes API version with a gr8s release suffix (see
   `v<k8s>-gr8s.<n>` maps to package version `<k8s>+gr8s.<n>` with packaging
   revision 1 in both formats.
 
+### Changed
+
+- `gr8s serve` joins a control-plane cluster with the same flags as
+  `gr8s agent` and `gr8s witness`: `--join HOST:PORT`, `--token`, and
+  `--ca-pin`. The token is bound to `--node-name`, which also names the Raft
+  member unless `--raft-id` is given. `--raft-join`, `--raft-token`,
+  `--raft-ca-pin`, and `--raft-node-name` are removed.
+
 ## [v1.37.2-gr8s.0] — 2026-11-15
 
 Initial release, marked pre-release as a trial.
