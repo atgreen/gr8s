@@ -312,8 +312,8 @@ health and locality also affect Service backend selection and image-peer
 ordering.
 
 Internal TLS uses a pure-Lisp TLS 1.3 implementation. It prefers the hybrid
-X25519MLKEM768 key exchange, which combines classical and post-quantum
-cryptography. Classical X25519/P-256 is available as a fallback. Image
+[X25519MLKEM768](https://atgreen.github.io/repl-yell/posts/post-quantum-tls-primer/)
+key exchange, which combines classical and post-quantum cryptography. Classical X25519/P-256 is available as a fallback. Image
 distribution uses node certificates and mutual TLS to authenticate its private
 peer swarm. Each node can seed the verified blobs that it receives.
 
