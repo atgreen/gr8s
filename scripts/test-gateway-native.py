@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
 import subprocess
 import tempfile
 import time
@@ -95,11 +96,22 @@ def run(args):
         apply({"apiVersion": "gateway.networking.k8s.io/v1", "kind": "GatewayClass",
                "metadata": {"name": "gr8s-test"},
                "spec": {"controllerName": "gr8s.io/gateway-controller"}})
-        apply({"apiVersion": "gateway.networking.k8s.io/v1", "kind": "Gateway",
-               "metadata": {"name": "web"},
-               "spec": {"gatewayClassName": "gr8s-test", "listeners": [
-                   {"name": "http", "protocol": "HTTP", "port": args.gateway_port}]}})
-        gateway = wait_for("Gateway programmed with zero routes", serving_gateway)
+        # Force a real bind failure, then change only the actual socket state.
+        # The desired Gateway stays unchanged: deduplication must not lose its retry.
+        with socket.socket() as occupied:
+            occupied.bind(("127.0.0.1", args.gateway_port))
+            occupied.listen(1)
+            apply({"apiVersion": "gateway.networking.k8s.io/v1", "kind": "Gateway",
+                   "metadata": {"name": "web"},
+                   "spec": {"gatewayClassName": "gr8s-test", "listeners": [
+                       {"name": "http", "protocol": "HTTP", "port": args.gateway_port}]}})
+            wait_for("listener bind failure observed",
+                     lambda: "Gateway convergence failed:" in (root / "gr8s.log").read_text(), timeout=60)
+            time.sleep(2)
+            check("failed listener is not programmed",
+                  condition(get_gateway(), "Programmed").get("status") != "True")
+        gateway = wait_for("Gateway retries unchanged desired listener", serving_gateway, timeout=30)
+        check("listener recovery preserves desired generation", gateway["metadata"]["generation"] == 1)
         address = gateway["status"]["addresses"][0]["value"]
         evidence["address"] = address
         check("zero-route listener returns HTTP 404", http_status(address, args.gateway_port) == 404)

@@ -22,6 +22,7 @@
   (core-change-observers nil)          ; nonblocking callbacks under the store lock
   (resource-revision 0)
   (gateway-dependency-revision 0)      ; process-local fence for non-Gateway desired changes
+  discovery-encoding-cache            ; immutable encoded rows from one captured projection
   template-history
   (template-history-recent nil)
   (template-history-maintained-at 0)

@@ -90,6 +90,82 @@
                      owners)))
    "alpha"))
 
+(test collector-cannot-delete-a-reparented-or-recreated-core-dependent
+  (dolist (race '(:reparent :recreate))
+    (with-temporary-store (store path)
+      (values path)
+      (let* ((live (gc-test-configmap store "live"))
+             (dependent (gc-test-configmap store "dependent" '("gone" "gone-uid")))
+             (allowed (symbol-function 'gr8s.controllers::controller-delete-allowed-p))
+             (raced nil) (expected-uid (gethash "uid" (gethash "metadata" dependent))))
+        (unwind-protect
+             (progn
+               (setf (symbol-function 'gr8s.controllers::controller-delete-allowed-p)
+                     (lambda (current resource namespace name controller)
+                       (when (and (not raced) (equal resource "configmaps") (equal name "dependent"))
+                         (setf raced t)
+                         (ecase race
+                           (:reparent
+                            (gr8s.resources::update-core-resource
+                             store resource namespace name
+                             (lambda (object)
+                               (setf (gethash "ownerReferences" (gethash "metadata" object))
+                                     (vector (gr8s.resources::core-object
+                                              "apiVersion" "v1" "kind" "ConfigMap" "name" "live"
+                                              "uid" (gethash "uid" (gethash "metadata" live))))) object)))
+                           (:recreate
+                            (gr8s.resources::delete-core-resource store resource namespace name)
+                            (setf expected-uid (gethash "uid" (gethash "metadata" (gc-test-configmap store name)))))))
+                       (funcall allowed current resource namespace name controller)))
+               (gr8s.controllers::collect-orphaned-api-objects (make-reconciler store (make-fake-runtime)))
+               (is (not (null raced)))
+               (let ((current (ignore-errors (gr8s.resources::get-core-resource store "configmaps" "alpha" "dependent"))))
+                 (is (hash-table-p current))
+                 (when current (is (equal expected-uid (gethash "uid" (gethash "metadata" current)))))))
+          (setf (symbol-function 'gr8s.controllers::controller-delete-allowed-p) allowed))))))
+
+#+sbcl
+(test collector-inspection-does-not-copy-unowned-resource-payloads
+  (with-temporary-store (store path)
+    (values path)
+    (gr8s.resources::create-core-resource
+     store "configmaps"
+     (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "large")
+                                 "data" (gr8s.resources::core-object "payload" (make-string 500000 :initial-element #\x)))
+     "default")
+    (let ((reconciler (make-reconciler store (make-fake-runtime))))
+      (gr8s.controllers::collect-orphaned-api-objects reconciler)
+      (sb-ext:gc :full t)
+      (let ((before (sb-ext:get-bytes-consed)))
+        (gr8s.controllers::collect-orphaned-api-objects reconciler)
+        (is (< (- (sb-ext:get-bytes-consed) before) 262144))))))
+
+(test collector-cannot-prune-an-owner-reference-edited-after-inspection
+  (with-temporary-store (store path)
+    (values path)
+    (let* ((live (gc-test-configmap store "live"))
+           (dependent (gc-test-configmap store "dependent" live '("gone" "gone-uid")))
+           (update (symbol-function 'gr8s.controllers::update-owned-workload)))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s.controllers::update-owned-workload)
+                   (lambda (current resource object transform)
+                     (gr8s.resources::update-core-resource
+                      store "configmaps" "alpha" "dependent"
+                      (lambda (value)
+                        (let ((reference (aref (gethash "ownerReferences" (gethash "metadata" value)) 1)))
+                          (setf (gethash "apiVersion" reference) "example.org/v1"
+                                (gethash "kind" reference) "FutureOwner"
+                                (gethash "name" reference) "future")) value))
+                     (funcall update current resource object transform)))
+             (gr8s.controllers::drop-dangling-owner-references store "configmaps" dependent)
+             (let ((references (gethash "ownerReferences"
+                                        (gethash "metadata" (gr8s.resources::get-core-resource
+                                                              store "configmaps" "alpha" "dependent")))))
+               (is (= 2 (length references)))
+               (is (find "FutureOwner" references :key (lambda (ref) (gethash "kind" ref)) :test #'equal))))
+        (setf (symbol-function 'gr8s.controllers::update-owned-workload) update)))))
+
 (test collector-drops-an-absent-owner-while-another-keeps-the-dependent
   (with-temporary-store (store path)
     (values path)

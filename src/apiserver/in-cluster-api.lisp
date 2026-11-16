@@ -95,9 +95,57 @@ server having picked a different one (podster-1v6)."
 (defvar *api-connection-certificate-chain* nil
   "TLS peer chain with verified key possession, scoped to one connection including keepalive requests.")
 
+(defstruct api-certificate-cache
+  second chain roots material depth identity)
+
+(defvar *api-connection-certificate-cache* nil
+  "One positive authentication result for this connection; never an authorization decision.")
+
+(defun cached-api-certificate-identity (chain ca cache &optional (now (get-universal-time)))
+  "Reuse verification only at the same time, with the same connection's certificate inputs.
+The native Windows/macOS verifier uses its own clock, so it is never cached here.
+TLS peer certificates and acceptor trust certificates are server-owned parsed objects;
+retain their identities and copies of their DER to detect replacement or material edits."
+  #+(or windows darwin macos)
+  (locally (declare (ignore cache)) (certificate-api-identity chain ca :now now))
+  #-(or windows darwin macos)
+  (if (null cache)
+      (certificate-api-identity chain ca :now now)
+      (let* ((roots (if (listp ca) ca (list ca)))
+             (certificates (append chain roots)))
+        (unless (and (api-certificate-cache-identity cache)
+                     (eql now (api-certificate-cache-second cache))
+                     (equal chain (api-certificate-cache-chain cache))
+                     (equal roots (api-certificate-cache-roots cache))
+                     (eql pure-tls::*default-verify-depth* (api-certificate-cache-depth cache))
+                     (every (lambda (certificate bytes)
+                              (equalp (pure-tls::x509-certificate-raw-der certificate) bytes))
+                            certificates (api-certificate-cache-material cache)))
+          ;; A failed revalidation must not leave a previous positive result reusable.
+          (setf (api-certificate-cache-identity cache) nil)
+          (let ((identity (certificate-api-identity chain ca :now now)))
+            (when identity
+              (setf (api-certificate-cache-second cache) now
+                    (api-certificate-cache-chain cache) (copy-list chain)
+                    (api-certificate-cache-roots cache) (copy-list roots)
+                    (api-certificate-cache-material cache)
+                    (mapcar (lambda (certificate) (copy-seq (pure-tls::x509-certificate-raw-der certificate))) certificates)
+                    (api-certificate-cache-depth cache) pure-tls::*default-verify-depth*
+                    (api-certificate-cache-identity cache) identity))))
+        ;; Request handlers may retain or modify their identity; keep the cache private.
+        (let ((identity (api-certificate-cache-identity cache)))
+          (when identity
+            (gr8s.resources::make-api-user-identity
+             :username (copy-seq (gr8s.resources::api-user-identity-username identity))
+             :uid (let ((uid (gr8s.resources::api-user-identity-uid identity))) (and uid (copy-seq uid)))
+             :groups (copy-core-object (gr8s.resources::api-user-identity-groups identity))
+             :extra (copy-core-object (gr8s.resources::api-user-identity-extra identity))))))))
+
 (defmethod hunchentoot:process-connection :around ((acceptor gr8s-in-cluster-acceptor) socket)
   "Isolate TLS peer identity across worker reuse and retain it across keepalive requests."
-  (let ((*api-connection-certificate-chain* nil)) (call-next-method)))
+  (let ((*api-connection-certificate-chain* nil)
+        (*api-connection-certificate-cache* (make-api-certificate-cache)))
+    (call-next-method)))
 
 (defmethod hunchentoot:initialize-connection-stream ((acceptor gr8s-in-cluster-acceptor) stream)
   "Request optional client proof-of-possession; HTTP authenticators verify trust and token alternatives."
@@ -196,8 +244,9 @@ one then answers 404 rather than 403, as upstream's does."
   (let* ((header (hunchentoot:header-in :authorization request))
          (token (when (and header (uiop:string-prefix-p "Bearer " header)) (subseq header 7)))
          (authenticated (or (handler-case
-                                (certificate-api-identity *api-connection-certificate-chain*
-                                  (in-cluster-client-ca (hunchentoot:request-acceptor request)))
+                                (cached-api-certificate-identity *api-connection-certificate-chain*
+                                  (in-cluster-client-ca (hunchentoot:request-acceptor request))
+                                  *api-connection-certificate-cache*)
                               (kubernetes-error () nil))
                             (and token (authenticate-service-account-token store token))))
          (identity (and authenticated (impersonated-api-identity store authenticated request)))

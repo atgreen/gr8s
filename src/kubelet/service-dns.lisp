@@ -169,16 +169,14 @@
                          (push secret secrets)))))))
     (nreverse secrets)))
 
-(defun build-service-discovery-projection (store)
-  "Serialize public objects from a captured immutable store in stable key order."
+(defun build-service-discovery-projection (store &optional previous-cache)
+  "Encode a captured view, reusing unchanged immutable rows; return bytes and a bounded cache."
   (labels ((objects (resource)
              (loop for key being the hash-keys of (pod-store-resources store)
                    using (hash-value object)
                    when (equal resource (first key)) collect object)))
-    (mapcar (lambda (object)
-              (trivial-utf-8:string-to-utf-8-bytes
-               (endpointslice-canonical-json (service-discovery-public-object object))))
-            (sort (append (objects "services")
+    (let* ((next-cache (make-hash-table :test 'eq))
+           (rows (append (objects "services")
                           (objects "endpointslices")
                           ;; Resolved against the cluster's Pods and Namespaces, which nodes do not see.
                           (network-policy-projection store)
@@ -193,11 +191,23 @@
                           (objects "clustertrustbundles")
                           (objects "podcertificaterequests")
                           (gateway-referenced-tls-secrets store)
-                          (ingress-referenced-tls-secrets store))
-                  #'string< :key (lambda (object)
+                          (ingress-referenced-tls-secrets store)))
+           (encoded
+             (mapcar (lambda (object)
+                       (let ((entry
+                               (or (and previous-cache (gethash object previous-cache))
                                    (let ((metadata (gethash "metadata" object)))
-                                     (format nil "~A/~A/~A" (gethash "kind" object)
-                                             (gethash "namespace" metadata) (gethash "name" metadata))))))))
+                                     (cons (format nil "~A/~A/~A" (gethash "kind" object)
+                                                   (gethash "namespace" metadata) (gethash "name" metadata))
+                                           (trivial-utf-8:string-to-utf-8-bytes
+                                            (endpointslice-canonical-json
+                                             (service-discovery-public-object object))))))))
+                         (setf (gethash object next-cache) entry)
+                         entry))
+                     rows)))
+      ;; Resolved policies and TLS membership are recomputed above. Only identical
+      ;; source objects can reuse bytes; UID/resourceVersion alone are insufficient.
+      (values (mapcar #'cdr (sort encoded #'string< :key #'car)) next-cache))))
 
 (defvar *discovery-projection-cache* nil)
 
@@ -228,20 +238,26 @@
             (alexandria:copy-hash-table (gr8s.store::pod-store-pod-observed-phases store))
             (gr8s.store::pod-store-pod-observed-resource-versions view)
             (alexandria:copy-hash-table (gr8s.store::pod-store-pod-observed-resource-versions store)))
-      view)))
+      (values view (gr8s.store::pod-store-discovery-encoding-cache store)))))
 
 (defun service-discovery-projection (store)
-  "Reuse serialization within a pass while both core and Pod input clocks agree."
+  "Capture coherent inputs; reuse unchanged row encodings across repair passes."
   (let* ((stamp (discovery-projection-stamp store))
          (cached (and *discovery-projection-cache* (gethash store *discovery-projection-cache*))))
     (if (and cached (equal stamp (car cached)))
         (values (second cached) (third cached))
-        (let* ((view (capture-service-discovery-store store))
-               (dependency-revision (gr8s.store::pod-store-gateway-dependency-revision view))
-               (projection (build-service-discovery-projection view)))
-          (when (and *discovery-projection-cache* (equal stamp (discovery-projection-stamp store)))
-            (setf (gethash store *discovery-projection-cache*) (list stamp projection dependency-revision)))
-          (values projection dependency-revision)))))
+        (multiple-value-bind (view previous-cache) (capture-service-discovery-store store)
+          (multiple-value-bind (projection next-cache)
+              (build-service-discovery-projection view previous-cache)
+            (with-store-lock (store)
+              ;; Concurrent captures may finish out of order. Never overwrite a
+              ;; cache published since our capture; a miss only costs re-encoding.
+              (when (eq previous-cache (gr8s.store::pod-store-discovery-encoding-cache store))
+                (setf (gr8s.store::pod-store-discovery-encoding-cache store) next-cache)))
+            (let ((dependency-revision (gr8s.store::pod-store-gateway-dependency-revision view)))
+              (when (and *discovery-projection-cache* (equal stamp (discovery-projection-stamp store)))
+                (setf (gethash store *discovery-projection-cache*) (list stamp projection dependency-revision)))
+              (values projection dependency-revision)))))))
 
 (defun decode-service-discovery-entry (bytes)
   "Validate one public discovery entry and return its resource key and object."
@@ -272,11 +288,21 @@
         (invalid-pod "public Service discovery metadata is invalid"))
       (cons (core-resource-key resource namespace name) public)))
 
+(defun discovery-octet-hash (bytes)
+  "FNV-1a content hash for discovery octets; cache equality still compares exact bytes."
+  (declare (type (vector (unsigned-byte 8)) bytes)
+           (optimize (speed 3) (safety 1)))
+  (let ((hash 2166136261))
+    (declare (type (unsigned-byte 32) hash))
+    (dotimes (index (length bytes) (logand hash most-positive-fixnum))
+      (setf hash (ldb (byte 32 0) (* (logxor hash (aref bytes index)) 16777619))))))
+
 (defun decode-service-discovery-projection (projection &optional cache)
   "Return validated resources and a decoding cache bounded to this projection.
 Exact octets are the keys; strings inside JSON never receive case-folded lookup."
   (let ((resources (make-hash-table :test 'equal))
-        (next-cache (make-hash-table :test 'equalp)))
+        (next-cache (make-hash-table :test 'equalp
+                                    #+sbcl :hash-function #+sbcl #'discovery-octet-hash)))
     (dolist (bytes projection)
       (check-type bytes (vector (unsigned-byte 8)))
       (let ((entry (or (and cache (gethash bytes cache)) (decode-service-discovery-entry bytes))))

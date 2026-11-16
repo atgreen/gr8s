@@ -1909,7 +1909,7 @@ versions, withdraws Pods the server no longer assigns, installs the assigned res
 objects, converges the Service LB, node ports, health checks, NetworkPolicy and Gateway
 listeners (all fail-soft), then creates or updates each assigned Pod and caches its
 observation. Signals NODE-SNAPSHOT-INCOMPLETE when any Pod could not be applied or parsed,
-so the revision is retried."
+or Gateway listeners did not converge, so the revision is retried."
   (unless (eq :running (node-runtime-state node-runtime))
     (error 'runtime-error :message "node runtime is not running"))
   ;; Don't start, stop or fail Pods against a runtime that is restarting. Wait a
@@ -1934,7 +1934,8 @@ so the revision is retried."
             (setf (node-runtime-applied-snapshot node-runtime) nil)
             (error condition)))
       (let ((gateway-update (node-gateway-update-p node-runtime snapshot public-resources))
-            (convergence-ready t))
+            (convergence-ready t)
+            (gateway-failure nil))
         ;; A partial failed apply must never authorize skipping work on a retry.
         (setf (node-runtime-applied-snapshot node-runtime) nil)
         (setf (node-runtime-gateway-synchronized-p node-runtime) nil)
@@ -2033,7 +2034,8 @@ so the revision is retried."
           (handler-case
               (install-node-gateway-view node-runtime public-resources)
             (error (condition)
-              (setf convergence-ready nil)
+              (setf convergence-ready nil
+                    gateway-failure (format nil "Gateway listener convergence incomplete: ~A" condition))
               (format *error-output* "gr8s: Gateway convergence failed: ~A~%" condition)))
           (when gateway-update
             (ensure-node-snapshot-current node-runtime snapshot)
@@ -2047,6 +2049,7 @@ so the revision is retried."
                     (node-runtime-discovery-resources node-runtime) public-resources
                     (node-runtime-discovery-cache node-runtime) next-cache)
               (record-node-gateway-baseline node-runtime snapshot convergence-ready)
+              (when gateway-failure (error 'node-snapshot-incomplete :message gateway-failure))
               (return-from reconcile-node-snapshot statuses)))
           (let* ((parsed (mapcar #'parse-node-assignment assignments))
                  (statuses
@@ -2091,6 +2094,8 @@ so the revision is retried."
                   (node-runtime-discovery-resources node-runtime) public-resources
                   (node-runtime-discovery-cache node-runtime) next-cache)
             (record-node-gateway-baseline node-runtime snapshot convergence-ready)
+            ;; Finish Pod work, but retain a retry: unchanged desired state may never be sent again.
+            (when gateway-failure (error 'node-snapshot-incomplete :message gateway-failure))
             statuses))))))
 
 (defun node-operation-response (request status &key (exit-code 0) (message ""))

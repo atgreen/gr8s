@@ -648,8 +648,9 @@ authenticated tunnel as slynk and launches ICL's browser mode (icl -b
     (unless (= 1 (count-if (lambda (key) (getf options key)) '(:node :selector :member)))
       (error "debug ~A requires exactly one target: a node name, or --node/--selector/--member"
              (if icl "icl" "slynk")))
-    (unless (<= 0 (getf options :local-port) 65535)
-      (error "debug --local-port must be 0..65535 (0 picks a free port)"))
+    (unless (<= (if icl 0 1) (getf options :local-port) 65535)
+      (error "debug ~A --local-port must be ~D..65535"
+             (if icl "icl" "slynk") (if icl 0 1)))
     (dolist (key '(:node :member))
       (when (and (getf options key) (not (path-segment-name-p (getf options key))))
         (error "debug target must be a valid Kubernetes name")))
