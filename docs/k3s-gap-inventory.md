@@ -4,7 +4,7 @@ A Kubernetes gap in this inventory means missing or incompatible behavior that
 upstream Kubernetes provides. Each gap should identify the upstream behavior and
 the gr8s difference. Implementation details, validation coverage, and optional k3s
 packaging workflows are documented separately. Reconciled with source and
-committed records on 2026-11-14. For implemented APIs, see the
+committed records on 2026-11-16. For implemented APIs, see the
 [API reference](kubernetes-surface.md);
 for familiar component names, see [gr8s for Kubernetes users](kubernetes-users.md).
 
@@ -22,7 +22,6 @@ external integration, topology, failure mode, or later build.
 |---|---|---|
 | CSI | Node expansion, driver volume statistics, raw block volumes, fsGroup delegation, and driver ServiceAccount tokens remain unsupported. | [Storage limits](persistent-storage.md#csi) |
 | Owner-reference authorization | gr8s does not implement upstream `OwnerReferencesPermissionEnforcement`. | [Security behavior](security-deviations.md#no-owner-reference-permission-enforcement-c1) |
-| Aggregated APIs | Aggregated OpenAPI is not merged for `kubectl explain`. | [API aggregation](kubernetes-surface.md#api-aggregation) |
 | Autoscaling | Kubernetes HPA can use custom/external metrics through installed providers. gr8s HPA implements Resource and ContainerResource metrics only. | [Upstream HPA](https://kubernetes.io/docs/concepts/workloads/autoscaling/horizontal-pod-autoscale/), [gr8s metrics](kubernetes-surface.md#metrics--autoscaling) |
 | Audit logging | Kubernetes supports audit Policy selection and Request/RequestResponse levels. gr8s provides an opt-in Metadata-level JSON sink without policy selection or managed retention/rotation. | [Upstream auditing](https://kubernetes.io/docs/tasks/debug/debug-cluster/audit/), `--audit-log-path` |
 
@@ -50,7 +49,7 @@ classified as Kubernetes gaps here.
 | Area | gr8s behavior | Reference and scope |
 |---|---|---|
 | HA and bounded recovery | Raft replication, learner admission, durable recovery, per-key transactions, streamed snapshots, and default-on automatic checkpoints | [Replication and recovery](high-availability.md#replication-and-recovery) explains the implementation; [validation coverage](high-availability.md#validation-coverage) identifies the tested scope. |
-| Operator backup/restore | Authenticated encrypted capture/verify primitives and state-bundle validation | No complete restore-to-live operator workflow, scheduled retention, or remote/S3 lifecycle. Raft snapshots alone do not back up cluster identity and keys. See [bundle evidence](https://github.com/atgreen/gr8s/blob/9928d73d274c0c4ad5adb889be2b2489d407e93c/docs/backup-bundle-validation-2026-11-11.json). |
+| Operator backup/restore | Encrypted capture/verify and state-bundle validation exist as internal, test-exercised library functions only | No `backup` or `restore` CLI command, no restore-to-live operator workflow, no scheduled retention, no remote/S3 lifecycle. Raft snapshots alone do not back up cluster identity and keys. See [bundle evidence](https://github.com/atgreen/gr8s/blob/9928d73d274c0c4ad5adb889be2b2489d407e93c/docs/backup-bundle-validation-2026-11-11.json). |
 | Telemetry | Lisp heap/GC, Raft/checkpoint, disk/inode, datastore growth, reconciliation, and Kubernetes-compatible metrics | Local sampled observations are not quorum health or an atomic cluster snapshot; alerts and capacity decisions must respect collector limits. See [control-plane metrics](control-plane-metrics.md) and [validation](https://github.com/atgreen/gr8s/blob/9928d73d274c0c4ad5adb889be2b2489d407e93c/docs/control-plane-telemetry-validation-2026-11-11.json). |
 | Installation and upgrades | Checksum-pinned systemd installation, persisted configuration, upgrade rollback, scoped cleanup and uninstall | No channel-based automatic node-upgrade controller. See [installation](installing.md). |
 | Certificates and Secrets | Leaf renewal/replacement, staged CA/ServiceAccount signer rotation, Secrets encryption and offline key rotation | External CA integration, external KMS, and leader-routed HA Secret-encryption key management remain outside documented support. See [certificates](certificate-management.md) and [Secrets](configmap-secret-api.md). |
