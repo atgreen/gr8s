@@ -3166,6 +3166,7 @@ No HA API may start from member-local certificate state before this converges."
   '(("serve" "Run the control plane and local node agent")
     ("agent" "Run a node agent") ("witness" "Run an HA quorum witness")
     ("net-agent" "Provide network services to a foreign cluster")
+    ("cni-install" "Install this binary as the node's CNI plugin")
     ("join-token" "Print a cluster join token")
     ("runtime" "Manage sandbox runtimes")
     ("kubeconfig" "Print or write a cluster kubeconfig")
@@ -3244,6 +3245,18 @@ No HA API may start from member-local certificate state before this converges."
                         ("--mtu N" "Pod interface MTU (default 1450)")
                         ("--overlay-backend NAME" "vxlan or wireguard (default vxlan)")
                         ("--wireguard-listen-port PORT" "Shared WireGuard UDP port (default 51820)")
+                        ("--help, -h" "show help"))))
+      ((equal path '("cni-install"))
+       (page "Install this binary as the node's CNI plugin (the net-agent init step)"
+             "[OPTIONS]"
+             :options '(("--cni-bin-dir DIR" "Host CNI bin mount (default /host-cni-bin)")
+                        ("--cni-conf-dir DIR" "Host CNI conf mount (default /host-cni-conf)")
+                        ("--bpf-mount DIR" "bpffs mount point (default /host-bpf)")
+                        ("--conflist NAME" "Conflist filename (default 05-gr8s.conflist)")
+                        ("--cni-name NAME" "CNI network name (default gr8s)")
+                        ("--socket PATH" "Agent socket in the conflist (default /run/gr8s/cni.sock)")
+                        ("--map-pin-root DIR" "Map pin root in the conflist (default /run/gr8s/bpf)")
+                        ("--direction NAME" "Guard attach direction (default egress)")
                         ("--help, -h" "show help"))))
       ((equal path '("runtime"))
        (page "Manage sandbox runtimes" "COMMAND [OPTIONS]"
