@@ -6,6 +6,103 @@
 (def-suite gateway-delta :in gr8s)
 (in-suite gateway-delta)
 
+(test discovery-octet-hash-agrees-across-vector-representations
+  (let* ((bytes (make-array 5 :element-type '(unsigned-byte 8)
+                             :initial-contents '(0 65 97 128 255)))
+         (backing (make-array 7 :element-type '(unsigned-byte 8)
+                               :initial-contents '(9 0 65 97 128 255 9)))
+         (displaced (make-array 5 :element-type '(unsigned-byte 8)
+                                 :displaced-to backing :displaced-index-offset 1))
+         (adjustable (make-array 7 :element-type '(unsigned-byte 8) :adjustable t
+                                  :fill-pointer 5 :initial-contents '(0 65 97 128 255 9 9))))
+    (dolist (copy (list (copy-seq bytes) displaced adjustable))
+      (is (equalp bytes copy))
+      (is (typep (gr8s.kubelet::discovery-octet-hash copy) '(integer 0 #.most-positive-fixnum)))
+      (is (= (gr8s.kubelet::discovery-octet-hash bytes)
+             (gr8s.kubelet::discovery-octet-hash copy))))
+    (is (/= (gr8s.kubelet::discovery-octet-hash bytes)
+            (gr8s.kubelet::discovery-octet-hash
+             (make-array 5 :element-type '(unsigned-byte 8) :initial-contents '(0 97 65 128 255)))))))
+
+#+sbcl
+(test discovery-cache-hash-collisions-still-compare-complete-octets
+  (with-temporary-store (store path)
+    (values path)
+    (gwc-seed store)
+    (let ((hash (symbol-function 'gr8s.kubelet::discovery-octet-hash)))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s.kubelet::discovery-octet-hash)
+                   (lambda (bytes) (declare (ignore bytes)) 0))
+             (multiple-value-bind (before cache)
+                 (gr8s.kubelet::decode-service-discovery-projection
+                  (gr8s.kubelet::service-discovery-projection store))
+               (gr8s.resources::update-core-resource
+                store "httproutes" "default" "app"
+                (lambda (object)
+                  (setf (gethash "hostnames" (gethash "spec" object)) #("Changed.example.com"))
+                  object))
+               (let* ((after (gr8s.kubelet::decode-service-discovery-projection
+                              (gr8s.kubelet::service-discovery-projection store) cache))
+                      (key '("httproutes" "default" "app")))
+                 (is (= (hash-table-count before) (hash-table-count after)))
+                 (is (equalp #("Changed.example.com")
+                             (gethash "hostnames" (gethash "spec" (gethash key after))))))))
+        (setf (symbol-function 'gr8s.kubelet::discovery-octet-hash) hash)))))
+
+(test gateway-full-baseline-reuses-only-previously-validated-discovery-identities
+  (with-temporary-store (store path)
+    (values path)
+    (gwc-seed store)
+    (let* ((session (gr8s.apiserver::make-node-agent-session nil))
+           (snapshot (desired-snapshot-for-test))
+           (decoder (symbol-function 'gr8s.kubelet::decode-service-discovery-entry))
+           (decoded 0))
+      (setf (gr8s.apiserver::node-agent-session-gateway-deltas-p session) t
+            (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json)
+            (gr8s.kubelet::service-discovery-projection store))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s.kubelet::decode-service-discovery-entry)
+                   (lambda (bytes) (incf decoded) (funcall decoder bytes)))
+             (gr8s.apiserver::install-node-gateway-baseline session snapshot)
+             (is (= 5 decoded))
+             ;; Equal octets may arrive in fresh vectors after snapshot reconstruction.
+             (setf decoded 0
+                   (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json)
+                   (mapcar #'copy-seq (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json)))
+             (gr8s.apiserver::install-node-gateway-baseline session snapshot)
+             (is (= 0 decoded))
+             (gr8s.resources::update-core-resource
+              store "httproutes" "default" "app"
+              (lambda (object) (setf (gethash "hostnames" (gethash "spec" object)) #("Changed.example.com")) object))
+             (setf decoded 0
+                   (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json)
+                   (gr8s.kubelet::service-discovery-projection store)
+                   (gr8s.apiserver::node-agent-session-gateway-revision session) 5
+                   (gr8s.apiserver::node-agent-session-gateway-acknowledged-revision session) 4)
+             (gr8s.apiserver::install-node-gateway-baseline session snapshot 23)
+             (is (= 1 decoded))
+             (is (= 0 (gr8s.apiserver::node-agent-session-gateway-revision session)))
+             (is (= 0 (gr8s.apiserver::node-agent-session-gateway-acknowledged-revision session)))
+             (is (= 23 (gr8s.apiserver::node-agent-session-gateway-dependency-epoch session)))
+             (let ((previous (gr8s.apiserver::node-agent-session-gateway-resources session))
+                   (previous-cache (gr8s.apiserver::node-agent-session-gateway-discovery-key-cache session)))
+               (push (trivial-utf-8:string-to-utf-8-bytes "{}")
+                     (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json))
+               (signals error (gr8s.apiserver::install-node-gateway-baseline session snapshot 24))
+               (is (eq previous (gr8s.apiserver::node-agent-session-gateway-resources session)))
+               (is (eq previous-cache (gr8s.apiserver::node-agent-session-gateway-discovery-key-cache session)))
+               (is (= 23 (gr8s.apiserver::node-agent-session-gateway-dependency-epoch session))))
+             (gr8s.resources::delete-core-resource store "httproutes" "default" "app")
+             (setf (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json)
+                   (gr8s.kubelet::service-discovery-projection store))
+             (gr8s.apiserver::install-node-gateway-baseline session snapshot)
+             (is (= 4 (hash-table-count (gr8s.apiserver::node-agent-session-gateway-discovery-key-cache session))))
+             (is (not (gethash '("httproutes" "default" "app")
+                              (gr8s.apiserver::node-agent-session-gateway-resources session)))))
+        (setf (symbol-function 'gr8s.kubelet::decode-service-discovery-entry) decoder)))))
+
 (defun gateway-change-for-test (name &key deleted (resource "httproutes") (namespace "default"))
   (make-instance 'gr8s.node.v1::gateway-resource-change
                  :resource resource :namespace namespace :name name :deleted deleted
@@ -464,13 +561,13 @@
       (unwind-protect
            (progn
              (setf (symbol-function 'gr8s.kubelet::build-service-discovery-projection)
-                   (lambda (view)
+                   (lambda (view &optional cache)
                      (when mutate
                        (setf mutate nil)
                        (gr8s.resources::update-core-resource
                         source "services" "default" "dep"
                         (lambda (object) (setf (gethash "port" (aref (gethash "ports" (gethash "spec" object)) 0)) 81) object)))
-                     (funcall original view)))
+                     (funcall original view cache)))
              (gr8s.kubelet::call-with-discovery-projection-cache
               (lambda ()
                 (multiple-value-bind (projection clock) (gr8s.kubelet::service-discovery-projection source)

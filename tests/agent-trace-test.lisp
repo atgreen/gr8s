@@ -97,6 +97,7 @@
 (test trace-operation-accepts-after-attach-streams-output-and-completes
   (let* ((runtime (gr8s.agent::%make-node-runtime :runtime t))
          (events nil)
+         (events-lock (bt:make-lock "trace test events"))
          (compiled-cgroups nil)
          (gr8s.agent::*trace-cgroup-id-function* (lambda (node request)
                                                     (declare (ignore node request))
@@ -113,12 +114,18 @@
              (format t "hit~%"))))
     (gr8s.agent::dispatch-node-operation
      runtime :operation-request (trace-request-for-test)
-     (lambda (variant payload) (push (cons variant payload) events)))
+     (lambda (variant payload)
+       (bt:with-lock-held (events-lock) (push (cons variant payload) events))))
     (is-true (wait-until (lambda ()
-                           (find :operation-response events :key #'car))
+                           (bt:with-lock-held (events-lock)
+                             (find-if (lambda (event)
+                                        (and (eq :operation-response (car event))
+                                             (= gr8s.node.v1::+operationstatus-operation_status_complete+
+                                                (slot-value (cdr event) 'gr8s.node.v1::status))))
+                                      events)))
                          :timeout 2))
     (is (equal '(101 202) compiled-cgroups))
-    (let ((ordered (reverse events)))
+    (let ((ordered (bt:with-lock-held (events-lock) (reverse events))))
       (is (equal '(:operation-response :operation-stream :operation-response)
                  (mapcar #'car ordered)))
       (is (= gr8s.node.v1::+operationstatus-operation_status_accepted+

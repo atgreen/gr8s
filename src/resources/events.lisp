@@ -138,6 +138,9 @@
   (let ((now (funcall *event-clock*)) (index nil)
         ;; Event expiry is local-plane: publish locally, never replicate (8ia.3).
         (*local-plane-write* t))
+    (unless (loop for expiry being the hash-values of (pod-store-event-expirations store)
+                  thereis (and expiry (<= expiry now)))
+      (return-from expire-core-events-unlocked nil))
     (maphash (lambda (key object)
                (when (and (equal "events" (first key))
                           (let ((expiry (gethash (gethash "uid" (gethash "metadata" object)) (pod-store-event-expirations store))))

@@ -46,14 +46,14 @@
       (when extra (setf (gethash "extra" actor) extra)))
     actor))
 
-(defun certificate-api-identity (chain ca)
+(defun certificate-api-identity (chain ca &key (now (get-universal-time)))
   "Verify the actual peer chain for client authentication, then decode CN, O, UID and credential ID."
   (when chain
     (handler-case
         (progn
           (pure-tls::verify-certificate-chain
            chain (if (listp ca) ca (list ca))
-           :purpose :client-auth :trust-anchor-mode :replace)
+           :purpose :client-auth :trust-anchor-mode :replace :now now)
           (let* ((leaf (first chain))
                  (raw (pure-tls::x509-certificate-raw-der leaf))
                  (tbs (pure-tls::asn1-children (first (pure-tls::asn1-children (pure-tls::parse-der raw)))))

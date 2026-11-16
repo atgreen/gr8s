@@ -811,6 +811,10 @@
     (is-false (getf options :icl))
     (is (= 4005 (getf options :local-port))))
   (signals error (gr8s.server::parse-debug-options '("icl")))
+  (is (zerop (getf (gr8s.server::parse-debug-options
+                    '("icl" "worker-1" "--local-port" "0")) :local-port)))
+  (signals error (gr8s.server::parse-debug-options '("icl" "worker-1" "--local-port" "-1")))
+  (signals error (gr8s.server::parse-debug-options '("icl" "worker-1" "--local-port" "65536")))
   (signals error (gr8s.server::parse-debug-options '("icl" "worker-1" "--member" "m1")))
   (signals error (gr8s.server::parse-debug-options '("repl" "worker-1"))))
 

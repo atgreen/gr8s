@@ -1,0 +1,327 @@
+{
+  "bead": "podster-dz8",
+  "date": "2026-11-15",
+  "change": "Check existing Event UID/deadline index using one clock sample before scanning resources; unchanged deletion transaction when any deadline is due.",
+  "code_files": [
+    "src/resources/events.lisp",
+    "tests/events-test.lisp"
+  ],
+  "provenance": {
+    "base_commit": "f69fb7ef0cf27bbb207bc8124997b8612e34c0cb",
+    "before": {
+      "start_unix": 1794782633.4874,
+      "runtime_tree_sha256": "07234b82a7e166b596db73cad90e7e1870eba7c373d95a9d28f218b08c97c646",
+      "base_commit": "f69fb7ef0cf27bbb207bc8124997b8612e34c0cb",
+      "dependencies_sha256": "1b88e697f7fcb638e97b4c1ad2cae066363f8517eb9e03d78953bd1880a602e2",
+      "exit_code": 0,
+      "end_unix": 1794783026.3314834,
+      "binary_sha256": "56c1fdb85e8aa3d7542d557bb18515f1ee53cb0336141bf7a95bcf80b62d13c4"
+    },
+    "after": {
+      "runtime_tree_sha256": "b05059043ab7823f7258d9e2b5d800543193966c7a488be9d39b891b1494eeef",
+      "binary_sha256": "e3a0391a7444f48dab78bc732816bcd12503d7da36f902adb62a46d2f39058fd",
+      "dependencies_sha256": "1b88e697f7fcb638e97b4c1ad2cae066363f8517eb9e03d78953bd1880a602e2"
+    },
+    "source_patch_sha256": "5f7eeab3c751ec9140de53e1856ae2bf1a6ef027ba678c5df65f2471a88c10c8",
+    "event_expiry_patch_sha256": "7c8fceae9551f2d20acf062b8a6222209db06f1a7ea609830f3e799a19f5a27a",
+    "runtime_difference": "Only src/resources/events.lisp differs from baseline runtime tree",
+    "build_command": "sbcl --noinform --non-interactive --load scripts/build-native.lisp"
+  },
+  "microbenchmark": {
+    "before": {
+      "rows": [
+        {
+          "events": 0.0,
+          "resources": 3000.0,
+          "trial": 0.0,
+          "iterations": 10000.0,
+          "cpu_ms": 365.215,
+          "wall_ms": 366.983,
+          "allocated_bytes": 32752.0
+        },
+        {
+          "events": 0.0,
+          "resources": 3000.0,
+          "trial": 1.0,
+          "iterations": 10000.0,
+          "cpu_ms": 365.5,
+          "wall_ms": 366.984,
+          "allocated_bytes": 0.0
+        },
+        {
+          "events": 0.0,
+          "resources": 3000.0,
+          "trial": 2.0,
+          "iterations": 10000.0,
+          "cpu_ms": 367.158,
+          "wall_ms": 367.984,
+          "allocated_bytes": 0.0
+        },
+        {
+          "events": 5.0,
+          "resources": 3005.0,
+          "trial": 0.0,
+          "iterations": 10000.0,
+          "cpu_ms": 372.974,
+          "wall_ms": 373.984,
+          "allocated_bytes": 0.0
+        },
+        {
+          "events": 5.0,
+          "resources": 3005.0,
+          "trial": 1.0,
+          "iterations": 10000.0,
+          "cpu_ms": 371.731,
+          "wall_ms": 372.983,
+          "allocated_bytes": 0.0
+        },
+        {
+          "events": 5.0,
+          "resources": 3005.0,
+          "trial": 2.0,
+          "iterations": 10000.0,
+          "cpu_ms": 373.555,
+          "wall_ms": 375.984,
+          "allocated_bytes": 0.0
+        }
+      ],
+      "median_cpu_ms": {
+        "0": 365.5,
+        "5": 372.974
+      }
+    },
+    "after": {
+      "rows": [
+        {
+          "events": 0.0,
+          "resources": 3000.0,
+          "trial": 0.0,
+          "iterations": 10000.0,
+          "cpu_ms": 0.094,
+          "wall_ms": 0.0,
+          "allocated_bytes": 0.0
+        },
+        {
+          "events": 0.0,
+          "resources": 3000.0,
+          "trial": 1.0,
+          "iterations": 10000.0,
+          "cpu_ms": 0.096,
+          "wall_ms": 0.0,
+          "allocated_bytes": 0.0
+        },
+        {
+          "events": 0.0,
+          "resources": 3000.0,
+          "trial": 2.0,
+          "iterations": 10000.0,
+          "cpu_ms": 0.094,
+          "wall_ms": 0.0,
+          "allocated_bytes": 0.0
+        },
+        {
+          "events": 5.0,
+          "resources": 3005.0,
+          "trial": 0.0,
+          "iterations": 10000.0,
+          "cpu_ms": 0.365,
+          "wall_ms": 1.0,
+          "allocated_bytes": 0.0
+        },
+        {
+          "events": 5.0,
+          "resources": 3005.0,
+          "trial": 1.0,
+          "iterations": 10000.0,
+          "cpu_ms": 0.32,
+          "wall_ms": 0.0,
+          "allocated_bytes": 0.0
+        },
+        {
+          "events": 5.0,
+          "resources": 3005.0,
+          "trial": 2.0,
+          "iterations": 10000.0,
+          "cpu_ms": 0.327,
+          "wall_ms": 1.0,
+          "allocated_bytes": 0.0
+        }
+      ],
+      "median_cpu_ms": {
+        "0": 0.094,
+        "5": 0.327
+      }
+    },
+    "scope": "10000 expiry calls under existing lock over3000 non-Event resources, zero or five unexpired Events, three trials per condition; same script and configuration. First baseline trial allocated32752 bytes; other trials allocated zero. Sub-millisecond candidate wall times are below timer resolution; use CPU measurement."
+  },
+  "diagnostic": {
+    "configuration": {
+      "vcpus": 4,
+      "memory_mib": 6144,
+      "cpu_affinity": "12-15",
+      "heap_mib": 2048,
+      "routes": 3000,
+      "mode": "B",
+      "instrumented": true
+    },
+    "runs": {
+      "before": {
+        "propagation": {
+          "n": 3000,
+          "mean_ms": 367.33253040466667,
+          "p50_ms": 173.595078,
+          "p95_ms": 1183.52633155,
+          "p99_ms": 1502.0920815899924,
+          "max_ms": 1746.9639109999998
+        },
+        "api_write": {
+          "n": 3000,
+          "mean_ms": 14.244982027,
+          "p50_ms": 10.171358,
+          "p95_ms": 28.58960574999999,
+          "p99_ms": 110.61508937999874,
+          "max_ms": 337.720314
+        },
+        "offered_routes_per_second": 69.58645033515009,
+        "full_publication": {
+          "n": 25,
+          "mean_ms": 539.27976,
+          "p50_ms": 550.0,
+          "p95_ms": 1022.7991999999999,
+          "p99_ms": 1032.079,
+          "max_ms": 1033.999
+        },
+        "full_apply": {
+          "n": 25,
+          "mean_ms": 306.35976,
+          "p50_ms": 282.0,
+          "p95_ms": 632.7991999999998,
+          "p99_ms": 645.759,
+          "max_ms": 645.999
+        },
+        "window": {
+          "start_unix_us": 1794794056356670,
+          "end_unix_us": 1794794099665959,
+          "duration_ms": 43308.986,
+          "overlapping_gc_ms": 5496.004,
+          "overlapping_allocated_bytes": 4707714656
+        },
+        "metadata": {
+          "units": "1000000",
+          "heap": "2147483648",
+          "nursery": "107374182",
+          "dropped": "0"
+        },
+        "route_coverage": "3000 unique applies and HTTP200s, routes0..2999",
+        "profile_unpaired_spans": 0
+      },
+      "after": {
+        "propagation": {
+          "n": 3000,
+          "mean_ms": 312.65231578133336,
+          "p50_ms": 140.75458350000002,
+          "p95_ms": 1118.7110506499996,
+          "p99_ms": 1350.4921042399988,
+          "max_ms": 1669.164376
+        },
+        "api_write": {
+          "n": 3000,
+          "mean_ms": 12.319457046333333,
+          "p50_ms": 9.162819500000001,
+          "p95_ms": 21.055236199999992,
+          "p99_ms": 103.55657662999975,
+          "max_ms": 294.318054
+        },
+        "offered_routes_per_second": 80.40489277441364,
+        "full_publication": {
+          "n": 23,
+          "mean_ms": 518.0675652173913,
+          "p50_ms": 544.001,
+          "p95_ms": 1003.7146999999999,
+          "p99_ms": 1041.55166,
+          "max_ms": 1049.911
+        },
+        "full_apply": {
+          "n": 23,
+          "mean_ms": 268.2077391304348,
+          "p50_ms": 247.001,
+          "p95_ms": 565.0532999999999,
+          "p99_ms": 589.44988,
+          "max_ms": 594.949
+        },
+        "window": {
+          "start_unix_us": 1794794273880060,
+          "end_unix_us": 1794794311232609,
+          "duration_ms": 37352.953,
+          "overlapping_gc_ms": 5539.794,
+          "overlapping_allocated_bytes": 4536187808
+        },
+        "metadata": {
+          "units": "1000000",
+          "heap": "2147483648",
+          "nursery": "107374182",
+          "dropped": "0"
+        },
+        "route_coverage": "3000 unique applies and HTTP200s, routes0..2999",
+        "profile_unpaired_spans": 0
+      }
+    },
+    "scope": "One instrumented before/after B3000 pair on a shared host. No new headline or Agentgateway parity claim. Differing numbers of periodic full reconciliations and external host activity limit causal interpretation of aggregate differences."
+  },
+  "review": {
+    "reviewer": "/root/landing_review",
+    "scope": [
+      "src/resources/events.lisp",
+      "tests/events-test.lisp"
+    ],
+    "independent": true,
+    "type": "static",
+    "important_findings": [],
+    "assessment": "The precheck matches the prior deletion predicate. Store locking, durable commit-before-publication, unchanged-object deadline retention, replacement UID deadlines, checkpoint restore and journal cleanup support the shortcut. Tests cover no-scan, single clock sampling, exact boundary, mixed deadlines, revisions, watch deletion, recreation, recovery and existing TTL refresh.",
+    "validation": "Reviewer ran scoped git diff --check; did not run tests or benchmarks."
+  },
+  "validation": {
+    "focused": {
+      "Event_checks": 87,
+      "recovery_checks": 69,
+      "failed": 0
+    },
+    "initial_make_check": {
+      "exit_code": 2,
+      "checks": 32626,
+      "passed": 32615,
+      "skipped": 9,
+      "failed": 2,
+      "failure": "Network-policy convergence counter returned3 instead of1 in one test. Follow-up podster-o62.",
+      "log": "/tmp/gr8s-event-expiry/make-check.log"
+    },
+    "targeted_failure_recheck": "Original failing test passed10 repetitions with old expiry and10 with new expiry;60 assertions total. Repeating the entire network-policy suite exposed a separate second-run failure with old expiry; also tracked in podster-o62.",
+    "repeat_make_check": {
+      "exit_code": 0,
+      "checks": 32626,
+      "passed": 32617,
+      "skipped": 9,
+      "failed": 0,
+      "log": "/tmp/gr8s-event-expiry/make-check-repeat.log",
+      "additional_gates": "All make check targets completed, including14 install lifecycle tests and static runtime verification."
+    }
+  },
+  "assessment": "Retain minimal optimization: substantial demonstrated reduction in no-expiry CPU work, passing Event/recovery regressions and independent review. Gateway paired diagnostic improved but is insufficient for a stable percentage speedup claim. No steady microbenchmark allocation reduction; whole-workload GC time was essentially unchanged.",
+  "evidence_directory": "/tmp/gr8s-event-expiry",
+  "git": "No commits or pushes; prior uncommitted work preserved.",
+  "beads_sync": {
+    "command": "bd dolt push",
+    "exit_code": 1,
+    "error": "push to origin/main: Error1105: unknown push error; no common ancestor",
+    "handling": "Local tracking retained; no reset, force push, or database replacement.",
+    "followup": "podster-o62 remains open for test isolation issues."
+  },
+  "preservation_verified": "Exact binary diff of all prior tracked changes matches initial-worktree.patch; entire tracked source patch matches built candidate.",
+  "archive": {
+    "path": "/home/green/RELEASE-gr8s/gr8s/build/gateway-perf-retained/event-expiry-evidence-2026-11-15.tar.gz",
+    "bytes": 135791484,
+    "sha256": "2850ddc134accd9e8359b822c5cd40314edb2329ddba005f76dc484652779cf4",
+    "verified_files": 80,
+    "verification": "Read every archived file and compared size/SHA256 to source manifest."
+  }
+}

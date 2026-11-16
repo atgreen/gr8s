@@ -402,3 +402,112 @@
                                  "-CAfile" (namestring ca-path) (namestring leaf))
                             :output :string :error-output :string :ignore-error-status t)
         (is (zerop status) "Issuer-linked key identifier did not verify: ~A ~A" out err)))))
+
+#-(or windows darwin macos)
+(test connection-certificate-reuse-is-bound-to-time-chain-and-trust
+  (with-temporary-store (store directory)
+    (declare (ignore store))
+    (let* ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "cache-pki/" directory)))
+           (foreign (gr8s.security::ensure-cluster-pki (merge-pathnames "other-pki/" directory)))
+           (ca (gr8s.security::cluster-pki-ca-certificate pki))
+           (leaf (certificate-api-test-subject-leaf pki '(((2 5 4 3) . "cached-user"))))
+           (other (certificate-api-test-subject-leaf pki '(((2 5 4 3) . "other-user"))))
+           (chain (list leaf)) (now (get-universal-time))
+           (cache (gr8s.apiserver::make-api-certificate-cache))
+           (verify (fdefinition 'pure-tls::verify-certificate-chain)) (calls 0))
+      (with-replaced-function (pure-tls::verify-certificate-chain
+                               (lambda (&rest args) (incf calls) (apply verify args)))
+        (let ((first (gr8s.apiserver::cached-api-certificate-identity chain ca cache now)))
+          (is (equal "cached-user" (gr8s.resources::api-identity-username first)))
+          ;; A request must never get mutable ownership of the cached identity.
+          (setf (aref (gr8s.resources::api-user-identity-username first) 0) #\X)
+          (setf (aref (aref (gr8s.resources::api-user-identity-groups first) 0) 0) #\X)
+          (setf (aref (aref (gethash "authentication.kubernetes.io/credential-id"
+                                   (gr8s.resources::api-user-identity-extra first)) 0) 0) #\Y)
+          (setf (aref (gr8s.resources::api-user-identity-groups first) 0) "changed")
+          (clrhash (gr8s.resources::api-user-identity-extra first))
+          (is (equal "cached-user" (gr8s.resources::api-identity-username
+                                    (gr8s.apiserver::cached-api-certificate-identity chain ca cache now))))
+          (let ((again (gr8s.apiserver::cached-api-certificate-identity chain ca cache now)))
+            (is (equalp #("system:authenticated") (gr8s.resources::api-user-identity-groups again)))
+            (is (uiop:string-prefix-p "X509SHA256="
+                  (aref (gethash "authentication.kubernetes.io/credential-id"
+                                 (gr8s.resources::api-user-identity-extra again)) 0)))
+            (is (= 1 (hash-table-count (gr8s.resources::api-user-identity-extra again)))))
+          (is (= 1 calls)))
+        (gr8s.apiserver::cached-api-certificate-identity chain ca cache (1+ now))
+        (is (= 2 calls))
+        (gr8s.apiserver::cached-api-certificate-identity chain ca
+          (gr8s.apiserver::make-api-certificate-cache) (1+ now))
+        (is (= 3 calls))
+        (is (equal "other-user" (gr8s.resources::api-identity-username
+                                  (gr8s.apiserver::cached-api-certificate-identity (list other) ca cache (1+ now)))))
+        (is (= 4 calls))
+        (signals kubernetes-error
+          (gr8s.apiserver::cached-api-certificate-identity chain
+            (gr8s.security::cluster-pki-ca-certificate foreign) cache (1+ now)))
+        (is (= 5 calls))
+        ;; Return to exactly the previous inputs after failure, at the same time.
+        (gr8s.apiserver::cached-api-certificate-identity (list other) ca cache (1+ now))
+        (is (= 6 calls))
+        (let ((pure-tls::*default-verify-depth* (1+ pure-tls::*default-verify-depth*)))
+          (gr8s.apiserver::cached-api-certificate-identity (list other) ca cache (1+ now)))
+        (is (= 7 calls))
+        (gr8s.apiserver::cached-api-certificate-identity chain ca cache now)
+        (let* ((bytes (pure-tls::x509-certificate-raw-der leaf))
+               (saved (aref bytes 0)) (before calls))
+          (unwind-protect
+               (with-replaced-function (pure-tls::verify-certificate-chain
+                                        (lambda (&rest args)
+                                          (declare (ignore args)) (incf calls)
+                                          (error "Injected material revalidation failure")))
+                 (setf (aref bytes 0) (logxor saved 1))
+                 (signals kubernetes-error
+                   (gr8s.apiserver::cached-api-certificate-identity chain ca cache now))
+                 (is (= (1+ before) calls)))
+            (setf (aref bytes 0) saved))
+          (gr8s.apiserver::cached-api-certificate-identity chain ca cache now)
+          (is (= (+ 2 before) calls)))
+        ;; A clock jump must run normal verification, including expiry and notBefore.
+        (signals kubernetes-error
+          (gr8s.apiserver::cached-api-certificate-identity chain ca cache
+            (1+ (pure-tls::certificate-not-after leaf))))
+        (signals kubernetes-error
+          (gr8s.apiserver::cached-api-certificate-identity chain ca cache
+            (1- (pure-tls::certificate-not-before leaf))))
+        (is-false (gr8s.apiserver::cached-api-certificate-identity nil ca cache now))))))
+
+(test cached-certificate-does-not-cache-rbac-grants
+  (with-temporary-store (store directory)
+    (let* ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "rbac-cache-pki/" directory)))
+           (ca (gr8s.security::cluster-pki-ca-certificate pki))
+           (leaf (certificate-api-test-subject-leaf pki '(((2 5 4 3) . "cached-reader"))))
+           (now (get-universal-time))
+           (authenticate (fdefinition 'gr8s.apiserver::cached-api-certificate-identity))
+           (verify (fdefinition 'pure-tls::verify-certificate-chain)) (verifications 0)
+           (gr8s.apiserver::*api-connection-certificate-chain* (list leaf))
+           (gr8s.apiserver::*api-connection-certificate-cache* (gr8s.apiserver::make-api-certificate-cache)))
+      (certificate-api-test-grant store "cache-reader"
+        (gr8s.resources::core-object "kind" "User" "name" "cached-reader" "apiGroup" "rbac.authorization.k8s.io")
+        (vector (gr8s.resources::core-object "apiGroups" #("") "resources" #("pods") "verbs" #("list"))))
+      (with-replaced-functions
+          ((gr8s.apiserver::cached-api-certificate-identity
+             (lambda (chain ca cache &optional ignored)
+               (declare (ignore ignored)) (funcall authenticate chain ca cache now)))
+           (pure-tls::verify-certificate-chain
+             (lambda (&rest args) (incf verifications) (apply verify args)))
+           (hunchentoot:header-in (lambda (&rest args) (declare (ignore args)) nil))
+           (hunchentoot:request-acceptor (lambda (request) (declare (ignore request)) :acceptor))
+           (gr8s.apiserver::in-cluster-client-ca (lambda (acceptor) (declare (ignore acceptor)) ca))
+           (hunchentoot:script-name (lambda (request) (declare (ignore request)) "/api/v1/pods"))
+           (hunchentoot:request-method (lambda (request) (declare (ignore request)) :get))
+           (hunchentoot:parameter (lambda (&rest args) (declare (ignore args)) nil)))
+        (is (equal "cached-reader" (gr8s.resources::api-identity-username
+                                    (gr8s.apiserver::authorize-in-cluster-request store :request))))
+        (gr8s.resources::delete-core-resource store "clusterrolebindings" nil "cache-reader")
+        (handler-case
+            (progn (gr8s.apiserver::authorize-in-cluster-request store :request)
+                   (fail "Removed RBAC grant remained authorized"))
+          (kubernetes-error (condition) (is (= 403 (gr8s.model::kubernetes-error-status-code condition)))))
+        #-(or windows darwin macos)
+        (is (= 1 verifications))))))

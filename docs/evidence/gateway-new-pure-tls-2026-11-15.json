@@ -1,0 +1,231 @@
+{
+  "status": "benchmark_passed",
+  "pure_tls": "20261115-401d59f",
+  "build": {
+    "start_unix": 1794779911.3773549,
+    "runtime_tree_sha256": "011f5a467a57328d4716e7f0a0b150dc6120e8f2d590eed85214fca2398cbfc0",
+    "base_commit": "f69fb7ef0cf27bbb207bc8124997b8612e34c0cb",
+    "dependencies_sha256": "1b88e697f7fcb638e97b4c1ad2cae066363f8517eb9e03d78953bd1880a602e2",
+    "exit_code": 0,
+    "end_unix": 1794780327.3053272,
+    "binary_sha256": "1072658095d467b596b37fa43d44be1813f67ade075e0ba5976aa32bb6fe167e"
+  },
+  "configuration": {
+    "vcpus": 4,
+    "memory_mib": 6144,
+    "affinity": "12-15",
+    "heap_mib": 2048
+  },
+  "comparison": {
+    "S": {
+      "previous_median_of_three": {
+        "post_apply": {
+          "mean_ms": 60.45827739766667,
+          "p95_ms": 85.34153544999938
+        },
+        "api_write": {
+          "mean_ms": 16.036788965,
+          "p95_ms": 42.214667849999984
+        },
+        "write_to_200_log_span": {
+          "mean_ms": 76.93092833333333,
+          "p95_ms": 118.95614999999883
+        }
+      },
+      "new_single_run": {
+        "file": "/tmp/gr8s-perf-gap/new-pure-tls-headline-evidence/S3000.log",
+        "post_apply": {
+          "n": 3000,
+          "mean_ms": 61.12198549033334,
+          "p50_ms": 32.3860545,
+          "p95_ms": 73.49902224999988,
+          "p99_ms": 941.0294590799992,
+          "max_ms": 1522.837991
+        },
+        "api_write": {
+          "n": 3000,
+          "mean_ms": 14.289469856666667,
+          "p50_ms": 11.0942285,
+          "p95_ms": 23.534094849999992,
+          "p99_ms": 91.45797217999994,
+          "max_ms": 331.815064
+        },
+        "write_to_200_log_span": {
+          "n": 3000,
+          "mean_ms": 75.55045966666667,
+          "p50_ms": 44.5525,
+          "p95_ms": 95.63609999999962,
+          "p99_ms": 1035.860959999998,
+          "max_ms": 1625.251
+        },
+        "api_write_span_s": 225.7965845,
+        "offered_routes_per_second": 13.286294859787837,
+        "post_apply_by_route_thousand": [
+          {
+            "n": 1000,
+            "mean_ms": 42.329399178,
+            "p50_ms": 33.1153745,
+            "p95_ms": 52.057259999999964,
+            "p99_ms": 282.58324455999997,
+            "max_ms": 440.093668
+          },
+          {
+            "n": 1000,
+            "mean_ms": 58.155332908,
+            "p50_ms": 32.2841785,
+            "p95_ms": 61.014472699998784,
+            "p99_ms": 676.4810512399999,
+            "max_ms": 799.06869
+          },
+          {
+            "n": 1000,
+            "mean_ms": 82.881224385,
+            "p50_ms": 31.7566035,
+            "p95_ms": 746.690561549999,
+            "p99_ms": 1105.3444385599998,
+            "max_ms": 1522.837991
+          }
+        ]
+      }
+    },
+    "B": {
+      "previous_median_of_three": {
+        "post_apply": {
+          "mean_ms": 277.11662392,
+          "p95_ms": 1010.9441408999992
+        },
+        "api_write": {
+          "mean_ms": 14.509553092666666,
+          "p95_ms": 32.310073949999996
+        },
+        "write_to_200_log_span": {
+          "mean_ms": 291.7599866666667,
+          "p95_ms": 1046.6266499999979
+        }
+      },
+      "new_single_run": {
+        "file": "/tmp/gr8s-perf-gap/new-pure-tls-headline-evidence/B3000.log",
+        "post_apply": {
+          "n": 3000,
+          "mean_ms": 274.116019848,
+          "p50_ms": 75.861042,
+          "p95_ms": 959.1825160499989,
+          "p99_ms": 1243.8762792699997,
+          "max_ms": 1547.2540239999998
+        },
+        "api_write": {
+          "n": 3000,
+          "mean_ms": 14.687921829,
+          "p50_ms": 11.602812,
+          "p95_ms": 29.800727749999997,
+          "p99_ms": 76.24206242999907,
+          "max_ms": 567.805189
+        },
+        "write_to_200_log_span": {
+          "n": 3000,
+          "mean_ms": 288.938214,
+          "p50_ms": 90.6275,
+          "p95_ms": 981.2625999999992,
+          "p99_ms": 1281.1467099999998,
+          "max_ms": 1573.592
+        },
+        "api_write_span_s": 44.41596775,
+        "offered_routes_per_second": 67.5432767081834,
+        "post_apply_by_route_thousand": [
+          {
+            "n": 1000,
+            "mean_ms": 108.868433044,
+            "p50_ms": 49.905675,
+            "p95_ms": 394.77033019999993,
+            "p99_ms": 489.02376455999996,
+            "max_ms": 594.384824
+          },
+          {
+            "n": 1000,
+            "mean_ms": 252.90686294,
+            "p50_ms": 108.14074149999999,
+            "p95_ms": 792.9845934,
+            "p99_ms": 928.5074464799999,
+            "max_ms": 1143.23749
+          },
+          {
+            "n": 1000,
+            "mean_ms": 460.57276356,
+            "p50_ms": 333.3857385,
+            "p95_ms": 1172.4651981999998,
+            "p99_ms": 1406.5762816099998,
+            "max_ms": 1547.2540239999998
+          }
+        ]
+      }
+    }
+  },
+  "certificate_tests": {
+    "checks": 97,
+    "passed": 97,
+    "failed": 0,
+    "log": "new-pure-tls-certificate-tests.log"
+  },
+  "authentication_microbenchmark": {
+    "calls": 100,
+    "previous_gr8s_cache_bypassed_bytes": 574243360,
+    "new_gr8s_cache_bypassed_bytes": 1571408,
+    "previous_ms": 576,
+    "new_ms": 6,
+    "note": "Bypasses gr8s cache only; dependency-internal caching remains enabled."
+  },
+  "limitations": [
+    "One new trial compared with three previous trials, not a repeatability claim.",
+    "No end-to-end allocation/GC profile yet for this binary."
+  ],
+  "evidence_root": "/tmp/gr8s-perf-gap",
+  "hashes": {
+    "new-pure-tls-summary.json": "24b5c0b60f51612934df0d53893354dd079440d82a11a3fbc993f0a7634d609e",
+    "new-pure-tls-ocicl.csv": "1b88e697f7fcb638e97b4c1ad2cae066363f8517eb9e03d78953bd1880a602e2",
+    "new-pure-tls-certificate-tests.log": "d1571b469c1affd7f2fa0d9e68bfa2c5d1d4390c5a1389a76bd68604859ab4a9",
+    "new-pure-tls-certificate-allocation.log": "5144adddc2ae8fae2d2765cbe0524cfbb0285b44ed8c1e5c5e28492464408306"
+  },
+  "native_lifecycle": {
+    "root": "/var/tmp/gr8s-gateway.jz2gjzty",
+    "checks": [
+      "failed listener is not programmed",
+      "listener recovery preserves desired generation",
+      "zero-route listener returns HTTP 404",
+      "initial attachedRoutes is zero",
+      "GatewayClass is accepted",
+      "unchanged readiness does not churn resourceVersion",
+      "unresolved TLS references prevent readiness and address publication",
+      "first route propagates without a warm-up route",
+      "listener remains programmed after last route removal",
+      "new listener returns HTTP 404",
+      "old listener is closed",
+      "Gateway status follows the current spec generation"
+    ],
+    "address": "10.0.2.15",
+    "status": "passed"
+  },
+  "final_repeated_trials_manifest": "/tmp/gr8s-perf-gap/final-trials-new-pure-tls/manifest.json",
+  "native_reconnect": {
+    "root": "/var/tmp/gr8s-reconnect.jgs4dibx",
+    "checks": [
+      "node enrolled",
+      "initial route reaches backend A",
+      "EndpointSlice update reaches backend B",
+      "backend replacement requires no route edit",
+      "new node session completed successful full Gateway apply",
+      "original route retains backend B after reconnect",
+      "new route activates after reconnect"
+    ],
+    "scope": "Native binary, external HTTP backends inside disposable VM, no Pod restart",
+    "status": "passed"
+  },
+  "project_checks": {
+    "command": "make check",
+    "exit_code": 0,
+    "checks": 32595,
+    "passed": 32586,
+    "skipped": 9,
+    "failed": 0,
+    "log": "/tmp/gr8s-perf-gap/new-pure-tls-make-check.log"
+  }
+}

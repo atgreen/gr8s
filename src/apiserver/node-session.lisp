@@ -144,6 +144,7 @@ planner groups by: its name and its region/zone."
   (gateway-revision 0)
   (gateway-acknowledged-revision 0)
   gateway-resources
+  gateway-discovery-key-cache         ; validated octets -> key, bounded to the last full projection
   gateway-dependency-epoch)
 
 (defparameter +desired-state-delta-capability+ "desired-state-delta"
@@ -240,12 +241,18 @@ concurrent publications cannot reorder a delta ahead of its base."
     (session snapshot &optional (dependency-epoch (slot-value snapshot 'gr8s.node.v1::gateway-dependency-revision)))
   "Reset the derived view after full node delivery, with SESSION's send lock held."
   (when (node-agent-session-gateway-deltas-p session)
-    (let ((resources (make-hash-table :test #'equal)))
+    (let ((resources (make-hash-table :test #'equal))
+          (previous-cache (node-agent-session-gateway-discovery-key-cache session))
+          (next-cache (make-hash-table :test #'equalp
+                                      #+sbcl :hash-function #+sbcl #'gr8s.kubelet::discovery-octet-hash)))
       (dolist (bytes (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json))
-        (let ((key (car (gr8s.kubelet::decode-service-discovery-entry bytes))))
+        (let ((key (or (and previous-cache (gethash bytes previous-cache))
+                       (car (gr8s.kubelet::decode-service-discovery-entry bytes)))))
+          (setf (gethash bytes next-cache) key)
           (when (member (first key) gr8s.protocol::+gateway-config-resources+ :test #'equal)
             (setf (gethash key resources) bytes))))
       (setf (node-agent-session-gateway-resources session) resources
+            (node-agent-session-gateway-discovery-key-cache session) next-cache
             (node-agent-session-gateway-revision session) 0
             (node-agent-session-gateway-acknowledged-revision session) 0
             (node-agent-session-gateway-dependency-epoch session) dependency-epoch))))

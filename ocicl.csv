@@ -82,7 +82,7 @@ named-readtables-test, ghcr.io/ocicl/named-readtables@sha256:9c467a5a6d7b4e928d4
 net.didierverna.asdf-flv, ghcr.io/ocicl/cl-cancel@sha256:43b6f25de42c09e32d99d09891cc9e629b4369cce9d7d0e2c9a1803d0b12f6f6, cl-cancel-20261112-7ea333b/ocicl/asdf-flv-20240503-3f1de41/net.didierverna.asdf-flv.asd
 nibbles, ghcr.io/ocicl/nibbles@sha256:deaed26c885bb78f401689a8060322a5fd0359d29443daaf7e2ca4172bc64a38, nibbles-20261009-98bc0b7/nibbles.asd
 precise-time, ghcr.io/ocicl/cl-cancel@sha256:43b6f25de42c09e32d99d09891cc9e629b4369cce9d7d0e2c9a1803d0b12f6f6, cl-cancel-20261112-7ea333b/ocicl/precise-time-20260218-93ea6ae/precise-time.asd
-pure-tls, ghcr.io/ocicl/pure-tls@sha256:39a78bbda3b5bc319881c8405ec759452adfb99ea1b6861afe540559d85ee913, pure-tls-20261112-17da78e/pure-tls.asd
+pure-tls, ghcr.io/ocicl/pure-tls@sha256:e786c3c1d1874d60286a25df74db52edef48d6551833685c66661472d51fefd9, pure-tls-20261115-401d59f/pure-tls.asd
 puri, ghcr.io/ocicl/puri@sha256:b803fb9444eaf2c7053812e19d342d4ce6a05fd1880fa3a2a2f824769a6d58d2, puri-20260406-4bbab89/puri.asd
 rfc2388, ghcr.io/ocicl/rfc2388@sha256:4190f6eb36b3b2f53def6eff56b44e76edf4086ada2feb6d88bb671a40fc9f70, rfc2388-20240503-591bcf7/rfc2388.asd
 salza2, ghcr.io/ocicl/salza2@sha256:0f9d930524b469e1442372a6e12b26742d9e6a1144e6a455006943190d1ea71e, salza2-2.1/salza2.asd

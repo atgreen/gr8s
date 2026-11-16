@@ -57,12 +57,28 @@
       (handler-case
           (update-owned-workload store resource object
             (lambda (current)
+              (unless (equal (gethash "resourceVersion" (gethash "metadata" object))
+                             (gethash "resourceVersion" (gethash "metadata" current)))
+                (gr8s.resources::core-resource-error 409 "Conflict" "Dependent changed during owner inspection"))
               (setf (gethash "ownerReferences" (gethash "metadata" current))
                     (remove-if (lambda (reference) (member (gethash "uid" reference) uids :test #'equal))
                                (gethash "ownerReferences" (gethash "metadata" current) #())))
               current))
         (kubernetes-error (condition)
           (unless (member (kubernetes-error-status-code condition) '(404 409)) (error condition)))))))
+
+(defun collector-resource-view (store resource)
+  "Capture immutable rows for read-only owner inspection, retaining collection order."
+  (let ((rows
+          (gr8s.store::with-store-lock (store)
+            (gr8s.resources::expire-core-events-unlocked store)
+            (loop for key being the hash-keys of (gr8s.store::pod-store-resources store)
+                  using (hash-value object)
+                  when (equal resource (first key))
+                    collect (let ((metadata (gethash "metadata" object)))
+                              (cons (format nil "~A/~A" (gethash "namespace" metadata) (gethash "name" metadata))
+                                    object))))))
+    (mapcar #'cdr (sort rows #'string< :key #'car))))
 
 (defun collect-orphaned-api-objects (reconciler)
   "Converge background deletion for supported dependents in the control-plane store."
@@ -76,12 +92,13 @@
             (unless (member (kubernetes-error-status-code condition) '(404 409)) (error condition))))))
     (dolist (type *stored-resource-types*)
       (let ((resource (first type)))
-        (dolist (object (list-core-resources store resource))
+        (dolist (object (collector-resource-view store resource))
           (drop-dangling-owner-references store resource object)
           (when (api-object-orphaned-p store object)
             (let* ((metadata (gethash "metadata" object)) (name (gethash "name" metadata))
                    (namespace (gethash "namespace" metadata)))
               (handler-case (when (controller-delete-allowed-p store resource namespace name "generic-garbage-collector")
-                              (delete-core-resource store resource namespace name :uid (gethash "uid" metadata)))
+                              (delete-core-resource store resource namespace name :uid (gethash "uid" metadata)
+                                                    :resource-version (gethash "resourceVersion" metadata)))
                 (kubernetes-error (condition)
                   (unless (member (kubernetes-error-status-code condition) '(404 409)) (error condition)))))))))))
