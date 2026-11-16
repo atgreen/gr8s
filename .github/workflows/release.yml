@@ -126,7 +126,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Check out installer scripts and license
+      - name: Check out license files
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -138,9 +138,11 @@ jobs:
           merge-multiple: true
           path: release
 
-      - name: Verify assets and add installer scripts
+      # The installer and lifecycle scripts ship inside the tarballs, not as
+      # loose release assets.
+      - name: Verify assets and add license files
         run: |
-          cp -f install.sh gr8s-killall.sh gr8s-uninstall.sh LICENSE NOTICE release/
+          cp -f LICENSE NOTICE release/
           cd release
           sha256sum -c gr8s-linux-amd64.sha256 gr8s-linux-arm64.sha256
           sha256sum -- * > ../SHA256SUMS

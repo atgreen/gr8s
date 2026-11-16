@@ -23,9 +23,10 @@ Release downloads include:
 - `gr8s-linux-amd64` and `gr8s-linux-arm64`, with matching `.sha256` files. These
   are the filenames used by `install.sh`.
 - `gr8s-<version>-linux-<arch>.tar.gz`, containing the executable as `gr8s`, the
-  installer and cleanup scripts, README, and license/notice files.
-- `install.sh`, `gr8s-killall.sh`, `gr8s-uninstall.sh`, `LICENSE`, `NOTICE`, and
-  `SHA256SUMS` for the complete download set.
+  installer and cleanup scripts (`install.sh`, `gr8s-killall.sh`,
+  `gr8s-uninstall.sh`), README, and license/notice files. The scripts ship only
+  inside the tarball, not as loose release assets.
+- `LICENSE`, `NOTICE`, and `SHA256SUMS` for the complete download set.
 - Per-architecture CycloneDX and SPDX files from ocicl. These describe the
   **Lisp dependencies**, rather than the entire native payload and web frontend.
 
