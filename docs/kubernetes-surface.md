@@ -256,8 +256,9 @@ External API servers register with an `APIService`. gr8s publishes the
 `extension-apiserver-authentication` ConfigMap in `kube-system` with a separate
 front-proxy CA, checks each one's discovery document to set its `Available`
 condition, lists its group in discovery, and proxies its requests over TLS with the
-caller's identity in `X-Remote-*` headers. OpenAPI documents aren't merged, so
-`kubectl explain` doesn't cover aggregated types.
+caller's identity in `X-Remote-*` headers. Available servers' OpenAPI v2 is
+merged into `/openapi/v2` and their v3 group documents are proxied, so
+`kubectl explain` covers aggregated types.
 
 ## Events
 
