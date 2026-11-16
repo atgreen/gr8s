@@ -158,19 +158,19 @@ gr8s is a large, working Common Lisp system — about 120,000 lines under
 a Raft store, an eBPF compiler, and a TLS stack — built to be explored from a
 REPL while it runs.
 
-- **REPL into a live cluster.** `gr8s debug slynk --node NODE --kubeconfig
-  KUBECONFIG --local-port 4005` opens an authenticated, RBAC-gated Slynk
-  tunnel to a node's running image. Point [Sly](https://github.com/joaotavora/sly)
-  at it, or attach [ICL](https://atgreen.github.io/icl) with
-  `icl --connect 127.0.0.1:4005`. Built-in helpers in the `GR8S` package —
-  `(debug-threads)`, `(debug-backtraces)`, `(debug-pod "default" "web")`,
-  `(debug-journal 20)` — inspect the node's local context.
-- **A modern REPL on the cluster.** `gr8s debug icl NODE` opens the same
-  tunnel and launches [ICL](https://atgreen.github.io/icl)'s browser IDE
-  against the node's live image in one step (`--no-launch` prints the
-  `icl -b --connect` line instead). ICL brings syntax highlighting,
-  completion, a TUI object inspector, package and class browsers,
-  flame-graph profiling, and notebooks to the same Slynk connection.
+- **REPL into a live cluster.** `gr8s debug icl NODE` opens an
+  authenticated, RBAC-gated Slynk tunnel to the node's running image and
+  launches [ICL](https://atgreen.github.io/icl)'s browser IDE against it in
+  one step (`--no-launch` prints the `icl -b --connect` line instead). ICL
+  brings syntax highlighting, completion, a TUI object inspector, package
+  and class browsers, flame-graph profiling, and notebooks. Built-in
+  helpers in the `GR8S` package — `(debug-threads)`, `(debug-backtraces)`,
+  `(debug-pod "default" "web")`, `(debug-journal 20)` — inspect the node's
+  local context.
+- **If you'd rather attach with Emacs or Lem**, run `gr8s debug slynk
+  --node NODE --kubeconfig KUBECONFIG --local-port 4005` and point
+  [Sly](https://github.com/joaotavora/sly) (or Lem's Lisp mode) at the
+  printed loopback port; the tunnel stays open while the command runs.
 - **eBPF written in Lisp.** [Whistler](https://github.com/atgreen/Whistler)
   compiles the entire dataplane — Service load balancing, NetworkPolicy,
   tracing probes — from a Lisp DSL to eBPF at runtime, with no clang or LLVM.
