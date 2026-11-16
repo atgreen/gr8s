@@ -54,20 +54,42 @@ set; `full` and `gateway` complete the formal profiles.
 
 ## Gateway API conformance
 
-Run the Gateway API conformance suite (`kubernetes-sigs/gateway-api`, matching
-the installed CRD bundle version) with `--gateway-class=gr8s`. Run it **from
-inside the cluster network** (on a node), because a gr8s Gateway advertises the
-node addresses and the suite connects to them directly:
+Build the official Gateway API suite at the release tag matching the installed
+CRD bundle (currently v1.6.3). The conformance directory is its own Go module:
 
 ```
-go test -c ./conformance -o gwconf.test        # build once, on a machine with Go
-scp gwconf.test <node>:/root/                   # copy the static binary to a node
-ssh <node> 'KUBECONFIG=/etc/rancher/k3s/k3s.yaml /root/gwconf.test \
-  -test.run TestConformance -gateway-class=gr8s \
-  -supported-features=Gateway,HTTPRoute,ReferenceGrant'
+cd gateway-api/conformance
+CGO_ENABLED=0 go test -c . -o gateway-conformance.test
 ```
 
-Verified passing against v1.6.3 with GatewayClass gr8s: HTTPRouteSimpleSameNamespace,
-HTTPRouteCrossNamespace, HTTPRouteHeaderMatching, HTTPRouteMatching,
-HTTPRouteMatchingAcrossRoutes, GatewayObservedGenerationBump. Known gaps:
-HTTPRoute path-match ordering and invalid-route-kind listener status.
+Copy the binary and `run-conformance.sh` to a node with access to the advertised
+Gateway Service IPs. Gateway-only testing can use the cluster's existing CNI
+and kube-proxy: run the gr8s agent with `--cni false --service-lb false --gateway
+true`. This does not test gr8s CNI or Service BPF forwarding.
+
+```
+KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
+GATEWAY_CONFORMANCE_BINARY=/root/gateway-conformance.test \
+GR8S_VERSION=<exact-tested-build-identifier> \
+GATEWAY_CONFORMANCE_REPORT=/root/gr8s-report.yaml \
+sh run-conformance.sh gateway
+```
+
+`GATEWAY_CLASS` defaults to `gr8s`; it must identify a GatewayClass whose
+controller is `gr8s.io/gateway-controller`. The runner executes the complete
+`GATEWAY-HTTP` profile, writes upstream report metadata, and returns the suite's
+exit status. No tests are excluded. Keep the test log, report, binary digest,
+cluster version, and configuration together when preparing a report submission.
+Do not present a partial or failed run as a conformance claim.
+
+On 2026-11-16, the official v1.6.3 standard-channel `GATEWAY-HTTP` profile
+passed all 36 core tests, with zero failures and zero skips (exit status 0).
+This includes path-match ordering and invalid-route-kind listener status.
+The [unmodified report](../../docs/evidence/gateway-http-conformance-2026-11-16.yaml)
+identifies the exact tested candidate by SHA-256; this is a snapshot result,
+not a claim about every subsequent build.
+
+The test ran on Fedora 44 with k3s v1.37.2+k3s1, stock flannel and kube-proxy,
+and gr8s Gateway-only mode. It does not establish CNI, Service BPF, extended
+Gateway feature, or ListenerSet conformance. The report and reproduction README
+are prepared locally for upstream review; no upstream submission has been made.

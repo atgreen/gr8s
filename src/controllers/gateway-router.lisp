@@ -20,8 +20,11 @@
 (defstruct gw-backend
   (name "" :type string)
   (namespace nil)                       ; nil = the route's own namespace
+  source-namespace
+  (source-kind "HTTPRoute")
   (port 0 :type (or integer string))
   (weight 1 :type integer)
+  invalid-reason                       ; invalid references retain their traffic weight
   resolver)                            ; per-dispatch immutable dependency view, or NIL
 
 (defstruct gw-match
@@ -63,6 +66,8 @@
       bound)))
 
 (defun resolve-gateway-backend (backend fallback-resolver)
+  (when (gw-backend-invalid-reason backend)
+    (return-from resolve-gateway-backend (values nil nil (gw-backend-invalid-reason backend))))
   (let ((resolver (or (gw-backend-resolver backend) fallback-resolver)))
     (when resolver (funcall resolver backend))))
 
@@ -136,15 +141,19 @@
                    :method (gethash "method" match-object)
                    :headers (gw-parse-headers match-object))))
 
-(defun gw-parse-backend (ref route-namespace)
+(defun gw-parse-backend (ref route-namespace &optional (route-kind "HTTPRoute"))
   "Normalize a backendRef into a GW-BACKEND, defaulting its namespace to
    ROUTE-NAMESPACE and its weight to 1. Signals a GATEWAY-ROUTE-ERROR when the
    ref has no name or no port."
   (make-gw-backend
    :name (or (gethash "name" ref) (gw-route-error "backendRef needs a name"))
    :namespace (or (gethash "namespace" ref) route-namespace)
+   :source-namespace route-namespace :source-kind route-kind
    :port (or (gethash "port" ref) (gw-route-error "backendRef ~S needs a port" (gethash "name" ref)))
-   :weight (let ((w (gethash "weight" ref))) (if w w 1))))
+   :weight (let ((w (gethash "weight" ref))) (if w w 1))
+   :invalid-reason (unless (and (equal (or (gethash "group" ref) "") "")
+                                (equal (or (gethash "kind" ref) "Service") "Service"))
+                     "InvalidKind")))
 
 (defun gw-name-value-alist (value)
   "Convert a JSON array of {name,value} into an alist of (name . value)."
@@ -335,30 +344,32 @@ path (Exact > longer PathPrefix), then method present, then #headers."
 ;;; order; matching host buckets are visited from most specific to catch-all.
 
 (defstruct gw-routing-table
-  (exact (make-hash-table :test 'equal))
-  (wildcard (make-hash-table :test 'equal))
+  (exact (fset:empty-ch-map #()))
+  (wildcard (fset:empty-ch-map #()))
   (fallback #()))
 
 (defun gateway-host-bucket (table host)
   (cond ((null host) (gw-routing-table-fallback table))
-        ((= 1 (gw-host-tier host)) (gethash (subseq host 1) (gw-routing-table-wildcard table) #()))
-        (t (gethash host (gw-routing-table-exact table) #()))))
+        ((= 1 (gw-host-tier host)) (fset:lookup (gw-routing-table-wildcard table) (subseq host 1)))
+        (t (fset:lookup (gw-routing-table-exact table) host))))
 
 (defun (setf gateway-host-bucket) (candidates table host)
   (if (null host)
       (setf (gw-routing-table-fallback table) candidates)
-      (let ((index (if (= 1 (gw-host-tier host)) (gw-routing-table-wildcard table)
+      (let* ((wildcard-p (= 1 (gw-host-tier host)))
+             (index (if wildcard-p (gw-routing-table-wildcard table)
                        (gw-routing-table-exact table)))
-            (key (if (= 1 (gw-host-tier host)) (subseq host 1) host)))
-        (if (zerop (length candidates)) (remhash key index) (setf (gethash key index) candidates))))
+             (key (if wildcard-p (subseq host 1) host))
+             (next (if (zerop (length candidates)) (fset:less index key)
+                       (fset:with index key candidates))))
+        (if wildcard-p (setf (gw-routing-table-wildcard table) next)
+            (setf (gw-routing-table-exact table) next))))
   candidates)
 
 (defun update-gateway-routing-table (table removed added candidate-before)
   "Replace changed routes, sharing untouched candidate vectors with the old table."
   (let ((next (copy-gw-routing-table table))
         (new-by-host (make-hash-table :test #'equal)))
-    (setf (gw-routing-table-exact next) (alexandria:copy-hash-table (gw-routing-table-exact table))
-          (gw-routing-table-wildcard next) (alexandria:copy-hash-table (gw-routing-table-wildcard table)))
     (dolist (route removed)
       (let ((key (gateway-route-source-key route)))
         (dolist (host (or (gw-route-hostnames route) (list nil)))
@@ -395,16 +406,16 @@ path (Exact > longer PathPrefix), then method present, then #headers."
                   :rate-limit (gw-candidate-rate-limit candidate))))
 
 (defun gw-dispatch-request (table host path method headers)
-  (or (gw-dispatch-candidates (gethash host (gw-routing-table-exact table) #())
+  (or (gw-dispatch-candidates (fset:lookup (gw-routing-table-exact table) host)
                               path method headers)
       ;; A wildcard requires a nonempty prefix before its dot. Visit suffixes
       ;; longest first, allowing a less specific bucket when no rule matches.
-      (when (plusp (hash-table-count (gw-routing-table-wildcard table)))
+      (unless (fset:empty? (gw-routing-table-wildcard table))
         (loop for dot = (position #\. host :start 1)
                 then (position #\. host :start (1+ dot))
               while dot
               thereis (gw-dispatch-candidates
-                       (gethash (subseq host dot) (gw-routing-table-wildcard table) #())
+                       (fset:lookup (gw-routing-table-wildcard table) (subseq host dot))
                        path method headers)))
       (gw-dispatch-candidates (gw-routing-table-fallback table) path method headers)))
 
@@ -415,16 +426,19 @@ path (Exact > longer PathPrefix), then method present, then #headers."
   "Build a request dispatcher over an immutable hostname-indexed routing table.
 Matching code is compiled with gr8s; changing ROUTES never invokes the compiler.
 The returned function owns its indexes; later builds do not mutate them."
-  (let ((table (make-gw-routing-table)) (fallback nil))
+  (let ((table (make-gw-routing-table)) (fallback nil)
+        (exact (make-hash-table :test 'equal)) (wildcard (make-hash-table :test 'equal)))
     (dolist (candidate (gw-route-candidates routes))
       (let ((host (gw-candidate-hostname candidate)))
         (cond ((null host) (push candidate fallback))
               ((= 1 (gw-host-tier host))
-               (push candidate (gethash (subseq host 1) (gw-routing-table-wildcard table))))
-              (t (push candidate (gethash host (gw-routing-table-exact table)))))))
-    (dolist (index (list (gw-routing-table-exact table) (gw-routing-table-wildcard table)))
+               (push candidate (gethash (subseq host 1) wildcard)))
+              (t (push candidate (gethash host exact))))))
+    (dolist (index (list exact wildcard))
       (maphash (lambda (host candidates)
                  (setf (gethash host index) (coerce (nreverse candidates) 'vector)))
                index))
-    (setf (gw-routing-table-fallback table) (coerce (nreverse fallback) 'vector))
+    (setf (gw-routing-table-exact table) (fset:convert 'fset:ch-map exact :default #())
+          (gw-routing-table-wildcard table) (fset:convert 'fset:ch-map wildcard :default #())
+          (gw-routing-table-fallback table) (coerce (nreverse fallback) 'vector))
     (values (gateway-router-from-table table) table)))

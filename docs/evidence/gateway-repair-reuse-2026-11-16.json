@@ -1,0 +1,528 @@
+{
+  "date": "2026-11-16",
+  "issues": [
+    "podster-vsy",
+    "podster-a1y"
+  ],
+  "baseCommit": "c9cbdf8404d4c42d04a8af9b5a4c2d1b95acccb4",
+  "runtimeTreeSHA256": "111d6bbd7973df56638ac66546b06d92483a564c0a26912fa7591bb559e2deb6",
+  "runtimeTreeHashDefinition": "Sorted src/**/*.lisp, proto/**/*.proto, gr8s.asd, scripts/build-native.lisp: path NUL bytes NUL concatenation.",
+  "ociclPinsSHA256": "1b88e697f7fcb638e97b4c1ad2cae066363f8517eb9e03d78953bd1880a602e2",
+  "baselineBinarySHA256": "57a9a09706076cf8e156bc11e78cbeb14c651dfef823bec67135e575d6667277",
+  "candidateBinarySHA256": "6c30c2fac000ca04700005c9f2b5285f9af055768cc956185914287fe15699e8",
+  "buildSourcePatchSHA256": "24023194da25e2595a307d269d317b20e3d9184f2dcd341950b7465a4a1d4c02",
+  "finalSourcePatchSHA256": "86677b1f9a912aff3d945413f90e7b0a51ba34e976ab2675265f63d060ac692d",
+  "changes": [
+    "Bounded EQ repair cache reuses previously validated immutable row identities before content-hashed baseline fallback.",
+    "Complete discovery projection is reused across repair passes when resource identity/revision, Pod revision, Gateway dependency fence and exact observed-status identities match.",
+    "Inputs and stamp are captured together; stale completion cannot replace a current cache; application reload clears both caches.",
+    "Independent calls receive private list spines; explicit per-pass cache retains its pre-existing shared-spine contract."
+  ],
+  "method": {
+    "vcpus": 4,
+    "memory_mib": 6144,
+    "cpu_affinity": "12-15",
+    "heap_mib": 2048,
+    "routes": 3000,
+    "mode": "B",
+    "instrumented": false,
+    "order": [
+      "before-1",
+      "after-1",
+      "after-2",
+      "before-2"
+    ],
+    "freshVMTemplateEachRun": true,
+    "ownHeavyBuildsTestsStopped": true,
+    "sharedHost": true,
+    "postApply": "API response to HTTP200, including ordered-probe delay in burst mode.",
+    "percentiles": "Linear interpolation p*(n-1)",
+    "baseline": "Retained stage3 binary from previous Gateway scaling work; not the original main binary."
+  },
+  "uninstrumentedRuns": [
+    {
+      "label": "before-1",
+      "binary_sha256": "57a9a09706076cf8e156bc11e78cbeb14c651dfef823bec67135e575d6667277",
+      "status": "passed",
+      "start": 1794825864.986445,
+      "end": 1794825981.436552,
+      "measurement": {
+        "file": "/tmp/gr8s-repair-reuse/confirmation/before-1-evidence/B3000.log",
+        "post_apply": {
+          "n": 3000,
+          "mean_ms": 76.34447334066667,
+          "p50_ms": 46.5715375,
+          "p95_ms": 227.19874324999884,
+          "p99_ms": 797.5201019099994,
+          "max_ms": 829.266421
+        },
+        "api_write": {
+          "n": 3000,
+          "mean_ms": 10.471313482666666,
+          "p50_ms": 9.063949000000001,
+          "p95_ms": 18.249132599999967,
+          "p99_ms": 37.470663209999934,
+          "max_ms": 213.279034
+        },
+        "write_to_200_log_span": {
+          "n": 3000,
+          "mean_ms": 86.95971233333333,
+          "p50_ms": 56.7435,
+          "p95_ms": 239.17299999999975,
+          "p99_ms": 802.6986799999994,
+          "max_ms": 837.363
+        },
+        "api_write_span_s": 31.793517,
+        "offered_routes_per_second": 94.35885938633338,
+        "post_apply_by_route_thousand": [
+          {
+            "n": 1000,
+            "mean_ms": 132.700850858,
+            "p50_ms": 48.3996725,
+            "p95_ms": 776.4355388499998,
+            "p99_ms": 814.60513743,
+            "max_ms": 829.266421
+          },
+          {
+            "n": 1000,
+            "mean_ms": 48.096583437,
+            "p50_ms": 45.5458745,
+            "p95_ms": 75.69403564999996,
+            "p99_ms": 100.38306827999997,
+            "max_ms": 263.334059
+          },
+          {
+            "n": 1000,
+            "mean_ms": 48.235985727,
+            "p50_ms": 45.3194035,
+            "p95_ms": 83.29616475,
+            "p99_ms": 113.58814001999998,
+            "max_ms": 136.939443
+          }
+        ]
+      }
+    },
+    {
+      "label": "after-1",
+      "binary_sha256": "6c30c2fac000ca04700005c9f2b5285f9af055768cc956185914287fe15699e8",
+      "status": "passed",
+      "start": 1794826069.030923,
+      "end": 1794826175.1736379,
+      "measurement": {
+        "file": "/tmp/gr8s-repair-reuse/confirmation/after-1-evidence/B3000.log",
+        "post_apply": {
+          "n": 3000,
+          "mean_ms": 67.07363031433333,
+          "p50_ms": 43.8475565,
+          "p95_ms": 130.90788829999997,
+          "p99_ms": 700.9626838899999,
+          "max_ms": 745.075639
+        },
+        "api_write": {
+          "n": 3000,
+          "mean_ms": 10.297611818,
+          "p50_ms": 9.0732715,
+          "p95_ms": 17.91495025,
+          "p99_ms": 35.88613178999983,
+          "max_ms": 193.228634
+        },
+        "write_to_200_log_span": {
+          "n": 3000,
+          "mean_ms": 77.51739366666666,
+          "p50_ms": 53.85,
+          "p95_ms": 141.17099999999994,
+          "p99_ms": 706.0194699999994,
+          "max_ms": 778.31
+        },
+        "api_write_span_s": 31.25751675,
+        "offered_routes_per_second": 95.97691409699077,
+        "post_apply_by_route_thousand": [
+          {
+            "n": 1000,
+            "mean_ms": 112.576949492,
+            "p50_ms": 45.381351,
+            "p95_ms": 665.9468688,
+            "p99_ms": 728.3382825000001,
+            "max_ms": 745.075639
+          },
+          {
+            "n": 1000,
+            "mean_ms": 44.784892288,
+            "p50_ms": 43.020599000000004,
+            "p95_ms": 60.689434049999974,
+            "p99_ms": 84.77974058999997,
+            "max_ms": 233.964536
+          },
+          {
+            "n": 1000,
+            "mean_ms": 43.859049163,
+            "p50_ms": 43.1920865,
+            "p95_ms": 61.1071772,
+            "p99_ms": 76.42438684,
+            "max_ms": 130.989271
+          }
+        ]
+      }
+    },
+    {
+      "label": "after-2",
+      "binary_sha256": "6c30c2fac000ca04700005c9f2b5285f9af055768cc956185914287fe15699e8",
+      "status": "passed",
+      "start": 1794826261.973041,
+      "end": 1794826370.255526,
+      "measurement": {
+        "file": "/tmp/gr8s-repair-reuse/confirmation/after-2-evidence/B3000.log",
+        "post_apply": {
+          "n": 3000,
+          "mean_ms": 68.67175477566667,
+          "p50_ms": 44.6558815,
+          "p95_ms": 243.95551254999899,
+          "p99_ms": 583.4904728399999,
+          "max_ms": 631.752802
+        },
+        "api_write": {
+          "n": 3000,
+          "mean_ms": 10.107087096,
+          "p50_ms": 8.872112,
+          "p95_ms": 17.471530899999973,
+          "p99_ms": 37.45015309999995,
+          "max_ms": 221.272586
+        },
+        "write_to_200_log_span": {
+          "n": 3000,
+          "mean_ms": 78.917494,
+          "p50_ms": 54.538,
+          "p95_ms": 257.45184999999964,
+          "p99_ms": 588.7891899999997,
+          "max_ms": 636.95
+        },
+        "api_write_span_s": 30.66953125,
+        "offered_routes_per_second": 97.81694984334004,
+        "post_apply_by_route_thousand": [
+          {
+            "n": 1000,
+            "mean_ms": 117.116503842,
+            "p50_ms": 47.7832545,
+            "p95_ms": 552.1882165,
+            "p99_ms": 617.81761418,
+            "max_ms": 631.752802
+          },
+          {
+            "n": 1000,
+            "mean_ms": 44.699937655,
+            "p50_ms": 43.728840000000005,
+            "p95_ms": 64.92106935,
+            "p99_ms": 87.45618957999993,
+            "max_ms": 126.440516
+          },
+          {
+            "n": 1000,
+            "mean_ms": 44.19882283,
+            "p50_ms": 42.706283,
+            "p95_ms": 63.276375599999994,
+            "p99_ms": 79.77339431999994,
+            "max_ms": 243.771574
+          }
+        ]
+      }
+    },
+    {
+      "label": "before-2",
+      "binary_sha256": "57a9a09706076cf8e156bc11e78cbeb14c651dfef823bec67135e575d6667277",
+      "status": "passed",
+      "start": 1794826457.5038197,
+      "end": 1794826554.2212877,
+      "measurement": {
+        "file": "/tmp/gr8s-repair-reuse/confirmation/before-2-evidence/B3000.log",
+        "post_apply": {
+          "n": 3000,
+          "mean_ms": 76.09382667733334,
+          "p50_ms": 45.106567,
+          "p95_ms": 334.8941853499997,
+          "p99_ms": 699.3438566799971,
+          "max_ms": 743.790652
+        },
+        "api_write": {
+          "n": 3000,
+          "mean_ms": 10.022949121333333,
+          "p50_ms": 8.756057,
+          "p95_ms": 17.831803549999993,
+          "p99_ms": 37.85279374999985,
+          "max_ms": 197.624841
+        },
+        "write_to_200_log_span": {
+          "n": 3000,
+          "mean_ms": 86.252727,
+          "p50_ms": 54.8765,
+          "p95_ms": 341.2591999999988,
+          "p99_ms": 714.5092899999985,
+          "max_ms": 752.379
+        },
+        "api_write_span_s": 30.41604875,
+        "offered_routes_per_second": 98.63214070499541,
+        "post_apply_by_route_thousand": [
+          {
+            "n": 1000,
+            "mean_ms": 134.984632917,
+            "p50_ms": 47.0256635,
+            "p95_ms": 668.4819171499998,
+            "p99_ms": 727.68216894,
+            "max_ms": 743.790652
+          },
+          {
+            "n": 1000,
+            "mean_ms": 45.312063799,
+            "p50_ms": 43.826980000000006,
+            "p95_ms": 64.35564604999999,
+            "p99_ms": 96.54973101,
+            "max_ms": 216.993449
+          },
+          {
+            "n": 1000,
+            "mean_ms": 47.984783316,
+            "p50_ms": 44.445629,
+            "p95_ms": 87.0867264,
+            "p99_ms": 119.09495001999997,
+            "max_ms": 143.649948
+          }
+        ]
+      }
+    }
+  ],
+  "microbenchmarks": {
+    "baseline": [
+      {
+        "label": "identity-and-diff",
+        "routes": 100,
+        "bytesPerCall": 21041.6,
+        "cpuMicrosecondsPerCall": 411.6
+      },
+      {
+        "label": "projection",
+        "routes": 100,
+        "bytesPerCall": 22840.0,
+        "cpuMicrosecondsPerCall": 81.25
+      },
+      {
+        "label": "collector",
+        "routes": 100,
+        "bytesPerCall": 11464.0,
+        "cpuMicrosecondsPerCall": 175.1
+      },
+      {
+        "label": "identity-and-diff",
+        "routes": 1000,
+        "bytesPerCall": 243000.8,
+        "cpuMicrosecondsPerCall": 3872.4
+      },
+      {
+        "label": "projection",
+        "routes": 1000,
+        "bytesPerCall": 176349.6,
+        "cpuMicrosecondsPerCall": 579.05
+      },
+      {
+        "label": "collector",
+        "routes": 1000,
+        "bytesPerCall": 96598.4,
+        "cpuMicrosecondsPerCall": 1534.25
+      },
+      {
+        "label": "identity-and-diff",
+        "routes": 3000,
+        "bytesPerCall": 651852.8,
+        "cpuMicrosecondsPerCall": 11475.95
+      },
+      {
+        "label": "projection",
+        "routes": 3000,
+        "bytesPerCall": 477009.6,
+        "cpuMicrosecondsPerCall": 1760.4
+      },
+      {
+        "label": "collector",
+        "routes": 3000,
+        "bytesPerCall": 289788.0,
+        "cpuMicrosecondsPerCall": 4652.1
+      },
+      {
+        "label": "identity-and-diff",
+        "routes": 10000,
+        "bytesPerCall": 1933394.4,
+        "cpuMicrosecondsPerCall": 38323.3
+      },
+      {
+        "label": "projection",
+        "routes": 10000,
+        "bytesPerCall": 1474109.6,
+        "cpuMicrosecondsPerCall": 5488.2
+      },
+      {
+        "label": "collector",
+        "routes": 10000,
+        "bytesPerCall": 961040.0,
+        "cpuMicrosecondsPerCall": 16332.35
+      }
+    ],
+    "candidateAllSizes": [
+      {
+        "label": "identity-and-diff",
+        "routes": 100,
+        "bytesPerCall": 16184.0,
+        "cpuMicrosecondsPerCall": 77.25
+      },
+      {
+        "label": "projection",
+        "routes": 100,
+        "bytesPerCall": 1637.6,
+        "cpuMicrosecondsPerCall": 3.15
+      },
+      {
+        "label": "collector",
+        "routes": 100,
+        "bytesPerCall": 11464.0,
+        "cpuMicrosecondsPerCall": 177.1
+      },
+      {
+        "label": "identity-and-diff",
+        "routes": 1000,
+        "bytesPerCall": 223199.2,
+        "cpuMicrosecondsPerCall": 705.05
+      },
+      {
+        "label": "projection",
+        "routes": 1000,
+        "bytesPerCall": 14738.4,
+        "cpuMicrosecondsPerCall": 18.7
+      },
+      {
+        "label": "collector",
+        "routes": 1000,
+        "bytesPerCall": 96598.4,
+        "cpuMicrosecondsPerCall": 1529.3
+      },
+      {
+        "label": "identity-and-diff",
+        "routes": 3000,
+        "bytesPerCall": 601078.4,
+        "cpuMicrosecondsPerCall": 1989.45
+      },
+      {
+        "label": "projection",
+        "routes": 3000,
+        "bytesPerCall": 47490.4,
+        "cpuMicrosecondsPerCall": 47.35
+      },
+      {
+        "label": "collector",
+        "routes": 3000,
+        "bytesPerCall": 289788.0,
+        "cpuMicrosecondsPerCall": 4636.8
+      },
+      {
+        "label": "identity-and-diff",
+        "routes": 10000,
+        "bytesPerCall": 1791330.4,
+        "cpuMicrosecondsPerCall": 6316.0
+      },
+      {
+        "label": "projection",
+        "routes": 10000,
+        "bytesPerCall": 158847.2,
+        "cpuMicrosecondsPerCall": 146.45
+      },
+      {
+        "label": "collector",
+        "routes": 10000,
+        "bytesPerCall": 961040.0,
+        "cpuMicrosecondsPerCall": 16005.65
+      }
+    ],
+    "finalProfileCounters": [
+      {
+        "label": "identity-and-diff",
+        "routes": 3000,
+        "bytesPerCall": 601078.4,
+        "cpuMicrosecondsPerCall": 2004.55
+      },
+      {
+        "label": "projection",
+        "routes": 3000,
+        "bytesPerCall": 47490.4,
+        "cpuMicrosecondsPerCall": 42.7
+      },
+      {
+        "label": "collector-with-namespace-checks",
+        "routes": 3000,
+        "bytesPerCall": 4513454.5,
+        "cpuMicrosecondsPerCall": 9364.45
+      }
+    ],
+    "method": "Warm 3 calls, full GC before counter baseline, then 20 calls using process-wide get-bytes-consed and CPU-time deltas. Separate sb-sprof allocation sampling over 300 calls. No concurrent own heavy jobs.",
+    "fixture": "Synthetic static routes; raw inserts explicitly advance resource revision and assert route count plus four supporting rows in final fixture. Collector baseline/all-size fixture lacks in-cluster namespace checks; final profile enables them with a live Namespace.",
+    "baselineProvenance": "All baseline measurement lines completed with original production code before a later malformed test assertion failed. That failure is not RED evidence. Correct RED is identity-red-corrected.log; projection RED is projection-red.log."
+  },
+  "allocationFindings": [
+    {
+      "component": "repair",
+      "inclusiveSamplePercent": 99.2,
+      "site": "GROW-HASH-TABLE",
+      "followup": "podster-ifu"
+    },
+    {
+      "component": "unchanged projection",
+      "inclusiveSamplePercent": 99.5,
+      "site": "COPY-LIST"
+    },
+    {
+      "component": "collector with namespace checks",
+      "inclusiveSamplePercent": 90.5,
+      "site": "COPY-CORE-OBJECT",
+      "followup": "podster-62b"
+    }
+  ],
+  "validation": {
+    "makeCheck": {
+      "exit": 0,
+      "checks": 32778,
+      "passed": 32769,
+      "skipped": 9,
+      "failed": 0,
+      "log": "make-check.log"
+    },
+    "finalFastPathSuite": {
+      "exit": 0,
+      "checks": 90,
+      "passed": 90,
+      "log": "projection-final-suite.log"
+    },
+    "gatewayDeltaSuite": {
+      "exit": 0,
+      "checks": 474,
+      "passed": 474,
+      "log": "projection-measure-and-delta.log"
+    },
+    "nativeBuild": {
+      "exit": 0,
+      "log": "native-build.log"
+    },
+    "finalAllocationProfile": {
+      "exit": 0,
+      "log": "allocation-profile-final.log"
+    },
+    "review": "Independent static review found no important issues; suggested concurrent status regression added and passed.",
+    "testsAfterBuild": "Only test code changed after native source freeze: concurrent Pod status replacement test. No production changes."
+  },
+  "limitations": [
+    "Two uninstrumented runs per binary are descriptive, not a statistical guarantee; offered write rates vary with API performance.",
+    "Agentgateway was not rerun; this measures the incremental gr8s change against retained stage3.",
+    "Cache misses still rebuild projections, and observation validation scales with Pod count. Measurements use many routes and few Pods.",
+    "Allocation sample percentages are statistical and inclusive, not exclusive totals; byte counters are process-wide.",
+    "Background collection and temporary repair hash-table allocation are profiled follow-ups, not fixed by this change."
+  ],
+  "rawEvidence": {
+    "archive": "build/gateway-perf-retained/repair-reuse/evidence-2026-11-16.tar.gz",
+    "archiveSHA256": "cb373a866b9e0e08ec83985509df394575bf75431146594f0e8a46e5c2be1f68",
+    "contents": "Source snapshots, runner, synthetic/profile fixtures, raw logs and VM results; retained binaries stored separately."
+  }
+}

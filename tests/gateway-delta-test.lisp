@@ -331,6 +331,295 @@
              (is (= 0 (gr8s.apiserver::node-agent-session-gateway-revision session))))
         (setf (symbol-function 'ag-grpc:stream-send) original)))))
 
+(defun call-with-gateway-repair-session (function)
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (gwc-seed store)
+    (gr8s.controllers::register-node
+     store (gr8s.model::make-node-record :id "repair-node" :name "worker" :pod-cidr "10.88.0.0/20"))
+    (let* ((server (gr8s.apiserver::%make-node-grpc-server :store store))
+           (session (gr8s.apiserver::make-node-agent-session nil))
+           (runtime (gr8s.controllers::make-control-plane-runtime store server))
+           (send (symbol-function 'ag-grpc:stream-send)) (sent nil))
+      (setf (gr8s.apiserver::node-agent-session-gateway-deltas-p session) t
+            (gethash "worker" (gr8s.apiserver::node-grpc-server-sessions server)) session)
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'ag-grpc:stream-send)
+                   (lambda (stream envelope) (declare (ignore stream)) (push envelope sent)))
+             (gr8s.controllers::publish-node-snapshot runtime "worker")
+             (gr8s.apiserver::note-node-snapshot-ack
+              server "worker" (make-instance 'gr8s.node.v1::snapshot-ack :revision 1 :applied t) session)
+             (funcall function store runtime server session (lambda () sent)))
+        (setf (symbol-function 'ag-grpc:stream-send) send)))))
+
+(defun send-gateway-repair-route-change (runtime server session &key (acknowledge t) (name "app"))
+  (multiple-value-bind (changes epoch)
+      (gr8s.controllers::capture-gateway-resource-changes runtime (list (list "httproutes" "default" name)))
+    (gr8s.apiserver::deliver-node-gateway-config session changes :dependency-epoch epoch))
+  (when acknowledge
+    (gr8s.apiserver::note-node-gateway-config-ack
+     server "worker"
+     (make-instance 'gr8s.node.v1::gateway-config-ack :base-node-revision 1
+                    :revision (gr8s.apiserver::node-agent-session-gateway-revision session) :applied t)
+     session)))
+
+(test periodic-repair-does-not-resend-acknowledged-gateway-state
+  (call-with-gateway-repair-session
+   (lambda (store runtime server session sent)
+     (let ((baseline (gr8s.apiserver::current-node-snapshot server "worker")))
+       (change-published-route-host store "repaired.example.com")
+       (send-gateway-repair-route-change runtime server session)
+       (is (= 2 (length (funcall sent))))
+       (is (= 1 (gr8s.controllers::publish-node-snapshot runtime "worker")))
+       (is (= 2 (length (funcall sent))))
+       (is (eq baseline (gr8s.apiserver::current-node-snapshot server "worker")))
+       (is (= 1 (gr8s.apiserver::node-agent-session-gateway-revision session)))))))
+
+(test periodic-repair-sends-missed-gateway-changes-behind-an-in-flight-update
+  (call-with-gateway-repair-session
+   (lambda (store runtime server session sent)
+     (let ((baseline (gr8s.apiserver::current-node-snapshot server "worker")))
+       (change-published-route-host store "in-flight.example.com")
+       (send-gateway-repair-route-change runtime server session :acknowledge nil)
+       ;; Repair must find durable changes even when their event was missed.
+       (change-published-route-host store "missed-event.example.com")
+       (is (= 1 (gr8s.controllers::publish-node-snapshot runtime "worker")))
+       (is (eq baseline (gr8s.apiserver::current-node-snapshot server "worker")))
+       (is (= 3 (length (funcall sent))))
+       (let ((envelope (first (funcall sent))))
+         (is (eq :gateway-config (slot-value envelope 'gr8s.node.v1::payload-case)))
+         (when (eq :gateway-config (slot-value envelope 'gr8s.node.v1::payload-case))
+           (let ((update (slot-value envelope 'gr8s.node.v1::gateway-config)))
+             (is (= 1 (slot-value update 'gr8s.node.v1::base-node-revision)))
+             (is (= 1 (slot-value update 'gr8s.node.v1::base-revision)))
+             (is (= 2 (slot-value update 'gr8s.node.v1::revision)))
+             (is (= 1 (length (slot-value update 'gr8s.node.v1::changes)))))))
+       (is (= 0 (gr8s.apiserver::node-agent-session-gateway-acknowledged-revision session)))))))
+
+(test gateway-repair-progress-requires-advancing-authenticated-acks
+  (call-with-gateway-repair-session
+   (lambda (store runtime server session sent)
+     (declare (ignore sent))
+     (flet ((ack (revision &key (base 1) (applied t) (peer session))
+              (gr8s.apiserver::note-node-gateway-config-ack
+               server "worker" (make-instance 'gr8s.node.v1::gateway-config-ack
+                                              :base-node-revision base :revision revision :applied applied) peer)))
+       (change-published-route-host store "one.example.com")
+       (send-gateway-repair-route-change runtime server session :acknowledge nil)
+       (is (integerp (gr8s.apiserver::node-agent-session-gateway-pending-since session)))
+       ;; A deterministic old timestamp proves sends cannot extend the deadline.
+       (setf (gr8s.apiserver::node-agent-session-gateway-pending-since session) -123)
+       (change-published-route-host store "two.example.com")
+       (send-gateway-repair-route-change runtime server session :acknowledge nil)
+       (is (= -123 (gr8s.apiserver::node-agent-session-gateway-pending-since session)))
+       (ack 0) (ack 3) (ack 1 :base 999)
+       (ack 1 :peer (gr8s.apiserver::make-node-agent-session nil))
+       (is (= 0 (gr8s.apiserver::node-agent-session-gateway-acknowledged-revision session)))
+       (is (= -123 (gr8s.apiserver::node-agent-session-gateway-pending-since session)))
+       (ack 1)
+       (is (= 1 (gr8s.apiserver::node-agent-session-gateway-acknowledged-revision session)))
+       (is (> (gr8s.apiserver::node-agent-session-gateway-pending-since session) -123))
+       (ack 1 :applied nil) (ack 3 :applied nil) (ack 2 :base 999 :applied nil)
+       (is (not (gr8s.apiserver::node-agent-session-gateway-repair-required-p session)))
+       (ack 2 :applied nil)
+       (is (gr8s.apiserver::node-agent-session-gateway-repair-required-p session))
+       (ack 2)
+       (is (null (gr8s.apiserver::node-agent-session-gateway-pending-since session)))
+       (is (gr8s.apiserver::node-agent-session-gateway-repair-required-p session))
+       (is (= 2 (gr8s.controllers::publish-node-snapshot runtime "worker")))
+       (is (not (gr8s.apiserver::node-agent-session-gateway-repair-required-p session)))
+       (is (null (gr8s.apiserver::node-agent-session-gateway-pending-since session)))
+       (is (= 0 (gr8s.apiserver::node-agent-session-gateway-revision session)))))))
+
+(test gateway-repair-recovers-missed-deletion-with-pending-acks
+  (call-with-gateway-repair-session
+   (lambda (store runtime server session sent)
+     (change-published-route-host store "pending.example.com")
+     (send-gateway-repair-route-change runtime server session :acknowledge nil)
+     (gr8s.resources::delete-core-resource store "httproutes" "default" "app")
+     (is (= 1 (gr8s.controllers::publish-node-snapshot runtime "worker")))
+     (is (= 3 (length (funcall sent))))
+     (let* ((envelope (first (funcall sent)))
+            (update (slot-value envelope 'gr8s.node.v1::gateway-config)))
+       (is (eq :gateway-config (slot-value envelope 'gr8s.node.v1::payload-case)))
+       (is (= 1 (length (slot-value update 'gr8s.node.v1::changes))))
+       (is (slot-value (first (slot-value update 'gr8s.node.v1::changes)) 'gr8s.node.v1::deleted)))
+     (is (not (gethash '("httproutes" "default" "app")
+                       (gr8s.apiserver::node-agent-session-gateway-resources session)))))))
+
+(test gateway-repair-send-failure-reconnects-with-fresh-durable-state
+  (call-with-gateway-repair-session
+   (lambda (store runtime server session sent)
+     (declare (ignore sent))
+     (change-published-route-host store "pending.example.com")
+     (send-gateway-repair-route-change runtime server session :acknowledge nil)
+     (change-published-route-host store "repair.example.com")
+     (let ((send (symbol-function 'ag-grpc:stream-send)))
+       (unwind-protect
+            (progn
+              (setf (symbol-function 'ag-grpc:stream-send)
+                    (lambda (&rest args) (declare (ignore args)) (error "injected repair send failure")))
+              (is (= 1 (gr8s.controllers::publish-node-snapshot runtime "worker"))))
+         (setf (symbol-function 'ag-grpc:stream-send) send)))
+     (is (gr8s.apiserver::node-agent-session-evicted-p session))
+     (is (= 1 (gr8s.apiserver::node-agent-session-gateway-revision session)))
+     (let* ((snapshot (gr8s.apiserver::prepare-node-connect-snapshot server "worker" 1))
+            (rows (gr8s.kubelet::decode-service-discovery-projection
+                   (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json)))
+            (route (gethash '("httproutes" "default" "app") rows)))
+       (is (= 2 (slot-value snapshot 'gr8s.node.v1::revision)))
+       (is (equalp #("repair.example.com") (gethash "hostnames" (gethash "spec" route))))))))
+
+(test unchanged-repair-reuses-validated-row-identities-without-content-hashing
+  (let ((hash (symbol-function 'gr8s.kubelet::discovery-octet-hash)) (hashed-bytes 0))
+    (unwind-protect
+         (progn
+           ;; Install before constructing caches so the tables retain this counter.
+           (setf (symbol-function 'gr8s.kubelet::discovery-octet-hash)
+                 (lambda (bytes) (incf hashed-bytes (length bytes)) (funcall hash bytes)))
+           (call-with-gateway-repair-session
+            (lambda (store runtime server session sent)
+              (declare (ignore runtime sent))
+              (let ((candidate (gr8s.controllers::node-desired-state-snapshot store "worker"))
+                    (baseline (gr8s.apiserver::current-node-snapshot server "worker")))
+                (gr8s.apiserver::attach-node-topology server "worker" candidate)
+                (bt:with-lock-held ((gr8s.apiserver::node-agent-session-lock session))
+                  (bt:with-lock-held ((gr8s.apiserver::node-grpc-server-lock server))
+                    (is (gr8s.apiserver::node-session-gateway-repair server "worker" session baseline candidate))
+                    (setf hashed-bytes 0)
+                    (multiple-value-bind (eligible changes)
+                        (gr8s.apiserver::node-session-gateway-repair server "worker" session baseline candidate)
+                      (is (eq t eligible)) (is (null changes)))
+                    (is (= 0 hashed-bytes))))))))
+      (setf (symbol-function 'gr8s.kubelet::discovery-octet-hash) hash))))
+
+(test covered-repair-caches-validated-identities-without-retaining-old-row-versions
+  (call-with-gateway-repair-session
+   (lambda (store runtime server session sent)
+     (declare (ignore sent))
+     (let ((decode (symbol-function 'gr8s.kubelet::decode-service-discovery-entry)) (decoded 0))
+       (unwind-protect
+            (progn
+              (setf (symbol-function 'gr8s.kubelet::decode-service-discovery-entry)
+                    (lambda (bytes) (incf decoded) (funcall decode bytes)))
+              (dotimes (i 3)
+                (change-published-route-host store (format nil "version-~D.example.com" i))
+                (send-gateway-repair-route-change runtime server session)
+                (setf decoded 0)
+                (is (= 1 (gr8s.controllers::publish-node-snapshot runtime "worker")))
+                (is (= 1 decoded))
+                (setf decoded 0)
+                (is (= 1 (gr8s.controllers::publish-node-snapshot runtime "worker")))
+                (is (= 0 decoded))
+                (is (= (length (gr8s.kubelet::service-discovery-projection store))
+                       (hash-table-count (gr8s.apiserver::node-agent-session-gateway-repair-key-cache session))))))
+         (setf (symbol-function 'gr8s.kubelet::decode-service-discovery-entry) decode))))))
+
+(test repair-preserves-full-delivery-for-unacknowledged-or-replaced-sessions
+  (dolist (reason '(:gateway-stalled :negative-ack :node-unacknowledged :replaced :evicted :unsupported :epoch))
+    (call-with-gateway-repair-session
+     (lambda (store runtime server session sent)
+       (change-published-route-host store "repaired.example.com")
+       (send-gateway-repair-route-change runtime server session
+                                        :acknowledge (not (member reason '(:gateway-stalled :negative-ack))))
+       (case reason
+         (:gateway-stalled
+          (setf (gr8s.apiserver::node-agent-session-gateway-pending-since session)
+                (- (get-internal-real-time) (* 31 internal-time-units-per-second))))
+         (:negative-ack
+          (gr8s.apiserver::note-node-gateway-config-ack
+           server "worker" (make-instance 'gr8s.node.v1::gateway-config-ack
+                                           :base-node-revision 1 :revision 1 :applied nil) session))
+         (:node-unacknowledged
+          (setf (gethash "worker" (gr8s.apiserver::node-grpc-server-acknowledged-revisions server)) 0))
+         (:replaced
+          (setf (gethash "worker" (gr8s.apiserver::node-grpc-server-sessions server))
+                (gr8s.apiserver::make-node-agent-session nil)))
+         (:evicted (setf (gr8s.apiserver::node-agent-session-evicted-p session) t))
+         (:unsupported (setf (gr8s.apiserver::node-agent-session-gateway-deltas-p session) nil))
+         (:epoch (incf (gr8s.apiserver::node-agent-session-gateway-dependency-epoch session))))
+       (is (= 2 (gr8s.controllers::publish-node-snapshot runtime "worker")))
+       (is (= 3 (length (funcall sent))))))))
+
+(test return-to-canonical-baseline-still-repairs-an-outstanding-gateway-deletion
+  (call-with-gateway-repair-session
+   (lambda (store runtime server session sent)
+     (let ((extra (gr8s.resources::get-core-resource store "httproutes" "default" "app")))
+       (setf (gethash "metadata" extra) (gr8s.resources::core-object "name" "extra"))
+       (gr8s.resources::create-core-resource store "httproutes" extra "default"))
+     (send-gateway-repair-route-change runtime server session :name "extra")
+     (gr8s.resources::delete-core-resource store "httproutes" "default" "extra")
+     (let ((candidate (gr8s.controllers::node-desired-state-snapshot store "worker")))
+       (gr8s.apiserver::attach-node-topology server "worker" candidate)
+       (is (gr8s.apiserver::same-node-desired-content-p
+            (gr8s.apiserver::current-node-snapshot server "worker") candidate)))
+     (is (= 1 (gr8s.controllers::publish-node-snapshot runtime "worker")))
+     (is (= 3 (length (funcall sent))))
+     (is (eq :gateway-config (slot-value (first (funcall sent)) 'gr8s.node.v1::payload-case)))
+     (is (not (gethash '("httproutes" "default" "extra")
+                       (gr8s.apiserver::node-agent-session-gateway-resources session)))))))
+
+(test covered-gateway-deletions-still-rebuild-fresh-state-on-reconnect
+  (call-with-gateway-repair-session
+   (lambda (store runtime server session sent)
+     (gr8s.resources::delete-core-resource store "httproutes" "default" "app")
+     (send-gateway-repair-route-change runtime server session)
+     (is (= 1 (gr8s.controllers::publish-node-snapshot runtime "worker")))
+     (is (= 2 (length (funcall sent))))
+     (let ((reconnect (gr8s.apiserver::prepare-node-connect-snapshot server "worker" 1)))
+       (is (= 2 (slot-value reconnect 'gr8s.node.v1::revision)))
+       (is (not (gethash '("httproutes" "default" "app")
+                         (gr8s.kubelet::decode-service-discovery-projection
+                          (slot-value reconnect 'gr8s.node.v1::service-discovery-objects-json)))))))))
+
+(test repair-requires-exact-discovery-coverage-and-unchanged-safety-state
+  (dolist (change '(:extra-row :missing-row :duplicate-row :dependency :pod :token :route :grant :receivers))
+    (call-with-gateway-repair-session
+     (lambda (store runtime server session sent)
+       (declare (ignore sent))
+       (change-published-route-host store "repaired.example.com")
+       (send-gateway-repair-route-change runtime server session)
+       (let ((candidate (gr8s.controllers::node-desired-state-snapshot store "worker"))
+             (baseline (gr8s.apiserver::current-node-snapshot server "worker")))
+         (gr8s.apiserver::attach-node-topology server "worker" candidate)
+         (case change
+           (:extra-row
+            (push (trivial-utf-8:string-to-utf-8-bytes
+                   "{\"apiVersion\":\"v1\",\"kind\":\"NetworkPolicy\",\"spec\":{},\"metadata\":{\"name\":\"extra\",\"namespace\":\"default\"}}")
+                  (slot-value candidate 'gr8s.node.v1::service-discovery-objects-json)))
+           (:missing-row
+            (push (trivial-utf-8:string-to-utf-8-bytes
+                   "{\"apiVersion\":\"networking.k8s.io/v1\",\"kind\":\"NetworkPolicy\",\"spec\":{},\"metadata\":{\"name\":\"old\",\"namespace\":\"default\"}}")
+                  (slot-value baseline 'gr8s.node.v1::service-discovery-objects-json)))
+           (:duplicate-row
+            (let ((rows (slot-value candidate 'gr8s.node.v1::service-discovery-objects-json)))
+              (setf (second rows) (first rows))))
+           (:dependency (incf (slot-value candidate 'gr8s.node.v1::gateway-dependency-revision)))
+           (:pod (push (make-instance 'gr8s.node.v1::pod-assignment :uid "new-pod")
+                       (slot-value candidate 'gr8s.node.v1::pods)))
+           (:token
+            (setf (slot-value baseline 'gr8s.node.v1::pods)
+                  (list (make-instance 'gr8s.node.v1::pod-assignment :uid "pod"
+                                       :resource-objects-json (list (make-array 1 :element-type '(unsigned-byte 8) :initial-element 1))))
+                  (slot-value candidate 'gr8s.node.v1::pods)
+                  (list (make-instance 'gr8s.node.v1::pod-assignment :uid "pod"
+                                       :resource-objects-json (list (make-array 1 :element-type '(unsigned-byte 8) :initial-element 2))))))
+           (:receivers
+            (setf (slot-value candidate 'gr8s.node.v1::service-receivers)
+                  (list (make-instance 'gr8s.node.v1::service-receiver-proof :pod-uid "new"))))
+           (:route (setf (slot-value candidate 'gr8s.node.v1::routes) nil))
+           (:grant (setf (slot-value candidate 'gr8s.node.v1::service-risk-grant-digest)
+                         (make-array 1 :element-type '(unsigned-byte 8) :initial-element 1))))
+         ;; Empty route lists can already be the fixture's topology: modify the network instead.
+         (when (eq change :route)
+           (setf (slot-value candidate 'gr8s.node.v1::network)
+                 (make-instance (class-of (slot-value baseline 'gr8s.node.v1::network)))))
+         (bt:with-lock-held ((gr8s.apiserver::node-agent-session-lock session))
+           (bt:with-lock-held ((gr8s.apiserver::node-grpc-server-lock server))
+             (is (not (gr8s.apiserver::node-session-gateway-repair
+                       server "worker" session baseline candidate))))))))))
+
 (test applying-a-gateway-update-sends-only-a-gateway-ack-and-does-not-persist-node-identity
   (let ((send (symbol-function 'gr8s.agent::send-agent-session-envelope))
         (persist (symbol-function 'gr8s.agent::persist-agent-identity))
@@ -429,6 +718,35 @@
       (is (null (funcall (cdr (gethash 8080 (gr8s.controllers::gateway-controller-routing-tables
                                            (gr8s.agent::node-runtime-gateway-controller agent))))
                         "new.example.com" "/" "GET" nil))))))
+
+(test gateway-deltas-preserve-old-resource-views-without-copying-the-whole-index
+  (with-temporary-store (source path)
+    (gwc-seed source)
+    (let ((agent (gateway-node-for-test path)))
+      (gr8s.agent::reconcile-node-snapshot agent (gateway-snapshot-for-test source 7))
+      (let* ((old (gr8s.agent::node-runtime-gateway-view-store agent))
+             (old-index (gr8s.store::pod-store-resources old))
+             (copy (symbol-function 'alexandria:copy-hash-table)))
+        (change-published-route-host source "changed.example.com")
+        (sb-ext:with-unlocked-packages (:alexandria)
+        (unwind-protect
+             (progn
+               (setf (symbol-function 'alexandria:copy-hash-table)
+                     (lambda (table &rest args)
+                       (when (eq table old-index) (error "Copied the entire Gateway resource index"))
+                       (apply copy table args)))
+               (gr8s.agent::reconcile-node-gateway-config
+                agent (gateway-update-for-test
+                       0 1 (gateway-object-change-for-test
+                            "httproutes" (gr8s.resources::get-core-resource source "httproutes" "default" "app")))))
+          (setf (symbol-function 'alexandria:copy-hash-table) copy)))
+        (is (equalp #("app.example.com")
+                    (gethash "hostnames" (gethash "spec"
+                      (gr8s.resources::get-core-resource old "httproutes" "default" "app")))))
+        (is (equalp #("changed.example.com")
+                    (gethash "hostnames" (gethash "spec"
+                      (gr8s.resources::get-core-resource
+                       (gr8s.agent::node-runtime-gateway-view-store agent) "httproutes" "default" "app")))))))))
 
 (test invalid-gateway-batches-cannot-partially-change-the-active-view
   (with-temporary-store (source path)
@@ -651,13 +969,40 @@
                       (lambda (a b) (gr8s.controllers::gw-key> (gr8s.controllers::gw-candidate-key a)
                                                              (gr8s.controllers::gw-candidate-key b)))))
                (updated (gr8s.controllers::gateway-router-from-table next)))
-          (is (eq (gethash "untouched.example.com" (gr8s.controllers::gw-routing-table-exact table))
-                  (gethash "untouched.example.com" (gr8s.controllers::gw-routing-table-exact next))))
+          (is (eq (gr8s.controllers::gateway-host-bucket table "untouched.example.com")
+                  (gr8s.controllers::gateway-host-bucket next "untouched.example.com")))
           (is (null (funcall updated "old.example.com" "/" "GET" nil)))
           (is (equal "new" (gr8s.controllers::gw-backend-name
                              (gr8s.controllers::gw-dispatch-backend (funcall updated "new.example.com" "/" "GET" nil)))))
           (is (equal "old" (gr8s.controllers::gw-backend-name
                              (gr8s.controllers::gw-dispatch-backend (funcall dispatcher "old.example.com" "/" "GET" nil))))))))))
+
+#+sbcl
+(test a-single-route-update-does-not-allocate-a-copy-of-the-hostname-index
+  (let* ((routes (loop for i below 10000
+                       collect (gr8s.controllers::make-gw-route
+                                :namespace "default" :name (format nil "route-~D" i)
+                                :hostnames (list (format nil "~D.example.com" i))
+                                :rules (list (gr8s.controllers::make-gw-rule
+                                              :matches (list (gr8s.controllers::make-gw-match)))))))
+         (replacement (gr8s.controllers::make-gw-route
+                       :namespace "default" :name "route-0" :hostnames '("changed.example.com")
+                       :rules (list (gr8s.controllers::make-gw-rule
+                                     :matches (list (gr8s.controllers::make-gw-match)))))))
+    (multiple-value-bind (dispatcher table) (gr8s.controllers::build-gateway-router routes)
+      (declare (ignore dispatcher))
+      (flet ((update ()
+               (gr8s.controllers::update-gateway-routing-table
+                table (list (first routes)) (list replacement)
+                (lambda (a b) (gr8s.controllers::gw-key>
+                               (gr8s.controllers::gw-candidate-key a)
+                               (gr8s.controllers::gw-candidate-key b))))))
+        (update)
+        (sb-ext:gc :full t)
+        (let ((start (sb-ext:get-bytes-consed)))
+          (dotimes (i 100) (update))
+          ;; Loose budget tolerates allocator granularity, but not a 10000-key copy.
+          (is (< (/ (- (sb-ext:get-bytes-consed) start) 100) 32768)))))))
 
 (test an-agent-route-edit-parses-only-that-route-and-does-not-replan-all-listeners
   (with-temporary-store (source path)
@@ -764,3 +1109,73 @@
           (apply-route "zeta")
           (gr8s.resources::delete-core-resource source "httproutes" "default" "zeta")
           (apply-route "zeta" t))))))
+
+(test gateway-incremental-hostname-restriction-survives-route-update-and-delete
+  (with-temporary-store (source path)
+    (gwc-seed source)
+    (gr8s.resources::update-core-resource
+     source "gateways" "default" "web"
+     (lambda (object)
+       (setf (gethash "hostname" (aref (gethash "listeners" (gethash "spec" object)) 0)) "app.example.com")
+       object))
+    (let* ((agent (gateway-node-for-test path))
+           (controller (gr8s.agent::node-runtime-gateway-controller agent)))
+      (gr8s.agent::reconcile-node-snapshot agent (gateway-snapshot-for-test source 7))
+      (gr8s.resources::update-core-resource
+       source "httproutes" "default" "app"
+       (lambda (object) (setf (gethash "hostnames" (gethash "spec" object)) #("*.example.com")) object))
+      (gr8s.agent::reconcile-node-gateway-config
+       agent (gateway-update-for-test 0 1
+               (gateway-object-change-for-test "httproutes"
+                 (gr8s.resources::get-core-resource source "httproutes" "default" "app"))))
+      (let ((router (gethash 8080 (gr8s.controllers::gateway-controller-routing-bases controller))))
+        (is (not (null (funcall router "app.example.com" "/" "GET" nil))))
+        (is (null (funcall router "other.example.com" "/" "GET" nil))))
+      (gr8s.agent::reconcile-node-gateway-config
+       agent (gateway-update-for-test 1 2 (gateway-change-for-test "app" :deleted t)))
+      (let ((router (gethash 8080 (gr8s.controllers::gateway-controller-routing-bases controller))))
+        (is (null (funcall router "app.example.com" "/" "GET" nil)))))))
+
+(test gateway-node-view-preserves-namespace-selector-labels
+  (with-temporary-store (source path)
+    (gwc-seed source)
+    (gr8s.resources::create-core-resource
+     source "namespaces" (com.inuoe.jzon:parse
+                          "{\"apiVersion\":\"v1\",\"kind\":\"Namespace\",\"metadata\":{\"name\":\"tenant\",\"labels\":{\"team\":\"blue\"}}}") nil)
+    (let ((agent (gateway-node-for-test path)))
+      (loop for color in '("blue" "red") for revision from 7 do
+        (gr8s.resources::update-core-resource
+         source "namespaces" nil "tenant"
+         (lambda (object) (setf (gethash "team" (gethash "labels" (gethash "metadata" object))) color) object))
+        (gr8s.agent::reconcile-node-snapshot agent (gateway-snapshot-for-test source revision))
+        (let* ((view (gr8s.controllers::gateway-controller-store
+                      (gr8s.agent::node-runtime-gateway-controller agent)))
+               (namespace (ignore-errors (gr8s.resources::get-core-resource view "namespaces" nil "tenant"))))
+          (is (not (null namespace)))
+          (when namespace
+            (is (equal color (gethash "team" (gethash "labels" (gethash "metadata" namespace)))))))))))
+
+(test gateway-node-view-delivers-reference-grants-and-revocation
+  (with-temporary-store (source path)
+    (gwc-seed source)
+    (gr8s.resources::create-core-resource
+     source "services" (com.inuoe.jzon:parse
+                       "{\"metadata\":{\"name\":\"web\",\"namespace\":\"target\"},\"spec\":{\"ports\":[{\"port\":80}]}}") "target")
+    (let ((agent (gateway-node-for-test path))
+          (backend (gr8s.controllers::gw-parse-backend
+                    (com.inuoe.jzon:parse "{\"name\":\"web\",\"namespace\":\"target\",\"port\":80}") "default"))
+          (grant (com.inuoe.jzon:parse
+                  "{\"apiVersion\":\"gateway.networking.k8s.io/v1\",\"kind\":\"ReferenceGrant\",\"metadata\":{\"name\":\"allow\",\"namespace\":\"target\"},\"spec\":{\"from\":[{\"group\":\"gateway.networking.k8s.io\",\"kind\":\"HTTPRoute\",\"namespace\":\"default\"}],\"to\":[{\"group\":\"\",\"kind\":\"Service\",\"name\":\"web\"}]}}")))
+      ;; Populate the desired-resource seam directly: this test covers projection,
+      ;; not registration of the ReferenceGrant API in the native server.
+      (loop for allowed in '(nil t nil) for revision from 7 do
+        (gr8s.store::with-store-lock (source)
+          (if allowed
+              (setf (gethash '("referencegrants" "target" "allow") (gr8s.store::pod-store-resources source)) grant)
+              (remhash '("referencegrants" "target" "allow") (gr8s.store::pod-store-resources source)))
+          (incf (gr8s.store::pod-store-resource-revision source)))
+        (gr8s.agent::reconcile-node-snapshot agent (gateway-snapshot-for-test source revision))
+        (let ((view (gr8s.controllers::gateway-controller-store
+                     (gr8s.agent::node-runtime-gateway-controller agent))))
+          (is (equal (unless allowed "RefNotPermitted")
+                     (gr8s.controllers::gateway-backend-reference-error view backend))))))))

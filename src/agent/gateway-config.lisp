@@ -17,13 +17,54 @@
         (node-runtime-gateway-config-revision node-runtime) 0
         (node-runtime-gateway-synchronized-p node-runtime) (and ready t)))
 
+(defstruct (gateway-projection-store (:include gr8s.store:pod-store)
+                                    (:constructor make-gateway-projection-store (index)))
+  ;; This derived store is never journaled. Each collection has its own persistent
+  ;; index, so backend discovery does not traverse unrelated routes.
+  index)
+
+(defun gateway-resource-index-with (index key object)
+  (let* ((resource (first key))
+         (collection (or (fset:lookup index resource)
+                         (fset:empty-ch-map nil 'fset:compare 'fset:eql-compare)))
+         (next (if object (fset:with collection (rest key) object)
+                   (fset:less collection (rest key)))))
+    (if (fset:empty? next) (fset:less index resource)
+        (fset:with index resource next))))
+
+(defun gateway-resource-index (resources)
+  (if (hash-table-p resources)
+      (let ((index (fset:empty-ch-map nil 'fset:compare 'fset:eql-compare)))
+        (maphash (lambda (key object)
+                   (setf index (gateway-resource-index-with index key object))) resources)
+        index)
+      resources))
+
+(defmethod gr8s.resources::get-core-resource ((store gateway-projection-store) resource namespace name)
+  (let* ((collection (fset:lookup (gateway-projection-store-index store) resource))
+         (object (and collection (fset:lookup collection (list namespace name)))))
+    (unless object
+      (gr8s.resources::core-resource-error 404 "NotFound" "~A ~A/~A was not found" resource namespace name))
+    (gr8s.resources::copy-core-object object)))
+
+(defmethod gr8s.resources::list-core-resources ((store gateway-projection-store) resource &optional namespace)
+  (let ((collection (fset:lookup (gateway-projection-store-index store) resource)) (objects nil))
+    (when collection
+      (fset:do-map (key object collection)
+        (when (or (null namespace) (equal namespace (first key)))
+          (push (gr8s.resources::copy-core-object object) objects))))
+    (values (sort objects #'string< :key
+                  (lambda (object)
+                    (let ((metadata (gethash "metadata" object)))
+                      (format nil "~A/~A" (gethash "namespace" metadata) (gethash "name" metadata)))))
+            (write-to-string (gr8s.store::pod-store-resource-revision store)))))
+
 (defun node-gateway-projection-store (node-runtime resources)
   "A derived read-only store: resources are immutable and never enter its journal."
-  (let ((view (gr8s.store::make-pod-store nil))
+  (let ((view (make-gateway-projection-store (gateway-resource-index resources)))
         (source (node-runtime-store node-runtime)))
     (gr8s.store::with-store-lock (source)
-      (setf (gr8s.store::pod-store-resources view) resources
-            (gr8s.store::pod-store-resource-revision view) (gr8s.store::pod-store-resource-revision source)
+      (setf (gr8s.store::pod-store-resource-revision view) (gr8s.store::pod-store-resource-revision source)
             (gr8s.store::pod-store-pods view) (alexandria:copy-hash-table (gr8s.store::pod-store-pods source))
             (gr8s.store::pod-store-pod-observed-statuses view)
             (alexandria:copy-hash-table (gr8s.store::pod-store-pod-observed-statuses source))
@@ -118,10 +159,9 @@ The caller holds the node apply lock; no durable resource index is modified."
       (error 'runtime-error :message "node runtime is not running"))
     (ensure-node-gateway-baseline-current node-runtime update)
     (let* ((changes (decode-node-gateway-changes node-runtime update))
-           (resources (alexandria:copy-hash-table
-                       (gr8s.store::pod-store-resources (node-runtime-gateway-view-store node-runtime)))))
+           (resources (gateway-projection-store-index (node-runtime-gateway-view-store node-runtime))))
       (dolist (entry changes)
-        (if (cdr entry) (setf (gethash (car entry) resources) (cdr entry)) (remhash (car entry) resources)))
+        (setf resources (gateway-resource-index-with resources (car entry) (cdr entry))))
       (ensure-node-gateway-baseline-current node-runtime update)
       (install-node-gateway-view node-runtime resources :changes changes)
       (ensure-node-gateway-baseline-current node-runtime update)

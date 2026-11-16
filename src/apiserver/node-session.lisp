@@ -144,7 +144,10 @@ planner groups by: its name and its region/zone."
   (gateway-revision 0)
   (gateway-acknowledged-revision 0)
   gateway-resources
+  gateway-pending-since
+  gateway-repair-required-p
   gateway-discovery-key-cache         ; validated octets -> key, bounded to the last full projection
+  gateway-repair-key-cache            ; immutable byte identities -> key, bounded to the last repair
   gateway-dependency-epoch)
 
 (defparameter +desired-state-delta-capability+ "desired-state-delta"
@@ -253,6 +256,9 @@ concurrent publications cannot reorder a delta ahead of its base."
             (setf (gethash key resources) bytes))))
       (setf (node-agent-session-gateway-resources session) resources
             (node-agent-session-gateway-discovery-key-cache session) next-cache
+            (node-agent-session-gateway-repair-key-cache session) nil
+            (node-agent-session-gateway-pending-since session) nil
+            (node-agent-session-gateway-repair-required-p session) nil
             (node-agent-session-gateway-revision session) 0
             (node-agent-session-gateway-acknowledged-revision session) 0
             (node-agent-session-gateway-dependency-epoch session) dependency-epoch))))
@@ -261,37 +267,43 @@ concurrent publications cannot reorder a delta ahead of its base."
     (session changes &key (dependency-epoch (node-agent-session-gateway-dependency-epoch session)))
   "Send only changed rows, committing the session base after a successful send."
   (bt:with-lock-held ((node-agent-session-lock session))
-    (let ((snapshot (node-agent-session-delivered session))
-          (resources (node-agent-session-gateway-resources session)))
-      (unless (node-agent-session-gateway-deltas-p session)
-        (return-from deliver-node-gateway-config (values nil :unsupported)))
-      (unless (and snapshot resources
-                   (eql dependency-epoch (node-agent-session-gateway-dependency-epoch session)))
-        (return-from deliver-node-gateway-config (values nil :baseline-required)))
-      (let* ((changed
-               (remove-if
-                (lambda (change)
-                  (let* ((key (gr8s.protocol::gateway-resource-change-key change))
-                         (old (gethash key resources)))
-                    (if (slot-value change 'gr8s.node.v1::deleted)
-                        (null old)
-                        (equalp old (slot-value change 'gr8s.node.v1::object-json))))) changes))
-             (base (node-agent-session-gateway-revision session)))
-        (unless changed (return-from deliver-node-gateway-config (values nil :unchanged)))
-        (let ((update (make-instance 'gr8s.node.v1::gateway-config-update
-                                     :base-node-revision (slot-value snapshot 'gr8s.node.v1::revision)
-                                     :base-revision base :revision (1+ base) :changes changed)))
-          (gr8s.protocol::validate-gateway-config-update
-           update (slot-value snapshot 'gr8s.node.v1::revision) base)
-          (ag-grpc:stream-send (node-agent-session-stream session)
-                               (make-server-envelope :gateway-config update))
-          (dolist (change changed)
-            (let ((key (gr8s.protocol::gateway-resource-change-key change)))
-              (if (slot-value change 'gr8s.node.v1::deleted)
-                  (remhash key resources)
-                  (setf (gethash key resources) (slot-value change 'gr8s.node.v1::object-json)))))
-          (setf (node-agent-session-gateway-revision session) (1+ base))
-          (values update :sent))))))
+    (deliver-node-gateway-config-locked session changes dependency-epoch)))
+
+(defun deliver-node-gateway-config-locked (session changes dependency-epoch)
+  "Send an ordered batch with SESSION's lock already held."
+  (let ((snapshot (node-agent-session-delivered session))
+        (resources (node-agent-session-gateway-resources session)))
+    (unless (node-agent-session-gateway-deltas-p session)
+      (return-from deliver-node-gateway-config-locked (values nil :unsupported)))
+    (unless (and snapshot resources
+                 (eql dependency-epoch (node-agent-session-gateway-dependency-epoch session)))
+      (return-from deliver-node-gateway-config-locked (values nil :baseline-required)))
+    (let* ((changed
+             (remove-if
+              (lambda (change)
+                (let* ((key (gr8s.protocol::gateway-resource-change-key change))
+                       (old (gethash key resources)))
+                  (if (slot-value change 'gr8s.node.v1::deleted)
+                      (null old)
+                      (equalp old (slot-value change 'gr8s.node.v1::object-json))))) changes))
+           (base (node-agent-session-gateway-revision session)))
+      (unless changed (return-from deliver-node-gateway-config-locked (values nil :unchanged)))
+      (let ((update (make-instance 'gr8s.node.v1::gateway-config-update
+                                   :base-node-revision (slot-value snapshot 'gr8s.node.v1::revision)
+                                   :base-revision base :revision (1+ base) :changes changed)))
+        (gr8s.protocol::validate-gateway-config-update
+         update (slot-value snapshot 'gr8s.node.v1::revision) base)
+        (ag-grpc:stream-send (node-agent-session-stream session)
+                             (make-server-envelope :gateway-config update))
+        (dolist (change changed)
+          (let ((key (gr8s.protocol::gateway-resource-change-key change)))
+            (if (slot-value change 'gr8s.node.v1::deleted)
+                (remhash key resources)
+                (setf (gethash key resources) (slot-value change 'gr8s.node.v1::object-json)))))
+        (when (= base (node-agent-session-gateway-acknowledged-revision session))
+          (setf (node-agent-session-gateway-pending-since session) (get-internal-real-time)))
+        (setf (node-agent-session-gateway-revision session) (1+ base))
+        (values update :sent)))))
 
 (defvar *node-session-stall-seconds* 30
   "Silence after which either end of a node session treats it as wedged.")
@@ -1147,13 +1159,17 @@ candidates; agents still require their transactional handshake/probe gates."
       (let ((snapshot (node-agent-session-delivered session))
             (revision (slot-value ack 'gr8s.node.v1::revision)))
         (when (and (eq session (gethash node-name (node-grpc-server-sessions server)))
-                   (slot-value ack 'gr8s.node.v1::applied)
                    snapshot
                    (= (slot-value ack 'gr8s.node.v1::base-node-revision)
                       (slot-value snapshot 'gr8s.node.v1::revision))
                    (< (node-agent-session-gateway-acknowledged-revision session) revision)
                    (<= revision (node-agent-session-gateway-revision session)))
-          (setf (node-agent-session-gateway-acknowledged-revision session) revision))))))
+          (if (slot-value ack 'gr8s.node.v1::applied)
+              (setf (node-agent-session-gateway-acknowledged-revision session) revision
+                    (node-agent-session-gateway-pending-since session)
+                    (unless (= revision (node-agent-session-gateway-revision session))
+                      (get-internal-real-time)))
+              (setf (node-agent-session-gateway-repair-required-p session) t)))))))
 
 (defun canonical-node-service-receiver-proofs (server node-name status &optional session)
   "Accept only complete receiver reports for the current ACKed assignment.
@@ -2149,17 +2165,92 @@ socket are released rather than leaked. Safe to call more than once."
 
 (defun same-node-desired-content-p (left right)
   "Compare workload assignments and topology independently of envelope revision."
+  (and (same-node-non-discovery-content-p left right)
+       (equalp (slot-value left 'gr8s.node.v1::service-discovery-objects-json)
+               (slot-value right 'gr8s.node.v1::service-discovery-objects-json))))
+
+(defun same-node-non-discovery-content-p (left right)
+  "Compare every desired-state field other than discovery rows and envelope revision."
   (and left right (same-node-snapshot-topology-p left right)
        (= (slot-value left 'gr8s.node.v1::gateway-dependency-revision)
           (slot-value right 'gr8s.node.v1::gateway-dependency-revision))
-       (equalp (slot-value left 'gr8s.node.v1::service-discovery-objects-json)
-               (slot-value right 'gr8s.node.v1::service-discovery-objects-json))
        (equalp (slot-value left 'gr8s.node.v1::service-risk-grant-digest)
                (slot-value right 'gr8s.node.v1::service-risk-grant-digest))
        (equalp (service-risk-snapshot-receiver-projection left)
                (service-risk-snapshot-receiver-projection right))
        (= (length (slot-value left 'gr8s.node.v1::pods)) (length (slot-value right 'gr8s.node.v1::pods)))
        (every #'same-pod-assignment-p (slot-value left 'gr8s.node.v1::pods) (slot-value right 'gr8s.node.v1::pods))))
+
+(defun node-gateway-progress-current-p (session)
+  "Pending sends may trail ACKs, but must not conceal a failed or stalled apply."
+  (and (not (node-agent-session-gateway-repair-required-p session))
+       (or (= (node-agent-session-gateway-revision session)
+              (node-agent-session-gateway-acknowledged-revision session))
+           (let ((since (node-agent-session-gateway-pending-since session)))
+             (and since (< (- (get-internal-real-time) since)
+                           (* *node-session-stall-seconds* internal-time-units-per-second)))))))
+
+(defun node-session-gateway-repair-current-p (server node-name session baseline snapshot)
+  "Check the live full baseline and progress fences with SESSION and SERVER locked."
+  (and session baseline
+       (eq session (gethash node-name (node-grpc-server-sessions server)))
+       (not (node-agent-session-evicted-p session))
+       (node-agent-session-gateway-deltas-p session)
+       (eq baseline (node-agent-session-delivered session))
+       (node-agent-session-gateway-resources session)
+       (= (slot-value baseline 'gr8s.node.v1::revision)
+          (gethash node-name (node-grpc-server-acknowledged-revisions server) 0))
+       (node-gateway-progress-current-p session)
+       (eql (node-agent-session-gateway-dependency-epoch session)
+            (slot-value snapshot 'gr8s.node.v1::gateway-dependency-revision))
+       (same-node-non-discovery-content-p baseline snapshot)))
+
+
+(defun node-session-gateway-repair (server node-name session baseline snapshot)
+  "Return eligibility and Gateway changes for authoritative repair.
+Caller holds SESSION then SERVER locks inside node publication. Non-Gateway
+state must match exactly; Gateway differences include missed events and deletes."
+  (unless (node-session-gateway-repair-current-p server node-name session baseline snapshot)
+    (return-from node-session-gateway-repair nil))
+  (let ((gateway (node-agent-session-gateway-resources session))
+        (other (make-hash-table :test #'equal))
+        (seen (make-hash-table :test #'equal))
+        (changes nil)
+        (baseline-cache (node-agent-session-gateway-discovery-key-cache session))
+        (repair-cache (node-agent-session-gateway-repair-key-cache session))
+        (next-cache (make-hash-table :test #'eq)))
+    (labels ((key-for (bytes)
+               ;; Captured projections reuse immutable encoded rows. Consult their
+               ;; validated identities before hashing or parsing their contents.
+               (or (and repair-cache (gethash bytes repair-cache))
+                   (and baseline-cache (gethash bytes baseline-cache))
+                   (car (gr8s.kubelet::decode-service-discovery-entry bytes))))
+             (gateway-key-p (key)
+               (member (first key) gr8s.protocol::+gateway-config-resources+ :test #'equal))
+             (change (key bytes)
+               (make-instance 'gr8s.node.v1::gateway-resource-change
+                              :resource (first key) :namespace (or (second key) "")
+                              :name (third key) :deleted (null bytes)
+                              :object-json (or bytes (make-array 0 :element-type '(unsigned-byte 8))))))
+      (dolist (bytes (slot-value baseline 'gr8s.node.v1::service-discovery-objects-json))
+        (let ((key (key-for bytes)))
+          (unless (gateway-key-p key) (setf (gethash key other) bytes))))
+      (dolist (bytes (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json))
+        (let ((key (key-for bytes)))
+          (when (gethash key seen) (return-from node-session-gateway-repair nil))
+          (if (gateway-key-p key)
+              (unless (equalp bytes (gethash key gateway)) (push (change key bytes) changes))
+              (unless (equalp bytes (gethash key other))
+                (return-from node-session-gateway-repair nil)))
+          (setf (gethash key seen) t (gethash bytes next-cache) key)))
+      (maphash (lambda (key bytes)
+                 (declare (ignore bytes))
+                 (unless (gethash key seen) (return-from node-session-gateway-repair nil))) other)
+      (maphash (lambda (key bytes)
+                 (declare (ignore bytes))
+                 (unless (gethash key seen) (push (change key nil) changes))) gateway))
+    (setf (node-agent-session-gateway-repair-key-cache session) next-cache)
+    (values t (nreverse changes))))
 
 (defun service-risk-node-identities (store)
   (mapcar (lambda (node) (cons (node-record-name node) (node-record-id node)))
@@ -2360,43 +2451,80 @@ check that selection against the current Service plan before preserving it."
 (defun publish-node-desired-state-locked (server node-name snapshot &key deduplicate)
   "Publish SNAPSHOT as NODE-NAME's new desired state: attach topology, assign the
    next revision, store it, and deliver it to the live session if any (fail-soft).
-   With DEDUPLICATE, returns the existing revision unchanged when the content is
-   identical. Errors if NODE-NAME is unknown or SNAPSHOT is not a
+   With DEDUPLICATE, retains the existing revision for identical content or a
+   Gateway-only repair delivered on the current baseline. Errors if NODE-NAME is unknown or SNAPSHOT is not a
    DesiredStateSnapshot. Returns the resulting revision."
   (get-node (node-grpc-server-store server) node-name)
   (unless (typep snapshot 'gr8s.node.v1::desired-state-snapshot)
     (error "Desired state must be a DesiredStateSnapshot"))
   (attach-node-topology server node-name snapshot)
   (let ((revision nil)
-        (session nil))
-    (bt:with-lock-held ((node-grpc-server-lock server))
-      (let* ((owners (service-risk-snapshot-owner-projection snapshot))
-             (identities (service-risk-node-identities (node-grpc-server-store server)))
-             (current (cluster-service-ready-receivers-locked
-                       server owners identities)))
-        (setf (slot-value snapshot 'gr8s.node.v1::service-receivers)
-              (or current
-                  (when (and (equalp owners (service-risk-owner-projection
-                                            (node-grpc-server-store server)))
-                             (service-risk-retained-grant-locked-p
-                              server owners identities))
-                    (mapcar (lambda (bytes)
-                              (ag-proto:deserialize-from-bytes
-                               'gr8s.node.v1::service-receiver-proof bytes))
-                            (node-grpc-server-service-risk-grant-receiver-projection
-                             server))))))
-      (setf (slot-value snapshot 'gr8s.node.v1::service-risk-grant-digest)
-            (or (service-risk-grant-for-snapshot-locked server node-name snapshot)
-                (make-array 0 :element-type '(unsigned-byte 8))))
-      (let ((existing (gethash node-name (node-grpc-server-snapshots server))))
-        (when (and deduplicate (same-node-desired-content-p existing snapshot))
-          (return-from publish-node-desired-state-locked (slot-value existing 'gr8s.node.v1::revision))))
-      (setf revision
-            (1+ (gethash node-name (node-grpc-server-revisions server) 0)))
-      (setf (slot-value snapshot 'gr8s.node.v1::revision) revision
-            (gethash node-name (node-grpc-server-revisions server)) revision
-            (gethash node-name (node-grpc-server-snapshots server)) snapshot
-            session (gethash node-name (node-grpc-server-sessions server))))
+        (session nil)
+        (repair-p nil)
+        (repair-changes nil)
+        (locked-session (bt:with-lock-held ((node-grpc-server-lock server))
+                          (gethash node-name (node-grpc-server-sessions server)))))
+    ;; ACK handlers take session then server; preserve that order here too.
+    (flet ((record-snapshot ()
+            (bt:with-lock-held ((node-grpc-server-lock server))
+              (let* ((owners (service-risk-snapshot-owner-projection snapshot))
+                     (identities (service-risk-node-identities (node-grpc-server-store server)))
+                     (current (cluster-service-ready-receivers-locked
+                               server owners identities)))
+                (setf (slot-value snapshot 'gr8s.node.v1::service-receivers)
+                      (or current
+                          (when (and (equalp owners (service-risk-owner-projection
+                                                    (node-grpc-server-store server)))
+                                     (service-risk-retained-grant-locked-p
+                                      server owners identities))
+                            (mapcar (lambda (bytes)
+                                      (ag-proto:deserialize-from-bytes
+                                       'gr8s.node.v1::service-receiver-proof bytes))
+                                    (node-grpc-server-service-risk-grant-receiver-projection
+                                     server))))))
+              (setf (slot-value snapshot 'gr8s.node.v1::service-risk-grant-digest)
+                    (or (service-risk-grant-for-snapshot-locked server node-name snapshot)
+                        (make-array 0 :element-type '(unsigned-byte 8))))
+              (let ((existing (gethash node-name (node-grpc-server-snapshots server))))
+                (when deduplicate
+                  (when (and (not (and locked-session
+                                       (plusp (node-agent-session-gateway-revision locked-session))))
+                             (same-node-desired-content-p existing snapshot))
+                    (return-from publish-node-desired-state-locked (slot-value existing 'gr8s.node.v1::revision)))
+                  (multiple-value-bind (eligible changes)
+                      (node-session-gateway-repair server node-name locked-session existing snapshot)
+                    (when eligible
+                      (setf repair-p t repair-changes changes
+                            revision (slot-value existing 'gr8s.node.v1::revision))
+                      (return-from record-snapshot)))))
+              (setf revision
+                    (1+ (gethash node-name (node-grpc-server-revisions server) 0)))
+              (setf (slot-value snapshot 'gr8s.node.v1::revision) revision
+                    (gethash node-name (node-grpc-server-revisions server)) revision
+                    (gethash node-name (node-grpc-server-snapshots server)) snapshot
+                    session (gethash node-name (node-grpc-server-sessions server))))))
+      (if locked-session
+          (bt:with-lock-held ((node-agent-session-lock locked-session))
+            (record-snapshot)
+            (when (and repair-p
+                       (not (bt:with-lock-held ((node-grpc-server-lock server))
+                              (node-session-gateway-repair-current-p
+                               server node-name locked-session
+                               (gethash node-name (node-grpc-server-snapshots server)) snapshot))))
+              (setf repair-p nil deduplicate nil)
+              (record-snapshot))
+            ;; Keep the session lock from proof through send: ACKs cannot invalidate
+            ;; its baseline/progress. Publication excludes competing configuration.
+            ;; Never hold SERVER's lock across network I/O.
+            (when repair-p
+              (handler-case
+                  (deliver-node-gateway-config-locked
+                   locked-session repair-changes
+                   (slot-value snapshot 'gr8s.node.v1::gateway-dependency-revision))
+                (error (condition)
+                  (format *error-output* "gr8s Gateway repair delivery for ~A failed: ~A~%" node-name condition)
+                  (close-node-agent-session locked-session)))))
+          (record-snapshot)))
     (when session
       (handler-case (deliver-node-snapshot session snapshot)
         (error (condition)

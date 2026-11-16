@@ -19,7 +19,7 @@
                "cl-cel" "cl-dns-proxy" "cl-raft/wal" "cl-re2" "cl-rtnetlink"
                "cl-torrent" "cl-wireguard-overlay"
                "cl-work-queue" "cl-safe-yaml" "cl-cronexpr"
-               "com.inuoe.jzon" "flexi-streams" "hunchentoot" "cl-ppcre"
+               "com.inuoe.jzon" "flexi-streams" "fset" "hunchentoot" "cl-ppcre"
                "pure-tls/acme" "drakma" "ironclad" "puri"
                "sb-posix" "slynk" "trivial-gray-streams" "trivial-utf-8"
                "usocket" "version-string"
@@ -399,7 +399,9 @@
                                            (:file "gateway-l4")
                                            (:file "gateway-sklookup")
                                            (:file "gateway-controller")
+                                           (:file "foreign-gateway-leases")
                                            (:file "foreign-gateway")
+                                           (:file "foreign-gateway-endpoints")
                                            (:file "foreign-service-lb")
                                            (:file "cert-manager")
                                            (:file "garbage-collection")

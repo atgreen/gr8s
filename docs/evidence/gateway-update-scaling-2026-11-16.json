@@ -1,0 +1,511 @@
+{
+  "date": "2026-11-16",
+  "issues": [
+    "podster-eal",
+    "podster-6qu"
+  ],
+  "status": "verified with listed limitations",
+  "baseCommit": "c9cbdf8404d4c42d04a8af9b5a4c2d1b95acccb4",
+  "runtimeTreeSHA256": "91a65e717fb0078187b465b8042896dee80bc2a6a9f939cdd3c4e03a5ca87d19",
+  "runtimeTreeHashDefinition": "Sorted src/**/*.lisp, proto/**/*.proto, gr8s.asd, scripts/build-native.lisp: path NUL bytes NUL concatenation.",
+  "ociclPinsSHA256": "1b88e697f7fcb638e97b4c1ad2cae066363f8517eb9e03d78953bd1880a602e2",
+  "candidateBinarySHA256": "57a9a09706076cf8e156bc11e78cbeb14c651dfef823bec67135e575d6667277",
+  "baselineBinarySHA256": "a6cb584d4d0f88ed175ad8aa73775eeafe67254a4fdbeab50551e3d6ba2dd95e",
+  "sourcePatchSHA256": "2877c0a22c5e155bdda81538d1b4bf146b01afe866dbf48726b76d54bdfc9029",
+  "changes": [
+    "Persistent resource collections and hostname maps preserve immutable views without whole-index copies.",
+    "Independent Gateway wakeup worker retains initial/observed-leadership repair, retry and shutdown fences.",
+    "Periodic authoritative repair diffs Gateway rows against ordered session-sent state, including missed additions and deletions; unchanged non-Gateway and safety state plus acknowledged full baseline are mandatory.",
+    "Monotonic pending-ACK progress permits in-flight repair; negative ACK or stalled progress forces full repair. Send failures evict for fresh reconnect."
+  ],
+  "method": {
+    "benchmarkCommit": "34f82c1abdec1c3e64e2c0ef2f56b31c288ab611",
+    "routes": 3000,
+    "mode": "B",
+    "order": [
+      "before-1",
+      "after-1",
+      "after-2",
+      "before-2"
+    ],
+    "profiling": false,
+    "vCPUs": 4,
+    "memoryMiB": 6144,
+    "heapMiB": 2048,
+    "hostCPUAffinity": "12-15",
+    "freshVMTemplateEachRun": true,
+    "ownHeavyBuildsTestsAndOtherVMsStopped": true,
+    "postApply": "API response to HTTP200, including ordered-probe delay in burst mode.",
+    "percentiles": "Linear interpolation p*(n-1)",
+    "sharedHost": true
+  },
+  "uninstrumentedRuns": [
+    {
+      "label": "before-1",
+      "binarySHA256": "a6cb584d4d0f88ed175ad8aa73775eeafe67254a4fdbeab50551e3d6ba2dd95e",
+      "latency": {
+        "file": "/tmp/gr8s-update-scaling/stage3-confirmation/before-1-evidence/B3000.log",
+        "post_apply": {
+          "n": 3000,
+          "mean_ms": 281.115119391,
+          "p50_ms": 112.087829,
+          "p95_ms": 990.6775239999995,
+          "p99_ms": 1160.527077149998,
+          "max_ms": 1323.685843
+        },
+        "api_write": {
+          "n": 3000,
+          "mean_ms": 11.243639998333334,
+          "p50_ms": 9.23328,
+          "p95_ms": 22.026249349999986,
+          "p99_ms": 49.90831768999967,
+          "max_ms": 249.68184
+        },
+        "write_to_200_log_span": {
+          "n": 3000,
+          "mean_ms": 292.4960266666667,
+          "p50_ms": 122.091,
+          "p95_ms": 1003.2152499999996,
+          "p99_ms": 1181.9859899999985,
+          "max_ms": 1332.713
+        },
+        "api_write_span_s": 34.091012,
+        "offered_routes_per_second": 87.99973435813521,
+        "post_apply_by_route_thousand": [
+          {
+            "n": 1000,
+            "mean_ms": 93.637517631,
+            "p50_ms": 49.26975,
+            "p95_ms": 349.70611359999987,
+            "p99_ms": 432.43359699999996,
+            "max_ms": 494.681699
+          },
+          {
+            "n": 1000,
+            "mean_ms": 235.400116225,
+            "p50_ms": 116.62567200000001,
+            "p95_ms": 678.5043320499997,
+            "p99_ms": 962.9232974199999,
+            "max_ms": 1070.060949
+          },
+          {
+            "n": 1000,
+            "mean_ms": 514.307724317,
+            "p50_ms": 510.228365,
+            "p95_ms": 1123.52242435,
+            "p99_ms": 1239.90038105,
+            "max_ms": 1323.685843
+          }
+        ]
+      }
+    },
+    {
+      "label": "after-1",
+      "binarySHA256": "57a9a09706076cf8e156bc11e78cbeb14c651dfef823bec67135e575d6667277",
+      "latency": {
+        "file": "/tmp/gr8s-update-scaling/stage3-confirmation/after-1-evidence/B3000.log",
+        "post_apply": {
+          "n": 3000,
+          "mean_ms": 78.16994115966666,
+          "p50_ms": 45.225584999999995,
+          "p95_ms": 303.3558625999988,
+          "p99_ms": 777.5123882399996,
+          "max_ms": 809.829054
+        },
+        "api_write": {
+          "n": 3000,
+          "mean_ms": 9.836752656333333,
+          "p50_ms": 8.621545000000001,
+          "p95_ms": 17.324942599999982,
+          "p99_ms": 34.48754628999999,
+          "max_ms": 219.742562
+        },
+        "write_to_200_log_span": {
+          "n": 3000,
+          "mean_ms": 88.13749133333333,
+          "p50_ms": 55.119,
+          "p95_ms": 311.7072999999989,
+          "p99_ms": 784.7359199999999,
+          "max_ms": 821.434
+        },
+        "api_write_span_s": 29.838091,
+        "offered_routes_per_second": 100.54262519676611,
+        "post_apply_by_route_thousand": [
+          {
+            "n": 1000,
+            "mean_ms": 141.530383081,
+            "p50_ms": 48.255361,
+            "p95_ms": 736.8169727,
+            "p99_ms": 794.69269271,
+            "max_ms": 809.829054
+          },
+          {
+            "n": 1000,
+            "mean_ms": 45.262826696,
+            "p50_ms": 44.157025000000004,
+            "p95_ms": 68.52818464999997,
+            "p99_ms": 101.04877076999998,
+            "max_ms": 125.032251
+          },
+          {
+            "n": 1000,
+            "mean_ms": 47.716613702,
+            "p50_ms": 44.2486745,
+            "p95_ms": 84.42772249999996,
+            "p99_ms": 124.87900917999997,
+            "max_ms": 258.389197
+          }
+        ]
+      }
+    },
+    {
+      "label": "after-2",
+      "binarySHA256": "57a9a09706076cf8e156bc11e78cbeb14c651dfef823bec67135e575d6667277",
+      "latency": {
+        "file": "/tmp/gr8s-update-scaling/stage3-confirmation/after-2-evidence/B3000.log",
+        "post_apply": {
+          "n": 3000,
+          "mean_ms": 72.97652359733334,
+          "p50_ms": 44.88269,
+          "p95_ms": 254.80749014999878,
+          "p99_ms": 676.0503649799997,
+          "max_ms": 706.189999
+        },
+        "api_write": {
+          "n": 3000,
+          "mean_ms": 9.813572444666667,
+          "p50_ms": 8.605737,
+          "p95_ms": 17.466671050000002,
+          "p99_ms": 35.41405503999998,
+          "max_ms": 204.241804
+        },
+        "write_to_200_log_span": {
+          "n": 3000,
+          "mean_ms": 82.92087633333334,
+          "p50_ms": 54.568,
+          "p95_ms": 265.7218999999989,
+          "p99_ms": 681.64733,
+          "max_ms": 725.596
+        },
+        "api_write_span_s": 29.77626175,
+        "offered_routes_per_second": 100.7513980494882,
+        "post_apply_by_route_thousand": [
+          {
+            "n": 1000,
+            "mean_ms": 125.869567004,
+            "p50_ms": 46.950516,
+            "p95_ms": 627.0162870999998,
+            "p99_ms": 699.88575524,
+            "max_ms": 706.189999
+          },
+          {
+            "n": 1000,
+            "mean_ms": 45.035001846,
+            "p50_ms": 43.615904,
+            "p95_ms": 66.4698528,
+            "p99_ms": 98.15420904999999,
+            "max_ms": 158.098561
+          },
+          {
+            "n": 1000,
+            "mean_ms": 48.025001942,
+            "p50_ms": 44.1470275,
+            "p95_ms": 87.5813549,
+            "p99_ms": 126.75664102999998,
+            "max_ms": 240.08026
+          }
+        ]
+      }
+    },
+    {
+      "label": "before-2",
+      "binarySHA256": "a6cb584d4d0f88ed175ad8aa73775eeafe67254a4fdbeab50551e3d6ba2dd95e",
+      "latency": {
+        "file": "/tmp/gr8s-update-scaling/stage3-confirmation/before-2-evidence/B3000.log",
+        "post_apply": {
+          "n": 3000,
+          "mean_ms": 289.123706026,
+          "p50_ms": 112.00248099999999,
+          "p95_ms": 954.5322828499993,
+          "p99_ms": 1121.6303418299997,
+          "max_ms": 1288.9929149999998
+        },
+        "api_write": {
+          "n": 3000,
+          "mean_ms": 11.271726366,
+          "p50_ms": 9.253712,
+          "p95_ms": 22.02844994999998,
+          "p99_ms": 44.34622851999955,
+          "max_ms": 383.739822
+        },
+        "write_to_200_log_span": {
+          "n": 3000,
+          "mean_ms": 300.53856433333334,
+          "p50_ms": 122.70400000000001,
+          "p95_ms": 968.2024499999999,
+          "p99_ms": 1135.406349999999,
+          "max_ms": 1300.39
+        },
+        "api_write_span_s": 34.1798505,
+        "offered_routes_per_second": 87.77100999900512,
+        "post_apply_by_route_thousand": [
+          {
+            "n": 1000,
+            "mean_ms": 93.388725914,
+            "p50_ms": 50.497407,
+            "p95_ms": 332.81485975,
+            "p99_ms": 437.90485392,
+            "max_ms": 503.855592
+          },
+          {
+            "n": 1000,
+            "mean_ms": 297.61061702,
+            "p50_ms": 154.163945,
+            "p95_ms": 898.84745495,
+            "p99_ms": 1047.2369351799998,
+            "max_ms": 1111.822135
+          },
+          {
+            "n": 1000,
+            "mean_ms": 476.371775144,
+            "p50_ms": 433.227254,
+            "p95_ms": 1063.2331218999998,
+            "p99_ms": 1207.52240135,
+            "max_ms": 1288.9929149999998
+          }
+        ]
+      }
+    }
+  ],
+  "diagnosticPair": {
+    "status": "passed",
+    "manifest": "stage3-vm/diagnostic-manifest.json",
+    "before": {
+      "file": "/tmp/gr8s-update-scaling/stage3-vm/before-evidence/B3000.log",
+      "post_apply": {
+        "n": 3000,
+        "mean_ms": 351.1007572,
+        "p50_ms": 158.123324,
+        "p95_ms": 1166.0583009999998,
+        "p99_ms": 1421.9215720799998,
+        "max_ms": 1531.902485
+      },
+      "api_write": {
+        "n": 3000,
+        "mean_ms": 12.987164394333334,
+        "p50_ms": 9.6678775,
+        "p95_ms": 24.466365649999982,
+        "p99_ms": 110.95552076999941,
+        "max_ms": 374.762939
+      },
+      "write_to_200_log_span": {
+        "n": 3000,
+        "mean_ms": 364.2325163333333,
+        "p50_ms": 170.64600000000002,
+        "p95_ms": 1183.7073499999995,
+        "p99_ms": 1433.7649399999998,
+        "max_ms": 1541.821
+      },
+      "api_write_span_s": 39.34261675,
+      "offered_routes_per_second": 76.25318923403843,
+      "post_apply_by_route_thousand": [
+        {
+          "n": 1000,
+          "mean_ms": 105.761385982,
+          "p50_ms": 49.9767985,
+          "p95_ms": 407.1445403499998,
+          "p99_ms": 512.02612221,
+          "max_ms": 577.677234
+        },
+        {
+          "n": 1000,
+          "mean_ms": 338.35460431,
+          "p50_ms": 211.600253,
+          "p95_ms": 909.1543188499998,
+          "p99_ms": 1237.13652133,
+          "max_ms": 1331.256991
+        },
+        {
+          "n": 1000,
+          "mean_ms": 609.186281308,
+          "p50_ms": 618.6532625,
+          "p95_ms": 1379.43665165,
+          "p99_ms": 1464.9608781099998,
+          "max_ms": 1531.902485
+        }
+      ]
+    },
+    "after": {
+      "file": "/tmp/gr8s-update-scaling/stage3-vm/after-evidence/B3000.log",
+      "post_apply": {
+        "n": 3000,
+        "mean_ms": 71.46641871266667,
+        "p50_ms": 45.485583500000004,
+        "p95_ms": 169.38725379999997,
+        "p99_ms": 837.1019213199995,
+        "max_ms": 884.499592
+      },
+      "api_write": {
+        "n": 3000,
+        "mean_ms": 11.016612205333333,
+        "p50_ms": 8.951270000000001,
+        "p95_ms": 17.649846649999983,
+        "p99_ms": 59.12772593999951,
+        "max_ms": 279.624204
+      },
+      "write_to_200_log_span": {
+        "n": 3000,
+        "mean_ms": 82.62398933333333,
+        "p50_ms": 55.322500000000005,
+        "p95_ms": 183.01669999999982,
+        "p99_ms": 843.9506,
+        "max_ms": 892.324
+      },
+      "api_write_span_s": 33.40490925,
+      "offered_routes_per_second": 89.80715910790866,
+      "post_apply_by_route_thousand": [
+        {
+          "n": 1000,
+          "mean_ms": 113.246589784,
+          "p50_ms": 47.3141175,
+          "p95_ms": 753.0040928999997,
+          "p99_ms": 855.64970236,
+          "max_ms": 884.499592
+        },
+        {
+          "n": 1000,
+          "mean_ms": 49.379630868,
+          "p50_ms": 44.1762415,
+          "p95_ms": 86.71114329999995,
+          "p99_ms": 142.45858188999864,
+          "max_ms": 311.563587
+        },
+        {
+          "n": 1000,
+          "mean_ms": 51.773035486,
+          "p50_ms": 45.080599,
+          "p95_ms": 110.59712455,
+          "p99_ms": 174.64254193999966,
+          "max_ms": 252.748455
+        }
+      ]
+    },
+    "repair_eligible": 27,
+    "repair_checks": 27,
+    "full_applies_before": 25,
+    "full_applies_after": 1,
+    "profile_dropped": 0,
+    "candidate_window_unpaired": 1,
+    "unpaired_explanation": "agent/FULL controller-pass began21.798ms before final probe and ended6.601ms after it; complete span in raw recording, excluded from bounded summary."
+  },
+  "isolatedAgentDelta": {
+    "before": [
+      {
+        "routes": 100,
+        "iterations": 100,
+        "bytes_per_operation": 26042.4,
+        "cpu_microseconds_per_operation": 54.58
+      },
+      {
+        "routes": 1000,
+        "iterations": 100,
+        "bytes_per_operation": 97693.1,
+        "cpu_microseconds_per_operation": 257.56
+      },
+      {
+        "routes": 3000,
+        "iterations": 100,
+        "bytes_per_operation": 218666.9,
+        "cpu_microseconds_per_operation": 627.07
+      },
+      {
+        "routes": 10000,
+        "iterations": 100,
+        "bytes_per_operation": 649725.8,
+        "cpu_microseconds_per_operation": 2162.54
+      }
+    ],
+    "after": [
+      {
+        "routes": 100,
+        "iterations": 100,
+        "bytes_per_operation": 23569.6,
+        "cpu_microseconds_per_operation": 40.99
+      },
+      {
+        "routes": 1000,
+        "iterations": 100,
+        "bytes_per_operation": 24221.0,
+        "cpu_microseconds_per_operation": 40.73
+      },
+      {
+        "routes": 3000,
+        "iterations": 100,
+        "bytes_per_operation": 24341.1,
+        "cpu_microseconds_per_operation": 39.92
+      },
+      {
+        "routes": 10000,
+        "iterations": 100,
+        "bytes_per_operation": 24413.0,
+        "cpu_microseconds_per_operation": 40.63
+      }
+    ],
+    "method": "Sequential processes, own builds/tests/VM measurements stopped; full agent fixture excludes full sync and uses fake listeners/runtime. Baseline ASDF setup loads once, then base source overrides before measurement. Resource-index-update component lines in before log are candidate helper diagnostics, not a baseline metric."
+  },
+  "validation": {
+    "makeCheck": {
+      "exit": 0,
+      "checks": 32768,
+      "passed": 32759,
+      "skipped": 9,
+      "failed": 0,
+      "log": "stage3-make-check.log"
+    },
+    "nativeBuild": {
+      "exit": 0,
+      "binary_sha256": "57a9a09706076cf8e156bc11e78cbeb14c651dfef823bec67135e575d6667277",
+      "binary": "build/gateway-perf-retained/update-scaling/gr8s-stage3",
+      "log": "stage3-build.log"
+    },
+    "profileSmoke": {
+      "exit": 0,
+      "checks": 9,
+      "passed": 9,
+      "eligible_single_change_recorded": true
+    },
+    "review": "Independent static review; no unresolved important findings.",
+    "repeatedLeadershipTests": "3x61 checks; plus final full suite."
+  },
+  "limitations": [
+    "Shared development host; own heavy jobs stopped for timings, external load not controlled.",
+    "Benchmark unique hostnames; shared-hostname update cost can still scale with affected bucket.",
+    "Dispatcher lookup increases by about0.06 microseconds in isolated measurement.",
+    "Periodic authoritative comparison and GC still contribute tail latency; follow-up podster-a1y.",
+    "Leadership gate detects observed loss, not unobserved loss/regain; unchanged boolean interface.",
+    "Two uninstrumented runs per binary are descriptive, not a statistical guarantee. Offered write rates vary with API performance; inspect rate with latency.",
+    "Agentgateway was not rerun for this comparison; results compare gr8s baseline and candidate."
+  ],
+  "followup": "podster-a1y: remaining repair comparison/safety preparation and GC tail latency",
+  "rawEvidence": {
+    "archive": "build/gateway-perf-retained/update-scaling/evidence-2026-11-16.tar.gz",
+    "archiveSHA256": "638bd95f90f1b075f87fa5c9da80c065bdf3e51f30d74b8e1e57e2ed664d7db5",
+    "contents": "Raw logs/profiles, binary/source identities, fixed harness, runner scripts, summaries, rejected intermediate designs and corrected baseline provenance; binaries retained separately alongside archive."
+  },
+  "reproduce": [
+    "sbcl --noinform --non-interactive --load scripts/bench-gateway-agent-deltas.lisp",
+    "sbcl --noinform --non-interactive --load scripts/bench-gateway-deltas.lisp",
+    "make check",
+    "sbcl --noinform --non-interactive --load scripts/build-native.lisp"
+  ],
+  "handoff": {
+    "code": "uncommitted on perf/gateway-update-scaling",
+    "issues": "podster-eal and podster-6qu closed locally",
+    "trackerSync": {
+      "command": "bd dolt push",
+      "exit": 1,
+      "error": "no common ancestor; local and remote Dolt histories diverged",
+      "issue": "podster-wiz"
+    }
+  }
+}

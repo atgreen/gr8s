@@ -244,13 +244,13 @@
            (let ((backend (gw-dispatch-backend dispatch)))
              (if (null backend)
                  (gateway-error-response 500 "Matched rule has no backend")
-                 (multiple-value-bind (host port) (gateway-resolve-backend acceptor backend)
+                 (multiple-value-bind (host port invalid-reason) (gateway-resolve-backend acceptor backend)
                    (if host
                        (gateway-proxy-exchange
                         dispatch request
                         (format nil "http://~A:~A" (if (find #\: host) (format nil "[~A]" host) host) port)
                         (hunchentoot:request-method request))
-                       (gateway-error-response 503 "No reachable backend for ~A"
+                       (gateway-error-response (if invalid-reason 500 503) "No reachable backend for ~A"
                                                (gw-backend-name backend))))))))
       (gateway-count-request (gateway-acceptor-name acceptor)
                              (and dispatch (gw-dispatch-route-key dispatch))
@@ -287,27 +287,55 @@
                  (equal reference (gethash "name" port))))
            (gethash "ports" (gethash "spec" service) #())))
 
-(defun make-service-backend-resolver (store)
-  "A resolver mapping a GW-BACKEND (a Service reference) to an address. It
-   prefers a randomly chosen ready Pod endpoint (direct dial, independent of the
-   service-LB cgroup interception), and falls back to the Service ClusterIP (which
-   the socket/eBPF service LB then spreads) when no endpoint is resolvable."
-  (lambda (backend)
+(defun gateway-reference-permitted-p (store source-namespace source-kind target-namespace target-kind target-name)
+  "A cross-namespace reference needs matching from/to entries in one target grant."
+  (or (equal source-namespace target-namespace)
+      (and store
+           (some
+            (lambda (grant)
+              (let ((spec (gethash "spec" grant)))
+                (and (some (lambda (entry)
+                             (and (equal (gethash "group" entry) "gateway.networking.k8s.io")
+                                  (equal (gethash "kind" entry) source-kind)
+                                  (equal (gethash "namespace" entry) source-namespace)))
+                           (gethash "from" spec #()))
+                     (some (lambda (entry)
+                             (and (equal (gethash "group" entry) "")
+                                  (equal (gethash "kind" entry) target-kind)
+                                  (or (null (gethash "name" entry))
+                                      (equal (gethash "name" entry) target-name))))
+                           (gethash "to" spec #())))))
+            (list-core-resources store "referencegrants" target-namespace)))))
+
+(defun gateway-backend-reference-error (store backend)
+  "Return invalid-reference reason, Service and Service port, without resolving endpoints."
+  (when (gw-backend-invalid-reason backend)
+    (return-from gateway-backend-reference-error (gw-backend-invalid-reason backend)))
+  (when (and (gw-backend-source-namespace backend)
+             (not (gateway-reference-permitted-p
+                   store (gw-backend-source-namespace backend) (gw-backend-source-kind backend)
+                   (gw-backend-namespace backend) "Service" (gw-backend-name backend))))
+    (return-from gateway-backend-reference-error "RefNotPermitted"))
+  (when store
     (let* ((namespace (or (gw-backend-namespace backend) "default"))
-           (service (ignore-errors (get-core-resource store "services" namespace
-                                                       (gw-backend-name backend)))))
-      (when service
-        (let* ((service-port (gateway-service-port service (gw-backend-port backend)))
-               (endpoints (and service-port
-                               (ignore-errors
-                                (service-pod-endpoints store service service-port)))))
-          (if endpoints
-              (let ((endpoint (nth (random (length endpoints)) endpoints)))
-                (values (first endpoint) (second endpoint)))
-              (let ((cluster-ip (gethash "clusterIP" (gethash "spec" service))))
-                (when (and service-port (stringp cluster-ip) (plusp (length cluster-ip))
-                           (not (equal cluster-ip "None")))
-                  (values cluster-ip (gethash "port" service-port))))))))))
+           (service (ignore-errors (get-core-resource store "services" namespace (gw-backend-name backend))))
+           (port (and service (gateway-service-port service (gw-backend-port backend)))))
+      (values (unless (and service port) "BackendNotFound") service port))))
+
+(defun make-service-backend-resolver (store)
+  "Resolve a valid Service reference; invalid references carry an HTTP500 reason."
+  (lambda (backend)
+    (multiple-value-bind (reason service service-port) (gateway-backend-reference-error store backend)
+      (if reason
+          (values nil nil reason)
+          (let ((endpoints (ignore-errors (service-pod-endpoints store service service-port))))
+            (if endpoints
+                (let ((endpoint (nth (random (length endpoints)) endpoints)))
+                  (values (first endpoint) (second endpoint)))
+                (let ((cluster-ip (gethash "clusterIP" (gethash "spec" service))))
+                  (when (and (stringp cluster-ip) (plusp (length cluster-ip))
+                             (not (equal cluster-ip "None")))
+                    (values cluster-ip (gethash "port" service-port))))))))))
 
 (defun start-gateway-listener (&key (address "127.0.0.1") port router resolver (name "gateway") tls)
   "Start a Gateway listener acceptor on PORT. ROUTER is a compiled dispatch fn

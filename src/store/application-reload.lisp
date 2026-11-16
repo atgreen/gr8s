@@ -4,7 +4,7 @@
 
 (defparameter *store-application-reload-fields*
   '(pod-store-pods pod-store-nodes pod-store-resources pod-store-resource-revision
-    pod-store-discovery-encoding-cache
+    pod-store-discovery-encoding-cache pod-store-discovery-projection-cache
     pod-store-template-history pod-store-template-history-recent pod-store-template-history-maintained-at
     pod-store-template-history-floor pod-store-resource-history-start pod-store-template-token-key
     pod-store-secret-encryption-config

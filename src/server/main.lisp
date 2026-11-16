@@ -2313,7 +2313,11 @@ handler and never gets here. A busy host makes this race likely."
   ;; (the default) always runs, keeping the single-node path unchanged.
   leader-gate
   (leader-active nil)
+  (leadership-generation 0)
   thread
+  gateway-thread
+  (gateway-pending nil)
+  (gateway-wake-up (bt:make-condition-variable :name "gr8s Gateway reconciliation wake-up"))
   (stop-requested nil)
   (pending nil)
   pending-scope
@@ -2338,10 +2342,21 @@ handler and never gets here. A busy host makes this race likely."
   (bt:with-lock-held ((reconciliation-worker-lock worker))
     (reconciliation-worker-stop-requested worker)))
 
+(defun invalidate-reconciliation-leadership (worker)
+  "An observed leadership loss invalidates even a still-running full repair."
+  (bt:with-lock-held ((reconciliation-worker-lock worker))
+    (incf (reconciliation-worker-leadership-generation worker))
+    (setf (reconciliation-worker-leader-active worker) nil)))
+
 (defun request-reconciliation (worker &key (scope :full))
-  "Remember changes during a pass; full work dominates any queued Gateway work."
+  "Queue Gateway publication independently after a successful leader repair."
   (bt:with-lock-held ((reconciliation-worker-lock worker))
     (unless (reconciliation-worker-stop-requested worker)
+      (when (and (eq scope :gateway) (reconciliation-worker-gateway-reconcile worker)
+                 (reconciliation-worker-leader-active worker))
+        (setf (reconciliation-worker-gateway-pending worker) t)
+        (bt:condition-notify (reconciliation-worker-gateway-wake-up worker))
+        (return-from request-reconciliation nil))
       (when (or (not (reconciliation-worker-pending worker)) (not (eq scope :gateway)))
         (setf (reconciliation-worker-pending-scope worker)
               (if (eq scope :gateway) :gateway :full)))
@@ -2387,26 +2402,26 @@ handler and never gets here. A busy host makes this race likely."
              ;; Everything committed before this point is covered by this pass.
              ;; Later changes keep PENDING set for a follow-up, even during a pass.
              (setf (reconciliation-worker-pass-scope worker)
-                   (if (and (eq (reconciliation-worker-pending-scope worker) :gateway)
-                            (reconciliation-worker-gateway-reconcile worker)
-                            (< (get-internal-real-time) (reconciliation-worker-full-repair-deadline worker)))
-                       :gateway :full)
+                   :full
                    (reconciliation-worker-pending worker) nil
                    (reconciliation-worker-pending-scope worker) nil))
            (handler-case
                ;; Only drive controllers when we hold leadership; a follower
                ;; reconciles nothing and simply waits to be promoted.
-               (if (let ((gate (reconciliation-worker-leader-gate worker)))
+               (let ((generation (bt:with-lock-held ((reconciliation-worker-lock worker))
+                                   (reconciliation-worker-leadership-generation worker))))
+                 (if (let ((gate (reconciliation-worker-leader-gate worker)))
                      (or (null gate) (funcall gate)))
                    (progn
-                     ;; A member that has just become leader first repairs all
-                     ;; controllers, even if the triggering change was Gateway-only.
-                     (unless (reconciliation-worker-leader-active worker)
-                       (setf (reconciliation-worker-pass-scope worker) :full))
                      (call-with-reconciliation-metrics
                       worker (lambda () (run-controller-pass worker)))
-                     (setf (reconciliation-worker-leader-active worker) t))
-                   (setf (reconciliation-worker-leader-active worker) nil))
+                     (if (let ((gate (reconciliation-worker-leader-gate worker)))
+                           (or (null gate) (funcall gate)))
+                         (bt:with-lock-held ((reconciliation-worker-lock worker))
+                           (when (= generation (reconciliation-worker-leadership-generation worker))
+                             (setf (reconciliation-worker-leader-active worker) t)))
+                         (invalidate-reconciliation-leadership worker)))
+                   (invalidate-reconciliation-leadership worker)))
              ;; Timeouts are serious conditions, not errors, and a late one can land here.
              ((or error sb-ext:timeout bt2:timeout) (error)
                (format *error-output* "gr8s reconciliation error: ~A~%" error)))
@@ -2415,6 +2430,51 @@ handler and never gets here. A busy host makes this race likely."
                (setf (reconciliation-worker-full-repair-deadline worker)
                      (reconciliation-deadline (reconciliation-worker-interval worker)))))
            (wait-for-reconciliation worker)))
+
+(defun gateway-reconciliation-admitted-p (worker)
+  "Admit only against the repaired generation that survives the leadership check."
+  (let ((generation (bt:with-lock-held ((reconciliation-worker-lock worker))
+                      (and (reconciliation-worker-leader-active worker)
+                           (reconciliation-worker-leadership-generation worker)))))
+    (and generation
+         (let ((gate (reconciliation-worker-leader-gate worker)))
+           (or (null gate) (funcall gate)))
+         (bt:with-lock-held ((reconciliation-worker-lock worker))
+           (and (not (reconciliation-worker-stop-requested worker))
+                (reconciliation-worker-leader-active worker)
+                (= generation (reconciliation-worker-leadership-generation worker)))))))
+
+(defun gateway-reconciliation-worker-loop (worker)
+  "Publish deltas independently of controller repair. Node fences still serialize delivery."
+  (loop
+    (bt:with-lock-held ((reconciliation-worker-lock worker))
+      (loop until (or (reconciliation-worker-stop-requested worker)
+                      (reconciliation-worker-gateway-pending worker))
+            do (bt:condition-wait (reconciliation-worker-gateway-wake-up worker)
+                                 (reconciliation-worker-lock worker)))
+      (when (reconciliation-worker-stop-requested worker) (return))
+      ;; Batch against a fixed deadline, even under continuous writes.
+      (let ((deadline (reconciliation-deadline 0.005)))
+        (loop for remaining = (- deadline (get-internal-real-time))
+              while (and (plusp remaining) (not (reconciliation-worker-stop-requested worker)))
+              do (bt:condition-wait (reconciliation-worker-gateway-wake-up worker)
+                                   (reconciliation-worker-lock worker)
+                                   :timeout (/ remaining internal-time-units-per-second))))
+      (when (reconciliation-worker-stop-requested worker) (return))
+      (setf (reconciliation-worker-gateway-pending worker) nil))
+    (handler-case
+        (if (gateway-reconciliation-admitted-p worker)
+            (call-with-reconciliation-metrics
+             worker (lambda ()
+                      (gr8s.kubelet::call-with-discovery-projection-cache
+                       (reconciliation-worker-gateway-reconcile worker))))
+            (progn
+              (invalidate-reconciliation-leadership worker)
+              (request-reconciliation worker)))
+      ((or error sb-ext:timeout bt2:timeout) (condition)
+        (format *error-output* "gr8s Gateway reconciliation error: ~A~%" condition)
+        ;; Full repair is the recovery path even without another resource write.
+        (request-reconciliation worker)))))
 
 (defun start-reconciliation-worker (reconciler &key (interval 1.0) observer before-reconcile
                                                      leader-gate watch-resources gateway-reconcile resource-change-handler)
@@ -2440,11 +2500,16 @@ worker keeps its existing cadence. LEADER-GATE still gates every pass."
       (setf (reconciliation-worker-resource-change-observer worker) callback)
       (gr8s.resources::add-core-resource-change-observer store callback))
     (handler-case
-        (setf (reconciliation-worker-thread worker)
+        (progn
+          (setf (reconciliation-worker-thread worker)
               (bt:make-thread (lambda () (reconciliation-worker-loop worker))
                               :name "gr8s reconciler"))
+          (when gateway-reconcile
+            (setf (reconciliation-worker-gateway-thread worker)
+                  (bt:make-thread (lambda () (gateway-reconciliation-worker-loop worker))
+                                  :name "gr8s Gateway publisher"))))
       (error (condition)
-        (when callback (gr8s.resources::remove-core-resource-change-observer store callback))
+        (stop-reconciliation-worker worker)
         (error condition)))
     worker))
 
@@ -2461,8 +2526,10 @@ worker keeps its existing cadence. LEADER-GATE still gates every pass."
     (setf (reconciliation-worker-resource-change-observer worker) nil))
   (bt:with-lock-held ((reconciliation-worker-lock worker))
     (setf (reconciliation-worker-stop-requested worker) t)
-    (bt:condition-notify (reconciliation-worker-wake-up worker)))
-  (let ((thread (reconciliation-worker-thread worker)))
+    (bt:condition-notify (reconciliation-worker-wake-up worker))
+    (bt:condition-notify (reconciliation-worker-gateway-wake-up worker)))
+  (dolist (thread (list (reconciliation-worker-thread worker)
+                       (reconciliation-worker-gateway-thread worker)))
     (when thread
       (let ((deadline (+ (get-internal-real-time)
                          (* (reconciliation-worker-shutdown-timeout worker)
