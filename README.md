@@ -151,41 +151,6 @@ Run `gr8s skill` for built-in operator and AI agent guidance, including first-re
 checks, live Slynk inspection, and selector-scoped kernel tracing. It works offline
 and can be saved with `gr8s skill > gr8s-guide.md`.
 
-## For Common Lisp developers
-
-gr8s is a large, working Common Lisp system — about 120,000 lines under
-[src/](src/) spanning an API server, controllers, a scheduler, a node agent,
-a Raft store, an eBPF compiler, and a TLS stack — built to be explored from a
-REPL while it runs.
-
-- **REPL into a live cluster.** `gr8s debug icl NODE` opens an
-  authenticated, RBAC-gated Slynk tunnel to the node's running image and
-  launches [ICL](https://atgreen.github.io/icl)'s browser IDE against it in
-  one step (`--no-launch` prints the `icl -b --connect` line instead). ICL
-  brings syntax highlighting, completion, a TUI object inspector, package
-  and class browsers, flame-graph profiling, and notebooks. Built-in
-  helpers in the `GR8S` package — `(debug-threads)`, `(debug-backtraces)`,
-  `(debug-pod "default" "web")`, `(debug-journal 20)` — inspect the node's
-  local context.
-- **If you'd rather attach with Emacs or Lem**, run `gr8s debug slynk
-  --node NODE --kubeconfig KUBECONFIG --local-port 4005` and point
-  [Sly](https://github.com/joaotavora/sly) (or Lem's Lisp mode) at the
-  printed loopback port; the tunnel stays open while the command runs.
-- **eBPF written in Lisp.** [Whistler](https://github.com/atgreen/Whistler)
-  compiles the entire dataplane — Service load balancing, NetworkPolicy,
-  tracing probes — from a Lisp DSL to eBPF at runtime, with no clang or LLVM.
-- **A Lisp network stack, no OpenSSL.** Internal TLS 1.3 is
-  [pure Lisp](#networking-and-security), and the repository
-  [shims `cl+ssl`](cl+ssl.asd) so even vendored HTTP clients link the
-  pure-Lisp TLS instead of OpenSSL.
-- **Pinned, reproducible dependencies.** [ocicl](https://github.com/ocicl/ocicl)
-  manages the dependency tree from a lockfile ([ocicl.csv](ocicl.csv)), so
-  builds resolve the same systems every time.
-- **Where to start reading.** The
-  [source map and developer walkthrough](docs/development.md) tours the code;
-  the [documentation style guide](docs/documentation-style.md) explains how
-  the source is annotated and why.
-
 ## How is gr8s different from k3s?
 
 k3s is the closest comparison to gr8s. Both provide a Kubernetes-compatible
@@ -368,6 +333,41 @@ workloads. gr8s can install and validate them automatically. Use
 `gr8s runtime install gvisor` or `gr8s runtime install kata` to install them,
 then select the runtime with `RuntimeClass`. See
 [Runtime & the container stack](docs/runtime.md) for configuration.
+
+## For Common Lisp developers
+
+gr8s is a large, working Common Lisp system — about 120,000 lines under
+[src/](src/) spanning an API server, controllers, a scheduler, a node agent,
+a Raft store, an eBPF compiler, and a TLS stack — built to be explored from a
+REPL while it runs.
+
+- **REPL into a live cluster.** `gr8s debug icl NODE` opens an
+  authenticated, RBAC-gated Slynk tunnel to the node's running image and
+  launches [ICL](https://atgreen.github.io/icl)'s browser IDE against it in
+  one step (`--no-launch` prints the `icl -b --connect` line instead). ICL
+  brings syntax highlighting, completion, a TUI object inspector, package
+  and class browsers, flame-graph profiling, and notebooks. Built-in
+  helpers in the `GR8S` package — `(debug-threads)`, `(debug-backtraces)`,
+  `(debug-pod "default" "web")`, `(debug-journal 20)` — inspect the node's
+  local context.
+- **If you'd rather attach with Emacs or Lem**, run `gr8s debug slynk
+  --node NODE --kubeconfig KUBECONFIG --local-port 4005` and point
+  [Sly](https://github.com/joaotavora/sly) (or Lem's Lisp mode) at the
+  printed loopback port; the tunnel stays open while the command runs.
+- **eBPF written in Lisp.** [Whistler](https://github.com/atgreen/Whistler)
+  compiles the entire dataplane — Service load balancing, NetworkPolicy,
+  tracing probes — from a Lisp DSL to eBPF at runtime, with no clang or LLVM.
+- **A Lisp network stack, no OpenSSL.** Internal TLS 1.3 is
+  [pure Lisp](#networking-and-security), and the repository
+  [shims `cl+ssl`](cl+ssl.asd) so even vendored HTTP clients link the
+  pure-Lisp TLS instead of OpenSSL.
+- **Pinned, reproducible dependencies.** [ocicl](https://github.com/ocicl/ocicl)
+  manages the dependency tree from a lockfile ([ocicl.csv](ocicl.csv)), so
+  builds resolve the same systems every time.
+- **Where to start reading.** The
+  [source map and developer walkthrough](docs/development.md) tours the code;
+  the [documentation style guide](docs/documentation-style.md) explains how
+  the source is annotated and why.
 
 ## Development and documentation
 
