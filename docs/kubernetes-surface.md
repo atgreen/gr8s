@@ -271,6 +271,24 @@ occurrences, which become Events after the server validates Pod UID, assignment,
 and desired revision. Replayed cumulative counts do not duplicate occurrences;
 see [`node-runtime-events.lisp`](../src/resources/node-runtime-events.lisp).
 
+A container that can't start says why in its waiting state and an Event, worded as
+a kubelet words them:
+
+| Cause | Waiting reason and message | Event |
+|---|---|---|
+| A volume that can't be set up, such as a missing ConfigMap or Secret | `ContainerCreating`, `MountVolume.SetUp failed for volume "cfg" : configmap "x" not found` | Warning `FailedMount` |
+| A failed image pull | `ErrImagePull`, the registry's error | Warning `Failed`, `Failed to pull image "x": ...` |
+| The same image still failing, before the next pull | `ImagePullBackOff`, `Back-off pulling image "x": ...` | Normal `BackOff` |
+| A missing image under pull policy `Never` | `ErrImageNeverPull` | Warning `ErrImageNeverPull` |
+| The runtime refusing to create the container | `CreateContainerError`, the runtime's error | Warning `Failed`, `Error: ...` |
+| A missing environment source, or an invalid subPath | `CreateContainerConfigError` | Warning `Failed`, `Error: ...` |
+| Repeated crashes | `CrashLoopBackOff`, `back-off 40s restarting failed container=...` | Warning `BackOff` |
+
+An evicted Pod also gets a Warning `Evicted` Event with the eviction message. A
+failure that lasts many reconciliation passes is one Event, not one per pass.
+Unlike a kubelet, gr8s records no `Pulling` or `Pulled` Events, and a container
+whose StartContainer call fails is still reported on the Pod as `RuntimeError`.
+
 ## Namespaces, quotas & lifecycle
 
 A deleted Namespace turns Terminating and refuses new content while its Pods drain
@@ -307,7 +325,11 @@ The local agent serves the kubelet's endpoints on port 10250 (`serve
 --kubelet-port`, 0 to disable): `/metrics/resource`, `/metrics/cadvisor`,
 `/stats/summary`, `/metrics`, and `/healthz`, measured from CRI container
 statistics and the cgroup v2 files of each container, sandbox, and the root.
-`/metrics/cadvisor` carries cAdvisor's `container_*`/`machine_*` series;
+`/metrics/cadvisor` carries cAdvisor's `container_*`/`machine_*` series,
+including OOM kills (`container_oom_events_total`) and, on kernels with PSI,
+CPU, memory and I/O pressure stalls (`container_pressure_*_waiting_seconds_total`
+and `container_pressure_*_stalled_seconds_total`). CFS throttling series appear
+only for containers with a CPU limit;
 `/metrics` carries the kubelet's own CRI-operation, Pod-start/sync-latency, and
 `process_*` series; `/metrics/probes` carries `prober_probe_*`.
 

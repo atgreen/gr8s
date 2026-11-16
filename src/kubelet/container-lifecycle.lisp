@@ -315,6 +315,8 @@
                                  "lastFailureTime" now
                                  "nextAttempt" (1+ (cri-container-info-attempt info))
                                  "backoff" (if reset 10 (min 300 (* 2 delay)))
+                                 ;; The wait this exit started, which CrashLoopBackOff reports.
+                                 "backoffDelay" delay
                                  "nextStart" (+ (if (plusp (cri-container-info-finished-at info)) finished now) delay)
                                  "lastTermination" (gethash "terminated" (gethash "state" (containerd-container-status-object info))))))
         (dolist (key '("probeState" "probeRestart"))
@@ -434,7 +436,47 @@
 
 (defun container-config-error-reason (condition)
   "Return the waiting reason a kubelet would report for CONDITION."
-  (if (typep condition 'container-image-pull-error) "ErrImagePull" "CreateContainerConfigError"))
+  (typecase condition
+    (gr8s.runtime:container-image-pull-backoff "ImagePullBackOff")
+    (container-image-pull-error "ErrImagePull")
+    (gr8s.runtime:container-image-never-pull "ErrImageNeverPull")
+    ;; The kubelet keeps a container whose volumes aren't ready in ContainerCreating.
+    (gr8s.runtime:volume-mount-error "ContainerCreating")
+    (gr8s.runtime:container-create-error "CreateContainerError")
+    (t "CreateContainerConfigError")))
+
+(defun container-config-error-event (condition)
+  "Return the reason, type and message of the Event a kubelet records for CONDITION."
+  (let ((message (runtime-error-message condition)))
+    (typecase condition
+      (gr8s.runtime:container-image-pull-backoff
+       (values "BackOff" "Normal"
+               (format nil "Back-off pulling image ~S" (gr8s.runtime:container-image-pull-error-image condition))))
+      (container-image-pull-error
+       (values "Failed" "Warning"
+               (if (gr8s.runtime:container-image-pull-error-image condition)
+                   (format nil "Failed to pull image ~S: ~A"
+                           (gr8s.runtime:container-image-pull-error-image condition) message)
+                   (format nil "Error: ErrImagePull: ~A" message))))
+      (gr8s.runtime:container-image-never-pull (values "ErrImageNeverPull" "Warning" message))
+      (gr8s.runtime:volume-mount-error (values "FailedMount" "Warning" message))
+      (t (values "Failed" "Warning" (format nil "Error: ~A" message))))))
+
+(defun container-config-error-report (spec condition)
+  "Return (SPEC message reason event-reason event-type event-message) for a container held back by CONDITION."
+  (multiple-value-bind (event-reason event-type event-message) (container-config-error-event condition)
+    (list spec (runtime-error-message condition) (container-config-error-reason condition)
+          event-reason event-type event-message)))
+
+(defun go-duration-text (seconds)
+  "Return whole SECONDS as Go's time.Duration prints them: 10s, 1m20s, 5m0s."
+  (multiple-value-bind (minutes rest) (floor seconds 60)
+    (if (plusp minutes) (format nil "~Dm~Ds" minutes rest) (format nil "~Ds" rest))))
+
+(defun crash-loop-back-off-message (pod name delay)
+  "Return the waiting message a kubelet gives container NAME while it backs off for DELAY seconds."
+  (format nil "back-off ~A restarting failed container=~A pod=~A_~A(~A)"
+          (go-duration-text delay) name (pod-name pod) (pod-namespace pod) (pod-uid pod)))
 
 (defun report-container-config-error (observed spec message &optional (reason "CreateContainerConfigError"))
   "Report SPEC, unable to start for lack of valid configuration, as a kubelet does."
@@ -555,8 +597,7 @@ A first attempt never ran, so it leaves no trace and is made again as attempt ze
                            ;; No attempt was consumed: a later pass retries, as siblings run on.
                            (container-image-pending () nil)
                            (container-config-error (condition)
-                             (push (list spec (runtime-error-message condition) (container-config-error-reason condition))
-                                   config-errors))))))))
+                             (push (container-config-error-report spec condition) config-errors))))))))
                  ((= (cri-container-info-state info) gr8s.cri.v1::+containerstate-container_created+)
                   ;; An interrupted or ambiguous StartContainer must reuse the
                   ;; already created attempt instead of allocating another.
@@ -582,8 +623,7 @@ A first attempt never ran, so it leaves no trace and is made again as attempt ze
                               (push name created-names))
                           (container-image-pending () nil)
                           (container-config-error (condition)
-                            (push (list spec (runtime-error-message condition) (container-config-error-reason condition))
-                                  config-errors))))))))
+                            (push (container-config-error-report spec condition) config-errors))))))))
       (containerd-prune-old-attempts runtime infos created-names)
       (when (and (pod-sidecar-names pod)
                  (let ((statuses (container-lifecycle-statuses current state)))
@@ -595,15 +635,27 @@ A first attempt never ran, so it leaves no trace and is made again as attempt ze
         (remember-container-lifecycle-statuses state (container-lifecycle-all-statuses observed))
         (save-container-lifecycle-state runtime uid state)
         (loop for status across statuses
-              for entry = (gethash (gethash "name" status) waiting)
+              for name = (gethash "name" status)
+              for entry = (gethash name waiting)
               when entry do
-                (setf (gethash "state" status) (core-object "waiting" (core-object "reason" "CrashLoopBackOff"))
-                      (gethash "lastState" status) (core-object "terminated" (copy-core-object (gethash "lastTermination" entry)))
-                      (gethash "ready" status) nil (gethash "started" status) nil))
-        (loop for (spec message reason) in config-errors
+                (let ((delay (let ((used (gethash "backoffDelay" entry)))
+                               (if (and (integerp used) (plusp used)) used (gethash "backoff" entry 10)))))
+                  (setf (gethash "state" status)
+                        (core-object "waiting" (core-object "reason" "CrashLoopBackOff"
+                                                            "message" (crash-loop-back-off-message pod name delay)))
+                        (gethash "lastState" status) (core-object "terminated" (copy-core-object (gethash "lastTermination" entry)))
+                        (gethash "ready" status) nil (gethash "started" status) nil)
+                  ;; One Event per exit: a kubelet repeats it while backing off, which only adds a count.
+                  (record-container-lifecycle-event
+                   runtime uid name (gethash "nextAttempt" entry 0) "BackOff"
+                   (format nil "Back-off restarting failed container ~A in pod ~A_~A(~A)"
+                           name (pod-name pod) (pod-namespace pod) (pod-uid pod))
+                   "Warning")))
+        (loop for (spec message reason event-reason event-type event-message) in config-errors
               do (report-container-config-error observed spec message reason)
-                 (record-container-lifecycle-event runtime uid (container-spec-name spec) reason "Failed"
-                                                   (format nil "Error: ~A: ~A" reason message) "Warning"))
+                 ;; Keyed by reason, so a condition that persists over many passes stays one Event.
+                 (record-container-lifecycle-event runtime uid (container-spec-name spec) reason event-reason
+                                                   event-message event-type))
         (when (and restarting (pod-initialization-complete-p pod (runtime-pod-status observed)))
           (setf (runtime-pod-phase observed) "Running"))
         ;; An existing sandbox's creation revision may be older than a metadata

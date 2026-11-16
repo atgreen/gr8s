@@ -284,6 +284,8 @@ message EndpointTelemetry {
   uint64 malformed_packets = 9;
   uint64 unsupported_packets = 10;
   string error_message = 11;
+  // Packets a NetworkPolicy refused, in either direction. They are also in dropped_packets.
+  uint64 policy_drops = 12;
 }
 
 message PodObservedStatus {

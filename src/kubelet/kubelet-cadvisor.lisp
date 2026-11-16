@@ -240,6 +240,13 @@ The device comes from the mount table, not stat, because btrfs reports anonymous
     ("container_network_transmit_errors_total" "Cumulative count of errors encountered while transmitting" "counter")
     ("container_network_transmit_packets_dropped_total" "Cumulative count of packets dropped while transmitting" "counter")
     ("container_network_transmit_packets_total" "Cumulative count of packets transmitted" "counter")
+    ("container_oom_events_total" "Count of out of memory events observed for the container" "counter")
+    ("container_pressure_cpu_stalled_seconds_total" "Total time duration no tasks in the container could make progress due to CPU congestion." "counter")
+    ("container_pressure_cpu_waiting_seconds_total" "Total time duration tasks in the container have waited due to CPU congestion." "counter")
+    ("container_pressure_io_stalled_seconds_total" "Total time duration no tasks in the container could make progress due to IO congestion." "counter")
+    ("container_pressure_io_waiting_seconds_total" "Total time duration tasks in the container have waited due to IO congestion." "counter")
+    ("container_pressure_memory_stalled_seconds_total" "Total time duration no tasks in the container could make progress due to memory congestion." "counter")
+    ("container_pressure_memory_waiting_seconds_total" "Total time duration tasks in the container have waited due to memory congestion." "counter")
     ("container_spec_cpu_period" "CPU period of the container." "gauge")
     ("container_spec_cpu_quota" "CPU quota of the container." "gauge")
     ("container_spec_cpu_shares" "CPU share of the container." "gauge")
@@ -252,6 +259,18 @@ The device comes from the mount table, not stat, because btrfs reports anonymous
 (defun sorted-labels (labels)
   "Order LABELS, an alist, by name, as the Prometheus registry renders them."
   (sort (copy-list labels) #'string< :key #'car))
+
+(defun parse-pressure-totals (text)
+  "Return the some and full total microseconds in a cgroup PSI file's TEXT, or NIL for each absent.
+A line reads \"some avg10=0.00 avg60=0.00 avg300=0.00 total=12345\"."
+  (let ((some nil) (full nil))
+    (dolist (line (and text (uiop:split-string text :separator '(#\Newline))) (values some full))
+      (let* ((fields (uiop:split-string line :separator '(#\Space)))
+             (total (find "total=" fields :test (lambda (prefix field) (uiop:string-prefix-p prefix field))))
+             (value (and total (ignore-errors (parse-integer total :start 6)))))
+        (when value
+          (cond ((equal "some" (first fields)) (setf some value))
+                ((equal "full" (first fields)) (setf full value))))))))
 
 (defun cpu-weight-to-shares (weight)
   "Convert cgroup v2 cpu.weight back to v1 shares, as runc's fs2 conversion does."
@@ -287,7 +306,22 @@ The device comes from the mount table, not stat, because btrfs reports anonymous
       (unless memory-from-meminfo
         (funcall add "container_memory_swap" labels (or (cgroup-file-value directory "memory.swap.current") 0) now)
         (funcall add "container_memory_max_usage_bytes" labels (cgroup-file-value directory "memory.peak") now)
-        (funcall add "container_memory_failcnt" labels (or (stat (cgroup-file-alist directory "memory.events") "max") 0) now))
+        (let ((events (cgroup-file-alist directory "memory.events")))
+          (funcall add "container_memory_failcnt" labels (or (stat events "max") 0) now)
+          ;; As cAdvisor counts them: the kernel's OOM killer acting inside this cgroup.
+          (funcall add "container_oom_events_total" labels (or (stat events "oom_kill") 0) now))
+        ;; Pressure stall information, absent on kernels without CONFIG_PSI.
+        (loop for resource in '("cpu" "memory" "io")
+              do (multiple-value-bind (some full)
+                     (parse-pressure-totals (ignore-errors (uiop:read-file-string
+                                                             (merge-pathnames (format nil "~A.pressure" resource)
+                                                                              (uiop:ensure-directory-pathname directory)))))
+                   (when some
+                     (funcall add (format nil "container_pressure_~A_waiting_seconds_total" resource)
+                              labels (seconds some) now))
+                   (when full
+                     (funcall add (format nil "container_pressure_~A_stalled_seconds_total" resource)
+                              labels (seconds full) now)))))
       (loop for (type key) in '(("pgfault" "pgfault") ("pgmajfault" "pgmajfault"))
             for value = (stat memory key)
             when value

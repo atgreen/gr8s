@@ -164,27 +164,32 @@ exactly the 48 bytes expected by the v2 endpoint_identity map."
    matching its \"_pending_*\" suffix."
   (directory (concatenate 'string link-path "_pending_*")))
 
-(defun read-cni-policy-counters (root sandbox-id)
+(defun read-cni-policy-counters
+    (root sandbox-id &key (open-pinned #'whistler/loader:open-pinned-object)
+                          (map-info #'cni-policy-map-info)
+                          (lookup (lambda (map index) (whistler/loader:map-lookup-int map index)))
+                          (close-fd #'sb-posix:close))
   "Read the Whistler policy counters for SANDBOX-ID under ROOT and return them in
    a hash table keyed by status-field name: \"rejectedSpoofs\" from the spoof map,
-   and the six allowed/dropped/malformed/unsupported packet and byte counters
-   from the traffic-stats map. Opens and closes each pinned map."
+   and from the traffic-stats map the allowed/dropped/malformed/unsupported packet
+   and byte counters and the NetworkPolicy drops. Opens and closes each pinned map."
   (multiple-value-bind (map-path link-path directory) (cni-pin-paths root sandbox-id)
     (declare (ignore link-path directory))
     (let ((result (make-hash-table :test #'equal)))
       (dolist (name '("rejected_spoofs" "traffic_stats"))
         (let* ((path (cni-policy-map-path map-path name))
-               (fd (whistler/loader:open-pinned-object path)))
+               (fd (funcall open-pinned path)))
           (unwind-protect
-               (let ((map (cni-policy-map-info fd name)))
+               (let ((map (funcall map-info fd name)))
                  (if (string= name "rejected_spoofs")
-                     (setf (gethash "rejectedSpoofs" result) (whistler/loader:map-lookup-int map 0))
+                     (setf (gethash "rejectedSpoofs" result) (funcall lookup map 0))
+                     ;; In traffic_stats order; the guards count policy refusals at index 6.
                      (loop for key in '("allowedPackets" "allowedBytes" "droppedPackets"
-                                        "droppedBytes" "malformedPackets" "unsupportedPackets")
+                                        "droppedBytes" "malformedPackets" "unsupportedPackets"
+                                        "policyDrops")
                            for index from 0
-                           do (setf (gethash key result)
-                                    (whistler/loader:map-lookup-int map index)))))
-            (sb-posix:close fd))))
+                           do (setf (gethash key result) (funcall lookup map index)))))
+            (funcall close-fd fd))))
       result)))
 
 (defun detach-cni-tcx-link (fd &key (bpf #'whistler/loader::%bpf))
