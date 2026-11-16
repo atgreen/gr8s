@@ -1,0 +1,16 @@
+[Unit]
+Description=gr8s Kubernetes server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/gr8s/server.env
+ExecStart=/usr/bin/gr8s $GR8S_EXEC_ARGS
+Restart=always
+RestartSec=5s
+KillMode=mixed
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=multi-user.target

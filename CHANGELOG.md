@@ -7,6 +7,14 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ## [Unreleased]
 
+### Added
+
+- RPM and DEB packages for amd64 and arm64, attached to each release. They
+  install `/usr/bin/gr8s`, `gr8s-killall.sh`, and disabled `gr8s-server` /
+  `gr8s-agent` systemd units configured through `/etc/gr8s/*.env`. A tag
+  `v<k8s>-gr8s.<n>` maps to package version `<k8s>+gr8s.<n>` with packaging
+  revision 1 in both formats.
+
 ## [v1.37.2-gr8s.0] — 2026-11-15
 
 Initial release, marked pre-release as a trial.

@@ -1,0 +1,51 @@
+# nfpm configuration for the gr8s RPM and DEB packages.
+# releng/build-packages.sh supplies the PKG_* variables; the packages
+# repackage the release binaries rather than rebuilding from source.
+name: gr8s
+arch: ${PKG_ARCH}
+platform: linux
+version: ${PKG_VERSION}
+release: ${PKG_RELEASE}
+section: admin
+priority: optional
+maintainer: Anthony Green <green@moxielogic.com>
+description: |
+  Single-binary Kubernetes-compatible cluster in Common Lisp.
+  Control plane, node agent, HA witness, Raft datastore, and embedded
+  container runtime in one executable. The gr8s-server and gr8s-agent
+  services install disabled; edit /etc/gr8s/server.env or
+  /etc/gr8s/agent.env, then enable the one this host should run.
+vendor: Anthony Green
+homepage: https://github.com/atgreen/gr8s
+license: Apache-2.0
+contents:
+  - src: build/package-stage/gr8s
+    dst: /usr/bin/gr8s
+    file_info:
+      mode: 0755
+  - src: gr8s-killall.sh
+    dst: /usr/bin/gr8s-killall.sh
+    file_info:
+      mode: 0755
+  - src: releng/gr8s-server.service
+    dst: /usr/lib/systemd/system/gr8s-server.service
+  - src: releng/gr8s-agent.service
+    dst: /usr/lib/systemd/system/gr8s-agent.service
+  - src: releng/server.env
+    dst: /etc/gr8s/server.env
+    type: config|noreplace
+    file_info:
+      mode: 0600
+  - src: releng/agent.env
+    dst: /etc/gr8s/agent.env
+    type: config|noreplace
+    file_info:
+      mode: 0600
+  - src: LICENSE
+    dst: /usr/share/doc/gr8s/LICENSE
+  - src: NOTICE
+    dst: /usr/share/doc/gr8s/NOTICE
+scripts:
+  postinstall: releng/package-scripts/postinstall.sh
+  preremove: releng/package-scripts/preremove.sh
+  postremove: releng/package-scripts/postremove.sh
