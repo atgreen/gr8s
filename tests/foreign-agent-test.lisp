@@ -9,8 +9,8 @@
 ;;;; with the link and map writes stubbed, since those need root.
 
 (in-package #:gr8s/tests)
-(def-suite foreign-cni-agent :in gr8s)
-(in-suite foreign-cni-agent)
+(def-suite foreign-net-agent :in gr8s)
+(in-suite foreign-net-agent)
 
 (defun foreign-agent-test-node (store name cidr)
   "Register NAME as a schedulable node whose API view carries CIDR."
@@ -39,7 +39,7 @@ since gr8s itself creates the interface."
                   :network-configuration
                   (trivial-utf-8:string-to-utf-8-bytes config))))
 
-(test foreign-cni-agent-serves-add-check-del-from-the-nodes-pod-cidr
+(test foreign-net-agent-serves-add-check-del-from-the-nodes-pod-cidr
   (with-core-api (store path)
     (foreign-agent-test-node store "worker-f" "10.88.7.0/24")
     (let* ((cluster (kube-test-cluster))
@@ -50,9 +50,9 @@ since gr8s itself creates the interface."
            (agent nil))
       (ensure-directories-exist root)
       (setf agent
-            (gr8s.network::start-foreign-cni-agent
+            (gr8s.network::start-foreign-net-agent
              cluster :node-name "worker-f"
-             :state-directory (merge-pathnames "cni-agent/" path)
+             :state-directory (merge-pathnames "net-agent/" path)
              :bpf-root (namestring root)
              :socket-path socket-path
              :operations-factory
@@ -119,9 +119,9 @@ since gr8s itself creates the interface."
              (let ((response (foreign-agent-cni-call socket-path "DEL" config "sandbox-1")))
                (is (slot-value response 'gr8s.node.v1::success)))
              (is (null (gethash "sandbox-1" links))))
-        (gr8s.network::stop-foreign-cni-agent agent)))))
+        (gr8s.network::stop-foreign-net-agent agent)))))
 
-(test foreign-cni-agent-waits-for-its-node-and-stops-cleanly-without-one
+(test foreign-net-agent-waits-for-its-node-and-stops-cleanly-without-one
   (with-core-api (store path)
     (values store)
     (let* ((cluster (kube-test-cluster))
@@ -130,9 +130,9 @@ since gr8s itself creates the interface."
            (thread (bt:make-thread
                     (lambda ()
                       (setf result
-                            (gr8s.network::start-foreign-cni-agent
+                            (gr8s.network::start-foreign-net-agent
                              cluster :node-name "never-arrives"
-                             :state-directory (merge-pathnames "cni-agent/" path)
+                             :state-directory (merge-pathnames "net-agent/" path)
                              :bpf-root (namestring path)
                              :socket-path (namestring (merge-pathnames "cni.sock" path))
                              :stop-predicate (lambda () stop))))
@@ -142,6 +142,37 @@ since gr8s itself creates the interface."
       (setf stop t)
       (bt:join-thread thread)
       (is (null result)))))
+
+(test foreign-net-agent-runs-extra-layers-without-the-cni-feature
+  ;; With :cni NIL the agent must not wait for a podCIDR, serve a CNI socket,
+  ;; or open IPAM -- the node here never exists -- yet the extra layers
+  ;; (gateway, service LB) still converge over the watch view.
+  (with-core-api (store path)
+    (values store)
+    (let* ((cluster (kube-test-cluster))
+           (converged 0) (converged-lock (bt:make-lock))
+           (stopped nil)
+           (agent (gr8s.network::start-foreign-net-agent
+                   cluster :cni nil :node-name "never-arrives"
+                   :state-directory (merge-pathnames "net-agent/" path)
+                   :extra-factory
+                   (lambda (view)
+                     (values (lambda ()
+                               ;; Prove the layer shares the live watch view.
+                               (gr8s.resources::list-core-resources view "nodes")
+                               (bt:with-lock-held (converged-lock)
+                                 (incf converged)))
+                             (lambda () (setf stopped t)))))))
+      (is (not (null agent)))
+      (unwind-protect
+           (progn
+             (is (null (gr8s.network::foreign-net-agent-server agent)))
+             (is (null (gr8s.network::foreign-net-agent-ipam agent)))
+             (is (poll-until (lambda ()
+                               (bt:with-lock-held (converged-lock)
+                                 (plusp converged))))))
+        (gr8s.network::stop-foreign-net-agent agent))
+      (is-true stopped))))
 
 (defun foreign-gateway-test-origin ()
   "A one-reply-per-connection HTTP origin; returns (values port stopper)."
@@ -193,9 +224,9 @@ since gr8s itself creates the interface."
              (gateway-port (foreign-gateway-free-port))
              (resolved-address nil)
              (agent
-               (gr8s.network::start-foreign-cni-agent
+               (gr8s.network::start-foreign-net-agent
                 cluster :node-name "worker-f"
-                :state-directory (merge-pathnames "cni-agent/" path)
+                :state-directory (merge-pathnames "net-agent/" path)
                 :bpf-root (namestring path)
                 :socket-path (namestring (merge-pathnames "cni.sock" path))
                 :policy-converger (lambda (&rest arguments) (declare (ignore arguments)) nil)
@@ -314,7 +345,7 @@ since gr8s itself creates the interface."
                                                              :name "gr8s-gateway-web")))))))
                       :timeout 30)
                      "the lease-holder provisions the fronting LoadBalancer Service")))
-          (gr8s.network::stop-foreign-cni-agent agent)
+          (gr8s.network::stop-foreign-net-agent agent)
           (funcall stop-origin))))))
 
 (defun foreign-lb-fake-map (name fd)
@@ -376,9 +407,9 @@ since gr8s itself creates the interface."
     (let* ((cluster (kube-test-cluster))
            (fabric-calls nil) (fabric-lock (bt:make-lock))
            (agent
-             (gr8s.network::start-foreign-cni-agent
+             (gr8s.network::start-foreign-net-agent
               cluster :node-name "worker-f"
-              :state-directory (merge-pathnames "cni-agent/" path)
+              :state-directory (merge-pathnames "net-agent/" path)
               :bpf-root (namestring path)
               :socket-path (namestring (merge-pathnames "cni-fabric.sock" path))
               :policy-converger (lambda (&rest arguments) (declare (ignore arguments)) nil)
@@ -407,7 +438,7 @@ since gr8s itself creates the interface."
                  (is (equal "worker-g" (gethash "nodeID" route)))
                  (is (equal "10.88.9.0/24" (gethash "podCIDR" route)))
                  (is (equal "192.0.2.80" (gethash "underlayAddress" route))))))
-        (gr8s.network::stop-foreign-cni-agent agent)))))
+        (gr8s.network::stop-foreign-net-agent agent)))))
 
 (test foreign-fabric-encrypts-with-wireguard-and-publishes-its-key
   (with-core-api (store path)
@@ -423,13 +454,13 @@ since gr8s itself creates the interface."
                          (ag-grpc:base64-encode peer-public)))
              (fabric-calls nil) (fabric-lock (bt:make-lock))
              (agent
-               (gr8s.network::start-foreign-cni-agent
+               (gr8s.network::start-foreign-net-agent
                 cluster :node-name "worker-f"
                 :overlay-backend "wireguard"
                 :wireguard-private-key private-key
                 :wireguard-public-key public-key
                 :wireguard-listen-port 51999
-                :state-directory (merge-pathnames "wg-cni-agent/" path)
+                :state-directory (merge-pathnames "wg-net-agent/" path)
                 :bpf-root (namestring path)
                 :socket-path (namestring (merge-pathnames "cni-wg.sock" path))
                 :policy-converger (lambda (&rest arguments) (declare (ignore arguments)) nil)
@@ -482,7 +513,7 @@ since gr8s itself creates the interface."
                      (is (equal "192.0.2.90" (gethash "underlayAddress" route)))
                      (is (equal peer-key (gethash "wireguardPublicKey" route)))
                      (is (= 51999 (gethash "wireguardListenPort" route)))))))
-          (gr8s.network::stop-foreign-cni-agent agent))))))
+          (gr8s.network::stop-foreign-net-agent agent))))))
 
 (test host-port-targets-filter-by-node-and-read-through-the-seam
   ;; The host-port path now reads status through the desired-state seam and can

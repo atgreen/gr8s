@@ -1393,10 +1393,11 @@ opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
       (ignore-errors (hunchentoot:stop acceptor)))
     0))
 
-(defun parse-cni-agent-options (arguments)
-  "Parse `gr8s cni-agent` options: the foreign-cluster CNI node agent
-(docs/design-foreign-cluster-networking.md)."
-  (let ((options (list :command :cni-agent)))
+(defun parse-net-agent-options (arguments)
+  "Parse `gr8s net-agent` options: the foreign-cluster network services agent
+(docs/design-foreign-cluster-networking.md). Each feature -- the CNI, the
+service LB, the Gateway -- is independently selectable; at least one must be."
+  (let ((options (list :command :net-agent :cni t)))
     (loop for (option value) on arguments by #'cddr
           do (unless value (error "~A requires a value" option))
              (cond ((equal option "--kubeconfig") (setf (getf options :kubeconfig) value))
@@ -1411,16 +1412,20 @@ opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
                     (setf (getf options :overlay-backend) value))
                    ((equal option "--wireguard-listen-port")
                     (setf (getf options :wireguard-listen-port) (parse-integer value)))
-                   ((equal option "--gateway")
+                   ((equal option "--cni")
                     ;; A flag with an explicit value keeps the pairwise parse.
+                    (setf (getf options :cni) (string= value "true")))
+                   ((equal option "--gateway")
                     (setf (getf options :gateway) (string= value "true")))
                    ((equal option "--service-lb")
                     (setf (getf options :service-lb) (string= value "true")))
-                   (t (error "unknown cni-agent option: ~A" option))))
+                   (t (error "unknown net-agent option: ~A" option))))
+    (unless (or (getf options :cni) (getf options :gateway) (getf options :service-lb))
+      (error "net-agent with --cni false needs --gateway or --service-lb"))
     options))
 
-(defun run-cni-agent-command (options)
-  "Run the foreign-cluster CNI agent until shutdown is requested."
+(defun run-net-agent-command (options)
+  "Run the foreign-cluster network services agent until shutdown is requested."
   (let ((cluster (if (getf options :kubeconfig)
                      (gr8s.kube-client:cluster-from-kubeconfig (getf options :kubeconfig))
                      (gr8s.kube-client:cluster-from-service-account)))
@@ -1429,15 +1434,17 @@ opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
                        (machine-instance)))
         (state-directory (uiop:ensure-directory-pathname
                           (or (getf options :state-directory)
-                              (merge-pathnames "cni-agent/" (default-state-directory)))))
+                              (merge-pathnames "net-agent/" (default-state-directory)))))
         (overlay-backend (or (getf options :overlay-backend) "vxlan")))
     ;; WireGuard mode generates/loads a durable node key pair up front, exactly
     ;; as native gr8s does, and advertises the public key via a Node annotation.
+    ;; The overlay is part of the CNI feature, so no key without it.
     (multiple-value-bind (wireguard-private-key wireguard-public-key)
-        (when (string= overlay-backend "wireguard")
+        (when (and (getf options :cni) (string= overlay-backend "wireguard"))
           (ensure-wireguard-key-pair state-directory))
-    (gr8s.network::run-foreign-cni-agent
+    (gr8s.network::run-foreign-net-agent
      cluster
+     :cni (getf options :cni)
      :node-name node-name
      :state-directory state-directory
      :bpf-root (or (getf options :bpf-root) "/sys/fs/bpf/gr8s")
@@ -1480,7 +1487,7 @@ opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
                          (handler-case (funcall converger)
                            (error (condition)
                              (format *error-output*
-                                     "~&gr8s cni-agent extra layer failed: ~A~%"
+                                     "~&gr8s net-agent extra layer failed: ~A~%"
                                      condition))))))
                    (let ((ordered (nreverse stoppers)))
                      (lambda () (mapc #'funcall ordered)))))))
@@ -1592,8 +1599,8 @@ needs no shell/coreutils/util-linux. Returns 0."
      (parse-serve-options (rest arguments)))
     ((string= "agent" (first arguments))
      (parse-agent-options (rest arguments)))
-    ((string= "cni-agent" (first arguments))
-     (parse-cni-agent-options (rest arguments)))
+    ((string= "net-agent" (first arguments))
+     (parse-net-agent-options (rest arguments)))
     ((string= "cni-install" (first arguments))
      (parse-cni-install-options (rest arguments)))
     ((string= "join-token" (first arguments))
@@ -2885,8 +2892,11 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
 gr8s is a self-contained Kubernetes-compatible cluster written in Common Lisp.
 `gr8s serve` runs a control plane and local agent; `gr8s agent` runs a worker;
 `gr8s witness` participates in HA quorum. The default runtime is managed
-containerd. The same executable also acts as its CNI plugin. Use kubectl for
-Kubernetes resources and gr8s commands for host/runtime administration.
+containerd. The same executable also acts as its CNI plugin, and `gr8s
+net-agent` runs that eBPF dataplane as a network services provider on a
+cluster gr8s did not create (see the foreign-cluster section below). Use
+kubectl for Kubernetes resources and gr8s commands for host/runtime
+administration.
 
 This command prints static guidance to stdout, needs no cluster or root access,
 and changes no state. Save it with `gr8s skill > gr8s-guide.md` for an agent.
@@ -2921,6 +2931,72 @@ owned by another user is the usual cause: use a root-owned path such as
 Record the launch arguments, service unit, runtime mode, overlay backend,
 node names, and state/log paths before changing a cluster. Check version
 with `gr8s version --state-directory /var/lib/gr8s`.
+
+## Networking a foreign cluster (gr8s net-agent)
+
+gr8s also runs as a network services provider for a Kubernetes cluster it did
+not create. A DaemonSet of `gr8s net-agent` Pods serves any combination of
+three independently selectable features from the Whistler eBPF dataplane:
+
+- `cni` (Helm `cni.enabled`, on by default): Pod networking and IPAM from
+  each node's `spec.podCIDR`, cross-node traffic over a VXLAN fabric or an
+  encrypted WireGuard fabric, NetworkPolicy enforced in eBPF for TCP, UDP,
+  and SCTP, and hostPort. This replaces the cluster's CNI and NetworkPolicy
+  controller.
+- `service-lb` (Helm `serviceLb.enabled`, on by default): a kube-proxy
+  replacement -- ClusterIP and NodePort Services, hostPort DNAT, and cluster
+  DNS reachability through the eBPF socket/packet load balancer.
+- `gateway` (Helm `gateway.enabled`, off by default): the Gateway API
+  (GatewayClass `gr8s.io/gateway-controller`) -- HTTPRoute routing, status,
+  and per-Gateway LoadBalancer Services.
+
+With the cni feature off, the gateway and service LB run alongside the
+cluster's incumbent CNI; they only require that Pod IPs are reachable from
+the host network, which most CNIs provide.
+
+There is no gr8s control plane, store, or state directory of cluster identity
+in this mode: desired state comes from the host cluster's API server via
+list+watch, so administer the cluster with its own kubectl. Install with the
+Helm chart in deploy/chart/gr8s-net. Disable the cluster's own CNI, NetworkPolicy
+controller, and kube-proxy only for the features that replace them (for the full
+stack on k3s: --flannel-backend=none --disable-network-policy
+--disable-kube-proxy); with `cni.enabled=false` and `serviceLb.enabled=false`
+the incumbents stay, and only the Gateway is added:
+
+    helm install gr8s-net deploy/chart/gr8s-net -n kube-system \\
+      --set apiServer.host=CONTROL_PLANE_IP \\
+      --set overlay.backend=wireguard \\
+      --set gateway.enabled=true
+
+Key values beyond the three feature toggles: `overlay.backend` (vxlan by
+default; wireguard encrypts Pod-CIDR-to-Pod-CIDR traffic only -- node and
+API-server traffic stays in the clear so the agent can bootstrap; cni feature
+only), `apiServer.host`/`apiServer.port` (required with serviceLb and no
+other proxy: the agent cannot reach the API server through the kubernetes
+Service ClusterIP that it is itself about to serve), and
+`gateway.tls.enabled` (grants cluster-wide Secret read for TLS listeners; off
+by default because it is the one grant that turns a node compromise into
+cluster-wide secret exposure).
+
+With the cni feature on, the chart's init container runs `gr8s cni-install`,
+a shell-free step that copies the binary into the host CNI bin directory,
+mounts the bpffs, and writes the conflist. The agent container runs `gr8s
+net-agent`, selecting features with --cni/--service-lb/--gateway true|false
+(--cni defaults to true; at least one feature must be on). Outside the chart
+it also accepts --kubeconfig (defaults to in-cluster ServiceAccount
+credentials), --node-name, --state-directory, --overlay-backend,
+--wireguard-listen-port, and --mtu.
+
+Troubleshooting in this mode: read the gr8s-net DaemonSet Pod logs in the
+install namespace; store-oriented gr8s commands do not apply. The service LB
+needs CAP_BPF, a mounted bpffs, and a modern kernel, and fails soft without
+them -- the cluster keeps whatever Service proxy it already runs. With the
+WireGuard backend each agent persists a key pair in its state directory and
+publishes the public key as the `gr8s.io/wireguard-public-key` Node
+annotation (this needs the nodes patch RBAC grant, which the chart gates on
+the backend); peers are built from the other Nodes' annotation, InternalIP,
+and podCIDR, so a node missing the annotation cannot join the encrypted
+fabric. Upstream conformance harnesses live in deploy/conformance/.
 
 ## First response to a failure
 
@@ -3016,7 +3092,9 @@ Do not assume Kubernetes compatibility means every upstream feature is supported
 In a source checkout, README.md and docs/building-and-testing.md cover setup;
 docs/installing.md covers systemd, upgrades, rollback, and cleanup;
 docs/runtime.md covers runtime payloads and air-gapped images;
-docs/design-gr8s-trace.md describes tracing limits and authorization.
+docs/design-gr8s-trace.md describes tracing limits and authorization;
+docs/design-foreign-cluster-networking.md describes the foreign-cluster
+CNI/Gateway design, and deploy/ holds its chart and conformance harness.
 " stream))
 
 (defun ensure-ha-pki-authority (store ha &key (timeout 30))
@@ -3300,10 +3378,10 @@ No HA API may start from member-local certificate state before this converges."
                (setf *shutdown-requested* nil)
                (install-shutdown-handlers)
                (agent options))
-              (:cni-agent
+              (:net-agent
                (setf *shutdown-requested* nil)
                (install-shutdown-handlers)
-               (run-cni-agent-command options))
+               (run-net-agent-command options))
               (:cni-install
                (run-cni-install-command options))
               (:witness
