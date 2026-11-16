@@ -54,7 +54,7 @@ version skew between components.
 | You would normally deploy | In gr8s |
 |---|---|
 | kube-apiserver, kube-controller-manager, kube-scheduler | Built in |
-| etcd | Built-in Raft datastore, with automatic checkpoints and `gr8s backup` / `gr8s restore` |
+| etcd | Built-in durable datastore, replicated with Raft for high availability; `gr8s backup` / `gr8s restore` |
 | kubelet, containerd, runc, CNI plugins | Built in; containerd, runc, and CNI plugins are embedded and started on demand |
 | CNI, kube-proxy, NetworkPolicy controller | Built-in eBPF dataplane, with VXLAN or WireGuard between nodes |
 | CoreDNS | Built-in node-local cluster DNS |
@@ -183,8 +183,10 @@ Those language capabilities support an integrated Kubernetes system:
   persistent storage, and custom resources. The
   [compatibility reference](docs/kubernetes-surface.md) lists supported behavior
   and limitations.
-- Raft replicates control-plane state without an external database. Certificates
-  authenticate node enrollment and internal communication.
+- Control-plane state lives in a built-in durable store, with no external
+  database; Raft replicates it across control-plane members for high
+  availability. Certificates authenticate node enrollment and internal
+  communication.
 - Cross-node traffic uses VXLAN by default. An optional adaptive WireGuard
   overlay selects paths between nodes. Authenticated BitTorrent v2 peers share
   verified image blobs, avoiding repeated registry downloads during multi-node
@@ -200,8 +202,8 @@ k3s is the closest comparison to gr8s. Both provide a Kubernetes-compatible
 cluster that you can operate with `kubectl`. k3s is a packaged Kubernetes
 distribution built from upstream components and familiar ecosystem add-ons.
 gr8s is an independent implementation: one native Common Lisp executable runs
-the API, controllers, scheduler, node agent, and embedded runtime. It uses its own Raft datastore and
-an eBPF dataplane rather than assembling the usual separate control-plane and
+the API, controllers, scheduler, node agent, and embedded runtime. It uses its own datastore, with Raft
+replication, and an eBPF dataplane rather than assembling the usual separate control-plane and
 networking components.
 
 That architecture gives gr8s an integrated system to explore and develop,
@@ -389,7 +391,7 @@ then select the runtime with `RuntimeClass`. See
 
 gr8s is a large, working Common Lisp system — about 120,000 lines under
 [src/](src/) spanning an API server, controllers, a scheduler, a node agent,
-a Raft store, an eBPF compiler, and a TLS stack — built to be explored from a
+a durable store with Raft replication, an eBPF compiler, and a TLS stack — built to be explored from a
 REPL while it runs.
 
 - **REPL into a live cluster.** `gr8s debug icl NODE` opens an
