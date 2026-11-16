@@ -58,7 +58,9 @@ Go, or JavaScript builds.
 ### Cutting a release
 
 1. Move the **Unreleased** entries in [`CHANGELOG.md`](../CHANGELOG.md) into a
-   dated section for the new version, and add its compare link.
+   dated section for the new version, and add its compare link. That section
+   becomes the GitHub release notes; the publish job fails if the tag has no
+   section.
 2. Pin the `gr8s-net` chart to the new image tag — `image.tag` in
    [`deploy/chart/gr8s-net/values.yaml`](../deploy/chart/gr8s-net/values.yaml)
    and `appVersion` in `Chart.yaml` — because a tag build publishes
