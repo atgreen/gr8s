@@ -22,6 +22,13 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Changed
 
+- Gateway reconciliation reuses unchanged routing and discovery data and wakes
+  promptly for committed updates, reducing repeated work as route counts grow.
+- Foreign-cluster Gateways isolate listeners, routes, and TLS material even when
+  they share ports and hostnames. Gateway HTTP handling now covers hostname
+  intersection, listener admission, backend and certificate ReferenceGrants,
+  and invalid-reference status; the recorded candidate passed all 36 Gateway
+  API v1.6.3 HTTP core conformance tests. ListenerSet support remains planned.
 - `gr8s serve` joins a control-plane cluster with the same flags as
   `gr8s agent` and `gr8s witness`: `--join HOST:PORT`, `--token`, and
   `--ca-pin`. The token is bound to `--node-name`, which also names the Raft
