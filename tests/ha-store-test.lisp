@@ -343,3 +343,112 @@
     (setf (gethash "ready" (gethash "status" after)) 1
           (gethash "mode" (gethash "spec" after)) "active")
     (is-false (gr8s.resources::core-replicated-state-equal-p before after))))
+
+;;; podster-uvs: the node-delta CAS compared whole replicated objects including
+;;; the lease clock (lastHeartbeat/leaseDeadline/readySince), which renews every
+;;; few seconds on the session-owning member. A write racing a heartbeat then
+;;; got member-dependent conflict verdicts: some replicas silently skipped the
+;;; committed delta, the stores forked, and every later delta from the forked
+;;; side conflicted forever (the observed livelock: leader stale + NotReady,
+;;; author fresh + Ready, handshakes refused ~1/s). The verdict must depend
+;;; only on stable state, and a skipped committed delta must be journaled.
+
+(test node-state-comparison-ignores-the-volatile-lease-clock
+  (with-temporary-store (store path)
+    (declare (ignorable path))
+    (gr8s.controllers::register-node
+     store (gr8s.model::make-node-record
+            :id "n1" :name "n1" :pod-cidr "10.88.1.0/24"
+            :underlay-address "192.0.2.10"))
+    (let* ((node (gethash "n1" (gr8s.store::pod-store-nodes store)))
+           (base (gr8s.store::node-replicated-object node))
+           (heartbeat-moved (gr8s.store::copy-pod-status-value base))
+           (stable-changed (gr8s.store::copy-pod-status-value base)))
+      (setf (gethash "lastHeartbeat" heartbeat-moved) 4003900000
+            (gethash "leaseDeadline" heartbeat-moved) 4003900015
+            (gethash "readySince" heartbeat-moved) 4003899000
+            (gethash "resourceVersion" heartbeat-moved) "9999")
+      (is (gr8s.store::node-object-same-state-p base heartbeat-moved)
+          "a moved lease clock is not a state difference")
+      (setf (gethash "annotations" stable-changed)
+            (gr8s.resources::core-object "example/a" "1"))
+      (is (not (gr8s.store::node-object-same-state-p base stable-changed))
+          "a real (stable) change still differs"))))
+
+(test racing-write-with-stale-lease-clock-applies-identically
+  ;; Two replicas at the same baseline apply the same committed delta whose
+  ;; expected image has an older heartbeat than current (the author built it
+  ;; before an interleaved heartbeat delta landed). Both must INSTALL it --
+  ;; and end byte-identical -- rather than skip it on whichever member's
+  ;; clock happened to differ.
+  (flet ((replica ()
+           (let ((store (gr8s.store::open-store
+                         (uiop:ensure-directory-pathname
+                          (sb-posix:mkdtemp
+                           (namestring (merge-pathnames "gr8s-replica-XXXXXX"
+                                                        (uiop:temporary-directory))))))))
+             (gr8s.controllers::register-node
+              store (gr8s.model::make-node-record
+                     :id "n1" :name "n1" :pod-cidr "10.88.1.0/24"
+                     :underlay-address "192.0.2.10"))
+             ;; Current state: a fresh heartbeat has already applied.
+             (let ((node (gethash "n1" (gr8s.store::pod-store-nodes store))))
+               (setf (gr8s.model::node-record-ready-p node) t
+                     (gr8s.model::node-record-last-heartbeat node) 4003900110
+                     (gr8s.model::node-record-lease-deadline node) 4003900125))
+             store)))
+    (let* ((a (replica)) (b (replica))
+           (current (gr8s.store::node-replicated-object
+                     (gethash "n1" (gr8s.store::pod-store-nodes a))))
+           (expected (gr8s.store::copy-pod-status-value current))
+           (object (gr8s.store::copy-pod-status-value current)))
+      ;; The author's images carry the OLDER clock it saw...
+      (dolist (image (list expected object))
+        (setf (gethash "lastHeartbeat" image) 4003900100
+              (gethash "leaseDeadline" image) 4003900115))
+      ;; ...and the write's real payload: an annotation.
+      (setf (gethash "annotations" object) (gr8s.resources::core-object "example/a" "1")
+            (gethash "resourceVersion" object) "4200")
+      (let ((delta (com.inuoe.jzon:stringify
+                    (gr8s.resources::core-object
+                     "version" 2 "resourceVersion" "4200"
+                     "changes" (vector (gr8s.resources::core-object
+                                        "name" "n1" "expected" expected "object" object))))))
+        (let ((result-a (gr8s.store::install-node-state-delta a delta))
+              (result-b (gr8s.store::install-node-state-delta b delta)))
+          (is (eq :node-ok (first result-a))
+              "a lease-clock difference alone must not refuse a committed delta")
+          (is (equal (first result-a) (first result-b))
+              "every replica reaches the same verdict")
+          (let ((view-a (gr8s.store::node-replicated-object (gethash "n1" (gr8s.store::pod-store-nodes a))))
+                (view-b (gr8s.store::node-replicated-object (gethash "n1" (gr8s.store::pod-store-nodes b)))))
+            (is (gr8s.store::json-value-equal-p view-a view-b)
+                "replicas converge")
+            (is (gethash "annotations" view-a)
+                "the write's payload was installed")))))))
+
+(test a-real-node-conflict-is-journaled-when-skipped
+  (with-temporary-store (store path)
+    (declare (ignorable path))
+    (gr8s.controllers::register-node
+     store (gr8s.model::make-node-record
+            :id "n1" :name "n1" :pod-cidr "10.88.1.0/24"
+            :underlay-address "192.0.2.10"))
+    (let* ((current (gr8s.store::node-replicated-object
+                     (gethash "n1" (gr8s.store::pod-store-nodes store))))
+           (expected (gr8s.store::copy-pod-status-value current))
+           (object (gr8s.store::copy-pod-status-value current)))
+      ;; A genuinely stale basis: expected names labels current never had.
+      (setf (gethash "labels" expected) (gr8s.resources::core-object "stale" "basis")
+            (gethash "labels" object) (gr8s.resources::core-object "new" "value"))
+      (let* ((delta (com.inuoe.jzon:stringify
+                     (gr8s.resources::core-object
+                      "version" 2 "resourceVersion" "4300"
+                      "changes" (vector (gr8s.resources::core-object
+                                         "name" "n1" "expected" expected "object" object)))))
+             (complaints (make-string-output-stream))
+             (result (let ((*error-output* complaints))
+                       (gr8s.store::install-node-state-delta store delta))))
+        (is (equal '(:node-conflict) result))
+        (is (search "n1" (get-output-stream-string complaints))
+            "a skipped committed delta is journaled, not silent")))))
