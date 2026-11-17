@@ -47,6 +47,34 @@ cp -rf source dest          # NOT: cp -r source dest
 - `apt-get` - use `-y` flag
 - `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
 
+## JSON usage and garbage minimization
+
+gr8s moves a lot of JSON (every API request, watch event, status heartbeat).
+jzon is fast; the garbage comes from intermediate copies around it. Rules:
+
+- **Parse octets, not decoded strings.** `jzon:parse` accepts UTF-8 octet
+  vectors, streams, and pathnames directly. Never write
+  `(jzon:parse (trivial-utf-8:utf-8-bytes-to-string bytes))` — pass the bytes.
+  Read request bodies with `(hunchentoot:raw-post-data :force-binary t)` when
+  the body is only parsed; keep `:force-text` only where the text itself is
+  used (the CRD duplicate-field scan, YAML, string patches).
+- **Emit to streams, not strings.** Prefer `(jzon:stringify x :stream s)`;
+  when the sink is a binary stream, wrap it once in a UTF-8 flexi-stream (see
+  the watch event writer in `src/apiserver/podtemplate-watch.lisp`). When you
+  genuinely need an octet vector, use `gr8s.resources:stringify-to-utf-8-bytes`
+  — it skips the intermediate string and returns a simple array (ironclad
+  requires simple octet vectors).
+- **Deep-copy structurally.** Copy parsed-JSON values with
+  `gr8s.resources:copy-core-object`, never by stringify-then-parse.
+- **Measure without materializing.** For size limits on serialized JSON, use
+  `trivial-utf-8:utf-8-byte-length` on the string rather than encoding to bytes.
+- **Walk models, don't re-parse your own output.** Internal consumers of a
+  response should use the parsed model (see `api-groups-object` in
+  `src/apiserver/http.lisp`), not `jzon:parse` of the serialized response.
+- **Stream big documents.** For large or incremental JSON, use
+  `jzon:with-parser`/`parse-next` and `jzon:with-writer`/`write-value`
+  (`src/resources/core-checkpoint-reader.lisp` is the house pattern).
+
 ## Testing eBPF and the native runtime as root
 
 Anything that loads BPF programs, attaches to cgroups, creates veths or runs
