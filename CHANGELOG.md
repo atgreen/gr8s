@@ -17,6 +17,11 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Changed
 
+- `gr8s doctor` gains `--fix`: pod-pool route overlaps caused by a killed
+  instance's leftovers (stale `gr8s-vxlan`/`gr8s-gateway`/`gr8s-services`
+  links, orphan pod veths) are deleted when the link is provably
+  gr8s-owned, instead of crash-looping the next startup. The startup
+  refusal now names the offending interface and points at the fix.
 - The packaged and installer-generated systemd services report readiness
   (`Type=notify`): `active` now means the API or node is serving, not
   merely that the process started, and repeated startup failures stop in

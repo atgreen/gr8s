@@ -114,3 +114,76 @@
   (let ((fails (gr8s.server::run-doctor
                 :firewall (lambda () (values t '("1025-65535/udp") '("ssh"))))))
     (is (integerp fails))))
+
+;;; podster-a5g: a killed gr8s instance leaves interfaces whose routes overlap
+;;; the pod pool, crash-looping the next startup. `doctor --fix` deletes links
+;;; it can PROVE gr8s created; everything else stays an operator decision.
+
+(test doctor-recognizes-gr8s-owned-links
+  (flet ((attrs (&key alias kind)
+           (let ((table (make-hash-table)))
+             (when alias (setf (gethash 20 table) (cl-rtnetlink::netlink-string alias)))
+             (when kind
+               (setf (gethash 18 table)
+                     (cl-rtnetlink::netlink-octets
+                      (cl-rtnetlink::netlink-attribute 1 (cl-rtnetlink::netlink-string kind)))))
+             table)))
+    (is (gr8s.server::doctor-gr8s-owned-link-p "gr8s-vxlan" (attrs)))
+    (is (gr8s.server::doctor-gr8s-owned-link-p "gr8s-services" (attrs)))
+    (is (gr8s.server::doctor-gr8s-owned-link-p
+         "anything" (attrs :alias "gr8s:vxlan:10.80.0.0/20:1:192.0.2.1"))
+        "the gr8s ownership alias marks a link whatever its name")
+    (is (gr8s.server::doctor-gr8s-owned-link-p
+         "grde05246b6b25c" (attrs :kind "veth"))
+        "an orphan gr8s pod veth is recognized by kind and name shape")
+    (is (not (gr8s.server::doctor-gr8s-owned-link-p "eth0" (attrs))))
+    (is (not (gr8s.server::doctor-gr8s-owned-link-p "grde05246b6b25c" (attrs :kind "dummy")))
+        "the veth name shape alone does not prove ownership")
+    (is (not (gr8s.server::doctor-gr8s-owned-link-p
+              "veth1234" (attrs :alias "flannel.1" :kind "veth"))))
+    (is (not (gr8s.server::doctor-gr8s-owned-link-p nil nil))
+        "a route whose link is unresolvable is never deleted")))
+
+(test doctor-fix-deletes-owned-debris-and-revalidates
+  (let* ((vxlan-attrs (let ((table (make-hash-table)))
+                        (setf (gethash 20 table) (cl-rtnetlink::netlink-string "gr8s:vxlan:x"))
+                        table))
+         (violations (list (list :cidr "10.80.0.0/32" :table 255 :index 7
+                                 :interface "gr8s-vxlan" :attributes vxlan-attrs)
+                           (list :cidr "10.80.0.1/32" :table 254 :index 8
+                                 :interface "gr8s-vxlan" :attributes vxlan-attrs)))
+         (deleted nil)
+         (calls 0))
+    ;; With --fix: delete once (deduplicated), re-validate, report clean.
+    (is (zerop (gr8s.server::doctor-check-pod-pool-routes
+                "10.80.0.0/12" #P"/tmp/x/" t
+                :violations-fn (lambda (cidr directory)
+                                 (declare (ignore cidr directory))
+                                 (incf calls)
+                                 (if (= calls 1) violations nil))
+                :deleter (lambda (name) (push name deleted)))))
+    (is (equal '("gr8s-vxlan") deleted)
+        "one shared link is deleted once, not per route")
+    ;; Without --fix: the same debris FAILs with a hint at --fix.
+    (is (= 1 (gr8s.server::doctor-check-pod-pool-routes
+              "10.80.0.0/12" #P"/tmp/x/" nil
+              :violations-fn (lambda (&rest args) (declare (ignore args)) violations)
+              :deleter (lambda (name) (push name deleted)))))
+    ;; Foreign debris is never deleted, with or without --fix.
+    (let ((foreign (list (list :cidr "10.80.9.9/32" :table 254 :index 9
+                               :interface "eth0" :attributes (make-hash-table)))))
+      (is (= 1 (gr8s.server::doctor-check-pod-pool-routes
+                "10.80.0.0/12" #P"/tmp/x/" t
+                :violations-fn (lambda (&rest args) (declare (ignore args)) foreign)
+                :deleter (lambda (name) (error "must not delete ~A" name)))))))
+  ;; A clean host stays quiet.
+  (is (zerop (gr8s.server::doctor-check-pod-pool-routes
+              "10.80.0.0/12" #P"/tmp/x/" nil
+              :violations-fn (lambda (&rest args) (declare (ignore args)) nil)
+              :deleter (lambda (name) (error "must not delete ~A" name))))))
+
+(test doctor-parses-fix-flag
+  (let ((options (gr8s.server::parse-doctor-options '("--fix"))))
+    (is (eq t (getf options :fix))))
+  (let ((options (gr8s.server::parse-doctor-options nil)))
+    (is (null (getf options :fix)))))
