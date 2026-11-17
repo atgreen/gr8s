@@ -31,6 +31,11 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- `gr8s serve --mtu N`: the Pod interface MTU handed to every node
+  (default unchanged: 1450, or 1420 for the wireguard backend). Needed
+  when the node underlay is itself a tunnel — over a WireGuard underlay
+  (MTU 1420), the default overlay frames overflow and fragment; `--mtu
+  1370` leaves room for the vxlan overhead.
 - `gr8s member`: operator-facing HA membership. `list` shows every durable
   control-plane member with role, address, leadership and contact state —
   a voter never heard from is flagged as a ghost — and `remove NAME`

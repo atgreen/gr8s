@@ -2847,3 +2847,30 @@
                                            (gr8s.controllers::get-node store "worker-b"))
                                           :key #'first :test #'string=))))))
         (gr8s.network::stop-wireguard-relay-server relay)))))
+
+;;; podster-cm3: over a tunneled underlay (WireGuard, 1420) the fixed overlay
+;;; MTU of 1450 overflows and fragments every full-size frame. serve --mtu
+;;; makes the assigned Pod MTU explicit; the defaults stay as they were.
+
+(test assigned-node-network-mtu-is-configurable-for-tunneled-underlays
+  (with-temporary-store (store path)
+    (declare (ignorable path))
+    (gr8s.controllers::register-node
+     store (gr8s.model::make-node-record
+            :id "n1" :name "n1" :pod-cidr "10.88.1.0/24"
+            :underlay-address "10.77.77.20"))
+    (flet ((assigned-mtu (&rest args)
+             (slot-value
+              (gr8s.apiserver::assigned-node-network
+               (apply #'gr8s.apiserver::%make-node-grpc-server :store store
+                      :cluster-pod-cidr "10.88.0.0/16"
+                      :cluster-pod-cidrs '("10.88.0.0/16") args)
+               "n1")
+              'gr8s.node.v1::mtu)))
+      (is (= 1450 (assigned-mtu)) "the vxlan default is unchanged")
+      (is (= 1420 (assigned-mtu :overlay-backend "wireguard"))
+          "the wireguard-backend default is unchanged")
+      (is (= 1370 (assigned-mtu :mtu 1370))
+          "an explicit MTU reaches the node network config")
+      (is (= 1370 (assigned-mtu :mtu 1370 :overlay-backend "wireguard"))
+          "an explicit MTU overrides either backend's default"))))
