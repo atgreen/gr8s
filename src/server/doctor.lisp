@@ -243,6 +243,94 @@ not provably gr8s-owned are never touched. Returns the FAIL count."
         (doctor-report :warn "pod-pool routes" (format nil "could not check: ~A" condition))
         0))))
 
+(defun doctor-interface-for-address (address &key (runner #'doctor-run))
+  "The interface holding ADDRESS, from `ip -4 -o addr`, or NIL."
+  (let ((out (funcall runner (list "ip" "-4" "-o" "addr" "show"))))
+    (loop for line in (uiop:split-string out :separator '(#\Newline))
+          for parts = (remove "" (uiop:split-string line) :test #'equal)
+          when (and (> (length parts) 3)
+                    (string= "inet" (third parts))
+                    (let ((cidr (fourth parts)))
+                      (string= address (subseq cidr 0 (or (position #\/ cidr) (length cidr))))))
+            return (second parts))))
+
+(defun doctor-zone-of-interface (interface &key (runner #'doctor-run))
+  "The firewalld zone serving INTERFACE: its assigned zone, else (values
+default-zone T) -- traffic on an unzoned interface falls into the default zone,
+which is exactly how a WireGuard mesh ends up silently dropped (podster-rnh)."
+  (multiple-value-bind (out code)
+      (funcall runner (list "firewall-cmd" (format nil "--get-zone-of-interface=~A" interface)))
+    (let ((zone (string-trim '(#\Space #\Newline) out)))
+      (if (and code (zerop code) (plusp (length zone)) (not (equal zone "no zone")))
+          (values zone nil)
+          (values (string-trim '(#\Space #\Newline)
+                               (funcall runner '("firewall-cmd" "--get-default-zone")))
+                  t)))))
+
+(defun doctor-port-admission-status (zone defaulted-p interface port-specs needed-ports)
+  "Decide the cluster-port admission check; return (values status detail hint)."
+  (let ((missing (remove-if (lambda (port)
+                              (some (lambda (spec) (doctor-port-spec-covers-p spec port))
+                                    port-specs))
+                            needed-ports)))
+    (cond
+      ((equal zone "trusted")
+       (values :ok (format nil "~A is in the trusted zone" interface) nil))
+      ((null missing)
+       (values :ok (format nil "zone ~A admits ~{~D~^, ~} on ~A" zone needed-ports interface) nil))
+      (t
+       (values :fail
+               (format nil "~A is served by zone ~A~:[~; (by default; the interface is in no zone)~], which does not admit ~{~D~^, ~}"
+                       interface zone defaulted-p missing)
+               (format nil "cluster traffic arriving on ~A is dropped; 'sudo firewall-cmd --zone=trusted --add-interface=~A --permanent && sudo firewall-cmd --reload' (member traffic is mTLS-authenticated), or admit each port: ~{--add-port=~D/tcp ~}"
+                       interface interface missing))))))
+
+(defun doctor-check-cluster-port-admission (state-directory
+                                            &key (runner #'doctor-run)
+                                                 (firewalld-active-p (gr8s.network::host-firewalld-active-p)))
+  "When this state directory is an HA member, verify the host firewall admits
+its raft, node and API ports on the interface its endpoints bind. gvision's
+join stalled for exactly this: gr8s listened on wg0 while firewalld's default
+zone dropped inbound 7000 without a trace (podster-rnh). Returns the FAIL count."
+  (let* ((path (merge-pathnames "metadata/server-ha-endpoint.json"
+                                (uiop:ensure-directory-pathname state-directory)))
+         (endpoint (and (probe-file path)
+                        (ignore-errors (com.inuoe.jzon:parse path)))))
+    (cond
+      ((null endpoint)
+       (doctor-report :ok "cluster ports" "no HA endpoint recorded; nothing to admit")
+       0)
+      ((not firewalld-active-p)
+       (doctor-report :ok "cluster ports" "no active firewalld; nothing drops them")
+       0)
+      (t
+       (let* ((host (gethash "host" endpoint))
+              (raft-port (gethash "port" endpoint))
+              (api-port (or (let ((url (gethash "apiUrl" endpoint)))
+                              (and (stringp url)
+                                   (let ((colon (position #\: url :from-end t)))
+                                     (ignore-errors (parse-integer (subseq url (1+ colon)))))))
+                            6443))
+              (needed (remove nil (list raft-port 7443 api-port)))
+              (interface (and (stringp host) (doctor-interface-for-address host :runner runner))))
+         (if (null interface)
+             (progn
+               (doctor-report :warn "cluster ports"
+                              (format nil "no interface currently holds the recorded member address ~A" host)
+                              "the member cannot serve its persisted endpoint; check the address or the interface it should live on")
+               0)
+             (multiple-value-bind (zone defaulted-p)
+                 (doctor-zone-of-interface interface :runner runner)
+               (multiple-value-bind (out code)
+                   (funcall runner (list "firewall-cmd" (format nil "--zone=~A" zone) "--list-ports"))
+                 (multiple-value-bind (status detail hint)
+                     (doctor-port-admission-status
+                      zone defaulted-p interface
+                      (and code (zerop code) (uiop:split-string (string-trim '(#\Newline) out)))
+                      needed)
+                   (doctor-report status "cluster ports" detail hint)
+                   (if (eq status :fail) 1 0))))))))))
+
 (defun run-doctor (&key (cluster-pod-cidr +default-cluster-pod-cidr+)
                         (state-directory (namestring (default-state-directory)))
                         (firewall #'doctor-firewall-state)
@@ -309,6 +397,11 @@ not provably gr8s-owned are never touched. Returns the FAIL count."
       ;; vxlan/gateway/services links or orphan pod veths) is deleted first.
       (incf fails (doctor-check-pod-pool-routes
                    cluster-pod-cidr (uiop:ensure-directory-pathname state-directory) fix))
+
+      ;; HA cluster ports vs the host firewall (podster-rnh): a member whose
+      ;; raft/node/API ports are dropped on its own listen interface stalls
+      ;; joins and replication without a single log line.
+      (incf fails (doctor-check-cluster-port-admission state-directory))
 
       ;; Host firewall vs the gateway DNS (169.254.1.1:53) — podster-sp5.
       (handler-case

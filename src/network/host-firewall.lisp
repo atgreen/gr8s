@@ -112,18 +112,20 @@
           collect (list "firewall-cmd" (format nil "~A-port=~D/tcp" verb port))))
 
 (defun ensure-control-plane-firewall
-    (node-port &key kubelet-port in-cluster-api-port relay-port-start relay-max-channels
+    (node-port &key kubelet-port in-cluster-api-port raft-port relay-port-start relay-max-channels
                       (runner #'host-firewall-run))
   "Open routable control-plane TCP listeners in an active firewalld. NODE-PORT
    admits agent enrollment; KUBELET-PORT admits the authenticated kubelet proxy
    used by metrics, logs, exec, and related node APIs; IN-CLUSTER-API-PORT admits
    the in-cluster apiserver that backs the \"kubernetes\" Service VIP, so Pods on
-   other nodes can reach it. A NIL or zero port is disabled. No-op without
-   firewalld; fail-soft. Returns T when rules were attempted."
+   other nodes can reach it; RAFT-PORT admits HA member replication and joins
+   (podster-rnh: a dropped raft port stalls a join silently). A NIL or zero port
+   is disabled. No-op without firewalld; fail-soft. Returns T when rules were
+   attempted."
   (let ((commands
           (append
            (control-plane-firewall-commands "--add" node-port kubelet-port
-                                            in-cluster-api-port)
+                                            in-cluster-api-port raft-port)
            (when (and relay-port-start relay-max-channels)
              (list
               (list "firewall-cmd"

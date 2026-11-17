@@ -187,3 +187,83 @@
     (is (eq t (getf options :fix))))
   (let ((options (gr8s.server::parse-doctor-options nil)))
     (is (null (getf options :fix)))))
+
+;;; podster-rnh: gvision's join stalled because firewalld's default zone
+;;; dropped raft :7000 arriving on the unzoned wg0 -- gr8s listened happily
+;;; and nothing logged. Doctor now maps the member's recorded endpoint to its
+;;; interface and firewalld zone and fails when the cluster ports are dropped.
+
+(defun port-admission-runner (&key (zone-of "no zone") (default "FedoraServer")
+                                   (ports "") (addr-lines "2: wlp1s0 inet 192.0.2.10/24 brd ..."))
+  (lambda (argv)
+    (let ((text (format nil "~{~A~^ ~}" argv)))
+      (cond
+        ((search "--get-zone-of-interface" text)
+         (if (equal zone-of "no zone") (values "no zone" 1) (values zone-of 0)))
+        ((search "--get-default-zone" text) (values default 0))
+        ((search "--list-ports" text) (values ports 0))
+        ((search "ip -4 -o addr" text) (values addr-lines 0))
+        (t (values "" 1))))))
+
+(test doctor-resolves-interface-and-zone-for-an-address
+  (let ((runner (port-admission-runner
+                 :addr-lines (format nil "1: lo inet 127.0.0.1/8 scope host lo~%7: wg0 inet 10.77.77.21/24 scope global wg0"))))
+    (is (equal "wg0" (gr8s.server::doctor-interface-for-address "10.77.77.21" :runner runner)))
+    (is (null (gr8s.server::doctor-interface-for-address "192.0.2.99" :runner runner))))
+  (multiple-value-bind (zone defaulted-p)
+      (gr8s.server::doctor-zone-of-interface "wg0" :runner (port-admission-runner))
+    (is (equal "FedoraServer" zone))
+    (is (eq t defaulted-p) "an unzoned interface falls to the default zone"))
+  (multiple-value-bind (zone defaulted-p)
+      (gr8s.server::doctor-zone-of-interface "wg0" :runner (port-admission-runner :zone-of "trusted"))
+    (is (equal "trusted" zone))
+    (is (null defaulted-p))))
+
+(test doctor-port-admission-decision
+  (multiple-value-bind (status detail hint)
+      (gr8s.server::doctor-port-admission-status "trusted" nil "wg0" nil '(7000 7443 6443))
+    (declare (ignorable detail))
+    (is (eq :ok status))
+    (is (null hint)))
+  (multiple-value-bind (status detail hint)
+      (gr8s.server::doctor-port-admission-status
+       "FedoraServer" t "wg0" '("7000/tcp" "7443/tcp" "6443/tcp") '(7000 7443 6443))
+    (declare (ignorable detail))
+    (is (eq :ok status))
+    (is (null hint)))
+  (multiple-value-bind (status detail hint)
+      (gr8s.server::doctor-port-admission-status
+       "FedoraServer" t "wg0" '("22/tcp") '(7000 7443 6443))
+    (is (eq :fail status))
+    (is (search "7000" detail))
+    (is (search "--zone=trusted --add-interface=wg0" hint)
+        "the hint is the exact repair command")))
+
+(test doctor-cluster-port-check-reads-the-ha-endpoint
+  (let* ((root (uiop:ensure-directory-pathname
+                (sb-posix:mkdtemp
+                 (namestring (merge-pathnames "gr8s-doctor-XXXXXX" (uiop:temporary-directory)))))))
+    (unwind-protect
+         (progn
+           ;; No endpoint: nothing to check.
+           (is (zerop (gr8s.server::doctor-check-cluster-port-admission
+                       root :runner (port-admission-runner) :firewalld-active-p t)))
+           (ensure-directories-exist (merge-pathnames "metadata/" root))
+           (with-open-file (out (merge-pathnames "metadata/server-ha-endpoint.json" root)
+                                :direction :output)
+             (write-string "{\"format\":\"gr8s-serve-ha-endpoint\",\"version\":1,\"memberId\":\"gvision\",\"host\":\"10.77.77.21\",\"port\":7000,\"apiUrl\":\"https://10.77.77.21:6443\"}" out))
+           (let ((runner (port-admission-runner
+                          :addr-lines "7: wg0 inet 10.77.77.21/24 scope global wg0")))
+             (is (= 1 (gr8s.server::doctor-check-cluster-port-admission
+                       root :runner runner :firewalld-active-p t))
+                 "dropped cluster ports on the member interface FAIL")
+             (is (zerop (gr8s.server::doctor-check-cluster-port-admission
+                         root :runner runner :firewalld-active-p nil))
+                 "without firewalld there is nothing to admit"))
+           (let ((runner (port-admission-runner
+                          :zone-of "trusted"
+                          :addr-lines "7: wg0 inet 10.77.77.21/24 scope global wg0")))
+             (is (zerop (gr8s.server::doctor-check-cluster-port-admission
+                         root :runner runner :firewalld-active-p t))
+                 "a trusted member interface passes")))
+      (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
