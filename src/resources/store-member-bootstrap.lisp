@@ -7,12 +7,19 @@
   (declare (ignore store phase descriptor)))
 
 (defun validate-store-member-bootstrap (record id role api-url)
+  "Validate a persisted bootstrap journal against this member's identity. The
+member id, role and application boundary are identity and must match. The apiURL
+is reachability, not identity -- it is where clients reach this member's API,
+which changes when the member roams to a new address (podster-1ig) -- so the
+field must be present and well-formed but its value is not pinned; API-URL
+migration is handled by the HA endpoint record and leader re-advertisement."
+  (declare (ignore api-url))
   (unless (and (hash-table-p record) (= 7 (hash-table-count record))
                (equal "gr8s-store-bootstrap" (gethash "format" record))
                (eql 1 (gethash "version" record))
                (equal id (gethash "memberID" record))
                (equal role (gethash "role" record))
-               (equal api-url (gethash "apiURL" record))
+               (stringp (gethash "apiURL" record))
                (member (gethash "phase" record) '("creating" "prepared" "published") :test #'equal))
     (error "Application WAL bootstrap identity or phase mismatch"))
   (let* ((application (gethash "application" record))

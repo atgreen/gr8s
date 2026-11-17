@@ -192,3 +192,30 @@
     (signals error (gr8s.resources::store-snapshot-artifact-reference 0 1 digest))
     (signals error (gr8s.ha::make-member-generation-validator
                     (gr8s.raft.transport::make-raft-member) 1 0 1 digest :recover t))))
+
+(test bootstrap-apiurl-is-not-pinned-as-identity
+  ;; podster-1ig: the bootstrap journal's apiURL is reachability, not identity. A
+  ;; member that roamed to a new address must still validate its published
+  ;; bootstrap -- the HA endpoint record and leader re-advertisement migrate the
+  ;; URL -- so a difference from the URL derived now is tolerated, while the
+  ;; member id and role stay pinned.
+  (flet ((record (&key (id "cp1") (role "founder") (url "https://192.168.1.5:6443"))
+           (let ((r (make-hash-table :test 'equal))
+                 (app (make-hash-table :test 'equal)))
+             (setf (gethash "index" app) 1 (gethash "term" app) 0 (gethash "sha256" app) "")
+             (setf (gethash "format" r) "gr8s-store-bootstrap" (gethash "version" r) 1
+                   (gethash "memberID" r) id (gethash "role" r) role
+                   (gethash "apiURL" r) url (gethash "phase" r) "creating"
+                   (gethash "application" r) app)
+             r)))
+    ;; A different advertised URL than the one derived now is accepted.
+    (finishes (gr8s.resources::validate-store-member-bootstrap
+               (record :url "https://192.168.1.5:6443") "cp1" "founder" "https://10.77.77.10:6443"))
+    ;; Identity -- member id and role -- is still pinned.
+    (signals error (gr8s.resources::validate-store-member-bootstrap
+                    (record :id "cp1") "cp2" "founder" "https://10.77.77.10:6443"))
+    (signals error (gr8s.resources::validate-store-member-bootstrap
+                    (record :role "founder") "cp1" "learner" "https://10.77.77.10:6443"))
+    ;; A malformed apiURL field is still rejected structurally.
+    (let ((bad (record))) (setf (gethash "apiURL" bad) 42)
+      (signals error (gr8s.resources::validate-store-member-bootstrap bad "cp1" "founder" "x")))))
