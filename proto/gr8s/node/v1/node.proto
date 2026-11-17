@@ -655,4 +655,8 @@ message JoinResponse {
   string leader_host = 3;
   uint32 leader_port = 4;
   repeated RaftMember members = 5;  // the address book, when accepted
+  // When not accepted and not a redirect: why the leader refused the
+  // admission (e.g. "change-in-flight", "role-conflict"), so the joiner
+  // can log an actionable reason instead of a bare failure.
+  string reason = 6;
 }
