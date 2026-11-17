@@ -7,6 +7,15 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ## [Unreleased]
 
+### Changed
+
+- The packaged and installer-generated systemd services report readiness
+  (`Type=notify`): `active` now means the API or node is serving, not
+  merely that the process started, and repeated startup failures stop in
+  `failed` after five attempts instead of restarting forever. The RPM/DEB
+  config files pin `--state-directory` to `/var/lib/gr8s/server` and
+  `/var/lib/gr8s/agent` rather than inheriting root's XDG default.
+
 ### Added
 
 - `gr8s status`: one screen of cluster health from anywhere a kubeconfig

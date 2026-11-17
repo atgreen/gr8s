@@ -803,6 +803,29 @@
                               arguments (constantly nil) (constantly 99)))))))
       (is (search "cni-install" output)))))
 
+(test service-manager-readiness-notification-sends-ready
+  ;; Without systemd the notification is a quiet no-op.
+  (sb-posix:unsetenv "NOTIFY_SOCKET")
+  (finishes (gr8s.server::notify-service-manager-ready))
+  (with-temporary-store (store root)
+    (declare (ignore store))
+    (let ((path (namestring (merge-pathnames "notify.sock" root)))
+          (listener (make-instance 'sb-bsd-sockets:local-socket :type :datagram)))
+      (unwind-protect
+           (progn
+             (sb-bsd-sockets:socket-bind listener path)
+             (sb-posix:setenv "NOTIFY_SOCKET" path 1)
+             (is-true (gr8s.server::notify-service-manager-ready))
+             (multiple-value-bind (buffer length)
+                 (sb-bsd-sockets:socket-receive listener nil 64)
+               (is (equal "READY=1" (subseq buffer 0 length)))))
+        (sb-posix:unsetenv "NOTIFY_SOCKET")
+        (sb-bsd-sockets:socket-close listener))))
+  ;; A dangling socket path must not error; the service keeps running.
+  (sb-posix:setenv "NOTIFY_SOCKET" "/nonexistent/notify.sock" 1)
+  (unwind-protect (finishes (gr8s.server::notify-service-manager-ready))
+    (sb-posix:unsetenv "NOTIFY_SOCKET")))
+
 (test backup-and-restore-commands-parse-and-are-discoverable
   (let ((options (gr8s.server::parse-backup-options
                   '("save" "--state-directory" "/s" "--output" "/b/out.bin" "--key-file" "/k"))))

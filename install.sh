@@ -282,9 +282,11 @@ cat >"$unit_temporary" <<EOF
 Description=gr8s Kubernetes $mode
 Wants=network-online.target
 After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
-Type=simple
+Type=notify
 EnvironmentFile=/etc/gr8s/$mode.env
 ExecStart=/usr/local/bin/gr8s \$GR8S_EXEC_ARGS
 Restart=always
