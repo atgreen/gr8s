@@ -22,6 +22,12 @@ the Kubernetes API version with a gr8s release suffix (see
   instead of immediately re-entering another 30-second drain window, and
   the Slynk debug tunnel no longer takes a store lease — so it stays
   usable precisely when the store is wedged.
+- Refusals that cross the wire now carry and log their reasons
+  (podster-ddc): a node-session handshake answered with a protocol-error
+  reports the peer's own explanation instead of a bare
+  ":PROTOCOL-ERROR"; a refused Raft admission names its reason in the
+  leader's journal and in the JoinResponse (new `reason` field), and the
+  joiner's failure message repeats it.
 
 - HA control-plane shutdown now always completes: stopping a Raft member
   bounds every worker-thread join under one deadline (10s), abandoning a

@@ -2874,3 +2874,33 @@
           "an explicit MTU reaches the node network config")
       (is (= 1370 (assigned-mtu :mtu 1370 :overlay-backend "wireguard"))
           "an explicit MTU overrides either backend's default"))))
+
+;;; podster-ddc: a protocol-error carries the server's explanation, but the
+;;; handshake's payload check used to discard it and log only ":PROTOCOL-ERROR"
+;;; -- root-causing a session refusal took live-image surgery. The mismatch
+;;; error must quote the peer's own message.
+
+(test envelope-payload-mismatch-reports-the-peers-explanation
+  (let ((envelope (gr8s.protocol::make-server-envelope
+                   :protocol-error
+                   (make-instance 'gr8s.node.v1::protocol-error
+                                  :supported-version 1 :received-version 1
+                                  :message "Conflict: Node changed before its consensus transaction committed")
+                   :sequence 1)))
+    (handler-case
+        (progn (gr8s.apiserver::node-envelope-payload envelope :hello)
+               (fail "a payload mismatch must signal"))
+      (error (condition)
+        (let ((text (princ-to-string condition)))
+          (is (search "the peer reported" text))
+          (is (search "Node changed before its consensus transaction" text)
+              "the server's explanation survives into the client error")))))
+  (let ((envelope (gr8s.protocol::make-server-envelope
+                   :hello (make-instance 'gr8s.node.v1::server-hello) :sequence 1)))
+    (handler-case
+        (progn (gr8s.apiserver::node-envelope-payload envelope :desired-state)
+               (fail "a payload mismatch must signal"))
+      (error (condition)
+        (is (search "HELLO" (princ-to-string condition))
+            "other mismatches keep naming the payload case")))
+    (finishes (gr8s.apiserver::node-envelope-payload envelope :hello))))

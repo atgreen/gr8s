@@ -212,9 +212,17 @@
           (multiple-value-bind (index accepted)
               (raft-cluster-admit-member node id host port role (and (plusp (length api-url)) api-url))
             (declare (ignore index))
+            ;; A refusal names its reason on both sides: here for the
+            ;; operator reading this leader's journal, and in the response
+            ;; for the joiner's log (podster-ddc).
+            (unless (eq t accepted)
+              (format *error-output* "~&gr8s HA: refusing join of ~A as ~(~A~): ~(~A~)~%"
+                      id role (or accepted :refused)))
             (make-instance 'gr8s.node.v1::join-response
                            :accepted (eq t accepted)
                            :leader-id (raft-node-id node)
+                           :reason (if (eq t accepted) ""
+                                       (string-downcase (symbol-name (or accepted :refused))))
                            :members (raft-cluster-address-book-members node)))))))
 
 (defun raft-cluster-address-book-members (node)
@@ -272,7 +280,8 @@
                    (< attempt max-redirects))
               (setf h (gr8s.node.v1::leader-host response)
                     p (gr8s.node.v1::leader-port response)))
-             (t (return (values nil :no-leader))))))
+             (t (return (values nil (let ((reason (gr8s.node.v1::reason response)))
+                                      (if (plusp (length reason)) reason "no-leader"))))))))
 
 (defun raft-member-propose-sync (member command &key (timeout 5))
   "Propose COMMAND on the leader and block until it commits, returning the

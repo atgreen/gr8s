@@ -843,12 +843,18 @@ the node the operation was addressed to."
         (finish-node-operation operation :error "Node disconnected")))))
 
 (defun node-envelope-payload (envelope variant)
-  "The payload ENVELOPE carries for VARIANT. Errors unless ENVELOPE's active payload
-   case is exactly VARIANT."
-  (unless (eq variant (slot-value envelope 'gr8s.node.v1::payload-case))
-    (error "Expected node-session payload ~S, received ~S"
-           variant (slot-value envelope 'gr8s.node.v1::payload-case)))
-  (slot-value envelope (find-symbol (symbol-name variant) :gr8s.node.v1)))
+  "The payload ENVELOPE carries for VARIANT. Errors unless ENVELOPE's active
+   payload case is exactly VARIANT; a protocol-error in VARIANT's place reports
+   the peer's own explanation rather than just the payload case, so a refused
+   handshake is diagnosable from the refused side's log (podster-ddc)."
+  (let ((actual (slot-value envelope 'gr8s.node.v1::payload-case)))
+    (unless (eq variant actual)
+      (if (eq actual :protocol-error)
+          (error "Expected node-session payload ~S; the peer reported: ~A"
+                 variant (slot-value (slot-value envelope 'gr8s.node.v1::protocol-error)
+                                     'gr8s.node.v1::message))
+          (error "Expected node-session payload ~S, received ~S" variant actual)))
+    (slot-value envelope (find-symbol (symbol-name variant) :gr8s.node.v1))))
 
 (defun assigned-node-network (server node-name)
   "The NodeNetworkConfig for NODE-NAME: the cluster and this node's Pod CIDRs, the

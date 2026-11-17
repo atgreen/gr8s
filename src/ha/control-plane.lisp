@@ -206,9 +206,12 @@ the cluster. Access stays gated until a current-term committed boundary applies.
            ;; reconnect using the durable address book, without enrollment tokens
            ;; or an accidental single-member configuration reset.
            (when (and join-host (eq :learner (gr8s.raft::raft-node-self-role (raft-member-node member))))
-             (unless (raft-cluster-join member join-host join-port
-                                       :node-name node-name :token token :api-url api-url)
-               (error "control plane ~A could not join the cluster at ~A:~D" id join-host join-port)))
+             (multiple-value-bind (joined reason)
+                 (raft-cluster-join member join-host join-port
+                                    :node-name node-name :token token :api-url api-url)
+               (unless joined
+                 (error "control plane ~A could not join the cluster at ~A:~D: ~A"
+                        id join-host join-port (or reason "no reason given")))))
            (raft-member-start member)
            (setf hcp (make-ha-control-plane :member member :store store
                                            :compaction-bytes compaction-bytes

@@ -64,3 +64,54 @@
                "the write replicates to both voters")
            (is (not (gr8s.raft.transport::raft-member-leader-p w)) "the witness never leads"))
       (dolist (m all) (ignore-errors (gr8s.raft.transport::stop-raft-member m))))))
+
+;;; podster-ddc: a refused admission names its reason on both sides -- the
+;;; leader's journal and the JoinResponse -- instead of a bare "could not join".
+
+(test join-refusal-carries-its-reason
+  (let* ((node (cl-raft::make-raft-node :id "leader"
+                                        :send-fn (lambda (&rest args) (declare (ignore args)))))
+         (member (gr8s.raft.transport::make-raft-member :node node)))
+    (gr8s.raft::raft-configure node '(("leader" . :voter)))
+    (setf (gr8s.raft::raft-node-role node) :leader
+          ;; Another membership change is still in flight, so admission refuses.
+          (gethash "pending" (gr8s.raft::raft-node-pending-members node)) :learner)
+    (let* ((request (make-instance 'gr8s.node.v1::join-request
+                                   :member-id "joiner" :host "10.0.0.9" :port 7000
+                                   :role "voter" :node-name "joiner"
+                                   :join-token "" :api-url ""))
+           (complaints (make-string-output-stream))
+           (response (let ((*error-output* complaints))
+                       (gr8s.raft.transport::raft-member-handle-join member request nil))))
+      (is (not (gr8s.node.v1::accepted response)))
+      (is (equal "change-in-flight" (gr8s.node.v1::reason response))
+          "the response carries the refusal reason for the joiner's log")
+      (is (search "refusing join of joiner" (get-output-stream-string complaints))
+          "the leader journals the refusal with its reason"))))
+
+(test joiner-surfaces-the-leaders-refusal-reason
+  (let* ((node (cl-raft::make-raft-node :id "joiner"
+                                        :send-fn (lambda (&rest args) (declare (ignore args)))))
+         (member (gr8s.raft.transport::make-raft-member :node node))
+         (original (symbol-function 'gr8s.raft.transport::raft-cluster-call-join)))
+    (unwind-protect
+         (progn
+           (setf (symbol-function 'gr8s.raft.transport::raft-cluster-call-join)
+                 (lambda (&rest args) (declare (ignore args))
+                   (make-instance 'gr8s.node.v1::join-response
+                                  :accepted nil :leader-id "leader"
+                                  :reason "change-in-flight")))
+           (multiple-value-bind (joined reason)
+               (gr8s.raft.transport::raft-cluster-join member "192.0.2.1" 7000)
+             (is (null joined))
+             (is (equal "change-in-flight" reason)))
+           ;; An old leader that sends no reason still reports something.
+           (setf (symbol-function 'gr8s.raft.transport::raft-cluster-call-join)
+                 (lambda (&rest args) (declare (ignore args))
+                   (make-instance 'gr8s.node.v1::join-response
+                                  :accepted nil :leader-id "")))
+           (multiple-value-bind (joined reason)
+               (gr8s.raft.transport::raft-cluster-join member "192.0.2.1" 7000)
+             (is (null joined))
+             (is (equal "no-leader" reason))))
+      (setf (symbol-function 'gr8s.raft.transport::raft-cluster-call-join) original))))
