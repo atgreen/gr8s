@@ -20,6 +20,10 @@
 
 (defstruct ha-control-plane
   member store
+  ;; The API URL this member intends to advertise, from its startup options. The
+  ;; leader reconciles the replicated config toward it so followers redirect
+  ;; clients to where the leader actually is after it roams (podster-1ig).
+  advertised-api-url
   maintenance-thread maintenance-running maintenance-error artifact-maintenance-error
   (maintenance-lock (bt:make-lock "gr8s HA maintenance"))
   (maintenance-changed (bt:make-condition-variable :name "gr8s HA maintenance"))
@@ -214,6 +218,7 @@ the cluster. Access stays gated until a current-term committed boundary applies.
                         id join-host join-port (or reason "no reason given")))))
            (raft-member-start member)
            (setf hcp (make-ha-control-plane :member member :store store
+                                           :advertised-api-url api-url
                                            :compaction-bytes compaction-bytes
                                            :compaction-entries compaction-entries
                                            :compaction-interval compaction-interval))

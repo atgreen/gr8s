@@ -23,6 +23,24 @@
       (setf (ha-control-plane-artifact-maintenance-error hcp) nil))
     removed))
 
+(defun reconcile-ha-advertised-api-url (hcp)
+  "On the leader, make the cluster's record of this member's API URL match the URL
+it now intends to advertise, so followers redirect clients to where the leader
+actually is after it has roamed to a new address (podster-1ig). Leader-gated and
+idempotent: a follower does nothing, and once the committed config matches, the
+refresh is skipped. Returns the proposal outcome, or NIL when nothing was done."
+  (let ((intended (ha-control-plane-advertised-api-url hcp)))
+    (when (and intended (ha-control-plane-leader-p hcp))
+      (multiple-value-bind (proposed reason)
+          (raft-cluster-readvertise-api-url (ha-control-plane-member hcp) intended)
+        (when (and (not proposed)
+                   reason
+                   (not (member reason '(:unchanged :not-leader :change-in-flight
+                                         :not-ready :transferring))))
+          (format *error-output* "~&gr8s HA could not re-advertise API URL ~A: ~A~%"
+                  intended reason))
+        (or proposed reason)))))
+
 (defun maintain-ha-store-once (hcp)
   "Attempt generation and artifact cleanup independently of local checkpoints."
   (unwind-protect
@@ -32,12 +50,16 @@
            (setf (ha-control-plane-maintenance-error hcp) nil))
          removed)
     ;; A generation failure must not starve independent artifact reclamation,
-    ;; and an artifact error must not hide the original generation condition.
+    ;; an artifact error must not hide the original generation condition, and
+    ;; neither must block the leader's API-URL re-advertisement.
     (handler-case (maintain-ha-artifacts-once hcp)
       (error (condition)
         (bt:with-lock-held ((ha-control-plane-maintenance-lock hcp))
           (setf (ha-control-plane-artifact-maintenance-error hcp) (princ-to-string condition)))
-        (format *error-output* "~&gr8s HA artifact maintenance failed: ~A~%" condition)))))
+        (format *error-output* "~&gr8s HA artifact maintenance failed: ~A~%" condition)))
+    (handler-case (reconcile-ha-advertised-api-url hcp)
+      (error (condition)
+        (format *error-output* "~&gr8s HA API-URL re-advertisement failed: ~A~%" condition)))))
 
 (defun start-ha-maintenance-worker (hcp &key (interval 1))
   "Run generation maintenance even when automatic Raft compaction is disabled."

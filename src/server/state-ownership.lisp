@@ -71,13 +71,23 @@ The independent patch lock also excludes agent and witness patch managers."
 (defconstant +serve-raft-default-port+ 7000)
 
 (defun serve-api-advertise-address (options)
-  "Return the stable address clients should use for this API listener."
-  (let ((listen (getf options :listen "0.0.0.0")))
-    (or (getf options :node-address)
-        (unless (member listen '("0.0.0.0" "::" "[::]") :test #'equal) listen)
-        (find-if-not (lambda (address) (uiop:string-prefix-p "127." address))
-                     (ignore-errors (gr8s.network::host-ipv4-addresses)))
-        "127.0.0.1")))
+  "Return the stable address clients should use for this API listener. Prefer the
+operator's explicit choices -- --node-address, then a non-wildcard --listen (the
+API is bound only there) -- and then --node-listen, the interface this node
+presents to the cluster (e.g. a WireGuard address chosen for roaming). Only when
+none is given fall back to the host's first non-loopback IPv4, which picks
+whatever LAN address comes first and strands other members' redirects on a stale
+address once the node roams off that network (podster-1ig)."
+  (let ((listen (getf options :listen "0.0.0.0"))
+        (node-listen (getf options :node-listen)))
+    (flet ((wildcard-p (address) (member address '("0.0.0.0" "::" "[::]") :test #'equal)))
+      (or (getf options :node-address)
+          (unless (wildcard-p listen) listen)
+          (and (stringp node-listen) (not (wildcard-p node-listen))
+               (not (uiop:string-prefix-p "127." node-listen)) node-listen)
+          (find-if-not (lambda (address) (uiop:string-prefix-p "127." address))
+                       (ignore-errors (gr8s.network::host-ipv4-addresses)))
+          "127.0.0.1"))))
 
 (defun serve-local-kubeconfig-address (options)
   "Return the address the locally generated admin kubeconfig should target. Like
@@ -124,8 +134,19 @@ https://ADDRESS:PORT' against an address the API certificate now covers."
       (gr8s.resources::core-object "format" "gr8s-serve-ha-endpoint" "version" 1
                                    "memberId" id "host" host "port" port "apiUrl" url))))
 
+(defparameter +serve-ha-endpoint-identity-keys+
+  '("format" "version" "memberId" "host" "port")
+  "The persisted HA endpoint fields that pin a member's consensus identity and so
+must not change on restart. The apiUrl is deliberately excluded: it is where
+clients reach this member's API, which changes when the member roams to a new
+address (podster-1ig), not part of its identity.")
+
 (defun check-serve-ha-endpoint (root options &key (publish t))
-  "Persist endpoint intent before opening application files or accepting RPCs."
+  "Persist endpoint intent before opening application files or accepting RPCs. The
+member id and Raft endpoint (host:port) are identity: a mismatch on restart is
+refused. The advertised API URL is not -- a roamed member may now sit at a new
+address -- so a changed URL is rewritten to the persisted record, and the HA
+layer re-advertises it to the cluster once this member leads."
   (let* ((directory (merge-pathnames "metadata/" root))
          (path (merge-pathnames "server-ha-endpoint.json" directory))
          (requested (serve-ha-endpoint-record options)))
@@ -133,9 +154,13 @@ https://ADDRESS:PORT' against an address the API certificate now covers."
     (if (gr8s.store::store-generation-stat path)
         (let ((existing (gr8s.store::read-private-generation-json path)))
           (unless (and (hash-table-p existing) (= 6 (hash-table-count existing))
-                       (loop for key being the hash-keys of requested using (hash-value value)
-                             always (equal value (gethash key existing))))
-            (error "Persisted HA identity or endpoint differs from startup options; restart with the original configuration")))
+                       (every (lambda (key)
+                                (equal (gethash key requested) (gethash key existing)))
+                              +serve-ha-endpoint-identity-keys+))
+            (error "Persisted HA member identity or Raft endpoint differs from startup options; restart with the original configuration"))
+          (when (and publish
+                     (not (equal (gethash "apiUrl" requested) (gethash "apiUrl" existing))))
+            (write-serve-state-record path requested)))
         (when publish (write-serve-state-record path requested)))))
 
 (defun check-serve-state-mode (root options)

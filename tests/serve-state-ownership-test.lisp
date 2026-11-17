@@ -189,8 +189,11 @@
                ;; A retry reuses the same descriptor, including after failure.
                (signals error (gr8s.server::serve options))
                (is (= 2 opened))
-               (dolist (change '((:raft-id "cp2") (:raft-port 7001) (:raft-listen "127.0.0.2")
-                                 (:listen "127.0.0.2") (:port 8081)))
+               ;; Identity -- the member id and its Raft endpoint -- is pinned: a
+               ;; restart changing any of these is refused, record untouched. The
+               ;; advertised API address (:listen/:port) is NOT identity and may
+               ;; change when the member roams (see the next test).
+               (dolist (change '((:raft-id "cp2") (:raft-port 7001) (:raft-listen "127.0.0.2")))
                  (let ((changed (copy-list options)))
                    (setf (getf changed (first change)) (second change))
                    (signals error (gr8s.server::run-serve-command changed))))
@@ -201,6 +204,49 @@
                             (list :state-directory root :raft-join "127.0.0.1:7000" :raft-id "cp1")
                             (lambda () :same)))))
         (setf (symbol-function 'gr8s.store::open-store) open-original)))))
+
+(test advertise-address-prefers-node-listen-over-the-host-ipv4-scan
+  ;; podster-1ig: on a WireGuard-roaming cluster the API must be advertised on the
+  ;; interface the operator chose for the cluster (--node-listen), not whatever
+  ;; LAN IPv4 the host scan happens to return first.
+  (flet ((addr (&rest options) (gr8s.server::serve-api-advertise-address options)))
+    ;; Explicit --node-address still wins outright.
+    (is (equal "10.77.77.10" (addr :node-address "10.77.77.10" :node-listen "10.77.77.99")))
+    ;; A pinned non-wildcard --listen (the API is bound only there) wins over node-listen.
+    (is (equal "192.0.2.5" (addr :listen "192.0.2.5" :node-listen "10.77.77.10")))
+    ;; Wildcard --listen (the roaming case): advertise the node's cluster interface.
+    (is (equal "10.77.77.10" (addr :listen "0.0.0.0" :node-listen "10.77.77.10")))
+    (is (equal "10.77.77.10" (addr :node-listen "10.77.77.10")))
+    ;; A loopback or wildcard --node-listen is not a real advertisement; fall through.
+    (is (not (equal "127.0.0.1" (addr :node-listen "0.0.0.0" :node-address "198.51.100.7"))))
+    (is (equal "198.51.100.7" (addr :node-listen "127.0.0.1" :node-address "198.51.100.7")))))
+
+(test ha-endpoint-tracks-a-changed-advertised-address-without-re-founding
+  ;; podster-1ig: the advertised API URL is reachability, not identity. A member
+  ;; that roams to a new address must restart with the new URL -- rewritten into
+  ;; the persisted record -- instead of being refused and forced to re-found.
+  (with-temporary-store (store root)
+    (declare (ignore store))
+    (let* ((path (merge-pathnames "metadata/server-ha-endpoint.json" root))
+           (base (list :state-directory root :raft-init t :raft-id "cp1"
+                       :raft-listen "127.0.0.1" :raft-port 7000
+                       :node-address "192.168.1.5" :port 6443)))
+      (gr8s.server::check-serve-ha-endpoint root base)
+      (let ((original (gr8s.store::read-private-generation-json path)))
+        (is (equal "https://192.168.1.5:6443" (gethash "apiUrl" original)))
+        ;; Same identity, new advertised address: accepted, and the record follows.
+        (let ((roamed (copy-list base)))
+          (setf (getf roamed :node-address) "10.77.77.10")
+          (finishes (gr8s.server::check-serve-ha-endpoint root roamed))
+          (let ((updated (gr8s.store::read-private-generation-json path)))
+            (is (equal "https://10.77.77.10:6443" (gethash "apiUrl" updated)))
+            (is (equal "cp1" (gethash "memberId" updated)))
+            (is (equal 7000 (gethash "port" updated)))))
+        ;; A changed Raft endpoint is still identity: refused.
+        (dolist (change '((:raft-id "cp2") (:raft-port 7001) (:raft-listen "127.0.0.2")))
+          (let ((changed (copy-list base)))
+            (setf (getf changed (first change)) (second change))
+            (signals error (gr8s.server::check-serve-ha-endpoint root changed))))))))
 
 (test ha-endpoint-rejects-unsafe-or-invalid-descriptors
   (dolist (failure '(:symlink :hardlink :permissions :null :extra :zero :wildcard))
