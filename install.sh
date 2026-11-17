@@ -298,6 +298,11 @@ KillMode=process
 # workloads run through control-plane restarts and upgrades (podster-1yx).
 # gr8s-killall.sh remains the way to stop workloads too.
 Delegate=yes
+# An explicit start deadline, not the host's DefaultTimeoutStartSec (45-90s),
+# so behaviour is the same everywhere. A recovering HA member waits past this
+# and extends it live via sd_notify, so a slow recovery is not restart-looped
+# as a hung start (podster-lmm).
+TimeoutStartSec=120s
 TimeoutStopSec=30s
 
 [Install]

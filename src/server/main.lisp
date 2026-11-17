@@ -66,10 +66,10 @@
     (error ()
       (error "invalid port: ~A" value))))
 
-(defun notify-service-manager-ready ()
-  "Tell a Type=notify service manager the service is now serving.
-Outside systemd (no NOTIFY_SOCKET) this is a no-op, and a notification
-failure never takes the service down with it."
+(defun notify-service-manager (message)
+  "Send one datagram MESSAGE to a Type=notify service manager (NOTIFY_SOCKET).
+Outside systemd (no NOTIFY_SOCKET) this is a no-op, and a notification failure
+never takes the service down with it. Returns true when a datagram was sent."
   (let ((name (uiop:getenv "NOTIFY_SOCKET")))
     (when (and name (plusp (length name)))
       (ignore-errors
@@ -81,9 +81,20 @@ failure never takes the service down with it."
                (progn
                  (sb-bsd-sockets:socket-connect
                   socket (if (char= #\@ (char name 0)) (subseq name 1) name))
-                 (sb-bsd-sockets:socket-send socket "READY=1" nil)
+                 (sb-bsd-sockets:socket-send socket message nil)
                  t)
             (sb-bsd-sockets:socket-close socket)))))))
+
+(defun notify-service-manager-ready ()
+  "Tell a Type=notify service manager the service is now serving."
+  (notify-service-manager "READY=1"))
+
+(defun notify-service-manager-extend-timeout (seconds)
+  "Push the current Type=notify start/stop deadline out by SECONDS from now
+(sd_notify EXTEND_TIMEOUT_USEC), so a live but still-recovering member outlasts
+TimeoutStartSec. Like a watchdog ping, it must be re-sent before it elapses."
+  (notify-service-manager
+   (format nil "EXTEND_TIMEOUT_USEC=~D" (round (* seconds 1000000)))))
 
 (defun option-value (arguments option)
   "The value following OPTION in ARGUMENTS (its second element), or signal an
@@ -2634,7 +2645,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
    journal instead of an eternally silent wait (podster-0d9)."
   (when ha
     (let ((store (ha-control-plane-store ha)) (member (ha-control-plane-member ha))
-          (next-report 0))
+          (next-report 0) (next-extend 0))
       (when (gr8s.store::store-access-blocked-p store)
         (format t "gr8s HA: waiting for committed application recovery~%")
         (finish-output))
@@ -2642,6 +2653,16 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
             do (unless (and (gr8s.raft.transport::raft-member-running member)
                             (bt:thread-alive-p (gr8s.raft.transport::raft-member-tick-thread member)))
                  (error "Raft clock stopped before application recovery completed"))
+               ;; The recovery wait is deliberately unbounded -- an operator ends a
+               ;; permanently lost quorum with --cluster-reset -- so a live, still-
+               ;; recovering member must not be killed on the Type=notify start
+               ;; timeout and restart-looped (podster-lmm). Keep pushing the start
+               ;; deadline out while we loop; the 90s extension outlasts the 20s
+               ;; re-send interval, so systemd only fires once we stop looping.
+               (when (>= (get-internal-real-time) next-extend)
+                 (notify-service-manager-extend-timeout 90)
+                 (setf next-extend (+ (get-internal-real-time)
+                                      (* 20 internal-time-units-per-second))))
                (when (>= (get-internal-real-time) next-report)
                  ;; First report after a grace period: an ordinary restart
                  ;; recovers within seconds and deserves no quorum lecture.

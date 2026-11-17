@@ -7,6 +7,21 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ## [Unreleased]
 
+### Fixed
+
+- Restarting an HA control-plane member no longer risks a restart-loop: the
+  committed-application recovery wait now extends the systemd start deadline
+  while it runs (`sd_notify EXTEND_TIMEOUT_USEC`), and the packaged and
+  installer-generated units set an explicit `TimeoutStartSec=120s` instead
+  of inheriting the host's `DefaultTimeoutStartSec` (45s on some hosts).
+  Previously a member restarted into recovery — which must wait for the
+  leader's dead-peer detection to drop its prior session (~15s) before it
+  can catch up — could overrun a 45s start timeout and, with `Restart=always`,
+  re-enter the same too-short window repeatedly without ever finishing. The
+  recovery wait is deliberately unbounded (an operator ends a permanently
+  lost quorum with `--cluster-reset`), so it now tells systemd it is still
+  making progress rather than being killed as a hung start (podster-lmm).
+
 ## [v1.37.2-gr8s.1] — 2026-11-17
 
 Second trial pre-release. Hardening from live multi-node HA operation on a
