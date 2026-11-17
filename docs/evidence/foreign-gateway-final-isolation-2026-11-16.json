@@ -1,0 +1,106 @@
+{
+  "root": "/var/tmp/gr8s-foreign-gateway-ysjet8dp",
+  "checks": [
+    "initial HTTP: distinct Gateway Service IPs",
+    "initial HTTP: both same-hostname Gateways route only their own tenant",
+    "initial HTTP: distinct private sockets",
+    "TCP to HTTP: distinct Gateway Service IPs",
+    "TCP to HTTP: both same-hostname Gateways route only their own tenant",
+    "TCP to HTTP: distinct private sockets",
+    "Protocol replacement retains both leases",
+    "Gateway recreation: distinct Gateway Service IPs",
+    "Gateway recreation: both same-hostname Gateways route only their own tenant",
+    "Gateway recreation: distinct private sockets",
+    "Recreated Gateway receives a new UID",
+    "Retired lease is not reused",
+    "Neighbor retains its lease",
+    "Gateway agent stopped gracefully",
+    "gw-ysjet8dp-a: shutdown withdraws endpoint",
+    "gw-ysjet8dp-b: shutdown withdraws endpoint",
+    "agent restart: distinct Gateway Service IPs",
+    "agent restart: both same-hostname Gateways route only their own tenant",
+    "agent restart: distinct private sockets",
+    "Agent restart preserves active leases",
+    "Old destination remains closed after restart",
+    "HTTPS certificate isolation: distinct Gateway Service IPs",
+    "HTTPS certificate isolation: both same-hostname Gateways route only their own tenant",
+    "HTTPS certificate isolation: distinct private sockets",
+    "Gateway agent stopped gracefully",
+    "HTTPS restart: distinct Gateway Service IPs",
+    "HTTPS restart: both same-hostname Gateways route only their own tenant",
+    "HTTPS restart: distinct private sockets",
+    "HTTPS restart preserves leases",
+    "Gateway agent stopped gracefully"
+  ],
+  "observations": [
+    {
+      "phase": "initial HTTP",
+      "addresses": [
+        "10.43.160.202",
+        "10.43.179.93"
+      ],
+      "ports": {
+        "gw-ysjet8dp-a": 20072,
+        "gw-ysjet8dp-b": 20073
+      }
+    },
+    {
+      "phase": "TCP to HTTP",
+      "addresses": [
+        "10.43.160.202",
+        "10.43.179.93"
+      ],
+      "ports": {
+        "gw-ysjet8dp-a": 20072,
+        "gw-ysjet8dp-b": 20073
+      }
+    },
+    {
+      "phase": "Gateway recreation",
+      "addresses": [
+        "10.43.104.6",
+        "10.43.179.93"
+      ],
+      "ports": {
+        "gw-ysjet8dp-a": 20074,
+        "gw-ysjet8dp-b": 20073
+      }
+    },
+    {
+      "phase": "agent restart",
+      "addresses": [
+        "10.43.104.6",
+        "10.43.179.93"
+      ],
+      "ports": {
+        "gw-ysjet8dp-a": 20074,
+        "gw-ysjet8dp-b": 20073
+      }
+    },
+    {
+      "phase": "HTTPS certificate isolation",
+      "addresses": [
+        "10.43.104.6",
+        "10.43.179.93"
+      ],
+      "ports": {
+        "gw-ysjet8dp-a": 20075,
+        "gw-ysjet8dp-b": 20076
+      }
+    },
+    {
+      "phase": "HTTPS restart",
+      "addresses": [
+        "10.43.104.6",
+        "10.43.179.93"
+      ],
+      "ports": {
+        "gw-ysjet8dp-a": 20075,
+        "gw-ysjet8dp-b": 20076
+      }
+    }
+  ],
+  "passed": true,
+  "candidateBinarySHA256": "80e3821279b20b498b846ff9cadd722b6f3ef54d4c2b8582a59eff46331ea109",
+  "exitCode": 0
+}

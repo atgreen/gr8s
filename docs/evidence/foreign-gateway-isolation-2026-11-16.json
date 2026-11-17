@@ -1,0 +1,193 @@
+{
+  "date": "2026-11-16",
+  "issue": "podster-p84",
+  "baseCommit": "c9cbdf8404d4c42d04a8af9b5a4c2d1b95acccb4",
+  "runtimeSource": {
+    "runtimeTreeSHA256": "9917bdea1a570b86a2170c5bc75197a6f7148de5f2bab0f3dfbd7444161fb2b2",
+    "definition": "Sorted src/**/*.lisp, proto/**/*.proto, gr8s.asd, scripts/build-native.lisp; path NUL contents NUL"
+  },
+  "candidateBinarySHA256": "b9327e5b6584a5931ce2a77b081157f01306bb67b6b7a6da8f0b2e865477c055",
+  "beforeProtocolFixBinarySHA256": "40c913db5519cfbd565821d96cd8d63dacc05a426e2de6fe8a9231e2ea220262",
+  "environment": {
+    "vmSSHPort": 22318,
+    "node": "gr8s-node1",
+    "kubernetes": "v1.37.2+k3s1",
+    "os": "Fedora 44",
+    "cpus": 4,
+    "memoryMiB": 6144,
+    "cni": "incumbent flannel",
+    "serviceForwarding": "incumbent kube-proxy",
+    "gr8sCNI": false,
+    "gr8sServiceLB": false
+  },
+  "unitSuite": {
+    "checks": 138,
+    "passed": 138,
+    "failed": 0,
+    "exit": 0,
+    "log": "/tmp/gr8s-foreign-gateway-readiness/protocol-suite.log"
+  },
+  "nativeBuild": {
+    "exit": 0,
+    "log": "/tmp/gr8s-foreign-gateway-readiness/native-build-final.log"
+  },
+  "helm": {
+    "lintExit": 0,
+    "gatewayAndDefaultTemplatesRendered": true,
+    "configMapWritesGated": true
+  },
+  "beforeProtocolFix": {
+    "exit": 1,
+    "root": "/var/tmp/gr8s-foreign-gateway-1kc0bobo",
+    "checks": [
+      "initial HTTP: distinct Gateway Service IPs",
+      "initial HTTP: both same-hostname Gateways route only their own tenant",
+      "initial HTTP: distinct private sockets",
+      "Gateway agent stopped gracefully"
+    ],
+    "observations": [
+      {
+        "phase": "initial HTTP",
+        "addresses": [
+          "10.43.251.243",
+          "10.43.34.45"
+        ],
+        "ports": {
+          "gw-1kc0bobo-a": 20000,
+          "gw-1kc0bobo-b": 20001
+        }
+      }
+    ],
+    "passed": false,
+    "error": "Timed out: gw-1kc0bobo-a serves TCP to HTTP"
+  },
+  "candidate": {
+    "exit": 0,
+    "root": "/var/tmp/gr8s-foreign-gateway-rpemo8ac",
+    "checks": [
+      "initial HTTP: distinct Gateway Service IPs",
+      "initial HTTP: both same-hostname Gateways route only their own tenant",
+      "initial HTTP: distinct private sockets",
+      "TCP to HTTP: distinct Gateway Service IPs",
+      "TCP to HTTP: both same-hostname Gateways route only their own tenant",
+      "TCP to HTTP: distinct private sockets",
+      "Protocol replacement retains both leases",
+      "Gateway recreation: distinct Gateway Service IPs",
+      "Gateway recreation: both same-hostname Gateways route only their own tenant",
+      "Gateway recreation: distinct private sockets",
+      "Recreated Gateway receives a new UID",
+      "Retired lease is not reused",
+      "Neighbor retains its lease",
+      "Gateway agent stopped gracefully",
+      "gw-rpemo8ac-a: shutdown withdraws endpoint",
+      "gw-rpemo8ac-b: shutdown withdraws endpoint",
+      "agent restart: distinct Gateway Service IPs",
+      "agent restart: both same-hostname Gateways route only their own tenant",
+      "agent restart: distinct private sockets",
+      "Agent restart preserves active leases",
+      "Old destination remains closed after restart",
+      "HTTPS certificate isolation: distinct Gateway Service IPs",
+      "HTTPS certificate isolation: both same-hostname Gateways route only their own tenant",
+      "HTTPS certificate isolation: distinct private sockets",
+      "Gateway agent stopped gracefully",
+      "HTTPS restart: distinct Gateway Service IPs",
+      "HTTPS restart: both same-hostname Gateways route only their own tenant",
+      "HTTPS restart: distinct private sockets",
+      "HTTPS restart preserves leases",
+      "Gateway agent stopped gracefully"
+    ],
+    "observations": [
+      {
+        "phase": "initial HTTP",
+        "addresses": [
+          "10.43.212.95",
+          "10.43.249.119"
+        ],
+        "ports": {
+          "gw-rpemo8ac-a": 20002,
+          "gw-rpemo8ac-b": 20003
+        }
+      },
+      {
+        "phase": "TCP to HTTP",
+        "addresses": [
+          "10.43.212.95",
+          "10.43.249.119"
+        ],
+        "ports": {
+          "gw-rpemo8ac-a": 20002,
+          "gw-rpemo8ac-b": 20003
+        }
+      },
+      {
+        "phase": "Gateway recreation",
+        "addresses": [
+          "10.43.206.169",
+          "10.43.249.119"
+        ],
+        "ports": {
+          "gw-rpemo8ac-a": 20004,
+          "gw-rpemo8ac-b": 20003
+        }
+      },
+      {
+        "phase": "agent restart",
+        "addresses": [
+          "10.43.206.169",
+          "10.43.249.119"
+        ],
+        "ports": {
+          "gw-rpemo8ac-a": 20004,
+          "gw-rpemo8ac-b": 20003
+        }
+      },
+      {
+        "phase": "HTTPS certificate isolation",
+        "addresses": [
+          "10.43.206.169",
+          "10.43.249.119"
+        ],
+        "ports": {
+          "gw-rpemo8ac-a": 20005,
+          "gw-rpemo8ac-b": 20006
+        }
+      },
+      {
+        "phase": "HTTPS restart",
+        "addresses": [
+          "10.43.206.169",
+          "10.43.249.119"
+        ],
+        "ports": {
+          "gw-rpemo8ac-a": 20005,
+          "gw-rpemo8ac-b": 20006
+        }
+      }
+    ],
+    "passed": true
+  },
+  "expectedCertificateSHA256": {
+    "gw-rpemo8ac-a.crt": "11f75e44ef4ed9ed0e3b86895dccbeafe648a6638db6c53380cd07a6b3e0a344",
+    "gw-rpemo8ac-b.crt": "c5ca62fb145f34a44ad936726148148b712957768e0185854554b8e55fc22267"
+  },
+  "archives": {
+    "build/foreign-gateway-readiness/before-evidence.tgz": "434718997f891db7b4f628e86fc8b9d26daf594fa237168f3de344cfcc24241c",
+    "build/foreign-gateway-readiness/candidate-evidence.tgz": "07fad7a3fe2ea0abc0de134e4f6f4607880abd524ef810278f61dd566e7c313d"
+  },
+  "fullProjectChecks": {
+    "status": "completed-log-verification",
+    "checks": 32869,
+    "passed": 32860,
+    "skipped": 9,
+    "failed": 0,
+    "log": "/tmp/gr8s-foreign-gateway-readiness/make-check.log",
+    "exitCode": null,
+    "exitCodeNote": "Session handle expired before retrieval. Log reaches final make check target: verify-static-runtime, which reports statically linked payload; no make error. Python install/uninstall suites report OK."
+  },
+  "limitations": [
+    "Single-node foreign-cluster validation; not gr8s CNI or gr8s Service BPF forwarding.",
+    "Gateway API conformance is separate follow-on work (podster-4om).",
+    "Gateway Programmed status remains optimistic; this report verifies observed traffic rather than relying on it.",
+    "Dedicated node ports 20000-29999 must not be used by host applications or a custom NodePort range; historical leases are retained."
+  ]
+}

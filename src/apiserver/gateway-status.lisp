@@ -127,7 +127,7 @@
   "HTTPS requires a same-namespace TLS Secret with both certificate and key."
   (if (not (equal "HTTPS" (gethash "protocol" listener))) t
       (let* ((namespace (gethash "namespace" (gethash "metadata" gateway)))
-             (ref (gr8s.controllers::gateway-listener-tls-ref namespace listener))
+             (ref (gr8s.controllers::gateway-listener-tls-ref namespace listener store))
              (secret (and ref (equal namespace (car ref))
                           (ignore-errors (get-core-resource store "secrets" (car ref) (cdr ref)))))
              (data (and secret (gethash "data" secret))))

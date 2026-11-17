@@ -1,0 +1,22 @@
+apiVersion: gateway.networking.k8s.io/v1
+date: "2026-11-16T18:36:29Z"
+gatewayAPIChannel: standard
+gatewayAPIVersion: v1.6.3
+implementation:
+  contact:
+  - https://github.com/atgreen
+  organization: atgreen
+  project: gr8s
+  url: https://github.com/atgreen/gr8s
+  version: c9cbdf8-dirty-sha256-80e3821279b20b498b846ff9cadd722b6f3ef54d4c2b8582a59eff46331ea109
+kind: ConformanceReport
+mode: default
+profiles:
+- core:
+    result: success
+    statistics:
+      Failed: 0
+      Passed: 36
+      Skipped: 0
+  name: GATEWAY-HTTP
+  summary: Core tests succeeded.

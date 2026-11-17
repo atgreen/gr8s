@@ -257,3 +257,88 @@
              (is (null *gw-backend-last*))))
       (gr8s.controllers::stop-gateway-listener gateway)
       (hunchentoot:stop backend))))
+
+(test gateway-proxy-invalid-backend-kind-does-not-resolve-a-service
+  (let ((calls 0))
+    (dolist (reference '("{\"name\":\"echo\",\"port\":80,\"kind\":\"UnknownKind\"}"
+                         "{\"name\":\"echo\",\"port\":80,\"kind\":\"Service\",\"group\":\"example.com\"}"))
+      (let* ((backend (gr8s.controllers::gw-parse-backend (com.inuoe.jzon:parse reference) "infra"))
+             (route (gr8s.controllers::make-gw-route
+                     :namespace "infra" :name "invalid"
+                     :rules (list (gr8s.controllers::make-gw-rule
+                                   :matches (list (gr8s.controllers::make-gw-match))
+                                   :backends (list backend)))))
+             (gateway (gr8s.controllers::start-gateway-listener
+                       :port 0 :router (gr8s.controllers::build-gateway-router (list route))
+                       :resolver (lambda (candidate) (declare (ignore candidate)) (incf calls) nil))))
+        (unwind-protect
+             (is (= 500 (gw-raw-request (hunchentoot:acceptor-port gateway) "any" "/")))
+          (gr8s.controllers::stop-gateway-listener gateway))))
+    (is (= 0 calls))))
+
+(test gateway-proxy-missing-service-or-port-is-an-invalid-reference
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (gr8s.resources::create-core-resource
+     store "services" (com.inuoe.jzon:parse
+                       "{\"metadata\":{\"name\":\"web\",\"namespace\":\"default\"},\"spec\":{\"ports\":[{\"port\":80}]}}") "default")
+    (dolist (reference '("{\"name\":\"missing\",\"port\":80}" "{\"name\":\"web\",\"port\":81}"))
+      (let* ((backend (gr8s.controllers::gw-parse-backend (com.inuoe.jzon:parse reference) "default"))
+             (route (gr8s.controllers::make-gw-route
+                     :namespace "default" :name "invalid"
+                     :rules (list (gr8s.controllers::make-gw-rule
+                                   :matches (list (gr8s.controllers::make-gw-match))
+                                   :backends (list backend)))))
+             (gateway (gr8s.controllers::start-gateway-listener
+                       :port 0 :router (gr8s.controllers::build-gateway-router (list route))
+                       :resolver (gr8s.controllers::make-service-backend-resolver store))))
+        (unwind-protect
+             (is (= 500 (gw-raw-request (hunchentoot:acceptor-port gateway) "any" "/")))
+          (gr8s.controllers::stop-gateway-listener gateway))))))
+
+(test gateway-cross-namespace-backend-requires-a-matching-reference-grant
+  (let* ((objects (make-hash-table :test #'equal))
+         (backend (gr8s.controllers::gw-parse-backend
+                   (com.inuoe.jzon:parse "{\"name\":\"web\",\"namespace\":\"target\",\"port\":80}") "source"))
+         (grant (com.inuoe.jzon:parse
+                 "{\"apiVersion\":\"gateway.networking.k8s.io/v1\",\"kind\":\"ReferenceGrant\",\"metadata\":{\"name\":\"allow\",\"namespace\":\"target\"},\"spec\":{\"from\":[{\"group\":\"gateway.networking.k8s.io\",\"kind\":\"HTTPRoute\",\"namespace\":\"source\"}],\"to\":[{\"group\":\"\",\"kind\":\"Service\",\"name\":\"web\"}]}}")))
+    (setf (gethash '("services" "target" "web") objects)
+          (com.inuoe.jzon:parse
+           "{\"metadata\":{\"name\":\"web\",\"namespace\":\"target\"},\"spec\":{\"clusterIP\":\"10.96.0.40\",\"ports\":[{\"port\":80}]}}"))
+    (flet ((check (allowed)
+             (let ((view (gr8s.agent::make-gateway-projection-store (gr8s.agent::gateway-resource-index objects))))
+               (multiple-value-bind (host port reason)
+                   (gr8s.controllers::resolve-gateway-backend backend (gr8s.controllers::make-service-backend-resolver view))
+                 (declare (ignore port))
+                 (is (eq allowed (not (null host))))
+                 (is (equal (unless allowed "RefNotPermitted") reason))))))
+      (check nil)
+      (setf (gethash '("referencegrants" "target" "allow") objects) grant)
+      (check t)
+      (dolist (case '(("from" "namespace" "other") ("from" "kind" "Gateway")
+                      ("from" "group" "example.com") ("to" "kind" "Secret")
+                      ("to" "group" "example.com") ("to" "name" "different")))
+        (destructuring-bind (side key value) case
+          (let* ((copy (gr8s.resources::copy-core-object grant))
+                 (entry (aref (gethash side (gethash "spec" copy)) 0)))
+            (setf (gethash key entry) value
+                  (gethash '("referencegrants" "target" "allow") objects) copy)
+            (check nil))))
+      (let ((copy (gr8s.resources::copy-core-object grant)))
+        (remhash "name" (aref (gethash "to" (gethash "spec" copy)) 0))
+        (setf (gethash '("referencegrants" "target" "allow") objects) copy)
+        (check t))
+      (remhash '("referencegrants" "target" "allow") objects)
+      (check nil))))
+
+(test gateway-reference-grant-does-not-confuse-http-and-tcp-routes
+  (let* ((objects (make-hash-table :test #'equal))
+         (route (com.inuoe.jzon:parse
+                 "{\"kind\":\"TCPRoute\",\"metadata\":{\"namespace\":\"source\"},\"spec\":{\"rules\":[{\"backendRefs\":[{\"name\":\"web\",\"namespace\":\"target\",\"port\":80}]}]}}"))
+         (backend (first (gr8s.controllers::l4-tcp-route-backends (gr8s.controllers::parse-tcproute route)))))
+    (setf (gethash '("services" "target" "web") objects)
+          (com.inuoe.jzon:parse "{\"spec\":{\"clusterIP\":\"10.96.0.40\",\"ports\":[{\"port\":80}]}}")
+          (gethash '("referencegrants" "target" "allow") objects)
+          (com.inuoe.jzon:parse "{\"spec\":{\"from\":[{\"group\":\"gateway.networking.k8s.io\",\"kind\":\"HTTPRoute\",\"namespace\":\"source\"}],\"to\":[{\"group\":\"\",\"kind\":\"Service\"}]}}"))
+    (let ((view (gr8s.agent::make-gateway-projection-store (gr8s.agent::gateway-resource-index objects))))
+      (is (equal "RefNotPermitted" (gr8s.controllers::gateway-backend-reference-error view backend))))))

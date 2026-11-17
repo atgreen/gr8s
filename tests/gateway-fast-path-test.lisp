@@ -127,6 +127,37 @@
            (create-pod store (parse-pod *valid-pod-json*))
            (is (not (eq changed (gr8s.kubelet::service-discovery-projection store))))))))))
 
+(test discovery-unchanged-repair-skips-projection-building
+  (with-temporary-store (store path)
+    (values path)
+    (gwc-seed store)
+    (let ((original (symbol-function 'gr8s.kubelet::build-service-discovery-projection))
+          (builds 0))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s.kubelet::build-service-discovery-projection)
+                   (lambda (&rest arguments) (incf builds) (apply original arguments)))
+             (let* ((first (gr8s.kubelet::service-discovery-projection store))
+                    (again (gr8s.kubelet::service-discovery-projection store)))
+               (is (= 1 builds))
+               (is (every #'eq first again))
+               ;; Callers own their list spine; replacing an entry must not poison reuse.
+               (setf (car first) nil)
+               (is (equalp again (gr8s.kubelet::service-discovery-projection store)))
+               (is (= 1 builds))))
+        (setf (symbol-function 'gr8s.kubelet::build-service-discovery-projection) original)))))
+
+(test discovery-reuse-preserves-dependency-fence-and-empty-projections
+  (with-temporary-store (store path)
+    (values path)
+    (multiple-value-bind (rows revision) (gr8s.kubelet::service-discovery-projection store)
+      (is (null rows))
+      (gr8s.store::with-store-lock (store)
+        (incf (gr8s.store::pod-store-gateway-dependency-revision store)))
+      (multiple-value-bind (next next-revision) (gr8s.kubelet::service-discovery-projection store)
+        (is (null next))
+        (is (= (1+ revision) next-revision))))))
+
 (test discovery-repair-reuses-unchanged-encoded-rows-across-passes
   (with-temporary-store (store path)
     (values path)
@@ -158,7 +189,8 @@
         (is (not (gethash old (gr8s.store::pod-store-discovery-encoding-cache store))))
         (is (= (length projection) (hash-table-count (gr8s.store::pod-store-discovery-encoding-cache store)))))
       (gr8s.store::reset-store-application store)
-      (is (null (gr8s.store::pod-store-discovery-encoding-cache store))))))
+      (is (null (gr8s.store::pod-store-discovery-encoding-cache store)))
+      (is (null (gr8s.store::pod-store-discovery-projection-cache store))))))
 
 (test discovery-encoding-rechecks-tls-rotation-and-reference-removal
   (with-temporary-store (store path)
@@ -168,7 +200,8 @@
                (gethash '("secrets" "default" "web-tls")
                         (gr8s.kubelet::decode-service-discovery-projection
                          (gr8s.kubelet::service-discovery-projection store)))))
-      (is (equal "Y2VydA==" (gethash "tls.crt" (gethash "data" (secret)))))
+      (is (equal (gethash "tls.crt" (gethash "data" (gateway-test-tls-secret "web-tls")))
+                 (gethash "tls.crt" (gethash "data" (secret)))))
       (gr8s.resources::update-core-resource
        store "secrets" "default" "web-tls"
        (lambda (object) (setf (gethash "tls.crt" (gethash "data" object)) "bmV3LWNlcnQ=") object))
@@ -217,6 +250,10 @@
     (values path)
     (gwc-seed store)
     (gr8s.kubelet::service-discovery-projection store)
+    ;; Force a cache miss before pausing a captured build.
+    (gr8s.resources::update-core-resource
+     store "httproutes" "default" "app"
+     (lambda (object) (setf (gethash "hostnames" (gethash "spec" object)) #("before.example.com")) object))
     (let ((original (symbol-function 'gr8s.kubelet::build-service-discovery-projection))
           (lock (bt:make-lock "projection capture test")) (changed (bt:make-condition-variable))
           (pause-next t) (waiting nil) (release nil) (thread nil) (old-result nil) (failure nil))
@@ -238,6 +275,52 @@
              (gr8s.resources::update-core-resource
               store "httproutes" "default" "app"
               (lambda (object) (setf (gethash "hostnames" (gethash "spec" object)) #("concurrent.example.com")) object))
+             (let ((new-result (gr8s.kubelet::service-discovery-projection store)))
+               (bt:with-lock-held (lock) (setf release t) (bt:condition-notify changed))
+               (bt:join-thread thread)
+               (is (null failure))
+               (is (not (equalp old-result new-result)))
+               (is (every #'eq new-result (gr8s.kubelet::service-discovery-projection store)))
+               (is (equalp new-result (funcall original (gr8s.kubelet::capture-service-discovery-store store))))))
+        (bt:with-lock-held (lock) (setf release t) (bt:condition-notify changed))
+        (when (and thread (bt:thread-alive-p thread)) (bt:join-thread thread))
+        (setf (symbol-function 'gr8s.kubelet::build-service-discovery-projection) original)))))
+
+(test discovery-concurrent-status-captures-do-not-poison-reuse
+  (with-temporary-store (store path)
+    (values path)
+    (gr8s.resources::create-core-resource
+     store "networkpolicies"
+     (npr-policy "default" "{\"podSelector\":{},\"ingress\":[{\"from\":[{\"podSelector\":{}}]}]}") "default")
+    (create-pod store (parse-pod *valid-pod-json*))
+    (gr8s.kubelet::service-discovery-projection store)
+    ;; Observations become visible before the watch revision advances.
+    (let ((pod (first (list-pods store))))
+      (gr8s.store::with-store-lock (store)
+        (setf (gethash (pod-uid pod) (gr8s.store::pod-store-pod-observed-statuses store))
+              (gr8s.resources::core-object "podIP" "10.80.0.7" "phase" "Running"))))
+    (let ((original (symbol-function 'gr8s.kubelet::build-service-discovery-projection))
+          (lock (bt:make-lock "projection capture test")) (changed (bt:make-condition-variable))
+          (pause-next t) (waiting nil) (release nil) (thread nil) (old-result nil) (failure nil))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s.kubelet::build-service-discovery-projection)
+                   (lambda (&rest arguments)
+                     (bt:with-lock-held (lock)
+                       (when pause-next
+                         (setf pause-next nil waiting t)
+                         (loop until release do (bt:condition-wait changed lock))))
+                     (apply original arguments)))
+             (setf thread
+                   (bt:make-thread (lambda ()
+                                     (handler-case
+                                         (setf old-result (gr8s.kubelet::service-discovery-projection store))
+                                       (error (condition) (setf failure condition))))))
+             (is (poll-until (lambda () (bt:with-lock-held (lock) waiting)) :timeout 5))
+             (let ((pod (first (list-pods store))))
+               (gr8s.store::with-store-lock (store)
+                 (setf (gethash (pod-uid pod) (gr8s.store::pod-store-pod-observed-statuses store))
+                       (gr8s.resources::core-object "podIP" "10.80.0.8" "phase" "Running"))))
              (let ((new-result (gr8s.kubelet::service-discovery-projection store)))
                (bt:with-lock-held (lock) (setf release t) (bt:condition-notify changed))
                (bt:join-thread thread)

@@ -59,6 +59,28 @@ writing Gateway/HTTPRoute status — is done by whichever agent holds a
 `coordination.k8s.io` Lease. The writes are idempotent create-or-update
 under optimistic concurrency, so leadership handoff mid-write is safe.
 
+Each Gateway UID has its own controller and routing tables on every node.
+Its selectorless Service keeps the public listener ports; node-specific
+EndpointSlices point those ports at private node sockets. Two Gateways can
+therefore share public ports and hostnames without sharing a routing table.
+
+Private TCP ports use the dedicated node range **20000–29999**. Keep hostPort,
+host-network applications, and any custom Service NodePort range outside it.
+The agent rejects an overlapping host ephemeral range at startup and refuses
+legacy Ingress listeners in this range. These host port assignments must remain
+in effect across agent restarts.
+
+Each node stores port assignments in a `gr8s-gateway-ports-*` ConfigMap in the
+leader-lease namespace (`kube-system` by default). Assignments are keyed by
+Gateway UID and public port, survive listener replacement, and are never
+recycled when a Gateway is deleted: delayed forwarding rules must never send
+one Gateway's traffic to another Gateway. The local persistent
+`gateway-certs/port-ledger.uid` file pins the ConfigMap identity. A missing or
+replaced ledger fails closed after that pin exists. Preserve both the ConfigMap
+and the agent's host-mounted state directory; deleting them is not a supported
+way to free ports. The range holds 10,000 historical assignments per node;
+exhaustion rejects new assignments instead of recycling old ones.
+
 A separate operator Deployment was considered and rejected: our cluster-wide
 residue is too small to justify a second deployable. IPAM comes from
 `node.spec.podCIDR`; Gateway API CRDs are installed by the cluster

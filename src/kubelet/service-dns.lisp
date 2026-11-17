@@ -11,8 +11,8 @@
   "Copy only public DNS fields; exclude arbitrary annotations and unrelated resources."
   (let* ((kind (gethash "kind" object)) (source (gethash "metadata" object))
          (metadata (core-object)) (result (core-object)))
-    (unless (member kind '("Service" "EndpointSlice" "NetworkPolicy" "Ingress" "IngressClass"
-                           "GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute"
+    (unless (member kind '("Namespace" "Service" "EndpointSlice" "NetworkPolicy" "Ingress" "IngressClass"
+                           "GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute" "ReferenceGrant"
                            "Secret" "ClusterTrustBundle" "PodCertificateRequest") :test #'equal)
       (invalid-pod "unsupported public Service discovery kind"))
     (dolist (key '("name" "namespace" "uid" "resourceVersion"))
@@ -25,17 +25,20 @@
       (multiple-value-bind (value present) (gethash "service.kubernetes.io/headless" (gethash "labels" source (core-object)))
         (when present (setf (gethash "service.kubernetes.io/headless" (gethash "labels" metadata)) value))))
     (setf (gethash "kind" result) kind
-          (gethash "apiVersion" result) (cond ((equal kind "Service") "v1")
+          (gethash "apiVersion" result) (cond ((member kind '("Namespace" "Service") :test #'equal) "v1")
                                               ((equal kind "Secret") "v1")
                                               ((equal kind "ClusterTrustBundle") "certificates.k8s.io/v1")
                                               ((equal kind "PodCertificateRequest") "certificates.k8s.io/v1")
                                               ((member kind '("NetworkPolicy" "Ingress" "IngressClass") :test #'equal)
                                                "networking.k8s.io/v1")
-                                              ((member kind '("GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute") :test #'equal)
+                                              ((member kind '("GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute" "ReferenceGrant") :test #'equal)
                                                "gateway.networking.k8s.io/v1")
                                               (t "discovery.k8s.io/v1"))
           (gethash "metadata" result) metadata)
     (cond
+      ((equal kind "Namespace")
+       (when (gethash "labels" source)
+         (setf (gethash "labels" metadata) (copy-core-object (gethash "labels" source)))))
       ((equal kind "Service")
        (let ((spec (core-object)))
          ;; What the node's Service proxy needs, as kube-proxy reads it.
@@ -71,7 +74,7 @@
        ;; policyTypes, and rules whose peers are addresses. The node needs nothing else.
        (setf (gethash "spec" result) (copy-core-object (gethash "spec" object))))
       ((member kind '("Ingress" "IngressClass"
-                      "GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute") :test #'equal)
+                      "GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute" "ReferenceGrant") :test #'equal)
        ;; The agent's Gateway controller reconciles these into L7 proxy listeners,
        ;; so it needs the full spec (controllerName / listeners / parentRefs+rules).
        (setf (gethash "spec" result) (copy-core-object (gethash "spec" object)))
@@ -142,6 +145,9 @@
                                 (name (gethash "name" ref))
                                 (namespace (or (gethash "namespace" ref) gateway-namespace)))
                            (when (and (equal kind "Secret") name
+                                      (equal (or (gethash "group" ref) "") "")
+                                      (gr8s.controllers::gateway-reference-permitted-p
+                                       store gateway-namespace "Gateway" namespace "Secret" name)
                                       (not (gethash (cons namespace name) seen)))
                              (setf (gethash (cons namespace name) seen) t)
                              (let ((secret (ignore-errors
@@ -176,12 +182,14 @@
                    using (hash-value object)
                    when (equal resource (first key)) collect object)))
     (let* ((next-cache (make-hash-table :test 'eq))
-           (rows (append (objects "services")
+           (rows (append (objects "namespaces")
+                          (objects "services")
                           (objects "endpointslices")
-                          ;; Resolved against the cluster's Pods and Namespaces, which nodes do not see.
+                          ;; NetworkPolicy selectors are resolved against cluster Pods and Namespaces.
                           (network-policy-projection store)
                           (objects "ingressclasses")
                           (objects "ingresses")
+                          (objects "referencegrants")
                           (objects "gatewayclasses")
                           (objects "gateways")
                           (objects "httproutes")
@@ -216,10 +224,10 @@
   (let ((*discovery-projection-cache* (or *discovery-projection-cache* (make-hash-table :test 'eq))))
     (funcall function)))
 
-(defun discovery-projection-stamp (store)
-  (with-store-lock (store)
-    (list (pod-store-resources store) (pod-store-resource-revision store)
-          (gr8s.store::pod-store-pod-revision store))))
+(defun discovery-projection-stamp-unlocked (store)
+  (list (pod-store-resources store) (pod-store-resource-revision store)
+        (gr8s.store::pod-store-pod-revision store)
+        (gr8s.store::pod-store-gateway-dependency-revision store)))
 
 (defun capture-service-discovery-store (store)
   "Capture immutable resource rows and the Pod indexes needed for policy resolution."
@@ -238,26 +246,50 @@
             (alexandria:copy-hash-table (gr8s.store::pod-store-pod-observed-phases store))
             (gr8s.store::pod-store-pod-observed-resource-versions view)
             (alexandria:copy-hash-table (gr8s.store::pod-store-pod-observed-resource-versions store)))
-      (values view (gr8s.store::pod-store-discovery-encoding-cache store)))))
+      (values view (gr8s.store::pod-store-discovery-encoding-cache store)
+              (discovery-projection-stamp-unlocked store)))))
+
+(defun discovery-projection-current-p (store cached stamp)
+  "Caller holds STORE's lock. Observations can change before the Pod watch revision."
+  (and cached (equal stamp (first cached))
+       (let ((observed (gr8s.store::pod-store-pod-observed-statuses store))
+             (captured (fourth cached)))
+         (and (= (hash-table-count observed) (hash-table-count captured))
+              (loop for uid being the hash-keys of observed using (hash-value status)
+                    always (eq status (gethash uid captured)))))))
 
 (defun service-discovery-projection (store)
-  "Capture coherent inputs; reuse unchanged row encodings across repair passes."
-  (let* ((stamp (discovery-projection-stamp store))
-         (cached (and *discovery-projection-cache* (gethash store *discovery-projection-cache*))))
-    (if (and cached (equal stamp (car cached)))
-        (values (second cached) (third cached))
-        (multiple-value-bind (view previous-cache) (capture-service-discovery-store store)
-          (multiple-value-bind (projection next-cache)
-              (build-service-discovery-projection view previous-cache)
-            (with-store-lock (store)
-              ;; Concurrent captures may finish out of order. Never overwrite a
-              ;; cache published since our capture; a miss only costs re-encoding.
-              (when (eq previous-cache (gr8s.store::pod-store-discovery-encoding-cache store))
-                (setf (gr8s.store::pod-store-discovery-encoding-cache store) next-cache)))
-            (let ((dependency-revision (gr8s.store::pod-store-gateway-dependency-revision view)))
-              (when (and *discovery-projection-cache* (equal stamp (discovery-projection-stamp store)))
-                (setf (gethash store *discovery-projection-cache*) (list stamp projection dependency-revision)))
-              (values projection dependency-revision)))))))
+  "Reuse a coherent projection while all resource and Pod inputs remain unchanged."
+  (with-store-lock (store)
+    (let* ((stamp (discovery-projection-stamp-unlocked store))
+           (pass-cache (and *discovery-projection-cache*
+                            (gethash store *discovery-projection-cache*)))
+           (cached (gr8s.store::pod-store-discovery-projection-cache store)))
+      (when (discovery-projection-current-p store pass-cache stamp)
+        (return-from service-discovery-projection (values (second pass-cache) (third pass-cache))))
+      (when (discovery-projection-current-p store cached stamp)
+        ;; Keep the retained list private; encoded byte vectors are immutable.
+        (let ((projection (copy-list (second cached))))
+          (when *discovery-projection-cache*
+            (setf (gethash store *discovery-projection-cache*)
+                  (list stamp projection (third cached) (fourth cached))))
+          (return-from service-discovery-projection (values projection (third cached)))))))
+  (multiple-value-bind (view previous-cache stamp) (capture-service-discovery-store store)
+    (multiple-value-bind (projection next-cache) (build-service-discovery-projection view previous-cache)
+      (let* ((dependency-revision (gr8s.store::pod-store-gateway-dependency-revision view))
+             (cached (list stamp projection dependency-revision
+                           (gr8s.store::pod-store-pod-observed-statuses view))))
+        (with-store-lock (store)
+          ;; A slower capture must not replace a newer published projection.
+          (when (discovery-projection-current-p store cached (discovery-projection-stamp-unlocked store))
+            (setf (gr8s.store::pod-store-discovery-projection-cache store) cached))
+          (when (eq previous-cache (gr8s.store::pod-store-discovery-encoding-cache store))
+            (setf (gr8s.store::pod-store-discovery-encoding-cache store) next-cache)))
+        (let ((result (copy-list projection)))
+          (when *discovery-projection-cache*
+            (setf (gethash store *discovery-projection-cache*)
+                  (list stamp result dependency-revision (fourth cached))))
+          (values result dependency-revision))))))
 
 (defun decode-service-discovery-entry (bytes)
   "Validate one public discovery entry and return its resource key and object."
@@ -266,10 +298,12 @@
            (public (service-discovery-public-object object))
            (metadata (gethash "metadata" public))
            (namespace (gethash "namespace" metadata)) (name (gethash "name" metadata))
-           (resource (cond ((equal "Service" (gethash "kind" public)) "services")
+           (resource (cond ((equal "Namespace" (gethash "kind" public)) "namespaces")
+                           ((equal "Service" (gethash "kind" public)) "services")
                            ((equal "NetworkPolicy" (gethash "kind" public)) "networkpolicies")
                            ((equal "IngressClass" (gethash "kind" public)) "ingressclasses")
                            ((equal "Ingress" (gethash "kind" public)) "ingresses")
+                           ((equal "ReferenceGrant" (gethash "kind" public)) "referencegrants")
                            ((equal "GatewayClass" (gethash "kind" public)) "gatewayclasses")
                            ((equal "Gateway" (gethash "kind" public)) "gateways")
                            ((equal "HTTPRoute" (gethash "kind" public)) "httproutes")
@@ -283,7 +317,7 @@
       (unless (and (stringp name) (plusp (length name))
                    ;; GatewayClass, IngressClass and ClusterTrustBundle are cluster-scoped (no
                    ;; namespace); all others are namespaced.
-                   (if (member resource '("gatewayclasses" "ingressclasses" "clustertrustbundles") :test #'equal)
+                   (if (member resource '("namespaces" "gatewayclasses" "ingressclasses" "clustertrustbundles") :test #'equal)
                        (null namespace) (dns-label-p namespace)))
         (invalid-pod "public Service discovery metadata is invalid"))
       (cons (core-resource-key resource namespace name) public)))

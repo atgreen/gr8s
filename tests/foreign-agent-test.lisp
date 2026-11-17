@@ -222,7 +222,7 @@ since gr8s itself creates the interface."
     (multiple-value-bind (origin-port stop-origin) (foreign-gateway-test-origin)
       (let* ((cluster (kube-test-cluster))
              (gateway-port (foreign-gateway-free-port))
-             (resolved-address nil)
+             (resolved-address nil) (front-port nil)
              (agent
                (gr8s.network::start-foreign-net-agent
                 cluster :node-name "worker-f"
@@ -290,11 +290,41 @@ since gr8s itself creates the interface."
 \"spec\":{\"parentRefs\":[{\"name\":\"web\"}],\"rules\":[{\"backendRefs\":[{\"name\":\"app-svc\",\"port\":80}]}]}}"))
                (is (poll-until
                     (lambda ()
+                      (let ((slice (find "gr8s-gateway-web"
+                                         (gr8s.resources::list-core-resources store "endpointslices" "default")
+                                         :test #'equal
+                                         :key (lambda (object)
+                                                (gethash "kubernetes.io/service-name"
+                                                         (gethash "labels" (gethash "metadata" object)
+                                                                  (make-hash-table :test #'equal)))))))
+                        (when slice
+                          (setf front-port (gethash "port" (aref (gethash "ports" slice) 0))))))
+                    :timeout 5)
+                   "the Gateway Service points to this node's isolated listener")
+               (let ((ledger
+                       (find "worker-f" (gr8s.resources::list-core-resources store "configmaps" "default")
+                             :test #'equal
+                             :key (lambda (object)
+                                    (gethash "gr8s.io/gateway-node"
+                                             (gethash "annotations" (gethash "metadata" object)
+                                                      (make-hash-table)))))))
+                 (is (not (null ledger)) "The advertised socket has a durable port lease")
+                 (when ledger
+                   (is (find (write-to-string front-port)
+                             (loop for key being the hash-keys of (gethash "data" ledger)
+                                     using (hash-value value)
+                                   unless (equal key "next-port") collect value)
+                             :test #'equal))
+                   (is (equal (gethash "uid" (gethash "metadata" ledger))
+                              (uiop:read-file-string
+                               (merge-pathnames "gateway-certs/port-ledger.uid" path))))))
+               (is (poll-until
+                    (lambda ()
                       (ignore-errors
                         (equal "origin-ok"
                                (map 'string #'code-char
                                     (drakma:http-request
-                                     (format nil "http://127.0.0.1:~D/" gateway-port)
+                                     (format nil "http://127.0.0.1:~D/" (or front-port gateway-port))
                                      :force-binary t)))))
                     :timeout 30)
                    "the gateway listener routes to the Service's endpoint")
@@ -318,7 +348,7 @@ since gr8s itself creates the interface."
                                  (plusp (length (gethash "addresses"
                                                          (gethash "status" gateway) #())))))))
                       :timeout 30)
-                     "the lease-holder programs Gateway status with node addresses")
+                     "the lease-holder programs Gateway status with its Service address")
                  (is (poll-until
                       (lambda ()
                         (ignore-errors
@@ -344,9 +374,71 @@ since gr8s itself creates the interface."
                                                              :namespace "default"
                                                              :name "gr8s-gateway-web")))))))
                       :timeout 30)
-                     "the lease-holder provisions the fronting LoadBalancer Service")))
-          (gr8s.network::stop-foreign-net-agent agent)
+                     "the lease-holder provisions the fronting LoadBalancer Service"))
+               (gr8s.network::stop-foreign-net-agent agent)
+               (setf agent nil)
+               (let ((remaining (gr8s.resources::list-core-resources store "endpointslices" "default")))
+                 (is (= 1 (length remaining)) "Shutdown withdraws the Gateway endpoint only")
+                 (is (equal "app-svc-1" (gethash "name" (gethash "metadata" (first remaining)))))))
+          (when agent (gr8s.network::stop-foreign-net-agent agent))
           (funcall stop-origin))))))
+
+(test foreign-gateways-on-the-same-port-have-separate-routing-tables
+  (with-temporary-store (store path)
+    (gwc-seed store)
+    (dolist (resource '("gateways" "httproutes"))
+      (let* ((name (if (equal resource "gateways") "web" "app"))
+             (object (gr8s.resources::get-core-resource store resource "default" name)))
+        (setf (gethash "metadata" object)
+              (gr8s.resources::core-object "name" name "namespace" "tenant-b"))
+        (gr8s.resources::create-core-resource store resource object "tenant-b")))
+    (let ((original (symbol-function 'gr8s.controllers::start-gateway-listener))
+          (handles nil) (stop nil))
+      (unwind-protect
+           (progn
+             ;; Bind real sockets on free test ports; retain the production routers.
+             (setf (symbol-function 'gr8s.controllers::start-gateway-listener)
+                   (lambda (&rest arguments)
+                     (setf (getf arguments :port) 0 (getf arguments :address) "127.0.0.1")
+                     (let ((handle (apply original arguments)))
+                       (push handle handles)
+                       handle)))
+             (multiple-value-bind (converge stopper)
+                 (gr8s.controllers:start-foreign-gateway
+                  store :cert-dir (merge-pathnames "certs/" path))
+               (setf stop stopper)
+               (funcall converge)
+               (is (= 2 (length handles))
+                   "same-port Gateways must own separate listener/router instances")
+               (is (equal '("default" "tenant-b")
+                          (sort (mapcar
+                                 (lambda (handle)
+                                   (let ((dispatch (funcall (gr8s.controllers::gateway-acceptor-router handle)
+                                                            "app.example.com" "/" "GET" nil)))
+                                     (gr8s.controllers::gw-backend-namespace
+                                      (gr8s.controllers::gw-dispatch-backend dispatch))))
+                                 handles)
+                                #'string<))
+                   "each Gateway's identical hostname resolves within its own route namespace")))
+        (when stop (funcall stop))
+        (setf (symbol-function 'gr8s.controllers::start-gateway-listener) original)))))
+
+(test foreign-gateway-refuses-an-unowned-fronting-service
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (gwc-seed store)
+    (let ((original (symbol-function 'gr8s.kube-client:kube-get))
+          (gateway (gr8s.resources::get-core-resource store "gateways" "default" "web")))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s.kube-client:kube-get)
+                   (lambda (&rest arguments)
+                     (declare (ignore arguments))
+                     (gr8s.resources::core-object
+                      "metadata" (gr8s.resources::core-object "name" "gr8s-gateway-web" "uid" "unowned")
+                      "spec" (gr8s.resources::core-object "type" "LoadBalancer"))))
+             (signals error (gr8s.controllers::foreign-gateway-provision-service nil gateway)))
+        (setf (symbol-function 'gr8s.kube-client:kube-get) original)))))
 
 (defun foreign-lb-fake-map (name fd)
   (cons name (whistler/loader::make-map-info
@@ -549,6 +641,8 @@ since gr8s itself creates the interface."
 (test foreign-gateway-serializes-periodic-and-nudged-listener-passes
   ;; Hold the periodic HTTP pass open while the agent nudges the same controller.
   ;; The nudge must wait for the complete HTTP/L4 pair, rather than touch its maps.
+  (with-temporary-store (view path)
+    (declare (ignore path))
   (let* ((http-symbol 'gr8s.controllers::converge-gateway-listeners)
          (l4-symbol 'gr8s.controllers::converge-gateway-l4-listeners)
          (old-http (symbol-function http-symbol))
@@ -574,7 +668,7 @@ since gr8s itself creates the interface."
                      (declare (ignore controller))
                      (bt:with-lock-held (lock) (push :l4 events))))
              (multiple-value-bind (converge stopper)
-                 (gr8s.controllers:start-foreign-gateway nil)
+                 (gr8s.controllers:start-foreign-gateway view)
                (setf stop stopper)
                (await (lambda () (bt:with-lock-held (lock) events)))
                (setf nudge
@@ -599,4 +693,621 @@ since gr8s itself creates the interface."
         (when nudge (bt:join-thread nudge))
         (when stop (funcall stop))
         (setf (symbol-function http-symbol) old-http
-              (symbol-function l4-symbol) old-l4)))))
+              (symbol-function l4-symbol) old-l4))))))
+(in-package #:gr8s/tests)
+(in-suite foreign-net-agent)
+
+(test foreign-gateway-service-reconciliation-preserves-allocated-fields
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (gwc-seed store)
+    (let* ((gateway (gr8s.resources::get-core-resource store "gateways" "default" "web"))
+           (current (gr8s.resources::core-object
+                     "apiVersion" "v1" "kind" "Service"
+                     "metadata" (gr8s.resources::core-object
+                                 "name" "gr8s-gateway-web" "namespace" "default" "uid" "service-uid"
+                                 "resourceVersion" "7"
+                                 "ownerReferences" (vector (gr8s.controllers::foreign-gateway-owner-reference gateway)))
+                     "spec" (gr8s.resources::core-object
+                             "type" "LoadBalancer" "clusterIP" "10.43.0.17"
+                             "ports" (vector (gr8s.resources::core-object
+                                              "name" "old" "port" 8080 "nodePort" 31000)))))
+           (get (symbol-function 'gr8s.kube-client:kube-get))
+           (put (symbol-function 'gr8s.kube-client:kube-replace))
+           (writes 0))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s.kube-client:kube-get)
+                   (lambda (&rest args) (declare (ignore args)) (gr8s.resources::copy-core-object current))
+                   (symbol-function 'gr8s.kube-client:kube-replace)
+                   (lambda (cluster uri object &rest args)
+                     (declare (ignore cluster uri args)) (incf writes) (setf current object)))
+             (gr8s.controllers::foreign-gateway-provision-service nil gateway)
+             (is (= 1 writes))
+             (is (equal "10.43.0.17" (gethash "clusterIP" (gethash "spec" current))))
+             (is (= 31000 (gethash "nodePort" (aref (gethash "ports" (gethash "spec" current)) 0))))
+             (is (equal "7" (gethash "resourceVersion" (gethash "metadata" current))))
+             (gr8s.controllers::foreign-gateway-provision-service nil gateway)
+             (is (= 1 writes))
+             (is (equal '("10.43.0.17") (gr8s.controllers::foreign-gateway-service-addresses current))))
+        (setf (symbol-function 'gr8s.kube-client:kube-get) get
+              (symbol-function 'gr8s.kube-client:kube-replace) put)))))
+
+(test foreign-gateway-replacement-retires-old-private-sockets
+  (with-temporary-store (store path)
+    (gwc-seed store)
+    (let* ((controllers (gr8s.controllers::make-foreign-gateway-controllers
+                         :view store :cert-dir path
+                         :ingress (gr8s.controllers::make-foreign-gateway-listener-controller
+                                   (gr8s.controllers::make-foreign-gateway-view :source store) nil path)))
+           (old nil))
+      (unwind-protect
+           (progn
+             (gr8s.controllers::converge-foreign-gateway-listeners controllers)
+             (let* ((snapshots (gr8s.controllers::foreign-gateway-listener-snapshots controllers))
+                    (gateway (first (first snapshots)))
+                    (key (gr8s.controllers::foreign-gateway-key gateway))
+                    (controller (gethash key (gr8s.controllers::foreign-gateway-controllers-gateways controllers)))
+                    (ports (second (first snapshots))))
+               (setf old (car (gethash 8080 (gr8s.controllers::gateway-controller-listeners controller))))
+               (is (= 1 (length snapshots)))
+               (is (equal "p-8080" (gethash "name" (aref ports 0))))
+               (is (= (hunchentoot:acceptor-port old) (gethash "port" (aref ports 0))))
+               (gr8s.resources::delete-core-resource store "gateways" "default" "web")
+               (gr8s.controllers::converge-foreign-gateway-listeners controllers)
+               (is (null (hunchentoot::acceptor-listen-socket old)))
+               (is (null (gr8s.controllers::foreign-gateway-listener-snapshots controllers)))
+               (setf (gethash "metadata" gateway)
+                     (gr8s.resources::core-object "name" "web" "namespace" "default"))
+               (gr8s.resources::create-core-resource store "gateways" gateway "default")
+               (gr8s.controllers::converge-foreign-gateway-listeners controllers)
+               (is (not (equal key (gr8s.controllers::foreign-gateway-key
+                                   (first (first (gr8s.controllers::foreign-gateway-listener-snapshots controllers)))))))))
+        (gr8s.controllers::stop-foreign-gateway-listeners controllers)))))
+
+(test foreign-gateway-failure-does-not-block-neighbors-or-retirement
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (gwc-seed store)
+    (let ((second (gr8s.resources::get-core-resource store "gateways" "default" "web")))
+      (setf (gethash "metadata" second)
+            (gr8s.resources::core-object "name" "second" "namespace" "default"))
+      (gr8s.resources::create-core-resource store "gateways" second "default"))
+    (let* ((ingress (gr8s.controllers::make-gateway-controller store))
+           (retired (gr8s.controllers::make-gateway-controller store))
+           (manager (gr8s.controllers::make-foreign-gateway-controllers :view store :ingress ingress))
+           (http (symbol-function 'gr8s.controllers::converge-gateway-listeners))
+           (l4 (symbol-function 'gr8s.controllers::converge-gateway-l4-listeners))
+           (stop (symbol-function 'gr8s.controllers::stop-gateway-controller))
+           (attempts nil) (completed nil) (stopped nil))
+      (setf (gethash '("default" "deleted" "old-uid")
+                     (gr8s.controllers::foreign-gateway-controllers-gateways manager)) retired)
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s.controllers::converge-gateway-listeners)
+                   (lambda (controller)
+                     (push controller attempts)
+                     (when (= 1 (length attempts)) (error "Invalid tenant certificate")))
+                   (symbol-function 'gr8s.controllers::converge-gateway-l4-listeners)
+                   (lambda (controller) (push controller completed))
+                   (symbol-function 'gr8s.controllers::stop-gateway-controller)
+                   (lambda (controller) (push controller stopped)))
+             (gr8s.controllers::converge-foreign-gateway-listeners manager)
+             (is (= 3 (length attempts)) "Both Gateways and Ingress were attempted")
+             (is (= 2 (length completed)) "Healthy Gateway and Ingress completed")
+             (is (member ingress completed))
+             (is (member retired stopped))
+             (is (= 2 (hash-table-count (gr8s.controllers::foreign-gateway-controllers-gateways manager)))))
+        (setf (symbol-function 'gr8s.controllers::converge-gateway-listeners) http
+              (symbol-function 'gr8s.controllers::converge-gateway-l4-listeners) l4
+              (symbol-function 'gr8s.controllers::stop-gateway-controller) stop)))))
+
+(test foreign-gateway-service-names-are-bounded-and-distinct
+  (flet ((name (value) (gr8s.controllers::foreign-gateway-service-name value)))
+    (is (equal "gr8s-gateway-web" (name "web")))
+    (dolist (gateway (list "tenant.gateway" (make-string 253 :initial-element #\a)))
+      (let ((service (name gateway)))
+        (is (<= (length service) 63))
+        (is (every (lambda (char) (or (find char "abcdefghijklmnopqrstuvwxyz0123456789")
+                                    (char= char #\-))) service))
+        (is (equal service (name gateway)))))
+    (is (not (equal (name "tenant.gateway") (name "tenant-gateway"))))
+    (is (not (equal (name (concatenate 'string (make-string 100 :initial-element #\a) "x"))
+                    (name (concatenate 'string (make-string 100 :initial-element #\a) "y")))))))
+
+(test foreign-gateway-port-leases-survive-restart-and-do-not-recycle
+  (let ((current nil) (writes 0)
+        (get (symbol-function 'gr8s.kube-client:kube-get))
+        (create (symbol-function 'gr8s.kube-client:kube-create))
+        (replace (symbol-function 'gr8s.kube-client:kube-replace)))
+    (labels ((persist (cluster path object &rest options)
+               (declare (ignore cluster path options))
+               (incf writes)
+               (setf current (gr8s.resources::copy-core-object object))
+               (setf (gethash "resourceVersion" (gethash "metadata" current)) (write-to-string writes))
+               current)
+             (leases ()
+               (gr8s.controllers::make-foreign-gateway-port-leases
+                :cluster :test :node-name "worker-a" :first-port 22000 :last-port 22002)))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s.kube-client:kube-get)
+                   (lambda (&rest args)
+                     (declare (ignore args))
+                     (if current (gr8s.resources::copy-core-object current)
+                         (error 'gr8s.kube-client:kube-error :status 404 :body "missing")))
+                   (symbol-function 'gr8s.kube-client:kube-create) #'persist
+                   (symbol-function 'gr8s.kube-client:kube-replace) #'persist)
+             (let* ((first (leases))
+                    (a (gr8s.controllers::foreign-gateway-port-for first '("ns" "a" "uid-a") 80)))
+               (is (= 22000 a))
+               (is (= a (gr8s.controllers::foreign-gateway-port-for first '("ns" "a" "uid-a") 80)))
+               (is (= 1 writes) "Reusing a lease performs no write")
+               ;; A new allocator represents a fresh agent process. The old
+               ;; Gateway may be gone; its port must not be recycled for B.
+               (let ((restarted (leases)))
+                 (is (= 22001 (gr8s.controllers::foreign-gateway-port-for restarted '("ns" "b" "uid-b") 80)))
+                 (is (= a (gr8s.controllers::foreign-gateway-port-for restarted '("ns" "a" "uid-a") 80)))
+                 (is (= 22002 (gr8s.controllers::foreign-gateway-port-for restarted '("ns" "a" "new-uid-a") 80)))
+                 (signals error (gr8s.controllers::foreign-gateway-port-for restarted '("ns" "c" "uid-c") 80))
+                 (is (= 3 writes)))))
+        (setf (symbol-function 'gr8s.kube-client:kube-get) get
+              (symbol-function 'gr8s.kube-client:kube-create) create
+              (symbol-function 'gr8s.kube-client:kube-replace) replace)))))
+
+(test foreign-gateway-port-leases-retry-conflicts-and-reject-foreign-state
+  (let ((current nil) (writes 0) (conflict nil)
+        (get (symbol-function 'gr8s.kube-client:kube-get))
+        (create (symbol-function 'gr8s.kube-client:kube-create))
+        (replace (symbol-function 'gr8s.kube-client:kube-replace))
+        (leases (gr8s.controllers::make-foreign-gateway-port-leases
+                 :cluster :test :node-name "worker-a" :first-port 22000 :last-port 22005)))
+    (labels ((persist (cluster path object &rest options)
+               (declare (ignore cluster path options))
+               (incf writes)
+               (setf current (gr8s.resources::copy-core-object object))
+               (setf (gethash "resourceVersion" (gethash "metadata" current)) (write-to-string writes))
+               current))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s.kube-client:kube-get)
+                   (lambda (&rest args)
+                     (declare (ignore args))
+                     (if current (gr8s.resources::copy-core-object current)
+                         (error 'gr8s.kube-client:kube-error :status 404 :body "missing")))
+                   (symbol-function 'gr8s.kube-client:kube-create) #'persist
+                   (symbol-function 'gr8s.kube-client:kube-replace)
+                   (lambda (cluster path object &rest options)
+                     (when conflict
+                       (setf conflict nil)
+                       (gr8s.controllers::foreign-gateway-port-for leases '("ns" "b" "uid-b") 80)
+                       (error 'gr8s.kube-client:kube-error :status 409 :body "version changed"))
+                     (apply #'persist cluster path object options)))
+             (is (= 22000 (gr8s.controllers::foreign-gateway-port-for leases '("ns" "a" "uid-a") 80)))
+             (setf conflict t)
+             (is (= 22002 (gr8s.controllers::foreign-gateway-port-for leases '("ns" "c" "uid-c") 80)))
+             (is (= 22001 (gr8s.controllers::foreign-gateway-port-for leases '("ns" "b" "uid-b") 80)))
+             (setf (gethash "gr8s.io/gateway-node" (gethash "annotations" (gethash "metadata" current))) "other-node")
+             (signals error (gr8s.controllers::foreign-gateway-port-for leases '("ns" "d" "uid-d") 80))
+             (is (= 3 writes) "Foreign state must not be overwritten")
+             (setf (gethash "gr8s.io/gateway-node" (gethash "annotations" (gethash "metadata" current))) "worker-a")
+             (maphash (lambda (key value)
+                        (when (equal value "22000") (setf (gethash key (gethash "data" current)) "99999")))
+                      (gethash "data" current))
+             (signals error (gr8s.controllers::foreign-gateway-port-for leases '("ns" "a" "uid-a") 80)))
+        (setf (symbol-function 'gr8s.kube-client:kube-get) get
+              (symbol-function 'gr8s.kube-client:kube-create) create
+              (symbol-function 'gr8s.kube-client:kube-replace) replace)))))
+
+(test foreign-gateway-port-leases-refuse-lost-or-replaced-ledger
+  (with-temporary-store (store directory)
+    (declare (ignore store))
+    (let ((current nil) (writes 0)
+          (marker (merge-pathnames "gateway-lease.uid" directory))
+          (get (symbol-function 'gr8s.kube-client:kube-get))
+          (create (symbol-function 'gr8s.kube-client:kube-create)))
+      (labels ((leases ()
+                 (gr8s.controllers::make-foreign-gateway-port-leases
+                  :cluster :test :node-name "worker-a" :identity-path marker)))
+        (unwind-protect
+             (progn
+               (setf (symbol-function 'gr8s.kube-client:kube-get)
+                     (lambda (&rest args)
+                       (declare (ignore args))
+                       (if current (gr8s.resources::copy-core-object current)
+                           (error 'gr8s.kube-client:kube-error :status 404 :body "missing")))
+                     (symbol-function 'gr8s.kube-client:kube-create)
+                     (lambda (cluster path object &rest options)
+                       (declare (ignore cluster path options))
+                       (incf writes)
+                       (setf current (gr8s.resources::copy-core-object object)
+                             (gethash "uid" (gethash "metadata" current)) "ledger-uid")
+                       current))
+               (is (= 20000 (gr8s.controllers::foreign-gateway-port-for (leases) '("ns" "a" "uid-a") 80)))
+               (is (probe-file marker))
+               (is (equal "ledger-uid" (uiop:read-file-string marker)))
+               (is (= 20000 (gr8s.controllers::foreign-gateway-port-for (leases) '("ns" "a" "uid-a") 80)))
+               (setf (gethash "uid" (gethash "metadata" current)) "replacement-uid")
+               (signals error (gr8s.controllers::foreign-gateway-port-for (leases) '("ns" "a" "uid-a") 80))
+               (setf current nil)
+               (signals error (gr8s.controllers::foreign-gateway-port-for (leases) '("ns" "b" "uid-b") 80))
+               (is (= 1 writes) "A missing ledger must not reset allocation"))
+          (setf (symbol-function 'gr8s.kube-client:kube-get) get
+                (symbol-function 'gr8s.kube-client:kube-create) create))))))
+
+(test foreign-gateway-private-range-excludes-ephemeral-and-ingress-ports
+  (is (gr8s.controllers::validate-foreign-gateway-port-range "32768 60999"))
+  (signals error (gr8s.controllers::validate-foreign-gateway-port-range "1024 65535"))
+  (signals error (gr8s.controllers::validate-foreign-gateway-port-range "20000 20001"))
+  (signals error (gr8s.controllers::validate-foreign-gateway-port-range "invalid")))
+
+(test foreign-gateway-ingress-cannot-bind-private-range
+  (let* ((start (symbol-function 'gr8s.controllers::start-gateway-listener))
+         (started nil)
+         (controller (gr8s.controllers::make-foreign-gateway-listener-controller nil nil nil)))
+    (unwind-protect
+         (progn
+           (setf (symbol-function 'gr8s.controllers::start-gateway-listener)
+                 (lambda (&rest args) (declare (ignore args)) (setf started t)))
+           (signals error (funcall (gr8s.controllers::gateway-controller-start-fn controller) 20000 nil nil nil))
+           (is (not started)))
+      (setf (symbol-function 'gr8s.controllers::start-gateway-listener) start))))
+
+(test foreign-gateway-port-leases-reject-regressed-counter-and-printer-collisions
+  (let* ((current (gr8s.resources::core-object
+                   "metadata" (gr8s.resources::core-object
+                               "annotations" (gr8s.resources::core-object "gr8s.io/gateway-node" "worker-a"))
+                   "data" (gr8s.resources::core-object "g-existing" "20000" "next-port" "20000")))
+         (writes 0)
+         (leases (gr8s.controllers::make-foreign-gateway-port-leases :cluster :test :node-name "worker-a"))
+         (get (symbol-function 'gr8s.kube-client:kube-get))
+         (replace (symbol-function 'gr8s.kube-client:kube-replace)))
+    (unwind-protect
+         (progn
+           (setf (symbol-function 'gr8s.kube-client:kube-get)
+                 (lambda (&rest args) (declare (ignore args)) (gr8s.resources::copy-core-object current))
+                 (symbol-function 'gr8s.kube-client:kube-replace)
+                 (lambda (cluster path object &rest args)
+                   (declare (ignore cluster path args))
+                   (incf writes) (setf current (gr8s.resources::copy-core-object object))))
+           (signals error (gr8s.controllers::foreign-gateway-port-for leases '("ns" "a" "uid-a") 80))
+           (is (= 0 writes))
+           (setf (gethash "next-port" (gethash "data" current)) "20001")
+           (let* ((*print-length* 0)
+                  (a (gr8s.controllers::foreign-gateway-port-for leases '("ns" "a" "uid-a") 443))
+                  (b (gr8s.controllers::foreign-gateway-port-for leases '("ns" "b" "uid-b") 443)))
+             (is (not (= a b)))))
+      (setf (symbol-function 'gr8s.kube-client:kube-get) get
+            (symbol-function 'gr8s.kube-client:kube-replace) replace))))
+
+(test foreign-gateway-slice-cleanup-requires-exact-service-ownership
+  (let* ((gateway (gr8s.resources::core-object
+                   "apiVersion" "gateway.networking.k8s.io/v1" "kind" "Gateway"
+                   "metadata" (gr8s.resources::core-object "name" "web" "namespace" "default" "uid" "gateway-uid")))
+         (service (gr8s.resources::core-object
+                   "apiVersion" "v1" "kind" "Service"
+                   "metadata" (gr8s.resources::core-object
+                               "name" "gr8s-gateway-web" "namespace" "default" "uid" "service-uid"
+                               "ownerReferences" (vector (gr8s.controllers::foreign-gateway-owner-reference gateway)))))
+         (slice (gr8s.controllers::foreign-gateway-endpoint-slice service "worker-a" "IPv4" '("192.0.2.9") #()))
+         (unowned (gr8s.resources::copy-core-object slice)))
+    (remhash "ownerReferences" (gethash "metadata" unowned))
+    (is (not (gr8s.controllers::foreign-gateway-local-slice-p unowned "worker-a")))
+    (is (gr8s.controllers::foreign-gateway-local-slice-p slice "worker-a" service))
+    (is (not (gr8s.controllers::foreign-gateway-local-slice-p unowned "worker-a" service)))
+    (is (not (gr8s.controllers::foreign-gateway-local-slice-p slice "worker-b" service)))
+    (setf (gethash "uid" (gethash "metadata" service)) "replacement-service")
+    (is (not (gr8s.controllers::foreign-gateway-local-slice-p slice "worker-a" service)))
+    (setf (gethash "uid" (gethash "metadata" service)) "service-uid"
+          (gethash "name" (gethash "metadata" slice)) "unrelated-slice")
+    (is (not (gr8s.controllers::foreign-gateway-local-slice-p slice "worker-a" service)))))
+
+(test foreign-gateway-service-failure-does-not-block-other-statuses
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (gwc-seed store)
+    (let ((second (gr8s.resources::get-core-resource store "gateways" "default" "web")))
+      (setf (gethash "metadata" second) (gr8s.resources::core-object "name" "second" "namespace" "default"))
+      (gr8s.resources::create-core-resource store "gateways" second "default"))
+    (let* ((symbols '(gr8s.controllers::foreign-gateway-publish-class-status
+                      gr8s.controllers::foreign-gateway-provision-service
+                      gr8s.controllers::foreign-gateway-publish-gateway-status
+                      gr8s.controllers::foreign-gateway-publish-route-status))
+           (functions (mapcar #'symbol-function symbols))
+           (attempts 0) (published 0) (routes 0))
+      (unwind-protect
+           (progn
+             (setf (symbol-function (first symbols)) (lambda (&rest args) (declare (ignore args)))
+                   (symbol-function (second symbols))
+                   (lambda (&rest args)
+                     (declare (ignore args))
+                     (when (= 1 (incf attempts)) (error "Conflicting Service owner"))
+                     (gr8s.resources::core-object "spec" (make-hash-table) "status" (make-hash-table)))
+                   (symbol-function (third symbols)) (lambda (&rest args) (declare (ignore args)) (incf published))
+                   (symbol-function (fourth symbols)) (lambda (&rest args) (declare (ignore args)) (incf routes)))
+             (gr8s.controllers::foreign-gateway-publish store nil)
+             (is (= 2 attempts))
+             (is (= 1 published))
+             (is (= 1 routes)))
+        (loop for symbol in symbols for function in functions do (setf (symbol-function symbol) function))))))
+
+(test foreign-gateway-endpoint-failure-does-not-block-healthy-publication
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (foreign-agent-test-node store "worker-a" "10.88.8.0/24")
+    (gwc-seed store)
+    (let* ((a (gr8s.resources::get-core-resource store "gateways" "default" "web"))
+           (b (gr8s.resources::copy-core-object a))
+           (ports (vector (gr8s.resources::core-object "name" "p-8080" "protocol" "TCP" "port" 20001)))
+           (get (symbol-function 'gr8s.kube-client:kube-get))
+           (upsert (symbol-function 'gr8s.controllers::foreign-gateway-upsert-slice))
+           (delete (symbol-function 'gr8s.controllers::foreign-gateway-delete-slice))
+           (lookup (symbol-function 'gr8s.resources::get-core-resource))
+           (published nil) (deleted nil))
+      (setf (gethash "metadata" b) (gr8s.resources::core-object "name" "healthy" "namespace" "default" "uid" "healthy-uid"))
+      (let* ((service (gr8s.resources::create-core-resource
+                       store "services"
+                       (gr8s.resources::core-object
+                        "apiVersion" "v1" "kind" "Service"
+                        "metadata" (gr8s.resources::core-object
+                                    "name" "gr8s-gateway-web" "namespace" "default"
+                                    "ownerReferences" (vector (gr8s.controllers::foreign-gateway-owner-reference a)))
+                        "spec" (gr8s.resources::core-object
+                                "ports" (vector (gr8s.resources::core-object "port" 8080)))) "default"))
+             (slice (gr8s.controllers::foreign-gateway-endpoint-slice
+                     service "worker-a" "IPv4" '("192.0.2.80") ports)))
+        (gr8s.resources::create-core-resource store "endpointslices" slice "default"))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s.kube-client:kube-get)
+                   (lambda (cluster path &rest args)
+                     (declare (ignore cluster args))
+                     (when (search "gr8s-gateway-web" path) (error "Temporary Service API failure"))
+                     (gr8s.resources::core-object
+                      "apiVersion" "v1" "kind" "Service"
+                      "metadata" (gr8s.resources::core-object
+                                  "name" "gr8s-gateway-healthy" "namespace" "default" "uid" "healthy-service"
+                                  "ownerReferences" (vector (gr8s.controllers::foreign-gateway-owner-reference b)))))
+                   (symbol-function 'gr8s.controllers::foreign-gateway-upsert-slice)
+                   (lambda (cluster service slice) (declare (ignore cluster service)) (push slice published))
+                   (symbol-function 'gr8s.controllers::foreign-gateway-delete-slice)
+                   (lambda (cluster slice) (declare (ignore cluster)) (push slice deleted))
+                   (symbol-function 'gr8s.resources::get-core-resource)
+                   (lambda (view resource namespace name)
+                     (if (equal resource "nodes")
+                         (gr8s.resources::core-object
+                          "status" (gr8s.resources::core-object
+                                    "addresses" (vector (gr8s.resources::core-object "type" "InternalIP" "address" "192.0.2.80"))))
+                         (funcall lookup view resource namespace name))))
+             (gr8s.controllers::foreign-gateway-publish-local-endpoints
+              store nil "worker-a" (list (list a ports) (list b ports)))
+             (is (= 1 (length published)))
+             (is (null deleted) "An API failure must preserve that Gateway's previous endpoint")
+             (is (equal "gr8s-gateway-healthy"
+                        (gethash "kubernetes.io/service-name" (gethash "labels" (gethash "metadata" (first published)))))))
+        (setf (symbol-function 'gr8s.kube-client:kube-get) get
+              (symbol-function 'gr8s.controllers::foreign-gateway-upsert-slice) upsert
+              (symbol-function 'gr8s.controllers::foreign-gateway-delete-slice) delete
+              (symbol-function 'gr8s.resources::get-core-resource) lookup)))))
+
+(test foreign-gateway-protocol-changes-reuse-the-lease-without-bind-deadlock
+  (with-temporary-store (store directory)
+    (gwc-seed store)
+    (let* ((port (foreign-gateway-free-port))
+           (allocator (symbol-function 'gr8s.controllers::foreign-gateway-port-for))
+           (manager (gr8s.controllers::make-foreign-gateway-controllers
+                     :view store :cert-dir directory :leases :test
+                     :ingress (gr8s.controllers::make-foreign-gateway-listener-controller
+                               (gr8s.controllers::make-foreign-gateway-view :source store) nil directory))))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s.controllers::foreign-gateway-port-for)
+                   (lambda (&rest args) (declare (ignore args)) port))
+             (dolist (protocol '("HTTP" "TCP" "HTTP"))
+               (gr8s.resources::update-core-resource
+                store "gateways" "default" "web"
+                (lambda (gateway)
+                  (setf (gethash "protocol" (aref (gethash "listeners" (gethash "spec" gateway)) 0)) protocol)
+                  gateway))
+               (gr8s.controllers::converge-foreign-gateway-listeners manager)
+               (let* ((controller (first (loop for value being the hash-values
+                                               of (gr8s.controllers::foreign-gateway-controllers-gateways manager)
+                                             collect value)))
+                      (http (gr8s.controllers::gateway-controller-listeners controller))
+                      (l4 (gr8s.controllers::gateway-controller-l4-listeners controller)))
+                 (is (= (if (equal protocol "HTTP") 1 0) (hash-table-count http)))
+                 (is (= (if (equal protocol "TCP") 1 0) (hash-table-count l4)))
+                 (let ((snapshot (first (gr8s.controllers::foreign-gateway-listener-snapshots manager))))
+                   (is (= port (gethash "port" (aref (second snapshot) 0))))))))
+        (gr8s.controllers::stop-foreign-gateway-listeners manager)
+        (setf (symbol-function 'gr8s.controllers::foreign-gateway-port-for) allocator)))))
+
+(test foreign-gateway-supported-kinds-require-the-gateway-api-group
+  (flet ((resolve (kinds)
+           (gr8s.controllers::foreign-gateway-listener-route-kinds
+            (gr8s.resources::core-object
+             "protocol" "HTTP" "allowedRoutes"
+             (gr8s.resources::core-object "kinds" kinds)))))
+    (multiple-value-bind (kinds valid)
+        (resolve (vector (gr8s.resources::core-object "kind" "HTTPRoute" "group" "example.com")))
+      (is (null kinds))
+      (is (null valid)))
+    (multiple-value-bind (kinds valid)
+        (resolve (vector (gr8s.resources::core-object "kind" "HTTPRoute")
+                         (gr8s.resources::core-object "kind" "InvalidRoute")))
+      (is (= 1 (length kinds)))
+      (is (equal "gateway.networking.k8s.io" (gethash "group" (first kinds))))
+      (is (null valid)))
+    (multiple-value-bind (kinds valid)
+        (resolve (vector (gr8s.resources::core-object "kind" "HTTPRoute")))
+      (is (= 1 (length kinds)))
+      (is (eq t valid)))))
+
+(test foreign-gateway-attached-route-count-respects-listener-hostname-and-section
+  (let* ((gateway (com.inuoe.jzon:parse
+                   "{\"metadata\":{\"name\":\"web\",\"namespace\":\"infra\",\"generation\":1},\"spec\":{\"listeners\":[{\"name\":\"foo\",\"port\":80,\"protocol\":\"HTTP\",\"hostname\":\"foo.example.com\"},{\"name\":\"bar\",\"port\":8080,\"protocol\":\"HTTP\",\"hostname\":\"bar.example.com\"}]}}"))
+         (routes (loop for (name host section) in '(("any" nil nil)
+                                                   ("foo" "foo.example.com" nil)
+                                                   ("wrong" "other.example.com" nil)
+                                                   ("bar-only" nil "bar"))
+                       collect (gr8s.resources::core-object
+                                "metadata" (gr8s.resources::core-object "name" name "namespace" "infra")
+                                "spec" (gr8s.resources::core-object
+                                        "hostnames" (if host (vector host) #())
+                                        "parentRefs" (vector
+                                                      (let ((parent (gr8s.resources::core-object "name" "web")))
+                                                        (when section (setf (gethash "sectionName" parent) section))
+                                                        parent))))))
+         (publish (symbol-function 'gr8s.controllers::foreign-gateway-put-status))
+         (status nil))
+    (unwind-protect
+         (progn
+           (setf (symbol-function 'gr8s.controllers::foreign-gateway-put-status)
+                 (lambda (cluster group version resource namespace name value)
+                   (declare (ignore cluster group version resource namespace name))
+                   (setf status value)))
+           (gr8s.controllers::foreign-gateway-publish-gateway-status nil gateway routes nil)
+           (is (= 2 (gethash "attachedRoutes" (aref (gethash "listeners" status) 0))))
+           (is (= 2 (gethash "attachedRoutes" (aref (gethash "listeners" status) 1)))))
+      (setf (symbol-function 'gr8s.controllers::foreign-gateway-put-status) publish))))
+
+(test foreign-route-status-matches-listener-admission
+  (let* ((gateway (com.inuoe.jzon:parse
+                   "{\"metadata\":{\"name\":\"web\",\"namespace\":\"infra\"},\"spec\":{\"listeners\":[{\"name\":\"http\",\"port\":80,\"protocol\":\"HTTP\",\"hostname\":\"app.example.com\"}]}}"))
+         (publish (symbol-function 'gr8s.controllers::foreign-gateway-put-status))
+         (status nil))
+    (unwind-protect
+         (progn
+           (setf (symbol-function 'gr8s.controllers::foreign-gateway-put-status)
+                 (lambda (&rest args) (setf status (car (last args)))))
+           (dolist (case '(("infra" "http" "app.example.com" "True" "Accepted")
+                           ("infra" "absent" "app.example.com" "False" "NoMatchingParent")
+                           ("infra" "http" "other.example.com" "False" "NoMatchingListenerHostname")
+                           ("tenant" "http" "app.example.com" "False" "NotAllowedByListeners")))
+             (destructuring-bind (namespace section host accepted reason) case
+               (let ((route (gr8s.resources::core-object
+                             "metadata" (gr8s.resources::core-object "name" "app" "namespace" namespace "generation" 3)
+                             "spec" (gr8s.resources::core-object
+                                     "hostnames" (vector host)
+                                     "parentRefs" (vector (gr8s.resources::core-object
+                                                           "name" "web" "namespace" "infra" "sectionName" section))))))
+                 (gr8s.controllers::foreign-gateway-publish-route-status nil route (list gateway))
+                 (let ((condition (find "Accepted" (gethash "conditions" (aref (gethash "parents" status) 0))
+                                        :test #'equal :key (lambda (value) (gethash "type" value)))))
+                   (is (equal accepted (gethash "status" condition)))
+                   (is (equal reason (gethash "reason" condition)))
+                   (is (= 3 (gethash "observedGeneration" condition))))))))
+      (setf (symbol-function 'gr8s.controllers::foreign-gateway-put-status) publish))))
+
+(test foreign-route-resolved-refs-reflects-backend-validation
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (gwc-seed store)
+    (gr8s.resources::create-core-resource
+     store "services" (com.inuoe.jzon:parse
+                       "{\"metadata\":{\"name\":\"web\",\"namespace\":\"default\"},\"spec\":{\"ports\":[{\"port\":80}]}}") "default")
+    (let ((publish (symbol-function 'gr8s.controllers::foreign-gateway-put-status))
+          (status nil)
+          (gateway (gr8s.resources::get-core-resource store "gateways" "default" "web")))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s.controllers::foreign-gateway-put-status)
+                   (lambda (&rest args) (setf status (car (last args)))))
+             (dolist (case '(("{\"name\":\"web\",\"port\":80,\"kind\":\"Other\"}" "InvalidKind")
+                             ("{\"name\":\"missing\",\"port\":80}" "BackendNotFound")
+                             ("{\"name\":\"web\",\"port\":81}" "BackendNotFound")
+                             ("{\"name\":\"web\",\"port\":80}" "ResolvedRefs")))
+               (destructuring-bind (reference reason) case
+                 (let ((route (gr8s.resources::get-core-resource store "httproutes" "default" "app")))
+                   (setf (gethash "backendRefs" (aref (gethash "rules" (gethash "spec" route)) 0))
+                         (vector (com.inuoe.jzon:parse reference)))
+                   (gr8s.controllers::foreign-gateway-publish-route-status nil route (list gateway) store)
+                   (let ((condition (find "ResolvedRefs" (gethash "conditions" (aref (gethash "parents" status) 0))
+                                          :test #'equal :key (lambda (value) (gethash "type" value)))))
+                     (is (equal reason (gethash "reason" condition)))
+                     (is (equal (if (equal reason "ResolvedRefs") "True" "False")
+                                (gethash "status" condition))))))))
+        (setf (symbol-function 'gr8s.controllers::foreign-gateway-put-status) publish)))))
+
+(test foreign-gateway-unsupported-listeners-are-rejected
+  (let ((publish (symbol-function 'gr8s.controllers::foreign-gateway-put-status)) (status nil))
+    (unwind-protect
+         (progn
+           (setf (symbol-function 'gr8s.controllers::foreign-gateway-put-status)
+                 (lambda (&rest args) (setf status (car (last args)))))
+           (dolist (mixed '(nil t))
+             (let* ((invalid (gr8s.resources::core-object "name" "invalid" "port" 1111 "protocol" "INVALID"))
+                    (gateway (gr8s.resources::core-object
+                              "metadata" (gr8s.resources::core-object "name" "web" "namespace" "infra" "generation" 2)
+                              "spec" (gr8s.resources::core-object
+                                      "listeners" (if mixed
+                                                      (vector invalid (gr8s.resources::core-object "name" "http" "port" 80 "protocol" "HTTP"))
+                                                      (vector invalid))))))
+               (gr8s.controllers::foreign-gateway-publish-gateway-status nil gateway nil nil)
+               (let* ((accepted (find "Accepted" (gethash "conditions" status) :test #'equal
+                                      :key (lambda (c) (gethash "type" c))))
+                      (listener (aref (gethash "listeners" status) 0))
+                      (condition (find "Accepted" (gethash "conditions" listener) :test #'equal
+                                       :key (lambda (c) (gethash "type" c)))))
+                 (is (equal (if mixed "True" "False") (gethash "status" accepted)))
+                 (is (equal "ListenersNotValid" (gethash "reason" accepted)))
+                 (is (equal "False" (gethash "status" condition)))
+                 (is (equal "UnsupportedProtocol" (gethash "reason" condition)))
+                 (is (= 0 (length (gethash "supportedKinds" listener))))))))
+      (setf (symbol-function 'gr8s.controllers::foreign-gateway-put-status) publish))))
+
+(test foreign-gateway-invalid-listener-status-does-not-require-a-service
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (gwc-seed store)
+    (gr8s.resources::update-core-resource
+     store "gateways" "default" "web"
+     (lambda (object)
+       (setf (gethash "protocol" (aref (gethash "listeners" (gethash "spec" object)) 0)) "INVALID") object))
+    (let ((publish (symbol-function 'gr8s.controllers::foreign-gateway-put-status)) (status nil))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s.controllers::foreign-gateway-put-status)
+                   (lambda (cluster group version resource namespace name value)
+                     (declare (ignore cluster group version namespace name))
+                     (when (equal resource "gateways") (setf status value))))
+             (gr8s.controllers::foreign-gateway-publish store nil)
+             (is (not (null status)))
+             (when status
+               (is (= 0 (gethash "attachedRoutes" (aref (gethash "listeners" status) 0))))))
+        (setf (symbol-function 'gr8s.controllers::foreign-gateway-put-status) publish)))))
+
+(test foreign-gateway-tls-reference-errors-are-published
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (let ((publish (symbol-function 'gr8s.controllers::foreign-gateway-put-status))
+          (status nil))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s.controllers::foreign-gateway-put-status)
+                   (lambda (&rest args) (setf status (car (last args)))))
+             (dolist (case '(("" "Secret" "infra" "InvalidCertificateRef")
+                             ("wrong.group" "Secret" "infra" "InvalidCertificateRef")
+                             ("" "WrongKind" "infra" "InvalidCertificateRef")
+                             ("" "Secret" "other" "RefNotPermitted")))
+               (destructuring-bind (group kind namespace reason) case
+                 (let* ((listener (gr8s.resources::core-object
+                                   "name" "https" "port" 443 "protocol" "HTTPS"
+                                   "tls" (gr8s.resources::core-object
+                                          "certificateRefs" (vector (gr8s.resources::core-object
+                                                                     "name" "missing" "namespace" namespace
+                                                                     "group" group "kind" kind)))))
+                        (gateway (gr8s.resources::core-object
+                                  "metadata" (gr8s.resources::core-object "name" "web" "namespace" "infra" "generation" 3)
+                                  "spec" (gr8s.resources::core-object "listeners" (vector listener)))))
+                   (gr8s.controllers::foreign-gateway-publish-gateway-status nil gateway nil nil store)
+                   (let* ((conditions (gethash "conditions" (aref (gethash "listeners" status) 0)))
+                          (resolved (find "ResolvedRefs" conditions :test #'equal :key (lambda (c) (gethash "type" c))))
+                          (programmed (find "Programmed" conditions :test #'equal :key (lambda (c) (gethash "type" c)))))
+                     (is (equal "False" (gethash "status" resolved)))
+                     (is (equal reason (gethash "reason" resolved)))
+                     (is (equal "False" (gethash "status" programmed)))
+                     (is (equal "False"
+                                (gethash "status" (find "Programmed" (gethash "conditions" status)
+                                                        :test #'equal :key (lambda (c) (gethash "type" c)))))))))))
+        (setf (symbol-function 'gr8s.controllers::foreign-gateway-put-status) publish)))))

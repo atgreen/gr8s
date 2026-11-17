@@ -23,7 +23,7 @@
   (hostnames '() :type list)            ; SNI host match: "h" or "*.suffix"
   (backends '() :type list))
 
-(defun l4-route-backends (object namespace)
+(defun l4-route-backends (object namespace &optional (kind "TLSRoute"))
   "Flatten all rules' backendRefs of an L4 route object into GW-BACKENDs."
   (let ((spec (gethash "spec" object)) (backends '()))
     (when spec
@@ -32,14 +32,14 @@
           (loop for rule across rules
                 for refs = (gethash "backendRefs" rule)
                 when refs do (loop for ref across refs
-                                   do (push (gw-parse-backend ref namespace) backends))))))
+                                   do (push (gw-parse-backend ref namespace (or (gethash "kind" object) kind)) backends))))))
     (nreverse backends)))
 
 (defun parse-tcproute (object)
   "Parse a stored TCPRoute into an L4-TCP-ROUTE: its namespace and the weighted
    GW-BACKENDs flattened from every rule (TCP routing is host-agnostic)."
   (let ((namespace (gethash "namespace" (gethash "metadata" object))))
-    (make-l4-tcp-route :namespace namespace :backends (l4-route-backends object namespace))))
+    (make-l4-tcp-route :namespace namespace :backends (l4-route-backends object namespace "TCPRoute"))))
 
 (defun parse-sni-route (object)
   "Parse a TLSRoute or GRPCRoute (both routed by SNI hostname) into an L4-SNI-ROUTE."

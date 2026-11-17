@@ -18,8 +18,8 @@
             "{\"apiVersion\":\"networking.k8s.io/v1\",\"kind\":\"IngressClass\",\"metadata\":{\"name\":\"gr8s\"},\"spec\":{\"controller\":\"gr8s.io/ingress-controller\"}}")
     (create "ingressclasses" nil
             "{\"apiVersion\":\"networking.k8s.io/v1\",\"kind\":\"IngressClass\",\"metadata\":{\"name\":\"foreign\"},\"spec\":{\"controller\":\"example.com/foreign\"}}")
-    (create "secrets" "default"
-            "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"web-tls\"},\"type\":\"kubernetes.io/tls\",\"data\":{\"tls.crt\":\"Y2VydA==\",\"tls.key\":\"a2V5\"}}")
+    (gr8s.resources::create-core-resource store "secrets"
+                                          (gateway-test-tls-secret "web-tls") "default")
     (create "ingresses" "default"
             "{\"apiVersion\":\"networking.k8s.io/v1\",\"kind\":\"Ingress\",\"metadata\":{\"name\":\"web\"},\"spec\":{\"ingressClassName\":\"gr8s\",\"defaultBackend\":{\"service\":{\"name\":\"fallback\",\"port\":{\"number\":9000}}},\"tls\":[{\"hosts\":[\"web.example\"],\"secretName\":\"web-tls\"}],\"rules\":[{\"host\":\"web.example\",\"http\":{\"paths\":[{\"path\":\"/exact\",\"pathType\":\"Exact\",\"backend\":{\"service\":{\"name\":\"web\",\"port\":{\"number\":80}}}},{\"path\":\"/api\",\"pathType\":\"Prefix\",\"backend\":{\"service\":{\"name\":\"web\",\"port\":{\"name\":\"http\"}}}}]}}]}}")
     (create "ingresses" "default"

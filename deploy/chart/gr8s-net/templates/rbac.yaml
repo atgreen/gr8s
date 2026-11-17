@@ -59,6 +59,13 @@ rules:
   - apiGroups: [""]
     resources: [services]
     verbs: [create, update, patch]
+  # Each node durably records Gateway listener ports; retired leases are kept.
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [create, update]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [create, update, patch, delete]
   {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

@@ -55,7 +55,7 @@ Route edits never enumerate or serialize the complete discovery projection."
             (when (and object (equal "gateways" (first key)))
               (loop for listener across (gethash "listeners" (gethash "spec" object) #())
                     for reference = (and (equal "HTTPS" (gethash "protocol" listener))
-                                         (gateway-listener-tls-ref (second key) listener))
+                                         (gateway-listener-tls-ref (second key) listener store))
                     when reference
                       do (let* ((secret-key (list "secrets" (car reference) (cdr reference)))
                                 (secret (gethash secret-key resources)))

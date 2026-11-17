@@ -213,6 +213,132 @@
                (is (poll-until (lambda () (> full before)) :timeout 2))))
         (stop-reconciliation-worker worker)))))
 
+(test gateway-publication-can-run-while-periodic-repair-is-busy
+  (with-temporary-store (store path)
+    (values path)
+    (let* ((passes 0) (repair-entered nil) (release-repair nil) (gateway nil)
+           (worker (start-reconciliation-worker
+                    (make-reconciler store (make-fake-runtime)) :interval 0.05
+                    :before-reconcile
+                    (lambda ()
+                      (when (> (incf passes) 1)
+                        (setf repair-entered t)
+                        (loop until release-repair do (sleep 0.005))))
+                    :gateway-reconcile (lambda () (setf gateway t)))))
+      (unwind-protect
+           (progn
+             (is (poll-until (lambda () repair-entered) :timeout 2))
+             (gr8s.server::request-reconciliation worker :scope :gateway)
+             (is (poll-until (lambda () gateway) :timeout 0.5)))
+        (setf release-repair t)
+        (stop-reconciliation-worker worker)))))
+
+(test gateway-worker-failure-requests-full-repair-and-shuts-down
+  (with-temporary-store (store path)
+    (values path)
+    (let* ((full 0) (gateway 0)
+           (worker (start-reconciliation-worker
+                    (make-reconciler store (make-fake-runtime)) :interval 30.0
+                    :before-reconcile (lambda () (incf full))
+                    :gateway-reconcile (lambda () (incf gateway) (error "injected Gateway failure")))))
+      (unwind-protect
+           (progn
+             (is (poll-until (lambda () (gr8s.server::reconciliation-worker-leader-active worker))))
+             (gr8s.server::request-reconciliation worker :scope :gateway)
+             (is (poll-until (lambda () (and (= gateway 1) (>= full 2))) :timeout 2)))
+        (stop-reconciliation-worker worker))
+      (is (not (bt:thread-alive-p (gr8s.server::reconciliation-worker-gateway-thread worker))))
+      (is (not (bt:thread-alive-p (gr8s.server::reconciliation-worker-thread worker)))))))
+
+(test gateway-worker-retains-writes-during-publication-and-observes-leadership-loss
+  (with-temporary-store (store path)
+    (values path)
+    (let* ((leader t) (gateway 0) (entered nil) (release nil)
+           (worker (start-reconciliation-worker
+                    (make-reconciler store (make-fake-runtime)) :interval 30.0
+                    :leader-gate (lambda () leader)
+                    :gateway-reconcile
+                    (lambda ()
+                      (when (= (incf gateway) 1)
+                        (setf entered t)
+                        (loop until release do (sleep 0.005)))))))
+      (unwind-protect
+           (progn
+             (is (poll-until (lambda () (gr8s.server::reconciliation-worker-leader-active worker))))
+             (gr8s.server::request-reconciliation worker :scope :gateway)
+             (is (poll-until (lambda () entered)))
+             (gr8s.server::request-reconciliation worker :scope :gateway)
+             (setf release t)
+             (is (poll-until (lambda () (= gateway 2))))
+             (setf leader nil)
+             (gr8s.server::request-reconciliation worker :scope :gateway)
+             (is (poll-until (lambda () (not (gr8s.server::reconciliation-worker-leader-active worker)))))
+             (is (= gateway 2)))
+        (setf release t)
+        (stop-reconciliation-worker worker)))))
+
+(test old-full-pass-cannot-authorize-gateway-after-observed-leadership-loss
+  (with-temporary-store (store path)
+    (values path)
+    (let* ((leader t) (passes 0) (gateway 0) (release-old nil) (release-new nil)
+           (worker (start-reconciliation-worker
+                    (make-reconciler store (make-fake-runtime)) :interval 30.0
+                    :leader-gate (lambda () leader)
+                    :before-reconcile
+                    (lambda ()
+                      (case (incf passes)
+                        (2 (loop until release-old do (sleep 0.005)))
+                        (3 (loop until release-new do (sleep 0.005)))))
+                    :gateway-reconcile (lambda () (incf gateway)))))
+      (unwind-protect
+           (progn
+             (is (poll-until (lambda () (gr8s.server::reconciliation-worker-leader-active worker))))
+             (gr8s.server::request-reconciliation worker)
+             (is (poll-until (lambda () (= passes 2))))
+             (setf leader nil)
+             (gr8s.server::request-reconciliation worker :scope :gateway)
+             (is (poll-until (lambda () (not (gr8s.server::reconciliation-worker-leader-active worker)))))
+             (setf leader t release-old t)
+             (is (poll-until (lambda () (= passes 3))))
+             (gr8s.server::request-reconciliation worker :scope :gateway)
+             (sleep 0.05)
+             (is (= gateway 0))
+             (is (not (gr8s.server::reconciliation-worker-leader-active worker))))
+        (setf release-old t release-new t)
+        (stop-reconciliation-worker worker)))))
+
+(test gateway-admission-rechecks-repair-after-a-concurrent-leadership-loss
+  (with-temporary-store (store path)
+    (values path)
+    (let* ((leader t) (gate-entered nil) (release-gate nil) (release-repair nil)
+           (passes 0) (gateway 0)
+           (worker (start-reconciliation-worker
+                    (make-reconciler store (make-fake-runtime)) :interval 30.0
+                    :leader-gate
+                    (lambda ()
+                      (when (equal "gr8s Gateway publisher" (bt:thread-name (bt:current-thread)))
+                        (setf gate-entered t)
+                        (loop until release-gate do (sleep 0.005)))
+                      leader)
+                    :before-reconcile
+                    (lambda ()
+                      (when (> (incf passes) 1)
+                        (loop until release-repair do (sleep 0.005))))
+                    :gateway-reconcile (lambda () (incf gateway)))))
+      (unwind-protect
+           (progn
+             (is (poll-until (lambda () (gr8s.server::reconciliation-worker-leader-active worker))))
+             (gr8s.server::request-reconciliation worker :scope :gateway)
+             (is (poll-until (lambda () gate-entered)))
+             (setf leader nil)
+             (gr8s.server::request-reconciliation worker)
+             (is (poll-until (lambda () (not (gr8s.server::reconciliation-worker-leader-active worker)))))
+             (setf leader t release-gate t)
+             (sleep 0.05)
+             (is (= gateway 0)))
+        (setf release-gate t release-repair t)
+        (stop-reconciliation-worker worker)))))
+
 (test pending-full-work-dominates-gateway-wakeups
   (let ((worker (gr8s.server::make-reconciliation-worker)))
     (gr8s.server::request-reconciliation worker :scope :gateway)

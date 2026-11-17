@@ -289,7 +289,12 @@ test-install-lifecycle:
 
 test-whistler-cni: containerd-bundle test
 
-check: containerd-bundle test-protocol-generation test-whistler-cni test-endpoint-policy test-service-lb-program test-service-packet-program test-service-nat test-service-nat-policy test-service-nat-guard test-service-wire test-service-packet-guard test-service-packet-gc test-service-tcp-state test-install-lifecycle
+.PHONY: test-gateway-conformance-runner
+test-gateway-conformance-runner:
+	python3 scripts/test_gateway_conformance_runner.py
+	sh -n deploy/conformance/run-conformance.sh
+
+check: containerd-bundle test-protocol-generation test-whistler-cni test-endpoint-policy test-service-lb-program test-service-packet-program test-service-nat test-service-nat-policy test-service-nat-guard test-service-wire test-service-packet-guard test-service-packet-gc test-service-tcp-state test-install-lifecycle test-gateway-conformance-runner
 	sh -n install.sh gr8s-killall.sh gr8s-uninstall.sh \
 	  scripts/gr8s scripts/install-containerd.sh scripts/collect-notices.sh \
 	  scripts/verify-static-runtime.sh scripts/smoke.sh scripts/test-core-api.sh
