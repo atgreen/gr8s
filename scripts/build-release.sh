@@ -1,9 +1,9 @@
 #!/bin/bash
-# Build the same assets locally and in GitHub Actions. Toolchains and the
-# Headlamp checkout are installed by release.yml; HEADLAMP must point to it.
+# Build the same assets locally and in GitHub Actions. Toolchains are installed
+# by release.yml; the dashboard is extracted from the digest-pinned Headlamp
+# image by `make dashboard-assets`, which needs podman or docker on PATH.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-: "${HEADLAMP:?Set HEADLAMP to the pinned Headlamp checkout}"
 case $(uname -m) in
   x86_64) architecture=amd64 ;;
   aarch64) architecture=arm64 ;;
