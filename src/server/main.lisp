@@ -3261,6 +3261,67 @@ key once with `gr8s backup keygen`). The encrypted bundle captures cluster
 identity, keys, and the Raft store; `gr8s backup verify` authenticates it and
 `gr8s restore` rebuilds a fresh state directory from it. See docs/backup-restore.md.
 
+## HA troubleshooting playbook
+
+In an HA cluster, orient with membership before anything else:
+
+    gr8s member list --kubeconfig KUBECONFIG
+
+Each durable member is shown with role, address, and contact state. A voter
+marked `never-heard` is a ghost: it holds a quorum vote it can never cast.
+Contact is only meaningful when the serving member is the leader; off-leader
+it reads `unknown` and the output names the leader to query. Exit 1 means
+ghosts exist.
+
+The journals explain refusals -- grep for these lines and trust them:
+
+- `refusing join of X as voter: REASON` (leader) and `could not join the
+  cluster at HOST:PORT: REASON` (joiner): the admission refusal and why
+  (`change-in-flight` means another membership change has not committed).
+- `committed node delta for X conflicts with this member's state; skipped`:
+  this member's replica of X has diverged in stable fields. One-shot bursts
+  during leadership churn self-heal; a steady stream means a baked fork --
+  wipe and rejoin this member (checklist below).
+- `application drain timed out after Ns; K requests still active: METHOD
+  PATH (AGEs)`: a checkpoint could not drain; the named request holds a
+  store lease. The API rejects with 503 while draining.
+- `waiting for a quorum: N of M voting members; ...not heard from since
+  startup`: who is missing and whether the cluster can proceed. A joiner
+  that stays at `no application snapshot bytes have arrived` has a
+  reachability problem -- usually a firewalled raft port; `gr8s doctor`'s
+  \"cluster ports\" check maps the member address to its interface and
+  firewalld zone and prints the exact repair.
+
+Member failure decision tree:
+
+- A member is gone but a quorum of live voters remains: `gr8s member remove
+  NAME`, then rejoin it (or its replacement) with a fresh
+  `gr8s join-token --role control-plane` token. Names may be reused.
+- The missing members broke quorum permanently: `gr8s serve --cluster-reset`
+  on a surviving voter (see docs/backup-restore.md for the full decision).
+- Never wipe a live voter's state directory without removing it from the
+  membership first: a committed voter that vanishes still costs quorum, and
+  its single-use join token is already burned.
+
+Wipe-and-rejoin checklist, in order (skipping a step crash-loops):
+stop the service; unmount any bpffs still mounted under the state directory
+(`mount | grep STATE_DIR`); remove the state directory; run
+`gr8s doctor --fix` to clear leftover gr8s network interfaces; mint a fresh
+control-plane token; update the service environment; start. Watch the join:
+enrollment errors and snapshot-transfer progress both appear in the journal.
+
+Replica forensics: every member's API serves its own replica, so the same
+object can be diffed across members to find a fork:
+
+    kubectl --server=https://MEMBER:6443 get node NAME -o json
+
+Operational properties worth relying on: service restarts do not restart
+workloads (containers and shims survive; `gr8s-killall.sh` is how workloads
+are actually stopped), so restart freely for upgrades -- one member at a
+time, leader last. Suspending or losing any member, the leader included, is
+tolerated: survivors elect within seconds and the returning member rejoins
+as a follower. Dead peers surface as connection errors within ~15 seconds.
+
 ## Live Lisp inspection with Slynk
 
 You can inspect a running process without restarting it or installing a debug

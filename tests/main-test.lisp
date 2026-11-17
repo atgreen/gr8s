@@ -953,3 +953,15 @@
       "without --mtu the backend defaults decide")
   (signals error (gr8s.server::parse-serve-options '("--mtu" "100")))
   (signals error (gr8s.server::parse-serve-options '("--mtu" "banana"))))
+
+(test skill-includes-the-ha-troubleshooting-playbook
+  ;; Distilled from the 2026-11-17 incidents: membership-first orientation,
+  ;; the journal lines that explain refusals, and the member decision tree.
+  (let ((output (with-output-to-string (stream) (gr8s.server::print-skill stream))))
+    (is (search "HA troubleshooting playbook" output))
+    (is (search "gr8s member list" output))
+    (is (search "conflicts with this member's state" output))
+    (is (search "gr8s member remove" output))
+    (is (search "--cluster-reset" output))
+    (is (search "Wipe-and-rejoin checklist" output))
+    (is (search "gr8s doctor --fix" output))))
