@@ -18,6 +18,14 @@ the Kubernetes API version with a gr8s release suffix (see
   unit's cgroup), restarting every pod on the node. Verified live: the
   same container process survived a full `systemctl restart`.
   `gr8s-killall.sh` remains the way to stop workloads too.
+- Replica readiness beliefs can no longer poison node-delta replication
+  (follow-up to the lease-clock fix): the replicated-node conflict check
+  also ignores `ready` and `runtimeDownMessage`, which every member's
+  expiry monitor flips locally at its own pace. A replica that once
+  marked a node NotReady used to skip every later heartbeat delta
+  forever — even one freshly rebuilt from the leader's snapshot
+  re-forked within seconds. A committed heartbeat now heals the
+  skipping replica's belief instead.
 
 - `gr8s status` and `gr8s member` now work against kubeconfigs with inline
   certificate data (`certificate-authority-data` and friends) — which

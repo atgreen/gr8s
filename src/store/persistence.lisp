@@ -571,12 +571,18 @@ renewals use the same compact one-key delta without changing resourceVersion."
                  (remhash name (pod-store-nodes store))))))
 
 (defparameter +node-volatile-comparison-fields+
-  '("resourceVersion" "lastHeartbeat" "leaseDeadline" "readySince")
-  "Fields the replicated-node CAS comparison ignores: the commit revision and
-the lease clock. The clock renews every few seconds on the session-owning
-member, so including it gives a write racing a heartbeat member-dependent
-conflict verdicts -- replicas that silently skip a committed delta fork, and
-every later delta from the forked side conflicts forever (podster-uvs).")
+  '("resourceVersion" "lastHeartbeat" "leaseDeadline" "readySince"
+    "ready" "runtimeDownMessage")
+  "Fields the replicated-node CAS comparison ignores: the commit revision, the
+lease clock, and the lease-DERIVED session state (ready, runtimeDownMessage).
+The clock renews every few seconds on the session-owning member, and every
+member's expiry monitor flips readiness locally at its own pace, so including
+any of them gives member-dependent conflict verdicts: a replica that once
+believed a node NotReady skipped every later heartbeat delta (whose expected
+image said Ready) forever -- even a replica freshly rebuilt from the leader's
+snapshot re-forked within seconds. These fields are single-author session
+state derived from the clock, not CAS-protected content (podster-uvs,
+podster-zu3).")
 
 (defun node-object-same-state-p (left right)
   "Compare a retry's desired state independently of its assigned commit revision
