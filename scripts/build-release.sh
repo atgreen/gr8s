@@ -34,7 +34,7 @@ print(':'.join(directories))
 PY
 )
 export CL_SOURCE_REGISTRY
-make dashboard-assets HEADLAMP="$HEADLAMP"
+make dashboard-assets
 test -s assets/dashboard/index.html
 scripts/collect-notices.sh "$output/NOTICES"
 export GR8S_NOTICES_FILE="$output/NOTICES"
