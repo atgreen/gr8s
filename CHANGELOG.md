@@ -7,6 +7,14 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ## [Unreleased]
 
+### Fixed
+
+- HA control-plane shutdown now always completes: stopping a Raft member
+  bounds every worker-thread join under one deadline (10s), abandoning a
+  thread that will not exit with a warning instead of hanging until
+  systemd kills the process — previously an unreachable peer during a
+  membership change could wedge `systemctl stop` forever.
+
 ### Changed
 
 - The packaged and installer-generated systemd services report readiness
