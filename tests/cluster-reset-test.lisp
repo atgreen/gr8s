@@ -139,3 +139,26 @@
   (signals error
     (gr8s.server::parse-serve-options
      (list "--state-directory" "/tmp/x" "--cluster-reset" "--join" "h:7000" "--node-name" "a"))))
+
+;;; podster-84o: "waiting for committed application recovery" looked identical
+;;; whether the snapshot was flowing or fully stalled. The wait report now
+;;; carries transfer progress, and flags an admitted learner that has received
+;;; nothing -- whose usual cause is a firewalled raft port.
+
+(test recovery-wait-report-shows-transfer-progress-and-stalls
+  (let* ((node (cl-raft::make-raft-node :id "j" :peers '("leader")
+                                        :send-fn (lambda (&rest args) (declare (ignore args)))))
+         (member (gr8s.raft.transport::make-raft-member :node node))
+         (hcp (gr8s.ha::make-ha-control-plane :member member :store nil)))
+    ;; An admitted learner with no receiver yet: the silent-stall warning.
+    (setf (gr8s.raft::raft-node-self-role node) :learner)
+    (let ((report (gr8s.ha:ha-recovery-wait-report hcp)))
+      (is (search "no application snapshot bytes have arrived" report))
+      (is (search "gr8s doctor" report)))
+    ;; Chunks flowing: progress instead of the warning.
+    (setf (gr8s.raft.transport::raft-member-snapshot-receiver member)
+          (gr8s.raft.transport::make-raft-snapshot-receiver
+           :from "leader" :term 1 :index 10 :total 1048576 :offset 262144))
+    (let ((report (gr8s.ha:ha-recovery-wait-report hcp)))
+      (is (search "262144 of 1048576 bytes received" report))
+      (is (not (search "no application snapshot bytes" report))))))

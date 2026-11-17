@@ -68,19 +68,25 @@
           (progn (com.inuoe.jzon:stringify body :stream output)
                  (terpri output) (finish-output output) 0)
           (let ((items (coerce (gethash "items" body #()) 'list))
-                (ghosts 0))
+                (ghosts 0)
+                (unknowns 0))
             (format output "~&~12A ~8A ~22A ~12A ~A~%" "MEMBER" "ROLE" "ADDRESS" "CONTACT" "LEADER")
             (dolist (item items)
               (let* ((spec (gethash "spec" item))
                      (item-status (gethash "status" item))
                      (contact (gethash "contact" item-status)))
                 (when (equal contact "never-heard") (incf ghosts))
+                (when (equal contact "unknown") (incf unknowns))
                 (format output "~12A ~8A ~22A ~12A ~A~%"
                         (gethash "name" (gethash "metadata" item))
                         (gethash "role" spec)
                         (or (gethash "address" spec) "-")
                         contact
                         (if (eq t (gethash "leader" item-status)) "yes" ""))))
+            (when (plusp unknowns)
+              (format output "~%contact is visible only from the leader~@[ (~A)~]; query it for ghost detection~%"
+                      (let ((leader (gethash "leader" body)))
+                        (and (stringp leader) leader))))
             (when (plusp ghosts)
               (format output "~%~D member~:P never heard from: if permanently gone, remove with `gr8s member remove NAME`; without a quorum of live voters, see --cluster-reset in docs/backup-restore.md~%"
                       ghosts))
