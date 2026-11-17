@@ -156,6 +156,28 @@
   (bt:with-lock-held ((raft-member-lock member))
     (raft-propose-config (raft-member-node member) :remove id)))
 
+(defun raft-cluster-readvertise-api-url (member api-url)
+  "Leader-side refresh of this member's own advertised API URL. When the committed
+   config records a different URL for this member -- it has roamed to a new address
+   -- set the local entry and propose an otherwise-unchanged config so every member
+   learns the new URL and redirects clients there (podster-1ig). Returns (values t
+   nil) once proposed, (values nil :unchanged) when the config already matches, or
+   (values nil reason) from raft-propose-config (e.g. :not-leader, :change-in-flight),
+   with the local entry restored so a later attempt retries."
+  (bt:with-lock-held ((raft-member-lock member))
+    (let* ((node (raft-member-node member))
+           (self (raft-node-id node))
+           (committed (gethash self (raft-node-api-urls node))))
+      (if (equal api-url committed)
+          (values nil :unchanged)
+          (progn
+            (setf (gethash self (raft-node-api-urls node)) api-url)
+            (multiple-value-bind (index outcome) (raft-propose-config (raft-member-node member))
+              (declare (ignore index))
+              (cond ((eq outcome t) (values t nil))
+                    (t (setf (gethash self (raft-node-api-urls node)) committed)
+                       (values nil outcome)))))))))
+
 (defun raft-cluster-members (member)
   "The current membership as an alist id->role, from this member's view."
   (bt:with-lock-held ((raft-member-lock member))

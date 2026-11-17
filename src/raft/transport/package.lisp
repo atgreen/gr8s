@@ -20,6 +20,7 @@
    #:raft-cluster-join
    #:raft-cluster-members
    #:raft-cluster-prepare-joiner
+   #:raft-cluster-readvertise-api-url
    #:raft-cluster-remove-member
    #:raft-link-drop
    #:raft-link-drop-relay

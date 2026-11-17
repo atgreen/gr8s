@@ -80,6 +80,55 @@
                "the surviving two-member cluster still commits"))
       (dolist (m all) (ignore-errors (gr8s.raft.transport::stop-raft-member m))))))
 
+(test leader-readvertises-its-api-url-to-the-whole-cluster
+  ;; podster-1ig: when the leader roams to a new address, a follower must learn the
+  ;; new URL so it redirects clients there. raft-cluster-readvertise-api-url sets the
+  ;; leader's own entry and proposes an otherwise-unchanged config to replicate it.
+  (let* ((ids '("a" "b"))
+         (kvs (mapcar (lambda (id) (cons id (make-hash-table :test 'equal))) ids))
+         (a (make-cluster-member "a" kvs))
+         (b (make-cluster-member "b" kvs)))
+    (flet ((url-of (member id)
+             (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
+               (gethash id (cl-raft::raft-node-api-urls (gr8s.raft.transport::raft-member-node member))))))
+      (unwind-protect
+           (progn
+             (gr8s.raft.transport::raft-cluster-init a)
+             (gr8s.raft.transport::raft-member-start a)
+             (is (poll-until (lambda () (gr8s.raft.transport::raft-member-leader-p a))))
+             (gr8s.raft.transport::raft-cluster-prepare-joiner b (list (cons "a" (member-address a))))
+             (gr8s.raft.transport::raft-member-start b)
+             (is (gr8s.raft.transport::raft-cluster-add-member
+                  a "b" (gr8s.raft.transport::raft-member-host b) (gr8s.raft.transport::raft-member-port b)))
+             (is (poll-until (lambda () (member "b" (cl-raft::raft-node-peers
+                                                     (gr8s.raft.transport::raft-member-node a)) :test #'equal))))
+
+             ;; The leader re-advertises its own API URL.
+             (multiple-value-bind (proposed reason)
+                 (gr8s.raft.transport::raft-cluster-readvertise-api-url a "https://10.77.77.10:6443")
+               (is (eq t proposed) "the leader proposes the API-URL refresh")
+               (is (null reason)))
+             ;; It replicates to the follower, so b now redirects clients to the new URL.
+             (is (poll-until (lambda () (equal "https://10.77.77.10:6443" (url-of b "a"))))
+                 "the follower learns the leader's new API URL")
+             (is (equal "https://10.77.77.10:6443" (url-of a "a")))
+
+             ;; Idempotent: nothing to do once the config already matches.
+             (multiple-value-bind (proposed reason)
+                 (gr8s.raft.transport::raft-cluster-readvertise-api-url a "https://10.77.77.10:6443")
+               (is (null proposed))
+               (is (eq :unchanged reason)))
+
+             ;; A follower cannot propose: the refresh is refused and its local
+             ;; entry for itself is left untouched.
+             (multiple-value-bind (proposed reason)
+                 (gr8s.raft.transport::raft-cluster-readvertise-api-url b "https://10.77.77.20:6443")
+               (is (null proposed))
+               (is (eq :not-leader reason)))
+             (is (not (equal "https://10.77.77.20:6443" (url-of b "b")))
+                 "a refused refresh leaves the follower's own entry unchanged"))
+        (dolist (m (list a b)) (ignore-errors (gr8s.raft.transport::stop-raft-member m)))))))
+
 (defun learner-test-join (member id port &optional (role "voter"))
   (gr8s.raft.transport::raft-member-handle-join
    member (make-instance 'gr8s.node.v1::join-request :member-id id :host "127.0.0.1" :port port :role role) nil))

@@ -9,6 +9,17 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- Follower writes no longer break on a roaming cluster: the control-plane
+  API is advertised on the node's own cluster interface. The advertise
+  address now considers `--node-listen` (the WireGuard address chosen for
+  roaming) before scanning the host's first non-loopback IPv4, which
+  returned whatever LAN address came first and stranded every follower's
+  redirect — and the dashboard's auth probe — on an address unreachable
+  once the node roamed off that network (podster-1ig). The advertised API
+  URL is also no longer pinned as consensus identity: only the member id
+  and Raft endpoint are, so a member that moves can restart with its new
+  address instead of being refused and forced to re-found, and the leader
+  re-advertises its current URL to the cluster so followers redirect there.
 - `gr8s dashboard` (and any client probing permissions against a
   follower) no longer fails with "Error Authenticating": the Headlamp
   login check POSTs a `SelfSubjectRulesReview`, which — being a POST —
