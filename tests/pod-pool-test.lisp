@@ -377,3 +377,37 @@
         (with-open-file (s (gr8s.network::node-ipam-state-path ipam) :direction :output :if-exists :supersede)
           (com.inuoe.jzon:stringify state :stream s))
         (signals gr8s.network::cni-error (gr8s.agent::persisted-node-route-identities root))))))
+
+;;; podster-a5g: the refusal must name the offending link so an operator (or
+;;; `gr8s doctor --fix`) knows what to delete, instead of a bare CIDR.
+
+(test host-route-violations-name-the-offending-interface
+  (with-temporary-store (store path)
+    (values store)
+    (let* ((attributes (pool-test-link-attributes
+                        "gr8s-vxlan" "gr8s:vxlan:stale" #(2 0 0 0 0 1) "vxlan"))
+           (route-reader (lambda () '((:cidr "10.80.0.0/32" :index 7 :table 255))))
+           (link-reader (lambda (index) (declare (ignore index)) attributes)))
+      (let ((violations (gr8s.agent::pod-pool-host-route-violations
+                         "10.80.0.0/12" path
+                         :route-reader route-reader :link-reader link-reader)))
+        (is (= 1 (length violations)))
+        (let ((violation (first violations)))
+          (is (equal "10.80.0.0/32" (getf violation :cidr)))
+          (is (eql 255 (getf violation :table)))
+          (is (equal "gr8s-vxlan" (getf violation :interface)))
+          (is (eq attributes (getf violation :attributes)))))
+      (handler-case
+          (progn (gr8s.agent::validate-pod-pool-host-routes
+                  "10.80.0.0/12" path
+                  :route-reader route-reader :link-reader link-reader)
+                 (fail "an overlapping stale route must be refused"))
+        (gr8s.network::cni-error (condition)
+          (let ((text (princ-to-string condition)))
+            (is (search "interface gr8s-vxlan" text))
+            (is (search "doctor --fix" text)))))
+      ;; A clean host reports no violations.
+      (is (null (gr8s.agent::pod-pool-host-route-violations
+                 "10.80.0.0/12" path
+                 :route-reader (lambda () '((:cidr "192.0.2.0/24" :index 2 :table 254)))
+                 :link-reader link-reader))))))

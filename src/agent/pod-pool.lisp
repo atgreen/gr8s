@@ -165,36 +165,71 @@
                     (equalp (gethash 4 vxlan) (ipv4-network-octets (gethash "underlayAddress" network)))
                     (equalp (gethash 15 vxlan) #(18 181))))))))
 
-(defun validate-pod-pool-host-routes
+(defun netlink-link-name (attributes)
+  "The link name in ATTRIBUTES (IFLA_IFNAME), or NIL."
+  (let ((octets (and (hash-table-p attributes) (gethash 3 attributes))))
+    (when octets
+      (ignore-errors
+       (trivial-utf-8:utf-8-bytes-to-string
+        (coerce (remove 0 octets) '(vector (unsigned-byte 8))))))))
+
+(defun pod-pool-host-route-violations
     (cidr state-directory &key (route-reader #'read-ip-host-routes)
                               (link-reader #'network-link-attributes-by-index))
-  "Reject overlapping host routes, allowing only exact journal-owned dataplane routes.
+  "Overlapping host routes that no exact journal-owned dataplane route accounts for.
 This runs while Pods come and go. A Pod's lease outlives its route both ways: ADD persists
 the lease before installing the route, and DEL removes the route before releasing the lease.
 So reading the journal on both sides of the route dump finds the lease of any Pod route in
-it, and an owned route whose link has since gone left with its link."
+it, and an owned route whose link has since gone left with its link. Each violation is a
+plist of :CIDR, :TABLE, :INDEX, and the offending link's :INTERFACE name and :ATTRIBUTES
+when the link still exists -- what `gr8s doctor --fix` uses to recognize gr8s-owned debris."
   (let* ((cidrs (cond ((stringp cidr) (list cidr))
                       ((vectorp cidr) (coerce cidr 'list))
                       (t cidr)))
          (before (persisted-node-route-identities state-directory))
          (routes (funcall route-reader))
-         (owned (append before (persisted-node-route-identities state-directory))))
-    (dolist (route routes)
+         (owned (append before (persisted-node-route-identities state-directory)))
+         (violations nil))
+    (dolist (route routes (nreverse violations))
       (when (and (plusp (nth-value 2 (parse-pod-cidr (getf route :cidr))))
                  (some (lambda (pool) (pod-cidrs-overlap-p pool (getf route :cidr)))
                        cidrs))
-        (let ((identities (remove-if-not
-                           (lambda (item) (string= (getf route :cidr) (getf item :cidr))) owned)))
-          (unless (and identities (plusp (getf route :index 0))
-                       (let ((attributes (handler-case (funcall link-reader (getf route :index))
-                                           (rtnetlink-error (condition)
-                                             (if (= 19 (rtnetlink-error-errno condition)) :gone nil)))))
-                         (or (eq :gone attributes)
-                             (and attributes
-                                  (some (lambda (identity) (route-link-matches-identity-p attributes identity))
-                                        identities)))))
-            (invalid-cni "Pod pool ~{~A~^, ~} overlaps host route ~A in table ~A"
-                         cidrs (getf route :cidr) (getf route :table)))))))
+        (let* ((identities (remove-if-not
+                            (lambda (item) (string= (getf route :cidr) (getf item :cidr))) owned))
+               (attributes (when (plusp (getf route :index 0))
+                             (handler-case (funcall link-reader (getf route :index))
+                               (rtnetlink-error (condition)
+                                 (if (= 19 (rtnetlink-error-errno condition)) :gone nil)))))
+               (allowed (and identities attributes
+                             (or (eq :gone attributes)
+                                 (some (lambda (identity)
+                                         (route-link-matches-identity-p attributes identity))
+                                       identities)))))
+          (unless allowed
+            (push (list :cidr (getf route :cidr) :table (getf route :table)
+                        :index (getf route :index 0)
+                        :interface (and (hash-table-p attributes) (netlink-link-name attributes))
+                        :attributes (and (hash-table-p attributes) attributes))
+                  violations)))))))
+
+(defun validate-pod-pool-host-routes
+    (cidr state-directory &key (route-reader #'read-ip-host-routes)
+                              (link-reader #'network-link-attributes-by-index))
+  "Reject overlapping host routes, allowing only exact journal-owned dataplane routes
+(see POD-POOL-HOST-ROUTE-VIOLATIONS). The refusal names the offending link when it
+still exists, and points at `gr8s doctor --fix`, which removes stale gr8s-owned
+links instead of leaving a crash loop (podster-a5g)."
+  (let ((violations (pod-pool-host-route-violations
+                     cidr state-directory
+                     :route-reader route-reader :link-reader link-reader)))
+    (when violations
+      (let ((violation (first violations))
+            (cidrs (cond ((stringp cidr) (list cidr))
+                         ((vectorp cidr) (coerce cidr 'list))
+                         (t cidr))))
+        (invalid-cni "Pod pool ~{~A~^, ~} overlaps host route ~A in table ~A~@[ (interface ~A)~]; 'gr8s doctor --fix' removes stale gr8s-owned interfaces"
+                     cidrs (getf violation :cidr) (getf violation :table)
+                     (getf violation :interface)))))
   t)
 
 (defun ensure-controller-node-pool

@@ -161,9 +161,92 @@ program is missing.  Used for optional host tools like firewall-cmd."
                "move the conflicting file out of the standard kubelet endpoint path")))
         finally (return fails)))
 
+(defparameter +gr8s-fixed-interface-names+
+  '("gr8s-vxlan" "gr8s-gateway" "gr8s-services" "gr8s-wg")
+  "The fixed interface names gr8s creates on a node (vxlan overlay, pod
+gateway, service network, wireguard overlay).")
+
+(defun doctor-gr8s-owned-link-p (name attributes)
+  "Judge from the kernel link alone whether gr8s created it: one of its fixed
+interface names, the ownership alias gr8s stamps on its devices (\"gr8s:...\"
+or \"gr8s-services/...\"), or a pod veth (kind veth, name gr + hex digits).
+Only such links may be deleted by --fix; anything else stays an operator call."
+  (or (and name (member name +gr8s-fixed-interface-names+ :test #'string=) t)
+      (let ((alias (and (hash-table-p attributes) (gethash 20 attributes))))
+        (and alias (>= (length alias) 4)
+             (loop for i below 4
+                   always (eql (aref alias i) (char-code (char "gr8s" i))))))
+      (and name (hash-table-p attributes)
+           (gr8s.network::network-link-kind-p attributes "veth")
+           (and (cl-ppcre:scan "^gr[0-9a-f]+$" name) t))))
+
+(defun doctor-check-pod-pool-routes
+    (cluster-pod-cidr directory fix
+     &key (violations-fn #'gr8s.agent::pod-pool-host-route-violations)
+          (deleter (lambda (name) (gr8s.network::delete-network-link name))))
+  "Report the pod-pool overlap check (the validate-pod-pool-host-routes trap);
+with FIX, first delete stale gr8s-owned links so startup stops crash-looping
+on debris a killed instance left behind (podster-a5g). Routes whose links are
+not provably gr8s-owned are never touched. Returns the FAIL count."
+  (flet ((describe-violations (violations)
+           (format nil "~{~{~A in table ~A~@[ (interface ~A)~]~}~^; ~}"
+                   (mapcar (lambda (violation)
+                             (list (getf violation :cidr) (getf violation :table)
+                                   (getf violation :interface)))
+                           violations))))
+    (handler-case
+        (let ((violations (funcall violations-fn cluster-pod-cidr directory)))
+          (if (null violations)
+              (progn (doctor-report :ok "pod-pool routes"
+                                    (format nil "no host route overlaps ~A (state dir ~A)"
+                                            cluster-pod-cidr directory))
+                     0)
+              (let* ((owned (remove-if-not
+                             (lambda (violation)
+                               (doctor-gr8s-owned-link-p (getf violation :interface)
+                                                         (getf violation :attributes)))
+                             violations))
+                     (fails 0))
+                (cond
+                  ((and fix owned)
+                   (dolist (name (remove-duplicates
+                                  (mapcar (lambda (violation) (getf violation :interface)) owned)
+                                  :test #'string= :from-end t))
+                     (handler-case
+                         (progn (funcall deleter name)
+                                (doctor-report :ok "pod-pool fix"
+                                               (format nil "removed stale gr8s interface ~A" name)))
+                       (error (condition)
+                         (incf fails)
+                         (doctor-report :fail "pod-pool fix"
+                                        (format nil "could not remove ~A: ~A" name condition)
+                                        "interface removal needs root; re-run under sudo"))))
+                   (let ((remaining (funcall violations-fn cluster-pod-cidr directory)))
+                     (if remaining
+                         (progn
+                           (incf fails)
+                           (doctor-report :fail "pod-pool routes"
+                                          (format nil "~A (checked state dir ~A)"
+                                                  (describe-violations remaining) directory)
+                                          "the remaining routes are not gr8s-owned; if one belongs to a live Pod of another agent, re-run with --state-directory pointing at it; otherwise remove it by hand"))
+                         (doctor-report :ok "pod-pool routes" "clean after removing stale gr8s interfaces")))
+                   fails)
+                  (t
+                   (doctor-report :fail "pod-pool routes"
+                                  (format nil "~A (checked state dir ~A)"
+                                          (describe-violations violations) directory)
+                                  (if owned
+                                      "stale gr8s-owned interfaces found; 'sudo gr8s doctor --fix' removes them"
+                                      "if the route is a live Pod owned by another agent, re-run with --state-directory pointing at that agent; otherwise remove the genuinely stale route (sudo ip route del <cidr>)"))
+                   1)))))
+      (error (condition)
+        (doctor-report :warn "pod-pool routes" (format nil "could not check: ~A" condition))
+        0))))
+
 (defun run-doctor (&key (cluster-pod-cidr +default-cluster-pod-cidr+)
                         (state-directory (namestring (default-state-directory)))
-                        (firewall #'doctor-firewall-state))
+                        (firewall #'doctor-firewall-state)
+                        fix)
   "Run every environment check and return the number of FAILs."
   (let ((fails 0))
     (flet ((note (status label &optional detail hint)
@@ -222,21 +305,10 @@ program is missing.  Used for optional host tools like firewall-cmd."
       ;; FAIL here names the state dir we checked: the usual cause is that the
       ;; overlapping route belongs to a live Pod owned by an agent whose state
       ;; dir is not this one, so re-run against that agent before touching any
-      ;; route.
-      (let ((directory (uiop:ensure-directory-pathname state-directory)))
-        (handler-case
-            (progn
-              (validate-pod-pool-host-routes cluster-pod-cidr directory)
-              (note :ok "pod-pool routes"
-                    (format nil "no host route overlaps ~A (state dir ~A)"
-                            cluster-pod-cidr directory)))
-          ((or cni-error rtnetlink-error) (c)
-            (note :fail "pod-pool routes"
-                  (format nil "~A (checked state dir ~A)" c directory)
-                  (format nil "if the route is a live Pod owned by another agent, re-run with ~
-                               --state-directory pointing at that agent; otherwise remove the ~
-                               genuinely stale route (sudo ip route del <cidr>)")))
-          (error (c) (note :warn "pod-pool routes" (format nil "could not check: ~A" c)))))
+      ;; route.  With --fix, provably gr8s-owned debris (a killed instance's
+      ;; vxlan/gateway/services links or orphan pod veths) is deleted first.
+      (incf fails (doctor-check-pod-pool-routes
+                   cluster-pod-cidr (uiop:ensure-directory-pathname state-directory) fix))
 
       ;; Host firewall vs the gateway DNS (169.254.1.1:53) — podster-sp5.
       (handler-case
