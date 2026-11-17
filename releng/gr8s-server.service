@@ -15,7 +15,13 @@ EnvironmentFile=/etc/gr8s/server.env
 ExecStart=/usr/bin/gr8s $GR8S_EXEC_ARGS
 Restart=always
 RestartSec=5s
-KillMode=mixed
+KillMode=process
+# KillMode=process + Delegate: like k3s, stopping the service kills only the
+# gr8s process. Managed containerd and the container shims (which live in this
+# unit's cgroup) survive, the restarted gr8s reconnects and re-adopts them, and
+# workloads run through control-plane restarts and upgrades (podster-1yx).
+# gr8s-killall.sh remains the way to stop workloads too.
+Delegate=yes
 TimeoutStopSec=30s
 
 [Install]

@@ -148,6 +148,11 @@ jobs:
           test "$(stat -c %a /etc/gr8s/agent.env)" = 600
           test "$(systemctl is-enabled gr8s-server.service || true)" = disabled
           test "$(systemctl is-enabled gr8s-agent.service || true)" = disabled
+          # Workloads must survive service restarts (podster-1yx): only the
+          # gr8s process may be killed; shims/containerd stay for re-adoption.
+          grep -q '^KillMode=process' /usr/lib/systemd/system/gr8s-server.service
+          grep -q '^Delegate=yes' /usr/lib/systemd/system/gr8s-server.service
+          grep -q '^KillMode=process' /usr/lib/systemd/system/gr8s-agent.service
           sudo dpkg -P gr8s
           test ! -e /usr/bin/gr8s
           test ! -e /usr/bin/gr8s-killall.sh
