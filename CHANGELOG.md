@@ -117,6 +117,15 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- Nodes now report standard kubelet `nodeInfo`, so `kubectl describe node`
+  and `kubectl get nodes -o wide` show real values instead of blanks:
+  machine/system/boot IDs, kernel version, OS image (os-release
+  PRETTY_NAME), and container runtime version, gathered once per session
+  hello. Control-plane nodes (an in-process `serve` agent) also get the
+  `node-role.kubernetes.io/control-plane` role label. These fields are
+  single-author session state, excluded from the replicated-node
+  conflict check like node readiness.
+
 - `gr8s serve --mtu N`: the Pod interface MTU handed to every node
   (default unchanged: 1450, or 1420 for the wireguard backend). Needed
   when the node underlay is itself a tunnel — over a WireGuard underlay

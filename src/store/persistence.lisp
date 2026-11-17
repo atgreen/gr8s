@@ -110,6 +110,17 @@
       (setf (gethash "readySince" object) (node-record-ready-since node)))
     (when (node-record-labels node) (setf (gethash "labels" object) (node-record-labels node)))
     (when (node-record-annotations node) (setf (gethash "annotations" object) (node-record-annotations node)))
+    ;; Standard kubelet nodeInfo (only non-empty fields persist/replicate).
+    (loop for (key . value) in (list (cons "machineID" (node-record-machine-id node))
+                                     (cons "systemUUID" (node-record-system-uuid node))
+                                     (cons "bootID" (node-record-boot-id node))
+                                     (cons "kernelVersion" (node-record-kernel-version node))
+                                     (cons "osImage" (node-record-os-image node))
+                                     (cons "containerRuntimeVersion" (node-record-runtime-version node)))
+          when (and value (plusp (length value)))
+            do (setf (gethash key object) value))
+    (when (node-record-control-plane-p node)
+      (setf (gethash "controlPlane" object) t))
     (when (node-record-certificate-issuer-fingerprint node)
       (setf (gethash "certificateIssuerFingerprint" object)
             (node-record-certificate-issuer-fingerprint node)))
@@ -174,6 +185,13 @@
                       (let ((time (gethash "wireguardReflexiveObservedAt" object)))
                         (when (integerp time) time))
                       :kubelet-port (let ((port (gethash "kubeletPort" object 0))) (if (integerp port) port 0))
+                      :machine-id (gethash "machineID" object "")
+                      :system-uuid (gethash "systemUUID" object "")
+                      :boot-id (gethash "bootID" object "")
+                      :kernel-version (gethash "kernelVersion" object "")
+                      :os-image (gethash "osImage" object "")
+                      :runtime-version (gethash "containerRuntimeVersion" object "")
+                      :control-plane-p (eq t (gethash "controlPlane" object))
                       :last-heartbeat (when (integerp heartbeat) heartbeat)
                       :lease-deadline (when (integerp deadline) deadline)
                       :ready-since (when (and persisted-ready-p
@@ -572,7 +590,12 @@ renewals use the same compact one-key delta without changing resourceVersion."
 
 (defparameter +node-volatile-comparison-fields+
   '("resourceVersion" "lastHeartbeat" "leaseDeadline" "readySince"
-    "ready" "runtimeDownMessage")
+    "ready" "runtimeDownMessage"
+    ;; Standard kubelet nodeInfo: single-author session state the owning
+    ;; member learns from the hello, so it must not drive CAS verdicts on
+    ;; other members (same reasoning as readiness; podster-uvs/zu3/k4t).
+    "machineID" "systemUUID" "bootID" "kernelVersion" "osImage"
+    "containerRuntimeVersion" "controlPlane")
   "Fields the replicated-node CAS comparison ignores: the commit revision, the
 lease clock, and the lease-DERIVED session state (ready, runtimeDownMessage).
 The clock renews every few seconds on the session-owning member, and every

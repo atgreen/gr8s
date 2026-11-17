@@ -9,6 +9,33 @@
   "OCTETS decoded as ASCII, one CODE-CHAR per byte."
   (map 'string #'code-char octets))
 
+(defun read-host-id-file (path)
+  "Trimmed contents of PATH, or \"\" when it cannot be read."
+  (or (ignore-errors (string-trim '(#\Space #\Newline #\Tab)
+                                  (uiop:read-file-string path)))
+      ""))
+
+(defun read-os-release-pretty-name ()
+  "The host's PRETTY_NAME from /etc/os-release (e.g. \"Fedora Linux 44\"), or \"\"."
+  (or (ignore-errors
+       (loop for line in (uiop:split-string (uiop:read-file-string "/etc/os-release")
+                                            :separator '(#\Newline))
+             when (uiop:string-prefix-p "PRETTY_NAME=" line)
+               return (string-trim '(#\")
+                                   (subseq line (length "PRETTY_NAME=")))))
+      ""))
+
+(defun agent-node-info (&optional runtime-version)
+  "The standard kubelet nodeInfo this host reports: machine/system/boot ids,
+kernel version, OS image, and container runtime version. Each field degrades
+to the empty string when its source is unreadable."
+  (list :machine-id (read-host-id-file "/etc/machine-id")
+        :system-uuid (read-host-id-file "/sys/class/dmi/id/product_uuid")
+        :boot-id (read-host-id-file "/proc/sys/kernel/random/boot_id")
+        :kernel-version (read-host-id-file "/proc/sys/kernel/osrelease")
+        :os-image (read-os-release-pretty-name)
+        :runtime-version (or runtime-version "")))
+
 (defun verify-enrollment-ca-pin (ca-pem expected-fingerprint)
   "Signal PKI-FAIL unless the certificate in CA-PEM has fingerprint
    EXPECTED-FINGERPRINT; returns NIL on a match."
@@ -781,7 +808,8 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
      ca-certificate-path certificate-path private-key-path &optional snapshot-observer (kubelet-port 0)
                                                                      runtime-health credential-token-function-setter
                                                                      wireguard-public-key wireguard-endpoints capabilities
-                                                                     gateway-config-handler gateway-session-reset)
+                                                                     gateway-config-handler gateway-session-reset
+                                                                     node-info control-plane)
   "Run one agent session to the control plane at HOST:PORT from connect to close:
    dial (TLS when a CA path is given), send the hello and first heartbeat, perform
    the ServerHello handshake, then apply the initial and subsequent snapshots in
@@ -859,7 +887,13 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
                               (if private-key-path
                                   (generate-node-key-and-csr node-name private-key-path)
                                   #())
-                              :boot-id (generate-uid)
+                              :boot-id (getf node-info :boot-id "")
+                              :machine-id (getf node-info :machine-id "")
+                              :system-uuid (getf node-info :system-uuid "")
+                              :kernel-version (getf node-info :kernel-version "")
+                              :os-image (getf node-info :os-image "")
+                              :runtime-version (getf node-info :runtime-version "")
+                              :control-plane control-plane
                               :agent-version "gr8s"
                               :underlay-address
                               (or underlay-address (node-channel-underlay-address channel))
@@ -997,6 +1031,7 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
                            wireguard-endpoints
                            capabilities
                            gateway-config-handler gateway-session-reset
+                           node-info control-plane
                            (stop-predicate (constantly nil)))
   "Maintain the agent's session to the control plane, reconnecting on loss. With
    ENDPOINTS (a list of (host port)) the agent rotates through the control-plane
@@ -1005,6 +1040,9 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
   (let* ((completed 0)
          (control (or control (make-node-session-control)))
          (targets (or endpoints (list (list host port))))
+         ;; Gather the host's nodeInfo once; boot-id and the rest are stable
+         ;; for the process's life, and each reconnect resends the same hello.
+         (node-info (or node-info (agent-node-info)))
          (attempt 0))
     (loop until (or (node-session-cancelled-p control)
                     (funcall stop-predicate))
@@ -1021,7 +1059,8 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
                                                  snapshot-observer kubelet-port runtime-health
                                                  credential-token-function-setter
                                                  wireguard-public-key wireguard-endpoints capabilities
-                                                 gateway-config-handler gateway-session-reset))
+                                                 gateway-config-handler gateway-session-reset
+                                                 node-info control-plane))
                        (unless (or (node-session-cancelled-p control) (funcall stop-predicate))
                          (format *error-output* "gr8s node session to ~A:~A ended; reconnecting~%"
                                  try-host try-port))

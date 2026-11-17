@@ -37,10 +37,17 @@
    #:node-record-capacity
    #:node-record-allocatable
    #:node-record-creation-timestamp
+   #:node-record-boot-id
+   #:node-record-control-plane-p
    #:node-record-extended-resources
    #:node-record-id
+   #:node-record-kernel-version
    #:node-record-kubelet-port
    #:node-record-labels
+   #:node-record-machine-id
+   #:node-record-os-image
+   #:node-record-runtime-version
+   #:node-record-system-uuid
    #:node-record-last-heartbeat
    #:node-record-lease-deadline
    #:node-record-name

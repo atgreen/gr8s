@@ -2941,3 +2941,57 @@
 (test socket-hardening-tolerates-unsupported-sockets
   ;; Best-effort by contract: a closed or odd socket must not signal.
   (finishes (gr8s.security::harden-node-channel-socket nil)))
+
+;;; podster-k4t: kubectl describe node showed <none>/empty for Roles,
+;;; nodeInfo osImage/kernelVersion/containerRuntimeVersion and the machine
+;;; ids. The agent reports them once per session hello; they are single-author
+;;; session state (excluded from the node CAS, like readiness).
+
+(test node-info-populates-the-api-object
+  (with-temporary-store (store path)
+    (declare (ignorable path))
+    (gr8s.controllers::register-node
+     store (gr8s.model:make-node-record :id "n1" :name "n1" :pod-cidr "10.88.1.0/24"
+                                        :underlay-address "192.0.2.10"))
+    (gr8s.controllers::update-node-info
+     store "n1"
+     (list :machine-id "m-123" :system-uuid "u-456" :boot-id "b-789"
+           :kernel-version "7.2.13-200.fc44.x86_64" :os-image "Fedora Linux 44"
+           :runtime-version "containerd 2.0.0")
+     t)
+    (let* ((node (gethash "n1" (gr8s.store::pod-store-nodes store)))
+           (obj (gr8s.resources::node-api-object node))
+           (info (gethash "nodeInfo" (gethash "status" obj)))
+           (labels (gethash "labels" (gethash "metadata" obj))))
+      (is (equal "7.2.13-200.fc44.x86_64" (gethash "kernelVersion" info)))
+      (is (equal "Fedora Linux 44" (gethash "osImage" info)))
+      (is (equal "containerd 2.0.0" (gethash "containerRuntimeVersion" info)))
+      (is (equal "m-123" (gethash "machineID" info)))
+      (is (equal "u-456" (gethash "systemUUID" info)))
+      (is (equal "b-789" (gethash "bootID" info)))
+      (is (equal "" (gethash "node-role.kubernetes.io/control-plane" labels :missing))
+          "a control-plane node gets the role label")
+      ;; Survives a persist/parse round-trip.
+      (let ((reparsed (gr8s.store::parse-node-record
+                       (gr8s.store::node-record-to-object node))))
+        (is (equal "Fedora Linux 44" (gr8s.model:node-record-os-image reparsed)))
+        (is (gr8s.model:node-record-control-plane-p reparsed))))))
+
+(test node-info-fields-are-excluded-from-the-node-cas
+  ;; A member that learns different nodeInfo must not conflict on heartbeats.
+  (dolist (field '("machineID" "osImage" "kernelVersion" "containerRuntimeVersion"
+                   "controlPlane"))
+    (is (member field gr8s.store::+node-volatile-comparison-fields+ :test #'equal)
+        "~A is excluded from the replicated-node conflict check" field)))
+
+(test a-plain-worker-gets-no-control-plane-role
+  (with-temporary-store (store path)
+    (declare (ignorable path))
+    (gr8s.controllers::register-node
+     store (gr8s.model:make-node-record :id "w" :name "w" :pod-cidr "10.88.2.0/24"
+                                        :underlay-address "192.0.2.11"))
+    (gr8s.controllers::update-node-info store "w" (list :os-image "Debian 13") nil)
+    (let* ((node (gethash "w" (gr8s.store::pod-store-nodes store)))
+           (labels (gethash "labels" (gethash "metadata" (gr8s.resources::node-api-object node)))))
+      (is (eq :missing (gethash "node-role.kubernetes.io/control-plane" labels :missing))
+          "a standalone agent node carries no control-plane role"))))

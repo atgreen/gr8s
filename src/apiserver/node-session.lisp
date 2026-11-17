@@ -1591,6 +1591,15 @@ An explicit unready or malformed current report withdraws its prior proof."
                                             (node-capacity-from-entries (slot-value hello 'gr8s.node.v1::capacity)))
                       (update-node-kubelet-port (node-grpc-server-store server) node-name
                                                 (or (slot-value hello 'gr8s.node.v1::kubelet-port) 0))
+                      (update-node-info
+                       (node-grpc-server-store server) node-name
+                       (list :machine-id (slot-value hello 'gr8s.node.v1::machine-id)
+                             :system-uuid (slot-value hello 'gr8s.node.v1::system-uuid)
+                             :boot-id (slot-value hello 'gr8s.node.v1::boot-id)
+                             :kernel-version (slot-value hello 'gr8s.node.v1::kernel-version)
+                             :os-image (slot-value hello 'gr8s.node.v1::os-image)
+                             :runtime-version (slot-value hello 'gr8s.node.v1::runtime-version))
+                       (slot-value hello 'gr8s.node.v1::control-plane))
                       (let ((session (make-node-agent-session stream)))
                         (setf (node-agent-session-node-id session) (node-record-id node)
                               (node-agent-session-deltas-p session)

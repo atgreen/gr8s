@@ -164,6 +164,17 @@ message NodeHello {
   // Signed by the node's existing private key. The authenticated session binds
   // the requested CN to node_name, so this cannot mint another identity.
   bytes certificate_request = 13;
+  // Standard kubelet nodeInfo fields, surfaced by `kubectl describe node`.
+  // Empty from an older agent; informational only (excluded from the
+  // replicated-node conflict check like other single-author session state).
+  string machine_id = 14;
+  string system_uuid = 15;
+  string kernel_version = 16;
+  string os_image = 17;
+  string runtime_version = 18;
+  // True when this agent runs inside a control-plane `serve`, so the node
+  // gets the node-role.kubernetes.io/control-plane label.
+  bool control_plane = 19;
 }
 
 message Heartbeat {

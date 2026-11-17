@@ -759,9 +759,14 @@ Anything but Disabled needs a read-only mount whose propagation is None."
 
 (defun node-builtin-labels (node)
   "Return the labels gr8s derives from what NODE actually is."
-  (core-object "kubernetes.io/os" "linux"
-               "kubernetes.io/arch" (native-node-architecture)
-               "kubernetes.io/hostname" (node-record-name node)))
+  (let ((labels (core-object "kubernetes.io/os" "linux"
+                             "kubernetes.io/arch" (native-node-architecture)
+                             "kubernetes.io/hostname" (node-record-name node))))
+    (when (gr8s.model:node-record-control-plane-p node)
+      ;; Upstream's role label: makes `kubectl get nodes` show the role and
+      ;; lets role selectors target control-plane nodes.
+      (setf (gethash "node-role.kubernetes.io/control-plane" labels) ""))
+    labels))
 
 (defun node-labels (node)
   "Return all of NODE's labels: the derived ones and those written through the API."

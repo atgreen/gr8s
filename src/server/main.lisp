@@ -2236,6 +2236,11 @@ agent masquerades Pod->apiserver traffic toward.")
                 :underlay-address (getf options :node-address)
                 :reconnect-delay 0.1 :control control
                 :kubelet-port (if kubelet (getf options :kubelet-port) 0)
+                ;; The in-process agent (CONTROL given) runs inside `serve`, so
+                ;; its node is control-plane; a standalone `gr8s agent` is not.
+                ;; Both report the host's standard kubelet nodeInfo.
+                :control-plane (not (null control))
+                :node-info (gr8s.agent::agent-node-info (serve-container-runtime-version runtime))
                 :stop-predicate stop-predicate))
           (when kubelet (stop-kubelet-server kubelet))
           (stop-node-runtime node-runtime)
@@ -2671,6 +2676,22 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
        (ensure-running-as-root :command "serve")
        (ensure-kubelet-endpoints-available :command "serve"))
      (serve-owned options))))
+
+(defun serve-container-runtime-version (runtime)
+  "Best-effort `name version` of RUNTIME's container runtime for nodeInfo, or
+   \"\" when it cannot be queried. Never blocks startup on a CRI failure."
+  (or (ignore-errors
+       (when (gr8s.runtime.containerd:containerd-runtime-p runtime)
+         (let ((info (gr8s.runtime.containerd:cri-runtime-version
+                      (gr8s.runtime.containerd:containerd-runtime-socket-path runtime)
+                      :timeout 3)))
+           (when info
+             (string-trim
+              " "
+              (format nil "~@[~A ~]~A"
+                      (gr8s.runtime.containerd:cri-version-info-runtime-name info)
+                      (gr8s.runtime.containerd:cri-version-info-runtime-version info)))))))
+      ""))
 
 (defun serve-owned (options)
   "Run the gr8s control plane until shutdown, returning 0. Opens the store and

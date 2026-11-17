@@ -525,8 +525,22 @@ otherwise, with the reasons and messages upstream kubelet uses."
                "daemonEndpoints" (core-object "kubeletEndpoint" (core-object "Port" (node-record-kubelet-port node)))
                "capacity" (node-resource-list node)
                "allocatable" (node-resource-list node :allocatable t)
-               "nodeInfo" (core-object "operatingSystem" "linux" "architecture" (native-node-architecture)
-                                        "kubeletVersion" (kubernetes-git-version)))))))
+               "nodeInfo" (let ((info (core-object
+                                       "operatingSystem" "linux"
+                                       "architecture" (native-node-architecture)
+                                       "kubeletVersion" (kubernetes-git-version))))
+                            ;; Standard kubelet nodeInfo the agent reports once
+                            ;; per session; absent before the first hello.
+                            (flet ((field (key value)
+                                     (when (and value (plusp (length value)))
+                                       (setf (gethash key info) value))))
+                              (field "machineID" (gr8s.model:node-record-machine-id node))
+                              (field "systemUUID" (gr8s.model:node-record-system-uuid node))
+                              (field "bootID" (gr8s.model:node-record-boot-id node))
+                              (field "kernelVersion" (gr8s.model:node-record-kernel-version node))
+                              (field "osImage" (gr8s.model:node-record-os-image node))
+                              (field "containerRuntimeVersion" (gr8s.model:node-record-runtime-version node)))
+                            info))))))
 
 (defun node-write-input (node method)
   "Return the requested Node object from a typed or JSON PUT, or a patch applied to NODE's view."

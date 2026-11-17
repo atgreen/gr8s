@@ -78,6 +78,17 @@
   wireguard-reflexive-observed-at
   ;; The port of the node's authenticated kubelet endpoints, or 0 when it serves none.
   (kubelet-port 0)
+  ;; Standard kubelet nodeInfo, reported once per session hello: informational,
+  ;; single-author state (excluded from the replicated-node conflict check).
+  (machine-id "")
+  (system-uuid "")
+  (boot-id "")
+  (kernel-version "")
+  (os-image "")
+  (runtime-version "")
+  ;; True when the agent runs inside a control-plane `serve`; surfaces the
+  ;; node-role.kubernetes.io/control-plane label (reported each session hello).
+  (control-plane-p nil)
   (ready-p nil)
   ;; Why the node's container runtime is down while its agent still holds the
   ;; lease, or NIL. Not persisted: the next heartbeat reports it again.

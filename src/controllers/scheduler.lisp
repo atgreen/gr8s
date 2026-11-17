@@ -1159,6 +1159,37 @@ Call with STORE's lock held."
           (setf (node-record-kubelet-port node) port)
           (publish-node-change-unlocked store old node))))))
 
+(defun update-node-info (store node-name info control-plane-p)
+  "Persist NODE-NAME's standard kubelet nodeInfo (a plist from the hello) and
+whether it is a control-plane node. Republishes only on a real change, so a
+steady reconnect is cheap. Each field is informational and single-author."
+  (with-store-lock (store)
+    (let ((node (get-node-unlocked store node-name)))
+      (when node
+        (flet ((changed (accessor new)
+                 (not (equal (funcall accessor node) new))))
+          (when (or (changed #'gr8s.model:node-record-machine-id (getf info :machine-id))
+                    (changed #'gr8s.model:node-record-system-uuid (getf info :system-uuid))
+                    (changed #'gr8s.model:node-record-boot-id (getf info :boot-id))
+                    (changed #'gr8s.model:node-record-kernel-version (getf info :kernel-version))
+                    (changed #'gr8s.model:node-record-os-image (getf info :os-image))
+                    (changed #'gr8s.model:node-record-runtime-version (getf info :runtime-version))
+                    (not (eq (gr8s.model:node-record-control-plane-p node) control-plane-p)))
+            (let ((updated (copy-node-record node))
+                  (old (node-api-object node)))
+              (flet ((apply-fields (target)
+                       (setf (gr8s.model:node-record-machine-id target) (getf info :machine-id "")
+                             (gr8s.model:node-record-system-uuid target) (getf info :system-uuid "")
+                             (gr8s.model:node-record-boot-id target) (getf info :boot-id "")
+                             (gr8s.model:node-record-kernel-version target) (getf info :kernel-version "")
+                             (gr8s.model:node-record-os-image target) (getf info :os-image "")
+                             (gr8s.model:node-record-runtime-version target) (getf info :runtime-version "")
+                             (gr8s.model:node-record-control-plane-p target) control-plane-p)))
+                (apply-fields updated)
+                (persist-node store updated)
+                (apply-fields node))
+              (publish-node-change-unlocked store old node))))))))
+
 (defun record-node-certificate-issuer (store node-name fingerprint)
   "Persist the CA fingerprint proven by NODE-NAME's authenticated session."
   (with-store-lock (store)
