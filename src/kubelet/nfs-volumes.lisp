@@ -201,24 +201,35 @@ A later call with the same KEY collects the result instead of starting another."
                                                  target (sb-int:strerror forced))))))))
 
 (defun ensure-provisioned-nfs-directory (server share name staging tokens &key wait)
-  "Create dynamically provisioned directory NAME in SHARE, mounted briefly at STAGING."
+  "Create dynamically provisioned directory NAME in SHARE, mounted briefly at STAGING.
+A failure here is the provisioner mounting the SHARE and mkdir-ing the per-claim
+directory as root -- not the Pod mounting its own subdirectory -- so its message
+names that step and the NFS-export requirements, otherwise the Pod's FailedMount
+event is a bare mount/permission error that points nowhere useful (podster-swg)."
   (let ((target (string-right-trim "/" (namestring staging))))
     (ensure-directories-exist (uiop:ensure-directory-pathname staging))
-    (unless (nfs-target-mounted-p target)
-      (mount-nfs-filesystem server share target tokens :wait wait))
-    (unwind-protect
-         (bounded-nfs-operation
-          (format nil "mkdir ~A" target)
-          (lambda ()
-            (let ((path (format nil "~A/~A" target name)))
-              (handler-case (sb-posix:mkdir path #o777)
-                (sb-posix:syscall-error (condition)
-                  (unless (= sb-posix:eexist (sb-posix:syscall-errno condition)) (error condition))))
-              ;; The process umask narrows mkdir; workloads run as arbitrary users.
-              (sb-posix:chmod path #o777)))
-          :wait (or wait *nfs-operation-wait-seconds*))
-      (unmount-nfs-filesystem target))
-    (ignore-errors (sb-posix:rmdir target))))
+    (handler-case
+        (progn
+          (unless (nfs-target-mounted-p target)
+            (mount-nfs-filesystem server share target tokens :wait wait))
+          (unwind-protect
+               (bounded-nfs-operation
+                (format nil "mkdir ~A" target)
+                (lambda ()
+                  (let ((path (format nil "~A/~A" target name)))
+                    (handler-case (sb-posix:mkdir path #o777)
+                      (sb-posix:syscall-error (condition)
+                        (unless (= sb-posix:eexist (sb-posix:syscall-errno condition)) (error condition))))
+                    ;; The process umask narrows mkdir; workloads run as arbitrary users.
+                    (sb-posix:chmod path #o777)))
+                :wait (or wait *nfs-operation-wait-seconds*))
+            (unmount-nfs-filesystem target))
+          (ignore-errors (sb-posix:rmdir target)))
+      (error (condition)
+        (error "could not create the provisioned directory ~A on NFS share ~A:~A (~A); ~
+                the export must admit this node's address and must not squash root ~
+                (no_root_squash / \"No mapping\")"
+               name server share condition)))))
 
 (defun safe-delete-volume-tree (path)
   "Delete PATH's tree as root without following links or crossing into another filesystem.

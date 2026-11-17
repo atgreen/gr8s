@@ -208,6 +208,28 @@
         (make-status-check "versions"
                            :ok (format nil "all members and agents at ~A" cluster)))))
 
+(defun status-control-plane-check (members)
+  "Flag any control-plane member whose /readyz reports an in-progress application
+restore (HTTP 503). An interrupted recovery can leave a member Ready yet with its
+store access blocked, so store-backed work -- volume provisioning, aggregation --
+silently fails on it until it is restarted (podster-ftb). MEMBERS is a list of
+plists with :name and :readyz, each :ready, :restoring, :unready, :unreachable or
+:unprobed; unreachable/unprobed are not faults, since a client off the
+control-plane network legitimately cannot reach every member's advertised API."
+  (let ((restoring (loop for member in members
+                         when (eq :restoring (getf member :readyz)) collect (getf member :name))))
+    (cond
+      ((null members) (make-status-check "control plane" :ok "no members reported"))
+      (restoring
+       (make-status-check
+        "control plane" :warn
+        (format nil "~A: store access blocked by an interrupted application restore"
+                (status-join-names restoring))
+        (format nil "restart to re-drive recovery: 'sudo systemctl restart gr8s-server' on ~A"
+                (status-join-names restoring))))
+      (t (make-status-check "control plane" :ok
+                            (format nil "~D member~:P" (length members)))))))
+
 (defun status-event-timestamp (event)
   (or (status-get event "lastTimestamp") (status-get event "eventTime")
       (status-get event "metadata" "creationTimestamp")))
@@ -267,6 +289,36 @@
 (defun status-fetch-items (config target)
   (status-items (debug-api-get-json config target)))
 
+(defun status-member-readyz (config api-url)
+  "Classify one member's /readyz, reached at its advertised API-URL with this
+client's credentials: :ready (200), :restoring (503, store access blocked by an
+application restore), :unready (any other response), or :unreachable. Bounded so
+an unreachable member never hangs `gr8s status`."
+  (handler-case
+      (sb-ext:with-timeout 5
+        (multiple-value-bind (stream socket host port base-path)
+            (open-debug-api-stream (list* :server api-url config))
+          (declare (ignore base-path))
+          (unwind-protect
+               (progn
+                 (write-debug-http-request stream "GET" host port "/readyz" (getf config :token))
+                 (case (gr8s.protocol::parse-http-response-head
+                        (gr8s.protocol::read-http-response-head stream))
+                   (200 :ready)
+                   (503 :restoring)
+                   (t :unready)))
+            (ignore-errors (close stream))
+            (ignore-errors (usocket:socket-close socket)))))
+    (error () :unreachable)))
+
+(defun status-probe-control-plane-members (config)
+  "List each control-plane member as (:name :readyz), probing those that advertise
+an API-URL. Returns NIL when the membership API is absent (a single control plane)."
+  (loop for member in (ignore-errors (status-fetch-items config "/apis/gr8s.io/v1/controlplanemembers"))
+        for api-url = (status-get member "spec" "apiURL")
+        collect (list :name (status-get member "metadata" "name")
+                      :readyz (if api-url (status-member-readyz config api-url) :unprobed))))
+
 (defun collect-cluster-status (config)
   "Fetch and analyze; optional API groups are allowed to be absent."
   (multiple-value-bind (ready milliseconds) (status-api-probe config)
@@ -293,7 +345,13 @@
                            (status-fetch-items config "/apis/networking.k8s.io/v1/ingresses")))
               (status-storage-check (status-fetch-items config "/api/v1/persistentvolumeclaims")
                                     (status-fetch-items config "/api/v1/persistentvolumes"))
-              (status-version-check version nodes))))
+              (status-version-check version nodes)))
+           ;; Probe each HA member's readiness directly: an interrupted recovery
+           ;; can leave a member Ready yet store-blocked (podster-ftb), which only
+           ;; its own /readyz reveals. A single control plane has no membership API.
+           (members (status-probe-control-plane-members config)))
+      (when members
+        (setf checks (append checks (list (status-control-plane-check members)))))
       (multiple-value-bind (events total-warnings)
           (status-warning-events
            (status-fetch-items config "/api/v1/events?fieldSelector=type%3DWarning&limit=500"))

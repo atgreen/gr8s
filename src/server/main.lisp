@@ -3343,6 +3343,39 @@ time, leader last. Suspending or losing any member, the leader included, is
 tolerated: survivors elect within seconds and the returning member rejoins
 as a follower. Dead peers surface as connection errors within ~15 seconds.
 
+If `gr8s status` reports a member with store access blocked by an interrupted
+application restore, that member is Ready yet cannot run store-backed work --
+volume provisioning, aggregation -- until restarted; restart it to re-drive
+recovery to completion.
+
+## NFS PersistentVolumes
+
+gr8s provisions and mounts NFS itself through the `mount(2)` syscall -- no
+`mount.nfs`, `nfs-common` or `nfs-utils`, only the host's in-kernel NFS client,
+which `gr8s doctor` reports on. A `gr8s.io/nfs` StorageClass needs `server` and
+`share`; each PVC gets its own `pvc-<uid>` subdirectory, created on the node
+where its Pod first runs by mounting the share as root. ReadWriteMany is allowed.
+
+Getting dynamic NFS working is almost always about the server's export, not gr8s.
+When a Pod sticks in `ContainerCreating`, read `kubectl describe pod` -- the
+`FailedMount` reason is the signal:
+
+- `access denied` / `Permission denied`: the export does not admit the mounting
+  node, or it squashes root. The export's host list must include each node's
+  address *as the server sees it* -- a node reaching the server over a tunnel
+  (WireGuard) presents its tunnel address, not its LAN address. And the export
+  must be `no_root_squash` (\"No mapping\" on a Synology), because gr8s creates
+  the per-claim directory as root. gr8s mounts from a privileged source port, so
+  a `secure` export is fine and `insecure` is not required.
+- `No such file or directory` on an NFSv4 attempt: usually the server's `fsid=0`
+  pseudo-root; gr8s falls back to NFSv3 on its own, so this is rarely fatal.
+
+A Pod can schedule onto any eligible node, so admit every node's address or
+confine NFS Pods with a nodeSelector/affinity. The server name is resolved on the
+node, so use an IP or a host-resolvable name -- never a Service name or
+ClusterIP. Static `nfs:` PVs work too (reclaim policy must be `Retain`). See
+docs/persistent-storage.md for the full reference.
+
 ## Live Lisp inspection with Slynk
 
 You can inspect a running process without restarting it or installing a debug
