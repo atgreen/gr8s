@@ -364,8 +364,12 @@
 
 (defun run-status-command (options &optional (output *standard-output*))
   "Print one screen of cluster health; exit 0 healthy, 1 warnings, 2 failures."
-  (let* ((config (read-debug-kubeconfig (getf options :kubeconfig)))
-         (status (handler-case (collect-cluster-status config)
+  (call-with-debug-kubeconfig
+   (getf options :kubeconfig)
+   (lambda (config) (run-status-command-with-config config options output))))
+
+(defun run-status-command-with-config (config options output)
+  (let* ((status (handler-case (collect-cluster-status config)
                    (error (condition)
                      (list :server (getf config :server) :version "unknown"
                            :checks (list (make-status-check

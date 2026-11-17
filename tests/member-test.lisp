@@ -117,3 +117,53 @@
                  "the ghost warning points at the escape hatches")))
       (setf (symbol-function 'gr8s.server::debug-api-request-json) request-original
             (symbol-function 'gr8s.server::read-debug-kubeconfig) kubeconfig-original))))
+
+;;; podster-7jb: gr8s kubeconfig emits inline certificate-authority-data /
+;;; client-certificate-data, but the debug TLS client only takes file paths --
+;;; so gr8s status/member failed UNKNOWN-CA against gr8s's own kubeconfigs.
+;;; The shared wrapper materializes inline data into private temporary files
+;;; for the duration of the call and removes them afterwards.
+
+(test debug-kubeconfig-materializes-inline-certificate-data
+  (let* ((root (uiop:ensure-directory-pathname
+                (sb-posix:mkdtemp
+                 (namestring (merge-pathnames "gr8s-kubeconfig-XXXXXX" (uiop:temporary-directory))))))
+         (path (merge-pathnames "config" root))
+         (encode (lambda (text) (ag-grpc:base64-encode (babel:string-to-octets text :encoding :utf-8)))))
+    (unwind-protect
+         (progn
+           (with-open-file (out path :direction :output)
+             (format out "apiVersion: v1~%current-context: gr8s~%clusters:~%- name: gr8s~%  cluster:~%    server: https://127.0.0.1:6443~%    certificate-authority-data: ~A~%contexts:~%- name: gr8s~%  context:~%    cluster: gr8s~%    user: admin~%users:~%- name: admin~%  user:~%    client-certificate-data: ~A~%    client-key-data: ~A~%"
+                     (funcall encode "CA-PEM") (funcall encode "CERT-PEM") (funcall encode "KEY-PEM")))
+           (let ((files nil))
+             (gr8s.server::call-with-debug-kubeconfig
+              path
+              (lambda (config)
+                (setf files (list (getf config :ca-file)
+                                  (getf config :client-certificate)
+                                  (getf config :client-key)))
+                (is (every (lambda (file) (and file (probe-file file))) files)
+                    "inline data is materialized into files for the TLS client")
+                (is (equal "CA-PEM" (uiop:read-file-string (getf config :ca-file))))
+                (is (equal "KEY-PEM" (uiop:read-file-string (getf config :client-key))))
+                (is (equal "https://127.0.0.1:6443" (getf config :server)))))
+             (is (notany (lambda (file) (and file (probe-file file))) files)
+                 "the temporary credential files are removed on the way out")))
+      (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
+
+(test debug-kubeconfig-passes-file-credentials-through
+  (let* ((root (uiop:ensure-directory-pathname
+                (sb-posix:mkdtemp
+                 (namestring (merge-pathnames "gr8s-kubeconfig-XXXXXX" (uiop:temporary-directory))))))
+         (path (merge-pathnames "config" root)))
+    (unwind-protect
+         (progn
+           (with-open-file (out path :direction :output)
+             (format out "apiVersion: v1~%current-context: gr8s~%clusters:~%- name: gr8s~%  cluster:~%    server: https://127.0.0.1:6443~%    certificate-authority: ca.crt~%contexts:~%- name: gr8s~%  context:~%    cluster: gr8s~%    user: admin~%users:~%- name: admin~%  user:~%    token: abc~%"))
+           (gr8s.server::call-with-debug-kubeconfig
+            path
+            (lambda (config)
+              (is (uiop:string-suffix-p (getf config :ca-file) "ca.crt")
+                  "file paths resolve relative to the kubeconfig and pass through")
+              (is (equal "abc" (getf config :token))))))
+      (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))

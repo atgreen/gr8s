@@ -793,6 +793,27 @@ authenticated tunnel as slynk and launches ICL's browser mode (icl -b
    stream)
   (finish-output stream))
 
+(defun call-with-debug-kubeconfig (path function)
+  "Call FUNCTION with PATH's current-context connection config. The TLS client
+   takes only file paths, while `gr8s kubeconfig` emits inline certificate data,
+   so certificate-authority-data and friends are materialized into private
+   temporary files for the duration of the call and removed on the way out
+   (podster-7jb). Explicit file paths pass through untouched."
+  (let ((config (read-debug-kubeconfig path))
+        (temporary nil))
+    (labels ((materialize (data-key file-key suffix)
+               (when (and (null (getf config file-key)) (getf config data-key))
+                 (let ((file (materialize-kubeconfig-data (getf config data-key) suffix)))
+                   (push file temporary)
+                   (setf (getf config file-key) file)))))
+      (unwind-protect
+           (progn
+             (materialize :ca-data :ca-file "ca.crt")
+             (materialize :client-certificate-data :client-certificate "client.crt")
+             (materialize :client-key-data :client-key "client.key")
+             (funcall function config))
+        (dolist (file temporary) (ignore-errors (delete-file file)))))))
+
 (defun debug-api-request-json (config method target)
   "Send METHOD to TARGET on CONFIG's server. Returns (values parsed-body status
    headers): the JSON body parsed when there is one (NIL otherwise), the HTTP
@@ -956,23 +977,13 @@ authenticated tunnel as slynk and launches ICL's browser mode (icl -b
 
 (defun run-debug-slynk-command (options)
   (handler-case
-      (let* ((config (read-debug-kubeconfig (getf options :kubeconfig)))
-             (temporary nil))
-        (labels ((materialize (data-key file-key suffix)
-                   (when (and (null (getf config file-key)) (getf config data-key))
-                     (let ((path (materialize-kubeconfig-data (getf config data-key) suffix)))
-                       (push path temporary)
-                       (setf (getf config file-key) path)))))
-          (unwind-protect
-               (progn
-                 (materialize :ca-data :ca-file "ca.crt")
-                 (materialize :client-certificate-data :client-certificate "client.crt")
-                 (materialize :client-key-data :client-key "client.key")
-                 (unless (or (getf config :token)
-                             (and (getf config :client-certificate) (getf config :client-key)))
-                   (error "kubeconfig has no bearer token or client certificate credentials"))
-                 (run-debug-slynk-command-with-config options config))
-            (dolist (path temporary) (ignore-errors (delete-file path))))))
+      (call-with-debug-kubeconfig
+       (getf options :kubeconfig)
+       (lambda (config)
+         (unless (or (getf config :token)
+                     (and (getf config :client-certificate) (getf config :client-key)))
+           (error "kubeconfig has no bearer token or client certificate credentials"))
+         (run-debug-slynk-command-with-config options config)))
     (sb-sys:interactive-interrupt ()
       (format t "~&gr8s Slynk tunnel closed.~%")
       0)))

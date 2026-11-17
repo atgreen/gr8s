@@ -9,6 +9,13 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- `gr8s status` and `gr8s member` now work against kubeconfigs with inline
+  certificate data (`certificate-authority-data` and friends) — which
+  `gr8s kubeconfig` itself emits. The CLI previously failed TLS
+  verification with UNKNOWN-CA unless credentials were file paths; the
+  inline data is now materialized into private temporary files for the
+  duration of the call, as the slynk tunnel already did.
+
 - HA control-plane shutdown now always completes: stopping a Raft member
   bounds every worker-thread join under one deadline (10s), abandoning a
   thread that will not exit with a warning instead of hanging until
