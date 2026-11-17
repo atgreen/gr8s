@@ -15,6 +15,10 @@
   access-blocked
   (application-loaded-p t)
   (active-requests 0)
+  ;; thread -> (description . start-universal-time) for every leased request,
+  ;; maintained under the store lock, so a drain that cannot finish can say
+  ;; exactly who is holding it up (podster-urj).
+  (active-request-registry (make-hash-table :test #'eq))
   (access-condition (bt:make-condition-variable :name "gr8s application access"))
   (pods (make-hash-table :test #'equal))
   (nodes (make-hash-table :test #'equal))

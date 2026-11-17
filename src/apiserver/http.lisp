@@ -1426,11 +1426,21 @@ PATH overrides the routed path, which lets the dashboard proxy re-dispatch a
       (status-response "Failure" "RuntimeError"
                        (runtime-error-message error) 500))))
 
+(defun store-lease-exempt-path-p (path)
+  "Debug endpoints that stay reachable while the application store is gated:
+a wedged store is exactly when the Slynk tunnel is needed, and it must not
+itself hold a request lease the drain then waits on (podster-urj)."
+  (and path
+       (cl-ppcre:scan "^/apis/gr8s[.]io/v1/(nodes|controlplanemembers)/[^/]+/slynk$" path)
+       t))
+
 (defun route-http-request (store runtime reconciler path method)
-  "Hold an application access lease across the complete routed request."
-  (if store
-      (gr8s.store::call-with-store-request
-       store (lambda () (route-http-request-with-access store runtime reconciler path method)))
+  "Hold an application access lease across the complete routed request, naming
+the request for drain diagnostics. Debug tunnels route without a lease."
+  (if (and store (not (store-lease-exempt-path-p path)))
+      (let ((gr8s.store::*store-request-description* (format nil "~A ~A" method path)))
+        (gr8s.store::call-with-store-request
+         store (lambda () (route-http-request-with-access store runtime reconciler path method))))
       (route-http-request-with-access store runtime reconciler path method)))
 
 (defun route-http-request-with-access (store runtime reconciler path method)
