@@ -456,3 +456,61 @@
           (let ((artifact (merge-pathnames (format nil "reload-~D.jsonl" round) root)))
             (gr8s.resources::capture-store-snapshot store artifact (+ 43 round) 7)
             (setf descriptor (nth-value 1 (materialize-live-test-snapshot store root artifact)))))))))
+
+;;; podster-urj: a drain that cannot complete must say WHO holds it up, and the
+;;; compaction worker must back off instead of re-entering a fresh 30s outage
+;;; window every interval -- one stuck request otherwise turns into a standing
+;;; cluster-wide 503.
+
+(test drain-timeout-names-the-requests-holding-leases
+  (with-temporary-store (store path)
+    (declare (ignorable path))
+    (let* ((release (sb-thread:make-semaphore))
+           (held (sb-thread:make-semaphore))
+           (worker (bt:make-thread
+                    (lambda ()
+                      (let ((gr8s.store::*store-request-description* "GET /api/v1/slow"))
+                        (gr8s.store::call-with-store-request
+                         store (lambda ()
+                                 (sb-thread:signal-semaphore held)
+                                 (sb-thread:wait-on-semaphore release)))))
+                    :name "gr8s test slow request")))
+      (unwind-protect
+           (progn
+             (sb-thread:wait-on-semaphore held)
+             (let ((complaints (make-string-output-stream)))
+               (handler-case
+                   (let ((*error-output* complaints))
+                     (gr8s.store::quiesce-store-access store :timeout 0.2)
+                     (fail "an undrainable store must refuse the quiesce"))
+                 (kubernetes-error (condition)
+                   (is (= 503 (gr8s.model::kubernetes-error-status-code condition)))))
+               (let ((text (get-output-stream-string complaints)))
+                 (is (search "GET /api/v1/slow" text)
+                     "the drain complaint names the held request")
+                 (is (search "1 request" text))))
+             (is (not (gr8s.store::store-access-blocked-p store))
+                 "a failed drain reopens access"))
+        (sb-thread:signal-semaphore release)
+        (ignore-errors (bt:join-thread worker))))
+    ;; With the lease released, the registry is empty and quiesce succeeds.
+    (is (null (gr8s.store::describe-active-store-requests-unlocked store)))
+    (gr8s.store::quiesce-store-access store :timeout 1)
+    (gr8s.store::resume-store-access store)))
+
+(test compaction-retry-delay-backs-off-after-failures
+  (is (= 1 (gr8s.ha::ha-compaction-retry-delay 0 1)) "healthy pacing is the interval")
+  (is (= 60 (gr8s.ha::ha-compaction-retry-delay 1 1)))
+  (is (= 120 (gr8s.ha::ha-compaction-retry-delay 2 1)))
+  (is (= 240 (gr8s.ha::ha-compaction-retry-delay 3 1)))
+  (is (= 600 (gr8s.ha::ha-compaction-retry-delay 7 1)) "the backoff caps at 600s")
+  (is (= 600 (gr8s.ha::ha-compaction-retry-delay 50 1)) "huge failure counts stay capped")
+  (is (= 900 (gr8s.ha::ha-compaction-retry-delay 1 900)) "a long interval is never shortened"))
+
+(test slynk-debug-path-is-exempt-from-the-store-lease
+  (is (gr8s.apiserver::store-lease-exempt-path-p
+       "/apis/gr8s.io/v1/controlplanemembers/gr8s-local/slynk"))
+  (is (gr8s.apiserver::store-lease-exempt-path-p "/apis/gr8s.io/v1/nodes/n1/slynk"))
+  (is (not (gr8s.apiserver::store-lease-exempt-path-p "/api/v1/pods")))
+  (is (not (gr8s.apiserver::store-lease-exempt-path-p "/apis/gr8s.io/v1/controlplanemembers")))
+  (is (not (gr8s.apiserver::store-lease-exempt-path-p nil))))

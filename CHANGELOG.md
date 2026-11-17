@@ -15,6 +15,13 @@ the Kubernetes API version with a gr8s release suffix (see
   verification with UNKNOWN-CA unless credentials were file paths; the
   inline data is now materialized into private temporary files for the
   duration of the call, as the slynk tunnel already did.
+- A stuck API request can no longer turn HA checkpointing into a standing
+  outage: when the pre-checkpoint drain times out, the journal now names
+  each request still holding an access lease (method, path, age), the
+  compaction worker backs off exponentially (60s doubling to a 600s cap)
+  instead of immediately re-entering another 30-second drain window, and
+  the Slynk debug tunnel no longer takes a store lease — so it stays
+  usable precisely when the store is wedged.
 
 - HA control-plane shutdown now always completes: stopping a Raft member
   bounds every worker-thread join under one deadline (10s), abandoning a

@@ -5,6 +5,10 @@
 (defvar *store-request-lease* nil
   "The store whose routed request may finish while new access is blocked.")
 
+(defvar *store-request-description* nil
+  "What the current routed request is, for drain diagnostics: the API layer
+binds it (method and path) before taking the request lease (podster-urj).")
+
 (defun store-access-unavailable (message)
   (error 'kubernetes-error :status-code 503 :reason "ServiceUnavailable" :message message))
 
@@ -27,14 +31,29 @@ Unwinding the request releases its lease even when a handler signals an error."
                    (store-access-unavailable "Application restore is blocking new requests"))
                  (sb-sys:without-interrupts
                    (incf (pod-store-active-requests store))
-                   (setf entered t)))
+                   (setf (gethash (bt:current-thread) (pod-store-active-request-registry store))
+                         (cons *store-request-description* (get-universal-time))
+                         entered t)))
                (let ((*store-request-lease* store)) (funcall function)))
           (when entered
             (bt:with-lock-held ((pod-store-lock store))
               (sb-sys:without-interrupts
                 (decf (pod-store-active-requests store))
+                (remhash (bt:current-thread) (pod-store-active-request-registry store))
                 (when (zerop (pod-store-active-requests store))
                   (bt:condition-notify (pod-store-access-condition store))))))))))
+
+(defun describe-active-store-requests-unlocked (store)
+  "The leased requests as \"what (age)\" strings, oldest first; caller holds the
+store lock. What a failed drain names (podster-urj)."
+  (let ((now (get-universal-time)) (rows nil))
+    (maphash (lambda (thread entry)
+               (push (list (or (car entry) (bt:thread-name thread) "unnamed request")
+                           (- now (cdr entry)))
+                     rows))
+             (pod-store-active-request-registry store))
+    (mapcar (lambda (row) (format nil "~A (~Ds)" (first row) (second row)))
+            (sort rows #'> :key #'second))))
 
 (defun quiesce-store-access (store &key (timeout 30))
   "Reject new access and drain routed requests before a caller attempts live reload.
@@ -53,6 +72,12 @@ Timeout or failure before draining reopens access; no application data is change
            (loop while (plusp (pod-store-active-requests store)) do
              (let ((remaining (/ (- deadline (get-internal-real-time)) internal-time-units-per-second)))
                (unless (plusp remaining)
+                 ;; Name the holders: a drain that cannot finish is otherwise
+                 ;; undiagnosable from outside (podster-urj).
+                 (format *error-output*
+                         "~&gr8s: application drain timed out after ~Ds; ~D request~:P still active:~{ ~A~^;~}~%"
+                         (round timeout) (pod-store-active-requests store)
+                         (describe-active-store-requests-unlocked store))
                  (store-access-unavailable "Timed out draining active API requests before application restore"))
                (bt:condition-wait (pod-store-access-condition store) (pod-store-lock store)
                                   :timeout (float remaining 1d0))))

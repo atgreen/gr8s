@@ -7,6 +7,15 @@
                (or (null interval) (and (realp interval) (plusp interval))))
     (error "Invalid HA compaction thresholds or interval")))
 
+(defun ha-compaction-retry-delay (consecutive-failures interval)
+  "Seconds until the next compaction attempt: INTERVAL while healthy, backing
+off exponentially (60s, 120s, ... capped at 600s) after failures. A drain that
+cannot complete blocks the whole API for its timeout window, so retrying it
+every interval turns one stuck request into a standing outage (podster-urj)."
+  (if (zerop consecutive-failures)
+      interval
+      (max interval (min 600 (* 60 (expt 2 (1- consecutive-failures)))))))
+
 (defun ha-compaction-due-unlocked-p (hcp)
   "Check disk bytes and conservative retained-command weight under the member mutex."
   (let* ((member (ha-control-plane-member hcp)) (node (raft-member-node member))
@@ -178,18 +187,27 @@ Drain again before WAL replacement so uncertain durability remains fail-closed."
           (ha-control-plane-compaction-thread hcp)
           (bt:make-thread
            (lambda ()
-             (loop
-               (bt:with-lock-held ((ha-control-plane-compaction-lock hcp))
-                 (unless (ha-control-plane-compaction-running hcp) (return))
-                 (bt:condition-wait (ha-control-plane-compaction-changed hcp)
-                                    (ha-control-plane-compaction-lock hcp)
-                                    :timeout (float (ha-control-plane-compaction-interval hcp) 1d0))
-                 (unless (ha-control-plane-compaction-running hcp) (return)))
-               (handler-case (compact-ha-store-once hcp)
-                 (error (condition)
-                   (bt:with-lock-held ((ha-control-plane-compaction-lock hcp))
-                     (setf (ha-control-plane-compaction-error hcp) (princ-to-string condition)))
-                   (format *error-output* "~&gr8s HA compaction failed: ~A~%" condition)))))
+             (let ((failures 0))
+               (loop
+                 (bt:with-lock-held ((ha-control-plane-compaction-lock hcp))
+                   (unless (ha-control-plane-compaction-running hcp) (return))
+                   (bt:condition-wait (ha-control-plane-compaction-changed hcp)
+                                      (ha-control-plane-compaction-lock hcp)
+                                      :timeout (float (ha-compaction-retry-delay
+                                                       failures
+                                                       (ha-control-plane-compaction-interval hcp))
+                                                      1d0))
+                   (unless (ha-control-plane-compaction-running hcp) (return)))
+                 (handler-case (progn (compact-ha-store-once hcp) (setf failures 0))
+                   (error (condition)
+                     (incf failures)
+                     (bt:with-lock-held ((ha-control-plane-compaction-lock hcp))
+                       (setf (ha-control-plane-compaction-error hcp) (princ-to-string condition)))
+                     (format *error-output* "~&gr8s HA compaction failed (attempt ~D, next in ~Ds): ~A~%"
+                             failures
+                             (round (ha-compaction-retry-delay
+                                     failures (ha-control-plane-compaction-interval hcp)))
+                             condition))))))
            :name "gr8s HA compaction"))))
   hcp)
 
