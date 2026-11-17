@@ -59,7 +59,7 @@ planner groups by: its name and its region/zone."
              (:constructor %make-node-grpc-server
                  (&key store grpc-server thread port heartbeat-timeout-seconds
                        pki cluster-pod-cidr node-prefix cluster-pod-cidrs node-prefixes
-                       overlay-backend
+                       overlay-backend mtu
                        wireguard-listen-port wireguard-relay-server
                        wireguard-relay-address image-tracker clock
                        gateway-stability-seconds)))
@@ -74,6 +74,10 @@ planner groups by: its name and its region/zone."
   cluster-pod-cidrs
   node-prefixes
   (overlay-backend "vxlan")
+  ;; Pod interface MTU handed to every node; NIL picks the backend default
+  ;; (1450 vxlan, 1420 wireguard). Set explicitly when the underlay is itself
+  ;; a tunnel, or the overlay's full-size frames overflow it (podster-cm3).
+  mtu
   (wireguard-listen-port 51820)
   wireguard-relay-server
   wireguard-relay-address
@@ -848,8 +852,9 @@ the node the operation was addressed to."
 
 (defun assigned-node-network (server node-name)
   "The NodeNetworkConfig for NODE-NAME: the cluster and this node's Pod CIDRs, the
-   cluster DNS address, the node's underlay address, and the fixed overlay VNI 42
-   and MTU 1450. Errors if NODE-NAME is unknown."
+   cluster DNS address, the node's underlay address, the fixed overlay VNI 42, and
+   the configured Pod MTU (default 1450, or 1420 for the wireguard backend).
+   Errors if NODE-NAME is unknown."
   (let ((node (get-node (node-grpc-server-store server) node-name)))
     (make-instance 'gr8s.node.v1::node-network-config
                    :cluster-pod-cidr (node-grpc-server-cluster-pod-cidr server)
@@ -866,9 +871,10 @@ the node the operation was addressed to."
                        (node-grpc-server-wireguard-listen-port server)
                        0)
                    :vni 42
-                   :mtu (if (string= "wireguard"
-                                    (node-grpc-server-overlay-backend server))
-                            1420 1450))))
+                   :mtu (or (node-grpc-server-mtu server)
+                            (if (string= "wireguard"
+                                         (node-grpc-server-overlay-backend server))
+                                1420 1450)))))
 
 (defun wireguard-projected-endpoints (server source-name peer)
   "Return PEER's authenticated candidates plus SOURCE-NAME's pair-specific relay."
@@ -2035,6 +2041,7 @@ socket are released rather than leaked. Safe to call more than once."
                                             cluster-pod-cidrs
                                             node-prefixes
                                             (overlay-backend "vxlan")
+                                            mtu
                                             (wireguard-listen-port 51820)
                                             wireguard-relay-address
                                             (wireguard-relay-listen "0.0.0.0")
@@ -2056,6 +2063,8 @@ socket are released rather than leaked. Safe to call more than once."
     (error "Gateway stability interval must be a non-negative integer"))
   (unless (member overlay-backend '("vxlan" "wireguard") :test #'string=)
     (error "Overlay backend must be vxlan or wireguard"))
+  (unless (or (null mtu) (and (integerp mtu) (<= 1280 mtu 9000)))
+    (error "Pod MTU must be between 1280 and 9000"))
   (unless (<= 1 wireguard-listen-port 65535)
     (error "WireGuard listen port must be between 1 and 65535"))
   (multiple-value-bind (cluster-pod-cidrs node-prefixes)
@@ -2083,6 +2092,7 @@ socket are released rather than leaked. Safe to call more than once."
                   :cluster-pod-cidrs cluster-pod-cidrs
                   :node-prefixes node-prefixes
                   :overlay-backend overlay-backend
+                  :mtu mtu
                   :wireguard-listen-port wireguard-listen-port
                   :wireguard-relay-server relay-server
                   :wireguard-relay-address wireguard-relay-address

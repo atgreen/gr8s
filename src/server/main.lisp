@@ -334,6 +334,14 @@ failure never takes the service down with it."
                       (setf (getf options :kubeconfig) value))
                      ((string= option "--kubelet-port")
                       (setf (getf options :kubelet-port) (if (equal value "0") 0 (parse-port value))))
+                     ;; podster-cm3: the Pod interface MTU handed to every node.
+                     ;; Set it below the underlay's when that is itself a tunnel
+                     ;; (WireGuard at 1420 leaves 1370 after vxlan overhead).
+                     ((string= option "--mtu")
+                      (let ((mtu (parse-integer value)))
+                        (unless (<= 1280 mtu 9000)
+                          (error "serve --mtu must be between 1280 and 9000"))
+                        (setf (getf options :mtu) mtu)))
                      ;; HA (podster-c2d.7.1): opt in to a Raft-replicated control
                      ;; plane. Absent these, serve runs single-node as before.
                      ((string= option "--raft-id")
@@ -2768,6 +2776,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                   :cluster-pod-cidrs (node-pool-cluster-cidrs pool)
                   :node-prefixes (node-pool-prefixes pool)
                   :overlay-backend (getf options :overlay-backend)
+                  :mtu (getf options :mtu)
                   :wireguard-listen-port 51820
                   :wireguard-relay-address (getf options :wireguard-relay-address)
                   :wireguard-relay-listen (getf options :wireguard-relay-listen)
@@ -3384,6 +3393,7 @@ No HA API may start from member-local certificate state before this converges."
                         ("--raft-compaction" "Enable automatic HA checkpoints (the HA default)")
                         ("--no-raft-compaction" "Disable automatic HA checkpoints for diagnostics")
                         ("--overlay-backend NAME" "vxlan or wireguard")
+                        ("--mtu N" "Pod interface MTU (default 1450; 1420 for wireguard)")
                         ("--runtime NAME" "containerd or fake")
                         ("--containerd-mode MODE" "managed or external")
                         ("--cni-mode MODE" "native or external")

@@ -944,3 +944,12 @@
                (is (eq enabled (not (null (gr8s.ha::ha-control-plane-compaction-thread ha)))))
                (is (eql (if enabled 1 nil) (gr8s.ha::ha-control-plane-compaction-interval ha))))
           (when ha (gr8s.ha::stop-ha-control-plane ha)))))))
+
+(test serve-parses-and-bounds-the-pod-mtu
+  ;; podster-cm3: --mtu names the Pod interface MTU handed to every node.
+  (let ((options (gr8s.server::parse-serve-options '("--mtu" "1370"))))
+    (is (= 1370 (getf options :mtu))))
+  (is (null (getf (gr8s.server::parse-serve-options nil) :mtu))
+      "without --mtu the backend defaults decide")
+  (signals error (gr8s.server::parse-serve-options '("--mtu" "100")))
+  (signals error (gr8s.server::parse-serve-options '("--mtu" "banana"))))
