@@ -452,3 +452,40 @@
         (is (equal '(:node-conflict) result))
         (is (search "n1" (get-output-stream-string complaints))
             "a skipped committed delta is journaled, not silent")))))
+
+;;; podster-zu3 live finding: a replica that once marked a node NotReady
+;;; skipped every later heartbeat delta (expected said Ready) forever -- even
+;;; a replica freshly rebuilt from the leader's snapshot re-forked in seconds.
+;;; Readiness is derived from the excluded lease clock, flipped locally by
+;;; every member's expiry monitor; it must not participate in the CAS either.
+
+(test divergent-readiness-belief-does-not-refuse-heartbeat-deltas
+  (with-temporary-store (store path)
+    (declare (ignorable path))
+    (gr8s.controllers::register-node
+     store (gr8s.model::make-node-record
+            :id "n1" :name "n1" :pod-cidr "10.88.1.0/24"
+            :underlay-address "192.0.2.10"))
+    ;; This replica's expiry monitor marked n1 NotReady.
+    (let ((node (gethash "n1" (gr8s.store::pod-store-nodes store))))
+      (setf (gr8s.model::node-record-ready-p node) nil))
+    (let* ((current (gr8s.store::node-replicated-object
+                     (gethash "n1" (gr8s.store::pod-store-nodes store))))
+           (expected (gr8s.store::copy-pod-status-value current))
+           (object (gr8s.store::copy-pod-status-value current)))
+      ;; The session-owning author believes n1 Ready, in both images.
+      (dolist (image (list expected object))
+        (setf (gethash "ready" image) t
+              (gethash "lastHeartbeat" image) 4003900500
+              (gethash "leaseDeadline" image) 4003900515))
+      (let* ((delta (com.inuoe.jzon:stringify
+                     (gr8s.resources::core-object
+                      "version" 2 "resourceVersion" "4400"
+                      "changes" (vector (gr8s.resources::core-object
+                                         "name" "n1" "expected" expected "object" object)))))
+             (result (gr8s.store::install-node-state-delta store delta)))
+        (is (eq :node-ok (first result))
+            "a readiness-belief difference alone must not refuse a committed heartbeat")
+        (is (eq t (gr8s.model::node-record-ready-p
+                   (gethash "n1" (gr8s.store::pod-store-nodes store))))
+            "the committed delta heals this replica's readiness belief")))))
