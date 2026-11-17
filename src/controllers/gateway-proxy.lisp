@@ -12,6 +12,32 @@
 
 (in-package #:gr8s.controllers)
 
+(defstruct gateway-tls-binding certificate key router entry routing-table secret-identity reference)
+(defstruct gateway-tls-snapshot index bootstrap (parents (fset:empty-ch-map nil)) (secrets (fset:empty-ch-map nil)))
+(defvar *gateway-connection-tls-snapshot* nil)
+(defvar *gateway-connection-tls-binding* nil)
+
+(defun gateway-connection-router (acceptor host)
+  "Keep requests on the logical listener selected during this TLS handshake."
+  (if *gateway-connection-tls-snapshot*
+      (when (and *gateway-connection-tls-binding*
+                 (eq *gateway-connection-tls-binding*
+                     (gateway-certificate-for-host
+                      (gateway-tls-snapshot-index *gateway-connection-tls-snapshot*) host)))
+        (gateway-tls-binding-router *gateway-connection-tls-binding*))
+      (gateway-acceptor-router acceptor)))
+
+(defun gateway-tls-certificate-provider (hostname alpn)
+  "Select material even when SNI is absent; never fall back to bootstrap material."
+  (declare (ignore alpn))
+  (setf *gateway-connection-tls-binding*
+        (gateway-certificate-for-host
+         (gateway-tls-snapshot-index *gateway-connection-tls-snapshot*) hostname))
+  (unless *gateway-connection-tls-binding*
+    (error 'pure-tls:tls-error :message "No admitted TLS listener for this hostname"))
+  (values (gateway-tls-binding-certificate *gateway-connection-tls-binding*)
+          (gateway-tls-binding-key *gateway-connection-tls-binding*)))
+
 (defclass gateway-acceptor (hunchentoot:acceptor)
   ((router :initarg :router :accessor gateway-acceptor-router :initform nil
            :documentation "The compiled dispatch fn (host path method headers) -> GW-BACKEND|NIL; hot-swappable.")
@@ -40,7 +66,7 @@
 (defun gateway-dispatch-for-request (acceptor request)
   "Run the listener's compiled router against REQUEST. Returns a GW-DISPATCH
    (backend + matched rule's filters + matched GW-MATCH) or NIL."
-  (let ((router (gateway-acceptor-router acceptor)))
+  (let ((router (gateway-connection-router acceptor (gateway-request-host request))))
     (when router
       (funcall router
                (or (gateway-request-host request) "")
@@ -259,11 +285,96 @@
 ;;; ---------------------------------------------------------------------------
 ;;; Backend resolution + listener lifecycle.
 
+(defstruct (gateway-certificate-index (:constructor %make-gateway-certificate-index))
+  (exact (fset:empty-ch-map nil))
+  (wildcard (fset:empty-ch-map nil))
+  default)
+
+(defun gateway-certificate-binding-tables (bindings)
+  "Normalize desired bindings in precedence order; the first equal hostname wins."
+  (let ((default nil)
+        (exact (make-hash-table :test 'equal))
+        (wildcards (make-hash-table :test 'equal)))
+    (dolist (binding bindings)
+      (destructuring-bind (host material) binding
+        (if (null host)
+            (unless default (setf default material))
+            (let* ((wildcard (and (> (length host) 2)
+                                  (string= "*." host :end2 2)))
+                   (table (if wildcard wildcards exact))
+                   (key (string-downcase (if wildcard (subseq host 1) host))))
+              (unless (nth-value 1 (gethash key table))
+                (setf (gethash key table) material))))))
+    (values exact wildcards default)))
+
+(defun make-gateway-certificate-index (bindings)
+  "Build a read-only-after-publication index from (HOST MATERIAL) bindings."
+  (multiple-value-bind (exact wildcards default) (gateway-certificate-binding-tables bindings)
+    (%make-gateway-certificate-index
+     :exact (fset:convert 'fset:ch-map exact :default nil)
+     :wildcard (fset:convert 'fset:ch-map wildcards :default nil)
+     :default default)))
+
+(defun gateway-update-certificate-index (index bindings)
+  "Change only differing hostname buckets; retain old reader snapshots."
+  (labels ((update-map (old desired)
+             (let ((next old))
+               (fset:do-map (key binding old)
+                 (declare (ignore binding))
+                 (unless (nth-value 1 (gethash key desired))
+                   (setf next (fset:less next key))))
+               (maphash (lambda (key binding)
+                          (unless (eq binding (fset:lookup old key))
+                            (setf next (fset:with next key binding)))) desired)
+               next)))
+    (multiple-value-bind (exact wildcards default) (gateway-certificate-binding-tables bindings)
+      (let ((next-exact (update-map (gateway-certificate-index-exact index) exact))
+            (next-wildcard (update-map (gateway-certificate-index-wildcard index) wildcards)))
+        (if (and (eq next-exact (gateway-certificate-index-exact index))
+                 (eq next-wildcard (gateway-certificate-index-wildcard index))
+                 (eq default (gateway-certificate-index-default index)))
+            index
+            (%make-gateway-certificate-index
+             :exact next-exact :wildcard next-wildcard :default default))))))
+
+(defun gateway-replace-certificate-binding (index hostname binding)
+  "Return a new index sharing untouched branches with the published INDEX."
+  (let ((next (copy-gateway-certificate-index index)))
+    (cond ((null hostname) (setf (gateway-certificate-index-default next) binding))
+          ((= 1 (gw-host-tier hostname))
+           (setf (gateway-certificate-index-wildcard next)
+                 (fset:with (gateway-certificate-index-wildcard index)
+                            (string-downcase (subseq hostname 1)) binding)))
+          (t (setf (gateway-certificate-index-exact next)
+                   (fset:with (gateway-certificate-index-exact index)
+                              (string-downcase hostname) binding))))
+    next))
+
+(defun gateway-certificate-for-host (index hostname)
+  "Select exact, then longest wildcard suffix, then an explicit default.
+   No matching listener returns NIL, including absent SNI without a default."
+  (or (and hostname
+           (let ((host (string-downcase hostname)))
+             (or (fset:lookup (gateway-certificate-index-exact index) host)
+                 (loop for dot = (position #\. host :start 1)
+                         then (position #\. host :start (1+ dot))
+                       while dot
+                       thereis (fset:lookup (gateway-certificate-index-wildcard index)
+                                            (subseq host dot))))))
+      (gateway-certificate-index-default index)))
+
 (defclass gateway-tls-acceptor (gateway-acceptor)
-  ((certificate :initarg :certificate :reader gateway-acceptor-certificate)
-   (private-key :initarg :private-key :reader gateway-acceptor-private-key))
+  ((certificate :initarg :certificate :initform nil :reader gateway-acceptor-certificate)
+   (private-key :initarg :private-key :initform nil :reader gateway-acceptor-private-key)
+   (tls-snapshot :initarg :tls-snapshot :initform nil :accessor gateway-acceptor-tls-snapshot))
   (:documentation "A Gateway HTTPS listener that terminates TLS with pure-tls,
    then dispatches the plaintext request exactly like the HTTP acceptor."))
+
+(defmethod hunchentoot:process-connection :around ((acceptor gateway-tls-acceptor) socket)
+  ;; One immutable snapshot is retained for the handshake and keep-alive requests.
+  (let ((*gateway-connection-tls-snapshot* (gateway-acceptor-tls-snapshot acceptor))
+        (*gateway-connection-tls-binding* nil))
+    (call-next-method)))
 
 (defmethod hunchentoot:acceptor-ssl-p ((acceptor gateway-tls-acceptor))
   "HTTPS: sets the scheme for X-Forwarded-Proto and redirect defaults."
@@ -273,10 +384,15 @@
   "Wrap the accepted connection in a server-side TLS stream before Hunchentoot
    reads the request (the same mechanism as the in-cluster API acceptor)."
   (with-tls-handshake-deadline (*tls-handshake-seconds*)
-    (let ((pure-tls:*server-ticket-key* (ironclad:random-data 32)))
+    (let* ((pure-tls:*server-ticket-key* (ironclad:random-data 32))
+           (snapshot *gateway-connection-tls-snapshot*)
+           (bootstrap (and snapshot (gateway-tls-snapshot-bootstrap snapshot))))
       (pure-tls:make-tls-server-stream stream
-                                       :certificate (gateway-acceptor-certificate acceptor)
-                                       :key (gateway-acceptor-private-key acceptor)
+                                       :certificate (if bootstrap (gateway-tls-binding-certificate bootstrap)
+                                                        (gateway-acceptor-certificate acceptor))
+                                       :key (if bootstrap (gateway-tls-binding-key bootstrap)
+                                                (gateway-acceptor-private-key acceptor))
+                                       :certificate-provider (and snapshot #'gateway-tls-certificate-provider)
                                        :verify pure-tls:+verify-none+))))
 
 (defun gateway-service-port (service reference)
@@ -287,7 +403,8 @@
                  (equal reference (gethash "name" port))))
            (gethash "ports" (gethash "spec" service) #())))
 
-(defun gateway-reference-permitted-p (store source-namespace source-kind target-namespace target-kind target-name)
+(defun gateway-reference-permitted-p (store source-namespace source-kind target-namespace target-kind target-name
+                                     &optional (source-group "gateway.networking.k8s.io"))
   "A cross-namespace reference needs matching from/to entries in one target grant."
   (or (equal source-namespace target-namespace)
       (and store
@@ -295,7 +412,7 @@
             (lambda (grant)
               (let ((spec (gethash "spec" grant)))
                 (and (some (lambda (entry)
-                             (and (equal (gethash "group" entry) "gateway.networking.k8s.io")
+                             (and (equal (gethash "group" entry) source-group)
                                   (equal (gethash "kind" entry) source-kind)
                                   (equal (gethash "namespace" entry) source-namespace)))
                            (gethash "from" spec #()))
@@ -346,6 +463,7 @@
        (make-instance 'gateway-tls-acceptor
                       :address address :port port
                       :router router :resolver resolver :gateway-name name
+                      :tls-snapshot (getf tls :snapshot)
                       :certificate (getf tls :certificate) :private-key (getf tls :key))
        (make-instance 'gateway-acceptor
                       :address address :port port

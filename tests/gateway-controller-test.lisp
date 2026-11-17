@@ -11,6 +11,721 @@
 (def-suite gateway-controller :in gr8s)
 (in-suite gateway-controller)
 
+(test gateway-l4-readiness-requires-installed-generation
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (gwc-seed store)
+    (let* ((objects (make-hash-table :test #'equal))
+           (gateway (gr8s.resources::get-core-resource store "gateways" "default" "web"))
+           (listener (aref (gethash "listeners" (gethash "spec" gateway)) 0))
+           (entry (gr8s.controllers::make-gateway-listener-entry
+                   :gateway gateway :owner gateway :listener listener)))
+      (setf (gethash "protocol" listener) "TCP"
+            (gethash '("gateways" "default" "web") objects) gateway
+            (gethash '("gatewayclasses" nil "gr8s") objects)
+            (gr8s.resources::get-core-resource store "gatewayclasses" nil "gr8s"))
+      (let ((controller (gr8s.controllers::make-gateway-controller
+                         (gr8s.agent::make-gateway-projection-store (gr8s.agent::gateway-resource-index objects))
+                         :l4-start-fn (lambda (&rest args) (declare (ignore args)) :socket)
+                         :l4-swap-fn (lambda (&rest args) (declare (ignore args)))
+                         :l4-stop-fn (lambda (&rest args) (declare (ignore args))))))
+        (is (not (gr8s.controllers::gateway-listener-entry-programmed-p controller entry)))
+        (gr8s.controllers::converge-gateway-l4-listeners controller)
+        (is (gr8s.controllers::gateway-listener-entry-programmed-p controller entry))
+        (incf (gethash "generation" (gethash "metadata" gateway)))
+        (is (not (gr8s.controllers::gateway-listener-entry-programmed-p controller entry)))
+        (gr8s.controllers::converge-gateway-l4-listeners controller)
+        (is (gr8s.controllers::gateway-listener-entry-programmed-p controller entry))
+        (gr8s.controllers::stop-gateway-controller controller)
+        (is (not (gr8s.controllers::gateway-listener-entry-programmed-p controller entry)))))))
+
+(test listener-readiness-compares-selector-values-case-sensitively
+  (let* ((gateway (gw-parse "{\"metadata\":{\"uid\":\"gateway-uid\"},\"spec\":{}}"))
+         (listener (gw-parse "{\"name\":\"http\",\"port\":8080,\"protocol\":\"HTTP\",\"allowedRoutes\":{\"namespaces\":{\"from\":\"Selector\",\"selector\":{\"matchLabels\":{\"team\":\"Blue\"}}}}}"))
+         (entry (gr8s.controllers::make-gateway-listener-entry
+                 :gateway gateway :owner gateway :listener listener))
+         (controller (gr8s.controllers::make-gateway-controller nil))
+         (labels (gethash "matchLabels" (gethash "selector" (gethash "namespaces"
+                           (gethash "allowedRoutes" listener))))))
+    (setf (gethash 8080 (gr8s.controllers::gateway-controller-listeners controller)) '(:listener)
+          (gethash 8080 (gr8s.controllers::gateway-controller-installed-listeners controller))
+          (gr8s.controllers::gateway-installed-listener-records (list entry) nil))
+    (is (gr8s.controllers::gateway-listener-entry-programmed-p controller entry))
+    ;; Labels are case-sensitive; both values are valid API input.
+    (setf (gethash "team" labels) "blue")
+    (is (not (gr8s.controllers::gateway-listener-entry-programmed-p controller entry)))
+    (setf (gethash "team" labels) "Blue")
+    (is (gr8s.controllers::gateway-listener-entry-programmed-p controller entry))
+    (setf (gethash "uid" (gethash "metadata" gateway)) "GATEWAY-UID")
+    (is (not (gr8s.controllers::gateway-listener-entry-programmed-p controller entry)))))
+
+(test stopping-gateway-controller-releases-tls-state
+  (let ((controller (gr8s.controllers::make-gateway-controller nil)))
+    (setf (gethash "material" (gr8s.controllers::gateway-controller-tls-materials controller)) :key
+          (gethash 443 (gr8s.controllers::gateway-controller-tls-snapshots controller)) :snapshot)
+    (gr8s.controllers::stop-gateway-controller controller)
+    (is (zerop (hash-table-count (gr8s.controllers::gateway-controller-tls-materials controller))))
+    (is (zerop (hash-table-count (gr8s.controllers::gateway-controller-tls-snapshots controller))))))
+
+(defun check-listenerset-route-delta-equivalence (controller gateway owners template objects make-view)
+  "Exercise a repeatable mixed sequence with at most three routes and two owners."
+  (let ((seed 1729))
+    (labels ((choose (limit)
+               (setf seed (mod (+ (* seed 1103515245) 12345) 2147483648))
+               (mod (floor seed 65536) limit))
+             (results (snapshot)
+               (loop for host in '("a.test" "b.test") append
+                 (loop for path in '("/" "/only" "/only/child")
+                       for binding = (gr8s.controllers::gateway-certificate-for-host
+                                      (gr8s.controllers::gateway-tls-snapshot-index snapshot) host)
+                       for dispatch = (funcall (gr8s.controllers::gateway-tls-binding-router binding)
+                                               host path "GET" nil)
+                       collect (when dispatch
+                                 (gr8s.controllers::gw-backend-name
+                                  (gr8s.controllers::gw-dispatch-backend dispatch)))))))
+      (dotimes (iteration 24)
+        (let* ((name (format nil "mixed-~D" (choose 3)))
+               (key (list "httproutes" "apps" name))
+               (action (choose 4))
+               (old (gr8s.controllers::gateway-controller-store controller))
+               (previous (gethash 443 (gr8s.controllers::gateway-controller-tls-snapshots controller)))
+               (prior-results (results previous))
+               (route (unless (zerop action) (gr8s.resources::copy-core-object template))))
+          (when route
+            (setf (gethash "name" (gethash "metadata" route)) name
+                  (gethash "hostnames" (gethash "spec" route)) #("a.test" "b.test")
+                  (gethash "parentRefs" (gethash "spec" route))
+                  (coerce (loop for parent in (if (= action 3) '("a" "b") (list (if (= action 1) "a" "b")))
+                                collect (let ((reference (gr8s.resources::copy-core-object
+                                                          (aref (gethash "parentRefs" (gethash "spec" template)) 0))))
+                                          (setf (gethash "name" reference) parent) reference)) 'vector))
+            (let ((rule (aref (gethash "rules" (gethash "spec" route)) 0)))
+              (setf (gethash "matches" rule)
+                    (vector (gr8s.resources::core-object "path"
+                             (gr8s.resources::core-object "type" "PathPrefix" "value" (if (zerop (choose 2)) "/" "/only"))))
+                    (gethash "name" (aref (gethash "backendRefs" rule) 0)) (format nil "backend-~D" iteration))))
+          (if route (setf (gethash key objects) route) (remhash key objects))
+          (setf (gr8s.controllers::gateway-controller-store controller) (funcall make-view))
+          (gr8s.controllers::converge-gateway-http-route-changes controller old (list (cons key route)))
+          (let* ((view (gr8s.controllers::gateway-controller-store controller))
+                 (plan (gr8s.controllers::gateway-listener-plan
+                        (list gateway) (gr8s.resources::list-core-resources view "httproutes")
+                        (constantly t) view owners))
+                 (port (find 443 plan :key (lambda (entry) (getf entry :port))))
+                 (rebuilt (gr8s.controllers::gateway-build-tls-snapshot
+                           controller (getf port :logical-listeners) (make-hash-table :test 'equal))))
+            (is (equal (results rebuilt)
+                       (results (gethash 443 (gr8s.controllers::gateway-controller-tls-snapshots controller)))))
+            (is (equal prior-results (results previous)))))))))
+
+(test listenerset-convergence-updates-shared-tls-without-restarting
+ (dolist (api '(("gateway.networking.k8s.io" "v1" "ListenerSet")
+                ("gateway.networking.x-k8s.io" "v1alpha1" "XListenerSet")))
+  (with-temporary-store (store directory)
+    (gwc-seed store)
+    (let* ((objects (make-hash-table :test 'equal))
+           (gateway (gr8s.resources::get-core-resource store "gateways" "default" "web"))
+           (a (listenerset-test-owner "a" "a" "2026-01-01T00:00:00Z" "a.test"))
+           (b (listenerset-test-owner "b" "b" "2026-01-02T00:00:00Z" "b.test"))
+           (secret-a (gateway-test-tls-secret "a"))
+           (secret-b (gateway-test-tls-secret "b"))
+           (route (gw-parse "{\"metadata\":{\"namespace\":\"apps\",\"name\":\"route\"},\"spec\":{\"parentRefs\":[{\"kind\":\"ListenerSet\",\"name\":\"a\"}],\"hostnames\":[\"a.test\"],\"rules\":[{\"backendRefs\":[{\"name\":\"old\",\"port\":80}]}]}}"))
+           (starts 0) (stops 0))
+      (let ((parent (aref (gethash "parentRefs" (gethash "spec" route)) 0)))
+        (setf (gethash "group" parent) (first api)
+              (gethash "kind" parent) (third api)))
+      (setf (gethash "allowedListeners" (gethash "spec" gateway))
+            (gw-parse "{\"namespaces\":{\"from\":\"All\"}}")
+            (gethash '("gateways" "default" "web") objects) gateway
+            (gethash '("httproutes" "apps" "route") objects) route
+            (gethash '("gatewayclasses" nil "gr8s") objects)
+            (gr8s.resources::get-core-resource store "gatewayclasses" nil "gr8s"))
+      (loop for owner in (list a b) for secret in (list secret-a secret-b)
+            for name in '("a" "b") do
+        (setf (gethash "apiVersion" owner) (format nil "~A/~A" (first api) (second api))
+              (gethash "kind" owner) (third api)
+              (gethash "parentRef" (gethash "spec" owner))
+              (gw-parse "{\"namespace\":\"default\",\"name\":\"web\"}")
+              (gethash "tls" (aref (gethash "listeners" (gethash "spec" owner)) 0))
+              (gr8s.resources::core-object "certificateRefs"
+                                          (vector (gr8s.resources::core-object "name" name)))
+              (gethash "namespace" (gethash "metadata" secret)) "apps"
+              (gethash (list "listenersets" "apps" name) objects) owner
+              (gethash (list "secrets" "apps" name) objects) secret))
+      (flet ((view () (gr8s.agent::make-gateway-projection-store
+                      (gr8s.agent::gateway-resource-index objects)))
+             (snapshot-view ()
+               (let ((source (gr8s.resources::make-foreign-resource-view nil)))
+                 (maphash (lambda (key object)
+                            (gr8s.resources::foreign-view-note source (first key) :added "unused" object)) objects)
+                 (gr8s.resources::foreign-view-snapshot source))))
+        (let ((controller (gr8s.controllers::make-gateway-controller
+                           (view) :cert-dir directory
+                           :start-fn (lambda (port router resolver tls)
+                                       (declare (ignore resolver)) (incf starts)
+                                       (if tls
+                                           (make-instance 'gr8s.controllers::gateway-tls-acceptor
+                                                          :port port :router router
+                                                          :tls-snapshot (getf tls :snapshot))
+                                           (make-instance 'gr8s.controllers::gateway-acceptor
+                                                          :port port :router router)))
+                           :stop-fn (lambda (handle) (declare (ignore handle)) (incf stops)))))
+          (gr8s.controllers::converge-gateway-listeners controller)
+          (is (equal '(443) (gethash '("apps" "a")
+                                     (gr8s.controllers::gateway-controller-secret-ports controller))))
+          (is (equal '(443) (gethash '("apps" "b")
+                                     (gr8s.controllers::gateway-controller-secret-ports controller))))
+          (let* ((handle (car (gethash 443 (gr8s.controllers::gateway-controller-listeners controller))))
+                 (snapshot (and handle (gr8s.controllers::gateway-acceptor-tls-snapshot handle))))
+            (is (not (null snapshot)))
+            ;; Shared TLS dispatch is entirely owned by the selected binding.
+            (is (null (gr8s.controllers::gateway-acceptor-router handle)))
+            (is (null (gethash 443 (gr8s.controllers::gateway-controller-routing-indices controller))))
+            (when snapshot
+              (let ((entry (find a (gr8s.controllers::gateway-listener-entries
+                                    (gr8s.controllers::gateway-controller-store controller) gateway (list a b))
+                                 :key #'gr8s.controllers::gateway-listener-entry-owner :test #'eq)))
+                (is (gr8s.controllers::gateway-listener-entry-programmed-p controller entry))
+                (setf (gethash "uid" (gethash "metadata" a)) "replacement")
+                (is (not (gr8s.controllers::gateway-listener-entry-programmed-p controller entry)))
+                (setf (gethash "uid" (gethash "metadata" a)) "a"
+                      (gethash "generation" (gethash "metadata" a)) 2)
+                (is (not (gr8s.controllers::gateway-listener-entry-programmed-p controller entry)))
+                (remhash "generation" (gethash "metadata" a))
+                (setf (gethash "resourceVersion" (gethash "metadata" secret-a)) "new-version")
+                (is (not (gr8s.controllers::gateway-listener-entry-programmed-p controller entry)))
+                (remhash "resourceVersion" (gethash "metadata" secret-a))
+                (is (gr8s.controllers::gateway-listener-entry-programmed-p controller entry)))
+              (let* ((old-view (gr8s.controllers::gateway-controller-store controller))
+                     (new-route (gw-parse (com.inuoe.jzon:stringify route)))
+                     (old-a (gr8s.controllers::gateway-certificate-for-host
+                             (gr8s.controllers::gateway-tls-snapshot-index snapshot) "a.test"))
+                     (old-b (gr8s.controllers::gateway-certificate-for-host
+                             (gr8s.controllers::gateway-tls-snapshot-index snapshot) "b.test")))
+                (setf (gethash "name" (aref (gethash "backendRefs"
+                                                    (aref (gethash "rules" (gethash "spec" new-route)) 0)) 0)) "new"
+                      (gethash '("httproutes" "apps" "route") objects) new-route
+                      (gr8s.controllers::gateway-controller-store controller) (view))
+                (gr8s.controllers::converge-gateway-http-route-changes
+                 controller old-view (list (cons '("httproutes" "apps" "route") new-route)))
+                (is (null (gr8s.controllers::gateway-acceptor-router handle)))
+                (is (null (gethash 443 (gr8s.controllers::gateway-controller-routing-indices controller))))
+                (let* ((next (gr8s.controllers::gateway-acceptor-tls-snapshot handle))
+                       (new-a (gr8s.controllers::gateway-certificate-for-host
+                               (gr8s.controllers::gateway-tls-snapshot-index next) "a.test")))
+                  (flet ((backend (binding)
+                           (gr8s.controllers::gw-backend-name
+                            (gr8s.controllers::gw-dispatch-backend
+                             (funcall (gr8s.controllers::gateway-tls-binding-router binding)
+                                      "a.test" "/" "GET" nil)))))
+                    (is (equal "new" (backend new-a)))
+                    (is (equal "old" (backend old-a))))
+                  (is (eq old-b (gr8s.controllers::gateway-certificate-for-host
+                                 (gr8s.controllers::gateway-tls-snapshot-index next) "b.test")))
+                  (is (eq (gr8s.controllers::gateway-tls-binding-certificate old-a)
+                          (gr8s.controllers::gateway-tls-binding-certificate new-a))))
+                ;; Reparenting must withdraw the old owner's routing before publishing the new one.
+                (let ((before (gr8s.controllers::gateway-controller-store controller))
+                      (moved (gw-parse (com.inuoe.jzon:stringify new-route))))
+                  (setf (gethash "name" (aref (gethash "parentRefs" (gethash "spec" moved)) 0)) "b"
+                        (gethash "hostnames" (gethash "spec" moved)) #("b.test")
+                        (gethash '("httproutes" "apps" "route") objects) moved
+                        (gr8s.controllers::gateway-controller-store controller) (view))
+                  (gr8s.controllers::converge-gateway-http-route-changes
+                   controller before (list (cons '("httproutes" "apps" "route") moved)))
+                  (let* ((next (gr8s.controllers::gateway-acceptor-tls-snapshot handle))
+                         (index (gr8s.controllers::gateway-tls-snapshot-index next)))
+                    (is (null (funcall (gr8s.controllers::gateway-tls-binding-router
+                                        (gr8s.controllers::gateway-certificate-for-host index "a.test"))
+                                       "a.test" "/" "GET" nil)))
+                    (is (funcall (gr8s.controllers::gateway-tls-binding-router
+                                  (gr8s.controllers::gateway-certificate-for-host index "b.test"))
+                                 "b.test" "/" "GET" nil)))
+                  (let ((before-delete (gr8s.controllers::gateway-controller-store controller)))
+                    (remhash '("httproutes" "apps" "route") objects)
+                    (setf (gr8s.controllers::gateway-controller-store controller) (view))
+                    (gr8s.controllers::converge-gateway-http-route-changes
+                     controller before-delete (list (cons '("httproutes" "apps" "route") nil)))
+                    (let ((next (gr8s.controllers::gateway-acceptor-tls-snapshot handle)))
+                      (is (null (funcall (gr8s.controllers::gateway-tls-binding-router
+                                          (gr8s.controllers::gateway-certificate-for-host
+                                           (gr8s.controllers::gateway-tls-snapshot-index next) "b.test"))
+                                         "b.test" "/" "GET" nil)))))))
+              (check-listenerset-route-delta-equivalence controller gateway (list a b) route objects #'view)
+              (let ((new-host-route (gr8s.resources::copy-core-object route)))
+                (setf (gethash "name" (gethash "metadata" new-host-route)) "new-host"
+                      (gethash "hostnames" (gethash "spec" new-host-route)) #("changed.test")
+                      (gethash '("httproutes" "apps" "new-host") objects) new-host-route))
+              (let ((sibling (gr8s.resources::copy-core-object route)))
+                (setf (gethash "name" (gethash "metadata" sibling)) "sibling"
+                      (gethash "name" (aref (gethash "parentRefs" (gethash "spec" sibling)) 0)) "b"
+                      (gethash "hostnames" (gethash "spec" sibling)) #("b.test")
+                      (gethash '("httproutes" "apps" "sibling") objects) sibling
+                      (gr8s.controllers::gateway-controller-store controller) (view))
+                (gr8s.controllers::converge-gateway-listeners controller))
+              (let* ((before (gr8s.controllers::gateway-acceptor-tls-snapshot handle))
+                     (old-b (gr8s.controllers::gateway-certificate-for-host
+                             (gr8s.controllers::gateway-tls-snapshot-index before) "b.test"))
+                     (changed (gr8s.resources::copy-core-object a))
+                     (old-view (snapshot-view)))
+                (setf (gethash "hostname" (aref (gethash "listeners" (gethash "spec" changed)) 0)) "changed.test"
+                      (gethash '("listenersets" "apps" "a") objects) changed)
+                (let ((manager (gr8s.controllers::make-foreign-gateway-controllers
+                                :view old-view :snapshot old-view :revision 1
+                                :ingress (gr8s.controllers::make-gateway-controller old-view))))
+                  (setf (gethash (gr8s.controllers::foreign-gateway-key gateway)
+                                 (gr8s.controllers::foreign-gateway-controllers-gateways manager)) controller)
+                  (let ((parser (symbol-function 'gr8s.controllers::parse-httproute))
+                        (list-resources (symbol-function 'gr8s.resources::list-core-resources))
+                        (route-lists 0)
+                        (parsed nil))
+                    (unwind-protect
+                         (progn
+                           (setf (symbol-function 'gr8s.controllers::parse-httproute)
+                                 (lambda (object)
+                                   (push (gethash "name" (gethash "metadata" object)) parsed)
+                                   (funcall parser object))
+                                 (symbol-function 'gr8s.resources::list-core-resources)
+                                 (lambda (store resource &optional namespace)
+                                   (when (equal resource "httproutes") (incf route-lists))
+                                   (funcall list-resources store resource namespace)))
+                           (is (gr8s.controllers::converge-foreign-gateway-snapshot
+                                manager (snapshot-view) 2 (list (cons '("listenersets" "apps" "a") changed)) nil))
+                           (is (zerop route-lists))
+                           (is (not (member "sibling" parsed :test #'equal)))
+                           (is (not (null (member "new-host" parsed :test #'equal)))))
+                      (setf (symbol-function 'gr8s.controllers::parse-httproute) parser
+                            (symbol-function 'gr8s.resources::list-core-resources) list-resources))))
+                (let ((after (gr8s.controllers::gateway-acceptor-tls-snapshot handle)))
+                  (let ((new-binding (gr8s.controllers::gateway-certificate-for-host
+                                      (gr8s.controllers::gateway-tls-snapshot-index after) "changed.test")))
+                    (is (not (null new-binding)))
+                    (when new-binding
+                      (is (not (null (funcall (gr8s.controllers::gateway-tls-binding-router new-binding)
+                                             "changed.test" "/" "GET" nil))))))
+                  (is (eq old-b (gr8s.controllers::gateway-certificate-for-host
+                                 (gr8s.controllers::gateway-tls-snapshot-index after) "b.test")))
+                  (is (null (gr8s.controllers::gateway-certificate-for-host
+                             (gr8s.controllers::gateway-tls-snapshot-index after) "a.test")))
+                  (is (not (null (gr8s.controllers::gateway-certificate-for-host
+                                  (gr8s.controllers::gateway-tls-snapshot-index before) "a.test")))))
+                (remhash '("httproutes" "apps" "sibling") objects)
+                (remhash '("httproutes" "apps" "new-host") objects)
+                (setf (gethash '("listenersets" "apps" "a") objects) a
+                      (gr8s.controllers::gateway-controller-store controller) (view))
+                (gr8s.controllers::converge-gateway-listeners controller))
+              (let* ((before (gr8s.controllers::gateway-acceptor-tls-snapshot handle))
+                     (old-view (let ((copy (make-hash-table :test 'equal)))
+                                 (maphash (lambda (key value)
+                                            (setf (gethash key copy) (gr8s.resources::copy-core-object value))) objects)
+                                 (gr8s.agent::make-gateway-projection-store
+                                  (gr8s.agent::gateway-resource-index copy))))
+                     (old-a (gr8s.controllers::gateway-certificate-for-host
+                             (gr8s.controllers::gateway-tls-snapshot-index before) "a.test"))
+                     (old-b (gr8s.controllers::gateway-certificate-for-host
+                             (gr8s.controllers::gateway-tls-snapshot-index before) "b.test")))
+                (setf (gethash "resourceVersion" (gethash "metadata" secret-a)) "rotated"
+                      (gr8s.controllers::gateway-controller-store controller) (view))
+                (let ((manager (gr8s.controllers::make-foreign-gateway-controllers
+                                :view old-view :snapshot old-view :revision 1
+                                :ingress (gr8s.controllers::make-gateway-controller old-view))))
+                  (setf (gethash (gr8s.controllers::foreign-gateway-key gateway)
+                                 (gr8s.controllers::foreign-gateway-controllers-gateways manager)) controller)
+                  (is (gr8s.controllers::converge-foreign-gateway-snapshot
+                       manager (view) 2 (list (cons '("secrets" "apps" "a") secret-a)) nil)))
+                (let* ((after (gr8s.controllers::gateway-acceptor-tls-snapshot handle))
+                       (new-a (gr8s.controllers::gateway-certificate-for-host
+                               (gr8s.controllers::gateway-tls-snapshot-index after) "a.test")))
+                  (is (equal "rotated" (second (gr8s.controllers::gateway-tls-binding-secret-identity new-a))))
+                  (is (not (equal "rotated" (second (gr8s.controllers::gateway-tls-binding-secret-identity old-a)))))
+                  (is (eq (gr8s.controllers::gateway-tls-binding-router old-a)
+                          (gr8s.controllers::gateway-tls-binding-router new-a)))
+                  (is (eq (gr8s.controllers::gateway-tls-binding-routing-table old-a)
+                          (gr8s.controllers::gateway-tls-binding-routing-table new-a)))
+                  (is (eq old-b (gr8s.controllers::gateway-certificate-for-host
+                                 (gr8s.controllers::gateway-tls-snapshot-index after) "b.test")))
+                  (is (gr8s.controllers::gateway-listener-entry-programmed-p
+                       controller (gr8s.controllers::gateway-tls-binding-entry new-a)))))
+              ;; Distinct valid PEM content exercises material reference retirement.
+              ;; Both listeners initially share the fixture's parsed material.
+              (let* ((original (gethash "tls.crt" (gethash "data" secret-a)))
+                     (changed (ag-grpc:base64-encode
+                               (concatenate '(vector (unsigned-byte 8))
+                                            (ag-grpc:base64-decode original) #(10)))))
+                (setf (gethash "tls.crt" (gethash "data" secret-a)) changed
+                      (gr8s.controllers::gateway-controller-store controller) (view))
+                (is (gr8s.controllers::converge-gateway-secret-changes controller '(("secrets" "apps" "a"))))
+                (is (= 2 (hash-table-count (gr8s.controllers::gateway-controller-tls-materials controller))))
+                (setf (gethash "tls.crt" (gethash "data" secret-b)) changed
+                      (gr8s.controllers::gateway-controller-store controller) (view))
+                (is (gr8s.controllers::converge-gateway-secret-changes controller '(("secrets" "apps" "b"))))
+                (is (= 1 (hash-table-count (gr8s.controllers::gateway-controller-tls-materials controller))))
+                (is (= 2 (first (alexandria:hash-table-values
+                                 (gr8s.controllers::gateway-controller-tls-material-users controller))))))
+              (is (gr8s.controllers::gateway-certificate-for-host
+                   (gr8s.controllers::gateway-tls-snapshot-index snapshot) "b.test"))
+              (setf (gethash "tls.key" (gethash "data" secret-a)) "SGVsbG8="
+                    (gr8s.controllers::gateway-controller-store controller) (view))
+              (is (not (gr8s.controllers::converge-gateway-secret-changes controller '(("secrets" "apps" "a")))))
+              (gr8s.controllers::converge-gateway-listeners controller)
+              (is (= 2 starts))
+              (is (zerop stops))
+              (is (eq handle (car (gethash 443 (gr8s.controllers::gateway-controller-listeners controller)))))
+              (let ((next (gr8s.controllers::gateway-acceptor-tls-snapshot handle)))
+                (is (null (gr8s.controllers::gateway-certificate-for-host
+                           (gr8s.controllers::gateway-tls-snapshot-index next) "a.test")))
+                (is (gr8s.controllers::gateway-certificate-for-host
+                     (gr8s.controllers::gateway-tls-snapshot-index next) "b.test")))
+              (remhash "allowedListeners" (gethash "spec" gateway))
+              (setf (gr8s.controllers::gateway-controller-store controller) (view))
+              (gr8s.controllers::converge-gateway-listeners controller)
+              (is (= 1 stops))
+              (is (zerop (hash-table-count (gr8s.controllers::gateway-controller-tls-materials controller))))))))))))
+
+(test listenerset-snapshots-reuse-live-material-and-withdraw-invalid-secrets
+  (with-temporary-store (store directory)
+    (values directory)
+    (gr8s.resources::create-core-resource store "secrets" (gateway-test-tls-secret "cert") "apps")
+    (let* ((controller (gr8s.controllers::make-gateway-controller store))
+           (owners (list (listenerset-test-owner "a" "a" "2026-01-01T00:00:00Z" "a.test")
+                         (listenerset-test-owner "b" "b" "2026-01-02T00:00:00Z" "b.test")))
+           (entries (loop for owner in owners
+                          for listener = (aref (gethash "listeners" (gethash "spec" owner)) 0)
+                          do (setf (gethash "tls" listener)
+                                   (gw-parse "{\"certificateRefs\":[{\"name\":\"cert\"}]}"))
+                          collect (gr8s.controllers::make-gateway-listener-entry
+                                   :owner owner :listener listener)))
+           (live (make-hash-table :test 'equal))
+           (snapshot (gr8s.controllers::gateway-build-tls-snapshot controller entries live)))
+      (is (not (null snapshot)))
+      (is (= 1 (hash-table-count live)))
+      (when snapshot
+        (let* ((index (gr8s.controllers::gateway-tls-snapshot-index snapshot))
+               (a (gr8s.controllers::gateway-certificate-for-host index "a.test"))
+               (b (gr8s.controllers::gateway-certificate-for-host index "b.test")))
+          (is (not (eq a b)))
+          (is (eq (gr8s.controllers::gateway-tls-binding-certificate a)
+                  (gr8s.controllers::gateway-tls-binding-certificate b)))
+          (setf (gr8s.controllers::gateway-controller-tls-materials controller) live)
+          (let* ((next-live (make-hash-table :test 'equal))
+                 (next (gr8s.controllers::gateway-build-tls-snapshot controller entries next-live)))
+            (is (= 1 (hash-table-count next-live)))
+            (is (eq (gr8s.controllers::gateway-tls-binding-key a)
+                    (gr8s.controllers::gateway-tls-binding-key
+                     (gr8s.controllers::gateway-tls-snapshot-bootstrap next)))))))
+      (gr8s.resources::update-core-resource
+       store "secrets" "apps" "cert"
+       (lambda (secret) (setf (gethash "tls.key" (gethash "data" secret)) "SGVsbG8=") secret))
+      (let ((next-live (make-hash-table :test 'equal)))
+        (is (null (gr8s.controllers::gateway-build-tls-snapshot controller entries next-live)))
+        (is (zerop (hash-table-count next-live)))))))
+
+(test listenerset-plan-parses-a-shared-route-once
+  (let* ((gateway (gw-parse "{\"metadata\":{\"namespace\":\"edge\",\"name\":\"public\"},\"spec\":{\"allowedListeners\":{\"namespaces\":{\"from\":\"All\"}},\"listeners\":[]}}"))
+         (a (listenerset-test-owner "a" "a" "2026-01-01T00:00:00Z" "a.test"))
+         (b (listenerset-test-owner "b" "b" "2026-01-02T00:00:00Z" "b.test"))
+         (route (gw-parse "{\"metadata\":{\"namespace\":\"apps\",\"name\":\"route\"},\"spec\":{\"parentRefs\":[{\"kind\":\"ListenerSet\",\"name\":\"a\"},{\"kind\":\"ListenerSet\",\"name\":\"b\"}],\"rules\":[{\"backendRefs\":[{\"name\":\"backend\",\"port\":80}]}]}}"))
+         (original (symbol-function 'gr8s.controllers::parse-httproute))
+         (calls 0))
+    (unwind-protect
+         (progn
+           (setf (symbol-function 'gr8s.controllers::parse-httproute)
+                 (lambda (object) (incf calls) (funcall original object)))
+           (let* ((plan (gr8s.controllers::gateway-listener-plan
+                         (list gateway) (list route) (constantly t) nil (list a b)))
+                  (entries (getf (first plan) :logical-listeners))
+                  (routes (mapcar (lambda (entry)
+                                    (first (gr8s.controllers::gateway-listener-entry-routes entry))) entries)))
+             (is (= 1 calls))
+             (is (= 2 (length routes)))
+             (is (equal '(("a.test") ("b.test"))
+                        (mapcar #'gr8s.controllers::gw-route-hostnames routes)))
+             (is (not (eq (first routes) (second routes))))
+             (is (equal '("a.test" "b.test")
+                        (sort (copy-list (gr8s.controllers::gw-route-hostnames
+                                          (first (getf (first plan) :routes)))) #'string<)))))
+      (setf (symbol-function 'gr8s.controllers::parse-httproute) original))))
+
+(test listenerset-tls-plan-retains-separate-logical-listeners
+  (let* ((gateway (gw-parse "{\"metadata\":{\"namespace\":\"edge\",\"name\":\"public\"},\"spec\":{\"allowedListeners\":{\"namespaces\":{\"from\":\"All\"}},\"listeners\":[]}}"))
+         (a (listenerset-test-owner "a" "a-uid" "2026-01-01T00:00:00Z" "a.test"))
+         (b (listenerset-test-owner "b" "b-uid" "2026-01-02T00:00:00Z" "b.test"))
+         (route (gw-parse "{\"metadata\":{\"namespace\":\"apps\",\"name\":\"app\"},\"spec\":{\"parentRefs\":[{\"kind\":\"ListenerSet\",\"name\":\"b\"}],\"hostnames\":[\"b.test\"],\"rules\":[{\"backendRefs\":[{\"name\":\"backend\",\"port\":80}]}]}}"))
+         (plan (gr8s.controllers::gateway-listener-plan
+                (list gateway) (list route) (constantly t) nil (list a b)))
+         (listeners (getf (first plan) :logical-listeners)))
+    (is (= 2 (length listeners)))
+    (when (= 2 (length listeners))
+      (is (eq a (gr8s.controllers::gateway-listener-entry-owner (first listeners))))
+      (is (null (gr8s.controllers::gateway-listener-entry-routes (first listeners))))
+      (is (= 1 (length (gr8s.controllers::gateway-listener-entry-routes (second listeners)))))
+      (is (equal '("b.test")
+                 (gr8s.controllers::gw-route-hostnames
+                  (first (gr8s.controllers::gateway-listener-entry-routes (second listeners)))))))))
+
+(defun listenerset-test-owner (name uid created host &optional (protocol "HTTPS"))
+  (gr8s.resources::core-object
+   "apiVersion" "gateway.networking.k8s.io/v1" "kind" "ListenerSet"
+   "metadata" (gr8s.resources::core-object "namespace" "apps" "name" name "uid" uid
+                                          "creationTimestamp" created)
+   "spec" (gr8s.resources::core-object
+           "parentRef" (gr8s.resources::core-object "name" "public" "namespace" "edge")
+           "listeners" (vector (gr8s.resources::core-object
+                                "name" "https" "port" 443 "protocol" protocol "hostname" host)))))
+
+(test listenerset-route-planning-keeps-parent-kind-group-and-owner-namespace
+  (let* ((gateway (com.inuoe.jzon:parse
+                   "{\"metadata\":{\"name\":\"public\",\"namespace\":\"edge\"},\"spec\":{\"listeners\":[],\"allowedListeners\":{\"namespaces\":{\"from\":\"All\"}}}}"))
+         (owner (listenerset-test-owner "tenant" "set-1" "2026-01-01T00:00:00Z" "tenant.example" "HTTP"))
+         (route (com.inuoe.jzon:parse
+                 "{\"apiVersion\":\"gateway.networking.k8s.io/v1\",\"kind\":\"HTTPRoute\",\"metadata\":{\"name\":\"route\",\"namespace\":\"apps\"},\"spec\":{\"parentRefs\":[{\"kind\":\"ListenerSet\",\"name\":\"tenant\"}],\"hostnames\":[\"tenant.example\"],\"rules\":[{\"backendRefs\":[{\"name\":\"backend\",\"port\":80}]}]}}"))
+         (parent (aref (gethash "parentRefs" (gethash "spec" route)) 0)))
+    (labels ((plan () (gr8s.controllers::gateway-listener-plan
+                      (list gateway) (list route) (constantly t) nil (list owner)))
+             (routes () (getf (first (plan)) :routes)))
+      (is (= 1 (length (routes))))
+      (is (equal '("tenant.example") (gr8s.controllers::gw-route-hostnames (first (routes)))))
+      (setf (gethash "kind" parent) "Gateway")
+      (is (null (routes)))
+      (setf (gethash "kind" parent) "ListenerSet"
+            (gethash "group" parent) "gateway.networking.x-k8s.io")
+      (is (null (routes)))
+      (setf (gethash "apiVersion" owner) "gateway.networking.x-k8s.io/v1alpha1")
+      (is (= 1 (length (routes))))
+      (setf (gethash "namespace" (gethash "metadata" route)) "edge"
+            (gethash "namespace" parent) "apps")
+      (is (null (routes)))
+      (remhash "allowedListeners" (gethash "spec" gateway))
+      (is (null (plan))))))
+
+(test listenerset-convergence-publishes-and-withdraws-admitted-routes
+  (with-temporary-store (store path)
+    (values path)
+    (gwc-seed store)
+    (let* ((objects (make-hash-table :test 'equal))
+           (gateway (gr8s.resources::get-core-resource store "gateways" "default" "web"))
+           (owner (listenerset-test-owner "tenant" "set-1" "2026-01-01T00:00:00Z" "tenant.example" "HTTP"))
+           (route (gr8s.resources::get-core-resource store "httproutes" "default" "app"))
+           (stopped nil))
+      (setf (gethash "allowedListeners" (gethash "spec" gateway))
+            (com.inuoe.jzon:parse "{\"namespaces\":{\"from\":\"All\"}}")
+            (gethash "parentRef" (gethash "spec" owner))
+            (com.inuoe.jzon:parse "{\"namespace\":\"default\",\"name\":\"web\"}")
+            (gethash "namespace" (gethash "metadata" route)) "apps"
+            (gethash "parentRefs" (gethash "spec" route))
+            (vector (com.inuoe.jzon:parse "{\"kind\":\"ListenerSet\",\"name\":\"tenant\"}"))
+            (gethash "hostnames" (gethash "spec" route)) #("tenant.example")
+            (gethash '("gateways" "default" "web") objects) gateway
+            (gethash '("gatewayclasses" nil "gr8s") objects)
+            (gr8s.resources::get-core-resource store "gatewayclasses" nil "gr8s")
+            (gethash '("listenersets" "apps" "tenant") objects) owner
+            (gethash '("httproutes" "apps" "app") objects) route)
+      (labels ((snapshot () (gr8s.agent::make-gateway-projection-store
+                            (gr8s.agent::gateway-resource-index objects))))
+        (let ((controller (gr8s.controllers::make-gateway-controller
+                           (snapshot)
+                           :start-fn (lambda (port &rest arguments) (declare (ignore arguments)) port)
+                           :stop-fn (lambda (handle) (push handle stopped))
+                           :swap-fn (lambda (&rest arguments) (declare (ignore arguments))))))
+          (gr8s.controllers::converge-gateway-listeners controller)
+          (let ((router (gethash 443 (gr8s.controllers::gateway-controller-routing-bases controller))))
+            (is (functionp router))
+            (when router (is (funcall router "tenant.example" "/" "GET" nil))))
+          (is (gethash 443 (gr8s.controllers::gateway-route-port-ranks controller route)))
+          (remhash "allowedListeners" (gethash "spec" gateway))
+          (setf (gr8s.controllers::gateway-controller-store controller) (snapshot))
+          (gr8s.controllers::converge-gateway-listeners controller)
+          (is (null (gethash 443 (gr8s.controllers::gateway-controller-routing-bases controller))))
+          (is (member 443 stopped))
+          (is (gethash 8080 (gr8s.controllers::gateway-controller-listeners controller))))))))
+
+(test listenerset-http-removal-preserves-gateway-routes
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (gwc-seed store)
+    (let* ((objects (make-hash-table :test 'equal))
+           (gateway (gr8s.resources::get-core-resource store "gateways" "default" "web"))
+           (owner (listenerset-test-owner "child" "child" "2026-01-01T00:00:00Z" "child.example.test" "HTTP")))
+      (setf (gethash "allowedListeners" (gethash "spec" gateway))
+            (gr8s.resources::core-object "namespaces" (gr8s.resources::core-object "from" "All"))
+            (gethash "port" (aref (gethash "listeners" (gethash "spec" gateway)) 0)) 443
+            (gethash "parentRef" (gethash "spec" owner))
+            (gr8s.resources::core-object "namespace" "default" "name" "web")
+            (gethash '("gateways" "default" "web") objects) gateway
+            (gethash '("gatewayclasses" nil "gr8s") objects)
+            (gr8s.resources::get-core-resource store "gatewayclasses" nil "gr8s")
+            (gethash '("httproutes" "default" "app") objects)
+            (gr8s.resources::get-core-resource store "httproutes" "default" "app")
+            (gethash '("listenersets" "apps" "child") objects) owner)
+      (flet ((view () (gr8s.agent::make-gateway-projection-store (gr8s.agent::gateway-resource-index objects))))
+        (let ((controller (gr8s.controllers::make-gateway-controller
+                           (view) :start-fn (lambda (&rest args) (declare (ignore args)) :http)
+                           :swap-fn (lambda (&rest args) (declare (ignore args)))
+                           :stop-fn (lambda (&rest args) (declare (ignore args))))))
+          (gr8s.controllers::converge-gateway-listeners controller)
+          (flet ((serves () (funcall (gethash 443 (gr8s.controllers::gateway-controller-routing-bases controller))
+                                    "app.example.com" "/" "GET" nil)))
+            (is (serves))
+            (remhash '("listenersets" "apps" "child") objects)
+            (setf (gr8s.controllers::gateway-controller-store controller) (view))
+            (gr8s.controllers::converge-gateway-listeners controller :reuse-tls-bindings-p t)
+            (is (serves))))))))
+
+(test listenerset-http-selects-logical-host-before-route
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (gwc-seed store)
+    (let* ((objects (make-hash-table :test 'equal))
+           (gateway (gr8s.resources::get-core-resource store "gateways" "default" "web"))
+           (a (listenerset-test-owner "a" "a" "2026-01-01T00:00:00Z" "*.example.test" "HTTP"))
+           (b (listenerset-test-owner "b" "b" "2026-01-02T00:00:00Z" "app.example.test" "HTTP"))
+           (route (gr8s.resources::get-core-resource store "httproutes" "default" "app")))
+      (setf (gethash "allowedListeners" (gethash "spec" gateway))
+            (gr8s.resources::core-object "namespaces" (gr8s.resources::core-object "from" "All"))
+            (gethash "namespace" (gethash "metadata" route)) "apps"
+            (gethash "hostnames" (gethash "spec" route)) #("*.example.test")
+            (gethash "parentRefs" (gethash "spec" route))
+            (vector (gr8s.resources::core-object "kind" "ListenerSet" "name" "a"))
+            (gethash "matches" (aref (gethash "rules" (gethash "spec" route)) 0))
+            (vector (gr8s.resources::core-object "path" (gr8s.resources::core-object "type" "PathPrefix" "value" "/private")))
+            (gethash '("gateways" "default" "web") objects) gateway
+            (gethash '("gatewayclasses" nil "gr8s") objects)
+            (gr8s.resources::get-core-resource store "gatewayclasses" nil "gr8s")
+            (gethash '("listenersets" "apps" "a") objects) a
+            (gethash '("listenersets" "apps" "b") objects) b
+            (gethash '("httproutes" "apps" "app") objects) route)
+      (dolist (owner (list a b))
+        (setf (gethash "parentRef" (gethash "spec" owner))
+              (gr8s.resources::core-object "namespace" "default" "name" "web")))
+      (labels ((view () (gr8s.agent::make-gateway-projection-store (gr8s.agent::gateway-resource-index objects))))
+        (let ((controller (gr8s.controllers::make-gateway-controller
+                           (view) :start-fn (lambda (&rest args) (declare (ignore args)) :http)
+                           :swap-fn (lambda (&rest args) (declare (ignore args)))
+                           :stop-fn (lambda (&rest args) (declare (ignore args))))))
+          (gr8s.controllers::converge-gateway-listeners controller)
+          (flet ((router () (gethash 443 (gr8s.controllers::gateway-controller-routing-bases controller))))
+            (let ((before (router)) (old (gr8s.controllers::gateway-controller-store controller)))
+              (gr8s.controllers::converge-gateway-listeners controller)
+              (is (eq before (router)))
+              (is (null (funcall before "app.example.test" "/private" "GET" nil)))
+              (is (funcall before "other.example.test" "/private" "GET" nil))
+              (setf (gethash "matches" (aref (gethash "rules" (gethash "spec" route)) 0))
+                    (vector (gr8s.resources::core-object "path" (gr8s.resources::core-object "type" "PathPrefix" "value" "/changed")))
+                    (gr8s.controllers::gateway-controller-store controller) (view))
+              (gr8s.controllers::converge-gateway-http-route-changes
+               controller old (list (cons '("httproutes" "apps" "app") route)))
+              (is (null (funcall (router) "app.example.test" "/changed" "GET" nil)))
+              (is (funcall (router) "other.example.test" "/changed" "GET" nil))
+              (is (null (funcall (router) "other.example.test" "/private" "GET" nil)))
+              (is (funcall before "other.example.test" "/private" "GET" nil))
+              (let ((updated (router)))
+                (gr8s.controllers::converge-gateway-listeners controller)
+                (is (eq updated (router))))
+              (flet ((binding (host)
+                       (gr8s.controllers::gateway-certificate-for-host
+                        (gr8s.controllers::gateway-tls-snapshot-index
+                         (gethash 443 (gr8s.controllers::gateway-controller-http-snapshots controller))) host)))
+                (let ((unchanged (binding "other.example.test"))
+                      (changed (binding "app.example.test")))
+                  (setf (gethash "generation" (gethash "metadata" b)) 2
+                        (gr8s.controllers::gateway-controller-store controller) (view))
+                  (gr8s.controllers::converge-gateway-listeners controller :reuse-tls-bindings-p t)
+                  (is (eq unchanged (binding "other.example.test")))
+                  (is (not (eq changed (binding "app.example.test"))))
+                  (is (funcall (router) "other.example.test" "/changed" "GET" nil))
+                  (is (null (funcall (router) "app.example.test" "/changed" "GET" nil))))))))))))
+
+(test listenerset-listener-order-preserves-owners-and-resolves-conflicts
+  (let* ((gateway (com.inuoe.jzon:parse
+                   "{\"apiVersion\":\"gateway.networking.k8s.io/v1\",\"kind\":\"Gateway\",\"metadata\":{\"namespace\":\"edge\",\"name\":\"public\",\"uid\":\"gw-1\"},\"spec\":{\"allowedListeners\":{\"namespaces\":{\"from\":\"All\"}},\"listeners\":[{\"name\":\"https\",\"port\":443,\"protocol\":\"HTTPS\",\"hostname\":\"parent.example\"}]}}"))
+         (old (listenerset-test-owner "a" "set-a" "2026-01-01T00:00:00Z" "tenant.example"))
+         (tie (listenerset-test-owner "b" "set-b" "2026-01-01T00:00:00Z" "tenant.example"))
+         (new (listenerset-test-owner "c" "set-c" "2026-01-02T00:00:00Z" "parent.example"))
+         (plain (listenerset-test-owner "d" "set-d" "2026-01-03T00:00:00Z" "plain.example" "HTTP"))
+         (entries (gr8s.controllers::gateway-listener-entries nil gateway (list plain new tie old))))
+    (is (equal (list gateway old tie new plain)
+               (mapcar #'gr8s.controllers::gateway-listener-entry-owner entries)))
+    (is (every (lambda (entry) (eq gateway (gr8s.controllers::gateway-listener-entry-gateway entry))) entries))
+    (is (equal '(nil nil "HostnameConflict" "HostnameConflict" "ProtocolConflict")
+               (mapcar #'gr8s.controllers::gateway-listener-entry-conflict entries)))
+    ;; Same listener names in different resources are valid and retain UID identity.
+    (is (equal '("gw-1" "set-a" "set-b" "set-c" "set-d")
+               (mapcar (lambda (entry)
+                         (gethash "uid" (gethash "metadata"
+                                                (gr8s.controllers::gateway-listener-entry-owner entry)))) entries)))
+    (remhash "allowedListeners" (gethash "spec" gateway))
+    (is (= 1 (length (gr8s.controllers::gateway-listener-entries nil gateway (list old tie)))))))
+
+(test listenerset-admission-defaults-to-deny-and-checks-parent-identity
+  (let* ((gateway (com.inuoe.jzon:parse
+                   "{\"metadata\":{\"namespace\":\"edge\",\"name\":\"public\"},\"spec\":{}}"))
+         (set (com.inuoe.jzon:parse
+               "{\"metadata\":{\"namespace\":\"apps\",\"name\":\"tenant\"},\"spec\":{\"parentRef\":{\"name\":\"public\",\"namespace\":\"edge\"}}}"))
+         (parent (gethash "parentRef" (gethash "spec" set))))
+    (is (not (gr8s.controllers::gateway-listenerset-admitted-p nil gateway set)))
+    (setf (gethash "allowedListeners" (gethash "spec" gateway))
+          (com.inuoe.jzon:parse "{\"namespaces\":{\"from\":\"All\"}}"))
+    (is (gr8s.controllers::gateway-listenerset-admitted-p nil gateway set))
+    (dolist (entry '(("name" . "other") ("namespace" . "other")
+                     ("kind" . "Service") ("group" . "other.example")))
+      (let ((old (gethash (car entry) parent)))
+        (setf (gethash (car entry) parent) (cdr entry))
+        (is (not (gr8s.controllers::gateway-listenerset-admitted-p nil gateway set)))
+        (if old (setf (gethash (car entry) parent) old) (remhash (car entry) parent))))
+    ;; Missing parent namespace is relative to the ListenerSet, not the Gateway.
+    (remhash "namespace" parent)
+    (is (not (gr8s.controllers::gateway-listenerset-admitted-p nil gateway set)))
+    (setf (gethash "namespace" (gethash "metadata" set)) "edge")
+    (is (gr8s.controllers::gateway-listenerset-admitted-p nil gateway set))
+    (setf (gethash "allowedListeners" (gethash "spec" gateway))
+          (com.inuoe.jzon:parse "{\"namespaces\":{\"from\":\"Same\"}}"))
+    (is (gr8s.controllers::gateway-listenerset-admitted-p nil gateway set))
+    (setf (gethash "namespace" parent) "edge"
+          (gethash "namespace" (gethash "metadata" set)) "apps")
+    (is (not (gr8s.controllers::gateway-listenerset-admitted-p nil gateway set)))))
+
+(test listenerset-admission-observes-namespace-selector-revocation
+  (with-temporary-store (store path)
+    (values path)
+    (gr8s.resources::create-core-resource
+     store "namespaces"
+     (com.inuoe.jzon:parse "{\"metadata\":{\"name\":\"apps\",\"labels\":{\"team\":\"trusted\"}}}") nil)
+    (let ((gateway (com.inuoe.jzon:parse
+                    "{\"metadata\":{\"namespace\":\"edge\",\"name\":\"public\"},\"spec\":{\"allowedListeners\":{\"namespaces\":{\"from\":\"Selector\",\"selector\":{\"matchLabels\":{\"team\":\"trusted\"}}}}}}"))
+          (set (com.inuoe.jzon:parse
+                "{\"metadata\":{\"namespace\":\"apps\",\"name\":\"tenant\"},\"spec\":{\"parentRef\":{\"name\":\"public\",\"namespace\":\"edge\"}}}")))
+      (is (gr8s.controllers::gateway-listenerset-admitted-p store gateway set))
+      (gr8s.resources::update-core-resource
+       store "namespaces" nil "apps"
+       (lambda (object) (remhash "labels" (gethash "metadata" object)) object))
+      (is (not (gr8s.controllers::gateway-listenerset-admitted-p store gateway set))))))
+
+(test listenerset-secret-grants-use-the-owning-kind-group-and-namespace
+  (let* ((objects (make-hash-table :test 'equal))
+         (owner (listenerset-test-owner "tenant" "set-1" "2026-01-01T00:00:00Z" "tenant.example"))
+         (listener (aref (gethash "listeners" (gethash "spec" owner)) 0))
+         (entry (gr8s.controllers::make-gateway-listener-entry :owner owner :listener listener))
+         (grant (com.inuoe.jzon:parse
+                 "{\"spec\":{\"from\":[{\"group\":\"gateway.networking.k8s.io\",\"kind\":\"Gateway\",\"namespace\":\"apps\"}],\"to\":[{\"group\":\"\",\"kind\":\"Secret\",\"name\":\"cert\"}]}}")))
+    (setf (gethash "tls" listener)
+          (com.inuoe.jzon:parse "{\"certificateRefs\":[{\"name\":\"cert\",\"namespace\":\"certs\"}]}")
+          (gethash '("referencegrants" "certs" "allow") objects) grant)
+    (labels ((reference ()
+               (gr8s.controllers::gateway-listener-entry-tls-ref
+                (gr8s.agent::make-gateway-projection-store (gr8s.agent::gateway-resource-index objects)) entry)))
+      (is (null (reference)))
+      (setf (gethash "kind" (aref (gethash "from" (gethash "spec" grant)) 0)) "ListenerSet")
+      (is (equal '("certs" . "cert") (reference)))
+      (setf (gethash "apiVersion" owner) "gateway.networking.x-k8s.io/v1alpha1")
+      (is (null (reference)))
+      (setf (gethash "group" (aref (gethash "from" (gethash "spec" grant)) 0))
+            "gateway.networking.x-k8s.io")
+      (is (equal '("certs" . "cert") (reference)))
+      (remhash '("referencegrants" "certs" "allow") objects)
+      (is (null (reference)))
+      (remhash "namespace" (aref (gethash "certificateRefs" (gethash "tls" listener)) 0))
+      (is (equal '("apps" . "cert") (reference))))))
+
 (defun gateway-test-tls-secret (name)
   (let ((root (asdf:system-relative-pathname "gr8s" "tests/fixtures/gateway-tls/")))
     (gr8s.resources::core-object
@@ -251,9 +966,16 @@
                        :swap-fn (lambda (&rest ignored) (declare (ignore ignored))))))
       (labels ((programmed ()
                  (slot-value (first (slot-value (first (gr8s.controllers::gateway-controller-observations controller))
-                                                'gr8s.node.v1::listeners)) 'gr8s.node.v1::programmed)))
+                                                'gr8s.node.v1::listeners)) 'gr8s.node.v1::programmed))
+               (installed ()
+                 (let ((gateway (gr8s.resources::get-core-resource store "gateways" "default" "web")))
+                   (gr8s.controllers::gateway-listener-entry-programmed-p
+                    controller (gr8s.controllers::make-gateway-listener-entry
+                                :gateway gateway :owner gateway
+                                :listener (aref (gethash "listeners" (gethash "spec" gateway)) 0))))))
         (gr8s.controllers::converge-gateway-listeners controller)
         (is (programmed))
+        (is (installed))
         (gr8s.resources::update-core-resource
          store "secrets" "default" "tls"
          (lambda (secret)
@@ -264,8 +986,10 @@
                                #(10))))
            secret))
         (is-false (programmed))
+        (is-false (installed))
         (gr8s.controllers::converge-gateway-listeners controller)
-        (is (programmed))))))
+        (is (programmed))
+        (is (installed))))))
 
 (test gateway-failed-registration-closes-the-unpublished-listener
   (with-temporary-store (store directory)

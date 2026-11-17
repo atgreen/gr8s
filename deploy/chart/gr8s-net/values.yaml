@@ -55,6 +55,9 @@ apiServer:
 gateway:
   # Serve the Gateway API (GatewayClass gr8s.io/gateway-controller) from every node.
   enabled: false
+  # Empty selects a served API automatically, preferring gateway.networking.k8s.io.
+  # Set gateway.networking.x-k8s.io to select the experimental API explicitly.
+  listenerSetAPIGroup: ""
   tls:
     # Grant the agent cluster-wide read on Secrets, for TLS listener certificates.
     # This is the one grant that turns a node compromise into cluster-wide secret

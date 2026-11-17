@@ -12,7 +12,8 @@
               collect
               (list gateway
                     (coerce
-                     (loop for service-port across (foreign-gateway-service-ports gateway)
+                     (loop for service-port across
+                           (foreign-gateway-service-ports gateway nil (gateway-controller-store controller))
                            for number = (gethash "port" service-port)
                            for http = (gethash number (gateway-controller-listeners controller))
                            for l4 = (gethash number (gateway-controller-l4-listeners controller))

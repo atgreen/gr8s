@@ -11,6 +11,263 @@
 (def-suite kube-client :in gr8s)
 (in-suite kube-client)
 
+(test foreign-snapshot-listenerset-index-follows-parent-and-gateway-identity
+  (let* ((view (gr8s.resources::make-foreign-resource-view nil))
+         (gateway (gw-parse "{\"metadata\":{\"namespace\":\"apps\",\"name\":\"edge\",\"uid\":\"gw1\"},\"spec\":{}}"))
+         (owner (gw-parse "{\"metadata\":{\"namespace\":\"apps\",\"name\":\"child\",\"uid\":\"set1\"},\"spec\":{\"parentRef\":{\"name\":\"edge\"}}}")))
+    (gr8s.resources::foreign-view-note view "gateways" :added "apps/edge" gateway)
+    (gr8s.resources::foreign-view-note view "listenersets" :added "apps/child" owner)
+    (let ((old (gr8s.resources::foreign-view-snapshot view)))
+      (flet ((children (snapshot uid)
+               (gr8s.resources::list-core-resources
+                (gr8s.controllers::make-foreign-gateway-view
+                 :source snapshot :gateway-key (list "apps" "edge" uid)) "listenersets")))
+        (is (= 1 (length (children old "gw1"))))
+        (is (null (children old "wrong")))
+        (setf (gethash "uid" (gethash "metadata" gateway)) "gw2")
+        (gr8s.resources::foreign-view-note view "gateways" :modified "apps/edge" gateway)
+        (let ((new (gr8s.resources::foreign-view-snapshot view)))
+          (is (null (children new "gw1")))
+          (is (= 1 (length (children new "gw2"))))
+          (setf (gethash "namespace" (gethash "parentRef" (gethash "spec" owner))) "other")
+          (gr8s.resources::foreign-view-note view "listenersets" :modified "apps/child" owner)
+          (is (null (children (gr8s.resources::foreign-view-snapshot view) "gw2")))
+          (is (= 1 (length (children new "gw2"))))
+          (remhash "namespace" (gethash "parentRef" (gethash "spec" owner)))
+          (gr8s.resources::foreign-view-note view "listenersets" :modified "apps/child" owner)
+          (gr8s.resources::foreign-view-note view "listenersets" :deleted "apps/child" owner)
+          (is (null (children (gr8s.resources::foreign-view-snapshot view) "gw2")))
+          (is (= 1 (length (children old "gw1")))))))))
+
+(test informer-initial-sync-waits-for-change-callbacks
+  (let ((original (symbol-function 'gr8s.kube-client:kube-list))
+        (informer nil) (observed :not-called))
+    (unwind-protect
+         (progn
+           (setf informer (gr8s.kube-client::%make-informer
+                           :on-change (lambda (&rest args)
+                                        (declare (ignore args))
+                                        (setf observed (gr8s.kube-client:informer-synced-p informer))))
+                 (symbol-function 'gr8s.kube-client:kube-list)
+                 (lambda (&rest args)
+                   (declare (ignore args))
+                   (gw-parse "{\"metadata\":{\"resourceVersion\":\"1\"},\"items\":[{\"metadata\":{\"name\":\"a\",\"resourceVersion\":\"1\"}}]}")))
+           (gr8s.kube-client::informer-relist informer)
+           (is (null observed))
+           (is (gr8s.kube-client:informer-synced-p informer)))
+      (setf (symbol-function 'gr8s.kube-client:kube-list) original))))
+
+(test foreign-snapshot-parent-index-retains-identity-and-reparenting
+  (let* ((view (gr8s.resources::make-foreign-resource-view nil))
+         (route (gw-parse "{\"metadata\":{\"namespace\":\"apps\",\"name\":\"r\"},\"spec\":{\"parentRefs\":[{\"kind\":\"ListenerSet\",\"name\":\"shared\"},{\"kind\":\"ListenerSet\",\"name\":\"shared\",\"sectionName\":\"two\"},{\"group\":\"gateway.networking.x-k8s.io\",\"kind\":\"XListenerSet\",\"name\":\"shared\"}]}}"))
+         (stable '("gateway.networking.k8s.io" "ListenerSet" "apps" "shared"))
+         (experimental '("gateway.networking.x-k8s.io" "XListenerSet" "apps" "shared"))
+         (gateway '("gateway.networking.k8s.io" "Gateway" "edge" "shared")))
+    (gr8s.resources::foreign-view-note view "httproutes" :added "apps/r" route)
+    (let ((old (gr8s.resources::foreign-view-snapshot view)))
+      (is (= 1 (length (gr8s.resources::foreign-snapshot-parent-routes old stable))))
+      (is (= 1 (length (gr8s.resources::foreign-snapshot-parent-routes old experimental))))
+      (is (null (gr8s.resources::foreign-snapshot-parent-routes old gateway)))
+      (setf (gethash "parentRefs" (gethash "spec" route))
+            (vector (gr8s.resources::core-object "name" "shared" "namespace" "edge")))
+      (gr8s.resources::foreign-view-note view "httproutes" :modified "apps/r" route)
+      (let ((new (gr8s.resources::foreign-view-snapshot view)))
+        (is (null (gr8s.resources::foreign-snapshot-parent-routes new stable)))
+        (is (null (gr8s.resources::foreign-snapshot-parent-routes new experimental)))
+        (is (= 1 (length (gr8s.resources::foreign-snapshot-parent-routes new gateway))))
+        (is (= 1 (length (gr8s.resources::foreign-snapshot-parent-routes old stable))))
+        (gr8s.resources::foreign-view-note view "httproutes" :deleted "apps/r" route)
+        (is (null (gr8s.resources::foreign-snapshot-parent-routes
+                   (gr8s.resources::foreign-view-snapshot view) gateway)))
+        (is (= 1 (length (gr8s.resources::foreign-snapshot-parent-routes new gateway))))))))
+
+(test foreign-view-snapshots-retain-old-state-and-coalesce-changes
+  (let* ((view (gr8s.resources::make-foreign-resource-view nil))
+         (object (gw-parse "{\"metadata\":{\"namespace\":\"apps\",\"name\":\"r\",\"uid\":\"old\"},\"spec\":{\"value\":1}}")))
+    (gr8s.resources::foreign-view-note view "httproutes" :added "apps/r" object)
+    (multiple-value-bind (before revision changes full)
+        (gr8s.resources::foreign-view-snapshot view)
+      (declare (ignore changes))
+      (is (not (null full)))
+      (setf (gethash "value" (gethash "spec" object)) 2)
+      (gr8s.resources::foreign-view-note view "httproutes" :modified "apps/r" object)
+      (gr8s.resources::foreign-view-note view "httproutes" :deleted "apps/r" object)
+      (setf (gethash "uid" (gethash "metadata" object)) "replacement")
+      (gr8s.resources::foreign-view-note view "httproutes" :added "apps/r" object)
+      (multiple-value-bind (after next deltas rebuild)
+          (gr8s.resources::foreign-view-snapshot view revision)
+        (is (not rebuild))
+        (is (= 1 (length deltas)))
+        (is (equal '("httproutes" "apps" "r") (caar deltas)))
+        (is (equal "replacement" (gethash "uid" (gethash "metadata" (cdar deltas)))))
+        (is (= 1 (gethash "value" (gethash "spec"
+                              (gr8s.resources::get-core-resource before "httproutes" "apps" "r")))))
+        (is (= 2 (gethash "value" (gethash "spec"
+                              (gr8s.resources::get-core-resource after "httproutes" "apps" "r")))))
+        ;; Returned deltas and reads must not mutate the retained snapshot.
+        (setf (gethash "value" (gethash "spec" (cdar deltas))) 99)
+        (is (= 2 (gethash "value" (gethash "spec"
+                              (gr8s.resources::get-core-resource after "httproutes" "apps" "r")))))
+        (gr8s.resources::foreign-view-note view "httproutes" :deleted "apps/r" object)
+        (multiple-value-bind (deleted ignored removals full)
+            (gr8s.resources::foreign-view-snapshot view next)
+          (declare (ignore ignored))
+          (is (not full))
+          (is (equal '((("httproutes" "apps" "r"))) removals))
+          (is (null (gr8s.resources::list-core-resources deleted "httproutes"))))))))
+
+(test foreign-view-snapshot-history-overflow-requires-rebuild
+  (let ((view (gr8s.resources::make-foreign-resource-view nil :history-limit 2)))
+    (dotimes (i 3)
+      (gr8s.resources::foreign-view-note
+       view "namespaces" :added (format nil "ns-~D" i)
+       (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" (format nil "ns-~D" i)))))
+    (multiple-value-bind (snapshot revision changes full)
+        (gr8s.resources::foreign-view-snapshot view 0)
+      (is (not (null full)))
+      (is (null changes))
+      (is (= 3 (length (gr8s.resources::list-core-resources snapshot "namespaces"))))
+      (multiple-value-bind (same next changes full)
+          (gr8s.resources::foreign-view-snapshot view revision)
+        (declare (ignore same))
+        (is (= revision next))
+        (is (null changes))
+        (is (not full))))))
+
+(defun listenerset-test-api-resources (group-version &key (namespaced t)
+                                                       (verbs #("get" "list" "watch")))
+  (let ((experimental (equal group-version "gateway.networking.x-k8s.io/v1alpha1")))
+   (gr8s.resources::core-object
+   "groupVersion" group-version
+   "resources" (vector (gr8s.resources::core-object
+                         "name" (if experimental "xlistenersets" "listenersets")
+                         "kind" (if experimental "XListenerSet" "ListenerSet")
+                         "namespaced" namespaced "verbs" verbs)))))
+
+(test listenerset-discovery-selects-one-served-version-and-preserves-group
+  (let ((advertised
+          (list (listenerset-test-api-resources "gateway.networking.k8s.io/v1beta1")
+                (listenerset-test-api-resources "gateway.networking.x-k8s.io/v1alpha1")
+                (listenerset-test-api-resources "gateway.networking.k8s.io/v1"))))
+    (is (equal '("listenersets" "gateway.networking.k8s.io" "v1" t)
+               (gr8s.resources::foreign-listenerset-location advertised)))
+    (is (equal '("xlistenersets" "gateway.networking.x-k8s.io" "v1alpha1" t)
+               (gr8s.resources::foreign-listenerset-location
+                advertised :group "gateway.networking.x-k8s.io")))
+    (is (null (gr8s.resources::foreign-listenerset-location nil)))
+    (is (null (gr8s.resources::foreign-listenerset-location
+               (list (first advertised)) :group "gateway.networking.x-k8s.io")))))
+
+(test listenerset-discovery-requires-a-namespaced-watchable-resource
+  (dolist (advertised
+            (list (listenerset-test-api-resources "gateway.networking.k8s.io/v1"
+                                                 :namespaced nil)
+                  (listenerset-test-api-resources "gateway.networking.k8s.io/v1"
+                                                 :verbs #("get" "list"))
+                  (listenerset-test-api-resources "unrelated.example/v1")))
+    (is (null (gr8s.resources::foreign-listenerset-location (list advertised))))))
+
+(test listenerset-discovery-retries-absence-and-propagates-forbidden
+  (let ((original (symbol-function 'gr8s.kube-client:kube-get))
+        (mode :absent) (calls nil))
+    (unwind-protect
+         (progn
+           (setf (symbol-function 'gr8s.kube-client:kube-get)
+                 (lambda (cluster path &key &allow-other-keys)
+                   (declare (ignore cluster))
+                   (push path calls)
+                   (ecase mode
+                     (:absent (error 'gr8s.kube-client:kube-error :status 404 :body nil))
+                     (:forbidden (error 'gr8s.kube-client:kube-error :status 403 :body nil))
+                     (:present (listenerset-test-api-resources "gateway.networking.k8s.io/v1")))))
+           (is (null (gr8s.resources::discover-foreign-listenerset-location nil)))
+           (setf mode :present calls nil)
+           (is (equal '("listenersets" "gateway.networking.k8s.io" "v1" t)
+                      (gr8s.resources::discover-foreign-listenerset-location nil)))
+           (is (equal '("/apis/gateway.networking.k8s.io/v1") calls))
+           (setf mode :forbidden)
+           (signals gr8s.kube-client:kube-error
+             (gr8s.resources::discover-foreign-listenerset-location nil)))
+      (setf (symbol-function 'gr8s.kube-client:kube-get) original))))
+
+(test informer-withdraws-objects-when-the-api-disappears
+  (let* ((changes nil)
+         (informer (gr8s.kube-client::%make-informer
+                    :path "/apis/gateway.networking.k8s.io/v1/listenersets"
+                    :on-change (lambda (change key object)
+                                 (declare (ignore object))
+                                 (push (list change key) changes)))))
+    (let ((object (kube-test-configmap "old" "k" "v")))
+      (setf (gethash "namespace" (gethash "metadata" object)) "default")
+      (gr8s.kube-client::informer-apply informer "ADDED" object))
+    (gr8s.kube-client::informer-record-error
+     informer (make-condition 'gr8s.kube-client:kube-error :status 404 :body nil))
+    (is (null (gr8s.kube-client:informer-objects informer)))
+    (is (gr8s.kube-client:informer-synced-p informer))
+    (is (member '(:deleted "default/old") changes :test #'equal))))
+
+(test informer-surfaces-forbidden-and-clears-the-error-after-a-successful-relist
+  (let* ((informer (gr8s.kube-client::%make-informer :path "/test"))
+         (denied (make-condition 'gr8s.kube-client:kube-error :status 403 :body nil))
+         (original (symbol-function 'gr8s.kube-client:kube-list)))
+    (gr8s.kube-client::informer-record-error informer denied)
+    (is (eq denied (gr8s.kube-client::informer-last-error informer)))
+    (is (not (gr8s.kube-client:informer-synced-p informer)))
+    (unwind-protect
+         (progn
+           (setf (symbol-function 'gr8s.kube-client:kube-list)
+                 (lambda (&rest arguments)
+                   (declare (ignore arguments))
+                   (gr8s.resources::core-object
+                    "metadata" (gr8s.resources::core-object "resourceVersion" "12")
+                    "items" #())))
+           (gr8s.kube-client::informer-relist informer)
+           (is (null (gr8s.kube-client::informer-last-error informer)))
+           (is (gr8s.kube-client:informer-synced-p informer)))
+      (setf (symbol-function 'gr8s.kube-client:kube-list) original))))
+
+(test foreign-listenerset-view-discovers-late-crds-and-keeps-groups-distinct
+  (with-core-api (store path)
+    (values store path)
+    (let* ((cluster (kube-test-cluster))
+           (view (gr8s.resources::make-foreign-resource-view
+                  cluster :discovery-retry-seconds 0))
+           (experimental (gr8s.resources::make-foreign-resource-view
+                          cluster :listenerset-group "gateway.networking.x-k8s.io"
+                                  :discovery-retry-seconds 0)))
+      (unwind-protect
+           (progn
+             (is (null (gr8s.resources::list-core-resources view "listenersets")))
+             (is (zerop (hash-table-count (gr8s.resources::foreign-resource-view-informers view))))
+             (loop for group in '("gateway.networking.k8s.io" "gateway.networking.x-k8s.io")
+                   ;; The native test server reserves Gateway v1 discovery for
+                   ;; built-ins; use its CRD-served stable-group alias here.
+                   for version in '("v1beta1" "v1alpha1")
+                   for resource in '("listenersets" "xlistenersets")
+                   for kind in '("ListenerSet" "XListenerSet")
+                   do (gr8s.kube-client:kube-create
+                       cluster "/apis/apiextensions.k8s.io/v1/customresourcedefinitions"
+                       (crd-fixture :group group :plural resource :kind kind
+                                    :versions (list version)))
+                      (gr8s.kube-client:kube-create
+                       cluster (gr8s.kube-client:resource-path group version resource
+                                                             :namespace "default")
+                       (crd-instance "shared-name" group kind version)))
+             (is (equal "gateway.networking.k8s.io/v1beta1"
+                        (gethash "apiVersion"
+                                 (first (gr8s.resources::list-core-resources view "listenersets")))))
+             (is (equal "gateway.networking.x-k8s.io/v1alpha1"
+                        (gethash "apiVersion"
+                                 (first (gr8s.resources::list-core-resources experimental "listenersets")))))
+             (is (= 1 (hash-table-count (gr8s.resources::foreign-resource-view-informers view))))
+             (gr8s.kube-client:kube-delete
+              cluster "/apis/gateway.networking.k8s.io/v1beta1/namespaces/default/listenersets/shared-name")
+             (is (poll-until
+                  (lambda () (null (gr8s.resources::list-core-resources view "listenersets")))))
+             (is (= 1 (length (gr8s.resources::list-core-resources experimental "listenersets")))))
+        (gr8s.resources::stop-foreign-resource-view view)
+        (gr8s.resources::stop-foreign-resource-view experimental)))))
+
 (defun kube-test-cluster ()
   "The running with-core-api fixture as a kube-client cluster (plain HTTP)."
   (gr8s.kube-client:make-kube-cluster

@@ -98,6 +98,8 @@ networking stack:
 - **Gateway API** — HTTPRoute routing, status, and LoadBalancer Services — and
   `networking.k8s.io/v1` **Ingress** (IngressClass `gr8s.io/ingress-controller`)
   served by the same proxy.
+  [ListenerSets](docs/design-listenersets.md) let teams attach HTTP/HTTPS listeners
+  to a shared Gateway, including separate TLS certificates on the same port.
 - **hostPort** (in-kernel DNAT at the socket hook) and cluster **DNS** reachability.
 
 Each piece is an independently selectable feature of the `gr8s net-agent`

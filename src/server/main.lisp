@@ -1481,6 +1481,11 @@ service LB, the Gateway -- is independently selectable; at least one must be."
                     (setf (getf options :cni) (string= value "true")))
                    ((equal option "--gateway")
                     (setf (getf options :gateway) (string= value "true")))
+                   ((equal option "--listenerset-api-group")
+                    (unless (member value '("gateway.networking.k8s.io"
+                                            "gateway.networking.x-k8s.io") :test #'equal)
+                      (error "unsupported ListenerSet API group: ~A" value))
+                    (setf (getf options :listenerset-api-group) value))
                    ((equal option "--service-lb")
                     (setf (getf options :service-lb) (string= value "true")))
                    (t (error "unknown net-agent option: ~A" option))))
@@ -1521,6 +1526,8 @@ service LB, the Gateway -- is independently selectable; at least one must be."
      :extra-factory
      (when (or (getf options :gateway) (getf options :service-lb))
        (lambda (view)
+         (setf (gr8s.resources::foreign-resource-view-listenerset-group view)
+               (getf options :listenerset-api-group))
          (let ((convergers '()) (stoppers '()))
            (when (getf options :gateway)
              (multiple-value-bind (converger stopper)
@@ -3350,6 +3357,7 @@ No HA API may start from member-local certificate state before this converges."
              :options '(("--cni BOOL" "CNI, IPAM, overlay, NetworkPolicy, hostPort (default true)")
                         ("--service-lb BOOL" "Replace kube-proxy with the eBPF socket LB")
                         ("--gateway BOOL" "Serve the Gateway API and Ingress")
+                        ("--listenerset-api-group GROUP" "Choose the stable or experimental ListenerSet group (default: discover, prefer stable)")
                         ("--kubeconfig FILE" "Host cluster access (default: in-cluster ServiceAccount)")
                         ("--node-name NAME" "This node's Kubernetes name (default: $NODE_NAME)")
                         ("--state-directory DIR" "Folder holding IPAM and key state")

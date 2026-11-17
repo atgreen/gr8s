@@ -71,6 +71,10 @@ spec:
             {{- if .Values.gateway.enabled }}
             - --gateway
             - "true"
+            {{- if .Values.gateway.listenerSetAPIGroup }}
+            - --listenerset-api-group
+            - {{ .Values.gateway.listenerSetAPIGroup | quote }}
+            {{- end }}
             {{- end }}
           env:
             - name: NODE_NAME

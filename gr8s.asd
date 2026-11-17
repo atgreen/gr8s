@@ -399,6 +399,7 @@
                                            (:file "gateway-l4")
                                            (:file "gateway-sklookup")
                                            (:file "gateway-controller")
+                                           (:file "gateway-listenersets")
                                            (:file "foreign-gateway-leases")
                                            (:file "foreign-gateway")
                                            (:file "foreign-gateway-endpoints")
