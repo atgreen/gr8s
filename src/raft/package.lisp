@@ -17,6 +17,7 @@
   ;; and that raft-cached-append-message is built from.
   (:import-from #:cl-raft
    #:file-raft-storage-catchup-error
+   #:file-raft-storage-entry-frames
    #:file-raft-storage-ownership-fd
    #:raft-command-memory-weight
    #:raft-command-wire-weight

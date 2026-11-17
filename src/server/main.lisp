@@ -210,10 +210,11 @@ failure never takes the service down with it."
                        :local-storage-path +default-local-storage-path+)))
     (loop while arguments
           for option = (first arguments)
-          do (if (member option '("--disable-agent" "--raft-init" "--raft-compaction" "--no-raft-compaction" "--containerd-no-sync") :test #'string=)
+          do (if (member option '("--disable-agent" "--raft-init" "--cluster-reset" "--raft-compaction" "--no-raft-compaction" "--containerd-no-sync") :test #'string=)
                  (progn
                    (cond ((string= option "--disable-agent") (setf (getf options :disable-agent) t))
                          ((string= option "--raft-init") (setf (getf options :raft-init) t))
+                         ((string= option "--cluster-reset") (setf (getf options :cluster-reset) t))
                          ((string= option "--raft-compaction") (setf (getf options :raft-compaction) t))
                          ((string= option "--no-raft-compaction") (setf (getf options :raft-compaction) nil))
                          ((string= option "--containerd-no-sync") (setf (getf options :containerd-no-sync) t)))
@@ -357,6 +358,11 @@ failure never takes the service down with it."
                       (setf (getf options :audit-log-path) value))
                      (t (error "unknown serve option: ~A" option)))
                    (setf arguments (cddr arguments)))))
+    (when (getf options :cluster-reset)
+      (when (getf options :raft-join)
+        (error "--cluster-reset recovers this member alone; it cannot be combined with --join"))
+      ;; The reset member continues as the (re-)founding sole voter.
+      (setf (getf options :raft-init) t))
     (when (and (eq t (getf options :raft-compaction))
                (not (or (getf options :raft-init) (getf options :raft-join))))
       (error "--raft-compaction requires --raft-init or --join"))
@@ -2590,9 +2596,13 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
            (equal "managed" (getf options :containerd-mode)))))
 
 (defun wait-for-ha-application (ha)
-  "Keep Raft listening while application-dependent services wait for catch-up."
+  "Keep Raft listening while application-dependent services wait for catch-up.
+   While blocked, periodically log WHY: the quorum arithmetic and which members
+   have never been heard from, so a quorum lost forever is diagnosable from the
+   journal instead of an eternally silent wait (podster-0d9)."
   (when ha
-    (let ((store (ha-control-plane-store ha)) (member (ha-control-plane-member ha)))
+    (let ((store (ha-control-plane-store ha)) (member (ha-control-plane-member ha))
+          (next-report 0))
       (when (gr8s.store::store-access-blocked-p store)
         (format t "gr8s HA: waiting for committed application recovery~%")
         (finish-output))
@@ -2600,6 +2610,15 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
             do (unless (and (gr8s.raft.transport::raft-member-running member)
                             (bt:thread-alive-p (gr8s.raft.transport::raft-member-tick-thread member)))
                  (error "Raft clock stopped before application recovery completed"))
+               (when (>= (get-internal-real-time) next-report)
+                 ;; First report after a grace period: an ordinary restart
+                 ;; recovers within seconds and deserves no quorum lecture.
+                 (when (plusp next-report)
+                   (let ((report (ignore-errors (ha-recovery-wait-report ha))))
+                     (when report (format t "~A~%" report) (finish-output))))
+                 (setf next-report (+ (get-internal-real-time)
+                                      (* (if (plusp next-report) 30 10)
+                                         internal-time-units-per-second))))
                (sleep 0.05))))
   (not *shutdown-requested*))
 
@@ -2998,6 +3017,14 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
           (join (getf options :raft-join)))
       (multiple-value-bind (join-host join-port)
           (if join (parse-agent-server join) (values nil nil))
+        (when (getf options :cluster-reset)
+          (let ((removed (gr8s.ha:reset-control-plane-membership
+                          (gr8s.store::pod-store-path store) id)))
+            (if removed
+                (format t "gr8s HA: cluster reset: ~A is now the sole voter; removed ~{~A~^, ~}~%~
+                           gr8s HA: remove --cluster-reset from the service arguments before adding members again~%"
+                        id removed)
+                (format t "gr8s HA: cluster reset: ~A is already the only durable member~%" id))))
         (format t "gr8s HA: Raft member ~A (~:[join ~A:~D~;founding cluster~])~%"
                 id (getf options :raft-init) join-host join-port)
         (start-ha-control-plane
@@ -3325,6 +3352,7 @@ No HA API may start from member-local certificate state before this converges."
                         ("--node-port PORT" "Agent supervisor port") ("--node-name NAME" "Node name")
                         ("--disable-agent" "Run only the control plane")
                         ("--raft-init" "Found an HA control-plane cluster")
+                        ("--cluster-reset" "Rewrite HA membership to this member alone (quorum lost forever)")
                         ("--join HOST:PORT" "Join an HA control-plane cluster through a member's Raft address")
                         ("--token TOKEN" "Control-plane join token for --node-name")
                         ("--ca-pin SHA256" "Raft CA fingerprint the joined member must present")
