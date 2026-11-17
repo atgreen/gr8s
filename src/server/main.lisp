@@ -2822,6 +2822,13 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                          (equal "containerd" (getf options :runtime))
                          (equal "managed" (getf options :containerd-mode)))
                 in-cluster-api-port)
+              ;; HA replication and joins arrive on the raft listener; a
+              ;; firewalled raft port stalls a join silently (podster-rnh).
+              :raft-port
+              (when (and (or (getf options :raft-init) (getf options :raft-join))
+                         (getf options :raft-listen)
+                         (not (string= "127.0.0.1" (getf options :raft-listen))))
+                (or (getf options :raft-port) +serve-raft-default-port+))
               :relay-port-start
               (when (getf options :wireguard-relay-address)
                 (getf options :wireguard-relay-port-start))

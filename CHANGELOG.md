@@ -38,6 +38,12 @@ the Kubernetes API version with a gr8s release suffix (see
   NotReady while its handshakes were refused once a second). A member
   that does skip a genuinely conflicting committed delta now says so in
   its journal instead of staying silent.
+- `gr8s doctor` now preflights the host firewall against the member's
+  recorded HA endpoint: it maps the member address to its interface and
+  firewalld zone and FAILs with the exact `firewall-cmd` repair when the
+  raft/node/API ports are dropped — the silent join-stall we hit when a
+  WireGuard interface sat in no zone. `serve` also admits the raft port
+  through firewalld alongside the node and API ports.
 
 - HA control-plane shutdown now always completes: stopping a Raft member
   bounds every worker-thread join under one deadline (10s), abandoning a
