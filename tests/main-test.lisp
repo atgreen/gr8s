@@ -774,6 +774,16 @@
                               arguments (constantly nil) (constantly 99)))))))
       (is (search "skill" output)))))
 
+(test net-agent-selects-an-explicit-listenerset-api-group
+  (dolist (group '("gateway.networking.k8s.io" "gateway.networking.x-k8s.io"))
+    (is (equal group
+               (getf (gr8s.server::parse-net-agent-options
+                      (list "--gateway" "true" "--listenerset-api-group" group))
+                     :listenerset-api-group))))
+  (signals error
+    (gr8s.server::parse-net-agent-options
+     '("--gateway" "true" "--listenerset-api-group" "unrelated.example"))))
+
 (test net-agent-features-are-independently-selectable
   (let ((options (gr8s.server::parse-net-agent-options nil)))
     (is (eq :net-agent (getf options :command)))

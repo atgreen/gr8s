@@ -12,6 +12,568 @@
 (def-suite foreign-net-agent :in gr8s)
 (in-suite foreign-net-agent)
 
+(test foreign-namespace-selector-index-retains-old-snapshots-without-resource-scans
+  (let* ((view (gr8s.resources::make-foreign-resource-view nil))
+         (owner (gw-parse "{\"metadata\":{\"namespace\":\"apps\",\"name\":\"owner\"},\"spec\":{\"listeners\":[{\"allowedRoutes\":{\"namespaces\":{\"from\":\"Selector\",\"selector\":{\"matchLabels\":{\"team\":\"Blue\"}}}}}]}}"))
+         (blue (gw-parse "{\"metadata\":{\"name\":\"apps\",\"labels\":{\"team\":\"Blue\"}}}"))
+         (list-resources (symbol-function 'gr8s.resources::list-core-resources)))
+    (gr8s.resources::foreign-view-note view "listenersets" :added "apps/owner" owner)
+    (let ((old (gr8s.resources::foreign-view-snapshot view)))
+      (setf (gethash "listeners" (gethash "spec" owner)) #())
+      (gr8s.resources::foreign-view-note view "listenersets" :modified "apps/owner" owner)
+      (let ((new (gr8s.resources::foreign-view-snapshot view)))
+        (unwind-protect
+             (progn
+               (setf (symbol-function 'gr8s.resources::list-core-resources)
+                     (lambda (&rest args) (declare (ignore args))
+                       (error "Namespace invalidation scanned a resource collection")))
+               (is (gr8s.controllers::foreign-gateway-namespace-affects-admission-p old nil blue))
+               (is (not (gr8s.controllers::foreign-gateway-namespace-affects-admission-p new nil blue))))
+          (setf (symbol-function 'gr8s.resources::list-core-resources) list-resources))))))
+
+(test foreign-namespace-pruning-keeps-selector-admission-transitions
+  (dolist (placement '(:gateway-admission :gateway-routes :listenerset-routes))
+    (let* ((objects (make-hash-table :test #'equal))
+           (policy (gw-parse "{\"namespaces\":{\"from\":\"Selector\",\"selector\":{\"matchLabels\":{\"team\":\"Blue\"}}}}"))
+           (owner (gw-parse "{\"metadata\":{\"namespace\":\"default\",\"name\":\"owner\"},\"spec\":{}}"))
+           (blue (gw-parse "{\"metadata\":{\"name\":\"apps\",\"labels\":{\"team\":\"Blue\"}}}"))
+           (lower (gw-parse "{\"metadata\":{\"name\":\"apps\",\"labels\":{\"team\":\"blue\"}}}")))
+      (if (eq placement :gateway-admission)
+          (setf (gethash "allowedListeners" (gethash "spec" owner)) policy)
+          (setf (gethash "listeners" (gethash "spec" owner))
+                (vector (gr8s.resources::core-object "allowedRoutes" policy))))
+      (setf (gethash (list (if (eq placement :listenerset-routes) "listenersets" "gateways")
+                          "default" "owner") objects) owner)
+      (let ((view (gr8s.agent::make-gateway-projection-store (gr8s.agent::gateway-resource-index objects))))
+        (is (gr8s.controllers::foreign-gateway-namespace-affects-admission-p view blue lower))
+        (is (gr8s.controllers::foreign-gateway-namespace-affects-admission-p view nil blue))
+        (is (gr8s.controllers::foreign-gateway-namespace-affects-admission-p view blue nil))
+        (is (not (gr8s.controllers::foreign-gateway-namespace-affects-admission-p view blue blue)))
+        (is (not (gr8s.controllers::foreign-gateway-namespace-affects-admission-p view nil lower)))))))
+
+(test foreign-listenerset-changes-reconcile-only-old-and-new-parents
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (gwc-seed store)
+    (let* ((view (gr8s.resources::make-foreign-resource-view nil))
+           (manager (gr8s.controllers::make-foreign-gateway-controllers
+                     :view view :ingress (gr8s.controllers::make-gateway-controller store)))
+           (template (gr8s.resources::get-core-resource store "gateways" "default" "web"))
+           (owner (listenerset-test-owner "child" "child-uid" "2026-01-01T00:00:00Z" "a.test"))
+           (converger (symbol-function 'gr8s.controllers::converge-gateway-listeners))
+           (namespace-update nil)
+           (visited nil))
+      (dolist (class (gr8s.resources::list-core-resources store "gatewayclasses"))
+        (gr8s.resources::foreign-view-note view "gatewayclasses" :added "unused" class))
+      (dolist (name '("web" "other" "unrelated"))
+        (let ((gateway (gr8s.resources::copy-core-object template)))
+          (when (equal name "web")
+            (setf (gethash "allowedListeners" (gethash "spec" gateway))
+                  (gw-parse "{\"namespaces\":{\"from\":\"Selector\",\"selector\":{\"matchLabels\":{\"team\":\"Blue\"}}}}")))
+          (setf (gethash "name" (gethash "metadata" gateway)) name
+                (gethash "uid" (gethash "metadata" gateway)) name
+                (gethash (gr8s.controllers::foreign-gateway-key gateway)
+                         (gr8s.controllers::foreign-gateway-controllers-gateways manager))
+                (gr8s.controllers::make-gateway-controller
+                 store :start-fn (lambda (&rest args) (declare (ignore args)) :listener)
+                 :stop-fn (lambda (&rest args) (declare (ignore args)))
+                 :swap-fn (lambda (&rest args) (declare (ignore args)))))
+          (gr8s.resources::foreign-view-note view "gateways" :added "unused" gateway)))
+      (setf (gethash "parentRef" (gethash "spec" owner))
+            (gr8s.resources::core-object "namespace" "default" "name" "web"))
+      (labels ((converge ()
+                 (multiple-value-bind (snapshot revision changes full)
+                     (gr8s.resources::foreign-view-snapshot
+                      view (gr8s.controllers::foreign-gateway-controllers-revision manager))
+                   (is (gr8s.controllers::converge-foreign-gateway-snapshot
+                        manager snapshot revision changes full))))
+               (change (action expected)
+                 (setf visited nil)
+                 (gr8s.resources::foreign-view-note view "listenersets" action "apps/child" owner)
+                 (converge)
+                 (is (equal expected (sort visited #'string<)))))
+        (unwind-protect
+             (progn
+               (converge)
+               (setf (symbol-function 'gr8s.controllers::converge-gateway-listeners)
+                     (lambda (controller &rest options)
+                       (when namespace-update
+                         (is (not (getf options :reuse-tls-bindings-p))))
+                       (push (or (second (gr8s.controllers::foreign-gateway-view-gateway-key
+                                          (gr8s.controllers::gateway-controller-store controller)))
+                                 "ingress") visited)
+                       (apply converger controller options)))
+               (change :added '("web"))
+               (setf (gethash "name" (gethash "parentRef" (gethash "spec" owner))) "other")
+               (change :modified '("other" "web"))
+               (setf (gethash "kind" (gethash "parentRef" (gethash "spec" owner))) "Service")
+               (change :modified '("other"))
+               (setf (gethash "group" (gethash "parentRef" (gethash "spec" owner))) "example.test")
+               (change :modified nil)
+               (remhash "kind" (gethash "parentRef" (gethash "spec" owner)))
+               (remhash "group" (gethash "parentRef" (gethash "spec" owner)))
+               (change :modified '("other"))
+               (change :deleted '("other"))
+               (setf namespace-update t)
+               (let ((namespace (gw-parse "{\"metadata\":{\"name\":\"apps\",\"labels\":{\"team\":\"Blue\"}}}")))
+                 (dolist (action '(:added :deleted))
+                   (setf visited nil)
+                   (gr8s.resources::foreign-view-note view "namespaces" action "apps" namespace)
+                   (converge)
+                   (is (equal '("web") (sort visited #'string<))))))
+          (setf (symbol-function 'gr8s.controllers::converge-gateway-listeners) converger)
+          (gr8s.controllers::stop-foreign-gateway-listeners manager))))))
+
+(test foreign-gateway-snapshot-keeps-backend-discovery-live
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (gwc-seed store)
+    (let* ((view (gr8s.resources::make-foreign-resource-view nil))
+           (manager (gr8s.controllers::make-foreign-gateway-controllers
+                     :view store :ingress (gr8s.controllers::make-gateway-controller store))))
+      (dolist (resource '("gateways" "gatewayclasses" "httproutes"))
+        (dolist (object (gr8s.resources::list-core-resources store resource))
+          (gr8s.resources::foreign-view-note view resource :added "unused" object)))
+      (unwind-protect
+           (progn
+             (gr8s.controllers::reconcile-foreign-gateway-listeners
+              manager (gr8s.resources::foreign-view-snapshot view))
+             (gr8s.resources::create-core-resource
+              store "services" (gw-parse "{\"metadata\":{\"name\":\"late\"},\"spec\":{\"clusterIP\":\"10.96.0.42\",\"ports\":[{\"port\":80}]}}") "default")
+             (let* ((controller (first (alexandria:hash-table-values
+                                       (gr8s.controllers::foreign-gateway-controllers-gateways manager))))
+                    (resolver (gr8s.controllers::gateway-controller-resolver controller)))
+               (is (equal "10.96.0.42"
+                          (funcall resolver (gr8s.controllers::make-gw-backend
+                                             :namespace "default" :name "late" :port 80))))))
+        (gr8s.controllers::stop-foreign-gateway-listeners manager)))))
+
+(test foreign-gateway-snapshot-route-deltas-and-failed-publication-retry
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (gwc-seed store)
+    (let* ((view (gr8s.resources::make-foreign-resource-view nil))
+           (manager (gr8s.controllers::make-foreign-gateway-controllers
+                     :view view :ingress (gr8s.controllers::make-gateway-controller store)))
+           (gateway (gr8s.resources::get-core-resource store "gateways" "default" "web"))
+           (route (gr8s.resources::get-core-resource store "httproutes" "default" "app"))
+           (controller (gr8s.controllers::make-gateway-controller
+                        store :start-fn (lambda (&rest args) (declare (ignore args)) :listener)
+                        :stop-fn (lambda (&rest args) (declare (ignore args)))
+                        :swap-fn (lambda (&rest args) (declare (ignore args)))))
+           (parse (symbol-function 'gr8s.controllers::parse-httproute))
+           (calls 0))
+      (setf (gethash (gr8s.controllers::foreign-gateway-key gateway)
+                     (gr8s.controllers::foreign-gateway-controllers-gateways manager)) controller)
+      (dolist (resource '("gatewayclasses" "gateways" "httproutes"))
+        (dolist (object (gr8s.resources::list-core-resources store resource))
+          (gr8s.resources::foreign-view-note view resource :added "unused" object)))
+      (labels ((converge ()
+                 (multiple-value-bind (snapshot revision changes full)
+                     (gr8s.resources::foreign-view-snapshot
+                      view (gr8s.controllers::foreign-gateway-controllers-revision manager))
+                   (gr8s.controllers::converge-foreign-gateway-snapshot manager snapshot revision changes full)))
+               (change () (gr8s.resources::foreign-view-note view "httproutes" :modified "default/app" route)))
+        (unwind-protect
+             (progn
+               (is (converge))
+               (setf (symbol-function 'gr8s.controllers::parse-httproute)
+                     (lambda (object) (incf calls) (funcall parse object)))
+               (is (converge))
+               (is (zerop calls))
+               (setf (gethash "status" route) (gr8s.resources::core-object "ignored" t))
+               (change)
+               (is (converge))
+               (is (zerop calls))
+               (dolist (resource '("services" "endpointslices" "pods" "nodes" "configmaps" "networkpolicies" "secrets" "namespaces"))
+                 (gr8s.resources::foreign-view-note
+                  view resource :added "unrelated"
+                  (gw-parse "{\"metadata\":{\"name\":\"unrelated\"},\"spec\":{}}"))
+                 (is (converge))
+                 (is (zerop calls)))
+               (setf (gethash "hostnames" (gethash "spec" route)) #("new.test"))
+               (change)
+               (is (converge))
+               (is (= 2 calls))
+               (let ((revision (gr8s.controllers::foreign-gateway-controllers-revision manager)))
+                 (setf (gethash "hostnames" (gethash "spec" route)) #("retry.test")
+                       (gr8s.controllers::gateway-controller-swap-fn controller)
+                       (lambda (&rest args) (declare (ignore args)) (error "publication failed")))
+                 (change)
+                 (is (not (converge)))
+                 (is (= revision (gr8s.controllers::foreign-gateway-controllers-revision manager)))
+                 (setf (gr8s.controllers::gateway-controller-swap-fn controller)
+                       (lambda (&rest args) (declare (ignore args))))
+                 (is (converge))
+                 (is (< revision (gr8s.controllers::foreign-gateway-controllers-revision manager)))))
+          (setf (symbol-function 'gr8s.controllers::parse-httproute) parse)
+          (gr8s.controllers::stop-foreign-gateway-listeners manager))))))
+
+(test foreign-route-status-merges-the-latest-other-controller-entries
+  (let* ((get (symbol-function 'gr8s.kube-client:kube-get))
+         (replace (symbol-function 'gr8s.kube-client:kube-replace))
+         (controller gr8s.controllers::*gateway-controller-name*)
+         (current (gw-parse "{\"metadata\":{\"uid\":\"route\",\"generation\":1},\"status\":{\"marker\":\"latest\",\"parents\":[{\"parentRef\":{\"name\":\"other\"},\"controllerName\":\"other/controller\",\"marker\":\"fresh\"},{\"parentRef\":{\"name\":\"third\"},\"controllerName\":\"third/controller\"}]}}"))
+         (desired (gw-parse "{\"parents\":[{\"parentRef\":{\"name\":\"other\"},\"controllerName\":\"other/controller\",\"marker\":\"stale\"}]}"))
+         (ours (gr8s.resources::core-object "parentRef" (gw-parse "{\"name\":\"ours\"}") "controllerName" controller))
+         (written nil))
+    (setf (gethash "parents" desired) (concatenate 'vector (gethash "parents" desired) (vector ours)))
+    (unwind-protect
+         (progn
+           (setf (symbol-function 'gr8s.kube-client:kube-get) (lambda (&rest args) (declare (ignore args)) current)
+                 (symbol-function 'gr8s.kube-client:kube-replace)
+                 (lambda (cluster path object) (declare (ignore cluster path)) (setf written object)))
+           (gr8s.controllers::foreign-gateway-put-status
+            nil "gateway.networking.k8s.io" "v1" "httproutes" "apps" "route" desired
+            :expected-uid "route" :expected-generation 1 :route-controller controller)
+           (let* ((status (gethash "status" written))
+                  (parents (gethash "parents" status)))
+             (is (= 3 (length parents)))
+             (is (equal "latest" (gethash "marker" status)))
+             (is (equal "fresh" (gethash "marker" (find "other/controller" parents
+                                                        :key (lambda (p) (gethash "controllerName" p)) :test #'equal))))
+             (is (find controller parents :key (lambda (p) (gethash "controllerName" p)) :test #'equal))))
+      (setf (symbol-function 'gr8s.kube-client:kube-get) get
+            (symbol-function 'gr8s.kube-client:kube-replace) replace))))
+
+(test foreign-route-status-retains-listenerset-parent-and-other-controllers
+  (with-temporary-store (store directory)
+    (values directory)
+    (gwc-seed store)
+    (let* ((gateway (gr8s.resources::get-core-resource store "gateways" "default" "web"))
+           (owner (listenerset-test-owner "a" "a-uid" "2026-01-01T00:00:00Z" "a.test" "HTTP"))
+           (route (gw-parse "{\"metadata\":{\"namespace\":\"apps\",\"name\":\"route\",\"generation\":3},\"spec\":{\"parentRefs\":[{\"group\":\"gateway.networking.k8s.io\",\"kind\":\"ListenerSet\",\"name\":\"a\"}],\"hostnames\":[\"a.test\"],\"rules\":[]},\"status\":{\"parents\":[{\"parentRef\":{\"name\":\"other\"},\"controllerName\":\"other.example/controller\",\"conditions\":[]}]}}"))
+           (objects (make-hash-table :test 'equal))
+           (put (symbol-function 'gr8s.controllers::foreign-gateway-put-status))
+           (status nil))
+      (setf (gethash "parentRef" (gethash "spec" owner)) (gw-parse "{\"namespace\":\"default\",\"name\":\"web\"}")
+            (gethash "allowedListeners" (gethash "spec" gateway)) (gw-parse "{\"namespaces\":{\"from\":\"All\"}}")
+            (gethash '("gateways" "default" "web") objects) gateway
+            (gethash '("listenersets" "apps" "a") objects) owner)
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s.controllers::foreign-gateway-put-status)
+                   (lambda (&rest args) (setf status (seventh args))))
+             (flet ((publish ()
+                      (gr8s.controllers::foreign-gateway-publish-route-status
+                       nil route (list gateway)
+                       (gr8s.agent::make-gateway-projection-store (gr8s.agent::gateway-resource-index objects)))))
+               (publish)
+               (is (not (null status)))
+               (when status
+                 (let ((parents (gethash "parents" status)))
+                   (is (= 2 (length parents)))
+                   (is (find "other.example/controller" parents :key (lambda (p) (gethash "controllerName" p)) :test #'equal))
+                   (let ((ours (find gr8s.controllers::*gateway-controller-name* parents
+                                     :key (lambda (p) (gethash "controllerName" p)) :test #'equal)))
+                     (is (equal "ListenerSet" (gethash "kind" (gethash "parentRef" ours))))
+                     (is (equal "True" (gethash "status" (aref (gethash "conditions" ours) 0))))))
+                 (setf (gethash "status" route) status
+                       (gethash "parentRefs" (gethash "spec" route)) #())
+                 (publish)
+                 (is (= 1 (length (gethash "parents" status)))))))
+        (setf (symbol-function 'gr8s.controllers::foreign-gateway-put-status) put)))))
+
+(test foreign-gateway-programmed-requires-installed-listeners
+  (let ((put (symbol-function 'gr8s.controllers::foreign-gateway-put-status))
+        (status nil))
+    (unwind-protect
+         (progn
+           (setf (symbol-function 'gr8s.controllers::foreign-gateway-put-status)
+                 (lambda (&rest args) (setf status (seventh args))))
+           (dolist (protocol '("HTTP" "TCP" "TLS"))
+             (let ((gateway (gw-parse "{\"metadata\":{\"namespace\":\"default\",\"name\":\"web\",\"uid\":\"gw\",\"generation\":1},\"spec\":{\"listeners\":[{\"name\":\"listener\",\"port\":8080}]}}")))
+               (setf (gethash "protocol" (aref (gethash "listeners" (gethash "spec" gateway)) 0)) protocol)
+               (dolist (installed '(nil t))
+                 (gr8s.controllers::foreign-gateway-publish-gateway-status
+                  nil gateway nil nil nil nil (constantly installed))
+                 (is (equal (if installed "True" "False")
+                            (gethash "status" (find "Programmed" (gethash "conditions" status)
+                                                   :key (lambda (c) (gethash "type" c)) :test #'equal))))
+                 (is (equal (if installed "True" "False")
+                            (gethash "status" (find "Programmed"
+                                                   (gethash "conditions" (aref (gethash "listeners" status) 0))
+                                                   :key (lambda (c) (gethash "type" c)) :test #'equal))))))))
+      (setf (symbol-function 'gr8s.controllers::foreign-gateway-put-status) put))))
+
+(test foreign-gateway-status-counts-accepted-listenersets-and-their-programming
+  (let ((put (symbol-function 'gr8s.controllers::foreign-gateway-put-status))
+        (gateway (gw-parse "{\"metadata\":{\"namespace\":\"edge\",\"name\":\"public\",\"uid\":\"gw\",\"generation\":1},\"spec\":{\"listeners\":[]}}"))
+        (ready (gw-parse "{\"conditions\":[{\"type\":\"Accepted\",\"status\":\"True\"},{\"type\":\"Programmed\",\"status\":\"True\"}]}"))
+        (denied (gw-parse "{\"conditions\":[{\"type\":\"Accepted\",\"status\":\"False\"},{\"type\":\"Programmed\",\"status\":\"False\"}]}"))
+        (status nil))
+    (unwind-protect
+         (progn
+           (setf (symbol-function 'gr8s.controllers::foreign-gateway-put-status)
+                 (lambda (&rest args) (setf status (seventh args))))
+           (flet ((condition-status (name)
+                    (gethash "status" (find name (gethash "conditions" status)
+                                           :key (lambda (c) (gethash "type" c)) :test #'equal))))
+             (gr8s.controllers::foreign-gateway-publish-gateway-status nil gateway nil nil nil (list ready denied))
+             (is (= 1 (gethash "attachedListenerSets" status)))
+             (is (equal "True" (condition-status "Accepted")))
+             (is (equal "True" (condition-status "Programmed")))
+             (setf (gethash "status" (aref (gethash "conditions" ready) 1)) "False")
+             (gr8s.controllers::foreign-gateway-publish-gateway-status nil gateway nil nil nil (list ready denied))
+             (is (= 1 (gethash "attachedListenerSets" status)))
+             (is (equal "False" (condition-status "Programmed")))
+             (gr8s.controllers::foreign-gateway-publish-gateway-status nil gateway nil nil nil (list denied))
+             (is (zerop (gethash "attachedListenerSets" status)))))
+      (setf (symbol-function 'gr8s.controllers::foreign-gateway-put-status) put))))
+
+(test foreign-status-publication-rejects-recreated-or-newer-objects
+  (let ((get (symbol-function 'gr8s.kube-client:kube-get))
+        (replace (symbol-function 'gr8s.kube-client:kube-replace))
+        (current (gw-parse "{\"metadata\":{\"uid\":\"new\",\"generation\":2}}"))
+        (writes 0))
+    (unwind-protect
+         (progn
+           (setf (symbol-function 'gr8s.kube-client:kube-get) (lambda (&rest args) (declare (ignore args)) current)
+                 (symbol-function 'gr8s.kube-client:kube-replace)
+                 (lambda (&rest args) (declare (ignore args)) (incf writes)))
+           (flet ((publish (uid generation)
+                    (gr8s.controllers::foreign-gateway-put-status
+                     nil "gateway.networking.k8s.io" "v1" "listenersets" "apps" "a"
+                     (gw-parse "{\"conditions\":[]}") :expected-uid uid :expected-generation generation)))
+             (publish "old" 2)
+             (is (zerop writes))
+             (publish "new" 1)
+             (is (zerop writes))
+             (publish "new" 2)
+             (is (= 1 writes))))
+      (setf (symbol-function 'gr8s.kube-client:kube-get) get
+            (symbol-function 'gr8s.kube-client:kube-replace) replace))))
+
+(test foreign-gateway-status-rejects-recreated-or-newer-gateways
+  (let ((get (symbol-function 'gr8s.kube-client:kube-get))
+        (replace (symbol-function 'gr8s.kube-client:kube-replace))
+        (current (gw-parse "{\"metadata\":{\"uid\":\"new\",\"generation\":2}}"))
+        (gateway (gw-parse "{\"metadata\":{\"namespace\":\"apps\",\"name\":\"edge\",\"uid\":\"old\",\"generation\":2},\"spec\":{\"listeners\":[]}}"))
+        (writes 0))
+    (unwind-protect
+         (progn
+           (setf (symbol-function 'gr8s.kube-client:kube-get)
+                 (lambda (&rest args) (declare (ignore args)) current)
+                 (symbol-function 'gr8s.kube-client:kube-replace)
+                 (lambda (&rest args) (declare (ignore args)) (incf writes)))
+           (flet ((publish ()
+                    (remhash "status" current)
+                    (gr8s.controllers::foreign-gateway-publish-gateway-status nil gateway nil nil)))
+             (publish)
+             (is (zerop writes))
+             (setf (gethash "uid" (gethash "metadata" gateway)) "new"
+                   (gethash "generation" (gethash "metadata" gateway)) 1)
+             (publish)
+             (is (zerop writes))
+             (setf (gethash "generation" (gethash "metadata" gateway)) 2)
+             (publish)
+             (is (= 1 writes))))
+      (setf (symbol-function 'gr8s.kube-client:kube-get) get
+            (symbol-function 'gr8s.kube-client:kube-replace) replace))))
+
+(test foreign-gateway-publishes-listenerset-status-to-its-served-version
+  (with-temporary-store (store directory)
+    (values directory)
+    (gwc-seed store)
+    (let* ((gateway (gr8s.resources::get-core-resource store "gateways" "default" "web"))
+           (owner (listenerset-test-owner "a" "a-uid" "2026-01-01T00:00:00Z" "a.test" "HTTP"))
+           (objects (make-hash-table :test 'equal))
+           (symbols '(gr8s.controllers::foreign-gateway-publish-class-status
+                      gr8s.controllers::foreign-gateway-provision-service
+                      gr8s.controllers::foreign-gateway-publish-gateway-status
+                      gr8s.controllers::foreign-gateway-publish-route-status
+                      gr8s.controllers::foreign-gateway-put-status))
+           (originals (mapcar #'symbol-function symbols))
+           (writes nil))
+      (setf (gethash "apiVersion" owner) "gateway.networking.k8s.io/v1beta1"
+            (gethash "parentRef" (gethash "spec" owner)) (gw-parse "{\"namespace\":\"default\",\"name\":\"web\"}")
+            (gethash "allowedListeners" (gethash "spec" gateway)) (gw-parse "{\"namespaces\":{\"from\":\"All\"}}")
+            (gethash '("gateways" "default" "web") objects) gateway
+            (gethash '("listenersets" "apps" "a") objects) owner
+            (gethash '("gatewayclasses" nil "gr8s") objects)
+            (gr8s.resources::get-core-resource store "gatewayclasses" nil "gr8s"))
+      (unwind-protect
+           (progn
+             (dolist (symbol (butlast symbols)) (setf (symbol-function symbol) (constantly nil)))
+             (setf (symbol-function (car (last symbols)))
+                   (lambda (&rest args) (push args writes)))
+             (gr8s.controllers::foreign-gateway-publish
+              (gr8s.agent::make-gateway-projection-store (gr8s.agent::gateway-resource-index objects))
+              nil (lambda (entry view) (declare (ignore entry view)) t))
+             (is (= 1 (length writes)))
+             (when writes
+               (is (equal '("gateway.networking.k8s.io" "v1beta1" "listenersets" "apps" "a")
+                          (subseq (first writes) 1 6)))
+               (let ((conditions (gethash "conditions" (seventh (first writes)))))
+                 (is (equal "True" (gethash "status" (find "Programmed" conditions
+                                                          :key (lambda (c) (gethash "type" c)) :test #'equal)))))))
+        (loop for symbol in symbols for original in originals do (setf (symbol-function symbol) original))))))
+
+(test experimental-listenerset-rejects-dynamic-ports-with-schema-valid-status
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (gwc-seed store)
+    (let* ((gateway (gr8s.resources::get-core-resource store "gateways" "default" "web"))
+           (owner (listenerset-test-owner "dynamic" "dynamic" "2026-01-01T00:00:00Z" "a.test" "HTTP"))
+           (listener (aref (gethash "listeners" (gethash "spec" owner)) 0)))
+      (setf (gethash "apiVersion" owner) "gateway.networking.x-k8s.io/v1alpha1"
+            (gethash "kind" owner) "XListenerSet"
+            (gethash "parentRef" (gethash "spec" owner))
+            (gw-parse "{\"namespace\":\"default\",\"name\":\"web\"}")
+            (gethash "allowedListeners" (gethash "spec" gateway))
+            (gw-parse "{\"namespaces\":{\"from\":\"All\"}}"))
+      (dolist (port '(0 nil))
+        (if port (setf (gethash "port" listener) port) (remhash "port" listener))
+        (let* ((entries (gr8s.controllers::gateway-listener-entries store gateway (list owner)))
+               (plan (gr8s.controllers::gateway-listener-plan
+                      (list gateway) nil (constantly t) store (list owner)))
+               (status (gr8s.controllers::foreign-listenerset-status
+                        store owner gateway entries nil (constantly t)))
+               (accepted (find "Accepted" (gethash "conditions" status)
+                               :key (lambda (item) (gethash "type" item)) :test #'equal)))
+          (is (equal '(8080) (mapcar (lambda (item) (getf item :port)) plan)))
+          (is (equal "False" (gethash "status" accepted)))
+          (is (equal "UnsupportedPort" (gethash "reason" accepted)))
+          ;; v1alpha1 requires status.listener.port >= 1; no socket means no entry.
+          (is (zerop (length (gethash "listeners" status)))))
+        (let ((fixed (gr8s.resources::copy-core-object listener)))
+          (setf (gethash "name" fixed) "fixed"
+                (gethash "port" fixed) 8443
+                (gethash "listeners" (gethash "spec" owner)) (vector listener fixed))
+          (let* ((entries (gr8s.controllers::gateway-listener-entries store gateway (list owner)))
+                 (plan (gr8s.controllers::gateway-listener-plan
+                        (list gateway) nil (constantly t) store (list owner)))
+                 (status (gr8s.controllers::foreign-listenerset-status
+                          store owner gateway entries nil (constantly t))))
+            (is (equal '(8080 8443) (sort (mapcar (lambda (item) (getf item :port)) plan) #'<)))
+            (is (= 1 (length (gethash "listeners" status))))
+            (is (= 8443 (gethash "port" (aref (gethash "listeners" status) 0)))))
+          (setf (gethash "listeners" (gethash "spec" owner)) (vector listener)))))))
+
+(test foreign-listenerset-attached-route-count-follows-the-served-api
+  (dolist (experimental '(nil t))
+    (with-temporary-store (store directory)
+      (declare (ignore directory))
+      (gwc-seed store)
+      (let* ((gateway (gr8s.resources::get-core-resource store "gateways" "default" "web"))
+             (owner (listenerset-test-owner "a" "a" "2026-01-02T00:00:00Z" "a.test" "HTTP"))
+             (route (gw-parse "{\"metadata\":{\"namespace\":\"apps\",\"name\":\"route\"},\"spec\":{\"parentRefs\":[{\"name\":\"a\",\"kind\":\"ListenerSet\"}],\"hostnames\":[\"other.test\"],\"rules\":[]}}"))
+             (parent (aref (gethash "parentRefs" (gethash "spec" route)) 0)))
+        (setf (gethash "parentRef" (gethash "spec" owner))
+              (gw-parse "{\"namespace\":\"default\",\"name\":\"web\"}")
+              (gethash "allowedListeners" (gethash "spec" gateway))
+              (gw-parse "{\"namespaces\":{\"from\":\"All\"}}"))
+        (when experimental
+          (setf (gethash "apiVersion" owner) "gateway.networking.x-k8s.io/v1alpha1"
+                (gethash "kind" owner) "XListenerSet"
+                (gethash "group" parent) "gateway.networking.x-k8s.io"
+                (gethash "kind" parent) "XListenerSet"))
+        (flet ((attached (sets)
+                 (gethash "attachedRoutes"
+                          (aref (gethash "listeners"
+                                         (gr8s.controllers::foreign-listenerset-status
+                                          store owner gateway
+                                          (gr8s.controllers::gateway-listener-entries store gateway sets)
+                                          (list route) (constantly nil))) 0))))
+          (is (= (if experimental 1 0) (attached (list owner))))
+          (setf (gethash "hostnames" (gethash "spec" route)) #("a.test"))
+          (is (= 1 (attached (list owner))))
+          (let ((winner (gr8s.resources::copy-core-object owner)))
+            (setf (gethash "name" (gethash "metadata" winner)) "winner"
+                  (gethash "uid" (gethash "metadata" winner)) "winner"
+                  (gethash "creationTimestamp" (gethash "metadata" winner)) "2026-01-01T00:00:00Z")
+            (is (= (if experimental 1 0) (attached (list winner owner))))
+            ;; Stable counts can include a conflicted listener when the same
+            ;; owner-level parentRef is accepted through another listener.
+            (let* ((first (aref (gethash "listeners" (gethash "spec" owner)) 0))
+                   (second (gr8s.resources::copy-core-object first)))
+              (setf (gethash "name" second) "other"
+                    (gethash "port" second) 444
+                    (gethash "listeners" (gethash "spec" owner)) (vector first second))
+              (is (= 1 (attached (list winner owner))))
+              (setf (gethash "listeners" (gethash "spec" owner)) (vector first))))
+          (remhash "allowedListeners" (gethash "spec" gateway))
+          (is (= (if experimental 1 0) (attached (list owner)))))))))
+
+(test foreign-listenerset-status-requires-admission-and-installed-listeners
+  (with-temporary-store (store directory)
+    (values directory)
+    (gwc-seed store)
+    (let* ((gateway (gr8s.resources::get-core-resource store "gateways" "default" "web"))
+           (owner (listenerset-test-owner "a" "a-uid" "2026-01-01T00:00:00Z" "a.test" "HTTP")))
+      (setf (gethash "parentRef" (gethash "spec" owner))
+            (gw-parse "{\"namespace\":\"default\",\"name\":\"web\"}")
+            (gethash "generation" (gethash "metadata" owner)) 3
+            (gethash "allowedListeners" (gethash "spec" gateway))
+            (gw-parse "{\"namespaces\":{\"from\":\"All\"}}"))
+      (labels ((condition-value (status type field)
+                 (gethash field (find type (gethash "conditions" status)
+                                      :key (lambda (condition) (gethash "type" condition)) :test #'equal)))
+               (status (&optional installed)
+                 (gr8s.controllers::foreign-listenerset-status
+                  store owner gateway
+                  (gr8s.controllers::gateway-listener-entries store gateway (list owner))
+                  nil (constantly installed))))
+        (let ((pending (status)))
+          (is (equal "True" (condition-value pending "Accepted" "status")))
+          (is (equal "False" (condition-value pending "Programmed" "status")))
+          (is (equal "Pending" (condition-value pending "Programmed" "reason")))
+          (is (= 3 (condition-value pending "Accepted" "observedGeneration")))
+          (is (= 1 (length (gethash "listeners" pending))))
+          (is (equal '("HTTPRoute")
+                     (map 'list (lambda (kind) (gethash "kind" kind))
+                          (gethash "supportedKinds" (aref (gethash "listeners" pending) 0)))))
+          (is (equal "False" (condition-value (aref (gethash "listeners" pending) 0) "Programmed" "status")))
+          (setf (gethash "status" owner) pending)
+          (let ((ready (status t)))
+            (is (equal "True" (condition-value ready "Programmed" "status")))
+            (is (equal (condition-value pending "Accepted" "lastTransitionTime")
+                       (condition-value ready "Accepted" "lastTransitionTime")))))
+        (is (null (gethash "port" (aref (gethash "listeners" (status t)) 0))))
+        (setf (gethash "apiVersion" owner) "gateway.networking.x-k8s.io/v1alpha1"
+              (gethash "kind" owner) "XListenerSet")
+        (is (eql 443 (gethash "port" (aref (gethash "listeners" (status t)) 0))))
+        (setf (gethash "allowedRoutes" (aref (gethash "listeners" (gethash "spec" owner)) 0))
+              (gw-parse "{\"kinds\":[{\"kind\":\"GRPCRoute\"}]}"))
+        (let ((unsupported (aref (gethash "listeners" (status t)) 0)))
+          (is (zerop (length (gethash "supportedKinds" unsupported))))
+          (is (equal "InvalidRouteKinds" (condition-value unsupported "ResolvedRefs" "reason")))
+          (is (equal "False" (condition-value unsupported "Programmed" "status"))))
+        (remhash "allowedListeners" (gethash "spec" gateway))
+        (let ((denied (status t)))
+          (is (equal "False" (condition-value denied "Accepted" "status")))
+          (is (equal "NotAllowed" (condition-value denied "Accepted" "reason")))
+          (is (equal "False" (condition-value denied "Programmed" "status"))))))))
+
+(test foreign-gateway-listenerset-ports-share-the-parent-service-and-snapshot
+  (let* ((gateway (com.inuoe.jzon:parse
+                   "{\"metadata\":{\"namespace\":\"edge\",\"name\":\"public\",\"uid\":\"gw-1\"},\"spec\":{\"listeners\":[],\"allowedListeners\":{\"namespaces\":{\"from\":\"All\"}}}}"))
+         (a (listenerset-test-owner "a" "a-1" "2026-01-01T00:00:00Z" "a.example" "HTTP"))
+         (b (listenerset-test-owner "b" "b-1" "2026-01-02T00:00:00Z" "b.example" "HTTP"))
+         (objects (make-hash-table :test 'equal)))
+    (setf (gethash '("gateways" "edge" "public") objects) gateway
+          (gethash '("listenersets" "apps" "a") objects) a
+          (gethash '("listenersets" "apps" "b") objects) b)
+    (let* ((view (gr8s.agent::make-gateway-projection-store (gr8s.agent::gateway-resource-index objects)))
+           (ports (gr8s.controllers::foreign-gateway-service-ports gateway nil view))
+           (controller (gr8s.controllers::make-gateway-controller view))
+           (manager (gr8s.controllers::make-foreign-gateway-controllers :view view)))
+      (is (= 1 (length ports)))
+      (when (plusp (length ports))
+        (is (= 443 (gethash "port" (aref ports 0))))
+        (is (equal "p-443" (gethash "name" (aref ports 0)))))
+      (setf (gethash 443 (gr8s.controllers::gateway-controller-listeners controller))
+            (cons (make-instance 'hunchentoot:easy-acceptor :port 24443) nil)
+            (gethash '("edge" "public" "gw-1")
+                     (gr8s.controllers::foreign-gateway-controllers-gateways manager)) controller)
+      (let ((destinations (second (first (gr8s.controllers::foreign-gateway-listener-snapshots manager)))))
+        (is (= 1 (length destinations)))
+        (when (plusp (length destinations))
+          (is (= 24443 (gethash "port" (aref destinations 0))))))
+      (remhash "allowedListeners" (gethash "spec" gateway))
+      (is (zerop (length (gr8s.controllers::foreign-gateway-service-ports gateway nil view))))
+      (is (zerop (length (second (first (gr8s.controllers::foreign-gateway-listener-snapshots manager)))))))))
+
 (defun foreign-agent-test-node (store name cidr)
   "Register NAME as a schedulable node whose API view carries CIDR."
   (gr8s.controllers::register-node
@@ -1163,8 +1725,8 @@ since gr8s itself creates the interface."
     (unwind-protect
          (progn
            (setf (symbol-function 'gr8s.controllers::foreign-gateway-put-status)
-                 (lambda (cluster group version resource namespace name value)
-                   (declare (ignore cluster group version resource namespace name))
+                 (lambda (cluster group version resource namespace name value &key expected-uid expected-generation)
+                   (declare (ignore cluster group version resource namespace name expected-uid expected-generation))
                    (setf status value)))
            (gr8s.controllers::foreign-gateway-publish-gateway-status nil gateway routes nil)
            (is (= 2 (gethash "attachedRoutes" (aref (gethash "listeners" status) 0))))
@@ -1179,7 +1741,7 @@ since gr8s itself creates the interface."
     (unwind-protect
          (progn
            (setf (symbol-function 'gr8s.controllers::foreign-gateway-put-status)
-                 (lambda (&rest args) (setf status (car (last args)))))
+                 (lambda (&rest args) (setf status (seventh args))))
            (dolist (case '(("infra" "http" "app.example.com" "True" "Accepted")
                            ("infra" "absent" "app.example.com" "False" "NoMatchingParent")
                            ("infra" "http" "other.example.com" "False" "NoMatchingListenerHostname")
@@ -1212,7 +1774,7 @@ since gr8s itself creates the interface."
       (unwind-protect
            (progn
              (setf (symbol-function 'gr8s.controllers::foreign-gateway-put-status)
-                   (lambda (&rest args) (setf status (car (last args)))))
+                   (lambda (&rest args) (setf status (seventh args))))
              (dolist (case '(("{\"name\":\"web\",\"port\":80,\"kind\":\"Other\"}" "InvalidKind")
                              ("{\"name\":\"missing\",\"port\":80}" "BackendNotFound")
                              ("{\"name\":\"web\",\"port\":81}" "BackendNotFound")
@@ -1234,7 +1796,7 @@ since gr8s itself creates the interface."
     (unwind-protect
          (progn
            (setf (symbol-function 'gr8s.controllers::foreign-gateway-put-status)
-                 (lambda (&rest args) (setf status (car (last args)))))
+                 (lambda (&rest args) (setf status (seventh args))))
            (dolist (mixed '(nil t))
              (let* ((invalid (gr8s.resources::core-object "name" "invalid" "port" 1111 "protocol" "INVALID"))
                     (gateway (gr8s.resources::core-object
@@ -1268,8 +1830,8 @@ since gr8s itself creates the interface."
       (unwind-protect
            (progn
              (setf (symbol-function 'gr8s.controllers::foreign-gateway-put-status)
-                   (lambda (cluster group version resource namespace name value)
-                     (declare (ignore cluster group version namespace name))
+                   (lambda (cluster group version resource namespace name value &rest options)
+                     (declare (ignore cluster group version namespace name options))
                      (when (equal resource "gateways") (setf status value))))
              (gr8s.controllers::foreign-gateway-publish store nil)
              (is (not (null status)))
@@ -1285,7 +1847,7 @@ since gr8s itself creates the interface."
       (unwind-protect
            (progn
              (setf (symbol-function 'gr8s.controllers::foreign-gateway-put-status)
-                   (lambda (&rest args) (setf status (car (last args)))))
+                   (lambda (&rest args) (setf status (seventh args))))
              (dolist (case '(("" "Secret" "infra" "InvalidCertificateRef")
                              ("wrong.group" "Secret" "infra" "InvalidCertificateRef")
                              ("" "WrongKind" "infra" "InvalidCertificateRef")

@@ -13,6 +13,133 @@
 (def-suite gateway-proxy :in gr8s)
 (in-suite gateway-proxy)
 
+(test gateway-certificate-index-reconciles-additions-removals-and-precedence
+  (let* ((old (gr8s.controllers::make-gateway-certificate-index
+               '(("a.test" :a) ("*.test" :wild) (nil :default))))
+         (same (gr8s.controllers::gateway-update-certificate-index
+                old '(("a.test" :a) ("*.test" :wild) (nil :default))))
+         (changed (gr8s.controllers::gateway-update-certificate-index
+                   old '(("b.test" :b) ("B.TEST" :loser) ("*.test" :wild) (nil :default))))
+         (empty (gr8s.controllers::gateway-update-certificate-index changed nil)))
+    (is (eq old same))
+    (is (eq :a (gr8s.controllers::gateway-certificate-for-host old "a.test")))
+    (is (eq :wild (gr8s.controllers::gateway-certificate-for-host changed "a.test")))
+    (is (eq :b (gr8s.controllers::gateway-certificate-for-host changed "b.test")))
+    (is (eq (gr8s.controllers::gateway-certificate-index-wildcard old)
+            (gr8s.controllers::gateway-certificate-index-wildcard changed)))
+    (is (null (gr8s.controllers::gateway-certificate-for-host empty "a.test")))
+    (is (null (gr8s.controllers::gateway-certificate-for-host empty nil)))
+    (is (fset:empty? (gr8s.controllers::gateway-certificate-index-exact empty)))
+    (is (fset:empty? (gr8s.controllers::gateway-certificate-index-wildcard empty)))))
+
+(test gateway-certificate-index-updates-preserve-the-published-snapshot
+  (let* ((old (gr8s.controllers::make-gateway-certificate-index
+               '(("a.test" :old-a) ("b.test" :b) ("*.wild.test" :old-wild) (nil :default))))
+         (next (gr8s.controllers::gateway-replace-certificate-binding old "A.TEST" :new-a))
+         (wild (gr8s.controllers::gateway-replace-certificate-binding next "*.wild.test" :new-wild))
+         (default (gr8s.controllers::gateway-replace-certificate-binding wild nil :new-default)))
+    (is (eq :old-a (gr8s.controllers::gateway-certificate-for-host old "a.test")))
+    (is (eq :new-a (gr8s.controllers::gateway-certificate-for-host next "a.test")))
+    (is (eq :b (gr8s.controllers::gateway-certificate-for-host next "b.test")))
+    (is (eq :old-wild (gr8s.controllers::gateway-certificate-for-host next "one.wild.test")))
+    (is (eq :new-wild (gr8s.controllers::gateway-certificate-for-host wild "one.wild.test")))
+    (is (eq :default (gr8s.controllers::gateway-certificate-for-host wild nil)))
+    (is (eq :new-default (gr8s.controllers::gateway-certificate-for-host default nil)))
+    (is (eq (gr8s.controllers::gateway-certificate-index-wildcard old)
+            (gr8s.controllers::gateway-certificate-index-wildcard next)))))
+
+(test gateway-tls-provider-pins-listener-and-rejects-sibling-hosts
+  (let* ((router-a (lambda (&rest args) (declare (ignore args)) :a))
+         (router-b (lambda (&rest args) (declare (ignore args)) :b))
+         (a (gr8s.controllers::make-gateway-tls-binding
+             :certificate '(:cert-a) :key :key-a :router router-a))
+         (b (gr8s.controllers::make-gateway-tls-binding
+             :certificate '(:cert-b) :key :key-b :router router-b))
+         (snapshot (gr8s.controllers::make-gateway-tls-snapshot
+                    :index (gr8s.controllers::make-gateway-certificate-index
+                            (list (list "*.a.test" a) (list "b.test" b)))
+                    :bootstrap a))
+         (acceptor (make-instance 'gr8s.controllers::gateway-tls-acceptor
+                                 :tls-snapshot snapshot :router router-b)))
+    (progv '(gr8s.controllers::*gateway-connection-tls-snapshot*
+             gr8s.controllers::*gateway-connection-tls-binding*)
+        (list snapshot nil)
+      (is (equal '((:cert-a) :key-a)
+                 (multiple-value-list
+                  (gr8s.controllers::gateway-tls-certificate-provider "one.a.test" nil))))
+      (is (eq router-a (gr8s.controllers::gateway-connection-router acceptor "two.a.test")))
+      (is (null (gr8s.controllers::gateway-connection-router acceptor "b.test")))
+      (is (null (gr8s.controllers::gateway-connection-router acceptor "unknown.test")))
+      (signals pure-tls:tls-error
+        (gr8s.controllers::gateway-tls-certificate-provider "unknown.test" nil))
+      (signals pure-tls:tls-error
+        (gr8s.controllers::gateway-tls-certificate-provider nil nil)))))
+
+(test gateway-certificate-index-selects-the-most-specific-listener
+  (let ((index (gr8s.controllers::make-gateway-certificate-index
+                '(("*.example.test" :broad)
+                  ("*.apps.example.test" :narrow)
+                  ("api.apps.example.test" :exact)
+                  ("api.apps.example.test" :loser)))))
+    (is (eq :exact (gr8s.controllers::gateway-certificate-for-host index "API.apps.example.test")))
+    (is (eq :narrow (gr8s.controllers::gateway-certificate-for-host index "web.apps.example.test")))
+    (is (eq :broad (gr8s.controllers::gateway-certificate-for-host index "apps.example.test")))
+    (is (eq :broad (gr8s.controllers::gateway-certificate-for-host index "a.b.example.test")))
+    (is (null (gr8s.controllers::gateway-certificate-for-host index "example.test")))
+    (is (null (gr8s.controllers::gateway-certificate-for-host index "badexample.test")))
+    (is (null (gr8s.controllers::gateway-certificate-for-host index "unrelated.test")))
+    (is (null (gr8s.controllers::gateway-certificate-for-host index nil)))))
+
+(test gateway-certificate-index-allows-only-an-explicit-default
+  (let ((index (gr8s.controllers::make-gateway-certificate-index
+                '((nil :default) ("example.test" :exact)))))
+    (is (eq :default (gr8s.controllers::gateway-certificate-for-host index nil)))
+    (is (eq :default (gr8s.controllers::gateway-certificate-for-host index "other.test")))
+    (is (eq :exact (gr8s.controllers::gateway-certificate-for-host index "example.test")))))
+
+(test gateway-tls-snapshot-enforces-sni-on-real-connections
+  (let* ((root (asdf:system-relative-pathname "gr8s" "tests/fixtures/gateway-tls/"))
+         (certificate (pure-tls:load-certificate-chain (merge-pathnames "server.crt" root)))
+         (key (pure-tls:load-private-key (merge-pathnames "server.key" root)))
+         (router (lambda (&rest args)
+                   (declare (ignore args))
+                   (gr8s.controllers::make-gw-dispatch
+                    :backend (gr8s.controllers::make-gw-backend :name "missing" :port 80))))
+         (a (gr8s.controllers::make-gateway-tls-binding :certificate certificate :key key :router router))
+         (b (gr8s.controllers::make-gateway-tls-binding :certificate certificate :key key :router router))
+         (snapshot (gr8s.controllers::make-gateway-tls-snapshot
+                    :bootstrap a :index (gr8s.controllers::make-gateway-certificate-index
+                                         (list (list "a.test" a) (list "b.test" b)))))
+         (gateway (gr8s.controllers::start-gateway-listener
+                   :port 0 :router router :resolver (constantly nil) :tls (list :snapshot snapshot)))
+         (port (hunchentoot:acceptor-port gateway)))
+    (unwind-protect
+         (flet ((request (sni host)
+                  (multiple-value-bind (output error-output exit)
+                      (uiop:run-program
+                       (list "curl" "--silent" "--show-error" "--insecure" "--noproxy" "*"
+                             "--max-time" "5" "--output" "/dev/null" "--write-out" "%{http_code}"
+                             "--resolve" (format nil "~A:~D:127.0.0.1" sni port)
+                             "--header" (format nil "Host: ~A" host)
+                             (format nil "https://~A:~D/" sni port))
+                       :output :string :error-output :string :ignore-error-status t)
+                    (declare (ignore error-output))
+                    (values output exit))))
+           ;; An admitted TLS connection reaches routing, which reports the missing backend.
+           (is (equal "503" (request "a.test" "a.test")))
+           (is (equal "503" (request "b.test" "b.test")))
+           (is (equal "404" (request "a.test" "b.test")))
+           (is (not (zerop (nth-value 1 (request "unknown.test" "a.test")))))
+           ;; curl omits SNI for an IP literal; the bootstrap certificate must not escape.
+           (is (not (zerop (nth-value 1 (request "127.0.0.1" "a.test")))))
+           (setf (gr8s.controllers::gateway-acceptor-tls-snapshot gateway)
+                 (gr8s.controllers::make-gateway-tls-snapshot
+                  :bootstrap b :index (gr8s.controllers::make-gateway-certificate-index
+                                       (list (list "b.test" b)))))
+           (is (not (zerop (nth-value 1 (request "a.test" "a.test")))))
+           (is (equal "503" (request "b.test" "b.test"))))
+      (gr8s.controllers::stop-gateway-listener gateway))))
+
 (test gateway-backend-resolver-maps-the-route-port-to-a-service-port
   (with-temporary-store (store directory)
     (values directory)

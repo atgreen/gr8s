@@ -27,7 +27,9 @@
                 (gethash "controllerName" (gethash "spec" class))))))
 
 (defun gateway-parent-matches-p (parent-ref route-namespace
-                                 gateway-namespace gateway-name listener-name listener-port)
+                                 gateway-namespace gateway-name listener-name listener-port
+                                 &optional (owner-kind "Gateway")
+                                           (owner-group "gateway.networking.k8s.io"))
   "True when an HTTPRoute PARENT-REF attaches to the given Gateway listener.
    kind/group default to Gateway/gateway.networking.k8s.io, namespace to the
    route's own; sectionName and port, when present, must equal the listener's."
@@ -37,8 +39,8 @@
         (namespace (or (gethash "namespace" parent-ref) route-namespace))
         (section (gethash "sectionName" parent-ref))
         (port (gethash "port" parent-ref)))
-    (and (equal kind "Gateway")
-         (equal group "gateway.networking.k8s.io")
+    (and (equal kind owner-kind)
+         (equal group owner-group)
          (equal name gateway-name)
          (equal namespace gateway-namespace)
          (or (null section) (equal section listener-name))
@@ -104,15 +106,22 @@
                      (gateway-hostname-intersection (gethash "hostname" listener) host)
                    (when overlaps (list intersection))))))
 
-(defun gateway-route-with-hostnames (route hosts)
-  "Parse ROUTE using the effective listener hostname restrictions."
+(defun gateway-route-with-hostnames (route hosts parsed-routes)
+  "Reuse this pass's parsed rules, copying each attachment's hostname restrictions."
   (when hosts
-    (let ((parsed (parse-httproute route)))
-      (setf (gw-route-hostnames parsed)
-            (unless (member nil hosts) (remove-duplicates hosts :test #'equal)))
-      parsed)))
+    (multiple-value-bind (base present) (gethash route parsed-routes)
+      (unless present
+        (setf base (ignore-errors (parse-httproute route))
+              (gethash route parsed-routes) base))
+      (when base
+        (let ((parsed (copy-gw-route base)))
+          (setf (gw-route-hostnames parsed)
+                (unless (member nil hosts) (remove-duplicates hosts :test #'equal)))
+          parsed)))))
 
-(defun gateway-listener-tls-ref (gateway-namespace listener &optional view)
+(defun gateway-listener-tls-ref (gateway-namespace listener &optional view
+                                                                       (source-kind "Gateway")
+                                                                       (source-group "gateway.networking.k8s.io"))
   "Return an authorized Secret reference, or NIL and a listener error reason."
   (let* ((tls (gethash "tls" listener))
          (refs (and tls (gethash "certificateRefs" tls)))
@@ -123,55 +132,93 @@
                      (equal (or (gethash "kind" ref) "Secret") "Secret")
                      (equal (or (gethash "group" ref) "") "")))
            (values nil "InvalidCertificateRef"))
-          ((not (gateway-reference-permitted-p view gateway-namespace "Gateway" namespace "Secret" name))
+          ((not (gateway-reference-permitted-p view gateway-namespace source-kind namespace "Secret" name
+                                               source-group))
            (values nil "RefNotPermitted"))
           (t (cons namespace name)))))
 
-(defun gateway-listener-plan (gateways httproutes controlled-p &optional view)
-  "Pure planner: return a list of per-port plists
-   (:port P :protocol \"HTTP\"|\"HTTPS\" :tls (ns . secret)|NIL :routes (GW-ROUTE...))
-   for every HTTP/HTTPS listener on a controlled Gateway, with each parentRef-
-   attached HTTPRoute parsed into a GW-ROUTE. Unparseable HTTPRoutes are dropped
-   (fail closed); routes attached via several listeners on one port are
-   de-duplicated. The first listener seen on a port fixes its protocol/TLS."
-  (let ((objects-by-port (make-hash-table))        ; port -> list of stored HTTPRoute objects
-        (listener-by-port (make-hash-table))       ; port -> (protocol . tls-ref)
-        (hosts-by-port (make-hash-table)))
+(defgeneric gateway-parent-route-reader (view)
+  (:documentation "Return an indexed owner-to-HTTPRoutes reader, or NIL for full-list fallback."))
+
+(defmethod gateway-parent-route-reader ((view t))
+  nil)
+
+(defmethod gateway-parent-route-reader ((view gr8s.resources::foreign-resource-snapshot))
+  (let ((parents (make-hash-table :test #'equal))
+        (objects (make-hash-table :test #'equal)))
+    (lambda (parent)
+      (multiple-value-bind (routes present) (gethash parent parents)
+        (if present routes
+            (setf (gethash parent parents)
+                  (mapcar
+                   (lambda (object)
+                     ;; A multi-parent route remains EQ across owner buckets so
+                     ;; the planner's parse-once cache also covers intersections.
+                     (let* ((metadata (gethash "metadata" object))
+                            (key (list (gethash "namespace" metadata) (gethash "name" metadata))))
+                       (or (gethash key objects) (setf (gethash key objects) object))))
+                   (gr8s.resources::foreign-snapshot-parent-routes view parent))))))))
+
+(defun gateway-listener-plan
+    (gateways httproutes controlled-p &optional view listener-sets reuse-routes-p parent-routes)
+  "Plan admitted logical listeners, retaining owner-relative route permissions.
+REUSE-ROUTES-P may omit route expansion for a published shared-TLS binding that
+the caller will retain. It is used only for ListenerSet-only changes."
+  (let ((objects-by-port (make-hash-table))
+        (logical-by-port (make-hash-table))
+        (listener-by-port (make-hash-table))
+        (hosts-by-port (make-hash-table))
+        (parsed-routes (make-hash-table :test #'eq))
+        (routes-by-parent (unless parent-routes (gateway-route-parent-index httproutes))))
     (dolist (gateway gateways)
       (when (funcall controlled-p gateway)
-        (let* ((metadata (gethash "metadata" gateway))
-               (gns (gethash "namespace" metadata))
-               (gname (gethash "name" metadata))
-               (spec (gethash "spec" gateway))
-               (listeners (and spec (gethash "listeners" spec))))
-          (when listeners
-            (loop for listener across listeners
-                  for protocol = (gethash "protocol" listener)
-                  when (member protocol '("HTTP" "HTTPS") :test #'equal)
-                    do (let ((port (gethash "port" listener))
-                             (lname (gethash "name" listener)))
-                         (unless (gethash port listener-by-port)
-                           (setf (gethash port listener-by-port)
-                                 (cons protocol (and (equal protocol "HTTPS")
-                                                     (gateway-listener-tls-ref gns listener view)))))
-                         (dolist (route httproutes)
-                           (when (and (gateway-route-attaches-p route gns gname lname port)
-                                      (gateway-listener-allows-route-p view route gns listener))
-                             (let ((hosts (gateway-listener-route-hostnames route listener)))
-                               (when hosts
-                                 (let ((by-route (or (gethash port hosts-by-port)
-                                                     (setf (gethash port hosts-by-port)
-                                                           (make-hash-table :test #'eq)))))
-                                   (setf (gethash route by-route) (append hosts (gethash route by-route)))
-                                   (push route (gethash port objects-by-port)))))))))))))
+        (dolist (entry (gateway-listener-entries view gateway listener-sets))
+          (let* ((owner (gateway-listener-entry-owner entry))
+                 (listener (gateway-listener-entry-listener entry))
+                 (metadata (gethash "metadata" owner))
+                 (namespace (gethash "namespace" metadata))
+                 (name (gethash "name" metadata))
+                 (kind (or (gethash "kind" owner) "Gateway"))
+                 (group (gateway-listener-owner-group owner))
+                 (protocol (gethash "protocol" listener))
+                 (port (gethash "port" listener)))
+            (when (and (null (gateway-listener-entry-error entry))
+                       (member protocol '("HTTP" "HTTPS") :test #'equal))
+              (push entry (gethash port logical-by-port))
+              (unless (gethash port listener-by-port)
+                (setf (gethash port listener-by-port)
+                      (cons protocol (and (equal protocol "HTTPS")
+                                          (gateway-listener-entry-tls-ref view entry)))))
+              (dolist (route (unless (and reuse-routes-p (funcall reuse-routes-p entry))
+                               (if parent-routes
+                                   (funcall parent-routes (list group kind namespace name))
+                                   (gethash (list group kind namespace name) routes-by-parent))))
+                (when (and (some (lambda (ref)
+                                   (gateway-parent-matches-p
+                                    ref (gethash "namespace" (gethash "metadata" route))
+                                    namespace name (gethash "name" listener) port kind group))
+                                 (gethash "parentRefs" (gethash "spec" route) #()))
+                           (gateway-listener-allows-route-p view route namespace listener))
+                  (let ((hosts (gateway-listener-route-hostnames route listener)))
+                    (when hosts
+                      (let ((parsed (ignore-errors (gateway-route-with-hostnames route hosts parsed-routes))))
+                        (when parsed
+                          (push parsed (gateway-listener-entry-routes entry))))
+                      (let ((by-route (or (gethash port hosts-by-port)
+                                          (setf (gethash port hosts-by-port)
+                                                (make-hash-table :test #'eq)))))
+                        (setf (gethash route by-route) (append hosts (gethash route by-route)))
+                        (push route (gethash port objects-by-port))))))))))))
     (loop for port being the hash-keys of listener-by-port using (hash-value listener)
-          for objects = (gethash port objects-by-port)
-          collect (list :port port
-                        :protocol (car listener)
-                        :tls (cdr listener)
-                        :routes (loop for object in (remove-duplicates (nreverse objects))
+          collect (list :port port :protocol (car listener) :tls (cdr listener)
+                        :logical-listeners
+                        (loop for entry in (nreverse (gethash port logical-by-port))
+                              do (setf (gateway-listener-entry-routes entry)
+                                       (nreverse (gateway-listener-entry-routes entry)))
+                              collect entry)
+                        :routes (loop for object in (gateway-distinct-route-objects (gethash port objects-by-port))
                                       for hosts = (gethash object (gethash port hosts-by-port))
-                                      for route = (ignore-errors (gateway-route-with-hostnames object hosts))
+                                      for route = (ignore-errors (gateway-route-with-hostnames object hosts parsed-routes))
                                       when route collect route)))))
 
 ;;; ---------------------------------------------------------------------------
@@ -183,10 +230,17 @@
   (routing-tables (make-hash-table))    ; HTTP/HTTPS port -> (routing-content . dispatcher)
   (routing-bases (make-hash-table))     ; same dispatchers without a dependency-view binding
   (routing-indices (make-hash-table))
+  (tls-materials (make-hash-table :test 'equal))
+  (tls-material-users (make-hash-table :test 'equal))
+  (tls-snapshots (make-hash-table))
+  (http-snapshots (make-hash-table))
+  (installed-listeners (make-hash-table))
+  (secret-ports (make-hash-table :test 'equal))
   parent-listeners
   snapshot-resolvers-p
-  start-fn stop-fn swap-fn register-fn unregister-fn
+  start-fn stop-fn swap-fn tls-swap-fn register-fn unregister-fn
   (l4-listeners (make-hash-table))      ; TCP/TLS port -> (mode . handle)
+  (l4-installed-listeners (fset:empty-ch-map nil))
   l4-start-fn l4-stop-fn l4-swap-fn)
 
 (defun gateway-write-octets (path octets)
@@ -228,7 +282,7 @@ This checks configured server material, not trust, hostname, or chain validity."
       (pure-tls::verify-certificate-verify-signature
        (car (last certificates)) algorithm signature challenge)
       ;; The verifier signals on failure; some algorithms return NIL on success.
-      t)))
+      (values t (nreverse certificates) key))))
 
 (defun gateway-tls-material-valid-p (certificate key)
   "Cache immutable material checks, retaining digests and verdicts only.
@@ -276,7 +330,7 @@ ReferenceGrant authorization must be checked separately on every reconciliation.
                 :secret-uid (gethash "uid" (gethash "metadata" secret))
                 :secret-version (gethash "resourceVersion" (gethash "metadata" secret))))))))
 
-(defun make-gateway-controller (store &key resolver cert-dir start-fn stop-fn swap-fn
+(defun make-gateway-controller (store &key resolver cert-dir start-fn stop-fn swap-fn tls-swap-fn
                                            register-fn unregister-fn
                                            l4-start-fn l4-stop-fn l4-swap-fn)
   "A controller over STORE. RESOLVER maps a GW-BACKEND to an address (defaults to
@@ -293,6 +347,8 @@ ReferenceGrant authorization must be checked separately on every reconciliation.
    :stop-fn (or stop-fn #'stop-gateway-listener)
    :swap-fn (or swap-fn
                 (lambda (handle router) (setf (gateway-acceptor-router handle) router)))
+   :tls-swap-fn (or tls-swap-fn
+                    (lambda (handle snapshot) (setf (gateway-acceptor-tls-snapshot handle) snapshot)))
    :register-fn (or register-fn (lambda (port handle) (declare (ignore port handle))))
    :unregister-fn (or unregister-fn (lambda (port) (declare (ignore port))))
    :l4-start-fn (or l4-start-fn
@@ -304,7 +360,7 @@ ReferenceGrant authorization must be checked separately on every reconciliation.
 (defun gateway-listener-signature (protocol tls-paths)
   "Transport identity of a listener; a change forces a restart (a router change
    alone only hot-swaps)."
-  (list protocol tls-paths))
+  (list protocol (if (getf tls-paths :snapshot) :sni tls-paths)))
 
 (defun register-gateway-listener (controller port handle stop-fn)
   "Publish HANDLE only after registration succeeds; close it on failure."
@@ -402,7 +458,7 @@ Ignore storage metadata while retaining every field used by dispatch and filters
                   (bind-gateway-http-dispatcher base (gateway-controller-resolver controller)) base)
               content base index))))
 
-(defun converge-gateway-listeners (controller)
+(defun converge-gateway-listeners (controller &key reuse-tls-bindings-p)
   "Start, update and stop listeners to match the current Gateway/Ingress plan.
 Unchanged routing content reuses the published table. Transport identity changes
 restart the listener. HTTPS with an unresolved certificate is never plaintext."
@@ -414,26 +470,74 @@ restart the listener. HTTPS with an unresolved certificate is never plaintext."
          (swap-fn (gateway-controller-swap-fn controller))
          (unregister-fn (gateway-controller-unregister-fn controller))
          (gateways (list-core-resources store "gateways"))
+         (listener-sets (list-core-resources store "listenersets"))
+         (parent-routes (and reuse-tls-bindings-p (gateway-parent-route-reader store)))
          (plan (merge-gateway-listener-plans
                 (gateway-listener-plan gateways
-                                       (list-core-resources store "httproutes")
-                                       (lambda (gateway) (gateway-controlled-p store gateway)) store)
+                                       (unless parent-routes (list-core-resources store "httproutes"))
+                                       (lambda (gateway) (gateway-controlled-p store gateway)) store listener-sets
+                                       (when reuse-tls-bindings-p
+                                         (lambda (entry)
+                                           (gateway-reusable-tls-binding
+                                            controller entry
+                                            (when (equal "HTTPS" (gethash "protocol" (gateway-listener-entry-listener entry)))
+                                              (gateway-current-secret-identity store entry)))))
+                                       parent-routes)
                 (ingress-listener-plan store)))
          (running (gateway-controller-listeners controller))
          (tables (gateway-controller-routing-tables controller))
+         (live-materials (make-hash-table :test 'equal))
+         (secret-ports (make-hash-table :test 'equal))
          (desired-ports '()))
     (dolist (entry plan)
-      (destructuring-bind (&key port protocol tls routes) entry
-        (let ((tls-paths (when (equal protocol "HTTPS")
-                           (gateway-resolve-listener-tls store tls cert-dir)))
-              (existing (gethash port running)))
+      (destructuring-bind (&key port protocol tls routes logical-listeners) entry
+        (when (equal protocol "HTTPS")
+          ;; Keep missing/invalid material dependencies so a later Secret can
+          ;; activate the listener without requiring a parent edit.
+          (dolist (reference (if logical-listeners
+                                 (mapcar (lambda (logical) (gateway-listener-entry-tls-ref store logical))
+                                         logical-listeners)
+                                 (list tls)))
+            (when reference
+              (pushnew port (gethash (list (car reference) (cdr reference)) secret-ports)))))
+        (let* ((existing (gethash port running))
+               (isolated-http-p (and (equal protocol "HTTP") logical-listeners
+                                     (or (gethash port (gateway-controller-http-snapshots controller))
+                                         (some (lambda (entry)
+                                                 (member (gethash "kind" (gateway-listener-entry-owner entry))
+                                                         '("ListenerSet" "XListenerSet") :test #'equal))
+                                               logical-listeners))))
+               (http-snapshot (when isolated-http-p
+                                (gateway-build-http-snapshot controller logical-listeners reuse-tls-bindings-p)))
+               (shared-tls-p (and (equal protocol "HTTPS")
+                                  (or (equal (cdr existing) '("HTTPS" :sni))
+                                      (some (lambda (listener)
+                                              (member (gethash "kind" (gateway-listener-entry-owner listener))
+                                                      '("ListenerSet" "XListenerSet") :test #'equal))
+                                            logical-listeners))))
+               (snapshot (when shared-tls-p
+                           (gateway-build-tls-snapshot controller logical-listeners live-materials
+                                                       reuse-tls-bindings-p)))
+               (tls-paths (when (equal protocol "HTTPS")
+                            (if shared-tls-p
+                                (when snapshot (list :snapshot snapshot))
+                                (gateway-resolve-listener-tls store tls cert-dir)))))
           (unless (and (equal protocol "HTTPS") (null tls-paths))
             (push port desired-ports)
-            (multiple-value-bind (router content base index) (gateway-router-for-port controller port routes)
+            (multiple-value-bind (router content base index)
+                (cond (http-snapshot
+                       (let ((base (if (eq http-snapshot (gethash port (gateway-controller-http-snapshots controller)))
+                                       (gethash port (gateway-controller-routing-bases controller))
+                                       (gateway-http-snapshot-router http-snapshot))))
+                         (values base :logical-listeners base nil)))
+                      ((not shared-tls-p) (gateway-router-for-port controller port routes)))
               (let ((signature (gateway-listener-signature protocol tls-paths)))
                 (if (and existing (equal (cdr existing) signature))
-                    (unless (eq router (cdr (gethash port tables)))
-                      (funcall swap-fn (car existing) router))
+                    (progn
+                      (unless (or shared-tls-p (eq router (cdr (gethash port tables))))
+                        (funcall swap-fn (car existing) router))
+                      (when snapshot
+                        (funcall (gateway-controller-tls-swap-fn controller) (car existing) snapshot)))
                     (progn
                       (when existing
                         (funcall unregister-fn port)
@@ -444,31 +548,56 @@ restart the listener. HTTPS with an unresolved certificate is never plaintext."
                                    controller port (funcall start-fn port router resolver tls-paths) stop-fn)
                                   signature))))
                 ;; Commit only after publication succeeds, so a failed swap retries.
-                (setf (gethash port tables) (cons content router)
-                      (gethash port (gateway-controller-routing-bases controller)) base
-                      (gethash port (gateway-controller-routing-indices controller)) index)))))))
+                (if snapshot
+                    (setf (gethash port (gateway-controller-tls-snapshots controller)) snapshot)
+                    (remhash port (gateway-controller-tls-snapshots controller)))
+                (if http-snapshot
+                    (setf (gethash port (gateway-controller-http-snapshots controller)) http-snapshot)
+                    (remhash port (gateway-controller-http-snapshots controller)))
+                (setf (gethash port (gateway-controller-installed-listeners controller))
+                      (gateway-installed-listener-records logical-listeners snapshot store
+                                                          (unless shared-tls-p tls)))
+                (if shared-tls-p
+                    (progn
+                      (remhash port tables)
+                      (remhash port (gateway-controller-routing-bases controller))
+                      (remhash port (gateway-controller-routing-indices controller)))
+                    (setf (gethash port tables) (cons content router)
+                          (gethash port (gateway-controller-routing-bases controller)) base
+                          (gethash port (gateway-controller-routing-indices controller)) index))))))))
     (dolist (port (loop for p being the hash-keys of running collect p))
       (unless (member port desired-ports)
         (funcall unregister-fn port)
         (funcall stop-fn (car (gethash port running)))
         (remhash port running)
         (remhash port tables)
+        (remhash port (gateway-controller-tls-snapshots controller))
+        (remhash port (gateway-controller-http-snapshots controller))
+        (remhash port (gateway-controller-installed-listeners controller))
         (remhash port (gateway-controller-routing-bases controller))
         (remhash port (gateway-controller-routing-indices controller))))
-    (setf (gateway-controller-parent-listeners controller) (gateway-parent-listener-index store gateways))
+    (setf (gateway-controller-tls-materials controller) live-materials
+          (gateway-controller-tls-material-users controller) (gateway-tls-material-use-counts controller)
+          (gateway-controller-secret-ports controller) secret-ports
+          (gateway-controller-parent-listeners controller)
+          (gateway-parent-listener-index store gateways listener-sets))
     (gateway-controller-listeners controller)))
 
-(defun gateway-parent-listener-index (store gateways)
+(defun gateway-parent-listener-index (store gateways &optional listener-sets)
   "Index controlled HTTP listener attachments in the full planner's source order."
   (let ((index (make-hash-table :test #'equal)) (rank 0))
     (dolist (gateway gateways)
       (when (gateway-controlled-p store gateway)
-        (let* ((metadata (gethash "metadata" gateway))
-               (key (list (gethash "namespace" metadata) (gethash "name" metadata))))
-          (loop for listener across (gethash "listeners" (gethash "spec" gateway) #())
-                when (member (gethash "protocol" listener) '("HTTP" "HTTPS") :test #'equal)
-                  do (push (list (gethash "name" listener) (gethash "port" listener) (incf rank) listener)
-                           (gethash key index))))))
+        (dolist (entry (gateway-listener-entries store gateway listener-sets))
+          (let* ((owner (gateway-listener-entry-owner entry))
+                 (metadata (gethash "metadata" owner))
+                 (listener (gateway-listener-entry-listener entry))
+                 (key (list (gateway-listener-owner-group owner) (or (gethash "kind" owner) "Gateway")
+                            (gethash "namespace" metadata) (gethash "name" metadata))))
+            (when (and (null (gateway-listener-entry-error entry))
+                       (member (gethash "protocol" listener) '("HTTP" "HTTPS") :test #'equal))
+              (push (list (gethash "name" listener) (gethash "port" listener) (incf rank) listener)
+                    (gethash key index)))))))
     index))
 
 (defun gateway-route-port-ranks (controller object)
@@ -478,10 +607,13 @@ restart the listener. HTTPS with an unresolved certificate is never plaintext."
         (loop for reference across (gethash "parentRefs" (gethash "spec" object) #())
               for parent-namespace = (or (gethash "namespace" reference) namespace)
               for parent-name = (gethash "name" reference)
-              do (dolist (listener (gethash (list parent-namespace parent-name)
+              for parent-kind = (or (gethash "kind" reference) "Gateway")
+              for parent-group = (or (gethash "group" reference) "gateway.networking.k8s.io")
+              do (dolist (listener (gethash (list parent-group parent-kind parent-namespace parent-name)
                                            (gateway-controller-parent-listeners controller)))
                    (destructuring-bind (name port rank definition) listener
-                     (when (and (gateway-parent-matches-p reference namespace parent-namespace parent-name name port)
+                     (when (and (gateway-parent-matches-p reference namespace parent-namespace parent-name name port
+                                                         parent-kind parent-group)
                                 (gateway-listener-route-hostnames object definition)
                                 (gateway-listener-allows-route-p (gateway-controller-store controller) object parent-namespace definition))
                        (setf (gethash port ports) (max rank (gethash port ports 0)))))))))
@@ -494,12 +626,15 @@ restart the listener. HTTPS with an unresolved certificate is never plaintext."
     (loop for reference across (gethash "parentRefs" (gethash "spec" object) #())
           for parent-namespace = (or (gethash "namespace" reference) namespace)
           for parent-name = (gethash "name" reference)
-          do (dolist (entry (gethash (list parent-namespace parent-name)
+          for parent-kind = (or (gethash "kind" reference) "Gateway")
+          for parent-group = (or (gethash "group" reference) "gateway.networking.k8s.io")
+          do (dolist (entry (gethash (list parent-group parent-kind parent-namespace parent-name)
                                      (gateway-controller-parent-listeners controller)))
                (destructuring-bind (name listener-port rank definition) entry
                  (declare (ignore rank))
                  (when (and (= port listener-port)
-                            (gateway-parent-matches-p reference namespace parent-namespace parent-name name port)
+                            (gateway-parent-matches-p reference namespace parent-namespace parent-name name port
+                                                      parent-kind parent-group)
                             (gateway-listener-allows-route-p (gateway-controller-store controller) object parent-namespace definition))
                    (setf hosts (append (gateway-listener-route-hostnames object definition) hosts))))))
     (when hosts
@@ -529,12 +664,13 @@ restart the listener. HTTPS with an unresolved certificate is never plaintext."
 (defun converge-gateway-http-route-changes (controller old-store changes)
   "Parse changed routes only and publish replacement buckets on affected ports."
   (let ((store (gateway-controller-store controller))
-        (by-port (make-hash-table)) (publications nil))
+        (by-port (make-hash-table)) (publications nil) (parsed-changes nil))
     (dolist (change changes)
       (let* ((key (car change))
              (old (ignore-errors (apply #'get-core-resource old-store key))) (new (cdr change))
              (old-route (and old (ignore-errors (parse-httproute old))))
              (new-route (and new (ignore-errors (parse-httproute new)))))
+        (push (list old old-route new new-route) parsed-changes)
         (when old-route
           (maphash (lambda (port rank) (declare (ignore rank))
                      (let ((delta (or (gethash port by-port)
@@ -550,19 +686,35 @@ restart the listener. HTTPS with an unresolved certificate is never plaintext."
     (maphash
      (lambda (port delta)
        (when (gethash port (gateway-controller-listeners controller))
-         (let* ((table (gethash port (gateway-controller-routing-indices controller)))
-                (next (update-gateway-routing-table table (car delta) (cdr delta)
-                                                   (gateway-incremental-candidate-order controller port store)))
-                (base (gateway-router-from-table next))
-                (router (bind-gateway-http-dispatcher base (gateway-controller-resolver controller))))
-           (push (list port next base router) publications)))) by-port)
+         (let* ((tls (gethash port (gateway-controller-tls-snapshots controller)))
+                (http (gethash port (gateway-controller-http-snapshots controller)))
+                (table (gethash port (gateway-controller-routing-indices controller)))
+                (next (unless (or tls http)
+                        (update-gateway-routing-table
+                         table (car delta) (cdr delta)
+                         (gateway-incremental-candidate-order controller port store))))
+                (snapshot (when (or tls http)
+                            (gateway-update-tls-routes controller (or tls http) old-store parsed-changes)))
+                (base (cond (http (gateway-http-snapshot-router snapshot))
+                            ((not tls) (gateway-router-from-table next))))
+                (router (cond (http base)
+                              ((not tls) (bind-gateway-http-dispatcher base (gateway-controller-resolver controller))))))
+           (push (list port next base router snapshot http) publications)))) by-port)
     (dolist (publication publications)
-      (destructuring-bind (port index base router) publication
-        (funcall (gateway-controller-swap-fn controller)
-                 (car (gethash port (gateway-controller-listeners controller))) router)
-        (setf (gethash port (gateway-controller-routing-tables controller)) (cons :incremental router)
-              (gethash port (gateway-controller-routing-bases controller)) base
-              (gethash port (gateway-controller-routing-indices controller)) index)))))
+      (destructuring-bind (port index base router snapshot http) publication
+        (if (and snapshot (not http))
+            (progn
+              (funcall (gateway-controller-tls-swap-fn controller)
+                       (car (gethash port (gateway-controller-listeners controller))) snapshot)
+              (setf (gethash port (gateway-controller-tls-snapshots controller)) snapshot))
+            (progn
+              (funcall (gateway-controller-swap-fn controller)
+                       (car (gethash port (gateway-controller-listeners controller))) router)
+              (when http
+                (setf (gethash port (gateway-controller-http-snapshots controller)) snapshot))
+              (setf (gethash port (gateway-controller-routing-tables controller)) (cons :incremental router)
+                    (gethash port (gateway-controller-routing-bases controller)) base
+                    (gethash port (gateway-controller-routing-indices controller)) index)))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; L4 (TCPRoute / TLSRoute / GRPCRoute) planning and convergence.
@@ -624,7 +776,8 @@ restart the listener. HTTPS with an unresolved certificate is never plaintext."
    longer desired."
   (let* ((store (gateway-controller-store controller))
          (resolver (gateway-controller-resolver controller))
-         (plan (gateway-l4-plan (list-core-resources store "gateways")
+         (gateways (list-core-resources store "gateways"))
+         (plan (gateway-l4-plan gateways
                                 (list-core-resources store "tcproutes")
                                 (list-core-resources store "tlsroutes")
                                 (list-core-resources store "grpcroutes")
@@ -656,6 +809,18 @@ restart the listener. HTTPS with an unresolved certificate is never plaintext."
         (funcall (gateway-controller-unregister-fn controller) port)
         (funcall (gateway-controller-l4-stop-fn controller) (cdr (gethash port running)))
         (remhash port running)))
+    (let ((records (fset:empty-ch-map nil)))
+      (dolist (gateway gateways)
+        (when (gateway-controlled-p store gateway)
+          (loop for listener across (gethash "listeners" (gethash "spec" gateway) #())
+                for mode = (cond ((equal "TCP" (gethash "protocol" listener)) :tcp)
+                                 ((equal "TLS" (gethash "protocol" listener)) :tls))
+                when (and mode (eql mode (car (gethash (gethash "port" listener) running))))
+                  do (let ((entry (make-gateway-listener-entry :gateway gateway :owner gateway :listener listener)))
+                       (setf records (fset:with records (gateway-listener-installation-key entry)
+                                               (gateway-listener-installation-value entry nil)))))))
+      ;; Publish generation evidence only after every lifecycle operation succeeds.
+      (setf (gateway-controller-l4-installed-listeners controller) records))
     running))
 
 (defun stop-gateway-controller (controller)
@@ -671,4 +836,11 @@ restart the listener. HTTPS with an unresolved certificate is never plaintext."
                (ignore-errors (funcall (gateway-controller-unregister-fn controller) port))
                (ignore-errors (funcall (gateway-controller-l4-stop-fn controller) (cdr entry))))
              l4)
-    (clrhash l4)))
+    (clrhash l4))
+  (clrhash (gateway-controller-tls-snapshots controller))
+  (clrhash (gateway-controller-http-snapshots controller))
+  (clrhash (gateway-controller-installed-listeners controller))
+  (setf (gateway-controller-l4-installed-listeners controller) (fset:empty-ch-map nil))
+  (clrhash (gateway-controller-secret-ports controller))
+  (clrhash (gateway-controller-tls-materials controller))
+  (clrhash (gateway-controller-tls-material-users controller)))

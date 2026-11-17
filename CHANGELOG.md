@@ -34,6 +34,12 @@ the Kubernetes API version with a gr8s release suffix (see
   `v<k8s>-gr8s.<n>` maps to package version `<k8s>+gr8s.<n>` with packaging
   revision 1 in both formats.
 
+- ListenerSet support for foreign-cluster Gateways, with stable and experimental
+  API discovery, explicit namespace admission, shared-port HTTPS certificates
+  selected by SNI, isolated HTTP routing, incremental updates, and installed-state
+  status. See the [setup and design notes](docs/design-listenersets.md).
+  Small VM acceptance covers both APIs; full-scale benchmarking is deferred.
+
 ### Changed
 
 - Gateway reconciliation reuses unchanged routing and discovery data and wakes
@@ -42,7 +48,7 @@ the Kubernetes API version with a gr8s release suffix (see
   they share ports and hostnames. Gateway HTTP handling now covers hostname
   intersection, listener admission, backend and certificate ReferenceGrants,
   and invalid-reference status; the recorded candidate passed all 36 Gateway
-  API v1.6.3 HTTP core conformance tests. ListenerSet support remains planned.
+  API v1.6.3 HTTP core conformance tests.
 - `gr8s serve` joins a control-plane cluster with the same flags as
   `gr8s agent` and `gr8s witness`: `--join HOST:PORT`, `--token`, and
   `--ca-pin`. The token is bound to `--node-name`, which also names the Raft

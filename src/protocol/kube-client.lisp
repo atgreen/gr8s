@@ -393,7 +393,7 @@ again).  Bookmarks advance the returned revision without reaching ON-EVENT."
   (lock (bt:make-lock "gr8s kube informer"))
   (cache (make-hash-table :test 'equal))
   (synced nil) (running t)
-  resource-version thread closer)
+  resource-version thread closer last-error)
 
 (defun informer-synced-p (informer)
   (bt:with-lock-held ((informer-lock informer)) (informer-synced informer)))
@@ -413,6 +413,22 @@ again).  Bookmarks advance the returned revision without reaching ON-EVENT."
         (error (condition)
           (format *error-output* "~&gr8s informer ~A handler failed: ~A~%"
                   (informer-path informer) condition))))))
+
+(defun informer-record-error (informer condition)
+  "Expose failed reads; an absent collection withdraws every cached object."
+  (let ((absent (and (typep condition 'kube-error)
+                     (= 404 (kube-error-status condition))))
+        (removed nil))
+    (bt:with-lock-held ((informer-lock informer))
+      (setf (informer-last-error informer) (unless absent condition)
+            (informer-synced informer) absent)
+      (when absent
+        (maphash (lambda (key object) (push (cons key object) removed))
+                 (informer-cache informer))
+        (clrhash (informer-cache informer))
+        (setf (informer-resource-version informer) nil)))
+    (dolist (entry removed)
+      (informer-note informer :deleted (car entry) (cdr entry)))))
 
 (defun informer-apply (informer type object)
   (let ((key (object-key object)))
@@ -449,9 +465,14 @@ again).  Bookmarks advance the returned revision without reaching ON-EVENT."
                       (push (list :modified key object) changes))))
       (setf (informer-cache informer) fresh
             (informer-resource-version informer) revision
-            (informer-synced informer) t))
+            (informer-last-error informer) nil
+            (informer-synced informer) nil))
     (dolist (change (nreverse changes))
       (apply #'informer-note informer change))
+    ;; Derived views must receive the entire initial list before callers can
+    ;; treat the informer as ready and capture their first snapshot.
+    (bt:with-lock-held ((informer-lock informer))
+      (setf (informer-synced informer) t))
     revision))
 
 (defun informer-loop (informer)
@@ -473,14 +494,13 @@ again).  Bookmarks advance the returned revision without reaching ON-EVENT."
                                              (informer-resource-version informer) last))
                             (when (eq exit :expired) (return)))))
              (kube-error (condition)
+               (informer-record-error informer condition)
                ;; A 404 collection is not an error to wait out: the resource's
                ;; CRD simply is not installed, and the correct cache is empty.
                ;; Report synced so consumers proceed, and look again rarely in
                ;; case the CRD arrives later.
                (cond
                  ((eql 404 (kube-error-status condition))
-                  (bt:with-lock-held ((informer-lock informer))
-                    (setf (informer-synced informer) t))
                   (loop repeat 30 while (informer-running informer) do (sleep 1)))
                  (t
                   (when (informer-running informer)
@@ -488,6 +508,7 @@ again).  Bookmarks advance the returned revision without reaching ON-EVENT."
                             (informer-path informer) condition)
                     (sleep 1)))))
              (error (condition)
+               (informer-record-error informer condition)
                (when (informer-running informer)
                  (format *error-output* "~&gr8s informer ~A: ~A; re-establishing~%"
                          (informer-path informer) condition)

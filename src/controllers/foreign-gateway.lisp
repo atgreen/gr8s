@@ -52,13 +52,30 @@ jzon parses null as the symbol NULL, which defeats GETHASH defaults."
                      when (equal "InternalIP" (gethash "type" entry))
                        collect (gethash "address" entry))))
 
-(defun foreign-gateway-put-status (cluster group version resource namespace name status)
+(defun foreign-gateway-put-status (cluster group version resource namespace name status
+                                   &key expected-uid expected-generation route-controller)
   "Write STATUS through the status subresource unless it is already current.
 Returns quietly on write conflicts; the next pass retries."
   (handler-case
       (let* ((path (gr8s.kube-client:resource-path group version resource
                                                    :namespace namespace :name name))
              (current (gr8s.kube-client:kube-get cluster path)))
+        (when (or (and expected-uid
+                       (not (equal expected-uid (gethash "uid" (gethash "metadata" current)))))
+                  (and expected-generation
+                       (not (eql expected-generation (gethash "generation" (gethash "metadata" current))))))
+          (return-from foreign-gateway-put-status nil))
+        (when route-controller
+          (let* ((latest (gethash "status" current (make-hash-table :test 'equal)))
+                 (merged (gr8s.resources::copy-core-object latest)))
+            (setf (gethash "parents" merged)
+                  (coerce
+                   (append
+                    (remove-if (lambda (entry) (equal route-controller (gethash "controllerName" entry)))
+                               (coerce (gethash "parents" latest #()) 'list))
+                    (remove-if-not (lambda (entry) (equal route-controller (gethash "controllerName" entry)))
+                                   (coerce (gethash "parents" status #()) 'list))) 'vector)
+                  status merged)))
         (unless (equalp status (gethash "status" current))
           (setf (gethash "status" current) status)
           (handler-case
@@ -72,7 +89,8 @@ Returns quietly on write conflicts; the next pass retries."
               ;; (gr8s's own serves these resources whole) takes a plain PUT.
               (unless (eql 404 (gr8s.kube-client:kube-error-status condition))
                 (error condition))
-              (gr8s.kube-client:kube-replace cluster path current)))))
+              (gr8s.kube-client:kube-replace cluster path current))))
+        t)
     (gr8s.kube-client:kube-error (condition)
       ;; A write conflict retries next pass; anything else deserves a line.
       (unless (eql 409 (gr8s.kube-client:kube-error-status condition))
@@ -126,12 +144,11 @@ Returns quietly on write conflicts; the next pass retries."
                 ((equal protocol "TLS") '("TLSRoute"))
                 (t '()))))
 
-(defun foreign-gateway-listener-route-kinds (listener)
+(defun foreign-gateway-listener-route-kinds
+    (listener &optional (supported (foreign-gateway-listener-supported-kinds (gethash "protocol" listener))))
   "The listener's resolved supportedKinds and whether every allowedRoutes kind
 is among them.  Returns (values supported-kind-objects all-allowed-supported-p)."
-  (let* ((protocol (gethash "protocol" listener))
-         (supported (foreign-gateway-listener-supported-kinds protocol))
-         (supported-names (mapcar (lambda (k) (gethash "kind" k)) supported))
+  (let* ((supported-names (mapcar (lambda (k) (gethash "kind" k)) supported))
          (allowed (gethash "kinds"
                            (gethash "allowedRoutes" listener (make-hash-table :test 'equal)))))
     (if (and (vectorp allowed) (plusp (length allowed)))
@@ -182,12 +199,15 @@ is among them.  Returns (values supported-kind-objects all-allowed-supported-p).
     (gr8s.kube-client:kube-error (condition)
       (unless (eql 404 (gr8s.kube-client:kube-error-status condition)) (error condition)))))
 
-(defun foreign-gateway-service-ports (gateway &optional existing)
+(defun foreign-gateway-service-ports (gateway &optional existing view)
   "One stable Service port per public TCP port, even with many hostname listeners."
   (let ((seen (make-hash-table)) (ports nil))
-    (loop for listener across (foreign-gateway-vector (gethash "listeners" (gethash "spec" gateway)))
+    (loop for entry in (gateway-listener-entries
+                       view gateway (when view (list-core-resources view "listenersets")))
+          for listener = (gateway-listener-entry-listener entry)
           for number = (gethash "port" listener)
-          when (and (member (gethash "protocol" listener) '("HTTP" "HTTPS" "TCP" "TLS") :test #'equal)
+          when (and (null (gateway-listener-entry-error entry))
+                    (member (gethash "protocol" listener) '("HTTP" "HTTPS" "TCP" "TLS") :test #'equal)
                     (not (gethash number seen)))
             do (let* ((old (find number (foreign-gateway-vector existing)
                                 :key (lambda (entry) (gethash "port" entry))))
@@ -199,9 +219,9 @@ is among them.  Returns (values supported-kind-objects all-allowed-supported-p).
                  (push port ports)))
     (coerce (sort ports #'< :key (lambda (entry) (gethash "port" entry))) 'vector)))
 
-(defun foreign-gateway-provision-service (cluster gateway)
+(defun foreign-gateway-provision-service (cluster gateway &optional view)
   "Reconcile the Gateway-owned selectorless Service without adopting name collisions."
-  (when (zerop (length (foreign-gateway-service-ports gateway)))
+  (when (zerop (length (foreign-gateway-service-ports gateway nil view)))
     (return-from foreign-gateway-provision-service nil))
   (let* ((metadata (gethash "metadata" gateway))
          (namespace (gethash "namespace" metadata))
@@ -219,7 +239,7 @@ is among them.  Returns (values supported-kind-objects all-allowed-supported-p).
                                      "ownerReferences" (vector (foreign-gateway-owner-reference gateway)))
                          "spec" (gr8s.resources::core-object "type" "LoadBalancer"))))
            (spec (gethash "spec" service))
-           (ports (foreign-gateway-service-ports gateway (gethash "ports" spec)))
+           (ports (foreign-gateway-service-ports gateway (gethash "ports" spec) view))
            (changed (or (not (equalp ports (gethash "ports" spec)))
                         (not (equal "LoadBalancer" (gethash "type" spec)))
                         (nth-value 1 (gethash "selector" spec)))))
@@ -240,13 +260,15 @@ is among them.  Returns (values supported-kind-objects all-allowed-supported-p).
         (let ((address (gethash "clusterIP" (gethash "spec" service))))
           (when (and (stringp address) (not (equal "None" address))) (list address))))))
 
-(defun foreign-gateway-listener-tls-error (view namespace listener)
+(defun foreign-gateway-listener-tls-error (view namespace listener
+                                         &optional (source-kind "Gateway")
+                                           (source-group "gateway.networking.k8s.io"))
   "Return the unresolved TLS reference reason for a terminating listener."
   (when (or (equal (gethash "protocol" listener) "HTTPS")
             (and (equal (gethash "protocol" listener) "TLS")
                  (equal (gethash "mode" (gethash "tls" listener (make-hash-table))) "Terminate")))
     (multiple-value-bind (reference error-reason)
-        (gateway-listener-tls-ref namespace listener view)
+        (gateway-listener-tls-ref namespace listener view source-kind source-group)
       (or error-reason
           (let* ((secret (and view reference
                               (ignore-errors (get-core-resource view "secrets" (car reference) (cdr reference)))))
@@ -255,19 +277,146 @@ is among them.  Returns (values supported-kind-objects all-allowed-supported-p).
                          (gateway-tls-material-valid-p (gethash "tls.crt" data) (gethash "tls.key" data)))
               "InvalidCertificateRef"))))))
 
-(defun foreign-gateway-publish-gateway-status (cluster gateway routes addresses &optional view)
+(defun foreign-listenerset-route-attached-p (view owner listener route admitted definitions)
+  "Count structural attachments for XListenerSet, accepted parents for stable API.
+Use the same current acceptance decision as route status, not prior API status."
+  (let* ((metadata (gethash "metadata" owner))
+         (namespace (gethash "namespace" metadata))
+         (kind (gethash "kind" owner "ListenerSet")))
+    (and (gateway-listener-allows-route-p view route namespace listener)
+         (some (lambda (parent)
+                 (and (gateway-parent-matches-p
+                       parent (gethash "namespace" (gethash "metadata" route))
+                       namespace (gethash "name" metadata)
+                       (gethash "name" listener) (gethash "port" listener)
+                       kind (gateway-listener-owner-group owner))
+                      (or (equal kind "XListenerSet")
+                          (and admitted
+                               (equal "Accepted" (gateway-route-parent-acceptance
+                                                  view route owner parent definitions))))))
+               (gethash "parentRefs" (gethash "spec" route) #())))))
+
+(defun foreign-listenerset-status (view owner gateway entries routes programmed-p)
+  "Describe a ListenerSet. PROGRAMMED-P must test an actually installed entry."
+  (let* ((metadata (gethash "metadata" owner))
+         (generation (gethash "generation" metadata))
+         (namespace (gethash "namespace" metadata))
+         (group (gateway-listener-owner-group owner))
+         (kind (gethash "kind" owner "ListenerSet"))
+         (owner-key (list group kind namespace (gethash "name" metadata)))
+         (definitions (loop for entry in entries
+                            when (and (equal owner-key (gateway-listener-owner-key entry))
+                                      (null (gateway-listener-entry-error entry)))
+                              collect (gateway-listener-entry-listener entry)))
+         (parent-accepted (and gateway (gateway-controlled-p view gateway)))
+         (admitted (and parent-accepted (gateway-listenerset-admitted-p view gateway owner)))
+         (existing (gethash "status" owner (make-hash-table :test 'equal)))
+         (accepted-count 0) (programmed-count 0) (invalid-count 0) (unsupported-port nil)
+         (statuses nil))
+    (labels ((condition (type value reason prior)
+               (foreign-gateway-condition type (if value "True" "False") reason
+                                          :generation generation :existing (gethash "conditions" prior))))
+      (loop for listener across (gethash "listeners" (gethash "spec" owner) #())
+            for name = (gethash "name" listener)
+            for entry = (or (find-if (lambda (entry)
+                                      (and (equal owner-key (gateway-listener-owner-key entry))
+                                           (equal name (gethash "name" (gateway-listener-entry-listener entry))))) entries)
+                            (make-gateway-listener-entry :gateway gateway :owner owner :listener listener))
+            for prior = (or (find name (gethash "listeners" existing #())
+                                 :key (lambda (status) (gethash "name" status)) :test #'equal)
+                            (make-hash-table :test 'equal))
+            for conflict = (gateway-listener-entry-conflict entry)
+            for port-ok = (gateway-listener-port-supported-p listener)
+            for supported = (member (gethash "protocol" listener) '("HTTP" "HTTPS") :test #'equal)
+            for tls-error = (foreign-gateway-listener-tls-error view namespace listener kind group)
+            for accepted = (and admitted supported port-ok (null conflict))
+            do (multiple-value-bind (kinds kinds-ok)
+                   (foreign-gateway-listener-route-kinds
+                    listener (when supported
+                               (list (gr8s.resources::core-object
+                                      "group" "gateway.networking.k8s.io" "kind" "HTTPRoute"))))
+                 (let* ((refs-error (or tls-error (unless kinds-ok "InvalidRouteKinds")))
+                        (programmed (and accepted (not refs-error) (funcall programmed-p entry))))
+                   (when accepted (incf accepted-count))
+                   (when programmed (incf programmed-count))
+                   (unless port-ok (setf unsupported-port t))
+                   (when (or (not supported) (not port-ok) conflict refs-error) (incf invalid-count))
+                   ;; The experimental schema requires a positive status port.
+                   ;; Omit unbound dynamic entries rather than inventing a port.
+                   (unless (and (equal kind "XListenerSet") (not port-ok))
+                   (push
+                    (gr8s.resources::core-object
+                     "name" name "supportedKinds" (if supported (coerce kinds 'vector) #())
+                     "attachedRoutes"
+                     (count-if
+                      (lambda (route)
+                        (foreign-listenerset-route-attached-p
+                         view owner listener route admitted definitions)) routes)
+                     "conditions"
+                     (vector
+                      (condition "Accepted" accepted
+                                 (cond ((not admitted) "NotAllowed") ((not port-ok) "UnsupportedPort")
+                                       ((not supported) "UnsupportedProtocol")
+                                       (conflict conflict) (t "Accepted")) prior)
+                      (condition "Conflicted" conflict (or conflict "NoConflicts") prior)
+                      (condition "ResolvedRefs" (null refs-error) (or refs-error "ResolvedRefs") prior)
+                      (condition "Programmed" programmed
+                                 (cond (programmed "Programmed") ((or (not accepted) refs-error) "Invalid")
+                                       (t "Pending")) prior))) statuses)
+                   (when (equal kind "XListenerSet")
+                     (setf (gethash "port" (first statuses)) (gethash "port" listener)))))))
+      (let* ((accepted (and admitted (plusp accepted-count)))
+             (accepted-reason (cond ((not parent-accepted) "ParentNotAccepted")
+                                    ((not admitted) "NotAllowed")
+                                    ((and (not accepted) unsupported-port) "UnsupportedPort")
+                                    ((or (not accepted) (plusp invalid-count)) "ListenersNotValid")
+                                    (t "Accepted")))
+             (programmed (and accepted (plusp programmed-count))))
+        (gr8s.resources::core-object
+         "listeners" (coerce (nreverse statuses) 'vector)
+         "conditions"
+         (vector (condition "Accepted" accepted accepted-reason existing)
+                 (condition "Programmed" programmed
+                            (cond (programmed "Programmed") ((not parent-accepted) "ParentNotProgrammed")
+                                  ((not admitted) "Invalid") ((plusp invalid-count) "ListenersNotValid")
+                                  (t "Pending")) existing)))))))
+
+(defun foreign-gateway-condition-true-p (status type)
+  (let ((condition (find type (gethash "conditions" status #())
+                         :key (lambda (entry) (gethash "type" entry)) :test #'equal)))
+    (and condition (equal "True" (gethash "status" condition)))))
+
+(defun foreign-gateway-publish-gateway-status (cluster gateway routes addresses
+                                             &optional view listener-set-statuses
+                                               (programmed-p (constantly nil)))
   (let* ((metadata (gethash "metadata" gateway))
          (generation (gethash "generation" metadata))
          (listeners (coerce (foreign-gateway-vector (gethash "listeners" (gethash "spec" gateway))) 'list))
+         (installed-listeners
+           (remove-if-not
+            (lambda (listener)
+              (funcall programmed-p
+                       (make-gateway-listener-entry :gateway gateway :owner gateway :listener listener)
+                       view))
+            listeners))
          (supported-count (count-if (lambda (listener)
                                      (foreign-gateway-listener-supported-kinds (gethash "protocol" listener))) listeners))
          (usable-count (count-if (lambda (listener)
-                                  (and (foreign-gateway-listener-supported-kinds (gethash "protocol" listener))
+                                  (and (member listener installed-listeners :test #'eq)
+                                       (foreign-gateway-listener-supported-kinds (gethash "protocol" listener))
                                        (not (foreign-gateway-listener-tls-error
                                              view (gethash "namespace" metadata) listener)))) listeners))
+         (attached-sets (count-if (lambda (status) (foreign-gateway-condition-true-p status "Accepted"))
+                                 listener-set-statuses))
+         (programmed-sets (count-if (lambda (status)
+                                     (and (foreign-gateway-condition-true-p status "Accepted")
+                                          (foreign-gateway-condition-true-p status "Programmed"))) listener-set-statuses))
+         (accepted (or (plusp supported-count) (plusp attached-sets)))
+         (programmed (or (plusp usable-count) (plusp programmed-sets)))
          (existing-status (gethash "status" gateway (make-hash-table :test 'equal)))
          (status (make-hash-table :test 'equal)))
-    (setf (gethash "addresses" status)
+    (setf (gethash "attachedListenerSets" status) attached-sets
+          (gethash "addresses" status)
           (coerce (loop for address in addresses
                         collect (let ((entry (make-hash-table :test 'equal)))
                                   (setf (gethash "type" entry) "IPAddress"
@@ -275,12 +424,12 @@ is among them.  Returns (values supported-kind-objects all-allowed-supported-p).
                                   entry))
                   'vector)
           (gethash "conditions" status)
-          (vector (foreign-gateway-condition "Accepted" (if (plusp supported-count) "True" "False")
-                                             (if (= supported-count (length listeners)) "Accepted" "ListenersNotValid")
+          (vector (foreign-gateway-condition "Accepted" (if accepted "True" "False")
+                                             (if (and accepted (= supported-count (length listeners))) "Accepted" "ListenersNotValid")
                                              :generation generation
                                              :existing (gethash "conditions" existing-status))
-                  (foreign-gateway-condition "Programmed" (if (plusp usable-count) "True" "False")
-                                             (if (plusp usable-count) "Programmed" "Invalid")
+                  (foreign-gateway-condition "Programmed" (if programmed "True" "False")
+                                             (cond (programmed "Programmed") (accepted "Pending") (t "Invalid"))
                                              :generation generation
                                              :existing (gethash "conditions" existing-status)))
           (gethash "listeners" status)
@@ -322,8 +471,12 @@ is among them.  Returns (values supported-kind-objects all-allowed-supported-p).
                                     :existing (and existing-listener
                                                    (gethash "conditions" existing-listener)))
                                    (foreign-gateway-condition
-                                    "Programmed" (if (and protocol-ok (not tls-error)) "True" "False")
-                                    (if (and protocol-ok (not tls-error)) "Programmed" "Invalid")
+                                    "Programmed" (if (and protocol-ok (not tls-error)
+                                                          (member listener installed-listeners :test #'eq))
+                                                     "True" "False")
+                                    (cond ((or (not protocol-ok) tls-error) "Invalid")
+                                          ((member listener installed-listeners :test #'eq) "Programmed")
+                                          (t "Pending"))
                                     :generation generation
                                     :existing (and existing-listener
                                                    (gethash "conditions" existing-listener)))
@@ -337,9 +490,10 @@ is among them.  Returns (values supported-kind-objects all-allowed-supported-p).
            'vector))
     (foreign-gateway-put-status cluster "gateway.networking.k8s.io" "v1" "gateways"
                                 (gethash "namespace" metadata) (gethash "name" metadata)
-                                status)))
+                                status :expected-uid (gethash "uid" metadata)
+                                :expected-generation generation)))
 
-(defun gateway-route-parent-acceptance (view route gateway parent)
+(defun gateway-route-parent-acceptance (view route gateway parent &optional (definitions nil definitions-p))
   "Accepted reason for this particular parentRef, using dataplane admission rules."
   (let* ((metadata (gethash "metadata" gateway))
          (namespace (gethash "namespace" metadata))
@@ -348,8 +502,10 @@ is among them.  Returns (values supported-kind-objects all-allowed-supported-p).
            (remove-if-not
             (lambda (listener)
               (gateway-parent-matches-p parent route-namespace namespace (gethash "name" metadata)
-                                        (gethash "name" listener) (gethash "port" listener)))
-            (coerce (gethash "listeners" (gethash "spec" gateway) #()) 'list)))
+                                        (gethash "name" listener) (gethash "port" listener)
+                                        (gethash "kind" gateway "Gateway") (gateway-listener-owner-group gateway)))
+            (if definitions-p definitions
+                (coerce (gethash "listeners" (gethash "spec" gateway) #()) 'list))))
          (allowed
            (remove-if-not
             (lambda (listener)
@@ -369,75 +525,144 @@ is among them.  Returns (values supported-kind-objects all-allowed-supported-p).
                         thereis (gateway-backend-reference-error
                                  view (gw-parse-backend reference namespace))))))
 
-(defun foreign-gateway-publish-route-status (cluster route gateways &optional view)
+(defun foreign-route-parent-key (parent namespace)
+  (list (gethash "group" parent "gateway.networking.k8s.io")
+        (gethash "kind" parent "Gateway") (gethash "namespace" parent namespace)
+        (gethash "name" parent)))
+
+(defun foreign-route-parent-status-key (parent namespace)
+  (append (foreign-route-parent-key parent namespace)
+          (list (gethash "sectionName" parent) (gethash "port" parent))))
+
+(defun foreign-route-owner-index (view gateways)
+  "Index controlled owners and winning logical listeners once per status pass."
+  (let ((index (make-hash-table :test 'equal))
+        (sets (when view (list-core-resources view "listenersets"))))
+    (dolist (gateway gateways)
+      (setf (gethash (gateway-listener-owner-key (make-gateway-listener-entry :owner gateway)) index)
+            (list gateway gateway nil)))
+    (dolist (owner sets)
+      (let* ((parent (gethash "parentRef" (gethash "spec" owner)))
+             (record (gethash (foreign-route-parent-key parent (gethash "namespace" (gethash "metadata" owner))) index)))
+        (when (and record (equal "Gateway" (gethash "kind" (first record) "Gateway")))
+          (setf (gethash (gateway-listener-owner-key (make-gateway-listener-entry :owner owner)) index)
+                (list owner (first record) nil)))))
+    (dolist (gateway gateways)
+      (dolist (entry (gateway-listener-entries view gateway sets))
+        (let ((record (gethash (gateway-listener-owner-key entry) index)))
+          (when (and record (null (gateway-listener-entry-error entry)))
+            (push (gateway-listener-entry-listener entry) (third record))))))
+    index))
+
+(defun foreign-gateway-publish-route-status (cluster route gateways &optional view owner-index)
   (let* ((metadata (gethash "metadata" route))
          (namespace (gethash "namespace" metadata))
          (backend-error (gateway-route-backend-reference-error view route))
          (existing (gethash "status" route (make-hash-table :test 'equal)))
-         (parents
-           (loop for parent in (foreign-gateway-route-parents route)
-                 for gateway = (find-if
-                                (lambda (candidate)
-                                  (let ((gw-metadata (gethash "metadata" candidate)))
-                                    (and (equal (gethash "name" parent)
-                                                (gethash "name" gw-metadata))
-                                         (equal (or (gethash "namespace" parent) namespace)
-                                                (gethash "namespace" gw-metadata)))))
-                                gateways)
-                 when gateway
-                   collect (let ((reason (gateway-route-parent-acceptance view route gateway parent))
-                                 (entry (make-hash-table :test 'equal))
-                                 (existing-parent
-                                   (find (gethash "name" parent)
-                                         (coerce (foreign-gateway-vector
-                                                  (gethash "parents" existing)) 'list)
-                                         :test #'equal
-                                         :key (lambda (candidate)
-                                                (gethash "name"
-                                                         (gethash "parentRef" candidate
-                                                                  (make-hash-table :test 'equal)))))))
-                             (setf (gethash "parentRef" entry) parent
-                                   (gethash "controllerName" entry) *gateway-controller-name*
-                                   (gethash "conditions" entry)
-                                   ;; observedGeneration must track the route's
-                                   ;; metadata.generation, which the conformance
-                                   ;; suite waits to see on every condition.
-                                   (vector (foreign-gateway-condition
-                                            "Accepted" (if (equal reason "Accepted") "True" "False") reason
-                                            :generation (gethash "generation" metadata)
-                                            :existing (and existing-parent
-                                                           (gethash "conditions" existing-parent)))
-                                           (foreign-gateway-condition
-                                            "ResolvedRefs" (if backend-error "False" "True")
-                                            (or backend-error "ResolvedRefs")
-                                            :generation (gethash "generation" metadata)
-                                            :existing (and existing-parent
-                                                           (gethash "conditions" existing-parent)))))
-                             entry))))
-    (when parents
-      (let ((status (make-hash-table :test 'equal)))
-        (setf (gethash "parents" status) (coerce parents 'vector))
+         (previous (coerce (gethash "parents" existing #()) 'list))
+         (index (or owner-index (foreign-route-owner-index view gateways)))
+         (ours nil))
+    (dolist (parent (foreign-gateway-route-parents route))
+      (let ((record (gethash (foreign-route-parent-key parent namespace) index)))
+        (when record
+          (destructuring-bind (owner gateway definitions) record
+            (let* ((reason (if (or (eq owner gateway) (gateway-listenerset-admitted-p view gateway owner))
+                               (gateway-route-parent-acceptance view route owner parent definitions)
+                               "NotAllowedByListeners"))
+                   (key (foreign-route-parent-status-key parent namespace))
+                   (prior (find-if (lambda (entry)
+                                     (and (equal *gateway-controller-name* (gethash "controllerName" entry))
+                                          (equal key (foreign-route-parent-status-key (gethash "parentRef" entry) namespace))))
+                                   previous)))
+              (push (gr8s.resources::core-object
+                     "parentRef" parent "controllerName" *gateway-controller-name*
+                     "conditions"
+                     (vector (foreign-gateway-condition
+                              "Accepted" (if (equal reason "Accepted") "True" "False") reason
+                              :generation (gethash "generation" metadata)
+                              :existing (and prior (gethash "conditions" prior)))
+                             (foreign-gateway-condition
+                              "ResolvedRefs" (if backend-error "False" "True") (or backend-error "ResolvedRefs")
+                              :generation (gethash "generation" metadata)
+                              :existing (and prior (gethash "conditions" prior))))) ours))))))
+    (when (or ours (some (lambda (entry) (equal *gateway-controller-name* (gethash "controllerName" entry))) previous))
+      (let ((status (gr8s.resources::copy-core-object existing)))
+        (setf (gethash "parents" status)
+              (coerce (append (remove-if (lambda (entry) (equal *gateway-controller-name* (gethash "controllerName" entry))) previous)
+                              (nreverse ours)) 'vector))
         (foreign-gateway-put-status cluster "gateway.networking.k8s.io" "v1" "httproutes"
-                                    namespace (gethash "name" metadata) status)))))
+                                    namespace (gethash "name" metadata) status
+                                    :expected-uid (gethash "uid" metadata)
+                                    :expected-generation (gethash "generation" metadata)
+                                    :route-controller *gateway-controller-name*)))))
 
-(defun foreign-gateway-publish (view cluster)
+(defun foreign-gateway-publish-listenersets (view cluster routes programmed-p)
+  "Publish each selected API's ListenerSets without conflating owner identities."
+  (let ((sets (list-core-resources view "listenersets"))
+        (published-by-gateway (make-hash-table :test 'equal))
+        (gateways (make-hash-table :test 'equal))
+        (entries-by-gateway (make-hash-table :test 'equal))
+        (routes-by-parent (gateway-route-parent-index routes)))
+    (dolist (gateway (list-core-resources view "gateways"))
+      (let ((metadata (gethash "metadata" gateway)))
+        (setf (gethash (list (gethash "namespace" metadata) (gethash "name" metadata)) gateways) gateway)))
+    (dolist (owner sets published-by-gateway)
+      (let* ((metadata (gethash "metadata" owner))
+             (namespace (gethash "namespace" metadata))
+             (parent (gethash "parentRef" (gethash "spec" owner)))
+             (parent-key (list (gethash "namespace" parent namespace) (gethash "name" parent)))
+             (gateway (gethash parent-key gateways)))
+        ;; A Gateway owned by another implementation also owns its child status.
+        (when (or (null gateway) (gateway-controlled-p view gateway))
+          (handler-case
+              (let* ((owner-key (gateway-listener-owner-key (make-gateway-listener-entry :owner owner)))
+                     (entry-index
+                       (when gateway
+                         (or (gethash parent-key entries-by-gateway)
+                             (setf (gethash parent-key entries-by-gateway)
+                                   (let ((index (make-hash-table :test 'equal)))
+                                     (dolist (entry (gateway-listener-entries view gateway sets) index)
+                                       (push entry (gethash (gateway-listener-owner-key entry) index))))))))
+                     (status (foreign-listenerset-status
+                              view owner gateway (and entry-index (gethash owner-key entry-index))
+                              (gethash owner-key routes-by-parent)
+                              (lambda (entry) (funcall programmed-p entry view))))
+                     (api (gethash "apiVersion" owner))
+                     (slash (position #\/ api)))
+                (when (foreign-gateway-put-status
+                 cluster (subseq api 0 slash) (subseq api (1+ slash))
+                 (if (equal "XListenerSet" (gethash "kind" owner)) "xlistenersets" "listenersets")
+                 namespace (gethash "name" metadata) status
+                 :expected-uid (gethash "uid" metadata)
+                 :expected-generation (gethash "generation" metadata))
+                  (when gateway
+                    (push status (gethash (foreign-gateway-key gateway) published-by-gateway)))))
+            (error (condition)
+              (format *error-output* "~&gr8s ListenerSet ~A/~A status publication failed: ~A~%"
+                      namespace (gethash "name" metadata) condition))))))))
+
+(defun foreign-gateway-publish (view cluster &optional (programmed-p (constantly nil)))
   "The lease-holder's pass: statuses and per-Gateway LoadBalancer Services."
   (let* ((gateways (remove-if-not (lambda (gateway) (gateway-controlled-p view gateway))
                                   (list-core-resources view "gateways")))
-         (routes (list-core-resources view "httproutes")))
+         (routes (list-core-resources view "httproutes"))
+         (route-owners (foreign-route-owner-index view gateways))
+         (listener-set-statuses (foreign-gateway-publish-listenersets view cluster routes programmed-p)))
     (foreign-gateway-publish-class-status view cluster)
     (dolist (gateway gateways)
       (handler-case
-          (let ((service (foreign-gateway-provision-service cluster gateway)))
+          (let ((service (foreign-gateway-provision-service cluster gateway view)))
             (foreign-gateway-publish-gateway-status cluster gateway
                                                   (foreign-gateway-attached-routes gateway routes)
-                                                  (when service (foreign-gateway-service-addresses service)) view))
+                                                  (when service (foreign-gateway-service-addresses service)) view
+                                                  (gethash (foreign-gateway-key gateway) listener-set-statuses)
+                                                  programmed-p))
         (error (condition)
           (let ((metadata (gethash "metadata" gateway)))
             (format *error-output* "~&gr8s Gateway ~A/~A publication failed: ~A~%"
                     (gethash "namespace" metadata) (gethash "name" metadata) condition)))))
     (dolist (route routes)
-      (foreign-gateway-publish-route-status cluster route gateways view))))
+      (foreign-gateway-publish-route-status cluster route gateways view route-owners))))
 
 (defstruct foreign-gateway-view source gateway-key)
 
@@ -448,6 +673,16 @@ is among them.  Returns (values supported-kind-objects all-allowed-supported-p).
 
 (defmethod list-core-resources ((view foreign-gateway-view) resource &optional namespace)
   "Keep Gateway and Ingress routing domains separate; share backend discovery."
+  (let ((source (foreign-gateway-view-source view))
+        (key (foreign-gateway-view-gateway-key view)))
+    (when (and key (equal resource "listenersets")
+               (typep source 'gr8s.resources::foreign-resource-snapshot))
+      (return-from list-core-resources
+        (values (remove-if-not
+                 (lambda (owner) (or (null namespace)
+                                     (equal namespace (gethash "namespace" (gethash "metadata" owner)))))
+                 (gr8s.resources::foreign-snapshot-gateway-listenersets source key))
+                (write-to-string (gr8s.resources::foreign-resource-snapshot-revision source))))))
   (multiple-value-bind (objects revision)
       (list-core-resources (foreign-gateway-view-source view) resource namespace)
     (values
@@ -462,8 +697,31 @@ is among them.  Returns (values supported-kind-objects all-allowed-supported-p).
 (defmethod get-core-resource ((view foreign-gateway-view) resource namespace name)
   (get-core-resource (foreign-gateway-view-source view) resource namespace name))
 
+(defmethod gateway-parent-route-reader ((view foreign-gateway-view))
+  (gateway-parent-route-reader (foreign-gateway-view-source view)))
+
 (defstruct foreign-gateway-controllers view resolver cert-dir ingress leases
+  snapshot revision retry-full-p
   (gateways (make-hash-table :test #'equal)))
+
+(defun foreign-gateway-installed-predicate (controllers)
+  "Capture under the convergence lock; subsequent API writes need no such lock."
+  (let ((captured (make-hash-table :test 'equal)))
+    (maphash
+     (lambda (key controller)
+       (let ((snapshot (copy-gateway-controller controller)))
+         (setf (gateway-controller-listeners snapshot)
+               (alexandria:copy-hash-table (gateway-controller-listeners controller))
+               (gateway-controller-l4-listeners snapshot)
+               (alexandria:copy-hash-table (gateway-controller-l4-listeners controller))
+               (gateway-controller-installed-listeners snapshot)
+               (alexandria:copy-hash-table (gateway-controller-installed-listeners controller))
+               (gethash key captured) snapshot)))
+     (foreign-gateway-controllers-gateways controllers))
+    (lambda (entry view)
+      (let* ((gateway (gateway-listener-entry-gateway entry))
+             (controller (and gateway (gethash (foreign-gateway-key gateway) captured))))
+        (and controller (gateway-listener-entry-programmed-p controller entry view))))))
 
 (defun make-foreign-gateway-listener-controller (view resolver cert-dir &key private port-fn)
   (flet ((bind-port (port)
@@ -494,19 +752,28 @@ is among them.  Returns (values supported-kind-objects all-allowed-supported-p).
       (funcall (gateway-controller-l4-stop-fn controller) (cdr (gethash port running)))
       (remhash port running))))
 
-(defun converge-foreign-gateway-listeners (controllers)
+(defun reconcile-foreign-gateway-listeners
+    (controllers &optional (view (foreign-gateway-controllers-view controllers))
+                           (gateway-keys nil selected-p) reuse-tls-bindings-p)
   "Each Gateway UID owns its routing tables and private node sockets."
-  (let* ((view (foreign-gateway-controllers-view controllers))
-         (running (foreign-gateway-controllers-gateways controllers))
+  (let* ((running (foreign-gateway-controllers-gateways controllers))
+         (success t)
          (desired (make-hash-table :test #'equal)))
-    (dolist (gateway (list-core-resources view "gateways"))
+    (dolist (gateway (if selected-p
+                        (loop for key in gateway-keys
+                              for object = (ignore-errors
+                                             (get-core-resource view "gateways" (first key) (second key)))
+                              when (and object (equal key (foreign-gateway-key object))) collect object)
+                        (list-core-resources view "gateways")))
       (when (gateway-controlled-p view gateway)
         (let* ((key (foreign-gateway-key gateway))
                (controller (or (gethash key running)
                                (setf (gethash key running)
                                      (make-foreign-gateway-listener-controller
                                       (make-foreign-gateway-view :source view :gateway-key key)
-                                      (foreign-gateway-controllers-resolver controllers)
+                                      (or (foreign-gateway-controllers-resolver controllers)
+                                          (make-service-backend-resolver
+                                           (foreign-gateway-controllers-view controllers)))
                                       (foreign-gateway-controllers-cert-dir controllers)
                                       :private t
                                       :port-fn (when (foreign-gateway-controllers-leases controllers)
@@ -515,27 +782,210 @@ is among them.  Returns (values supported-kind-objects all-allowed-supported-p).
                                                     (foreign-gateway-controllers-leases controllers)
                                                     key port))))))))
           (setf (gethash key desired) t)
+          (setf (gateway-controller-store controller)
+                (make-foreign-gateway-view :source view :gateway-key key))
           (handler-case
               (progn
                 (retire-foreign-gateway-obsolete-l4-listeners controller gateway)
-                (converge-gateway-listeners controller)
+                (if reuse-tls-bindings-p
+                    (converge-gateway-listeners controller :reuse-tls-bindings-p t)
+                    (converge-gateway-listeners controller))
                 (converge-gateway-l4-listeners controller))
             (error (condition)
+              (setf success nil)
               (format *error-output* "~&gr8s Gateway ~A/~A listener convergence failed: ~A~%"
                       (first key) (second key) condition))))))
     (dolist (key (loop for key being the hash-keys of running
-                      unless (gethash key desired) collect key))
+                      when (and (or (not selected-p) (member key gateway-keys :test #'equal))
+                                (not (gethash key desired))) collect key))
       (stop-gateway-controller (gethash key running))
       (remhash key running))
     ;; Preserve the existing Ingress entry point without merging its routes
     ;; into any Gateway's Service-addressed listeners.
-    (converge-gateway-listeners (foreign-gateway-controllers-ingress controllers))
-    (converge-gateway-l4-listeners (foreign-gateway-controllers-ingress controllers))))
+    (unless selected-p
+      (setf (gateway-controller-store (foreign-gateway-controllers-ingress controllers))
+            (make-foreign-gateway-view :source view))
+      (converge-gateway-listeners (foreign-gateway-controllers-ingress controllers))
+      (converge-gateway-l4-listeners (foreign-gateway-controllers-ingress controllers)))
+    success))
+
+(defun foreign-listenerset-parent-key (view owner)
+  "Resolve a valid parent identity, including the Gateway incarnation."
+  (when owner
+    (let* ((parent (gethash "parentRef" (gethash "spec" owner)))
+           (namespace (or (and parent (gethash "namespace" parent))
+                          (gethash "namespace" (gethash "metadata" owner))))
+           (gateway (and parent
+                         (equal (gethash "group" parent "gateway.networking.k8s.io")
+                                "gateway.networking.k8s.io")
+                         (equal (gethash "kind" parent "Gateway") "Gateway")
+                         (ignore-errors
+                           (get-core-resource view "gateways" namespace (gethash "name" parent))))))
+      (when gateway (foreign-gateway-key gateway)))))
+
+(defun foreign-listenerset-changed-parents (before snapshot changes)
+  "Include both sides of moves and deletion, without scanning unrelated Gateways."
+  (let ((keys nil))
+    (dolist (change changes keys)
+      (let ((old (ignore-errors (apply #'get-core-resource before (car change)))))
+        (dolist (key (list (foreign-listenerset-parent-key before old)
+                          (foreign-listenerset-parent-key snapshot (cdr change))))
+          (when key (pushnew key keys :test #'equal)))))))
+
+(defparameter +foreign-gateway-planning-resources+
+  '("gateways" "gatewayclasses" "listenersets" "httproutes"
+    "grpcroutes" "tcproutes" "tlsroutes" "ingresses" "ingressclasses"
+    "namespaces" "secrets" "referencegrants"))
+
+(defun foreign-gateway-configuration-object (object)
+  "Ignore API bookkeeping while preserving case-sensitive routing configuration."
+  (when object
+    (let* ((copy (gr8s.resources::copy-core-object object))
+           (metadata (gethash "metadata" copy)))
+      (remhash "status" copy)
+      (when metadata
+        (remhash "resourceVersion" metadata)
+        (remhash "managedFields" metadata))
+      copy)))
+
+(defun foreign-gateway-secret-used-p (controllers key)
+  (or (gethash (rest key) (gateway-controller-secret-ports (foreign-gateway-controllers-ingress controllers)))
+      (loop for controller being the hash-values of (foreign-gateway-controllers-gateways controllers)
+            thereis (gethash (rest key) (gateway-controller-secret-ports controller)))))
+
+(defun foreign-gateway-rotate-secrets (controllers snapshot changes)
+  "Update shared TLS bindings, or request full reconciliation for unsupported cases."
+  (let ((keys (mapcar #'car changes)))
+    (flet ((update (controller key)
+             (setf (gateway-controller-store controller)
+                   (make-foreign-gateway-view :source snapshot :gateway-key key))
+             (unless (converge-gateway-secret-changes controller keys)
+               (return-from foreign-gateway-rotate-secrets nil))))
+      (maphash (lambda (key controller) (update controller key))
+               (foreign-gateway-controllers-gateways controllers))
+      (update (foreign-gateway-controllers-ingress controllers) nil))
+    t))
+
+(defun foreign-namespace-selector-changed-p (selector old new)
+  (labels ((matches (selector object)
+             (and object
+                  (not (null (gr8s.resources::workload-selector-matches-p
+                              selector (gethash "labels" (gethash "metadata" object))))))))
+    (not (eq (matches selector old) (matches selector new)))))
+
+(defun foreign-gateway-namespace-affects-admission-p (view old new)
+  "Namespace metadata matters only when a listener selector changes admission."
+  (flet ((changed (selector) (foreign-namespace-selector-changed-p selector old new)))
+    (if (typep view 'gr8s.resources::foreign-resource-snapshot)
+        (fset:do-map (owner selectors (gr8s.resources::foreign-resource-snapshot-namespace-selectors view))
+          (declare (ignore owner))
+          (when (some #'changed selectors)
+            (return-from foreign-gateway-namespace-affects-admission-p t)))
+        (loop for resource in '("gateways" "listenersets")
+              thereis (loop for owner in (list-core-resources view resource)
+                            thereis (some #'changed
+                                          (gr8s.resources::foreign-owner-namespace-selectors resource owner)))))))
+
+(defun foreign-namespace-changed-parents (before snapshot changes)
+  "Select Gateway incarnations whose indexed selectors change their match."
+  (let ((keys nil)
+        (objects (mapcar (lambda (change)
+                           (cons (ignore-errors (apply #'get-core-resource before (car change)))
+                                 (cdr change))) changes)))
+    (fset:do-map (owner selectors (gr8s.resources::foreign-resource-snapshot-namespace-selectors snapshot))
+      (when (some (lambda (selector)
+                    (some (lambda (pair) (foreign-namespace-selector-changed-p selector (car pair) (cdr pair)))
+                          objects)) selectors)
+        (let* ((object (apply #'get-core-resource snapshot owner))
+               (key (if (equal "gateways" (first owner))
+                        (foreign-gateway-key object)
+                        (foreign-listenerset-parent-key snapshot object))))
+          (when key (pushnew key keys :test #'equal)))))
+    keys))
+
+(defun converge-foreign-gateway-snapshot (controllers snapshot revision changes full)
+  "Acknowledge a captured revision only after publication; failures force recovery."
+  (let* ((before (foreign-gateway-controllers-snapshot controllers))
+         (rebuild (or full (null before) (foreign-gateway-controllers-retry-full-p controllers)))
+         (deltas (unless rebuild
+                   (remove-if
+                    (lambda (change)
+                      (or (not (member (caar change) +foreign-gateway-planning-resources+ :test #'equal))
+                          (and (equal "secrets" (caar change))
+                               (not (foreign-gateway-secret-used-p controllers (car change))))
+                          (let ((old (ignore-errors (apply #'get-core-resource before (car change)))))
+                            ;; Secret resourceVersion participates in installed-state evidence.
+                            (or (and (equal "namespaces" (caar change))
+                                     (not (foreign-gateway-namespace-affects-admission-p snapshot old (cdr change))))
+                                (gr8s.resources::core-json-equal-p
+                                 (if (equal "secrets" (caar change)) old (foreign-gateway-configuration-object old))
+                                 (if (equal "secrets" (caar change)) (cdr change)
+                                     (foreign-gateway-configuration-object (cdr change)))))))) changes)))
+         (success nil))
+    (unwind-protect
+         (handler-case
+             (setf success
+                   (cond
+                     ((and (not rebuild) (null deltas)) t)
+                     ((and (not rebuild)
+                           (every (lambda (change) (equal "listenersets" (caar change))) deltas))
+                      (reconcile-foreign-gateway-listeners
+                       controllers snapshot
+                       (foreign-listenerset-changed-parents before snapshot deltas) t))
+                     ((and (not rebuild)
+                           (typep snapshot 'gr8s.resources::foreign-resource-snapshot)
+                           (every (lambda (change) (equal "namespaces" (caar change))) deltas))
+                      (reconcile-foreign-gateway-listeners
+                       controllers snapshot (foreign-namespace-changed-parents before snapshot deltas)))
+                     ((and (not rebuild)
+                           (every (lambda (change) (equal "secrets" (caar change))) deltas))
+                      (or (foreign-gateway-rotate-secrets controllers snapshot deltas)
+                          (reconcile-foreign-gateway-listeners controllers snapshot)))
+                     ((and (not rebuild)
+                           (every (lambda (change) (equal "httproutes" (caar change))) deltas))
+                      (maphash
+                       (lambda (key controller)
+                         (let ((old (gateway-controller-store controller)))
+                           (setf (gateway-controller-store controller)
+                                 (make-foreign-gateway-view :source snapshot :gateway-key key))
+                           (handler-case (converge-gateway-http-route-changes controller old deltas)
+                             (error (condition)
+                               (ignore-errors (stop-gateway-controller controller))
+                               (error condition)))))
+                       (foreign-gateway-controllers-gateways controllers))
+                      t)
+                     (t (reconcile-foreign-gateway-listeners controllers snapshot))))
+           (error (condition)
+             (format *error-output* "~&gr8s Gateway snapshot publication failed: ~A~%" condition)
+             nil))
+      (setf (foreign-gateway-controllers-retry-full-p controllers) (not success))
+      (when success
+        (setf (foreign-gateway-controllers-snapshot controllers) snapshot
+              (foreign-gateway-controllers-revision controllers) revision)))
+    success))
+
+(defun converge-foreign-gateway-listeners (controllers)
+  (let ((view (foreign-gateway-controllers-view controllers)))
+    (if (typep view 'gr8s.resources::foreign-resource-view)
+        (progn
+          ;; Start every planning input before capturing the first coherent view.
+          ;; Subsequent calls check watch health and retry discovery of optional APIs.
+          (dolist (resource +foreign-gateway-planning-resources+)
+            (let ((informer (gr8s.resources::foreign-view-informer view resource)))
+              (when (and informer (not (gr8s.kube-client:informer-synced-p informer)))
+                (error "Gateway input ~A has not synchronized" resource))))
+          (multiple-value-bind (snapshot revision changes full)
+              (gr8s.resources::foreign-view-snapshot view (foreign-gateway-controllers-revision controllers))
+            (converge-foreign-gateway-snapshot controllers snapshot revision changes full)))
+        (reconcile-foreign-gateway-listeners controllers))))
 
 (defun stop-foreign-gateway-listeners (controllers)
   (maphash (lambda (key controller) (declare (ignore key)) (stop-gateway-controller controller))
            (foreign-gateway-controllers-gateways controllers))
   (clrhash (foreign-gateway-controllers-gateways controllers))
+  (setf (foreign-gateway-controllers-snapshot controllers) nil
+        (foreign-gateway-controllers-revision controllers) nil
+        (foreign-gateway-controllers-retry-full-p controllers) nil)
   (stop-gateway-controller (foreign-gateway-controllers-ingress controllers)))
 
 (defun start-foreign-gateway (view &key cert-dir resolver cluster node-name
@@ -600,7 +1050,10 @@ the per-Gateway LoadBalancer Services.  RESOLVER overrides backend resolution
              (lambda ()
                (loop until stopping do
                  (when leader
-                   (handler-case (foreign-gateway-publish view cluster)
+                   (handler-case (foreign-gateway-publish
+                                  view cluster
+                                  (bt:with-lock-held (convergence-lock)
+                                    (foreign-gateway-installed-predicate controllers)))
                      (error (condition)
                        (format *error-output* "~&gr8s gateway status pass failed: ~A~%"
                                condition))))
