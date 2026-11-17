@@ -55,7 +55,9 @@
 
 (defun run-member-list-command (options &optional (output *standard-output*))
   "Print the control-plane membership; exit 0, or 1 when any member is a ghost."
-  (let ((config (read-debug-kubeconfig (getf options :kubeconfig))))
+  (call-with-debug-kubeconfig
+   (getf options :kubeconfig)
+   (lambda (config)
     (multiple-value-bind (body status)
         (debug-api-request-json config "GET" "/apis/gr8s.io/v1/controlplanemembers")
       (unless (= status 200)
@@ -83,12 +85,14 @@
               (format output "~%~D member~:P never heard from: if permanently gone, remove with `gr8s member remove NAME`; without a quorum of live voters, see --cluster-reset in docs/backup-restore.md~%"
                       ghosts))
             (finish-output output)
-            (if (plusp ghosts) 1 0))))))
+            (if (plusp ghosts) 1 0)))))))
 
 (defun run-member-remove-command (options &optional (output *standard-output*))
   "Propose removing a member; follows one leader redirect. Exit 0 once proposed."
-  (let ((config (read-debug-kubeconfig (getf options :kubeconfig)))
-        (target (format nil "/apis/gr8s.io/v1/controlplanemembers/~A" (getf options :name))))
+  (call-with-debug-kubeconfig
+   (getf options :kubeconfig)
+   (lambda (config)
+    (let ((target (format nil "/apis/gr8s.io/v1/controlplanemembers/~A" (getf options :name))))
     (multiple-value-bind (body status headers) (debug-api-request-json config "DELETE" target)
       (when (member status '(307 308))
         ;; A follower redirects writes to the leader; retry there once with
@@ -109,4 +113,4 @@
                  (terpri output))
           (format output "~A~%" (member-api-error-message body status)))
       (finish-output output)
-      0)))
+      0)))))
