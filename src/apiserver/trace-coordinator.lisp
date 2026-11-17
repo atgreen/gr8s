@@ -54,7 +54,11 @@
                                                   "verbs" #("create"))
                                     (core-object "name" "patchrollouts" "singularName" "patchrollout"
                                                  "namespaced" nil "kind" "PatchRollout"
-                                                 "verbs" #("create" "get" "list"))))))
+                                                 "verbs" #("create" "get" "list"))
+                                    (core-object "name" "controlplanemembers"
+                                                 "singularName" "controlplanemember"
+                                                 "namespaced" nil "kind" "ControlPlaneMember"
+                                                 "verbs" #("get" "list" "delete"))))))
 
 (defun release-trace-coordinator-slot (coordinator)
   "Return COORDINATOR's cluster-wide session slot exactly once."

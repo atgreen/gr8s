@@ -76,3 +76,45 @@ carry cluster identity. A bundle restores a complete control plane;
 snapshots restore a member's store. Validation evidence for the bundle
 format is recorded in the
 [bundle validation record](https://github.com/atgreen/gr8s/blob/9928d73d274c0c4ad5adb889be2b2489d407e93c/docs/backup-bundle-validation-2026-11-11.json).
+
+## Disaster recovery: a quorum lost forever
+
+An HA cluster that loses a majority of its voting members permanently —
+hosts destroyed, a member's state directory wiped — cannot elect a leader,
+so nothing commits: not application writes, and not the membership change
+that would remove the dead voters. A restarted survivor blocks at
+
+```
+gr8s HA: waiting for committed application recovery
+gr8s HA: waiting for a quorum: 2 of 2 voting members needed; ...
+```
+
+and the API never starts. The journal lines name each member and whether
+it has been heard from since startup.
+
+First check whether the survivors still hold a quorum: `gr8s member list`
+marks members never heard from as ghosts, and while a quorum of live
+voters remains, `gr8s member remove NAME` is the ordinary cure — no reset
+needed (see [membership maintenance](high-availability.md#membership-maintenance)).
+
+If the missing members are gone for good **and** the survivors cannot form
+a quorum, reset the surviving member to a one-voter cluster:
+
+```sh
+# On the surviving voter, with gr8s stopped:
+gr8s serve --state-directory /var/lib/gr8s/server --raft-init --cluster-reset ...
+```
+
+`--cluster-reset` rewrites the durable membership to the local member
+alone, keeps every committed application entry and the retained snapshot
+baseline, discards the uncommitted tail, and then continues serving as
+the sole voter. It refuses to run with `--join`, and it is idempotent —
+but remove the flag from the service arguments once the member is
+healthy, or a later restart will silently evict any members you have
+added since. Re-add replacement members afterwards with fresh
+`gr8s join-token --role control-plane` tokens; a lost member's old name
+may be reused once the reset has removed it.
+
+Run the reset on a surviving **voter** (voters hold the Raft CA). If no
+voter survived, restore the newest backup bundle instead — that is what
+`gr8s backup` exists for.

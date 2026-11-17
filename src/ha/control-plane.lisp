@@ -236,6 +236,44 @@ the cluster. Access stays gated until a current-term committed boundary applies.
         (t (values (raft-member-leader-p (ha-control-plane-member hcp))
                    (raft-member-leader-api-url (ha-control-plane-member hcp))))))
 
+(defun ha-control-plane-membership (hcp)
+  "The durable membership from this member's view: a plist of :SELF, :LEADER
+   (its id, or NIL while unknown) and :MEMBERS, each member a plist of :ID,
+   :ROLE, :ADDRESS (host port), :API-URL, :LEADER and :CONTACT (:self,
+   :in-contact once a message has arrived from it, else :never-heard -- a dead
+   voter shows as a never-heard member, which is what `gr8s member list` calls
+   a ghost). Serves /apis/gr8s.io/v1/controlplanemembers (podster-9x6)."
+  (let ((member (ha-control-plane-member hcp)))
+    (bt:with-lock-held ((raft-member-lock member))
+      (let* ((node (raft-member-node member))
+             (self (raft-node-id node))
+             (leader (raft-node-leader-id node)))
+        (list
+         :self self :leader leader
+         :members
+         (loop for (id . role) in (sort (copy-alist (raft-current-config node))
+                                        #'string< :key #'car)
+               collect (let ((link (gethash id (gr8s.raft.transport::raft-member-links member))))
+                         (list :id id :role role
+                               :address (gethash id (raft-node-peer-addresses node))
+                               :api-url (gethash id (raft-node-api-urls node))
+                               :leader (equal id leader)
+                               :contact (cond ((equal id self) :self)
+                                              ((and link (plusp (gr8s.raft.transport::raft-peer-link-received-messages link)))
+                                               :in-contact)
+                                              (t :never-heard))))))))))
+
+(defun ha-control-plane-remove-member (hcp id)
+  "Propose removing member ID from the cluster, on the leader. Returns
+   (values t nil) once the config change is proposed -- it commits when a
+   quorum of the REMAINING voters acknowledges it -- or (values nil reason),
+   reason a keyword such as :not-leader, :change-in-flight, :not-ready,
+   :transferring or :cannot-remove-self."
+  (multiple-value-bind (index outcome)
+      (raft-cluster-remove-member (ha-control-plane-member hcp) id)
+    (declare (ignore index))
+    (if (eq outcome t) (values t nil) (values nil outcome))))
+
 (defun ha-control-plane-node-endpoints (hcp node-port)
   "Return every known control-plane node endpoint as (HOST PORT), with this
    member first. Raft and node gRPC use different ports but the same advertised

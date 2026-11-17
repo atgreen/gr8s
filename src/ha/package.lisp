@@ -12,7 +12,10 @@
    #:ha-control-plane-member
    #:ha-control-plane-node-endpoints
    #:ha-control-plane-node-session-endpoints
+   #:ha-control-plane-membership
+   #:ha-control-plane-remove-member
    #:ha-control-plane-store
+   #:ha-recovery-wait-report
    #:make-ha-control-plane
    #:make-raft-plane
    #:make-raft-resource-record
@@ -35,6 +38,7 @@
    #:raft-resource-store-equal
    #:raft-resource-store-resources
    #:raft-resource-store-revision
+   #:reset-control-plane-membership
    #:start-ha-control-plane
    #:stop-ha-control-plane))
 

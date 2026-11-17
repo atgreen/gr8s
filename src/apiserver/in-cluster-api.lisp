@@ -330,7 +330,8 @@ NIL to disable API audit logging. Bound by serve from --audit-log-path.")
                                                                leader-status-fn
                                                                debug-state-directory
                                                                debug-member-resolver
-                                                               control-plane-metrics-fn)
+                                                               control-plane-metrics-fn
+                                                               control-plane-membership-fn)
   "Start the authenticated TLS Kubernetes API listener."
   (multiple-value-bind (certificate key)
       (ensure-kubernetes-api-credentials pki :addresses (cons address certificate-addresses))
@@ -341,6 +342,7 @@ NIL to disable API audit logging. Bound by serve from --audit-log-path.")
                     :debug-state-directory debug-state-directory
                     :debug-member-resolver debug-member-resolver
                     :control-plane-metrics-fn control-plane-metrics-fn
+                    :control-plane-membership-fn control-plane-membership-fn
                     :certificate (namestring certificate) :private-key (namestring key)
                     :client-ca (cluster-pki-trust-certificates pki)))))
 

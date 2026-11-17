@@ -106,6 +106,24 @@ same identity and endpoints, including after an interrupted first startup. A
 changed configuration fails before startup instead of publishing a new address
 that other members cannot reach. This release has no endpoint migration command.
 
+### Membership maintenance
+
+`gr8s member list` shows the durable membership from any member a kubeconfig
+reaches: each member's role, address, leadership, and a contact column — a
+voter marked `never-heard` is a **ghost**, holding a quorum vote it can never
+cast (its host or state directory is gone). The same data is served at
+`GET /apis/gr8s.io/v1/controlplanemembers` for other tooling.
+
+`gr8s member remove NAME` proposes dropping a member through the leader. The
+change commits once a quorum of the **remaining** voters acknowledges it, so
+it cures a ghost only while the survivors still hold a quorum (for example,
+one dead voter out of three). A member cannot remove itself. When the dead
+members themselves broke the quorum — one dead voter out of two — nothing can
+commit anymore, and the escape hatch is `gr8s serve --cluster-reset` on a
+surviving voter: see
+[disaster recovery](backup-restore.md#disaster-recovery-a-quorum-lost-forever).
+A removed member's name may be reused by a later join.
+
 The [production recovery validation](evidence/production-ha-recovery-validation-2026-11-10.json)
 uses three real CLI processes and a witness with authenticated Raft. It verifies
 leader loss, rejoin, full restart, preserved credentials and writes with a witness
