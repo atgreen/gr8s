@@ -36,7 +36,8 @@
                              "contact" (ecase (getf entry :contact)
                                          (:self "self")
                                          (:in-contact "in-contact")
-                                         (:never-heard "never-heard")))))
+                                         (:never-heard "never-heard")
+                                         (:unknown "unknown")))))
                 (when (getf entry :leader) (setf (gethash "leader" status) t))
                 status))))
 

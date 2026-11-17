@@ -44,6 +44,15 @@ the Kubernetes API version with a gr8s release suffix (see
   raft/node/API ports are dropped — the silent join-stall we hit when a
   WireGuard interface sat in no zone. `serve` also admits the raft port
   through firewalld alongside the node and API ports.
+- A joining member's catch-up is now observable (podster-84o): the
+  recovery-wait journal line reports snapshot-transfer progress (bytes
+  received, time since the last chunk), and an admitted learner that has
+  received nothing says so explicitly with a pointer at `gr8s doctor`'s
+  firewall check — previously a healthy transfer and a firewalled stall
+  logged identically. `gr8s member list` no longer presents healthy
+  peers as ghosts when queried on a follower: contact is reported as
+  `unknown` off-leader (followers rarely message each other), with a
+  note naming the leader to query.
 
 - HA control-plane shutdown now always completes: stopping a Raft member
   bounds every worker-thread join under one deadline (10s), abandoning a

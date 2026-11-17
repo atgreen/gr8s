@@ -104,5 +104,25 @@
                                   peer address heard)))
                       peers))))
         (format nil "gr8s HA: waiting for a quorum: ~D of ~D voting member~:P needed; ~{~A~^; ~}~
+                     ~@[~%~A~]~
                      ~%gr8s HA: if the missing members are permanently gone, restart this member with --cluster-reset to continue alone"
-                (raft-majority node) (raft-cluster-size node) descriptions)))))
+                (raft-majority node) (raft-cluster-size node) descriptions
+                (ha-catchup-transfer-line member node))))))
+
+(defun ha-catchup-transfer-line (member node)
+  "One journal line describing a joiner's snapshot catch-up, or NIL: progress
+while chunks arrive, and -- the silent stall podster-84o is about -- an explicit
+warning when an admitted learner has received nothing, whose usual cause is a
+firewalled raft port on this member (see `gr8s doctor`)."
+  (let ((receiver (gr8s.raft.transport::raft-member-snapshot-receiver member)))
+    (cond
+      (receiver
+       (format nil "gr8s HA: application snapshot transfer: ~D~@[ of ~D~] bytes received, last chunk ~Ds ago"
+               (gr8s.raft.transport::raft-snapshot-receiver-offset receiver)
+               (let ((total (gr8s.raft.transport::raft-snapshot-receiver-total receiver)))
+                 (and (integerp total) (plusp total) total))
+               (round (- (get-internal-real-time)
+                         (gr8s.raft.transport::raft-snapshot-receiver-activity receiver))
+                      internal-time-units-per-second)))
+      ((eq :learner (gr8s.raft::raft-node-self-role node))
+       "gr8s HA: admitted, but no application snapshot bytes have arrived; check that this member's raft port is reachable from the leader ('gr8s doctor' checks the host firewall)"))))

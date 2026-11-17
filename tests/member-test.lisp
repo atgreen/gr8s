@@ -167,3 +167,51 @@
                   "file paths resolve relative to the kubeconfig and pass through")
               (is (equal "abc" (getf config :token))))))
       (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
+;;; podster-84o: followers rarely message each other, so a follower's view
+;;; presented every healthy peer as "never-heard" -- a false ghost. Contact is
+;;; now :unknown unless this member is the leader, and the CLI says where to
+;;; look instead of crying ghost.
+
+(test follower-view-reports-contact-as-unknown
+  (let* ((node (cl-raft::make-raft-node :id "b" :send-fn (lambda (&rest args) (declare (ignore args)))))
+         (member (gr8s.raft.transport::make-raft-member :node node))
+         (hcp (gr8s.ha::make-ha-control-plane :member member :store nil)))
+    (gr8s.raft::raft-configure node '(("a" . :voter) ("b" . :voter) ("c" . :voter)))
+    (setf (gr8s.raft:raft-node-leader-id node) "a")
+    (let* ((membership (gr8s.ha:ha-control-plane-membership hcp))
+           (members (getf membership :members)))
+      (is (equal '(:unknown :self :unknown)
+                 (mapcar (lambda (m) (getf m :contact)) members))
+          "a follower reports peers as unknown, never as ghosts"))
+    (is (equal "unknown"
+               (gethash "contact"
+                        (gethash "status"
+                                 (gr8s.apiserver::control-plane-member-object
+                                  '(:id "c" :role :voter :address nil :api-url nil
+                                    :leader nil :contact :unknown))))))))
+
+(test member-list-does-not-cry-ghost-from-a-follower
+  (let ((request-original (symbol-function 'gr8s.server::debug-api-request-json))
+        (kubeconfig-original (symbol-function 'gr8s.server::read-debug-kubeconfig)))
+    (unwind-protect
+         (progn
+           (setf (symbol-function 'gr8s.server::read-debug-kubeconfig)
+                 (lambda (path) (declare (ignore path)) (list :server "https://127.0.0.1:6443"))
+                 (symbol-function 'gr8s.server::debug-api-request-json)
+                 (lambda (config method target)
+                   (declare (ignore config method target))
+                   (values (com.inuoe.jzon:parse
+                            "{\"kind\":\"ControlPlaneMemberList\",\"leader\":\"a\",\"items\":[
+                              {\"metadata\":{\"name\":\"a\"},\"spec\":{\"role\":\"voter\"},\"status\":{\"contact\":\"unknown\",\"leader\":true}},
+                              {\"metadata\":{\"name\":\"b\"},\"spec\":{\"role\":\"voter\"},\"status\":{\"contact\":\"self\"}}]}")
+                           200)))
+           (let* ((output (make-string-output-stream))
+                  (code (gr8s.server::run-member-list-command
+                         (list :command :member-list :kubeconfig "ignored" :output "text")
+                         output))
+                  (text (get-output-stream-string output)))
+             (is (zerop code) "unknown contact is not a ghost")
+             (is (search "visible only from the leader (a)" text))
+             (is (not (search "never heard from" text)))))
+      (setf (symbol-function 'gr8s.server::debug-api-request-json) request-original
+            (symbol-function 'gr8s.server::read-debug-kubeconfig) kubeconfig-original))))
