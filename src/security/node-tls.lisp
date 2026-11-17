@@ -108,13 +108,39 @@ than silently replacing the node's authenticated network identity."
     (unless (equal "h2" (pure-tls:tls-selected-alpn stream))
       (pki-fail "invalid-server-protocol" "Node server did not negotiate HTTP/2"))))
 
+(defparameter +node-channel-dead-peer-timeout-seconds+ 15
+  "How long a node/member channel may carry unacknowledged data before the
+kernel declares the peer dead. A suspended or parted peer otherwise leaves
+heartbeats buffering locally for minutes before EOF surfaces: after a laptop
+resume the agent kept writing into a dead session for 2m22s and the node sat
+NotReady the whole time (podster-ao6).")
+
+(defun harden-node-channel-socket (socket)
+  "Bound dead-peer detection on SOCKET with TCP_USER_TIMEOUT (unacknowledged
+sends) and keep-alive probes (a fully idle direction). Best-effort: an
+unsupported option never blocks the connection."
+  (ignore-errors
+    (let ((fd (sb-bsd-sockets:socket-file-descriptor (usocket:socket socket))))
+      (cffi:with-foreign-object (value :int)
+        (flet ((set-option (level option option-value)
+                 (setf (cffi:mem-ref value :int) option-value)
+                 (cffi:foreign-funcall "setsockopt" :int fd :int level :int option
+                                       :pointer value :unsigned-int 4 :int)))
+          (set-option 1 9 1)   ; SOL_SOCKET SO_KEEPALIVE
+          (set-option 6 18 (* 1000 +node-channel-dead-peer-timeout-seconds+)) ; SOL_TCP TCP_USER_TIMEOUT (ms)
+          (set-option 6 4 5)   ; TCP_KEEPIDLE: probe an idle connection after 5s
+          (set-option 6 5 5)   ; TCP_KEEPINTVL: every 5s
+          (set-option 6 6 3))))) ; TCP_KEEPCNT: dead after 3 missed probes
+  socket)
+
 (defun %make-node-tls-channel
     (host port &key (timeout 10) ca-pin ca-certificate-path certificate-path private-key-path)
   "Authenticate the server before sending HTTP/2 data, including join tokens."
   (unless (or ca-pin ca-certificate-path)
     (pki-fail "missing-server-trust" "A cluster CA pin or certificate is required"))
-  (let ((socket (usocket:socket-connect host port :element-type '(unsigned-byte 8)
-                                       :timeout timeout))
+  (let ((socket (harden-node-channel-socket
+                 (usocket:socket-connect host port :element-type '(unsigned-byte 8)
+                                         :timeout timeout)))
         (tls nil))
     (handler-case
         (progn

@@ -320,7 +320,14 @@ concurrent publications cannot reorder a delta ahead of its base."
   (let* ((output *error-output*)
          (report (bt:make-thread
                   (lambda ()
-                    (let ((*standard-output* output))
+                    ;; Frames carry live session/store structs; unbounded
+                    ;; printing turned each one into multi-KB journal lines
+                    ;; (podster-ao6). Depth/length limits keep the stacks
+                    ;; readable and the journal sane.
+                    (let ((*standard-output* output)
+                          (*print-level* 3)
+                          (*print-length* 8)
+                          (*print-lines* 1))
                       (ignore-errors (debug-backtraces "" 2)))
                     (finish-output output))
                   :name "gr8s node session stall report")))

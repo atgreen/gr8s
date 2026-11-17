@@ -2904,3 +2904,40 @@
         (is (search "HELLO" (princ-to-string condition))
             "other mismatches keep naming the payload case")))
     (finishes (gr8s.apiserver::node-envelope-payload envelope :hello))))
+
+;;; podster-ao6: after a suspend the agent wrote heartbeats into a dead TCP
+;;; connection for 2m22s before EOF surfaced -- buffered sends count as
+;;; "success" until the kernel's retransmission patience runs out. Every node
+;;; channel now bounds dead-peer detection with TCP_USER_TIMEOUT and
+;;; keep-alive probes, verified here against the kernel with getsockopt.
+
+(test node-channels-bound-dead-peer-detection
+  (let* ((listener (usocket:socket-listen "127.0.0.1" 0 :element-type '(unsigned-byte 8)))
+         (port (usocket:get-local-port listener)))
+    (unwind-protect
+         (let ((socket (usocket:socket-connect "127.0.0.1" port
+                                               :element-type '(unsigned-byte 8))))
+           (unwind-protect
+                (progn
+                  (is (eq socket (gr8s.security::harden-node-channel-socket socket))
+                      "hardening returns the socket for inline use")
+                  (let ((fd (sb-bsd-sockets:socket-file-descriptor (usocket:socket socket))))
+                    (flet ((option (level name)
+                             (cffi:with-foreign-objects ((value :int) (len :unsigned-int))
+                               (setf (cffi:mem-ref value :int) 0
+                                     (cffi:mem-ref len :unsigned-int) 4)
+                               (cffi:foreign-funcall "getsockopt" :int fd :int level :int name
+                                                     :pointer value :pointer len :int)
+                               (cffi:mem-ref value :int))))
+                      (is (= (* 1000 gr8s.security::+node-channel-dead-peer-timeout-seconds+)
+                             (option 6 18))
+                          "TCP_USER_TIMEOUT bounds unacknowledged sends")
+                      (is (plusp (option 1 9)) "SO_KEEPALIVE probes idle connections")
+                      (is (= 5 (option 6 4)) "keep-alive idle threshold")
+                      (is (= 3 (option 6 6)) "keep-alive probe count"))))
+             (usocket:socket-close socket)))
+      (usocket:socket-close listener))))
+
+(test socket-hardening-tolerates-unsupported-sockets
+  ;; Best-effort by contract: a closed or odd socket must not signal.
+  (finishes (gr8s.security::harden-node-channel-socket nil)))
