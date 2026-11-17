@@ -208,7 +208,11 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$RELEASE_TAG" --verify-tag --notes-file release-notes.md release/*
+          # Every v1.37.2-gr8s.N tag is a trial pre-release while gr8s is in
+          # trial; publish it flagged as such so it is never the "Latest"
+          # release. Drop --prerelease when cutting the first stable release.
+          gh release create "$RELEASE_TAG" --prerelease --verify-tag \
+            --notes-file release-notes.md release/*
 
   image:
     name: Publish gr8s-net container image

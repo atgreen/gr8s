@@ -7,6 +7,11 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ## [Unreleased]
 
+## [v1.37.2-gr8s.1] — 2026-11-17
+
+Second trial pre-release. Hardening from live multi-node HA operation on a
+roaming WireGuard cluster, plus Kubernetes-native Pod failure reporting.
+
 ### Fixed
 
 - Follower writes no longer break on a roaming cluster: the control-plane
@@ -237,5 +242,6 @@ OpenSSL. Release artifacts cover Linux amd64 and arm64: binaries with
 checksums, tarballs carrying the installer and lifecycle scripts, and
 CycloneDX and SPDX SBOMs for the Lisp dependencies.
 
-[Unreleased]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.0...HEAD
+[Unreleased]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.1...HEAD
+[v1.37.2-gr8s.1]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.0...v1.37.2-gr8s.1
 [v1.37.2-gr8s.0]: https://github.com/atgreen/gr8s/releases/tag/v1.37.2-gr8s.0
