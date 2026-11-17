@@ -26,6 +26,12 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- `gr8s member`: operator-facing HA membership. `list` shows every durable
+  control-plane member with role, address, leadership and contact state —
+  a voter never heard from is flagged as a ghost — and `remove NAME`
+  proposes dropping a member through the leader (it commits once the
+  remaining voters agree). Backed by
+  `GET/DELETE /apis/gr8s.io/v1/controlplanemembers`.
 - `gr8s serve --cluster-reset`: the escape hatch for an HA cluster whose
   voting majority is permanently gone. It rewrites the durable membership
   to the surviving member alone — committed application entries and the

@@ -92,8 +92,13 @@ gr8s HA: waiting for a quorum: 2 of 2 voting members needed; ...
 and the API never starts. The journal lines name each member and whether
 it has been heard from since startup.
 
-If (and only if) the missing members are gone for good, reset the
-surviving member to a one-voter cluster:
+First check whether the survivors still hold a quorum: `gr8s member list`
+marks members never heard from as ghosts, and while a quorum of live
+voters remains, `gr8s member remove NAME` is the ordinary cure — no reset
+needed (see [membership maintenance](high-availability.md#membership-maintenance)).
+
+If the missing members are gone for good **and** the survivors cannot form
+a quorum, reset the surviving member to a one-voter cluster:
 
 ```sh
 # On the surviving voter, with gr8s stopped:

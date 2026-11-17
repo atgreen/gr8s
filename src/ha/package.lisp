@@ -12,6 +12,8 @@
    #:ha-control-plane-member
    #:ha-control-plane-node-endpoints
    #:ha-control-plane-node-session-endpoints
+   #:ha-control-plane-membership
+   #:ha-control-plane-remove-member
    #:ha-control-plane-store
    #:ha-recovery-wait-report
    #:make-ha-control-plane

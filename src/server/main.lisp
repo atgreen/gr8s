@@ -785,22 +785,32 @@ authenticated tunnel as slynk and launches ICL's browser mode (icl -b
    stream)
   (finish-output stream))
 
-(defun debug-api-get-json (config target)
+(defun debug-api-request-json (config method target)
+  "Send METHOD to TARGET on CONFIG's server. Returns (values parsed-body status
+   headers): the JSON body parsed when there is one (NIL otherwise), the HTTP
+   status, and the response headers, leaving non-200 handling to the caller."
   (multiple-value-bind (stream socket host port base-path) (open-debug-api-stream config)
     (unwind-protect
          (progn
-           (write-debug-http-request stream "GET" host port (concatenate 'string base-path target)
+           (write-debug-http-request stream method host port (concatenate 'string base-path target)
                                      (getf config :token))
            (multiple-value-bind (status headers)
                (gr8s.protocol::parse-http-response-head
                 (gr8s.protocol::read-http-response-head stream))
-             (unless (= status 200) (error "Kubernetes API returned HTTP ~D" status))
              (let* ((length (parse-integer (or (cdr (assoc :content-length headers)) "0")))
                     (body (make-array length :element-type '(unsigned-byte 8))))
                (read-sequence body stream)
-               (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string body)))))
+               (values (when (plusp length)
+                         (ignore-errors
+                          (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string body))))
+                       status headers))))
       (ignore-errors (close stream))
       (ignore-errors (usocket:socket-close socket)))))
+
+(defun debug-api-get-json (config target)
+  (multiple-value-bind (body status) (debug-api-request-json config "GET" target)
+    (unless (= status 200) (error "Kubernetes API returned HTTP ~D" status))
+    body))
 
 (defun random-websocket-key ()
   (ag-grpc:base64-encode (secure-random-octets 16)))
@@ -1704,6 +1714,8 @@ needs no shell/coreutils/util-linux. Returns 0."
      (parse-restore-options (rest arguments)))
     ((string= "status" (first arguments))
      (parse-status-options (rest arguments)))
+    ((string= "member" (first arguments))
+     (parse-member-options (rest arguments)))
     ((string= "doctor" (first arguments))
      (parse-doctor-options (rest arguments)))
     ((string= "dashboard" (first arguments))
@@ -2860,7 +2872,8 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                                  store runtime reconciler pki
                                  :port in-cluster-api-port
                                  :debug-state-directory state-directory
-                                 :debug-member-resolver (make-debug-member-resolver ha))))
+                                 :debug-member-resolver (make-debug-member-resolver ha)
+                                 :control-plane-membership-fn (make-control-plane-membership-fn ha))))
                         (setf (pod-store-in-cluster-config store)
                               (list :host "10.96.0.1" :port 443
                                     :ca-pem (uiop:read-file-string (cluster-pki-ca-certificate-path pki))))
@@ -2885,6 +2898,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                            (list (serve-api-advertise-address options))
                            :debug-state-directory state-directory
                            :debug-member-resolver (make-debug-member-resolver ha)
+                           :control-plane-membership-fn (make-control-plane-membership-fn ha)
                            :control-plane-metrics-fn
                            (lambda ()
                              (concatenate 'string
@@ -3046,6 +3060,14 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
          :api-url (format nil "https://~A:~D" (serve-api-advertise-address options)
                           (getf options :port))
          :pki pki)))))
+
+(defun make-control-plane-membership-fn (ha)
+  "The acceptor's HA membership surface (podster-9x6), or NIL outside HA."
+  (when ha
+    (lambda (action &optional id)
+      (ecase action
+        (:list (gr8s.ha:ha-control-plane-membership ha))
+        (:remove (gr8s.ha:ha-control-plane-remove-member ha id))))))
 
 (defun make-debug-member-resolver (ha)
   "Return an exact member lookup closure for the Slynk API, or NIL outside HA."
@@ -3314,6 +3336,7 @@ No HA API may start from member-local certificate state before this converges."
     ("kubeconfig" "Print or write a cluster kubeconfig")
     ("doctor" "Diagnose a node state directory")
     ("status" "Show cluster health at a glance")
+    ("member" "List or remove HA control-plane members")
     ("debug" "Inspect live processes and trace Pods")
     ("wireguard" "Manage WireGuard identity")
     ("network" "Inspect cluster networking") ("certificate" "Manage certificates")
@@ -3499,6 +3522,13 @@ No HA API may start from member-local certificate state before this converges."
              :options '(("--kubeconfig PATH" "Cluster kubeconfig (default $KUBECONFIG or ~/.kube/config)")
                         ("--output FORMAT" "text (default) or json")
                         ("--help, -h" "show help"))))
+      ((equal path '("member"))
+       (page "List or remove HA control-plane members" "COMMAND [OPTIONS]"
+             :commands '(("list" "Show the durable membership, with contact state (default)")
+                         ("remove NAME" "Propose removing a member; commits once the remaining voters agree"))
+             :options '(("--kubeconfig PATH" "Cluster kubeconfig (default $KUBECONFIG or ~/.kube/config)")
+                        ("--output FORMAT" "text (default) or json")
+                        ("--help, -h" "show help"))))
       ((equal path '("backup"))
        (page "Capture and verify encrypted state backups" "COMMAND [OPTIONS]"
              :commands '(("keygen" "Create a private backup key file")
@@ -3631,6 +3661,8 @@ No HA API may start from member-local certificate state before this converges."
                (run-backup-command options))
               (:restore (run-restore-command options))
               (:status (run-status-command options))
+              (:member-list (run-member-list-command options))
+              (:member-remove (run-member-remove-command options))
               (:doctor
                (if (plusp (apply #'run-doctor
                                  (append
