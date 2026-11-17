@@ -28,6 +28,16 @@ the Kubernetes API version with a gr8s release suffix (see
   ":PROTOCOL-ERROR"; a refused Raft admission names its reason in the
   leader's journal and in the JoinResponse (new `reason` field), and the
   joiner's failure message repeats it.
+- HA replicas can no longer fork over the node lease clock (podster-uvs):
+  the replicated-node conflict check now ignores `lastHeartbeat`,
+  `leaseDeadline` and `readySince`, which renew every few seconds on the
+  session-owning member — including them gave a write racing a heartbeat
+  member-dependent verdicts, so some replicas silently skipped a
+  committed delta, diverged, and then conflicted on every later delta
+  from the forked side (observed live as a leader marking the author
+  NotReady while its handshakes were refused once a second). A member
+  that does skip a genuinely conflicting committed delta now says so in
+  its journal instead of staying silent.
 
 - HA control-plane shutdown now always completes: stopping a Raft member
   bounds every worker-thread join under one deadline (10s), abandoning a

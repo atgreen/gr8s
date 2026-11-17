@@ -570,12 +570,23 @@ renewals use the same compact one-key delta without changing resourceVersion."
               do (ignore-errors (delete-file (node-path store node)))
                  (remhash name (pod-store-nodes store))))))
 
+(defparameter +node-volatile-comparison-fields+
+  '("resourceVersion" "lastHeartbeat" "leaseDeadline" "readySince")
+  "Fields the replicated-node CAS comparison ignores: the commit revision and
+the lease clock. The clock renews every few seconds on the session-owning
+member, so including it gives a write racing a heartbeat member-dependent
+conflict verdicts -- replicas that silently skip a committed delta fork, and
+every later delta from the forked side conflicts forever (podster-uvs).")
+
 (defun node-object-same-state-p (left right)
-  "Compare a retry's desired state independently of its assigned commit revision."
+  "Compare a retry's desired state independently of its assigned commit revision
+and the volatile lease clock. The verdict decides whether a committed delta
+installs, so it must come out identical on every member (podster-uvs)."
   (if (and (hash-table-p left) (hash-table-p right))
       (let ((a (copy-pod-status-value left)) (b (copy-pod-status-value right)))
-        (remhash "resourceVersion" a)
-        (remhash "resourceVersion" b)
+        (dolist (field +node-volatile-comparison-fields+)
+          (remhash field a)
+          (remhash field b))
         (json-value-equal-p a b))
       (eq left right)))
 
@@ -632,8 +643,16 @@ renewals use the same compact one-key delta without changing resourceVersion."
                                  (gethash (gethash "name" change) (pod-store-nodes store))) 'null)
               unless (or (node-object-same-state-p current (gethash "expected" change))
                          (node-object-same-state-p current (gethash "object" change)))
-                do (return-from install-node-state-delta (list :node-conflict))))
+                do ;; A skipped committed delta must be visible in the journal:
+                   ;; members silently dropping deltas is how replica divergence
+                   ;; went unnoticed for hours (podster-uvs).
+                   (format *error-output*
+                           "~&gr8s: committed node delta for ~A conflicts with this member's state; skipped~%"
+                           (gethash "name" change))
+                   (return-from install-node-state-delta (list :node-conflict))))
       (when (and checked (not (node-delta-claims-available-p store changes)))
+        (format *error-output*
+                "~&gr8s: committed node delta refused: it claims an identity, address or CIDR another node holds~%")
         (return-from install-node-state-delta (list :node-conflict)))
       (loop for change across changes
             for name = (gethash "name" change)
