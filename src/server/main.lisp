@@ -1670,6 +1670,8 @@ needs no shell/coreutils/util-linux. Returns 0."
      (parse-backup-options (rest arguments)))
     ((string= "restore" (first arguments))
      (parse-restore-options (rest arguments)))
+    ((string= "status" (first arguments))
+     (parse-status-options (rest arguments)))
     ((string= "doctor" (first arguments))
      (parse-doctor-options (rest arguments)))
     ((string= "dashboard" (first arguments))
@@ -3018,6 +3020,12 @@ This command prints static guidance to stdout, needs no cluster or root access,
 and changes no state. Save it with `gr8s skill > gr8s-guide.md` for an agent.
 Use `gr8s help` and `gr8s help COMMAND` for command discovery.
 
+With cluster access, run `gr8s status --kubeconfig KUBECONFIG` first: one
+screen of cluster health — API, nodes, workload exceptions, networking,
+storage, versions, recent Warning events — where every warn/fail line names
+the next command to run (`--output json` for a stable machine-readable form;
+exit 0 healthy, 1 warnings, 2 failures).
+
 ## First-time setup and inventory
 
 Real workloads need Linux 6.6+ with TCX eBPF support, root, cgroup v2, and
@@ -3248,6 +3256,7 @@ No HA API may start from member-local certificate state before this converges."
     ("runtime" "Manage sandbox runtimes")
     ("kubeconfig" "Print or write a cluster kubeconfig")
     ("doctor" "Diagnose a node state directory")
+    ("status" "Show cluster health at a glance")
     ("debug" "Inspect live processes and trace Pods")
     ("wireguard" "Manage WireGuard identity")
     ("network" "Inspect cluster networking") ("certificate" "Manage certificates")
@@ -3426,6 +3435,11 @@ No HA API may start from member-local certificate state before this converges."
                          ("reencrypt" "Rewrite all Secrets with the active key")
                          ("finalize" "Discard superseded encryption keys"))
              :options '(("--help, -h" "show help"))))
+      ((equal path '("status"))
+       (page "Show cluster health at a glance" "[OPTIONS]"
+             :options '(("--kubeconfig PATH" "Cluster kubeconfig (default $KUBECONFIG or ~/.kube/config)")
+                        ("--output FORMAT" "text (default) or json")
+                        ("--help, -h" "show help"))))
       ((equal path '("backup"))
        (page "Capture and verify encrypted state backups" "COMMAND [OPTIONS]"
              :commands '(("keygen" "Create a private backup key file")
@@ -3557,6 +3571,7 @@ No HA API may start from member-local certificate state before this converges."
               ((:backup-keygen :backup-save :backup-verify)
                (run-backup-command options))
               (:restore (run-restore-command options))
+              (:status (run-status-command options))
               (:doctor
                (if (plusp (apply #'run-doctor
                                  (append
