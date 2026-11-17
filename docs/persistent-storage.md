@@ -120,6 +120,35 @@ The agent mounts through `mount(2)`, so hosts need the kernel NFS client but not
   the background, so a dead server holds up only the Pods that use it. On Pod
   deletion, a blocked unmount is forced and detached.
 
+### Export requirements
+
+Dynamic provisioning creates each claim's directory on the node where its Pod
+first runs, mounting the share as root to `mkdir` it. So, on the NFS server:
+
+- **Admit every node that may mount.** The export's host list must include each
+  node's address *as the server sees it*. A node that reaches the server over a
+  tunnel (such as WireGuard) presents its tunnel address, not its LAN address, so
+  admit that one — otherwise the mount is refused with `access denied` /
+  `Permission denied`. A Pod can schedule onto any eligible node, so admit them
+  all (or confine NFS Pods with scheduling constraints).
+- **Do not squash root** (`no_root_squash`; "No mapping" on a Synology). gr8s
+  creates the per-claim directory as root, and a root-squashing export rejects
+  that `mkdir` with `Permission denied` even when the mount itself succeeds.
+- **Privileged ports are fine.** gr8s mounts from a reserved source port, so an
+  export restricted to privileged ports (the default, `secure`) works; you do
+  not need `insecure` / "allow connections from non-privileged ports".
+
+A static PV pointing at an existing `nfs:` share needs only that its mounting
+nodes are admitted; its reclaim policy must be `Retain` (`Delete` and `Recycle`
+are unsupported for a hand-made PV).
+
+When a mount fails, the Pod's `FailedMount` event carries the reason: `access
+denied` / `Permission denied` is almost always the export host list or root
+squash above; a `No such file or directory` from an NFSv4 attempt is usually the
+server's `fsid=0` pseudo-root, which gr8s handles by falling back to NFSv3.
+`gr8s doctor` reports whether the host's kernel NFS client is available, and
+`gr8s status` flags a control-plane member whose store recovery is stuck.
+
 Each Pod gets its own mount, removed when the Pod ends.
 
 ## Reclaim

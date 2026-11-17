@@ -78,6 +78,28 @@ creates it 0700. MODE/OWNER-UID are ignored when EXISTS-P is NIL."
     (t
      (values :ok (format nil "owned by uid ~D, mode ~3,'0O" owner-uid (logand #o777 mode)) nil))))
 
+(defun doctor-filesystem-listed-p (filesystems name)
+  "True when /proc/filesystems lists NAME. Each line is an optional \"nodev\" tag
+and the filesystem name, whitespace-separated (e.g. \"nodev\\tnfs4\")."
+  (some (lambda (line)
+          (member name (remove "" (uiop:split-string line :separator '(#\Space #\Tab))
+                               :test #'equal)
+                  :test #'string=))
+        (uiop:split-string (string-trim '(#\Newline) filesystems) :separator '(#\Newline))))
+
+(defun doctor-nfs-client-status (loaded-p loadable-p)
+  "Decide the kernel NFS-client check; return (values status detail hint). gr8s
+mounts NFS PersistentVolumes through the mount(2) syscall, so the only host
+prerequisite is the in-kernel NFS client -- never mount.nfs or nfs-utils. Its
+absence is advisory, not a failure: a cluster that mounts no NFS volumes never
+needs it, so a missing client warns rather than fails."
+  (cond
+    (loaded-p (values :ok "in-kernel NFS client present (nfs/nfs4)" nil))
+    (loadable-p (values :ok "in-kernel NFS client available (module loads on demand)" nil))
+    (t (values :warn "no in-kernel NFS client (no nfs/nfs4 support found)"
+               "only needed for NFS PersistentVolumes; 'sudo modprobe nfs' (v3) or ~
+                'sudo modprobe nfsv4' -- gr8s mounts via mount(2) and needs no nfs-utils/mount.nfs"))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Data gathering (degrades gracefully; a probe failure becomes a warn).
 
@@ -441,6 +463,24 @@ zone dropped inbound 7000 without a trace (podster-rnh). Returns the FAIL count.
                                    interface cidr port)
                            "gr8s programs these when the overlay comes up; cross-node Pod traffic stays blocked until it does"))))))
         (error (c) (note :warn "overlay firewall" (format nil "could not check: ~A" c))))
+
+      ;; In-kernel NFS client for NFS PersistentVolumes (podster-0fr). gr8s
+      ;; mounts NFS through mount(2), not mount.nfs, so the one host prerequisite
+      ;; is the kernel client; advisory, since a cluster using no NFS volumes
+      ;; never needs it. The module usually auto-loads on first mount, so a
+      ;; dry-run modprobe counts as available.
+      (handler-case
+          (let* ((filesystems (handler-case (uiop:read-file-string "/proc/filesystems") (error () "")))
+                 (loaded (or (doctor-filesystem-listed-p filesystems "nfs4")
+                             (doctor-filesystem-listed-p filesystems "nfs")))
+                 (loadable (or loaded
+                               (flet ((loadable-p (module)
+                                        (let ((code (nth-value 1 (doctor-run (list "modprobe" "-nq" module)))))
+                                          (and code (zerop code)))))
+                                 (or (loadable-p "nfs") (loadable-p "nfsv4"))))))
+            (multiple-value-bind (status detail hint) (doctor-nfs-client-status loaded loadable)
+              (note status "nfs client" detail hint)))
+        (error (c) (note :warn "nfs client" (format nil "could not check: ~A" c))))
 
       ;; The in-process eBPF programs compile (no ELF, no toolchain).
       (handler-case

@@ -40,6 +40,22 @@
     ;; Exists but is not a directory -> fail.
     (is (eq :fail (status 0 t nil 0 #o100600)))))
 
+(test doctor-nfs-client-decision
+  ;; /proc/filesystems parsing: the "nodev<TAB>nfs4" shape, and plain names.
+  (let ((procfs (format nil "nodev~Asysfs~%nodev~Atmpfs~%~Aext4~%nodev~Anfs~%nodev~Anfs4~%"
+                        #\Tab #\Tab #\Tab #\Tab #\Tab)))
+    (is (gr8s.server::doctor-filesystem-listed-p procfs "nfs"))
+    (is (gr8s.server::doctor-filesystem-listed-p procfs "nfs4"))
+    (is (gr8s.server::doctor-filesystem-listed-p procfs "ext4"))
+    (is (not (gr8s.server::doctor-filesystem-listed-p procfs "nfsd")))
+    (is (not (gr8s.server::doctor-filesystem-listed-p "" "nfs"))))
+  (flet ((status (&rest args) (values (apply #'gr8s.server::doctor-nfs-client-status args))))
+    ;; Already loaded, or loadable on demand -> ok. Absent is advisory (warn), never fail.
+    (is (eq :ok (status t nil)))
+    (is (eq :ok (status t t)))
+    (is (eq :ok (status nil t)))
+    (is (eq :warn (status nil nil)))))
+
 (test doctor-firewall-dns-decision
   ;; No active firewall -> not blocked.
   (is (not (gr8s.server::doctor-firewall-blocks-dns-p nil nil nil)))

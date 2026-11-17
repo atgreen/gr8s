@@ -119,6 +119,22 @@
       (is (eq :warn (check-field check :status)))
       (is (search "old at v1.37.1-gr8s.9" (check-field check :detail))))))
 
+(test control-plane-check-flags-a-member-stuck-in-application-restore
+  (flet ((check (&rest members) (gr8s.server::status-control-plane-check members)))
+    ;; All ready (or unreachable/unprobed, which are not faults) -> ok.
+    (is (eq :ok (check-field (check '(:name "a" :readyz :ready)
+                                    '(:name "b" :readyz :unreachable)
+                                    '(:name "c" :readyz :unprobed)) :status)))
+    ;; No membership API (single control plane) -> ok.
+    (is (eq :ok (check-field (gr8s.server::status-control-plane-check nil) :status)))
+    ;; A member whose /readyz 503s (store access blocked by an interrupted
+    ;; restore) -> warn naming it, with the restart remedy (podster-ftb).
+    (let ((check (check '(:name "gr8s2" :readyz :restoring) '(:name "leader" :readyz :ready))))
+      (is (eq :warn (check-field check :status)))
+      (is (search "gr8s2" (check-field check :detail)))
+      (is (search "application restore" (check-field check :detail)))
+      (is (search "systemctl restart gr8s-server" (check-field check :hint))))))
+
 (test warning-events-deduplicate-cap-and-order-newest-first
   (let ((events (status-fixture-items "{\"items\":[
           {\"reason\":\"BackOff\",\"message\":\"older\",\"lastTimestamp\":\"2026-11-16T10:00:00Z\",
