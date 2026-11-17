@@ -9,6 +9,15 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- Dead peers are detected in seconds, not minutes: every node and member
+  channel now sets `TCP_USER_TIMEOUT` (15s) and keep-alive probes, so a
+  suspended or vanished peer surfaces as a connection error within
+  ~15 seconds instead of waiting out the kernel's retransmission
+  patience — after a laptop resume, the agent previously wrote
+  heartbeats into a dead session for 2m22s while its node sat NotReady.
+  Session-stall reports also stopped dumping unbounded structure
+  graphs into the journal.
+
 - Workloads survive control-plane restarts and upgrades: the packaged
   and installer-generated systemd units use `KillMode=process` with
   `Delegate=yes` (k3s parity), so stopping `gr8s-server` kills only the
