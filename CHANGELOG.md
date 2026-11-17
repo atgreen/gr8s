@@ -80,6 +80,12 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Changed
 
+- `gr8s skill` gains an HA troubleshooting playbook distilled from live
+  incident experience: membership-first orientation, the journal lines
+  that explain refusals and what each means, the member-failure decision
+  tree (remove vs `--cluster-reset`), the wipe-and-rejoin checklist, and
+  per-member replica forensics.
+
 - The dashboard is no longer optional: `make native` requires the
   embedded Headlamp frontend, which is now extracted automatically from
   the digest-pinned upstream container image (podman/docker, no Node.js)
