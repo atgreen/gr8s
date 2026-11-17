@@ -9,6 +9,16 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- Workloads survive control-plane restarts and upgrades: the packaged
+  and installer-generated systemd units use `KillMode=process` with
+  `Delegate=yes` (k3s parity), so stopping `gr8s-server` kills only the
+  gr8s process — managed containerd and the container shims survive, and
+  the restarted gr8s reconnects and re-adopts the running containers.
+  Previously every service restart SIGKILLed the shims (they live in the
+  unit's cgroup), restarting every pod on the node. Verified live: the
+  same container process survived a full `systemctl restart`.
+  `gr8s-killall.sh` remains the way to stop workloads too.
+
 - `gr8s status` and `gr8s member` now work against kubeconfigs with inline
   certificate data (`certificate-authority-data` and friends) — which
   `gr8s kubeconfig` itself emits. The CLI previously failed TLS
