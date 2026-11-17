@@ -30,7 +30,7 @@ TEST_EVAL := --eval '(require :asdf)' --eval '(asdf:test-system :gr8s)'
 OCICL ?= ocicl
 OCICL_STAMP := ocicl/.ocicl-installed
 
-.PHONY: test-raft-snapshots test-raft-checkpoint-memory test-pod-transactions test-pod-transaction-memory test-core-recovery test-core-recovery-memory all help containerd-bundle dashboard-assets generate-protocol test-protocol-generation test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api test-install-lifecycle check smoke smoke-two-node run kubeconfig notices native clean deps
+.PHONY: dashboard-assets-from-source dashboard-assets-compress test-raft-snapshots test-raft-checkpoint-memory test-pod-transactions test-pod-transaction-memory test-core-recovery test-core-recovery-memory all help containerd-bundle dashboard-assets generate-protocol test-protocol-generation test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api test-install-lifecycle check smoke smoke-two-node run kubeconfig notices native clean deps
 
 all: native
 
@@ -69,13 +69,38 @@ $(CONTAINERD_BUNDLE_MARKER): scripts/install-containerd.sh
 
 containerd-bundle: $(CONTAINERD_BUNDLE_MARKER)
 
-# Embed the Headlamp frontend into the dashboard: build it in a local Headlamp
-# checkout and vendor the result (minus brotli/sourcemaps) into assets/dashboard/,
-# which src/apiserver/dashboard-assets.lisp bakes into the image at compile time.
-# A build without this step simply ships no dashboard. HEADLAMP points at the
-# checkout (git clone https://github.com/kubernetes-sigs/headlamp).
+# Embed the Headlamp frontend into the dashboard. The assets are a hard build
+# dependency of build/gr8s -- a gr8s without its dashboard is not a valid build
+# (podster-22l). The default source is the digest-pinned upstream container
+# image (no npm needed, same pinning discipline as the containerd bundle);
+# dashboard-assets-from-source builds from a local Headlamp checkout instead,
+# for hacking on Headlamp itself (git clone https://github.com/kubernetes-sigs/headlamp).
+HEADLAMP_IMAGE ?= ghcr.io/headlamp-k8s/headlamp@sha256:8a0ef97527544baa2b35825940ddf4db6e2d09c30cd5aa31fd269ff604cc8b75
+# ^ v0.46.0
+DASHBOARD_MARKER := assets/dashboard/index.html
 HEADLAMP ?= $(HOME)/git/headlamp
+
+$(DASHBOARD_MARKER):
+	rm -rf assets/dashboard build/headlamp-rootfs
+	mkdir -p assets/dashboard build/headlamp-rootfs
+	tool=$$(command -v podman || command -v docker) && \
+	  cid=$$("$$tool" create "$(HEADLAMP_IMAGE)") && \
+	  { "$$tool" export "$$cid" | tar -x -C build/headlamp-rootfs headlamp/frontend; \
+	    status=$$?; "$$tool" rm "$$cid" >/dev/null; exit $$status; }
+	cd build/headlamp-rootfs/headlamp/frontend && \
+	  find . -type f ! -name '*.br' ! -name '*.map' -print0 | \
+	  cpio -pd0 --quiet "$(CURDIR)/assets/dashboard"
+	rm -rf build/headlamp-rootfs
+	$(MAKE) dashboard-assets-compress
+	@# The embedder reads assets at compile time; make sure a cached FASL from an
+	@# asset-less build cannot survive a fresh asset tree.
+	touch src/apiserver/dashboard-assets.lisp
+
 dashboard-assets:
+	rm -rf assets/dashboard
+	$(MAKE) $(DASHBOARD_MARKER)
+
+dashboard-assets-from-source:
 	npm --prefix "$(HEADLAMP)/frontend" ci
 	npm --prefix "$(HEADLAMP)/frontend" run build
 	rm -rf assets/dashboard
@@ -83,6 +108,10 @@ dashboard-assets:
 	cd "$(HEADLAMP)/frontend/build" && \
 	  find . -type f ! -name '*.br' ! -name '*.map' -print0 | \
 	  cpio -pd0 --quiet "$(CURDIR)/assets/dashboard"
+	$(MAKE) dashboard-assets-compress
+	touch src/apiserver/dashboard-assets.lisp
+
+dashboard-assets-compress:
 	@# Pre-gzip the voluminous text assets (JS/CSS/JSON/SVG/WASM) so the image
 	@# embeds and the browser receives them compressed; each original is replaced
 	@# by its .gz, which dashboard-assets.lisp serves with Content-Encoding: gzip.
@@ -97,7 +126,7 @@ dashboard-assets:
 help:
 	@echo "gr8s targets:"
 	@echo "  containerd-bundle Build and verify pinned containerd, runc, and CNI binaries"
-	@echo "  dashboard-assets Build the Headlamp frontend (HEADLAMP=path) and embed it in the dashboard"
+	@echo "  dashboard-assets Refresh the embedded Headlamp frontend from the pinned image (always built in)"
 	@echo "  generate-protocol Generate Common Lisp node-protocol bindings"
 	@echo "  test-protocol-generation Verify standalone protocol generation from a clean output"
 	@echo "  test          Run the unit and HTTP test suite"
@@ -340,7 +369,7 @@ notices:
 
 native: build/gr8s
 
-build/gr8s: $(CONTAINERD_BUNDLE_MARKER) $(NODE_PROTOCOL_LISP) scripts/build-native.lisp $(LISP_SOURCES)
+build/gr8s: $(CONTAINERD_BUNDLE_MARKER) $(DASHBOARD_MARKER) $(NODE_PROTOCOL_LISP) scripts/build-native.lisp $(LISP_SOURCES)
 	$(SBCL) --noinform --non-interactive --load scripts/build-native.lisp
 
 clean:

@@ -62,6 +62,14 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Changed
 
+- The dashboard is no longer optional: `make native` requires the
+  embedded Headlamp frontend, which is now extracted automatically from
+  the digest-pinned upstream container image (podman/docker, no Node.js)
+  — previously a source build without a manual asset step silently
+  shipped no dashboard. Release builds use the same pinned image instead
+  of an npm build from a Headlamp checkout;
+  `make dashboard-assets-from-source` remains for hacking on Headlamp.
+
 - `gr8s doctor` gains `--fix`: pod-pool route overlaps caused by a killed
   instance's leftovers (stale `gr8s-vxlan`/`gr8s-gateway`/`gr8s-services`
   links, orphan pod veths) are deleted when the link is provably

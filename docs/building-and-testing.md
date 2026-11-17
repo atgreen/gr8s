@@ -146,21 +146,24 @@ are disabled, install a sufficiently new Go toolchain explicitly. Install
 [`kubectl`](https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/) before
 starting the workload walkthrough.
 
-### Optional dashboard assets
+### Dashboard assets
 
-The dashboard command serves embedded Headlamp frontend assets. A source build
-without those assets does not include a working frontend. This step additionally
-needs Node.js/npm, `cpio`, and `gzip`; use a Headlamp checkout compatible with its
-own frontend build requirements. From the gr8s repository root:
+The dashboard command serves embedded Headlamp frontend assets, and they are a
+hard prerequisite of `make native`: a gr8s without its dashboard is not a valid
+build. The assets are extracted automatically from the digest-pinned upstream
+Headlamp container image (`HEADLAMP_IMAGE` in the Makefile) using podman or
+docker, then compressed for embedding — no Node.js required. `make
+dashboard-assets` refreshes them explicitly.
+
+To hack on Headlamp itself, build the assets from a local checkout instead:
 
 ```sh
 git clone https://github.com/kubernetes-sigs/headlamp.git /tmp/gr8s-headlamp
-make dashboard-assets HEADLAMP=/tmp/gr8s-headlamp
+make dashboard-assets-from-source HEADLAMP=/tmp/gr8s-headlamp
 make native
 ```
 
-The asset target runs `npm ci` and the frontend build, then copies and compresses
-assets for embedding. It is optional for API/CLI operation. See
+That path needs Node.js/npm in addition to `cpio` and `gzip`. See
 [the dashboard command](../README.md#dashboard) for usage.
 
 ### Network access

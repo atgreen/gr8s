@@ -83,26 +83,11 @@ jobs:
           go-version: '1.27.3'
           cache: false
 
-      - name: Install Node.js
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: '24'
-          package-manager-cache: false
-
-      - name: Check out Headlamp 0.46.0
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          repository: kubernetes-sigs/headlamp
-          ref: 825604fdadbe7ed94b8e61f615d7917c743e9083
-          path: build/headlamp
-          persist-credentials: false
-
       - name: Test release packaging
         run: python3 scripts/test_release_package.py
 
       - name: Build, smoke-test, and package the native executable
         env:
-          HEADLAMP: ${{ github.workspace }}/build/headlamp
           RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
         run: scripts/build-release.sh
 
