@@ -246,3 +246,45 @@
                  "an inline apply failure is reported as a retriable non-commit")
              (is (null index))))
       (setf (symbol-function 'gr8s.raft.transport::raft-member-propose) propose))))
+
+;;; podster-2pm: a systemctl stop once hung forever in STOP-RAFT-MEMBER's
+;;; JOIN-THREAD (unreachable peer mid-config-change) until systemd SIGABRT'd the
+;;; process. Shutdown must finish within its deadline no matter what a worker
+;;; thread is doing: a thread that will not exit is abandoned with a warning,
+;;; never waited on indefinitely.
+
+(test stop-raft-member-abandons-a-stuck-worker-thread
+  (let* ((member (gr8s.raft.transport::make-raft-member :running t))
+         (release nil)
+         (stuck (bt:make-thread
+                 (lambda () (loop until release do (sleep 0.05)))
+                 :name "gr8s test stuck raft worker")))
+    (setf (gr8s.raft.transport::raft-member-tick-thread member) stuck)
+    (unwind-protect
+         (let ((start (get-internal-real-time))
+               (warned nil))
+           (handler-bind ((warning (lambda (w) (setf warned t) (muffle-warning w))))
+             (gr8s.raft.transport::stop-raft-member member :timeout 0.5))
+           (let ((elapsed (/ (- (get-internal-real-time) start)
+                             internal-time-units-per-second)))
+             (is (< elapsed 5)
+                 "stop returned in ~,1F seconds despite a thread that never exits" elapsed))
+           (is-true warned "abandoning a worker thread is reported")
+           (is-true (bt:thread-alive-p stuck)
+                    "the stuck thread is abandoned, not killed"))
+      (setf release t)
+      (when (bt:thread-alive-p stuck) (bt:join-thread stuck)))))
+
+(test stop-raft-member-joins-cooperative-workers-without-warning
+  (let* ((member (gr8s.raft.transport::make-raft-member :running t))
+         (worker (bt:make-thread
+                  (lambda ()
+                    (loop while (gr8s.raft.transport::raft-member-running member)
+                          do (sleep 0.01)))
+                  :name "gr8s test cooperative raft worker")))
+    (setf (gr8s.raft.transport::raft-member-tick-thread member) worker)
+    (let ((warned nil))
+      (handler-bind ((warning (lambda (w) (setf warned t) (muffle-warning w))))
+        (gr8s.raft.transport::stop-raft-member member))
+      (is-false warned "a cooperative shutdown stays silent")
+      (is-false (bt:thread-alive-p worker)))))

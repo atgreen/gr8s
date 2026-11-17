@@ -647,31 +647,59 @@ id, or NIL."
   "Whether MEMBER is currently the Raft leader (read under the member lock)."
   (bt:with-lock-held ((raft-member-lock member)) (raft-leader-p (raft-member-node member))))
 
-(defun stop-raft-member (member)
+(defun raft-stop-remaining-seconds (deadline)
+  "Seconds left until DEADLINE (internal time), floored so a join or lock grab
+   past the deadline still gets one short chance instead of none."
+  (max 0.1 (/ (- deadline (get-internal-real-time))
+              internal-time-units-per-second)))
+
+(defun raft-stop-join-or-abandon (thread deadline what)
+  "Join THREAD within DEADLINE (internal time); a thread that will not exit is
+   abandoned with a warning so shutdown always completes -- the exiting process
+   reclaims it (podster-2pm). An already-finished or aborted thread counts as
+   joined."
+  (when (and thread (bt:thread-alive-p thread))
+    (let ((seconds (raft-stop-remaining-seconds deadline)))
+      (handler-case (sb-thread:join-thread thread :timeout seconds)
+        (sb-thread:join-thread-error ()
+          (when (bt:thread-alive-p thread)
+            (warn "gr8s raft shutdown: ~A thread did not exit within ~,1F seconds; abandoning it"
+                  what seconds)))))))
+
+(defun stop-raft-member (member &key (timeout 10))
   "Stop MEMBER: clear its running flag and join its tick, renewal and per-peer sender
    threads, drop every link, and stop its gRPC server. Errors from any one teardown
-   are ignored so shutdown always completes."
-  (setf (raft-member-running member) nil)
-  (maphash (lambda (id link)
-             (declare (ignore id))
-             (bt:with-lock-held ((raft-peer-link-lock link))
-               (bt:condition-notify (raft-peer-link-changed link))))
-           (raft-member-links member))
-  (when (and (raft-member-tick-thread member) (bt:thread-alive-p (raft-member-tick-thread member)))
-    (ignore-errors (bt:join-thread (raft-member-tick-thread member))))
-  (when (and (raft-member-renewal-thread member) (bt:thread-alive-p (raft-member-renewal-thread member)))
-    (ignore-errors (bt:join-thread (raft-member-renewal-thread member))))
-  (maphash (lambda (id link) (declare (ignore id))
-             (when (and (raft-peer-link-thread link) (bt:thread-alive-p (raft-peer-link-thread link)))
-               (ignore-errors (bt:join-thread (raft-peer-link-thread link))))
-             (raft-link-drop link)
-             (raft-link-drop-relay link))
-           (raft-member-links member))
-  (ignore-errors (ag-grpc:server-stop (raft-member-grpc-server member)))
-  (when (and (raft-member-server-thread member) (bt:thread-alive-p (raft-member-server-thread member)))
-    (ignore-errors (bt:join-thread (raft-member-server-thread member))))
-  (bt:with-lock-held ((raft-member-lock member))
-    (unwind-protect
-         (unwind-protect (raft-member-clear-snapshot-receiver member)
-           (raft-member-close-snapshot-root member))
-      (raft-member-close-owned-storage member))))
+   are ignored, and no join outlives TIMEOUT seconds in total -- a worker thread that
+   will not exit is abandoned with a warning -- so shutdown always completes
+   (podster-2pm: an unreachable peer mid-config-change once hung this join until
+   systemd killed the process)."
+  (let ((deadline (+ (get-internal-real-time)
+                     (round (* timeout internal-time-units-per-second)))))
+    (setf (raft-member-running member) nil)
+    (maphash (lambda (id link)
+               (declare (ignore id))
+               (bt:with-lock-held ((raft-peer-link-lock link))
+                 (bt:condition-notify (raft-peer-link-changed link))))
+             (raft-member-links member))
+    (raft-stop-join-or-abandon (raft-member-tick-thread member) deadline "tick")
+    (raft-stop-join-or-abandon (raft-member-renewal-thread member) deadline "certificate renewal")
+    (maphash (lambda (id link)
+               (raft-stop-join-or-abandon (raft-peer-link-thread link) deadline
+                                          (format nil "peer ~A sender" id))
+               (raft-link-drop link)
+               (raft-link-drop-relay link))
+             (raft-member-links member))
+    (ignore-errors (ag-grpc:server-stop (raft-member-grpc-server member)))
+    (raft-stop-join-or-abandon (raft-member-server-thread member) deadline "gRPC server")
+    ;; An abandoned worker may still hold the member lock; a bounded grab keeps
+    ;; even the final storage teardown from blocking shutdown.
+    (let ((seconds (raft-stop-remaining-seconds deadline)))
+      (if (sb-thread:grab-mutex (raft-member-lock member) :timeout seconds)
+          (unwind-protect
+               (unwind-protect
+                    (unwind-protect (raft-member-clear-snapshot-receiver member)
+                      (raft-member-close-snapshot-root member))
+                 (raft-member-close-owned-storage member))
+            (sb-thread:release-mutex (raft-member-lock member)))
+          (warn "gr8s raft shutdown: member lock still held after ~,1F seconds; leaving storage for process exit"
+                seconds)))))
