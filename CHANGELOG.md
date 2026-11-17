@@ -9,6 +9,13 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- `gr8s dashboard` (and any client probing permissions against a
+  follower) no longer fails with "Error Authenticating": the Headlamp
+  login check POSTs a `SelfSubjectRulesReview`, which — being a POST —
+  was redirected to the Raft leader like a write. Authorization and token
+  reviews are read-only evaluations every member can answer from its
+  replicated RBAC, so they are now served locally instead of redirected.
+
 - Dead peers are detected in seconds, not minutes: every node and member
   channel now sets `TCP_USER_TIMEOUT` (15s) and keep-alive probes, so a
   suspended or vanished peer surfaces as a connection error within

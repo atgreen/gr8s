@@ -58,3 +58,24 @@
     (is (null (gr8s.ha::raft-leader-redirect-url :get "/api/v1/configmaps" nil leader)))
     ;; No known leader -> no redirect (caller answers 503).
     (is (null (gr8s.ha::raft-leader-redirect-url :post "/api/v1/configmaps" nil nil)))))
+
+;;; podster-fq7: the dashboard login check POSTs a SelfSubjectRulesReview. As a
+;;; write it was redirected to the leader's (stale, LAN) API URL, which the
+;;; browser could not follow -> "Error Authenticating". Authorization and token
+;;; reviews are read-only evaluations every member can answer, so they must not
+;;; redirect.
+
+(test auth-reviews-are-not-redirected-to-the-leader
+  (flet ((redirects (path)
+           (gr8s.apiserver::ha-non-redirecting-write-path-p path)))
+    ;; Served locally on any member (no redirect):
+    (is (redirects "/apis/authorization.k8s.io/v1/selfsubjectrulesreviews"))
+    (is (redirects "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews"))
+    (is (redirects "/apis/authorization.k8s.io/v1/namespaces/default/localsubjectaccessreviews"))
+    (is (redirects "/apis/authentication.k8s.io/v1/tokenreviews"))
+    (is (redirects "/apis/gr8s.io/v1/patchrollouts"))
+    ;; Real writes still redirect (function returns NIL -> caller redirects):
+    (is (not (redirects "/api/v1/namespaces/default/pods")))
+    (is (not (redirects "/apis/apps/v1/namespaces/default/deployments")))
+    (is (not (redirects "/apis/authorization.k8s.io/v1/subjectaccessreviews"))
+        "a cluster-admin SubjectAccessReview is not one of the self/local probes")))

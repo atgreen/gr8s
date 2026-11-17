@@ -94,12 +94,25 @@ without input, and a client without WebSocket pings (any before v5.channel.k8s.i
       (ignore-errors (setf (sb-impl::fd-stream-timeout (usocket:socket-stream socket))
                            (coerce seconds 'single-float))))))
 
+(defun ha-non-redirecting-write-path-p (script-name)
+  "True for POST endpoints that are not real writes and must be served locally on
+   any member, never redirected to the leader. Patch commands authenticate
+   locally and relay over member mTLS. Authorization and token reviews are
+   read-only evaluations -- they persist nothing, every member can answer them,
+   and redirecting them breaks clients that probe permissions against a follower
+   (the dashboard's login check POSTs a SelfSubjectRulesReview; a redirect to the
+   leader's API URL fails and surfaces as \"Error Authenticating\")."
+  (or (equal script-name "/apis/gr8s.io/v1/patchrollouts")
+      (and (uiop:string-prefix-p "/apis/authorization.k8s.io/v1/" script-name)
+           (loop for review in '("selfsubjectrulesreviews" "selfsubjectaccessreviews"
+                                 "localsubjectaccessreviews")
+                 thereis (uiop:string-suffix-p script-name (concatenate 'string "/" review))))
+      (equal script-name "/apis/authentication.k8s.io/v1/tokenreviews")))
+
 (defun ha-redirect-response (acceptor request)
   "When this member is not the Raft leader and REQUEST mutates, return a redirect
    to the leader (or a 503 if the leader is unknown); else NIL to serve locally."
-  ;; Patch commands authenticate locally and relay over member mTLS, preserving
-  ;; the CLI session across leadership transfer without forwarding local tokens.
-  (when (equal (hunchentoot:script-name request) "/apis/gr8s.io/v1/patchrollouts")
+  (when (ha-non-redirecting-write-path-p (hunchentoot:script-name request))
     (return-from ha-redirect-response nil))
   (let ((status-fn (acceptor-leader-status-fn acceptor)))
     (when status-fn
