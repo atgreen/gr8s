@@ -96,7 +96,8 @@
                                   :private-key-path (merge-pathnames "rsa-key.pem" directory) :max-sessions 1)
                                 (error (condition) condition))))
                  (is-true failure)
-                 (is (search "PROTOCOL-ERROR" (princ-to-string failure))))
+                 (is (search "the peer reported" (princ-to-string failure))
+                     "the refusal carries the server's explanation (podster-ddc)"))
                (is-false (gr8s.model::node-record-ready-p (gr8s.controllers::get-node store "profile-worker"))))
              ;; The actual already-enrolled leaf/key remain usable, with no CA
              ;; replacement, pin update or hidden credential regeneration.
