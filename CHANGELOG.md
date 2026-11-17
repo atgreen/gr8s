@@ -9,6 +9,11 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- `gr8s status`: one screen of cluster health from anywhere a kubeconfig
+  reaches — API readiness, nodes, workload exceptions, Services without
+  endpoints, storage, version skew, and deduplicated recent Warning
+  events, each warn/fail line naming the next command to run. `--output
+  json` for agents; exit 0/1/2 for healthy/warnings/failures.
 - `gr8s backup` (`keygen`, `save`, `verify`) and `gr8s restore`: offline
   operator backup of a control-plane state directory — cluster identity,
   keys, and the Raft store — into one encrypted, authenticated bundle,
