@@ -121,6 +121,18 @@ the Kubernetes API version with a gr8s release suffix (see
   `failed` after five attempts instead of restarting forever. The RPM/DEB
   config files pin `--state-directory` to `/var/lib/gr8s/server` and
   `/var/lib/gr8s/agent` rather than inheriting root's XDG default.
+- Gateway reconciliation reuses unchanged routing and discovery data and wakes
+  promptly for committed updates, reducing repeated work as route counts grow.
+- Foreign-cluster Gateways isolate listeners, routes, and TLS material even when
+  they share ports and hostnames. Gateway HTTP handling now covers hostname
+  intersection, listener admission, backend and certificate ReferenceGrants,
+  and invalid-reference status; the recorded candidate passed all 36 Gateway
+  API v1.6.3 HTTP core conformance tests.
+- `gr8s serve` joins a control-plane cluster with the same flags as
+  `gr8s agent` and `gr8s witness`: `--join HOST:PORT`, `--token`, and
+  `--ca-pin`. The token is bound to `--node-name`, which also names the Raft
+  member unless `--raft-id` is given. `--raft-join`, `--raft-token`,
+  `--raft-ca-pin`, and `--raft-node-name` are removed.
 
 ### Added
 
@@ -165,21 +177,6 @@ the Kubernetes API version with a gr8s release suffix (see
   selected by SNI, isolated HTTP routing, incremental updates, and installed-state
   status. See the [setup and design notes](docs/design-listenersets.md).
   Small VM acceptance covers both APIs; full-scale benchmarking is deferred.
-
-### Changed
-
-- Gateway reconciliation reuses unchanged routing and discovery data and wakes
-  promptly for committed updates, reducing repeated work as route counts grow.
-- Foreign-cluster Gateways isolate listeners, routes, and TLS material even when
-  they share ports and hostnames. Gateway HTTP handling now covers hostname
-  intersection, listener admission, backend and certificate ReferenceGrants,
-  and invalid-reference status; the recorded candidate passed all 36 Gateway
-  API v1.6.3 HTTP core conformance tests.
-- `gr8s serve` joins a control-plane cluster with the same flags as
-  `gr8s agent` and `gr8s witness`: `--join HOST:PORT`, `--token`, and
-  `--ca-pin`. The token is bound to `--node-name`, which also names the Raft
-  member unless `--raft-id` is given. `--raft-join`, `--raft-token`,
-  `--raft-ca-pin`, and `--raft-node-name` are removed.
 
 ## [v1.37.2-gr8s.0] — 2026-11-15
 
