@@ -110,4 +110,5 @@
     (export symbols '#:gr8s.resources)))
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
-  (export (intern "PARSE-YAML" '#:gr8s.resources) '#:gr8s.resources))
+  (export (intern "PARSE-YAML" '#:gr8s.resources) '#:gr8s.resources)
+  (export (intern "STRINGIFY-TO-UTF-8-BYTES" '#:gr8s.resources) '#:gr8s.resources))

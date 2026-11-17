@@ -293,8 +293,7 @@
 
 (defun decode-service-discovery-entry (bytes)
   "Validate one public discovery entry and return its resource key and object."
-    (let* ((object (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string bytes)
-                                       :max-string-length (* 2 1024 1024)))
+    (let* ((object (com.inuoe.jzon:parse bytes :max-string-length (* 2 1024 1024)))
            (public (service-discovery-public-object object))
            (metadata (gethash "metadata" public))
            (namespace (gethash "namespace" metadata)) (name (gethash "name" metadata))

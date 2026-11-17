@@ -22,7 +22,7 @@
   (cond
     ((equal name "k8s.io.apiextensions_apiserver.pkg.apis.apiextensions.v1.JSON")
      (let ((raw (gethash "raw" object)))
-       (if (and raw (plusp (length raw))) (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string (ag-grpc:base64-decode raw))
+       (if (and raw (plusp (length raw))) (com.inuoe.jzon:parse (ag-grpc:base64-decode raw)
                                    :max-string-length (* 2 1024 1024)) 'null)))
     ((equal name "k8s.io.apiextensions_apiserver.pkg.apis.apiextensions.v1.JSONSchemaPropsOrBool")
      (or (gethash "schema" object) (eq t (gethash "allows" object))))

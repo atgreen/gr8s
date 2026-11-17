@@ -54,7 +54,7 @@
    :resource-objects-json
    (when (and store (not (deletion-requested-p pod)))
      (mapcar (lambda (object)
-               (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify object)))
+               (gr8s.resources:stringify-to-utf-8-bytes object))
              (pod-referenced-resource-objects store pod)))))
 
 (defun node-desired-state-snapshot (store node-name &key excluded-uid)
@@ -426,8 +426,7 @@ kubelet summary feeds both HPA and metrics.k8s.io."
                                   operation gr8s.node.v1::+streamchannel-stream_channel_stdout+))
                          (object (and (plusp (length report))
                                       (com.inuoe.jzon:parse
-                                       (trivial-utf-8:utf-8-bytes-to-string
-                                        (coerce report '(vector (unsigned-byte 8))))))))
+                                       (coerce report '(vector (unsigned-byte 8)))))))
                     (when object
                       (if (and (gethash "node" object) (gethash "pods" object))
                           (progn

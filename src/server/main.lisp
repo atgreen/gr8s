@@ -831,7 +831,7 @@ authenticated tunnel as slynk and launches ICL's browser mode (icl -b
                (read-sequence body stream)
                (values (when (plusp length)
                          (ignore-errors
-                          (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string body))))
+                          (com.inuoe.jzon:parse body)))
                        status headers))))
       (ignore-errors (close stream))
       (ignore-errors (usocket:socket-close socket)))))
@@ -1858,8 +1858,7 @@ needs no shell/coreutils/util-linux. Returns 0."
                (multiple-value-bind (opcode payload)
                    (gr8s.protocol:read-websocket-frame stream)
                  (case opcode
-                   (1 (let* ((object (com.inuoe.jzon:parse
-                                      (trivial-utf-8:utf-8-bytes-to-string payload)))
+                   (1 (let* ((object (com.inuoe.jzon:parse payload))
                              (data (gethash "data" object)))
                         (if data
                             (format t "[~A] ~A" (gethash "node" object) data)

@@ -321,7 +321,7 @@ stop reclaim, so a failure here is only logged."
      'gr8s.node.v1::operation-request
      :operation-id (generate-uid)
      :kind gr8s.node.v1::+operationkind-operation_kind_reclaim_volume+
-     :volume-json (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify volume))))
+     :volume-json (stringify-to-utf-8-bytes volume)))
    (node-record-name node)
    (volume-reclaim-lane volume)
    now))

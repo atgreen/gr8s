@@ -124,11 +124,10 @@
                                  :tag tag)
           (setf (gethash "data" copy)
                 (com.inuoe.jzon:parse
-                 (trivial-utf-8:utf-8-bytes-to-string
-                  (ironclad:decrypt-message
-                   mode ciphertext
-                   :associated-data
-                   (secret-encryption-aad resource namespace name key-id)))
+                 (ironclad:decrypt-message
+                  mode ciphertext
+                  :associated-data
+                  (secret-encryption-aad resource namespace name key-id))
                  :max-string-length (* 2 1024 1024)))
           (remhash +secret-encrypted-data-field+ copy)
           copy))))

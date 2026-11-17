@@ -111,7 +111,7 @@ A hostNetwork Pod has no address of its own, so it reports its node's as its Pod
       (let* ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "")
                                                      :separator '(#\;))))
              (applied (equal content-type "application/apply-patch+yaml"))
-             (patch (unless applied (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t)))))
+             (patch (unless applied (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-binary t)))))
         (cond (applied (apply-pod-patched-object (copy-json-object current) "status"))
               ((equal content-type "application/json-patch+json") (apply-core-json-patch current patch))
               ((equal content-type "application/merge-patch+json")

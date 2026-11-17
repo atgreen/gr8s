@@ -85,7 +85,7 @@
          (ciphertext
            (ironclad:encrypt-message
             mode
-            (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify material))
+            (stringify-to-utf-8-bytes material)
             :associated-data (pki-authority-aad key-id))))
     (core-object "format" "gr8s-pki-authority-envelope" "version" 1
                  "provider" "aes-gcm" "keyId" key-id
@@ -110,10 +110,9 @@
     (reinitialize-instance mode :cipher-name :aes :key (pki-authority-key store)
                            :initialization-vector nonce :tag tag)
     (com.inuoe.jzon:parse
-     (trivial-utf-8:utf-8-bytes-to-string
-      (ironclad:decrypt-message
-       mode (ag-grpc:base64-decode (gethash "ciphertext" envelope))
-       :associated-data (pki-authority-aad key-id))))))
+     (ironclad:decrypt-message
+      mode (ag-grpc:base64-decode (gethash "ciphertext" envelope))
+      :associated-data (pki-authority-aad key-id)))))
 
 (defun pki-authority-state (envelope)
   (core-object

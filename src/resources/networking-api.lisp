@@ -339,7 +339,7 @@ no class, by field or by the legacy kubernetes.io/ingress.class annotation, the 
                                                         "application/json-patch+json")
                                          :test #'equal)
                            (core-resource-error 415 "UnsupportedMediaType" "Unsupported status patch type"))
-                         (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t))))))
+                         (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-binary t))))))
       (json-response
        (update-core-resource
         store resource namespace name

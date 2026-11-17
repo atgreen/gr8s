@@ -119,8 +119,7 @@
   "Return ASSIGNMENT's validated objects as (KEY . OBJECT), or signal if any is not acceptable."
   (let* ((pod (assignment-pod assignment))
          (projected (mapcar (lambda (bytes)
-                              (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string bytes)
-                                                   :max-string-length (* 2 1024 1024)))
+                              (com.inuoe.jzon:parse bytes :max-string-length (* 2 1024 1024)))
                             (slot-value assignment 'gr8s.node.v1::resource-objects-json))))
     (loop for object in projected
           collect

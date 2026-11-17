@@ -326,8 +326,7 @@ Provider names resolve only within BIN-DIRECTORY and are returned in configurati
                                       (t ""))
                                 (gethash "data" secret)))))
     (when encoded
-      (let* ((config (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string
-                                            (core-base64-bytes encoded "pull secret"))))
+      (let* ((config (com.inuoe.jzon:parse (core-base64-bytes encoded "pull secret")))
              (registries (if (equal type "kubernetes.io/dockerconfigjson")
                              (gethash "auths" (require-object config "pull secret") (core-object))
                              (require-object config "pull secret"))))

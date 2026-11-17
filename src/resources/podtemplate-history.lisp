@@ -152,7 +152,7 @@ The lists are replaced rather than changed by commits, so a caller may read them
         (unless (and (< (length value) 8192) (= 2 (length parts))
                      (equal (second parts) (template-token-signature store payload)))
           (error "Invalid token signature"))
-        (let ((token (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string (core-base64-bytes payload "continue")))))
+        (let ((token (com.inuoe.jzon:parse (core-base64-bytes payload "continue"))))
           (unless (and (hash-table-p token) (equal resource (gethash "resource" token "podtemplates"))
                        (equal (or namespace 'null) (gethash "namespace" token))
                        (equal labels (gethash "labels" token)) (equal fields (gethash "fields" token))

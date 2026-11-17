@@ -81,9 +81,8 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
                    (kubernetes-error-details error)))
 
 (defun copy-json-object (object)
-  "Return an independent deep copy of OBJECT, by serializing it to JSON and
-   parsing it back."
-  (com.inuoe.jzon:parse (com.inuoe.jzon:stringify object)))
+  "Return an independent deep copy of OBJECT, a parsed-JSON value."
+  (copy-core-object object))
 
 (defun pod-response-object (pod status)
   "Return POD encoded as a Kubernetes object with STATUS as its status subobject.
@@ -118,7 +117,7 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
   "Parse the current request body as a JSON object, signaling a Kubernetes error
    if it is not one. Used for patch bodies."
   (require-object
-   (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t))
+   (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-binary t))
    "patch"))
 
 (defun merge-json-object (target patch)
@@ -172,13 +171,18 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
     (setf groups (concatenate 'vector groups (vector (autoscaling-api-group) (apiservice-api-group))))
     groups))
 
-(defun api-groups-response (&optional store)
-  "Describe builtin groups and actual store-scoped custom API groups."
+(defun api-groups-object (&optional store)
+  "Describe builtin groups and actual store-scoped custom API groups, as the
+   parsed-JSON APIGroupList model."
   (let ((groups (builtin-api-groups)))
     (when store
       (setf groups (concatenate 'vector groups (coerce (crd-api-groups store) 'vector)
                                 (coerce (aggregated-api-groups store) 'vector))))
-    (json-response (json-object "apiVersion" "v1" "kind" "APIGroupList" "groups" groups))))
+    (json-object "apiVersion" "v1" "kind" "APIGroupList" "groups" groups)))
+
+(defun api-groups-response (&optional store)
+  "Describe builtin groups and actual store-scoped custom API groups."
+  (json-response (api-groups-object store)))
 
 (defun api-resources-response ()
   "Answer /api/v1 discovery: the core v1 resources and subresources this server
@@ -1016,8 +1020,7 @@ already signalling, with its handlers unbound for the handler tests, and then fi
   "Parse a terminal-resize payload (JSON with height and width) into
    (values HEIGHT WIDTH), each defaulting to 0 when absent."
   (let ((size
-          (com.inuoe.jzon:parse
-           (trivial-utf-8:utf-8-bytes-to-string data))))
+          (com.inuoe.jzon:parse data)))
     (values (gethash "height" size 0)
             (gethash "width" size 0))))
 

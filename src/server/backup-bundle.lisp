@@ -22,7 +22,7 @@
         finally (return nil)))
 
 (defun write-backup-bundle-json (writer kind object)
-  (let ((json (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify object))))
+  (let ((json (gr8s.resources:stringify-to-utf-8-bytes object)))
     (when (> (length json) 16384) (error "Backup metadata record too large"))
     (write-backup-record writer (concatenate '(vector (unsigned-byte 8)) (vector kind) json))))
 

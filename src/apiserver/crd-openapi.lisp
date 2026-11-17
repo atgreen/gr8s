@@ -176,7 +176,7 @@ then used as they stand."
                    "apis/storage.k8s.io/v1" "api/v1" "apis/events.k8s.io/v1"))
       (setf (gethash key paths) (core-object "serverRelativeURL" (openapi-builtin-document-url key))))
     ;; Every group discovery advertises has a document, even one with only generic paths.
-    (loop for group across (gethash "groups" (com.inuoe.jzon:parse (api-groups-response store)))
+    (loop for group across (gethash "groups" (api-groups-object store))
           do (loop for version across (gethash "versions" group)
                    for key = (concatenate 'string "apis/" (gethash "groupVersion" version))
                    unless (or (gethash key paths)

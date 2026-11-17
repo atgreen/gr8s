@@ -49,7 +49,7 @@
                       (progn
                         (unless (member content-type '("application/merge-patch+json" "application/strategic-merge-patch+json" "application/json-patch+json") :test #'equal)
                           (core-resource-error 415 "UnsupportedMediaType" "Unsupported storage status patch type"))
-                        (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t)))))
+                        (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-binary t)))))
            (admit (lambda (requested old)
                     (admit-subresource-write store resource "status" namespace name requested old :dry-run dry-run)))
            (admission-probe (admission-attributes-for store "UPDATE" resource namespace name :subresource "status")))

@@ -35,7 +35,7 @@
       ((string= content-type "application/vnd.kubernetes.protobuf")
        (decode-eviction-protobuf (hunchentoot:raw-post-data :force-binary t)))
       ((member content-type '("" "application/json") :test #'string=)
-       (require-object (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t)) "Eviction"))
+       (require-object (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-binary t)) "Eviction"))
       (t (core-resource-error 415 "UnsupportedMediaType" "Supported Eviction formats are JSON and Kubernetes protobuf")))))
 
 (defun mark-pod-disruption-target (store pod)

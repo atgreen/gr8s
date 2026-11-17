@@ -258,7 +258,7 @@
 (defun local-apiservices (store)
   "Describe each API version this server serves itself as an available local APIService."
   (let* ((groups (if store
-                     (gethash "groups" (com.inuoe.jzon:parse (api-groups-response store)))
+                     (gethash "groups" (api-groups-object store))
                      (builtin-api-groups)))
          (versions (cons (cons "" "v1")
                          (loop for group across groups

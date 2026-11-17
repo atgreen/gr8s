@@ -1440,7 +1440,7 @@ deletion deadline cannot postpone an earlier one. Holds the store lock."
      :resource-version (pod-resource-version pod)
      :phase (gethash "phase" status "Unknown") :reason (gethash "reason" status "")
      :message (gethash "message" status "") :pod-ip (gethash "podIP" status "")
-     :status-json (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify wire-status))
+     :status-json (gr8s.resources:stringify-to-utf-8-bytes wire-status)
      :runtime-deleted runtime-deleted)))
 
 (defun node-runtime-service-translation-record
@@ -2345,8 +2345,7 @@ failed response carrying ERROR. Idempotent; a second call does nothing."
 on \"Success\", otherwise the ExitCode cause, defaulting to 1 (also 1 on any parse error)."
   (handler-case
       (let* ((status
-               (com.inuoe.jzon:parse
-                (trivial-utf-8:utf-8-bytes-to-string data)))
+               (com.inuoe.jzon:parse data))
              (details (gethash "details" status))
              (causes (and details (gethash "causes" details))))
         (if (equal "Success" (gethash "status" status))
@@ -2523,8 +2522,7 @@ last-input sequence."
 (defun start-volume-reclaim-operation (node-runtime request emit)
   "Queue a volume's removal. A request for one already running joins it, so a control plane
 that reconnects or restarts gets the answer without a second deletion racing the first."
-  (let ((volume (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string
-                                       (slot-value request 'gr8s.node.v1::volume-json))))
+  (let ((volume (com.inuoe.jzon:parse (slot-value request 'gr8s.node.v1::volume-json)))
         (directory (node-runtime-state-directory node-runtime))
         (reclaim *reclaim-volume-call*))
     (work-queue-submit
@@ -2555,7 +2553,7 @@ that reconnects or restarts gets the answer without a second deletion racing the
            (funcall emit :operation-stream
                     (node-operation-stream
                      request gr8s.node.v1::+streamchannel-stream_channel_stdout+
-                     (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify metrics))))
+                     (gr8s.resources:stringify-to-utf-8-bytes metrics)))
            (funcall emit :operation-response
                     (node-operation-response request gr8s.node.v1::+operationstatus-operation_status_complete+)))
        (error (condition)

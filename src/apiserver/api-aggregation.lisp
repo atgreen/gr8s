@@ -575,7 +575,7 @@ TARGET is the request line's path, the current request's own unless given."
                  ("X-Remote-User" . "system:kube-aggregator") ("X-Remote-Group" . "system:masters")))
             (declare (ignore headers))
             (if (<= 200 code 299)
-                (values nil (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string response)))
+                (values nil (com.inuoe.jzon:parse response))
                 (values "FailedDiscoveryCheck"
                         (format nil "failing or missing response from https://~A.~A.svc:~D~A: bad status: ~D"
                                 name namespace port target code))))

@@ -60,7 +60,7 @@
   "Read JSON/protobuf PUT or schema-aware supported patch formats."
   (if (eq method :put) (core-resource-request-object kind)
       (let* ((content-type (request-media-type))
-             (patch (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t))))
+             (patch (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-binary t))))
         (cond ((equal content-type "application/json-patch+json") (apply-core-json-patch old patch))
               ((equal content-type "application/merge-patch+json") (merge-json-object old (require-object patch "patch")))
               ((equal content-type "application/strategic-merge-patch+json")

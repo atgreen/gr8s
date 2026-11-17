@@ -105,7 +105,7 @@ saying why they could not be read. NIL means usage comes from the controller's o
       (declare (ignore headers))
       (unless (<= 200 code 299)
         (error "the server responded with HTTP ~D" code))
-      (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string body)))))
+      (com.inuoe.jzon:parse body))))
 
 (defun pod-metrics-usage-table (list)
   "Index a PodMetricsList by Pod name, each a table of container name to (cpu-cores . memory-bytes)."

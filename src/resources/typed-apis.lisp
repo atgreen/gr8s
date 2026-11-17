@@ -521,7 +521,7 @@
                           (core-resource-error 415 "UnsupportedMediaType" "Unsupported status patch type"))
                         (if (equal content-type "application/apply-patch+yaml")
                             (values (parse-yaml (hunchentoot:raw-post-data :force-text t)))
-                            (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t)))))))
+                            (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-binary t)))))))
       ;; Webhooks cannot run inside the update's transaction, so settle a selected write first.
       (when (admission-active-p store (admission-attributes-for store "UPDATE" resource namespace name :subresource "status"))
         (let ((old (get-core-resource store resource namespace name)))

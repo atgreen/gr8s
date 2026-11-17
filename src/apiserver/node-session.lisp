@@ -1417,8 +1417,7 @@ An explicit unready or malformed current report withdraws its prior proof."
                       (let* ((bytes (slot-value pod-status 'gr8s.node.v1::status-json))
                              (object (handler-case
                                          (when (plusp (length bytes))
-                                           (com.inuoe.jzon:parse
-                                            (trivial-utf-8:utf-8-bytes-to-string bytes)))
+                                           (com.inuoe.jzon:parse bytes))
                                        (error () nil))))
                         (unless (hash-table-p object) (setf object (make-hash-table :test #'equal)))
                         (merge-node-pod-address-status object pod-status)

@@ -85,7 +85,7 @@
   "Answer the aggregated document for the legacy /api or named /apis root."
   (let* ((groups (if (string= root "/api")
                      (list (cons "" '("v1")))
-                     (let ((document (com.inuoe.jzon:parse (api-groups-response store))))
+                     (let ((document (api-groups-object store)))
                        (map 'list (lambda (group)
                                     (cons (gethash "name" group)
                                           (map 'list (lambda (version) (gethash "version" version)) (gethash "versions" group))))

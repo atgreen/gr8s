@@ -252,7 +252,7 @@ returns the API server's answer."
                               :server-name (kubelet-auth-api-server-name auth) :method :post
                               :target (format nil "/apis/~A/v1/~A" group resource)
                               :headers '(("Content-Type" . "application/json") ("Accept" . "application/json"))
-                              :body (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify review))
+                              :body (gr8s.resources:stringify-to-utf-8-bytes review)
                               :trust-certificates (kubelet-auth-trust-certificates auth)
                               :client-certificate (kubelet-auth-client-certificate auth)
                               :client-key (kubelet-auth-client-key auth))
@@ -260,7 +260,7 @@ returns the API server's answer."
           (unless (<= 200 code 299)
             (error "~A review failed with HTTP ~D: ~A" (gethash "kind" review) code
                    (trivial-utf-8:utf-8-bytes-to-string body)))
-          (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string body))))))
+          (com.inuoe.jzon:parse body)))))
 
 (defun kubelet-token-identity (auth token)
   "Return the identity a TokenReview finds for TOKEN, or NIL when the token is not valid."

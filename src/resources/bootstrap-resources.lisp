@@ -534,7 +534,7 @@ otherwise, with the reasons and messages upstream kubelet uses."
       (core-resource-request-object "Node")
       (let* ((content-type (request-media-type))
              (apply-patch (equal content-type "application/apply-patch+yaml"))
-             (patch (unless apply-patch (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t))))
+             (patch (unless apply-patch (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-binary t))))
              (current (node-api-object node)))
         (cond (apply-patch
                (let ((*apply-update-manager* nil))

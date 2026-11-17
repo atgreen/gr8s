@@ -220,15 +220,16 @@ one holding a lock, so the handler only starts the reporter."
         (format t "no Pod ~A/~A~%" namespace name)
         (let ((uid (pod-uid pod)))
           (with-store-lock (store)
-            (format t "~A~%" (com.inuoe.jzon:stringify
-                              (core-object
-                               "object" (pod-to-object pod)
-                               "statusRevision" (pod-status-revision pod)
-                               "observed" (gethash uid (pod-store-pod-observed-statuses store) 'null)
-                               "observedResourceVersion" (gethash uid (pod-store-pod-observed-resource-versions store) 'null)
-                               "published" (gethash uid (pod-store-pod-published-statuses store) 'null)
-                               "finalization" (gethash uid (pod-store-pod-finalization-states store) 'null))
-                              :pretty t))))))
+            (com.inuoe.jzon:stringify
+             (core-object
+              "object" (pod-to-object pod)
+              "statusRevision" (pod-status-revision pod)
+              "observed" (gethash uid (pod-store-pod-observed-statuses store) 'null)
+              "observedResourceVersion" (gethash uid (pod-store-pod-observed-resource-versions store) 'null)
+              "published" (gethash uid (pod-store-pod-published-statuses store) 'null)
+              "finalization" (gethash uid (pod-store-pod-finalization-states store) 'null))
+             :pretty t :stream *standard-output*)
+            (terpri)))))
   (values))
 
 (defun debug-journal (&optional (count 20))

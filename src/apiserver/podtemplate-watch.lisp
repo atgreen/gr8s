@@ -94,12 +94,13 @@ PAGE-READER and EVENT-READER replace the durable journal for separately stored r
     (setf (hunchentoot:content-type*) "application/json"
           (hunchentoot:header-out :cache-control) "no-cache")
     (let* ((out (hunchentoot:send-headers))
+           (json-out (flexi-streams:make-flexi-stream out :external-format :utf-8))
            (deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second)))
            (last-bookmark (get-internal-real-time)))
       (labels ((write-event (event)
-                 (write-sequence (trivial-utf-8:string-to-utf-8-bytes
-                                  (concatenate 'string (com.inuoe.jzon:stringify event) (string #\Newline))) out)
-                 (finish-output out))
+                 (com.inuoe.jzon:stringify event :stream json-out)
+                 (write-char #\Newline json-out)
+                 (finish-output json-out))
                (emit (event)
                  (let ((view (crd-api-view (event-api-view event))))
                    (when (and *table-request* (not (equal "ERROR" (gethash "type" view))))

@@ -49,7 +49,7 @@
                                                        "application/json-patch+json")
                                         :test #'equal)
                           (core-resource-error 415 "UnsupportedMediaType" "Unsupported ResourceQuota status patch type"))
-                        (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t))))))
+                        (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-binary t))))))
       (json-response
        (update-core-resource
         store resource namespace name
@@ -109,7 +109,7 @@ allocatable amount given for one of them is the one charged."
            (requested
              (if (eq method :put)
                  (core-resource-request-object "Node")
-                 (let ((patch (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t))))
+                 (let ((patch (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-binary t))))
                    (cond ((equal content-type "application/json-patch+json")
                           (apply-core-json-patch (copy-core-object current) patch))
                          ((member content-type '("application/merge-patch+json" "application/strategic-merge-patch+json")

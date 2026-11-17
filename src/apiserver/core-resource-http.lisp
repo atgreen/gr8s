@@ -326,7 +326,7 @@
       (core-resource-error 415 "UnsupportedMediaType" "Supported patch types are JSON merge, strategic merge, JSON patch and apply"))
     (setf patch (if (or (equal resource "customresourcedefinitions") (custom-resource-key-p resource))
                     (crd-parse-json-content (hunchentoot:raw-post-data :force-text t))
-                    (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t) :max-string-length (* 2 1024 1024))))
+                    (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-binary t) :max-string-length (* 2 1024 1024))))
     (json-response
      (admitted-update-core-resource
       store resource namespace name

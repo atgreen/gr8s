@@ -82,8 +82,7 @@
     (invalid-trace-request "Trace request frame is too large"))
   (let* ((object
            (handler-case
-               (com.inuoe.jzon:parse
-                (trivial-utf-8:utf-8-bytes-to-string payload))
+               (com.inuoe.jzon:parse payload)
              (error (condition)
                (invalid-trace-request "Invalid trace request JSON: ~A" condition))))
          (source (and (hash-table-p object) (gethash "source" object)))

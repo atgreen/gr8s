@@ -119,7 +119,7 @@ No existing artifact may be replaced. The source store is never modified."
        (when (plusp (length buffer)) (error "Truncated store snapshot record"))
        (return nil))
       ((= byte 10)
-       (let ((record (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string buffer)
+       (let ((record (com.inuoe.jzon:parse buffer
                                            :max-string-length (* 2 1024 1024) :max-depth 128)))
          (unless (hash-table-p record) (error "Store snapshot record must be an object"))
          (return record)))

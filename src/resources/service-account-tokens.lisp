@@ -236,7 +236,7 @@ The caller must hold STORE's credential lock."
 
 (defun jwt-json-segment (object)
   "Encode OBJECT as one JOSE base64url JSON segment."
-  (base64url-encode (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify object))))
+  (base64url-encode (stringify-to-utf-8-bytes object)))
 
 (defun unix-time-now ()
   "Return the current Unix time in seconds."
@@ -314,7 +314,7 @@ Returns the token and its Unix expiry."
              (signature (base64url-decode (third parts)))
              (signed (concatenate 'string (first parts) "." (second parts))))
         (when (and header payload signature (= 64 (length signature)))
-          (let ((header-object (ignore-errors (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string header)))))
+          (let ((header-object (ignore-errors (com.inuoe.jzon:parse header))))
             (when (and (hash-table-p header-object) (equal "ES256" (gethash "alg" header-object)))
               (let* ((kid (gethash "kid" header-object))
                      (entry
@@ -330,8 +330,7 @@ Returns the token and its Unix expiry."
                              :sha256 (trivial-utf-8:string-to-utf-8-bytes signed))
                             (coerce signature '(simple-array (unsigned-byte 8) (*)))))
                   (ignore-errors
-                   (com.inuoe.jzon:parse
-                    (trivial-utf-8:utf-8-bytes-to-string payload))))))))))))
+                   (com.inuoe.jzon:parse payload)))))))))))
 
 (defun service-account-claims-bound-live-p (store namespace kubernetes)
   "Check any Pod or Secret the claims name is still the same live object."

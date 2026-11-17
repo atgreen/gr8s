@@ -112,12 +112,12 @@
       ((equal name "k8s.io.apimachinery.pkg.runtime.RawExtension")
        ;; Keep the client's key order: a revision's data is compared byte for byte.
        (let ((raw (gethash "raw" object)))
-         (if raw (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string (ag-grpc:base64-decode raw))) (core-object))))
+         (if raw (com.inuoe.jzon:parse (ag-grpc:base64-decode raw)) (core-object))))
       ((member name '("k8s.io.api.authorization.v1.ExtraValue" "k8s.io.api.authentication.v1.ExtraValue") :test #'equal)
        (gethash "items" object #()))
       ((equal name "k8s.io.apimachinery.pkg.apis.meta.v1.FieldsV1")
        (let ((raw (gethash "Raw" object)))
-         (if raw (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string (ag-grpc:base64-decode raw))) (core-object))))
+         (if raw (com.inuoe.jzon:parse (ag-grpc:base64-decode raw)) (core-object))))
       ((member name '("k8s.io.apimachinery.pkg.apis.meta.v1.Time" "k8s.io.apimachinery.pkg.apis.meta.v1.MicroTime") :test #'equal)
        (if (zerop (hash-table-count object)) 'null
            (multiple-value-bind (year month day hour minute second)
@@ -363,6 +363,6 @@ when both were on the server and it came first, so entries new to the list lead 
     (validate-template-shape object (template-schema "io.k8s.api.core.v1.PodTemplate") "PodTemplate")
     ;; Keep protobuf's larger transport budget from admitting strings that
     ;; cannot be read back by the durable JSON store's 2 MiB string limit.
-    (when (> (length (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify object))) (* 2 1024 1024))
+    (when (> (trivial-utf-8:utf-8-byte-length (com.inuoe.jzon:stringify object)) (* 2 1024 1024))
       (core-resource-error 413 "RequestEntityTooLarge" "PodTemplate exceeds the 2 MiB storage limit"))
     object))

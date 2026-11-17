@@ -85,6 +85,14 @@
         ((vectorp object) (map 'vector #'copy-core-object object))
         (t object)))
 
+(defun stringify-to-utf-8-bytes (value)
+  "Encode VALUE as JSON straight into fresh UTF-8 octets, with no intermediate string.
+   Consumers such as ironclad require a simple array, as string-to-utf-8-bytes returned."
+  (coerce (flexi-streams:with-output-to-sequence (out)
+            (com.inuoe.jzon:stringify
+             value :stream (flexi-streams:make-flexi-stream out :external-format :utf-8)))
+          '(simple-array (unsigned-byte 8) (*))))
+
 (defparameter *stored-resource-types*
   '(("configmaps" "ConfigMap" "v1" t)
     ("secrets" "Secret" "v1" t)
@@ -217,9 +225,8 @@ by one record, not the journal size. Only newline-terminated records are parsed.
           ((= byte 10)
            (let ((record
                    (handler-case
-                       (com.inuoe.jzon:parse
-                        (trivial-utf-8:utf-8-bytes-to-string buffer)
-                        :max-string-length (* 2 1024 1024))
+                       (com.inuoe.jzon:parse buffer
+                                             :max-string-length (* 2 1024 1024))
                      (error (condition)
                        (error "Damaged core resource journal record at byte ~D of ~A: ~A"
                               bytes path condition)))))
@@ -1045,8 +1052,7 @@ before any state is published."
            (require-key key)
            (handler-case
                (require-object (com.inuoe.jzon:parse
-                                (trivial-utf-8:utf-8-bytes-to-string
-                                 (core-base64-bytes (gethash key data) key))) key)
+                                (core-base64-bytes (gethash key data) key)) key)
              (error () (core-resource-error 422 "Invalid" "~A must contain a JSON object" key)))))
         ((string= type "kubernetes.io/service-account-token")
          (let ((annotations (gethash "annotations" (gethash "metadata" object))))

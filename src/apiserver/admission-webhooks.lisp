@@ -398,7 +398,7 @@ cache, address/verify-name split and socket-close-on-deadline live in the client
             (usocket:timeout-error () (failure "context deadline exceeded"))
             (error (condition) (failure (remove #\Newline (princ-to-string condition)))))
         (unless (<= 200 code 299) (failure (format nil "unexpected status ~D" code)))
-        (handler-case (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string response)
+        (handler-case (com.inuoe.jzon:parse response
                                             :max-string-length +admission-maximum-response+)
           (error (condition)
             (error 'admission-call-failure
