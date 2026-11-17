@@ -105,6 +105,20 @@ the Kubernetes API version with a gr8s release suffix (see
   systemd kills the process — previously an unreachable peer during a
   membership change could wedge `systemctl stop` forever.
 
+- Pod failures now say why, in the status fields and Events `kubectl`
+  already shows and worded as a kubelet words them. A missing ConfigMap
+  or Secret volume — whose 404 used to escape every handler and surface
+  only in the node log — now waits in `ContainerCreating` with a
+  `FailedMount` Event (`configmap "x" not found`), as do other volume
+  set-up failures; `CrashLoopBackOff` reports its back-off time with a
+  `BackOff` Event; a failing pull is `ErrImagePull` then
+  `ImagePullBackOff` (and `ErrImageNeverPull` under `imagePullPolicy:
+  Never`); a container the runtime refuses to create is
+  `CreateContainerError` instead of failing the whole Pod sync as
+  `RuntimeError`; and an eviction raises an `Evicted` Event. The
+  control-plane node-Event allowlist no longer drops `BackOff`,
+  `FailedToRetrieveImagePullSecret` or `RestartingAllContainers`.
+
 ### Changed
 
 - `gr8s skill` gains an HA troubleshooting playbook distilled from live
@@ -182,6 +196,14 @@ the Kubernetes API version with a gr8s release suffix (see
   `gr8s-agent` systemd units configured through `/etc/gr8s/*.env`. A tag
   `v<k8s>-gr8s.<n>` maps to package version `<k8s>+gr8s.<n>` with packaging
   revision 1 in both formats.
+
+- Failure and pressure metrics: `/metrics` exports
+  `gr8s_endpoint_policy_drops_total` (the NetworkPolicy drop counter the
+  guards kept but never published; inbound policy drops now also count in
+  `dropped_packets`, as outbound ones always did), and
+  `/metrics/cadvisor` adds `container_oom_events_total` and the PSI
+  pressure-stall series. Node pressure conditions now carry the kubelet's
+  own messages.
 
 - ListenerSet support for foreign-cluster Gateways, with stable and experimental
   API discovery, explicit namespace admission, shared-port HTTPS certificates
