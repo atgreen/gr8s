@@ -2,9 +2,15 @@
 Description=gr8s Kubernetes server
 Wants=network-online.target
 After=network-online.target
+# A deterministic startup failure lands in `systemctl --failed` instead of
+# restarting forever.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
-Type=simple
+# The binary tells systemd when the API is actually serving, so active
+# means serving, not merely executed.
+Type=notify
 EnvironmentFile=/etc/gr8s/server.env
 ExecStart=/usr/bin/gr8s $GR8S_EXEC_ARGS
 Restart=always

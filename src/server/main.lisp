@@ -66,6 +66,25 @@
     (error ()
       (error "invalid port: ~A" value))))
 
+(defun notify-service-manager-ready ()
+  "Tell a Type=notify service manager the service is now serving.
+Outside systemd (no NOTIFY_SOCKET) this is a no-op, and a notification
+failure never takes the service down with it."
+  (let ((name (uiop:getenv "NOTIFY_SOCKET")))
+    (when (and name (plusp (length name)))
+      (ignore-errors
+        (let ((socket (make-instance (if (char= #\@ (char name 0))
+                                         'sb-bsd-sockets:local-abstract-socket
+                                         'sb-bsd-sockets:local-socket)
+                                     :type :datagram)))
+          (unwind-protect
+               (progn
+                 (sb-bsd-sockets:socket-connect
+                  socket (if (char= #\@ (char name 0)) (subseq name 1) name))
+                 (sb-bsd-sockets:socket-send socket "READY=1" nil)
+                 t)
+            (sb-bsd-sockets:socket-close socket)))))))
+
 (defun option-value (arguments option)
   "The value following OPTION in ARGUMENTS (its second element), or signal an
    error that OPTION requires a value."
@@ -2135,6 +2154,9 @@ agent masquerades Pod->apiserver traffic toward.")
                               (lambda ()
                                 (gr8s.agent:node-runtime-wireguard-metrics-text
                                  node-runtime))))
+               ;; Enrolled, runtime up, kubelet serving: the node is ready even
+               ;; though the session below reconnects for the process lifetime.
+               (notify-service-manager-ready)
                (run-node-session
                 host port node-name identity
                 (lambda (snapshot)
@@ -2908,6 +2930,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                       (format t "gr8s kubeconfig: ~A~%" (namestring kubeconfig)))
                     (format t "gr8s listening on https://~A:~D~%" address port)
                     (finish-output)
+                    (notify-service-manager-ready)
                     (loop until *shutdown-requested* do (sleep 0.1)))
                (when debug-port (stop-debug-server debug-port))
                (when aggregator (stop-api-aggregator aggregator))
