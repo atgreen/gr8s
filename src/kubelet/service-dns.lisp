@@ -442,23 +442,112 @@ Exact octets are the keys; strings inside JSON never receive case-folded lookup.
             (resolve-store-service-ptr store question)
             (resolve-store-service-question store question #'rotate))))))
 
-(defun make-cluster-dns-resolver (store)
+;;; ---------------------------------------------------------------------------
+;;; External zone: serve Gateway/route hostnames authoritatively (podster-iga).
+;;; Each node answers names in a configured external zone with its OWN gateway
+;;; address, so an upstream resolver that forwards the zone to every node
+;;; aggregates them and a down node simply drops out. The gr8s DNS owns both the
+;;; Gateway state and the answer, so there is nothing to push -- the record is
+;;; the live state (the CoreDNS k8s_external / cluster.local model).
+
+(defun parse-dns-ipv4-octets (address)
+  "Parse a dotted-quad IPv4 string into a four-octet vector, or NIL."
+  (let ((parts (and (stringp address) (uiop:split-string address :separator "."))))
+    (when (and parts (= 4 (length parts)))
+      (let ((octets (mapcar (lambda (part) (ignore-errors (parse-integer part))) parts)))
+        (when (every (lambda (octet) (typep octet '(integer 0 255))) octets)
+          (coerce octets 'vector))))))
+
+(defun dns-name-serves-hostname-p (name hostname)
+  "True when query NAME is served by a Gateway/route/ingress HOSTNAME, which may be
+a single-label wildcard such as \"*.example.net\" (one extra label before the
+suffix). Both are compared canonically (lowercased, no trailing dot)."
+  (let ((name (canonical-dns-name name)) (hostname (canonical-dns-name hostname)))
+    (cond
+      ((zerop (length hostname)) nil)
+      ((and (> (length hostname) 1) (char= #\* (char hostname 0)))
+       (let ((suffix (subseq hostname 1))) ; ".example.net"
+         (and (> (length name) (length suffix))
+              (string= suffix (subseq name (- (length name) (length suffix))))
+              (let ((label (subseq name 0 (- (length name) (length suffix)))))
+                (and (plusp (length label)) (not (find #\. label)))))))
+      (t (string= name hostname)))))
+
+(defun store-external-served-hostnames (store)
+  "The external hostnames this cluster serves: Gateway listener hostnames (wildcards
+kept), HTTPRoute hostnames, and Ingress rule hosts."
+  (let ((hostnames nil))
+    (flet ((add (host) (when (and (stringp host) (plusp (length host)))
+                         (pushnew host hostnames :test #'equal))))
+      (dolist (gateway (ignore-errors (list-core-resources store "gateways")))
+        (loop for listener across (gethash "listeners" (gethash "spec" gateway (core-object)) #())
+              do (add (gethash "hostname" listener))))
+      (dolist (route (ignore-errors (list-core-resources store "httproutes")))
+        (loop for host across (gethash "hostnames" (gethash "spec" route (core-object)) #())
+              do (add host)))
+      (dolist (ingress (ignore-errors (list-core-resources store "ingresses")))
+        (loop for rule across (gethash "rules" (gethash "spec" ingress (core-object)) #())
+              do (add (gethash "host" rule)))))
+    hostnames))
+
+(defun external-zone-answer (store serve-zones node-address question)
+  "Authoritatively answer QUESTION when its name is in a configured external
+SERVE-ZONE: an A record of NODE-ADDRESS (this node's IPv4 gateway address) when the
+name matches a served Gateway/route/ingress hostname, NXDOMAIN when it is in a zone
+but matches nothing, NODATA for a matched name whose type we do not serve. Returns
+(values answers handled-p rcode), or (nil nil nil) when the name is in no serve-zone
+so the proxy forwards it upstream as usual."
+  (let ((name (0conf:question-name question)))
+    (when (and serve-zones
+               (some (lambda (zone) (dns-name-in-zone-p name zone)) serve-zones))
+      (if (some (lambda (host) (dns-name-serves-hostname-p name host))
+                (store-external-served-hostnames store))
+          (let ((octets (and (= (0conf:question-qtype question) 0conf:+type-a+)
+                             (parse-dns-ipv4-octets node-address))))
+            (values (when octets
+                      (list (make-instance '0conf:a-record :name name :address octets :ttl 30)))
+                    t 0))
+          (values nil t +dns-name-error+)))))
+
+(defun make-cluster-dns-resolver (store &key serve-zones node-address)
   "Return a cl-dns-proxy resolver for STORE that answers cluster-authoritative
 names -- the reserved API service, and any name in the cluster zone, as NXDOMAIN
-when it does not resolve -- and declines everything else so the proxy forwards
-it upstream.  The proxy's resolver protocol is (ANSWERS HANDLED-P RCODE); gr8s's
-store resolver speaks (ANSWERS EXISTS REVERSE-AUTHORITY), which this adapts, so
-the cluster-DNS policy stays in gr8s while the forwarding proxy stays general."
+when it does not resolve -- plus any configured external SERVE-ZONES, whose
+Gateway/route/ingress hostnames resolve to this node's NODE-ADDRESS (podster-iga);
+it declines everything else so the proxy forwards it upstream.  The proxy's
+resolver protocol is (ANSWERS HANDLED-P RCODE); gr8s's store resolver speaks
+(ANSWERS EXISTS REVERSE-AUTHORITY), which this adapts, so the cluster-DNS policy
+stays in gr8s while the forwarding proxy stays general."
   (let ((service-resolver (store-service-dns-resolver store)))
     (lambda (question)
       (let ((name (0conf:question-name question)))
-        (if (string= (canonical-dns-name name) +dns-kubernetes-service+)
-            (values (kubernetes-service-answer question) t 0)
-            (multiple-value-bind (answers exists reverse-authority)
-                (funcall service-resolver question)
-              (if (or reverse-authority (dns-name-in-zone-p name +dns-cluster-zone+))
-                  (values answers t (if exists 0 +dns-name-error+))
-                  (values nil nil nil))))))))
+        (cond
+          ((string= (canonical-dns-name name) +dns-kubernetes-service+)
+           (values (kubernetes-service-answer question) t 0))
+          (t
+           (multiple-value-bind (answers handled rcode)
+               (external-zone-answer store serve-zones node-address question)
+             (if handled
+                 (values answers handled rcode)
+                 (multiple-value-bind (answers exists reverse-authority)
+                     (funcall service-resolver question)
+                   (if (or reverse-authority (dns-name-in-zone-p name +dns-cluster-zone+))
+                       (values answers t (if exists 0 +dns-name-error+))
+                       (values nil nil nil)))))))))))
+
+(defun make-external-zone-dns-resolver (store serve-zones node-address)
+  "A resolver for the node's externally reachable DNS listener (podster-iga): it
+answers the configured external SERVE-ZONES authoritatively (Gateway/route/ingress
+hostnames -> this node's NODE-ADDRESS, NXDOMAIN for in-zone names it does not serve)
+and REFUSES everything else, so the listener is authoritative-only -- never an open
+forwarder for arbitrary names."
+  (lambda (question)
+    (multiple-value-bind (answers handled rcode)
+        (external-zone-answer store serve-zones node-address question)
+      (if handled
+          (values answers handled rcode)
+          ;; Not in a serve zone: REFUSED (rcode 5). Never forward from this listener.
+          (values nil t 5)))))
 
 (defun service-dns-endpoint-unready-p (endpoint)
   "Exclude explicitly unready endpoints while retaining unspecified or null readiness."
