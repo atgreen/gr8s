@@ -3432,6 +3432,32 @@ Membership is fixed at trace start: restart the trace after a container restart.
 Completion or client disconnect cleans up attachments. Output is ephemeral, so
 save relevant evidence securely. Begin with a narrow selector and short duration.
 
+## Built-in APIs -- do not install upstream duplicates
+
+gr8s serves several Kubernetes APIs natively that you would otherwise install as
+a separate controller. Installing the upstream version on top registers the same
+API group a second time and wedges discovery: `kubectl` then reports `<group>,
+Kind=X matches multiple kinds` and EVERY resource in that group fails to apply.
+Before `helm install`-ing or applying any controller, check whether gr8s already
+serves its group -- `kubectl api-resources --api-group=GROUP` or
+`kubectl get --raw /apis` -- and if so, use the native resources; do not add the
+upstream CRDs.
+
+- **cert-manager (`cert-manager.io/v1`): built in.** gr8s implements Issuer,
+  ClusterIssuer, Certificate and CertificateRequest with a native controller --
+  do NOT install upstream cert-manager or its CRDs. It is a compatible subset:
+  `selfSigned` and `ca` issuers only (acme/vault/venafi are rejected at
+  admission), and a `ca` issuer signs from the gr8s cluster CA, not from a
+  Secret-held CA (any `spec.ca.secretName` is ignored). A Certificate's issued
+  key pair is written to its `spec.secretName` as a `kubernetes.io/tls` Secret,
+  so a Gateway/Ingress TLS listener can reference it directly. To give services
+  one trusted CA, point a `ca` ClusterIssuer at the cluster CA and trust that CA
+  on clients.
+
+If you have already installed an upstream duplicate and wedged a group, recover
+by removing it and its CRDs (`helm uninstall ...`; `kubectl delete crd ...`);
+the native group returns once the duplicate CRDs are gone.
+
 ## Maintenance and agent working practices
 
 Persistent state contains cluster identity and data. Preserve it across restarts;
