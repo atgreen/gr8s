@@ -156,6 +156,9 @@
             (crd-selectable-field-paths *crd-view-definition* *crd-request-version*))
           (when (or (csr-resource-p resource) (equal resource "clustertrustbundles")) '("spec.signerName"))
           (when (equal resource "resourceslices") '("spec.driver" "spec.nodeName"))
+          ;; pkg/apis/core/v1 Secret field label conversion; controllers (e.g. the
+          ;; prometheus-operator) watch secrets by type!=kubernetes.io/dockercfg.
+          (when (equal resource "secrets") '("type"))
           ;; pkg/apis/certificates/v1 field label conversions; signers watch by signerName.
           (when (equal resource "podcertificaterequests") '("spec.signerName" "spec.podName" "spec.nodeName"))
           (when (equal resource "events")

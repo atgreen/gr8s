@@ -140,6 +140,32 @@
       (is (equal "worker-a"
                  (gethash "name" (gethash "metadata" (aref items 0))))))))
 
+(test secrets-support-the-upstream-type-field-selector
+  (with-core-api (store path)
+    (values path)
+    (flet ((secret (name type)
+             (let ((object (core-fixture "Secret" name)))
+               (setf (gethash "type" object) type)
+               (when (equal type "kubernetes.io/dockercfg")
+                 ;; this type requires its data key; base64 of "{}".
+                 (setf (gethash "data" object)
+                       (gr8s.resources::core-object ".dockercfg" "e30=")))
+               object)))
+      (gr8s.resources::create-core-resource store "secrets" (secret "opaque" "Opaque") "default")
+      (gr8s.resources::create-core-resource store "secrets"
+                                  (secret "dockercfg" "kubernetes.io/dockercfg") "default"))
+    (let ((collection "/api/v1/namespaces/default/secrets"))
+      ;; type!= is how the prometheus-operator watches non-dockercfg secrets.
+      (let ((filtered (check-core-status 200 collection
+                        :parameters '(("fieldSelector" . "type!=kubernetes.io/dockercfg")))))
+        (is (= 1 (length (gethash "items" filtered))))
+        (is (equal "opaque" (gethash "name" (gethash "metadata" (aref (gethash "items" filtered) 0))))))
+      ;; and equality on type.
+      (let ((filtered (check-core-status 200 collection
+                        :parameters '(("fieldSelector" . "type=kubernetes.io/dockercfg")))))
+        (is (= 1 (length (gethash "items" filtered))))
+        (is (equal "dockercfg" (gethash "name" (gethash "metadata" (aref (gethash "items" filtered) 0)))))))))
+
 (test json-patch-replace-can-introduce-object-members
   (with-core-api (store path)
     (values path)
