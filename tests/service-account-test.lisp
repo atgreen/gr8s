@@ -304,7 +304,7 @@
              (is (typep server 'gr8s.apiserver::gr8s-acceptor)))
         (when server (stop-server server))))))
 
-(defun service-account-tls-status (pki path &optional token)
+(defun service-account-tls-status (pki path &optional token (scheme "Bearer"))
   "Read an HTTP response status over verified TLS using the test cluster CA."
   (sb-sys:with-deadline (:seconds 10)
     (let* ((socket (usocket:socket-connect "127.0.0.1" *tls-api-port* :element-type '(unsigned-byte 8)))
@@ -321,7 +321,7 @@
                (with-output-to-string (out)
                  (format out "GET ~A HTTP/1.1~C~CHost: kubernetes.default.svc~C~CConnection: close~C~C"
                          path #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed)
-                 (when token (format out "Authorization: Bearer ~A~C~C" token #\Return #\Linefeed))
+                 (when token (format out "Authorization: ~A ~A~C~C" scheme token #\Return #\Linefeed))
                  (format out "~C~C" #\Return #\Linefeed))) tls)
              (finish-output tls)
              (let ((line (with-output-to-string (out)
@@ -413,6 +413,24 @@
                (is (= 200 (service-account-tls-status pki "/api/v1/pods" token)))
                (gr8s.resources::delete-core-resource store "serviceaccounts" "alpha" "reader")
                (is (= 401 (service-account-tls-status pki "/api/v1/pods" token)))))
+        (when server (stop-server server))))))
+
+(test tls-api-accepts-case-insensitive-bearer-schemes
+  (with-temporary-store (store directory)
+    (let* ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" directory)))
+           (runtime (make-fake-runtime))
+           (server nil) (*tls-api-port* nil))
+      (service-account-test-store store)
+      (unwind-protect
+           (progn
+             (setf server (start-test-tls-api store runtime (make-reconciler store runtime) pki))
+             (let ((token (service-account-test-token
+                           (gr8s.resources::ensure-service-account-credential store "alpha" "reader"))))
+               (dolist (scheme '("Bearer" "bearer" "bEaReR"))
+                 (is (= 200 (service-account-tls-status pki "/version" token scheme)))
+                 (is (= 401 (service-account-tls-status pki "/version" "forged" scheme)))
+                 (is (= 403 (service-account-tls-status pki "/api/v1/pods" token scheme))))
+               (is (= 401 (service-account-tls-status pki "/version" token "Basic")))))
         (when server (stop-server server))))))
 
 (test default-cluster-roles-exist-and-grant-nothing-until-bound

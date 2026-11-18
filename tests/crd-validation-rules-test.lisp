@@ -14,6 +14,46 @@
   "Parse a JSON schema."
   (com.inuoe.jzon:parse text))
 
+(test nested-unbounded-collections-share-the-request-cardinality-bound
+  ;; AlertmanagerConfig receivers[].snsConfigs[].sigv4 uses this presence rule.
+  ;; Nested unbounded collections share one request-size limit, not one each.
+  (let* ((leaf (rule-schema "{\"type\":\"object\",\"properties\":{\"externalId\":{\"type\":\"string\"},\"roleArn\":{\"type\":\"string\"}},\"x-kubernetes-validations\":[{\"rule\":\"!has(self.externalId) || has(self.roleArn)\"}]}"))
+         (schema (gr8s.resources::core-object
+                  "type" "array" "items"
+                  (gr8s.resources::core-object "type" "array" "items" leaf)))
+         (total (list 0))
+         (cost (nth-value 2 (gr8s.resources::crd-compile-rule-expression
+                            "!has(self.externalId) || has(self.roleArn)" leaf nil nil))))
+    (gr8s.resources::crd-check-schema-rules schema "openAPIV3Schema" nil 1 nil total)
+    (is (= (car total) (* cost (floor gr8s.resources::+crd-maximum-request-bytes+
+                                      (1+ (gr8s.resources::cel-schema-min-size leaf))))))))
+
+(test rule-cardinality-retains-explicit-limits-until-an-unbounded-ancestor
+  (let* ((leaf (rule-schema "{\"type\":\"integer\",\"x-kubernetes-validations\":[{\"rule\":\"self >= 0\"}]}"))
+         (cost (nth-value 2 (gr8s.resources::crd-compile-rule-expression "self >= 0" leaf nil nil))))
+    (dolist (collection '("array" "object"))
+      (dolist (bounds '((2 3) (nil 3) (2 nil) (0 3)))
+        (let ((schema leaf) (total (list 0)))
+          (dolist (bound (reverse bounds))
+            (setf schema (gr8s.resources::core-object
+                          "type" collection
+                          (if (equal collection "array") "items" "additionalProperties") schema))
+            (when bound
+              (setf (gethash (if (equal collection "array") "maxItems" "maxProperties") schema) bound)))
+          (gr8s.resources::crd-check-schema-rules schema "openAPIV3Schema" nil 1 nil total)
+          (is (= (car total)
+                 (* cost (if (every #'identity bounds) (reduce #'* bounds)
+                             (floor gr8s.resources::+crd-maximum-request-bytes+ 2))))))))))
+
+(test nested-message-expression-cost-is-not-multiplied-by-cardinality
+  (let* ((leaf (rule-schema "{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\",\"maxLength\":8},\"allowed\":{\"type\":\"boolean\"}},\"x-kubernetes-validations\":[{\"rule\":\"self.allowed\",\"messageExpression\":\"self.message\"}]}"))
+         (schema (gr8s.resources::core-object "type" "array" "maxItems" 10 "items" leaf))
+         (total (list 0)))
+    (gr8s.resources::crd-check-schema-rules schema "openAPIV3Schema" nil 1 nil total)
+    (is (= (car total)
+           (+ (* 10 (nth-value 2 (gr8s.resources::crd-compile-rule-expression "self.allowed" leaf nil nil)))
+              (nth-value 2 (gr8s.resources::crd-compile-rule-expression "self.message" leaf nil nil)))))))
+
 (defun rule-definition (schema-text &key (plural "rulers"))
   "Build a definition whose single version uses the JSON schema SCHEMA-TEXT."
   (gr8s.resources::core-object

@@ -2819,6 +2819,8 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                  (start-node-grpc-server
                   store :host (getf options :node-listen "127.0.0.1")
                   :port (getf options :node-port)
+                  :session-admission-fn
+                  (when ha (lambda () (ha-control-plane-leader-p ha)))
                   :pki pki :cluster-pod-cidr (gethash "clusterPodCIDR" pool)
                   :node-prefix (gethash "nodePrefix" pool)
                   :cluster-pod-cidrs (node-pool-cluster-cidrs pool)

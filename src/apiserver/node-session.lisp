@@ -62,8 +62,11 @@ planner groups by: its name and its region/zone."
                        overlay-backend mtu
                        wireguard-listen-port wireguard-relay-server
                        wireguard-relay-address image-tracker clock
-                       gateway-stability-seconds)))
+                       gateway-stability-seconds session-admission-fn)))
   store
+  ;; HA admits persistent agent streams only on the publishing leader.
+  ;; Enrollment and peer-operation relay are deliberately independent.
+  session-admission-fn
   grpc-server
   thread
   port
@@ -1501,6 +1504,14 @@ An explicit unready or malformed current report withdraws its prior proof."
        :message (princ-to-string condition))
       :sequence 1))))
 
+(defun node-sessions-admitted-p (server)
+  (let ((predicate (node-grpc-server-session-admission-fn server)))
+    (or (null predicate) (funcall predicate))))
+
+(defun ensure-node-session-admitted (server)
+  (unless (node-sessions-admitted-p server)
+    (error "Node sessions require an active control-plane leader; reconnect to another endpoint")))
+
 (defun handle-node-connect-internal (server context stream)
   "Serve one agent Connect stream end to end: read and authenticate the NodeHello,
    update the node's underlay address/capacity/kubelet port, build its connect
@@ -1509,6 +1520,7 @@ An explicit unready or malformed current report withdraws its prior proof."
    flush any queued operations. Then loop handling inbound envelopes until the stream
    ends. On exit deregisters the session and fails its pending operations. Refreshes
    peer topology when this node's underlay address changed."
+  (ensure-node-session-admitted server)
   (let ((first (ag-grpc:stream-recv stream)))
     (unless first (error "Node session ended before its hello"))
     (ensure-node-protocol-version (slot-value first 'gr8s.node.v1::protocol-version))
@@ -1615,6 +1627,7 @@ An explicit unready or malformed current report withdraws its prior proof."
           (node-grpc-server-pki server) authenticated)))
       (unwind-protect
            (progn
+             (ensure-node-session-admitted server)
              ;; Register and drain queued work atomically; hold the send lock
              ;; through the handshake so a concurrent publication or operation
              ;; cannot arrive before ServerHello and the initial snapshot.
@@ -1624,11 +1637,17 @@ An explicit unready or malformed current report withdraws its prior proof."
                    (setf (gethash node-name (node-grpc-server-sessions server)) session
                          snapshot (gethash node-name (node-grpc-server-snapshots server) snapshot)
                          operations (gethash node-name (node-grpc-server-operation-queues server)))
+                   ;; Bind drained work before any handshake step can fail.
+                   (dolist (operation operations)
+                     (setf (pending-node-operation-session operation) session))
                    (clear-service-risk-grant-locked server)
                    ;; A previous session's ACK cannot prove this incarnation
                    ;; has rebuilt its local v2 risk map after a restart.
                    (remhash node-name (node-grpc-server-acknowledged-revisions server))
                    (remhash node-name (node-grpc-server-operation-queues server)))
+                 ;; Recheck outside the server lock: leadership may have changed
+                 ;; during the handshake, after the monitor last swept sessions.
+                 (ensure-node-session-admitted server)
                  (ag-grpc:stream-send
                   stream (make-server-envelope
                           :hello (make-instance 'gr8s.node.v1::server-hello
@@ -1654,8 +1673,7 @@ An explicit unready or malformed current report withdraws its prior proof."
                  (setf (node-agent-session-delivered session) snapshot)
                  (install-node-gateway-baseline session snapshot)
                  (loop for operation in operations for sequence from 3
-                       do (setf (pending-node-operation-session operation) session)
-                          (ag-grpc:stream-send
+                       do (ag-grpc:stream-send
                            stream (make-server-envelope
                                    :operation-request (pending-node-operation-request operation)
                                    :sequence sequence)))))
@@ -1696,6 +1714,15 @@ socket are released rather than leaked. Safe to call more than once."
     (when (typep stream 'ag-grpc::grpc-server-call-stream)
       (ignore-errors
        (ag-http2:connection-close (ag-grpc::server-stream-connection stream))))))
+
+(defun evict-inadmissible-node-sessions (server)
+  "Release follower-owned streams so agents reconnect to the publishing leader."
+  (unless (node-sessions-admitted-p server)
+    (let ((sessions (bt:with-lock-held ((node-grpc-server-lock server))
+                      (loop for session being the hash-values of (node-grpc-server-sessions server)
+                            unless (node-agent-session-evicted-p session) collect session))))
+      ;; Closing connections can run stream cleanup; never do it under the lock.
+      (dolist (session sessions) (close-node-agent-session session)))))
 
 (defun evict-silent-node-sessions (server now)
   "Close sessions whose peer or handler has gone quiet, so a live agent reconnects."
@@ -1772,7 +1799,8 @@ socket are released rather than leaked. Safe to call more than once."
   "Until SERVER is stopping, every 50ms expire node leases past the heartbeat
    timeout and evict sessions that have gone silent."
   (loop until (node-grpc-server-stopping-p server)
-        do (let ((now (funcall (node-grpc-server-clock server))))
+        do (evict-inadmissible-node-sessions server)
+           (let ((now (funcall (node-grpc-server-clock server))))
              (handler-case (reconcile-node-heartbeats server now)
                (kubernetes-error (condition)
                  ;; A renewed lease may win consensus while this member's
@@ -2048,6 +2076,7 @@ socket are released rather than leaked. Safe to call more than once."
 (defun start-node-grpc-server (store &key (host "127.0.0.1") (port 0)
                                             (heartbeat-timeout-seconds 15)
                                             pki
+                                            session-admission-fn
                                             (cluster-pod-cidr +default-cluster-pod-cidr+)
                                             (node-prefix +default-node-pod-prefix+)
                                             cluster-pod-cidrs
@@ -2095,6 +2124,7 @@ socket are released rather than leaked. Safe to call more than once."
               :max-channels wireguard-relay-max-channels)))
          (server (%make-node-grpc-server
                   :store store
+                  :session-admission-fn session-admission-fn
                   :grpc-server grpc-server
                   :port port
                   :heartbeat-timeout-seconds heartbeat-timeout-seconds

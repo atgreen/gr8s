@@ -284,7 +284,7 @@ returns the API server's answer."
 the AUTHORIZATION header, or NIL."
   (or (and chain (handler-case (certificate-api-identity chain (kubelet-auth-client-ca auth))
                    (kubernetes-error () nil)))
-      (let ((token (and authorization (uiop:string-prefix-p "Bearer " authorization)
+      (let ((token (and authorization (>= (length authorization) 7) (string-equal "Bearer " authorization :end2 7)
                         (string-trim " " (subseq authorization 7)))))
         (and token (plusp (length token)) (kubelet-token-identity auth token)))))
 

@@ -213,7 +213,12 @@
                                          text (cel-error-message condition))))
                  (unless (eq :bool (cel-type-head type))
                    (crd-schema-error (format nil "~A.rule" rule-path) "Invalid value: ~S: cel expression must evaluate to a bool" text))
-                 (let ((scaled (* cost cardinality)))
+                 ;; An unbounded ancestor loses the product of explicit schema
+                 ;; limits. As in Kubernetes getExpressionCost/maxCardinality,
+                 ;; all occurrences then share one maximum request size.
+                 (let ((scaled (* cost (or cardinality
+                                           (floor +crd-maximum-request-bytes+
+                                                  (1+ (cel-schema-min-size schema)))))))
                    (when (> scaled +crd-rule-cost-limit+)
                      (crd-schema-error (format nil "~A.rule" rule-path) "Forbidden: ~A"
                                        (crd-cost-error-message "estimated rule cost" scaled +crd-rule-cost-limit+)))
@@ -237,7 +242,16 @@
                    (when (> cost +crd-rule-cost-limit+)
                      (crd-schema-error (format nil "~A.messageExpression" rule-path) "Forbidden: ~A"
                                        (crd-cost-error-message "estimated messageExpression cost" cost +crd-rule-cost-limit+)))
-                   (incf (car total) (* cost cardinality))))))))
+                   (incf (car total) cost)))))))
+
+(defun crd-child-rule-cardinality (schema cardinality)
+  "Multiply explicit collection limits, retaining NIL after an unbounded ancestor."
+  (when cardinality
+    (let ((bound (cond ((equal "array" (gethash "type" schema)) (gethash "maxItems" schema))
+                       ((hash-table-p (gethash "additionalProperties" schema))
+                        (gethash "maxProperties" schema))
+                       (t 1))))
+      (when (typep bound '(integer 0 *)) (* cardinality bound)))))
 
 (defun crd-check-schema-rules (schema &optional (path "openAPIV3Schema") root (cardinality 1) uncorrelatable (total (list 0)))
   "Admit the rules throughout SCHEMA, refusing the definition when they overrun the total budget."
@@ -248,17 +262,18 @@
              (setf (gethash "x-kubernetes-validations" merged) (gethash "x-kubernetes-validations" branch #()))
              (crd-check-rules-at merged path root cardinality uncorrelatable total)))
   (let ((properties (gethash "properties" schema)) (additional (gethash "additionalProperties" schema))
-        (items (gethash "items" schema)))
+        (items (gethash "items" schema))
+        (child-cardinality (crd-child-rule-cardinality schema cardinality)))
     (when (hash-table-p properties)
       (maphash (lambda (name child)
-                 (crd-check-schema-rules child (format nil "~A.properties[~A]" path name) nil cardinality uncorrelatable total))
+                 (crd-check-schema-rules child (format nil "~A.properties[~A]" path name) nil child-cardinality uncorrelatable total))
                properties))
     (when (hash-table-p additional)
       (crd-check-schema-rules additional (concatenate 'string path ".additionalProperties") nil
-                              (* cardinality (cel-schema-properties-bound schema additional)) uncorrelatable total))
+                              child-cardinality uncorrelatable total))
     (when (hash-table-p items)
       (crd-check-schema-rules items (concatenate 'string path ".items") nil
-                              (* cardinality (cel-schema-items-bound schema))
+                              child-cardinality
                               (or uncorrelatable
                                   (and (not (equal "map" (gethash "x-kubernetes-list-type" schema)))
                                        path))
