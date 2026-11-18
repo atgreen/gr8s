@@ -2,6 +2,68 @@
 ;;;; SPDX-License-Identifier: Apache-2.0
 (in-package #:gr8s.ha)
 
+;;; Self-heal for the application-restore wedge (podster-7l9).
+;;;
+;;; When a snapshot-barrier restore quiesces the store but the cluster is left with no
+;;; leader, nothing proposes the :store-recovery-barrier, so no member resumes and the
+;;; store stays access-blocked forever -- the whole API returns 503 until a human
+;;; restarts every member. The signature is unambiguous: the store is application-blocked
+;;; AND Raft reports no leader, continuously. Either alone is normal (a checkpoint keeps
+;;; its leader; an in-progress election is not store-blocked), so requiring both -- well
+;;; past any legitimate checkpoint drain or snapshot install -- isolates the real wedge.
+;;; The member then restarts itself (systemd Restart=always re-runs WAL recovery), which
+;;; is exactly the manual fix; when every member is wedged they all do it and re-form.
+
+(defparameter *ha-store-wedge-threshold-seconds* 180
+  "How long the store may stay application-blocked with no elected leader before this
+member restarts to break the podster-7l9 deadlock. Comfortably above any legitimate
+drain/install, and both conditions must hold the whole time.")
+
+(defun self-restart-exit ()
+  "Exit so systemd (Restart=always) restarts us into a clean WAL recovery. Abrupt by
+design: the store is already wedged, no writes are in flight, and the WAL is durable."
+  (sb-ext:exit :code 1 :abort t))
+
+(defun ha-store-wedge-condition-p (hcp)
+  "True when this member's store is application-blocked AND Raft reports no leader -- the
+podster-7l9 wedge signature."
+  (let ((store (ha-control-plane-store hcp))
+        (node (raft-member-node (ha-control-plane-member hcp))))
+    (and (gr8s.store::store-access-blocked-p store)
+         (null (gr8s.raft:raft-node-leader-id node)))))
+
+(defun ha-store-wedge-advance (wedged-p seen-serving wedge-since now exit)
+  "Pure wedge-watchdog step. WEDGED-P is whether the wedge condition holds now;
+SEEN-SERVING whether the store has ever been observed serving since the worker started
+(so initial startup recovery, which is store-blocked on purpose, is never mistaken for a
+wedge); WEDGE-SINCE the internal-real-time the condition began, or NIL. Returns
+(values seen-serving wedge-since), and calls EXIT once the condition has held past
+*ha-store-wedge-threshold-seconds*."
+  (cond
+    ((not wedged-p) (values t nil))             ; serving: remember it, clear the timer
+    ((not seen-serving) (values nil nil))       ; still in first-boot recovery: ignore
+    ((null wedge-since) (values t now))         ; wedge just began
+    ((>= (/ (- now wedge-since) internal-time-units-per-second)
+         *ha-store-wedge-threshold-seconds*)
+     (funcall exit)
+     (values t wedge-since))
+    (t (values t wedge-since))))
+
+(defun ha-store-wedge-watch (hcp seen-serving wedge-since
+                             &key (now (get-internal-real-time)) (exit #'self-restart-exit))
+  "Run one wedge-watchdog step against HCP, logging on trigger. Returns the updated
+(values seen-serving wedge-since)."
+  (let ((wedged (ha-store-wedge-condition-p hcp)))
+    (when (and wedged seen-serving wedge-since
+               (>= (/ (- now wedge-since) internal-time-units-per-second)
+                   *ha-store-wedge-threshold-seconds*))
+      (format *error-output*
+              "~&gr8s HA: store application-blocked with no leader for ~Ds ~
+               (podster-7l9 wedge); restarting this member to recover from its WAL.~%"
+              (round (/ (- now wedge-since) internal-time-units-per-second)))
+      (finish-output *error-output*))
+    (ha-store-wedge-advance wedged seen-serving wedge-since now exit)))
+
 (defun maintain-ha-artifacts-once (hcp)
   "Claim one obsolete artifact under member ownership; unlink trash outside it."
   (let* ((member (ha-control-plane-member hcp))
@@ -71,18 +133,25 @@ refresh is skipped. Returns the proposal outcome, or NIL when nothing was done."
           (ha-control-plane-maintenance-thread hcp)
           (bt:make-thread
            (lambda ()
-             (loop
-               (bt:with-lock-held ((ha-control-plane-maintenance-lock hcp))
-                 (unless (ha-control-plane-maintenance-running hcp) (return))
-                 (bt:condition-wait (ha-control-plane-maintenance-changed hcp)
-                                    (ha-control-plane-maintenance-lock hcp)
-                                    :timeout (float interval 1d0))
-                 (unless (ha-control-plane-maintenance-running hcp) (return)))
-               (handler-case (maintain-ha-store-once hcp)
-                 (error (condition)
-                   (bt:with-lock-held ((ha-control-plane-maintenance-lock hcp))
-                     (setf (ha-control-plane-maintenance-error hcp) (princ-to-string condition)))
-                   (format *error-output* "~&gr8s HA generation maintenance failed: ~A~%" condition)))))
+             (let ((seen-serving nil) (wedge-since nil))
+               (loop
+                 (bt:with-lock-held ((ha-control-plane-maintenance-lock hcp))
+                   (unless (ha-control-plane-maintenance-running hcp) (return))
+                   (bt:condition-wait (ha-control-plane-maintenance-changed hcp)
+                                      (ha-control-plane-maintenance-lock hcp)
+                                      :timeout (float interval 1d0))
+                   (unless (ha-control-plane-maintenance-running hcp) (return)))
+                 (handler-case (maintain-ha-store-once hcp)
+                   (error (condition)
+                     (bt:with-lock-held ((ha-control-plane-maintenance-lock hcp))
+                       (setf (ha-control-plane-maintenance-error hcp) (princ-to-string condition)))
+                     (format *error-output* "~&gr8s HA generation maintenance failed: ~A~%" condition)))
+                 ;; Watch for the podster-7l9 wedge; a fault here must not kill the worker.
+                 (handler-case
+                     (multiple-value-setq (seen-serving wedge-since)
+                       (ha-store-wedge-watch hcp seen-serving wedge-since))
+                   (error (condition)
+                     (format *error-output* "~&gr8s HA wedge watchdog error: ~A~%" condition))))))
            :name "gr8s HA generation maintenance"))))
   hcp)
 
