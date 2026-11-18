@@ -211,8 +211,11 @@
          (orig-host (hunchentoot:header-in* :host))
          (host (or (and rewrite (getf rewrite :hostname)) orig-host))
          (scheme (if (hunchentoot:acceptor-ssl-p hunchentoot:*acceptor*) "https" "http"))
+         ;; The Gateway is a pass-through proxy: the client's Authorization is meant
+         ;; for the backend app (e.g. an S3 server's SigV4 check), so keep it.
          (headers (gateway-apply-header-ops
-                   (pod-proxy-end-to-end-headers (gateway-request-headers request) :request t)
+                   (pod-proxy-end-to-end-headers (gateway-request-headers request)
+                                                 :request t :consume-credential nil)
                    req-ops))
          (body (hunchentoot:raw-post-data :force-binary t)))
     (setf headers (append (list (cons "Host" host) (cons "X-Forwarded-Host" orig-host)

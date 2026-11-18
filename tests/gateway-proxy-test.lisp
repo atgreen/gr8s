@@ -193,10 +193,10 @@
     "backend-ok"))
 
 
-(defun gw-raw-request (port host path &key (method "GET") body)
+(defun gw-raw-request (port host path &key (method "GET") body extra-headers)
   "Send one HTTP/1.1 request with an explicit Host header over a raw socket and
-   return (values status-code headers-alist body-string). Connection: close
-   frames the read."
+   return (values status-code headers-alist body-string). EXTRA-HEADERS is an alist
+   of (name . value) sent verbatim. Connection: close frames the read."
   (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
     (unwind-protect
          (progn
@@ -206,6 +206,8 @@
                           :external-format :latin-1)))
              (format stream "~A ~A HTTP/1.1~C~CHost: ~A~C~CConnection: close~C~C"
                      method path #\Return #\Newline host #\Return #\Newline #\Return #\Newline)
+             (loop for (name . value) in extra-headers
+                   do (format stream "~A: ~A~C~C" name value #\Return #\Newline))
              (when body
                (format stream "Content-Length: ~D~C~CContent-Type: text/plain~C~C"
                        (length body) #\Return #\Newline #\Return #\Newline))
@@ -275,6 +277,35 @@
            (is (= 404 (gw-raw-request listener-port "nope.org" "/x")))
            (is (null *gw-backend-last*))
            (is (= 503 (gw-raw-request listener-port "fail.example.com" "/y"))))
+      (gr8s.controllers::stop-gateway-listener gateway)
+      (hunchentoot:stop backend))))
+
+(test gateway-forwards-the-client-authorization-to-the-backend
+  ;; podster-8lq: the Gateway is a pass-through proxy, so the end user's
+  ;; Authorization must reach the backend app (e.g. an S3 server validating a
+  ;; SigV4 signature). The pod proxy strips it (the apiserver credential); the
+  ;; Gateway must not.
+  (let* ((backend (hunchentoot:start (make-instance 'gw-echo-acceptor
+                                                    :address "127.0.0.1" :port 0)))
+         (backend-port (hunchentoot:acceptor-port backend))
+         (routes (list (gr8s.controllers::make-gw-route
+                        :namespace "default" :hostnames '("app.example.com")
+                        :rules (list (gr8s.controllers::make-gw-rule
+                                      :matches (list (gr8s.controllers::make-gw-match :path-type :prefix :path "/"))
+                                      :backends (list (gr8s.controllers::make-gw-backend :name "echo" :port backend-port)))))))
+         (router (gr8s.controllers::build-gateway-router routes))
+         (resolver (lambda (b) (when (equal (gr8s.controllers::gw-backend-name b) "echo")
+                                 (values "127.0.0.1" backend-port))))
+         (gateway (gr8s.controllers::start-gateway-listener :port 0
+                                                :router router :resolver resolver :name "test"))
+         (listener-port (hunchentoot:acceptor-port gateway)))
+    (unwind-protect
+         (progn
+           (setf *gw-backend-last* nil)
+           (let ((auth "AWS4-HMAC-SHA256 Credential=key/20260101/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=deadbeef"))
+             (is (= 200 (gw-raw-request listener-port "app.example.com" "/"
+                                        :extra-headers (list (cons "Authorization" auth)))))
+             (is (equal auth (gw-request-header-seen "authorization")))))
       (gr8s.controllers::stop-gateway-listener gateway)
       (hunchentoot:stop backend))))
 

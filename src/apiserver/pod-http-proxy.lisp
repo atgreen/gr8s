@@ -65,16 +65,23 @@
                         (if (find #\: address) (format nil "[~A]" address) address) port)
                 (pod-uid pod))))))
 
-(defun pod-proxy-end-to-end-headers (headers &key request)
-  "Strip connection-scoped fields and consumed API credentials from forwarded headers."
+(defun pod-proxy-end-to-end-headers (headers &key request (consume-credential t))
+  "Strip connection-scoped fields from forwarded HEADERS, and on a REQUEST also the
+   hop-managed fields the proxy re-derives (host, content framing, x-forwarded-*).
+   CONSUME-CREDENTIAL, true for a proxy that authenticated the client itself (the
+   pod proxy, API aggregation — the client's Authorization is the consumed apiserver
+   credential and must not leak downstream), also strips Authorization. A pass-through
+   proxy like the Gateway passes NIL so the end user's Authorization reaches the
+   backend application (e.g. an S3 server validating a SigV4 signature)."
   (let* ((connection (cdr (assoc "connection" headers :test #'string-equal)))
          (hop (append '("connection" "keep-alive" "proxy-authenticate" "proxy-authorization"
                         "te" "trailer" "transfer-encoding" "upgrade")
                       (when connection (mapcar (lambda (item) (string-trim '(#\Space #\Tab) item))
                                                (uiop:split-string connection :separator ",")))
                       (when (assoc "transfer-encoding" headers :test #'string-equal) '("content-length"))
-                      (when request '("host" "authorization" "content-length" "content-type"
-                                      "x-forwarded-host" "x-forwarded-uri" "x-forwarded-proto")))))
+                      (when request '("host" "content-length" "content-type"
+                                      "x-forwarded-host" "x-forwarded-uri" "x-forwarded-proto"))
+                      (when (and request consume-credential) '("authorization")))))
     (remove-if (lambda (header) (member (car header) hop :test #'string-equal)) headers)))
 
 (defun pod-proxy-rewrite-location (location target prefix frontend)
