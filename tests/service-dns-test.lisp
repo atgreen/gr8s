@@ -89,6 +89,60 @@
     (lambda (packet) (declare (ignore packet)) (error "cluster query leaked upstream"))
     (gr8s.kubelet::make-cluster-dns-resolver store))))
 
+(test external-zone-hostname-matching-and-ipv4-parse
+  ;; Exact and single-label-wildcard matching (podster-iga).
+  (flet ((serves (name host) (gr8s.kubelet::dns-name-serves-hostname-p name host)))
+    (is (serves "grafana.lab.example.net" "grafana.lab.example.net"))
+    (is (serves "GRAFANA.Lab.Example.Net" "grafana.lab.example.net")) ; canonical
+    (is (not (serves "grafana.lab.example.net" "prometheus.lab.example.net")))
+    ;; "*.lab.example.net" covers exactly one extra label, not the apex or two.
+    (is (serves "grafana.lab.example.net" "*.lab.example.net"))
+    (is (not (serves "lab.example.net" "*.lab.example.net")))
+    (is (not (serves "a.b.lab.example.net" "*.lab.example.net"))))
+  (is (equalp #(10 77 77 20) (gr8s.kubelet::parse-dns-ipv4-octets "10.77.77.20")))
+  (is (null (gr8s.kubelet::parse-dns-ipv4-octets "10.77.77")))
+  (is (null (gr8s.kubelet::parse-dns-ipv4-octets "10.77.77.256"))))
+
+(test external-zone-answers-served-hostnames-with-node-address
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (gr8s.resources::create-core-resource store "gateways"
+      (gr8s.resources::core-object
+       "apiVersion" "gateway.networking.k8s.io/v1" "kind" "Gateway"
+       "metadata" (gr8s.resources::core-object "name" "gw")
+       "spec" (gr8s.resources::core-object
+               "gatewayClassName" "gr8s"
+               "listeners" (vector (gr8s.resources::core-object
+                                    "name" "https" "protocol" "HTTPS" "port" 443
+                                    "hostname" "grafana.lab.example.net"))))
+      "infra")
+    (gr8s.resources::create-core-resource store "httproutes"
+      (gr8s.resources::core-object
+       "apiVersion" "gateway.networking.k8s.io/v1" "kind" "HTTPRoute"
+       "metadata" (gr8s.resources::core-object "name" "prom" "namespace" "apps")
+       "spec" (gr8s.resources::core-object "hostnames" (vector "prometheus.lab.example.net")))
+      "apps")
+    (let ((resolve (gr8s.kubelet::make-cluster-dns-resolver
+                    store :serve-zones '("lab.example.net") :node-address "10.77.77.20")))
+      (flet ((answer (name)
+               (multiple-value-list
+                (funcall resolve (0conf:make-question :name name :qtype 0conf:+type-a+ :qclass 1)))))
+        ;; Served Gateway-listener host -> this node's address, authoritative NOERROR.
+        (destructuring-bind (answers handled rcode) (answer "grafana.lab.example.net")
+          (is-true handled) (is (eql 0 rcode))
+          (is (equalp #(10 77 77 20) (0conf:a-address (first answers)))))
+        ;; Served HTTPRoute host likewise.
+        (destructuring-bind (answers handled rcode) (answer "prometheus.lab.example.net")
+          (declare (ignore rcode))
+          (is-true handled)
+          (is (equalp #(10 77 77 20) (0conf:a-address (first answers)))))
+        ;; In the serve zone but matching nothing -> authoritative NXDOMAIN (rcode 3), no forward.
+        (destructuring-bind (answers handled rcode) (answer "nope.lab.example.net")
+          (is-true handled) (is (null answers)) (is (eql 3 rcode)))
+        ;; Outside the serve zone -> declined so the proxy forwards it (handled NIL).
+        (destructuring-bind (answers handled rcode) (answer "grafana.other.example.net")
+          (declare (ignore answers rcode)) (is (null handled)))))))
+
 (test service-dns-public-projection-and-durable-withdrawal
   (with-temporary-store (store directory)
     (let* ((object (service-test-object "web" "http"))

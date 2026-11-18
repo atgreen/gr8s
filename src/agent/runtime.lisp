@@ -34,6 +34,7 @@
   resource-manager
   pod-resources-server
   dns-forward-rules
+  dns-serve-zones                       ; external zones served authoritatively (podster-iga)
   network
   network-reconciler
   ;; Authenticated WireGuard endpoint observations and last-known-good choices.
@@ -325,7 +326,8 @@ The v1 socket LB remains active; a validated grant can release v2 tables."
                                      (reconcile-node-overlay-network
                                       network previous-networks
                                       wireguard-private-key))))
-                               dns-forward-rules (cpu-manager-policy "none") reserved-cpus
+                               dns-forward-rules dns-serve-zones
+                               (cpu-manager-policy "none") reserved-cpus
                                (topology-manager-policy "none"))
   "Build and return a NODE-RUNTIME for STATE-DIRECTORY, opening its local desired-state
 store (watch journal disabled, since the control plane serves every watch) and wiring in
@@ -347,6 +349,7 @@ START-NODE-RUNTIME does that."
              :state-directory directory :runtime runtime :manager manager
              :dynamic-resource-manager dynamic-resource-manager
              :dns-forward-rules dns-forward-rules
+             :dns-serve-zones dns-serve-zones
              :network-reconciler network-reconciler
              :wireguard-path-state-path (merge-pathnames "wireguard-paths.json" directory)
              :wireguard-path-state
@@ -1250,7 +1253,24 @@ the node from starting."
   "Run the agent body with the services its runtime needs layered around it: for managed
 containerd, the Service LB, agent CNI server and DNS server; for unmanaged containerd,
 just the DNS server; for any other runtime, nothing."
-  (let ((body (lambda () (run-node-runtime-body node-runtime))))
+  (let* ((store (node-runtime-store node-runtime))
+         (serve-zones (node-runtime-dns-serve-zones node-runtime))
+         ;; This node's own gateway-serving address: what served external-zone
+         ;; hostnames resolve to, and where the authoritative listener binds.
+         (node-address (and serve-zones
+                            (ignore-errors (containerd-node-address (node-runtime-runtime node-runtime)))))
+         (resolver (make-cluster-dns-resolver store :serve-zones serve-zones :node-address node-address))
+         (inner (lambda () (run-node-runtime-body node-runtime)))
+         ;; With external zones configured, also expose an authoritative-only DNS
+         ;; listener on the node's own address, so an upstream resolver can forward
+         ;; the served zone to it (podster-iga); it refuses everything else.
+         (body (if (and serve-zones node-address)
+                   (lambda ()
+                     (ensure-node-dns-firewall)
+                     (call-with-dns-server
+                      inner :address node-address :port 53 :upstreams nil
+                      :resolver (make-external-zone-dns-resolver store serve-zones node-address)))
+                   inner)))
     (if (containerd-runtime-p (node-runtime-runtime node-runtime))
         (if (node-runtime-manager node-runtime)
             (call-with-service-lb
@@ -1260,12 +1280,10 @@ just the DNS server; for any other runtime, nothing."
                 node-runtime
                 (lambda () (call-with-dns-server body :address +dns-pod-server-address+
                                                  :forward-rules (node-runtime-dns-forward-rules node-runtime)
-                                                 :resolver
-                                           (make-cluster-dns-resolver (node-runtime-store node-runtime)))))))
+                                                 :resolver resolver)))))
             (call-with-dns-server body :address +dns-pod-server-address+
                                        :forward-rules (node-runtime-dns-forward-rules node-runtime)
-                                       :resolver
-                                        (make-cluster-dns-resolver (node-runtime-store node-runtime))))
+                                       :resolver resolver))
         (funcall body))))
 
 (defun call-with-external-cni-dns-gateway

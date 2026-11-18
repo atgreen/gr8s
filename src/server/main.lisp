@@ -126,6 +126,14 @@ TimeoutStartSec. Like a watchdog ping, it must be re-sent before it elapses."
         (progn (setf (cdr existing) (append (cdr existing) (list (cdr parsed)))) rules)
         (append rules (list (list (car parsed) (cdr parsed)))))))
 
+(defun add-dns-serve-zone (zones value)
+  "Add a canonical external DNS zone to serve authoritatively from the node DNS
+(podster-iga), deduplicated and order-preserving."
+  (let ((zone (canonical-dns-name value)))
+    (unless (dns-subdomain-p zone)
+      (error "invalid DNS serve zone: ~A" value))
+    (if (member zone zones :test #'equal) zones (append zones (list zone)))))
+
 (defun parse-wireguard-endpoint (value)
   "Parse NAME=IPV4:PORT into the authenticated endpoint tuple advertised by an agent."
   (let* ((equals (position #\= value))
@@ -216,6 +224,7 @@ TimeoutStartSec. Like a watchdog ping, it must be re-sent before it elapses."
                        :cni-conf-dir nil
                        :cni-bin-dirs nil
                        :dns-forward-rules nil
+                       :dns-serve-zones nil
                        :kubeconfig nil
                        :kubelet-port +kubelet-default-port+
                        :local-storage-path +default-local-storage-path+)))
@@ -341,6 +350,9 @@ TimeoutStartSec. Like a watchdog ping, it must be re-sent before it elapses."
                      ((string= option "--dns-forward")
                       (setf (getf options :dns-forward-rules)
                             (add-dns-forward-rule (getf options :dns-forward-rules) value)))
+                     ((string= option "--dns-serve-zone")
+                      (setf (getf options :dns-serve-zones)
+                            (add-dns-serve-zone (getf options :dns-serve-zones) value)))
                      ((string= option "--kubeconfig")
                       (setf (getf options :kubeconfig) value))
                      ((string= option "--kubelet-port")
@@ -429,7 +441,8 @@ TimeoutStartSec. Like a watchdog ping, it must be re-sent before it elapses."
                        :cni-conf-dir nil
                        :cni-bin-dirs nil
                        :wireguard-endpoints nil
-                       :dns-forward-rules nil)))
+                       :dns-forward-rules nil
+                       :dns-serve-zones nil)))
     (loop while arguments
           for option = (first arguments)
           for value = (option-value arguments option)
@@ -495,6 +508,9 @@ TimeoutStartSec. Like a watchdog ping, it must be re-sent before it elapses."
                ((string= option "--dns-forward")
                 (setf (getf options :dns-forward-rules)
                       (add-dns-forward-rule (getf options :dns-forward-rules) value)))
+               ((string= option "--dns-serve-zone")
+                (setf (getf options :dns-serve-zones)
+                      (add-dns-serve-zone (getf options :dns-serve-zones) value)))
                (t (error "unknown agent option: ~A" option)))
              (setf arguments (cddr arguments)))
     (dolist (required '(:server :node-name :state-directory))
@@ -2195,6 +2211,7 @@ agent masquerades Pod->apiserver traffic toward.")
                (agent-state-path options "runtime/") runtime manager
                :wireguard-private-key wireguard-private-key
                :dns-forward-rules (getf options :dns-forward-rules)
+               :dns-serve-zones (getf options :dns-serve-zones)
                :cpu-manager-policy (getf options :cpu-manager-policy "none")
                :reserved-cpus (getf options :reserved-cpus)
                :topology-manager-policy (getf options :topology-manager-policy "none")))
@@ -3457,6 +3474,34 @@ upstream CRDs.
 If you have already installed an upstream duplicate and wedged a group, recover
 by removing it and its CRDs (`helm uninstall ...`; `kubectl delete crd ...`);
 the native group returns once the duplicate CRDs are gone.
+
+## Serving external service names (--dns-serve-zone)
+
+Instead of running ExternalDNS to push records into a managed DNS provider, gr8s
+can serve your service hostnames authoritatively from its own node DNS -- it
+already owns both the Gateway state and a DNS server, so the record is the live
+state, like CoreDNS's `k8s_external` or the cluster's own `cluster.local`.
+
+Start the control plane (or an agent) with `--dns-serve-zone ZONE` (repeatable),
+e.g. `--dns-serve-zone lab.example.net`. Each node then serves that zone
+authoritatively on its own address at `:53` (firewall opened automatically): a
+name matching a Gateway listener, HTTPRoute, or Ingress hostname resolves to that
+node's gateway address, an in-zone name that matches nothing is NXDOMAIN, and
+anything outside the zone is REFUSED (the listener is never an open forwarder).
+
+Then point one static forward/delegation at the nodes -- it never changes, even
+as the gateway re-homes, because each node returns its own live address and a
+down node simply drops out of the list:
+
+- An upstream resolver (e.g. pfSense/Unbound `Domain Override`, or a BIND `NS`
+  delegation): forward `ZONE` to the gr8s node addresses (list them for HA).
+- Clients resolve through that upstream; roaming clients too, as long as they
+  reach the upstream.
+
+Composes with `--dns-forward ZONE=IP` (stub-forward a zone OUT); they are
+independent -- a cluster can forward some zones upstream and serve one zone
+authoritatively. The served answer carries a short TTL so a gateway change is
+picked up within seconds. Pods resolve the same names through the cluster DNS.
 
 ## Maintenance and agent working practices
 

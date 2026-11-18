@@ -146,6 +146,17 @@
      :runner runner)
     t))
 
+(defun ensure-node-dns-firewall (&key (runner #'host-firewall-run))
+  "Admit this node's authoritative DNS listener (53/udp and 53/tcp) through
+   firewalld, so an upstream resolver can forward a served external zone to it
+   (podster-iga). No-op without firewalld; fail-soft. Returns T when attempted."
+  (when (host-firewalld-active-p :runner runner)
+    (apply-overlay-firewall-commands
+     (list (list "firewall-cmd" "--add-port=53/udp")
+           (list "firewall-cmd" "--add-port=53/tcp"))
+     :runner runner)
+    t))
+
 (defun ensure-image-peer-firewall (port &key (runner #'host-firewall-run))
   "Admit TCP traffic to this node's mTLS image-peer (BitTorrent) listener so
    peers on other nodes can fetch blobs from it. No-op without firewalld;
