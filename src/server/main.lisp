@@ -2320,6 +2320,21 @@ agent masquerades Pod->apiserver traffic toward.")
   thread
   control)
 
+(defun kubelet-serving-addresses (local-addresses options)
+  "The IPv4 SANs for a kubelet serving certificate: every LOCAL-ADDRESSES entry plus
+the configured node addresses and loopback, deduplicated, with NIL, empty and the
+unspecified 0.0.0.0 dropped. The apiserver (and a Prometheus kubelet scrape) reaches
+the kubelet at the node InternalIP -- the WireGuard underlay -- so it must be a SAN,
+alongside the LAN primary and 127.0.0.1 (podster-6ls)."
+  (remove-duplicates
+   (remove-if (lambda (address) (or (null address) (zerop (length address))
+                                    (string= address "0.0.0.0")))
+              (append local-addresses
+                      (list (getf options :node-address)
+                            (getf options :node-listen)
+                            "127.0.0.1")))
+   :test #'equal))
+
 (defun start-local-node-agent
     (server pki node-name state-directory &optional runtime-options
      &key endpoints session-endpoints)
@@ -2370,9 +2385,16 @@ agent masquerades Pod->apiserver traffic toward.")
     ;; Only a managed containerd node has the in-cluster API its kubelet delegates reviews to.
     (if (and (plusp (or (getf options :kubelet-port) 0))
              (equal "containerd" (getf options :runtime)) (equal "managed" (getf options :containerd-mode)))
-        (issue-kubelet-credentials pki directory node-name
-                                   (remove-duplicates (remove nil (list (discover-local-primary-ipv4) "127.0.0.1"))
-                                                      :test #'equal))
+        ;; The serving cert must carry the node's InternalIP (the apiserver proxies
+        ;; to the kubelet there, as does a Prometheus kubelet scrape), not just the
+        ;; default-route source -- the InternalIP is the WireGuard underlay address,
+        ;; while discover-local-primary-ipv4 returns the LAN primary (podster-6ls).
+        (issue-kubelet-credentials
+         pki directory node-name
+         (kubelet-serving-addresses
+          (append (ignore-errors (gr8s.network::host-ipv4-addresses))
+                  (list (discover-local-primary-ipv4)))
+          options))
         (setf (getf options :kubelet-port) 0))
     (when (managed-containerd-options-p options)
       ;; Run synchronously so serve's top-level error handler prints one concise

@@ -856,6 +856,26 @@
         (sb-posix:unsetenv "NOTIFY_SOCKET")
         (sb-bsd-sockets:socket-close listener)))))
 
+(test kubelet-serving-addresses-cover-the-node-internalip
+  ;; podster-6ls: the apiserver proxies to the kubelet at the node InternalIP (the
+  ;; WireGuard underlay), not the default-route source, so it must be a serving-cert
+  ;; SAN -- along with the LAN primary and loopback.
+  (let ((sans (gr8s.server::kubelet-serving-addresses
+               '("10.77.77.10" "192.168.1.198")
+               '(:node-listen "10.77.77.10" :node-address nil))))
+    (is (member "10.77.77.10" sans :test #'equal))
+    (is (member "192.168.1.198" sans :test #'equal))
+    (is (member "127.0.0.1" sans :test #'equal)))
+  ;; A configured --node-address is included even if no interface carries it yet.
+  (is (member "10.0.0.5" (gr8s.server::kubelet-serving-addresses
+                          '("192.168.1.198") '(:node-address "10.0.0.5"))
+              :test #'equal))
+  ;; NIL, empty and the unspecified 0.0.0.0 are dropped; duplicates collapse.
+  (let ((sans (gr8s.server::kubelet-serving-addresses
+               '("10.77.77.10" nil "" "10.77.77.10")
+               '(:node-listen "0.0.0.0"))))
+    (is (equal '("10.77.77.10" "127.0.0.1") sans))))
+
 (test startup-timeout-keepalive-extends-the-deadline-and-stops-at-ready
   ;; podster-qoa: a cold rejoin's pre-recovery work can exceed TimeoutStartSec
   ;; before the recovery wait starts extending, so a keepalive must push the
