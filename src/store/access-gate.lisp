@@ -62,6 +62,9 @@ Timeout or failure before draining reopens access; no application data is change
   (unless (typep timeout '(real 0 *)) (error "Invalid application quiescence timeout"))
   (when (eq store *store-request-lease*)
     (store-access-unavailable "Cannot quiesce application access from its own routed request"))
+  ;; Log the onset so a block with no matching "resumed" line is diagnosable (podster-7l9).
+  (format *error-output* "~&gr8s: blocking application store access for restore/checkpoint (drain <= ~Ds).~%"
+          (round timeout))
   (let ((deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second)))
         (drained nil) (blocked nil))
     (unwind-protect
@@ -100,6 +103,7 @@ Timeout or failure before draining reopens access; no application data is change
                    (or (selected-store-generation-root (pod-store-path store)) (pod-store-path store)))
       (store-access-unavailable "Store indexes still belong to another application generation"))
     (setf (pod-store-access-blocked store) nil))
+  (format *error-output* "~&gr8s: application store access resumed.~%")
   store)
 
 (defun store-access-blocked-p (store)

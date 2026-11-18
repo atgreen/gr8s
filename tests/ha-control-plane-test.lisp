@@ -862,3 +862,29 @@
         (bt:signal-semaphore release)
         (gr8s.ha::stop-ha-maintenance-worker hcp)
         (setf (symbol-function 'gr8s.store::reap-retired-store-generations) original)))))
+
+(test ha-store-wedge-advance-restarts-only-on-a-sustained-leaderless-block
+  ;; podster-7l9: self-heal fires only when the store is blocked AND leaderless, has
+  ;; served before (so first-boot recovery is exempt), and the condition has held past
+  ;; the threshold. Anything else leaves the member running.
+  (let* ((unit internal-time-units-per-second)
+         (now (* 1000 unit))
+         (exited nil))
+    (flet ((ex () (setf exited t)))
+      ;; Not wedged -> mark as having served, clear any timer, never exit.
+      (multiple-value-bind (seen since) (gr8s.ha::ha-store-wedge-advance nil nil 123 now #'ex)
+        (is (eq t seen)) (is (null since)) (is (not exited)))
+      ;; Wedged but never served yet (first-boot recovery) -> ignored.
+      (multiple-value-bind (seen since) (gr8s.ha::ha-store-wedge-advance t nil nil now #'ex)
+        (is (null seen)) (is (null since)) (is (not exited)))
+      ;; Wedge begins (served before) -> start the timer, do not exit.
+      (multiple-value-bind (seen since) (gr8s.ha::ha-store-wedge-advance t t nil now #'ex)
+        (is (eq t seen)) (is (= now since)) (is (not exited)))
+      ;; Wedge held, but under threshold -> keep waiting.
+      (let ((since (- now (* (1- gr8s.ha::*ha-store-wedge-threshold-seconds*) unit))))
+        (multiple-value-bind (s w) (gr8s.ha::ha-store-wedge-advance t t since now #'ex)
+          (declare (ignore s)) (is (= since w)) (is (not exited))))
+      ;; Wedge held past threshold -> restart.
+      (let ((since (- now (* (+ 5 gr8s.ha::*ha-store-wedge-threshold-seconds*) unit))))
+        (gr8s.ha::ha-store-wedge-advance t t since now #'ex)
+        (is (eq t exited))))))
