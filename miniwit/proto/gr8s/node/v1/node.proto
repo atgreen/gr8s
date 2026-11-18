@@ -1,0 +1,664 @@
+// SPDX-FileCopyrightText: 2026 Anthony Green
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package gr8s.node.v1;
+
+option go_package = "github.com/atgreen/gr8s/miniwit/proto/gr8s/node/v1;nodev1";
+
+service EnrollmentService {
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+}
+
+service NodeService {
+  rpc Connect(stream AgentEnvelope) returns (stream ServerEnvelope);
+  // Private swarm coordination. The node_name is bound to the mTLS client
+  // certificate by the server and is never accepted as a bearer identity.
+  rpc TrackImage(ImageTrackerRequest) returns (ImageTrackerResponse);
+}
+
+message ImageTrackerRequest {
+  string node_name = 1;
+  string action = 2; // lookup | acquire | renew | publish | announce | withdraw
+  string digest = 3;
+  bytes lease_token = 4;
+  bytes metainfo = 5;
+  string peer_address = 6;
+  uint32 peer_port = 7;
+  bytes peer_id = 8;
+  bool complete = 9;
+}
+
+message ImageTrackerPeer {
+  string node_name = 1;
+  string address = 2;
+  uint32 port = 3;
+  bytes peer_id = 4;
+  bool complete = 5;
+}
+
+message ImageTrackerResponse {
+  string status = 1; // available | missing | waiting | granted | ok | error
+  bytes lease_token = 2;
+  uint64 expires_at = 3;
+  bytes metainfo = 4;
+  bytes infohash = 5;
+  repeated ImageTrackerPeer peers = 6;
+  string error_message = 7;
+}
+
+message EnrollRequest {
+  uint32 protocol_version = 1;
+  string node_name = 2;
+  string join_token = 3;
+  bytes certificate_request = 4;
+}
+
+message EnrollResponse {
+  uint32 protocol_version = 1;
+  string node_id = 2;
+  bytes node_certificate = 3;
+  bytes ca_certificate = 4;
+}
+
+message AgentEnvelope {
+  uint32 protocol_version = 1;
+  uint64 sequence = 2;
+  oneof payload {
+    NodeHello hello = 10;
+    Heartbeat heartbeat = 11;
+    SnapshotAck snapshot_ack = 12;
+    NodeStatus status = 13;
+    OperationResponse operation_response = 14;
+    OperationStream operation_stream = 15;
+    CredentialTokenRequest credential_token_request = 16;
+    GatewayConfigAck gateway_config_ack = 17;
+  }
+}
+
+message ServerEnvelope {
+  uint32 protocol_version = 1;
+  uint64 sequence = 2;
+  oneof payload {
+    ServerHello hello = 10;
+    DesiredStateSnapshot desired_state = 11;
+    OperationRequest operation_request = 12;
+    OperationInput operation_input = 13;
+    OperationCancel operation_cancel = 14;
+    ProtocolError protocol_error = 15;
+    CredentialTokenResponse credential_token_response = 16;
+    GatewayConfigUpdate gateway_config = 17;
+  }
+}
+
+// A session-local derived Gateway view. This channel never acknowledges node
+// state or advances last_applied_revision. Each full node snapshot resets its
+// Gateway revision to zero; a reconnect always starts with a full snapshot.
+message GatewayConfigUpdate {
+  uint64 base_node_revision = 1;
+  uint64 base_revision = 2;
+  uint64 revision = 3;
+  repeated GatewayResourceChange changes = 4;
+}
+
+message GatewayResourceChange {
+  string resource = 1;
+  string namespace = 2;
+  string name = 3;
+  bytes object_json = 4;
+  bool deleted = 5;
+}
+
+message GatewayConfigAck {
+  uint64 base_node_revision = 1;
+  uint64 revision = 2;
+  bool applied = 3;
+  string error_message = 4;
+}
+
+// A node asks the control plane for a short-lived token bound to a Pod whose
+// image it is about to pull. The authenticated session supplies the node name.
+message CredentialTokenRequest {
+  string request_id = 1;
+  string namespace = 2;
+  string pod_name = 3;
+  string pod_uid = 4;
+  string service_account_name = 5;
+  string audience = 6;
+  repeated string required_annotation_keys = 7;
+  repeated string optional_annotation_keys = 8;
+}
+
+message CredentialTokenResponse {
+  string request_id = 1;
+  string token = 2;
+  map<string, string> service_account_annotations = 3;
+  string service_account_uid = 4;
+  string error_message = 5;
+}
+
+// One authenticated candidate endpoint for a node's WireGuard identity. The
+// enclosing NodeHello is bound to the node's mTLS certificate; the control
+// plane copies these candidates only into routes for that same identity.
+message WireguardEndpoint {
+  string name = 1;
+  string address = 2;
+  uint32 port = 3;
+}
+
+message NodeHello {
+  string node_name = 1;
+  string boot_id = 2;
+  string agent_version = 3;
+  uint64 last_applied_revision = 4;
+  map<string, string> labels = 5;
+  repeated string capabilities = 6;
+  string underlay_address = 7;
+  map<string, string> capacity = 8;
+  // The port of the agent's authenticated kubelet endpoints, or 0 when it serves none.
+  uint32 kubelet_port = 9;
+  // Public half of the node-local WireGuard identity. The mTLS-authenticated
+  // session binds it to node_name; private key material never leaves the node.
+  bytes wireguard_public_key = 10;
+  repeated WireguardEndpoint wireguard_endpoints = 11;
+  bytes patch_inventory_json = 12;
+  // Signed by the node's existing private key. The authenticated session binds
+  // the requested CN to node_name, so this cannot mint another identity.
+  bytes certificate_request = 13;
+}
+
+message Heartbeat {
+  uint64 observed_at_unix_nanos = 1;
+  // Why the node's container runtime cannot serve Pods; empty while it can.
+  // A node that reports it stays leased but is NotReady, as kubelet reports
+  // "container runtime is down".
+  string runtime_down_message = 2;
+  // Node-pressure signals the agent observes locally, surfaced as the standard
+  // kubelet Node conditions (MemoryPressure/DiskPressure/PIDPressure) so the
+  // scheduler and clients can see a pressured node. Absent (false) from an older
+  // agent, which the control plane reads as "no pressure reported".
+  bool memory_pressure = 3;
+  bool disk_pressure = 4;
+  bool pid_pressure = 5;
+}
+
+message SnapshotAck {
+  uint64 revision = 1;
+  bool applied = 2;
+  string error_message = 3;
+}
+
+message NodeStatus {
+  uint64 observed_at_unix_nanos = 1;
+  repeated PodObservedStatus pods = 2;
+  repeated EndpointTelemetry endpoints = 3;
+  // Every CSI driver registered on this node, in full on each report.
+  repeated CsiDriverRegistration csi_drivers = 4;
+  // podCertificate projected volumes (KEP-4317): the node generates each pod's
+  // keypair locally and reports only the public key, so the control plane can
+  // create the PodCertificateRequest. The private key never leaves the node.
+  repeated PodCertificateClaim pod_certificate_requests = 5;
+  // Endpoints learned by this node's kernel from authenticated WireGuard
+  // handshakes. The server binds the report to this node's mTLS session.
+  repeated WireguardPeerObservation wireguard_peer_observations = 6;
+  // Full healthy inventory for every device-plugin resource known to this node.
+  // Disconnected plugins report zero, so stale devices cannot remain schedulable.
+  map<string, string> device_plugin_resources = 7;
+  map<string, string> resource_capacity = 8;
+  map<string, string> resource_allocatable = 9;
+  // Exact local v2 receivers observed after TCX attachment. The revision
+  // binds the report to the owner's current network assignment.
+  repeated ServiceReceiverProof service_receivers = 10;
+  uint64 service_receiver_revision = 11;
+  // True for the periodic complete report, including an empty/unready set.
+  // Short Pod status updates leave this false and do not alter the last report.
+  bool service_receiver_report_present = 12;
+  // Complete local Gateway listener inventory, including an empty report.
+  // UID and generation prevent stale configuration from being marked programmed.
+  repeated GatewayObservation gateways = 13;
+  bool gateway_report_present = 14;
+}
+
+message GatewayObservation {
+  string namespace = 1;
+  string name = 2;
+  string uid = 3;
+  uint64 generation = 4;
+  repeated GatewayListenerObservation listeners = 5;
+}
+
+message GatewayListenerObservation {
+  string name = 1;
+  bool programmed = 2;
+  string reason = 3;
+  string message = 4;
+}
+
+message ServiceReceiverProof {
+  string pod_uid = 1;
+  bytes incarnation = 2;
+}
+
+message WireguardPeerObservation {
+  bytes peer_public_key = 1;
+  string address = 2;
+  uint32 port = 3;
+  uint64 latest_handshake_unix_seconds = 4;
+  uint64 received_bytes = 5;
+  uint32 path_score = 6;
+  bool healthy = 7;
+  uint32 active_flows = 8;
+}
+
+// A node's request that the control plane create a PodCertificateRequest for a
+// pod's podCertificate projected volume (KEP-4317). The control plane fills in
+// the node name and UID from the authenticated session, never from the claim.
+message PodCertificateClaim {
+  string name = 1;              // deterministic PodCertificateRequest name
+  string namespace = 2;         // the pod's namespace
+  string signer_name = 3;
+  string pkix_public_key = 4;   // base64 SubjectPublicKeyInfo DER
+  string pod_name = 5;
+  string pod_uid = 6;
+  string service_account_name = 7;
+  string service_account_uid = 8;
+  int64 max_expiration_seconds = 9;
+  string stub_pkcs10_request = 10; // base64 PKCS#10 DER signed by the pod key (certificates.k8s.io/v1)
+}
+
+message CsiDriverRegistration {
+  string name = 1;
+  string node_id = 2;
+  int64 max_volumes = 3;
+  map<string, string> topology = 4;
+}
+
+message EndpointTelemetry {
+  string sandbox_id = 1;
+  string interface_name = 2;
+  string pod_ip = 3;
+  uint64 allowed_packets = 4;
+  uint64 allowed_bytes = 5;
+  uint64 dropped_packets = 6;
+  uint64 dropped_bytes = 7;
+  uint64 rejected_spoofs = 8;
+  uint64 malformed_packets = 9;
+  uint64 unsupported_packets = 10;
+  string error_message = 11;
+  // Packets a NetworkPolicy refused, in either direction. They are also in dropped_packets.
+  uint64 policy_drops = 12;
+}
+
+message PodObservedStatus {
+  string namespace = 1;
+  string name = 2;
+  string uid = 3;
+  string resource_version = 4;
+  string phase = 5;
+  string reason = 6;
+  string message = 7;
+  string pod_ip = 8;
+  bytes status_json = 9;
+  // Physical cleanup can complete while public Pod finalizers retain the API object.
+  bool runtime_deleted = 10;
+}
+
+enum OperationStatus {
+  OPERATION_STATUS_UNSPECIFIED = 0;
+  OPERATION_STATUS_ACCEPTED = 1;
+  OPERATION_STATUS_COMPLETE = 2;
+  OPERATION_STATUS_FAILED = 3;
+}
+
+enum StreamChannel {
+  STREAM_CHANNEL_UNSPECIFIED = 0;
+  STREAM_CHANNEL_STDIN = 1;
+  STREAM_CHANNEL_STDOUT = 2;
+  STREAM_CHANNEL_STDERR = 3;
+  STREAM_CHANNEL_TERMINAL_RESIZE = 4;
+}
+
+message OperationResponse {
+  string operation_id = 1;
+  OperationStatus status = 2;
+  int32 exit_code = 3;
+  string error_message = 4;
+}
+
+message OperationStream {
+  string operation_id = 1;
+  uint64 sequence = 2;
+  StreamChannel channel = 3;
+  bytes data = 4;
+  bool eof = 5;
+  // PORT_FORWARD: how much more input the node has written to the Pod.
+  uint64 acknowledged_bytes = 6;
+}
+
+message ServerHello {
+  string node_id = 1;
+  uint32 heartbeat_interval_seconds = 2;
+  string assigned_pod_cidr = 3;
+  repeated string assigned_pod_cidrs = 4;
+  // Current cluster trust bundle, delivered only inside the authenticated node
+  // session. Agents install it only when it still validates their own client leaf.
+  bytes cluster_ca_bundle = 5;
+  // Present when the authenticated node leaf was not issued by the active CA.
+  bytes renewed_node_certificate = 6;
+}
+
+message DesiredStateSnapshot {
+  uint64 revision = 1;
+  repeated PodAssignment pods = 2;
+  NodeNetworkConfig network = 3;
+  repeated NodeRoute routes = 4;
+  // Public Service/EndpointSlice DNS data, separate from Pod-scoped secrets.
+  repeated bytes service_discovery_objects_json = 5;
+  // Nonzero on a delta (podster-uqb.139), sent only to an agent that offered
+  // the "desired-state-delta" capability: the revision of the snapshot this one
+  // changes, which must be the last one the session delivered. PODS then holds
+  // only new or changed assignments, REMOVED_POD_UIDS the base's assignments
+  // that are gone, and SERVICE_DISCOVERY_OBJECTS_JSON is the base's unless
+  // SERVICE_DISCOVERY_CHANGED. NETWORK and ROUTES are always complete.
+  uint64 base_revision = 6;
+  repeated string removed_pod_uids = 7;
+  bool service_discovery_changed = 8;
+  // SHA-256 of the complete length-framed discovery projection. Empty means
+  // risk publication only. The server grants a digest after all v2-capable
+  // nodes ACK the same projection; the agent verifies it before selection.
+  bytes service_risk_grant_digest = 9;
+  // Complete receiver set validated from authenticated node reports. A node
+  // publishes remote owner readiness from this set before ACKing the snapshot.
+  repeated ServiceReceiverProof service_receivers = 10;
+  // Process-local control-plane dependency fence for Gateway delta delivery.
+  // This does not replace node revision or Service risk acknowledgements.
+  uint64 gateway_dependency_revision = 11;
+}
+
+message PodAssignment {
+  string namespace = 1;
+  string name = 2;
+  string uid = 3;
+  string resource_version = 4;
+  bytes pod_json = 5;
+  bool deleting = 6;
+  // Only ConfigMaps/Secrets referenced by this Pod, delivered over node mTLS.
+  repeated bytes resource_objects_json = 7;
+}
+
+message NodeNetworkConfig {
+  string cluster_pod_cidr = 1;
+  string node_pod_cidr = 2;
+  string dns_address = 3;
+  uint32 vni = 4;
+  uint32 mtu = 5;
+  string underlay_address = 6;
+  string overlay_backend = 7; // vxlan | wireguard
+  uint32 wireguard_listen_port = 8;
+  repeated string cluster_pod_cidrs = 9;
+  repeated string node_pod_cidrs = 10;
+  // Private node-authenticated identities for Service source translation.
+  repeated ServiceTranslationIdentity service_translations = 11;
+}
+
+message ServiceTranslationIdentity {
+  string pod_uid = 1;
+  string node_name = 2;
+  string pod_ip = 3;
+  string translation_ip = 4;
+  string sandbox_id = 5;
+  string interface_name = 6;
+  string node_id = 7;
+  string incarnation_generation = 8;
+}
+
+message NodeRoute {
+  string node_id = 1;
+  string pod_cidr = 2;
+  string underlay_address = 3;
+  bytes wireguard_public_key = 4;
+  uint32 wireguard_listen_port = 5;
+  repeated string pod_cidrs = 6;
+  repeated WireguardEndpoint wireguard_endpoints = 7;
+  string node_name = 8;
+  // Optional authenticated forwarding peer for sparse topologies. When absent,
+  // the destination node above remains the direct WireGuard peer.
+  WireguardNextHop next_hop = 9;
+  string region = 10;
+  string zone = 11;
+  uint32 capacity_score = 12;
+  uint32 link_cost = 13;
+}
+
+message WireguardNextHop {
+  string node_id = 1;
+  string node_name = 2;
+  string underlay_address = 3;
+  bytes wireguard_public_key = 4;
+  uint32 wireguard_listen_port = 5;
+  repeated WireguardEndpoint wireguard_endpoints = 6;
+}
+
+enum OperationKind {
+  OPERATION_KIND_UNSPECIFIED = 0;
+  OPERATION_KIND_LOGS = 1;
+  OPERATION_KIND_EXEC = 2;
+  OPERATION_KIND_RECLAIM_VOLUME = 3;
+  OPERATION_KIND_ATTACH = 4;
+  OPERATION_KIND_METRICS = 5;
+  OPERATION_KIND_PORT_FORWARD = 6;
+  OPERATION_KIND_NETWORK_EXPLAIN = 7;
+  OPERATION_KIND_TRACE = 8;
+  OPERATION_KIND_PATCH = 9;
+  // Privileged, explicitly authorized on-demand debugger byte stream.
+  OPERATION_KIND_SLYNK = 10;
+}
+
+message OperationRequest {
+  string operation_id = 1;
+  OperationKind kind = 2;
+  string namespace = 3;
+  string pod = 4;
+  string pod_uid = 5;
+  string container = 6;
+  repeated string command = 7;
+  bool stdin = 8;
+  bool stdout = 9;
+  bool stderr = 10;
+  bool tty = 11;
+  bool previous = 12;
+  // The PersistentVolume whose provisioned directory RECLAIM_VOLUME removes.
+  bytes volume_json = 13;
+  // The port in the Pod's network namespace PORT_FORWARD connects to.
+  uint32 port = 14;
+  // EXEC and ATTACH: the control plane acknowledges output as it reaches the client
+  // (OperationInput.acknowledged_bytes), so the node may hold output back while too
+  // much is unacknowledged. An older control plane never acknowledges, and leaves this false.
+  bool acknowledges_output = 15;
+  // NETWORK_EXPLAIN: authenticated node ID whose path decision is requested.
+  string peer_id = 16;
+  // TRACE: bpftrace source compiled and run in-process by the node agent.
+  string trace_source = 17;
+  // TRACE: exact Pod UIDs assigned to this authenticated node whose live
+  // cgroups may contribute events.
+  repeated string trace_pod_uids = 18;
+  // TRACE: hard node-side deadline. The agent rejects zero and out-of-range
+  // values rather than accepting an unbounded tracing session.
+  uint64 trace_duration_milliseconds = 19;
+  bytes patch_command_json = 20;
+}
+
+message OperationInput {
+  string operation_id = 1;
+  uint64 sequence = 2;
+  StreamChannel channel = 3;
+  bytes data = 4;
+  uint32 rows = 5;
+  uint32 columns = 6;
+  bool eof = 7;
+  // PORT_FORWARD, and EXEC or ATTACH that ACKNOWLEDGES_OUTPUT: how much more output has
+  // reached the client.
+  uint64 acknowledged_bytes = 8;
+}
+
+message OperationCancel {
+  string operation_id = 1;
+  string reason = 2;
+}
+
+message ProtocolError {
+  uint32 supported_version = 1;
+  uint32 received_version = 2;
+  string message = 3;
+}
+
+// The CNI executable is a thin local client.  It forwards the complete CNI
+// invocation to the node agent over a private Unix socket; only the agent is
+// allowed to mutate IPAM, links, routes, or BPF state.
+message CniRequest {
+  uint32 protocol_version = 1;
+  string command = 2;
+  bytes network_configuration = 3;
+  string container_id = 4;
+  string network_namespace = 5;
+  string interface_name = 6;
+  string arguments = 7;
+  string plugin_path = 8;
+}
+
+message CniResponse {
+  uint32 protocol_version = 1;
+  bool success = 2;
+  bytes result_json = 3;
+  uint32 error_code = 4;
+  string error_message = 5;
+  string error_details = 6;
+}
+
+// Raft consensus transport between HA control-plane members (podster-c2d.3).
+// A single one-way delivery carrying one serialized Raft message; replies flow
+// as their own Deliver calls, matching the core's fire-and-forget send model.
+message PatchManagementRequest { bytes command_json = 1; }
+message PatchManagementResponse { bytes result_json = 1; string error_message = 2; }
+
+service RaftTransport {
+  rpc PatchManagement(PatchManagementRequest) returns (PatchManagementResponse);
+  rpc Deliver(RaftEnvelope) returns (RaftAck);
+  // A follower forwards an internal durable-store write to the current leader.
+  // Mutual Raft TLS authenticates the caller; the leader commits the serialized
+  // command through the same log used by local writers.
+  rpc Propose(RaftProposal) returns (RaftProposalResult);
+  // A new member asks the cluster to admit it (podster-c2d.10). Call it on any
+  // member; a follower answers with accepted=false and the current leader's
+  // address so the joiner can retry there. The leader authenticates the joiner,
+  // proposes the membership change, and returns the member address book so the
+  // joiner can reach every peer.
+  rpc Join(JoinRequest) returns (JoinResponse);
+  // Exchange a one-time Raft join token for a member certificate. This is the only
+  // call that doesn't need one, and the caller must first check the CA it pinned.
+  rpc EnrollMember(EnrollMemberRequest) returns (EnrollMemberResponse);
+  // Exchange a member's still-valid certificate for a new one with the same name.
+  rpc RenewMember(RenewMemberRequest) returns (RenewMemberResponse);
+  // Relay an exec/attach/port-forward-style operation frame to the control-plane
+  // member that owns the target node's one live agent session. The same call
+  // carries agent output back to the member that accepted the API stream.
+  rpc RelayOperation(RoutedOperation) returns (RoutedOperationResult);
+}
+
+message RoutedOperation {
+  string source_member = 1;
+  string node_name = 2;
+  oneof payload {
+    OperationRequest operation_request = 10;
+    OperationInput operation_input = 11;
+    OperationCancel operation_cancel = 12;
+    OperationStream operation_stream = 13;
+    OperationResponse operation_response = 14;
+  }
+}
+
+message RoutedOperationResult {
+  bool accepted = 1;
+  string error_message = 2;
+}
+
+message RenewMemberRequest {
+  bytes certificate_request = 1;
+}
+
+message RenewMemberResponse {
+  string certificate = 1;      // PEM chain for the member
+}
+
+message EnrollMemberRequest {
+  string member_id = 1;
+  string node_name = 2;   // the name the join token is bound to
+  string join_token = 3;
+  string role = 4;        // "voter" | "witness"
+  bytes certificate_request = 5;
+}
+
+message EnrollMemberResponse {
+  string certificate = 1;      // PEM chain for the member
+  string ca_certificate = 2;
+  string ca_private_key = 3;   // voters only, so they can admit members after a failover
+  // Voters only, so agents and API clients keep working when another member takes over.
+  string node_ca_certificate = 4;
+  string node_ca_private_key = 5;
+  // Voters must mint and verify every Pod's projected token with one cluster key.
+  string service_account_signing_key = 6;
+}
+
+message RaftEnvelope {
+  uint32 protocol_version = 1;
+  bytes payload = 2;
+}
+
+message RaftAck {
+}
+
+message RaftProposal {
+  bytes command = 1;
+}
+
+message RaftProposalResult {
+  bool committed = 1;
+  string reason = 2;
+  // The committed log position lets the forwarding member delay its API
+  // response until its own state machine has applied the write.
+  uint64 index = 3;
+  // Application rejection is distinct from consensus commit. Currently used
+  // for per-Pod transaction preconditions, encoded as a data-only Raft form.
+  bytes application_result = 4;
+}
+
+message RaftMember {
+  string id = 1;
+  string host = 2;
+  uint32 port = 3;
+  string role = 4;   // "voter" | "witness"
+}
+
+message JoinRequest {
+  string member_id = 1;
+  string host = 2;
+  uint32 port = 3;
+  string role = 4;        // "voter" | "witness"
+  string node_name = 5;   // the name the join token is bound to
+  string join_token = 6;
+  string api_url = 7;     // the joiner's HTTP API base URL, for leader-aware redirects
+  bytes patch_inventory_json = 8;
+}
+
+message JoinResponse {
+  bool accepted = 1;
+  string leader_id = 2;    // when not accepted: where to retry
+  string leader_host = 3;
+  uint32 leader_port = 4;
+  repeated RaftMember members = 5;  // the address book, when accepted
+  // When not accepted and not a redirect: why the leader refused the
+  // admission (e.g. "change-in-flight", "role-conflict"), so the joiner
+  // can log an actionable reason instead of a bare failure.
+  string reason = 6;
+}
