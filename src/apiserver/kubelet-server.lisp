@@ -241,26 +241,47 @@ returns the API server's answer."
         (setf (gethash key (kubelet-auth-cache auth)) (cons (+ now (funcall ttl-function value)) value)))
       value)))
 
+(defun kubelet-review-redirect-endpoint (location default-port)
+  "Parse a Raft-leader redirect LOCATION into (values host port target). The path and
+   query are preserved; a Location without a port falls back to DEFAULT-PORT."
+  (let ((uri (puri:parse-uri location)))
+    (values (puri:uri-host uri)
+            (or (puri:uri-port uri) default-port)
+            (format nil "~A~@[?~A~]" (or (puri:uri-path uri) "/") (puri:uri-query uri)))))
+
 (defun kubelet-delegated-review (auth review)
-  "Create REVIEW, a TokenReview or SubjectAccessReview object, with the API server and return its answer."
+  "Create REVIEW, a TokenReview or SubjectAccessReview object, with the API server and
+return its answer. A SubjectAccessReview is a write, so in HA a follower API server
+replies 307 to the Raft leader (podster-v7c follow-up); follow that redirect once so the
+kubelet can actually authorize its callers."
   (if (kubelet-auth-review auth)
       (funcall (kubelet-auth-review auth) review)
-      (let ((group (if (equal "TokenReview" (gethash "kind" review)) "authentication.k8s.io" "authorization.k8s.io"))
-            (resource (if (equal "TokenReview" (gethash "kind" review)) "tokenreviews" "subjectaccessreviews")))
-        (multiple-value-bind (code headers body)
-            (tls-http-request :address (kubelet-auth-api-address auth) :port (kubelet-auth-api-port auth)
-                              :server-name (kubelet-auth-api-server-name auth) :method :post
-                              :target (format nil "/apis/~A/v1/~A" group resource)
-                              :headers '(("Content-Type" . "application/json") ("Accept" . "application/json"))
-                              :body (gr8s.resources:stringify-to-utf-8-bytes review)
-                              :trust-certificates (kubelet-auth-trust-certificates auth)
-                              :client-certificate (kubelet-auth-client-certificate auth)
-                              :client-key (kubelet-auth-client-key auth))
-          (declare (ignore headers))
-          (unless (<= 200 code 299)
-            (error "~A review failed with HTTP ~D: ~A" (gethash "kind" review) code
-                   (trivial-utf-8:utf-8-bytes-to-string body)))
-          (com.inuoe.jzon:parse body)))))
+      (let* ((group (if (equal "TokenReview" (gethash "kind" review)) "authentication.k8s.io" "authorization.k8s.io"))
+             (resource (if (equal "TokenReview" (gethash "kind" review)) "tokenreviews" "subjectaccessreviews"))
+             (target (format nil "/apis/~A/v1/~A" group resource))
+             (body (gr8s.resources:stringify-to-utf-8-bytes review)))
+        (flet ((post (address port path)
+                 (tls-http-request :address address :port port
+                                   :server-name (kubelet-auth-api-server-name auth) :method :post
+                                   :target path
+                                   :headers '(("Content-Type" . "application/json") ("Accept" . "application/json"))
+                                   :body body
+                                   :trust-certificates (kubelet-auth-trust-certificates auth)
+                                   :client-certificate (kubelet-auth-client-certificate auth)
+                                   :client-key (kubelet-auth-client-key auth))))
+          (multiple-value-bind (code headers rbody)
+              (post (kubelet-auth-api-address auth) (kubelet-auth-api-port auth) target)
+            (when (member code '(307 308))
+              (let ((location (cdr (assoc "location" headers :test #'string-equal))))
+                (when location
+                  (multiple-value-bind (host port path)
+                      (kubelet-review-redirect-endpoint location (kubelet-auth-api-port auth))
+                    (when host
+                      (multiple-value-setq (code headers rbody) (post host port (or path target))))))))
+            (unless (<= 200 code 299)
+              (error "~A review failed with HTTP ~D: ~A" (gethash "kind" review) code
+                     (trivial-utf-8:utf-8-bytes-to-string rbody)))
+            (com.inuoe.jzon:parse rbody))))))
 
 (defun kubelet-token-identity (auth token)
   "Return the identity a TokenReview finds for TOKEN, or NIL when the token is not valid."

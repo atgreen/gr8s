@@ -38,6 +38,23 @@
     (is (null (tok "Bearer")))
     (is (null (tok "Bearer ")))))
 
+(test kubelet-review-redirect-endpoint-parses-the-leader-location
+  ;; In HA a SubjectAccessReview (a write) to a follower is 307-redirected to the
+  ;; Raft leader; the kubelet follows the Location so it can authorize scrapes.
+  (multiple-value-bind (host port target)
+      (gr8s.apiserver::kubelet-review-redirect-endpoint
+       "https://10.77.77.21:6443/apis/authorization.k8s.io/v1/subjectaccessreviews" 443)
+    (is (equal "10.77.77.21" host))
+    (is (= 6443 port))
+    (is (equal "/apis/authorization.k8s.io/v1/subjectaccessreviews" target)))
+  ;; A Location without an explicit port falls back to the caller's API port.
+  (multiple-value-bind (host port target)
+      (gr8s.apiserver::kubelet-review-redirect-endpoint
+       "https://leader.example/apis/authentication.k8s.io/v1/tokenreviews" 443)
+    (is (equal "leader.example" host))
+    (is (= 443 port))
+    (is (equal "/apis/authentication.k8s.io/v1/tokenreviews" target))))
+
 (test kubelet-paths-map-to-the-kubelet-subresources
   (loop for (path subresources) in '(("/metrics/resource" ("metrics")) ("/metrics" ("metrics"))
                                      ("/metrics/cadvisor" ("metrics")) ("/stats/summary" ("stats"))
