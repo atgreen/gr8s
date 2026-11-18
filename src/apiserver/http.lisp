@@ -20,6 +20,18 @@
 
 (in-package #:gr8s.apiserver)
 
+(defun authorization-bearer-token (authorization)
+  "The token from an RFC 7235 `Bearer <token>` Authorization header, or NIL when
+   the header is absent or its scheme is not bearer. The auth-scheme is matched
+   case-insensitively per RFC 7235 §2.1 -- the official Kubernetes Python client's
+   in-cluster loader sends a lowercase `bearer ` scheme, which a case-sensitive
+   `Bearer ` check rejected with 401 even for a valid token (podster-xnq). The
+   token itself is returned verbatim, with only leading scheme whitespace removed."
+  (when (and authorization (>= (length authorization) 7)
+             (string-equal "bearer " authorization :end2 7))
+    (let ((token (string-left-trim " " (subseq authorization 7))))
+      (and (plusp (length token)) token))))
+
 (defun shallow-copy-object (object)
   "Copy OBJECT's top level only, sharing its values."
   (let ((copy (make-hash-table :test (hash-table-test object) :size (hash-table-count object))))

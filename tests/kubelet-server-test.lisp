@@ -19,6 +19,25 @@
      (unwind-protect (let ((,pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" ,directory)))) ,@body)
        (uiop:delete-directory-tree ,directory :validate t :if-does-not-exist :ignore))))
 
+(test authorization-bearer-token-matches-the-scheme-case-insensitively
+  ;; podster-xnq: the Kubernetes Python client's in-cluster loader sends a
+  ;; lowercase `bearer ` scheme. RFC 7235 §2.1 makes the scheme case-insensitive.
+  (flet ((tok (header) (gr8s.apiserver::authorization-bearer-token header)))
+    ;; Scheme casing varies; the token is returned verbatim.
+    (is (equal "aBc.dEf" (tok "Bearer aBc.dEf")))
+    (is (equal "aBc.dEf" (tok "bearer aBc.dEf")))
+    (is (equal "aBc.dEf" (tok "BEARER aBc.dEf")))
+    (is (equal "aBc.dEf" (tok "BeArEr aBc.dEf")))
+    ;; Extra scheme whitespace is tolerated; token case/content preserved.
+    (is (equal "t.k" (tok "bearer    t.k")))
+    ;; Not a bearer credential, or no credential at all.
+    (is (null (tok "Basic dXNlcjpwYXNz")))
+    (is (null (tok "Token abc")))
+    (is (null (tok nil)))
+    (is (null (tok "")))
+    (is (null (tok "Bearer")))
+    (is (null (tok "Bearer ")))))
+
 (test kubelet-paths-map-to-the-kubelet-subresources
   (loop for (path subresources) in '(("/metrics/resource" ("metrics")) ("/metrics" ("metrics"))
                                      ("/metrics/cadvisor" ("metrics")) ("/stats/summary" ("stats"))
@@ -83,11 +102,13 @@ is user alice, and only alice may get nodes/metrics, and system:masters anything
                                           (equal "node-a" (gethash "name" attributes))
                                           (equal "get" (gethash "verb" attributes)))))))))))
 
-(defun kubelet-test-get (pki port path &key token client)
-  "GET PATH from the kubelet listener on PORT, verifying it by PKI's CA, returning status and text."
+(defun kubelet-test-get (pki port path &key token client (scheme "Bearer"))
+  "GET PATH from the kubelet listener on PORT, verifying it by PKI's CA, returning status and text.
+SCHEME is the Authorization auth-scheme to send (default \"Bearer\"); vary it to check
+case-insensitive scheme matching."
   (multiple-value-bind (code headers body)
       (gr8s.apiserver::tls-http-request :address "127.0.0.1" :port port :server-name "127.0.0.1" :target path
-                              :headers (when token (list (cons "Authorization" (format nil "Bearer ~A" token))))
+                              :headers (when token (list (cons "Authorization" (format nil "~A ~A" scheme token))))
                               :trust-certificates (list (gr8s.security::cluster-pki-ca-certificate pki))
                               :client-certificate (first client) :client-key (second client))
     (values code (trivial-utf-8:utf-8-bytes-to-string body) (cdr (assoc "content-type" headers :test #'string=)))))
@@ -115,6 +136,13 @@ is user alice, and only alice may get nodes/metrics, and system:masters anything
                  (is (= 200 code))
                  (is (equal "text/plain; version=0.0.4; charset=utf-8" type))
                  (is (equal (gr8s.kubelet::kubelet-resource-metrics-text (kubelet-test-node-stats)) text)))
+               ;; The auth-scheme is case-insensitive (RFC 7235); the Kubernetes
+               ;; Python client sends a lowercase `bearer` (podster-xnq). A valid
+               ;; token authenticates under any scheme casing; a non-bearer scheme does not.
+               (is (= 200 (kubelet-test-get pki port "/metrics/resource" :token "good" :scheme "bearer")))
+               (is (= 200 (kubelet-test-get pki port "/metrics/resource" :token "good" :scheme "BEARER")))
+               (is (= 200 (kubelet-test-get pki port "/metrics/resource" :token "good" :scheme "beArer")))
+               (is (= 401 (kubelet-test-get pki port "/metrics/resource" :token "good" :scheme "Token")))
                ;; alice may read metrics but not stats, and the kubelet says what it checked.
                (multiple-value-bind (code text) (kubelet-test-get pki port "/stats/summary" :token "good")
                  (is (= 403 code))
