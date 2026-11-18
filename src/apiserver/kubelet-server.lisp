@@ -628,7 +628,15 @@ returning it, or NIL. A port another process holds leaves the node without one, 
       (when (and (plusp port) (probe-file certificate) (probe-file client-certificate))
         (handler-case
             (let ((ca (first (pure-tls:load-certificate-chain (merge-pathnames "ca.crt" directory)))))
-              (multiple-value-bind (api-host api-port) (parse-agent-server (or (getf options :kubelet-api-server) "10.96.0.1:443"))
+              ;; Default the delegated-review target to this node's own API server, not
+              ;; the kubernetes ClusterIP VIP (10.96.0.1): a host-network component cannot
+              ;; rely on ClusterIP routing from the host, which does not work on every node
+              ;; (podster-shw). The local API server is always reachable, and an HA follower
+              ;; redirects writes (SubjectAccessReview) to the leader, which the review now
+              ;; 6443 is the API port every node serves on 0.0.0.0 (gr8s.server's
+              ;; +in-cluster-api-port+, not visible to this package).
+              (multiple-value-bind (api-host api-port)
+                  (parse-agent-server (or (getf options :kubelet-api-server) "127.0.0.1:6443"))
                 (start-kubelet-server
                  :port port :certificate certificate :key key :node-name node-name
                  :auth (make-kubelet-auth :client-ca ca :api-address api-host :api-port api-port
