@@ -91,6 +91,84 @@
           (format *error-output* "gr8s: overlay firewall command failed (~{~A~^ ~}): ~A~%"
                   argv out))))))
 
+;;; ---------------------------------------------------------------------------
+;;; Pod -> remote-node InternalIP masquerade (podster-v7c).
+;;;
+;;; A Pod reaching a service bound to another node's host IP (node-exporter :9100,
+;;; the kubelet :10250, a hostNetwork Pod) egresses the WireGuard underlay with its
+;;; Pod source address; the peer drops it by cryptokey routing, because the Pod CIDR
+;;; is not in the peer's AllowedIPs (those carry only the node mesh -- Pod->Pod rides
+;;; the VXLAN whose outer header is node-to-node). SNAT-ing to this node's address
+;;; restores a symmetric, accepted path, as kube-proxy does for NodePort.
+;;;
+;;; This is applied via nft directly, NOT firewalld: a node may have no firewalld
+;;; (then the overlay ACCEPTs above are a no-op, but this SNAT is still required),
+;;; and firewalld's own tables are left untouched -- gr8s owns the gr8s-overlay
+;;; table in its own family, replaced atomically on each reconcile.
+
+(defun overlay-snat-address-family (address)
+  "The nft family token for an address or CIDR: \"ip6\" for IPv6, else \"ip\"."
+  (if (find #\: address) "ip6" "ip"))
+
+(defun overlay-snat-nft-ruleset (pod-cidrs underlay-addresses)
+  "An nft script (for `nft -f -`) masquerading this node's Pod traffic destined to a
+   peer node's underlay (InternalIP) address to the node's own address, for every
+   same-family (Pod-CIDR, underlay address) pair. The gr8s-overlay table is replaced
+   atomically per family; a family with no pairs has its table removed, so a
+   reconcile withdraws stale rules and an empty call tears the tables down."
+  (let ((cidrs (if (stringp pod-cidrs) (list pod-cidrs) pod-cidrs))
+        (lines '()))
+    (dolist (family '("ip" "ip6"))
+      (let ((fam-cidrs (remove-if-not (lambda (c) (string= family (overlay-snat-address-family c))) cidrs))
+            (fam-addrs (remove-if-not (lambda (a) (string= family (overlay-snat-address-family a)))
+                                      underlay-addresses)))
+        ;; `add` makes the table exist (idempotent) so the following flush or
+        ;; delete never fails on a first run.
+        (push (format nil "add table ~A gr8s-overlay" family) lines)
+        (if (and fam-cidrs fam-addrs)
+            (progn
+              (push (format nil "flush table ~A gr8s-overlay" family) lines)
+              (push (format nil "add chain ~A gr8s-overlay postrouting ~
+                                 { type nat hook postrouting priority 100 ; policy accept ; }"
+                            family)
+                    lines)
+              (dolist (address fam-addrs)
+                (dolist (cidr fam-cidrs)
+                  (push (format nil "add rule ~A gr8s-overlay postrouting ~
+                                     ~A saddr ~A ~A daddr ~A masquerade"
+                                family family cidr family address)
+                        lines))))
+            (push (format nil "delete table ~A gr8s-overlay" family) lines))))
+    (format nil "~{~A~%~}" (nreverse lines))))
+
+(defun run-overlay-snat-nft (ruleset)
+  "Apply RULESET with `nft -f -` (gr8s runs as root on the node). Missing nft or an
+   apply error is fail-soft: logged, returns NIL; success returns T."
+  (handler-case
+      (multiple-value-bind (out err code)
+          (uiop:run-program '("nft" "-f" "-")
+                            :input (make-string-input-stream ruleset)
+                            :output nil :error-output '(:string :stripped t)
+                            :ignore-error-status t)
+        (declare (ignore out))
+        (cond ((and code (zerop code)) t)
+              (t (format *error-output* "gr8s: overlay SNAT nft apply failed: ~A~%" err)
+                 nil)))
+    (error (condition)
+      (format *error-output* "gr8s: overlay SNAT nft unavailable: ~A~%" condition)
+      nil)))
+
+(defun ensure-overlay-snat (pod-cidrs underlay-addresses &key (runner #'run-overlay-snat-nft))
+  "Install the Pod->remote-node-InternalIP masquerade for POD-CIDRS and the peers'
+   UNDERLAY-ADDRESSES. A no-op (returns NIL) when either is empty; otherwise returns
+   RUNNER's result. Idempotent: the ruleset is an atomic per-family replace."
+  (when (and pod-cidrs underlay-addresses)
+    (funcall runner (overlay-snat-nft-ruleset pod-cidrs underlay-addresses))))
+
+(defun remove-overlay-snat (&key (runner #'run-overlay-snat-nft))
+  "Withdraw the Pod->remote-node masquerade, deleting the gr8s-overlay tables."
+  (funcall runner (overlay-snat-nft-ruleset nil nil)))
+
 (defun ensure-overlay-firewall
     (node-pod-cidr &key (runner #'host-firewall-run)
                         (interface +node-vxlan-interface+)

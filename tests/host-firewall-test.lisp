@@ -7,6 +7,43 @@
 (in-package #:gr8s/tests)
 (in-suite gr8s)
 
+(test overlay-snat-nft-ruleset-masquerades-pod-to-each-node-internalip
+  ;; podster-v7c: Pod->remote-node InternalIP (any port) is SNAT'd to this node so
+  ;; node-exporter/kubelet/hostNetwork scrapes cross the WireGuard underlay with a
+  ;; source the peer accepts. Applied via nft (firewalld-independent).
+  (let ((rs (gr8s.network::overlay-snat-nft-ruleset
+             "10.80.16.0/20" '("10.77.77.10" "10.77.77.21"))))
+    (is (search "add table ip gr8s-overlay" rs))
+    (is (search "type nat hook postrouting" rs))
+    (is (search "ip saddr 10.80.16.0/20 ip daddr 10.77.77.10 masquerade" rs))
+    (is (search "ip saddr 10.80.16.0/20 ip daddr 10.77.77.21 masquerade" rs))
+    ;; No IPv6 pairs -> the ip6 table is torn down, never populated.
+    (is (search "delete table ip6 gr8s-overlay" rs))
+    (is (not (search "ip6 saddr" rs))))
+  ;; Dual-stack: each pair lands in its own family's table, no cross-family rule.
+  (let ((rs (gr8s.network::overlay-snat-nft-ruleset
+             '("10.80.16.0/20" "fd80:16::/64") '("10.77.77.21" "fd77::21"))))
+    (is (search "ip saddr 10.80.16.0/20 ip daddr 10.77.77.21 masquerade" rs))
+    (is (search "ip6 saddr fd80:16::/64 ip6 daddr fd77::21 masquerade" rs))
+    (is (not (search "ip daddr fd77::21" rs)))
+    (is (not (search "ip6 daddr 10.77.77.21" rs))))
+  ;; No inputs -> teardown of both tables, no masquerade rule.
+  (let ((rs (gr8s.network::overlay-snat-nft-ruleset nil nil)))
+    (is (search "delete table ip gr8s-overlay" rs))
+    (is (search "delete table ip6 gr8s-overlay" rs))
+    (is (not (search "masquerade" rs)))))
+
+(test ensure-overlay-snat-applies-the-ruleset-and-no-ops-when-empty
+  (let ((captured nil))
+    (flet ((runner (ruleset) (setf captured ruleset) t))
+      ;; Both Pod CIDR and peers present -> the runner sees the masquerade ruleset.
+      (is (gr8s.network::ensure-overlay-snat "10.80.16.0/20" '("10.77.77.21") :runner #'runner))
+      (is (search "ip saddr 10.80.16.0/20 ip daddr 10.77.77.21 masquerade" captured))
+      ;; No peers (or no CIDR) -> no-op, runner is not called.
+      (setf captured :untouched)
+      (is (null (gr8s.network::ensure-overlay-snat "10.80.16.0/20" '() :runner #'runner)))
+      (is (eq :untouched captured)))))
+
 (test overlay-firewall-commands-are-scoped-to-the-overlay
   (let ((cmds (gr8s.network::overlay-firewall-commands "10.80.0.0/20")))
     ;; interface + one Pod-CIDR source + VXLAN port + per-CIDR tcp/udp NodePort

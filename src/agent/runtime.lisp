@@ -46,6 +46,9 @@
   ;; firewall-cmd for each one; retaining all three fields also makes a backend
   ;; transition withdraw the rules it supersedes.
   overlay-firewall-identity
+  ;; The applied Pod->remote-node-InternalIP nft masquerade identity (podster-v7c);
+  ;; nil until applied. Re-applied when the Pod CIDRs or peer underlay set change.
+  overlay-snat-identity
   ipam
   cni-operations
   ;; Durable endpoints created by an operator-owned primary CNI before the
@@ -832,6 +835,10 @@ conflicting network."
         ;; would drop the forwarded/encapsulated packets without a scoped ACCEPT.
         ;; No-op without firewalld; fail-soft. Only meaningful for a managed node.
         (ignore-errors (ensure-node-runtime-overlay-firewall node-runtime network))
+        ;; SNAT Pod->remote-node InternalIP so node-local scrapes (node-exporter,
+        ;; kubelet) reach peers over the underlay (podster-v7c). nft, not firewalld:
+        ;; required even on a node without firewalld. Fail-soft.
+        (ignore-errors (ensure-node-runtime-overlay-snat node-runtime network))
         ;; Retire withdrawn owner incarnations while the previous applied
         ;; network is still durable. A crash after promotion must not strand
         ;; enabled rows that the new assignment no longer names.
@@ -890,6 +897,30 @@ inactive-firewalld attempt is not remembered, so a later snapshot can retry."
           (setf (node-runtime-overlay-firewall-identity node-runtime) desired)
           t)))))
 
+(defun ensure-node-runtime-overlay-snat (node-runtime network)
+  "Install NETWORK's Pod->remote-node-InternalIP masquerade via nft, once per identity.
+Unlike the overlay ACCEPTs this is NOT firewalld-gated: the SNAT is required wherever
+Pods egress to a peer node's host IP over the WireGuard underlay, including on a node
+with no firewalld (podster-v7c). Re-applies when the Pod CIDRs or peer set change."
+  (when (and (node-runtime-manager node-runtime)
+             (plusp (length (gethash "underlayAddress" network ""))))
+    (let* ((cidrs (persisted-node-network-cidrs network "nodePodCIDRs" "nodePodCIDR"))
+           (underlays (sort (remove-duplicates
+                             (remove nil (mapcar #'cdr (gr8s.network::node-vxlan-route-pairs network)))
+                             :test #'equal)
+                            #'string<))
+           (desired (and cidrs underlays (list cidrs underlays)))
+           (current (node-runtime-overlay-snat-identity node-runtime)))
+      (unless (equal desired current)
+        (cond
+          (desired
+           (when (gr8s.network::ensure-overlay-snat cidrs underlays)
+             (setf (node-runtime-overlay-snat-identity node-runtime) desired)
+             t))
+          (t
+           (ignore-errors (gr8s.network::remove-overlay-snat))
+           (setf (node-runtime-overlay-snat-identity node-runtime) nil)))))))
+
 (defun apply-node-runtime-network (node-runtime snapshot)
   "Configure the node network from SNAPSHOT's assigned network. A managed agent given no
 assigned network signals INVALID-CNI in native mode; external CNI mode leaves all
@@ -925,7 +956,11 @@ link, route, overlay and IPAM ownership to the configured plugins."
     (let ((identity (node-runtime-overlay-firewall-identity node-runtime)))
       (when identity
         (ignore-errors
-          (call-overlay-firewall-function #'remove-overlay-firewall identity))))))
+          (call-overlay-firewall-function #'remove-overlay-firewall identity))))
+    ;; Withdraw the Pod->remote-node masquerade too (podster-v7c).
+    (when (node-runtime-overlay-snat-identity node-runtime)
+      (ignore-errors (gr8s.network::remove-overlay-snat))
+      (setf (node-runtime-overlay-snat-identity node-runtime) nil))))
 
 (defun reconcile-cached-node-network (node-runtime)
   "Re-apply the node's durable network to repair kernel state -- e.g. VXLAN FDB entries a
