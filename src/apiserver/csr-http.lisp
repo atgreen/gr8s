@@ -46,7 +46,7 @@
 (defun csr-http-request-actor (store)
   "Derive immutable request actor fields from verified TLS or token identity, never headers claiming a username."
   (let* ((header (hunchentoot:header-in* :authorization))
-         (token (and header (>= (length header) 7) (string-equal "Bearer " header :end2 7) (subseq header 7)))
+         (token (authorization-bearer-token header))
          (identity (or *authenticated-api-identity* (and token (authenticate-service-account-token store token)))))
     (if identity (api-identity-actor identity)
         (core-object "username" "system:anonymous" "groups" #("system:unauthenticated")))))
@@ -92,7 +92,8 @@
   (when (typep hunchentoot:*acceptor* 'gr8s-in-cluster-acceptor)
     (let* ((header (hunchentoot:header-in* :authorization))
            (identity (or *authenticated-api-identity*
-                         (and header (>= (length header) 7) (string-equal "Bearer " header :end2 7) (authenticate-service-account-token store (subseq header 7)))))
+                         (let ((token (authorization-bearer-token header)))
+                           (and token (authenticate-service-account-token store token)))))
            (signer (gethash "signerName" (gethash "spec" old))))
       (unless identity (core-resource-error 401 "Unauthorized" "A verified API identity is required"))
       (cond ((eq path :approval) (csr-authorize-signer store identity signer "approve"))
