@@ -242,7 +242,7 @@ one then answers 404 rather than 403, as upstream's does."
 (defun authorize-in-cluster-request (store request)
   "Authenticate a verified certificate or live bearer token, then enforce current RBAC."
   (let* ((header (hunchentoot:header-in :authorization request))
-         (token (when (and header (uiop:string-prefix-p "Bearer " header)) (subseq header 7)))
+         (token (when (and header (>= (length header) 7) (string-equal "Bearer " header :end2 7)) (subseq header 7)))
          (authenticated (or (handler-case
                                 (cached-api-certificate-identity *api-connection-certificate-chain*
                                   (in-cluster-client-ca (hunchentoot:request-acceptor request))

@@ -1423,6 +1423,7 @@
                  (apply #'gr8s.controllers::install-node-enrollment-command store payload)))))
       (setf server (gr8s.apiserver::start-node-grpc-server
                     store :host "127.0.0.1" :port 0 :pki pki
+                    :session-admission-fn (constantly nil)
                     :cluster-pod-cidr "10.80.0.0/12" :node-prefix 20))
       (unwind-protect
            (progn
@@ -1640,7 +1641,8 @@
         (gr8s.controllers::register-node
          store (gr8s.model::make-node-record :id "node-relayed" :name "worker-relayed"
                                       :pod-cidr "10.88.9.0/24")))
-      (let* ((origin (gr8s.apiserver::start-node-grpc-server origin-store :host "127.0.0.1" :port 0))
+      (let* ((origin (gr8s.apiserver::start-node-grpc-server origin-store :host "127.0.0.1" :port 0
+                                                              :session-admission-fn (constantly nil)))
              (owner (gr8s.apiserver::start-node-grpc-server owner-store :host "127.0.0.1" :port 0))
              (origin-member (gr8s.raft.transport::start-raft-member "origin" :port 0))
              (owner-member (gr8s.raft.transport::start-raft-member "owner" :port 0))
@@ -2941,3 +2943,108 @@
 (test socket-hardening-tolerates-unsupported-sockets
   ;; Best-effort by contract: a closed or odd socket must not signal.
   (finishes (gr8s.security::harden-node-channel-socket nil)))
+
+(test follower-rejects-node-connect-before-applying-a-snapshot
+  (with-temporary-store (store path)
+    (gr8s.controllers::register-node
+     store (gr8s.model::make-node-record :id "node-follower" :name "worker-follower"
+                                       :pod-cidr "10.88.3.0/24"))
+    (let ((server (gr8s.apiserver::start-node-grpc-server
+                   store :port 0 :session-admission-fn (constantly nil)))
+          (applied nil))
+      (unwind-protect
+           (progn
+             (signals error
+               (gr8s.agent::run-node-session
+                "127.0.0.1" (gr8s.apiserver::node-grpc-server-port server)
+                "worker-follower" (merge-pathnames "agent/identity.json" path)
+                (lambda (snapshot) (declare (ignore snapshot)) (setf applied t))
+                :max-sessions 1))
+             (is (null applied)))
+        (gr8s.apiserver::stop-node-grpc-server server)))))
+
+(test demotion-evicts-live-node-session-and-reconnect-replays-snapshot
+  (with-temporary-store (store path)
+    (gr8s.controllers::register-node
+     store (gr8s.model::make-node-record :id "node-demoted" :name "worker-demoted"
+                                       :pod-cidr "10.88.3.0/24"))
+    (gwc-seed store)
+    (let* ((leader-p t)
+           (server (gr8s.apiserver::start-node-grpc-server
+                    store :port 0 :session-admission-fn (lambda () leader-p)))
+           (control (gr8s.agent::make-node-session-control))
+           (applied nil)
+           (agent nil))
+      (unwind-protect
+           (labels ((session ()
+                      (bt:with-lock-held ((gr8s.apiserver::node-grpc-server-lock server))
+                        (gethash "worker-demoted" (gr8s.apiserver::node-grpc-server-sessions server)))))
+             (setf agent
+                   (bt:make-thread
+                    (lambda ()
+                      (gr8s.agent::run-node-session
+                       "127.0.0.1" (gr8s.apiserver::node-grpc-server-port server)
+                       "worker-demoted" (merge-pathnames "agent/identity.json" path)
+                       (lambda (snapshot) (push snapshot applied))
+                       :control control :reconnect-delay 0.1))))
+             (is-true (wait-until (lambda () (and (session) applied)) :timeout 5))
+             (let ((old (session)))
+               (setf leader-p nil)
+               (is-true (wait-until (lambda () (gr8s.apiserver::node-agent-session-evicted-p old))
+                                   :timeout 2))
+               (is-true (wait-until (lambda () (null (session))) :timeout 2))
+               (change-published-route-host store "after-demotion.example.com")
+               (setf leader-p t)
+               (is-true (wait-until (lambda () (and (session) (not (eq old (session)))
+                                                   (>= (length applied) 2))) :timeout 5))
+               (let* ((entries (mapcar #'gr8s.kubelet::decode-service-discovery-entry
+                                      (slot-value (first applied) 'gr8s.node.v1::service-discovery-objects-json)))
+                      (route (cdr (assoc '("httproutes" "default" "app") entries :test #'equal))))
+                 (is (equalp #("after-demotion.example.com") (gethash "hostnames" (gethash "spec" route)))))
+               ;; Later edits must also reach the reconnected stream.
+               (change-published-route-host store "after-reconnect.example.com")
+               (gr8s.controllers::publish-node-snapshot
+                (gr8s.controllers::make-control-plane-runtime store server) "worker-demoted")
+               (is-true (wait-until (lambda () (>= (length applied) 3)) :timeout 5))
+               (let* ((entries (mapcar #'gr8s.kubelet::decode-service-discovery-entry
+                                      (slot-value (first applied) 'gr8s.node.v1::service-discovery-objects-json)))
+                      (route (cdr (assoc '("httproutes" "default" "app") entries :test #'equal))))
+                 (is (equalp #("after-reconnect.example.com") (gethash "hostnames" (gethash "spec" route)))))))
+        (gr8s.agent::cancel-node-session control)
+        (when agent (ignore-errors (bt:join-thread agent)))
+        (gr8s.apiserver::stop-node-grpc-server server)))))
+
+(test demotion-during-registration-fails-drained-node-operations
+  (with-temporary-store (store path)
+    (gr8s.controllers::register-node
+     store (gr8s.model::make-node-record :id "node-race" :name "worker-race"
+                                       :pod-cidr "10.88.3.0/24"))
+    (let ((server nil) (checks 0) (operation nil))
+      (setf server
+            (gr8s.apiserver::start-node-grpc-server
+             store :port 0
+             :session-admission-fn
+             (lambda ()
+               ;; The heartbeat monitor must not consume handshake decisions.
+               (or (null server)
+                   (eq (bt:current-thread) (gr8s.apiserver::node-grpc-server-monitor-thread server))
+                   (< (incf checks) 3)))))
+      (unwind-protect
+           (progn
+             (setf operation
+                   (gr8s.apiserver::queue-node-operation
+                    server "worker-race"
+                    (make-instance 'gr8s.node.v1::operation-request
+                                   :operation-id "registration-race"
+                                   :kind gr8s.node.v1::+operationkind-operation_kind_exec+)))
+             (signals error
+               (gr8s.agent::run-node-session
+                "127.0.0.1" (gr8s.apiserver::node-grpc-server-port server)
+                "worker-race" (merge-pathnames "agent/identity.json" path)
+                (lambda (snapshot) (declare (ignore snapshot))) :max-sessions 1))
+             (is (= 3 checks))
+             (is-true (wait-until (lambda () (gr8s.apiserver::pending-node-operation-done-p operation))
+                                 :timeout 1))
+             (is (equal "Node disconnected" (gr8s.apiserver::pending-node-operation-error operation))))
+        (when operation (gr8s.apiserver::release-node-operation server operation))
+        (gr8s.apiserver::stop-node-grpc-server server)))))

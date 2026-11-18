@@ -395,13 +395,20 @@ Return (values result final-contents events)."
   ;; snapshot follows; the address itself must lead to the Pod's policy being written.
   (let ((directory (uiop:ensure-directory-pathname
                     (sb-posix:mkdtemp (namestring (merge-pathnames "gr8s-test-XXXXXX" (uiop:temporary-directory))))))
-        (converged 0))
+        (converged 0)
+        (observed-runtime nil))
     (sb-int:encapsulate 'gr8s.agent::converge-node-network-policies-unlocked 'npr-count
-                        (lambda (function &rest arguments) (declare (ignore function arguments)) (incf converged)))
+                        (lambda (function runtime &rest arguments)
+                          ;; Other live runtimes in the suite must neither count
+                          ;; toward this observation nor lose their convergence.
+                          (if (eq runtime observed-runtime)
+                              (incf converged)
+                              (apply function runtime arguments))))
     (unwind-protect
          (let* ((runtime (gr8s.agent::make-node-runtime directory (gr8s.runtime::make-fake-runtime) nil))
                 (store (gr8s.agent::node-runtime-store runtime))
                 (pod (create-pod store (parse-pod *valid-pod-json*))))
+           (setf observed-runtime runtime)
            (gr8s.agent::cache-node-observation runtime pod (gr8s.resources::core-object "phase" "Pending"))
            (is (= 0 converged))
            (gr8s.agent::cache-node-observation runtime pod (gr8s.resources::core-object "phase" "Running" "podIP" "10.88.0.7"))

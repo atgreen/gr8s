@@ -14,6 +14,13 @@
   "Validate a test declaration through production probe validation."
   (gr8s.kubelet::validate-container-probe (com.inuoe.jzon:parse json) kind))
 
+(test probes-treat-null-http-headers-as-absent
+  (let* ((probe (checked-probe "{\"httpGet\":{\"port\":80,\"httpHeaders\":null}}"))
+         (action (gethash "httpGet" probe)))
+    (is (zerop (length (gethash "httpHeaders" action #())))))
+  (signals gr8s.model::kubernetes-error
+    (checked-probe "{\"httpGet\":{\"port\":80,\"httpHeaders\":false}}")))
+
 (test probes-validate-actions-and-default-typed-zero-scalars
   (let ((probe (checked-probe "{\"httpGet\":{\"port\":\"http\"},\"periodSeconds\":0,\"timeoutSeconds\":0}")))
     (is (= 10 (gethash "periodSeconds" probe))) (is (= 1 (gethash "timeoutSeconds" probe)))

@@ -9,6 +9,19 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- Keep HA node streams on the active publishing leader and reconnect them after
+  demotion, preventing follower-owned agents from missing later Gateway routes.
+  Fail queued operations if leadership changes during their handshake (podster-c28).
+
+- CRD CEL admission shares one request-size bound across nested unbounded
+  collections, matching Kubernetes cardinality accounting. This admits the
+  upstream AlertmanagerConfig CRD without raising validation cost limits
+  (podster-b85).
+- HTTP probes accept `httpHeaders: null` as an absent optional list, including
+  server-side applied DaemonSets such as node-exporter (podster-2zo).
+- API and kubelet authentication accept case-insensitive Bearer scheme names.
+  This supports the Python Kubernetes client's lowercase `bearer` header while
+  retaining token validation and RBAC checks (podster-xnq).
 - Restarting an HA control-plane member no longer risks a restart-loop: the
   committed-application recovery wait now extends the systemd start deadline
   while it runs (`sd_notify EXTEND_TIMEOUT_USEC`), and the packaged and

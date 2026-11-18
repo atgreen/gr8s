@@ -9,6 +9,38 @@
 (def-suite server-side-apply :in gr8s)
 (in-suite server-side-apply)
 
+(test apply-daemonset-allows-null-probe-http-headers
+  (with-crd-api (store path)
+    (values store path)
+    (let ((manifest "apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: null-headers
+spec:
+  selector:
+    matchLabels: {app: null-headers}
+  template:
+    metadata:
+      labels: {app: null-headers}
+    spec:
+      containers:
+      - name: exporter
+        image: example/exporter:latest
+        readinessProbe:
+          httpGet:
+            port: 9100
+            httpHeaders: null
+"))
+      (dolist (expected '(201 200))
+        (let* ((object (apply-request expected "/apis/apps/v1/namespaces/default/daemonsets/null-headers" manifest))
+               (container (aref (gethash "containers" (gethash "spec" (gethash "template" (gethash "spec" object)))) 0))
+               ;; Workload templates retain their declared JSON; the Pod parser
+               ;; validates/defaults a copy before the probe is executed.
+               (probe (gr8s.kubelet::validate-container-probe
+                       (gr8s.resources::copy-core-object (gethash "readinessProbe" container)) "readinessProbe"))
+               (action (gethash "httpGet" probe)))
+          (is (zerop (length (gethash "httpHeaders" action #())))))))))
+
 (defun apply-crd-fixture (schema &key (plural "foos") (kind "Foo"))
   "Build a cluster-scoped definition with SCHEMA, as upstream's field validation tests do."
   (gr8s.resources::core-object "apiVersion" "apiextensions.k8s.io/v1" "kind" "CustomResourceDefinition"

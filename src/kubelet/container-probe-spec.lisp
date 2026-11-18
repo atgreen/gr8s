@@ -40,6 +40,8 @@
      (validate-probe-port (gethash "port" action))
      (when (gethash "host" action) (unless (probe-single-line-p (gethash "host" action)) (invalid-pod "Invalid probe host")))
      (when (equal handler "httpGet")
+       ;; JSON null decodes to a nil slice in Kubernetes' HTTPGetAction.
+       (when (eq 'null (gethash "httpHeaders" action)) (remhash "httpHeaders" action))
        (when (gethash "path" action) (unless (probe-single-line-p (gethash "path" action)) (invalid-pod "Invalid probe path")))
        (when (member (gethash "path" action) '(nil "") :test #'equal) (setf (gethash "path" action) "/"))
        (when (member (gethash "scheme" action) '(nil "") :test #'equal) (setf (gethash "scheme" action) "HTTP"))
