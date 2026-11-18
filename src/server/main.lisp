@@ -85,8 +85,13 @@ never takes the service down with it. Returns true when a datagram was sent."
                  t)
             (sb-bsd-sockets:socket-close socket)))))))
 
+(defvar *service-ready-signaled* nil
+  "Set once READY=1 has been sent, so the startup-timeout keepalive stops pushing
+the Type=notify start deadline out once the service is actually serving.")
+
 (defun notify-service-manager-ready ()
   "Tell a Type=notify service manager the service is now serving."
+  (setf *service-ready-signaled* t)
   (notify-service-manager "READY=1"))
 
 (defun notify-service-manager-extend-timeout (seconds)
@@ -95,6 +100,39 @@ never takes the service down with it. Returns true when a datagram was sent."
 TimeoutStartSec. Like a watchdog ping, it must be re-sent before it elapses."
   (notify-service-manager
    (format nil "EXTEND_TIMEOUT_USEC=~D" (round (* seconds 1000000)))))
+
+(defstruct (startup-timeout-keepalive (:constructor %make-startup-timeout-keepalive))
+  thread (stop nil))
+
+(defun start-startup-timeout-keepalive (&key (interval 15) (extension 90))
+  "Keep the Type=notify start deadline pushed out from the first startup phase
+until READY=1. podster-lmm extends the deadline inside the HA recovery wait, but
+a cold rejoin's earlier work (store open, Raft catch-up) can itself exceed
+TimeoutStartSec before that loop is reached, so systemd kills and restart-loops
+the member (podster-qoa). Send one extension now and re-send every INTERVAL
+seconds -- shorter than EXTENSION so a ping never lapses -- until the service
+signals ready or STOP is set. Returns a handle for STOP-STARTUP-TIMEOUT-KEEPALIVE."
+  (setf *service-ready-signaled* nil)
+  (let ((keepalive (%make-startup-timeout-keepalive)))
+    (notify-service-manager-extend-timeout extension)
+    (setf (startup-timeout-keepalive-thread keepalive)
+          (bt:make-thread
+           (lambda ()
+             (loop until (or (startup-timeout-keepalive-stop keepalive)
+                             *service-ready-signaled*)
+                   do (notify-service-manager-extend-timeout extension)
+                      (sleep interval)))
+           :name "gr8s startup timeout keepalive"))
+    keepalive))
+
+(defun stop-startup-timeout-keepalive (keepalive)
+  "Stop a startup-timeout keepalive and join its thread. Idempotent and safe in an
+unwind, so a startup that fails before READY=1 does not leak the thread."
+  (when keepalive
+    (setf (startup-timeout-keepalive-stop keepalive) t)
+    (let ((thread (startup-timeout-keepalive-thread keepalive)))
+      (when (and thread (bt:thread-alive-p thread))
+        (ignore-errors (bt:join-thread thread))))))
 
 (defun option-value (arguments option)
   "The value following OPTION in ARGUMENTS (its second element), or signal an
@@ -2732,6 +2770,10 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
          (in-cluster-api-port +in-cluster-api-port+)
          (state-directory
            (uiop:ensure-directory-pathname (getf options :state-directory)))
+         ;; Start before the store opens: open-store and the HA join/catch-up below
+         ;; can outlast TimeoutStartSec on a cold rejoin, before wait-for-ha-application
+         ;; starts extending the deadline (podster-qoa). The keepalive covers that gap.
+         (startup-timeout-keepalive (start-startup-timeout-keepalive))
          (store (progn
                   (when (or (getf options :raft-init) (getf options :raft-join))
                     (gr8s.raft.transport::raft-reap-snapshot-directory
@@ -3077,7 +3119,10 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
            :relay-max-channels
            (when (getf options :wireguard-relay-address)
              (getf options :wireguard-relay-max-channels)))))
-      (when memory-monitor (stop-memory-monitor memory-monitor))))
+      (when memory-monitor (stop-memory-monitor memory-monitor))
+      ;; READY=1 already stopped it on a normal start; this covers a startup that
+      ;; errors before READY so the keepalive thread never outlives serve (podster-qoa).
+      (stop-startup-timeout-keepalive startup-timeout-keepalive)))
   0)
 
 (defun ensure-control-plane-pki (state-directory options)

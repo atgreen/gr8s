@@ -856,6 +856,36 @@
         (sb-posix:unsetenv "NOTIFY_SOCKET")
         (sb-bsd-sockets:socket-close listener)))))
 
+(test startup-timeout-keepalive-extends-the-deadline-and-stops-at-ready
+  ;; podster-qoa: a cold rejoin's pre-recovery work can exceed TimeoutStartSec
+  ;; before the recovery wait starts extending, so a keepalive must push the
+  ;; deadline out from the first startup phase, re-send until READY, then stop.
+  (with-temporary-store (store root)
+    (declare (ignore store))
+    (let ((path (namestring (merge-pathnames "notify.sock" root)))
+          (listener (make-instance 'sb-bsd-sockets:local-socket :type :datagram))
+          (keepalive nil))
+      (unwind-protect
+           (progn
+             (sb-bsd-sockets:socket-bind listener path)
+             (sb-posix:setenv "NOTIFY_SOCKET" path 1)
+             (setf keepalive (gr8s.server::start-startup-timeout-keepalive
+                              :interval 0.05 :extension 90))
+             ;; It extends immediately and keeps re-sending, so repeated datagrams
+             ;; arrive without any recovery-wait loop having been reached yet.
+             (dotimes (i 2)
+               (multiple-value-bind (buffer length)
+                   (sb-bsd-sockets:socket-receive listener nil 64)
+                 (is (equal "EXTEND_TIMEOUT_USEC=90000000" (subseq buffer 0 length)))))
+             ;; READY=1 stops the keepalive on its own.
+             (setf gr8s.server::*service-ready-signaled* t)
+             (let ((thread (gr8s.server::startup-timeout-keepalive-thread keepalive)))
+               (loop repeat 100 while (bt:thread-alive-p thread) do (sleep 0.02))
+               (is (not (bt:thread-alive-p thread)))))
+        (gr8s.server::stop-startup-timeout-keepalive keepalive)
+        (sb-posix:unsetenv "NOTIFY_SOCKET")
+        (ignore-errors (sb-bsd-sockets:socket-close listener))))))
+
 (test backup-and-restore-commands-parse-and-are-discoverable
   (let ((options (gr8s.server::parse-backup-options
                   '("save" "--state-directory" "/s" "--output" "/b/out.bin" "--key-file" "/k"))))
