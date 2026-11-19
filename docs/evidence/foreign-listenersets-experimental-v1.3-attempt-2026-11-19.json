@@ -1,0 +1,29 @@
+{
+  "root": "/root/gateway-goal/listenersets-experimental/gr8s-listenersets-olud52jm",
+  "checks": [
+    "ls-fe17aba53932-a/a: correct backend and distinct certificate",
+    "ls-fe17aba53932-a/b: correct backend and distinct certificate",
+    "ls-fe17aba53932-a: ListenerSet status and Gateway count",
+    "ls-fe17aba53932-a: unmatched SNI rejected",
+    "ls-fe17aba53932-a: absent SNI rejected",
+    "ls-fe17aba53932-a: sibling Host cannot cross SNI listener",
+    "ls-fe17aba53932-b/a: correct backend and distinct certificate",
+    "ls-fe17aba53932-b/b: correct backend and distinct certificate",
+    "ls-fe17aba53932-b: ListenerSet status and Gateway count",
+    "ls-fe17aba53932-b: unmatched SNI rejected",
+    "ls-fe17aba53932-b: absent SNI rejected",
+    "ls-fe17aba53932-b: sibling Host cannot cross SNI listener",
+    "One shared socket per Gateway, distinct between Gateways",
+    "Certificate rotation preserves sibling routing",
+    "Certificate rotation preserves socket lease",
+    "Route update reaches HTTPS snapshot",
+    "Admission revocation withdraws traffic and status",
+    "Deleting one ListenerSet preserves its sibling",
+    "Recreated ListenerSet has a new UID",
+    "Conflict preserves older listener certificate and routing",
+    "Agent stopped gracefully"
+  ],
+  "passed": false,
+  "listenerset_api": "gateway.networking.x-k8s.io/v1alpha1",
+  "error": "kubectl ('apply', '-f', '-'): The XListenerSet \"dynamic\" is invalid: spec.listeners[0].port: Invalid value: 0: spec.listeners[0].port in body should be greater than or equal to 1\n"
+}
