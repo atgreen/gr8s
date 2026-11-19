@@ -1,0 +1,91 @@
+{
+  "source_commit": "8dc9b3e1882c157bd8617db069d9829fa6f4469c",
+  "runtime_sources_identical_to": "1114b4d649090f0fc64e2f24487e016fce3ebbeb",
+  "source_changes_since_base": [
+    "docs/design-listenersets.md"
+  ],
+  "binary_sha256": "3fe42ec85a64df357c8f2e0dd80b14f88ce51345d7b6cf35c5c04fa12ef78468",
+  "binary_version": "gr8s 1.37.2-g8dc9b3e",
+  "report_version": "1.37.2+git.8dc9b3e1.sha256.3fe42ec85a64df357c8f2e0dd80b14f88ce51345d7b6cf35c5c04fa12ef78468",
+  "gateway_api_version": "v1.6.3",
+  "gateway_api_commit": "c0836133e24073fcdcdbb1713aba3cc73a89d0b5",
+  "gateway_api_channel": "standard",
+  "conformance_binary_sha256": "d7d2b1b82cc29f7ff7a555692b03a1b2253cacb7a3f206c514632d4f725eb5d5",
+  "standard_crds_sha256": "356c2b8e286a964dc20995435659ad1095386329974793af10bbfe3eff977fe5",
+  "experimental_xlistenerset_crd_source": "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.4.0/config/crd/experimental/gateway.networking.x-k8s.io_xlistenersets.yaml",
+  "experimental_xlistenerset_crd_sha256": "c8608401e8d8746637428d7bc45b3c0f6a80f9ebc276e2d7aa3ebe8ce9ea706b",
+  "vm": {
+    "os": "Fedora 44",
+    "ram_mib": 4096,
+    "vcpus": 4,
+    "disk_cache": "unsafe (disposable test guest only)",
+    "k3s_version": "v1.37.2+k3s1",
+    "cni": "stock flannel",
+    "services": "stock kube-proxy",
+    "gr8s_args": [
+      "net-agent",
+      "--cni",
+      "false",
+      "--service-lb",
+      "false",
+      "--gateway",
+      "true"
+    ]
+  },
+  "focused_tests": {
+    "foreign-net-agent": 344,
+    "gateway-router": 66,
+    "gateway-controller": 425,
+    "gateway-sni": 6,
+    "failed": 0,
+    "skipped": 0,
+    "exit_code": 0
+  },
+  "conformance_runner_unit_tests": {
+    "passed": 2,
+    "exit_code": 0
+  },
+  "scale_validation": "not performed; decomposed as podster-18x.3.1 through podster-18x.3.3",
+  "http_conformance": {
+    "exit_code": 0,
+    "statistics": {
+      "Failed": 0,
+      "Passed": 36,
+      "Skipped": 0
+    },
+    "date": "2026-11-19T13:58:28Z",
+    "initial_preflight_failure": "Mixed Gateway API CRD versions: standard v1.6.3 plus legacy v1.3.0 XListenerSet. Removed the legacy CRD; reran the unmodified full profile on standard v1.6.3. Raw failed preflight retained in conformance-attempt1-mixed-crds.log."
+  },
+  "isolation": {
+    "exit_code": 0,
+    "passed": true,
+    "checks": 30
+  },
+  "evidence_sha256": {
+    "gateway-http-conformance-2026-11-19.yaml": "3e4539b8324a9e0ba04a709a46e2afdb72b4e698623770bbe9bf0c313cf8e3d8",
+    "gateway-http-conformance-2026-11-19.log.gz": "32c281b43b521daabd659b9bfff478581f0a746ba1113bdc65e554527169192b",
+    "gateway-http-preflight-mixed-crds-2026-11-19.log.gz": "e40be4954fa524b0dac89270ff62df6947130d9140f69c1e21b40a9b93e470de",
+    "foreign-gateway-isolation-2026-11-19.json": "7d5c84889facb12129514004647a2bac2fd23505208a228c093d9b6056ee0cb3",
+    "foreign-listenersets-stable-2026-11-19.json": "c4cba6c9c7936a69f7ac9bbb3d580a9c14636484f3a84bb25b6a699b59d0d017",
+    "foreign-listenersets-experimental-2026-11-19.json": "def187b2971081a285eb89c53f65b60abf4ff36d11bbe7d8bf33658986c2c7b2",
+    "foreign-listenersets-experimental-v1.3-attempt-2026-11-19.json": "80515018d41d005a96a136d6eda0f7161287cc138c4feab7d19273f7efc84dc2"
+  },
+  "listenersets": {
+    "stable": {
+      "api": "gateway.networking.k8s.io/v1",
+      "crd_bundle": "v1.6.3",
+      "exit_code": 0,
+      "passed": true,
+      "checks": 31
+    },
+    "experimental": {
+      "api": "gateway.networking.x-k8s.io/v1alpha1",
+      "crd_bundle": "v1.4.0",
+      "exit_code": 0,
+      "passed": true,
+      "checks": 34
+    },
+    "initial_experimental_fixture_failure": "The v1.3.0 XListenerSet schema rejects spec port0 at API admission. The unchanged fixture requires v1.4.0 for zero/omitted-port UnsupportedPort checks; no schema was edited. Retained failed result separately.",
+    "workload_bounds": "two Gateways, at most six routes, five ListenerSets; not benchmark-scale proof"
+  }
+}

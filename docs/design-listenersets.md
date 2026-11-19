@@ -187,6 +187,14 @@ both are installed, set
 `gateway.listenerSetAPIGroup=gateway.networking.x-k8s.io`, or pass
 `--listenerset-api-group gateway.networking.x-k8s.io` to `gr8s net-agent`.
 
+For the native acceptance fixture, use the v1.6.3 standard bundle for stable
+ListenerSets and the upstream [v1.4.0 XListenerSet CRD](https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.4.0/config/crd/experimental/gateway.networking.x-k8s.io_xlistenersets.yaml)
+for the experimental group. The latter permits omitted/zero spec ports, allowing
+the fixture to verify the controller's `UnsupportedPort` status. The older
+v1.3.0 CRD requires a positive spec port and rejects that input at API admission.
+Install the legacy experimental CRD after running official HTTP conformance:
+that suite requires uniform CRD bundle versions, even for optional APIs.
+
 The parent Gateway uses GatewayClass `gr8s` and must explicitly allow child
 namespaces through `spec.allowedListeners.namespaces`. For example,
 `from: Same` permits ListenerSets in the Gateway's namespace. Each set names
@@ -205,7 +213,19 @@ not fall through to another listener's routes when that table has no match.
 
 ## Current small-scale evidence
 
-The native candidate with SHA-256
+On 2026-11-19, the current source snapshot `8dc9b3e1` (native executable
+SHA-256 `3fe42ec85a64df357c8f2e0dd80b14f88ce51345d7b6cf35c5c04fa12ef78468`)
+passed the unchanged native fixture again: [31 stable checks](evidence/foreign-listenersets-stable-2026-11-19.json)
+and [34 experimental checks](evidence/foreign-listenersets-experimental-2026-11-19.json),
+both exit status 0. The experimental run used the unmodified upstream v1.4.0
+CRD and includes zero/omitted-port rejection with schema-valid status, while a
+fixed-port sibling continues serving. The [provenance record](evidence/foreign-gateway-validation-2026-11-19.json)
+includes exact CRD hashes and the initial v1.3.0 schema mismatch. The focused
+Lisp suites passed 841 checks with zero failures/skips, and the official HTTP
+core profile separately passed 36/36. None of these runs establish target-scale
+performance; stage 6 remains tracked in the three open follow-ups above.
+
+The earlier native candidate with SHA-256
 `717c64679e1cd83faf5b77979cf72833888799bdcef0bcb255dc847c70637342`
 passed the disposable-VM fixture in `scripts/test-foreign-listenersets.py`:
 31 checks against the stable API and 34 against the experimental API. These
