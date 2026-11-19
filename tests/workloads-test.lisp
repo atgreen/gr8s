@@ -602,3 +602,54 @@
         (flet ((message (type) (gethash "message" (find type conditions :test #'equal :key (lambda (c) (gethash "type" c))))))
           (is (equal "Deployment has minimum availability." (message "Available")))
           (is (equal (format nil "ReplicaSet \"~A\" has successfully progressed." set-name) (message "Progressing"))))))))
+
+(test replica-set-distinguishes-operational-failures-from-programming-errors
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let* ((runtime (make-fake-runtime))
+           (reconciler (make-reconciler store runtime))
+           (owner (gr8s.resources::create-core-resource
+                   store "replicasets" (workload-fixture "ReplicaSet" "failures" 1) "alpha"))
+           (create (symbol-function 'gr8s.controllers::create-replica-set-pod)))
+      (unwind-protect
+           (progn
+             (dolist (failure (list (make-condition 'kubernetes-error :status-code 403
+                                                  :reason "Forbidden" :message "quota denied")
+                                    (make-condition 'gr8s.runtime:runtime-error :message "runtime unavailable")))
+               (setf (symbol-function 'gr8s.controllers::create-replica-set-pod)
+                     (lambda (&rest arguments) (declare (ignore arguments)) (error failure)))
+               (gr8s.controllers::reconcile-replica-set reconciler owner)
+               (let ((condition (aref (gethash "conditions" (workload-status store "replicasets" "failures")) 0)))
+                 (is (equal "ReplicaFailure" (gethash "type" condition)))
+                 (is (equal (princ-to-string failure) (gethash "message" condition))))
+               (setf owner (gr8s.resources::get-core-resource store "replicasets" "alpha" "failures")))
+             (let ((failure (make-condition 'simple-error :format-control "controller bug")))
+               (setf (symbol-function 'gr8s.controllers::create-replica-set-pod)
+                     (lambda (&rest arguments) (declare (ignore arguments)) (error failure)))
+               (is (eq failure
+                       (handler-case (gr8s.controllers::reconcile-replica-set reconciler owner)
+                         (simple-error (condition) condition))))))
+        (setf (symbol-function 'gr8s.controllers::create-replica-set-pod) create)))))
+
+(test workload-pass-isolates-programming-errors-to-the-failing-owner
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let* ((runtime (make-fake-runtime))
+           (reconciler (make-reconciler store runtime))
+           (create (symbol-function 'gr8s.controllers::create-replica-set-pod)))
+      (dolist (name '("broken" "healthy"))
+        (gr8s.resources::create-core-resource store "replicasets"
+                                             (workload-fixture "ReplicaSet" name 1) "alpha"))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s.controllers::create-replica-set-pod)
+                   (lambda (store owner)
+                     (if (equal "broken" (gethash "name" (gethash "metadata" owner)))
+                         (error "controller bug")
+                         (funcall create store owner))))
+             (let ((diagnostics (with-output-to-string (*error-output*)
+                                  (gr8s.controllers::reconcile-workloads reconciler))))
+               (is (search "controller bug" diagnostics)))
+             (is (= 1 (gethash "replicas" (workload-status store "replicasets" "healthy"))))
+             (is (null (gethash "conditions" (workload-status store "replicasets" "broken")))))
+        (setf (symbol-function 'gr8s.controllers::create-replica-set-pod) create)))))

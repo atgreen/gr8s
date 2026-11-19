@@ -40,6 +40,10 @@ the Kubernetes API version with a gr8s release suffix (see
 - A Pod spec field set to `null` is read as omitted, as Kubernetes reads it.
   A Deployment whose chart rendered `volumes: null` was accepted and then
   never got a Pod: `spec.volumes must be an array` (podster-crv).
+- Workload reconciliation preserves typed Kubernetes and runtime failures until
+  rendering status. Unexpected programming errors are logged at the controller
+  boundary without being reported as ordinary replica failures, and other
+  workloads continue reconciling (podster-kag).
 
 - Keep HA node streams on the active publishing leader and reconnect them after
   demotion, preventing follower-owned agents from missing later Gateway routes.

@@ -5,6 +5,37 @@
 
 (defpackage #:gr8s.apiserver
   (:use #:cl)
+  (:import-from #:gr8s.foundation
+   #:+dns-pod-server-address+
+   #:json-object
+   #:node-steering-capacity-score
+   #:rank-network-steering-candidates
+   #:steering-bounded-integer)
+  (:import-from #:gr8s.model
+   #:kubernetes-error-status-code
+   #:make-node-record
+   #:node-record-all-pod-cidrs
+   #:node-record-capacity
+   #:node-record-id
+   #:node-record-labels
+   #:node-record-name
+   #:node-record-pod-cidr
+   #:node-record-ready-p
+   #:node-record-ready-since
+   #:node-record-underlay-address
+   #:node-record-wireguard-endpoints
+   #:node-record-wireguard-public-key
+   #:node-record-wireguard-reflexive-observed-at
+   #:pod-name
+   #:pod-namespace
+   #:pod-node-name
+   #:pod-resource-version
+   #:pod-to-object
+   #:pod-uid)
+  (:import-from #:gr8s.protocol
+   #:+node-protocol-version+
+   #:ensure-node-protocol-version
+   #:make-server-envelope)
   (:shadow
    #:node-grpc-server
    #:node-grpc-server-port

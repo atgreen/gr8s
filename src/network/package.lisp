@@ -5,6 +5,13 @@
 
 (defpackage #:gr8s.network
   (:use #:cl)
+  (:import-from #:cl-rtnetlink
+   #:call-rtnetlink
+   #:netlink-attribute
+   #:netlink-octets
+   #:netlink-read-integer)
+  (:import-from #:gr8s.model
+   #:pod)
   (:export #:validate-network-policy-spec))
 ;;; The rtnetlink dataplane primitives -- the Linux UAPI wire codec, the private
 ;;; per-thread socket transaction, and the link/address/route/neighbor

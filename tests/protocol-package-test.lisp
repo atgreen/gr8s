@@ -67,3 +67,17 @@
           (find-symbol name server)
         (is (eq :external status))
         (is (eq server (symbol-package implementation)))))))
+
+(test module-imports-preserve-domain-and-condition-symbol-identity
+  (dolist (entry '(("GR8S.AGENT" "GR8S.FOUNDATION" "JSON-OBJECT")
+                   ("GR8S.APISERVER" "GR8S.PROTOCOL" "MAKE-SERVER-ENVELOPE")
+                   ("GR8S.CONTROLLERS" "GR8S.MODEL" "KUBERNETES-ERROR")
+                   ("GR8S.KUBELET" "GR8S.MODEL" "POD")
+                   ("GR8S.KUBELET" "GR8S.RUNTIME" "RUNTIME-ERROR")
+                   ("GR8S.NETWORK" "CL-RTNETLINK" "CALL-RTNETLINK")
+                   ("GR8S.RUNTIME" "GR8S.FOUNDATION" "+GR8S-VERSION+")))
+    (destructuring-bind (consumer provider name) entry
+      (let ((symbol (find-symbol name provider)))
+        (is-true symbol)
+        (is (eq symbol (find-symbol name consumer)))
+        (is (eq (find-package provider) (symbol-package symbol)))))))

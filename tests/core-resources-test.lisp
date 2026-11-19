@@ -316,3 +316,19 @@
   (let ((object (gr8s.resources::core-object "a" 1 "b" 2 "a" 3)))
     (is (= 2 (hash-table-count object)))
     (is (= 3 (gethash "a" object)))))
+
+(test json-constructors-preserve-values-and-return-independent-objects
+  (dolist (constructor (list #'gr8s.foundation:json-object
+                             #'gr8s.resources::core-object
+                             #'gr8s.store::store-json-object))
+    (let* ((array (vector 1 2))
+           (object (funcall constructor "duplicate" 1 "duplicate" 2
+                            "false" nil "null" 'null "array" array))
+           (other (funcall constructor)))
+      (is (= 2 (gethash (copy-seq "duplicate") object)))
+      (is (null (gethash "false" object)))
+      (is-true (nth-value 1 (gethash "false" object)))
+      (is (eq 'null (gethash "null" object)))
+      (is (eq array (gethash "array" object)))
+      (setf (gethash "only-here" other) t)
+      (is-false (nth-value 1 (gethash "only-here" object))))))

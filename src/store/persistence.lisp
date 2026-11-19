@@ -13,11 +13,8 @@
 (defvar *apply-update-manager* nil)
 
 (defun store-json-object (&rest pairs)
-  "Return an EQUAL hash table populated by alternating key and value PAIRS."
-  (let ((object (make-hash-table :test #'equal)))
-    (loop for (key value) on pairs by #'cddr
-          do (setf (gethash key object) value))
-    object))
+  "Construct a JSON object using the shared foundation representation."
+  (apply #'gr8s.foundation:json-object pairs))
 
 (defun pending-pod-status ()
   "Return the initial status published for a Pod without an observation."

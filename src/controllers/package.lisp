@@ -5,6 +5,42 @@
 
 (defpackage #:gr8s.controllers
   (:use #:cl)
+  (:import-from #:gr8s.model
+   #:copy-node-record
+   #:dns-label-p
+   #:kubernetes-error
+   #:kubernetes-error-status-code
+   #:make-node-record
+   #:node-record-all-pod-cidrs
+   #:node-record-allocatable
+   #:node-record-capacity
+   #:node-record-certificate-issuer-fingerprint
+   #:node-record-creation-timestamp
+   #:node-record-disk-pressure
+   #:node-record-extended-resources
+   #:node-record-id
+   #:node-record-kubelet-port
+   #:node-record-last-heartbeat
+   #:node-record-lease-deadline
+   #:node-record-memory-pressure
+   #:node-record-name
+   #:node-record-pid-pressure
+   #:node-record-pod-cidr
+   #:node-record-ready-p
+   #:node-record-ready-since
+   #:node-record-runtime-down-message
+   #:node-record-underlay-address
+   #:node-record-wireguard-endpoints
+   #:node-record-wireguard-public-key
+   #:node-record-wireguard-reflexive-observed-at
+   #:pod
+   #:pod-name
+   #:pod-namespace
+   #:pod-node-name
+   #:pod-resource-version
+   #:pod-status-revision
+   #:pod-to-object
+   #:pod-uid)
   (:shadow
    #:+pod-certificate-request-beta-version+
    #:control-plane-runtime

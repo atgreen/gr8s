@@ -69,10 +69,8 @@
 ;; Core and bootstrap resources share a durable transaction and revision sequence.
 ;; Objects are copied at the boundary so clients cannot mutate indexed state.
 (defun core-object (&rest pairs)
-  "Return an EQUAL hash table holding the flat KEY VALUE PAIRS -- gr8s's JSON-object constructor."
-  (let ((object (make-hash-table :test #'equal)))
-    (loop for (key value) on pairs by #'cddr do (setf (gethash key object) value))
-    object))
+  "Construct a JSON object using the shared foundation representation."
+  (apply #'gr8s.foundation:json-object pairs))
 
 (defun copy-core-object (object)
   "Return a deep copy of a parsed-JSON value: hash tables, strings, and vectors are

@@ -8,4 +8,10 @@
 ;;;; nothing but CL and is loaded before every other gr8s module.
 
 (defpackage #:gr8s.foundation
-  (:use #:cl))
+  (:use #:cl)
+  (:export #:json-object
+           #:+gr8s-version+
+           #:+dns-pod-server-address+
+           #:node-steering-capacity-score
+           #:rank-network-steering-candidates
+           #:steering-bounded-integer))
