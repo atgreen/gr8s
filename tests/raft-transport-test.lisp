@@ -288,3 +288,30 @@
         (gr8s.raft.transport::stop-raft-member member))
       (is-false warned "a cooperative shutdown stays silent")
       (is-false (bt:thread-alive-p worker)))))
+
+(test the-raft-clock-says-when-it-ran-late-and-where-the-time-went
+  ;; A clock thread that stops for longer than the election timeout costs the
+  ;; leader its place, and nothing used to say so.
+  (is (null (gr8s.raft.transport::raft-clock-lateness-report 1/20 0.05 0.0 0.01 0.0))
+      "an ordinary pass is not reported")
+  (is (null (gr8s.raft.transport::raft-clock-lateness-report 1/20 0.05 0.2 0.2 0.0)))
+  (let ((report (gr8s.raft.transport::raft-clock-lateness-report 1/20 0.05 0.3 5.7 0.4)))
+    (is (search "6.0s late" report))
+    (is (search "the tick 5.7s" report) "the slow part is named")
+    (is (search "the member lock 0.3s" report))
+    (is (search "0.4s of that pass in GC" report)))
+  (is (search "sleep took 3.0s"
+              (gr8s.raft.transport::raft-clock-lateness-report 1/20 3.0 0.0 0.0 2.9))
+      "a stop-the-world stall shows up as a sleep that overran"))
+
+(test a-change-of-raft-standing-is-reported-once
+  (is (null (gr8s.raft.transport::raft-standing-report "cp1" '(:leader 3 "cp1") '(:leader 3 "cp1"))))
+  (is (equal "gr8s raft: cp1 is now follower in term 4, leader cp2 (was leader in term 3, leader cp1)"
+             (gr8s.raft.transport::raft-standing-report "cp1" '(:leader 3 "cp1") '(:follower 4 "cp2"))))
+  (is (equal "gr8s raft: cp1 is now candidate in term 5, leader unknown (was follower in term 4, leader cp2)"
+             (gr8s.raft.transport::raft-standing-report "cp1" '(:follower 4 "cp2") '(:candidate 5 nil))))
+  (is (equal "gr8s raft: cp1 is now follower in term 1, leader unknown"
+             (gr8s.raft.transport::raft-standing-report "cp1" nil '(:follower 1 nil)))
+      "the first report has nothing to compare with")
+  (let ((node (cl-raft::make-raft-node :id "cp1" :role :leader :leader-id "cp1")))
+    (is (equal '(:leader 0 "cp1") (gr8s.raft.transport::raft-standing node)))))

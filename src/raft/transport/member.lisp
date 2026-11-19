@@ -256,27 +256,80 @@ retry instead of dying; any other error still propagates.")
              (format stream "Raft apply callback failed (will retry): ~A"
                      (raft-apply-error-underlying condition)))))
 
+(defparameter *raft-clock-late-report-seconds* 1/2
+  "Report a pass of the clock thread that took this much longer than its tick.
+Followers call an election after one to two seconds without a heartbeat.")
+
+(defun raft-clock-lateness-report (tick-seconds slept lock-wait tick-time gc-time)
+  "Describe a clock pass that ran late, or NIL when it was on time. SLEPT is how
+long the tick's sleep really took, LOCK-WAIT how long the member lock took to
+get, TICK-TIME the tick itself, which applies committed entries; GC-TIME is the
+collector's time over the whole pass. All in seconds."
+  (let ((late (- (+ slept lock-wait tick-time) tick-seconds)))
+    (when (>= late *raft-clock-late-report-seconds*)
+      (format nil "gr8s raft: clock thread ~,1Fs late: its ~Dms sleep took ~,1Fs, ~
+                   the member lock ~,1Fs to get, the tick ~,1Fs (~,1Fs of that pass in GC); ~
+                   no heartbeat was sent meanwhile"
+              late (round (* 1000 tick-seconds)) slept lock-wait tick-time gc-time))))
+
+(defun raft-standing (node)
+  "NODE's role, term and known leader: what an operator asks after a failover."
+  (list (gr8s.raft::raft-node-role node)
+        (gr8s.raft::raft-node-current-term node)
+        (gr8s.raft:raft-node-leader-id node)))
+
+(defun raft-standing-report (id before after)
+  "Describe a change of standing from BEFORE to AFTER, or NIL when nothing changed."
+  (unless (equal before after)
+    (destructuring-bind (role term leader) after
+      (format nil "gr8s raft: ~A is now ~(~A~) in term ~D, leader ~:[unknown~;~:*~A~]~
+                   ~@[ (was ~{~(~A~) in term ~D, leader ~:[unknown~;~:*~A~]~})~]"
+              id role term leader before))))
+
 (defun raft-member-tick-loop (member tick-seconds)
   "MEMBER's clock thread: every TICK-SECONDS, drive RAFT-TICK under the member lock to
-   advance the election and heartbeat timers, until the member stops."
-  (loop while (raft-member-running member) do
-    (sleep tick-seconds)
-    (when (raft-member-running member)
-      (bt:with-lock-held ((raft-member-lock member))
-        ;; RAFT-TICK applies committed entries; a failing apply leaves
-        ;; LAST-APPLIED un-advanced for retry on the next tick and must never
-        ;; kill the clock thread (and with it the whole process). Only the
-        ;; typed apply failure is contained here; any other tick error still
-        ;; propagates.
-        (handler-case (raft-tick (raft-member-node member))
-          (raft-apply-error (condition)
-            (warn "~A" condition)))
-        (ignore-errors (raft-member-promote-learners member))
-        (raft-member-expire-snapshot-receiver member))
-      ;; Store startup checks may acquire outer application barriers. They must
-      ;; run after releasing the member mutex, and never kill the tick clock.
-      (let ((check (raft-member-startup-check-fn member)))
-        (when check (ignore-errors (funcall check member)))))))
+   advance the election and heartbeat timers, until the member stops. It reports
+   when it runs late and when the member's role, term or leader changes: a clock
+   that stops for longer than the election timeout costs the leader its place,
+   and neither that nor the election was visible in any log (podster-0tg)."
+  (let ((standing nil))
+    (flet ((seconds-since (start)
+             (/ (- (get-internal-real-time) start) internal-time-units-per-second)))
+      (loop while (raft-member-running member) do
+        (let ((pass-start (get-internal-real-time))
+              (gc-start sb-ext:*gc-run-time*)
+              (slept 0) (lock-wait 0) (tick-time 0) (now-standing standing))
+          (sleep tick-seconds)
+          (setf slept (seconds-since pass-start))
+          (when (raft-member-running member)
+            (let ((lock-start (get-internal-real-time)))
+              (bt:with-lock-held ((raft-member-lock member))
+                (setf lock-wait (seconds-since lock-start))
+                (let ((tick-start (get-internal-real-time)))
+                  ;; RAFT-TICK applies committed entries; a failing apply leaves
+                  ;; LAST-APPLIED un-advanced for retry on the next tick and must never
+                  ;; kill the clock thread (and with it the whole process). Only the
+                  ;; typed apply failure is contained here; any other tick error still
+                  ;; propagates.
+                  (handler-case (raft-tick (raft-member-node member))
+                    (raft-apply-error (condition)
+                      (warn "~A" condition)))
+                  (ignore-errors (raft-member-promote-learners member))
+                  (raft-member-expire-snapshot-receiver member)
+                  (setf tick-time (seconds-since tick-start)
+                        now-standing (raft-standing (raft-member-node member))))))
+            (let ((late (raft-clock-lateness-report
+                         tick-seconds slept lock-wait tick-time
+                         (/ (- sb-ext:*gc-run-time* gc-start) internal-time-units-per-second)))
+                  (changed (raft-standing-report
+                            (raft-node-id (raft-member-node member)) standing now-standing)))
+              (when late (format *error-output* "~&~A~%" late))
+              (when changed (format *error-output* "~&~A~%" changed))
+              (setf standing now-standing))
+            ;; Store startup checks may acquire outer application barriers. They must
+            ;; run after releasing the member mutex, and never kill the tick clock.
+            (let ((check (raft-member-startup-check-fn member)))
+              (when check (ignore-errors (funcall check member))))))))))
 
 (defun raft-member-configured-peer-p (member id)
   "Current configured remote member, including learners; not a retained old link."
