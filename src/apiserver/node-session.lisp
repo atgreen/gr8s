@@ -1712,7 +1712,9 @@ PATIENCE seconds the 503 is signalled as it stands."
                                                     :encoding :utf-8)
                                                    #())
                                                :renewed-node-certificate
-                                               renewed-node-certificate)
+                                               renewed-node-certificate
+                                               :session-endpoints
+                                               (node-session-endpoint-strings server))
                           :sequence 1))
                  ;; Every session starts from a complete snapshot.
                  (ag-grpc:stream-send

@@ -23,7 +23,10 @@ the Kubernetes API version with a gr8s release suffix (see
 - A member that refuses a node session because it is not the leader now names
   the members that can admit it, and the agent goes there. An agent started
   with one `--server`, or a member's own agent started before the others
-  joined, could not otherwise follow a leadership change (podster-1t0).
+  joined, could not otherwise follow a leadership change. Every session hello
+  also lists those members and the agent keeps the list on disk, so it finds
+  another member when the one it was configured with is gone and can say
+  nothing (podster-1t0).
 - `metrics.k8s.io` requests and the HPA pass no longer wait on silent nodes.
   Node metrics are collected on their own thread and a reader waits two
   seconds at most before it is served the previous collection; a request used

@@ -235,7 +235,31 @@ complete snapshot to the next one."
     (setf (gethash "nodeId" identity) node-id
           (gethash "assignedPodCIDR" identity) cidr
           (gethash "assignedPodCIDRs" identity) cidrs)
+    ;; And where else the control plane can be found: a member that has gone
+    ;; away cannot say so then (podster-1t0).
+    (let ((endpoints (slot-value hello 'gr8s.node.v1::session-endpoints)))
+      (when endpoints
+        (setf (gethash "sessionEndpoints" identity) (coerce endpoints 'vector))))
     (persist-agent-identity identity-path identity)))
+
+(defun learned-node-session-endpoints (identity-path)
+  "The control-plane members the last ServerHello named, as (HOST PORT) lists,
+   read back from the identity at IDENTITY-PATH; NIL when none are recorded."
+  (let ((identity (and (probe-file identity-path)
+                       (ignore-errors (com.inuoe.jzon:parse identity-path)))))
+    (when (hash-table-p identity)
+      (let ((endpoints (gethash "sessionEndpoints" identity)))
+        (when (and (vectorp endpoints) (not (stringp endpoints)))
+          (loop for endpoint across endpoints
+                for parsed = (and (stringp endpoint)
+                                  (ignore-errors (parse-node-session-endpoint endpoint)))
+                when parsed collect parsed))))))
+
+(defun node-session-targets-with-learned (targets learned)
+  "TARGETS followed by the LEARNED endpoints it does not already hold."
+  (append targets
+          (remove-if (lambda (endpoint) (member endpoint targets :test #'equal))
+                     (remove-duplicates learned :test #'equal :from-end t))))
 
 (defun install-agent-session-credentials (hello ca-certificate-path certificate-path)
   "Install HELLO's renewed leaf and authenticated trust bundle without stranding the node.
@@ -1030,7 +1054,9 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
          (attempt 0))
     (loop until (or (node-session-cancelled-p control)
                     (funcall stop-predicate))
-          do (destructuring-bind (try-host try-port)
+          do (setf targets (node-session-targets-with-learned
+                            targets (learned-node-session-endpoints identity-path)))
+             (destructuring-bind (try-host try-port)
                  (nth (mod attempt (length targets)) targets)
                (handler-case
                    ;; An interrupted session was abandoned, so it does not count.

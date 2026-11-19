@@ -344,6 +344,9 @@ message ServerHello {
   bytes cluster_ca_bundle = 5;
   // Present when the authenticated node leaf was not issued by the active CA.
   bytes renewed_node_certificate = 6;
+  // Every control-plane member that serves nodes, as HOST:PORT, leader first.
+  // The agent keeps it so it can find another member when this one is gone.
+  repeated string session_endpoints = 7;
 }
 
 message DesiredStateSnapshot {

@@ -201,3 +201,49 @@
              (is (null (gr8s.apiserver::node-heartbeats-recordable-since server 100 108))
                  "a member that stops admitting sessions starts over when it resumes"))
         (gr8s.apiserver::stop-node-grpc-server server)))))
+
+(test agent-remembers-the-other-members-and-finds-one-when-its-server-is-gone
+  ;; A member that has gone away cannot refuse a session and name the leader.
+  ;; The agent has to know the others already: each ServerHello lists them.
+  (is (equal '(("10.0.0.2" 7443) ("10.0.0.1" 7443))
+             (gr8s.agent::node-session-targets-with-learned
+              '(("10.0.0.2" 7443)) '(("10.0.0.1" 7443) ("10.0.0.2" 7443) ("10.0.0.1" 7443)))))
+  (with-temporary-store (store path)
+    (gr8s.controllers::register-node
+     store (gr8s.model::make-node-record :id "node-1" :name "worker-a" :pod-cidr "10.88.0.0/20"))
+    (let* ((identity-path (merge-pathnames "agent/identity.json" path))
+           (survivor (gr8s.apiserver::start-node-grpc-server
+                      store :host "127.0.0.1" :port 0 :heartbeat-timeout-seconds 2))
+           (survivor-port (gr8s.apiserver::node-grpc-server-port survivor))
+           (configured (gr8s.apiserver::start-node-grpc-server
+                        store :host "127.0.0.1" :port 0 :heartbeat-timeout-seconds 2
+                        :session-endpoints-fn
+                        (lambda () (list (list "127.0.0.1" survivor-port)))))
+           (configured-port (gr8s.apiserver::node-grpc-server-port configured))
+           (sessions 0)
+           (control (gr8s.agent::make-node-session-control))
+           (agent-thread nil))
+      (unwind-protect
+           (progn
+             (dolist (server (list configured survivor))
+               (gr8s.apiserver::publish-node-desired-state server "worker-a" (empty-desired-snapshot)))
+             (setf agent-thread
+                   (bt:make-thread
+                    (lambda ()
+                      (gr8s.agent::run-node-session
+                       "127.0.0.1" configured-port "worker-a" identity-path
+                       (lambda (snapshot) (declare (ignore snapshot)) (incf sessions))
+                       :reconnect-delay 0.05 :control control))
+                    :name "gr8s learned-endpoint test agent"))
+             (is-true (wait-until (lambda () (= 1 sessions)) :timeout 10))
+             (is (equal (list (list "127.0.0.1" survivor-port))
+                        (gr8s.agent::learned-node-session-endpoints identity-path))
+                 "the hello's member list is on disk")
+             (gr8s.apiserver::stop-node-grpc-server configured)
+             (setf configured nil)
+             (is-true (wait-until (lambda () (>= sessions 2)) :timeout 20)
+                      "with its only configured server gone, the agent reaches the other member"))
+        (gr8s.agent::cancel-node-session control)
+        (when agent-thread (ignore-errors (bt:join-thread agent-thread)))
+        (when configured (gr8s.apiserver::stop-node-grpc-server configured))
+        (gr8s.apiserver::stop-node-grpc-server survivor)))))
