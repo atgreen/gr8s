@@ -26,7 +26,8 @@ gr8s backup save --state-directory /var/lib/gr8s/server \
 systemctl start gr8s-server
 
 # Authenticate a bundle end to end without restoring it. Prints the release
-# that wrote it, its creation time, and verified totals.
+# that wrote it, its creation time (createdAt, a Common Lisp universal time:
+# seconds since 1900, not the Unix epoch), and verified totals.
 gr8s backup verify --input /backups/cluster-20261116.gr8s-backup \
   --key-file /root/gr8s-backup.key
 
@@ -48,11 +49,15 @@ Everything under the state directory except reconstructible runtime trees
 bundle and checked again on verify and restore.
 
 The format (`GR8SBK01`) encrypts every record with AES-256-GCM under a key
-derived from your key file and a per-bundle salt. Frame counters are
-authenticated, so a bundle cannot be reordered, truncated, or spliced
-without detection; each member file additionally carries its SHA-256.
-Capture refuses symlinks, hard links, and files that changed while being
-read, and publishes the output atomically without overwriting.
+derived from your key file and a per-bundle salt. Its manifest records the
+format name `gr8s-state-bundle`, version `1`, and the exclusion policy
+`gr8s-control-plane-v1`, alongside the writing release and `createdAt`.
+Frame counters are authenticated, so a bundle cannot be reordered,
+truncated, or spliced without detection; each member file additionally
+carries its SHA-256. Capture refuses symlinks, hard links, source files not
+owned by the caller or writable by group or other, files that changed while
+being read, and an `--output` path inside the captured state directory, and
+publishes the output atomically without overwriting.
 
 ## Restore semantics
 

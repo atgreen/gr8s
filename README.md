@@ -164,8 +164,9 @@ to that work:
 Those language capabilities support an integrated Kubernetes system:
 
 - **Explore the cluster in a browser.** The integrated Headlamp dashboard
-  provides a Kubernetes web UI with live resource updates. Source builds need
-  the [dashboard assets step](docs/building-and-testing.md#optional-dashboard-assets).
+  provides a Kubernetes web UI with live resource updates. `make native` embeds
+  the assets automatically; see
+  [dashboard assets](docs/building-and-testing.md#dashboard-assets).
 - **Trace workloads in the kernel.** `gr8s debug trace` sends programs written in a
   bpftrace-compatible language to nodes hosting Pods selected through the
   Kubernetes API. [Whistler](https://github.com/atgreen/Whistler) JIT-compiles them
@@ -227,7 +228,7 @@ Download the binary from the
 check it, and start a single-node cluster:
 
 ```sh
-VERSION=v1.37.2-gr8s.0 ARCH=amd64
+VERSION=v1.37.2-gr8s.1 ARCH=amd64
 curl -fLO https://github.com/atgreen/gr8s/releases/download/$VERSION/gr8s-linux-$ARCH
 curl -fLO https://github.com/atgreen/gr8s/releases/download/$VERSION/gr8s-linux-$ARCH.sha256
 sha256sum -c gr8s-linux-$ARCH.sha256
@@ -240,7 +241,9 @@ sudo gr8s serve \
 ```
 
 That is the whole installation. To build the binary yourself instead, install
-**SBCL** and run `make native` from the repository root; see the
+the build toolchain (**SBCL** and **ocicl**, plus Go for the runtime payload and
+podman or docker and cpio for the embedded dashboard) and run `make native` from
+the repository root; see the
 [build requirements](docs/building-and-testing.md#requirements) and the
 [runtime payload details](docs/runtime.md#the-self-contained-payload). Commands
 below that use `gr8s` work the same with `build/gr8s`.
@@ -304,9 +307,10 @@ sudo gr8s dashboard --kubeconfig /tmp/gr8s.kubeconfig
 
 It serves on loopback `http://127.0.0.1:8080` by default (change with `--port`)
 and launches your browser; `--no-launch` prints the URL instead. The process
-runs in the foreground until Ctrl-C. Source builds need the optional
-[dashboard assets step](docs/building-and-testing.md#optional-dashboard-assets)
-before dumping the native executable.
+runs in the foreground until Ctrl-C. The assets are a hard prerequisite of
+`make native`, extracted automatically from the pinned Headlamp image before
+the executable is dumped; see
+[dashboard assets](docs/building-and-testing.md#dashboard-assets).
 
 ## Kubernetes capabilities
 
@@ -407,8 +411,8 @@ then select the runtime with `RuntimeClass`. See
 
 ## For Common Lisp developers
 
-gr8s is a large, working Common Lisp system — about 120,000 lines under
-[src/](src/) spanning an API server, controllers, a scheduler, a node agent,
+gr8s is a large, working Common Lisp system — roughly 100,000 lines of
+handwritten Lisp under [src/](src/), plus generated protocol bindings, spanning an API server, controllers, a scheduler, a node agent,
 a durable store with Raft replication, an eBPF compiler, and a TLS stack — built to be explored from a
 REPL while it runs.
 

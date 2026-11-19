@@ -64,17 +64,27 @@ BPF and native runtime tests run as root in disposable VMs. See "Testing eBPF an
 
 ## Build & Test
 
-_Add your build and test commands here_
-
 ```bash
-# Example:
-# npm install
-# npm test
+make deps     # restore pinned Lisp dependencies (ocicl.csv) into ocicl/
+make native   # build/gr8s; needs SBCL, ocicl, Go, podman or docker plus cpio
+              # (dashboard assets), and builds the containerd bundle on demand
+make test     # FiveAM unit and HTTP suite
+make check    # shell syntax checks plus the protocol/eBPF/install test targets
 ```
+
+Rerun one test: load `gr8s/tests`, then `(fiveam:run! 'gr8s/tests::test-name)`.
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+One native SBCL executable (a dumped image) runs a combined server/node, a
+worker agent, a control-plane-only server, or a Raft witness. Key modules
+(load order in `gr8s.asd`): `src/resources` — typed resource models and store
+objects; `src/store` + `src/ha` + `src/raft` — durable control-plane state with
+Raft replication (thin extensions over the cl-raft library from ocicl);
+`src/apiserver` — the Kubernetes API over hunchentoot; `src/controllers` —
+workload controllers and the scheduler; `src/kubelet` + `src/agent` — node
+runtime over managed containerd; `src/network` — eBPF/VXLAN/WireGuard dataplane
+compiled by Whistler; `src/server` — CLI entry, `main.lisp`. See `docs/design.md`.
 
 ## Conventions & Patterns
 

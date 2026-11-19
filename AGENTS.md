@@ -144,7 +144,10 @@ Stop it with SIGTERM so it joins its runtime work. To debug, add
 copying `scripts/gr8s-debug.py` in first.
 
 The native build needs the containerd bundle at `build/containerd`. In a new
-worktree, symlink it from a worktree that already has it.
+worktree, symlink it from a worktree that already has it. It also needs
+`assets/dashboard/` to exist (`make dashboard-assets`): a direct
+`sbcl --load scripts/build-native.lisp` in a fresh worktree silently dumps a
+binary with no dashboard.
 
 ### Running tests
 
@@ -163,7 +166,9 @@ run refuses the debug server and `--hold-on-failure`, so its binary is unmodifie
 These are in `~/.cache/gr8s-vm/tools/`. Use them whenever several agents are working:
 
 - `gr8s-slot COMMAND...` limits builds and host test suites to two at once. It runs
-  `make test` one at a time, because the suite binds fixed port 18089.
+  `make test` one at a time: the test servers now take kernel-assigned ports, but
+  concurrent runs of one checkout still race on the shared ASDF FASL cache and on
+  the regenerated `src/generated/` protocol sources.
 - `gr8s-upstream BINARY RUNNER FOCUS EXPECTED RESULT_DIR [ARGS...]` waits for a free
   VM in first-come order, copies the evidence to `RESULT_DIR`, and removes the run.
   It skips any VM under 1500 MB free on `/var`.

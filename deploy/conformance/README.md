@@ -13,20 +13,30 @@ throwaway k3s on a KVM host, is the right place.
 
 ## Prepare the cluster
 
-A k3s install with the pieces gr8s owns turned off:
+A k3s install with the pieces gr8s owns turned off. Two prerequisites: the
+chart ships no CRDs, so install the Gateway API CRD bundle before enabling the
+gateway; and with `serviceLb` on (the default) and nothing else serving the
+`kubernetes` ClusterIP, `apiServer.host` is required — the agent cannot reach
+the API through the Service it is itself bringing up (see
+`../chart/gr8s-net/values.yaml`). Run the helm install from the repository
+root:
 
 ```
 curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server \
   --flannel-backend=none --disable-network-policy \
   --disable-kube-proxy --disable=traefik --disable=servicelb" sh -
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.3/standard-install.yaml
 helm install gr8s-net deploy/chart/gr8s-net -n kube-system \
-  --set gateway.enabled=true   # cni and serviceLb features default on
+  --set gateway.enabled=true \
+  --set apiServer.host=<control-plane-node-IP>  # cni and serviceLb default on
 ```
 
 Join more nodes with `k3s agent` on a shared underlay and the same chart; the
 agent reconciles the VXLAN fabric from the Node objects.
 
 ## Run
+
+From this directory (`deploy/conformance/`):
 
 ```
 KUBECONFIG=/etc/rancher/k3s/k3s.yaml sh run-conformance.sh network   # sig-network Conformance
@@ -64,8 +74,8 @@ CGO_ENABLED=0 go test -c . -o gateway-conformance.test
 
 Copy the binary and `run-conformance.sh` to a node with access to the advertised
 Gateway Service IPs. Gateway-only testing can use the cluster's existing CNI
-and kube-proxy: run the gr8s agent with `--cni false --service-lb false --gateway
-true`. This does not test gr8s CNI or Service BPF forwarding.
+and kube-proxy: run `gr8s net-agent` with `--cni false --service-lb false
+--gateway true`. This does not test gr8s CNI or Service BPF forwarding.
 
 ```
 KUBECONFIG=/etc/rancher/k3s/k3s.yaml \

@@ -1,9 +1,16 @@
 # ListenerSet support for foreign-cluster Gateways
 
-Status: implementation in progress. This records the explicitly
-permitted decomposition of podster-dk9. HTTP core conformance does not cover it.
-Full-scale and doubling runs are deferred at the user's request; current VM
+Status: stages 1–5 below are landed — discovery/adapters and watches,
+admission/merge and reverse indices
+([`gateway-listenersets.lisp`](../src/controllers/gateway-listenersets.lisp)),
+shared-port SNI TLS dispatch, route attachment, and status including
+`attachedListenerSets`, with the discovery order and `--listenerset-api-group`
+selection described under "Enabling ListenerSets". Only stage 6, full-scale
+validation, remains: full-scale and doubling runs are deferred at the user's
+request, and current VM
 validation is limited to two Gateways, at most six routes, and a few ListenerSets.
+This records the explicitly permitted decomposition of podster-dk9. HTTP core
+conformance does not cover it.
 
 ## Required workload and API compatibility
 
@@ -46,8 +53,9 @@ owner kind/group/namespace/UID/generation, parent Gateway UID, hostname, TLS
 reference and allowedRoutes. Do not flatten away the owner namespace: same-
 namespace Secret and Route defaults are relative to the ListenerSet. A Secret
 ReferenceGrant must name ListenerSet as the source kind and its actual API group;
-a grant to Gateway does not authorize the child. Extend the existing grant helper
-(which currently fixes the source group) to accept the full source identity.
+a grant to Gateway does not authorize the child. The grant helper
+`gateway-reference-permitted-p` accepts the full source identity, including an
+optional source group.
 
 Attach a set only if its parent reference resolves to a controlled Gateway and
 Gateway.allowedListeners admits the set's namespace. Missing allowedListeners
@@ -65,15 +73,20 @@ legacy experimental conditions and precedence against that adapter's schema.
 
 ## Shared-port HTTPS dispatch
 
-The current planner keeps the first TLS reference on a port, and
-`gateway-ssl-acceptor` stores a single certificate and key. Replace that model
-with one immutable per-socket snapshot containing an SNI certificate index and
-HTTP hostname routing index. Exact hostname wins over wildcard; use the API's
-conflict precedence for equal matches. An unmatched SNI must not select another
-tenant's arbitrary certificate. Define and test the no-SNI behavior explicitly.
+The planner once kept the first TLS reference on a port, with a
+`gateway-ssl-acceptor` storing a single certificate and key; that model is gone.
+The controller builds one immutable per-socket snapshot containing an SNI
+certificate index and HTTP hostname routing index (`gateway-build-tls-snapshot`
+in [`gateway-controller.lisp`](../src/controllers/gateway-controller.lisp)).
+Exact hostname wins over wildcard; equal matches use the API's
+conflict precedence. An unmatched SNI must not select another
+tenant's arbitrary certificate, and the no-SNI behavior is defined and tested
+explicitly.
 
-Use pure-tls's server `certificate-provider` capability to select parsed certificate/key
-material. Parse and validate once per Secret content version, with authorization
+Each handshake selects parsed certificate/key material from that snapshot
+through pure-tls's server `certificate-provider` capability
+([`gateway-proxy.lisp`](../src/controllers/gateway-proxy.lisp)). Parse and
+validate once per Secret content version, with authorization
 checked outside the material cache. Publish new indices atomically; each handshake
 and request captures a consistent snapshot. Existing connections may finish on
 their captured state, but new connections after acknowledgement must use the new

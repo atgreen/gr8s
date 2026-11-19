@@ -24,6 +24,12 @@ The [API reference](kubernetes-surface.md) describes current implementation
 scope; the [gap inventory](k3s-gap-inventory.md) covers operational limits beyond
 this test selection.
 
+Separately, the gr8s-as-CNI Gateway dataplane passed the official Gateway API
+v1.6.3 standard-channel `GATEWAY-HTTP` profile on **2026-11-16**: 36/36 core
+tests, no failures, no skips. The
+[Gateway conformance harness](../deploy/conformance/README.md) records that run
+and how to reproduce it.
+
 ## Historical v1.36 progression
 
 The following ledger is an archived account of early development against the
@@ -98,11 +104,27 @@ failure buckets at that stage, largest first.
   ```
 - **Cluster**: a native gr8s executable in a disposable root Linux guest (see
   AGENTS.md). Not a containerized control plane.
-- **Evidence**: each run preserves the official Sonobuoy archive, native and
-  worker logs, and the executed-spec inventory under
-  `build/conformance/<date>-<id>/`, and a summary JSON is committed to `docs/`.
+- **Evidence**: each run preserves the official Sonobuoy archive, the native
+  server log, and the executed-spec inventory. The single-node runner keeps
+  them under a `/var/tmp/gr8s-conformance.*` directory (`--state-parent`
+  changes the parent); `scripts/e2e-two-node.sh` keeps its run state under
+  `~/.cache/gr8s-vm/run`. A summary JSON is committed to `docs/evidence/`,
+  named like `conformance-full-v1.37-2026-11-11.json`.
 
 ### Running a round
+
+The current recorded result was produced by the two-node libvirt runner:
+
+```sh
+# Provision/reuse two VMs, bring up the cluster, and submit the certified
+# suite (the default GR8S_E2E_MODE); see the script header for all subcommands.
+scripts/e2e-two-node.sh run
+scripts/e2e-two-node.sh watch      # live progress until the run finishes
+scripts/e2e-two-node.sh results    # retrieve and summarize the finished run
+scripts/e2e-two-node.sh report     # print the run's conformance evidence JSON
+```
+
+The single-node runner drives the same suite against one `serve` process:
 
 ```sh
 # Full certified suite (hours); requires root in a disposable guest,
@@ -125,7 +147,8 @@ See that script's header for details.
 
 ### Adding a round to this ledger
 
-1. Commit the run's summary JSON to `docs/conformance-full-<ordinal>-<date>.json`.
+1. Commit the run's summary JSON to `docs/evidence/`, following the existing
+   `conformance-full-*.json` naming.
 2. Update **Current recorded result** with the suite version, executed/pass/fail
    counts, build identity, topology, runner, and evidence link. Keep earlier
    results clearly labelled as historical; never mix denominators across versions.

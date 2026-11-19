@@ -12,8 +12,10 @@ A witness starts with the witness role and completes its join handshake before
 starting the election clock. It reuses its saved member certificate on restart.
 a new enrollment token is unnecessary when those credentials remain usable.
 Restart with the same member ID, state directory and advertised listening
-address. The member owns the recovered WAL stream and closes it after its server
-and worker threads stop.
+address. A witness listens on 127.0.0.1 and a kernel-assigned port by default,
+so a witness restarted without an explicit `--port` can move; pass `--listen`
+and `--port` when peers must find it at the same address. The member owns the
+recovered WAL stream and closes it after its server and worker threads stop.
 
 The transport API exposes this lifecycle as
 `start-raft-member :storage-path PATH :initial-role :witness`. Recovery runs under
@@ -31,7 +33,9 @@ place. An uncertain checkpoint failure retains ownership until explicit close.
 Validation and restore failures release the newly acquired lease. This protects
 the WAL lifecycle; callers must still coordinate the rest of the state directory.
 
-New writes and checkpoints use `@GR8SWAL1` frames: a fixed 157-byte ASCII header
+The Raft engine and its WAL belong to the external cl-raft library (same
+author), vendored under `ocicl/`. New writes and checkpoints use its
+`@CLRAFTW1 ` frames (the magic ends in a space): a fixed 157-byte ASCII header
 contains a 16-digit hexadecimal UTF-8 payload length, a SHA-256 payload checksum
 and a SHA-256 checksum of the header fields. The payload is one readable Lisp
 record followed by a newline. Printing uses a bounded counting/digest sink before
@@ -105,7 +109,10 @@ that reference in the journal, and publishes the initial WAL through atomic
 checkpoint replacement. It then marks publication durable. A restart can resume
 at each boundary without recapturing an already retained baseline from later files.
 Published WALs that disappear, become empty or gain later hard/log state are never
-reinitialized. Bootstrap identity and API URL changes are refused.
+reinitialized. Bootstrap identity changes (member ID and role) are refused. The
+journal's API URL is reachability rather than identity: it must be present and
+well-formed, but a changed URL is accepted — a member can roam to a new address,
+and the HA endpoint record and leader re-advertisement handle the migration.
 
 The founder baseline is index1/term0 with one voter. A learner starts at
 index0/term0 and cannot campaign. Its local zero-index artifact supports restart;
@@ -135,11 +142,11 @@ can supply the corresponding `:validate-fn` callback. `open-file-raft-storage`
 also accepts `:prepare-fn` for journal publication under its lease before data-file
 creation; errors release that newly acquired lease.
 
-Production `start-ha-control-plane` does not invoke this recovery helper yet.
-Production callers must acquire state-directory ownership before opening the
-application, use the durable bootstrap/recovery path, and admit new voters as
-learners until they catch up. Capture registration, native multi-voter acceptance
-and automatic compaction remain unfinished.
+Production `start-ha-control-plane` now starts its member through this recovery
+helper (`start-store-member-from-wal`). `serve` acquires state-directory
+ownership before opening the application, uses the durable bootstrap/recovery
+path, and admits new voters as learners until they catch up. Capture
+registration and automatic compaction are described below.
 
 `serve` acquires exclusive ownership of its canonical state directory before
 opening the application store, pool or PKI. The CLI acquires that ownership
@@ -159,10 +166,14 @@ ownership across every administrative command.
 
 HA startup also persists `metadata/server-ha-endpoint.json`, binding member ID,
 Raft host/port and API URL to the state directory before startup patch evaluation.
-The production Raft default is port 7000; internal transport callers may still
-request an ephemeral port for isolated tests. Restart with the original endpoints.
-Changes and malformed or nonprivate descriptors are refused before application
-initialization.
+The record's identity keys are its format, version, member ID and Raft host/port;
+restart with those original values. The API URL is deliberately not an identity
+key: a changed URL is accepted, rewritten to the persisted record, and
+re-advertised to the cluster once this member leads. Identity changes and
+malformed or nonprivate descriptors are refused before application
+initialization. The `serve` Raft default is port 7000; `witness` defaults to a
+kernel-assigned port, and internal transport callers may still request an
+ephemeral port for isolated tests.
 
 A learner-to-voter configuration change now requires an applied-progress receipt.
 Successful AppendEntries replies report `:applied-index` only after application
@@ -255,9 +266,11 @@ report remain in the printed temporary evidence directory, including on failure.
 
 This probe uses unprivileged loopback plaintext transport and ordinary files.
 Its JSON scope distinguishes the instrumented harness from production `serve`.
-VM execution, authenticated native transport and leader handoff during catch-up
-remain separate acceptance requirements under `podster-ucm.2.9.4`. Production
-voter startup integration remains under `podster-ucm.2.1.4`.
+VM execution remains a separate acceptance requirement under `podster-ucm.2.9.4`;
+the authenticated-transport and leader-handoff runs described below have since
+closed those gaps. Production voter startup integration (`podster-ucm.2.1.4`)
+has also landed: `serve` starts HA members through the durable store recovery
+adapter described above.
 
 The first 2026-11-10 native runs passed the 4 MiB smoke case but exhausted the
 64 MiB receiver's 384 MiB heap. Unary gRPC dispatch retained complete request
@@ -278,9 +291,10 @@ shutdown, snapshot and node-session checks total 392 passing assertions; evidenc
 is in `http2-stream-retirement-validation-2026-11-10.json`.
 
 The streaming error-path and native memory follow-up is recorded under
-`podster-ucm.2.10`; see cancellation validation below. Native leader handoff, authenticated transport,
-VM execution and production voter startup remain separate work; these runs do
-not establish their completion.
+`podster-ucm.2.10`; see cancellation validation below. These runs do not by
+themselves establish native leader handoff, authenticated transport, VM
+execution or production voter startup; the handoff, TLS and production-startup
+validations below have since covered all of those but VM execution.
 
 
 ### Long-lived RPC memory probe
@@ -460,9 +474,10 @@ catch-up and verified that removed members cannot renew their certificates;
 the product's application-restore requirement remains enforced. These checks
 do not establish native automatic-compaction or VM acceptance.
 
-An internal compaction worker is available through
-`start-ha-control-plane` with an explicit positive `:compaction-interval`.
-The production default remains `nil`, so ordinary `serve` does not start it.
+An internal compaction worker runs through
+`start-ha-control-plane` with a positive `:compaction-interval`. HA `serve`
+passes a one-second interval unless `--no-raft-compaction` is given; standalone
+`serve` does not start it.
 Its policy triggers when either the retained WAL or a conservative estimate of
 retained command memory reaches `:compaction-bytes` (16 MiB by default), or the
 applied prefix reaches `:compaction-entries` (256 by default). The WAL check uses
@@ -501,8 +516,9 @@ cycles, reclaimed artifacts and the most recent error.
 The checkpoint worker's HA tests cover repeated byte-triggered checkpoints and
 recovery, capture failure, uncertain storage failure and waking a long-interval
 worker at shutdown. They also cover live writes during capture and recovery of
-the newer committed suffix. Production activation still requires capture-pause and
-multi-member availability validation (`podster-ucm.11.3.9`). Retained watch
+the newer committed suffix. Production activation additionally required
+capture-pause and multi-member availability validation (`podster-ucm.11.3.9`);
+the acceptance records below cover it. Retained watch
 history remains part of the snapshot: a tiny live resource set does not imply a
 tiny snapshot, and an overly aggressive trigger can repeatedly serialize that
 history. Uncommitted proposals also need separate admission backpressure
@@ -661,8 +677,8 @@ the original term with 96 MiB retained history per member and 384 MiB heaps.
 The [validation record](evidence/async-compaction-validation-2026-11-10.json) preserves
 the full result; the [diagnostic record](evidence/compaction-phase-diagnostics-2026-11-10.json)
 records the earlier failures and the reduction from seconds to milliseconds.
-Production/VM acceptance remains separate; automatic compaction stays disabled
-by default.
+VM acceptance remains separate; HA `serve` now schedules automatic compaction
+by default, as described below.
 
 Production HA startup reclaims recognized abandoned snapshot publication and
 capture scratch after validated WAL recovery and before listening. Cleanup

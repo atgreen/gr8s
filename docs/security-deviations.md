@@ -5,7 +5,9 @@ deliberately differ from upstream Kubernetes. They are recorded here so they are
 explicit, auditable decisions rather than silent gaps. Each entry notes the
 behaviour, why it is acceptable for gr8s, and when it should be revisited.
 
-These were identified in the k1/k2 security spot-checks (see `k1.md`, `k2.md`).
+These were identified in the k1/k2 security spot-checks, whose findings are
+summarized in the
+[2026-11-13 compatibility review](history/compatibility-review-2026-11-13.md).
 
 ## Egress NetworkPolicy does not gate the API server, node IP, or node-local DNS (F5)
 
@@ -25,17 +27,21 @@ policy can therefore still reach the API server, node-hosted services, and DNS.
 
 ## Certificate leaves live up to ~1 year with no revocation (F11)
 
-Signed node/member/CSR leaves have lifetimes up to ~365 days
-(`*csr-certificate-duration*`), and there is no CRL/OCSP revocation.
+CSR-API leaves honor the requested lifetime up to `*csr-certificate-duration*`
+(365 days, `src/resources/csr-signer.lisp`). Internal node/member enrollment
+leaves are signed with a fixed 365-day validity in `certificate-der`
+(`src/security/pki.lisp`), and the cluster CA with ten years. There is no
+CRL/OCSP revocation.
 
-- **Why acceptable:** this matches the upstream Kubernetes model (short-lived
-  certificates plus Node deletion rather than revocation), and the default is an
-  overridable `defparameter`. Upstream's `--cluster-signing-duration` also
-  defaults to one year.
+- **Why acceptable:** this matches the upstream Kubernetes model (certificate
+  rotation plus Node deletion rather than revocation). Upstream's
+  `--cluster-signing-duration` also defaults to one year.
 - **Residual risk:** a compromised key is usable until expiry. For a
   revocation-free system, one year is on the long side.
-- **Revisit if:** a shorter default is wanted; lower `*csr-certificate-duration*`
-  (certificates rotate automatically before expiry).
+- **Revisit if:** a shorter default is wanted. Lowering the overridable
+  `*csr-certificate-duration*` shortens only CSR-API issuance; internal
+  enrollment leaves need the fixed validity in `certificate-der` changed
+  (internal certificates rotate automatically before expiry).
 
 ## Voter enrollment ships CA, node-CA, and SA signing keys as plaintext PEM (F14)
 

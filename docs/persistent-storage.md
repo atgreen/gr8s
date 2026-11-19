@@ -4,7 +4,7 @@
 
 | Volume | How to use it | Sharing | Reclaim |
 |---|---|---|---|
-| Node-local directory | Default class `local-path`, or a class using `gr8s.io/local-path` | One node | `Delete` or `Retain` |
+| Node-local directory | Default class `local-path`, or a class using `gr8s.io/local-path` | One node | `Delete` or `Retain`, or `onDelete: archive` |
 | NFS, dynamic | A class using `gr8s.io/nfs` | Many nodes | `Delete` or `Retain`, or `onDelete: archive` |
 | NFS, static | A PV or Pod with an `nfs` source | Many nodes | `Retain` |
 | `local` and `hostPath` | A PV or Pod with that source | One node | `Retain` |
@@ -49,6 +49,8 @@ agent restart.
 `WaitForFirstConsumer` and `Delete`. Deleting the class is respected on later
 starts. `--local-storage-path DIR` sets its directory, which defaults to
 `/var/lib/gr8s/storage`, and a class can set its own with the `path` parameter.
+`path` and `onDelete` are the class's only accepted parameters; `onDelete`
+takes `delete`, `retain` or `archive`, with the same meaning as for NFS below.
 
 ```yaml
 apiVersion: storage.k8s.io/v1
@@ -66,6 +68,11 @@ A claim gets a `pvc-<uid>` directory on the node its first consumer is scheduled
 to, and its Pods stay on that node. The agent creates the directory with mode
 `0777`, so a workload can run as any user. `ReadWriteMany` and `ReadOnlyMany`
 claims stay Pending, because one node's directory can't serve other nodes.
+
+Both built-in provisioners pass over a claim that sets a `selector`, a
+`volumeName`, a `dataSource` or `dataSourceRef`, or `volumeMode: Block`. Such a
+claim can still bind to a matching existing PV, but nothing is provisioned for
+it.
 
 ## NFS
 
@@ -113,7 +120,8 @@ The agent mounts through `mount(2)`, so hosts need the kernel NFS client but not
 - **NFSv3:** this defaults to `nolock`, because `rpc.statd` isn't assumed. Add the
   `lock` option only if the host runs it. NFSv4 has no such limit.
 - **Server names:** these are resolved by the host, so a cluster Service name or
-  ClusterIP won't work as a server.
+  ClusterIP won't work as a server. `server` must be an IPv4 address or host
+  name; an IPv6 address is rejected.
 - **Mount options:** unknown options are rejected when the object is created.
   `nosuid` and `nodev` are always set.
 - **Dead servers:** each mount call waits up to five seconds and then keeps going in

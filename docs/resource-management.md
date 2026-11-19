@@ -109,8 +109,10 @@ NUMA conformance certification.
 The [native validation record](evidence/resource-management-native-2026-11-09.json)
 contains the tested binary hash, live process/container identity, upstream RPC
 responses and host-suite comparison with clean main. An independent upstream
-client also checks DRA reporting against prepared-claim fixtures.
-only claims prepared for that exact Pod UID are reported.
+client also checks DRA reporting against prepared-claim fixtures: a Pod's
+report includes a claim only when it was prepared for that exact Pod UID, so
+a claim prepared for a different Pod — even under the same claim name — is
+never reported.
 
 The ordinary restart check runs before the deliberate SIGBUS exec. Combined
 fault-then-restart recovery is tracked separately in `podster-g2l`.

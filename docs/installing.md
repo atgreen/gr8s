@@ -4,9 +4,10 @@ SPDX-License-Identifier: Apache-2.0
 -->
 # Installing and operating gr8s with systemd
 
-The supported installation lifecycle is Linux with systemd. The installer must
-run as root and requires `install.sh`, `gr8s-killall.sh`, and
-`gr8s-uninstall.sh` in the same directory. It installs one role per machine:
+The supported installation lifecycle is Linux with systemd. The installer
+needs root to write its destinations — it has no explicit root check, and
+without root it fails on the first permission error — and requires
+`install.sh`, `gr8s-killall.sh`, and `gr8s-uninstall.sh` in the same directory. It installs one role per machine:
 `gr8s-server.service` for a combined control plane and node, or
 `gr8s-agent.service` for an agent joining an existing server.
 
@@ -14,6 +15,12 @@ The installer writes the binary and lifecycle tools to `/usr/local/bin`, the
 selected role's arguments to `/etc/gr8s/server.env` or `/etc/gr8s/agent.env`,
 and its unit to `/etc/systemd/system`. Runtime and cluster data belong under
 `/var/lib/gr8s`. Uninstall preserves that directory unless purge is explicit.
+
+The release RPM and DEB packages are an alternative to `install.sh`: they place
+the binary and `gr8s-killall.sh` in `/usr/bin`, disabled `gr8s-server` and
+`gr8s-agent` units in `/usr/lib/systemd/system`, and editable `/etc/gr8s/*.env`
+files. The packages and `install.sh` are alternatives, not layers — don't mix
+them on one host. See [release packaging](building-and-testing.md).
 
 ## Install from a local binary
 
@@ -30,6 +37,10 @@ sudo env \
   INSTALL_GR8S_EXEC_ARGS='serve --state-directory /var/lib/gr8s/server --kubeconfig /etc/gr8s/kubeconfig --node-listen 192.0.2.10 --node-address 192.0.2.10' \
   ./install.sh
 ```
+
+`INSTALL_GR8S_MODE` defaults to `server` when unset, and
+`INSTALL_GR8S_EXEC_ARGS` must begin with the subcommand matching the mode —
+`serve` for a server, `agent` for an agent — or the installer refuses it.
 
 The server example exposes its node endpoint on TCP 7443. For a machine that
 will never accept remote workers, omit `--node-listen` and `--node-address` to
@@ -74,6 +85,11 @@ startup or enrollment failures.
 `INSTALL_GR8S_EXEC_ARGS` is stored in a systemd environment file. Quotes,
 backslashes, tabs, and newlines are rejected instead of being reinterpreted.
 
+`INSTALL_GR8S_ASSET_ROOT` names the directory the lifecycle scripts are read
+from when they are not beside `install.sh`. `INSTALL_GR8S_ROOT` prefixes every
+installed path — binary, configuration, and unit directories — which is how
+the rootless install contract suite installs into a scratch tree.
+
 ## Install a checksum-pinned release
 
 Without `INSTALL_GR8S_BINARY`, a SHA-256 digest is mandatory. Supply either an
@@ -90,7 +106,10 @@ sudo env \
 
 or a release tag through `INSTALL_GR8S_VERSION`. Version downloads resolve to
 `https://github.com/atgreen/gr8s/releases/download/VERSION/gr8s-linux-ARCH`,
-where x86-64 maps to `amd64` and AArch64 maps to `arm64`. Curl follows
+where x86-64 maps to `amd64` and AArch64 maps to `arm64`. `INSTALL_GR8S_ARCH`
+overrides the detected architecture, and `INSTALL_GR8S_RELEASE_BASE` replaces
+the GitHub download base that the version and asset name are appended to.
+Curl follows
 redirects, treats HTTP failures as errors, and retries transient failures. The
 download is copied to destination-local staging and its digest is checked
 before any installed file is published.

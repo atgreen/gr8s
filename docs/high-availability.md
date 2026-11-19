@@ -1,7 +1,9 @@
 # High availability (pure-Lisp Raft)
 
 The control plane can run with multiple masters on a Raft consensus layer written
-from scratch in Common Lisp. It needs **no etcd or external database**. Members
+from scratch in Common Lisp. It needs **no etcd or external database**. The Raft
+engine and its write-ahead log are the external cl-raft library (same author),
+vendored under `ocicl/`. Members
 use the same ag-gRPC transport as the rest of gr8s. One Raft implementation runs
 under real gRPC and a deterministic in-process simulator. The simulator tests
 leader election, log replication, the §5.4.2 commit rule, ordered application,
@@ -30,7 +32,9 @@ PodCIDR. Events are deliberately local.
   follower idles until promotion.
 - **Leader-aware HTTP.** A follower answers a mutating API request with a 307 to
   the current leader and preserves the path and query. It returns 503 when it
-  does not know the leader. Followers serve reads locally.
+  does not know the leader. Followers serve reads locally. A few POST paths that
+  persist nothing are served locally on any member rather than redirected: patch
+  rollouts, self/local subject access and rules reviews, and token reviews.
 - **Agents reconnect across failover.** Given more than one control-plane
   endpoint, a node agent rotates through them on reconnect and resumes against the
   new leader.
@@ -82,7 +86,8 @@ member-to-member traffic on the chosen Raft ports. Run token creation against th
 same state directory as the issuing member (add `--state-directory PATH` if it
 uses a nondefault directory). Each token is bound to its role and node name and
 can be used only once; the joiner's `--node-name` must match. A member's Raft ID
-is its `--node-name` unless `--raft-id` sets another.
+is its `--node-name` unless `serve`'s `--raft-id` or `witness`'s `--member-id`
+sets another.
 
 Requested voters first join as learners. Existing voters keep their quorum while
 the learner installs application state and catches up. The leader automatically
@@ -95,16 +100,21 @@ HA is **opt-in** for a fresh state directory. Once HA intent is persisted,
 restart with the appropriate `--raft-init` or `--join` options; omitting them
 is refused before application initialization.
 
-The production Raft port defaults to **7000** and the listening address defaults
-to loopback. Set `--raft-listen` for a cluster spanning machines.
+For `serve`, the production Raft port defaults to **7000** and the listening
+address defaults to loopback. `witness` defaults to loopback and a
+kernel-assigned port, so pass `--port` when a witness must restart at a stable
+address. Set `--raft-listen` for a cluster spanning machines.
 Use `--raft-port` to select another
 port, and `--raft-listen` to select the reachable member address. The address
 must not be a wildcard bind address. Each HA state directory records its member
 ID, Raft address and port, and API URL in `metadata/server-ha-endpoint.json`
 before startup patches or application files are opened. Restarts must use the
-same identity and endpoints, including after an interrupted first startup. A
-changed configuration fails before startup instead of publishing a new address
-that other members cannot reach. This release has no endpoint migration command.
+same member ID and Raft address and port, including after an interrupted first
+startup; a changed Raft endpoint fails before startup instead of publishing a
+new address that other members cannot reach. The API URL is reachability rather
+than identity: a changed URL is accepted, rewritten to the persisted record, and
+re-advertised to the cluster once this member leads. This release has no Raft
+endpoint migration command.
 
 ### Membership maintenance
 

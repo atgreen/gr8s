@@ -1,5 +1,9 @@
 # Whistler networking for foreign clusters: standalone CNI and Gateway API
 
+> **Status:** implemented; this document records the design. The watch client,
+> the desired-state seam, `gr8s net-agent`, the per-Gateway LoadBalancer, the
+> port ledger, and the Helm chart described below are all shipped.
+
 ## Goal
 
 Package gr8s's Whistler eBPF networking so it installs on any conformant
@@ -26,19 +30,23 @@ guards, the service NAT programs, and the node-integrated Gateway proxy.
 The single hard coupling is ingestion: every one of those consumers today
 reads desired state from gr8s's own store through the gr8s node protocol.
 
-The new work is therefore concentrated in three pieces:
+The new work was therefore concentrated in three pieces, all shipped:
 
-1. **A Kubernetes API watch client** (new). List+watch with resourceVersion
+1. **A Kubernetes API watch client**
+   ([`kube-client.lisp`](../src/protocol/kube-client.lisp)). List+watch with
+   resourceVersion
    resume and bookmarks, watch re-establishment with backoff, ServiceAccount
    token and kubeconfig authentication, built on `gr8s.http-client` (which
-   gains streaming response reads). It materializes watched objects as the
+   gained streaming response reads). It materializes watched objects as the
    same JSON-shaped hash tables the controllers already consume. It also
    provides `coordination.k8s.io` Lease leader election.
-2. **A desired-state seam** (refactor). The network and gateway consumers
+2. **A desired-state seam**
+   ([`foreign-view.lisp`](../src/resources/foreign-view.lisp)). The network
+   and gateway consumers
    read through a narrow interface with two implementations: the gr8s store
-   (today's behavior, unchanged) and the watch client's cache. The planners
-   and dataplane code do not change.
-3. **`gr8s net-agent`** (new mode; first shipped as `cni-agent`). The
+   (native behavior, unchanged) and the watch client's cache. The planners
+   and dataplane code did not change.
+3. **`gr8s net-agent`** (first shipped as `cni-agent`). The
    DaemonSet entry point: watches Nodes, Pods, NetworkPolicies, Services,
    EndpointSlices — and, when the gateway flag is set, GatewayClasses,
    Gateways, HTTPRoutes and ReferenceGrants — and drives the existing
@@ -92,12 +100,17 @@ lifts out into an operator mechanically.
 
 - The per-arch release binaries the CI already builds, wrapped in a
   container image.
-- An init container installs the `gr8s` binary into `/opt/cni/bin` and
+- An init container runs the `gr8s cni-install` subcommand, which installs
+  the `gr8s` binary into `/opt/cni/bin`, mounts the bpffs, and
   writes the CNI conf (the existing chained-plugin configuration, pointing
-  at the agent's socket).
-- A Helm chart installs the DaemonSet, ServiceAccount, RBAC, and the CNI
+  at the agent's socket) — shell-free, so the image can be distroless.
+- The Helm chart in [`deploy/chart/gr8s-net/`](../deploy/chart/gr8s-net/)
+  installs the DaemonSet, ServiceAccount, RBAC, and the CNI
   conf settings; `gateway.enabled` turns on the Gateway watchers and the
-  GatewayClass reconciliation.
+  GatewayClass reconciliation. Note one default divergence: the chart's
+  `serviceLb.enabled` defaults to true (the chart deploys gr8s as the
+  kube-proxy replacement), while the bare `gr8s net-agent` CLI leaves
+  `--service-lb` off unless passed.
 
 ## Validation
 

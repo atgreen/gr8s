@@ -13,20 +13,24 @@ key. RSA-PSS parameters must match the actual hash/MGF/digest-length salt;
 unknown or inconsistent key algorithms are rejected. Usages must be known,
 unique and nonempty; `expirationSeconds`, if present, is at least 600.
 
-Create clears client-provided status and actor claims. A live verified
-ServiceAccount token supplies username, account UID and standard groups;
-the existing local administrative HTTP listener otherwise records the
-anonymous actor. Ordinary updates preserve spec and status. Approval updates
+Create clears client-provided status and actor claims. Actor fields derive only
+from verified request credentials: a TLS client certificate or a live verified
+ServiceAccount token supplies username, account UID and standard groups, and a
+request that carries neither is recorded as the anonymous actor
+(`system:anonymous`, `system:unauthenticated`). Ordinary updates preserve spec
+and status. Approval updates
 change conditions while preserving certificate/spec; status updates preserve
 spec and existing approval/denial values. Approved/Denied/Failed conditions
 cannot be removed, Approved and Denied are exclusive, and an issued certificate
 cannot be replaced or cleared. Metadata changes use optimistic resource
 versions, including upstream unconditional-update behavior when RV is omitted.
 
-The authenticated TLS listener also requires signer-specific `approve`
-or `sign` RBAC where appropriate, including the `example.com/*` signer name
-form. The existing administrative HTTP listener retains its existing trust
-boundary. Forged impersonation headers never supply CSR actor identity.
+Approval and status writes also require signer-specific `approve` or `sign`
+RBAC where appropriate, including the `example.com/*` signer name form. There is
+no separate administrative listener: every request crosses the same
+authenticated HTTPS API (see
+[API client certificates](api-client-certificates.md)). Forged impersonation
+headers never supply CSR actor identity.
 
 Structural unknown fields are pruned; Strict rejects unknown/duplicate JSON
 fields and Warn emits actual HTTP Warning headers. Finalizers keep deletion
@@ -90,6 +94,22 @@ names and organization groups use live User/Group RBAC; CSR actor fields derive
 from the authenticated identity and signer-specific admission still applies.
 Server-side apply remains outside this surface; custom signer automation is an
 optional controller extension.
+
+## PodCertificateRequests and ClusterTrustBundles
+
+`certificates.k8s.io/v1` also serves cluster-scoped `ClusterTrustBundle` and
+namespaced `PodCertificateRequest` objects; v1beta1 still serves
+PodCertificateRequest for clients that have not moved (v1beta1 carries
+`pkixPublicKey`/`proofOfPossession`, v1 the `stubPKCS10Request`).
+ClusterTrustBundles follow upstream's signer-prefixed naming, CA-only PEM
+validation and `spec.signerName` field selector, and project into Pods as
+`clusterTrustBundle` volume sources. PodCertificateRequests implement the
+control-plane half of KEP-4317 `podCertificate` projected volumes: each
+node-reported claim becomes a request attributed to the authenticated node, and
+the built-in signer fills `status.certificateChain` with a short-lived SPIFFE
+leaf from the cluster CA — only for signer names listed in
+`*pod-certificate-signers*`, which is empty by default so an external controller
+can own its signers.
 
 Run the focused native proof with strict validation enabled:
 

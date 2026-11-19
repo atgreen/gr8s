@@ -72,8 +72,9 @@ quota, and runtime resource accounting. See
 including interactive streams and nonzero exit status. `kubectl port-forward`
 works over its WebSocket tunnel and over plain SPDY, for Pods on any node, with a
 1 MiB window each way. Pod HTTP proxy forwards real bodies, status codes, and
-headers with separate `pods/proxy` authorization; connection upgrades return HTTP
-501 (tracked). See the [proxy record](evidence/pod-http-proxy-validation-2026-11-04.json).
+headers with separate `pods/proxy` authorization, and relays connection upgrades
+as bidirectional streams, without following backend redirects. See the
+[proxy record](evidence/pod-http-proxy-validation-2026-11-04.json).
 
 ## Config, identity & secrets
 
@@ -194,7 +195,8 @@ the node as the source; SCTP host ports are scheduled but not relayed.
   `spec.ordinals`, reverse-ordinal rolling updates bounded by a partition,
   `OnDelete`, and ControllerRevision history. Each `volumeClaimTemplates` entry
   becomes a real PVC per ordinal; `persistentVolumeClaimRetentionPolicy` is honored
-  both directions. `maxUnavailable` above 1 is refused.
+  both directions. `maxUnavailable` accepts counts and percentages from 1 to 100%
+  and bounds the rolling update; 0 and percentages above 100% are refused.
 - **DaemonSets** — one Pod on every node their template selects, following node
   labels, recording `apps/v1` ControllerRevisions. RollingUpdate respects
   `maxUnavailable`/`maxSurge`; OnDelete leaves running Pods alone.
@@ -322,7 +324,9 @@ implemented alongside stored-resource watches; see
 ## Metrics & autoscaling
 
 The local agent serves the kubelet's endpoints on port 10250 (`serve
---kubelet-port`, 0 to disable): `/metrics/resource`, `/metrics/cadvisor`,
+--kubelet-port`, 0 to disable) only when the node runs managed containerd; under
+any other runtime the kubelet port is forced to 0. The endpoints are
+`/metrics/resource`, `/metrics/cadvisor`,
 `/stats/summary`, `/metrics`, and `/healthz`, measured from CRI container
 statistics and the cgroup v2 files of each container, sandbox, and the root.
 `/metrics/cadvisor` carries cAdvisor's `container_*`/`machine_*` series,
@@ -353,7 +357,8 @@ health, datastore and filesystem capacity, and reconciliation convergence. See
 [control-plane metrics](control-plane-metrics.md) for labels and sampling limits.
 
 A HorizontalPodAutoscaler controller scales Deployments, ReplicaSets,
-ReplicationControllers, and StatefulSets on Resource and ContainerResource metrics,
+ReplicationControllers, StatefulSets, and custom resources whose served version
+declares the scale subresource, on Resource and ContainerResource metrics,
 with upstream's tolerance, stabilization, and rate policies. Each node reports
 CPU/memory from CRI statistics; the control plane uses that shared snapshot for
 the native resource-metrics API and derives the cumulative rates used by HPA.

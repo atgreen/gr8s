@@ -1,5 +1,13 @@
 # gr8s multi-node design
 
+> **Status:** this is the original multi-node design, kept for the
+> responsibility split and protocol rationale, which still hold. The items it
+> defers or excludes — WireGuard, ClusterIP Services, NetworkPolicy, Pod
+> affinity, taint-based eviction, HA, IPv6, NodePort/LoadBalancer, the socket
+> load balancer, the kubelet API — have since shipped; the passages below mark
+> each where it appears. [networking.md](networking.md) describes the current
+> dataplane.
+
 ## Goal
 
 gr8s runs a multi-node Kubernetes-compatible control plane and node agents from
@@ -95,8 +103,11 @@ non-terminal Pods. The assignment is persisted with the Pod and is not changed
 merely because another node becomes less loaded.
 
 If no node is Ready, the Pod remains Pending. Loss of a node marks its Pods
-Unknown. Automatic eviction on node loss, timeout-based replacement, Pod affinity
-and anti-affinity, and resource scoring are deferred.
+Unknown. The deferrals this design listed here have since shipped: inter-Pod
+affinity and anti-affinity are implemented and scored in placement
+([`pod-affinity.lisp`](../src/resources/pod-affinity.lisp), used by the
+scheduler's node-preference scoring), and NoExecute taints evict Pods with
+toleration timers ([`node-taints.lisp`](../src/resources/node-taints.lisp)).
 
 ## Node networking
 
@@ -117,17 +128,22 @@ ARP proxying, a bridge, or one gateway address per Pod.
 Cross-node traffic initially uses one ordinary Linux VXLAN device and one
 cluster VNI. Agents reconcile remote Node PodCIDR routes, VTEP peers, and FDB
 entries from revisioned control-plane topology. Linux performs encapsulation;
-[Whistler](https://github.com/atgreen/Whistler) does not implement a custom tunnel. VXLAN can later be replaced by
-native routing or WireGuard without changing local Pod attachment.
+[Whistler](https://github.com/atgreen/Whistler) does not implement a custom tunnel. The predicted WireGuard
+replacement shipped without changing local Pod attachment: `--overlay-backend
+wireguard` selects the self-tuning encrypted overlay
+([`wireguard.lisp`](../src/network/wireguard.lisp)); VXLAN remains the default.
 
-[Whistler](https://github.com/atgreen/Whistler) initially enforces exact local Pod source ownership and validates
-that remote source addresses belong to the PodCIDR advertised by the
-encapsulating node. Persistent maps hold Pod-IP identity, Node PodCIDR/VTEP,
-policy, counters, and flow/drop telemetry. Security identity is derived from
-control-plane state, not trusted from VXLAN metadata.
+[Whistler](https://github.com/atgreen/Whistler) enforces exact local Pod source ownership, and persistent maps
+hold Pod identity, policy, counters, and flow telemetry. The remote-source
+validation maps this paragraph originally planned — checking that a remote
+source address belongs to the PodCIDR/VTEP advertised by the encapsulating
+node — were never implemented; the shipped BPF map set has no such tables.
+Security identity is still derived from control-plane state, not trusted from
+VXLAN metadata.
 
-IPv4 ClusterIP Services and standard NetworkPolicy remain the next dataplane
-layers. They are not prerequisites for splitting the agent and CNI ownership.
+IPv4 ClusterIP Services and standard NetworkPolicy, "the next dataplane layers"
+when this was written, are implemented; see
+[networking.md](networking.md).
 
 ## Recovery
 
@@ -163,10 +179,13 @@ boundary end to end:
 Only after that skeleton passes do we add Service translation, NetworkPolicy,
 automatic node-loss eviction, or more sophisticated scheduling.
 
-## Explicit exclusions
+## Explicit exclusions (historical)
 
-The first version excludes control-plane HA, etcd compatibility, Kubernetes
+The first version excluded control-plane HA, etcd compatibility, Kubernetes
 kubelet and Node API compatibility, cloud-provider integration, dynamic
 multi-block IPAM, IPv6, BGP, WireGuard, NodePort, LoadBalancer, ExternalIP,
 socket-level load balancing, XDP acceleration, DSR, Maglev, L7 policy, and
-automatic Pod rescheduling after node loss.
+automatic Pod rescheduling after node loss. Many of these have since shipped:
+control-plane HA, the kubelet API, IPv6 Pod CIDRs, WireGuard, NodePort and
+LoadBalancer Services, and the eBPF socket load balancer all exist now. The
+list records the original scope cut, not the current feature set.

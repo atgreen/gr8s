@@ -1,5 +1,8 @@
 # Selector-scoped kernel tracing
 
+> **Status:** implemented. This records the design; where the shipped behavior
+> diverges from the original plan, the text below states what the code does.
+
 ## Goal
 
 `gr8s debug trace` accepts programs written in a bpftrace-compatible language and
@@ -31,9 +34,11 @@ credential loading can be added without changing the server protocol.
 
 The request contains a namespace, Kubernetes label selector, bpftrace-compatible source,
 and duration.  The server enforces source and duration limits before dispatch.
-The CLI prints every received UTF-8 record, prefixing it with the node name when
-more than one node participates.  A terminal summary reports nodes that
-completed, failed, or disconnected.
+The CLI prints every received UTF-8 record, always prefixing it with its
+`[node]` name, even when only one node participates.  The terminal frame
+carries only the counts of completed and failed nodes (`completedNodes`,
+`failedNodes`); a disconnected outcome appears only in the server's audit
+line, not in the client summary.
 
 ## Control-plane coordinator
 
@@ -51,9 +56,11 @@ fields.  The coordinator drains each operation concurrently into one serialized
 WebSocket writer.  Client close, timeout, or a fatal coordinator error cancels
 every unfinished node operation.
 
-An empty selector result is an error.  Pods without a node assignment or nodes
-without a live agent session are reported explicitly rather than silently
-omitted.
+An empty selector result is an error.  A Pod without a node assignment is
+silently filtered out of the selection (`running-pod-p` requires one), and a
+selected node without a live agent session has its operation queued until the
+agent connects — neither case is reported to the client, diverging from the
+original intent to surface both explicitly.
 
 ## Node trace session
 
@@ -82,20 +89,22 @@ response is emitted.
 
 ## Limits and safety
 
-The first implementation applies hard server-side limits (constants, covered by
-tests):
+The first implementation applies hard limits (constants, covered by tests).
+The API server enforces the 64 KiB source size, the 30-second default and
+300-second maximum duration, and the eight cluster-wide session cap; the node
+agent enforces the rest — one trace session per node, 256 matching Pods **per
+node** (not cluster-wide), 128 generated programs, and 16 MiB output per node
+(see [`trace.lisp`](../src/agent/trace.lisp)). Further restrictions:
 
-- one trace session per node and eight cluster-wide sessions;
-- 64 KiB source, 30-second default and 300-second maximum duration, 256 matching
-  Pods, 128 generated programs, and 16 MiB output per node;
 - no `uprobe`/`uretprobe`, child-process (`-c`), or arbitrary file input;
 - kprobe, kretprobe, tracepoint, kfunc, kretfunc, profile, and interval probes;
 - no persistent trace resources or historical output.
 
 [Whistler](https://github.com/atgreen/Whistler) verifier rejection and attach errors are returned verbatim but do not
 leave partial attachments behind.  The server records requester identity,
-selector, participating nodes, start/end time, and terminal status in the audit
-path without recording potentially sensitive trace output.
+selector, participating nodes, start/end time, and terminal status as a line on
+its standard error stream — not in the API audit log — without recording
+potentially sensitive trace output.
 
 ## Protocol changes
 

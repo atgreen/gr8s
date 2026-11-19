@@ -26,13 +26,14 @@ JSON parsing also limits strings to 2 MiB and nesting to 128 levels.
 | Record kind | Contents |
 |---|---|
 | `header` | Format name `gr8s-store-snapshot`, version, applied index and term |
-| `clocks` | Resource and Pod/Node revisions, resource history start, history floor and shared template token key |
+| `clocks` | Resource and Pod revisions, Pod epoch floor, resource history start, template history floor, Secret encryption policy and the shared template token key |
 | `resource` | Collection, namespace, name and one built-in or custom resource |
 | `workloadDeletion` | One controller deletion-state key and value |
 | `jobControllerState` | One Job controller-state key and value |
 | `history` | One retained resource history entry |
 | `pod` | Desired object, observation/condition/finalization checkpoint and published status/revision |
 | `node` | One Node record, including replicated runtime health |
+| `imageTrackerConfig`, `imageTrackerOrigin`, `imageTrackerSwarm`, `imageTrackerPeer`, `imageTrackerMetainfoChunk` | Replicated image tracker state; see [replicated image tracker state](#replicated-image-tracker-state) |
 | `end` | Count of preceding records |
 
 Local Events and their history are excluded. The writer enumerates store indexes.
@@ -48,8 +49,9 @@ synchronizes the containing directory. Serialization failures remove the private
 temporary file and leave the destination absent. A directory synchronization error
 can leave a complete published file but returns an error. No Raft descriptor has
 been published by this helper. Private generation ownership and checksum verification are handled by the
-materializer described below. Live restore intent, interrupted-install recovery
-and reclamation remain pending.
+materializer described below; restore intent, interrupted-install recovery and
+reclamation are handled by the startup intent protocol and the joined HA
+maintenance worker described below.
 
 `gr8s.resources::map-store-snapshot-records` reads one bounded record at a time.
 Pass `nil` as its callback for a validation pass, with `:expected-index` and
@@ -65,7 +67,7 @@ They may populate a staging destination; successful callbacks alone do not prove
 that the complete artifact is valid. Do not mutate the live store during this
 pass. The higher-level `gr8s.resources::validate-store-snapshot` also checks
 cross-record identities and relationships; use it before completing a staged
-generation. The materializer verifies the artifact checksum; live restore remains pending.
+generation. The materializer verifies the artifact checksum; live restore is described below.
 The reader returns header, clocks and count without collecting the data records.
 The [reader validation record](evidence/store-snapshot-reader-validation-2026-11-09.json)
 covers malformed artifacts and constrained-heap capture plus validation.
@@ -80,6 +82,10 @@ sbcl --dynamic-space-size 384 --noinform --non-interactive \
 The default probe captures and validates the artifact while keeping the source
 store resident. `GR8S_SNAPSHOT_RECORDS` controls the number of 64 KiB resource payloads. Setting
 `GR8S_SNAPSHOT_LEGACY=1` selects whole-state JSON materialization for comparison.
+`GR8S_SNAPSHOT_RETAIN=1` adds durable registry retention, and
+`GR8S_SNAPSHOT_TRANSFER=1` adds a loopback member-to-member artifact transfer
+(which implies retention); further phases are listed with the live-transfer
+probe below.
 The [validation record](evidence/store-snapshot-artifact-validation-2026-11-09.json)
 distinguishes capture evidence from the remaining restore and transport work.
 
@@ -114,16 +120,17 @@ The internal generation helpers create staging directories, publish completion
 metadata and select complete generations. The caller must first validate and
 synchronize every staged file and subdirectory, quiesce the member, manage restore
 intent, and reload the live indexes. Selection does not change an existing store
-object's indexes or application root. These helpers are not a live restore command;
-live restore, crash recovery and Raft integration remain under
-`podster-ucm.11.3.3`.
+object's indexes or application root. These helpers are not a live restore
+command on their own; live restore, crash recovery and Raft integration
+(`podster-ucm.11.3.3`) are wired together by the startup recovery and live
+installation paths described below.
 
 Metadata publication synchronizes its private temporary file, renames it, then
 synchronizes the parent directory. Failure before rename preserves the prior
 selector. Failure after rename reports uncertainty: the new selector may already
 be visible, and neither completed generation is removed or rolled back. Power-loss
-recovery must inspect the durable selection and restore intent. Generation garbage
-collection is not enabled.
+recovery inspects the durable selection and restore intent at startup. Retired
+generations are reclaimed by the joined HA maintenance worker described below.
 
 The [generation selection validation](evidence/store-generation-validation-2026-11-09.json)
 covers reopen, write routing, credential preservation, publication failures and
@@ -158,7 +165,8 @@ validation pass with the source store still resident. The `store-snapshot-index`
 FiveAM suite covers these cross-record checks. The [validation evidence](evidence/store-snapshot-index-validation-2026-11-09.json)
 records the focused suites and constrained-heap probe. The materializer below
 consumes validated records. Coordination of restore intent with live reload and
-Raft/WAL recovery remains pending; this validator does not select or restore a generation.
+Raft/WAL recovery is handled by the member restore paths described below; this
+validator does not select or restore a generation.
 
 ## Durable Pod publications
 
@@ -192,7 +200,7 @@ specification changes, deletion, stale records, unsafe links and write-failure
 coverage. The [publication validation evidence](evidence/pod-publication-validation-2026-11-09.json)
 includes a native API status/revision round trip across process restart, broader
 watch/status/failover checks and the constrained-heap probe. The materializer
-restores publication files; live restore intent remains pending.
+restores publication files; live restore intent is described below.
 
 ## Materializing a completed generation
 
@@ -245,8 +253,9 @@ GR8S_SNAPSHOT_MATERIALIZE=1 sbcl --dynamic-space-size 384 \
 ```
 
 The startup intent protocol below handles interrupted application selection. Atomic
-live selection/reload, production WAL integration, full interrupted-install recovery
-and automatic compaction remain separate required work.
+live selection/reload, production WAL integration, interrupted-install recovery
+and automatic compaction have since landed; the member restore barrier below
+describes how production startup wires them together.
 
 ## Recovering an interrupted application selection
 
@@ -336,8 +345,9 @@ python3 scripts/test-store-generation-native.py --gr8s build/gr8s --pending-rest
 This acknowledges application startup loading only. It does not update a Raft
 member's stable snapshot descriptor, applied index or WAL, and it does not block
 readers of an already running store. Durable live restore, reader blocking/reload,
-member/WAL recovery coordination, reclamation and power-loss acceptance remain
-required before production snapshot installation can use this path.
+member/WAL recovery coordination and reclamation are supplied by the access
+gate, reload helper, member restore barrier and maintenance worker described
+below; this probe exercises none of them.
 
 ## Quiescing routed requests before live reload
 
@@ -348,7 +358,8 @@ leased requests may finish their transactions while draining; the gate stays
 closed once they have all returned. Nested routing shares its outer lease, and
 handler errors release leases during unwinding.
 
-The default drain timeout is 30 seconds and `:timeout` can select a shorter bound.
+The default drain timeout is 30 seconds; `:timeout` accepts any non-negative
+real bound, longer or shorter.
 If draining fails or times out, the gate reopens without changing application
 state. Long-lived watch, exec or streaming requests can therefore defer a restore;
 this helper does not forcibly terminate them. It cannot be called from its own
@@ -366,8 +377,9 @@ This gate covers routed HTTP request lifetimes and ordinary store transactions.
 It does not stop raw consensus application, node RPC ingress, controller work
 outside store transactions, or already retained external object references.
 The live restore caller still needs a consensus-writer/member-lock barrier and
-quiescence for those remaining paths before clearing indexes. No production live
-reload or automatic compaction is enabled by this access gate alone.
+quiescence for those remaining paths before clearing indexes. This gate alone
+performs no live reload and schedules no compaction; the dispatch barrier below
+supplies the remaining barriers for production installation.
 
 Run the `store-access-gate` FiveAM suite for concurrent drain, rejected reads and
 writes, error cleanup, timeout recovery, generation checks and HTTP readiness.
@@ -429,7 +441,8 @@ it does not claim that old and new full application heaps remain resident togeth
 
 The [application reload evidence](evidence/store-application-reload-validation-2026-11-09.json)
 records the focused checks, same-object heap result, and the distinct scope of the
-native startup smoke. Production ingress and member/WAL integration remain pending.
+native startup smoke; production ingress and member/WAL integration have since
+landed (see the member restore barrier below).
 
 ## Replicated image tracker state
 
@@ -650,14 +663,16 @@ retention; intermediate chunk calls retain their two-second budget.
 Retention runs under the member mutex and must perform filesystem work only.
 It must not acquire application ingress/writer locks or invoke live application
 reload. Installing these callbacks does not install a production application
-restore callback or enable compaction. Production startup and its use of the
-restore barriers, artifact retention rules and automatic compaction still require coordination.
+restore callback or enable compaction; `configure-member-store-restore` below
+installs the restore barriers, and HA `serve` schedules compaction separately.
 
-`gr8s.resources::configure-member-store-restore` opts a running member and store
-into live application installation. It requires an open file WAL and no pending
-installation, binds the artifact registry, and installs an application restore
-callback plus an outer dispatch barrier. It does not configure application-voter
-startup recovery or automatic compaction.
+`gr8s.resources::configure-member-store-restore` opts a member and store into
+live application installation. For a running member it requires an open file WAL
+and no pending installation; it binds the artifact registry and installs an
+application restore callback plus an outer dispatch barrier. With `:startup t`,
+`start-store-member-from-wal` installs the same barriers before WAL recovery and
+the peer listener start, so application-voter startup recovery uses this path
+too. Automatic compaction is controlled separately.
 
 An incoming final snapshot chunk that advances the committed boundary, a durable
 pending installation, or an unfinished gate resume enters this barrier. Dispatch
@@ -700,5 +715,7 @@ GR8S_SNAPSHOT_LIVE_TRANSFER=1 GR8S_SNAPSHOT_RECOVER_RECEIVER=1 \
 
 This probe uses controlled snapshot boundaries and loopback peer traffic. It does
 not prove unmodified `gr8s serve` startup recovery, active native-agent reference
-drain, or production failover after an interrupted installation. Those paths
-remain acceptance requirements before enabling application compaction.
+drain, or production failover after an interrupted installation. Unmodified
+`serve` recovery is covered by the separate production recovery validation;
+active-agent drain and interrupted-install failover acceptance remain open,
+although HA `serve` now schedules automatic compaction by default.

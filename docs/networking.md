@@ -26,10 +26,25 @@ bytes, rejected spoofs, malformed packets, and unsupported protocols.
 Identity initialization precedes TCX attachment; replacement links are attached
 and pinned before atomically replacing the old pin. Existing counter maps survive
 repeated CNI ADD calls. Each endpoint keeps `rejected_spoofs`,
-`endpoint_identity`, and `traffic_stats` maps alongside its `tcx-ingress` link
+`endpoint_identity`, and `traffic_stats` maps, the `netpol_*` NetworkPolicy
+mode/CIDR/port/flow maps in IPv4 and IPv6 variants, and the `local_pod_v4` and
+`host_redirect_v4` fast-path tables, alongside its `tcx-ingress` and
+`tcx-egress` links
 under `AGENT_STATE_DIR/containerd/bpf/CONTAINER_ID/`. CNI CHECK validates kernel
 map schemas, identity, and the TCX interface/direction; DEL removes staged links
 and all maps even after the Pod namespace disappears.
+
+The guard also carries two host-firewall bypass fast paths. When a packet's
+destination is another Pod on the same node, the guard redirects it straight to
+that Pod's veth, driven by the `local_pod_v4` map (destination Pod IPv4 →
+destination ifindex and MACs), skipping the kernel forward path and any host
+firewall FORWARD reject
+([`local-pod-delivery.lisp`](../src/network/local-pod-delivery.lisp)). When the
+destination is host-local — the API server ClusterIP `10.96.0.1` or the node's
+own address — the guard redirects the packet to the loopback ingress, which the
+host firewall trusts, so Pod-to-host traffic never crosses the INPUT path
+([`host-redirect.lisp`](../src/network/host-redirect.lisp)). The agent rebuilds
+both tables in every Pod's pinned maps on each node reconcile.
 
 The native image contains both ordinary and Service-enabled endpoint templates,
 including their map descriptors and relocations. First CNI ADD uses the existing
@@ -88,7 +103,8 @@ protobuf requests, including numeric and named target ports.
 
 A **cgroup eBPF socket load balancer** rewrites a native client's `connect(2)` to
 a ready backend, resolving numeric or named target ports against selected Pods or
-manually managed slices. There is no DNAT and no conntrack: the socket connects
+manually managed slices. It covers TCP and UDP. In the socket LB there is no DNAT
+and no conntrack: the socket connects
 directly to the real backend, so the return path needs no reverse translation.
 IPv4 and IPv6 `connect` hooks steer connected sockets, `sendmsg` hooks steer
 unconnected UDP `sendto(2)`, and `recvmsg` hooks restore the Service source address
@@ -97,6 +113,16 @@ holds each client's network namespace on one backend until the timeout passes or
 the Service's backend set changes. The reserved `default/kubernetes` Service
 describes the HTTPS API at `10.96.0.1:443`, with matching Endpoints and an
 EndpointSlice.
+
+SCTP ClusterIP traffic takes a separate path: the kernel never runs the
+`connect4` hook for SCTP sockets, so two TC classifiers on the client Pod's veth
+perform a DNAT-style rewrite of the IPv4 addresses, reusing the shared Service
+and backend maps and a small `gr8s-sctp-ct` conntrack map to restore the VIP as
+the reply source. Only addresses are rewritten, never ports — SCTP's CRC32c
+covers the transport header but not the IP header — so a Service whose
+`targetPort` differs from its `port` drops SCTP packets, as other eBPF
+dataplanes also require. See
+[`service-sctp-nat.lisp`](../src/network/service-sctp-nat.lisp).
 
 Before rewriting a socket, the program validates that the selected backend belongs
 to the requested Service. This prevents shared backend-slot repacking from sending
@@ -310,10 +336,16 @@ and preservation of the held connection's original TCP metadata. Its test client
 allows a longer receive deadline for the intentional interruption.
 
 `NodePort` and `LoadBalancer` Services allocate node ports from 30000–32767. The
-agent relays each in userspace, for TCP and UDP, with client-address affinity, so
-a Pod sees the node as the source; a port with no ready backends has no listener.
-No cloud controller assigns a LoadBalancer an address, and only `Cluster` traffic
-policies are accepted.
+agent relays each in userspace, for TCP, UDP, and SCTP, with client-address
+affinity; a port with no ready backends has no listener. `externalTrafficPolicy`
+accepts `Cluster` and `Local`, `internalTrafficPolicy` accepts `Local`, and
+`trafficDistribution` accepts `PreferClose`, `PreferSameZone`, and
+`PreferSameNode`. Under `Cluster` policy a Pod sees the node as the source;
+under `Local` the relay binds an `IP_TRANSPARENT` upstream socket to the
+client's address so the Pod sees the original client (TCP and UDP; it falls
+back to the node address without CAP_NET_ADMIN), and a Local LoadBalancer's
+`healthCheckNodePort` answers whether this node has ready endpoints. No cloud
+controller assigns a LoadBalancer an address.
 
 The API server proxies `services/[scheme:]name[:port]/proxy` to a ready backend,
 as it does for Pods, and keeps a proxied HTML page's rooted links inside the
@@ -468,8 +500,10 @@ filters, and an eBPF rate-limit fast path.
 Managed Pods receive directly routed veth pairs and `/32` addresses from
 persistent agent IPAM. The control plane assigns each node a distinct Pod CIDR
 within `10.80.0.0/12` and includes the network configuration in desired-state
-snapshots. The agent persists that assignment and restores IPAM before restarting
-reconciliation. containerd invokes only the `gr8s` CNI plugin, which sends typed
+snapshots. The ranges are configurable: `--cluster-pod-cidr` takes one or more
+comma-separated cluster pools (IPv6 CIDRs allowed), and `--node-pod-prefix` /
+`--node-pod-prefix-ipv6` set the per-node CIDR size carved from them. The agent
+persists that assignment and restores IPAM before restarting reconciliation. containerd invokes only the `gr8s` CNI plugin, which sends typed
 requests to the agent's private Unix socket. CNI ADD retains its durable lease
 through partial failures; DEL releases it only after removing policy and links.
 
@@ -636,6 +670,13 @@ cache is bounded and shared by the UDP and TCP listeners. Repeat
 domains; the longest matching zone wins, and repeated zones provide multiple
 upstreams. Other names continue to use the host's IPv4 resolvers.
 
+`--dns-serve-zone ZONE` (repeatable) serves an external zone authoritatively
+from each node's own address: an in-zone name matching a Gateway listener,
+HTTPRoute, or Ingress hostname resolves to that node's gateway address, an
+in-zone name that matches nothing is NXDOMAIN, and anything outside the zone is
+REFUSED — the listener is never an open forwarder. Point a static forward or NS
+delegation for the zone at the node addresses instead of running ExternalDNS.
+
 The kubelet `/metrics` endpoint includes query and response counters, cache hits
 and misses, upstream success and error counts, and forwarding duration. DNS is
 embedded in every native agent rather than deployed as Pods, so its lifecycle and
@@ -661,9 +702,13 @@ over immediately. A healthy optimization needs repeated proof and a material cos
 improvement. Endpoint changes are trialled without deleting the last-known-good
 path, require returned authenticated bytes and a fresh handshake, and roll back on
 failure. Selections, observations, MTU evidence, and bounded decision history are
-persisted across restart. `gr8s network explain NODE DESTINATION` resolves a
-sparse destination to its effective peer and prints both the topology decision
-(`direct-peer` or `sparse-next-hop`) and ranked endpoint evidence.
+persisted across restart. `gr8s network explain NODE PEER` takes two node names
+(DNS labels, not addresses), resolves the sparse-topology destination to its
+effective peer, and prints both the topology decision (`direct-peer` or
+`sparse-next-hop`) and ranked endpoint evidence. It authenticates through the
+kubeconfig like the other operator commands (`--kubeconfig PATH`, defaulting to
+`$KUBECONFIG` or `~/.kube/config`); `--server URL` bypasses that with an
+explicit endpoint.
 
 NATed nodes first establish authenticated sessions with the rendezvous point;
 the control plane exchanges the observed reflexive endpoints so both sides can
@@ -730,7 +775,10 @@ Useful kubelet metrics include:
 - `gr8s_wireguard_path_safe_mtu_bytes` and
   `gr8s_wireguard_telemetry_available`.
 
-The overlay is IPv4-only today. Sparse mode's threshold and 30-second gateway
+WireGuard endpoint candidates (`--wireguard-endpoint NAME=IPV4:PORT` and
+NAT-observed endpoints) are IPv4-only today; the VXLAN and WireGuard devices
+themselves carry IPv6 Pod CIDRs and enable IPv6 forwarding for them. Sparse
+mode's threshold and 30-second gateway
 stability interval are conservative fixed defaults rather than public tuning
 knobs. `scripts/test-wireguard-sparse-routing.sh` builds two independent gateways
 in disposable namespaces, invokes the production next-hop trial, removes the
@@ -786,6 +834,16 @@ assignments, and addresses.
 Nodes need underlay connectivity for the node endpoint and VXLAN UDP port 4789.
 Each agent receives its own Pod CIDR and the peer route set; no bridge or
 host-local CNI configuration is required.
+
+Cross-node traffic deliberately stays on the kernel's normal routing path, so an
+active firewalld could drop it. The agent programs a narrow, overlay-scoped set
+of ACCEPTs instead of trusting whole cluster CIDRs: the selected overlay device
+joins an ACCEPT zone (admitting decapsulated or decrypted traffic), this node's
+Pod CIDR becomes a zone source (admitting local Pod egress and forwarding in the
+NEW direction; conntrack admits the replies as ESTABLISHED), and the overlay's
+UDP port is admitted on the uplink. With no active firewalld nothing is
+programmed; every step is idempotent and fail-soft. See
+[`host-firewall.lisp`](../src/network/host-firewall.lisp).
 
 ## Telemetry
 

@@ -22,11 +22,18 @@ groups separate from one another and from builtin resources.
 Supported structural schemas apply recursive defaults and unknown-field pruning,
 including marked preserved subtrees. Validation covers types, required fields,
 enums, numeric/string/array/object bounds, patterns, nullable fields, logical
-constraints and map/set list identities. Unknown schema keywords, CEL and
-unsupported validation formats fail admission instead of being ignored.
+constraints and map/set list identities. `x-kubernetes-validations` CEL rules
+are typed against their schema at admission, refused when they do not compile or
+exceed upstream's estimated-cost limits, and enforced on every write with
+`self`/`oldSelf` under the per-rule and per-request cost budgets. Unknown schema
+keywords fail admission. A validation format outside the Kubernetes registry
+validates nothing upstream either, so it is admitted and ignored rather than
+refused.
 
 Served versions share object UIDs and one storage identity. Conversion strategy
-None changes the API version without transforming fields; each version's schema
+None changes the API version without transforming fields; strategy Webhook sends
+a ConversionReview to the definition's webhook over the admission transport,
+never under the store lock. Each version's schema
 controls its defaults, pruning and validation. Removing a stored version requires
 actual migration first. A declared status subresource isolates status writes from
 desired fields and preserves generation. Ordinary writes preserve status. CRD
@@ -41,12 +48,16 @@ after restart. Failed durable writes do not publish route or resource deletion.
 A definition can be recreated only
 after its previous instances have been removed.
 
-CEL, conversion webhooks, scale subresources, additional printer columns,
-custom field selectors, server-side
-apply, protobuf requests for unstructured custom objects, and protobuf OpenAPI
-v2 wire negotiation are not implemented. gr8s does not advertise these features.
-Unsupported executable schema and conversion
-features are rejected. The native kubectl smoke passes strict creation,
+The scale subresource serves autoscaling/v1 Scale reads and writes through each
+version's declared replica and selector paths, and appears in discovery.
+`additionalPrinterColumns` drive served Table output, with the default Age
+column when a version declares none. `selectableFields` admit up to eight scalar
+paths and serve custom field selectors, converting through the webhook when the
+request version requires it. Server-side apply
+(`application/apply-patch+yaml`) manages custom resources and their status with
+`managedFields` ownership. Typed apiextensions requests and the OpenAPI v2
+document negotiate protobuf; unstructured custom objects themselves require
+JSON, as upstream. The native kubectl smoke passes strict creation,
 real streamed watches, version identity, restart persistence and finalizer
 cleanup without disabling validation. Run it against a dumped executable with:
 

@@ -10,7 +10,9 @@ live-process debugging.
 and arm64 executables on Ubuntu 24.04 runners. Pushing a `v*` tag builds both
 architectures and publishes a GitHub release only after both builds succeed.
 Running the workflow manually builds the selected ref and uploads artifacts
-without publishing a release. Use a clean, committed ref for either path.
+without publishing a GitHub release; it still builds and pushes the
+`ghcr.io/atgreen/gr8s-net:latest` container image. Use a clean, committed ref
+for either path.
 
 Each build includes the pinned containerd/runc/CNI payload, the Headlamp
 dashboard, and collected third-party license notices. It checks the executable's
@@ -44,16 +46,17 @@ glibc 2.39 baseline. The embedded runtime payload is static, but the gr8s execut
 is not a fully static or musl build. Hosts also need the libzstd shared library and
 the kernel/runtime requirements below.
 
-The workflow pins SBCL, ocicl, and Headlamp source commits and the GitHub Actions
-used to build them. Runtime versions remain pinned in
+The workflow pins the SBCL and ocicl source commits and the GitHub Actions used
+to build them; the Headlamp dashboard is pinned as a container image digest
+(`HEADLAMP_IMAGE` in the Makefile). Runtime versions remain pinned in
 [`install-containerd.sh`](../scripts/install-containerd.sh), and Lisp versions in
 `ocicl.csv`. Update these pins deliberately when changing the release toolchain.
 
-To assemble the same assets locally, install the workflow's toolchain, configure
-ocicl, check out the pinned Headlamp source, and run:
+To assemble the same assets locally, install the workflow's toolchain (including
+podman or docker and `cpio` for the dashboard assets), configure ocicl, and run:
 
 ```sh
-HEADLAMP=/path/to/headlamp scripts/build-release.sh
+scripts/build-release.sh
 ```
 
 Artifacts appear in `build/release/`. The helper restores the pinned Lisp
@@ -78,13 +81,16 @@ Go, or JavaScript builds.
    fails unless `gr8s version` of the built binary equals the tag, and the tag
    must point at a clean, committed ref.
 4. After both architecture builds succeed, the workflow publishes the GitHub
-   release and the container image. Mark a trial with
-   `gh release edit TAG --prerelease`.
+   release and the container image. Every release is created as a pre-release
+   while gr8s is in trial; drop `--prerelease` in the workflow when cutting the
+   first stable release.
 
 ## Requirements
 
 Build on Linux with SBCL, ocicl, GNU Make, Git, Go, curl, CA certificates,
-GNU coreutils (`sha256sum`, `install`), awk, grep, and binutils (`readelf`). The
+GNU coreutils (`sha256sum`, `install`), awk, grep, binutils (`readelf`),
+podman or docker, and `cpio` (these extract the embedded dashboard assets,
+which `make native` hard-requires). The
 native payload build compiles containerd, its shim, and CNI plugins from pinned
 Go modules, and downloads a checksum-verified runc binary. It does not require
 clang or LLVM. The payload installer supports x86-64 and AArch64.
@@ -113,7 +119,7 @@ not an assertion that a fresh Fedora build has been acceptance-tested.
 
 ```sh
 sudo dnf install -y sbcl make gcc git golang curl ca-certificates \
-  coreutils gawk grep binutils python3 iproute util-linux nftables
+  coreutils gawk grep binutils podman cpio python3 iproute util-linux nftables
 ```
 
 Install [ocicl](https://github.com/ocicl/ocicl#installation), for example from
@@ -274,7 +280,7 @@ dumps straight into `build/gr8s` (no launcher script):
 ```sh
 make native
 build/gr8s --help
-build/gr8s runtime-assets
+build/gr8s runtime list
 ```
 
 Useful targets:
@@ -283,11 +289,14 @@ Useful targets:
 make containerd-bundle   build and verify containerd, runc, and CNI payloads
 make test                unit and HTTP tests
 make test-containerd     include live CRI/containerd integration tests
-make test-whistler-cni   build the eBPF object and test the Common Lisp CNI path
-make check               shell syntax checks plus tests
+make test-whistler-cni   build the containerd bundle, then run the test suite
+                         (covers the Common Lisp Whistler CNI path)
+make check               containerd bundle; unit, protocol-generation,
+                         BPF-fixture, install-lifecycle, and Gateway-runner
+                         tests; script syntax checks; verify-static-runtime.sh
 make smoke               build normally, then sudo the embedded-containerd smoke
 make run                 start the current server
-make kubeconfig          write a loopback kubeconfig
+make kubeconfig          write an HTTPS loopback kubeconfig for PORT (6443)
 make native              build the dumped SBCL executable
 make clean               remove build outputs
 ```
@@ -419,7 +428,8 @@ python3 scripts/test-podtemplates-sonobuoy.py \
   --certified-conformance --timeout 21600
 ```
 
-The runner preserves the official Sonobuoy archive, native and worker logs, and
+The runner launches a single `serve` process (which hosts the local agent) and
+preserves the official Sonobuoy archive, the native server log, and
 individual executed specs in its printed report directory. A passing result
 requires every selected spec to execute and pass; running it does not establish
 certification. `--image-archives DIRECTORY` stages preloaded images so specs don't
@@ -458,7 +468,7 @@ arbitrary code execution as the gr8s user, normally root.** It binds to
 `<state>/debug/slynk.secret` (because `hostNetwork` Pods share loopback); a
 connecting Emacs Sly client needs a matching `~/.sly-secret`.
 
-Forms can also be evaluated from a shell, in the `gr8s` package:
+Forms can also be evaluated from a shell, in the `gr8s.apiserver` package:
 
 ```sh
 scripts/gr8s-debug.py --port PORT --state-directory DIR '(debug-threads)'

@@ -36,10 +36,23 @@ atomic application snapshot. History series are omitted when no store is
 attached. Counters reset with the process. Restoring an application or starting
 a new watch epoch can reduce the history gauges.
 
-These metrics complement API server, scheduler, dataplane, and process metrics.
+These metrics complement API server, scheduler, dataplane, storage, gateway,
+and process metrics.
 The sections below cover Raft health, disk/inode capacity, datastore file
 growth, and reconciliation convergence. Each family describes a local
 observation with the sampling limits documented for that collector.
+
+The same `/metrics` response also carries families emitted by other collectors:
+`apiserver_flowcontrol_nominal_limit_seats{priority_level=...}` (nominal
+execution seats per PriorityLevelConfiguration),
+`apiserver_admission_webhook_fail_open_count{name=...,type=...}` (admission
+webhooks whose failure under `failurePolicy: Ignore` let a request through),
+the volume reclaim families `gr8s_volume_reclaim_failures_total`,
+`gr8s_volume_reclaim_waiting`, `gr8s_volume_reclaim_oldest_outstanding_seconds`
+and `gr8s_volume_reclaim_outstanding{node=...,lane=...}` (documented in
+[persistent storage](persistent-storage.md)), and
+`gr8s_gateway_requests_total{gateway=...,route=...,code=...}` (documented in
+[networking](networking.md)).
 
 ## Raft and checkpoint worker
 
@@ -64,7 +77,7 @@ quorum. A leader gauge of one alone is not proof that writes can commit.
 | `gr8s_raft_catchup_cache_limit_bytes` | Disk cache budget; omitted when disabled |
 | `gr8s_raft_catchup_cache_error` | One after a cache error, cleared by a successfully retained segment |
 | `gr8s_raft_peer_replication_lag_entries{peer=...}` | Leader's last index minus peer acknowledged match index; omitted on followers |
-| `gr8s_raft_peer_outbox_messages{peer=...}` | Queued plus sender-owned messages on each configured peer link |
+| `gr8s_raft_peer_outbox_messages{peer=...}` | Queued plus sender-owned messages on each retained peer link, configured or not |
 | `gr8s_compaction_completed_total` | Successful checkpoints through the local worker/manual worker API |
 | `gr8s_compaction_in_flight` | One while worker capture or publication is running |
 | `gr8s_compaction_error` | One while the worker retains an error since its last successful checkpoint |
@@ -122,7 +135,7 @@ measurements. All section labels emit zero before their first observation.
 All these families are gauges except the phase and member-lock observation,
 execution-time and GC-time totals and
 `gr8s_compaction_completed_total`, which are counters scoped to the control-plane instance. Peer labels use
-configured peer IDs; no command payloads or error messages are exposed. Peer series disappear
+peer link IDs; no command payloads or error messages are exposed. Peer series disappear
 when their links are removed. Replication lag reflects acknowledged log
 positions, not confirmed application convergence on that peer. An empty outbox
 can mean either a healthy idle peer or an unreachable peer whose latest attempt
@@ -150,8 +163,10 @@ successful write, quorum reachability, application convergence or readiness.
 
 Counters and timestamps reset on process restart or physical link replacement.
 A retained old link produces no receipt series while its member is outside the
-current configuration. If the same link is reused after readmission, its counter
-and last current-term receipt can remain. No per-message or object labels are
+current configuration, though its outbox and replication-lag series are still
+emitted: only the three receipt metrics are restricted to configured peers. If
+the same link is reused after readmission, its counter and last current-term
+receipt can remain. No per-message or object labels are
 allocated. Only local monotonic time is used; remote wall clocks are irrelevant.
 
 ## State filesystem capacity

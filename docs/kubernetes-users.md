@@ -27,8 +27,9 @@ These are responsibility mappings. They do not promise every upstream flag,
 extension, or operational behavior. See the [compatibility gaps](k3s-gap-inventory.md)
 and [conformance evidence](CONFORMANCE.md).
 
-The optional `gr8s dashboard` command serves an embedded Headlamp web UI and
-proxies the cluster API. See [dashboard setup](building-and-testing.md#optional-dashboard-assets).
+The `gr8s dashboard` command serves the embedded Headlamp web UI — always built
+into the binary — and proxies the cluster API. See
+[dashboard setup](building-and-testing.md#dashboard-assets).
 
 ## Processes and defaults
 
