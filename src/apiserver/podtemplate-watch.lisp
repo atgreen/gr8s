@@ -96,11 +96,12 @@ PAGE-READER and EVENT-READER replace the durable journal for separately stored r
     (let* ((out (hunchentoot:send-headers))
            (json-out (flexi-streams:make-flexi-stream out :external-format :utf-8))
            (deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second)))
+           (sink json-out)
            (last-bookmark (get-internal-real-time)))
       (labels ((write-event (event)
-                 (com.inuoe.jzon:stringify event :stream json-out)
-                 (write-char #\Newline json-out)
-                 (finish-output json-out))
+                 (com.inuoe.jzon:stringify event :stream sink)
+                 (write-char #\Newline sink)
+                 (finish-output sink))
                (emit (event)
                  (let ((view (crd-api-view (event-api-view event))))
                    (when (and *table-request* (not (equal "ERROR" (gethash "type" view))))
@@ -124,11 +125,26 @@ PAGE-READER and EVENT-READER replace the durable journal for separately stored r
             (progn
               (check-watch-store-access store)
               (when expired (error expired))
-              (dolist (event first-events) (emit event))
-              ;; client-go waits for this bookmark before trusting its initial state.
-              (when (and send-initial (true-parameter-p (hunchentoot:parameter "allowWatchBookmarks"))) (bookmark t))
-              ;; Flush headers even for an initially empty watch.
-              (finish-output out)
+              ;; Rendering the initial state reads the store; sending it does not, and
+              ;; takes as long as the client likes. A watch stuck in that write cannot
+              ;; notice a checkpoint waiting for its lease, so it is rendered first and
+              ;; sent without the lease.
+              (let ((initial-state
+                      (flexi-streams:with-output-to-sequence (octets)
+                        (setf sink (flexi-streams:make-flexi-stream octets :external-format :utf-8))
+                        (unwind-protect
+                             (progn
+                               (dolist (event first-events) (emit event))
+                               ;; client-go waits for this bookmark before trusting its initial state.
+                               (when (and send-initial (true-parameter-p (hunchentoot:parameter "allowWatchBookmarks")))
+                                 (bookmark t)))
+                          (setf sink json-out)))))
+                (setf first-events nil)
+                (gr8s.store::call-with-store-request-suspended
+                 (lambda ()
+                   (write-sequence initial-state out)
+                   ;; Flush headers even for an initially empty watch.
+                   (finish-output out))))
               (loop while (and (< (get-internal-real-time) deadline)
                                (not (api-watch-client-departed-p)))
                     do (check-watch-store-access store)

@@ -298,3 +298,96 @@
         (gr8s.store::quiesce-store-access store :timeout 5 :brief t)
         (gr8s.store::resume-store-access store))
       (is (null (search "still waiting" (get-output-stream-string report)))))))
+
+(test a-request-sending-its-response-does-not-hold-up-a-checkpoint
+  ;; Sending a response reads nothing from the store and lasts as long as the
+  ;; client takes to read it.
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (flet ((sending-request (sending finish)
+             "Start a request that suspends its lease to send; return (thread . results)."
+             (let ((results (list nil)))
+               (cons (bt:make-thread
+                      (lambda ()
+                        (setf (car results)
+                              (handler-case
+                                  (gr8s.store::call-with-store-request
+                                   store (lambda ()
+                                           (gr8s.store::call-with-store-request-suspended
+                                            (lambda ()
+                                              (bt:signal-semaphore sending)
+                                              (bt:wait-on-semaphore finish :timeout 10)))
+                                           ;; Back under the lease: the store can be read again.
+                                           (list-pods store nil)
+                                           (gr8s.store::pod-store-active-requests store)))
+                                (gr8s.model::kubernetes-error (condition)
+                                  (gr8s.model::kubernetes-error-status-code condition))))))
+                     results))))
+      ;; A checkpoint runs to completion while the request is sending.
+      (let* ((sending (bt:make-semaphore)) (finish (bt:make-semaphore))
+             (request (sending-request sending finish)))
+        (is-true (bt:wait-on-semaphore sending :timeout 5))
+        (is (zerop (gr8s.store::pod-store-active-requests store)))
+        (is (eq store (gr8s.store::quiesce-store-access store :timeout 0 :brief t)))
+        (gr8s.store::resume-store-access store)
+        (bt:signal-semaphore finish)
+        (bt:join-thread (car request))
+        (is (eql 1 (cadr request)) "the request holds its lease again once it has sent")
+        (is (zerop (gr8s.store::pod-store-active-requests store))))
+      ;; A restore that began meanwhile ends the request instead of readmitting it.
+      (let* ((sending (bt:make-semaphore)) (finish (bt:make-semaphore))
+             (request (sending-request sending finish)))
+        (is-true (bt:wait-on-semaphore sending :timeout 5))
+        (is (eq store (gr8s.store::quiesce-store-access store :timeout 0)))
+        (bt:signal-semaphore finish)
+        (bt:join-thread (car request))
+        (is (eql 503 (cadr request)))
+        (is (zerop (gr8s.store::pod-store-active-requests store)))
+        (gr8s.store::resume-store-access store))
+      ;; A request that gave its lease up for good is not handed one back.
+      (is (zerop (gr8s.store::call-with-store-request
+                  store (lambda ()
+                          (gr8s.store::release-store-request)
+                          (gr8s.store::call-with-store-request-suspended (lambda () nil))
+                          (gr8s.store::pod-store-active-requests store)))))))
+  (is (eq :sent (gr8s.store::call-with-store-request-suspended (lambda () :sent)))
+      "outside a request the function is simply called"))
+
+(test a-watch-sending-its-initial-state-to-a-slow-client-does-not-hold-up-a-checkpoint
+  ;; Lab, 2026-11-19: kube-state-metrics watched all Secrets over a 2 MB/s link.
+  ;; Six megabytes of Helm releases took three seconds to send, and a checkpoint
+  ;; waited for all of it.
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (let ((count 16))
+      (dotimes (index count)
+        (gr8s.resources::create-core-resource
+         store "configmaps"
+         (configmap-input (format nil "large-~D" index) "k" (make-string 900000 :initial-element #\x))
+         "default"))
+      (let ((server (start-http-test-server :store store :runtime (make-fake-runtime))))
+        (unwind-protect
+             (sb-sys:with-deadline (:seconds 60)
+               (multiple-value-bind (stream code)
+                   (drakma:http-request
+                    (format nil "http://127.0.0.1:~D/api/v1/namespaces/default/configmaps" *http-test-port*)
+                    :want-stream t
+                    :parameters '(("watch" . "true") ("resourceVersion" . "0") ("timeoutSeconds" . "300")))
+                 (unwind-protect
+                      (progn
+                        (is (= 200 code))
+                        ;; The client has read nothing; the server is mid-send.
+                        (is (eq store (gr8s.store::quiesce-store-access store :timeout 2 :brief t))
+                            "the checkpoint does not wait for the client to read")
+                        (gr8s.store::resume-store-access store)
+                        (dotimes (index count)
+                          (is (equal "ADDED" (gethash "type" (read-template-watch-event stream)))))
+                        ;; The watch took its lease back and goes on reporting changes.
+                        (gr8s.resources::create-core-resource
+                         store "configmaps" (configmap-input "afterwards" "k" "v") "default")
+                        (let ((event (read-template-watch-event stream)))
+                          (is (equal "ADDED" (gethash "type" event)))
+                          (is (equal "afterwards"
+                                     (gethash "name" (gethash "metadata" (gethash "object" event)))))))
+                   (close stream))))
+          (stop-server server))))))
