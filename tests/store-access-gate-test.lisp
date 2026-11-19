@@ -267,3 +267,34 @@
       (is (zerop (gr8s.store::pod-store-active-requests store)) "the lease is given back once, not twice")
       (gr8s.store::resume-store-access store)))
   (is (null (gr8s.store::release-store-request)) "outside a request there is nothing to release"))
+
+(test a-slow-drain-names-the-requests-it-waits-on
+  ;; The store is closed to everyone while a checkpoint drains, so a drain that
+  ;; takes seconds has to say whose request it was waiting for.
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (let* ((entered (bt:make-semaphore))
+           (request (bt:make-thread
+                     (lambda ()
+                       (let ((gr8s.store::*store-request-description* "PATCH /apis/example/slow"))
+                         (gr8s.store::call-with-store-request
+                          store (lambda () (bt:signal-semaphore entered) (sleep 0.6)))))))
+           (report (make-string-output-stream)))
+      (is-true (bt:wait-on-semaphore entered :timeout 5))
+      (let ((gr8s.store::*store-drain-report-seconds* 0.2)
+            (*error-output* report))
+        (is (eq store (gr8s.store::quiesce-store-access store :timeout 5 :brief t))))
+      (bt:join-thread request)
+      (gr8s.store::resume-store-access store)
+      (let ((text (get-output-stream-string report)))
+        (is (search "drain still waiting" text))
+        (is (search "1 request active: PATCH /apis/example/slow" text) "the holder is named")
+        (is (= 1 (count-if (lambda (line) (search "still waiting" line))
+                           (uiop:split-string text :separator '(#\Newline))))
+            "it is said once, not on every wake-up")))
+    ;; A drain that finishes promptly says nothing extra.
+    (let ((report (make-string-output-stream)))
+      (let ((*error-output* report))
+        (gr8s.store::quiesce-store-access store :timeout 5 :brief t)
+        (gr8s.store::resume-store-access store))
+      (is (null (search "still waiting" (get-output-stream-string report)))))))

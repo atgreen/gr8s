@@ -119,6 +119,11 @@ store lock. What a failed drain names (podster-urj)."
     (mapcar (lambda (row) (format nil "~A (~Ds)" (first row) (second row)))
             (sort rows #'> :key #'second))))
 
+(defparameter *store-drain-report-seconds* 1
+  "Say which requests a drain is waiting on once it has waited this long. The
+store is closed to everyone for as long as the drain lasts, and node leases run
+out after fifteen seconds of it.")
+
 (defun quiesce-store-access (store &key (timeout 30) brief)
   "Reject new access and drain routed requests before a caller attempts live reload.
 BRIEF marks a checkpoint's quiesce, which reopens in a moment: new requests wait
@@ -132,7 +137,8 @@ Timeout or failure before draining reopens access; no application data is change
   (format *error-output* "~&gr8s: blocking application store access for restore/checkpoint (drain <= ~Ds).~%"
           (round timeout))
   (let ((deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second)))
-        (slow (+ (get-internal-real-time) (* 5 internal-time-units-per-second)))
+        (slow (+ (get-internal-real-time)
+                 (* *store-drain-report-seconds* internal-time-units-per-second)))
         (drained nil) (blocked nil))
     (unwind-protect
          (bt:with-lock-held ((pod-store-lock store))
@@ -154,11 +160,12 @@ Timeout or failure before draining reopens access; no application data is change
                (when (and slow (> (get-internal-real-time) slow))
                  (setf slow nil)
                  (format *error-output*
-                         "~&gr8s: application drain still waiting after 5s; ~D request~:P active:~{ ~A~^;~}~%"
+                         "~&gr8s: application drain still waiting after ~Ds; ~D request~:P active:~{ ~A~^;~}~%"
+                         (round *store-drain-report-seconds*)
                          (pod-store-active-requests store)
                          (describe-active-store-requests-unlocked store)))
                (bt:condition-wait (pod-store-access-condition store) (pod-store-lock store)
-                                  :timeout (min 1d0 (float remaining 1d0)))))
+                                  :timeout (min 1/4 (float remaining 1d0)))))
            (setf (pod-store-access-blocked store) :blocked drained t)
            store)
       (when (and blocked (not drained))
