@@ -169,3 +169,70 @@
                         (gr8s.store::resume-store-access store))
                    (close stream)))))
         (stop-server server)))))
+
+(defun store-request-outcome (store)
+  "Run one leased request against STORE; return :SERVED or the status code it was refused with."
+  (handler-case (gr8s.store::call-with-store-request store (lambda () :served))
+    (gr8s.model::kubernetes-error (condition)
+      (gr8s.model::kubernetes-error-status-code condition))))
+
+(test a-request-waits-out-a-checkpoint-quiesce-and-is-served
+  ;; Helm does not retry a 503, so a write that lands in a checkpoint must not get one.
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (gr8s.store::quiesce-store-access store :timeout 0 :brief t)
+    (let* ((outcome nil)
+           (request (bt:make-thread (lambda () (setf outcome (store-request-outcome store))))))
+      (sleep 0.2)
+      (is (null outcome) "the request is held while the checkpoint has the store")
+      (gr8s.store::resume-store-access store)
+      (bt:join-thread request)
+      (is (eq :served outcome)))))
+
+(test a-request-is-not-held-for-a-restore
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (gr8s.store::quiesce-store-access store :timeout 0)
+    (let ((start (get-internal-real-time)))
+      (is (eql 503 (store-request-outcome store)) "a store closed for a restore fails closed")
+      (is (< (- (get-internal-real-time) start) internal-time-units-per-second)))
+    ;; A checkpoint that hands its gate to a restore stops holding requests too.
+    (bt:with-lock-held ((gr8s.store::pod-store-lock store))
+      (setf (gr8s.store::pod-store-access-block-brief-p store) t))
+    (let* ((outcome nil)
+           (request (bt:make-thread (lambda () (setf outcome (store-request-outcome store))))))
+      (sleep 0.2)
+      (is (null outcome))
+      (gr8s.store::end-brief-store-quiesce store)
+      (bt:join-thread request)
+      (is (eql 503 outcome)))
+    (gr8s.store::resume-store-access store)))
+
+(test a-checkpoint-quiesce-that-outlasts-patience-asks-the-client-to-retry
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (gr8s.store::quiesce-store-access store :timeout 0 :brief t)
+    (let ((gr8s.store::*store-quiesce-patience-seconds* 0.2))
+      (is (eql 429 (store-request-outcome store))))
+    (gr8s.store::resume-store-access store)))
+
+(test an-http-request-waits-out-a-checkpoint-from-its-first-store-read
+  ;; A request reads the store to be classified for flow control before it is
+  ;; routed. That read was unleased and was refused while a checkpoint had the
+  ;; store: four GETs in a row on the lab, during one two-second quiesce.
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (let ((server (start-http-test-server :store store :runtime (make-fake-runtime))))
+      (unwind-protect
+           (progn
+             (gr8s.store::quiesce-store-access store :timeout 0 :brief t)
+             (let* ((status nil)
+                    (client (bt:make-thread
+                             (lambda ()
+                               (setf status (nth-value 1 (request "/api/v1/namespaces/default/pods")))))))
+               (sleep 0.3)
+               (is (null status) "the request is held, not refused, while the checkpoint has the store")
+               (gr8s.store::resume-store-access store)
+               (bt:join-thread client)
+               (is (eql 200 status))))
+        (stop-server server)))))

@@ -247,3 +247,22 @@
         (when agent-thread (ignore-errors (bt:join-thread agent-thread)))
         (when configured (gr8s.apiserver::stop-node-grpc-server configured))
         (gr8s.apiserver::stop-node-grpc-server survivor)))))
+
+(test a-checkpoint-does-not-make-the-leader-deny-being-one
+  ;; A write that lands in a checkpoint must reach the store and wait there, not
+  ;; be answered "No Raft leader is currently available".
+  (with-temporary-store (store path)
+    (values path)
+    (let* ((node (cl-raft::make-raft-node :id "cp1" :role :leader))
+           (member (gr8s.raft.transport::make-raft-member :node node))
+           (hcp (gr8s.ha::make-ha-control-plane :member member :store store)))
+      (is-true (gr8s.ha::ha-control-plane-leader-status hcp))
+      (unwind-protect
+           (progn
+             (gr8s.store::quiesce-store-access store :timeout 0)
+             (is-false (gr8s.ha::ha-control-plane-leader-status hcp)
+                       "while its application is being restored it routes nothing")
+             (setf (gr8s.ha::ha-control-plane-compaction-quiescing hcp) t)
+             (is-true (gr8s.ha::ha-control-plane-leader-status hcp)
+                      "during its own checkpoint it is still the leader"))
+        (setf (gr8s.store::pod-store-access-blocked store) nil)))))

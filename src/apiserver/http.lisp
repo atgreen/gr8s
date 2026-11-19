@@ -85,7 +85,10 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
 
 (defun kubernetes-error-response (error)
   "Render ERROR, a kubernetes-error, as a Kubernetes Status of kind Failure,
-   carrying its reason, message, status code, and details."
+   carrying its reason, message, status code, and details. A 429 tells the
+   client when to come back, which is what makes client-go retry it."
+  (when (and (eql 429 (kubernetes-error-status-code error)) (boundp 'hunchentoot:*reply*))
+    (setf (hunchentoot:header-out "Retry-After") "1"))
   (status-response "Failure"
                    (kubernetes-error-reason error)
                    (kubernetes-error-message error)
@@ -1425,7 +1428,9 @@ PATH overrides the routed path, which lets the dashboard proxy re-dispatch a
             (*crd-field-validation* (crd-request-field-validation)))
         (let ((*flowcontrol-request-level*
                 (if (and store (not *authenticated-api-identity*))
-                    (flowcontrol-note-request store (request-api-identity) path method)
+                    (call-with-brief-store-access
+                     store path
+                     (lambda () (flowcontrol-note-request store (request-api-identity) path method)))
                     *flowcontrol-request-level*)))
           (check-request-timeout-parameter)
           (multiple-value-bind (*table-request* *table-api-version*) (negotiate-table-request)
@@ -1448,6 +1453,16 @@ itself hold a request lease the drain then waits on (podster-urj)."
   (and path
        (cl-ppcre:scan "^/apis/gr8s[.]io/v1/(nodes|controlplanemembers)/[^/]+/slynk$" path)
        t))
+
+(defun call-with-brief-store-access (store path function)
+  "Call FUNCTION, which reads STORE on a request's way in, under a lease of its
+own. The request's own lease is not taken until it is routed, and classifying it
+for flow control reads the store before that: unleased, the read was refused
+outright while a checkpoint had the store, where a lease waits the checkpoint
+out (podster-j76). A debug tunnel takes no lease anywhere."
+  (if (store-lease-exempt-path-p path)
+      (funcall function)
+      (gr8s.store::call-with-store-request store function)))
 
 (defun route-http-request (store runtime reconciler path method)
   "Hold an application access lease across the complete routed request, naming
