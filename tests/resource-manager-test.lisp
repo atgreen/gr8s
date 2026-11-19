@@ -4,11 +4,11 @@
 (def-suite resource-manager :in gr8s)
 (in-suite resource-manager)
 
-(defun rm-test-topology ()
+(defun rm-test-topology (&key (memory (* 1024 1024 1024)) (second-node-cpus #(2 3)))
   (gr8s.resources::core-object "online" #(0 1 2 3) "cpus" (gr8s.resources::core-object)
-    "nodes" (vector (gr8s.resources::core-object "id" 0 "cpus" #(0 1) "memory" (* 1024 1024 1024)
+    "nodes" (vector (gr8s.resources::core-object "id" 0 "cpus" #(0 1) "memory" memory
                                       "hugepages" (gr8s.resources::core-object "hugepages-2Mi" "0"))
-                     (gr8s.resources::core-object "id" 1 "cpus" #(2 3) "memory" (* 1024 1024 1024)
+                     (gr8s.resources::core-object "id" 1 "cpus" second-node-cpus "memory" memory
                                       "hugepages" (gr8s.resources::core-object "hugepages-2Mi" "67108864")))))
 
 (defun rm-test-container (name cpu &optional (memory "32Mi") device)
@@ -308,3 +308,20 @@
         (finishes (gr8s.kubelet::prepare-node-pod-resources manager new))
         (is-false (gethash (pod-uid old) (gr8s.kubelet::node-resource-manager-allocations manager)))
         (is (equalp #(1 2) (gethash "cpus" (gethash (pod-uid new) (gr8s.kubelet::node-resource-manager-allocations manager)))))))))
+
+(test a-reboot-that-reports-slightly-less-memory-keeps-its-reservations
+  ;; The kernel's MemTotal moves by a few kB between boots of the same machine.
+  (with-temporary-store (store path)
+    (declare (ignore store))
+    (flet ((restore (&rest topology-options)
+             (gr8s.kubelet::make-node-resource-manager
+              path :policy "static" :topology-policy "single-numa-node" :reserved-cpus "0"
+                   :topology (apply #'rm-test-topology topology-options))))
+      (let ((pod (rm-test-pod "pinned" (list (rm-test-container "main" "2")))))
+        (gr8s.kubelet::prepare-node-pod-resources (restore) pod)
+        (let ((restored (restore :memory (- (* 1024 1024 1024) 16384))))
+          (is (equal '(2 3) (coerce (gethash "cpus" (gethash (pod-uid pod) (gr8s.kubelet::node-resource-manager-allocations restored)))
+                                    'list))))
+        ;; What reservations do depend on still refuses to start.
+        (signals error (restore :second-node-cpus #(3)))
+        (signals error (restore :memory (* 16 1024 1024)))))))
