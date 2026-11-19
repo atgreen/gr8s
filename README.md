@@ -352,6 +352,22 @@ cluster needs no Raft configuration. See
 [High availability](docs/high-availability.md) for membership and durability
 guarantees. See [Design](docs/design.md) for component boundaries.
 
+## miniwit — a tiny third Raft vote
+
+[`miniwit`](miniwit/) is a tiny Go program with minimal memory, CPU, and
+storage needs. You run two full gr8s master nodes plus miniwit as the third
+Raft-cluster participant: it provides the deciding vote for leader election and
+split-brain scenarios without running the control-plane dataplane. It never
+campaigns, so it cannot become leader — it only grants votes, acknowledges
+AppendEntries, and tracks the Raft log boundary for quorum.
+
+miniwit is a self-contained Go module (its own `go.mod`, independent of the
+Lisp build) that speaks gr8s's `RaftTransport` gRPC/mTLS protocol — enroll,
+join, follow. It cross-compiles to a single static FreeBSD/amd64 binary, so it
+is small enough to run on a home router (pfSense). See
+[`miniwit/README.md`](miniwit/README.md) for the protocol, flags, and build and
+enroll/join instructions.
+
 ## Networking and security
 
 [Whistler](https://github.com/atgreen/Whistler) is the embedded Lisp-to-eBPF
