@@ -1808,12 +1808,14 @@ socket are released rather than leaked. Safe to call more than once."
       (setf (node-grpc-server-topology-decisions server)
             (subseq (node-grpc-server-topology-decisions server) 0 128)))))
 
-(defun reconcile-node-heartbeats (server now)
-  "Expire failed leases, update stable transit admission, and republish topology."
+(defun reconcile-node-heartbeats (server now &key (expire-leases t))
+  "Expire failed leases when EXPIRE-LEASES, update stable transit admission, and
+   republish topology."
   (let* ((expired
-           (expire-node-heartbeats
-            (node-grpc-server-store server)
-            (- now (node-grpc-server-heartbeat-timeout-seconds server)) :now now))
+           (when expire-leases
+             (expire-node-heartbeats
+              (node-grpc-server-store server)
+              (- now (node-grpc-server-heartbeat-timeout-seconds server)) :now now)))
          (stable (stable-transit-node-names server now))
          (added nil)
          (removed nil))
@@ -1826,6 +1828,10 @@ socket are released rather than leaked. Safe to call more than once."
         (clrhash previous)
         (dolist (name stable) (setf (gethash name previous) t))))
     (dolist (node expired)
+      (format *error-output* "gr8s: node ~A lease expired~@[ ~Ds after its last heartbeat~]; marked not ready~%"
+              (node-record-name node)
+              (and (gr8s.model::node-record-last-heartbeat node)
+                   (- now (gr8s.model::node-record-last-heartbeat node))))
       (note-topology-decision
        server now (node-record-name node) :lease-expired
        "lease expired; removed from destinations and transit immediately"))
@@ -1843,13 +1849,39 @@ socket are released rather than leaked. Safe to call more than once."
       (refresh-node-peer-topology server ""))
     expired))
 
+(defun node-heartbeats-recordable-since (server recordable-since now)
+  "When this member last became able to record heartbeats without a break, given
+   that it was RECORDABLE-SINCE at the previous look: NOW if it has just become
+   able, NIL while it cannot. Only the member that admits node sessions sees
+   heartbeats, and not while its store is closed."
+  (let ((store (node-grpc-server-store server)))
+    (if (and (node-sessions-admitted-p server)
+             (not (and store (gr8s.store::store-access-blocked-p store))))
+        (or recordable-since now)
+        nil)))
+
+(defun node-leases-judgeable-p (recordable-since now timeout)
+  "Whether a lease found expired at NOW can be held against its node: only once
+   this member has been able to record heartbeats for a whole lease TIMEOUT. A
+   follower never sees them, and a leader whose store was closed for a long
+   checkpoint, or that was elected a moment ago, has not been listening long
+   enough to know a node is gone (podster-htq)."
+  (and recordable-since (>= (- now recordable-since) timeout)))
+
 (defun monitor-node-heartbeats (server)
   "Until SERVER is stopping, every 50ms expire node leases past the heartbeat
    timeout and evict sessions that have gone silent."
-  (loop until (node-grpc-server-stopping-p server)
+  (loop with recordable-since = nil
+        until (node-grpc-server-stopping-p server)
         do (evict-inadmissible-node-sessions server)
            (let ((now (funcall (node-grpc-server-clock server))))
-             (handler-case (reconcile-node-heartbeats server now)
+             (setf recordable-since (node-heartbeats-recordable-since server recordable-since now))
+             (handler-case
+                 (reconcile-node-heartbeats
+                  server now
+                  :expire-leases (node-leases-judgeable-p
+                                  recordable-since now
+                                  (or (node-grpc-server-heartbeat-timeout-seconds server) 0)))
                (kubernetes-error (condition)
                  ;; A renewed lease may win consensus while this member's
                  ;; expiry is in flight. Retry from committed state next tick;

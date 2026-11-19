@@ -15,6 +15,11 @@ the Kubernetes API version with a gr8s release suffix (see
   lists no longer include witnesses, which have no node listener, and a session
   dial gives up after ten seconds instead of the kernel's two minutes
   (podster-htq).
+- Only the member that hears a node's heartbeats expires its lease, and only
+  after listening for a whole lease period. Heartbeat renewals are not
+  replicated, so a follower saw every ready node with a long-expired lease,
+  marked it not ready, and that write overrode the leader's fresh record until
+  the next heartbeat: nodes flapped NotReady every few seconds (podster-htq).
 - A member that refuses a node session because it is not the leader now names
   the members that can admit it, and the agent goes there. An agent started
   with one `--server`, or a member's own agent started before the others

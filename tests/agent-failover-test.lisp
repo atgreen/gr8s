@@ -178,3 +178,26 @@
     (gr8s.apiserver::call-once-store-is-available
      (lambda () (error 'kubernetes-error :status-code 503 :reason "ServiceUnavailable" :message "still"))
      :patience 0.05 :pause 0.01)))
+
+(test a-lease-is-judged-only-by-a-member-that-could-hear-the-heartbeats
+  ;; Not at all while it cannot record them (a follower, a closed store) ...
+  (is-false (gr8s.apiserver::node-leases-judgeable-p nil 100 15))
+  ;; ... and not until it has been listening for a whole lease: a new leader, or
+  ;; one whose store a long checkpoint just reopened.
+  (is-false (gr8s.apiserver::node-leases-judgeable-p 90 100 15))
+  (is-true (gr8s.apiserver::node-leases-judgeable-p 85 100 15))
+  (with-temporary-store (store path)
+    (values path)
+    (let ((admitted t)
+          (server (gr8s.apiserver::start-node-grpc-server
+                   store :host "127.0.0.1" :port 0 :heartbeat-timeout-seconds 15)))
+      (unwind-protect
+           (progn
+             (setf (gr8s.apiserver::node-grpc-server-session-admission-fn server)
+                   (lambda () admitted))
+             (is (= 100 (gr8s.apiserver::node-heartbeats-recordable-since server nil 100)))
+             (is (= 100 (gr8s.apiserver::node-heartbeats-recordable-since server 100 107)))
+             (setf admitted nil)
+             (is (null (gr8s.apiserver::node-heartbeats-recordable-since server 100 108))
+                 "a member that stops admitting sessions starts over when it resumes"))
+        (gr8s.apiserver::stop-node-grpc-server server)))))
