@@ -247,9 +247,14 @@ checkpoint and have to find the leader again (podster-htq)."
            (not (gr8s.store::store-access-blocked-p (ha-control-plane-store hcp))))))
 
 (defun ha-control-plane-leader-status (hcp)
-  "Return leader routing only after this member's application recovery gate opens."
+  "Return leader routing only after this member's application recovery gate opens.
+A leader's own checkpoint closes the gate for a moment without making it any
+less the leader: a write that arrives then is routed here and waits at the
+store, rather than being told there is no leader (podster-j76)."
   (cond ((null hcp) (values t nil))
-        ((gr8s.store::store-access-blocked-p (ha-control-plane-store hcp)) (values nil nil))
+        ((and (gr8s.store::store-access-blocked-p (ha-control-plane-store hcp))
+              (not (ha-control-plane-compaction-quiescing hcp)))
+         (values nil nil))
         (t (values (raft-member-leader-p (ha-control-plane-member hcp))
                    (raft-member-leader-api-url (ha-control-plane-member hcp))))))
 
