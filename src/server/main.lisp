@@ -1097,14 +1097,14 @@ offline and takes effect the next time the node agent starts."
     options))
 
 (defun parse-network-options (arguments)
-  "Parse `gr8s network explain NODE PEER [--server URL]'."
+  "Parse `gr8s network explain NODE PEER [--kubeconfig PATH | --server URL]'."
   (unless (string= (first arguments) "explain")
     (error "unknown network subcommand: ~A" (or (first arguments) "")))
   (unless (and (second arguments) (third arguments))
     (error "network explain requires NODE and PEER"))
   (let ((options (list :command :network-explain
                        :node (second arguments) :peer (third arguments)
-                       :server "http://127.0.0.1:8080"))
+                       :kubeconfig (default-client-kubeconfig)))
         (arguments (cdddr arguments)))
     (unless (and (dns-label-p (getf options :node))
                  (dns-label-p (getf options :peer)))
@@ -1115,47 +1115,48 @@ offline and takes effect the next time the node agent starts."
                ((string= option "--server")
                 (setf (getf options :server) (option-value arguments option)
                       arguments (cddr arguments)))
+               ((string= option "--kubeconfig")
+                (setf (getf options :kubeconfig) (option-value arguments option)
+                      arguments (cddr arguments)))
                (t (error "unknown network explain option: ~A" option))))
     options))
 
 (defun print-network-explanation (options &optional (output *standard-output*))
-  "Fetch and print one agent's durable path decision and candidate evidence."
-  (multiple-value-bind (body status)
-      (drakma:http-request
-       (format nil "~A/gr8s/v1/network/explain?node=~A&peer=~A"
-               (string-right-trim "/" (getf options :server))
-               (getf options :node) (getf options :peer))
-       :method :get :proxy nil)
-    (let ((body-text
-            (etypecase body
-              (string body)
-              ((array (unsigned-byte 8) (*))
-               (trivial-utf-8:utf-8-bytes-to-string body)))))
-    (unless (= status 200)
-      (error "network explain failed with HTTP ~D: ~A" status
-             body-text))
-    (let* ((object (com.inuoe.jzon:parse
-                    body-text))
-           (selected (gethash "selected" object)))
-      (format output "Node ~A → peer ~A~%" (getf options :node) (gethash "peerID" object))
-      (when (gethash "destinationPeerID" object)
-        (format output "Topology: destination ~A via ~A (~A)~%"
-                (gethash "destinationPeerID" object)
-                (gethash "nextHopPeerID" object)
-                (gethash "topologyReason" object)))
-      (format output "Selected: ~A (~A:~D), reason: ~A~%"
-              (gethash "name" selected) (gethash "address" selected)
-              (gethash "port" selected) (gethash "reason" object))
-      (loop for candidate across (gethash "candidates" object #())
-            do (format output "  ~A ~A:~D  ~:[unhealthy~;healthy~]  score=~D  handshake-age=~Ds  successes=~D failures=~D~%"
-                       (gethash "name" candidate) (gethash "address" candidate)
-                       (gethash "port" candidate) (gethash "healthy" candidate)
-                       (gethash "score" candidate)
-                       (gethash "handshakeAgeSeconds" candidate)
-                       (gethash "consecutiveSuccesses" candidate)
-                       (gethash "consecutiveFailures" candidate)))))
-    (finish-output output))
-  0)
+  "Fetch and print one agent's durable path decision and candidate evidence.
+Authenticates through the kubeconfig like the other operator commands;
+--server bypasses it for an explicit endpoint, such as a test server."
+  (flet ((explain (config)
+           (multiple-value-bind (object status)
+               (debug-api-request-json
+                config "GET"
+                (format nil "/gr8s/v1/network/explain?node=~A&peer=~A"
+                        (getf options :node) (getf options :peer)))
+             (unless (= status 200)
+               (error "network explain failed: ~A"
+                      (member-api-error-message object status)))
+             (let ((selected (gethash "selected" object)))
+               (format output "Node ~A → peer ~A~%" (getf options :node) (gethash "peerID" object))
+               (when (gethash "destinationPeerID" object)
+                 (format output "Topology: destination ~A via ~A (~A)~%"
+                         (gethash "destinationPeerID" object)
+                         (gethash "nextHopPeerID" object)
+                         (gethash "topologyReason" object)))
+               (format output "Selected: ~A (~A:~D), reason: ~A~%"
+                       (gethash "name" selected) (gethash "address" selected)
+                       (gethash "port" selected) (gethash "reason" object))
+               (loop for candidate across (gethash "candidates" object #())
+                     do (format output "  ~A ~A:~D  ~:[unhealthy~;healthy~]  score=~D  handshake-age=~Ds  successes=~D failures=~D~%"
+                                (gethash "name" candidate) (gethash "address" candidate)
+                                (gethash "port" candidate) (gethash "healthy" candidate)
+                                (gethash "score" candidate)
+                                (gethash "handshakeAgeSeconds" candidate)
+                                (gethash "consecutiveSuccesses" candidate)
+                                (gethash "consecutiveFailures" candidate)))))))
+    (if (getf options :server)
+        (explain (list :server (getf options :server)))
+        (call-with-debug-kubeconfig (getf options :kubeconfig) #'explain))
+    (finish-output output)
+    0))
 
 (defun rotate-wireguard-node-key (options &optional (output *standard-output*))
   "Replace the durable node-local WireGuard identity and print its public key.
@@ -3255,7 +3256,8 @@ Keep this process running. In another terminal:
 The kubeconfig is owner-only. Use the actual installation's state directory,
 kubeconfig, namespace, and endpoints in all examples. Without an explicit state
 directory, gr8s uses $XDG_STATE_HOME/gr8s or ~/.local/state/gr8s; sudo can change
-that home. The default API is loopback port 8080; the agent supervisor uses 7443.
+that home. The default API is HTTPS on all interfaces, port 6443; the agent
+supervisor uses 7443.
 An agent's --server HOST:PORT is the supervisor, not the Kubernetes API URL.
 `--runtime fake` is for development and does not prove real container/BPF health.
 

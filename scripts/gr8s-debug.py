@@ -6,7 +6,7 @@
 Speaks just enough of the Slynk protocol for scripted use: each message is six hex
 digits giving its UTF-8 byte length, then an s-expression. The first message must
 be the bare session secret from <state>/debug/slynk.secret. Each FORM is evaluated by
-gr8s::debug-eval in the GR8S package, for example:
+gr8s.apiserver::debug-eval in the GR8S.APISERVER package, for example:
 
     gr8s-debug.py --port 4005 --state-directory DIR '(debug-threads)'
     gr8s-debug.py --port 4005 --state-directory DIR '(debug-pod "default" "web")'
@@ -65,8 +65,8 @@ def parse_reply(message, request_id):
 
 def evaluate(connection, form, request_id):
     """Evaluate FORM remotely and return (status, output), ignoring unrelated events."""
-    wrapped = f"(gr8s::debug-eval {lisp_string(form)})"
-    send(connection, f"(:emacs-rex {wrapped} \"GR8S\" t {request_id})")
+    wrapped = f"(gr8s.apiserver::debug-eval {lisp_string(form)})"
+    send(connection, f"(:emacs-rex {wrapped} \"GR8S.APISERVER\" t {request_id})")
     while True:
         reply = parse_reply(receive(connection), request_id)
         if reply:

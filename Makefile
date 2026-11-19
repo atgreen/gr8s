@@ -8,7 +8,7 @@
 
 SBCL ?= sbcl
 STATE_DIR ?= /tmp/gr8s-state
-PORT ?= 8080
+PORT ?= 6443
 RUNTIME ?= containerd
 CONTAINERD_MODE ?= managed
 CONTAINERD_EXECUTABLE ?= $(CURDIR)/build/containerd/bin/containerd
@@ -362,7 +362,7 @@ run: containerd-bundle
 
 kubeconfig:
 	scripts/gr8s kubeconfig --output "$(KUBECONFIG)" \
-	  --server "http://127.0.0.1:$(PORT)"
+	  --server "https://127.0.0.1:$(PORT)"
 
 notices:
 	scripts/collect-notices.sh NOTICES
