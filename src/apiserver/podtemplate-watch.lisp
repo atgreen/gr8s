@@ -94,14 +94,29 @@ PAGE-READER and EVENT-READER replace the durable journal for separately stored r
     (setf (hunchentoot:content-type*) "application/json"
           (hunchentoot:header-out :cache-control) "no-cache")
     (let* ((out (hunchentoot:send-headers))
-           (json-out (flexi-streams:make-flexi-stream out :external-format :utf-8))
+           ;; Events are rendered here and sent by SEND-PENDING: a watch never writes
+           ;; to its client while it holds its store lease. A checkpoint waits for
+           ;; every lease, and a watch inside a socket write cannot notice one, so a
+           ;; slow client would hold the store closed for as long as it took to read.
+           (pending (flexi-streams:make-in-memory-output-stream))
+           (sink (flexi-streams:make-flexi-stream pending :external-format :utf-8))
+           (pending-p nil)
            (deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second)))
-           (sink json-out)
            (last-bookmark (get-internal-real-time)))
       (labels ((write-event (event)
                  (com.inuoe.jzon:stringify event :stream sink)
                  (write-char #\Newline sink)
-                 (finish-output sink))
+                 (finish-output sink)
+                 (setf pending-p t))
+               (send-pending (&optional even-if-empty)
+                 ;; An idle watch comes through here twenty times a second.
+                 (when (or pending-p even-if-empty)
+                   (let ((octets (flexi-streams:get-output-stream-sequence pending)))
+                     (setf pending-p nil)
+                     (gr8s.store::call-with-store-request-suspended
+                      (lambda ()
+                        (write-sequence octets out)
+                        (finish-output out))))))
                (emit (event)
                  (let ((view (crd-api-view (event-api-view event))))
                    (when (and *table-request* (not (equal "ERROR" (gethash "type" view))))
@@ -125,26 +140,12 @@ PAGE-READER and EVENT-READER replace the durable journal for separately stored r
             (progn
               (check-watch-store-access store)
               (when expired (error expired))
-              ;; Rendering the initial state reads the store; sending it does not, and
-              ;; takes as long as the client likes. A watch stuck in that write cannot
-              ;; notice a checkpoint waiting for its lease, so it is rendered first and
-              ;; sent without the lease.
-              (let ((initial-state
-                      (flexi-streams:with-output-to-sequence (octets)
-                        (setf sink (flexi-streams:make-flexi-stream octets :external-format :utf-8))
-                        (unwind-protect
-                             (progn
-                               (dolist (event first-events) (emit event))
-                               ;; client-go waits for this bookmark before trusting its initial state.
-                               (when (and send-initial (true-parameter-p (hunchentoot:parameter "allowWatchBookmarks")))
-                                 (bookmark t)))
-                          (setf sink json-out)))))
-                (setf first-events nil)
-                (gr8s.store::call-with-store-request-suspended
-                 (lambda ()
-                   (write-sequence initial-state out)
-                   ;; Flush headers even for an initially empty watch.
-                   (finish-output out))))
+              (dolist (event first-events) (emit event))
+              (setf first-events nil)
+              ;; client-go waits for this bookmark before trusting its initial state.
+              (when (and send-initial (true-parameter-p (hunchentoot:parameter "allowWatchBookmarks"))) (bookmark t))
+              ;; Flush headers even for an initially empty watch.
+              (send-pending t)
               (loop while (and (< (get-internal-real-time) deadline)
                                (not (api-watch-client-departed-p)))
                     do (check-watch-store-access store)
@@ -160,13 +161,18 @@ PAGE-READER and EVENT-READER replace the durable journal for separately stored r
                        (when (and (true-parameter-p (hunchentoot:parameter "allowWatchBookmarks"))
                                   (> (- (get-internal-real-time) last-bookmark) (* 20 internal-time-units-per-second)))
                          (bookmark) (setf last-bookmark (get-internal-real-time)))
+                       (send-pending)
                        (sleep .05)))
           (kubernetes-error (condition)
+            ;; The watch is over and reads the store no more: give the lease up for
+            ;; good, so that sending this last event does not wait to take it back.
+            (gr8s.store::release-store-request)
             ;; A Status has no object to project, so the views would only mangle it.
             (ignore-errors (write-event (core-object "type" "ERROR" "object"
                                          (core-object "apiVersion" "v1" "kind" "Status" "metadata" (core-object) "status" "Failure"
                                                       "code" (kubernetes-error-status-code condition)
-                                                      "reason" (kubernetes-error-reason condition) "message" (kubernetes-error-message condition))))))
+                                                      "reason" (kubernetes-error-reason condition) "message" (kubernetes-error-message condition))))
+                           (send-pending)))
           (stream-error () nil)
           (usocket:socket-error () nil))))
     nil))

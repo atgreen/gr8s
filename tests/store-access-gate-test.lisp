@@ -353,7 +353,7 @@
   (is (eq :sent (gr8s.store::call-with-store-request-suspended (lambda () :sent)))
       "outside a request the function is simply called"))
 
-(test a-watch-sending-its-initial-state-to-a-slow-client-does-not-hold-up-a-checkpoint
+(test a-watch-writing-to-a-slow-client-does-not-hold-up-a-checkpoint
   ;; Lab, 2026-11-19: kube-state-metrics watched all Secrets over a 2 MB/s link.
   ;; Six megabytes of Helm releases took three seconds to send, and a checkpoint
   ;; waited for all of it.
@@ -382,6 +382,21 @@
                         (gr8s.store::resume-store-access store)
                         (dotimes (index count)
                           (is (equal "ADDED" (gethash "type" (read-template-watch-event stream)))))
+                        ;; The same holds for what the watch reports later. On the lab a
+                        ;; rewritten half-megabyte Helm release, sent at 100 kB/s, held a
+                        ;; checkpoint for nine seconds.
+                        (dotimes (index count)
+                          (gr8s.resources::update-core-resource
+                           store "configmaps" "default" (format nil "large-~D" index)
+                           (lambda (object)
+                             (setf (gethash "k" (gethash "data" object)) (make-string 900000 :initial-element #\y))
+                             object)))
+                        (sleep 1)
+                        (is (eq store (gr8s.store::quiesce-store-access store :timeout 2 :brief t))
+                            "nor for the client to read later events")
+                        (gr8s.store::resume-store-access store)
+                        (dotimes (index count)
+                          (is (equal "MODIFIED" (gethash "type" (read-template-watch-event stream)))))
                         ;; The watch took its lease back and goes on reporting changes.
                         (gr8s.resources::create-core-resource
                          store "configmaps" (configmap-input "afterwards" "k" "v") "default")
