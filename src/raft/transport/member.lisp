@@ -260,17 +260,31 @@ retry instead of dying; any other error still propagates.")
   "Report a pass of the clock thread that took this much longer than its tick.
 Followers call an election after one to two seconds without a heartbeat.")
 
-(defun raft-clock-lateness-report (tick-seconds slept lock-wait tick-time gc-time)
+(defun raft-clock-lateness-report (tick-seconds slept lock-wait tick-time gc-time &optional holders)
   "Describe a clock pass that ran late, or NIL when it was on time. SLEPT is how
 long the tick's sleep really took, LOCK-WAIT how long the member lock took to
 get, TICK-TIME the tick itself, which applies committed entries; GC-TIME is the
-collector's time over the whole pass. All in seconds."
+collector's time over the whole pass. All in seconds. HOLDERS names the threads
+seen holding the member lock while the clock waited for it."
   (let ((late (- (+ slept lock-wait tick-time) tick-seconds)))
     (when (>= late *raft-clock-late-report-seconds*)
       (format nil "gr8s raft: clock thread ~,1Fs late: its ~Dms sleep took ~,1Fs, ~
-                   the member lock ~,1Fs to get, the tick ~,1Fs (~,1Fs of that pass in GC); ~
+                   the member lock ~,1Fs to get~@[ (held by ~{~A~^, ~})~], ~
+                   the tick ~,1Fs (~,1Fs of that pass in GC); ~
                    no heartbeat was sent meanwhile"
-              late (round (* 1000 tick-seconds)) slept lock-wait tick-time gc-time))))
+              late (round (* 1000 tick-seconds)) slept lock-wait holders tick-time gc-time))))
+
+(defun grab-member-lock-noting-holders (member)
+  "Take MEMBER's lock, which the caller must release, and return the names of the
+threads seen holding it meanwhile: looked at every quarter second, so a holder
+is named only when the wait was long enough to matter."
+  (let ((lock (raft-member-lock member)) (holders nil))
+    (loop until (sb-thread:grab-mutex lock :timeout 1/4)
+          do (let ((owner (sb-thread:mutex-owner lock)))
+               (when owner
+                 (pushnew (or (sb-thread:thread-name owner) "an unnamed thread") holders
+                          :test #'equal))))
+    (nreverse holders)))
 
 (defun raft-standing (node)
   "NODE's role, term and known leader: what an operator asks after a failover."
@@ -298,12 +312,14 @@ collector's time over the whole pass. All in seconds."
       (loop while (raft-member-running member) do
         (let ((pass-start (get-internal-real-time))
               (gc-start sb-ext:*gc-run-time*)
-              (slept 0) (lock-wait 0) (tick-time 0) (now-standing standing))
+              (slept 0) (lock-wait 0) (tick-time 0) (holders nil) (now-standing standing))
           (sleep tick-seconds)
           (setf slept (seconds-since pass-start))
           (when (raft-member-running member)
             (let ((lock-start (get-internal-real-time)))
-              (bt:with-lock-held ((raft-member-lock member))
+              (setf holders (grab-member-lock-noting-holders member))
+              (unwind-protect
+               (progn
                 (setf lock-wait (seconds-since lock-start))
                 (let ((tick-start (get-internal-real-time)))
                   ;; RAFT-TICK applies committed entries; a failing apply leaves
@@ -317,10 +333,12 @@ collector's time over the whole pass. All in seconds."
                   (ignore-errors (raft-member-promote-learners member))
                   (raft-member-expire-snapshot-receiver member)
                   (setf tick-time (seconds-since tick-start)
-                        now-standing (raft-standing (raft-member-node member))))))
+                        now-standing (raft-standing (raft-member-node member)))))
+               (sb-thread:release-mutex (raft-member-lock member))))
             (let ((late (raft-clock-lateness-report
                          tick-seconds slept lock-wait tick-time
-                         (/ (- sb-ext:*gc-run-time* gc-start) internal-time-units-per-second)))
+                         (/ (- sb-ext:*gc-run-time* gc-start) internal-time-units-per-second)
+                         holders))
                   (changed (raft-standing-report
                             (raft-node-id (raft-member-node member)) standing now-standing)))
               (when late (format *error-output* "~&~A~%" late))
