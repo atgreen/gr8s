@@ -357,6 +357,87 @@ STATE-DIRECTORY is not that process's. Returns the FAIL count."
         (doctor-report :warn "service interface" (format nil "could not check: ~A" condition))
         0))))
 
+;;; Flushed-write latency. Every Raft commit waits for one flush of the log, so a
+;;; member on a slow disk restarts slowly and sends its heartbeats late under
+;;; load. On the lab a voter at 179 ms a flush (btrfs with compression on a busy
+;;; SATA disk) looked like a network fault for days.
+
+(defun doctor-storage-latency-status (milliseconds control-plane-p)
+  "Judge the median time of one flushed 4 kB write. Returns (values STATUS DETAIL HINT)."
+  (let ((detail (format nil "~,1F ms per flushed write" milliseconds)))
+    (cond
+      ((< milliseconds 2) (values :ok detail nil))
+      ((< milliseconds 20)
+       (values :ok (format nil "~A (adequate; a disk with power-loss protection flushes in under 1 ms)" detail) nil))
+      ((or (< milliseconds 100) (not control-plane-p))
+       (values :warn detail
+               (if control-plane-p
+                   "a control-plane member this slow restarts slowly and may send heartbeats late under load"
+                   "slow for container and volume writes; a control-plane member needs under 20 ms")))
+      (t (values :fail detail
+                 "too slow for a control-plane member: every commit waits for a flush. Use a faster disk, and a filesystem without compression or copy-on-write for the state directory")))))
+
+(defun doctor-mount-for-path (mounts path)
+  "The /proc/mounts line in MOUNTS whose mount point is the longest prefix of PATH,
+as \"FSTYPE OPTIONS on MOUNTPOINT\", or NIL."
+  (let ((best nil) (best-length -1))
+    (dolist (line (uiop:split-string mounts :separator '(#\Newline)))
+      (let ((fields (remove "" (uiop:split-string line :separator '(#\Space)) :test #'equal)))
+        (when (>= (length fields) 4)
+          (let* ((point (second fields)) (length (length point)))
+            (when (and (> length best-length)
+                       (or (equal point "/") (equal point path)
+                           (and (< length (length path)) (string= point path :end2 length)
+                                (char= #\/ (char path length)))))
+              (setf best (format nil "~A ~A on ~A" (third fields) (fourth fields) point)
+                    best-length length))))))
+    best))
+
+(defun doctor-measure-flush-milliseconds (directory &key (writes 50) (budget-seconds 2))
+  "Median milliseconds of a flushed 4 kB write to a scratch file in DIRECTORY,
+which is removed afterwards. Stops after WRITES writes or BUDGET-SECONDS,
+whichever comes first, so a slow disk under a running member is not held up."
+  (let ((path (merge-pathnames (format nil ".doctor-flush-~D" (sb-posix:getpid))
+                               (uiop:ensure-directory-pathname directory)))
+        (block (make-array 4096 :element-type '(unsigned-byte 8) :initial-element 0))
+        (deadline (+ (get-internal-real-time) (* budget-seconds internal-time-units-per-second)))
+        (times nil))
+    (unwind-protect
+         (with-open-file (stream path :direction :output :if-exists :supersede
+                                      :element-type '(unsigned-byte 8))
+           (loop repeat writes
+                 while (or (null times) (< (get-internal-real-time) deadline))
+                 do (let ((start (get-internal-real-time)))
+                      (write-sequence block stream)
+                      (finish-output stream)
+                      (sb-posix:fsync (sb-sys:fd-stream-fd stream))
+                      (push (- (get-internal-real-time) start) times))))
+      (ignore-errors (delete-file path)))
+    (* 1000 (/ (nth (floor (length times) 2) (sort times #'<)) internal-time-units-per-second))))
+
+(defun doctor-check-storage-latency
+    (state-directory &key (measure-fn #'doctor-measure-flush-milliseconds)
+                          (mounts-fn #'doctor-mounts))
+  "Time flushed writes where gr8s keeps its state. Returns the FAIL count."
+  (let* ((directory (uiop:ensure-directory-pathname state-directory))
+         (path (string-right-trim "/" (namestring directory))))
+    (handler-case
+        (if (not (uiop:directory-exists-p directory))
+            0
+            (multiple-value-bind (status detail hint)
+                (doctor-storage-latency-status
+                 (funcall measure-fn directory)
+                 (and (probe-file (merge-pathnames "raft/control-plane.log" directory)) t))
+              (doctor-report status "storage"
+                             (format nil "~A: ~A~@[ (~A)~]" path detail
+                                     (and (not (eq status :ok))
+                                          (ignore-errors (doctor-mount-for-path (funcall mounts-fn) path))))
+                             hint)
+              (if (eq status :fail) 1 0)))
+      (error (c)
+        (doctor-report :warn "storage" (format nil "~A: could not measure: ~A" path c))
+        0))))
+
 (defun doctor-interface-for-address (address &key (runner #'doctor-run))
   "The interface holding ADDRESS, from `ip -4 -o addr`, or NIL."
   (let ((out (funcall runner (list "ip" "-4" "-o" "addr" "show"))))
@@ -515,6 +596,9 @@ zone dropped inbound 7000 without a trace (podster-rnh). Returns the FAIL count.
       ;; A service interface stamped by another cluster's CA: what a rebuild in
       ;; a wiped state directory inherits, and what serve refuses to start beside.
       (incf fails (doctor-check-service-interface state-directory fix))
+
+      ;; How long a flushed write takes where the Raft log lives.
+      (incf fails (doctor-check-storage-latency state-directory))
 
       ;; HA cluster ports vs the host firewall (podster-rnh): a member whose
       ;; raft/node/API ports are dropped on its own listen interface stalls

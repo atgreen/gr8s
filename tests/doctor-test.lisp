@@ -313,3 +313,46 @@
     (is-false (gr8s.server::doctor-serve-command-line-p (command-line "/usr/bin/gr8s" "doctor" "--fix")))
     (is-false (gr8s.server::doctor-serve-command-line-p (command-line "/usr/bin/k3s" "serve")))
     (is-false (gr8s.server::doctor-serve-command-line-p ""))))
+
+(test doctor-judges-flushed-write-latency
+  ;; Lab, 2026-11-19: 0.8 ms on the founder's SSD, 10 ms on a consumer NVMe in a
+  ;; guest, 179 ms on btrfs with compression on a busy SATA disk.
+  (flet ((status (milliseconds control-plane-p)
+           (nth-value 0 (gr8s.server::doctor-storage-latency-status milliseconds control-plane-p))))
+    (is (eq :ok (status 0.8 t)))
+    (is (eq :ok (status 10 t)))
+    (is (eq :warn (status 40 t)))
+    (is (eq :fail (status 179 t)))
+    (is (eq :warn (status 179 nil)) "a worker keeps no Raft log; slow is a warning there"))
+  (is (search "179.0 ms" (nth-value 1 (gr8s.server::doctor-storage-latency-status 179 t))))
+  (let ((mounts (format nil "/dev/vda3 / btrfs rw,compress=zstd:1 0 0~%/dev/vda3 /var btrfs rw,compress=zstd:1,subvol=/var 0 0~%/dev/vdb /var/lib/gr8s xfs rw,noatime 0 0~%/dev/vdc /var/lib/gr8s-other ext4 rw 0 0~%")))
+    (is (equal "xfs rw,noatime on /var/lib/gr8s"
+               (gr8s.server::doctor-mount-for-path mounts "/var/lib/gr8s/server")))
+    (is (equal "btrfs rw,compress=zstd:1,subvol=/var on /var"
+               (gr8s.server::doctor-mount-for-path mounts "/var/log")))
+    (is (equal "btrfs rw,compress=zstd:1 on /" (gr8s.server::doctor-mount-for-path mounts "/srv"))))
+  (let ((root (uiop:ensure-directory-pathname
+               (sb-posix:mkdtemp (namestring (merge-pathnames "gr8s-doctor-XXXXXX" (uiop:temporary-directory)))))))
+    (unwind-protect
+         (flet ((check (milliseconds)
+                  (let* ((out (make-string-output-stream))
+                         (fails (let ((*standard-output* out))
+                                  (gr8s.server::doctor-check-storage-latency
+                                   root :measure-fn (lambda (directory) (declare (ignore directory)) milliseconds)
+                                        :mounts-fn (lambda () "/dev/vda3 / btrfs rw,compress=zstd:1 0 0")))))
+                    (values fails (get-output-stream-string out)))))
+           ;; The real measurement runs, returns a time and leaves nothing behind.
+           (is (typep (gr8s.server::doctor-measure-flush-milliseconds root :writes 3) '(real 0)))
+           (is (null (uiop:directory-files root)))
+           (is (zerop (check 0.8)))
+           (is (zerop (check 179)) "without a Raft log this is a worker")
+           (ensure-directories-exist (merge-pathnames "raft/" root))
+           (with-open-file (out (merge-pathnames "raft/control-plane.log" root) :direction :output)
+             (write-string "x" out))
+           (multiple-value-bind (fails text) (check 179)
+             (is (= 1 fails))
+             (is (search "btrfs rw,compress=zstd:1 on /" text) "a poor result names the filesystem")))
+      (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore)))
+  (is (zerop (let ((*standard-output* (make-broadcast-stream)))
+               (gr8s.server::doctor-check-storage-latency "/nonexistent/gr8s/state/")))
+      "no state directory yet: nothing to measure"))

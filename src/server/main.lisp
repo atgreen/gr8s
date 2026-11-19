@@ -3433,6 +3433,11 @@ The journals explain refusals -- grep for these lines and trust them:
   reachability problem -- usually a firewalled raft port; `gr8s doctor`'s
   \"cluster ports\" check maps the member address to its interface and
   firewalld zone and prints the exact repair.
+- `gr8s raft: clock thread ...s late` on one member, or a member that takes far
+  longer than the others to restart: suspect its disk. Every commit waits for a
+  flush of the Raft log. `gr8s doctor --state-directory STATE_DIR` times
+  flushed writes there in its \"storage\" check: under 2 ms is good, under
+  20 ms adequate, and over 100 ms fails a control-plane member.
 
 Member failure decision tree:
 
