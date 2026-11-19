@@ -2716,6 +2716,10 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
       (and local-agent (equal "containerd" (getf options :runtime))
            (equal "managed" (getf options :containerd-mode)))))
 
+(defparameter *recovery-wait-report-seconds* '(10 . 30)
+  "How long WAIT-FOR-HA-APPLICATION waits before its first report of why, and
+between later ones. An ordinary restart recovers within the first.")
+
 (defun wait-for-ha-application (ha)
   "Keep Raft listening while application-dependent services wait for catch-up.
    While blocked, periodically log WHY: the quorum arithmetic and which members
@@ -2753,7 +2757,9 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                                                 condition))))
                    (finish-output))
                  (setf next-report (+ (get-internal-real-time)
-                                      (* (if (plusp next-report) 30 10)
+                                      (* (if (plusp next-report)
+                                             (cdr *recovery-wait-report-seconds*)
+                                             (car *recovery-wait-report-seconds*))
                                          internal-time-units-per-second))))
                (sleep 0.05))))
   (not *shutdown-requested*))

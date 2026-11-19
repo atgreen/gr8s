@@ -340,3 +340,37 @@
                 "membership removal must commit before checking renewal denial"))
           (is (rejected-p (lambda () (request-renewal credentials port "w1" key)))
               "a removed member's certificate must be left to run out"))))))
+
+(defun raft-channel-read-limit (channel)
+  "Seconds the socket under CHANNEL lets one read wait."
+  (sb-impl::fd-stream-timeout
+   (usocket:socket-stream (ag-http2:connection-socket (ag-grpc:channel-connection channel)))))
+
+(test a-raft-link-lets-a-call-wait-as-long-as-the-call-allows
+  ;; podster-kiw: the link connected with a two-second timeout, which usocket also
+  ;; gave to every read. A peer has minutes to answer the last chunk of a
+  ;; snapshot, because it installs the snapshot first; the socket gave up after
+  ;; two seconds, the leader never learned that the peer had caught up, and on a
+  ;; cluster taking writes it sent snapshot after snapshot for ever. Only the TLS
+  ;; path behaves this way, so only a test over TLS sees it.
+  (with-founded-cluster (founder)
+    (let ((credentials (control-plane-credentials founder)) (port (control-plane-port founder)))
+      (flet ((limit (&rest options)
+               (let ((channel (apply #'gr8s.security::make-raft-channel credentials "127.0.0.1" port 2 options)))
+                 (unwind-protect (raft-channel-read-limit channel)
+                   (ignore-errors (ag-grpc:channel-close channel))))))
+        (is (= 2 (limit)) "unless told otherwise, the connect timeout is also the read limit")
+        (is (= 400 (limit :read-timeout 400)))))
+    (with-temporary-store (witness-store witness-state)
+      (declare (ignore witness-store))
+      (with-joined-witness (witness founder witness-state)
+        (let ((member (gr8s.ha::ha-control-plane-member founder)))
+          (flet ((link-channel ()
+                   (let ((link (gethash "w1" (gr8s.raft.transport::raft-member-links member))))
+                     (and link (gr8s.raft.transport::raft-peer-link-channel link)))))
+            (is (poll-until #'link-channel :timeout 20) "the founder opened a link to the witness")
+            (let ((channel (link-channel)))
+              (when channel
+                (is (> (raft-channel-read-limit channel)
+                       gr8s.raft.transport::*raft-artifact-completion-timeout*)
+                    "a read on the link outlasts the longest deadline a call on it is given")))))))))

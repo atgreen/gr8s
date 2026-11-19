@@ -645,6 +645,31 @@
              (is (not (gr8s.store::store-access-blocked-p store))))
         (gr8s.ha::stop-ha-control-plane ha)))))
 
+(test a-joiner-can-be-replayed-well-past-a-snapshot-before-its-log-is-full
+  ;; podster-kiw: a wiped member rejoining a cluster that was taking writes was
+  ;; sent snapshot after snapshot. Its retained-log budget held about 450 entries,
+  ;; it cannot checkpoint until it has caught up, and the leader committed more
+  ;; than that in the time one snapshot took to send and install.
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (let ((ha nil))
+      (unwind-protect
+           (progn
+             ;; The checkpoint worker installs the budget, as it does under serve.
+             (setf ha (gr8s.ha::start-ha-control-plane store :id "budget" :init t :compaction-interval 3600))
+             (let* ((node (gr8s.raft.transport::raft-member-node (gr8s.ha::ha-control-plane-member ha)))
+                    (limit (gr8s.raft::raft-node-retained-byte-limit node))
+                    (command (list :node-delta (make-string 1000 :initial-element #\x)))
+                    (proposal (+ 128 (funcall (gr8s.raft::raft-node-uncommitted-weight-fn node) command)))
+                    (retained (+ 128 (funcall (gr8s.raft::raft-node-retained-weight-fn node) command))))
+               (is (integerp limit))
+               (is (> proposal 65536) "a proposal still reserves for its waiting client")
+               (is (< retained 8192) "an entry retained from replication is charged its own size")
+               ;; Two checkpoints' worth of entries went by during one snapshot
+               ;; in the reproduction; leave room for a great deal more.
+               (is (> (floor limit retained) 5000))))
+        (when ha (gr8s.ha::stop-ha-control-plane ha))))))
+
 (test compaction-worker-restores-disk-cache-policy-without-overwriting-external-changes
   (with-temporary-store (store root)
     (values root)

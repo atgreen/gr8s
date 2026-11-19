@@ -180,8 +180,6 @@ Unknown files, directories, symlinks, hard links or permissions preserve the roo
             do (ironclad:update-digest hash buffer :end count)))
     (ironclad:byte-array-to-hex-string (ironclad:produce-digest hash))))
 
-(defparameter *raft-snapshot-rpc-timeout* 2)
-(defparameter *raft-artifact-completion-timeout* 60)
 
 (defun raft-link-deliver-message (stub message)
   (gr8s.node.v1::raft-transport-deliver
@@ -254,7 +252,11 @@ Probe capacity at most once per unchanged second while recovery is required."
       (let ((total (file-length stream)) (offset 0)
             (buffer (make-array +raft-snapshot-chunk-bytes+ :element-type '(unsigned-byte 8))))
         (unless (<= 1 total (raft-member-snapshot-max-bytes member)) (error "Snapshot exceeds transfer limit"))
+        (when *raft-snapshot-send-progress* (setf (second *raft-snapshot-send-progress*) total))
         (loop for count = (read-sequence buffer stream) while (plusp count) do
+          ;; Counted as sent before the call that carries it: a failure on the
+          ;; last chunk is then reported as waiting for the install.
+          (when *raft-snapshot-send-progress* (setf (first *raft-snapshot-send-progress*) (+ offset count)))
           (unless (raft-member-running member) (error "Snapshot sender stopped"))
           (when (and obsolete-p (funcall obsolete-p (plusp offset)))
             (return-from raft-link-send-snapshot-file :obsolete))
@@ -271,6 +273,30 @@ Probe capacity at most once per unchanged second while recovery is required."
                           (when (and header (zerop offset)) (list :artifact-envelope header)))))
           (incf offset count))
         (unless (= offset total) (error "Snapshot source size changed during transfer"))))))
+
+(defun raft-snapshot-transfer-notice (member peer message total)
+  "One line for the leader's journal as a snapshot transfer to PEER begins: what
+is sent and what the leader knows of PEER. A peer that needs snapshot after
+snapshot shows here as a rising acknowledged index that never reaches the log.
+NIL when the member's state cannot be read without waiting for its lock."
+  (sb-thread:with-mutex ((raft-member-lock member) :wait-p nil)
+    (let* ((node (raft-member-node member))
+           (matched (gethash peer (gr8s.raft:raft-node-match-index node) 0))
+           (required (gethash peer (gr8s.raft::raft-node-peer-snapshot-required node))))
+      (format nil "gr8s raft: sending snapshot ~D (~D bytes) to ~A, which has acknowledged ~D; ~
+                   log starts after ~D~:[~;, ~:*a snapshot is required up to ~A~]; ~
+                   replay from ~D is ~:[not ~;~]cached"
+              (getf message :last-index) total peer matched
+              (gr8s.raft:raft-node-snapshot-index node) required (1+ matched)
+              ;; From the cache's index: reading a segment back is not free, and
+              ;; the sender already rations how often it does so.
+              (and (plusp matched)
+                   (let ((storage (gr8s.raft:raft-node-storage node)))
+                     (and (typep storage 'gr8s.raft::file-raft-storage)
+                          (some (lambda (segment)
+                                  (<= (cl-raft::raft-catchup-segment-first segment) (1+ matched)
+                                      (cl-raft::raft-catchup-segment-last segment)))
+                                (cl-raft::file-raft-storage-catchup-segments storage)))))))))
 
 (defun raft-link-send-snapshot (member stub message &key (recipient-role :voter) peer)
   "Send bounded chunks, abandoning an obsolete image only after current proof.
@@ -305,6 +331,12 @@ Store artifacts travel as raw bytes; witnesses receive configuration only."
             (let ((path (funcall source member message)) (digest (eighth reference)))
               (when (obsolete-p) (return-from raft-link-send-snapshot nil))
               (unless (equal digest (raft-snapshot-file-digest path)) (error "Artifact source checksum mismatch"))
+              (let ((notice (and peer (ignore-errors
+                                        (raft-snapshot-transfer-notice
+                                         member peer message
+                                         (with-open-file (file path :element-type '(unsigned-byte 8))
+                                           (file-length file)))))))
+                (when notice (format t "~A~%" notice) (finish-output)))
               (raft-link-send-snapshot-file member stub message path digest :format :artifact-v1 :header header :obsolete-p #'obsolete-p)))
           (return-from raft-link-send-snapshot nil)))
       ;; Legacy opaque snapshots remain available for generic state-machine users.

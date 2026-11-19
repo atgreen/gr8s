@@ -32,7 +32,7 @@ cl-fad, ghcr.io/ocicl/cl-fad@sha256:c0aaffc859e419e0a94cedb08f48c2484da404363fb0
 cl-json, ghcr.io/ocicl/cl-json@sha256:54c4d00901c2c5b0ea9da11eed8f0104fc5819e1ed9a29d1f3364503a720a868, cl-json-20240907-994dd38/cl-json.asd
 cl-ppcre, ghcr.io/ocicl/cl-ppcre@sha256:bf073924cf4fd5957a4fd961a95d446ed0e53fa32a5002cbd2d52182874f45e5, cl-ppcre-20250606-a2ea581/cl-ppcre.asd
 cl-ppcre-unicode, ghcr.io/ocicl/cl-ppcre@sha256:bf073924cf4fd5957a4fd961a95d446ed0e53fa32a5002cbd2d52182874f45e5, cl-ppcre-20250606-a2ea581/cl-ppcre-unicode.asd
-cl-raft, ghcr.io/ocicl/cl-raft@sha256:0fca9a5e7d8dcfb9f344d4f467002bcac6d9bdb180241f5f5c55d160895f2a69, cl-raft-20261119-181cd6a/cl-raft.asd
+cl-raft, ghcr.io/ocicl/cl-raft@sha256:3d2e7dd4c041e92561425a12b52db90d6febe3ca5b9a2c955c6cd9f2af8513d2, cl-raft-20261119-f40345f/cl-raft.asd
 cl-re2, ghcr.io/ocicl/cl-re2@sha256:a767d3c0ea04370b19170fdae5de52e48d836444799d7b8dd0d382a5cc1597c1, cl-re2-20261112-a6ddb92/cl-re2.asd
 cl-reexport, ghcr.io/ocicl/cl-reexport@sha256:c795feb3e3727a19e61797187eb31bac1e855b1332335d26752200a28e9b9da8, cl-reexport-20240503-03ad7a0/cl-reexport.asd
 cl-reexport-test, ghcr.io/ocicl/cl-reexport@sha256:c795feb3e3727a19e61797187eb31bac1e855b1332335d26752200a28e9b9da8, cl-reexport-20240503-03ad7a0/cl-reexport-test.asd

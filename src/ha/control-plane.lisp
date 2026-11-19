@@ -204,7 +204,15 @@ the cluster. Access stays gated until a current-term committed boundary applies.
            (bt:with-lock-held ((raft-member-lock member))
              (setf (gr8s.raft::raft-node-uncommitted-byte-limit (raft-member-node member)) (* 16 1024 1024)
                    (gr8s.raft::raft-node-uncommitted-weight-fn (raft-member-node member))
-                   #'store-raft-command-retention-weight)
+                   #'store-raft-command-retention-weight
+                   ;; A proposal is charged two pages for its waiting client. An
+                   ;; entry a follower retains from replication has no waiter, and
+                   ;; at that price the retained budget held about 450 entries: a
+                   ;; joiner, which cannot checkpoint until it has caught up, never
+                   ;; caught up with a leader that committed more than that while a
+                   ;; snapshot was sent and installed (podster-kiw).
+                   (gr8s.raft::raft-node-retained-weight-fn (raft-member-node member))
+                   #'gr8s.raft::raft-command-memory-weight)
              (raft-member-enable-dynamic-membership member :pki pki))
            ;; Only a learner still awaiting admission needs Join. Recovered voters
            ;; reconnect using the durable address book, without enrollment tokens

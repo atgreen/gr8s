@@ -348,6 +348,10 @@
     (let ((report (gr8s.raft.transport::raft-snapshot-send-failure-report "gr8s2" failure nil)))
       (is (search "snapshot transfer to gr8s2 failed" report))
       (is (search "Artifact source checksum mismatch" report)))
+    (is (search "failed at byte 65536 of 4000000 and"
+                (gr8s.raft.transport::raft-snapshot-send-failure-report "gr8s2" failure nil '(65536 4000000))))
+    (is (search "after sending all 4000000 bytes, waiting for it to be installed"
+                (gr8s.raft.transport::raft-snapshot-send-failure-report "gr8s2" failure nil '(4000000 4000000))))
     (is (null (gr8s.raft.transport::raft-snapshot-send-failure-report "gr8s2" failure 2)))
     (is (stringp (gr8s.raft.transport::raft-snapshot-send-failure-report
                   "gr8s2" failure gr8s.raft.transport::*raft-snapshot-failure-report-seconds*)))))

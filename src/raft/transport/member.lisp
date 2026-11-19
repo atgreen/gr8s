@@ -215,13 +215,27 @@ release it only after source lookup and delivery finish, including failures."
   (setf (raft-peer-link-relay-channel link) nil
         (raft-peer-link-relay-stub link) nil))
 
+(defparameter *raft-snapshot-rpc-timeout* 2
+  "Seconds a peer has to answer one message or one chunk of a snapshot.")
+
+(defparameter *raft-artifact-completion-timeout* 300
+  "Seconds a peer has to answer the last chunk of a snapshot, which it does only
+after installing the snapshot. In a test VM a 90 MB snapshot took 30 seconds to
+install. A leader that stops waiting never learns that the peer caught up: it
+sends its next snapshot instead, and on a cluster that is taking writes the peer
+never catches up at all (podster-kiw).")
+
 (defun raft-link-stub (member link)
   "Lazily open and cache a channel+stub to this peer, or NIL if unreachable."
   (or (raft-peer-link-stub link)
       (handler-case
           (let ((channel (gr8s.security::make-raft-channel
                           (raft-member-credentials member)
-                          (raft-peer-link-host link) (raft-peer-link-port link) 2)))
+                          (raft-peer-link-host link) (raft-peer-link-port link) 2
+                          ;; Two seconds to connect. Each call then has its own
+                          ;; deadline, the longest of them the snapshot completion:
+                          ;; the socket must not give up before that does.
+                          :read-timeout (+ *raft-artifact-completion-timeout* 5))))
             (setf (raft-peer-link-channel link) channel
                   (raft-peer-link-stub link) (gr8s.node.v1::make-raft-transport-stub channel)))
         ;; A stalled TLS handshake is a timeout, and it must not end this link's thread.
@@ -230,14 +244,26 @@ release it only after source lookup and delivery finish, including failures."
 (defparameter *raft-snapshot-failure-report-seconds* 30
   "Report a peer's failed snapshot transfers no more often than this.")
 
-(defun raft-snapshot-send-failure-report (peer condition seconds-since-last-report)
+(defvar *raft-snapshot-send-progress* nil
+  "While a link sends a snapshot, a list (SENT TOTAL) of octets that the sender
+updates in place, so that a failure can say how far the transfer had got.")
+
+(defun raft-snapshot-send-failure-report (peer condition seconds-since-last-report &optional progress)
   "Describe a snapshot transfer to PEER that ended in CONDITION, or NIL when one
 was reported within the last *RAFT-SNAPSHOT-FAILURE-REPORT-SECONDS*. Raft sends
 the snapshot again, so a transfer that fails the same way every time would
-otherwise leave the joiner waiting for recovery with nothing in either journal."
+otherwise leave the joiner waiting for recovery with nothing in either journal.
+PROGRESS is (SENT TOTAL) in octets: a failure after the last octet is the
+receiver installing the snapshot, and one before it is the transfer itself."
   (when (or (null seconds-since-last-report)
             (>= seconds-since-last-report *raft-snapshot-failure-report-seconds*))
-    (format nil "gr8s raft: snapshot transfer to ~A failed and will be retried: ~A" peer condition)))
+    (format nil "gr8s raft: snapshot transfer to ~A failed~@[ ~A~] and will be retried: ~A"
+            peer
+            (destructuring-bind (&optional sent total) progress
+              (cond ((not (and sent total (plusp total))) nil)
+                    ((>= sent total) (format nil "after sending all ~D bytes, waiting for it to be installed" total))
+                    (t (format nil "at byte ~D of ~D" sent total))))
+            condition)))
 
 (defun raft-link-sender-loop (member link)
   "LINK's sender thread: while MEMBER runs, drain its outbox and Deliver each message
@@ -253,19 +279,21 @@ otherwise leave the joiner waiting for recovery with nothing in either journal."
                (when stub
                  (handler-case
                      (if (eq :install-snapshot (getf message :type))
-                         (handler-bind
+                         (let ((*raft-snapshot-send-progress* (list 0 0)))
+                          (handler-bind
                              ((error
                                 (lambda (condition)
                                   (let ((report (raft-snapshot-send-failure-report
                                                  (raft-peer-link-id link) condition
                                                  (and last-failure-report
                                                       (/ (- (get-internal-real-time) last-failure-report)
-                                                         internal-time-units-per-second)))))
+                                                         internal-time-units-per-second))
+                                                 *raft-snapshot-send-progress*)))
                                     (when report
                                       (setf last-failure-report (get-internal-real-time))
                                       (format t "~A~%" report)
                                       (finish-output))))))
-                           (raft-link-send-snapshot member stub message :recipient-role (raft-peer-link-role link)))
+                           (raft-link-send-snapshot member stub message :recipient-role (raft-peer-link-role link))))
                          (raft-link-deliver-message stub message))
                    (error () (raft-link-drop link))))))
         (bt:with-lock-held ((raft-peer-link-lock link))
