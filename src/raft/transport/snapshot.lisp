@@ -288,10 +288,15 @@ NIL when the member's state cannot be read without waiting for its lock."
                    replay from ~D is ~:[not ~;~]cached"
               (getf message :last-index) total peer matched
               (gr8s.raft:raft-node-snapshot-index node) required (1+ matched)
+              ;; From the cache's index: reading a segment back is not free, and
+              ;; the sender already rations how often it does so.
               (and (plusp matched)
-                   (ignore-errors
-                     (gr8s.raft::raft-storage-read-catchup
-                      (gr8s.raft:raft-node-storage node) node (1+ matched))))))))
+                   (let ((storage (gr8s.raft:raft-node-storage node)))
+                     (and (typep storage 'gr8s.raft::file-raft-storage)
+                          (some (lambda (segment)
+                                  (<= (cl-raft::raft-catchup-segment-first segment) (1+ matched)
+                                      (cl-raft::raft-catchup-segment-last segment)))
+                                (cl-raft::file-raft-storage-catchup-segments storage)))))))))
 
 (defun raft-link-send-snapshot (member stub message &key (recipient-role :voter) peer)
   "Send bounded chunks, abandoning an obsolete image only after current proof.
