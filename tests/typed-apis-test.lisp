@@ -675,3 +675,16 @@
         (gr8s.resources::reconcile-storage-version-migrations store :now (+ now 120))
         (is (equal before (gethash "resourceVersion"
                                    (gethash "metadata" (gr8s.resources::get-core-resource store "storageversionmigrations" nil "cm")))))))))
+
+(test typed-resource-normalizers-preserve-discovery-traits-and-unknown-resources
+  (signals type-error
+    (gr8s.resources::normalize-typed-api-spec "unregistered" nil))
+  (let* ((unknown (gr8s.resources::core-object "spec" (gr8s.resources::core-object "untouched" t)))
+         (before (gr8s.resources::copy-core-object unknown)))
+    (is (eq unknown (gr8s.resources::normalize-typed-api-spec "unregistered" unknown)))
+    (is (equalp before unknown)))
+  (is-true (gr8s.resources::typed-api-trait-p "flowschemas" :status))
+  (is-true (gr8s.resources::typed-api-trait-p "flowschemas" :generation))
+  (is-false (gr8s.resources::typed-api-trait-p "leases" :status))
+  (is (equal "io.k8s.api.coordination.v1.Lease"
+             (gr8s.resources::typed-api-schema-name "leases"))))

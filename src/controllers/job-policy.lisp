@@ -46,7 +46,8 @@
   "Use real CRI finish timestamps, falling back to observation time only for an already terminal Pod."
   (or (loop for field in '("containerStatuses" "initContainerStatuses")
             maximize (loop for container across (gethash field status #())
-                           for terminated = (gethash "terminated" (gethash "state" container (core-object)))
+                           for terminated = (multiple-value-bind (state present-p) (gethash "state" container)
+                                              (when present-p (gethash "terminated" state)))
                            for finished = (and terminated (gethash "finishedAt" terminated))
                            maximize (or (and finished (ignore-errors (pod-deletion-time finished))) 0))
             into latest
@@ -190,7 +191,8 @@
     (when (eq name 'null) (setf name nil))
     (loop for field in '("containerStatuses" "initContainerStatuses")
           thereis (loop for container across (gethash field status #())
-                        for terminated = (gethash "terminated" (gethash "state" container (core-object)))
+                        for terminated = (multiple-value-bind (state present-p) (gethash "state" container)
+                                              (when present-p (gethash "terminated" state)))
                         for code = (and terminated (gethash "exitCode" terminated))
                         thereis (and code (/= 0 code)
                                      (or (null name) (equal name (gethash "name" container)))

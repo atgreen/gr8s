@@ -94,3 +94,15 @@
              (record (gethash "owner-uid" (gr8s.store::pod-store-job-controller-states reopened))))
         (is (= 2 (gethash "failuresAfterLastSuccess" record)))
         (is (= 4000000000 (gethash "lastFailureTime" record)))))))
+
+(test job-finish-time-distinguishes-missing-state-from-invalid-state
+  (let ((gr8s.controllers::*job-clock* (lambda () 4000000000)))
+    (is (= 4000000000
+           (gr8s.controllers::job-pod-finished-time
+            (gr8s.resources::core-object "containerStatuses"
+                                         (vector (gr8s.resources::core-object "name" "main"))))))
+    (dolist (invalid-state (list nil 'null 42))
+      (signals type-error
+        (gr8s.controllers::job-pod-finished-time
+         (gr8s.resources::core-object "containerStatuses"
+                                      (vector (gr8s.resources::core-object "state" invalid-state))))))))

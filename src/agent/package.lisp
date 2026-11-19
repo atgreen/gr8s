@@ -5,6 +5,20 @@
 
 (defpackage #:gr8s.agent
   (:use #:cl)
+  (:import-from #:cl-rtnetlink
+   #:ipv4-network-octets
+   #:netlink-attributes
+   #:netlink-integer
+   #:netlink-string
+   #:network-link-attributes-by-index
+   #:rtnetlink-error
+   #:rtnetlink-error-errno)
+  (:import-from #:gr8s.foundation
+   #:json-object)
+  (:import-from #:gr8s.model
+   #:node-record-all-pod-cidrs
+   #:node-record-api-only
+   #:node-record-name)
   (:shadow
    #:cancel-node-session
    #:make-node-session-control

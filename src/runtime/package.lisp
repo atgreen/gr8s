@@ -5,6 +5,8 @@
 
 (defpackage #:gr8s.runtime
   (:use #:cl #:gr8s.model)
+  (:import-from #:gr8s.foundation
+   #:+gr8s-version+)
   (:export
    #:*running-pod-cancellation-deferred*
    #:*running-pod-cancellation-pending*

@@ -132,11 +132,15 @@
         (unwind-protect
              (progn
                (setf (symbol-function 'gr8s.resources::admit-in-cluster-pod)
-                     (lambda (&rest arguments) (declare (ignore arguments)) (error "quota exceeded")))
+                     (lambda (&rest arguments)
+                       (declare (ignore arguments))
+                       (gr8s.resources::core-resource-error 403 "Forbidden" "quota exceeded")))
                (gr8s.controllers::reconcile-workloads reconciler))
           (setf (symbol-function 'gr8s.resources::admit-in-cluster-pod) original)))
       (let ((condition (aref (gethash "conditions" (workload-status store "replicationcontrollers" "web")) 0)))
         (is (equal "ReplicaFailure" (gethash "type" condition)))
+        (is (equal "FailedCreate" (gethash "reason" condition)))
+        (is (equal "Forbidden: quota exceeded" (gethash "message" condition)))
         (is (null (nth-value 1 (gethash "lastUpdateTime" condition)))))
       (gr8s.controllers::reconcile-workloads reconciler)
       (is (null (gethash "conditions" (workload-status store "replicationcontrollers" "web")))))))

@@ -1,14 +1,15 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
 ;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
-;;;; Cross-module imports for implementation files that formerly reached
+;;;; Remaining implementation imports, including cycles, for files that reached
 ;;;; their sibling symbols through the GR8S composition package.
 ;;;;
 ;;;; The scheduler, node-agent pod pool, kubelet pod/runtime helpers, and the
 ;;;; control-plane node-session / extension surfaces now live in their owning
 ;;;; module packages; this file shadowing-imports exactly the sibling symbols
-;;;; their bodies reference.  INTERN (not FIND-SYMBOL) forward-declares
-;;;; collaborators defined later in the serial system.  Loaded after every
+;;;; their bodies reference. Stable foundation, model, protocol, runtime, and
+;;;; library dependencies are declared in each consumer package.
+;;;; INTERN (not FIND-SYMBOL) forward-declares collaborators defined later.  Loaded after every
 ;;;; module package boundary exists and before the first such file compiles.
 
 (in-package #:cl-user)
@@ -16,15 +17,10 @@
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (dolist (spec '(
                   ;; GR8S.AGENT
-                  ("GR8S.AGENT" "CL-RTNETLINK" "IPV4-NETWORK-OCTETS" "NETLINK-ATTRIBUTES"
-                   "NETLINK-INTEGER" "NETLINK-STRING" "NETWORK-LINK-ATTRIBUTES-BY-INDEX"
-                   "RTNETLINK-ERROR-ERRNO")
                   ("GR8S.AGENT" "GR8S.CONTROLLERS" "+DEFAULT-CLUSTER-POD-CIDR+"
                    "+DEFAULT-NODE-POD-PREFIX+" "FORMAT-POD-ADDRESS" "LIST-NODES"
                    "NORMALIZE-POD-POOL-GEOMETRY" "PARSE-POD-CIDR" "POD-CIDRS-OVERLAP-P")
-                  ("GR8S.AGENT" "GR8S.FOUNDATION" "JSON-OBJECT")
-                  ("GR8S.AGENT" "GR8S.MODEL" "NODE-RECORD-ALL-POD-CIDRS" "NODE-RECORD-API-ONLY"
-                   "NODE-RECORD-NAME")
+
                   ("GR8S.AGENT" "GR8S.NETWORK" "+NODE-VXLAN-INTERFACE+"
                    "+NODE-WIREGUARD-INTERFACE+" "CNI-CONTEXT-CONTAINER-ID" "INVALID-CNI"
                    "MAKE-CNI-CONTEXT" "NETWORK-LINK-KIND-P" "NETWORK-LINK-UNTAGGED-P"
@@ -43,22 +39,10 @@
                    "UPDATE-NODE-CAPACITY" "UPDATE-NODE-EXTENDED-RESOURCES"
                    "UPDATE-NODE-KUBELET-PORT" "UPDATE-NODE-UNDERLAY-ADDRESS"
                    "UPDATE-NODE-WIREGUARD-ENDPOINTS" "UPDATE-NODE-WIREGUARD-PUBLIC-KEY")
-                  ("GR8S.APISERVER" "GR8S.FOUNDATION" "+DNS-POD-SERVER-ADDRESS+" "JSON-OBJECT"
-                   "NODE-STEERING-CAPACITY-SCORE" "RANK-NETWORK-STEERING-CANDIDATES"
-                   "STEERING-BOUNDED-INTEGER")
                   ("GR8S.APISERVER" "GR8S.KUBELET" "DELETION-REQUESTED-P"
                    "EXTENDED-RESOURCE-NAME-P" "SAVE-POD-FINALIZATION-STATE"
                    "SAVE-POD-OBSERVATION")
-                  ("GR8S.APISERVER" "GR8S.MODEL" "KUBERNETES-ERROR-STATUS-CODE"
-                   "MAKE-NODE-RECORD" "NODE-RECORD-ALL-POD-CIDRS" "NODE-RECORD-CAPACITY"
-                   "NODE-RECORD-ID" "NODE-RECORD-LABELS" "NODE-RECORD-NAME"
-                   "NODE-RECORD-POD-CIDR" "NODE-RECORD-READY-P" "NODE-RECORD-READY-SINCE"
-                   "NODE-RECORD-UNDERLAY-ADDRESS" "NODE-RECORD-WIREGUARD-ENDPOINTS"
-                   "NODE-RECORD-WIREGUARD-PUBLIC-KEY"
-                   "NODE-RECORD-WIREGUARD-REFLEXIVE-OBSERVED-AT" "POD-NAME" "POD-NAMESPACE"
-                   "POD-NODE-NAME" "POD-RESOURCE-VERSION" "POD-TO-OBJECT" "POD-UID")
-                  ("GR8S.APISERVER" "GR8S.PROTOCOL" "+NODE-PROTOCOL-VERSION+"
-                   "ENSURE-NODE-PROTOCOL-VERSION" "MAKE-SERVER-ENVELOPE")
+
                   ("GR8S.APISERVER" "GR8S.RESOURCES" "CORE-OBJECT" "GET-CORE-RESOURCE"
                    "MINT-SERVICE-ACCOUNT-TOKEN" "NODE-CAPACITY-FROM-ENTRIES"
                    "NOTE-NODE-HEARTBEAT-LEASE" "RECORD-NODE-RUNTIME-EVENTS"
@@ -77,20 +61,6 @@
                    "TABLE-GET")
                   ("GR8S.CONTROLLERS" "GR8S.KUBELET" "DELETION-REQUESTED-P" "POD-DELETION-TIME"
                    "POD-FOR-THIS-SCHEDULER-P" "POD-SCHEDULING-GATED-P" "SAVE-POD-OBSERVATION")
-                  ("GR8S.CONTROLLERS" "GR8S.MODEL" "COPY-NODE-RECORD" "DNS-LABEL-P"
-                   "KUBERNETES-ERROR-STATUS-CODE" "MAKE-NODE-RECORD" "NODE-RECORD-ALL-POD-CIDRS"
-                   "NODE-RECORD-ALLOCATABLE" "NODE-RECORD-CAPACITY"
-                   "NODE-RECORD-CERTIFICATE-ISSUER-FINGERPRINT" "NODE-RECORD-CREATION-TIMESTAMP"
-                   "NODE-RECORD-EXTENDED-RESOURCES" "NODE-RECORD-ID" "NODE-RECORD-KUBELET-PORT"
-                   "NODE-RECORD-LAST-HEARTBEAT" "NODE-RECORD-LEASE-DEADLINE" "NODE-RECORD-NAME"
-                   "NODE-RECORD-MEMORY-PRESSURE" "NODE-RECORD-DISK-PRESSURE"
-                   "NODE-RECORD-PID-PRESSURE"
-                   "NODE-RECORD-POD-CIDR" "NODE-RECORD-READY-P" "NODE-RECORD-READY-SINCE"
-                   "NODE-RECORD-RUNTIME-DOWN-MESSAGE" "NODE-RECORD-UNDERLAY-ADDRESS"
-                   "NODE-RECORD-WIREGUARD-ENDPOINTS" "NODE-RECORD-WIREGUARD-PUBLIC-KEY"
-                   "NODE-RECORD-WIREGUARD-REFLEXIVE-OBSERVED-AT" "POD-NAME" "POD-NAMESPACE"
-                   "POD-NODE-NAME" "POD-RESOURCE-VERSION" "POD-STATUS-REVISION" "POD-TO-OBJECT"
-                   "POD-UID")
                   ("GR8S.CONTROLLERS" "GR8S.RESOURCES" "CHOOSE-PREEMPTION-UNLOCKED"
                    "COMMIT-CORE-RESOURCES" "COPY-CORE-OBJECT" "COPY-CORE-RESOURCE-INDEX"
                    "CORE-OBJECT" "CORE-RESOURCE-KEY" "CREATE-CORE-RESOURCE" "GET-CORE-RESOURCE"
@@ -118,13 +88,6 @@
                    "CORE-RESOURCE-DRY-RUN-P" "CORE-RESOURCE-REQUEST-OBJECT" "JSON-RESPONSE"
                    "MERGE-JSON-OBJECT" "POD-RESPONSE-OBJECT")
                   ("GR8S.KUBELET" "GR8S.CONTROLLERS" "PARSE-IPV4-INTEGER")
-                  ("GR8S.KUBELET" "GR8S.MODEL" "CONTAINER-SPEC-IMAGE" "CONTAINER-SPEC-NAME"
-                   "DNS-LABEL-P" "INVALID-POD" "NODE-RECORD-LABELS" "NODE-RECORD-NAME"
-                   "OPTIONAL-VECTOR" "POD-CONTAINERS" "POD-EPHEMERAL-CONTAINERS"
-                   "POD-INIT-CONTAINERS" "POD-NAME" "POD-NAMESPACE" "POD-NODE-NAME"
-                   "POD-RESOURCE-VERSION" "POD-TO-OBJECT" "POD-UID" "REJECT-UNSUPPORTED-FIELDS"
-                   "REQUIRE-DNS-LABEL" "REQUIRE-DNS-SUBDOMAIN" "REQUIRE-NONEMPTY-STRING"
-                   "REQUIRE-OBJECT" "REQUIRE-STRING-VECTOR")
                   ("GR8S.KUBELET" "GR8S.RESOURCES" "APPLY-POD-LEVEL-RESOURCES"
                    "CONTAINER-RESOURCE-MAP" "COPY-CORE-OBJECT" "CORE-DATA-KEY-P"
                    "CORE-LABEL-NAME-P" "CORE-OBJECT" "CORE-QUALIFIED-KEY-P"
@@ -135,8 +98,6 @@
                    "VALIDATE-HOST-STORAGE-SOURCE" "VALIDATE-POD-AFFINITY-GROUP"
                    "VALIDATE-POD-LEVEL-RESOURCES" "VALIDATE-STORAGE-ACCESS-MODES"
                    "VALIDATE-TOPOLOGY-SPREAD-CONSTRAINTS")
-                  ("GR8S.KUBELET" "GR8S.RUNTIME" "CONTAINER-CONFIG-ERROR" "RUNTIME-DELETE-POD"
-                   "RUNTIME-FORGET-POD-FINALIZATION" "RUNTIME-OBSERVE" "RUNTIME-TERMINATE-POD")
                   ("GR8S.KUBELET" "GR8S.RUNTIME.CONTAINERD" "CONTAINERD-OWNED-SANDBOX"
                    "CONTAINERD-POD-LOG-DIRECTORY" "CONTAINERD-RUNTIME-LOG-ROOT")
                   ("GR8S.KUBELET" "GR8S.SECURITY" "WRITE-PRIVATE-TEXT-ATOMICALLY")
@@ -148,7 +109,6 @@
                    "POD-STORE-POD-OBSERVED-RESOURCE-VERSIONS" "POD-STORE-POD-OBSERVED-STATUSES"
                    "PUBLISH-POD-STATUS-UNLOCKED" "REMOVE-POD" "UPDATE-POD" "WITH-STORE-LOCK")
                   ;; GR8S.RUNTIME
-                  ("GR8S.RUNTIME" "GR8S.FOUNDATION" "+GR8S-VERSION+")
                   ("GR8S.RUNTIME" "GR8S.SERVER" "MAIN")
                   ;; Quoted condition-class and type references the undefined-function
                   ;; scan did not see (e.g. (error 'kubernetes-error ...)).  They must be
@@ -156,19 +116,14 @@
                   ;; integration shadowing-import replaces -- and so uninterns -- the
                   ;; fresh symbol the file captured, leaving a dangling #:SYMBOL that no
                   ;; longer names the condition class.
-                  ("GR8S.AGENT" "CL-RTNETLINK" "RTNETLINK-ERROR")
                   ("GR8S.AGENT" "GR8S.NETWORK" "CNI-ERROR")
-                  ("GR8S.CONTROLLERS" "GR8S.MODEL" "KUBERNETES-ERROR" "POD")
-                  ("GR8S.KUBELET" "GR8S.MODEL" "POD")
-                  ("GR8S.KUBELET" "GR8S.RUNTIME" "RUNTIME-ERROR")
-                  ("GR8S.NETWORK" "CL-RTNETLINK" "CALL-RTNETLINK" "NETLINK-ATTRIBUTE"
-                   "NETLINK-OCTETS" "NETLINK-READ-INTEGER")
+
+
                   ("GR8S.NETWORK" "GR8S.CONTROLLERS" "SERVICE-AFFINITY-TIMEOUT"
                    "SERVICE-LOAD-BALANCER-IDENTITY" "SERVICE-LOAD-BALANCER-PORT-OWNERS"
                    "SERVICE-NODE-ZONE" "SERVICE-PORT-BACKENDS" "SERVICE-PROXIED-P"
                    "SERVICE-SLICE-ENDPOINT-RECORDS" "TERMINAL-POD-PHASE-P")
                   ("GR8S.NETWORK" "GR8S.KUBELET" "POD-HOST-NETWORK-P")
-                  ("GR8S.NETWORK" "GR8S.MODEL" "POD")
                   ("GR8S.NETWORK" "GR8S.RESOURCES" "LIST-CORE-RESOURCES")
                   ("GR8S.NETWORK" "GR8S.STORE" "LIST-PODS")
                   ))
