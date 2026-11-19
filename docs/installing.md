@@ -121,8 +121,8 @@ sha256sum /usr/local/bin/gr8s /usr/local/bin/gr8s.previous
 ## Stop, clean up, and uninstall
 
 `gr8s-killall.sh` stops only the two known gr8s services, kills processes in
-those units, unmounts paths owned beneath `/var/lib/gr8s`, and removes
-`/run/gr8s`. It preserves configuration, installed binaries, persistent data,
+those units and the containers their shims started, unmounts paths owned
+beneath `/var/lib/gr8s`, and removes `/run/gr8s`. It preserves configuration, installed binaries, persistent data,
 and unrelated host services and mounts.
 
 ```sh

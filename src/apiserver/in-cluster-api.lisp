@@ -348,18 +348,25 @@ NIL to disable API audit logging. Bound by serve from --audit-log-path.")
 
 (defparameter +service-network-interface+ "gr8s-services")
 
+(defun service-network-owner (ca-fingerprint)
+  "The identity stamped on the service interface of the cluster whose CA has CA-FINGERPRINT."
+  (format nil "gr8s-services/~A" ca-fingerprint))
+
 (defun in-cluster-network-owner (pki)
   "Bind the native service interface identity to its owning cluster CA."
-  (format nil "gr8s-services/~A" (cluster-pki-ca-fingerprint pki)))
+  (service-network-owner (cluster-pki-ca-fingerprint pki)))
 
-(defun in-cluster-network-owned-p (pki)
-  "Recognize only this cluster's dummy interface and deterministic MAC identity."
-  (let* ((attributes (network-link-attributes +service-network-interface+))
-         (owner (in-cluster-network-owner pki)))
+(defun service-network-owned-by-p (owner)
+  "Recognize only OWNER's dummy interface and deterministic MAC identity."
+  (let ((attributes (network-link-attributes +service-network-interface+)))
     (and (network-link-kind-p attributes "dummy")
          (equalp (gethash 1 attributes) (network-identity-mac owner))
          (or (equalp (gethash 20 attributes) (netlink-string owner))
              (network-link-untagged-p attributes)))))
+
+(defun in-cluster-network-owned-p (pki)
+  "Recognize only this cluster's service interface."
+  (service-network-owned-by-p (in-cluster-network-owner pki)))
 
 (defun ensure-in-cluster-network (pki)
   "Ensure the owned native service interface has the Kubernetes API virtual IP."

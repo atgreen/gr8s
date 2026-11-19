@@ -283,3 +283,33 @@
                          root :runner runner :firewalld-active-p t))
                  "a trusted member interface passes")))
       (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
+
+(test doctor-removes-a-service-interface-another-cluster-left
+  (flet ((check (status fix &key serve-pid (deleter (lambda (name) (error "must not delete ~A" name))))
+           (let ((*standard-output* (make-broadcast-stream)))
+             (gr8s.server::doctor-check-service-interface
+              "/var/lib/gr8s/server/" fix
+              :status-fn (lambda (directory) (declare (ignore directory)) status)
+              :serve-pid-fn (lambda () serve-pid)
+              :deleter deleter))))
+    (is (zerop (check :absent t)))
+    (is (zerop (check :owned t)))
+    ;; A rebuilt cluster's serve refuses to start beside it, so it is a FAIL...
+    (is (= 1 (check :foreign nil)))
+    ;; ...that --fix clears.
+    (let ((deleted nil))
+      (is (zerop (check :foreign t :deleter (lambda (name) (push name deleted)))))
+      (is (equal '("gr8s-services") deleted)))
+    ;; With a serve running it may be that process's, under another state directory.
+    (is (zerop (check :foreign t :serve-pid 4242)))
+    (is (= 1 (check :foreign t :deleter (lambda (name) (declare (ignore name)) (error "EPERM")))))))
+
+(test doctor-recognizes-a-running-serve
+  (flet ((command-line (&rest arguments)
+           (format nil "~{~A~C~}" (loop for argument in arguments
+                                        append (list argument (code-char 0))))))
+    (is-true (gr8s.server::doctor-serve-command-line-p
+              (command-line "/usr/bin/gr8s" "serve" "--raft-init")))
+    (is-false (gr8s.server::doctor-serve-command-line-p (command-line "/usr/bin/gr8s" "doctor" "--fix")))
+    (is-false (gr8s.server::doctor-serve-command-line-p (command-line "/usr/bin/k3s" "serve")))
+    (is-false (gr8s.server::doctor-serve-command-line-p ""))))
