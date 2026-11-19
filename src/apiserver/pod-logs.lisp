@@ -124,8 +124,16 @@ Text with no CRI lines, as from a non-CRI runtime, passes through unless a filte
       (handler-case
           (progn
             (send text)
+            ;; A follow lasts as long as its client likes; it must not hold the
+            ;; request lease a checkpoint waits for.
+            (gr8s.store::release-store-request)
             (loop
-              (let* ((finished (pod-container-finished-p store pod container))
+              ;; A quiet container sends nothing, so a failed send would never
+              ;; tell us the client has gone.
+              (when (api-watch-client-departed-p) (return))
+              (let* ((finished (handler-case (pod-container-finished-p store pod container)
+                                 ;; The store is closed for a moment; ask again next time.
+                                 (kubernetes-error () nil)))
                      (raw (handler-case (or (reconciler-logs reconciler (pod-uid pod) container) "")
                             (runtime-error () "")))
                      (end (position #\Newline raw :from-end t)))

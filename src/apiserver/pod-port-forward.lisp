@@ -289,6 +289,8 @@ carries its data and 2N+1 its errors, each opened with the port as two little-en
     (admit-pod-port-forward store namespace name)
     (unless (upgrade-request-p)
       (bad-exec-request "Port forwarding requires an upgraded connection"))
+    ;; Forwarding lasts until the client goes; a checkpoint must not wait for that.
+    (gr8s.store::release-store-request)
     (if (channel-port-forward-requested-p)
         (serve-channel-port-forward (reconciler-runtime reconciler) (pod-uid pod))
         (serve-port-forward-connection (reconciler-runtime reconciler) (pod-uid pod)

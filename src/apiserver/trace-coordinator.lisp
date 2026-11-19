@@ -345,6 +345,8 @@
            (nodes (mapcar #'car (trace-coordinator-operations coordinator))))
       (audit-trace-session :started requester namespace (getf request :selector)
                            nodes started-at :running)
+      ;; The trace runs for its whole duration; the store was only needed to start it.
+      (gr8s.store::release-store-request)
       (labels ((finished-p () (bt:with-lock-held (finished-lock) finished-p))
                (mark-finished () (bt:with-lock-held (finished-lock) (setf finished-p t))))
         (unwind-protect

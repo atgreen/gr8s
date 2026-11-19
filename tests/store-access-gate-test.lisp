@@ -236,3 +236,34 @@
                (bt:join-thread client)
                (is (eql 200 status))))
         (stop-server server)))))
+(test a-request-that-released-its-lease-does-not-hold-up-a-checkpoint
+  ;; A followed log or an exec session stays open as long as its client likes.
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (let* ((released (bt:make-semaphore)) (finish (bt:make-semaphore))
+           (after-release nil) (first-release nil) (second-release nil)
+           (request (bt:make-thread
+                     (lambda ()
+                       (gr8s.store::call-with-store-request
+                        store (lambda ()
+                                (setf first-release (gr8s.store::release-store-request)
+                                      second-release (gr8s.store::release-store-request))
+                                (bt:signal-semaphore released)
+                                (bt:wait-on-semaphore finish :timeout 10)
+                                ;; Reads after the release are refused like any unleased caller's.
+                                (setf after-release
+                                      (handler-case (progn (list-pods store nil) :served)
+                                        (gr8s.model::kubernetes-error (condition)
+                                          (gr8s.model::kubernetes-error-status-code condition))))))))))
+      (is-true (bt:wait-on-semaphore released :timeout 5))
+      (is-true first-release)
+      (is-true second-release "releasing twice is harmless")
+      (is (zerop (gr8s.store::pod-store-active-requests store)))
+      ;; The request is still running, and the store quiesces without waiting for it.
+      (is (eq store (gr8s.store::quiesce-store-access store :timeout 0)))
+      (bt:signal-semaphore finish)
+      (bt:join-thread request)
+      (is (eql 503 after-release))
+      (is (zerop (gr8s.store::pod-store-active-requests store)) "the lease is given back once, not twice")
+      (gr8s.store::resume-store-access store)))
+  (is (null (gr8s.store::release-store-request)) "outside a request there is nothing to release"))

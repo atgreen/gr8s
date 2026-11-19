@@ -319,6 +319,8 @@
   (admit-pod-proxy store namespace id)
   (let ((target (pod-proxy-target store namespace id))
         (prefix "^/api/v1/namespaces/[^/]+/pods/[^/]+/proxy(?=/|$)"))
+    ;; The exchange takes as long as the workload behind it; the store's part is done.
+    (gr8s.store::release-store-request)
     (if (upgrade-request-p)
         (proxy-upgrade-exchange target prefix method)
         (proxy-http-exchange target prefix method))))
@@ -365,6 +367,7 @@
     (core-resource-error 405 "MethodNotAllowed" "Unsupported Service proxy method"))
   (let ((target (service-proxy-target store namespace id))
         (prefix "^/api/v1/namespaces/[^/]+/services/[^/]+/proxy(?=/|$)"))
+    (gr8s.store::release-store-request)
     (if (upgrade-request-p)
         (proxy-upgrade-exchange target prefix method)
         (proxy-http-exchange target prefix method))))
