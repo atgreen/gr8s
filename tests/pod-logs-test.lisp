@@ -144,3 +144,42 @@
     (is-true (gr8s.apiserver::exec-options-stdout options))
     (is-true (gr8s.apiserver::exec-options-stderr options))))
 
+
+(test a-followed-log-neither-holds-up-a-checkpoint-nor-outlives-its-client
+  ;; One `kubectl logs -f` kept every checkpoint waiting out its drain limit, and
+  ;; with it the whole API; and a quiet container's follow ran on after its
+  ;; client had gone, because nothing was ever sent to fail (podster-cwj).
+  (with-core-api (store path)
+    (values path)
+    (create-pod store (parse-pod *valid-pod-json*))
+    (let ((fetches 0)
+          (raw (format nil "2026-11-04T08:00:00Z stdout F container is alive~%"))
+          (socket (usocket:socket-connect "127.0.0.1" *core-api-port* :element-type '(unsigned-byte 8))))
+      (sb-int:encapsulate 'gr8s.kubelet::reconciler-logs 'canned
+                          (lambda (f &rest arguments) (declare (ignore f arguments)) (incf fetches) raw))
+      (unwind-protect
+           (let ((stream (usocket:socket-stream socket)))
+             (write-sequence
+              (trivial-utf-8:string-to-utf-8-bytes
+               (format nil "GET /api/v1/namespaces/default/pods/hello/log?follow=true HTTP/1.1~C~CHost: 127.0.0.1~C~C~C~C"
+                       #\Return #\Newline #\Return #\Newline #\Return #\Newline))
+              stream)
+             (finish-output stream)
+             ;; The first lines arriving means the follow loop is running.
+             (is-true (wait-until
+                       (lambda ()
+                         (and (>= fetches 2)
+                              (zerop (gr8s.store::pod-store-active-requests store))))
+                       :timeout 10)
+                      "the follow gives its lease up once it is streaming")
+             (is (eq store (gr8s.store::quiesce-store-access store :timeout 1 :brief t))
+                 "a checkpoint does not wait for the follow")
+             (gr8s.store::resume-store-access store)
+             (usocket:socket-close socket)
+             (setf socket nil)
+             (sleep 3)
+             (let ((after-leaving fetches))
+               (sleep 3)
+               (is (= after-leaving fetches) "the follow stops once its client has gone")))
+        (when socket (ignore-errors (usocket:socket-close socket)))
+        (sb-int:unencapsulate 'gr8s.kubelet::reconciler-logs 'canned)))))

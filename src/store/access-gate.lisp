@@ -5,6 +5,9 @@
 (defvar *store-request-lease* nil
   "The store whose routed request may finish while new access is blocked.")
 
+(defvar *store-request-release* nil
+  "Inside a routed request, a function that gives its lease up early; NIL elsewhere.")
+
 (defvar *store-request-description* nil
   "What the current routed request is, for drain diagnostics: the API layer
 binds it (method and path) before taking the request lease (podster-urj).")
@@ -63,14 +66,46 @@ Unwinding the request releases its lease even when a handler signals an error."
                    (setf (gethash (bt:current-thread) (pod-store-active-request-registry store))
                          (cons *store-request-description* (get-universal-time))
                          entered t)))
-               (let ((*store-request-lease* store)) (funcall function)))
+               (flet ((release ()
+                        (when entered
+                          (bt:with-lock-held ((pod-store-lock store))
+                            (sb-sys:without-interrupts
+                              (setf entered nil)
+                              (decf (pod-store-active-requests store))
+                              (remhash (bt:current-thread) (pod-store-active-request-registry store))
+                              (when (zerop (pod-store-active-requests store))
+                                (bt:condition-notify (pod-store-access-condition store))))))))
+                 (unwind-protect
+                      (let ((*store-request-lease* store)
+                            (*store-request-release*
+                              (lambda ()
+                                (release)
+                                ;; No longer one of the requests a drain lets finish.
+                                (setf *store-request-lease* nil))))
+                        (funcall function))
+                   (release))))
+          ;; Entered but unwound before the inner cleanup form was established.
           (when entered
             (bt:with-lock-held ((pod-store-lock store))
               (sb-sys:without-interrupts
+                (setf entered nil)
                 (decf (pod-store-active-requests store))
                 (remhash (bt:current-thread) (pod-store-active-request-registry store))
                 (when (zerop (pod-store-active-requests store))
                   (bt:condition-notify (pod-store-access-condition store))))))))))
+
+(defun release-store-request ()
+  "Give up the current routed request's lease now, before the handler returns.
+For a request that stays open for as long as its client likes -- a followed
+log, an exec session, a port-forward -- once it has read what it needs: a
+checkpoint drains every lease before it can proceed, so one such request held
+the store closed for the full drain limit on every attempt, and with it the
+whole API (podster-cwj). What the handler reads from the store afterwards it
+reads like any unleased caller: refused while the store is closed. A no-op
+outside a routed request or when already released."
+  (when *store-request-release*
+    (funcall *store-request-release*)
+    t))
 
 (defun describe-active-store-requests-unlocked (store)
   "The leased requests as \"what (age)\" strings, oldest first; caller holds the

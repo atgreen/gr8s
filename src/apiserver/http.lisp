@@ -1219,6 +1219,8 @@ A client that asks for SPDY instead is served as a kubelet's streaming server se
        (format nil "container ~A is not valid for pod ~A" container name)))
     ;; kubelet streams every exec, with or without input or a terminal, through the runtime's
     ;; streaming server: output arrives as it is written and the command has no deadline.
+    ;; Nothing below reads the store, and a checkpoint must not wait for the session to end.
+    (gr8s.store::release-store-request)
     (if (typep (reconciler-runtime reconciler) 'control-plane-runtime)
         (serve-agent-exec-session
          reconciler (pod-uid pod) container options)
@@ -1252,6 +1254,7 @@ A client that asks for SPDY instead is served as a kubelet's streaming server se
     (let ((tty (attach-container-tty-p pod container)))
       (setf (exec-options-tty options) tty)
       (when tty (setf (exec-options-stderr options) nil)))
+    (gr8s.store::release-store-request)
     (if (typep (reconciler-runtime reconciler) 'control-plane-runtime)
         (serve-agent-exec-session reconciler (pod-uid pod) container options :attach t)
         (proxy-runtime-stream
