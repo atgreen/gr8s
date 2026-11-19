@@ -340,3 +340,14 @@
     ;; An uncontended lock is taken at once and names nobody.
     (is (null (gr8s.raft.transport::grab-member-lock-noting-holders member)))
     (sb-thread:release-mutex (gr8s.raft.transport::raft-member-lock member))))
+
+(test a-failed-snapshot-transfer-is-reported-but-not-on-every-retry
+  ;; podster-kiw: a joiner waited for recovery for ten minutes while neither its
+  ;; journal nor the leader's mentioned a transfer.
+  (let ((failure (make-condition 'simple-error :format-control "Artifact source checksum mismatch")))
+    (let ((report (gr8s.raft.transport::raft-snapshot-send-failure-report "gr8s2" failure nil)))
+      (is (search "snapshot transfer to gr8s2 failed" report))
+      (is (search "Artifact source checksum mismatch" report)))
+    (is (null (gr8s.raft.transport::raft-snapshot-send-failure-report "gr8s2" failure 2)))
+    (is (stringp (gr8s.raft.transport::raft-snapshot-send-failure-report
+                  "gr8s2" failure gr8s.raft.transport::*raft-snapshot-failure-report-seconds*)))))

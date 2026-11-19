@@ -2745,8 +2745,13 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                  ;; First report after a grace period: an ordinary restart
                  ;; recovers within seconds and deserves no quorum lecture.
                  (when (plusp next-report)
-                   (let ((report (ignore-errors (ha-recovery-wait-report ha))))
-                     (when report (format t "~A~%" report) (finish-output))))
+                   ;; A report that fails must say so: silence here reads as
+                   ;; "nothing to report" while the member waits for ever.
+                   (format t "~A~%" (handler-case (ha-recovery-wait-report ha)
+                                      (error (condition)
+                                        (format nil "gr8s HA: still waiting for committed application recovery; the report of why failed: ~A"
+                                                condition))))
+                   (finish-output))
                  (setf next-report (+ (get-internal-real-time)
                                       (* (if (plusp next-report) 30 10)
                                          internal-time-units-per-second))))

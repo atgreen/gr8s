@@ -162,3 +162,48 @@
     (let ((report (gr8s.ha:ha-recovery-wait-report hcp)))
       (is (search "262144 of 1048576 bytes received" report))
       (is (not (search "no application snapshot bytes" report))))))
+
+(test a-wiped-member-rejoins-a-reset-founder-and-becomes-a-voter
+  ;; podster-kiw: after `serve --cluster-reset` on the survivor, the lost member's
+  ;; host came back with an empty state directory and its old name. It was listed
+  ;; as a learner, never received a snapshot and waited for recovery forever.
+  (with-temporary-store (source source-root)
+    (with-temporary-store (lost lost-root)
+      (with-temporary-store (wiped wiped-root)
+        (gr8s.resources::create-core-resource source "configmaps" (configmap-input "recover" "k" "A") "default")
+        (let ((founder nil) (second nil)
+              (founder-wal (merge-pathnames "raft/control-plane.log" source-root)))
+          (flet ((node (member) (gr8s.raft.transport::raft-member-node member))
+                 (join (store root)
+                   (let ((member (gr8s.resources::start-store-member-from-wal
+                                  store "second" (merge-pathnames "raft/control-plane.log" root)
+                                  :bootstrap-role :learner)))
+                     (gr8s.raft.transport::raft-member-start member)
+                     (gr8s.raft.transport::raft-cluster-join
+                      member "127.0.0.1" (gr8s.raft.transport::raft-member-port founder))
+                     member)))
+            (unwind-protect
+                 (progn
+                   (setf founder (gr8s.resources::start-store-member-from-wal
+                                  source "founder" founder-wal :bootstrap-role :founder))
+                   (gr8s.raft.transport::raft-member-start founder)
+                   (is (poll-until (lambda () (not (gr8s.store::store-access-blocked-p source))) :timeout 15))
+                   (setf second (join lost lost-root))
+                   (is (poll-until (lambda () (eq :voter (cl-raft::raft-node-self-role (node second)))) :timeout 30))
+                   ;; The second voter is lost for good; the founder is reset alone.
+                   (gr8s.raft.transport::stop-raft-member second)
+                   (setf second nil)
+                   (gr8s.raft.transport::stop-raft-member founder)
+                   (setf founder nil)
+                   (is (equal '("second") (gr8s.ha:reset-control-plane-membership source-root "founder")))
+                   (setf founder (gr8s.resources::start-store-member-from-wal source "founder" founder-wal))
+                   (gr8s.raft.transport::raft-member-start founder)
+                   (is (poll-until (lambda () (not (gr8s.store::store-access-blocked-p source))) :timeout 15))
+                   (setf second (join wiped wiped-root))
+                   (is (poll-until (lambda () (not (gr8s.store::store-access-blocked-p wiped))) :timeout 30)
+                       "the wiped member receives a snapshot and finishes recovery")
+                   (is (equal "A" (startup-store-raw-value wiped)))
+                   (is (poll-until (lambda () (eq :voter (cl-raft::raft-node-self-role (node second)))) :timeout 30)
+                       "the wiped member is promoted"))
+              (when second (gr8s.raft.transport::stop-raft-member second))
+              (when founder (gr8s.raft.transport::stop-raft-member founder)))))))))
