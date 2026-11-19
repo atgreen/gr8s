@@ -344,6 +344,9 @@ message ServerHello {
   bytes cluster_ca_bundle = 5;
   // Present when the authenticated node leaf was not issued by the active CA.
   bytes renewed_node_certificate = 6;
+  // Every control-plane member that serves nodes, as HOST:PORT, leader first.
+  // The agent keeps it so it can find another member when this one is gone.
+  repeated string session_endpoints = 7;
 }
 
 message DesiredStateSnapshot {
@@ -509,6 +512,9 @@ message ProtocolError {
   uint32 supported_version = 1;
   uint32 received_version = 2;
   string message = 3;
+  // Set when a control-plane member refuses a session it cannot admit: the
+  // members that serve nodes, as HOST:PORT, with the leader first when known.
+  repeated string session_endpoints = 4;
 }
 
 // The CNI executable is a thin local client.  It forwards the complete CNI

@@ -123,6 +123,37 @@ class CleanupLifecycleTest(unittest.TestCase):
         )
         self.assertNotIn(str(foreign_mount), self.umount_log.read_text(encoding="utf-8"))
 
+    def test_killall_ends_containers_of_gr8s_shims_only(self):
+        proc = Path(self.temporary.name) / "proc"
+
+        def process(pid, command, children="", cgroup=""):
+            directory = proc / str(pid)
+            (directory / "task" / str(pid)).mkdir(parents=True)
+            (directory / "cmdline").write_bytes(command.encode() + b"\0-id\0x\0")
+            (directory / "task" / str(pid) / "children").write_text(children)
+            (directory / "cgroup").write_text(f"0::{cgroup}\n")
+
+        def container_cgroup(path):
+            directory = self.cgroup_root / path
+            directory.mkdir(parents=True)
+            (directory / "cgroup.kill").write_text("")
+            return directory / "cgroup.kill"
+
+        shim = "containerd/runtime/bin/containerd-shim-runc-v2"
+        process(100, f"{self.root}/var/lib/gr8s/agent/{shim}", "200 201 ", "/system.slice/gr8s-server.service")
+        process(200, "/pause", cgroup="/k8s.io/sandbox")
+        process(201, "/bin/node_exporter", cgroup="/k8s.io/exporter")
+        process(300, f"/var/lib/rancher/k3s/{shim}", "400 ", "/system.slice/k3s.service")
+        process(400, "/pause", cgroup="/kubepods/foreign")
+        owned = [container_cgroup("k8s.io/sandbox"), container_cgroup("k8s.io/exporter")]
+        foreign = container_cgroup("kubepods/foreign")
+
+        result = self.run_script(KILLALL, GR8S_TEST_MOUNTS="", GR8S_PROC_ROOT=str(proc))
+        self.assertEqual(0, result.returncode, result.stderr)
+        for kill in owned:
+            self.assertEqual("1\n", kill.read_text())
+        self.assertEqual("", foreign.read_text())
+
     def test_killall_attempts_every_cleanup_but_reports_real_failures(self):
         self.write("etc/systemd/system/gr8s-server.service")
         self.write("etc/systemd/system/gr8s-agent.service")

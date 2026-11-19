@@ -99,9 +99,29 @@
     (invalid-pod "~A must be a lowercase DNS subdomain" context))
   value)
 
+(defun omit-null-fields (object)
+  "Remove every explicit JSON null field from OBJECT, at any depth, in place, and
+   return OBJECT. Kubernetes decodes a null field as an omitted one, and charts
+   render empty lists that way (`volumes: null`); readers here default an absent
+   field but not a null one (podster-crv)."
+  (cond ((hash-table-p object)
+         (dolist (key (loop for key being the hash-keys of object using (hash-value value)
+                            when (eq value 'null) collect key))
+           (remhash key object))
+         (maphash (lambda (key value) (declare (ignore key)) (omit-null-fields value)) object))
+        ((and (vectorp object) (not (stringp object)))
+         (map nil #'omit-null-fields object)))
+  object)
+
 (defun optional-vector (object key context)
-  "Return array KEY from OBJECT, defaulting to an empty vector."
+  "Return array KEY from OBJECT, defaulting to an empty vector. An explicit JSON
+   null is the same as an omitted field, as it is for Kubernetes, so it is
+   dropped from OBJECT: Helm charts render an empty list as `volumes: null`
+   (podster-crv)."
   (let ((value (gethash key object #())))
+    (when (eq value 'null)
+      (remhash key object)
+      (setf value #()))
     (unless (and (vectorp value) (not (stringp value)))
       (invalid-pod "~A.~A must be an array" context key))
     value))
@@ -328,7 +348,7 @@
                       (com.inuoe.jzon:parse input))
                   "Pod"))
          (metadata (object-value object "metadata" "Pod"))
-         (spec (object-value object "spec" "Pod")))
+         (spec (omit-null-fields (object-value object "spec" "Pod"))))
     (reject-unsupported-fields
      object '("apiVersion" "kind" "metadata" "spec" "status") "Pod")
     (require-empty-object-if-present object "status" "Pod.status")
