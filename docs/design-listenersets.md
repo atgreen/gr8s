@@ -6,9 +6,9 @@ admission/merge and reverse indices
 shared-port SNI TLS dispatch, route attachment, and status including
 `attachedListenerSets`, with the discovery order and `--listenerset-api-group`
 selection described under "Enabling ListenerSets". Only stage 6, full-scale
-validation, remains: full-scale and doubling runs are deferred at the user's
-request, and current VM
-validation is limited to two Gateways, at most six routes, and a few ListenerSets.
+validation, remains: full-scale and doubling runs have not been demonstrated.
+Current VM validation is limited to two Gateways, at most six routes, and a few
+ListenerSets.
 This records the explicitly permitted decomposition of podster-dk9. HTTP core
 conformance does not cover it.
 
@@ -111,8 +111,10 @@ Secret must not rebuild all 40,000 routes. Keep a full reconciliation as recover
 and compare it against incremental results in randomized tests.
 
 Bound caches by live content references and retire unused versions after readers
-release snapshots. The current 4,096-entry material cache clears wholesale at
-capacity; replace that policy before measuring sustained ListenerSet churn. Do
+release snapshots. Parsed per-controller material already uses live-reference
+accounting. The separate process-wide 4,096-entry digest/verdict cache in
+`gateway-tls-material-valid-p` still clears wholesale at capacity; replace that
+policy before measuring sustained ListenerSet churn. Do
 not retain private material merely to cache a negative verdict. Record bytes
 consed with SBCL deltas and allocation profiles, alongside CPU and propagation
 latency, for initial load and single-object changes.
@@ -139,7 +141,7 @@ Implement in the dependent stages recorded as children of podster-dk9:
 Each stage starts with failing tests. The final VM run must include two isolated
 Gateways sharing port 443 and overlapping hostnames, distinct certificates across
 sets, namespace/grant revocation, delete/recreate UIDs, conflicting listener
-precedence and agent restart. Once the user authorizes full-scale testing,
+precedence and agent restart. For full-scale validation,
 exercise 2,500 sets/Secrets and 40,000 routes
 per Gateway, verify all expected routes and certificates, and measure p50/p95/p99
 change-to-observable latency plus allocation and memory high-water marks. Double
@@ -148,6 +150,31 @@ No throughput or propagation target is claimed until that evidence exists.
 
 Benchmark installation/wiring remains podster-qx7, outside this goal. These
 acceptance fixtures can reproduce its resource shape without changing that repo.
+
+### Remaining scale work
+
+The 2026-11-19 audit found the original `podster-dk9` unavailable in this
+checkout's issue database. Its local counterpart, `podster-18x.3`, decomposes
+stage 6 into concrete acceptance work:
+
+- `podster-18x.3.1`: a parameterized disposable-VM fixture generating two
+  isolated Gateways, each with 2,500 sets/Secrets and 40,000 routes. Keep a
+  deterministic inventory and verify every route and certificate. Capture
+  generation acknowledgement, propagation percentiles, allocation, RSS, API
+  writes and full-reconciliation counts for initial load and single-object edits.
+- `podster-18x.3.2`: replace wholesale digest/verdict-cache eviction. Start with
+  a regression using more than 4,096 distinct materials and repeated rotation;
+  measure parse counts, allocation and memory. Preserve grant checks outside
+  the cache and avoid retaining private material for negative verdicts.
+- `podster-18x.3.3`: after those prerequisites, run the target workload and double
+  it to 5,000 sets/Secrets and 80,000 routes per Gateway. Exercise route, set,
+  Secret and namespace/grant changes, UID replacement and restart. Compare CPU,
+  allocation, memory and p50/p95/p99 propagation to detect quadratic growth;
+  prove route/Secret edits do not reparse unrelated routes. Publish raw output
+  with exact source, binary, CRD, cluster and hardware identifiers.
+
+This decomposition is permitted by the supplied goal. Small functional fixtures
+and HTTP core conformance do not establish benchmark-scale readiness.
 
 ## Enabling ListenerSets
 
