@@ -215,3 +215,24 @@
     (let ((gr8s.store::*store-quiesce-patience-seconds* 0.2))
       (is (eql 429 (store-request-outcome store))))
     (gr8s.store::resume-store-access store)))
+
+(test an-http-request-waits-out-a-checkpoint-from-its-first-store-read
+  ;; A request reads the store to be classified for flow control before it is
+  ;; routed. That read was unleased and was refused while a checkpoint had the
+  ;; store: four GETs in a row on the lab, during one two-second quiesce.
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (let ((server (start-http-test-server :store store :runtime (make-fake-runtime))))
+      (unwind-protect
+           (progn
+             (gr8s.store::quiesce-store-access store :timeout 0 :brief t)
+             (let* ((status nil)
+                    (client (bt:make-thread
+                             (lambda ()
+                               (setf status (nth-value 1 (request "/api/v1/namespaces/default/pods")))))))
+               (sleep 0.3)
+               (is (null status) "the request is held, not refused, while the checkpoint has the store")
+               (gr8s.store::resume-store-access store)
+               (bt:join-thread client)
+               (is (eql 200 status))))
+        (stop-server server)))))

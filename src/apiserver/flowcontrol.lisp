@@ -194,7 +194,9 @@ and the exec, attach, port-forward and log subresources."
   "Call FUNCTION holding a seat of the current request's priority level, when that level is limited."
   (let* ((level *flowcontrol-request-level*)
          (limits (and level (not (flowcontrol-long-running-p path method))
-                      (progn (flowcontrol-table store) (fifth *flowcontrol-snapshot*))))
+                      (call-with-brief-store-access
+                       store path
+                       (lambda () (flowcontrol-table store) (fifth *flowcontrol-snapshot*)))))
          (entry (and limits (gethash level limits))))
     (if (null entry)
         (funcall function)
