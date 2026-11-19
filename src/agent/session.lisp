@@ -987,6 +987,28 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
         (ignore-errors (bt:join-thread watchdog-thread)))
       (ignore-errors (ag-grpc:channel-close channel)))))))
 
+(defun parse-node-session-endpoint (endpoint)
+  "Split ENDPOINT, a HOST:PORT string a control-plane member sent, into the list
+   (HOST PORT). Signals on anything else."
+  (let ((colon (position #\: endpoint :from-end t)))
+    (unless (and colon (plusp colon)) (error "Malformed node-session endpoint ~S" endpoint))
+    (let ((port (parse-integer endpoint :start (1+ colon))))
+      (unless (<= 1 port 65535) (error "Malformed node-session endpoint ~S" endpoint))
+      (list (subseq endpoint 0 colon) port))))
+
+(defun node-session-targets-after-refusal (targets condition)
+  "The endpoints to rotate through once a member has refused the session with
+   CONDITION, or NIL when it named none. A member that cannot admit a session
+   names those that can, leader first: they go first, with TARGETS kept behind
+   them. An agent given one --server could not otherwise follow a leadership
+   change it never held a session through (podster-1t0)."
+  (let ((named (loop for endpoint in (node-session-refused-endpoints condition)
+                     for parsed = (ignore-errors (parse-node-session-endpoint endpoint))
+                     when parsed collect parsed)))
+    (when named
+      (append named (remove-if (lambda (target) (member target named :test #'equal))
+                               targets)))))
+
 (defun run-node-session (host port node-name identity-path apply-snapshot
                          &key max-sessions (reconnect-delay 1) endpoints
                            operation-handler underlay-address status-provider snapshot-observer
@@ -1034,7 +1056,13 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
                      (error condition))
                    (unless (node-session-cancelled-p control)
                      (format *error-output* "gr8s node session to ~A:~A ended: ~A; reconnecting~%"
-                             try-host try-port condition))))
+                             try-host try-port condition))
+                   (when (typep condition 'node-session-refused)
+                     (let ((redirected (node-session-targets-after-refusal targets condition)))
+                       ;; Start over at the first member it named only on
+                       ;; news; told the same again, keep rotating.
+                       (when (and redirected (not (equal redirected targets)))
+                         (setf targets redirected attempt -1))))))
                (incf attempt)
                (unless (or (node-session-cancelled-p control)
                            (funcall stop-predicate))

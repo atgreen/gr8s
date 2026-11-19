@@ -509,6 +509,9 @@ message ProtocolError {
   uint32 supported_version = 1;
   uint32 received_version = 2;
   string message = 3;
+  // Set when a control-plane member refuses a session it cannot admit: the
+  // members that serve nodes, as HOST:PORT, with the leader first when known.
+  repeated string session_endpoints = 4;
 }
 
 // The CNI executable is a thin local client.  It forwards the complete CNI

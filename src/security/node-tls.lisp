@@ -138,9 +138,13 @@ unsupported option never blocks the connection."
   "Authenticate the server before sending HTTP/2 data, including join tokens."
   (unless (or ca-pin ca-certificate-path)
     (pki-fail "missing-server-trust" "A cluster CA pin or certificate is required"))
+  ;; TIMEOUT is NIL for a long-lived session, whose reads must not time out. The
+  ;; connect still must: an address that drops SYNs -- a firewalled member, or a
+  ;; witness that has no node listener -- otherwise holds the caller for the
+  ;; kernel's two-minute connect timeout before it can try another member.
   (let ((socket (harden-node-channel-socket
                  (usocket:socket-connect host port :element-type '(unsigned-byte 8)
-                                         :timeout timeout)))
+                                         :timeout (or timeout 10))))
         (tls nil))
     (handler-case
         (progn

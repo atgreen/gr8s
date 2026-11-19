@@ -28,7 +28,7 @@
   (maintenance-lock (bt:make-lock "gr8s HA maintenance"))
   (maintenance-changed (bt:make-condition-variable :name "gr8s HA maintenance"))
   (generation-reaped-files 0) (artifacts-reaped 0)
-  compaction-thread compaction-running compaction-in-flight compaction-retention-policy compaction-catchup-policy
+  compaction-thread compaction-running compaction-in-flight compaction-quiescing compaction-retention-policy compaction-catchup-policy
   (compaction-lock (bt:make-lock "gr8s HA compaction"))
   (compaction-changed (bt:make-condition-variable :name "gr8s HA compaction"))
   (compaction-bytes (* 16 1024 1024)) (compaction-entries 256) (compaction-interval 1)
@@ -237,6 +237,15 @@ the cluster. Access stays gated until a current-term committed boundary applies.
   (and hcp (not (gr8s.store::store-access-blocked-p (ha-control-plane-store hcp)))
        (raft-member-leader-p (ha-control-plane-member hcp))))
 
+(defun ha-control-plane-admits-node-sessions-p (hcp)
+  "True on the elected leader once its application has recovered. A checkpoint
+quiesces the store for a moment on a leader that goes on serving, which is no
+reason to end every node's session: agents would lose readiness on each
+checkpoint and have to find the leader again (podster-htq)."
+  (and hcp (raft-member-leader-p (ha-control-plane-member hcp))
+       (or (ha-control-plane-compaction-quiescing hcp)
+           (not (gr8s.store::store-access-blocked-p (ha-control-plane-store hcp))))))
+
 (defun ha-control-plane-leader-status (hcp)
   "Return leader routing only after this member's application recovery gate opens."
   (cond ((null hcp) (values t nil))
@@ -286,6 +295,16 @@ the cluster. Access stays gated until a current-term committed boundary applies.
     (declare (ignore index))
     (if (eq outcome t) (values t nil) (values nil outcome))))
 
+(defun ha-control-plane-node-serving-members-unlocked (node node-port)
+  "The members of NODE's cluster that serve nodes, as (ID HOST NODE-PORT) entries;
+the caller holds the member lock. A witness only votes: it has no node listener,
+and an agent sent to one waits out a connect timeout before it tries a member
+that can admit it (podster-htq)."
+  (loop for id being the hash-keys of (raft-node-peer-addresses node)
+          using (hash-value address)
+        unless (eq :witness (cdr (assoc id (raft-current-config node) :test #'equal)))
+          collect (cons id (list (first address) node-port))))
+
 (defun ha-control-plane-node-endpoints (hcp node-port)
   "Return every known control-plane node endpoint as (HOST PORT), with this
    member first. Raft and node gRPC use different ports but the same advertised
@@ -298,9 +317,7 @@ the cluster. Access stays gated until a current-term committed boundary applies.
              (self (raft-node-id node))
              (members
                (sort
-                (loop for id being the hash-keys of (raft-node-peer-addresses node)
-                        using (hash-value address)
-                      collect (cons id (list (first address) node-port)))
+                (ha-control-plane-node-serving-members-unlocked node node-port)
                 #'string< :key #'car))
              (self-entry (assoc self members :test #'equal)))
         (mapcar #'cdr
@@ -319,9 +336,7 @@ API and controllers. Remaining members retain reconnect failover coverage."
              (leader (raft-node-leader-id node))
              (members
                (sort
-                (loop for id being the hash-keys of (raft-node-peer-addresses node)
-                        using (hash-value address)
-                      collect (cons id (list (first address) node-port)))
+                (ha-control-plane-node-serving-members-unlocked node node-port)
                 #'string< :key #'car))
              (leader-entry (and leader (assoc leader members :test #'equal))))
         (mapcar #'cdr

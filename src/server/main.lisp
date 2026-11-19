@@ -2884,7 +2884,11 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                   store :host (getf options :node-listen "127.0.0.1")
                   :port (getf options :node-port)
                   :session-admission-fn
-                  (when ha (lambda () (ha-control-plane-leader-p ha)))
+                  (when ha (lambda () (ha-control-plane-admits-node-sessions-p ha)))
+                  :session-endpoints-fn
+                  (when ha
+                    (lambda ()
+                      (ha-control-plane-node-session-endpoints ha (getf options :node-port))))
                   :pki pki :cluster-pod-cidr (gethash "clusterPodCIDR" pool)
                   :node-prefix (gethash "nodePrefix" pool)
                   :cluster-pod-cidrs (node-pool-cluster-cidrs pool)
@@ -3341,6 +3345,12 @@ fabric. Upstream conformance harnesses live in deploy/conformance/.
 
 1. Check host prerequisites with `sudo gr8s doctor --state-directory /var/lib/gr8s`.
    It diagnoses kernel, cgroups, bpffs, Pod route overlap, and firewall/DNS issues.
+   Check free space too: `df -h STATE_DIR`. A full disk does not announce
+   itself. The image pull-through proxy answers 503, so Pods sit in
+   ImagePullBackOff; the server exits on `No space left on device`; and in HA the
+   member drops out of quorum. Free space before diagnosing anything above it --
+   rotated logs under /var/log are usually the quickest win, and the images are
+   under STATE_DIR/agent.
 2. Inspect Kubernetes state with your kubeconfig:
 
        kubectl get nodes -o wide
@@ -3389,9 +3399,27 @@ The journals explain refusals -- grep for these lines and trust them:
   this member's replica of X has diverged in stable fields. One-shot bursts
   during leadership churn self-heal; a steady stream means a baked fork --
   wipe and rejoin this member (checklist below).
+- `blocking application store access for restore/checkpoint` followed within
+  about a second by `application store access resumed`: a routine checkpoint.
+  They come in pairs, more often under write load. Writes that land in one get
+  a 503 (`Application restore is blocking ...`) and succeed on retry -- re-run
+  a `kubectl apply` or `helm` step that failed that way. A `blocking` line with
+  no `resumed` after it is the problem case.
 - `application drain timed out after Ns; K requests still active: METHOD
   PATH (AGEs)`: a checkpoint could not drain; the named request holds a
   store lease. The API rejects with 503 while draining.
+- `gr8s node session to HOST:PORT ended: ...; reconnecting` (agent side), with
+  the node NotReady for `AgentNotReady: Readiness follows the gr8s node session
+  lease`: the agent has no session with the leader. The text after `ended:` is
+  the reason. `Node sessions require an active control-plane leader` means that
+  member is not the serving leader; the agent moves to the members the refusal
+  names. A timeout means the address does not answer on the node port.
+- `service interface belongs to another cluster` (serve exits at startup): the
+  host still has the `gr8s-services` interface of a cluster whose state was
+  removed. `sudo gr8s doctor --fix --state-directory STATE_DIR` removes it.
+- `HA state requires its Raft startup options; standalone fallback is
+  refused`: the state directory holds an HA member but the arguments name no HA
+  mode. See the startup arguments below.
 - `waiting for a quorum: N of M voting members; ...not heard from since
   startup`: who is missing and whether the cluster can proceed. A joiner
   that stays at `no application snapshot bytes have arrived` has a
@@ -3410,12 +3438,48 @@ Member failure decision tree:
   membership first: a committed voter that vanishes still costs quorum, and
   its single-use join token is already burned.
 
+HA startup arguments, which live in the service environment and are read on
+every start: the member that founded the cluster keeps `--raft-init` for good
+(on a state directory that already holds the cluster it resumes it); every
+other control-plane member keeps `--join HOST:PORT --token ... --ca-pin ...`.
+`--cluster-reset` is for one start only and cannot be combined with `--join`:
+once the member is up, replace it with `--raft-init`, or the next restart
+resets the membership again. After a crash loop systemd refuses further starts
+(`Start request repeated too quickly`) until `systemctl reset-failed UNIT`.
+
+Tokens come from a control-plane member's own state directory:
+
+    gr8s join-token --node-name NAME --role node|control-plane|witness \
+        --state-directory STATE_DIR
+
+The output is JSON with the token and the CA pin. A token admits that one name
+in that one role, once.
+
 Wipe-and-rejoin checklist, in order (skipping a step crash-loops):
-stop the service; unmount any bpffs still mounted under the state directory
-(`mount | grep STATE_DIR`); remove the state directory; run
-`gr8s doctor --fix` to clear leftover gr8s network interfaces; mint a fresh
-control-plane token; update the service environment; start. Watch the join:
-enrollment errors and snapshot-transfer progress both appear in the journal.
+stop the workloads and the service with `gr8s-killall.sh`, which also unmounts
+what is mounted under the state directory; remove the state directory; run
+`gr8s doctor --fix --state-directory STATE_DIR` to clear leftover gr8s network
+interfaces; mint a fresh control-plane token; update the service environment;
+start. Watch the join: enrollment errors and snapshot-transfer progress both
+appear in the journal.
+
+A joiner is listed as `learner` until it has caught up, and its service stays
+`activating` while it logs `waiting for committed application recovery`. To
+tell catching up from stuck, watch its state directory:
+`du -sh STATE_DIR/snapshot-artifacts STATE_DIR/application-generations`. Growth
+means the snapshot is arriving, which can take minutes over a slow link. No
+growth at all, with the raft port reachable in both directions, is a fault:
+collect both journals before restarting anything.
+
+Rebuilding a cluster from nothing, when no member's state is worth keeping:
+on every node run `gr8s-killall.sh`, remove the state directory, and run
+`gr8s doctor --fix`; start the founder with `--raft-init`; join each further
+control-plane member, then the witness, then the agents, each with its own
+fresh token. The new cluster has a new CA: write a new kubeconfig with
+`gr8s kubeconfig --state-directory STATE_DIR --server URL --output FILE`,
+and have clients trust the new CA. Workloads and their PersistentVolume
+bindings are gone with the old state; data on an NFS server stays there under
+the old `pvc-<uid>` directories, unattached.
 
 Replica forensics: every member's API serves its own replica, so the same
 object can be diffed across members to find a fork:
@@ -3517,6 +3581,15 @@ Output identifies nodes; aggregation maps remain per node. Default duration is
 Membership is fixed at trace start: restart the trace after a container restart.
 Completion or client disconnect cleans up attachments. Output is ephemeral, so
 save relevant evidence securely. Begin with a narrow selector and short duration.
+
+## Gateway backends and NetworkPolicy
+
+The gr8s gateway runs on each node's host network, not as a Pod. A
+NetworkPolicy that admits a backend's traffic by `namespaceSelector` or
+`podSelector` therefore never matches the gateway, and a default-deny ingress
+policy in the backend's namespace cuts its routes off: the gateway answers
+`the gateway backend connection failed: ... TIMEOUT`. When a route times out,
+look for NetworkPolicies in the backend namespace before anything else.
 
 ## Built-in APIs -- do not install upstream duplicates
 

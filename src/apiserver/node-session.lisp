@@ -62,11 +62,15 @@ planner groups by: its name and its region/zone."
                        overlay-backend mtu
                        wireguard-listen-port wireguard-relay-server
                        wireguard-relay-address image-tracker clock
-                       gateway-stability-seconds session-admission-fn)))
+                       gateway-stability-seconds session-admission-fn
+                       session-endpoints-fn)))
   store
   ;; HA admits persistent agent streams only on the publishing leader.
   ;; Enrollment and peer-operation relay are deliberately independent.
   session-admission-fn
+  ;; Where a refused agent should go instead: the members that serve nodes as
+  ;; (HOST PORT), leader first.
+  session-endpoints-fn
   grpc-server
   thread
   port
@@ -852,6 +856,17 @@ the node the operation was addressed to."
       (unless (pending-node-operation-done-p operation)
         (finish-node-operation operation :error "Node disconnected")))))
 
+(define-condition node-session-refused (error)
+  ((expected :initarg :expected :reader node-session-refused-expected)
+   (message :initarg :message :reader node-session-refused-message)
+   (endpoints :initarg :endpoints :initform nil :reader node-session-refused-endpoints))
+  (:report (lambda (condition stream)
+             (format stream "Expected node-session payload ~S; the peer reported: ~A"
+                     (node-session-refused-expected condition)
+                     (node-session-refused-message condition))))
+  (:documentation "The peer answered with a protocol-error. ENDPOINTS, HOST:PORT
+strings, are the members it says can admit the session instead."))
+
 (defun node-envelope-payload (envelope variant)
   "The payload ENVELOPE carries for VARIANT. Errors unless ENVELOPE's active
    payload case is exactly VARIANT; a protocol-error in VARIANT's place reports
@@ -860,9 +875,11 @@ the node the operation was addressed to."
   (let ((actual (slot-value envelope 'gr8s.node.v1::payload-case)))
     (unless (eq variant actual)
       (if (eq actual :protocol-error)
-          (error "Expected node-session payload ~S; the peer reported: ~A"
-                 variant (slot-value (slot-value envelope 'gr8s.node.v1::protocol-error)
-                                     'gr8s.node.v1::message))
+          (let ((reported (slot-value envelope 'gr8s.node.v1::protocol-error)))
+            (error 'node-session-refused
+                   :expected variant
+                   :message (slot-value reported 'gr8s.node.v1::message)
+                   :endpoints (slot-value reported 'gr8s.node.v1::session-endpoints)))
           (error "Expected node-session payload ~S, received ~S" variant actual)))
     (slot-value envelope (find-symbol (symbol-name variant) :gr8s.node.v1))))
 
@@ -1501,16 +1518,46 @@ An explicit unready or malformed current report withdraws its prior proof."
        (if envelope
            (slot-value envelope 'gr8s.node.v1::protocol-version)
            0)
-       :message (princ-to-string condition))
+       :message (princ-to-string condition)
+       :session-endpoints
+       (when (typep condition 'node-session-not-admitted)
+         (node-session-not-admitted-endpoints condition)))
       :sequence 1))))
 
 (defun node-sessions-admitted-p (server)
   (let ((predicate (node-grpc-server-session-admission-fn server)))
     (or (null predicate) (funcall predicate))))
 
+(define-condition node-session-not-admitted (error)
+  ((endpoints :initarg :endpoints :initform nil :reader node-session-not-admitted-endpoints))
+  (:report "Node sessions require an active control-plane leader; reconnect to another endpoint")
+  (:documentation "This member is not the leader that serves node sessions.
+ENDPOINTS, HOST:PORT strings, are the members that may be, leader first."))
+
+(defun node-session-endpoint-strings (server)
+  "The members that serve node sessions, as HOST:PORT strings, leader first."
+  (let ((endpoints-fn (node-grpc-server-session-endpoints-fn server)))
+    (when endpoints-fn
+      (mapcar (lambda (endpoint) (format nil "~A:~D" (first endpoint) (second endpoint)))
+              (ignore-errors (funcall endpoints-fn))))))
+
 (defun ensure-node-session-admitted (server)
   (unless (node-sessions-admitted-p server)
-    (error "Node sessions require an active control-plane leader; reconnect to another endpoint")))
+    (error 'node-session-not-admitted :endpoints (node-session-endpoint-strings server))))
+
+(defun call-once-store-is-available (function &key (patience 35) (pause 0.05))
+  "Call FUNCTION, and again after PAUSE seconds for as long as it signals a 503.
+A checkpoint closes the store to writes for a moment, up to its drain limit; an
+agent's report that arrives then is handled once the store reopens rather than
+ending the session, which costs the node its readiness (podster-htq). After
+PATIENCE seconds the 503 is signalled as it stands."
+  (loop with deadline = (+ (get-internal-real-time) (* patience internal-time-units-per-second))
+        do (handler-case (return (funcall function))
+             (kubernetes-error (condition)
+               (unless (and (eql 503 (kubernetes-error-status-code condition))
+                            (< (get-internal-real-time) deadline))
+                 (error condition))
+               (sleep pause)))))
 
 (defun handle-node-connect-internal (server context stream)
   "Serve one agent Connect stream end to end: read and authenticate the NodeHello,
@@ -1687,7 +1734,8 @@ An explicit unready or malformed current report withdraws its prior proof."
              (loop for envelope = (ag-grpc:stream-recv stream)
                    while envelope
                    do (setf (node-agent-session-last-envelope-time session) (get-universal-time))
-                      (handle-node-agent-envelope server node-name envelope session)
+                      (call-once-store-is-available
+                       (lambda () (handle-node-agent-envelope server node-name envelope session)))
                       (setf (node-agent-session-last-envelope-time session) (get-universal-time))))
         (bt:with-lock-held ((node-grpc-server-lock server))
           (when (eq session (gethash node-name (node-grpc-server-sessions server)))
@@ -2076,7 +2124,7 @@ socket are released rather than leaked. Safe to call more than once."
 (defun start-node-grpc-server (store &key (host "127.0.0.1") (port 0)
                                             (heartbeat-timeout-seconds 15)
                                             pki
-                                            session-admission-fn
+                                            session-admission-fn session-endpoints-fn
                                             (cluster-pod-cidr +default-cluster-pod-cidr+)
                                             (node-prefix +default-node-pod-prefix+)
                                             cluster-pod-cidrs
@@ -2125,6 +2173,7 @@ socket are released rather than leaked. Safe to call more than once."
          (server (%make-node-grpc-server
                   :store store
                   :session-admission-fn session-admission-fn
+                  :session-endpoints-fn session-endpoints-fn
                   :grpc-server grpc-server
                   :port port
                   :heartbeat-timeout-seconds heartbeat-timeout-seconds
