@@ -61,6 +61,17 @@
                "reserved" (format-cpu-set (node-resource-manager-reserved manager))
                "topology" (node-resource-manager-topology manager)))
 
+(defun config-without-memory-totals (config)
+  "CONFIG less each NUMA node's MemTotal. The kernel reports it a few kB
+differently from one boot to the next, and no reservation is keyed on it;
+VALIDATE-RESOURCE-CHECKPOINT checks that the reservations still fit."
+  (let* ((copy (gr8s.resources::copy-core-object config))
+         (topology (and (hash-table-p copy) (gethash "topology" copy)))
+         (nodes (and (hash-table-p topology) (gethash "nodes" topology))))
+    (when (vectorp nodes)
+      (map nil (lambda (node) (when (hash-table-p node) (remhash "memory" node))) nodes))
+    copy))
+
 (defun save-node-resource-checkpoint (manager)
   "Write the authoritative reservations before exposing any new exclusive CPU."
   (ensure-directories-exist (node-resource-manager-checkpoint manager))
@@ -105,7 +116,8 @@
       (let ((root (com.inuoe.jzon:parse (node-resource-manager-checkpoint manager))))
         (unless (and (eql 1 (gethash "version" root)) (hash-table-p (gethash "allocations" root)))
           (error "Invalid resource-manager checkpoint"))
-        (unless (gr8s.store::json-value-equal-p (gethash "config" root) (resource-manager-config manager))
+        (unless (gr8s.store::json-value-equal-p (config-without-memory-totals (gethash "config" root))
+                                                (config-without-memory-totals (resource-manager-config manager)))
           (when (plusp (hash-table-count (gethash "allocations" root)))
             (error "Resource policies or topology changed with live reservations; drain this node first")))
         (setf (node-resource-manager-allocations manager) (gethash "allocations" root))))
@@ -393,7 +405,15 @@ Admission still calls the strict reconciler before starting a dedicated containe
                                  (subsetp (coerce (gethash "cpus" allocation) 'list) pool))
                       (error "Container affinity is outside its checkpointed Pod CPU pool")))
                   (gethash "containers" plan))))
-     (node-resource-manager-allocations manager))))
+     (node-resource-manager-allocations manager))
+    ;; A node's memory total is not part of the configuration compared at
+    ;; restore, so a node that shrank below what is pinned to it is caught here.
+    (dolist (node (topology-node-ids (node-resource-manager-topology manager)))
+      (let ((pinned (loop for plan being the hash-values of (node-resource-manager-allocations manager)
+                          when (and (eql node (gethash "node" plan)) (hash-table-p (gethash "memory" plan)))
+                            sum (gethash "memory" (gethash "memory" plan) 0))))
+        (unless (<= pinned (topology-node-memory (node-resource-manager-topology manager) node "memory"))
+          (error "NUMA node ~D no longer has the memory reserved on it; drain this node first" node))))))
 
 (defun verify-node-resource-recovery (manager)
   "Refuse to reset affinity for live containers when its authoritative file is missing."
