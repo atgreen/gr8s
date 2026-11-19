@@ -134,8 +134,13 @@ unsupported option never blocks the connection."
   socket)
 
 (defun %make-node-tls-channel
-    (host port &key (timeout 10) ca-pin ca-certificate-path certificate-path private-key-path)
-  "Authenticate the server before sending HTTP/2 data, including join tokens."
+    (host port &key (timeout 10) (read-timeout nil read-timeout-p)
+                    ca-pin ca-certificate-path certificate-path private-key-path)
+  "Authenticate the server before sending HTTP/2 data, including join tokens.
+READ-TIMEOUT, when given, replaces TIMEOUT as the limit on each read from the
+socket once the channel is up, for a caller whose calls carry deadlines of
+their own: the socket's limit would otherwise end a call that was allowed
+longer."
   (unless (or ca-pin ca-certificate-path)
     (pki-fail "missing-server-trust" "A cluster CA pin or certificate is required"))
   ;; TIMEOUT is NIL for a long-lived session, whose reads must not time out. The
@@ -165,6 +170,10 @@ unsupported option never blocks the connection."
                   (ag-http2::make-stream-multiplexer :client-p t))
             (ag-http2::connection-handshake connection)
             (setf (ag-grpc:channel-connection channel) connection)
+            ;; usocket gave TIMEOUT to the stream as well as to the connect.
+            (when read-timeout-p
+              (setf (sb-impl::fd-stream-timeout (usocket:socket-stream socket))
+                    (and read-timeout (coerce read-timeout 'single-float))))
             channel))
       (error (condition)
         (when tls (ignore-errors (close tls)))

@@ -323,10 +323,13 @@ one fails once its certificate expires and is then opened again with the new one
         message)
       (octets->raft-message (gr8s.node.v1::payload request))))
 
-(defun make-raft-channel (credentials host port timeout)
-  "Open a channel to a peer, authenticating both ends when this member uses TLS."
+(defun make-raft-channel (credentials host port timeout &key (read-timeout timeout))
+  "Open a channel to a peer, authenticating both ends when this member uses TLS.
+TIMEOUT bounds the connection and its negotiation and is the default deadline of
+a call. READ-TIMEOUT is the socket's own limit on a read, which ends any call
+that waits longer whatever deadline the call was given; it defaults to TIMEOUT."
   (if credentials
-      (make-node-tls-channel host port :timeout timeout
+      (make-node-tls-channel host port :timeout timeout :read-timeout read-timeout
                                        :ca-certificate-path (raft-credentials-ca-path credentials)
                                        :certificate-path (raft-credentials-certificate-path credentials)
                                        :private-key-path (raft-credentials-key-path credentials))

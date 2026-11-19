@@ -180,8 +180,6 @@ Unknown files, directories, symlinks, hard links or permissions preserve the roo
             do (ironclad:update-digest hash buffer :end count)))
     (ironclad:byte-array-to-hex-string (ironclad:produce-digest hash))))
 
-(defparameter *raft-snapshot-rpc-timeout* 2)
-(defparameter *raft-artifact-completion-timeout* 60)
 
 (defun raft-link-deliver-message (stub message)
   (gr8s.node.v1::raft-transport-deliver
@@ -254,7 +252,11 @@ Probe capacity at most once per unchanged second while recovery is required."
       (let ((total (file-length stream)) (offset 0)
             (buffer (make-array +raft-snapshot-chunk-bytes+ :element-type '(unsigned-byte 8))))
         (unless (<= 1 total (raft-member-snapshot-max-bytes member)) (error "Snapshot exceeds transfer limit"))
+        (when *raft-snapshot-send-progress* (setf (second *raft-snapshot-send-progress*) total))
         (loop for count = (read-sequence buffer stream) while (plusp count) do
+          ;; Counted as sent before the call that carries it: a failure on the
+          ;; last chunk is then reported as waiting for the install.
+          (when *raft-snapshot-send-progress* (setf (first *raft-snapshot-send-progress*) (+ offset count)))
           (unless (raft-member-running member) (error "Snapshot sender stopped"))
           (when (and obsolete-p (funcall obsolete-p (plusp offset)))
             (return-from raft-link-send-snapshot-file :obsolete))
