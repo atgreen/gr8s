@@ -241,8 +241,88 @@
                  (gateway-status-condition conditions "Programmed" "False" "Pending"
                                            "Gateway configuration cannot be resolved" generation)))))))
 
+(defun route-parent-controlled-gateway (store route parent gateways)
+  "The gr8s-controlled Gateway a route's PARENT ref targets, or NIL. GATEWAYS is
+the pre-filtered list of controlled Gateways."
+  (declare (ignore store))
+  (let ((group (gethash "group" parent "gateway.networking.k8s.io"))
+        (kind (gethash "kind" parent "Gateway"))
+        (name (gethash "name" parent))
+        (namespace (gethash "namespace" parent (gethash "namespace" (gethash "metadata" route)))))
+    (when (and (equal group "gateway.networking.k8s.io") (equal kind "Gateway") name)
+      (find-if (lambda (gateway)
+                 (let ((metadata (gethash "metadata" gateway)))
+                   (and (equal name (gethash "name" metadata))
+                        (equal namespace (gethash "namespace" metadata)))))
+               gateways))))
+
+(defun httproute-status-object (store route gateways)
+  "Compute an HTTPRoute's .status.parents (Accepted + ResolvedRefs) for every
+parentRef targeting a gr8s-controlled Gateway, reusing the controllers'
+acceptance and backend-resolution rules. Entries written by other controllers
+are preserved. Returns the new status object, or NIL when nothing of ours
+applies -- this is status only, so route dispatch is never affected."
+  (let* ((metadata (gethash "metadata" route))
+         (generation (gethash "generation" metadata 1))
+         (old (gethash "status" route (core-object)))
+         (previous (coerce (gethash "parents" old #()) 'list))
+         (controller gr8s.controllers::*gateway-controller-name*)
+         (backend-error (gr8s.controllers::gateway-route-backend-reference-error store route))
+         (ours nil))
+    (loop for parent across (gethash "parentRefs" (gethash "spec" route) #())
+          for gateway = (route-parent-controlled-gateway store route parent gateways)
+          when gateway do
+            (let* ((reason (gr8s.controllers::gateway-route-parent-acceptance store route gateway parent))
+                   (accepted (equal reason "Accepted"))
+                   (key (list (gethash "name" parent) (gethash "sectionName" parent) (gethash "port" parent)))
+                   (prior (find-if (lambda (entry)
+                                     (and (equal controller (gethash "controllerName" entry))
+                                          (let ((ref (gethash "parentRef" entry)))
+                                            (equal key (list (gethash "name" ref) (gethash "sectionName" ref)
+                                                             (gethash "port" ref))))))
+                                   previous))
+                   (prior-conditions (and prior (gethash "conditions" prior))))
+              (push (core-object
+                     "parentRef" parent "controllerName" controller
+                     "conditions"
+                     (vector (gateway-status-condition prior-conditions "Accepted" (if accepted "True" "False")
+                                                       reason
+                                                       (if accepted "Route accepted by the Gateway"
+                                                           "Route not accepted by the Gateway") generation)
+                             (gateway-status-condition prior-conditions "ResolvedRefs"
+                                                       (if backend-error "False" "True")
+                                                       (or backend-error "ResolvedRefs")
+                                                       (if backend-error "A backend reference is invalid"
+                                                           "All references resolved") generation)))
+                    ours))
+          finally
+             ;; Write only when we have (or previously wrote) parent entries, so
+             ;; routes attached to a foreign controller are left untouched.
+             (return
+               (when (or ours (some (lambda (entry) (equal controller (gethash "controllerName" entry))) previous))
+                 (let ((status (copy-core-object old)))
+                   (setf (gethash "parents" status)
+                         (coerce (append (remove-if (lambda (entry)
+                                                      (equal controller (gethash "controllerName" entry)))
+                                                    previous)
+                                         (nreverse ours))
+                                 'vector))
+                   status))))))
+
+(defun reconcile-httproute-status (store)
+  "Publish controller-owned HTTPRoute status. gr8s attaches and serves routes but
+historically never wrote their .status, so Gateway-API tooling saw them as
+'Not accepted'. Dispatch is unaffected -- this only reports acceptance."
+  (let ((gateways (remove-if-not (lambda (gateway) (gr8s.controllers::gateway-controlled-p store gateway))
+                                 (list-core-resources store "gateways"))))
+    (when gateways
+      (dolist (route (list-core-resources store "httproutes"))
+        (let ((status (httproute-status-object store route gateways)))
+          (when status
+            (write-gateway-controller-status store "httproutes" route status)))))))
+
 (defun reconcile-gateway-status (server)
-  "Publish controller-owned class and Gateway status on the leader's pass."
+  "Publish controller-owned class, Gateway and HTTPRoute status on the leader's pass."
   (let* ((store (node-grpc-server-store server))
          (live (gateway-live-node-observations server (funcall (node-grpc-server-clock server)))))
     (dolist (class (list-core-resources store "gatewayclasses"))
@@ -258,5 +338,6 @@
       (when (gr8s.controllers::gateway-controlled-p store gateway)
         (write-gateway-controller-status
          store "gateways" gateway
-         (gateway-status-or-invalid store gateway (gateway-current-node-observations gateway live))))))
+         (gateway-status-or-invalid store gateway (gateway-current-node-observations gateway live)))))
+    (reconcile-httproute-status store))
   nil)

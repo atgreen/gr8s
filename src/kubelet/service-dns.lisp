@@ -78,9 +78,10 @@
        ;; The agent's Gateway controller reconciles these into L7 proxy listeners,
        ;; so it needs the full spec (controllerName / listeners / parentRefs+rules).
        (setf (gethash "spec" result) (copy-core-object (gethash "spec" object)))
-       (when (member kind '("Gateway" "GatewayClass") :test #'equal)
-         ;; Desired spec identity is UID + generation. Status writes must not
-         ;; invalidate discovery digests or force another dataplane snapshot.
+       (when (member kind '("Gateway" "GatewayClass" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute") :test #'equal)
+         ;; Desired spec identity is UID + generation. Status writes -- now
+         ;; including route Accepted/ResolvedRefs -- must not invalidate discovery
+         ;; digests or force another dataplane snapshot.
          (remhash "resourceVersion" metadata)
          (setf (gethash "generation" metadata) (gethash "generation" source 1)))
        (when (equal kind "Ingress")

@@ -945,6 +945,41 @@
       (let ((gateway (gr8s.resources::get-core-resource store "gateways" "default" name)))
         (is (equal "False" (gethash "status" (gateway-test-condition gateway "Programmed"))))))))
 
+(test httproute-status-reports-acceptance-and-resolved-refs
+  ;; gr8s attaches and serves routes but historically never wrote HTTPRoute
+  ;; .status, so Gateway-API tooling showed them "Not accepted". The reconcile
+  ;; must now populate Accepted + ResolvedRefs for routes on controlled Gateways.
+  (with-temporary-store (store directory)
+    (values directory)
+    (gwc-seed store)   ; seeds route "app" (parentRef web) with backend app-svc:80
+    (labels ((our-parent ()
+               (let ((route (gr8s.resources::get-core-resource store "httproutes" "default" "app")))
+                 (find "gr8s.io/gateway-controller"
+                       (gethash "parents" (gethash "status" route (gr8s.resources::core-object)) #())
+                       :test #'equal :key (lambda (parent) (gethash "controllerName" parent)))))
+             (cond-of (parent type)
+               (find type (gethash "conditions" parent) :test #'equal
+                     :key (lambda (condition) (gethash "type" condition))))
+             (reconcile ()
+               (gr8s.apiserver::reconcile-gateway-status
+                (gr8s.apiserver::%make-node-grpc-server :store store))))
+      (reconcile)
+      (let ((parent (our-parent)))
+        (is (not (null parent)))                                    ; we wrote a parent entry
+        (is (equal "web" (gethash "name" (gethash "parentRef" parent))))
+        (is (equal "True" (gethash "status" (cond-of parent "Accepted"))))   ; route attaches
+        (is (equal "Accepted" (gethash "reason" (cond-of parent "Accepted"))))
+        ;; app-svc Service does not exist yet, so the backend ref cannot resolve.
+        (is (equal "False" (gethash "status" (cond-of parent "ResolvedRefs"))))
+        (is (equal "BackendNotFound" (gethash "reason" (cond-of parent "ResolvedRefs")))))
+      ;; Create the backend Service; ResolvedRefs must flip to True on re-reconcile.
+      (gr8s.resources::create-core-resource
+       store "services"
+       (com.inuoe.jzon:parse "{\"apiVersion\":\"v1\",\"kind\":\"Service\",\"metadata\":{\"name\":\"app-svc\",\"namespace\":\"default\"},\"spec\":{\"ports\":[{\"port\":80}]}}")
+       "default")
+      (reconcile)
+      (is (equal "True" (gethash "status" (cond-of (our-parent) "ResolvedRefs")))))))
+
 (test gateway-observations-do-not-reuse-a-replaced-tls-secret
   (with-temporary-store (store directory)
     (gwc-seed store)
