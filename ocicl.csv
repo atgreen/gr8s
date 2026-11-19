@@ -37,7 +37,7 @@ cl-re2, ghcr.io/ocicl/cl-re2@sha256:a767d3c0ea04370b19170fdae5de52e48d836444799d
 cl-reexport, ghcr.io/ocicl/cl-reexport@sha256:c795feb3e3727a19e61797187eb31bac1e855b1332335d26752200a28e9b9da8, cl-reexport-20240503-03ad7a0/cl-reexport.asd
 cl-reexport-test, ghcr.io/ocicl/cl-reexport@sha256:c795feb3e3727a19e61797187eb31bac1e855b1332335d26752200a28e9b9da8, cl-reexport-20240503-03ad7a0/cl-reexport-test.asd
 cl-rtnetlink, ghcr.io/ocicl/cl-rtnetlink@sha256:b63b5e664e766b82f4319499ce86ecfde7b258dfb3343dd41f294507655470dd, cl-rtnetlink-20261111-d11ab3d/cl-rtnetlink.asd
-cl-safe-yaml, ghcr.io/ocicl/cl-safe-yaml@sha256:eff4942205543bc6388b08f6c4231f09768740e534f5ae0d9c6b51d83aef0e4d, cl-safe-yaml-20261111-a334e1d/cl-safe-yaml.asd
+cl-safe-yaml, ghcr.io/ocicl/cl-safe-yaml@sha256:8c6427c73608354a931cf3815692cac243072c2fd41daee11f5cced7100a9722, cl-safe-yaml-20261119-2d07720/cl-safe-yaml.asd
 cl-torrent, ghcr.io/ocicl/cl-torrent@sha256:a3b958b5d7f6e9996dd11471388921baf3834bd0b312a6836ec69bd4db3ac4c7, cl-torrent-20261111-a40202d/cl-torrent.asd
 cl-wireguard-overlay, ghcr.io/ocicl/cl-wireguard-overlay@sha256:972cea63d5016019e7c3953cfa48acf78a3c010e31ac978cfc6ca90d7d169a12, cl-wireguard-overlay-20261111-10a3ce8/cl-wireguard-overlay.asd
 cl-work-queue, ghcr.io/ocicl/cl-work-queue@sha256:1435346d5e89a003bf96d6d4a62e18258f9b671fb65c070e0473dfb67c94602e, cl-work-queue-20261111-893291d/cl-work-queue.asd

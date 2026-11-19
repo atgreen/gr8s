@@ -67,3 +67,20 @@
 
 (test yaml-reads-only-the-first-document
   (is (equal "{\"a\":1}" (yaml-json (format nil "---~%a: 1~%---~%b: 2~%")))))
+
+(test a-server-side-apply-body-parses-in-linear-time
+  ;; kubectl sends a server-side apply as single-line JSON under a YAML content
+  ;; type. The reader counted lines from the top for every key, so the 499 kB
+  ;; prometheuses CRD took 22 seconds to apply and held a checkpoint for as long
+  ;; (cl-safe-yaml before 20261119).
+  (let* ((text (with-output-to-string (out)
+                 (write-string "{\"apiVersion\":\"apiextensions.k8s.io/v1\",\"properties\":{" out)
+                 (dotimes (index 40000)
+                   (format out "~:[,~;~]\"field~D\":{\"type\":\"string\",\"description\":\"field number ~D\"}"
+                           (zerop index) index index))
+                 (write-string "}}" out)))
+         (start (get-internal-real-time))
+         (object (gr8s.resources::parse-yaml text)))
+    (is (= 40000 (hash-table-count (gethash "properties" object))))
+    (is (< (/ (- (get-internal-real-time) start) internal-time-units-per-second) 5)
+        "~D characters parsed in under five seconds" (length text))))
