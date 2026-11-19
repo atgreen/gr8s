@@ -1043,17 +1043,25 @@
 (defmethod print-object ((object unstable-wal-print-object) stream)
   (write-string (if (= 1 (incf (unstable-wal-print-calls object))) ":FIRST" ":OTHER") stream))
 
-(test raft-wal-seals-an-append-if-the-record-changes-between-printer-passes
+(test raft-wal-frames-a-record-from-one-printing
+  ;; A frame's length and digest come from the same text that is written, so a
+  ;; record that prints differently every time still gets a frame that passes
+  ;; its own checksum. The writer once printed twice and sealed the log when
+  ;; the two disagreed.
   (with-raft-temp-dir (path)
-    (let ((storage (cl-raft::open-file-raft-storage path)))
+    (let ((storage (cl-raft::open-file-raft-storage path))
+          (unstable (make-instance 'unstable-wal-print-object)))
       (unwind-protect
            (progn
-             (signals error (gr8s.raft::raft-storage-append-entry storage
-                              (cl-raft::make-raft-entry :index 1 :term 1 :command (make-instance 'unstable-wal-print-object))))
-             (is (null (gr8s.raft::file-raft-storage-stream storage)))
-             (signals error (gr8s.raft::raft-storage-save-hard-state storage 2 "blocked"))
-             (signals error (cl-raft::open-file-raft-storage path)))
-        (cl-raft::close-file-raft-storage storage)))))
+             (gr8s.raft::raft-storage-append-entry
+              storage (cl-raft::make-raft-entry :index 1 :term 1 :command unstable))
+             (is (= 1 (unstable-wal-print-calls unstable)))
+             (is (not (null (gr8s.raft::file-raft-storage-stream storage))) "the log stays open")
+             (gr8s.raft::raft-storage-save-hard-state storage 2 "accepted"))
+        (cl-raft::close-file-raft-storage storage))
+      (let ((recovered (cl-raft::load-raft-log path)))
+        (is (= 2 (cl-raft::raft-recovered-term recovered)))
+        (is (eq :first (cl-raft::raft-entry-command (first (cl-raft::raft-recovered-entries recovered)))))))))
 
 (test raft-wal-framing-binds-the-printer-and-reader-radix-and-package
   (with-raft-temp-dir (path)
