@@ -132,3 +132,17 @@
              (multiple-value-list
               (gr8s.apiserver::kubernetes-authorization-target
                "/apis/metrics.k8s.io/v1beta1/namespaces/alpha/pods/web" :get)))))
+
+(test a-reader-does-not-wait-out-a-slow-metrics-collection
+  ;; The readers are API requests holding a store lease and the HPA pass; a
+  ;; silent node holds collection for its whole timeout.
+  (let ((runtime (gr8s.controllers::make-control-plane-runtime nil nil))
+        (gr8s.controllers::*resource-metrics-wait-seconds* 0.2)
+        (cached (vector (com.inuoe.jzon:parse "{\"node\":{\"nodeName\":\"a\"}}"))))
+    (setf (gr8s.controllers::control-plane-runtime-resource-metrics-summaries runtime) cached
+          ;; A collection is in flight and will not finish while we watch.
+          (gr8s.controllers::control-plane-runtime-resource-metrics-refreshing runtime) t)
+    (let ((start (get-internal-real-time)))
+      (is (eq cached (gr8s.runtime:runtime-resource-metrics runtime))
+          "it is served the previous collection")
+      (is (< (/ (- (get-internal-real-time) start) internal-time-units-per-second) 2)))))
