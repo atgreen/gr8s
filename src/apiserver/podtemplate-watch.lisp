@@ -94,28 +94,27 @@ PAGE-READER and EVENT-READER replace the durable journal for separately stored r
     (setf (hunchentoot:content-type*) "application/json"
           (hunchentoot:header-out :cache-control) "no-cache")
     (let* ((out (hunchentoot:send-headers))
-           ;; Events are rendered here and sent by SEND-PENDING: a watch never writes
-           ;; to its client while it holds its store lease. A checkpoint waits for
-           ;; every lease, and a watch inside a socket write cannot notice one, so a
-           ;; slow client would hold the store closed for as long as it took to read.
-           (pending (flexi-streams:make-in-memory-output-stream))
-           (sink (flexi-streams:make-flexi-stream pending :external-format :utf-8))
-           (pending-p nil)
+           (json-out (flexi-streams:make-flexi-stream out :external-format :utf-8))
+           ;; Events wait here, newest first, for SEND-PENDING: a watch neither
+           ;; serializes nor writes to its client while it holds its store lease. A
+           ;; checkpoint waits for every lease, and a watch inside a socket write
+           ;; cannot notice one, so a slow client would hold the store closed for as
+           ;; long as it took to read.
+           (pending nil)
            (deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second)))
            (last-bookmark (get-internal-real-time)))
       (labels ((write-event (event)
-                 (com.inuoe.jzon:stringify event :stream sink)
-                 (write-char #\Newline sink)
-                 (finish-output sink)
-                 (setf pending-p t))
+                 (push event pending))
                (send-pending (&optional even-if-empty)
-                 ;; An idle watch comes through here twenty times a second.
-                 (when (or pending-p even-if-empty)
-                   (let ((octets (flexi-streams:get-output-stream-sequence pending)))
-                     (setf pending-p nil)
+                 (when (or pending even-if-empty)
+                   (let ((events (nreverse pending)))
+                     (setf pending nil)
                      (gr8s.store::call-with-store-request-suspended
                       (lambda ()
-                        (write-sequence octets out)
+                        (dolist (event events)
+                          (com.inuoe.jzon:stringify event :stream json-out)
+                          (write-char #\Newline json-out))
+                        (finish-output json-out)
                         (finish-output out))))))
                (emit (event)
                  (let ((view (crd-api-view (event-api-view event))))
