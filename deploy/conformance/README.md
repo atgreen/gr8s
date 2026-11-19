@@ -103,3 +103,20 @@ The test ran on Fedora 44 with k3s v1.37.2+k3s1, stock flannel and kube-proxy,
 and gr8s Gateway-only mode. It does not establish CNI, Service BPF, extended
 Gateway feature, or ListenerSet conformance. The report and reproduction README
 are prepared locally for upstream review; no upstream submission has been made.
+
+The current source was checked again on 2026-11-19. The official v1.6.3 standard
+`GATEWAY-HTTP` profile again passed all 36 core tests, zero failures/skips,
+exit status 0. The [unmodified report](../../docs/evidence/gateway-http-conformance-2026-11-19.yaml),
+[full log](../../docs/evidence/gateway-http-conformance-2026-11-19.log.gz), and
+[build/cluster provenance](../../docs/evidence/foreign-gateway-validation-2026-11-19.json)
+identify the tested snapshot. Fresh native isolation checks also passed all
+30 assertions, including same-hostname HTTP/HTTPS tenant isolation and restart.
+
+The [local upstream PR draft](upstream/PR.md) contains the reproduction README,
+unaltered report and a ready-to-review patch against `kubernetes-sigs/gateway-api`.
+It has not been submitted. Install only the pinned standard CRDs for this
+profile: the suite rejects mixed bundle versions, including a legacy v1.3.0
+experimental XListenerSet CRD. The failed preflight log is retained alongside
+the successful run; it ran no tests. ListenerSet acceptance tests are separate
+from this HTTP core profile, and benchmark-scale validation remains decomposed
+in [the ListenerSet design](../../docs/design-listenersets.md#remaining-scale-work).

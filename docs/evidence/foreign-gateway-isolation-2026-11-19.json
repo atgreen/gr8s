@@ -1,0 +1,104 @@
+{
+  "root": "/root/gateway-goal/isolation/gr8s-foreign-gateway-eq7vdaz2",
+  "checks": [
+    "initial HTTP: distinct Gateway Service IPs",
+    "initial HTTP: both same-hostname Gateways route only their own tenant",
+    "initial HTTP: distinct private sockets",
+    "TCP to HTTP: distinct Gateway Service IPs",
+    "TCP to HTTP: both same-hostname Gateways route only their own tenant",
+    "TCP to HTTP: distinct private sockets",
+    "Protocol replacement retains both leases",
+    "Gateway recreation: distinct Gateway Service IPs",
+    "Gateway recreation: both same-hostname Gateways route only their own tenant",
+    "Gateway recreation: distinct private sockets",
+    "Recreated Gateway receives a new UID",
+    "Retired lease is not reused",
+    "Neighbor retains its lease",
+    "Gateway agent stopped gracefully",
+    "gw-eq7vdaz2-a: shutdown withdraws endpoint",
+    "gw-eq7vdaz2-b: shutdown withdraws endpoint",
+    "agent restart: distinct Gateway Service IPs",
+    "agent restart: both same-hostname Gateways route only their own tenant",
+    "agent restart: distinct private sockets",
+    "Agent restart preserves active leases",
+    "Old destination remains closed after restart",
+    "HTTPS certificate isolation: distinct Gateway Service IPs",
+    "HTTPS certificate isolation: both same-hostname Gateways route only their own tenant",
+    "HTTPS certificate isolation: distinct private sockets",
+    "Gateway agent stopped gracefully",
+    "HTTPS restart: distinct Gateway Service IPs",
+    "HTTPS restart: both same-hostname Gateways route only their own tenant",
+    "HTTPS restart: distinct private sockets",
+    "HTTPS restart preserves leases",
+    "Gateway agent stopped gracefully"
+  ],
+  "observations": [
+    {
+      "phase": "initial HTTP",
+      "addresses": [
+        "10.43.188.38",
+        "10.43.24.27"
+      ],
+      "ports": {
+        "gw-eq7vdaz2-a": 20000,
+        "gw-eq7vdaz2-b": 20001
+      }
+    },
+    {
+      "phase": "TCP to HTTP",
+      "addresses": [
+        "10.43.188.38",
+        "10.43.24.27"
+      ],
+      "ports": {
+        "gw-eq7vdaz2-a": 20000,
+        "gw-eq7vdaz2-b": 20001
+      }
+    },
+    {
+      "phase": "Gateway recreation",
+      "addresses": [
+        "10.43.127.67",
+        "10.43.24.27"
+      ],
+      "ports": {
+        "gw-eq7vdaz2-a": 20002,
+        "gw-eq7vdaz2-b": 20001
+      }
+    },
+    {
+      "phase": "agent restart",
+      "addresses": [
+        "10.43.127.67",
+        "10.43.24.27"
+      ],
+      "ports": {
+        "gw-eq7vdaz2-a": 20002,
+        "gw-eq7vdaz2-b": 20001
+      }
+    },
+    {
+      "phase": "HTTPS certificate isolation",
+      "addresses": [
+        "10.43.127.67",
+        "10.43.24.27"
+      ],
+      "ports": {
+        "gw-eq7vdaz2-a": 20003,
+        "gw-eq7vdaz2-b": 20004
+      }
+    },
+    {
+      "phase": "HTTPS restart",
+      "addresses": [
+        "10.43.127.67",
+        "10.43.24.27"
+      ],
+      "ports": {
+        "gw-eq7vdaz2-a": 20003,
+        "gw-eq7vdaz2-b": 20004
+      }
+    }
+  ],
+  "passed": true
+}
