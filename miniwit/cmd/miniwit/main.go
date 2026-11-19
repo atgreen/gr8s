@@ -36,6 +36,7 @@ type config struct {
 	dataDir     string
 	maxLogBytes int64
 	retainBytes int64
+	renewBefore time.Duration
 }
 
 func main() {
@@ -54,6 +55,7 @@ func main() {
 	flag.StringVar(&cfg.dataDir, "data-dir", "/var/lib/miniwit", "directory for credentials and the Raft log")
 	flag.Int64Var(&cfg.maxLogBytes, "max-log-bytes", 4<<20, "compact the on-disk log once it passes this many bytes")
 	flag.Int64Var(&cfg.retainBytes, "retain-log-bytes", 1<<20, "bytes of the most recent log to keep after compaction")
+	flag.DurationVar(&cfg.renewBefore, "renew-before", transport.RenewBefore, "renew the member certificate once it is this close to expiry")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -88,7 +90,8 @@ func run(cfg config) error {
 	defer stop()
 
 	// 1. Enroll (or reuse) the member certificate.
-	id, err := transport.Enroll(ctx, cfg.joinAddress, cfg.memberID, cfg.nodeName, cfg.joinToken, cfg.caPin, filepath.Join(cfg.dataDir, "pki"))
+	pkiDir := filepath.Join(cfg.dataDir, "pki")
+	id, err := transport.Enroll(ctx, cfg.joinAddress, cfg.memberID, cfg.nodeName, cfg.joinToken, cfg.caPin, pkiDir)
 	if err != nil {
 		return fmt.Errorf("enroll: %w", err)
 	}
@@ -121,6 +124,9 @@ func run(cfg config) error {
 	}
 	sender.UpdateAddresses(res.Addresses)
 	log.Printf("joined the cluster as %s (%d peers known)", cfg.joinRole, len(res.Addresses))
+
+	// 4. Keep the member certificate current; a voter signs the renewal.
+	go transport.RenewalLoop(ctx, id, cfg.memberID, pkiDir, sender.Addresses, cfg.renewBefore, transport.RenewCheckEvery)
 
 	<-ctx.Done()
 	log.Printf("shutting down")

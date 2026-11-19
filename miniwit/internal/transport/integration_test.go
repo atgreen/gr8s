@@ -70,10 +70,7 @@ func (ca *testCA) identity(t *testing.T, memberID string) *Identity {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Identity{
-		Cert: tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key},
-		CA:   ca.cert,
-	}
+	return NewIdentity(tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, ca.cert)
 }
 
 // recordingServer is a stand-in "leader": it records every Deliver payload so the
