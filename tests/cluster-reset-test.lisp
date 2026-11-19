@@ -207,3 +207,34 @@
                        "the wiped member is promoted"))
               (when second (gr8s.raft.transport::stop-raft-member second))
               (when founder (gr8s.raft.transport::stop-raft-member founder)))))))))
+
+(test a-member-waiting-for-recovery-says-why
+  ;; podster-kiw: a joiner waited ten minutes without a word. The report was
+  ;; written and unit-tested, but the server package never imported it, so the
+  ;; call failed on every real member and the failure was discarded.
+  (with-temporary-store (store root)
+    (let ((member (gr8s.resources::start-store-member-from-wal
+                   store "joiner" (merge-pathnames "raft/control-plane.log" root)
+                   :bootstrap-role :learner)))
+      (unwind-protect
+           (progn
+             (gr8s.raft.transport::raft-member-start member)
+             (is-true (gr8s.store::store-access-blocked-p store))
+             ;; The wait ends on the process-wide shutdown flag, set here from
+             ;; another thread as a signal handler would.
+             (let* ((gr8s.server::*recovery-wait-report-seconds* '(0.2 . 0.2))
+                    (out (make-string-output-stream))
+                    (stopper (bt:make-thread (lambda () (sleep 1) (setf gr8s.server::*shutdown-requested* t))))
+                    (served (unwind-protect
+                                 (let ((*standard-output* out))
+                                   (gr8s.server::wait-for-ha-application
+                                    (gr8s.ha::make-ha-control-plane :member member :store store)))
+                              (bt:join-thread stopper)
+                              (setf gr8s.server::*shutdown-requested* nil)))
+                    (text (get-output-stream-string out)))
+               (is (null served) "shutdown ended the wait; the store never opened")
+               (is (search "waiting for committed application recovery" text))
+               (is (search "no application snapshot bytes have arrived" text)
+                   "a learner that has received nothing is told so")
+               (is (null (search "report of why failed" text)))))
+        (gr8s.raft.transport::stop-raft-member member)))))
