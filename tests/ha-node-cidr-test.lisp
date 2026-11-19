@@ -357,8 +357,8 @@
       (unwind-protect
            (progn
              (setf (symbol-function 'gr8s.apiserver::reconcile-node-heartbeats)
-                   (lambda (s now)
-                     (declare (ignore now))
+                   (lambda (s now &key expire-leases)
+                     (declare (ignore now expire-leases))
                      (incf calls)
                      (case calls
                        (1 (error 'gr8s.model::kubernetes-error :status-code 409 :reason "Conflict" :message "Lease renewed"))

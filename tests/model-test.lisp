@@ -108,3 +108,20 @@
      "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"containers\":[{\"name\":\"web\",\"image\":\"busybox\",\"ports\":[{\"containerPort\":53,\"protocol\":\"QUIC\"}]}]}}"))
   (is (parse-pod
        "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"containers\":[{\"name\":\"web\",\"image\":\"busybox\",\"ports\":[{\"containerPort\":53,\"protocol\":\"UDP\"}]}]}}")))
+
+(test a-null-list-field-is-an-omitted-one
+  ;; Helm renders an empty list as null (kube-prometheus-stack's operator has
+  ;; `volumes: null` and `volumeMounts: null`), and Kubernetes reads it as absent.
+  (let* ((pod (parse-pod
+               "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"volumes\":null,\"containers\":[{\"name\":\"web\",\"image\":\"busybox\",\"volumeMounts\":null,\"env\":null}]}}"))
+         (spec (gethash "spec" (pod-to-object pod))))
+    (is (string= "hello" (pod-name pod)))
+    (is (not (eq 'null (gethash "volumes" spec))))
+    (is (not (eq 'null (gethash "volumeMounts" (aref (gethash "containers" spec) 0))))))
+  (let ((template (com.inuoe.jzon:parse
+                   "{\"volumes\":null,\"containers\":[{\"name\":\"web\",\"volumeMounts\":null,\"args\":[\"a\"]}],\"nodeSelector\":{\"a\":\"b\"}}")))
+    (gr8s.model::omit-null-fields template)
+    (is (null (nth-value 1 (gethash "volumes" template))))
+    (is (null (nth-value 1 (gethash "volumeMounts" (aref (gethash "containers" template) 0)))))
+    (is (equalp #("a") (gethash "args" (aref (gethash "containers" template) 0))))
+    (is (equal "b" (gethash "a" (gethash "nodeSelector" template))))))

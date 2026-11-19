@@ -146,7 +146,7 @@
           (gethash "namespace" metadata) namespace
           (gethash "ownerReferences" metadata) (vector (workload-owner-reference owner)))
     (core-object "apiVersion" "v1" "kind" "Pod" "metadata" metadata
-                 "spec" (copy-core-object (gethash "spec" template)))))
+                 "spec" (omit-null-fields (copy-core-object (gethash "spec" template))))))
 
 (defun workload-controller-name (owner)
   "Name the upstream controller whose service account would write for OWNER."

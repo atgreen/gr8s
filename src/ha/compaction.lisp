@@ -102,6 +102,7 @@ Drain again before WAL replacement so uncertain durability remains fail-closed."
       (return-from compact-ha-store-once-exclusive nil))
     (unwind-protect
          (progn
+           (setf (ha-control-plane-compaction-quiescing hcp) t)
            (gr8s.store::quiesce-store-access store)
            (setf owns-gate t)
            (gr8s.store::call-with-store-application-barriers
@@ -117,7 +118,8 @@ Drain again before WAL replacement so uncertain durability remains fail-closed."
                                  (gr8s.raft::raft-prepared-compaction-term prepared))))))
                 (when (gr8s.resources::member-store-restore-may-resume-p member)
                   (gr8s.store::resume-store-access store)
-                  (setf owns-gate nil)))))
+                  (setf owns-gate nil
+                        (ha-control-plane-compaction-quiescing hcp) nil)))))
            (unless (and prepared (not owns-gate))
              (return-from compact-ha-store-once-exclusive nil))
            (let* ((index (gr8s.raft::raft-prepared-compaction-index prepared))
@@ -138,6 +140,7 @@ Drain again before WAL replacement so uncertain durability remains fail-closed."
                     (gr8s.resources::retain-store-snapshot-artifact root temporary index term digest))
                   (when (gr8s.store::store-access-blocked-p store)
                     (return-from compact-ha-store-once-exclusive nil))
+                  (setf (ha-control-plane-compaction-quiescing hcp) t)
                   (gr8s.store::quiesce-store-access store)
                   (setf owns-gate t)
                   (gr8s.store::call-with-store-application-barriers
@@ -155,15 +158,18 @@ Drain again before WAL replacement so uncertain durability remains fail-closed."
                          t)))))))))
       (unwind-protect
            (when (and temporary (probe-file temporary)) (delete-file temporary))
-        (when owns-gate
-        ;; Hold the same outer-before-member order through gate reopening, so a
-        ;; failed WAL replacement cannot permit standalone/unconfirmed writes.
-        (gr8s.store::call-with-store-application-barriers
-         store
-         (lambda ()
-           (with-ha-compaction-member-lock (hcp :resume)
-             (when (gr8s.resources::member-store-restore-may-resume-p member)
-               (gr8s.store::resume-store-access store))))))))))
+        (unwind-protect
+             (when owns-gate
+               ;; Hold the same outer-before-member order through gate reopening, so a
+               ;; failed WAL replacement cannot permit standalone/unconfirmed writes.
+               (gr8s.store::call-with-store-application-barriers
+                store
+                (lambda ()
+                  (with-ha-compaction-member-lock (hcp :resume)
+                    (when (gr8s.resources::member-store-restore-may-resume-p member)
+                      (gr8s.store::resume-store-access store))))))
+          ;; A gate still closed from here on is a restore's, not a checkpoint's.
+          (setf (ha-control-plane-compaction-quiescing hcp) nil))))))
 
 (defun start-ha-compaction-worker (hcp)
   (validate-ha-compaction-options (ha-control-plane-compaction-bytes hcp)

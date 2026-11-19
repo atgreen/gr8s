@@ -28,6 +28,8 @@
   (resource-metrics-summaries #())
   (container-metrics (make-hash-table :test #'equal))
   (resource-metrics-at 0)
+  (resource-metrics-refreshing nil)
+  (resource-metrics-refreshed (bt:make-condition-variable :name "control-plane resource metrics"))
   (resource-metrics-lock (bt:make-lock "control-plane resource metrics")))
 
 (defun control-plane-pod-by-uid (runtime uid)
@@ -404,43 +406,78 @@ direction waits for acknowledgements, so a long download neither piles up here n
    (control-plane-runtime-node-server runtime)
    (control-plane-port-forward-operation session)))
 
+(defun collect-control-plane-resource-metrics (runtime)
+  "Ask every agent for its metrics report. Returns (values SUMMARIES CONTAINER-METRICS):
+the kubelet summaries of current agents, and the per-container view of every agent --
+an older agent's cumulative-container report still feeds HPA. A node that does not
+answer costs its whole timeout."
+  (let ((summaries nil) (metrics (make-hash-table :test #'equal)))
+    (dolist (node (list-nodes (control-plane-runtime-store runtime)))
+      (unless (node-record-api-only node)
+        (handler-case
+            (let* ((operation
+                     (request-node-operation
+                      (control-plane-runtime-node-server runtime) (node-record-name node)
+                      (make-instance 'gr8s.node.v1::operation-request
+                                     :operation-id (generate-uid)
+                                     :kind gr8s.node.v1::+operationkind-operation_kind_metrics+)
+                      :timeout 5))
+                   (report (node-operation-channel-data
+                            operation gr8s.node.v1::+streamchannel-stream_channel_stdout+))
+                   (object (and (plusp (length report))
+                                (com.inuoe.jzon:parse
+                                 (coerce report '(vector (unsigned-byte 8)))))))
+              (when object
+                (if (and (gethash "node" object) (gethash "pods" object))
+                    (progn
+                      (push object summaries)
+                      (maphash (lambda (uid containers) (setf (gethash uid metrics) containers))
+                               (gr8s.apiserver::container-metrics-from-summary object)))
+                    (maphash (lambda (uid containers) (setf (gethash uid metrics) containers)) object))))
+          (error (condition)
+            (format *error-output* "gr8s resource metrics from ~A: ~A~%"
+                    (node-record-name node) condition)))))
+    (values (coerce (nreverse summaries) 'vector) metrics)))
+
+(defparameter *resource-metrics-wait-seconds* 2
+  "How long a reader waits for a metrics collection in flight before it is served
+what is already cached.")
+
 (defun refresh-control-plane-resource-metrics (runtime)
-  "Refresh RUNTIME's shared metrics cache from every agent at most once every five seconds.
-An older agent's cumulative-container report still feeds HPA, while a current agent's
-kubelet summary feeds both HPA and metrics.k8s.io."
-  (bt:with-lock-held ((control-plane-runtime-resource-metrics-lock runtime))
-    (let ((now (get-universal-time)))
-      (when (>= (- now (control-plane-runtime-resource-metrics-at runtime)) 5)
-        (let ((summaries nil) (metrics (make-hash-table :test #'equal)))
-          (dolist (node (list-nodes (control-plane-runtime-store runtime)))
-            (unless (node-record-api-only node)
-              (handler-case
-                  (let* ((operation
-                           (request-node-operation
-                            (control-plane-runtime-node-server runtime) (node-record-name node)
-                            (make-instance 'gr8s.node.v1::operation-request
-                                           :operation-id (generate-uid)
-                                           :kind gr8s.node.v1::+operationkind-operation_kind_metrics+)
-                            :timeout 5))
-                         (report (node-operation-channel-data
-                                  operation gr8s.node.v1::+streamchannel-stream_channel_stdout+))
-                         (object (and (plusp (length report))
-                                      (com.inuoe.jzon:parse
-                                       (coerce report '(vector (unsigned-byte 8)))))))
-                    (when object
-                      (if (and (gethash "node" object) (gethash "pods" object))
-                          (progn
-                            (push object summaries)
-                            (maphash (lambda (uid containers) (setf (gethash uid metrics) containers))
-                                     (gr8s.apiserver::container-metrics-from-summary object)))
-                          (maphash (lambda (uid containers) (setf (gethash uid metrics) containers)) object))))
-                (error (condition)
-                  (format *error-output* "gr8s resource metrics from ~A: ~A~%"
-                          (node-record-name node) condition)))))
-          (setf (control-plane-runtime-resource-metrics-summaries runtime)
-                (coerce (nreverse summaries) 'vector)
-                (control-plane-runtime-container-metrics runtime) metrics
-                (control-plane-runtime-resource-metrics-at runtime) now))))
+  "Bring RUNTIME's shared metrics cache up to date when it is more than five seconds
+old, and return RUNTIME. Collection runs on its own thread, one at a time, and a
+reader waits for it only briefly: a silent node holds collection for its whole
+timeout, and the readers are API requests holding a store lease -- which a
+checkpoint must drain before it can proceed -- and the HPA pass (podster-9o6).
+A reader that stops waiting is served the previous collection."
+  (let ((lock (control-plane-runtime-resource-metrics-lock runtime)))
+    (bt:with-lock-held (lock)
+      (when (and (not (control-plane-runtime-resource-metrics-refreshing runtime))
+                 (>= (- (get-universal-time) (control-plane-runtime-resource-metrics-at runtime)) 5))
+        (setf (control-plane-runtime-resource-metrics-refreshing runtime) t)
+        (bt:make-thread
+         (lambda ()
+           (unwind-protect
+                (multiple-value-bind (summaries metrics)
+                    (collect-control-plane-resource-metrics runtime)
+                  (bt:with-lock-held (lock)
+                    (setf (control-plane-runtime-resource-metrics-summaries runtime) summaries
+                          (control-plane-runtime-container-metrics runtime) metrics
+                          ;; Stamped on completion: a collection slowed by a silent
+                          ;; node must not be stale the moment it lands.
+                          (control-plane-runtime-resource-metrics-at runtime) (get-universal-time))))
+             (bt:with-lock-held (lock)
+               (setf (control-plane-runtime-resource-metrics-refreshing runtime) nil)
+               (sb-thread:condition-broadcast
+                (control-plane-runtime-resource-metrics-refreshed runtime)))))
+         :name "gr8s resource metrics"))
+      (loop with deadline = (+ (get-internal-real-time)
+                               (* *resource-metrics-wait-seconds* internal-time-units-per-second))
+            while (control-plane-runtime-resource-metrics-refreshing runtime)
+            for remaining = (/ (- deadline (get-internal-real-time)) internal-time-units-per-second)
+            while (plusp remaining)
+            do (bt:condition-wait (control-plane-runtime-resource-metrics-refreshed runtime) lock
+                                  :timeout (float remaining 1d0))))
     runtime))
 
 (defmethod runtime-container-metrics ((runtime control-plane-runtime))

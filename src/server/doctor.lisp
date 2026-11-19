@@ -265,6 +265,98 @@ not provably gr8s-owned are never touched. Returns the FAIL count."
         (doctor-report :warn "pod-pool routes" (format nil "could not check: ~A" condition))
         0))))
 
+(defun doctor-state-ca-fingerprint (state-directory)
+  "The fingerprint of the cluster CA kept under STATE-DIRECTORY, or NIL when it
+holds no cluster."
+  (let ((path (merge-pathnames "pki/pki/cluster-ca.crt"
+                               (uiop:ensure-directory-pathname state-directory))))
+    (when (probe-file path)
+      (gr8s.security::octets-to-hex
+       (pure-tls:certificate-fingerprint
+        (first (pure-tls:load-certificate-chain path)))))))
+
+(defun doctor-service-interface-status (state-directory)
+  "Who owns the host's service interface: :ABSENT when there is none, :OWNED when
+the cluster in STATE-DIRECTORY stamped it, :FOREIGN otherwise -- another
+cluster's, or debris when STATE-DIRECTORY was wiped."
+  (if (zerop (gr8s.network::native-interface-index
+              gr8s.apiserver::+service-network-interface+))
+      :absent
+      (let ((fingerprint (doctor-state-ca-fingerprint state-directory)))
+        (if (and fingerprint
+                 (gr8s.apiserver::service-network-owned-by-p
+                  (gr8s.apiserver::service-network-owner fingerprint)))
+            :owned
+            :foreign))))
+
+(defun doctor-serve-command-line-p (command-line)
+  "True when COMMAND-LINE, a /proc cmdline with NUL-separated arguments, is a
+running `gr8s serve`."
+  (let ((arguments (uiop:split-string command-line :separator (list (code-char 0)))))
+    (and (equal "gr8s" (file-namestring (or (first arguments) "")))
+         (equal "serve" (second arguments)))))
+
+(defun doctor-running-serve-pid ()
+  "The pid of a running `gr8s serve` on this host, or NIL."
+  (dolist (entry (directory #P"/proc/*/"))
+    (let ((pid (ignore-errors (parse-integer (car (last (pathname-directory entry)))))))
+      (when (and pid (/= pid (sb-posix:getpid))
+                 (doctor-serve-command-line-p
+                  (or (ignore-errors
+                       (uiop:read-file-string (merge-pathnames "cmdline" entry)))
+                      "")))
+        (return pid)))))
+
+(defun doctor-check-service-interface
+    (state-directory fix
+     &key (status-fn #'doctor-service-interface-status)
+          (serve-pid-fn #'doctor-running-serve-pid)
+          (deleter (lambda (name) (gr8s.network::delete-network-link name))))
+  "Report a service interface another cluster left behind: `gr8s serve` refuses
+to start beside one (`service interface belongs to another cluster`), which
+crash-loops a cluster rebuilt in a wiped state directory (podster-mg4). With
+FIX, delete it -- unless a serve is running, whose interface it may be when
+STATE-DIRECTORY is not that process's. Returns the FAIL count."
+  (let ((name gr8s.apiserver::+service-network-interface+))
+    (handler-case
+        (ecase (funcall status-fn state-directory)
+          (:absent 0)
+          (:owned
+           (doctor-report :ok "service interface"
+                          (format nil "~A belongs to the cluster in ~A" name state-directory))
+           0)
+          (:foreign
+           (let ((pid (funcall serve-pid-fn)))
+             (cond
+               (pid
+                (doctor-report
+                 :warn "service interface"
+                 (format nil "~A does not belong to the cluster in ~A, and gr8s serve is running (pid ~D)"
+                         name state-directory pid)
+                 "re-run with --state-directory pointing at that process's state directory")
+                0)
+               (fix
+                (handler-case
+                    (progn (funcall deleter name)
+                           (doctor-report :ok "service interface fix"
+                                          (format nil "removed stale gr8s interface ~A" name))
+                           0)
+                  (error (condition)
+                    (doctor-report :fail "service interface fix"
+                                   (format nil "could not remove ~A: ~A" name condition)
+                                   "interface removal needs root; re-run under sudo")
+                    1)))
+               (t
+                (doctor-report
+                 :fail "service interface"
+                 (format nil "~A belongs to another cluster, not the one in ~A"
+                         name state-directory)
+                 "gr8s serve will not start beside it; 'sudo gr8s doctor --fix' removes it")
+                1)))))
+      (error (condition)
+        (doctor-report :warn "service interface" (format nil "could not check: ~A" condition))
+        0))))
+
 (defun doctor-interface-for-address (address &key (runner #'doctor-run))
   "The interface holding ADDRESS, from `ip -4 -o addr`, or NIL."
   (let ((out (funcall runner (list "ip" "-4" "-o" "addr" "show"))))
@@ -419,6 +511,10 @@ zone dropped inbound 7000 without a trace (podster-rnh). Returns the FAIL count.
       ;; vxlan/gateway/services links or orphan pod veths) is deleted first.
       (incf fails (doctor-check-pod-pool-routes
                    cluster-pod-cidr (uiop:ensure-directory-pathname state-directory) fix))
+
+      ;; A service interface stamped by another cluster's CA: what a rebuild in
+      ;; a wiped state directory inherits, and what serve refuses to start beside.
+      (incf fails (doctor-check-service-interface state-directory fix))
 
       ;; HA cluster ports vs the host firewall (podster-rnh): a member whose
       ;; raft/node/API ports are dropped on its own listen interface stalls

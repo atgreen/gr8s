@@ -62,6 +62,7 @@
    #:node-record-wireguard-public-key
    #:node-record-unschedulable
    #:object-value
+   #:omit-null-fields
    #:optional-vector
    #:parse-container
    #:parse-environment

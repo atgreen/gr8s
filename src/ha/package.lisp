@@ -12,6 +12,7 @@
    #:ha-control-plane-member
    #:ha-control-plane-node-endpoints
    #:ha-control-plane-node-session-endpoints
+   #:ha-control-plane-admits-node-sessions-p
    #:ha-control-plane-membership
    #:ha-control-plane-remove-member
    #:ha-control-plane-store

@@ -66,6 +66,7 @@ Timeout or failure before draining reopens access; no application data is change
   (format *error-output* "~&gr8s: blocking application store access for restore/checkpoint (drain <= ~Ds).~%"
           (round timeout))
   (let ((deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second)))
+        (slow (+ (get-internal-real-time) (* 5 internal-time-units-per-second)))
         (drained nil) (blocked nil))
     (unwind-protect
          (bt:with-lock-held ((pod-store-lock store))
@@ -82,8 +83,15 @@ Timeout or failure before draining reopens access; no application data is change
                          (round timeout) (pod-store-active-requests store)
                          (describe-active-store-requests-unlocked store))
                  (store-access-unavailable "Timed out draining active API requests before application restore"))
+               ;; A drain this slow closes the API for as long: say once who it waits on.
+               (when (and slow (> (get-internal-real-time) slow))
+                 (setf slow nil)
+                 (format *error-output*
+                         "~&gr8s: application drain still waiting after 5s; ~D request~:P active:~{ ~A~^;~}~%"
+                         (pod-store-active-requests store)
+                         (describe-active-store-requests-unlocked store)))
                (bt:condition-wait (pod-store-access-condition store) (pod-store-lock store)
-                                  :timeout (float remaining 1d0))))
+                                  :timeout (min 1d0 (float remaining 1d0)))))
            (setf (pod-store-access-blocked store) :blocked drained t)
            store)
       (when (and blocked (not drained))
