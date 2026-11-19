@@ -25,6 +25,7 @@
    #:raft-node-catchup-byte-limit
    #:raft-node-peer-snapshot-required
    #:raft-node-retained-byte-limit
+   #:raft-node-retained-weight-fn
    #:raft-node-uncommitted-byte-limit
    #:raft-node-uncommitted-weight-fn
    #:raft-prepare-compaction
