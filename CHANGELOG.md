@@ -9,6 +9,30 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- HA node sessions survive checkpoints. A checkpoint quiesces the store for a
+  moment, and the leader took that for lost leadership: it closed every node's
+  session and refused new ones until the checkpoint finished. Agent endpoint
+  lists no longer include witnesses, which have no node listener, and a session
+  dial gives up after ten seconds instead of the kernel's two minutes
+  (podster-htq).
+- A member that refuses a node session because it is not the leader now names
+  the members that can admit it, and the agent goes there. An agent started
+  with one `--server`, or a member's own agent started before the others
+  joined, could not otherwise follow a leadership change (podster-1t0).
+- `metrics.k8s.io` requests and the HPA pass no longer wait on silent nodes.
+  Node metrics are collected on their own thread and a reader waits two
+  seconds at most before it is served the previous collection; a request used
+  to hold its store lease for the per-node timeout times the number of silent
+  nodes, stalling every checkpoint drain behind it (podster-9o6).
+- `gr8s doctor --fix` removes a `gr8s-services` interface that another
+  cluster left behind, which made `gr8s serve` exit with `service interface
+  belongs to another cluster` after a rebuild in a wiped state directory.
+  `gr8s-killall.sh` now ends the containers its shims started; they used to
+  survive under init and hold their host ports (podster-mg4).
+- A Pod spec field set to `null` is read as omitted, as Kubernetes reads it.
+  A Deployment whose chart rendered `volumes: null` was accepted and then
+  never got a Pod: `spec.volumes must be an array` (podster-crv).
+
 - Keep HA node streams on the active publishing leader and reconnect them after
   demotion, preventing follower-owned agents from missing later Gateway routes.
   Fail queued operations if leadership changes during their handshake (podster-c28).
