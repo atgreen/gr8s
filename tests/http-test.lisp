@@ -1205,6 +1205,9 @@
          (multiple-value-bind (runtime runtime-far) (connected-test-sockets listener)
            (multiple-value-bind (client client-far) (connected-test-sockets listener)
              (let* ((descriptor (sb-bsd-sockets:socket-file-descriptor (usocket:socket runtime)))
+                    ;; Other tests' relays may still be winding down; wait only for this one's.
+                    (earlier (remove "gr8s exec client-to-runtime" (bt:all-threads)
+                                     :key #'bt:thread-name :test-not #'equal))
                     (relay (bt:make-thread
                             (lambda ()
                               (gr8s.apiserver::relay-runtime-stream (usocket:socket-stream client)
@@ -1229,7 +1232,8 @@
                         (is-true (wait-until
                                   (lambda ()
                                     (notany (lambda (thread)
-                                              (equal "gr8s exec client-to-runtime" (bt:thread-name thread)))
+                                              (and (equal "gr8s exec client-to-runtime" (bt:thread-name thread))
+                                                   (not (member thread earlier))))
                                             (bt:all-threads)))
                                   :timeout 5))
                         (let ((out (usocket:socket-stream fresh-far)))
