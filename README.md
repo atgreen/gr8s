@@ -64,7 +64,7 @@ version skew between components.
 | Kubernetes dashboard | Built-in Headlamp UI: `gr8s dashboard` |
 | Certificate management | Automatic leaf renewal, staged CA rotation, one-time join tokens |
 | bpftrace, debug tooling | `gr8s debug trace` and a live Lisp REPL into any node |
-| Image distribution | Authenticated peer-to-peer sharing of image blobs between nodes |
+| Registry mirror, peer-to-peer image distribution (Dragonfly, Kraken, Spegel) | Built-in BitTorrent v2: nodes share image layers with each other instead of each pulling from the registry |
 
 The same file takes every role:
 
@@ -191,9 +191,14 @@ Those language capabilities support an integrated Kubernetes system:
   availability. Certificates authenticate node enrollment and internal
   communication.
 - Cross-node traffic uses VXLAN by default. An optional adaptive WireGuard
-  overlay selects paths between nodes. Authenticated BitTorrent v2 peers share
-  verified image blobs, avoiding repeated registry downloads during multi-node
-  rollouts.
+  overlay selects paths between nodes.
+- Container images travel between nodes over BitTorrent v2. The control plane
+  runs a private tracker with one swarm per image layer. A layer the cluster
+  does not have yet is fetched from the registry by one node, and the others
+  download its pieces from every node that already holds them. Peers
+  authenticate each other with cluster certificates, and each piece is checked
+  against the layer's digest. A rollout to many nodes normally costs the registry
+  one download of each layer.
 
 Run `gr8s skill` for built-in operator and AI agent guidance, including first-response
 checks, live Slynk inspection, and selector-scoped kernel tracing. It works offline
