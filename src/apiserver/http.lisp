@@ -85,7 +85,10 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
 
 (defun kubernetes-error-response (error)
   "Render ERROR, a kubernetes-error, as a Kubernetes Status of kind Failure,
-   carrying its reason, message, status code, and details."
+   carrying its reason, message, status code, and details. A 429 tells the
+   client when to come back, which is what makes client-go retry it."
+  (when (and (eql 429 (kubernetes-error-status-code error)) (boundp 'hunchentoot:*reply*))
+    (setf (hunchentoot:header-out "Retry-After") "1"))
   (status-response "Failure"
                    (kubernetes-error-reason error)
                    (kubernetes-error-message error)

@@ -22,7 +22,7 @@
   "Reset only application payload/index state and caches derived from it.")
 
 (defparameter *store-member-reload-fields*
-  '(pod-store-path pod-store-data-root pod-store-generation-readers pod-store-generation-reap-lock pod-store-generation-reap-cursor pod-store-access-blocked pod-store-application-loaded-p
+  '(pod-store-path pod-store-data-root pod-store-generation-readers pod-store-generation-reap-lock pod-store-generation-reap-cursor pod-store-access-blocked pod-store-access-block-brief-p pod-store-access-reopened pod-store-application-loaded-p
     pod-store-active-requests pod-store-active-request-registry pod-store-access-condition pod-store-in-cluster-config
     pod-store-credential-lock pod-store-service-account-signing-key pod-store-workload-lock
     pod-store-core-change-observers pod-store-gateway-dependency-revision

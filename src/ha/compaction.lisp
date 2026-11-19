@@ -103,7 +103,7 @@ Drain again before WAL replacement so uncertain durability remains fail-closed."
     (unwind-protect
          (progn
            (setf (ha-control-plane-compaction-quiescing hcp) t)
-           (gr8s.store::quiesce-store-access store)
+           (gr8s.store::quiesce-store-access store :brief t)
            (setf owns-gate t)
            (gr8s.store::call-with-store-application-barriers
             store
@@ -141,7 +141,7 @@ Drain again before WAL replacement so uncertain durability remains fail-closed."
                   (when (gr8s.store::store-access-blocked-p store)
                     (return-from compact-ha-store-once-exclusive nil))
                   (setf (ha-control-plane-compaction-quiescing hcp) t)
-                  (gr8s.store::quiesce-store-access store)
+                  (gr8s.store::quiesce-store-access store :brief t)
                   (setf owns-gate t)
                   (gr8s.store::call-with-store-application-barriers
                    store
@@ -169,7 +169,8 @@ Drain again before WAL replacement so uncertain durability remains fail-closed."
                     (when (gr8s.resources::member-store-restore-may-resume-p member)
                       (gr8s.store::resume-store-access store))))))
           ;; A gate still closed from here on is a restore's, not a checkpoint's.
-          (setf (ha-control-plane-compaction-quiescing hcp) nil))))))
+          (setf (ha-control-plane-compaction-quiescing hcp) nil)
+          (gr8s.store::end-brief-store-quiesce store))))))
 
 (defun start-ha-compaction-worker (hcp)
   (validate-ha-compaction-options (ha-control-plane-compaction-bytes hcp)

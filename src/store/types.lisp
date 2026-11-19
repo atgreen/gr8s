@@ -13,6 +13,10 @@
   (generation-readers (make-hash-table :test #'equal))
   (generation-reap-lock (bt:make-lock "gr8s generation reclamation"))
   access-blocked
+  ;; True while ACCESS-BLOCKED is a checkpoint's own short quiesce, which a new
+  ;; request waits out, rather than a restore, which it must not.
+  access-block-brief-p
+  (access-reopened (bt:make-condition-variable :name "gr8s application access reopened"))
   (application-loaded-p t)
   (active-requests 0)
   ;; thread -> (description . start-universal-time) for every leased request,
