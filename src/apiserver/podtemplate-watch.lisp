@@ -95,12 +95,27 @@ PAGE-READER and EVENT-READER replace the durable journal for separately stored r
           (hunchentoot:header-out :cache-control) "no-cache")
     (let* ((out (hunchentoot:send-headers))
            (json-out (flexi-streams:make-flexi-stream out :external-format :utf-8))
+           ;; Events wait here, newest first, for SEND-PENDING: a watch neither
+           ;; serializes nor writes to its client while it holds its store lease. A
+           ;; checkpoint waits for every lease, and a watch inside a socket write
+           ;; cannot notice one, so a slow client would hold the store closed for as
+           ;; long as it took to read.
+           (pending nil)
            (deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second)))
            (last-bookmark (get-internal-real-time)))
       (labels ((write-event (event)
-                 (com.inuoe.jzon:stringify event :stream json-out)
-                 (write-char #\Newline json-out)
-                 (finish-output json-out))
+                 (push event pending))
+               (send-pending (&optional even-if-empty)
+                 (when (or pending even-if-empty)
+                   (let ((events (nreverse pending)))
+                     (setf pending nil)
+                     (gr8s.store::call-with-store-request-suspended
+                      (lambda ()
+                        (dolist (event events)
+                          (com.inuoe.jzon:stringify event :stream json-out)
+                          (write-char #\Newline json-out))
+                        (finish-output json-out)
+                        (finish-output out))))))
                (emit (event)
                  (let ((view (crd-api-view (event-api-view event))))
                    (when (and *table-request* (not (equal "ERROR" (gethash "type" view))))
@@ -125,10 +140,11 @@ PAGE-READER and EVENT-READER replace the durable journal for separately stored r
               (check-watch-store-access store)
               (when expired (error expired))
               (dolist (event first-events) (emit event))
+              (setf first-events nil)
               ;; client-go waits for this bookmark before trusting its initial state.
               (when (and send-initial (true-parameter-p (hunchentoot:parameter "allowWatchBookmarks"))) (bookmark t))
               ;; Flush headers even for an initially empty watch.
-              (finish-output out)
+              (send-pending t)
               (loop while (and (< (get-internal-real-time) deadline)
                                (not (api-watch-client-departed-p)))
                     do (check-watch-store-access store)
@@ -144,13 +160,18 @@ PAGE-READER and EVENT-READER replace the durable journal for separately stored r
                        (when (and (true-parameter-p (hunchentoot:parameter "allowWatchBookmarks"))
                                   (> (- (get-internal-real-time) last-bookmark) (* 20 internal-time-units-per-second)))
                          (bookmark) (setf last-bookmark (get-internal-real-time)))
+                       (send-pending)
                        (sleep .05)))
           (kubernetes-error (condition)
+            ;; The watch is over and reads the store no more: give the lease up for
+            ;; good, so that sending this last event does not wait to take it back.
+            (gr8s.store::release-store-request)
             ;; A Status has no object to project, so the views would only mangle it.
             (ignore-errors (write-event (core-object "type" "ERROR" "object"
                                          (core-object "apiVersion" "v1" "kind" "Status" "metadata" (core-object) "status" "Failure"
                                                       "code" (kubernetes-error-status-code condition)
-                                                      "reason" (kubernetes-error-reason condition) "message" (kubernetes-error-message condition))))))
+                                                      "reason" (kubernetes-error-reason condition) "message" (kubernetes-error-message condition))))
+                           (send-pending)))
           (stream-error () nil)
           (usocket:socket-error () nil))))
     nil))

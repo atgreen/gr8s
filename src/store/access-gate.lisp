@@ -8,6 +8,9 @@
 (defvar *store-request-release* nil
   "Inside a routed request, a function that gives its lease up early; NIL elsewhere.")
 
+(defvar *store-request-resume* nil
+  "Within a routed request, a function that takes its released lease again.")
+
 (defvar *store-request-description* nil
   "What the current routed request is, for drain diagnostics: the API layer
 binds it (method and path) before taking the request lease (podster-urj).")
@@ -55,44 +58,45 @@ closed from here on is a restore, and requests waiting on it must fail closed."
 Unwinding the request releases its lease even when a handler signals an error."
   (if (eq store *store-request-lease*) (funcall function)
       (let ((entered nil))
-        (unwind-protect
-             (progn
-               (bt:with-lock-held ((pod-store-lock store))
-                 (await-brief-store-quiesce-unlocked store)
-                 (when (pod-store-access-blocked store)
-                   (store-access-unavailable "Application restore is blocking new requests"))
-                 (sb-sys:without-interrupts
-                   (incf (pod-store-active-requests store))
-                   (setf (gethash (bt:current-thread) (pod-store-active-request-registry store))
-                         (cons *store-request-description* (get-universal-time))
-                         entered t)))
-               (flet ((release ()
-                        (when entered
-                          (bt:with-lock-held ((pod-store-lock store))
-                            (sb-sys:without-interrupts
-                              (setf entered nil)
-                              (decf (pod-store-active-requests store))
-                              (remhash (bt:current-thread) (pod-store-active-request-registry store))
-                              (when (zerop (pod-store-active-requests store))
-                                (bt:condition-notify (pod-store-access-condition store))))))))
+        (flet ((enter ()
+                 (bt:with-lock-held ((pod-store-lock store))
+                   (await-brief-store-quiesce-unlocked store)
+                   (when (pod-store-access-blocked store)
+                     (store-access-unavailable "Application restore is blocking new requests"))
+                   (sb-sys:without-interrupts
+                     (incf (pod-store-active-requests store))
+                     (setf (gethash (bt:current-thread) (pod-store-active-request-registry store))
+                           (cons *store-request-description* (get-universal-time))
+                           entered t))))
+               (release ()
+                 (when entered
+                   (bt:with-lock-held ((pod-store-lock store))
+                     (sb-sys:without-interrupts
+                       (setf entered nil)
+                       (decf (pod-store-active-requests store))
+                       (remhash (bt:current-thread) (pod-store-active-request-registry store))
+                       (when (zerop (pod-store-active-requests store))
+                         (bt:condition-notify (pod-store-access-condition store))))))))
+          ;; The outer form covers a lease entered but unwound before the inner
+          ;; cleanup form was established.
+          (unwind-protect
+               (progn
+                 (enter)
                  (unwind-protect
-                      (let ((*store-request-lease* store)
-                            (*store-request-release*
-                              (lambda ()
-                                (release)
-                                ;; No longer one of the requests a drain lets finish.
-                                (setf *store-request-lease* nil))))
+                      (let* ((*store-request-lease* store)
+                             (*store-request-release*
+                               (lambda ()
+                                 (release)
+                                 ;; No longer one of the requests a drain lets finish.
+                                 (setf *store-request-lease* nil)))
+                             (*store-request-resume*
+                               (lambda ()
+                                 (unless entered
+                                   (enter)
+                                   (setf *store-request-lease* store)))))
                         (funcall function))
-                   (release))))
-          ;; Entered but unwound before the inner cleanup form was established.
-          (when entered
-            (bt:with-lock-held ((pod-store-lock store))
-              (sb-sys:without-interrupts
-                (setf entered nil)
-                (decf (pod-store-active-requests store))
-                (remhash (bt:current-thread) (pod-store-active-request-registry store))
-                (when (zerop (pod-store-active-requests store))
-                  (bt:condition-notify (pod-store-access-condition store))))))))))
+                   (release)))
+            (release))))))
 
 (defun release-store-request ()
   "Give up the current routed request's lease now, before the handler returns.
@@ -106,6 +110,22 @@ outside a routed request or when already released."
   (when *store-request-release*
     (funcall *store-request-release*)
     t))
+
+(defun call-with-store-request-suspended (function)
+  "Call FUNCTION without the current routed request's lease, then take the lease
+again and return FUNCTION's values. For the part of a request that only writes
+to its client: a checkpoint drains every lease, so a large response to a slow
+client held the store closed for as long as the client took to read it. Taking
+the lease again waits out a checkpoint like a new request does and is refused
+during a restore, which ends the request. When FUNCTION unwinds, the lease
+stays released. Outside a routed request FUNCTION is simply called."
+  ;; A request that gave its lease up for good holds none to suspend.
+  (if (and *store-request-lease* *store-request-release* *store-request-resume*)
+      (let ((resume *store-request-resume*))
+        (funcall *store-request-release*)
+        (multiple-value-prog1 (funcall function)
+          (funcall resume)))
+      (funcall function)))
 
 (defun describe-active-store-requests-unlocked (store)
   "The leased requests as \"what (age)\" strings, oldest first; caller holds the
