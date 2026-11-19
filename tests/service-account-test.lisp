@@ -661,3 +661,38 @@
                  nil "get" "" "nodes" nil nil nil nil "/api/v1/nodes" 401)))
       (is (equal "system:anonymous" (gethash "username" (gethash "user" anon))))
       (is (stringp (com.inuoe.jzon:stringify anon))))))
+
+(test a-valid-token-is-never-answered-401-because-the-store-is-closed
+  ;; Token verification reads the store and swallows a refused read. Prometheus,
+  ;; kube-state-metrics and Grafana's sidecars were told their credentials were
+  ;; bad whenever a checkpoint landed on one of their requests.
+  (with-temporary-store (store directory)
+    (let* ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" directory)))
+           (runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime))
+           (server nil) (*tls-api-port* nil))
+      (service-account-test-store store)
+      (unwind-protect
+           (progn
+             (setf server (start-test-tls-api store runtime reconciler pki))
+             (let ((token (service-account-test-token
+                           (gr8s.resources::ensure-service-account-credential store "alpha" "reader")))
+                   (port *tls-api-port*))
+               (is (= 200 (service-account-tls-status pki "/version" token)))
+               ;; A checkpoint: the request waits and is then served.
+               (gr8s.store::quiesce-store-access store :timeout 0 :brief t)
+               (let* ((status nil)
+                      (client (bt:make-thread
+                               (lambda ()
+                                 (let ((*tls-api-port* port))
+                                   (setf status (service-account-tls-status pki "/version" token)))))))
+                 (sleep 0.3)
+                 (is (null status) "held while the checkpoint has the store")
+                 (gr8s.store::resume-store-access store)
+                 (bt:join-thread client)
+                 (is (eql 200 status)))
+               ;; A restore: unavailable, and said so.
+               (gr8s.store::quiesce-store-access store :timeout 0)
+               (is (= 503 (service-account-tls-status pki "/version" token)))
+               (gr8s.store::resume-store-access store)
+               (is (= 200 (service-account-tls-status pki "/version" token)))))
+        (when server (stop-server server))))))

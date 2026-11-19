@@ -319,7 +319,20 @@ NIL to disable API audit logging. Bound by serve from --audit-log-path.")
     (unwind-protect
          (handler-case
              (let* ((*flowcontrol-request-level* nil)
-                    (*authenticated-api-identity* (authorize-in-cluster-request (acceptor-store acceptor) request)))
+                    (store (acceptor-store acceptor))
+                    ;; Authentication, flow control and RBAC all read the store,
+                    ;; before the request is routed and takes its lease. Token
+                    ;; verification swallows a refused read, so while a checkpoint
+                    ;; had the store a valid token was answered 401, which tells a
+                    ;; client its credentials are bad rather than to try again
+                    ;; (podster-t5g). Under a lease the reads wait the checkpoint
+                    ;; out, and a store closed for a restore answers 503.
+                    (*authenticated-api-identity*
+                      (if store
+                          (call-with-brief-store-access
+                           store (request-route-path (hunchentoot:script-name request))
+                           (lambda () (authorize-in-cluster-request store request)))
+                          (authorize-in-cluster-request store request))))
                (setf identity *authenticated-api-identity*)
                (call-next-method))
            (kubernetes-error (condition) (kubernetes-error-response condition)))
