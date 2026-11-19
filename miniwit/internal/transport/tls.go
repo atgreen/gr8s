@@ -14,16 +14,41 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"sync"
 )
 
 // FixedServerSAN is the constant SAN every gr8s member certificate carries; the
 // identity lives in the Common Name (pki.lisp: +node-server-common-name+).
 const FixedServerSAN = "gr8s-control"
 
-// Identity is this witness's enrolled TLS material.
+// Identity is this witness's enrolled TLS material. The member certificate is
+// replaced when it is renewed, so the TLS configs below ask for it at each
+// handshake rather than holding a copy.
 type Identity struct {
-	Cert tls.Certificate   // member leaf + key (CN == member id, SAN == FixedServerSAN)
-	CA   *x509.Certificate // the cluster CA, trust anchor for every peer
+	CA *x509.Certificate // the cluster CA, trust anchor for every peer
+
+	mu   sync.RWMutex
+	cert tls.Certificate // member leaf + key (CN == member id, SAN == FixedServerSAN)
+}
+
+// NewIdentity returns an identity presenting cert and trusting ca.
+func NewIdentity(cert tls.Certificate, ca *x509.Certificate) *Identity {
+	return &Identity{CA: ca, cert: cert}
+}
+
+// Certificate returns the member certificate currently presented.
+func (id *Identity) Certificate() tls.Certificate {
+	id.mu.RLock()
+	defer id.mu.RUnlock()
+	return id.cert
+}
+
+// setCertificate makes cert the one presented on every handshake from now on.
+// Connections already open keep the certificate they were made with.
+func (id *Identity) setCertificate(cert tls.Certificate) {
+	id.mu.Lock()
+	defer id.mu.Unlock()
+	id.cert = cert
 }
 
 func (id *Identity) caPool() *x509.CertPool {
@@ -39,7 +64,10 @@ func (id *Identity) caPool() *x509.CertPool {
 func (id *Identity) MemberClientTLS() *tls.Config {
 	pool := id.caPool()
 	return &tls.Config{
-		Certificates:          []tls.Certificate{id.Cert},
+		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			cert := id.Certificate()
+			return &cert, nil
+		},
 		InsecureSkipVerify:    true, // replaced by VerifyPeerCertificate below
 		VerifyPeerCertificate: verifyAgainstCA(pool, true),
 		NextProtos:            []string{"h2"},
@@ -56,7 +84,10 @@ func (id *Identity) MemberClientTLS() *tls.Config {
 func (id *Identity) ServerTLS() *tls.Config {
 	pool := id.caPool()
 	return &tls.Config{
-		Certificates:          []tls.Certificate{id.Cert},
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			cert := id.Certificate()
+			return &cert, nil
+		},
 		ClientAuth:            tls.VerifyClientCertIfGiven,
 		ClientCAs:             pool,
 		InsecureSkipVerify:    true,

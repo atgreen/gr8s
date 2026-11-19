@@ -4,6 +4,7 @@ package transport
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 
@@ -53,6 +54,18 @@ func (s *PeerSender) UpdateAddresses(addrs AddressBook) {
 		}
 		s.addrs[k] = v
 	}
+}
+
+// Addresses returns every known peer endpoint.
+func (s *PeerSender) Addresses() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	addrs := make([]string, 0, len(s.addrs))
+	for _, a := range s.addrs {
+		addrs = append(addrs, a)
+	}
+	sort.Strings(addrs)
+	return addrs
 }
 
 // Address returns the known endpoint for a peer, if any.

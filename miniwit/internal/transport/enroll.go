@@ -103,7 +103,7 @@ func LoadIdentity(dir string) (*Identity, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse CA: %w", err)
 	}
-	return &Identity{Cert: cert, CA: ca}, nil
+	return NewIdentity(cert, ca), nil
 }
 
 func makeCSR(memberID string, key *rsa.PrivateKey) ([]byte, error) {

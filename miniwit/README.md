@@ -18,10 +18,12 @@ odd-numbered third vote.
 > the non-campaigning follower core, snapshot-chunk handling (including the
 > witness config-snapshot format), and byte-bounded log compaction are
 > implemented and unit/integration-tested — including a real mutual-TLS Deliver
-> round-trip between two Go endpoints. What is *not* yet done: certificate
-> renewal (`RenewMember`) and the end-to-end test that confirms wire fidelity
-> against a live gr8s cluster. **Do not point this at a production cluster**
-> until it has run against a throwaway gr8s cluster. See *Roadmap* below.
+> round-trip between two Go endpoints. So is certificate renewal. It has run
+> as the witness of a live two-voter gr8s cluster: enrollment, join,
+> replication, a five-minute leader outage in which its vote elected the other
+> voter, a restart, and a renewal signed by a real voter. What is *not* yet
+> done is an automated end-to-end test against a throwaway cluster, so that
+> evidence is from one lab on one day. See *Roadmap* below.
 
 ## Why a witness can be this small
 
@@ -157,7 +159,36 @@ miniwit \
 | `-data-dir` | `/var/lib/miniwit` | Directory for credentials and the Raft log. |
 | `-max-log-bytes` | `4 MiB` | Compact the on-disk log once it passes this many bytes. |
 | `-retain-log-bytes` | `1 MiB` | Bytes of the most recent log to keep after compaction. |
+| `-renew-before` | `720h` | Renew the member certificate once it is this close to expiry. |
 | `-version` | — | Print version and exit. |
+
+## Certificate renewal
+
+A member certificate lasts a year. A gr8s voter holds the cluster CA and signs
+its own replacement; a witness holds no CA, so it asks a voter, as a gr8s
+witness does (`src/security/raft-tls.lisp`).
+
+miniwit looks at its certificate when it starts and every hour after. Once the
+certificate is within `-renew-before` of expiry (30 days, the window gr8s
+members use) it sends a signing request for its existing key to each peer it
+knows in turn, over the mutual-TLS connection it already has. Another witness
+refuses and the next peer is tried. The voter checks that the caller is still
+a member of the cluster, so a removed witness cannot renew.
+
+The reply replaces `pki/member.crt` only if it is for this member's id and key,
+signed by the cluster CA already on disk, and expires later than the
+certificate it replaces. The file is replaced atomically, and new connections
+present the new certificate at their next handshake, without a restart.
+
+A renewal that fails is logged with the days left and tried again at the next
+hourly look, so there are about 720 attempts before the certificate runs out.
+A witness that was offline past its expiry cannot renew: its certificate no
+longer authenticates it. Remove it from the cluster and enroll it again with a
+fresh `gr8s join-token --role witness`.
+
+To see a renewal without waiting eleven months, start miniwit once with
+`-renew-before 9000h`, then restart it without the flag; left in place it
+would renew every hour.
 
 ## Operational caveats (read before deploying)
 
@@ -181,7 +212,9 @@ miniwit \
 - ⑤ snapshot chunk reassembly + boundary install ✅ — `internal/raftcore`
   (`snapshot.go`), including the witness config-snapshot form and byte-bounded
   log compaction (`-max-log-bytes`/`-retain-log-bytes`).
-- ⑥ certificate renewal (`RenewMember`) — **pending**.
-- ⑦ end-to-end test against a throwaway 2-voter + 1-witness cluster — **pending**;
-  this is where enroll/join wire fidelity is finally confirmed. Required before
-  any production use.
+- ⑥ certificate renewal ✅ — `internal/transport` (`renew.go`). See *Certificate
+  renewal* above.
+- ⑦ automated end-to-end test against a throwaway 2-voter + 1-witness cluster —
+  **pending**. Enroll, join, replication, failover and renewal have each been
+  exercised by hand against a live cluster, which confirms wire fidelity for
+  those paths but is not a test anyone can re-run.
