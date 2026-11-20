@@ -288,6 +288,16 @@ within its election timeout. A single-node control plane always does."
       (when match
         (list (string-trim "[]" (aref groups 0)) (parse-integer (aref groups 1)))))))
 
+(defun raft-member-heard-within-p (member id seconds)
+  "True when a message from member ID arrived within SECONDS. The caller holds
+MEMBER's lock."
+  (let* ((link (gethash id (gr8s.raft.transport::raft-member-links member)))
+         (heard (and link
+                     (bt:with-lock-held ((gr8s.raft.transport::raft-peer-link-lock link))
+                       (gr8s.raft.transport::raft-peer-link-last-receive-ticks link)))))
+    (and heard
+         (> heard (- (get-internal-real-time) (* seconds internal-time-units-per-second))))))
+
 (defun ha-control-plane-live-api-endpoints (hcp &key (silence-seconds 3))
   "On the leader, the API listeners of the members that can answer a client now,
 as sorted (HOST PORT) entries: this member, and every other member that serves
@@ -301,21 +311,15 @@ second, which serves as the lease a kube-apiserver would hold."
   (let ((member (ha-control-plane-member hcp)))
     (bt:with-lock-held ((raft-member-lock member))
       (let* ((node (raft-member-node member))
-             (self (raft-node-id node))
-             (earliest (- (get-internal-real-time) (* silence-seconds internal-time-units-per-second))))
-        (flet ((heard-lately-p (id)
-                 (let* ((link (gethash id (gr8s.raft.transport::raft-member-links member)))
-                        (heard (and link
-                                    (bt:with-lock-held ((gr8s.raft.transport::raft-peer-link-lock link))
-                                      (gr8s.raft.transport::raft-peer-link-last-receive-ticks link)))))
-                   (and heard (> heard earliest)))))
-          (when (raft-leader-p node)
-            (sort (loop for (id . role) in (raft-current-config node)
-                        for endpoint = (api-url-endpoint (gethash id (raft-node-api-urls node)))
-                        when (and endpoint (not (eq role :witness))
-                                  (or (equal id self) (heard-lately-p id)))
-                          collect endpoint)
-                  #'string< :key (lambda (endpoint) (format nil "~A:~5,'0D" (first endpoint) (second endpoint))))))))))
+             (self (raft-node-id node)))
+        (when (raft-leader-p node)
+          (sort (loop for (id . role) in (raft-current-config node)
+                      for endpoint = (api-url-endpoint (gethash id (raft-node-api-urls node)))
+                      when (and endpoint (not (eq role :witness))
+                                (or (equal id self)
+                                    (raft-member-heard-within-p member id silence-seconds)))
+                        collect endpoint)
+                #'string< :key (lambda (endpoint) (format nil "~A:~5,'0D" (first endpoint) (second endpoint)))))))))
 
 (defun ha-control-plane-membership (hcp)
   "The durable membership from this member's view: a plist of :SELF, :LEADER
@@ -358,6 +362,26 @@ second, which serves as the lease a kube-apiserver would hold."
       (raft-cluster-remove-member (ha-control-plane-member hcp) id)
     (declare (ignore index))
     (if (eq outcome t) (values t nil) (values nil outcome))))
+
+(defun ha-control-plane-transfer-leadership (hcp id &key (silence-seconds 3))
+  "On the leader, start handing leadership to voter ID, as before restarting this
+member (podster-f9u). The leader takes no new writes while ID catches up, then
+tells it to stand for election at once; if ID has not taken over within one
+election timeout the leader carries on. Returns (values t nil) once the handover
+has started, or (values nil reason): :not-leader, :self (ID already leads),
+:not-voter (a witness or a learner cannot lead), or :out-of-contact -- a voter
+not heard from within SILENCE-SECONDS could not take over, and waiting for it
+would only hold writes up."
+  (let ((member (ha-control-plane-member hcp)))
+    (bt:with-lock-held ((raft-member-lock member))
+      (let ((node (raft-member-node member)))
+        (if (and (raft-leader-p node)
+                 (not (equal id (raft-node-id node)))
+                 (eq :voter (cdr (assoc id (raft-current-config node) :test #'equal)))
+                 (not (raft-member-heard-within-p member id silence-seconds)))
+            (values nil :out-of-contact)
+            (multiple-value-bind (started reason) (raft-transfer-leadership node id)
+              (values started reason)))))))
 
 (defun ha-control-plane-node-serving-members-unlocked (node node-port)
   "The members of NODE's cluster that serve nodes, as (ID HOST NODE-PORT) entries;

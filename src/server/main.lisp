@@ -854,6 +854,8 @@ authenticated tunnel as slynk and launches ICL's browser mode (icl -b
           (line "Sec-WebSocket-Key: ~A" websocket-key)
           (line "Sec-WebSocket-Protocol: gr8s.slynk.v1"))
         (when token (line "Authorization: Bearer ~A" token))
+        ;; No request here has a body, and a POST must say so.
+        (when (equal method "POST") (line "Content-Length: 0"))
         (line ""))))
    stream)
   (finish-output stream))
@@ -3232,7 +3234,8 @@ between later ones. An ordinary restart recovers within the first.")
     (lambda (action &optional id)
       (ecase action
         (:list (gr8s.ha:ha-control-plane-membership ha))
-        (:remove (gr8s.ha:ha-control-plane-remove-member ha id))))))
+        (:remove (gr8s.ha:ha-control-plane-remove-member ha id))
+        (:transfer-leadership (gr8s.ha:ha-control-plane-transfer-leadership ha id))))))
 
 (defun make-debug-member-resolver (ha)
   "Return an exact member lookup closure for the Slynk API, or NIL outside HA."
@@ -3724,7 +3727,7 @@ No HA API may start from member-local certificate state before this converges."
     ("kubeconfig" "Print or write a cluster kubeconfig")
     ("doctor" "Diagnose resources, survey a cluster, or check the host")
     ("status" "Show cluster health at a glance")
-    ("member" "List or remove HA control-plane members")
+    ("member" "List or remove HA control-plane members, or move the leadership")
     ("debug" "Inspect live processes and trace Pods")
     ("wireguard" "Manage WireGuard identity")
     ("network" "Inspect cluster networking") ("certificate" "Manage certificates")
@@ -3940,9 +3943,10 @@ No HA API may start from member-local certificate state before this converges."
                         ("--output FORMAT" "text (default) or json")
                         ("--help, -h" "show help"))))
       ((equal path '("member"))
-       (page "List or remove HA control-plane members" "COMMAND [OPTIONS]"
+       (page "List or remove HA control-plane members, or move the leadership" "COMMAND [OPTIONS]"
              :commands '(("list" "Show the durable membership, with contact state (default)")
-                         ("remove NAME" "Propose removing a member; commits once the remaining voters agree"))
+                         ("remove NAME" "Propose removing a member; commits once the remaining voters agree")
+                         ("transfer-leadership NAME" "Hand the leadership to voter NAME, as before restarting the leader"))
              :options '(("--kubeconfig PATH" "Cluster kubeconfig (default $KUBECONFIG or ~/.kube/config)")
                         ("--output FORMAT" "text (default) or json")
                         ("--help, -h" "show help"))))
@@ -4080,6 +4084,7 @@ No HA API may start from member-local certificate state before this converges."
               (:status (run-status-command options))
               (:member-list (run-member-list-command options))
               (:member-remove (run-member-remove-command options))
+              (:member-transfer-leadership (run-member-transfer-leadership-command options))
               (:doctor-cluster
                (gr8s-diagnose:doctor-main (getf options :arguments)))
               (:doctor

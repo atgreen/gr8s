@@ -81,6 +81,11 @@
   (let ((options (gr8s.server::parse-member-options '("remove" "gr8s2"))))
     (is (eq :member-remove (getf options :command)))
     (is (equal "gr8s2" (getf options :name))))
+  (let ((options (gr8s.server::parse-member-options '("transfer-leadership" "gr8s2" "--output" "json"))))
+    (is (eq :member-transfer-leadership (getf options :command)))
+    (is (equal "gr8s2" (getf options :name)))
+    (is (equal "json" (getf options :output))))
+  (signals error (gr8s.server::parse-member-options '("transfer-leadership")))
   (signals error (gr8s.server::parse-member-options '("remove")))
   (signals error (gr8s.server::parse-member-options '("remove" "--output" "json")))
   (signals error (gr8s.server::parse-member-options '("destroy" "x")))
@@ -215,3 +220,168 @@
              (is (not (search "never heard from" text)))))
       (setf (symbol-function 'gr8s.server::debug-api-request-json) request-original
             (symbol-function 'gr8s.server::read-debug-kubeconfig) kubeconfig-original))))
+
+;;; podster-f9u: `gr8s member transfer-leadership NAME` has the leader hand its
+;;; leadership to a voter, so that the leader can be restarted without the
+;;; cluster waiting out an election.
+
+(defun call-with-three-control-planes (function)
+  "Call FUNCTION with three members of one control plane, the first of them leading."
+  (with-temporary-store (s1 p1)
+    (with-temporary-store (s2 p2)
+      (with-temporary-store (s3 p3)
+        (declare (ignore p1 p2 p3))
+        (let ((h1 nil) (h2 nil) (h3 nil))
+          (unwind-protect
+               (progn
+                 (setf h1 (gr8s.ha::start-ha-control-plane s1 :id "cp1" :init t))
+                 (is (poll-until (lambda () (gr8s.ha::ha-control-plane-leader-p h1))))
+                 (let ((port (gr8s.raft.transport::raft-member-port (gr8s.ha::ha-control-plane-member h1))))
+                   (setf h2 (gr8s.ha::start-ha-control-plane s2 :id "cp2" :join-host "127.0.0.1" :join-port port))
+                   (setf h3 (gr8s.ha::start-ha-control-plane s3 :id "cp3" :join-host "127.0.0.1" :join-port port)))
+                 (is (poll-until
+                      (lambda ()
+                        (equal '(:voter :voter :voter)
+                               (mapcar (lambda (entry) (getf entry :role))
+                                       (getf (gr8s.ha:ha-control-plane-membership h1) :members))))
+                      :timeout 20)
+                     "both joiners become voters")
+                 (funcall function h1 h2 h3))
+            (dolist (h (list h1 h2 h3)) (when h (ignore-errors (gr8s.ha::stop-ha-control-plane h))))))))))
+
+(defun transfer-leadership-outcome (hcp id &rest arguments)
+  (multiple-value-list (apply #'gr8s.ha:ha-control-plane-transfer-leadership hcp id arguments)))
+
+(test the-leader-hands-its-leadership-to-the-voter-it-is-asked-to
+  (call-with-three-control-planes
+   (lambda (h1 h2 h3)
+     (is (equal '(nil :not-leader) (transfer-leadership-outcome h2 "cp3"))
+         "only the leader can hand the leadership over")
+     (is (equal '(nil :self) (transfer-leadership-outcome h1 "cp1")))
+     (is (equal '(nil :not-voter) (transfer-leadership-outcome h1 "nobody")))
+     (is (gr8s.ha::ha-control-plane-leader-p h1) "a refusal changes nothing")
+     (is (equal '(t nil) (transfer-leadership-outcome h1 "cp2")))
+     (is (poll-until (lambda () (gr8s.ha::ha-control-plane-leader-p h2)) :timeout 5)
+         "the member named leads, well inside an election timeout's wait")
+     (is (poll-until (lambda ()
+                       (every (lambda (h) (equal "cp2" (getf (gr8s.ha:ha-control-plane-membership h) :leader)))
+                              (list h1 h2 h3)))
+                     :timeout 5)
+         "and every member knows it")
+     (is-false (gr8s.ha::ha-control-plane-leader-p h1))
+     ;; The cluster takes writes under its new leader, from any member.
+     (gr8s.resources::create-core-resource (gr8s.ha:ha-control-plane-store h1) "configmaps"
+                                           (configmap-input "after-handover" "k" "v") "default")
+     (is (poll-until (lambda ()
+                       (every (lambda (h) (equal "v" (configmap-value (gr8s.ha:ha-control-plane-store h)
+                                                                      "after-handover" "k")))
+                              (list h1 h2 h3)))
+                     :timeout 10)))))
+
+(test the-leader-keeps-its-leadership-from-a-voter-it-cannot-hear
+  (call-with-three-control-planes
+   (lambda (h1 h2 h3)
+     (declare (ignore h2))
+     (gr8s.ha::stop-ha-control-plane h3)
+     (sleep 1.5)
+     (is (equal '(nil :out-of-contact) (transfer-leadership-outcome h1 "cp3" :silence-seconds 1))
+         "a stopped voter could not take over, and waiting for it would hold writes up")
+     (is (gr8s.ha::ha-control-plane-leader-p h1))
+     (gr8s.resources::create-core-resource (gr8s.ha:ha-control-plane-store h1) "configmaps"
+                                           (configmap-input "still-writable" "k" "v") "default")
+     (is (equal "v" (configmap-value (gr8s.ha:ha-control-plane-store h1) "still-writable" "k"))))))
+
+(defun call-with-stubbed-member-api (answer function)
+  "Call FUNCTION while the member commands' API requests are answered by ANSWER,
+a function of the method and the target that returns a body, a status and headers."
+  (let ((request-original (symbol-function 'gr8s.server::debug-api-request-json))
+        (kubeconfig-original (symbol-function 'gr8s.server::read-debug-kubeconfig)))
+    (unwind-protect
+         (progn
+           (setf (symbol-function 'gr8s.server::read-debug-kubeconfig)
+                 (lambda (path) (declare (ignore path)) (list :server "https://127.0.0.1:6443"))
+                 (symbol-function 'gr8s.server::debug-api-request-json)
+                 (lambda (config method target) (funcall answer config method target)))
+           (funcall function))
+      (setf (symbol-function 'gr8s.server::debug-api-request-json) request-original
+            (symbol-function 'gr8s.server::read-debug-kubeconfig) kubeconfig-original))))
+
+(defun run-transfer-leadership-command (name)
+  "Run `gr8s member transfer-leadership NAME`; return its exit code and what it printed."
+  (let* ((output (make-string-output-stream))
+         (code (gr8s.server::run-member-transfer-leadership-command
+                (list :command :member-transfer-leadership :kubeconfig "ignored" :output "text" :name name)
+                output)))
+    (values code (get-output-stream-string output))))
+
+(defun member-test-status (message)
+  (com.inuoe.jzon:parse (com.inuoe.jzon:stringify (gr8s.resources::core-object "kind" "Status" "message" message))))
+
+(test transfer-leadership-waits-until-the-member-leads
+  (let ((leaders (list "a" "a" "b")) (requests nil))
+    (call-with-stubbed-member-api
+     (lambda (config method target)
+       (declare (ignore config))
+       (push (list method target) requests)
+       (if (equal method "POST")
+           (values (member-test-status "handing over") 202)
+           (values (com.inuoe.jzon:parse (format nil "{\"leader\":\"~A\",\"items\":[]}" (pop leaders))) 200)))
+     (lambda ()
+       (multiple-value-bind (code text) (run-transfer-leadership-command "b")
+         (is (= 0 code))
+         (is (search "b now leads" text)))))
+    (is (equal '("POST" "/apis/gr8s.io/v1/controlplanemembers/b/leadership") (first (last requests))))
+    (is (= 4 (length requests)) "it asked who leads until the answer was b")))
+
+(test transfer-leadership-fails-when-the-member-does-not-come-to-lead
+  (let ((gr8s.server::*member-leadership-wait-seconds* 0.5))
+    (call-with-stubbed-member-api
+     (lambda (config method target)
+       (declare (ignore config target))
+       (if (equal method "POST")
+           (values (member-test-status "handing over") 202)
+           (values (com.inuoe.jzon:parse "{\"leader\":\"a\",\"items\":[]}") 200)))
+     (lambda ()
+       (handler-case (progn (run-transfer-leadership-command "b") (fail "the command reported success"))
+         (error (condition)
+           (is (search "did not take the leadership" (princ-to-string condition)))
+           (is (search "a leads" (princ-to-string condition)))))))))
+
+(test transfer-leadership-to-the-leader-is-already-done
+  (let ((requests 0))
+    (call-with-stubbed-member-api
+     (lambda (config method target)
+       (declare (ignore config method target))
+       (incf requests)
+       (values (member-test-status "a already leads") 200))
+     (lambda ()
+       (multiple-value-bind (code text) (run-transfer-leadership-command "a")
+         (is (= 0 code))
+         (is (search "a already leads" text)))))
+    (is (= 1 requests) "there is nothing to wait for")))
+
+(test transfer-leadership-reports-why-it-was-refused
+  (call-with-stubbed-member-api
+   (lambda (config method target)
+     (declare (ignore config method target))
+     (values (member-test-status "control-plane member w is a witness; only a voter can lead") 409))
+   (lambda ()
+     (handler-case (progn (run-transfer-leadership-command "w") (fail "the command reported success"))
+       (error (condition)
+         (is (search "only a voter can lead" (princ-to-string condition))))))))
+
+(test a-member-command-follows-one-redirect-to-the-leader
+  (let ((servers nil))
+    (call-with-stubbed-member-api
+     (lambda (config method target)
+       (push (list (getf config :server) method target) servers)
+       (cond ((equal method "GET")
+              (values (com.inuoe.jzon:parse "{\"leader\":\"b\",\"items\":[]}") 200))
+             ((equal (getf config :server) "https://127.0.0.1:6443")
+              (values nil 307 '((:location . "https://10.0.0.9:6443/apis/gr8s.io/v1/controlplanemembers/b/leadership"))))
+             (t (values (member-test-status "handing over") 202))))
+     (lambda ()
+       (is (= 0 (run-transfer-leadership-command "b")))))
+    (is (find '("https://10.0.0.9:6443/apis/gr8s.io/v1/controlplanemembers/b/leadership" "POST" "")
+              servers :test #'equal)
+        "the request is sent again to where the follower pointed")))

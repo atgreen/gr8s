@@ -19,6 +19,7 @@
    #:ha-control-plane-membership
    #:ha-control-plane-remove-member
    #:ha-control-plane-store
+   #:ha-control-plane-transfer-leadership
    #:ha-recovery-wait-report
    #:make-ha-control-plane
    #:make-raft-plane
