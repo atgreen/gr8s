@@ -46,9 +46,13 @@
    (control-plane-membership-fn :initarg :control-plane-membership-fn :initform nil
                                 :reader acceptor-control-plane-membership-fn)
    ;; HA (podster-c2d.7.3): NIL (single-node) or a function returning
-   ;; (values self-leader-p leader-api-url). A follower redirects mutating
-   ;; requests to the leader so writes always land where consensus happens.
+   ;; (values self-leader-p leader-api-url). A follower carries a write to the
+   ;; leader, so that writes always land where consensus happens; see
+   ;; HA-FOLLOWER-WRITE-RESPONSE.
    (leader-status-fn :initarg :leader-status-fn :initform nil :reader acceptor-leader-status-fn)
+   ;; The cluster PKI whose administrative certificate this member presents when
+   ;; it carries a client's write to the leader over TLS, or NIL.
+   (relay-pki :initarg :relay-pki :initform nil :reader acceptor-relay-pki)
    ;; HA (podster-gxi): NIL (single-node) or a function of no arguments that
    ;; returns T once this member's store holds every write committed before the
    ;; call, or (values NIL reason) when no leader that a quorum follows can be
@@ -120,7 +124,9 @@ without input, and a client without WebSocket pings (any before v5.channel.k8s.i
 
 (defun ha-redirect-response (acceptor request)
   "When this member is not the Raft leader and REQUEST mutates, return a redirect
-   to the leader (or a 503 if the leader is unknown); else NIL to serve locally."
+   to the leader (or a 503 if the leader is unknown); else NIL to serve locally.
+   Reached only by what HA-FOLLOWER-WRITE-RESPONSE does not carry to the leader
+   itself: a request that upgrades its connection."
   (when (ha-non-redirecting-write-path-p (hunchentoot:script-name request))
     (return-from ha-redirect-response nil))
   (let ((status-fn (acceptor-leader-status-fn acceptor)))
@@ -258,6 +264,7 @@ arbitrarily old, and it cannot tell (podster-gxi)."
   (cond
     ((health-response (hunchentoot:script-name request) (acceptor-store acceptor)
                       (acceptor-follows-a-leader-fn acceptor)))
+    ((ha-follower-write-response acceptor request))
     ((ha-redirect-response acceptor request))
     ((ha-stale-read-response acceptor request))
     (t

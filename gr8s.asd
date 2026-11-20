@@ -381,6 +381,7 @@
                                            (:file "server")
                                            (:file "in-cluster-api")
                                            (:file "api-aggregation")
+                                           (:file "leader-relay")
                                            (:file "kubelet-server")
                                            ))
                              (:module "controllers"
@@ -502,7 +503,6 @@
                              (:file "pod-publications-test")
                              (:file "ha-node-cidr-test")
                              (:file "ha-events-test")
-                             (:file "ha-redirect-http-test")
                              (:file "agent-failover-test")
                              (:file "ha-smoke-test")
                              (:file "raft-store-test")
@@ -646,6 +646,7 @@
                              (:file "user-namespaces-test")
                              (:file "service-account-test")
                              (:file "api-client-certificate-test")
+                             (:file "ha-follower-write-test")
                              (:file "bootstrap-protobuf-test")
                              (:file "events-test")
                              (:file "pod-deletion-test")
