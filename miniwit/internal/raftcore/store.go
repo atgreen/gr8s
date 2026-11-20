@@ -103,27 +103,39 @@ func (s *FileStore) Load() (*State, error) {
 		return nil, err
 	}
 	st.CommitIndex = st.SnapshotIdx // volatile; the leader re-advances it
-	entries, err := readLog(logPath(s.dir), st.SnapshotIdx)
+	entries, clean, err := readLog(logPath(s.dir), st.SnapshotIdx)
 	if err != nil {
 		return nil, err
+	}
+	if !clean {
+		// The file holds more than the log: lines at or below the boundary that a
+		// compaction did not get to remove, or a torn line from an interrupted
+		// append. Appending after either would hide every later entry from the
+		// next Load (podster-sjl, podster-9m0), so write the log back clean first.
+		if err := rewriteLog(s.dir, entries); err != nil {
+			return nil, err
+		}
 	}
 	st.Log = entries
 	return st, nil
 }
 
-// readLog reads the contiguous entry prefix that sits strictly after snapshotIdx.
-// It stops at the first line that is unparseable (a torn trailing write) or breaks
-// contiguity, keeping only the durable, in-order prefix.
-func readLog(path string, snapshotIdx int64) ([]Entry, error) {
+// readLog reads the contiguous run of entries that sits strictly after
+// snapshotIdx. The boundary is written before the log is rewritten to match it
+// (see Follower.maybeCompact), so the file may begin with entries at or below the
+// boundary; those are skipped. Reading stops at the first line that is
+// unparseable (a torn trailing write) or breaks contiguity. clean reports that
+// the file held exactly the entries returned.
+func readLog(path string, snapshotIdx int64) (entries []Entry, clean bool, err error) {
 	f, err := os.Open(path)
 	if os.IsNotExist(err) {
-		return nil, nil
+		return nil, true, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer f.Close()
-	var entries []Entry
+	clean = true
 	expect := snapshotIdx + 1
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
@@ -134,15 +146,24 @@ func readLog(path string, snapshotIdx int64) ([]Entry, error) {
 		}
 		var e Entry
 		if err := json.Unmarshal(line, &e); err != nil {
+			clean = false
 			break // torn trailing line: stop, the rest was never durably acked
 		}
+		if len(entries) == 0 && e.Index <= snapshotIdx {
+			clean = false
+			continue // below the boundary: a rewrite that did not finish
+		}
 		if e.Index != expect {
+			clean = false
 			break // contiguity broken: keep only the clean prefix
 		}
 		entries = append(entries, e)
 		expect++
 	}
-	return entries, nil
+	if sc.Err() != nil {
+		clean = false
+	}
+	return entries, clean, nil
 }
 
 // PutHardState atomically replaces hardstate.json.
@@ -164,31 +185,6 @@ func (s *FileStore) AppendLog(entries []Entry) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	f, err := os.OpenFile(logPath(s.dir), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	w := bufio.NewWriter(f)
-	for _, e := range entries {
-		line, err := json.Marshal(e)
-		if err != nil {
-			return err
-		}
-		w.Write(line)
-		w.WriteByte('\n')
-	}
-	if err := w.Flush(); err != nil {
-		return err
-	}
-	return f.Sync()
-}
-
-// RewriteLog replaces the whole log file atomically. Only the rare truncation and
-// snapshot-install paths use it.
-func (s *FileStore) RewriteLog(entries []Entry) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	var buf []byte
 	for _, e := range entries {
 		line, err := json.Marshal(e)
@@ -198,7 +194,46 @@ func (s *FileStore) RewriteLog(entries []Entry) error {
 		buf = append(buf, line...)
 		buf = append(buf, '\n')
 	}
-	return writeFileAtomic(logPath(s.dir), buf)
+	f, err := os.OpenFile(logPath(s.dir), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if _, err = f.Write(buf); err == nil {
+		err = f.Sync()
+	}
+	if err != nil {
+		// Leave no part of a failed append behind: a later append after a torn
+		// line would be unreadable at the next Load (podster-9m0).
+		_ = f.Truncate(info.Size())
+		return err
+	}
+	return nil
+}
+
+// RewriteLog replaces the whole log file atomically. Only the rare truncation and
+// snapshot-install paths use it.
+func (s *FileStore) RewriteLog(entries []Entry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return rewriteLog(s.dir, entries)
+}
+
+func rewriteLog(dir string, entries []Entry) error {
+	var buf []byte
+	for _, e := range entries {
+		line, err := json.Marshal(e)
+		if err != nil {
+			return err
+		}
+		buf = append(buf, line...)
+		buf = append(buf, '\n')
+	}
+	return writeFileAtomic(logPath(dir), buf)
 }
 
 // writeFileAtomic writes data to a temp file, fsyncs it, renames it over path, and

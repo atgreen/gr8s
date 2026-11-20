@@ -156,6 +156,14 @@ per member, from voters and witnesses only; majority is ⌊n/2⌋+1 of those) an
   payload is discarded — a witness has nothing to restore it into; only the
   boundary matters for log matching).
 
+A crash can fall between any two writes, so their order is part of the format.
+The boundary is written before the log file is trimmed to match it, and a
+restart skips entries at or below the boundary; the reverse order once left a
+file that read back as an empty log. Entries past a boundary this witness does
+not hold are removed before that boundary is written. A write that fails leaves
+memory as it was, so a retry is never acknowledged for entries that are not on
+disk, and a torn line is trimmed at restart before anything is appended after it.
+
 The on-disk log is compacted once it passes a byte bound, keeping only the most
 recent slice. Both bounds are tunable with `-max-log-bytes` and
 `-retain-log-bytes` (see flags below).

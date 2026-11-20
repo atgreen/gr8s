@@ -323,9 +323,15 @@ func (f *Follower) handleAppendEntries(msg *lispwire.Msg) error {
 	// (the hot path), a conflict rewrites the log, and a commit-index advance is
 	// in-memory only (Raft treats commitIndex as volatile) unless it commits a
 	// membership change, which is written to the hard state.
+	//
+	// The log in memory must never run ahead of the log on disk. If a write
+	// fails, memory goes back to what it was: otherwise the leader's retry would
+	// find the entries already "held", append nothing, and be told they are
+	// stored when they are not (podster-9m0).
 	entries := msg.Entries
 	var toAppend []lispwire.Entry
 	truncated := false
+	held := f.st.Log // appending leaves these elements alone; truncating does not
 	for k, e := range entries {
 		i := prevIndex + 1 + int64(k)
 		if i > f.lastLogIndex() {
@@ -333,6 +339,7 @@ func (f *Follower) handleAppendEntries(msg *lispwire.Msg) error {
 			break
 		}
 		if et, ok := f.logTerm(i); !ok || et != e.Term {
+			held = append([]Entry(nil), f.st.Log...)
 			f.truncateFrom(i)
 			truncated = true
 			toAppend = entries[k:]
@@ -345,11 +352,13 @@ func (f *Follower) handleAppendEntries(msg *lispwire.Msg) error {
 	switch {
 	case truncated:
 		if err := f.store.RewriteLog(f.st.Log); err != nil {
+			f.st.Log = held
 			return err
 		}
 	case len(toAppend) > 0:
 		newStored := f.st.Log[int64(len(f.st.Log))-int64(len(toAppend)):]
 		if err := f.store.AppendLog(newStored); err != nil {
+			f.st.Log = held
 			return err
 		}
 	}
@@ -435,23 +444,40 @@ func (f *Follower) installBoundary(index, lastTerm int64, state lispwire.Value) 
 	held := ok && bt == lastTerm
 	hs := f.st.HardState
 	addrs := f.membershipAcrossSnapshot(&hs, index, held, state)
-	if held {
-		f.truncateBefore(index)
-	} else {
-		f.st.Log = nil
-	}
 	hs.SnapshotIdx = index
 	hs.SnapshotTrm = lastTerm
-	// Rewrite the log first: if we crash between the two, a log whose entries sit
-	// beyond an un-advanced boundary is still consistent, whereas a boundary ahead
-	// of a stale log would orphan entries. Then record the new boundary.
-	if err := f.store.RewriteLog(f.st.Log); err != nil {
-		return err
+	// Order matters, because a crash can fall between any two writes
+	// (podster-sjl). Load skips entries at or below the boundary and keeps what
+	// follows it, so the boundary is written first and the log trimmed after: a
+	// crash in between leaves the new boundary with the old file, which reads
+	// back as exactly the new log. The old order (log, then boundary) left a
+	// file starting past the old boundary, and Load returned an empty log: the
+	// witness forgot entries it had acknowledged.
+	//
+	// The one thing that must go before the boundary is a suffix that disagrees
+	// with it. Entries past a boundary we do not hold were written by a leader
+	// the snapshot's leader has superseded; once the boundary is on disk Load
+	// would take them for its continuation.
+	var kept []Entry
+	if held {
+		kept = entriesAfter(f.st.Log, index)
+	} else if f.lastLogIndex() > index {
+		upTo := entriesThrough(f.st.Log, index)
+		if err := f.store.RewriteLog(upTo); err != nil {
+			return err
+		}
+		f.st.Log = upTo
 	}
 	if err := f.store.PutHardState(hs); err != nil {
 		return err
 	}
 	f.st.HardState = hs
+	f.st.Log = kept
+	if err := f.store.RewriteLog(kept); err != nil {
+		// The state is durable and correct; only the file is longer than it
+		// needs to be, and Load trims it.
+		f.logf("could not trim the log after installing boundary %d: %v", index, err)
+	}
 	if index > f.st.CommitIndex {
 		f.st.CommitIndex = index
 	}
@@ -524,24 +550,41 @@ func (f *Follower) maybeCompact() error {
 	if !ok {
 		return nil
 	}
-	f.truncateBefore(cut)
-	f.st.SnapshotIdx = cut
-	f.st.SnapshotTrm = cutTerm
-	if err := f.store.RewriteLog(f.st.Log); err != nil {
+	// Boundary first, then the file: see installBoundary.
+	hs := f.st.HardState
+	hs.SnapshotIdx = cut
+	hs.SnapshotTrm = cutTerm
+	if err := f.store.PutHardState(hs); err != nil {
 		return err
 	}
-	return f.store.PutHardState(f.st.HardState)
+	f.st.HardState = hs
+	f.st.Log = entriesAfter(f.st.Log, cut)
+	if err := f.store.RewriteLog(f.st.Log); err != nil {
+		f.logf("could not trim the log after compacting to %d: %v", cut, err)
+	}
+	return nil
 }
 
-// truncateBefore drops stored entries at index <= boundary, keeping the suffix.
-func (f *Follower) truncateBefore(boundary int64) {
-	kept := f.st.Log[:0:0]
-	for _, e := range f.st.Log {
+// entriesAfter returns a copy of the entries with index > boundary.
+func entriesAfter(log []Entry, boundary int64) []Entry {
+	var kept []Entry
+	for _, e := range log {
 		if e.Index > boundary {
 			kept = append(kept, e)
 		}
 	}
-	f.st.Log = kept
+	return kept
+}
+
+// entriesThrough returns a copy of the entries with index <= boundary.
+func entriesThrough(log []Entry, boundary int64) []Entry {
+	var kept []Entry
+	for _, e := range log {
+		if e.Index <= boundary {
+			kept = append(kept, e)
+		}
+	}
+	return kept
 }
 
 // LeaderID returns the leader this follower last heard from, or "" if none. The
