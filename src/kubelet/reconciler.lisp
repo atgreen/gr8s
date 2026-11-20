@@ -359,10 +359,12 @@ default nodefs.available eviction threshold (roughly 10%, 1Gi here as a floor)."
   "The node filesystem whose free space backs the DiskPressure signal.")
 
 (defun node-disk-available ()
-  "(values available-bytes free-inodes) for the node filesystem, or (values NIL NIL)."
+  "Return available bytes and free inodes; NIL means that measurement is unavailable.
+Filesystems such as Btrfs report zero total inodes because they have no fixed pool."
   (let ((statistics (ignore-errors (filesystem-statistics *node-nodefs-path*))))
     (if statistics
-        (values (second statistics) (fifth statistics))
+        (values (second statistics)
+                (when (plusp (fourth statistics)) (fifth statistics)))
         (values nil nil))))
 
 (defparameter *node-disk-available-fn* #'node-disk-available
