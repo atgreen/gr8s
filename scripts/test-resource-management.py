@@ -16,7 +16,6 @@ import socket
 import subprocess
 import tempfile
 import time
-import urllib.request
 
 IMAGE = "registry.k8s.io/e2e-test-images/busybox:1.37.0-1"
 
@@ -57,10 +56,12 @@ class Smoke:
 
         def ready():
             assert self.process.poll() is None, "server exited; inspect server.log"
+            if not self.config.exists():
+                return False
             try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{self.api}/readyz", timeout=2) as r:
-                    return r.status == 200 and self.config.exists()
-            except OSError:
+                response = self.k('get', '--raw', '/readyz', check=False, timeout=5)
+                return response.returncode == 0 and response.stdout.strip() == 'ok'
+            except subprocess.TimeoutExpired:
                 return False
         wait(ready, "server readiness")
 
@@ -71,9 +72,9 @@ class Smoke:
             self.process = None
             assert code == 0, f"shutdown exit {code}"
 
-    def k(self, *args, obj=None, check=True):
+    def k(self, *args, obj=None, check=True, timeout=40):
         return subprocess.run(["kubectl", "--kubeconfig", str(self.config), "--request-timeout=15s", *args],
-                              input=json.dumps(obj) if obj else None, text=True, capture_output=True, check=check, timeout=40)
+                              input=json.dumps(obj) if obj else None, text=True, capture_output=True, check=check, timeout=timeout)
 
     def get(self, resource, name):
         r = self.k("get", resource, name, "-o", "json", check=False)

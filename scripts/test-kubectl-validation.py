@@ -18,8 +18,6 @@ import socket
 import subprocess
 import tempfile
 import time
-import urllib.error
-import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE = ROOT / "tests/fixtures/builtin-manifests.json"
@@ -58,10 +56,11 @@ class Server:
             if self.process.poll() is not None:
                 raise AssertionError(f"native API exited {self.process.returncode}")
             try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/readyz", timeout=1):
-                    if (self.root / "kubeconfig").exists():
+                if (self.root / "kubeconfig").exists():
+                    code, out, _ = self.kubectl('get', '--raw', '/readyz', timeout=5)
+                    if code == 0 and out.strip() == 'ok':
                         return
-            except (OSError, urllib.error.URLError):
+            except subprocess.TimeoutExpired:
                 pass
             time.sleep(0.1)
         raise AssertionError("native API did not become ready")
@@ -72,10 +71,10 @@ class Server:
             assert self.process.wait(timeout=30) == 0
         self.process = None
 
-    def kubectl(self, *arguments):
+    def kubectl(self, *arguments, timeout=120):
         """Run kubectl; return (code, stdout, stderr)."""
         result = subprocess.run(["kubectl", *arguments], env=self.env, text=True,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
         return result.returncode, result.stdout, result.stderr
 
 
