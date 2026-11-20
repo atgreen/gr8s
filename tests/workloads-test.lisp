@@ -561,6 +561,79 @@
         when (and (equal kind (gethash "kind" involved)) (equal name (gethash "name" involved)))
           collect (cons (gethash "reason" event) (gethash "message" event))))
 
+(test controller-event-names-handle-long-workload-names
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (dolist (name (list "short" (make-string 237 :initial-element #\a)
+                        (concatenate 'string (make-string 235 :initial-element #\a) ".a")
+                        (concatenate 'string (make-string 235 :initial-element #\a) "-a")
+                        (make-string 253 :initial-element #\a)))
+      (let* ((input (workload-fixture "ReplicaSet" name 0)) (spec (gethash "spec" input))
+             (labels (gr8s.resources::core-object "app" "event-test")))
+        (setf (gethash "matchLabels" (gethash "selector" spec)) labels
+              (gethash "labels" (gethash "metadata" (gethash "template" spec))) labels)
+        (let ((owner (gr8s.resources::create-core-resource store "replicasets" input "alpha")))
+          (dotimes (attempt 2)
+            (gr8s.controllers::record-controller-event store owner "Warning" "FailedCreate" "test rejection"))
+          (let ((events (remove-if-not
+                         (lambda (event) (equal (gethash "uid" (gethash "metadata" owner))
+                                                (gethash "uid" (gethash "involvedObject" event))))
+                         (gr8s.resources::list-core-resources store "events" "alpha"))))
+            (is (= 1 (length events)))
+            (when events
+              (is (<= (length (gethash "name" (gethash "metadata" (first events)))) 253))
+              (is (equal name (gethash "name" (gethash "involvedObject" (first events)))))
+              (is (= 1 (gethash "count" (first events)))))))))
+    (is (= 5 (length (gr8s.resources::list-core-resources store "events" "alpha"))))))
+
+(test replica-set-quota-failures-publish-and-refresh-warning-events
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let* ((reconciler (make-reconciler store (make-fake-runtime)))
+           (owner (gr8s.resources::create-core-resource
+                   store "replicasets" (workload-fixture "ReplicaSet" "blocked" 1) "alpha")))
+      (gr8s.resources::create-core-resource
+       store "resourcequotas"
+       (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "quota")
+                                   "spec" (gr8s.resources::core-object "hard" (gr8s.resources::core-object "pods" "0")))
+       "alpha")
+      (labels ((sync () (gr8s.controllers::reconcile-replica-set
+                         reconciler (gr8s.resources::get-core-resource store "replicasets" "alpha" "blocked")))
+               (failures () (remove-if-not
+                             (lambda (event) (equal "FailedCreate" (gethash "reason" event)))
+                             (gr8s.resources::list-core-resources store "events" "alpha"))))
+        (sync)
+        (is (null (list-pods store)))
+        (is (= 1 (length (failures))))
+        (when (failures)
+          (let* ((event (first (failures))) (name (gethash "name" (gethash "metadata" event)))
+                 (version (gethash "resourceVersion" (gethash "metadata" event))))
+            (is (equal "Warning" (gethash "type" event)))
+            (is (equal (gethash "uid" (gethash "metadata" owner))
+                       (gethash "uid" (gethash "involvedObject" event))))
+            (is (search "exceeded quota: quota," (gethash "message" event)))
+            (sync)
+            (is (= 1 (length (failures))))
+            (is (= 1 (gethash "count" (first (failures)))))
+            (is (equal version (gethash "resourceVersion" (gethash "metadata" (first (failures))))))
+            (gr8s.resources::update-core-resource
+             store "events" "alpha" name
+             (lambda (old)
+               (setf (gethash "firstTimestamp" old) "2020-01-01T00:00:00Z"
+                     (gethash "lastTimestamp" old) "2020-01-01T00:00:00Z") old))
+            (sync)
+            (let ((refreshed (first (failures))))
+              (is (= 1 (length (failures))))
+              (is (= 2 (gethash "count" refreshed)))
+              (is (equal name (gethash "name" (gethash "metadata" refreshed))))
+              (is (equal "2020-01-01T00:00:00Z" (gethash "firstTimestamp" refreshed)))
+              (is (not (equal "2020-01-01T00:00:00Z" (gethash "lastTimestamp" refreshed)))))
+            (gr8s.resources::delete-core-resource store "resourcequotas" "alpha" "quota")
+            (sync)
+            (is (= 1 (length (list-pods store))))
+            (is (= 2 (gethash "count" (first (failures)))))
+            (is (zerop (length (gethash "conditions" (workload-status store "replicasets" "blocked") #()))))))))))
+
 (test workload-controllers-record-the-events-upstream-controllers-do
   ;; kubectl describe and kubectl events --for show these; upstream's deployment,
   ;; replicaset, statefulset and job controllers record them with these words.
