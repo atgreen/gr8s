@@ -139,7 +139,8 @@
                               :components ((:file "package")
                                            (:file "member")
                                            (:file "snapshot")
-                                           (:file "cluster")))
+                                           (:file "cluster")
+                                           (:file "read")))
                              (:module "ha"
                               :serial t
                               :components ((:file "package")
@@ -482,6 +483,7 @@
                              (:file "raft-test")
                              (:file "raft-transport-test")
                              (:file "raft-cluster-test")
+                             (:file "raft-read-test")
                              (:file "raft-failover-test")
                              (:file "raft-join-test")
                              (:file "witness-command-test")

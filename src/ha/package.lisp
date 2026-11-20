@@ -7,6 +7,8 @@
   (:use #:cl #:gr8s.raft #:gr8s.raft.transport)
   (:export
    #:ha-control-plane
+   #:ha-control-plane-await-linearizable-read
+   #:ha-control-plane-follows-a-leader-p
    #:ha-control-plane-leader-p
    #:ha-control-plane-leader-status
    #:ha-control-plane-member

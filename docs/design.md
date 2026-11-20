@@ -57,8 +57,9 @@ so a replacement object does not inherit an old object's runtime state by name.
 
 Standalone operation uses the local durable store. HA adds a Raft log and application
 checkpoints, replicates desired state and selected observations, and gates controller
-work on leadership. Events and some telemetry remain local. Followers can serve
-local reads, so a follower read alone is not proof of a quorum-confirmed latest value.
+work on leadership. Events and some telemetry remain local. A read that names no
+resourceVersion is confirmed with the leader before any member answers it; a read at
+resourceVersion=0 is served from the member's own state and may be old.
 See [HA consistency and recovery](high-availability.md) for the exact guarantees.
 
 ## Networking and identity
