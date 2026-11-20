@@ -25,7 +25,8 @@
 ;;;;
 ;;;; A request that upgrades its connection (exec, attach, port-forward, proxy)
 ;;;; is a conversation the client must hold with the member that carries it, and
-;;;; is still redirected.
+;;;; is still redirected. So is a client whose identity cannot be put in headers
+;;;; without changing it.
 
 (in-package #:gr8s.apiserver)
 
@@ -56,6 +57,34 @@
          (not (ha-non-redirecting-write-path-p path))
          (not (hunchentoot:header-in :upgrade request))
          (not (cl-ppcre:scan "/(pods|services|nodes)/[^/]+/(exec|attach|portforward|proxy)(/|$)" path)))))
+
+(defun leader-relay-header-text-p (text &key list-item)
+  "True when TEXT arrives at the leader as it left: printable ASCII with no space
+at either end. One of several values of a header (LIST-ITEM) may hold no comma,
+which is where the receiver divides them."
+  (and (stringp text) (plusp (length text))
+       (every (lambda (character) (char<= #\Space character #\~)) text)
+       (char/= #\Space (char text 0)) (char/= #\Space (char text (1- (length text))))
+       (not (and list-item (find #\, text)))))
+
+(defun leader-relay-identity-expressible-p (identity)
+  "True when the leader will read IDENTITY from LEADER-RELAY-IDENTITY-HEADERS
+exactly as this member holds it. A certificate may name a group \"a,b\"; sent as a
+header it would arrive as the groups a and b, and the client would be given
+rights it does not have. Such a client is sent to the leader to speak for itself."
+  (let* ((actor (api-identity-actor identity))
+         (uid (gethash "uid" actor))
+         (extra (gethash "extra" actor)))
+    (and (leader-relay-header-text-p (gethash "username" actor))
+         (every (lambda (group) (leader-relay-header-text-p group :list-item t)) (gethash "groups" actor))
+         (or (null uid) (leader-relay-header-text-p uid))
+         (or (not (hash-table-p extra))
+             (loop for key being the hash-keys of extra using (hash-value values)
+                   always (and (leader-relay-header-text-p key)
+                               ;; A header's name is read without regard to case.
+                               (string= key (string-downcase key))
+                               (every (lambda (value) (leader-relay-header-text-p value :list-item t))
+                                      values)))))))
 
 (defun leader-relay-identity-headers (identity)
   "Ask the leader to act for IDENTITY, which this member authenticated."
@@ -153,7 +182,8 @@ having come to lead while it held the write."
   (let ((status-fn (acceptor-leader-status-fn acceptor))
         (pki (acceptor-relay-pki acceptor)))
     (when (and status-fn (leader-relayed-request-p request)
-               (not (funcall status-fn)))
+               (not (funcall status-fn))
+               (leader-relay-identity-expressible-p (request-api-identity)))
       (let ((deadline (+ (get-internal-real-time)
                          (* *leader-relay-patience-seconds* internal-time-units-per-second)))
             (body nil))

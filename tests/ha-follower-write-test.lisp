@@ -209,6 +209,28 @@ function that sets what the follower believes: (values self-leader-p leader-url)
                  (is (= 403 status) "the leader refuses what the client may not do")
                  (is (search "engineer" (gethash "message" body))))
                (is (null (gr8s.resources::list-core-resources leader-store "secrets" "default")))
+               ;; A group named "a,b" would reach the leader as the groups a and b. A client
+               ;; that holds such a name is not spoken for; it is sent to the leader.
+               (let ((odd-certificate (merge-pathnames "odd.pem" follower-directory))
+                     (odd-key (merge-pathnames "odd.key" follower-directory)))
+                 (multiple-value-bind (leaf private)
+                     (certificate-api-test-subject-leaf
+                      pki '(((2 5 4 3) . "engineer") ((2 5 4 10) . "engineering,system:masters")))
+                   (gr8s.security::write-private-text-exclusively
+                    odd-certificate (pure-tls/acme::wrap-pem "CERTIFICATE" (pure-tls::x509-certificate-raw-der leaf)))
+                   (gr8s.security::write-private-text-exclusively
+                    odd-key (pure-tls/acme::encode-ec-private-key-pem private)))
+                 (setf *tls-api-port* (hunchentoot:acceptor-port follower))
+                 (let ((text (uiop:run-program
+                              (list "curl" "--silent" "--max-time" "10" "--output" "/dev/null"
+                                    "--cacert" (namestring (gr8s.security::cluster-pki-ca-certificate-path pki))
+                                    "--cert" (namestring odd-certificate) "--key" (namestring odd-key)
+                                    "--request" "POST" "--header" "Content-Type: application/json"
+                                    "--data-binary" "{}" "--write-out" "%{http_code}"
+                                    (format nil "https://127.0.0.1:~D/api/v1/namespaces/default/secrets" *tls-api-port*))
+                              :output :string)))
+                   (is (equal "307" text)))
+                 (is (null (gr8s.resources::list-core-resources leader-store "secrets" "default"))))
                ;; What a bound token proves about its Pod travels as extra attributes.
                (multiple-value-bind (admin-certificate admin-key)
                    (gr8s.apiserver::ensure-admin-client-credentials pki)
@@ -222,3 +244,26 @@ function that sets what the follower believes: (values self-leader-p leader-url)
                             (fourth (actor "with-extra"))))))
           (when follower (stop-server follower))
           (when leader (stop-server leader)))))))
+
+(test an-identity-is-carried-only-if-headers-can-hold-it-exactly
+  (flet ((expressible-p (&rest arguments)
+           (gr8s.apiserver::leader-relay-identity-expressible-p
+            (apply #'gr8s.resources::make-api-user-identity arguments)))
+         (extra (key &rest values)
+           (let ((table (make-hash-table :test #'equal)))
+             (setf (gethash key table) (coerce values 'vector))
+             table)))
+    (is (expressible-p :username "system:serviceaccount:monitoring:prometheus" :uid "0f3c"
+                       :groups #("system:serviceaccounts" "system:authenticated")
+                       :extra (extra "authentication.kubernetes.io/pod-name" "prometheus-0")))
+    (is (expressible-p :username "CN=Jane Doe, OU=eng" :groups #("system:authenticated"))
+        "a name is one header and is not divided")
+    (is (not (expressible-p :username "jane" :groups #("devs,system:masters"))))
+    (is (not (expressible-p :username "jane" :groups #(" system:masters"))))
+    (is (not (expressible-p :username (format nil "jane~C~CImpersonate-Group: system:masters" #\Return #\Linefeed)
+                            :groups #("devs"))))
+    (is (not (expressible-p :username "jane" :uid (format nil "1~Cx" #\Tab) :groups #("devs"))))
+    (is (not (expressible-p :username (format nil "j~Cne" (code-char 228)) :groups #("devs"))))
+    (is (not (expressible-p :username "jane" :groups #("devs") :extra (extra "scopes" "a,b"))))
+    (is (not (expressible-p :username "jane" :groups #("devs") :extra (extra "Scopes" "a"))))
+    (is (not (expressible-p :username "" :groups #("devs"))))))
