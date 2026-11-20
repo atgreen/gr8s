@@ -400,3 +400,84 @@ function that sets what the follower believes: (values self-leader-p leader-url)
       (when peer (ignore-errors (usocket:socket-close peer)))
       (ignore-errors (usocket:socket-close listener))
       (ignore-errors (bt:join-thread stalling-leader)))))
+
+;;; podster-f9u: handing the leadership over is asked of the leader, like any write.
+
+(test a-follower-carries-a-request-to-hand-the-leadership-over
+  (with-temporary-store (leader-store leader-directory)
+    (with-temporary-store (follower-store follower-directory)
+      (let* ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" leader-directory)))
+             (certificate (merge-pathnames "engineer.pem" follower-directory))
+             (key (merge-pathnames "engineer.key" follower-directory))
+             (members '((:id "cp1" :role :voter :leader t :contact :self)
+                        (:id "cp2" :role :voter :contact :in-contact)
+                        (:id "cp3" :role :voter :contact :in-contact)
+                        (:id "w" :role :witness :contact :in-contact)))
+             (asked-of-leader nil) (asked-of-follower nil)
+             (leader nil) (follower nil) (*tls-api-port* nil))
+        (flet ((listener (store membership-fn &rest arguments)
+                 (let ((runtime (make-fake-runtime)))
+                   (apply #'gr8s.apiserver::start-in-cluster-api store runtime (make-reconciler store runtime) pki
+                          :address "127.0.0.1" :port 0 :control-plane-membership-fn membership-fn arguments)))
+               (ask (name &optional (method "POST") (subresource "/leadership"))
+                 (multiple-value-bind (status body)
+                     (certificate-api-test-request
+                      pki certificate key
+                      (format nil "/apis/gr8s.io/v1/controlplanemembers/~A~A" name subresource) :method method)
+                   (list status (gethash "message" body)))))
+          (unwind-protect
+               (progn
+                 (setf leader (listener leader-store
+                                        (lambda (action &optional id)
+                                          (ecase action
+                                            (:list (list :self "cp1" :leader "cp1" :members members))
+                                            (:transfer-leadership
+                                             (push id asked-of-leader)
+                                             (cond ((equal id "cp1") (values nil :self))
+                                                   ((equal id "w") (values nil :not-voter))
+                                                   ((equal id "cp3") (values nil :out-of-contact))
+                                                   (t (values t nil))))))))
+                 (let ((leader-url (format nil "https://127.0.0.1:~D" (hunchentoot:acceptor-port leader))))
+                   (setf follower (listener follower-store
+                                            (lambda (action &optional id)
+                                              (ecase action
+                                                (:list (list :self "cp2" :leader "cp1" :members members))
+                                                (:transfer-leadership (push id asked-of-follower)
+                                                                      (values nil :not-leader))))
+                                            :leader-status-fn (lambda () (values nil leader-url)))))
+                 (multiple-value-bind (leaf private)
+                     (certificate-api-test-subject-leaf pki '(((2 5 4 3) . "engineer")))
+                   (gr8s.security::write-private-text-exclusively
+                    certificate (pure-tls/acme::wrap-pem "CERTIFICATE" (pure-tls::x509-certificate-raw-der leaf)))
+                   (gr8s.security::write-private-text-exclusively
+                    key (pure-tls/acme::encode-ec-private-key-pem private)))
+                 (setf *tls-api-port* (hunchentoot:acceptor-port follower))
+                 (is (= 403 (first (ask "cp2"))) "the right must be granted")
+                 (is (null asked-of-leader))
+                 (dolist (store (list leader-store follower-store))
+                   (follower-write-grant
+                    store "engineer"
+                    (vector (gr8s.resources::core-object "apiGroups" #("gr8s.io")
+                                                         "resources" #("controlplanemembers/leadership")
+                                                         "verbs" #("create")))))
+                 (let ((answer (ask "cp2")))
+                   (is (= 202 (first answer)) "the handover has started; it is not yet done")
+                   (is (search "cp2" (second answer))))
+                 (is (equal '("cp2") asked-of-leader))
+                 (is (null asked-of-follower) "a follower has no leadership to hand over")
+                 (let ((answer (ask "cp1")))
+                   (is (= 200 (first answer)))
+                   (is (search "already leads" (second answer))))
+                 (let ((answer (ask "w")))
+                   (is (= 409 (first answer)))
+                   (is (search "is a witness; only a voter can lead" (second answer))))
+                 (let ((answer (ask "cp3")))
+                   (is (= 409 (first answer)))
+                   (is (search "has not heard from" (second answer))))
+                 (setf asked-of-leader nil)
+                 (is (= 404 (first (ask "nobody"))))
+                 (is (null asked-of-leader))
+                 (is (= 403 (first (ask "cp3" "DELETE" "")))
+                     "the right to move the leadership is not the right to remove a member"))
+            (when follower (stop-server follower))
+            (when leader (stop-server leader))))))))

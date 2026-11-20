@@ -8,9 +8,11 @@
 ;;;;   DELETE /apis/gr8s.io/v1/controlplanemembers/<id>  propose removing a
 ;;;;          member (the usual cure for a ghost: a member whose host and state
 ;;;;          are gone while a quorum of the remaining voters is still alive)
-;;;; Followers redirect the DELETE to the leader through the ordinary mutating
-;;;; redirect; a cluster whose quorum is gone cannot commit the removal, and
-;;;; that is what `serve --cluster-reset` is for.
+;;;;   POST   /apis/gr8s.io/v1/controlplanemembers/<id>/leadership  hand the
+;;;;          leadership to a voter, as before restarting the leader (podster-f9u)
+;;;; A follower carries the DELETE and the POST to the leader as it does any
+;;;; write; a cluster whose quorum is gone cannot commit the removal, and that
+;;;; is what `serve --cluster-reset` is for.
 
 (in-package #:gr8s.apiserver)
 
@@ -81,3 +83,35 @@
                               id (string-downcase (symbol-name (or reason :unavailable)))
                               (when (eq reason :change-in-flight)
                                 " (another membership change has not committed yet)")))))))
+
+(defun serve-control-plane-member-leadership (path)
+  "Answer POST /apis/gr8s.io/v1/controlplanemembers/<id>/leadership: have the
+   leader hand its leadership to voter <id>. 202 says the handover has started,
+   not that it is done: <id> leads once the membership names it the leader."
+  (unless *authenticated-api-identity*
+    (core-resource-error 403 "Forbidden" "control-plane membership requires authenticated Kubernetes API access"))
+  (let* ((membership-fn (control-plane-membership-fn-or-404))
+         (id (first (last (remove "" (uiop:split-string path :separator '(#\/)) :test #'equal) 2)))
+         (entry (find id (getf (funcall membership-fn :list) :members)
+                      :key (lambda (entry) (getf entry :id)) :test #'equal)))
+    (unless entry
+      (core-resource-error 404 "NotFound" "control-plane member ~A was not found" id))
+    (multiple-value-bind (started reason) (funcall membership-fn :transfer-leadership id)
+      (flet ((success (status control)
+               (json-response (core-object "apiVersion" "v1" "kind" "Status" "status" "Success"
+                                           "message" (format nil control id))
+                              status)))
+        (cond
+          (started (success 202 "the leader is handing its leadership to control-plane member ~A"))
+          ((eq reason :self) (success 200 "control-plane member ~A already leads"))
+          ((eq reason :not-voter)
+           (core-resource-error 409 "Conflict" "control-plane member ~A is a ~A; only a voter can lead"
+                                id (string-downcase (symbol-name (getf entry :role)))))
+          ((eq reason :out-of-contact)
+           (core-resource-error 409 "Conflict"
+                                "the leader has not heard from control-plane member ~A lately, so it could not take over"
+                                id))
+          (t
+           ;; Leadership moved between this request's arrival and its handling.
+           (core-resource-error 503 "ServiceUnavailable"
+                                "this member no longer leads the control plane; try again")))))))

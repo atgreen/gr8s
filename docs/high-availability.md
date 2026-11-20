@@ -207,6 +207,32 @@ surviving voter: see
 [disaster recovery](backup-restore.md#disaster-recovery-a-quorum-lost-forever).
 A removed member's name may be reused by a later join.
 
+`gr8s member transfer-leadership NAME` has the leader hand its leadership to
+voter `NAME`. Use it before you restart or stop the leader: without it the other
+members notice the leader is gone only after one to two seconds of silence and
+then hold an election, and writes wait for both. In a handover the leader takes
+no new writes for a moment, makes sure `NAME` holds everything it does, and tells
+it to stand for election at once.
+
+```console
+$ gr8s member transfer-leadership gr8s2
+control-plane member gr8s2 now leads
+```
+
+The command works through any member and returns once `NAME` leads. It exits 1,
+with the reason, when the handover is refused or does not happen:
+
+- `NAME` is a witness or a learner. Only a voter can lead.
+- The leader has not heard from `NAME` in the last three seconds.
+- `NAME` did not take over within ten seconds. The leader gives up on a handover
+  after one election timeout and carries on leading.
+
+Naming the member that already leads succeeds and changes nothing. Other tooling
+can send `POST /apis/gr8s.io/v1/controlplanemembers/NAME/leadership`; the RBAC
+rule is `create` on `controlplanemembers/leadership` in the `gr8s.io` group. A
+`202` answer means the handover has started, and the member list names the new
+leader when it is done.
+
 The [production recovery validation](evidence/production-ha-recovery-validation-2026-11-10.json)
 uses three real CLI processes and a witness with authenticated Raft. It verifies
 leader loss, rejoin, full restart, preserved credentials and writes with a witness
