@@ -132,6 +132,8 @@
                      (is (eq t committed))
                      (is (equal '(:node-conflict) result))))
                  ;; Kill the leader; a survivor keeps the CIDR assignment.
+                 (is (poll-until (lambda () (control-plane-voters-p h1 3)) :timeout 20)
+                     "both joiners vote before the leader is stopped")
                  (gr8s.ha::stop-ha-control-plane h1)
                  (setf h1 nil)
                  (is (poll-until (lambda () (or (gr8s.ha::ha-control-plane-leader-p h2)

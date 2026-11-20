@@ -64,6 +64,17 @@ Clients see the renumbering as one modification of each object. It happens
 once after an upgrade; when the members already agree, a round changes nothing.
 A round waits for every voter, so it completes only when all of them run a
 version that takes part. Pods are numbered separately and are not covered.
+
+A member that restarts loads its last snapshot and applies the log after it
+again. That gives each object the version it had, so a restart changes no
+version and costs no renumbering. The member checks this: before it loads the
+snapshot it notes its revision and the digest of its versions, and the replay
+must come to both. If it does not, a version the member gave out before could
+come to name other content, so the member takes revisions above all it gave
+out, logs that, and starts a round. This happens to a member that counted by
+itself under an older version, and not otherwise in ordinary operation. A
+member that is sent a snapshot because it fell too far behind also moves its
+revisions above its own, and the round that follows renumbers.
 A kubelet's
 repeated Event (a probe that fails every few seconds) is shown at once for its
 first ten occurrences and then brought up to date once a minute, so that it

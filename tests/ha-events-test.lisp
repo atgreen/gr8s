@@ -297,3 +297,125 @@
        (sleep 4)
        (is (equal version (ha-configmap-version s1 "held")))
        (is (ha-versions-alike-p (list s1 s2 s3)))))))
+
+;;; podster-69p: a member that restarts replays its log. It must come to the
+;;; versions it held, and not number what it replays a second time.
+
+(defun call-with-two-restartable-members (function)
+  "Call FUNCTION with a founder's store and a function that stops the second
+member, calls its argument on that member's stopped store, and starts it again;
+the function returns the second member's store, which a restart replaces."
+  (with-temporary-store (s1 p1)
+    (declare (ignore p1))
+    (with-temporary-store (s2 p2)
+      (let ((h1 nil) (h2 nil) (port2 nil))
+        (unwind-protect
+             (progn
+               (setf h1 (gr8s.ha::start-ha-control-plane s1 :id "one" :init t))
+               (is (poll-until (lambda () (gr8s.ha::ha-control-plane-leader-p h1)) :timeout 15))
+               (setf h2 (gr8s.ha::start-ha-control-plane
+                         s2 :id "two" :join-host "127.0.0.1"
+                         :join-port (gr8s.raft.transport::raft-member-port (gr8s.ha::ha-control-plane-member h1)))
+                     port2 (gr8s.raft.transport::raft-member-port (gr8s.ha::ha-control-plane-member h2)))
+               (is (poll-until
+                    (lambda ()
+                      (and (eq :voter (cl-raft::raft-node-self-role
+                                       (gr8s.raft.transport::raft-member-node (gr8s.ha::ha-control-plane-member h2))))
+                           (not (gr8s.store::store-access-blocked-p s2))))
+                    :timeout 20))
+               (funcall function s1
+                        (lambda (&optional (while-stopped #'identity))
+                          (gr8s.ha::stop-ha-control-plane h2)
+                          (funcall while-stopped s2)
+                          (setf s2 (gr8s.store::open-store p2 :defer-restore-completion t)
+                                h2 (gr8s.ha::start-ha-control-plane s2 :id "two" :port port2
+                                                                        :join-host "127.0.0.1" :join-port 1))
+                          (is (poll-until (lambda () (not (gr8s.store::store-access-blocked-p s2))) :timeout 30))
+                          s2)
+                        (lambda () s2)))
+          (when h2 (ignore-errors (gr8s.ha::stop-ha-control-plane h2)))
+          (when h1 (ignore-errors (gr8s.ha::stop-ha-control-plane h1))))))))
+
+(test a-member-that-restarts-holds-the-versions-it-held
+  (call-with-two-restartable-members
+   (lambda (s1 restart second)
+     (dotimes (i 20)
+       (gr8s.resources::create-core-resource s1 "configmaps" (configmap-input (format nil "kept-~D" i) "k" "v") "default"))
+     (is (poll-until (lambda () (ha-versions-alike-p (list s1 (funcall second)))) :timeout 20))
+     ;; Let the round that the members' start began come to its end.
+     (sleep 3)
+     (let ((revision (first (ha-revisions (list s1))))
+           (version (ha-configmap-version s1 "kept-7")))
+       (dotimes (restarts 2)
+         (let ((s2 (funcall restart)))
+           (is (poll-until (lambda () (ha-versions-alike-p (list s1 s2))) :timeout 20))
+           (sleep 3)
+           (is (ha-versions-alike-p (list s1 s2)))
+           (is (equal version (ha-configmap-version s2 "kept-7"))
+               "the restarted member gives the object the version it had")
+           (is (equal version (ha-configmap-version s1 "kept-7"))
+               "and no member was made to renumber it")))
+       ;; A restart costs the marker and the two reports of a round, each time.
+       (is (<= (first (ha-revisions (list s1))) (+ revision 8))
+           "a restart does not count the replayed log again")))))
+
+(test a-member-whose-log-does-not-give-its-versions-renumbers-above-them
+  ;; A version this member gave out must not come to name other content. When
+  ;; the replay does not reproduce what it held, it takes revisions above all
+  ;; of them, and the members then agree as after an upgrade.
+  (call-with-two-restartable-members
+   (lambda (s1 restart second)
+     (gr8s.resources::create-core-resource s1 "configmaps" (configmap-input "held" "k" "v") "default")
+     (is (poll-until (lambda () (ha-versions-alike-p (list s1 (funcall second)))) :timeout 20))
+     (sleep 3)
+     (ha-plant-own-numbering (funcall second) "held")
+     (let* ((given-out (first (ha-revisions (list (funcall second)))))
+            (s2 (funcall restart)))
+       (is (> (first (ha-revisions (list s2))) given-out))
+       (is (> (parse-integer (ha-configmap-version s2 "held")) given-out)
+           "the object has a version this member never gave out")
+       (is (poll-until (lambda () (ha-versions-alike-p (list s1 s2))) :timeout 30)
+           "and the other member comes to the same numbering")
+       (is (> (parse-integer (ha-configmap-version s1 "held")) given-out))))))
+
+(test recovered-versions-are-checked-against-what-the-member-held
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (dotimes (i 3)
+      (gr8s.resources::create-core-resource store "configmaps" (configmap-input (format nil "c~D" i) "k" "v") "default"))
+    (bt:with-lock-held ((gr8s.store::pod-store-lock store))
+      (flet ((ha-configmap-version (store name)
+               ;; The lock is held here.
+               (gethash "resourceVersion"
+                        (gethash "metadata"
+                                 (gethash (gr8s.resources::core-resource-key "configmaps" "default" name)
+                                          (gr8s.store::pod-store-resources store))))))
+      (let ((revision (gr8s.store::pod-store-resource-revision store))
+            (digest (gr8s.resources::core-versions-digest (gr8s.store::pod-store-resources store)))
+            (version (ha-configmap-version store "c1")))
+        ;; The replay has not come to where the member stopped: nothing is decided.
+        (setf (gr8s.store::pod-store-core-recovery-expectation store) (cons (+ revision 5) digest))
+        (gr8s.resources::check-recovered-core-versions store)
+        (is (gr8s.store::pod-store-core-recovery-expectation store))
+        ;; It has come there, with the versions the member held.
+        (setf (gr8s.store::pod-store-core-recovery-expectation store) (cons revision digest))
+        (gr8s.resources::check-recovered-core-versions store)
+        (is (null (gr8s.store::pod-store-core-recovery-expectation store)))
+        (is (= revision (gr8s.store::pod-store-resource-revision store)))
+        (is (stringp version))
+        (is (equal version (ha-configmap-version store "c1")))
+        (is-false (gr8s.store::pod-store-core-version-round-wanted store))
+        ;; It is over and never came there.
+        (setf (gr8s.store::pod-store-core-recovery-expectation store) (cons (+ revision 40) digest))
+        (gr8s.resources::check-recovered-core-versions store :replayed t)
+        (is (= (+ revision 41) (gr8s.store::pod-store-resource-revision store)))
+        (is (equal (format nil "~D" (+ revision 41)) (ha-configmap-version store "c1")))
+        (is (= (+ revision 41) (gr8s.store::pod-store-resource-history-start store)))
+        (is-true (gr8s.store::pod-store-core-version-round-wanted store))
+        ;; It came there with other versions.
+        (let ((revision (gr8s.store::pod-store-resource-revision store)))
+          (setf (gr8s.store::pod-store-core-recovery-expectation store) (cons revision "another digest")
+                (gr8s.store::pod-store-core-version-round-wanted store) nil)
+          (gr8s.resources::check-recovered-core-versions store)
+          (is (= (1+ revision) (gr8s.store::pod-store-resource-revision store)))
+          (is-true (gr8s.store::pod-store-core-version-round-wanted store))))))))
