@@ -36,21 +36,25 @@
     (and major minor
          (or (> major min-major) (and (= major min-major) (>= minor min-minor))))))
 
-(defun doctor-port-spec-covers-p (spec port)
-  "SPEC is a firewalld port like \"53/udp\" or \"1025-65535/tcp\"; does it cover PORT?"
-  (let* ((range (subseq spec 0 (position #\/ spec)))
+(defun doctor-port-spec-covers-p (spec port &key protocol)
+  "Does a firewalld port or range cover PORT and, when supplied, PROTOCOL?"
+  (let* ((slash (position #\/ spec))
+         (range (subseq spec 0 slash))
          (dash (position #\- range)))
-    (ignore-errors
-     (if dash
-         (<= (parse-integer range :end dash) port (parse-integer range :start (1+ dash)))
-         (= port (parse-integer range))))))
+    (and (or (null protocol) (and slash (string= protocol (subseq spec (1+ slash)))))
+         (ignore-errors
+          (if dash
+              (<= (parse-integer range :end dash) port (parse-integer range :start (1+ dash)))
+              (= port (parse-integer range)))))))
 
-(defun doctor-firewall-blocks-dns-p (active ports services)
-  "True when a firewall is ACTIVE yet nothing opens inbound DNS (the \"dns\"
-service or a port range covering 53), so the gateway DNS would be rejected."
+(defun doctor-dns-rules-incomplete-p (active ports services)
+  "True when the inspected zone lacks the dns service or explicit TCP+UDP53 rules.
+This describes listed configuration, not reachability through the full firewall."
   (and active
        (not (member "dns" services :test #'string=))
-       (notany (lambda (spec) (doctor-port-spec-covers-p spec 53)) ports)))
+       (not (every (lambda (protocol)
+                     (some (lambda (spec) (doctor-port-spec-covers-p spec 53 :protocol protocol)) ports))
+                   '("tcp" "udp")))))
 
 (defun doctor-state-directory-status (euid exists-p is-dir-p owner-uid mode)
   "Decide the state-directory ownership check; return (values status detail hint).
@@ -112,26 +116,52 @@ single-value /proc files)."
   "Return the contents of /proc/mounts, or \"\" when it cannot be read."
   (handler-case (uiop:read-file-string "/proc/mounts") (error () "")))
 
-(defun doctor-firewall-state (&key (runner #'doctor-run))
-  "Return (values active-p ports services) by asking firewall-cmd, or (nil nil nil)
-when no active firewalld is present."
-  (multiple-value-bind (out code) (funcall runner (list "firewall-cmd" "--state"))
+(defun doctor-firewalld-active-p (&key (runner #'doctor-run))
+  "Return active state; only NOT_RUNNING proves inactivity."
+  (multiple-value-bind (out code) (funcall runner '("firewall-cmd" "--state"))
     (declare (ignore out))
-    (if (and code (zerop code))
-        (values t
-                (uiop:split-string (string-trim '(#\Newline) (funcall runner '("firewall-cmd" "--list-ports"))))
-                (uiop:split-string (string-trim '(#\Newline) (funcall runner '("firewall-cmd" "--list-services")))))
+    (case code
+      (0 t)
+      (252 nil)
+      (otherwise (error "firewall-cmd --state failed (exit ~S); firewalld state is unknown" code)))))
+
+(defun doctor-firewall-state (&key (runner #'doctor-run))
+  "Return active-p, ports and services. Only NOT_RUNNING proves inactivity.
+Signal on unreadable state or rule lists so the caller reports an unknown check."
+  (labels ((read-list (option)
+             (multiple-value-bind (out code) (funcall runner (list "firewall-cmd" option))
+               (unless (eql code 0)
+                 (error "firewall-cmd ~A failed (exit ~S); rules could not be read" option code))
+               (uiop:split-string (string-trim '(#\Newline) out)))))
+    (if (doctor-firewalld-active-p :runner runner)
+        (values t (read-list "--list-ports") (read-list "--list-services"))
         (values nil nil nil))))
 
+(defparameter *doctor-command-timeout* 5)
+(defparameter *doctor-command-output-limit* (* 1024 1024))
+
 (defun doctor-run (argv)
-  "Run ARGV, returning (values stdout exit-code), or (values \"\" nil) if the
-program is missing.  Used for optional host tools like firewall-cmd."
+  "Run ARGV with bounded time and output. Return stdout and exit-code, or
+empty output and NIL when unavailable, timed out or oversized. Partial output
+cannot establish an observation. Used for optional host tools like firewall-cmd."
   (handler-case
-      (multiple-value-bind (out err code)
-          (uiop:run-program argv :output '(:string :stripped t) :ignore-error-status t
-                                 :error-output nil)
-        (declare (ignore err))
-        (values out code))
+      (let ((process (uiop:launch-program argv :output :stream :error-output nil)))
+        (unwind-protect
+             (sb-ext:with-timeout *doctor-command-timeout*
+               (let ((out (with-output-to-string (out)
+                            (loop for character = (read-char (uiop:process-info-output process) nil nil)
+                                  for size from 0 while character
+                                  do (when (>= size *doctor-command-output-limit*)
+                                       (error "Host command output limit exceeded"))
+                                     (write-char character out)))))
+                 (values (uiop:stripln out) (uiop:wait-process process))))
+          (unwind-protect
+               (progn
+                 (when (uiop:process-alive-p process)
+                   (uiop:terminate-process process :urgent t))
+                 (uiop:wait-process process))
+            (uiop:close-streams process))))
+    (sb-ext:timeout () (values "" nil))
     (error () (values "" nil))))
 
 ;;; ---------------------------------------------------------------------------
@@ -394,25 +424,30 @@ as \"FSTYPE OPTIONS on MOUNTPOINT\", or NIL."
     best))
 
 (defun doctor-measure-flush-milliseconds (directory &key (writes 50) (budget-seconds 2))
-  "Median milliseconds of a flushed 4 kB write to a scratch file in DIRECTORY,
-which is removed afterwards. Stops after WRITES writes or BUDGET-SECONDS,
-whichever comes first, so a slow disk under a running member is not held up."
-  (let ((path (merge-pathnames (format nil ".doctor-flush-~D" (sb-posix:getpid))
-                               (uiop:ensure-directory-pathname directory)))
-        (block (make-array 4096 :element-type '(unsigned-byte 8) :initial-element 0))
+  "Median milliseconds of flushed 4 kB writes to a private scratch file.
+Stop between writes after WRITES or BUDGET-SECONDS; a single fsync may take longer."
+  (let ((block (make-array 4096 :element-type '(unsigned-byte 8) :initial-element 0))
         (deadline (+ (get-internal-real-time) (* budget-seconds internal-time-units-per-second)))
         (times nil))
-    (unwind-protect
-         (with-open-file (stream path :direction :output :if-exists :supersede
-                                      :element-type '(unsigned-byte 8))
-           (loop repeat writes
-                 while (or (null times) (< (get-internal-real-time) deadline))
-                 do (let ((start (get-internal-real-time)))
-                      (write-sequence block stream)
-                      (finish-output stream)
-                      (sb-posix:fsync (sb-sys:fd-stream-fd stream))
-                      (push (- (get-internal-real-time) start) times))))
-      (ignore-errors (delete-file path)))
+    (multiple-value-bind (fd path)
+        (sb-posix:mkstemp
+         (namestring (merge-pathnames ".doctor-flush-XXXXXX"
+                                     (uiop:ensure-directory-pathname directory))))
+      (let ((stream nil))
+        (unwind-protect
+             (progn
+               (setf stream (sb-sys:make-fd-stream fd :output t :auto-close t
+                                                  :element-type '(unsigned-byte 8)))
+               (loop repeat writes
+                     while (or (null times) (< (get-internal-real-time) deadline))
+                     do (let ((start (get-internal-real-time)))
+                          (write-sequence block stream)
+                          (finish-output stream)
+                          (sb-posix:fsync fd)
+                          (push (- (get-internal-real-time) start) times))))
+          (unwind-protect
+               (if stream (close stream) (sb-posix:close fd))
+            (ignore-errors (delete-file path))))))
     (* 1000 (/ (nth (floor (length times) 2) (sort times #'<)) internal-time-units-per-second))))
 
 (defun doctor-check-storage-latency
@@ -440,7 +475,8 @@ whichever comes first, so a slow disk under a running member is not held up."
 
 (defun doctor-interface-for-address (address &key (runner #'doctor-run))
   "The interface holding ADDRESS, from `ip -4 -o addr`, or NIL."
-  (let ((out (funcall runner (list "ip" "-4" "-o" "addr" "show"))))
+  (multiple-value-bind (out code) (funcall runner (list "ip" "-4" "-o" "addr" "show"))
+    (unless (eql code 0) (error "Could not inspect local addresses"))
     (loop for line in (uiop:split-string out :separator '(#\Newline))
           for parts = (remove "" (uiop:split-string line) :test #'equal)
           when (and (> (length parts) 3)
@@ -450,81 +486,169 @@ whichever comes first, so a slow disk under a running member is not held up."
             return (second parts))))
 
 (defun doctor-zone-of-interface (interface &key (runner #'doctor-run))
-  "The firewalld zone serving INTERFACE: its assigned zone, else (values
-default-zone T) -- traffic on an unzoned interface falls into the default zone,
-which is exactly how a WireGuard mesh ends up silently dropped (podster-rnh)."
+  "Return the assigned zone, or the default zone for a confirmed unzoned interface.
+Query failures are unknown observations and signal an error."
   (multiple-value-bind (out code)
       (funcall runner (list "firewall-cmd" (format nil "--get-zone-of-interface=~A" interface)))
     (let ((zone (string-trim '(#\Space #\Newline) out)))
-      (if (and code (zerop code) (plusp (length zone)) (not (equal zone "no zone")))
-          (values zone nil)
-          (values (string-trim '(#\Space #\Newline)
-                               (funcall runner '("firewall-cmd" "--get-default-zone")))
-                  t)))))
+      (cond
+        ((and (eql code 0) (plusp (length zone)) (not (equal zone "no zone")))
+         (values zone nil))
+        ((and (member code '(0 1)) (equal zone "no zone"))
+         (multiple-value-bind (default default-code)
+             (funcall runner '("firewall-cmd" "--get-default-zone"))
+           (let ((name (string-trim '(#\Space #\Newline) default)))
+             (unless (and (eql default-code 0) (plusp (length name)))
+               (error "Could not inspect default firewall zone"))
+             (values name t))))
+        (t (error "Could not inspect interface firewall zone"))))))
 
 (defun doctor-port-admission-status (zone defaulted-p interface port-specs needed-ports)
-  "Decide the cluster-port admission check; return (values status detail hint)."
+  "Describe explicit TCP port coverage, without inferring effective packet policy."
   (let ((missing (remove-if (lambda (port)
-                              (some (lambda (spec) (doctor-port-spec-covers-p spec port))
+                              (some (lambda (spec) (doctor-port-spec-covers-p spec port :protocol "tcp"))
                                     port-specs))
                             needed-ports)))
-    (cond
-      ((equal zone "trusted")
-       (values :ok (format nil "~A is in the trusted zone" interface) nil))
-      ((null missing)
-       (values :ok (format nil "zone ~A admits ~{~D~^, ~} on ~A" zone needed-ports interface) nil))
-      (t
-       (values :fail
-               (format nil "~A is served by zone ~A~:[~; (by default; the interface is in no zone)~], which does not admit ~{~D~^, ~}"
-                       interface zone defaulted-p missing)
-               (format nil "cluster traffic arriving on ~A is dropped; 'sudo firewall-cmd --zone=trusted --add-interface=~A --permanent && sudo firewall-cmd --reload' (member traffic is mTLS-authenticated), or admit each port: ~{--add-port=~D/tcp ~}"
-                       interface interface missing))))))
+    (if (null missing)
+        (values :ok
+                (format nil "zone ~A lists explicit TCP rules for ~{~D~^, ~} on ~A; reachability is not tested"
+                        zone needed-ports interface)
+                nil)
+        (values :warn
+                (format nil "zone ~A on ~A~:[~; (default zone)~] has no explicit TCP rules for ~{~D~^, ~}; effective admission is unknown"
+                        zone interface defaulted-p missing)
+                "inspect enabled services, rich rules, zone target and policies; test the endpoint from a peer before changing firewall rules"))))
+
+(defun doctor-ha-api-port (url)
+  "Return the HTTPS endpoint port, or NIL when URL cannot identify one."
+  (handler-case
+      (when (stringp url)
+        (let* ((uri (puri:parse-uri url))
+               (host (puri:uri-host uri))
+               (port (or (puri:uri-port uri) 443)))
+          (when (and (eq :https (puri:uri-scheme uri))
+                     (stringp host) (plusp (length host))
+                     (typep port '(integer 1 65535)))
+            port)))
+    (error () nil)))
+
+(defun doctor-read-ha-endpoint (path)
+  "Read endpoint metadata, distinguishing absence from unreadable or invalid data."
+  (handler-case
+      (if (not (probe-file path))
+          (values nil :absent)
+          (let* ((endpoint (com.inuoe.jzon:parse path))
+                 (api-port (and (hash-table-p endpoint)
+                                (doctor-ha-api-port (gethash "apiUrl" endpoint)))))
+            (if (and (hash-table-p endpoint)
+                     (equal "gr8s-serve-ha-endpoint" (gethash "format" endpoint))
+                     (eql 1 (gethash "version" endpoint))
+                     (every (lambda (key)
+                              (let ((value (gethash key endpoint)))
+                                (and (stringp value) (plusp (length value)))))
+                            '("memberId" "host" "apiUrl"))
+                     (typep (gethash "port" endpoint) '(integer 1 65535))
+                     api-port)
+                (values endpoint :present api-port)
+                (values nil :invalid))))
+    (error () (values nil :unreadable))))
+
+(defun doctor-check-address-port-admission (host needed &key (runner #'doctor-run))
+  "Check listed TCP port admission on the local interface holding HOST."
+  (handler-case
+      (let ((interface (doctor-interface-for-address host :runner runner)))
+        (if (null interface)
+            (progn
+              (doctor-report :warn "cluster ports"
+                             (format nil "cannot map recorded endpoint ~A to a local IPv4 interface; admission for ~{~D~^, ~} could not be checked"
+                                     host needed)
+                             "check the advertised address, local listener and any DNS or forwarding path")
+              0)
+            (multiple-value-bind (zone defaulted-p)
+                (doctor-zone-of-interface interface :runner runner)
+              (multiple-value-bind (out code)
+                  (funcall runner (list "firewall-cmd" (format nil "--zone=~A" zone) "--list-ports"))
+                (unless (eql code 0) (error "Could not inspect firewall ports"))
+                (multiple-value-bind (status detail hint)
+                    (doctor-port-admission-status
+                     zone defaulted-p interface
+                     (uiop:split-string (string-trim '(#\Newline) out))
+                     needed)
+                  (doctor-report status "cluster ports" detail hint)
+                  (if (eq status :fail) 1 0))))))
+    (error ()
+      (doctor-report :warn "cluster ports"
+                     (format nil "could not inspect interface or firewall state for ~A; admission is unknown" host)
+                     "check access to ip and firewall-cmd, then retry")
+      0)))
+
+(defun doctor-check-node-port-admission (state-directory &key (runner #'doctor-run))
+  "Inspect the configured node listener without inventing missing endpoint facts."
+  (handler-case
+      (let ((path (merge-pathnames "metadata/server-node-endpoint.json"
+                                  (uiop:ensure-directory-pathname state-directory))))
+        (if (not (probe-file path))
+            (progn
+              (doctor-report :warn "node listener" "endpoint not recorded; firewall coverage is unknown"
+                             "inspect the member startup configuration for node-listen and node-port")
+              0)
+            (let ((record (com.inuoe.jzon:parse path)))
+              (unless (and (hash-table-p record)
+                           (equal "gr8s-serve-node-endpoint" (gethash "format" record))
+                           (eql 1 (gethash "version" record))
+                           (stringp (gethash "host" record))
+                           (plusp (length (gethash "host" record)))
+                           (typep (gethash "port" record) '(integer 1 65535)))
+                (error "Invalid node endpoint record"))
+              (doctor-check-address-port-admission
+               (gethash "host" record) (list (gethash "port" record)) :runner runner))))
+    (error ()
+      (doctor-report :warn "node listener" "endpoint metadata is unreadable or invalid; firewall coverage is unknown")
+      0)))
 
 (defun doctor-check-cluster-port-admission (state-directory
                                             &key (runner #'doctor-run)
-                                                 (firewalld-active-p (gr8s.network::host-firewalld-active-p)))
+                                                 (firewalld-active-p :probe))
   "When this state directory is an HA member, verify the host firewall admits
-its raft, node and API ports on the interface its endpoints bind. gvision's
+its recorded Raft and API ports on their respective local IPv4 interfaces.
+The configured node listener is checked independently when recorded. gvision's
 join stalled for exactly this: gr8s listened on wg0 while firewalld's default
 zone dropped inbound 7000 without a trace (podster-rnh). Returns the FAIL count."
-  (let* ((path (merge-pathnames "metadata/server-ha-endpoint.json"
-                                (uiop:ensure-directory-pathname state-directory)))
-         (endpoint (and (probe-file path)
-                        (ignore-errors (com.inuoe.jzon:parse path)))))
+  (multiple-value-bind (endpoint state api-port)
+      (doctor-read-ha-endpoint
+       (merge-pathnames "metadata/server-ha-endpoint.json"
+                        (uiop:ensure-directory-pathname state-directory)))
+    (when (and (eq state :present) (eq firewalld-active-p :probe))
+      (setf firewalld-active-p
+            (handler-case (doctor-firewalld-active-p :runner runner)
+              (error () :unknown))))
     (cond
-      ((null endpoint)
+      ((member state '(:invalid :unreadable))
+       (doctor-report :warn "cluster ports"
+                      "HA endpoint metadata is unreadable or invalid; admission could not be checked"
+                      "inspect metadata/server-ha-endpoint.json and restore the recorded member configuration")
+       0)
+      ((eq state :absent)
        (doctor-report :ok "cluster ports" "no HA endpoint recorded; nothing to admit")
        0)
+      ((eq firewalld-active-p :unknown)
+       (doctor-report :warn "cluster ports" "firewalld state is unknown; admission could not be checked"
+                      "check access to firewall-cmd and retry")
+       0)
       ((not firewalld-active-p)
-       (doctor-report :ok "cluster ports" "no active firewalld; nothing drops them")
+       (doctor-report :ok "cluster ports" "firewalld is inactive; other firewall rules and reachability are not checked")
        0)
       (t
-       (let* ((host (gethash "host" endpoint))
-              (raft-port (gethash "port" endpoint))
-              (api-port (or (let ((url (gethash "apiUrl" endpoint)))
-                              (and (stringp url)
-                                   (let ((colon (position #\: url :from-end t)))
-                                     (ignore-errors (parse-integer (subseq url (1+ colon)))))))
-                            6443))
-              (needed (remove nil (list raft-port 7443 api-port)))
-              (interface (and (stringp host) (doctor-interface-for-address host :runner runner))))
-         (if (null interface)
-             (progn
-               (doctor-report :warn "cluster ports"
-                              (format nil "no interface currently holds the recorded member address ~A" host)
-                              "the member cannot serve its persisted endpoint; check the address or the interface it should live on")
-               0)
-             (multiple-value-bind (zone defaulted-p)
-                 (doctor-zone-of-interface interface :runner runner)
-               (multiple-value-bind (out code)
-                   (funcall runner (list "firewall-cmd" (format nil "--zone=~A" zone) "--list-ports"))
-                 (multiple-value-bind (status detail hint)
-                     (doctor-port-admission-status
-                      zone defaulted-p interface
-                      (and code (zerop code) (uiop:split-string (string-trim '(#\Newline) out)))
-                      needed)
-                   (doctor-report status "cluster ports" detail hint)
-                   (if (eq status :fail) 1 0))))))))))
+       (+ (doctor-check-node-port-admission state-directory :runner runner)
+          (let* ((host (gethash "host" endpoint))
+                 (api-host (puri:uri-host (puri:parse-uri (gethash "apiUrl" endpoint))))
+                 (raft-ports (list (gethash "port" endpoint))))
+            (if (equal host api-host)
+                (doctor-check-address-port-admission host (append raft-ports (list api-port))
+                                                     :runner runner)
+                (+ (doctor-check-address-port-admission host raft-ports :runner runner)
+                   (doctor-check-address-port-admission api-host (list api-port)
+                                                        :runner runner)))))))))
 
 (defun run-doctor (&key (cluster-pod-cidr +default-cluster-pod-cidr+)
                         (state-directory (namestring (default-state-directory)))
@@ -610,13 +734,13 @@ zone dropped inbound 7000 without a trace (podster-rnh). Returns the FAIL count.
           (multiple-value-bind (active ports services) (funcall firewall)
             (cond
               ((not active) (note :ok "firewall DNS" "no active firewalld"))
-              ((doctor-firewall-blocks-dns-p active ports services)
+              ((doctor-dns-rules-incomplete-p active ports services)
                ;; Not a problem since podster-sp5: Pod DNS to 169.254.1.1:53 is
                ;; eBPF-redirected to loopback ingress, bypassing the host
                ;; firewall's inbound path, so an un-opened :53 no longer blocks it.
                (note :ok "firewall DNS"
-                     "firewalld active without inbound :53; Pod DNS still served via the eBPF redirect-to-loopback"))
-              (t (note :ok "firewall DNS" "inbound DNS is permitted"))))
+                     "default zone lacks the dns service or explicit TCP+UDP :53 rules; Pod DNS is designed to use loopback redirection (not probed)"))
+              (t (note :ok "firewall DNS" "default zone lists the dns service or TCP+UDP :53 rules; other zones and packet reachability were not checked"))))
         (error (c) (note :warn "firewall DNS" (format nil "could not check: ~A" c))))
 
       ;; Host firewall vs the cross-node overlay (podster-vwy). Cross-node Pod

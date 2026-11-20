@@ -161,7 +161,16 @@ layer re-advertises it to the cluster once this member leads."
           (when (and publish
                      (not (equal (gethash "apiUrl" requested) (gethash "apiUrl" existing))))
             (write-serve-state-record path requested)))
-        (when publish (write-serve-state-record path requested)))))
+        (when publish (write-serve-state-record path requested)))
+    ;; Listener configuration is mutable and is not Raft member identity. Keep
+    ;; it separate so older binaries can still read the six-field HA record.
+    (when publish
+      (write-serve-state-record
+       (merge-pathnames "server-node-endpoint.json" directory)
+       (gr8s.resources::core-object
+        "format" "gr8s-serve-node-endpoint" "version" 1
+        "host" (getf options :node-listen "127.0.0.1")
+        "port" (getf options :node-port 7443))))))
 
 (defun check-serve-state-mode (root options)
   "Never silently open a Raft application's files as standalone state."

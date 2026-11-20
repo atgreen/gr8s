@@ -101,7 +101,10 @@
            (ready (merge-pathnames "owner-ready.txt" root))
            (log (merge-pathnames "owner-child.log" root))
            (process (sb-ext:run-program "sbcl"
-                     (list "--dynamic-space-size" "384" "--noinform" "--non-interactive" "--load" script "--" (namestring root) (namestring ready))
+                     (list "--dynamic-space-size" "384" "--noinform" "--no-sysinit" "--no-userinit"
+                            "--load" (namestring (merge-pathnames "scripts/bootstrap.lisp"
+                                                                (asdf:system-source-directory :gr8s)))
+                            "--non-interactive" "--load" script "--" (namestring root) (namestring ready))
                      :search t :wait nil :input nil :output log :error :output)))
       (unwind-protect
            (progn
@@ -414,3 +417,22 @@ front with one clear line, rather than failing deep in startup (podster-983-adja
                    (gr8s.server::runtime-error (c) (gr8s.runtime:runtime-error-message c)))))
     (is (search "gr8s agent must run as root" message))
     (is (not (search "--disable-agent" message)))))
+
+(test ha-node-listener-record-follows-configuration
+  (with-temporary-store (store root)
+    (declare (ignore store))
+    (let* ((path (merge-pathnames "metadata/server-node-endpoint.json" root))
+           (options (list :raft-init t :raft-id "cp1" :raft-listen "127.0.0.1"
+                          :raft-port 7000 :node-address "192.0.2.10" :port 6443
+                          :node-listen "192.0.2.20" :node-port 8444)))
+      (gr8s.server::check-serve-ha-endpoint root options :publish nil)
+      (is-false (probe-file path))
+      (gr8s.server::check-serve-ha-endpoint root options)
+      (is (probe-file path))
+      (when (probe-file path)
+        (let ((record (gr8s.store::read-private-generation-json path)))
+          (is (equal "192.0.2.20" (gethash "host" record)))
+          (is (= 8444 (gethash "port" record))))
+        (setf (getf options :node-port) 9444)
+        (gr8s.server::check-serve-ha-endpoint root options)
+        (is (= 9444 (gethash "port" (gr8s.store::read-private-generation-json path))))))))
