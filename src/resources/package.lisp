@@ -10,7 +10,7 @@
    #:re2-compile #:re2-search #:re2-match-p
    #:re2-syntax-error #:re2-syntax-error-message)
   (:shadow
-   #:*raft-local-plane-resources*
+   #:*member-expired-resources*
    #:*stored-resource-types*
    #:copy-core-object
    #:copy-core-resource-index

@@ -12,26 +12,24 @@
 ;;;;   * CONSENSUS plane -- durable API objects (the stored resource types):
 ;;;;     small, low-write, must be linearizable. These are proposed through Raft
 ;;;;     (podster-c2d.4) so every member converges.
-;;;;   * LOCAL plane -- observed Pod status, endpoint telemetry, node
-;;;;     heartbeats/leases, and expiring Events: high-churn, loss-tolerant, and
-;;;;     reconstructable from the agents that report them. These bypass consensus
-;;;;     (kept per-member / gossiped / re-derived), keeping the Raft log tiny.
+;;;;   * LOCAL plane -- observed Pod status, endpoint telemetry and node
+;;;;     heartbeats/leases: high-churn, loss-tolerant, and reconstructable from
+;;;;     the agents that report them. These bypass consensus (kept per-member /
+;;;;     gossiped / re-derived), keeping the Raft log tiny.
+;;;;
+;;;; Events are API objects and are on the consensus plane: a client must see the
+;;;; same ones through every member. Only their expiry is each member's own.
 ;;;;
 ;;;; This module only classifies and routes; the leader-aware HTTP/controller
 ;;;; wiring that calls it is podster-c2d.7.
 
 (in-package #:gr8s.ha)
 
-;; *RAFT-LOCAL-PLANE-RESOURCES* lives in core-resources.lisp (loaded before this
-;; file) so the replication blob and INSTALL-CORE-STATE-BLOB can filter on it.
-
 (defun raft-consensus-resource-p (resource)
   "True when writes to RESOURCE (a stored-resource plural like \"configmaps\")
-   must go through Raft. Every stored resource type is consensus state except
-   those explicitly placed on the local plane."
+   must go through Raft: every stored resource type, Events included."
   (and (or (assoc resource gr8s.resources::*stored-resource-types* :test #'equal)
            (assoc resource gr8s.resources::*internal-stored-resource-types* :test #'equal))
-       (not (member resource gr8s.resources::*raft-local-plane-resources* :test #'equal))
        t))
 
 ;;; Observed/telemetry state is never an API resource write -- it arrives from

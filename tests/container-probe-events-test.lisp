@@ -168,3 +168,62 @@
           (setf (symbol-function 'gr8s.resources::get-core-resource) original)
           (bt:signal-semaphore release :count 2)
           (mapc #'bt:join-thread threads))))))
+
+(defun repeated-probe-event (pod count at)
+  "One readiness failure of POD's first container, seen COUNT times, the last at universal time AT."
+  (vector (gr8s.resources::core-object
+           "id" "repeated" "kind" "readinessProbe" "container" "c0" "reason" "Unhealthy"
+           "message" (format nil "Readiness probe failed: attempt ~D" count) "count" count
+           "firstTimestamp" (gr8s.store::current-timestamp 4000000000)
+           "lastTimestamp" (gr8s.store::current-timestamp at))))
+
+(test a-probe-that-keeps-failing-rewrites-its-event-at-most-once-a-minute
+  ;; A probe that fails every few seconds reports a higher count each time. Every
+  ;; rewrite of the Event is a write to the whole control plane.
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (let* ((now 4000000000) (gr8s.resources::*event-clock* (lambda () now))
+           (pod (event-outbox-pod store)))
+      (flet ((report (count)
+               (gr8s.resources::record-node-runtime-events store pod "probe-node" (repeated-probe-event pod count now)))
+             (stored ()
+               (let ((events (gr8s.resources::list-core-resources store "events" "default")))
+                 (and (= 1 (length events)) (elt events 0)))))
+        (loop for count from 1 to 10
+              do (incf now 5) (report count)
+                 (is (eql count (gethash "count" (stored))) "the first failures are each shown at once"))
+        (let ((revision (gr8s.store::pod-store-resource-revision store)))
+          (loop for count from 11 to 21
+                do (incf now 5) (report count))
+          (is (eql 10 (gethash "count" (stored))) "after those, 55 seconds of failures write nothing")
+          (is (= revision (gr8s.store::pod-store-resource-revision store))))
+        (incf now 5) (report 22)
+        (is (eql 22 (gethash "count" (stored))) "and a minute after the last write the count is brought up to date")
+        (is (search "attempt 22" (gethash "message" (stored))))
+        (incf now 5) (report 23)
+        (is (eql 22 (gethash "count" (stored))))))))
+
+(test a-page-of-events-stops-at-the-first-one-the-control-plane-cannot-commit
+  ;; Without a quorum each write waits out its timeout. A node's status report
+  ;; must not wait that long once for every Event it carries; the node reports
+  ;; the same cumulative records again.
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (let* ((now 4000000000) (gr8s.resources::*event-clock* (lambda () now))
+           (pod (event-outbox-pod store 3)) (proposals 0)
+           (page (coerce (loop for container in '("c0" "c1" "c2")
+                               collect (let ((event (elt (repeated-probe-event pod 1 now) 0)))
+                                         (setf (gethash "id" event) container (gethash "container" event) container)
+                                         event))
+                         'vector)))
+      (setf (gr8s.store::pod-store-consensus-commit-fn store)
+            (lambda (tag json)
+              (declare (ignore tag json))
+              (incf proposals)
+              (gr8s.resources::core-resource-error 503 "ServiceUnavailable" "The control-plane write could not commit")))
+      (gr8s.resources::record-node-runtime-events store pod "probe-node" page)
+      (is (= 1 proposals))
+      (setf (gr8s.store::pod-store-consensus-commit-fn store) nil)
+      (is (null (gr8s.resources::list-core-resources store "events" "default")))
+      (gr8s.resources::record-node-runtime-events store pod "probe-node" page)
+      (is (= 3 (length (gr8s.resources::list-core-resources store "events" "default")))))))

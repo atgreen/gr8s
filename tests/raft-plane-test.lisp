@@ -23,7 +23,7 @@
   (dolist (r '("configmaps" "secrets" "services" "gateways" "networkpolicies"
                "certificates" "httproutes"))
     (is (gr8s.ha::raft-consensus-resource-p r) "~A is consensus state" r))
-  (is (not (gr8s.ha::raft-consensus-resource-p "events")))   ; deliberately local plane
+  (is (gr8s.ha::raft-consensus-resource-p "events"))         ; every member shows the same Events
   (is (not (gr8s.ha::raft-consensus-resource-p "bogus")))    ; not a stored type -> not consensus
   (is (gr8s.ha::raft-local-plane-category-p :observed-status))
   (is (gr8s.ha::raft-local-plane-category-p :endpoint-telemetry))
@@ -36,8 +36,9 @@
                  :consensus-fn (lambda (op) (push (cons :consensus op) routed) :c)
                  :local-fn (lambda (op) (push (cons :local op) routed) :l))))
     (is (eq :c (gr8s.ha::raft-plane-submit plane "configmaps" :put)))
-    (is (eq :l (gr8s.ha::raft-plane-submit plane "events" :put)))
-    (is (equal '((:consensus . :put) (:local . :put)) (nreverse routed)))))
+    (is (eq :c (gr8s.ha::raft-plane-submit plane "events" :put)))
+    (is (eq :l (gr8s.ha::raft-plane-submit plane "bogus" :put)))
+    (is (equal '((:consensus . :put) (:consensus . :put) (:local . :put)) (nreverse routed)))))
 
 (test raft-leader-aware-http-redirect
   ;; Method classification.

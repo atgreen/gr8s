@@ -4,7 +4,8 @@
 ;;;; Purpose:
 ;;;; Store one canonical Event behind the core and events.k8s.io APIs, preserving
 ;;;; identity, revisions and watch history across conversions. Events expire one
-;;;; hour after their last write; expiry is a real journaled deletion.
+;;;; hour after their last write; expiry is a real journaled deletion, which each
+;;;; member of an HA control plane makes for itself.
 
 (in-package #:gr8s.resources)
 
@@ -136,8 +137,8 @@
 (defun expire-core-events-unlocked (store)
   "Delete expired Events atomically, preserving actual DELETED watch events."
   (let ((now (funcall *event-clock*)) (index nil)
-        ;; Event expiry is local-plane: publish locally, never replicate (8ia.3).
-        (*local-plane-write* t))
+        ;; Each member expires its own copy; nothing is proposed.
+        (*unreplicated-write* t))
     (unless (loop for expiry being the hash-values of (pod-store-event-expirations store)
                   thereis (and expiry (<= expiry now)))
       (return-from expire-core-events-unlocked nil))

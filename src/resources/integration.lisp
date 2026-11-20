@@ -151,7 +151,7 @@
                   ("GR8S.SERVER"
                    "AGENT" "SERVE")
                   ("GR8S.STORE"
-                   "*APPLY-UPDATE-MANAGER*" "*CORE-WRITE-ACTIVE*" "*LOCAL-PLANE-WRITE*"
+                   "*APPLY-UPDATE-MANAGER*" "*CORE-WRITE-ACTIVE*" "*UNREPLICATED-WRITE*"
                    "*PENDING-CONSENSUS-COMMIT*" "*POD-NAME-GENERATOR*"
                    "*POD-REVISION-RESERVATION*" "*PODTEMPLATE-CLOCK*"
                    "*WATCH-HISTORY-SECONDS*" "APPROXIMATE-HEAP-BYTES" "CURRENT-TIMESTAMP"

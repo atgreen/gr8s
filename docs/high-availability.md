@@ -16,7 +16,7 @@ their production acceptance and current limits are described below.
 
 gr8s splits state along a **consistency plane**: durable desired state (the
 stored API resources) is proposed through Raft so every member converges, while
-self-expiring Events and endpoint telemetry stay local. Pod observations and
+endpoint telemetry stays local. Pod observations and
 published status, and node heartbeat/readiness deltas, also replicate so a newly
 elected leader can serve current API state. Agents reconnect and re-report after
 failover.
@@ -24,7 +24,18 @@ failover.
 What is replicated, and verified to survive a leader kill with its identity
 intact: core API resources (including controller-written status, Job accounting,
 EndpointSlices, CSR/certificate issuance state), **Pods**, and a Node's assigned
-PodCIDR. Events are deliberately local.
+PodCIDR.
+
+**Events** are written through Raft too, so `kubectl get events` and `kubectl
+describe` show the same ones through every member. Only their expiry is each
+member's own: a member stamps an Event when it applies it and drops its copy an
+hour later, so for a moment around that hour members may differ. A write of an
+Event is therefore applied whatever a member held before; the newest wins.
+Events are not part of a snapshot, so a member that caught up from one may show
+fewer until they are next written or have expired everywhere. A kubelet's
+repeated Event (a probe that fails every few seconds) is shown at once for its
+first ten occurrences and then brought up to date once a minute, so that it
+does not become a write to every member each time.
 
 ## Around the datastore
 

@@ -14,9 +14,9 @@
 ;;;; the last journal record can be torn -- by a crash mid-append -- and damage
 ;;;; anywhere else is an error. On an HA store a commit instead stashes the full
 ;;;; state blob for the caller to replicate through Raft once the lock is released,
-;;;; and every member reinstalls it; high-churn, self-expiring kinds (events) are
-;;;; kept off the consensus plane (podster-8ia.3) but still live in the on-disk
-;;;; state. Objects are copied at the store boundary so callers cannot mutate
+;;;; and every member reinstalls it. An Event is replicated write by write like
+;;;; any other object, but each member expires its own copy, and Events are left
+;;;; out of the state blob and of snapshots (podster-xm5). Objects are copied at the store boundary so callers cannot mutate
 ;;;; indexed state; writes run under WITH-CORE-WRITE with optimistic
 ;;;; resourceVersion concurrency and mirror upstream validation, immutability,
 ;;;; finalizer, and resource-quota semantics.
@@ -410,20 +410,22 @@ whether the journal must be rewritten (a torn record) and its complete bytes."
 (defparameter +template-history-recent-limit+ 512
   "Newest journal entries kept separately, so that an idle watch reads few of them.")
 
-(defparameter *raft-local-plane-resources*
+(defparameter *member-expired-resources*
   '("events")
-  "Durable resource kinds kept OFF the consensus plane: high-churn and
-   self-expiring, so eventual consistency is acceptable. They publish locally on
-   each member and are excluded from the HA replication blob (podster-8ia.3); the
-   full on-disk state still includes them.")
+  "Resource kinds whose objects each member deletes by itself when they are old
+   enough: Events. A write of one is replicated like any other, so every member
+   shows the same Events (podster-xm5). Their expiry is not: each member stamps
+   an Event when it applies it and drops its own copy an hour later, so members
+   may differ for a moment around that time, and a write of such an object is
+   applied whatever a member held before. They are left out of the replication
+   blob and of snapshots, which a member from before podster-xm5 would refuse.")
 
-(defun local-plane-resource-p (resource)
-  "Return whether RESOURCE is a local-plane kind (events): kept off the consensus
-   plane, published per-member, and excluded from the HA replication blob."
-  (member resource *raft-local-plane-resources* :test #'equal))
+(defun member-expired-resource-p (resource)
+  "True when each member expires its own objects of kind RESOURCE (Events)."
+  (member resource *member-expired-resources* :test #'equal))
 
 (defun core-checkpoint-object (store resources revision workload-deletions job-controller-states
-                               history floor token-key event-expirations &key omit-local-plane)
+                               history floor token-key event-expirations &key omit-member-expired)
   "Return the complete durable core-resource state, as a checkpoint or HA state blob holds it."
   (multiple-value-bind (durable durable-floor) (durable-template-history history floor)
     (progn
@@ -440,7 +442,7 @@ whether the journal must be rewritten (a torn record) and its complete bytes."
                   "eventExpirations" event-expirations
                   "items" (coerce (loop for key being the hash-keys of resources using (hash-value object)
                                         unless (or (custom-resource-key-p (first key))
-                                                   (and omit-local-plane (local-plane-resource-p (first key))))
+                                                   (and omit-member-expired (member-expired-resource-p (first key))))
                                           collect (encrypt-secret-object store (first key) object)) 'vector)
                   "customResourceItems" (coerce (loop for key being the hash-keys of resources using (hash-value object)
                                                       when (custom-resource-key-p (first key))
@@ -448,7 +450,7 @@ whether the journal must be rewritten (a torn record) and its complete bytes."
                                                                              (encrypt-secret-object store (first key) object))) 'vector)))))
 
 (defun core-checkpoint-writer (store resources revision workload-deletions job-controller-states
-                                history floor token-key event-expirations &key omit-local-plane)
+                                history floor token-key event-expirations &key omit-member-expired)
   "Return a synchronous writer that transforms and emits one object at a time.
 Caller keeps the same store barriers as checkpoint publication. No complete
 transformed history, resource vector or JSON string is constructed."
@@ -490,7 +492,7 @@ transformed history, resource vector or JSON string is constructed."
                        (lambda (emit)
                          (maphash (lambda (key object)
                                     (unless (or (custom-resource-key-p (first key))
-                                                (and omit-local-plane (local-plane-resource-p (first key))))
+                                                (and omit-member-expired (member-expired-resource-p (first key))))
                                       (maybe-collect-core-recovery-garbage)
                                       (funcall emit (encrypt-secret-object store (first key) object))))
                                   resources)))
@@ -505,20 +507,19 @@ transformed history, resource vector or JSON string is constructed."
           (write-char #\} stream))))))
 
 (defun core-state-json (store resources revision workload-deletions job-controller-states
-                        &key omit-local-plane)
+                        &key omit-member-expired)
   "Serialize the complete durable core-resource state, as a checkpoint is written.
    Returns (values json history floor token-key event-expirations added) so the
    direct publish path can also set the derived in-memory slots: HISTORY and FLOOR
    are what watches read, which reaches further back than what is written. With
-   OMIT-LOCAL-PLANE, local-plane kinds (events) are left out -- used for the HA
-   replication blob so high-churn events never ride the Raft log."
+   OMIT-MEMBER-EXPIRED, Events are left out -- used for the HA replication blob."
   (multiple-value-bind (history floor added) (next-template-history store resources revision)
     (let* ((token-key (or (pod-store-template-token-key store) (secure-random-octets 32)))
            (event-expirations (next-event-expirations store resources)))
       (values (com.inuoe.jzon:stringify
                (core-checkpoint-object store resources revision workload-deletions job-controller-states
                                        history floor token-key event-expirations
-                                       :omit-local-plane omit-local-plane))
+                                       :omit-member-expired omit-member-expired))
               history floor token-key event-expirations added))))
 
 (defun core-state-delta-json (store resources revision workload-deletions job-controller-states)
@@ -540,7 +541,7 @@ time. A stale author cannot replace a changed key or erase unrelated commits."
        (declare (ignore present))
        (let ((old (gethash key (pod-store-resources store)))
              (new (gethash key resources)))
-         (unless (or (eq old new) (local-plane-resource-p (first key)))
+         (unless (eq old new)
            (push (core-object "resource" (first key)
                               "namespace" (or (second key) 'null)
                               "name" (third key)
@@ -740,10 +741,9 @@ Callbacks run under the store lock and must not read or write the store."
   ;; Write the new state durably before publishing it in memory. A failed write
   ;; leaves both the old disk state and the old index intact.
   (cond
-    ;; HA consensus write: defer to the replicated apply path, keeping local-plane
-    ;; resources (events) out of the Raft log (podster-8ia.3). A local-plane-only
-    ;; write never replicates -- it falls through to the local publish below.
-    ((and *core-write-active* (not *local-plane-write*) (pod-store-consensus-commit-fn store))
+    ;; HA consensus write: defer to the replicated apply path. A member's own
+    ;; expiry of its Events is not proposed; it falls through to the local publish.
+    ((and *core-write-active* (not *unreplicated-write*) (pod-store-consensus-commit-fn store))
      (setf *pending-consensus-commit*
            (core-state-delta-json store resources revision workload-deletions job-controller-states)))
     (t
@@ -778,14 +778,14 @@ Callbacks run under the store lock and must not read or write the store."
    :core-state entry commits (podster-c2d.7.2). Uses the RAW store lock, never
    WITH-STORE-LOCK: on the leader this runs while the proposing writer still holds
    the consensus-write lock during its flush, so acquiring that lock again here
-   would deadlock. Local-plane resources (events) are not in the blob, so this
-   member's own ones are carried across the reload rather than dropped (8ia.3)."
+   would deadlock. Events are not in the blob, so the ones this member holds are
+   carried across the reload rather than dropped."
   (bt:with-lock-held ((pod-store-lock store))
     (let ((previous (when (gr8s.store::pod-store-core-change-observers store)
                       (alexandria:copy-hash-table (pod-store-resources store))))
           (local (loop for key being the hash-keys of (pod-store-resources store)
                          using (hash-value object)
-                       when (local-plane-resource-p (first key))
+                       when (member-expired-resource-p (first key))
                          collect (cons key object))))
       ;; The blob replaces the checkpoint, so no older journal may be replayed over it.
       (write-core-checkpoint store json)
@@ -850,9 +850,12 @@ before any state is published."
                                           (gethash "name" change))
               for current = (gethash key (pod-store-resources store) 'null)
               for expected = (gethash "expected" change)
-              unless (core-replicated-state-equal-p
-                      current (if (hash-table-p expected)
-                                  (decrypt-secret-object store resource expected) expected))
+              ;; Members expire Events by their own clocks, so one may hold an
+              ;; Event that another has dropped: the newest write of one wins.
+              unless (or (member-expired-resource-p resource)
+                         (core-replicated-state-equal-p
+                          current (if (hash-table-p expected)
+                                      (decrypt-secret-object store resource expected) expected)))
                 do (return-from install-core-state-delta (list :core-conflict)))
         (dolist (entry (list (cons "workloadDeletions" workload-deletions)
                             (cons "jobControllerStates" job-controller-states)))
@@ -894,7 +897,7 @@ before any state is published."
       ;; apply, not another transaction to propose: force the durable publish
       ;; path so the leader installs the same committed entry as its followers.
       (let ((*core-write-active* nil)
-            (*local-plane-write* nil))
+            (*unreplicated-write* nil))
         (commit-core-resources store resources revision
                                :workload-deletions workload-deletions
                                :job-controller-states job-controller-states))
@@ -1233,7 +1236,6 @@ before any state is published."
    the next revision, and commits -- signalling 409 AlreadyExists on a key
    collision. A Service's ClusterIP is claimed by its IPAddress object in the same
    commit. With DRY-RUN, validates and prepares everything but does not commit."
-  (let ((*local-plane-write* (local-plane-resource-p resource)))
    (with-crd-deferred-conversions
     (with-core-write (store)
     (expire-core-events-unlocked store)
@@ -1289,7 +1291,7 @@ before any state is published."
         (when (equal resource "services")
           (setf revision (prepare-service-ip-address-writes resources object nil revision)))
         (unless dry-run (commit-core-resources store resources revision))
-        (copy-core-object object)))))))
+        (copy-core-object object))))))
 
 (defun core-resource-update-view (resource existing)
   "Copy stored object EXISTING into the form the current request's writer sees."
@@ -1336,7 +1338,6 @@ watch event is sent, so a repeated apply or update shows no drift."
    event. When the transform clears the last finalizer of a deleting object (or
    finalizes a CSR), the object is removed instead. With DRY-RUN, prepares
    everything but does not commit."
-  (let ((*local-plane-write* (local-plane-resource-p resource)))
    (with-crd-deferred-conversions
     (with-core-write (store)
     (expire-core-events-unlocked store)
@@ -1411,7 +1412,7 @@ watch event is sent, so a repeated apply or update shows no drift."
            (when (equal resource "services")
              (setf revision (prepare-service-ip-address-writes resources object existing revision)))
            (unless dry-run (commit-core-resources store resources revision))
-           (copy-core-object object)))))))))
+           (copy-core-object object))))))))
 
 (defun delete-core-resource (store resource namespace name &key uid resource-version dry-run)
   "Delete the object for RESOURCE NAMESPACE NAME, returning a private copy of what
@@ -1425,7 +1426,6 @@ watch event is sent, so a repeated apply or update shows no drift."
    does not commit."
   ;; A COND (not RETURN-FROM) so WITH-CORE-WRITE's consensus flush always runs on
   ;; the delegated CRD/CSR/storage delete paths too (they stash via COMMIT-CORE-RESOURCES).
-  (let ((*local-plane-write* (local-plane-resource-p resource)))
    (with-core-write (store)
     (expire-core-events-unlocked store)
     (let* ((existing (get-core-resource-unlocked store resource namespace name))
@@ -1466,4 +1466,4 @@ watch event is sent, so a repeated apply or update shows no drift."
            (when (and (equal resource "services") (plusp (hash-table-count (gethash "selector" (gethash "spec" existing) (core-object)))))
              (remhash (core-resource-key "endpoints" namespace name) resources))
            (unless dry-run (commit-core-resources store resources (1+ (pod-store-resource-revision store)))))
-         (copy-core-object existing)))))))
+         (copy-core-object existing))))))
