@@ -15,7 +15,7 @@
 :- dynamic quota_rejection/3, quota_present/2.
 :- dynamic current_zero_disruptions/2, budget_selects/3, healthy_pod/2.
 :- dynamic control_plane/1.              % control_plane(Proof): the kubernetes Service has several members
-:- dynamic member_says/3.                % member_says(Member, ResourceVersion, Proof), of Namespace default
+:- dynamic member_says/3.                % member_says(Member, ResourceVersion, Proof), of Namespace default; the version a number when it is one
 
 %% related(?Code, ?Details, ?Proof)
 related("service-selector-empty", [Service], [Root, Pods]) :-
@@ -56,18 +56,32 @@ related("pdb-blocks-healthy-eviction", [Budget, Pod], [Root, Pods]) :-
     healthy_pod(Pod, Pods).
 
 %% Every API server must give an object the same resourceVersion: a client
-%% reads through one and writes through another.
-related("members-disagree", [Member, Version, Other, OtherVersion], [Root, Proof, OtherProof]) :-
+%% reads through one and writes through another. One finding names the member
+%% that is furthest on and every member that differs from it.
+related("members-disagree", [Ahead, Version, Others], [Root, Proof|Proofs]) :-
     control_plane(Root),
-    member_says(Member, Version, Proof),
-    member_says(Other, OtherVersion, OtherProof),
-    Member @< Other,
-    Version \== OtherVersion.
+    findall(view(V, M, P), member_says(M, V, P), Views),
+    msort(Views, Sorted),
+    last(Sorted, view(Version, Ahead, Proof)),
+    findall(Text-P,
+            ( member(view(V, M, P), Sorted), V \== Version, differs(M, V, Text) ),
+            Differing),
+    Differing \== [],
+    findall(Text, member(Text-_, Differing), Others),
+    findall(P, member(_-P, Differing), Proofs).
+
+differs(Member, Version, Text) :-
+    shown(Version, Shown),
+    string_concat(Member, " gives ", Start),
+    string_concat(Start, Shown, Text).
+
+shown(Version, Shown) :- number(Version), !, number_string(Version, Shown).
+shown(Version, Version).
 
 %% relation(?Code, ?Severity, ?Summary, ?Step): Summary takes the details.
 relation("members-disagree", "warning",
-         "Control-plane members answer differently: ~A gives Namespace default resourceVersion ~A, and ~A gives it ~A. A client that reads through one and updates through the other is refused as a conflict.",
-         "This is a fault in the control plane, not in a workload. Upgrade the control plane, or rebuild the member that differs from the leader.").
+         "Control-plane members do not agree: ~A gives Namespace default resourceVersion ~A, and ~{~A~^, ~}. A client that reads through one member and writes through another is refused as a conflict, and a program that watches through a member that is behind is told that its resourceVersion is newer than storage.",
+         "This is a fault in the control plane, not in a workload, so fix it before anything listed under it. See which member leads and whether each is in contact, and bring every member to the same gr8s release. A member that still differs after that is removed and joined again.").
 relation("service-selector-empty", "warning",
          "Service ~A selects no Pods in the observed namespace.",
          "Compare the Service selector with the intended workload labels.").
@@ -95,3 +109,6 @@ relation("rollout-quota-rejection", "warning",
 relation("pdb-blocks-healthy-eviction", "advisory",
          "PDB ~A currently permits zero disruptions and selects healthy Pod ~A; voluntary eviction would be blocked by this budget.",
          "Restore redundancy or review the disruption policy before draining; do not bypass the budget blindly.").
+
+%% relation_command(?Code, ?Command): what to run for the step.
+relation_command("members-disagree", "gr8s member list").

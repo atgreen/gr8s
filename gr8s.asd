@@ -16,13 +16,13 @@
   ;; surfaced through VERSION-STRING as +GR8S-VERSION+ (see src/version.lisp).
   :version "1.37.2"
   :depends-on ("0conf" "ag-grpc" "ag-prolog/syntax" "bordeaux-threads" "cffi" "chipz" "cl-cancel"
-               "cl-cel" "cl-dns-proxy" "cl-raft/wal" "cl-re2" "cl-rtnetlink"
+               "cl-cel" "cl-commonmark" "cl-dns-proxy" "cl-raft/wal" "cl-re2" "cl-rtnetlink"
                "cl-torrent" "cl-wireguard-overlay"
                "cl-work-queue" "cl-safe-yaml" "cl-cronexpr"
                "com.inuoe.jzon" "flexi-streams" "fset" "hunchentoot" "cl-ppcre"
                "pure-tls/acme" "drakma" "ironclad" "puri"
                "sb-posix" "slynk" "trivial-gray-streams" "trivial-utf-8"
-               "usocket" "version-string"
+               "tuition" "usocket" "version-string"
                "whistler/loader" "whistler/bpftrace")
   :serial t
   :components ((:static-file "schema/podtemplate-v1.json")
@@ -460,7 +460,7 @@
                                            (:static-file "rules/relations.pl")
                                            (:static-file "rules/explanation.pl")
                                            (:static-file "rules/impact.pl")
-                                           (:file "rules") (:file "live")
+                                           (:file "rules") (:file "progress") (:file "live") (:file "markdown")
                                            (:file "catalog") (:file "extended-catalog") (:file "readiness") (:file "applications") (:file "doctor")
                                            (:file "causal") (:file "logs") (:file "pod-events") (:file "scheduling") (:file "survey") (:file "impact")))
                              (:module "server"

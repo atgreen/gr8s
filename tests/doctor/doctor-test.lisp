@@ -155,8 +155,11 @@
   (assert (search "Pod bao-0 in namespace test: 1 problem found." text))
   (assert (< (search "1. Pod bao-0: container \"bao\" is running but not ready" text)
              (search "Because of this:" text)
-             (search "- StatefulSet bao: Fewer Pods are ready" text)
-             (search "- Pod bao-0: The Pod is not ready" text)))
+             (search "- StatefulSet bao: Fewer Pods are ready" text)))
+  ;; What only restates the problem on the same Pod is left to the JSON.
+  (assert (not (search "- Pod bao-0: The Pod is not ready" text)))
+  (assert (find "pod-Ready-False" (gethash "impact" (aref (gethash "problems" report) 0))
+                :test #'equal :key (lambda (entry) (gethash "rule" entry))))
   (assert (not (search "2. " text))))
 ;; With nothing to explain them, the same rules stay full findings.
 (let* ((node (fixture-resource "Pod" "bao-0" "test" nil
@@ -207,7 +210,7 @@
   (assert (equal "findings" (gethash "status" report)))
   (let ((text (with-output-to-string (*standard-output*)
                 (print-survey (survey-report "Pod/test/bao-0" (list (list "Pod/test/bao-0" report)) nil nil)))))
-    (assert (search "     Readiness probe failed: Sealed true" text))))
+    (assert (search "    Readiness probe failed: Sealed true" text))))
 ;; An unexplained Unhealthy Event is its own finding; long text is cut.
 (let ((report (diagnose-with-events (unready-pod :probe nil)
                 (list (pod-event "Unhealthy" (make-string 2000 :initial-element #\x) :count 1)))))

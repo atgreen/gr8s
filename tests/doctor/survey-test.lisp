@@ -49,7 +49,10 @@
             (lambda () reads))))
 (defun problems (report) (coerce (gethash "problems" report) 'list))
 (defun impact-rules (problem) (map 'list (lambda (i) (gethash "rule" i)) (gethash "impact" problem)))
-(defun text (report) (with-output-to-string (*standard-output*) (print-survey report)))
+;; Reports are read at 01:05 on the day the fixtures are dated.
+(defun text (report)
+  (let ((*report-time* (encode-universal-time 0 5 1 1 1 2026 0)))
+    (with-output-to-string (*standard-output*) (print-survey report))))
 
 ;; Replicas that fail the same way are one cause, and it explains the workload above them.
 (let* ((owner '("ReplicaSet" "web-1"))
@@ -138,7 +141,9 @@
                      (sort (mapcar (lambda (i) (gethash "rule" i)) loose) #'string<))))
     (assert (zerop (gethash "reach" problem)))
     (let ((text (text report)))
-      (assert (< (search "Because of this:" text) (search "Possibly related:" text)
+      ;; The certain consequences are all on the Pod itself, so none is listed.
+      (assert (not (search "Because of this:" text)))
+      (assert (< (search "Possibly related:" text)
                  (search "Service web-active selects no Pods: Pod web-a would match its selector but for the label active" text)))))
   (let ((problem (first (problems (survey (object "app" "web" "tier" "api") t)))))
     (assert (equal "service-waits-for-label" (gethash "rule" problem)))
@@ -176,10 +181,10 @@
        (loud (with-output-to-string (*standard-output*) (print-survey report :notes t))))
   (assert (zerop (length (problems report))))
   (assert (search "no problems found" quiet))
-  (assert (search "1 configuration and history note not shown; add --notes to list it." quiet))
+  (assert (search "1 configuration and history note not shown; add `--notes` to list it." quiet))
   (assert (search "Pod host: The Pod uses the node's network directly." loud)))
 ;;; Rules that say why: restarts, known applications, and Services that wait for a label.
-(defun restarter (name &key (code 1) (reason "Error") (restarts 6) liveness (image "example/api:1") limit)
+(defun restarter (name &key (code 1) (reason "Error") (restarts 6) liveness (image "example/api:1") limit started)
   (thing "Pod" name
          :spec (object "nodeName" "n1"
                        "containers" (vector (apply #'object "name" "api" "image" image
@@ -187,7 +192,8 @@
                                                            (when limit (list "resources" (object "limits" (object "memory" limit))))))))
          :status (object "conditions" (vector (object "type" "Ready" "status" "True"))
                          "containerStatuses"
-                         (vector (object "name" "api" "restartCount" restarts "state" (object "running" (object))
+                         (vector (object "name" "api" "restartCount" restarts
+                                         "state" (object "running" (if started (object "startedAt" started) (object)))
                                          "lastState" (object "terminated" (object "reason" reason "exitCode" code
                                                                                   "finishedAt" "2026-01-01T00:00:00Z")))))))
 (defun happened (pod reason message &key (type "Warning"))
@@ -409,6 +415,96 @@
   (assert (null (control-plane "73364" nil)))
   (assert (null (control-plane "73364"))))
 
+;; One finding names the member furthest on and every member that differs, and
+;; it comes before a problem that reaches more.
+(flet ((cluster (versions &rest things)
+         (let ((service (thing "Service" "kubernetes" :ns "default" :spec (object "clusterIP" "10.96.0.1")))
+               (slice (thing "EndpointSlice" "kubernetes" :ns "default"
+                             :labels (object "kubernetes.io/service-name" "kubernetes"))))
+           (setf (gethash "ports" slice) (vector (object "port" 6443))
+                 (gethash "endpoints" slice)
+                 (coerce (loop for nil in versions for index from 1
+                               collect (object "addresses" (vector (format nil "10.0.0.~D" index))))
+                         'vector))
+           (let ((inner (apply #'world service slice (thing "Node" "n1" :ns nil) things)))
+             (checkup nil (lambda (kind ns name)
+                            (if (equal kind "MemberView")
+                                (values (object "metadata"
+                                                (object "name" "default" "resourceVersion"
+                                                        (nth (1- (parse-integer name :start 7 :end (position #\: name)))
+                                                             versions)))
+                                        :present)
+                                (funcall inner kind ns name)))))))
+       (wrote (pod line)
+         (object "kind" "PreviousLog" "metadata" (object "name" (format nil "~A/api" pod) "namespace" "test")
+                 "text" (format nil "~A~%" line))))
+  (let* ((report (cluster '("9000" "80509" "73364")))
+         (problem (first (problems report))))
+    (assert (equal '("members-disagree") (problem-rules report)))
+    ;; 9000 is behind 80509: versions are compared as numbers.
+    (assert (search "10.0.0.2:6443 gives Namespace default resourceVersion 80509, and 10.0.0.1:6443 gives 9000, 10.0.0.3:6443 gives 73364."
+                    (gethash "summary" problem)))
+    (assert (equal "Control-plane members do not agree" (gethash "title" problem)))
+    (assert (equalp #("gr8s member list") (gethash "commands" problem)))
+    ;; A fault of the cluster itself is in no namespace.
+    (assert (not (search "Namespace: default" (text report)))))
+  (let ((stale "err=\"failed to list *v1.StatefulSet: Requested resourceVersion is newer than storage\"")
+        (owner '("ReplicaSet" "web-1")))
+    ;; A program that gave up on a stale answer is listed under the members that
+    ;; disagree, with the workload above it, though no link joins the two.
+    (let* ((report (cluster '("80509" "73364")
+                            (short "Deployment" "big") (short "ReplicaSet" "big-1" '("Deployment" "big"))
+                            (crashing "big-1-a" '("ReplicaSet" "big-1")) (crashing "big-1-b" '("ReplicaSet" "big-1"))
+                            (short "ReplicaSet" "web-1")
+                            (let ((pod (restarter "web-a")))
+                              (setf (gethash "ownerReferences" (gethash "metadata" pod))
+                                    (vector (object "kind" (first owner) "name" (second owner) "uid" (second owner)
+                                                    "controller" t)))
+                              pod)
+                            (wrote "web-a" stale)))
+           (problem (first (problems report))))
+      (assert (equal '("members-disagree" "waiting-CrashLoopBackOff") (problem-rules report)))
+      (assert (subsetp '("api-answered-behind" "restarts-crash" "replicaset-ready-deficit") (impact-rules problem)
+                       :test #'equal))
+      (let ((text (text report)))
+        (assert (search "- Pod web-a: container \"api\" gives up because an API server answered it from a state older" text))
+        ;; One line for each resource the cause reaches.
+        (assert (not (search "- Pod web-a: container \"api\" keeps crashing" text)))))
+    (assert (equal '("api-answered-behind") (problem-rules (cluster '("80509" "80509") (restarter "web-a") (wrote "web-a" stale)))))
+    (assert (equal '("api-answered-behind")
+                   (problem-rules (cluster '("80509" "80509") (restarter "web-a")
+                                           (wrote "web-a" "Too large resource version: 85041, current: 77942")))))
+    ;; A restart loop that has stopped is not a problem. It is listed under the
+    ;; cause that is still there, or as recovered when nothing is.
+    (let* ((since "2026-01-01T00:05:00Z")
+           (report (cluster '("80509" "73364") (restarter "web-a" :started since) (wrote "web-a" stale)))
+           (problem (first (problems report))))
+      (assert (equal '("members-disagree") (problem-rules report)))
+      (assert (zerop (length (gethash "recovered" report))))
+      (assert (equal since (gethash "recoveredAt" (find "api-answered-behind" (coerce (gethash "impact" problem) 'list)
+                                                        :test #'equal :key (lambda (entry) (gethash "rule" entry))))))
+      (assert (search "from a state older than one it had already been given. It has run without a restart for 1 hour (since 2026-01-01T00:05:00Z)."
+                      (text report))))
+    (let* ((report (cluster '("80509" "80509") (restarter "web-a" :started "2026-01-01T00:05:00Z") (wrote "web-a" stale)))
+           (recovered (coerce (gethash "recovered" report) 'list)))
+      (assert (null (problems report)))
+      (assert (equal '("api-answered-behind") (mapcar (lambda (entry) (gethash "rule" entry)) recovered)))
+      (assert (search "no problems found by the checks that ran. 1 more has recovered." (text report)))
+      (assert (search "It has run without a restart for 1 hour (since 2026-01-01T00:05:00Z). Namespace: test" (text report))))))
+(let* ((report (survey (restarter "web-a" :started "2026-01-01T00:05:00Z")))
+       (recovered (coerce (gethash "recovered" report) 'list)))
+  (assert (null (problems report)))
+  (assert (equal '("restarted-earlier") (mapcar (lambda (entry) (gethash "rule" entry)) recovered)))
+  (assert (search "restarted 6 times; its last run exited with code 1 at 2026-01-01T00:00:00Z, and it has run without a restart since 2026-01-01T00:05:00Z."
+                  (gethash "summary" (first recovered))))
+  (assert (search "Recovered" (text report))))
+(assert (search "its last run was killed for running out of memory at"
+                (gethash "summary" (aref (gethash "recovered" (survey (restarter "web-a" :reason "OOMKilled" :code 137
+                                                                                 :started "2026-01-01T00:05:00Z")))
+                                         0))))
+;; A run that began a moment ago is one more turn of the loop.
+(assert (equal '("restarts-crash") (problem-rules (survey (restarter "web-a" :started (timestamp))))))
+
 ;; A program the API refuses says what it was refused. The bindings and roles
 ;; say which link is missing.
 (flet ((refused (line &rest access)
@@ -511,7 +607,10 @@
                    (sort (coerce (gethash "resources" problem) 'list) #'string<)))
     (assert (search "ConfigMap bao-config has no service_registration block" (gethash "summary" problem)))
     (assert (not (search "DO-NOT-PRINT" (com.inuoe.jzon:stringify report))))
-    (assert (not (search "Possibly related" (text report)))))
+    (assert (not (search "Possibly related" (text report))))
+    ;; The Service stays empty until the Pod is healthy, so the Pod's own problem comes first.
+    (assert (equal "service-label-never-set" (car (last (problem-rules report)))))
+    (assert (rest (problems report))))
   (let ((report (registered "service_registration \"kubernetes\" {}")))
     (assert (not (member "service-label-never-set" (problem-rules report) :test #'equal)))
     (assert (search "Possibly related" (text report)))))
@@ -527,17 +626,39 @@
          (text (text report)))
     (assert (equal '("Node/early" "Node/middle" "Node/late" "Node/last")
                    (mapcar (lambda (p) (aref (gethash "resources" p) 0)) (problems report))))
-    (assert (search "  1. Node early: The node is not ready" text))
-    (assert (search "Since: 2026-01-01T00:00:00Z" text))))
-(let ((text (with-output-to-string (*standard-output*)
-              (print-problem (object "summary" "s" "resources" #("Pod/test/a") "impact" #() "commands" #() "rule" "r"
-                                     "causeFound" t "nextStep" "n" "detailHeading" "h"
-                                     "detail" (format nil "~{l~D~^~%~}" '(1 2 3 4 5 6 7 8 9)))
-                             1 nil))))
+    (assert (search (format nil "~%1. Node early: The node is not ready~%2. Node middle") text))
+    (assert (search "Since: 1 hour ago (2026-01-01T00:00:00Z)" text))))
+(let ((text (render-markdown
+             (problem-markdown (object "summary" "s" "resources" #("Pod/test/a") "impact" #() "commands" #() "rule" "r"
+                                       "causeFound" t "nextStep" "n" "detailHeading" "h"
+                                       "detail" (format nil "~{l~D~^~%~}" '(1 2 3 4 5 6 7 8 9)))
+                               1 nil))))
   (assert (search "l6" text))
   (assert (not (search "l7" text)))
   (assert (search "(3 more lines; --json has all of it)" text)))
-(format t "Restart, application, label, time-order and long-report rules passed.~%")
+;; The report is Markdown. Text from the API renders as itself, a terminal
+;; gets wrapped lines, and nothing a log line holds can end its block.
+(assert (equal "a_b *v1 <x> `c` [y] &amp;" (string-right-trim '(#\Newline) (render-markdown (markdown-text "a_b *v1 <x> `c` [y] &amp;")))))
+(assert (equal "1. not a list" (string-right-trim '(#\Newline) (render-markdown (markdown-text "1. not a list")))))
+(assert (equal (format nil "    one ``` two~%    # three~%") (render-markdown (markdown-block '("one ``` two" "# three")))))
+(let ((lines (uiop:split-string (render-markdown (format nil "## Title~%~%~{~A~^ ~}~%~%- ~{~A~^ ~}~%" (make-list 30 :initial-element "word")
+                                                         (make-list 30 :initial-element "item"))
+                                                 :width 40)
+                                :separator '(#\Newline))))
+  (assert (every (lambda (line) (<= (length line) 40)) lines))
+  (assert (find "- item item item item item item item" lines :test #'equal))
+  (assert (find "  item item item item item item item" lines :test #'equal)))
+;; A command is never broken, so that it can be pasted.
+(assert (search (format nil "    kubectl ~{~A~^ ~}~%" (make-list 30 :initial-element "argument"))
+                (render-markdown (markdown-block (list (format nil "kubectl ~{~A~^ ~}" (make-list 30 :initial-element "argument"))) "sh")
+                                 :width 40)))
+(assert (equal "level=error msg=\"Unable to sync caches\" controller=alertmanager"
+               (quiet-log-line "ts=2026-11-20T12:42:40.915065335Z level=error caller=/go/pkg/shared_informer.go:506 msg=\"Unable to sync caches\" controller=alertmanager")))
+(assert (equal "Pod bao-0: OpenBao in container \"api\" has never been initialised"
+               (problem-title "Pod bao-0: OpenBao in container \"api\" has never been initialised, so it is sealed and reports that it is not ready.")))
+(assert (equal "Container \"api\" in Pod web-a: The container has restarted at least five times"
+               (problem-title "Container \"api\" in Pod web-a: The container has restarted at least five times.")))
+(format t "Restart, recovery, application, label, order and report rules passed.~%")
 ;;; Impact: the same links followed upwards.
 (flet ((running (name node &key owner labels secret)
          (thing "Pod" name :owner owner :labels labels
@@ -588,3 +709,25 @@
 (format t "Impact of losing a node, a Secret and a workload passed.~%")
 (assert (> *verdict-checks* 20))
 (format t "Survey causes, replica collapse, reach order, unexplained symptoms, target scope, list reuse and notes checks passed.~%")
+
+;; Steps are told to whoever watches; with nobody watching nothing is written.
+(let ((steps nil))
+  (let ((*progress* (lambda (step) (push step steps))))
+    (checkup "test" (lambda (kind ns name) (declare (ignore kind ns name)) (values (object "items" #()) :present))))
+  (assert (equal "Working out what causes what" (first steps))))
+(assert (equal "" (with-output-to-string (out) (assert (eql 7 (call-with-progress (lambda () (progress "x") 7) :stream out))))))
+
+;; A report does not open by repeating its headline.
+(assert (equal "It is sealed." (problem-detail "Pod a: OpenBao was never initialised, so it is sealed." "Pod a: OpenBao was never initialised")))
+(assert (equal "A gives 2." (problem-detail "Members do not agree: a gives 2." "Members do not agree")))
+(assert (equal "" (problem-detail "The slice lists no endpoints." "The slice lists no endpoints")))
+(assert (equal "One thing and another." (problem-detail "One thing and another." "One thing")))
+;; A reader is told how long ago, with the timestamp after it.
+(let ((*report-time* (encode-universal-time 0 5 1 1 1 2026 0)))
+  (assert (equal "exited 50 minutes ago (2026-01-01T00:15:00Z), then 1 hour ago (2026-01-01T00:00:00Z)."
+                 (with-ages "exited at 2026-01-01T00:15:00Z, then 2026-01-01T00:00:00Z.")))
+  (assert (equal "2 days ago (2025-12-30T00:00:00Z)" (with-ages "2025-12-30T00:00:00Z")))
+  (assert (equal "It has run for 50 minutes (since 2026-01-01T00:15:00Z)." (with-ages "It has run since 2026-01-01T00:15:00Z.")))
+  ;; What is not a past timestamp is left as it is.
+  (assert (equal "at 2026-01-02T00:00:00Z" (with-ages "at 2026-01-02T00:00:00Z")))
+  (assert (equal "TLS To T" (with-ages "TLS To T"))))

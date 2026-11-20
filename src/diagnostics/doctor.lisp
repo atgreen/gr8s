@@ -8,13 +8,15 @@
 
 (defun doctor-help (&optional (stream *standard-output*))
   (format stream "gr8s doctor — evidence-backed diagnostics~%
-  diagnose [KIND/NAME] [-n NAMESPACE] [--kubeconfig FILE] [--context NAME] [--notes] [--json]
+  diagnose [KIND/NAME] [-n NAMESPACE] [--kubeconfig FILE] [--context NAME] [--notes] [--markdown | --json]
   impact KIND/NAME [-n NAMESPACE] [--kubeconfig FILE] [--context NAME] [--json]
   host [--state-directory DIR] [--cluster-pod-cidr CIDR] [--fix]~%
 Diagnose with no target surveys everything you can see, or one namespace with -n,
 and reports the causes it finds with what each one explains. With KIND/NAME it
 reports on that resource, what it depends on and what depends on it. It only reads.
 What cannot be read is reported as incomplete. Configuration notes need --notes.
+The report is wrapped and styled for a terminal and plain for a pipe; --markdown
+writes it as Markdown.
 Impact says what would stop working if a node, workload, Secret, ConfigMap or
 claim went away. Without --kubeconfig, kubectl uses its own default configuration.
 Checkup is an alias for diagnose without a target. Host retains the local host checks.~%"))
@@ -172,7 +174,7 @@ The third return value records the original collection time, including cache hit
 (defun doctor-main (arguments)
   (handler-case
       (let ((command (pop arguments)) (namespace nil) (kubeconfig nil) (context nil) (json nil) (target nil)
-            (notes nil))
+            (notes nil) (markdown nil))
         (when (or (null command) (member command '("--help" "-h" "help") :test #'equal))
           (doctor-help) (return-from doctor-main 0))
         (unless (member command '("diagnose" "checkup" "impact") :test #'equal)
@@ -185,6 +187,7 @@ The third return value records the original collection time, including cache hit
                          ((member arg '("-n" "--namespace") :test #'equal) (setf namespace (value arg)))
                          ((equal arg "--json") (setf json t))
                          ((equal arg "--notes") (setf notes t))
+                         ((equal arg "--markdown") (setf markdown t))
                          ((and (member command '("diagnose" "impact") :test #'equal) (null target) (position #\/ arg))
                           (setf target arg))
                          (t (error "Unknown doctor argument: ~A" arg)))))
@@ -195,14 +198,18 @@ The third return value records the original collection time, including cache hit
           (error "Invalid namespace."))
         (when (equal command "impact")
           (unless target (error "Specify the KIND/NAME whose loss to consider."))
-          (let ((report (impact-target target namespace (bounded-getter (kubectl-getter kubeconfig context)))))
+          (let ((report (call-with-progress
+                         (lambda ()
+                           (impact-target target namespace (bounded-getter (kubectl-getter kubeconfig context)))))))
             (if json (progn (com.inuoe.jzon:stringify report :stream *standard-output*) (terpri))
                 (print-impact report))
             (return-from doctor-main (if (equal "incomplete" (gethash "status" report)) 2 0))))
         (let* ((getter (bounded-getter (kubectl-getter kubeconfig context)))
-               (report (if target (diagnose-target target namespace getter) (checkup namespace getter))))
+               (report (call-with-progress
+                        (lambda ()
+                          (if target (diagnose-target target namespace getter) (checkup namespace getter))))))
           (if json (progn (com.inuoe.jzon:stringify report :stream *standard-output*) (terpri))
-              (print-survey report :notes notes))
+              (print-survey report :notes notes :markdown markdown))
           (cond ((equal "incomplete" (gethash "status" report)) 2)
                 ((plusp (length (gethash "problems" report))) 1) (t 0))))
     (error (condition) (format *error-output* "Doctor failed: ~A~%" condition) 2)))

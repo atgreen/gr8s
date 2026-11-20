@@ -4,7 +4,7 @@
 (asdf:defsystem "gr8s-doctor"
   :description "gr8s doctor diagnostics: Prolog rules run by ag-prolog"
   :license "MIT"
-  :depends-on ("ag-prolog/syntax" "com.inuoe.jzon")
+  :depends-on ("ag-prolog/syntax" "cl-commonmark" "com.inuoe.jzon" "tuition")
   :serial t
   ;; rules.lisp reads the Prolog files when it is compiled, so they come first.
   :components ((:file "package")
@@ -19,7 +19,9 @@
                (:static-file "rules/explanation.pl")
                (:static-file "rules/impact.pl")
                (:file "rules")
+               (:file "progress")
                (:file "live")
+               (:file "markdown")
                (:file "catalog")
                (:file "extended-catalog")
                (:file "readiness")

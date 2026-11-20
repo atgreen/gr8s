@@ -24,6 +24,21 @@
     (format nil "~4,'0D-~2,'0D-~2,'0DT~2,'0D:~2,'0D:~2,'0DZ"
             year month day hour minute second)))
 
+(defun timestamp-age (stamp)
+  "Seconds since STAMP, a UTC API timestamp, or NIL when it is not one."
+  (handler-case
+      (and (stringp stamp) (>= (length stamp) 20)
+           (char= #\Z (char stamp (1- (length stamp))))
+           (- (get-universal-time)
+              (encode-universal-time
+               (parse-integer stamp :start 17 :end 19)
+               (parse-integer stamp :start 14 :end 16)
+               (parse-integer stamp :start 11 :end 13)
+               (parse-integer stamp :start 8 :end 10)
+               (parse-integer stamp :start 5 :end 7)
+               (parse-integer stamp :start 0 :end 4) 0)))
+    (error () nil)))
+
 (defun references (pod)
   "Return only required references, without configuration or Secret values."
   (let ((refs nil))
@@ -195,6 +210,10 @@ Kind PreviousLog with name POD/CONTAINER reads the last lines of that
 container's previous run, as an object with a text field. Kind MemberView with
 name HOST:PORT reads Namespace default through that one API server."
   (lambda (kind namespace name)
+    (cond ((equal kind "PreviousLog")
+           (progress "Reading the last log of Pod ~A" (subseq name 0 (position #\/ name))))
+          ((equal kind "MemberView") (progress "Asking control-plane member ~A" name))
+          ((null name) (progress "Listing ~A resources" kind)))
     (handler-case
         (let* ((log (equal kind "PreviousLog"))
                (member (equal kind "MemberView"))

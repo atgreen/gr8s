@@ -220,7 +220,11 @@ Service. Every member must give it the same resourceVersion."
               (let ((version (field view "metadata" "resourceVersion")))
                 ;; A member the doctor cannot reach from here proves nothing.
                 (when (and (eq state :present) (stringp version) (equal "default" (field view "metadata" "name")))
-                  (causal-fact context 'member_says member version
+                  ;; Numbers compare by size, so the rules can say which member is furthest on.
+                  (causal-fact context 'member_says member
+                               (if (and (plusp (length version)) (every #'digit-char-p version))
+                                   (parse-integer version)
+                                   version)
                                (causal-observation context "Namespace" nil "default" :present view
                                                    (format nil "Read through ~A" member))))))))))))
 
@@ -334,21 +338,9 @@ Service. Every member must give it the same resourceVersion."
 
 (defun recent-event-p (event &optional (seconds 900))
   "Accept UTC API timestamps only; malformed or old Events cannot establish this cause."
-  (let ((stamp (or (field event "series" "lastObservedTime") (field event "lastTimestamp")
-                   (field event "eventTime"))))
-    (handler-case
-        (and (stringp stamp) (>= (length stamp) 20)
-             (char= #\Z (char stamp (1- (length stamp))))
-             (let* ((time (encode-universal-time
-                           (parse-integer stamp :start 17 :end 19)
-                           (parse-integer stamp :start 14 :end 16)
-                           (parse-integer stamp :start 11 :end 13)
-                           (parse-integer stamp :start 8 :end 10)
-                           (parse-integer stamp :start 5 :end 7)
-                           (parse-integer stamp :start 0 :end 4) 0))
-                    (age (- (get-universal-time) time)))
-               (<= -60 age seconds)))
-      (error () nil))))
+  (let ((age (timestamp-age (or (field event "series" "lastObservedTime") (field event "lastTimestamp")
+                                (field event "eventTime")))))
+    (and age (<= -60 age seconds))))
 
 (defun event-quota-name (event)
   ;; Classify the standard admission message without retaining arbitrary Event text.
@@ -437,7 +429,9 @@ Service. Every member must give it the same resourceVersion."
                       = (first (known `(relation ,code ?severity ?summary ?step) '(?severity ?summary ?step)))
                     for finding = (object "code" code "rule" code "severity" severity
                                           "summary" (apply #'format nil summary details)
-                                          "nextStep" step "evidence" (coerce proof 'vector))
+                                          "nextStep" step
+                                          "commands" (coerce (known `(relation_command ,code ?command) '?command) 'vector)
+                                          "evidence" (coerce proof 'vector))
                     ;; Every Service that one unconfigured application leaves empty is one problem.
                     when (equal code "service-label-never-set")
                       do (destructuring-bind (service label application pod configmap) details

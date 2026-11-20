@@ -88,6 +88,8 @@
                                        (or (field last "finishedAt") "an unknown time")))))
                    when (and (stringp name) container (hash-table-p (field status "state" "running")))
                      do (fact 'container_running name)
+                        (let* ((since (field status "state" "running" "startedAt")) (age (timestamp-age since)))
+                          (when age (fact 'running_since name since age)))
                         ;; JSON false is NIL here; an absent flag proves nothing.
                         (multiple-value-bind (ready present) (gethash "ready" status)
                           (when (and present (null ready)) (fact 'container_unready name)))
@@ -100,7 +102,7 @@
   "Commands a person can paste to see what the API cannot show."
   (let ((name (field pod "metadata" "name")) (container (first details)))
     (cond ((equal code "readiness-gate-unmet") nil)
-          ((uiop:string-prefix-p "restarts-" code)
+          ((uiop:string-prefix-p "restart" code)
            (list (format nil "kubectl -n ~A logs ~A -c ~A --previous --tail=50" namespace name container)))
           (t
            (let* ((spec (find container (concatenate 'vector (or (field pod "spec" "containers") #())
@@ -118,10 +120,13 @@
                      :key (lambda (c) (field c "type")))))
     (loop for (code details) in (prove (readiness-facts pod events) '((unready ?code ?details)) '(?code ?details))
           for (summary step) = (first (known `(explanation ,code ?summary ?step) '(?summary ?step)))
-          collect (object "code" code "rule" code "severity" "warning"
+          for over = (known `(over ,code) t)
+          collect (object "code" code "rule" code "severity" (if over "past" "warning")
                           "container" (unless (equal code "readiness-gate-unmet") (first details))
-                          "since" (unless (uiop:string-prefix-p "restarts-" code)
+                          "since" (unless (uiop:string-prefix-p "restart" code)
                                     (field ready "lastTransitionTime"))
+                          ;; What is over says last when the run it is in now began.
+                          "recoveredAt" (when over (car (last details)))
                           "summary" (apply #'format nil summary (field pod "metadata" "name") details)
                           "nextStep" step
                           "commands" (coerce (readiness-commands pod namespace code details) 'vector)

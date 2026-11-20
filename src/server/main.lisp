@@ -3771,6 +3771,7 @@ No HA API may start from member-local certificate state before this converges."
                         ("--kubeconfig FILE" "Cluster credentials (default: kubectl's own configuration)")
                         ("--context NAME" "Kubeconfig context")
                         ("--notes" "Also list configuration and history notes")
+                        ("--markdown" "Write the report as Markdown instead of rendering it")
                         ("--json" "Emit problems, findings, evidence and coverage"))))
       ((and (equal (first path) "doctor") (equal (second path) "host"))
        (page "Check the local host environment" "[OPTIONS]"

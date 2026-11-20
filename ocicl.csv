@@ -27,6 +27,7 @@ cl-base64, ghcr.io/ocicl/cl-base64@sha256:702412dbc1ed825e275fb23e22c29527eb786b
 cl-base64-tests, ghcr.io/ocicl/cl-base64@sha256:702412dbc1ed825e275fb23e22c29527eb786bf644e47c7621bf0dbb34e17c7e, cl-base64-20240503-80496b7/cl-base64-tests.asd
 cl-cancel, ghcr.io/ocicl/cl-cancel@sha256:087ebcf41f19b84cd414a3f321fabb368ec44f2de4561e244aef440045dcd09e, cl-cancel-20261113-6e0db3c/cl-cancel.asd
 cl-cel, ghcr.io/ocicl/cl-cel@sha256:e553bc176b4c9195e9274c3598091899f5abd1680b692365c3fc145a92b3b7d5, cl-cel-20261111-677573c/cl-cel.asd
+cl-commonmark, ghcr.io/ocicl/cl-commonmark@sha256:51d847f223132f1845398118798f9848a4d28d16965b372dd4f187d7c433e3f3, cl-commonmark-20260915-bd43508/cl-commonmark.asd
 cl-cronexpr, ghcr.io/ocicl/cl-cronexpr@sha256:ea461d15d34106acb971847d98fb3a67413b90cfe901fac1bca00f95118bb1f7, cl-cronexpr-20261111-0c4613b/cl-cronexpr.asd
 cl-dns-proxy, ghcr.io/ocicl/cl-dns-proxy@sha256:b8d0f30cb2a9bbffa325d35b3e0ec6ecc6591c4655cedce3ac20efba1fba34a6, cl-dns-proxy-20261111-84039f6/cl-dns-proxy.asd
 cl-fad, ghcr.io/ocicl/cl-fad@sha256:c0aaffc859e419e0a94cedb08f48c2484da404363fb0fe4ffd6e09a80aadafe1, cl-fad-0.7.6/cl-fad.asd
@@ -91,13 +92,17 @@ slynk, ghcr.io/ocicl/slynk@sha256:f2b1cab9d0d90ff8404c3886f12314c27b298bd2cd2f5e
 split-sequence, ghcr.io/ocicl/split-sequence@sha256:3a37662eedd99c42995587b9d443c4631f25c4c523091bcca31a27b880585b8e, split-sequence-2.0.1/split-sequence.asd
 trivial-backtrace, ghcr.io/ocicl/cl-cancel@sha256:43b6f25de42c09e32d99d09891cc9e629b4369cce9d7d0e2c9a1803d0b12f6f6, cl-cancel-20261112-7ea333b/ocicl/trivial-backtrace-20240503-7f90b4a/trivial-backtrace.asd
 trivial-backtrace-test, ghcr.io/ocicl/cl-cancel@sha256:43b6f25de42c09e32d99d09891cc9e629b4369cce9d7d0e2c9a1803d0b12f6f6, cl-cancel-20261112-7ea333b/ocicl/trivial-backtrace-20240503-7f90b4a/trivial-backtrace-test.asd
+trivial-channels, ghcr.io/ocicl/trivial-channels@sha256:9b190fcc1853729090ff0b27d24c916dcb166bbb5bad6456340f9b05f3689b3d, trivial-channels-20240503-e237011/trivial-channels.asd
 trivial-features, ghcr.io/ocicl/cl-cancel@sha256:43b6f25de42c09e32d99d09891cc9e629b4369cce9d7d0e2c9a1803d0b12f6f6, cl-cancel-20261112-7ea333b/ocicl/trivial-features-20260908-828246a/trivial-features.asd
 trivial-features-tests, ghcr.io/ocicl/cl-cancel@sha256:43b6f25de42c09e32d99d09891cc9e629b4369cce9d7d0e2c9a1803d0b12f6f6, cl-cancel-20261112-7ea333b/ocicl/trivial-features-20260908-828246a/trivial-features-tests.asd
 trivial-garbage, ghcr.io/ocicl/trivial-garbage@sha256:e76c38568f7ff0a2564ab47e27e0b2293f00f258e6510f2abec4d46920f2c4db, trivial-garbage-20260829-f0663f7/trivial-garbage.asd
 trivial-gray-streams, ghcr.io/ocicl/trivial-gray-streams@sha256:9d702556e5973fd18e67642b18bd5a2f901972ef7d5b134615e2f5fd77396bb9, trivial-gray-streams-20260818-257d73e/trivial-gray-streams.asd
 trivial-gray-streams-test, ghcr.io/ocicl/trivial-gray-streams@sha256:9d702556e5973fd18e67642b18bd5a2f901972ef7d5b134615e2f5fd77396bb9, trivial-gray-streams-20260818-257d73e/trivial-gray-streams-test.asd
 trivial-indent, ghcr.io/ocicl/cl-cancel@sha256:43b6f25de42c09e32d99d09891cc9e629b4369cce9d7d0e2c9a1803d0b12f6f6, cl-cancel-20261112-7ea333b/ocicl/trivial-indent-20261007-b181b48/trivial-indent.asd
+trivial-timeout, ghcr.io/ocicl/trivial-timeout@sha256:18f5f87e1fa3a35e5608cd424d22c2b24f581f810d9f9f8c6229b849c2f239ad, trivial-timeout-20240503-e70d9b4/trivial-timeout.asd
+trivial-timeout-test, ghcr.io/ocicl/trivial-timeout@sha256:18f5f87e1fa3a35e5608cd424d22c2b24f581f810d9f9f8c6229b849c2f239ad, trivial-timeout-20240503-e70d9b4/trivial-timeout-test.asd
 trivial-utf-8, ghcr.io/ocicl/trivial-utf-8@sha256:014e7fa0edd7f351c8b38c3247e0cdda438235bb8a086bb0f2bac08f78ef400d, trivial-utf-8-20240503-ba9b4ff/trivial-utf-8.asd
+tuition, ghcr.io/ocicl/tuition@sha256:8fba7fe73545de2ceb80570d361acdc9cee2021a7c3130eb0fc3af257b53fbd4, cl-tuition-20261116-1d0fa57/tuition.asd
 uffi, ghcr.io/ocicl/cl-cancel@sha256:43b6f25de42c09e32d99d09891cc9e629b4369cce9d7d0e2c9a1803d0b12f6f6, cl-cancel-20261112-7ea333b/ocicl/cffi-20260821-787d3cd/uffi-compat/uffi.asd
 usocket, ghcr.io/ocicl/usocket@sha256:282856b819b22a4319ba30a15605ee934aa23292a471fd29ea4d3f2074b3f16d, usocket-0.8.8/usocket.asd
 usocket-server, ghcr.io/ocicl/usocket@sha256:282856b819b22a4319ba30a15605ee934aa23292a471fd29ea4d3f2074b3f16d, usocket-0.8.8/usocket-server.asd
