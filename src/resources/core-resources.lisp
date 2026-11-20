@@ -532,6 +532,10 @@ transformed history, resource vector or JSON string is constructed."
                                        :omit-member-expired omit-member-expired))
               history floor token-key event-expirations added))))
 
+(defvar *core-transaction-notes* nil
+  "A plist of names and JSON values that a transaction's replicated record carries
+   besides its changes. The members use them to agree on resource versions.")
+
 (defun core-state-delta-json (store resources revision workload-deletions job-controller-states)
   "Serialize one HA core transaction as key-level effects against STORE's base.
 Effects carry encrypted prior-object conditions and are merged at Raft apply
@@ -574,6 +578,8 @@ time. A stale author cannot replace a changed key or erase unrelated commits."
           (gethash "templateTokenKey" record)
           (ag-grpc:base64-encode
            (or (pod-store-template-token-key store) (secure-random-octets 32))))
+    (loop for (name value) on *core-transaction-notes* by #'cddr
+          do (setf (gethash name record) value))
     (let ((delta (core-map-delta (pod-store-workload-deletions store) workload-deletions :preconditions t)))
       (when delta (setf (gethash "workloadDeletions" record) delta)))
     (let ((delta (core-map-delta (pod-store-job-controller-states store) job-controller-states :preconditions t)))
@@ -836,6 +842,40 @@ Callbacks run under the store lock and must not read or write the store."
                              (or (not present)
                                  (gr8s.store::json-value-equal-p value (gethash "value" condition)))))))))
 
+(defconstant +core-version-marks-kept+ 8
+  "How many markers a member remembers; a round concerns the newest.")
+
+(defconstant +core-version-renumber-keys+ 500
+  "How many objects one transaction renumbers.")
+
+(defstruct core-version-mark
+  "What this member held at a marker in the replicated log."
+  id
+  ;; Its revision there, raised by whatever it has since been raised.
+  revision
+  ;; Of the version of every object it held there.
+  digest
+  ;; Each member's name, with the revision and digest it last reported.
+  (reports (make-hash-table :test #'equal))
+  ;; The revision this member last reported.
+  reported
+  ;; NIL, :STARTED, or :DONE when the members need no renumbering any more.
+  renumbering)
+
+(defun find-core-version-mark (store id)
+  (find id (gr8s.store::pod-store-core-version-marks store) :key #'core-version-mark-id :test #'equal))
+
+(defun core-versions-digest (resources)
+  "A digest of the resourceVersion of every object in RESOURCES that all members hold."
+  (let ((lines (sort (loop for key being the hash-keys of resources using (hash-value object)
+                           unless (member-expired-resource-p (first key))
+                             collect (format nil "~S ~A~%" key (gethash "resourceVersion" (gethash "metadata" object))))
+                     #'string<))
+        (digest (ironclad:make-digest :sha256)))
+    (dolist (line lines)
+      (ironclad:update-digest digest (trivial-utf-8:string-to-utf-8-bytes line)))
+    (ironclad:byte-array-to-hex-string (ironclad:produce-digest digest))))
+
 (defun install-core-state-delta (store json)
   "Apply one committed key-level core transaction to STORE in Raft log order.
 The command's revision span is rebased on this replica's committed revision;
@@ -844,17 +884,24 @@ before any state is published.
 
 Every member must give a transaction the same revision, or a client that reads
 through one member cannot update through another (podster-gts). Only applying
-a transaction advances the revision, so members that agree stay agreed. A
-member that finds its author ahead of it was left behind by an older version:
-it takes the author's numbering and marks its objects to be given versions the
-other members share."
+a transaction advances the revision, so members that agree stay agreed.
+Members that an older version left counting apart come to agree as
+RECONCILE-CORE-VERSIONS describes; the transactions it proposes carry no
+changes, only notes, and are applied here."
   (bt:with-lock-held ((pod-store-lock store))
     (let* ((delta (com.inuoe.jzon:parse json :max-string-length (* 2 1024 1024)))
            (resources (copy-core-resource-index store))
            (time (gethash "time" delta))
-           (behind (> (gethash "baseRevision" delta 0) (pod-store-resource-revision store)))
-           (revision (+ (max (pod-store-resource-revision store) (gethash "baseRevision" delta 0))
-                        (gethash "revisionSpan" delta 1)))
+           (own (pod-store-resource-revision store))
+           (report (let ((report (gethash "versionReport" delta))) (and (hash-table-p report) report)))
+           (reported-mark (and report (find-core-version-mark store (gethash "mark" report))))
+           ;; The member that reports was this far ahead at the marker, which
+           ;; every member passed at the same place in the log.
+           (ahead (if reported-mark
+                      (max 0 (- (gethash "revision" report) (core-version-mark-revision reported-mark)))
+                      0))
+           (raised (- (max (+ own ahead) (gethash "baseRevision" delta 0)) own))
+           (revision (+ own raised (gethash "revisionSpan" delta 1)))
            (workload-deletions (pod-store-workload-deletions store))
            (job-controller-states (pod-store-job-controller-states store)))
       ;; All conditions run before mutation, including policy/key installation
@@ -909,10 +956,40 @@ other members share."
                        (when (and expiry (<= expiry time) (eq object (gethash key resources)))
                          (remhash key resources)))))
                  (pod-store-resources store)))
-      (when behind
+      (when (plusp raised)
         (format *error-output* "~&gr8s: resource revision ~D was behind the control plane's ~D; taking its numbering~%"
-                (pod-store-resource-revision store) (gethash "baseRevision" delta))
-        (setf (gr8s.store::pod-store-core-versions-stale store) t))
+                own (+ own raised))
+        ;; Had this member counted so from the start, it would have stood this
+        ;; much higher at every marker.
+        (dolist (mark (gr8s.store::pod-store-core-version-marks store))
+          (incf (core-version-mark-revision mark) raised))
+        ;; An author's revision says nothing of the versions the members hold.
+        (when (zerop ahead)
+          (setf (gr8s.store::pod-store-core-version-round-wanted store) t)))
+      (let ((renumber (gethash "versionRenumber" delta)))
+        (when (hash-table-p renumber)
+          (loop for name across (gethash "keys" renumber)
+                for namespace = (aref name 1)
+                for key = (core-resource-key (aref name 0) (unless (eq namespace 'null) namespace) (aref name 2))
+                for object = (gethash key resources)
+                when object
+                  do (let ((copy (copy-core-object object)))
+                       (setf (gethash "resourceVersion" (gethash "metadata" copy)) (write-to-string revision)
+                             (gethash key resources) copy)))
+          (when (eq t (gethash "last" renumber))
+            (let ((mark (find-core-version-mark store (gethash "mark" renumber))))
+              (when mark (setf (core-version-mark-renumbering mark) :done))))))
+      (when reported-mark
+        (setf (gethash (gethash "member" report) (core-version-mark-reports reported-mark))
+              (cons (gethash "revision" report) (gethash "digest" report))))
+      (let ((id (gethash "versionMark" delta)))
+        (when (stringp id)
+          (setf (gr8s.store::pod-store-core-version-marks store)
+                (loop for mark in (cons (make-core-version-mark :id id :revision revision
+                                                                :digest (core-versions-digest resources))
+                                        (gr8s.store::pod-store-core-version-marks store))
+                      repeat +core-version-marks-kept+
+                      collect mark))))
       (when (gethash "workloadDeletions" delta)
         (setf workload-deletions
               (apply-core-map-delta workload-deletions
@@ -939,38 +1016,94 @@ other members share."
                                :job-controller-states job-controller-states))
       (list :core-ok))))
 
-(defun advertise-core-revision (store)
-  "Commit a transaction that changes nothing, so that every member learns this
-   member's revision and the highest becomes the one they all count from."
-  (with-core-write (store)
-    (commit-core-resources store (pod-store-resources store) (1+ (pod-store-resource-revision store)))))
+(defun propose-core-version-notes (store &rest notes)
+  "Commit a transaction that changes nothing and carries NOTES."
+  (let ((*core-transaction-notes* notes))
+    (with-core-write (store)
+      (commit-core-resources store (pod-store-resources store) (1+ (pod-store-resource-revision store))))))
 
-(defun restamp-core-resources (store &key (batch 100))
-  "Rewrite every stored object unchanged, BATCH at a time, so that each takes a
-   resourceVersion all members share. Returns whether every batch committed."
-  (let ((keys (with-store-lock (store)
-                (setf (gr8s.store::pod-store-core-versions-stale store) nil)
+(defun propose-core-version-mark (store)
+  "Put a marker in the replicated log. Every member notes what it holds there and
+   reports it: see RECONCILE-CORE-VERSIONS."
+  (propose-core-version-notes store "versionMark" (format nil "~(~32,'0X~)" (random (expt 2 128) (make-random-state t)))))
+
+(defun renumber-core-resources (store mark)
+  "Have every member give each object it holds the revision of one transaction,
+   +CORE-VERSION-RENUMBER-KEYS+ objects to a transaction. The transactions name
+   the objects and do not carry them, so their size does not matter and a member
+   renumbers what it holds. Returns whether all of them committed."
+  (let ((keys (bt:with-lock-held ((pod-store-lock store))
+                (setf (core-version-mark-renumbering mark) :started)
                 (sort (loop for key being the hash-keys of (pod-store-resources store)
-                            unless (equal "events" (first key)) collect key)
-                      #'string< :key #'prin1-to-string)))
-        (complete t))
-    (loop while keys
-          do (let ((group (loop repeat batch while keys collect (pop keys))))
-               (handler-case
-                   (with-core-write (store)
-                     (let ((index (copy-core-resource-index store)) (changed nil))
-                       (dolist (key group)
-                         (let ((object (gethash key index)))
-                           (when object
-                             (setf (gethash key index) (copy-core-object object) changed t))))
-                       (when changed
-                         (commit-core-resources store index (1+ (pod-store-resource-revision store))))))
-                 ;; A group that lost a race is tried again with the rest next time.
-                 (kubernetes-error ()
-                   (setf complete nil)))))
-    (unless complete
-      (with-store-lock (store) (setf (gr8s.store::pod-store-core-versions-stale store) t)))
-    complete))
+                            unless (member-expired-resource-p (first key)) collect key)
+                      #'string< :key #'prin1-to-string))))
+    (handler-case
+        (loop while keys
+              do (let ((group (loop repeat +core-version-renumber-keys+ while keys collect (pop keys))))
+                   (propose-core-version-notes
+                    store "versionRenumber"
+                    (core-object "mark" (core-version-mark-id mark)
+                                 "keys" (map 'vector (lambda (key) (vector (first key) (or (second key) 'null) (third key)))
+                                             group)
+                                 "last" (if keys nil t))))
+              finally (return t))
+      ;; With no leader a transaction cannot commit. The next pass starts again.
+      (kubernetes-error ()
+        (bt:with-lock-held ((pod-store-lock store))
+          (unless (eq :done (core-version-mark-renumbering mark))
+            (setf (core-version-mark-renumbering mark) nil)))
+        nil))))
+
+(defun reconcile-core-versions (store member voters leader-p &key ask)
+  "Bring the control plane's members to count revisions alike and to give each
+   object one resourceVersion (podster-gts, podster-b5d). MEMBER is this member's
+   name and VOTERS the names of the voters; LEADER-P is whether this member leads.
+   Called by every member, again and again. ASK starts a round.
+
+   Members that ran an older version counted apart. What each holds can be
+   compared only at one place in the replicated log, because every member applies
+   the log in the same order, however busy the cluster is. So a round goes:
+
+   1. A member puts a marker in the log, when it starts or finds it was behind.
+      At the marker each member notes its revision and a digest of the version
+      of every object it holds.
+   2. Each member reports what it noted. A member that finds another was ahead
+      of it at the marker raises its revision by that much, and reports again.
+   3. When every voter has reported the revision this member noted, they count
+      alike. If their digests differ, the leader has them renumber every object.
+
+   A voter that runs an older version, or is stopped, does not report, and the
+   round waits: it puts its own marker in the log when it starts."
+  (when (or ask (bt:with-lock-held ((pod-store-lock store))
+                  (gr8s.store::pod-store-core-version-round-wanted store)))
+    (propose-core-version-mark store)
+    (bt:with-lock-held ((pod-store-lock store))
+      (setf (gr8s.store::pod-store-core-version-round-wanted store) nil)))
+  (let ((mark nil) (revision nil) (report-due nil) (settled nil) (alike nil))
+    (bt:with-lock-held ((pod-store-lock store))
+      (setf mark (first (gr8s.store::pod-store-core-version-marks store)))
+      (when mark
+        (let ((reports (core-version-mark-reports mark)))
+          (setf revision (core-version-mark-revision mark)
+                report-due (not (eql revision (core-version-mark-reported mark)))
+                settled (and voters
+                             (every (lambda (voter) (eql revision (car (gethash voter reports)))) voters))
+                alike (every (lambda (voter) (equal (core-version-mark-digest mark) (cdr (gethash voter reports))))
+                             voters))
+          (when report-due (setf (core-version-mark-reported mark) revision))
+          (when (and settled alike) (setf (core-version-mark-renumbering mark) :done)))))
+    (when report-due
+      (handler-case
+          (propose-core-version-notes
+           store "versionReport" (core-object "mark" (core-version-mark-id mark) "member" member
+                                              "revision" revision "digest" (core-version-mark-digest mark)))
+        (kubernetes-error (condition)
+          (bt:with-lock-held ((pod-store-lock store))
+            (setf (core-version-mark-reported mark) nil))
+          (error condition))))
+    (when (and leader-p settled (not alike) (null (core-version-mark-renumbering mark)))
+      (format *error-output* "~&gr8s: the members hold different versions of some objects; renumbering all~%")
+      (renumber-core-resources store mark))))
 
 (defun copy-core-resource-index (store)
   "Return a shallow copy of STORE's resource index: a fresh EQUAL table that shares

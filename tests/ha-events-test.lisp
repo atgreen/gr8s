@@ -58,6 +58,27 @@
        (every (lambda (store) (equal (ha-configmap-version (first stores) name) (ha-configmap-version store name)))
               stores)))
 
+(defun ha-versions-alike-p (stores)
+  "Whether STORES count alike and hold one version of every object."
+  (and (apply #'= (ha-revisions stores))
+       (let ((digests (mapcar (lambda (store)
+                                (bt:with-lock-held ((gr8s.store::pod-store-lock store))
+                                  (gr8s.resources::core-versions-digest (gr8s.store::pod-store-resources store))))
+                              stores)))
+         (every (lambda (digest) (equal digest (first digests))) digests))))
+
+(defun ha-plant-own-numbering (store name &key (lead 500))
+  "Give STORE a revision LEAD ahead and a version of its own for ConfigMap NAME, as an old member had."
+  (bt:with-lock-held ((gr8s.store::pod-store-lock store))
+    (let* ((index (gr8s.resources::copy-core-resource-index store))
+           (key (gr8s.resources::core-resource-key "configmaps" "default" name))
+           (ahead (+ lead (gr8s.store::pod-store-resource-revision store)))
+           (gr8s.store::*unreplicated-write* t)
+           (copy (gr8s.resources::copy-core-object (gethash key index))))
+      (setf (gethash "resourceVersion" (gethash "metadata" copy)) (format nil "~D" (+ ahead 7))
+            (gethash key index) copy)
+      (gr8s.resources::commit-core-resources store index ahead))))
+
 (defun call-with-ha-event-cluster (function)
   "Call FUNCTION with the stores of a leader and two followers."
   (with-temporary-store (s1 p1)
@@ -155,11 +176,10 @@
                  (gethash key index) copy))
          (gr8s.resources::commit-core-resources s2 index ahead)))
      (is-false (ha-members-agree-p (list s1 s2 s3) "held"))
-     (gr8s.resources::advertise-core-revision s2)
-     (is (poll-until (lambda () (and (ha-members-agree-p (list s1 s2 s3) "held")
-                                     (notany #'gr8s.store::pod-store-core-versions-stale (list s1 s2 s3))))
-                     :timeout 20)
+     (gr8s.resources::propose-core-version-mark s2)
+     (is (poll-until (lambda () (ha-versions-alike-p (list s1 s2 s3))) :timeout 20)
          "the members that were behind take the higher numbering, and every object one version")
+     (is (ha-members-agree-p (list s1 s2 s3) "held"))
      (is (> (parse-integer (ha-configmap-version s1 "held")) 500)))))
 
 (test a-member-without-an-event-takes-the-next-write-of-it
@@ -213,3 +233,67 @@
       (let ((details (gr8s.model:kubernetes-error-details condition)))
         (is (eql 1 (gethash "retryAfterSeconds" details)))
         (is (equal "ResourceVersionTooLarge" (gethash "reason" (aref (gethash "causes" details) 0))))))))
+
+(test objects-too-large-to-send-together-are-renumbered-too
+  ;; Ten CustomResourceDefinitions are megabytes. Rewriting a hundred objects in
+  ;; one write could exceed what a write may hold, and then never happened
+  ;; (podster-b5d). Renumbering names the objects and does not carry them.
+  (call-with-ha-event-cluster
+   (lambda (s1 s2 s3)
+     (let ((large (make-string (* 500 1024) :initial-element #\x)))
+       (dotimes (i 12)
+         (gr8s.resources::create-core-resource s1 "configmaps" (configmap-input (format nil "large-~2,'0D" i) "k" large)
+                                               "default")))
+     (is (poll-until (lambda () (ha-members-agree-p (list s1 s2 s3) "large-11")) :timeout 30))
+     (ha-plant-own-numbering s2 "large-07")
+     (is-false (ha-versions-alike-p (list s1 s2 s3)))
+     (gr8s.resources::propose-core-version-mark s2)
+     (is (poll-until (lambda () (ha-versions-alike-p (list s1 s2 s3))) :timeout 40)
+         "every object takes one version, however much the objects hold together"))))
+
+(test a-follower-that-counted-ahead-is-followed-while-writes-go-on
+  ;; The follower is not the author of the writes that go on, and what it says of
+  ;; its revision is applied after other writes have been. The members compare
+  ;; what they held at one place in the log, so that does not matter (podster-b5d).
+  (call-with-ha-event-cluster
+   (lambda (s1 s2 s3)
+     (gr8s.resources::create-core-resource s1 "configmaps" (configmap-input "held" "k" "v") "default")
+     (is (poll-until (lambda () (ha-members-agree-p (list s1 s2 s3) "held")) :timeout 10))
+     (ha-plant-own-numbering s2 "held")
+     (let* ((stop nil)
+            (writer (bt:make-thread
+                     (lambda ()
+                       (loop for i from 0 until stop
+                             do (ignore-errors
+                                 (gr8s.resources::create-core-resource
+                                  s1 "configmaps" (configmap-input (format nil "busy-~D" i) "k" "v") "default")))))))
+       (unwind-protect
+            (progn
+              (sleep 0.5)
+              (gr8s.resources::propose-core-version-mark s2)
+              (is (poll-until (lambda () (apply #'= (ha-revisions (list s1 s2 s3)))) :timeout 20)
+                  "the members count alike while the writes go on"))
+         (setf stop t)
+         (bt:join-thread writer)))
+     (is (poll-until (lambda () (ha-versions-alike-p (list s1 s2 s3))) :timeout 30)
+         "and every object has one version")
+     (is (> (parse-integer (ha-configmap-version s1 "held")) 500)))))
+
+(test members-that-count-alike-and-hold-different-versions-renumber
+  ;; What an upgrade can leave: the revisions agree, and objects written before
+  ;; they did still have a version on each member (podster-b5d).
+  (call-with-ha-event-cluster
+   (lambda (s1 s2 s3)
+     (gr8s.resources::create-core-resource s1 "configmaps" (configmap-input "held" "k" "v") "default")
+     (is (poll-until (lambda () (ha-versions-alike-p (list s1 s2 s3))) :timeout 10))
+     (ha-plant-own-numbering s3 "held" :lead 0)
+     (is (apply #'= (ha-revisions (list s1 s2 s3))))
+     (is-false (ha-versions-alike-p (list s1 s2 s3)))
+     (gr8s.resources::propose-core-version-mark s2)
+     (is (poll-until (lambda () (ha-versions-alike-p (list s1 s2 s3))) :timeout 20))
+     ;; Once they agree, another round changes nothing.
+     (let ((version (ha-configmap-version s1 "held")))
+       (gr8s.resources::propose-core-version-mark s1)
+       (sleep 4)
+       (is (equal version (ha-configmap-version s1 "held")))
+       (is (ha-versions-alike-p (list s1 s2 s3)))))))
