@@ -278,6 +278,42 @@
                               (list h1 h2 h3)))
                      :timeout 10)))))
 
+(test a-handover-refuses-no-write
+  ;; A write that reaches the leader while it hands over waits for the member that
+  ;; takes over, as a write that reaches a follower does.
+  (call-with-three-control-planes
+   (lambda (h1 h2 h3)
+     (declare (ignore h3))
+     (let* ((stop nil) (refused nil) (written 0) (lock (bt:make-lock))
+            (writers
+              (loop for writer below 4
+                    collect (let ((writer writer))
+                              (bt:make-thread
+                               (lambda ()
+                                 (loop for i from 0 until stop
+                                       do (dolist (h (list h1 h2))
+                                            (handler-case
+                                                (progn
+                                                  (gr8s.resources::create-core-resource
+                                                   (gr8s.ha:ha-control-plane-store h) "configmaps"
+                                                   (configmap-input (format nil "w~D-~D-~A" writer i
+                                                                            (if (eq h h1) "a" "b"))
+                                                                    "k" "v")
+                                                   "default")
+                                                  (bt:with-lock-held (lock) (incf written)))
+                                              (error (condition)
+                                                (bt:with-lock-held (lock) (push (princ-to-string condition) refused))))))))))))
+       (unwind-protect
+            (dotimes (round 6)
+              (sleep 0.3)
+              (multiple-value-bind (from to name) (if (evenp round) (values h1 h2 "cp2") (values h2 h1 "cp1"))
+                (is (equal '(t nil) (transfer-leadership-outcome from name)))
+                (is (poll-until (lambda () (gr8s.ha::ha-control-plane-leader-p to)) :timeout 5))))
+         (setf stop t)
+         (mapc #'bt:join-thread writers))
+       (is (null refused) "no write was refused: ~D of ~D, first ~A" (length refused) (+ written (length refused)) (first refused))
+       (is (plusp written))))))
+
 (test the-leader-keeps-its-leadership-from-a-voter-it-cannot-hear
   (call-with-three-control-planes
    (lambda (h1 h2 h3)

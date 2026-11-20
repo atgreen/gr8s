@@ -132,9 +132,16 @@ leave the entry un-applied and retry instead of crashing their thread."
 (defun make-store-raft-commit-function (member)
   (lambda (tag json)
     (multiple-value-bind (result committed)
-        (if (raft-member-leader-p member)
-            (raft-member-propose-sync member (list tag json) :timeout 10)
-            (raft-member-forward-propose-sync member (list tag json) :timeout 10))
+        (multiple-value-bind (result committed)
+            (if (raft-member-leader-p member)
+                (raft-member-propose-sync member (list tag json) :timeout 10)
+                (values nil :not-leader))
+          ;; A leader that is handing its leadership over, or has just lost it,
+          ;; appended nothing: the write waits for the member that leads next, as
+          ;; a follower's does (podster-f9u).
+          (if (member committed '(:not-leader :transferring))
+              (raft-member-forward-propose-sync member (list tag json) :timeout 10)
+              (values result committed)))
       (unless (eq committed t)
         (if (eq committed :proposal-too-large)
             (gr8s.resources::core-resource-error 413 "RequestEntityTooLarge" "Write exceeds the control-plane proposal byte limit")
