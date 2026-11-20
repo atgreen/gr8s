@@ -3021,7 +3021,9 @@ between later ones. An ordinary restart recovers within the first.")
                                  :port in-cluster-api-port
                                  :debug-state-directory state-directory
                                  :debug-member-resolver (make-debug-member-resolver ha)
-                                 :control-plane-membership-fn (make-control-plane-membership-fn ha))))
+                                 :control-plane-membership-fn (make-control-plane-membership-fn ha)
+                                 :linearizable-read-fn
+                                 (when ha (lambda () (ha-control-plane-await-linearizable-read ha))))))
                         (setf (pod-store-in-cluster-config store)
                               (list :host "10.96.0.1" :port 443
                                     :ca-pem (uiop:read-file-string (cluster-pki-ca-certificate-path pki))))
@@ -3052,7 +3054,11 @@ between later ones. An ordinary restart recovers within the first.")
                              (concatenate 'string
                                           (if ha (gr8s.ha::ha-metrics-text ha) "")
                                           (reconciliation-worker-metrics-text worker)))
-                           :leader-status-fn (when ha (lambda () (ha-control-plane-leader-status ha)))))
+                           :leader-status-fn (when ha (lambda () (ha-control-plane-leader-status ha)))
+                           :linearizable-read-fn
+                           (when ha (lambda () (ha-control-plane-await-linearizable-read ha)))
+                           :follows-a-leader-fn
+                           (when ha (lambda () (ha-control-plane-follows-a-leader-p ha)))))
                     (setf worker (start-reconciliation-worker reconciler
                                   :watch-resources t
                                   :resource-change-handler

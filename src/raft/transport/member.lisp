@@ -127,6 +127,18 @@
   (relay-lock (bt:make-lock "gr8s operation relay link"))
   relay-channel relay-stub)
 
+;;; One round of leadership confirmation serves every read that was waiting when
+;;; it began (read.lisp). ROUND numbers the round running or last finished.
+(defstruct raft-read-gate
+  (lock (bt:make-lock "gr8s raft read gate"))
+  (changed (bt:make-condition-variable :name "gr8s raft read gate changed"))
+  (round 0 :type fixnum)
+  (running nil)
+  (confirmed 0 :type fixnum)            ; the latest round a quorum confirmed
+  (refusal nil)                         ; why the last unconfirmed round failed
+  ;; A follower's connection to the leader. Only the thread driving a round uses it.
+  channel stub leader)
+
 (defstruct raft-member
   node
   (lock (bt:make-lock "gr8s raft node"))
@@ -147,6 +159,7 @@
   artifact-pins
   snapshot-directory snapshot-root snapshot-owner-fd snapshot-receiver
   (snapshot-max-bytes (* 16 1024 1024 1024))
+  (read-gate (make-raft-read-gate))
   ;; This member's RAFT-CREDENTIALS. Only in-process tests run without any.
   credentials
   ;; A RAFT-SEAL-KEY on a member that holds the cluster CA key, else NIL.
@@ -585,6 +598,17 @@ Normal replication continues while the barrier drains outstanding application wr
                                            '(:core-delta :pod-delta :node-delta :image-tracker)))
                               (raft-message->octets (list :result result))
                               (make-array 0 :element-type '(unsigned-byte 8)))))))
+     :read-index-handler
+     (lambda (request context)
+       (declare (ignore request))
+       (when credentials (gr8s.security::authenticate-raft-peer credentials context))
+       (multiple-value-bind (index confirmed)
+           (raft-member-confirm-leadership
+            member (+ (get-internal-real-time) (* 2 internal-time-units-per-second)))
+         (make-instance 'gr8s.node.v1::raft-read-index-result
+                        :confirmed (eq confirmed t)
+                        :reason (if (eq confirmed t) "" (string-downcase (symbol-name confirmed)))
+                        :index (or index 0))))
      :join-handler (lambda (request context)
                      (let ((handler (raft-member-join-handler member)))
                        (if handler
@@ -849,6 +873,7 @@ id, or NIL."
                (raft-link-drop link)
                (raft-link-drop-relay link))
              (raft-member-links member))
+    (raft-read-gate-drop-leader (raft-member-read-gate member))
     (ignore-errors (ag-grpc:server-stop (raft-member-grpc-server member)))
     (raft-stop-join-or-abandon (raft-member-server-thread member) deadline "gRPC server")
     ;; An abandoned worker may still hold the member lock; a bounded grab keeps

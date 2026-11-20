@@ -140,7 +140,8 @@
                                            (:file "seal")
                                            (:file "member")
                                            (:file "snapshot")
-                                           (:file "cluster")))
+                                           (:file "cluster")
+                                           (:file "read")))
                              (:module "ha"
                               :serial t
                               :components ((:file "package")
@@ -484,6 +485,7 @@
                              (:file "raft-transport-test")
                              (:file "raft-cluster-test")
                              (:file "raft-seal-test")
+                             (:file "raft-read-test")
                              (:file "raft-failover-test")
                              (:file "raft-join-test")
                              (:file "witness-command-test")

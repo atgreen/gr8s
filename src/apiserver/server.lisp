@@ -48,7 +48,16 @@
    ;; HA (podster-c2d.7.3): NIL (single-node) or a function returning
    ;; (values self-leader-p leader-api-url). A follower redirects mutating
    ;; requests to the leader so writes always land where consensus happens.
-   (leader-status-fn :initarg :leader-status-fn :initform nil :reader acceptor-leader-status-fn))
+   (leader-status-fn :initarg :leader-status-fn :initform nil :reader acceptor-leader-status-fn)
+   ;; HA (podster-gxi): NIL (single-node) or a function of no arguments that
+   ;; returns T once this member's store holds every write committed before the
+   ;; call, or (values NIL reason) when no leader that a quorum follows can be
+   ;; reached. See HA-STALE-READ-RESPONSE.
+   (linearizable-read-fn :initarg :linearizable-read-fn :initform nil
+                         :reader acceptor-linearizable-read-fn)
+   ;; NIL, or a function returning true unless this member has lost the leader.
+   (follows-a-leader-fn :initarg :follows-a-leader-fn :initform nil
+                        :reader acceptor-follows-a-leader-fn))
   (:default-initargs
    :listen-backlog 512
    :taskmaster (make-instance 'hunchentoot:one-thread-per-connection-taskmaster
@@ -133,6 +142,40 @@ without input, and a client without WebSocket pings (any before v5.channel.k8s.i
                      (hunchentoot:content-type*) "text/plain; charset=utf-8")
                (format nil "No Raft leader is currently available~%")))))))))
 
+(defun linearizable-read-request-p (method path resource-version)
+  "True for a read that Kubernetes answers from a quorum: a GET, LIST or WATCH of
+resources that names no resourceVersion (\"Most Recent\" in the API concepts). A
+read at resourceVersion=0 asks for any version, however old, and one at a given
+version asks for that one; discovery and health describe this server; and the
+gr8s.io endpoints are what an operator uses to look at a member that is cut off."
+  (and (eq method :get)
+       (member resource-version '(nil "") :test #'equal)
+       (cl-ppcre:scan "^/(api/v1|apis/[^/]+/[^/]+)/[^/]" path)
+       (not (uiop:string-prefix-p "/apis/gr8s.io/" path))
+       t))
+
+(defun ha-stale-read-response (acceptor request)
+  "Before a read that must be current, bring this member up to date with the
+leader; return NIL to serve it. A member that cannot reach a leader that a quorum
+follows answers 503, as it already does for a write: its own state may be
+arbitrarily old, and it cannot tell (podster-gxi)."
+  (let ((await (acceptor-linearizable-read-fn acceptor)))
+    (when (and await
+               (linearizable-read-request-p (hunchentoot:request-method request)
+                                            (hunchentoot:script-name request)
+                                            (hunchentoot:get-parameter "resourceVersion" request)))
+      (multiple-value-bind (current reason) (funcall await)
+        (unless current
+          (setf (hunchentoot:return-code*) hunchentoot:+http-service-unavailable+
+                (hunchentoot:content-type*) "application/json"
+                (hunchentoot:header-out "Retry-After") "1")
+          (com.inuoe.jzon:stringify
+           (json-object
+            "kind" "Status" "apiVersion" "v1" "metadata" (json-object)
+            "status" "Failure" "reason" "ServiceUnavailable" "code" 503
+            "message" (format nil "This control-plane member cannot reach a Raft leader that a quorum follows (~(~A~)), so it cannot tell how old its state is. Retry, use another member, or pass resourceVersion=0 to read this member's own state."
+                              (or reason :timeout)))))))))
+
 ;;; Health endpoints, answered as upstream's healthz package does: each check is
 ;;; listed by name with ?verbose, can be read alone at /<endpoint>/<check>, and can be
 ;;; left out with ?exclude=. Every check names a part of upstream's server that has
@@ -166,7 +209,7 @@ without input, and a client without WebSocket pings (any before v5.channel.k8s.i
       (append (subseq +health-common-checks+ 0 3) '("informer-sync") (subseq +health-common-checks+ 3))
       +health-common-checks+))
 
-(defun health-response (path &optional store)
+(defun health-response (path &optional store follows-a-leader-fn)
   "Answer a health PATH such as /readyz or /livez/etcd, or return NIL for any other path."
   (let* ((parts (cl-ppcre:split "/" path :limit 3))
          (endpoint (second parts))
@@ -179,6 +222,21 @@ without input, and a client without WebSocket pings (any before v5.channel.k8s.i
           ((and (equal endpoint "readyz") store (gr8s.store::store-access-blocked-p store))
            (setf (hunchentoot:return-code*) 503)
            "application restore in progress")
+          ;; Upstream's etcd check fails when its etcd cannot serve a quorum
+          ;; read, which takes the server out of a load balancer. A member that
+          ;; has lost the leader is in that state; it is still alive.
+          ((and (equal endpoint "readyz") (member check '(nil "" "etcd") :test #'equal)
+                (not (member "etcd" (loop for (name . value) in (hunchentoot:get-parameters*)
+                                          when (equal name "exclude") collect value)
+                             :test #'equal))
+                follows-a-leader-fn (not (funcall follows-a-leader-fn)))
+           (setf (hunchentoot:return-code*) 503)
+           (if (hunchentoot:get-parameter "verbose")
+               (with-output-to-string (out)
+                 (dolist (name checks)
+                   (format out (if (equal name "etcd") "[-]etcd failed: reason withheld~%" "[+]~A ok~%") name))
+                 (format out "readyz check failed~%"))
+               (format nil "[-]etcd failed: this member has lost the Raft leader~%")))
           ((and check (plusp (length check)))
            (if (member check checks :test #'equal)
                "ok"
@@ -198,8 +256,10 @@ without input, and a client without WebSocket pings (any before v5.channel.k8s.i
 (defmethod hunchentoot:acceptor-dispatch-request
     ((acceptor gr8s-acceptor) request)
   (cond
-    ((health-response (hunchentoot:script-name request) (acceptor-store acceptor)))
+    ((health-response (hunchentoot:script-name request) (acceptor-store acceptor)
+                      (acceptor-follows-a-leader-fn acceptor)))
     ((ha-redirect-response acceptor request))
+    ((ha-stale-read-response acceptor request))
     (t
      (handle-http-request (acceptor-store acceptor)
                           (acceptor-runtime acceptor)
@@ -208,6 +268,7 @@ without input, and a client without WebSocket pings (any before v5.channel.k8s.i
 
 (defun start-server (&key (address "127.0.0.1") (port 8080)
                           store runtime reconciler leader-status-fn
+                          linearizable-read-fn follows-a-leader-fn
                           debug-state-directory debug-member-resolver control-plane-metrics-fn
                           control-plane-membership-fn)
   "Start the gr8s API server on ADDRESS:PORT and return the running acceptor.
@@ -239,7 +300,9 @@ without input, and a client without WebSocket pings (any before v5.channel.k8s.i
                     :debug-member-resolver debug-member-resolver
                     :control-plane-metrics-fn control-plane-metrics-fn
                     :control-plane-membership-fn control-plane-membership-fn
-                    :leader-status-fn leader-status-fn))))
+                    :leader-status-fn leader-status-fn
+                    :linearizable-read-fn linearizable-read-fn
+                    :follows-a-leader-fn follows-a-leader-fn))))
 
 (defparameter +api-listener-shutdown-timeout+ 2.0
   "Seconds to wait for a Hunchentoot listener after repeated shutdown wakes.")

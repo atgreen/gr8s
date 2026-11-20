@@ -266,6 +266,18 @@ store, rather than being told there is no leader (podster-j76)."
         (t (values (raft-member-leader-p (ha-control-plane-member hcp))
                    (raft-member-leader-api-url (ha-control-plane-member hcp))))))
 
+(defun ha-control-plane-await-linearizable-read (hcp &key (timeout 5))
+  "Return T once this member's store holds every write committed before the call,
+or (values NIL reason) when no leader that a quorum follows can be reached. A
+single-node control plane (HCP NIL) is always current."
+  (or (null hcp)
+      (raft-member-await-linearizable-read (ha-control-plane-member hcp) :timeout timeout)))
+
+(defun ha-control-plane-follows-a-leader-p (hcp)
+  "True unless this member has lost the leader: it leads, or heard from a leader
+within its election timeout. A single-node control plane always does."
+  (or (null hcp) (raft-member-follows-a-leader-p (ha-control-plane-member hcp))))
+
 (defun ha-control-plane-membership (hcp)
   "The durable membership from this member's view: a plist of :SELF, :LEADER
    (its id, or NIL while unknown) and :MEMBERS, each member a plist of :ID,

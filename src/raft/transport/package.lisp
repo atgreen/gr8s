@@ -32,6 +32,8 @@
    #:raft-member
    #:raft-member-credentials
    #:raft-member-enable-dynamic-membership
+   #:raft-member-await-linearizable-read
+   #:raft-member-follows-a-leader-p
    #:raft-member-forward-propose-sync
    #:raft-member-grpc-server
    #:raft-member-handle-join
