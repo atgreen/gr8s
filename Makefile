@@ -7,6 +7,7 @@
 # and producing the dumped gr8s executable.
 
 SBCL ?= sbcl
+LISP_BOOTSTRAP := --no-sysinit --no-userinit --load scripts/bootstrap.lisp
 STATE_DIR ?= /tmp/gr8s-state
 PORT ?= 6443
 RUNTIME ?= containerd
@@ -163,49 +164,52 @@ help:
 generate-protocol: $(NODE_PROTOCOL_LISP)
 
 $(NODE_PROTOCOL_LISP): $(NODE_PROTOCOL_PROTO) scripts/generate-node-protocol.lisp src/generated/package.lisp
-	$(SBCL) --noinform --non-interactive --load scripts/generate-node-protocol.lisp
+	$(SBCL) --noinform $(LISP_BOOTSTRAP) --non-interactive --load scripts/generate-node-protocol.lisp
 
 test-protocol-generation:
 	scripts/test-node-protocol-generation.sh
 
 test-pod-transactions: generate-protocol
-	$(SBCL) --noinform --non-interactive --eval '(require :asdf)' --eval '(asdf:load-system "gr8s/tests")' --eval '(dolist (suite (quote (gr8s/tests::pod-transactions gr8s/tests::ha-pod-failover))) (unless (fiveam:run! suite) (uiop:quit 1)))'
+	$(SBCL) --noinform $(LISP_BOOTSTRAP) --non-interactive --eval '(require :asdf)' --eval '(asdf:load-system "gr8s/tests")' --eval '(dolist (suite (quote (gr8s/tests::pod-transactions gr8s/tests::ha-pod-failover))) (unless (fiveam:run! suite) (uiop:quit 1)))'
 
 test-pod-transaction-memory:
-	$(SBCL) --dynamic-space-size 384 --noinform --non-interactive --load scripts/test-pod-transaction-memory.lisp
+	$(SBCL) --dynamic-space-size 384 --noinform $(LISP_BOOTSTRAP) --non-interactive --load scripts/test-pod-transaction-memory.lisp
 
 test-raft-snapshots: generate-protocol
-	$(SBCL) --noinform --non-interactive --eval '(require :asdf)' --eval '(asdf:load-system "gr8s/tests")' --eval '(unless (fiveam:run! (quote gr8s/tests::raft-snapshot)) (uiop:quit 1))'
+	$(SBCL) --noinform $(LISP_BOOTSTRAP) --non-interactive --eval '(require :asdf)' --eval '(asdf:load-system "gr8s/tests")' --eval '(unless (fiveam:run! (quote gr8s/tests::raft-snapshot)) (uiop:quit 1))'
 
 test-raft-checkpoint-memory:
-	$(SBCL) --dynamic-space-size 384 --noinform --non-interactive --load scripts/test-raft-checkpoint-memory.lisp
+	$(SBCL) --dynamic-space-size 384 --noinform $(LISP_BOOTSTRAP) --non-interactive --load scripts/test-raft-checkpoint-memory.lisp
 
 test-core-recovery: generate-protocol
-	$(SBCL) --noinform --non-interactive --eval '(require :asdf)' --eval '(asdf:load-system "gr8s/tests")' --eval '(unless (fiveam:run! (quote gr8s/tests::core-recovery)) (uiop:quit 1))'
+	$(SBCL) --noinform $(LISP_BOOTSTRAP) --non-interactive --eval '(require :asdf)' --eval '(asdf:load-system "gr8s/tests")' --eval '(unless (fiveam:run! (quote gr8s/tests::core-recovery)) (uiop:quit 1))'
 
 test-core-recovery-memory:
-	$(SBCL) --dynamic-space-size 384 --noinform --non-interactive --load scripts/test-core-recovery-memory.lisp
+	$(SBCL) --dynamic-space-size 384 --noinform $(LISP_BOOTSTRAP) --non-interactive --load scripts/test-core-recovery-memory.lisp
 
 test: generate-protocol
-	$(SBCL) --noinform --non-interactive $(TEST_EVAL)
+	python3 scripts/test-bootstrap.py
+	python3 scripts/test_native_readiness.py
+	$(SBCL) --noinform $(LISP_BOOTSTRAP) --non-interactive $(TEST_EVAL)
+	$(MAKE) test-doctor
 
 test-containerd:
 	GR8S_RUN_CONTAINERD_TESTS=1 GR8S_RUN_CONTAINERD_SANDBOX_TESTS=1 \
 	GR8S_RUN_CONTAINERD_LIFECYCLE_TESTS=1 \
 	GR8S_CONTAINERD_SOCKET="$(CONTAINERD_SOCKET)" \
-	$(SBCL) --noinform --non-interactive $(TEST_EVAL)
+	$(SBCL) --noinform $(LISP_BOOTSTRAP) --non-interactive $(TEST_EVAL)
 
 test-routed-network:
-	unshare -Urn $(SBCL) --noinform --non-interactive --load scripts/test-routed-network.lisp
+	unshare -Urn $(SBCL) --noinform $(LISP_BOOTSTRAP) --non-interactive --load scripts/test-routed-network.lisp
 
 test-vxlan-network:
-	unshare -Urn $(SBCL) --noinform --non-interactive --load scripts/test-vxlan-network.lisp
+	unshare -Urn $(SBCL) --noinform $(LISP_BOOTSTRAP) --non-interactive --load scripts/test-vxlan-network.lisp
 
 test-agent-network:
-	unshare -Urn $(SBCL) --noinform --non-interactive --load scripts/test-agent-network.lisp
+	unshare -Urn $(SBCL) --noinform $(LISP_BOOTSTRAP) --non-interactive --load scripts/test-agent-network.lisp
 
 test-node-topology:
-	unshare -Urn $(SBCL) --noinform --non-interactive --load scripts/test-node-topology.lisp
+	unshare -Urn $(SBCL) --noinform $(LISP_BOOTSTRAP) --non-interactive --load scripts/test-node-topology.lisp
 
 # The egress guard is JIT-compiled in-process; the fixture is its raw bytecode +
 # map descriptors as JSON, not an ELF object.
@@ -215,28 +219,28 @@ build/gr8s-service-packet-test.json build/gr8s-service-packet-gc-test.json \
 build/gr8s-service-packet-guard-test.json build/gr8s-service-nat-test.json build/gr8s-service-nat-policy-test.json build/gr8s-service-nat-guard-test.json build/gr8s-service-wire-test.json: $(WHISTLER_FIXTURE_SOURCES)
 
 build/gr8s-endpoint-test.json: src/network/egress-guard-program.lisp src/network/egress-guard.lisp scripts/compile-endpoint-policy-fixture.lisp
-	$(SBCL) --noinform --script scripts/compile-endpoint-policy-fixture.lisp $@
+	$(SBCL) --noinform $(LISP_BOOTSTRAP) --script scripts/compile-endpoint-policy-fixture.lisp $@
 
 test-endpoint-policy: build/gr8s-endpoint-test.json
 	python3 scripts/test-endpoint-policy.py $<
 
 # Execute the socket LB bytecode across interrupted Service map updates.
 build/gr8s-service-test.json: src/network/service-lb-program.lisp src/network/service-lb.lisp scripts/compile-endpoint-policy-fixture.lisp
-	$(SBCL) --noinform --script scripts/compile-endpoint-policy-fixture.lisp $@ service-lb
+	$(SBCL) --noinform $(LISP_BOOTSTRAP) --script scripts/compile-endpoint-policy-fixture.lisp $@ service-lb
 
 .PHONY: test-service-lb-program
 test-service-lb-program: build/gr8s-service-test.json
 	python3 scripts/test-service-lb-program.py $<
 
 build/gr8s-service-packet-test.json: src/network/service-packet-program.lisp src/network/service-lb-program.lisp scripts/compile-endpoint-policy-fixture.lisp
-	$(SBCL) --noinform --script scripts/compile-endpoint-policy-fixture.lisp $@ service-packet-lb
+	$(SBCL) --noinform $(LISP_BOOTSTRAP) --script scripts/compile-endpoint-policy-fixture.lisp $@ service-packet-lb
 
 .PHONY: test-service-packet-program
 test-service-packet-program: build/gr8s-service-packet-test.json
 	python3 scripts/test-service-packet-program.py $<
 
 build/gr8s-service-nat-test.json: src/network/service-nat-program.lisp src/network/service-packet-program.lisp src/network/service-lb-program.lisp scripts/compile-endpoint-policy-fixture.lisp
-	$(SBCL) --noinform --script scripts/compile-endpoint-policy-fixture.lisp $@ service-nat
+	$(SBCL) --noinform $(LISP_BOOTSTRAP) --script scripts/compile-endpoint-policy-fixture.lisp $@ service-nat
 
 .PHONY: test-service-nat
 test-service-nat: build/gr8s-service-nat-test.json
@@ -245,14 +249,14 @@ test-service-nat: build/gr8s-service-nat-test.json
 	python3 scripts/test-service-nat-gc.py $<
 
 build/gr8s-service-nat-policy-test.json: src/network/service-nat-policy.lisp src/network/service-nat-program.lisp src/network/egress-guard-program.lisp scripts/compile-endpoint-policy-fixture.lisp
-	$(SBCL) --noinform --script scripts/compile-endpoint-policy-fixture.lisp $@ service-nat-policy
+	$(SBCL) --noinform $(LISP_BOOTSTRAP) --script scripts/compile-endpoint-policy-fixture.lisp $@ service-nat-policy
 
 .PHONY: test-service-nat-policy
 test-service-nat-policy: build/gr8s-service-nat-policy-test.json
 	python3 scripts/test-service-nat-policy.py $<
 
 build/gr8s-service-nat-guard-test.json: src/network/service-nat-guard.lisp src/network/service-nat-policy.lisp src/network/service-nat-program.lisp src/network/service-packet-program.lisp src/network/egress-guard-program.lisp scripts/compile-endpoint-policy-fixture.lisp
-	$(SBCL) --noinform --script scripts/compile-endpoint-policy-fixture.lisp $@ service-nat-guard
+	$(SBCL) --noinform $(LISP_BOOTSTRAP) --script scripts/compile-endpoint-policy-fixture.lisp $@ service-nat-guard
 
 .PHONY: test-service-nat-guard
 test-service-nat-guard: build/gr8s-service-nat-guard-test.json
@@ -260,7 +264,7 @@ test-service-nat-guard: build/gr8s-service-nat-guard-test.json
 	python3 scripts/probe-service-passive-ownership.py $< --risk
 
 build/gr8s-service-wire-test.json: src/network/service-wire.lisp scripts/compile-endpoint-policy-fixture.lisp
-	$(SBCL) --noinform --script scripts/compile-endpoint-policy-fixture.lisp $@ service-wire
+	$(SBCL) --noinform $(LISP_BOOTSTRAP) --script scripts/compile-endpoint-policy-fixture.lisp $@ service-wire
 
 .PHONY: test-service-wire
 test-service-wire: build/gr8s-service-wire-test.json
@@ -278,14 +282,14 @@ test-service-tcp-state: build/gr8s-service-packet-test.json build/gr8s-service-p
 	python3 scripts/test-service-tcp-state.py $^
 
 build/gr8s-service-packet-gc-test.json: src/network/service-packet-program.lisp scripts/compile-endpoint-policy-fixture.lisp
-	$(SBCL) --noinform --script scripts/compile-endpoint-policy-fixture.lisp $@ service-packet-gc
+	$(SBCL) --noinform $(LISP_BOOTSTRAP) --script scripts/compile-endpoint-policy-fixture.lisp $@ service-packet-gc
 
 .PHONY: test-service-packet-gc
 test-service-packet-gc: build/gr8s-service-packet-test.json build/gr8s-service-packet-gc-test.json
 	python3 scripts/test-service-packet-gc.py $^
 
 build/gr8s-service-packet-guard-test.json: src/network/service-packet-program.lisp src/network/egress-guard-program.lisp src/network/egress-guard.lisp scripts/compile-endpoint-policy-fixture.lisp
-	$(SBCL) --noinform --script scripts/compile-endpoint-policy-fixture.lisp $@ service-packet-guard
+	$(SBCL) --noinform $(LISP_BOOTSTRAP) --script scripts/compile-endpoint-policy-fixture.lisp $@ service-packet-guard
 
 .PHONY: test-service-packet-guard
 test-service-packet-guard: build/gr8s-service-packet-guard-test.json
@@ -294,17 +298,17 @@ test-service-packet-guard: build/gr8s-service-packet-guard-test.json
 # Real-root verification that the Service LB JIT-compiles, loads, attaches to a
 # cgroup, pins its maps, and round-trips entries through the kernel. No ELF.
 test-service-lb:
-	sudo $(SBCL) --noinform --non-interactive --load scripts/test-service-lb.lisp
+	sudo $(SBCL) --noinform $(LISP_BOOTSTRAP) --non-interactive --load scripts/test-service-lb.lisp
 
 # Real-root end-to-end: a Pod connect(2) to an unrouted ClusterIP is redirected
 # in-kernel to a backend, and repeated connects spread across backends.
 smoke-service-lb:
-	sudo $(SBCL) --noinform --non-interactive --load scripts/smoke-service-lb.lisp
+	sudo $(SBCL) --noinform $(LISP_BOOTSTRAP) --non-interactive --load scripts/smoke-service-lb.lisp
 
 # Real-root end-to-end of the AGENT path: converge a Service + EndpointSlice
 # into the LB maps and redirect an unrouted ClusterIP connect to backends.
 smoke-service-lb-agent:
-	sudo $(SBCL) --noinform --non-interactive --load scripts/smoke-service-lb-agent.lisp
+	sudo $(SBCL) --noinform $(LISP_BOOTSTRAP) --non-interactive --load scripts/smoke-service-lb-agent.lisp
 
 test-endpoint-policy-kernel: build/gr8s-endpoint-test.json
 	python3 scripts/test-endpoint-policy.py $< --kernel
@@ -313,6 +317,7 @@ test-core-api:
 	scripts/test-core-api.sh
 
 test-install-lifecycle:
+	python3 scripts/test_runtime_download_errors.py
 	python3 scripts/test_install_lifecycle.py
 	python3 scripts/test_uninstall_lifecycle.py
 
@@ -369,8 +374,19 @@ notices:
 
 native: build/gr8s
 
-build/gr8s: $(CONTAINERD_BUNDLE_MARKER) $(DASHBOARD_MARKER) $(NODE_PROTOCOL_LISP) scripts/build-native.lisp $(LISP_SOURCES)
-	$(SBCL) --noinform --non-interactive --load scripts/build-native.lisp
+build/gr8s: $(CONTAINERD_BUNDLE_MARKER) $(DASHBOARD_MARKER) $(NODE_PROTOCOL_LISP) scripts/build-native.lisp scripts/bootstrap.lisp ocicl.csv $(LISP_SOURCES)
+	$(SBCL) --noinform $(LISP_BOOTSTRAP) --non-interactive --load scripts/build-native.lisp
 
 clean:
 	rm -rf -- build
+
+# Isolated doctor suite: no cluster, native runtime, or root privileges required.
+.PHONY: test-doctor
+test-doctor:
+	$(SBCL) --noinform --no-sysinit --no-userinit --script tests/doctor/references-test.lisp
+	$(SBCL) --noinform --no-sysinit --no-userinit --script tests/doctor/catalog-test.lisp
+	$(SBCL) --noinform --no-sysinit --no-userinit --script tests/doctor/doctor-test.lisp
+	$(SBCL) --noinform --no-sysinit --no-userinit --script tests/doctor/causal-test.lisp
+	$(SBCL) --noinform --no-sysinit --no-userinit --script tests/doctor/survey-test.lisp
+	python3 tests/doctor/diagnose-cli-test.py
+	python3 tests/doctor/cli-test.py

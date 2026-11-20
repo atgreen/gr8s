@@ -573,7 +573,10 @@
         (write-line "(loop (sleep 1)))" stream))
       (unwind-protect
            (progn
-             (setf process (sb-ext:run-program "sbcl" (list "--noinform" "--non-interactive" "--load" (namestring script))
+             (setf process (sb-ext:run-program "sbcl" (list "--noinform" "--no-sysinit" "--no-userinit"
+                            "--load" (namestring (merge-pathnames "scripts/bootstrap.lisp"
+                                                                (asdf:system-source-directory :gr8s)))
+                            "--non-interactive" "--load" (namestring script))
                                                :search t :wait nil :input nil :output log :error :output))
              (poll-until (lambda () (or (probe-file ready) (not (sb-ext:process-alive-p process)))) :timeout 60)
              (unless (probe-file ready)

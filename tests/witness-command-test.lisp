@@ -196,7 +196,10 @@
              (when (probe-file ready) (delete-file ready))
              (let ((log (merge-pathnames (format nil "witness-child-~D.log" cycle) root)))
                (setf process (sb-ext:run-program "sbcl"
-                              (list "--noinform" "--non-interactive" "--load" (namestring script))
+                              (list "--noinform" "--no-sysinit" "--no-userinit"
+                            "--load" (namestring (merge-pathnames "scripts/bootstrap.lisp"
+                                                                (asdf:system-source-directory :gr8s)))
+                            "--non-interactive" "--load" (namestring script))
                               :search t :wait nil :input nil :output log :error :output))
                (poll-until (lambda () (or (probe-file ready) (not (sb-ext:process-alive-p process)))) :timeout 60)
                (unless (probe-file ready)

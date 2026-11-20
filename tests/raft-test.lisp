@@ -826,7 +826,10 @@
            (script (namestring (merge-pathnames "scripts/raft-wal-owner-test-child.lisp"
                                                 (asdf:system-source-directory :gr8s))))
            (process (sb-ext:run-program "sbcl"
-                     (list "--dynamic-space-size" "384" "--noinform" "--non-interactive"
+                     (list "--dynamic-space-size" "384" "--noinform" "--no-sysinit" "--no-userinit"
+                            "--load" (namestring (merge-pathnames "scripts/bootstrap.lisp"
+                                                                (asdf:system-source-directory :gr8s)))
+                            "--non-interactive"
                            "--load" script "--" (namestring path) ready)
                      :search t :wait nil :input nil :output log :error :output)))
       (unwind-protect
@@ -1005,7 +1008,10 @@
              (when (probe-file ready) (delete-file ready))
              (let ((before (raft-wal-size path)))
                (setf process (sb-ext:run-program "sbcl"
-                              (list "--dynamic-space-size" "384" "--noinform" "--non-interactive"
+                              (list "--dynamic-space-size" "384" "--noinform" "--no-sysinit" "--no-userinit"
+                            "--load" (namestring (merge-pathnames "scripts/bootstrap.lisp"
+                                                                (asdf:system-source-directory :gr8s)))
+                            "--non-interactive"
                                     "--load" script "--" (namestring path) ready)
                               :search t :wait nil :input nil :output log :if-output-exists :supersede :error :output))
                (poll-until (lambda () (or (probe-file ready) (not (sb-ext:process-alive-p process)))) :timeout 60)

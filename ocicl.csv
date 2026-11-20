@@ -2,6 +2,7 @@
 ag-grpc, ghcr.io/ocicl/ag-grpc-all@sha256:03b7b759de5e3a7123ca200a497b86eb5e9ac70db4da0dba68c83becf794ff9d, ag-gRPC-20261114-ca1fb0c/ag-grpc.asd
 ag-grpc-all, ghcr.io/ocicl/ag-grpc-all@sha256:03b7b759de5e3a7123ca200a497b86eb5e9ac70db4da0dba68c83becf794ff9d, ag-gRPC-20261114-ca1fb0c/ag-grpc-all.asd
 ag-http2, ghcr.io/ocicl/ag-grpc-all@sha256:03b7b759de5e3a7123ca200a497b86eb5e9ac70db4da0dba68c83becf794ff9d, ag-gRPC-20261114-ca1fb0c/ag-http2.asd
+ag-prolog, ghcr.io/ocicl/ag-prolog@sha256:5f0531c57faa419af5613375cf1092b5c9c7637ddcc8646fd7ee7fc847fba7ae, ag-prolog-20261120-47eb38d/ag-prolog.asd
 ag-proto, ghcr.io/ocicl/ag-grpc-all@sha256:03b7b759de5e3a7123ca200a497b86eb5e9ac70db4da0dba68c83becf794ff9d, ag-gRPC-20261114-ca1fb0c/ag-proto.asd
 ag-proto-cli, ghcr.io/ocicl/ag-grpc-all@sha256:03b7b759de5e3a7123ca200a497b86eb5e9ac70db4da0dba68c83becf794ff9d, ag-gRPC-20261114-ca1fb0c/ag-proto-cli.asd
 alexandria, ghcr.io/ocicl/cl-cancel@sha256:43b6f25de42c09e32d99d09891cc9e629b4369cce9d7d0e2c9a1803d0b12f6f6, cl-cancel-20261112-7ea333b/ocicl/alexandria-20260812-f283e25/alexandria.asd

@@ -126,7 +126,10 @@
              (log (merge-pathnames "bootstrap-child.log" root))
              (wal (merge-pathnames "raft/control-plane.log" root))
              (process (sb-ext:run-program "sbcl"
-                       (list "--dynamic-space-size" "384" "--noinform" "--non-interactive" "--load" script "--"
+                       (list "--dynamic-space-size" "384" "--noinform" "--no-sysinit" "--no-userinit"
+                            "--load" (namestring (merge-pathnames "scripts/bootstrap.lisp"
+                                                                (asdf:system-source-directory :gr8s)))
+                            "--non-interactive" "--load" script "--"
                              (namestring root) (namestring ready) phase)
                        :search t :wait nil :input nil :output log :error :output))
              (member nil))

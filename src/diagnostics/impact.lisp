@@ -1,0 +1,103 @@
+;;;; SPDX-License-Identifier: MIT
+(in-package #:gr8s-diagnose)
+
+;;; `gr8s doctor impact KIND/NAME`: what stops working if a resource goes
+;;; away. The facts behind rules/impact.pl.
+
+(defun impact-facts (resources removed)
+  "RESOURCES maps (kind namespace name) to objects; REMOVED is the target asked about."
+  (multiple-value-bind (edges owners) (dependency-edges resources)
+    (let ((facts (list (list 'removed removed))))
+      (labels ((fact (&rest fact) (push fact facts))
+               (top-owner (key)
+                 (loop for owner = (gethash key owners) while owner do (setf key owner)
+                       finally (return key))))
+        (maphash
+         (lambda (key resource)
+           (destructuring-bind (kind ns name) key
+             (declare (ignore name))
+             (let ((target (key-target key)))
+               (cond
+                 ((equal kind "Pod")
+                  (when (active-pod-p resource)
+                    (fact 'pod target)
+                    (when (condition-p resource "Ready" "True") (fact 'ready target))
+                    (when (stringp (field resource "spec" "nodeName"))
+                      (fact 'runs_on target (resource-target "Node" nil (field resource "spec" "nodeName"))))
+                    (let ((owner (top-owner key)))
+                      (unless (equal owner key) (fact 'has_pod (key-target owner) target)))
+                    (loop for (ref-kind ref-name) in (remove-duplicates (references resource) :test #'equal
+                                                                        :key (lambda (r) (subseq r 0 2)))
+                          do (fact 'needs target (resource-target ref-kind ns ref-name)))
+                    (loop for volume across (or (field resource "spec" "volumes") #())
+                          for claim = (field volume "persistentVolumeClaim" "claimName")
+                          when (stringp claim)
+                            do (fact 'needs target (resource-target "PersistentVolumeClaim" ns claim)))))
+                 ((member kind '("Deployment" "StatefulSet" "DaemonSet" "ReplicaSet" "Job" "CronJob") :test #'equal)
+                  ;; A ReplicaSet or Job that a Deployment or CronJob owns is reported as its owner.
+                  (unless (gethash key owners) (fact 'workload target)))
+                 ((equal kind "Service")
+                  (fact 'service target)
+                  (dolist (to (gethash key edges))
+                    (when (equal "Pod" (first to)) (fact 'routes_to target (key-target to)))))
+                 ((equal kind "PodDisruptionBudget")
+                  (let ((selector (field resource "spec" "selector"))
+                        (allowed (field resource "status" "disruptionsAllowed")))
+                    (when (and (integerp allowed) (selector-valid-p selector))
+                      (fact 'permits target allowed)
+                      (maphash (lambda (other pod)
+                                 (when (and (equal "Pod" (first other)) (equal ns (second other))
+                                            (selector-matches-p selector (field pod "metadata" "labels")))
+                                   (fact 'guards target (key-target other))))
+                               resources))))))))
+         resources))
+      facts)))
+
+(defun impact-report (kind name namespace getter)
+  "Survey what can depend on the target and return what its loss would affect."
+  (let* ((target (resource-target kind namespace name))
+         (kinds (if namespace (remove-if-not #'namespaced-kind-p *checkup-kinds*) *checkup-kinds*))
+         (getter (snapshot-getter getter kinds))
+         (resources (make-hash-table :test #'equal)) (warnings nil))
+    (dolist (listed kinds)
+      (multiple-value-bind (items complete) (list-roots getter listed namespace)
+        (unless complete (push (format nil "Could not completely list ~A resources." listed) warnings))
+        (loop for resource across items
+              for item-name = (field resource "metadata" "name")
+              when (stringp item-name)
+                do (setf (gethash (list listed (when (namespaced-kind-p listed) (field resource "metadata" "namespace"))
+                                        item-name)
+                                  resources)
+                         resource))))
+    (let ((effects (loop for (resource effect)
+                           in (prove (impact-facts resources target) '((effect ?resource ?effect)) '(?resource ?effect)
+                                     :max-steps 200000000 :max-results nil)
+                         for (group text arguments)
+                           = (first (known `(effect_text ,effect ?group ?text ?arguments) '(?group ?text ?arguments)))
+                         collect (object "resource" resource "group" (string-downcase (symbol-name group))
+                                         "text" (apply #'format nil text
+                                                       (mapcar (lambda (argument)
+                                                                 (if (stringp argument) (plain-target argument) argument))
+                                                               arguments))))))
+      (object "target" target
+              "status" (if warnings "incomplete" "complete")
+              "effects" (coerce (sort effects #'string< :key (lambda (effect) (gethash "resource" effect))) 'vector)
+              "warnings" (coerce (reverse warnings) 'vector)))))
+
+(defun print-impact (report)
+  (let ((effects (coerce (gethash "effects" report) 'list))
+        (target (plain-target (gethash "target" report))))
+    (if (null effects)
+        (format t "Nothing the doctor can see depends on ~A.~%" (safe-text target))
+        (format t "Losing ~A would affect ~D resource~:P.~%" (safe-text target)
+                (length (remove-duplicates effects :test #'equal :key (lambda (effect) (gethash "resource" effect))))))
+    (loop for (group heading) in (known '(group_heading ?group ?heading) '(?group ?heading))
+          for members = (remove (string-downcase (symbol-name group)) effects
+                                :test-not #'equal :key (lambda (effect) (gethash "group" effect)))
+          when members
+            do (format t "~%~A~%" heading)
+               (dolist (effect members)
+                 (format t " - ~A: ~A~%" (safe-text (plain-target (gethash "resource" effect)))
+                         (safe-text (gethash "text" effect)))))
+    (loop for warning across (gethash "warnings" report) do (format t "~%Incomplete: ~A~%" (safe-text warning)))
+    (format t "~%This is what the API shows depending on it now. Pods of a workload are started again elsewhere when there is room; this does not check that there is.~%")))

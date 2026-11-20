@@ -66,6 +66,16 @@ cni_plugin_p() {
     go version -m "$1" | grep -Fq "v$cni_plugins_version"
 }
 
+download_module_source() {
+  # Do not pipe go directly into awk: POSIX sh would hide go's exit status.
+  if module_download=$(go mod download -json "$1"); then
+    printf '%s\n' "$module_download" | awk -F'"' '$2 == "Dir" { print $4 }'
+  else
+    printf 'Failed to download Go module %s:\n%s\n' "$1" "$module_download" >&2
+    return 1
+  fi
+}
+
 if ! { static_binary_p "$destination/bin/containerd" &&
        patched_grpc_p "$destination/bin/containerd" &&
        static_binary_p "$destination/bin/containerd-shim-runc-v2" &&
@@ -76,10 +86,8 @@ if ! { static_binary_p "$destination/bin/containerd" &&
   mkdir -p "$go_bin"
   package=github.com/containerd/containerd/v2
   ldflags="-s -w -X $package/version.Version=$containerd_version -X $package/version.Revision=$containerd_revision -X $package/version.Package=$package"
-  containerd_source=$(go mod download -json "$package@v$containerd_version" |
-    awk -F'"' '$2 == "Dir" { print $4 }')
-  grpc_source=$(go mod download -json "google.golang.org/grpc@$grpc_version" |
-    awk -F'"' '$2 == "Dir" { print $4 }')
+  containerd_source=$(download_module_source "$package@v$containerd_version")
+  grpc_source=$(download_module_source "google.golang.org/grpc@$grpc_version")
   cp -R "$containerd_source" "$temporary_directory/containerd"
   cp -R "$grpc_source" "$temporary_directory/grpc"
   chmod -R u+w "$temporary_directory/containerd" "$temporary_directory/grpc"

@@ -15,7 +15,6 @@ import socket
 import subprocess
 import tempfile
 import time
-import urllib.request
 
 
 def free_port():
@@ -87,10 +86,12 @@ class NativeStorageSmoke:
             """Check this process and its readiness endpoint, rather than a stale marker."""
             if self.process.poll() is not None:
                 raise AssertionError(f"native server exited early: {self.process.returncode}")
+            if not self.config.exists():
+                return False
             try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/readyz", timeout=2) as response:
-                    return response.status == 200 and self.config.exists()
-            except OSError:
+                response = self.kubectl('get', '--raw', '/readyz', check=False, timeout=5)
+                return response.returncode == 0 and response.stdout.strip() == 'ok'
+            except subprocess.TimeoutExpired:
                 return False
         wait_for(ready, "native server readiness", 90)
 

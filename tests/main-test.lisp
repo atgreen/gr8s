@@ -157,10 +157,9 @@
     (is (string= "managed" (getf agent-options :containerd-mode)))))
 
 (test cli-doctor-parses-state-directory-flag-positional-and-cidr
-  ;; Bare `doctor' leaves state-directory unset so run-doctor falls back to the
-  ;; shared default-state-directory (not the old hardcoded /var/lib/gr8s).
+  ;; Bare doctor now shows command help without probing the host.
   (let ((options (parse-cli-options '("doctor"))))
-    (is (eq :doctor (getf options :command)))
+    (is (eq :doctor-cluster (getf options :command)))
     (is-false (getf options :state-directory)))
   ;; The --state-directory VALUE form must consume its value, not swallow the
   ;; flag name as the directory (the bug behind the false-positive advice).
@@ -1035,3 +1034,11 @@
     (is (search "--cluster-reset" output))
     (is (search "Wipe-and-rejoin checklist" output))
     (is (search "gr8s doctor --fix" output))))
+
+(test cli-doctor-subcommands
+  (is (eq :doctor-cluster (getf (parse-cli-options '("doctor" "checkup" "--json")) :command)))
+  (is (equal '("diagnose" "pod/web" "--kubeconfig" "test.config")
+             (getf (parse-cli-options '("doctor" "diagnose" "pod/web" "--kubeconfig" "test.config")) :arguments)))
+  (let ((options (parse-cli-options '("doctor" "host" "--state-directory" "/tmp/test-state"))))
+    (is (eq :doctor (getf options :command)))
+    (is (equal "/tmp/test-state" (getf options :state-directory)))))

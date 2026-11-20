@@ -9,6 +9,45 @@
 (def-suite doctor :in gr8s)
 (in-suite doctor)
 
+(test doctor-host-command-bounds
+  ;; PROGV also exercises the old implementation, which ignores these limits.
+  (progv '(gr8s.server::*doctor-command-timeout* gr8s.server::*doctor-command-output-limit*)
+      '(1 32)
+    (multiple-value-bind (out code)
+        (gr8s.server::doctor-run '("python3" "-c" "import time; print('partial', flush=True); time.sleep(2)"))
+      (is (null code) "A timed-out command cannot establish a successful observation")
+      (is (equal "" out) "Discard partial output"))
+    (multiple-value-bind (out code)
+        (gr8s.server::doctor-run '("python3" "-c" "print('x' * 64)"))
+      (is (null code) "An oversized response cannot establish a successful observation")
+      (is (equal "" out)))
+    (multiple-value-bind (out code)
+        (gr8s.server::doctor-run '("python3" "-c" "import sys; sys.stdout.write('x' * 32)"))
+      (is (= 0 code))
+      (is (equal (make-string 32 :initial-element #\x) out)))
+    (multiple-value-bind (out code)
+        (gr8s.server::doctor-run '("python3" "-c" "import sys; print('no'); sys.exit(7)"))
+      (is (= 7 code))
+      (is (equal "no" out)))))
+
+(test doctor-host-command-reaps-interrupted-children
+  (progv '(gr8s.server::*doctor-command-timeout* gr8s.server::*doctor-command-output-limit*)
+      '(1 32)
+    (dolist (action '("os.close(1)" "print('x' * 64, flush=True)"))
+      (uiop:with-temporary-file (:pathname pid-file :keep nil)
+        (multiple-value-bind (out code)
+            (gr8s.server::doctor-run
+             (list "python3" "-c"
+                   (format nil "import os, sys, time; open(sys.argv[1], 'w').write(str(os.getpid())); ~A; time.sleep(3)" action)
+                   (namestring pid-file)))
+          (is (null code))
+          (is (equal "" out)))
+        (let* ((pid (parse-integer (uiop:read-file-string pid-file)))
+               (gone (handler-case (progn (sb-posix:kill pid 0) nil)
+                       (sb-posix:syscall-error (c)
+                         (= sb-posix:esrch (sb-posix:syscall-errno c))))))
+          (is (eq t gone) "Interrupted direct child must be terminated and reaped"))))))
+
 (test doctor-parses-and-gates-kernel-version
   (is (equal '(7 2) (multiple-value-list (gr8s.server::doctor-kernel-version "7.2.11-200.fc44.x86_64"))))
   (is (equal '(6 6) (multiple-value-list (gr8s.server::doctor-kernel-version "6.6.0-generic"))))
@@ -58,13 +97,13 @@
 
 (test doctor-firewall-dns-decision
   ;; No active firewall -> not blocked.
-  (is (not (gr8s.server::doctor-firewall-blocks-dns-p nil nil nil)))
+  (is (not (gr8s.server::doctor-dns-rules-incomplete-p nil nil nil)))
   ;; Active, DNS not in ports or services -> blocked (the FedoraWorkstation case).
-  (is (gr8s.server::doctor-firewall-blocks-dns-p t '("1025-65535/udp" "1025-65535/tcp") '("ssh" "samba-client")))
+  (is (gr8s.server::doctor-dns-rules-incomplete-p t '("1025-65535/udp" "1025-65535/tcp") '("ssh" "samba-client")))
   ;; Active but the "dns" service is allowed -> not blocked.
-  (is (not (gr8s.server::doctor-firewall-blocks-dns-p t '() '("ssh" "dns"))))
-  ;; Active but a port range covers 53 -> not blocked.
-  (is (not (gr8s.server::doctor-firewall-blocks-dns-p t '("1-1024/udp") '("ssh")))))
+  (is (not (gr8s.server::doctor-dns-rules-incomplete-p t '() '("ssh" "dns"))))
+  ;; Both TCP and UDP ranges cover 53.
+  (is (not (gr8s.server::doctor-dns-rules-incomplete-p t '("1-1024/udp" "1-1024/tcp") '("ssh")))))
 
 (test doctor-firewall-state-reads-firewall-cmd
   ;; Injected runner standing in for firewall-cmd.
@@ -77,10 +116,10 @@
       (is (not (null active)))
       (is (member "1025-65535/udp" ports :test #'string=))
       (is (member "ssh" services :test #'string=))
-      (is (gr8s.server::doctor-firewall-blocks-dns-p active ports services))))
-  ;; firewall-cmd missing (nil exit) -> no active firewall.
+      (is (gr8s.server::doctor-dns-rules-incomplete-p active ports services))))
+  ;; A missing client does not establish that the daemon is inactive.
   (flet ((absent (argv) (declare (ignore argv)) (values "" nil)))
-    (is (null (nth-value 0 (gr8s.server::doctor-firewall-state :runner #'absent))))))
+    (signals error (gr8s.server::doctor-firewall-state :runner #'absent))))
 
 (test doctor-classifies-live-stale-and-absent-kubelet-endpoints
   (with-temporary-store (store path)
@@ -239,8 +278,8 @@
   (multiple-value-bind (status detail hint)
       (gr8s.server::doctor-port-admission-status "trusted" nil "wg0" nil '(7000 7443 6443))
     (declare (ignorable detail))
-    (is (eq :ok status))
-    (is (null hint)))
+    (is (eq :warn status))
+    (is (search "zone target" hint)))
   (multiple-value-bind (status detail hint)
       (gr8s.server::doctor-port-admission-status
        "FedoraServer" t "wg0" '("7000/tcp" "7443/tcp" "6443/tcp") '(7000 7443 6443))
@@ -250,10 +289,9 @@
   (multiple-value-bind (status detail hint)
       (gr8s.server::doctor-port-admission-status
        "FedoraServer" t "wg0" '("22/tcp") '(7000 7443 6443))
-    (is (eq :fail status))
+    (is (eq :warn status))
     (is (search "7000" detail))
-    (is (search "--zone=trusted --add-interface=wg0" hint)
-        "the hint is the exact repair command")))
+    (is (search "test the endpoint from a peer" hint))))
 
 (test doctor-cluster-port-check-reads-the-ha-endpoint
   (let* ((root (uiop:ensure-directory-pathname
@@ -270,9 +308,9 @@
              (write-string "{\"format\":\"gr8s-serve-ha-endpoint\",\"version\":1,\"memberId\":\"gvision\",\"host\":\"10.77.77.21\",\"port\":7000,\"apiUrl\":\"https://10.77.77.21:6443\"}" out))
            (let ((runner (port-admission-runner
                           :addr-lines "7: wg0 inet 10.77.77.21/24 scope global wg0")))
-             (is (= 1 (gr8s.server::doctor-check-cluster-port-admission
+             (is (= 0 (gr8s.server::doctor-check-cluster-port-admission
                        root :runner runner :firewalld-active-p t))
-                 "dropped cluster ports on the member interface FAIL")
+                 "missing explicit ports warn, because effective policy is unknown")
              (is (zerop (gr8s.server::doctor-check-cluster-port-admission
                          root :runner runner :firewalld-active-p nil))
                  "without firewalld there is nothing to admit"))
@@ -281,7 +319,7 @@
                           :addr-lines "7: wg0 inet 10.77.77.21/24 scope global wg0")))
              (is (zerop (gr8s.server::doctor-check-cluster-port-admission
                          root :runner runner :firewalld-active-p t))
-                 "a trusted member interface passes")))
+                 "a zone name alone cannot establish a failure")))
       (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
 
 (test doctor-removes-a-service-interface-another-cluster-left
@@ -356,3 +394,280 @@
   (is (zerop (let ((*standard-output* (make-broadcast-stream)))
                (gr8s.server::doctor-check-storage-latency "/nonexistent/gr8s/state/")))
       "no state directory yet: nothing to measure"))
+
+(test doctor-firewall-probe-failures-are-not-inactivity
+  (dolist (code '(nil 1 29 36 251 253 254))
+    (signals error
+      (gr8s.server::doctor-firewall-state
+       :runner (lambda (argv) (declare (ignore argv)) (values "PRIVATE-FAILURE" code)))))
+  (is (equal '(nil nil nil)
+             (multiple-value-list
+              (gr8s.server::doctor-firewall-state
+               :runner (lambda (argv) (declare (ignore argv)) (values "not running" 252))))))
+  (dolist (failed-operation '("--list-ports" "--list-services"))
+    (signals error
+      (gr8s.server::doctor-firewall-state
+       :runner (lambda (argv)
+                 (if (equal failed-operation (second argv))
+                     (values "PRIVATE-FAILURE" 253)
+                     (values "" 0)))))))
+
+(test doctor-port-admission-requires-tcp
+  (multiple-value-bind (status detail hint)
+      (gr8s.server::doctor-port-admission-status
+       "public" nil "wg0" '("7000/udp" "7443/udp" "6443/udp") '(7000 7443 6443))
+    (declare (ignore hint))
+    (is (eq :warn status))
+    (is (search "7000" detail)))
+  (multiple-value-bind (status detail hint)
+      (gr8s.server::doctor-port-admission-status
+       "public" nil "wg0" '("6000-8000/tcp") '(7000 7443 6443))
+    (declare (ignore detail hint))
+    (is (eq :ok status))))
+
+(test doctor-dns-check-distinguishes-protocols
+  (is (gr8s.server::doctor-dns-rules-incomplete-p t '("53/tcp") nil))
+  (is (gr8s.server::doctor-dns-rules-incomplete-p t '("53/udp") nil))
+  (is (not (gr8s.server::doctor-dns-rules-incomplete-p t '("53/udp" "53/tcp") nil)))
+  (is (gr8s.server::doctor-dns-rules-incomplete-p t '("53/sctp") nil)))
+
+(test doctor-corrupt-ha-endpoint-is-not-absence
+  (let ((root (uiop:ensure-directory-pathname
+               (sb-posix:mkdtemp (namestring (merge-pathnames "gr8s-doctor-corrupt-XXXXXX" (uiop:temporary-directory)))))))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist (merge-pathnames "metadata/" root))
+           (dolist (contents '("{PRIVATE-BROKEN" "null" "[]" "{}"
+                               "{\"host\":\"127.0.0.1\",\"port\":\"bad\"}"))
+             (with-open-file (out (merge-pathnames "metadata/server-ha-endpoint.json" root)
+                                  :direction :output :if-exists :supersede)
+               (write-string contents out))
+             (let ((output (with-output-to-string (*standard-output*)
+                             (gr8s.server::doctor-check-cluster-port-admission
+                              root :firewalld-active-p t
+                              :runner (lambda (&rest args) (declare (ignore args))
+                                        (error "must not probe with invalid metadata"))))))
+               (is (search "[warn]" output))
+               (is (search "HA endpoint" output))
+               (is-false (search "nothing to admit" output))
+               (is-false (search "PRIVATE-BROKEN" output)))))
+      (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
+
+(test doctor-api-url-admission-port
+  (let* ((root (uiop:ensure-directory-pathname
+                (sb-posix:mkdtemp
+                 (namestring (merge-pathnames "gr8s-doctor-url-XXXXXX" (uiop:temporary-directory))))))
+         (path (merge-pathnames "metadata/server-ha-endpoint.json" root)))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist path)
+           (dolist (case '(("nonsense" nil) ("https://" nil)
+                           ("https://10.77.77.21:bad" nil)
+                           ("https://10.77.77.21:0" nil)
+                           ("https://10.77.77.21:65536" nil)
+                           ("ftp://10.77.77.21:6443" nil)
+                           ("https://10.77.77.21" 443)
+                           ("https://10.77.77.21:443" 443)
+                           ("https://10.77.77.21:8443" 8443)))
+             (destructuring-bind (url port) case
+               (with-open-file (out path :direction :output :if-exists :supersede)
+                 (com.inuoe.jzon:stringify
+                  (gr8s.resources::core-object
+                   "format" "gr8s-serve-ha-endpoint" "version" 1
+                   "memberId" "test" "host" "10.77.77.21" "port" 7000 "apiUrl" url)
+                  :stream out))
+               (let* ((calls 0)
+                      (delegate (port-admission-runner
+                                 :addr-lines "7: wg0 inet 10.77.77.21/24 scope global wg0"
+                                 :ports (format nil "7000/tcp 7443/tcp ~D/tcp" (or port 6443))))
+                      (output
+                        (with-output-to-string (*standard-output*)
+                          (gr8s.server::doctor-check-cluster-port-admission
+                           root :firewalld-active-p t
+                           :runner (lambda (argv) (incf calls) (funcall delegate argv))))))
+                 (if port
+                     (progn (is (search "[ ok ]" output) "URL ~A: ~A" url output)
+                            (is (plusp calls)))
+                     (progn (is (search "[warn]" output) "URL ~A: ~A" url output)
+                            (is (zerop calls) "Invalid metadata must not probe ports")))))))
+      (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
+
+(test doctor-checks-api-interface-separately
+  (let* ((root (uiop:ensure-directory-pathname
+                (sb-posix:mkdtemp
+                 (namestring (merge-pathnames "gr8s-doctor-zones-XXXXXX" (uiop:temporary-directory))))))
+         (path (merge-pathnames "metadata/server-ha-endpoint.json" root)))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist path)
+           (dolist (api-host '("192.0.2.10" "api.example.invalid"))
+             (with-open-file (out path :direction :output :if-exists :supersede)
+               (com.inuoe.jzon:stringify
+                (gr8s.resources::core-object
+                 "format" "gr8s-serve-ha-endpoint" "version" 1
+                 "memberId" "test" "host" "10.77.77.21" "port" 7000
+                 "apiUrl" (format nil "https://~A:6443" api-host)) :stream out))
+             (dolist (api-open '(nil t))
+               (let* ((result nil)
+                      (output
+                        (with-output-to-string (*standard-output*)
+                          (setf result
+                                (gr8s.server::doctor-check-cluster-port-admission
+                                 root :firewalld-active-p t
+                                 :runner
+                                 (lambda (argv)
+                                   (cond
+                                     ((equal argv '("ip" "-4" "-o" "addr" "show"))
+                                      (values (format nil "7: wg0 inet 10.77.77.21/24 scope global wg0~%2: eth0 inet 192.0.2.10/24 scope global eth0") 0))
+                                     ((member "--get-zone-of-interface=wg0" argv :test #'equal)
+                                      (values "trusted" 0))
+                                     ((member "--get-zone-of-interface=eth0" argv :test #'equal)
+                                      (values "public" 0))
+                                     ((member "--zone=trusted" argv :test #'equal) (values "" 0))
+                                     ((member "--zone=public" argv :test #'equal)
+                                      (values (if api-open "6443/tcp" "") 0))
+                                     (t (error "Unexpected probe: ~S" argv)))))))))
+                 (cond
+                   ((equal api-host "api.example.invalid")
+                    (is (search "[warn]" output))
+                    (is (search api-host output))
+                    (is (zerop result)))
+                   (api-open
+                    (is (search "6443" output))
+                    (is (search "eth0" output))
+                    (is (zerop result)))
+                   (t
+                    (is (search "[warn]" output))
+                    (is (search "eth0" output))
+                    (is (zerop result))))))))
+      (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
+
+(test doctor-port-query-errors-are-unknown
+  (dolist (failure '("address" "zone" "default" "ports"))
+    (dolist (code '(nil 29 36 253))
+      (let* ((queries nil)
+             (result nil)
+             (output
+               (with-output-to-string (*standard-output*)
+                 (setf result
+                       (gr8s.server::doctor-check-address-port-admission
+                        "10.77.77.21" '(7000)
+                        :runner
+                        (lambda (argv)
+                          (let ((kind (cond ((equal (first argv) "ip") "address")
+                                            ((member "--get-zone-of-interface=wg0" argv :test #'equal) "zone")
+                                            ((member "--get-default-zone" argv :test #'equal) "default")
+                                            (t "ports"))))
+                            (push kind queries)
+                            (cond
+                              ((equal kind failure) (values "PRIVATE-PROBE-ERROR" code))
+                              ((equal kind "address") (values "7: wg0 inet 10.77.77.21/24 scope global wg0" 0))
+                              ((equal kind "zone")
+                               (if (equal failure "default") (values "no zone" 1) (values "trusted" 0)))
+                              ((equal kind "default") (values "trusted" 0))
+                              (t (values "7000/tcp" 0))))))))))
+        (is (search "[warn]" output) "~A code ~S: ~A" failure code output)
+        (is-false (search "[ ok ]" output))
+        (is-false (search "[FAIL]" output))
+        (is-false (search "PRIVATE-PROBE-ERROR" output))
+        (is (zerop result))
+        (is (equal failure (first queries)) "Do not probe beyond the failed observation")))))
+
+(test doctor-port-list-is-not-effective-policy
+  ;; Empty explicit ports also occurs when services or rich rules allow traffic.
+  ;; Zone names can survive changes to their target and therefore prove nothing.
+  (dolist (zone '("public" "trusted"))
+    (multiple-value-bind (status detail hint)
+        (gr8s.server::doctor-port-admission-status zone nil "eth0" nil '(6443))
+      (is (eq :warn status))
+      (is (search "explicit TCP" detail))
+      (is (search "6443" detail))
+      (is-false (search "dropped" hint))
+      (is-false (search "--add-interface" hint))
+      (is (search "services" hint))))
+  (multiple-value-bind (status detail hint)
+      (gr8s.server::doctor-port-admission-status "public" nil "eth0" '("6443/tcp") '(6443))
+    (is (eq :ok status))
+    (is (search "explicit TCP" detail))
+    (is (search "reachability" detail))
+    (is (null hint))))
+
+(test doctor-storage-probe-preserves-existing-files
+  (let* ((root (uiop:ensure-directory-pathname
+                (sb-posix:mkdtemp (namestring (merge-pathnames "gr8s-doctor-storage-XXXXXX" (uiop:temporary-directory))))))
+         (path (merge-pathnames (format nil ".doctor-flush-~D" (sb-posix:getpid)) root)))
+    (unwind-protect
+         (progn
+           (with-open-file (out path :direction :output) (write-string "existing-data" out))
+           (is (typep (gr8s.server::doctor-measure-flush-milliseconds root :writes 1) '(real 0)))
+           (is (probe-file path))
+           (when (probe-file path)
+             (is (equal "existing-data" (uiop:read-file-string path))))
+           (is (= 1 (length (uiop:directory-files root)))))
+      (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
+
+(test doctor-node-listener-port-is-observed-not-assumed
+  (let* ((root (uiop:ensure-directory-pathname
+                (sb-posix:mkdtemp (namestring (merge-pathnames "gr8s-doctor-node-XXXXXX" (uiop:temporary-directory))))))
+         (node-path (merge-pathnames "metadata/server-node-endpoint.json" root))
+         (runner (port-admission-runner :zone-of "public" :ports "7000/tcp 6443/tcp 8444/tcp"
+                                       :addr-lines (format nil "7: wg0 inet 10.77.77.21/24 scope global wg0~%2: eth0 inet 192.0.2.20/24 scope global eth0"))))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist node-path)
+           (with-open-file (out (merge-pathnames "metadata/server-ha-endpoint.json" root) :direction :output)
+             (com.inuoe.jzon:stringify
+              (gr8s.resources::core-object "format" "gr8s-serve-ha-endpoint" "version" 1
+               "memberId" "test" "host" "10.77.77.21" "port" 7000 "apiUrl" "https://10.77.77.21:6443") :stream out))
+           (flet ((check () (with-output-to-string (*standard-output*)
+                             (gr8s.server::doctor-check-cluster-port-admission root :firewalld-active-p t :runner runner))))
+             (let ((output (check)))
+               (is (search "node listener" output))
+               (is (search "not recorded" output))
+               (is-false (search "7443" output)))
+             (with-open-file (out node-path :direction :output)
+               (com.inuoe.jzon:stringify
+                (gr8s.resources::core-object "format" "gr8s-serve-node-endpoint" "version" 1
+                 "host" "192.0.2.20" "port" 8444) :stream out))
+             (let ((output (check)))
+               (is (search "8444" output))
+               (is (search "eth0" output))
+               (is-false (search "7443" output))
+               (is-false (search "[warn]" output)))))
+      (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
+
+(test doctor-default-cluster-firewall-probe-preserves-unknown
+  (let* ((root (uiop:ensure-directory-pathname
+                (sb-posix:mkdtemp (namestring (merge-pathnames "gr8s-doctor-state-XXXXXX" (uiop:temporary-directory))))))
+         (path (merge-pathnames "metadata/server-ha-endpoint.json" root))
+         (legacy (symbol-function 'gr8s.network::host-firewalld-active-p)))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist path)
+           (with-open-file (out path :direction :output)
+             (com.inuoe.jzon:stringify
+              (gr8s.resources::core-object "format" "gr8s-serve-ha-endpoint" "version" 1
+               "memberId" "test" "host" "10.77.77.21" "port" 7000
+               "apiUrl" "https://10.77.77.21:6443") :stream out))
+           ;; The runtime's Boolean helper intentionally collapses failures.
+           ;; Diagnostics must use its own error-aware injected runner instead.
+           (setf (symbol-function 'gr8s.network::host-firewalld-active-p) (lambda () nil))
+           (dolist (code '(nil 29 36 251 253 252))
+             (let* ((calls 0)
+                    (output
+                      (with-output-to-string (*standard-output*)
+                        (gr8s.server::doctor-check-cluster-port-admission
+                         root :runner (lambda (argv)
+                                        (incf calls)
+                                        (assert (equal argv '("firewall-cmd" "--state")))
+                                        (values "PRIVATE-STATE-ERROR" code))))))
+               (is (= 1 calls))
+               (if (eql code 252)
+                   (is (search "firewalld is inactive" output))
+                   (progn
+                     (is (search "[warn]" output))
+                     (is (search "state is unknown" output))
+                     (is-false (search "[ ok ]" output))))
+               (is-false (search "PRIVATE-STATE-ERROR" output)))))
+      (setf (symbol-function 'gr8s.network::host-firewalld-active-p) legacy)
+      (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))

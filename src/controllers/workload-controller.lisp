@@ -159,31 +159,50 @@
           ((equal kind "CronJob") "cronjob-controller")
           (t "replicaset-controller"))))
 
-(defun record-controller-event (store object type reason message &key (key message) (component (workload-controller-name object)))
-  "Publish one Event about the workload OBJECT as its upstream controller would; KEY makes a repeat a no-op.
+(defun refresh-controller-event (store namespace name now interval)
+  "Refresh an ongoing failure at most once per INTERVAL seconds, keeping its identity."
+  (update-core-resource store "events" namespace name
+    (lambda (old)
+      (let ((last (ignore-errors (pod-deletion-time (gethash "lastTimestamp" old)))))
+        (when (or (null last) (>= (- (pod-deletion-time now) last) interval))
+          (setf (gethash "count" old) (1+ (gethash "count" old 1))
+                (gethash "lastTimestamp" old) now)))
+      old)))
+
+(defun record-controller-event (store object type reason message
+                                &key (key message) (component (workload-controller-name object)) repeat-interval)
+  "Publish one Event about OBJECT; KEY deduplicates repeats unless REPEAT-INTERVAL allows a refresh.
 Call without STORE's lock. A failure is logged rather than failing the controller's pass."
   (let* ((metadata (workload-metadata object)) (namespace (gethash "namespace" metadata))
          (now (current-timestamp))
          (digest (octets-to-hex (ironclad:digest-sequence
                                  :sha256 (trivial-utf-8:string-to-utf-8-bytes
                                           (format nil "~A/~A/~A" (gethash "uid" metadata) reason key)))))
-         (name (format nil "~A.~A" (gethash "name" metadata) (string-downcase (subseq digest 0 16))))
+         (owner-name (gethash "name" metadata))
+         ;; Reserve 17 characters for the separator and identity digest.
+         (prefix (string-right-trim ".-" (subseq owner-name 0 (min 236 (length owner-name)))))
+         (name (format nil "~A.~A" prefix (string-downcase (subseq digest 0 16))))
          (involved (core-object "apiVersion" (gethash "apiVersion" object) "kind" (gethash "kind" object)
                                 "namespace" namespace "name" (gethash "name" metadata) "uid" (gethash "uid" metadata))))
     (when (gethash "resourceVersion" metadata)
       (setf (gethash "resourceVersion" involved) (gethash "resourceVersion" metadata)))
     (handler-case
-        (create-core-resource store "events"
-          (core-object "apiVersion" "v1" "kind" "Event" "metadata" (core-object "name" name)
-                       "involvedObject" involved
-                       "reason" reason "message" message "type" type "count" 1
-                       "firstTimestamp" now "lastTimestamp" now
-                       "source" (core-object "component" component)
-                       "reportingComponent" component)
-          namespace)
+        (handler-case
+            (create-core-resource store "events"
+              (core-object "apiVersion" "v1" "kind" "Event" "metadata" (core-object "name" name)
+                           "involvedObject" involved
+                           "reason" reason "message" message "type" type "count" 1
+                           "firstTimestamp" now "lastTimestamp" now
+                           "source" (core-object "component" component)
+                           "reportingComponent" component)
+              namespace)
+          (kubernetes-error (condition)
+            (if (= 409 (kubernetes-error-status-code condition))
+                (when repeat-interval
+                  (refresh-controller-event store namespace name now repeat-interval))
+                (error condition))))
       (error (condition)
-        (unless (and (typep condition 'kubernetes-error) (= 409 (kubernetes-error-status-code condition)))
-          (format *error-output* "gr8s ~A Event publication failed: ~A~%" component condition))))))
+        (format *error-output* "gr8s ~A Event publication failed: ~A~%" component condition)))))
 
 (defun record-pod-created-event (store owner pod)
   "Record OWNER's SuccessfulCreate Event for POD, worded as its upstream controller words it."
@@ -263,6 +282,10 @@ NODE-NAME pins a daemon Pod to its node; LABELS is an alist added to the templat
                                 "replicas" (length active) "fullyLabeledReplicas" fully-labeled
                                 "readyReplicas" ready "availableReplicas" available)))
       (when failure
+        (record-controller-event store owner "Warning" failure-reason
+                                 (format nil "Error ~A: ~A"
+                                         (if (equal failure-reason "FailedCreate") "creating" "deleting") failure)
+                                 :repeat-interval 30)
         (let ((condition (workload-condition (gethash "conditions" (gethash "status" owner) #())
                                              "ReplicaFailure" "True" failure-reason (princ-to-string failure))))
           ;; Replica conditions have no lastUpdateTime in their API schema.

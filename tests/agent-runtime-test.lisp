@@ -1185,3 +1185,26 @@ process count against the kernel ceiling; and the heartbeat carries all three."
       (is-true (slot-value heartbeat 'gr8s.node.v1::memory-pressure))
       (is-true (slot-value heartbeat 'gr8s.node.v1::disk-pressure))
       (is-true (slot-value heartbeat 'gr8s.node.v1::pid-pressure)))))
+
+(test agent-disk-pressure-distinguishes-unreported-inodes-from-exhaustion
+  "Btrfs reports zero total inodes; that is not evidence of inode exhaustion."
+  (let ((original (symbol-function 'gr8s.kubelet::filesystem-statistics))
+        (gr8s.kubelet::*node-disk-available-fn* #'gr8s.kubelet::node-disk-available)
+        (healthy-bytes (* 2 gr8s.kubelet::+disk-eviction-threshold-bytes+)))
+    (unwind-protect
+         (dolist (case (list (list healthy-bytes 0 0 nil nil)
+                            (list 0 0 0 nil t)
+                            (list healthy-bytes 100000 0 0 t)
+                            (list healthy-bytes 100000 50000 50000 nil)))
+           (destructuring-bind (available total free expected-inodes pressure) case
+             (setf (symbol-function 'gr8s.kubelet::filesystem-statistics)
+                   (lambda (path)
+                     (declare (ignore path))
+                     (list healthy-bytes available 0 total free (- total free))))
+             (multiple-value-bind (bytes inodes) (gr8s.kubelet::node-disk-available)
+               (is (= available bytes))
+               (is (eql expected-inodes inodes)))
+             (is (eql pressure (gr8s.agent::agent-node-disk-pressure-p)))
+             (is (eql pressure (slot-value (gr8s.agent::agent-heartbeat nil)
+                                            'gr8s.node.v1::disk-pressure)))))
+      (setf (symbol-function 'gr8s.kubelet::filesystem-statistics) original))))
