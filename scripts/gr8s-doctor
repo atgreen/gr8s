@@ -1,0 +1,6 @@
+#!/bin/sh
+# Lightweight source runner for the same diagnostics embedded in gr8s.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+exec sbcl --noinform --no-sysinit --no-userinit \
+  --script "$root/scripts/gr8s-doctor.lisp" "$@"

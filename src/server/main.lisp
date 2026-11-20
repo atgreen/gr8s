@@ -1057,6 +1057,9 @@ authenticated tunnel as slynk and launches ICL's browser mode (icl -b
   "Parse `gr8s doctor' options: --state-directory/--cluster-pod-cidr VALUE, or a
 bare positional state directory for backward compatibility.  A missing
 :state-directory leaves run-doctor to use the shared default-state-directory."
+  (let ((route (gr8s-diagnose:doctor-command-route arguments)))
+    (when route (return-from parse-doctor-options route)))
+  (when (equal (first arguments) "host") (setf arguments (rest arguments)))
   (let ((options (list :command :doctor))
         (positional-seen nil))
     (loop while arguments
@@ -2751,7 +2754,7 @@ between later ones. An ordinary restart recovers within the first.")
                  (when (plusp next-report)
                    ;; A report that fails must say so: silence here reads as
                    ;; "nothing to report" while the member waits for ever.
-                   (format t "~A~%" (handler-case (ha-recovery-wait-report ha)
+                   (format t "~A~%" (handler-case (gr8s.ha:ha-recovery-wait-report ha)
                                       (error (condition)
                                         (format nil "gr8s HA: still waiting for committed application recovery; the report of why failed: ~A"
                                                 condition))))
@@ -3719,7 +3722,7 @@ No HA API may start from member-local certificate state before this converges."
     ("join-token" "Print a cluster join token")
     ("runtime" "Manage sandbox runtimes")
     ("kubeconfig" "Print or write a cluster kubeconfig")
-    ("doctor" "Diagnose a node state directory")
+    ("doctor" "Diagnose resources, survey a cluster, or check the host")
     ("status" "Show cluster health at a glance")
     ("member" "List or remove HA control-plane members")
     ("debug" "Inspect live processes and trace Pods")
@@ -3743,6 +3746,34 @@ No HA API may start from member-local certificate state before this converges."
            (simple (description &optional (usage "[OPTIONS]"))
              (page description usage :options '(("--help, -h" "show help")))))
     (cond
+      ((equal path '("doctor"))
+       (page "Diagnose resources, survey a cluster, or check the host" "COMMAND [OPTIONS]"
+             :commands '(("diagnose [KIND/NAME]" "Find the causes behind current problems")
+                          ("impact KIND/NAME" "Say what would stop working if a resource went away")
+                          ("host" "Run local host checks (legacy doctor options)"))))
+      ((and (equal (first path) "doctor") (equal (second path) "impact"))
+       (page "What would stop working if a resource went away; read-only"
+             "KIND/NAME [OPTIONS]"
+             :options '(("KIND/NAME" "A node, workload, Pod, Secret, ConfigMap or claim")
+                        ("-n, --namespace NAME" "Namespace of the resource")
+                        ("--kubeconfig FILE" "Cluster credentials (default: kubectl's own configuration)")
+                        ("--context NAME" "Kubeconfig context")
+                        ("--json" "Emit the affected resources as JSON"))))
+      ((and (equal (first path) "doctor")
+            (member (second path) '("diagnose" "checkup") :test #'equal))
+       (page "Read-only cluster diagnostics; incomplete evidence is reported"
+             "[KIND/NAME] [OPTIONS]"
+             :options '(("KIND/NAME" "One resource; default is everything you can see")
+                        ("-n, --namespace NAME" "Survey or look in one namespace")
+                        ("--kubeconfig FILE" "Cluster credentials (default: kubectl's own configuration)")
+                        ("--context NAME" "Kubeconfig context")
+                        ("--notes" "Also list configuration and history notes")
+                        ("--json" "Emit problems, findings, evidence and coverage"))))
+      ((and (equal (first path) "doctor") (equal (second path) "host"))
+       (page "Check the local host environment" "[OPTIONS]"
+             :options '(("--state-directory DIR" "Node state directory")
+                        ("--cluster-pod-cidr CIDR" "Pod network range")
+                        ("--fix" "Repair supported local host problems"))))
       ((equal path '("skill"))
        (simple "Print offline Markdown guidance for operators and AI agents" ""))
       ((equal path '("dashboard"))
@@ -4049,6 +4080,8 @@ No HA API may start from member-local certificate state before this converges."
               (:status (run-status-command options))
               (:member-list (run-member-list-command options))
               (:member-remove (run-member-remove-command options))
+              (:doctor-cluster
+               (gr8s-diagnose:doctor-main (getf options :arguments)))
               (:doctor
                (if (plusp (apply #'run-doctor
                                  (append

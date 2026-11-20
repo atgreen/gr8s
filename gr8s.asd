@@ -15,7 +15,7 @@
   ;; base plus a "-gr8s.N" suffix carried in a git tag (e.g. v1.37.2-gr8s.0),
   ;; surfaced through VERSION-STRING as +GR8S-VERSION+ (see src/version.lisp).
   :version "1.37.2"
-  :depends-on ("0conf" "ag-grpc" "bordeaux-threads" "cffi" "chipz" "cl-cancel"
+  :depends-on ("0conf" "ag-grpc" "ag-prolog/syntax" "bordeaux-threads" "cffi" "chipz" "cl-cancel"
                "cl-cel" "cl-dns-proxy" "cl-raft/wal" "cl-re2" "cl-rtnetlink"
                "cl-torrent" "cl-wireguard-overlay"
                "cl-work-queue" "cl-safe-yaml" "cl-cronexpr"
@@ -445,6 +445,24 @@
                                            (:file "port-forward")
                                            (:file "slynk-debug")
                                            ))
+                             (:module "diagnostics"
+                              :serial t
+                              ;; rules.lisp reads the Prolog files when it is compiled,
+                              ;; so they come first and a change to one rebuilds it.
+                              :components ((:file "package")
+                                           (:static-file "rules/catalog.pl")
+                                           (:static-file "rules/references.pl")
+                                           (:static-file "rules/pods.pl")
+                                           (:static-file "rules/scheduling.pl")
+                                           (:static-file "rules/applications.pl")
+                                           (:static-file "rules/logs.pl")
+                                           (:static-file "rules/access.pl")
+                                           (:static-file "rules/relations.pl")
+                                           (:static-file "rules/explanation.pl")
+                                           (:static-file "rules/impact.pl")
+                                           (:file "rules") (:file "live")
+                                           (:file "catalog") (:file "extended-catalog") (:file "readiness") (:file "applications") (:file "doctor")
+                                           (:file "causal") (:file "logs") (:file "pod-events") (:file "scheduling") (:file "survey") (:file "impact")))
                              (:module "server"
                               :serial t
                               :components ((:file "integration")
