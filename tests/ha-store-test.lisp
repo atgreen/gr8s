@@ -14,6 +14,13 @@
 (def-suite ha-store :in gr8s)
 (in-suite ha-store)
 
+(defun control-plane-voters-p (hcp count)
+  "Whether HCP's control plane has COUNT members and all of them vote. A member that
+has just joined does not vote yet, and the others cannot elect a leader without it."
+  (let ((roles (mapcar (lambda (entry) (getf entry :role))
+                       (getf (gr8s.ha:ha-control-plane-membership hcp) :members))))
+    (and (= count (length roles)) (every (lambda (role) (eq :voter role)) roles))))
+
 (defun configmap-input (name key value)
   (com.inuoe.jzon:parse
    (format nil "{\"apiVersion\":\"v1\",\"kind\":\"ConfigMap\",\"metadata\":{\"name\":\"~A\",\"namespace\":\"default\"},\"data\":{\"~A\":\"~A\"}}"
