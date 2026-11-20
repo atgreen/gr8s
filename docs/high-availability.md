@@ -54,9 +54,17 @@ does not become a write to every member each time.
   this member; the client waits out the election and no longer. A write that
   was sent is never sent twice: if no answer comes, the client is told 504 and
   that the write may or may not have been carried out. If no leader can take a
-  write within 30 seconds the follower answers 503 with `Retry-After`. A
-  request that upgrades its connection (exec, attach, port-forward, proxy) is a
-  conversation and is still answered with a 307 to the leader. A few POST paths
+  write within 30 seconds the follower answers 503 with `Retry-After`; it holds
+  at most 64 writes at a time that way and refuses further ones at once. The
+  leader's certificate must be the one issued for the address the membership
+  gives for it. A member that is handed a carried write while it does not lead
+  says so, and the member that carried it looks for the leader again, so two
+  members that take each other for the leader do not pass a write around. Two
+  kinds of request are still answered with a 307 to the leader: one that
+  upgrades its connection (exec, attach, port-forward, proxy), which is a
+  conversation, and one from a client whose identity headers could not carry
+  unchanged, such as a certificate group with a comma in its name or a
+  certificate named like a ServiceAccount. A few POST paths
   that persist nothing are served locally on any member: patch rollouts,
   self/local subject access and rules reviews, and token reviews.
 - **A read is current unless it asks not to be.** As in Kubernetes, a GET, LIST

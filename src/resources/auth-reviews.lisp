@@ -302,13 +302,21 @@
       (values (third parts) (fourth parts)))))
 
 (defun impersonation-extra (request)
-  "The extra attributes REQUEST impersonates, as an alist of key to values: one
-Impersonate-Extra-<key> header for each key, the key percent-encoded."
-  (loop for (name . nil) in (hunchentoot:headers-in request)
-        for text = (string-downcase (string name))
-        when (and (uiop:string-prefix-p "impersonate-extra-" text) (> (length text) 18))
-          collect (cons (hunchentoot:url-decode (subseq text 18) hunchentoot::+utf-8+)
-                        (impersonation-header-values request name))))
+  "The extra attributes REQUEST impersonates, as an alist of key to values: the
+Impersonate-Extra-<key> headers, the key percent-encoded. A key's values may come
+in one header, divided by commas, or in several."
+  (let ((extra nil))
+    (loop for (name . value) in (hunchentoot:headers-in request)
+          for text = (string-downcase (string name))
+          when (and (uiop:string-prefix-p "impersonate-extra-" text) (> (length text) 18))
+            do (let* ((key (hunchentoot:url-decode (subseq text 18) hunchentoot::+utf-8+))
+                      (entry (or (assoc key extra :test #'equal)
+                                 (first (push (list key) extra)))))
+                 (setf (cdr entry)
+                       (append (cdr entry)
+                               (mapcar (lambda (item) (string-trim " " item))
+                                       (uiop:split-string value :separator '(#\,)))))))
+    (nreverse extra)))
 
 (defun impersonated-api-identity (store identity request)
   "Return the identity REQUEST impersonates, checking each attribute, or IDENTITY if it impersonates none."

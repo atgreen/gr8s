@@ -239,31 +239,164 @@ function that sets what the follower believes: (values self-leader-p leader-url)
                              pki admin-certificate admin-key collection :method "POST"
                              :object (csr-fixture (csr-crypto-fixture follower-directory "ec") :name "with-extra")
                              :headers '("Impersonate-User: engineer"
-                                        "Impersonate-Extra-authentication.kubernetes.io%2Fpod-name: builder-0"))))
-                 (is (equal '(("authentication.kubernetes.io/pod-name" "builder-0"))
-                            (fourth (actor "with-extra"))))))
+                                        "Impersonate-Extra-authentication.kubernetes.io%2Fpod-name: builder-0"
+                                        ;; One attribute's values in one header, or in several.
+                                        "Impersonate-Extra-scopes: view, edit"
+                                        "Impersonate-Extra-teams: a" "Impersonate-Extra-teams: b"))))
+                 (is (equal '(("authentication.kubernetes.io/pod-name" "builder-0")
+                              ("scopes" "edit" "view") ("teams" "a" "b"))
+                            (mapcar (lambda (entry) (cons (car entry) (sort (copy-list (cdr entry)) #'string<)))
+                                    (fourth (actor "with-extra")))))))
           (when follower (stop-server follower))
           (when leader (stop-server leader)))))))
 
 (test an-identity-is-carried-only-if-headers-can-hold-it-exactly
-  (flet ((expressible-p (&rest arguments)
+  (flet ((expressible-p (username &rest arguments &key (groups '("devs")) &allow-other-keys)
            (gr8s.apiserver::leader-relay-identity-expressible-p
-            (apply #'gr8s.resources::make-api-user-identity arguments)))
+            (apply #'gr8s.resources::make-api-user-identity
+                   :username username
+                   :groups (coerce (append groups '("system:authenticated")) 'vector)
+                   (alexandria:remove-from-plist arguments :groups))))
          (extra (key &rest values)
            (let ((table (make-hash-table :test #'equal)))
              (setf (gethash key table) (coerce values 'vector))
              table)))
-    (is (expressible-p :username "system:serviceaccount:monitoring:prometheus" :uid "0f3c"
-                       :groups #("system:serviceaccounts" "system:authenticated")
-                       :extra (extra "authentication.kubernetes.io/pod-name" "prometheus-0")))
-    (is (expressible-p :username "CN=Jane Doe, OU=eng" :groups #("system:authenticated"))
-        "a name is one header and is not divided")
-    (is (not (expressible-p :username "jane" :groups #("devs,system:masters"))))
-    (is (not (expressible-p :username "jane" :groups #(" system:masters"))))
-    (is (not (expressible-p :username (format nil "jane~C~CImpersonate-Group: system:masters" #\Return #\Linefeed)
-                            :groups #("devs"))))
-    (is (not (expressible-p :username "jane" :uid (format nil "1~Cx" #\Tab) :groups #("devs"))))
-    (is (not (expressible-p :username (format nil "j~Cne" (code-char 228)) :groups #("devs"))))
-    (is (not (expressible-p :username "jane" :groups #("devs") :extra (extra "scopes" "a,b"))))
-    (is (not (expressible-p :username "jane" :groups #("devs") :extra (extra "Scopes" "a"))))
-    (is (not (expressible-p :username "" :groups #("devs"))))))
+    (is (expressible-p "jane" :uid "0f3c" :extra (extra "authentication.kubernetes.io/pod-name" "builder-0")))
+    (is (expressible-p "CN=Jane Doe, OU=eng") "a name is one header and is not divided")
+    (is (not (expressible-p "jane" :groups '("devs,system:masters"))))
+    (is (not (expressible-p "jane" :groups '(" system:masters"))))
+    (is (not (expressible-p (format nil "jane~C~CImpersonate-Group: system:masters" #\Return #\Linefeed))))
+    (is (not (expressible-p "jane" :uid (format nil "1~Cx" #\Tab))))
+    (is (not (expressible-p (format nil "j~Cne" (code-char 228)))))
+    (is (not (expressible-p "jane" :extra (extra "scopes" "a,b"))))
+    (is (not (expressible-p "jane" :extra (extra "Scopes" "a"))))
+    (is (not (expressible-p "jane" :extra (extra "scopes"))) "a key with no value has no header")
+    (is (not (expressible-p "")))
+    ;; The leader gives these groups to whoever is named so. A client must hold them already.
+    (is (not (expressible-p "system:serviceaccount:monitoring:prometheus"))
+        "a certificate named like a ServiceAccount is not one")
+    (is (gr8s.apiserver::leader-relay-identity-expressible-p
+         (gr8s.resources::make-api-service-account-identity :namespace "monitoring" :name "prometheus" :uid "0f3c")))
+    (is (not (gr8s.apiserver::leader-relay-identity-expressible-p
+              (gr8s.resources::make-api-user-identity :username "jane" :groups #("devs"))))
+        "the leader would count this client among the authenticated")
+    (is (gr8s.apiserver::leader-relay-identity-expressible-p
+         (gr8s.resources::make-api-user-identity :username "system:anonymous" :groups #("system:unauthenticated"))))
+    ;; Several values of one attribute travel in one header: the receiver keeps
+    ;; only the first of several headers whose name it has not met before.
+    (is (equal '(("Impersonate-User" . "jane") ("Impersonate-Group" . "system:authenticated")
+                 ("Impersonate-Extra-scopes" . "view, edit"))
+               (gr8s.apiserver::leader-relay-identity-headers
+                (gr8s.resources::make-api-user-identity :username "jane" :groups #("system:authenticated")
+                                                        :extra (extra "scopes" "view" "edit")))))))
+
+(defun follower-write-curl (port &rest arguments)
+  "POST a ConfigMap to PORT with curl and extra ARGUMENTS; return the status and the response headers."
+  (let* ((text (uiop:run-program
+                (append (list "curl" "--silent" "--max-time" "20" "--output" "/dev/null" "--dump-header" "-"
+                              "--request" "POST" "--header" "Content-Type: application/json"
+                              "--data-binary" (follower-write-configmap-json (format nil "c~D" (random 1000000)) "v")
+                              "--write-out" "%{http_code}")
+                        arguments
+                        (list (format nil "http://127.0.0.1:~D/api/v1/namespaces/default/configmaps" port)))
+                :output :string :ignore-error-status t))
+         (code (parse-integer text :start (max 0 (- (length text) 3)) :junk-allowed t)))
+    (values code (string-downcase text))))
+
+(test a-write-that-asks-leave-to-send-its-body-is-answered-once
+  ;; curl sends Expect: 100-continue when told to. The follower gives that leave
+  ;; itself; the leader must not be asked for it again, or its interim answer
+  ;; would be taken for the answer.
+  (call-with-leader-and-follower
+   (lambda (leader-port leader-store follower-port follower-store believe)
+     (declare (ignore follower-store))
+     (funcall believe nil (format nil "http://127.0.0.1:~D" leader-port))
+     (is (= 201 (follower-write-curl follower-port "--header" "Expect: 100-continue")))
+     (is (= 1 (length (gr8s.resources::list-core-resources leader-store "configmaps" "default")))))))
+
+(test members-that-take-each-other-for-the-leader-do-not-pass-a-write-around
+  (with-temporary-store (store-a path-a)
+    (with-temporary-store (store-b path-b)
+      (declare (ignore path-a path-b))
+      (let* ((url-b nil) (url-a nil)
+             (a (gr8s.apiserver::start-server :address "127.0.0.1" :port 0 :store store-a
+                                              :leader-status-fn (lambda () (values nil url-b))))
+             (b (gr8s.apiserver::start-server :address "127.0.0.1" :port 0 :store store-b
+                                              :leader-status-fn (lambda () (values nil url-a))))
+             (saved gr8s.apiserver::*leader-relay-patience-seconds*))
+        (unwind-protect
+             (progn
+               (setf url-a (format nil "http://127.0.0.1:~D" (hunchentoot:acceptor-port a))
+                     url-b (format nil "http://127.0.0.1:~D" (hunchentoot:acceptor-port b))
+                     gr8s.apiserver::*leader-relay-patience-seconds* 1)
+               ;; A member told that a write was carried to it says that it does not lead.
+               (multiple-value-bind (code headers)
+                   (follower-write-curl (hunchentoot:acceptor-port b) "--header" "X-Gr8s-Relayed: 1")
+                 (is (= 503 code))
+                 (is (search "x-gr8s-not-leader" headers)))
+               ;; So a asks b, b refuses, and a gives up when its patience ends.
+               (let ((started (get-internal-real-time)))
+                 (is (= 503 (follower-write-curl (hunchentoot:acceptor-port a))))
+                 (is (< (/ (- (get-internal-real-time) started) internal-time-units-per-second) 6)))
+               (is (null (gr8s.resources::list-core-resources store-a "configmaps" "default")))
+               (is (null (gr8s.resources::list-core-resources store-b "configmaps" "default"))))
+          (setf gr8s.apiserver::*leader-relay-patience-seconds* saved)
+          (gr8s.apiserver::stop-server a)
+          (gr8s.apiserver::stop-server b))))))
+
+(test a-member-holds-only-so-many-writes-while-there-is-no-leader
+  (call-with-leader-and-follower
+   (lambda (leader-port leader-store follower-port follower-store believe)
+     (declare (ignore leader-port leader-store follower-store))
+     (funcall believe nil "http://127.0.0.1:1")
+     (let ((saved gr8s.apiserver::*leader-relay-waiting-places*)
+           (started (get-internal-real-time)))
+       (unwind-protect
+            (progn
+              (setf gr8s.apiserver::*leader-relay-waiting-places* 0)
+              (is (= 503 (follower-write-curl follower-port)))
+              (is (< (/ (- (get-internal-real-time) started) internal-time-units-per-second) 3)
+                  "a write that finds no place is refused at once"))
+         (setf gr8s.apiserver::*leader-relay-waiting-places* saved))
+       (is (zerop gr8s.apiserver::*leader-relay-waiting*))))
+   :patience 20))
+
+(test an-answer-the-leader-does-not-finish-ends-the-request
+  ;; The leader sends the head of its answer and then nothing. The follower's
+  ;; thread must end, with its two connections, and not wait in the debugger.
+  (let* ((listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t :element-type '(unsigned-byte 8)))
+         (port (usocket:get-local-port listener))
+         (peer nil)
+         (stalling-leader
+           (bt:make-thread
+            (lambda ()
+              (ignore-errors
+                (setf peer (usocket:socket-accept listener :element-type '(unsigned-byte 8)))
+                (let ((stream (usocket:socket-stream peer)))
+                  ;; Read the request's head, then answer with half a body.
+                  (loop with seen = 0
+                        for octet = (read-byte stream nil nil)
+                        while octet
+                        do (setf seen (if (member octet '(13 10)) (1+ seen) 0))
+                        until (= seen 4))
+                  (write-sequence (trivial-utf-8:string-to-utf-8-bytes
+                                   (format nil "HTTP/1.1 200 OK~C~CContent-Length: 100~C~C~C~Chalf"
+                                           #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed))
+                                  stream)
+                  (force-output stream)
+                  (sleep 8))))))
+         (saved gr8s.apiserver::*leader-relay-answer-seconds*))
+    (unwind-protect
+         (call-with-leader-and-follower
+          (lambda (leader-port leader-store follower-port follower-store believe)
+            (declare (ignore leader-port leader-store follower-store))
+            (funcall believe nil (format nil "http://127.0.0.1:~D" port))
+            (setf gr8s.apiserver::*leader-relay-answer-seconds* 1)
+            (let ((started (get-internal-real-time)))
+              (follower-write-curl follower-port "--data-binary" "{}")
+              (is (< (/ (- (get-internal-real-time) started) internal-time-units-per-second) 6)
+                  "the client's connection is ended when the leader's time is up"))))
+      (setf gr8s.apiserver::*leader-relay-answer-seconds* saved)
+      (when peer (ignore-errors (usocket:socket-close peer)))
+      (ignore-errors (usocket:socket-close listener))
+      (ignore-errors (bt:join-thread stalling-leader)))))
