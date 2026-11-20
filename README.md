@@ -442,8 +442,12 @@ REPL while it runs.
   [shims `cl+ssl`](cl+ssl.asd) so even vendored HTTP clients link the
   pure-Lisp TLS instead of OpenSSL.
 - **Pinned, reproducible dependencies.** [ocicl](https://github.com/ocicl/ocicl)
-  manages the dependency tree from a lockfile ([ocicl.csv](ocicl.csv)), so
-  builds resolve the same systems every time.
+  restores the dependency tree from a lockfile ([ocicl.csv](ocicl.csv)).
+  The full-server source launcher and Makefile core-system Lisp commands use
+  [a controlled bootstrap](scripts/bootstrap.lisp) to select the locked paths
+  without inheriting host ASDF registries or Lisp startup files. The local
+  `cl+ssl` shim takes precedence; missing pins require `ocicl install` rather
+  than silently falling back to a host library.
 - **Where to start reading.** The
   [source map and developer walkthrough](docs/development.md) tours the code;
   the [documentation style guide](docs/documentation-style.md) explains how

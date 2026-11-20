@@ -12,9 +12,10 @@
     (sb-ext:run-program sb-ext:*runtime-pathname*
                         (list "--core" (namestring sb-ext:*core-pathname*)
                               "--dynamic-space-size" (format nil "~DMB" (floor *gr8s-dynamic-space-size* (* 1024 1024)))
-                              "--noinform" "--non-interactive" "--load" "scripts/build-native.lisp")
+                              "--noinform" "--no-sysinit" "--no-userinit" "--non-interactive" "--load" "scripts/build-native.lisp")
                         :output t :error t :input t))))
 
+(load (merge-pathnames "bootstrap.lisp" *load-truename*))
 (asdf:load-asd (truename "gr8s.asd"))
 (asdf:load-system :gr8s)
 (gr8s.runtime::embed-runtime-assets #P"build/containerd/")

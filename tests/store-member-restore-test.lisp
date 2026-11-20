@@ -396,7 +396,10 @@
                (dolist (path (list ready report stop)) (when (probe-file path) (delete-file path)))
                (setf process
                      (sb-ext:run-program "sbcl"
-                      (list "--dynamic-space-size" "384" "--noinform" "--non-interactive" "--load" script "--"
+                      (list "--dynamic-space-size" "384" "--noinform" "--no-sysinit" "--no-userinit"
+                            "--load" (namestring (merge-pathnames "scripts/bootstrap.lisp"
+                                                                (asdf:system-source-directory :gr8s)))
+                            "--non-interactive" "--load" script "--"
                             (namestring root) (namestring wal) (namestring ready) (namestring report) (namestring stop))
                       :search t :wait nil :input nil :output log :if-output-exists :supersede :error :output))
                (await-file ready)
@@ -533,7 +536,10 @@
         (labels ((launch (mode)
                    (setf process
                          (sb-ext:run-program "sbcl"
-                          (list "--dynamic-space-size" "384" "--noinform" "--non-interactive" "--load" script "--"
+                          (list "--dynamic-space-size" "384" "--noinform" "--no-sysinit" "--no-userinit"
+                            "--load" (namestring (merge-pathnames "scripts/bootstrap.lisp"
+                                                                (asdf:system-source-directory :gr8s)))
+                            "--non-interactive" "--load" script "--"
                                 (namestring root) (namestring wal) (namestring ready) (namestring report) (namestring stop) mode)
                           :search t :wait nil :input nil :output log :if-output-exists :supersede :error :output)))
                  (await-file (path)

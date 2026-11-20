@@ -60,7 +60,10 @@
                (dolist (path (list ready report stop log)) (when (probe-file path) (delete-file path)))
                (setf process
                      (sb-ext:run-program "sbcl"
-                      (list "--dynamic-space-size" "384" "--noinform" "--non-interactive" "--load"
+                      (list "--dynamic-space-size" "384" "--noinform" "--no-sysinit" "--no-userinit"
+                            "--load" (namestring (merge-pathnames "scripts/bootstrap.lisp"
+                                                                (asdf:system-source-directory :gr8s)))
+                            "--non-interactive" "--load"
                             (namestring (truename "scripts/store-restore-memory-receiver.lisp")) "--"
                             (namestring sink-root) (write-to-string count) (namestring ready)
                             (namestring report) (namestring stop) mode)
