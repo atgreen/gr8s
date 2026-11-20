@@ -30,8 +30,10 @@
          (role (or (gethash id (raft-node-roles node)) (gethash id (raft-node-pending-members node))))
          (existing (gethash id (raft-member-links member))))
     (if existing
-        (when role (setf (raft-peer-link-role existing) role))
-        (let ((link (make-raft-peer-link :id id :host host :port port :role (or role :voter))))
+        (setf (raft-peer-link-role existing) (or role (raft-peer-link-role existing))
+              (raft-peer-link-sealed existing) (not (raft-peer-holds-seal-key-p node id)))
+        (let ((link (make-raft-peer-link :id id :host host :port port :role (or role :voter)
+                                         :sealed (not (raft-peer-holds-seal-key-p node id)))))
           (setf (gethash id (raft-member-links member)) link
                 (raft-peer-link-thread link)
                 (bt:make-thread (lambda () (raft-link-sender-loop member link))

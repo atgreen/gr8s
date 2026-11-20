@@ -39,8 +39,14 @@ PodCIDR. Events are deliberately local.
   endpoint, a node agent rotates through them on reconnect and resumes against the
   new leader.
 - **Membership is dynamic.** Single-member, effective-on-commit changes grow or
-  shrink the cluster. A **witness** votes for quorum but never leads, so a
-  two-node + witness topology survives one node loss. New members enroll with a
+  shrink the cluster. A **witness** votes for quorum and stores the log but has
+  no application state, so a two-node + witness topology survives one node loss.
+  It takes no writes and never campaigns on its own timer. It leads only to hand
+  over: when a leader fails under load the other voter is often an entry or two
+  behind the witness, which must then refuse it its vote. The witness stands for
+  election itself, replicates its log to that voter, and transfers leadership to
+  it at once (at most one election timeout; see cl-raft's
+  `raft-witness-should-stand-in-p`). New members enroll with a
   one-time token, then join with the certificate they receive (a follower
   redirects to the leader).
 - **Members use mutual TLS.** Replication carries every Secret, so each member
@@ -48,8 +54,19 @@ PodCIDR. Events are deliberately local.
   the member it names. Worker certificates and tokens aren't accepted, because
   they come from a separate CA and token store. A joiner checks the CA against its
   pin before sending anything. Voters hold the CA key so they can admit
-  replacements after a failover; witnesses don't, but their log does hold
-  replicated state, which is why it's created with mode `0600`. Member certificates
+  replacements after a failover; witnesses don't.
+- **A witness cannot read the log it stores.** A committed write may exist only
+  on the leader and the witness, so the witness has to keep entries and be able
+  to return them. A leader sends a witness each command sealed (AES-256-GCM,
+  bound to the entry's index and term) under a key derived from the cluster CA
+  key, which a witness is never given. Membership changes and barriers stay
+  readable. A voter opens a sealed entry before it reaches its log, and accepts
+  from a witness nothing but sealed entries and barriers. A witness also may
+  not propose a write or relay a node operation through another member. Each
+  voter logs the key's id at startup (`log entries are sealed for witnesses
+  under key ...`); the ids must match. Replacing the cluster CA key changes the
+  key: a witness then holds entries no voter can open, and cannot hand over
+  until its log has turned over. Member certificates
   last a year and renew themselves in their last 30 days: a voter signs its own,
   and a witness asks a voter, so a witness that stays offline past expiry has to
   enroll again.

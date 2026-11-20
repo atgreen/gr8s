@@ -137,6 +137,7 @@
                              (:module "raft/transport"
                               :serial t
                               :components ((:file "package")
+                                           (:file "seal")
                                            (:file "member")
                                            (:file "snapshot")
                                            (:file "cluster")))
@@ -482,6 +483,7 @@
                              (:file "raft-test")
                              (:file "raft-transport-test")
                              (:file "raft-cluster-test")
+                             (:file "raft-seal-test")
                              (:file "raft-failover-test")
                              (:file "raft-join-test")
                              (:file "witness-command-test")
