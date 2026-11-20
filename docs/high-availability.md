@@ -32,9 +32,24 @@ PodCIDR. Events are deliberately local.
   follower idles until promotion.
 - **Leader-aware HTTP.** A follower answers a mutating API request with a 307 to
   the current leader and preserves the path and query. It returns 503 when it
-  does not know the leader. Followers serve reads locally. A few POST paths that
+  does not know the leader. A few POST paths that
   persist nothing are served locally on any member rather than redirected: patch
   rollouts, self/local subject access and rules reviews, and token reviews.
+- **A read is current unless it asks not to be.** As in Kubernetes, a GET, LIST
+  or WATCH that names no `resourceVersion` is answered from a quorum: the member
+  first asks the leader how far the log has been committed, the leader confirms
+  with one round of heartbeats that a quorum still follows it, and the member
+  answers once it has applied that far (Raft ReadIndex, as etcd does it). One
+  round serves every read that was waiting when it began. A member that cannot
+  reach such a leader within five seconds answers 503 with `Retry-After`, as it
+  does for a write, because its own state may be arbitrarily old. A read at
+  `resourceVersion=0` accepts any version and is still served from the member's
+  own state, as are discovery, health and the `gr8s.io` endpoints an operator
+  uses to inspect a member that is cut off.
+- **A member that has lost the leader is not ready.** `/readyz` and
+  `/readyz/etcd` answer 503 on a follower that has heard no leader for an
+  election timeout, so a load balancer stops sending to it. `/livez` still
+  answers 200: restarting the member would not help.
 - **Agents reconnect across failover.** Given more than one control-plane
   endpoint, a node agent rotates through them on reconnect and resumes against the
   new leader.

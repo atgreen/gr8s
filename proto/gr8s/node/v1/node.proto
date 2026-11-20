@@ -553,6 +553,11 @@ service RaftTransport {
   // Mutual Raft TLS authenticates the caller; the leader commits the serialized
   // command through the same log used by local writers.
   rpc Propose(RaftProposal) returns (RaftProposalResult);
+  // A follower asks the leader which log position a read must wait for. The
+  // leader answers with its commit index once a quorum has confirmed that it
+  // still leads; a follower that has applied that index can serve a read no
+  // older than the moment it asked (Raft ReadIndex).
+  rpc ReadIndex(RaftReadIndexRequest) returns (RaftReadIndexResult);
   // A new member asks the cluster to admit it (podster-c2d.10). Call it on any
   // member; a follower answers with accepted=false and the current leader's
   // address so the joiner can retry there. The leader authenticates the joiner,
@@ -635,6 +640,17 @@ message RaftProposalResult {
   // Application rejection is distinct from consensus commit. Currently used
   // for per-Pod transaction preconditions, encoded as a data-only Raft form.
   bytes application_result = 4;
+}
+
+message RaftReadIndexRequest {
+}
+
+message RaftReadIndexResult {
+  bool confirmed = 1;
+  // When not confirmed: "not-leader", "not-ready" (a new leader that has not
+  // yet committed an entry of its own term) or "timeout".
+  string reason = 2;
+  uint64 index = 3;
 }
 
 message RaftMember {
