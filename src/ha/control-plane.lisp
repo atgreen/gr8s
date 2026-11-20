@@ -24,6 +24,8 @@
   ;; leader reconciles the replicated config toward it so followers redirect
   ;; clients to where the leader actually is after it roams (podster-1ig).
   advertised-api-url
+  ;; Whether this start has told the other members its resource revision.
+  revision-advertised
   maintenance-thread maintenance-running maintenance-error artifact-maintenance-error
   (maintenance-lock (bt:make-lock "gr8s HA maintenance"))
   (maintenance-changed (bt:make-condition-variable :name "gr8s HA maintenance"))

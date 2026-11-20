@@ -675,8 +675,13 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
             for remaining = (/ (- deadline (get-internal-real-time))
                                internal-time-units-per-second)
             when (<= remaining 0)
+              ;; Say which node, and whether it could have answered at all: a
+              ;; request held for an agent that is not connected only ever times out.
               do (setf (pending-node-operation-error operation)
-                       "Node operation timed out"
+                       (format nil "Node ~A did not answer within ~D second~:P~:[; its agent is not connected to the control plane~;~]"
+                               (pending-node-operation-node-name operation) timeout
+                               (or (pending-node-operation-session operation)
+                                   (pending-node-operation-remote-member operation)))
                        (pending-node-operation-done-p operation) t)
                  (loop-finish)
             do (bt:condition-wait

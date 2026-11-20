@@ -39,6 +39,9 @@
   (resource-history-start 0)
   template-token-key
   (event-expirations (make-hash-table :test #'equal))
+  ;; Set when this member took another's revision numbering: the versions of
+  ;; the objects it already held are then its own and must be rewritten.
+  (core-versions-stale nil)
   (core-journal-bytes 0)
   (core-checkpoint-bytes 0)
   (core-checkpoint-needed t)

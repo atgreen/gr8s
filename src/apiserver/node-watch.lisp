@@ -81,7 +81,7 @@ client can see, so they cost neither a revision nor an event."
     (core-resource-error 410 "Expired" "too old resource version: ~D (~D)"
                          revision (pod-store-node-watch-floor store)))
   (when (> revision (pod-store-pod-revision store))
-    (core-resource-error 504 "Timeout" "Requested resourceVersion is newer than storage")))
+    (gr8s.resources::resource-version-too-large-error revision (pod-store-pod-revision store))))
 
 (defun node-selection-predicate (labels fields)
   "Return a test for Node API views matching the LABELS and FIELDS selectors."

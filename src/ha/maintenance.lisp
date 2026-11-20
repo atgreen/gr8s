@@ -121,7 +121,34 @@ refresh is skipped. Returns the proposal outcome, or NIL when nothing was done."
         (format *error-output* "~&gr8s HA artifact maintenance failed: ~A~%" condition)))
     (handler-case (reconcile-ha-advertised-api-url hcp)
       (error (condition)
-        (format *error-output* "~&gr8s HA API-URL re-advertisement failed: ~A~%" condition)))))
+        (format *error-output* "~&gr8s HA API-URL re-advertisement failed: ~A~%" condition)))
+    (handler-case (reconcile-ha-resource-revisions hcp)
+      (error (condition)
+        (format *error-output* "~&gr8s HA resource revision reconciliation failed: ~A~%" condition)))))
+
+(defun reconcile-ha-resource-revisions (hcp)
+  "Once per start, tell the other members this member's resource revision, and
+whenever this member has taken another's numbering, rewrite what it held."
+  (let ((store (ha-control-plane-store hcp)))
+    ;; A learner cannot propose, and with no leader a proposal only waits.
+    (when (and (gr8s.store::pod-store-consensus-commit-fn store)
+               (let ((member (ha-control-plane-member hcp)))
+                 (bt:with-lock-held ((raft-member-lock member))
+                   (let ((node (raft-member-node member)))
+                     (and (gr8s.raft::raft-node-leader-id node)
+                          (not (eq :learner (gr8s.raft::raft-node-self-role node))))))))
+      ;; A store that is installing a snapshot, or a write that cannot commit
+      ;; yet, is tried again on the next pass.
+      (handler-case
+          (progn
+            (unless (ha-control-plane-revision-advertised hcp)
+              (gr8s.resources::advertise-core-revision store)
+              (setf (ha-control-plane-revision-advertised hcp) t))
+            (when (gr8s.store::pod-store-core-versions-stale store)
+              (gr8s.resources::restamp-core-resources store)))
+        (gr8s.model:kubernetes-error (condition)
+          (unless (eql 503 (gr8s.model:kubernetes-error-status-code condition))
+            (error condition)))))))
 
 (defun start-ha-maintenance-worker (hcp &key (interval 1))
   "Run generation maintenance even when automatic Raft compaction is disabled."

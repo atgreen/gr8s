@@ -162,6 +162,16 @@
   (error 'kubernetes-error :status-code code :reason reason
          :message (apply #'format nil control arguments)))
 
+(defun resource-version-too-large-error (requested current)
+  "Signal the 504 a client gets for a resourceVersion this server has not reached.
+   The cause is what client-go looks for before it lists again without one; a
+   reflector that cannot recognise the error repeats the same request instead."
+  (error 'kubernetes-error :status-code 504 :reason "Timeout"
+         :message (format nil "Too large resource version: ~D, current: ~D" requested current)
+         :details (core-object "retryAfterSeconds" 1
+                               "causes" (vector (core-object "reason" "ResourceVersionTooLarge"
+                                                             "message" "Too large resource version")))))
+
 (defun core-resource-key (resource namespace name)
   "Return the index key identifying one stored object: the list (RESOURCE NAMESPACE NAME)."
   (list resource namespace name))
@@ -552,6 +562,8 @@ time. A stale author cannot replace a changed key or erase unrelated commits."
                  changes))))
      keys)
     (setf (gethash "version" record) 2
+          ;; Every member expires Events at this time, not by its own clock.
+          (gethash "time" record) (funcall *event-clock*)
           (gethash "baseRevision" record) base
           ;; Preserve the transaction's revision width (for example a Service
           ;; plus its IPAddress claim), but rebase it on committed apply state.
@@ -828,11 +840,20 @@ Callbacks run under the store lock and must not read or write the store."
   "Apply one committed key-level core transaction to STORE in Raft log order.
 The command's revision span is rebased on this replica's committed revision;
 unrelated keys are preserved; version 2 conditions reject stale same-key writes
-before any state is published."
+before any state is published.
+
+Every member must give a transaction the same revision, or a client that reads
+through one member cannot update through another (podster-gts). Only applying
+a transaction advances the revision, so members that agree stay agreed. A
+member that finds its author ahead of it was left behind by an older version:
+it takes the author's numbering and marks its objects to be given versions the
+other members share."
   (bt:with-lock-held ((pod-store-lock store))
     (let* ((delta (com.inuoe.jzon:parse json :max-string-length (* 2 1024 1024)))
            (resources (copy-core-resource-index store))
-           (revision (+ (pod-store-resource-revision store)
+           (time (gethash "time" delta))
+           (behind (> (gethash "baseRevision" delta 0) (pod-store-resource-revision store)))
+           (revision (+ (max (pod-store-resource-revision store) (gethash "baseRevision" delta 0))
                         (gethash "revisionSpan" delta 1)))
            (workload-deletions (pod-store-workload-deletions store))
            (job-controller-states (pod-store-job-controller-states store)))
@@ -879,6 +900,19 @@ before any state is published."
                      ;; this member; the next delta must not move one backwards.
                      (setf (gethash "resourceVersion" (gethash "metadata" object)) (write-to-string revision)
                            (gethash key resources) object))))
+      ;; Events leave every member in the same transaction, at its author's time.
+      (when (realp time)
+        (maphash (lambda (key object)
+                   (when (equal "events" (first key))
+                     (let ((expiry (gethash (gethash "uid" (gethash "metadata" object))
+                                            (pod-store-event-expirations store))))
+                       (when (and expiry (<= expiry time) (eq object (gethash key resources)))
+                         (remhash key resources)))))
+                 (pod-store-resources store)))
+      (when behind
+        (format *error-output* "~&gr8s: resource revision ~D was behind the control plane's ~D; taking its numbering~%"
+                (pod-store-resource-revision store) (gethash "baseRevision" delta))
+        (setf (gr8s.store::pod-store-core-versions-stale store) t))
       (when (gethash "workloadDeletions" delta)
         (setf workload-deletions
               (apply-core-map-delta workload-deletions
@@ -897,11 +931,46 @@ before any state is published."
       ;; apply, not another transaction to propose: force the durable publish
       ;; path so the leader installs the same committed entry as its followers.
       (let ((*core-write-active* nil)
-            (*unreplicated-write* nil))
+            (*unreplicated-write* nil)
+            ;; An Event written here expires an hour after its author's time.
+            (*event-clock* (if (realp time) (lambda () time) *event-clock*)))
         (commit-core-resources store resources revision
                                :workload-deletions workload-deletions
                                :job-controller-states job-controller-states))
       (list :core-ok))))
+
+(defun advertise-core-revision (store)
+  "Commit a transaction that changes nothing, so that every member learns this
+   member's revision and the highest becomes the one they all count from."
+  (with-core-write (store)
+    (commit-core-resources store (pod-store-resources store) (1+ (pod-store-resource-revision store)))))
+
+(defun restamp-core-resources (store &key (batch 100))
+  "Rewrite every stored object unchanged, BATCH at a time, so that each takes a
+   resourceVersion all members share. Returns whether every batch committed."
+  (let ((keys (with-store-lock (store)
+                (setf (gr8s.store::pod-store-core-versions-stale store) nil)
+                (sort (loop for key being the hash-keys of (pod-store-resources store)
+                            unless (equal "events" (first key)) collect key)
+                      #'string< :key #'prin1-to-string)))
+        (complete t))
+    (loop while keys
+          do (let ((group (loop repeat batch while keys collect (pop keys))))
+               (handler-case
+                   (with-core-write (store)
+                     (let ((index (copy-core-resource-index store)) (changed nil))
+                       (dolist (key group)
+                         (let ((object (gethash key index)))
+                           (when object
+                             (setf (gethash key index) (copy-core-object object) changed t))))
+                       (when changed
+                         (commit-core-resources store index (1+ (pod-store-resource-revision store))))))
+                 ;; A group that lost a race is tried again with the rest next time.
+                 (kubernetes-error ()
+                   (setf complete nil)))))
+    (unless complete
+      (with-store-lock (store) (setf (gr8s.store::pod-store-core-versions-stale store) t)))
+    complete))
 
 (defun copy-core-resource-index (store)
   "Return a shallow copy of STORE's resource index: a fresh EQUAL table that shares

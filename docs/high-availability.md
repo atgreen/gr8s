@@ -27,12 +27,30 @@ EndpointSlices, CSR/certificate issuance state), **Pods**, and a Node's assigned
 PodCIDR.
 
 **Events** are written through Raft too, so `kubectl get events` and `kubectl
-describe` show the same ones through every member. Only their expiry is each
-member's own: a member stamps an Event when it applies it and drops its copy an
-hour later, so for a moment around that hour members may differ. A write of an
-Event is therefore applied whatever a member held before; the newest wins.
+describe` show the same ones through every member. An Event lasts an hour from
+the time its author's clock read when it was written, and leaves every member in
+the same later write, at that write's author's time: no member drops one by its
+own clock, so an idle cluster keeps an expired Event until its next write.
 Events are not part of a snapshot, so a member that caught up from one may show
-fewer until they are next written or have expired everywhere. A kubelet's
+fewer until they are next written; a write of an Event is therefore applied
+whatever a member held before, and the newest wins.
+
+**Every member gives an object the same `resourceVersion`.** A client may read
+through one member and write through another, and a version it was given by one
+must mean the same to the other: otherwise an update is refused as a conflict
+for ever and a list at a version is refused as too new. A resource revision is
+therefore taken only when a committed write is applied, which every member does
+in the same order. Nothing a member does alone takes one: trimming its watch
+history keeps the revision, and Events expire as above. A version this member
+has not reached is answered with 504 and the `ResourceVersionTooLarge` cause,
+as a kube-apiserver does, so a client lists again without one.
+
+Members that ran a version from before this rule counted separately. Each
+member proposes one empty write when it starts, which carries its revision; a
+member that finds an author ahead of it takes the author's numbering, logs
+that it was behind, and rewrites every object it holds, unchanged, a hundred at
+a time, so that each gets a version all members share. Clients see those as
+modifications. This happens once after an upgrade and not again. A kubelet's
 repeated Event (a probe that fails every few seconds) is shown at once for its
 first ten occurrences and then brought up to date once a minute, so that it
 does not become a write to every member each time.

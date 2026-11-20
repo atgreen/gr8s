@@ -135,9 +135,12 @@
     expirations))
 
 (defun expire-core-events-unlocked (store)
-  "Delete expired Events atomically, preserving actual DELETED watch events."
+  "Delete expired Events atomically, preserving actual DELETED watch events.
+An HA member does nothing here: its Events leave when a transaction is applied
+(INSTALL-CORE-STATE-DELTA), so that no member's revision advances alone."
+  (when (pod-store-consensus-commit-fn store)
+    (return-from expire-core-events-unlocked nil))
   (let ((now (funcall *event-clock*)) (index nil)
-        ;; Each member expires its own copy; nothing is proposed.
         (*unreplicated-write* t))
     (unless (loop for expiry being the hash-values of (pod-store-event-expirations store)
                   thereis (and expiry (<= expiry now)))
