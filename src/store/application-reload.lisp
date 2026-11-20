@@ -8,7 +8,7 @@
     pod-store-template-history pod-store-template-history-recent pod-store-template-history-maintained-at
     pod-store-template-history-floor pod-store-resource-history-start pod-store-template-token-key
     pod-store-secret-encryption-config
-    pod-store-event-expirations pod-store-core-versions-stale pod-store-core-journal-bytes pod-store-core-checkpoint-bytes pod-store-core-checkpoint-needed
+    pod-store-event-expirations pod-store-core-version-marks pod-store-core-version-round-wanted pod-store-core-journal-bytes pod-store-core-checkpoint-bytes pod-store-core-checkpoint-needed
     pod-store-verified-tokens pod-store-projected-tokens pod-store-pod-certificates
     pod-store-workload-deletions pod-store-job-controller-states
     pod-store-pod-finalization-states pod-store-pod-observed-phases pod-store-pod-observed-statuses

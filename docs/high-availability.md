@@ -45,12 +45,26 @@ history keeps the revision, and Events expire as above. A version this member
 has not reached is answered with 504 and the `ResourceVersionTooLarge` cause,
 as a kube-apiserver does, so a client lists again without one.
 
-Members that ran a version from before this rule counted separately. Each
-member proposes one empty write when it starts, which carries its revision; a
-member that finds an author ahead of it takes the author's numbering, logs
-that it was behind, and rewrites every object it holds, unchanged, a hundred at
-a time, so that each gets a version all members share. Clients see those as
-modifications. This happens once after an upgrade and not again. A kubelet's
+Members that ran a version from before this rule counted separately, and an
+upgrade must bring them to agree. What two members hold can be compared only at
+one place in the replicated log, because every member applies the log in the
+same order however busy the cluster is. So the members agree in rounds:
+
+1. A member puts a marker in the log when it starts. At the marker, each member
+   notes its revision and a digest of the version of every object it holds.
+2. Each member reports what it noted. A member that finds another was ahead of
+   it at the marker raises its revision by that much, and logs that it was
+   behind.
+3. When every voter has reported the same revision, they count alike. If their
+   digests differ, the leader has every member renumber the objects it holds,
+   500 to a write. Those writes name the objects and do not carry them, so the
+   size of the objects does not matter.
+
+Clients see the renumbering as one modification of each object. It happens
+once after an upgrade; when the members already agree, a round changes nothing.
+A round waits for every voter, so it completes only when all of them run a
+version that takes part. Pods are numbered separately and are not covered.
+A kubelet's
 repeated Event (a probe that fails every few seconds) is shown at once for its
 first ten occurrences and then brought up to date once a minute, so that it
 does not become a write to every member each time.
