@@ -9,6 +9,7 @@
    #:ha-control-plane
    #:ha-control-plane-await-linearizable-read
    #:ha-control-plane-follows-a-leader-p
+   #:ha-control-plane-live-api-endpoints
    #:ha-control-plane-leader-p
    #:ha-control-plane-leader-status
    #:ha-control-plane-member

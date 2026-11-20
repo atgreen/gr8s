@@ -489,3 +489,39 @@
         (is (eq t (gr8s.model::node-record-ready-p
                    (gethash "n1" (gr8s.store::pod-store-nodes store))))
             "the committed delta heals this replica's readiness belief")))))
+
+;;; podster-bn8: the leader knows which members can answer an API client now.
+
+(test the-leader-lists-the-api-listeners-of-the-members-it-hears
+  (with-temporary-store (s1 p1)
+    (with-temporary-store (s2 p2)
+      (with-temporary-store (s3 p3)
+        (declare (ignore p1 p2 p3))
+        (let ((h1 nil) (h2 nil) (h3 nil))
+          (unwind-protect
+               (progn
+                 (setf h1 (gr8s.ha::start-ha-control-plane s1 :id "cp1" :init t :api-url "https://192.0.2.1:6443"))
+                 (is (poll-until (lambda () (gr8s.ha::ha-control-plane-leader-p h1))))
+                 (let ((lp (gr8s.raft.transport::raft-member-port (gr8s.ha::ha-control-plane-member h1))))
+                   (setf h2 (gr8s.ha::start-ha-control-plane s2 :id "cp2" :join-host "127.0.0.1" :join-port lp
+                                                                :api-url "https://192.0.2.2:6443"))
+                   (setf h3 (gr8s.ha::start-ha-control-plane s3 :id "cp3" :join-host "127.0.0.1" :join-port lp
+                                                                :api-url "https://192.0.2.3:7443")))
+                 (is (poll-until
+                      (lambda () (equal '(("192.0.2.1" 6443) ("192.0.2.2" 6443) ("192.0.2.3" 7443))
+                                        (gr8s.ha::ha-control-plane-live-api-endpoints h1)))
+                      :timeout 20)
+                     "the leader and both members it hears")
+                 (is (null (gr8s.ha::ha-control-plane-live-api-endpoints h2))
+                     "a member that does not lead has no say")
+                 ;; cp3 stops. It is still a member, but it answers nobody.
+                 (gr8s.ha::stop-ha-control-plane h3)
+                 (setf h3 nil)
+                 (is (poll-until
+                      (lambda () (equal '(("192.0.2.1" 6443) ("192.0.2.2" 6443))
+                                        (gr8s.ha::ha-control-plane-live-api-endpoints h1 :silence-seconds 1)))
+                      :timeout 10)
+                     "a member the leader no longer hears is left out")
+                 (is (equal '(("192.0.2.1" 6443) ("192.0.2.2" 6443) ("192.0.2.3" 7443))
+                            (gr8s.ha::ha-control-plane-live-api-endpoints h1 :silence-seconds 3600))))
+            (dolist (h (list h1 h2 h3)) (when h (ignore-errors (gr8s.ha::stop-ha-control-plane h))))))))))

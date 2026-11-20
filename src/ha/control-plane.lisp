@@ -278,6 +278,43 @@ single-node control plane (HCP NIL) is always current."
 within its election timeout. A single-node control plane always does."
   (or (null hcp) (raft-member-follows-a-leader-p (ha-control-plane-member hcp))))
 
+(defun api-url-endpoint (url)
+  "The (HOST PORT) that URL, a member's advertised API URL, names; NIL if it names none."
+  (when (stringp url)
+    (multiple-value-bind (match groups)
+        (cl-ppcre:scan-to-strings "^https?://(\\[[^\\]]+\\]|[^:/\\[\\]]+):(\\d{1,5})/?$" url)
+      (when match
+        (list (string-trim "[]" (aref groups 0)) (parse-integer (aref groups 1)))))))
+
+(defun ha-control-plane-live-api-endpoints (hcp &key (silence-seconds 3))
+  "On the leader, the API listeners of the members that can answer a client now,
+as sorted (HOST PORT) entries: this member, and every other member that serves
+the API and was heard from within SILENCE-SECONDS. A witness serves none. NIL on
+a member that does not lead.
+
+This is what the kubernetes Service should lead to (podster-bn8). A member the
+leader does not hear is stopped or cut off, and one that is cut off refuses
+reads, so neither can answer. A leader hears each follower several times a
+second, which serves as the lease a kube-apiserver would hold."
+  (let ((member (ha-control-plane-member hcp)))
+    (bt:with-lock-held ((raft-member-lock member))
+      (let* ((node (raft-member-node member))
+             (self (raft-node-id node))
+             (earliest (- (get-internal-real-time) (* silence-seconds internal-time-units-per-second))))
+        (flet ((heard-lately-p (id)
+                 (let* ((link (gethash id (gr8s.raft.transport::raft-member-links member)))
+                        (heard (and link
+                                    (bt:with-lock-held ((gr8s.raft.transport::raft-peer-link-lock link))
+                                      (gr8s.raft.transport::raft-peer-link-last-receive-ticks link)))))
+                   (and heard (> heard earliest)))))
+          (when (raft-leader-p node)
+            (sort (loop for (id . role) in (raft-current-config node)
+                        for endpoint = (api-url-endpoint (gethash id (raft-node-api-urls node)))
+                        when (and endpoint (not (eq role :witness))
+                                  (or (equal id self) (heard-lately-p id)))
+                          collect endpoint)
+                  #'string< :key (lambda (endpoint) (format nil "~A:~5,'0D" (first endpoint) (second endpoint))))))))))
+
 (defun ha-control-plane-membership (hcp)
   "The durable membership from this member's view: a plist of :SELF, :LEADER
    (its id, or NIL while unknown) and :MEMBERS, each member a plist of :ID,
