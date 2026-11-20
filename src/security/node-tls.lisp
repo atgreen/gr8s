@@ -196,12 +196,23 @@ connection instead of letting the condition kill the process."))
   "Run BODY, a TLS negotiation, signalling TLS-HANDSHAKE-TIMEOUT after SECONDS.
 Hunchentoot logs and drops a connection whose setup signals an ERROR, but nothing
 catches a bare deadline: one client that stalled its handshake for ten seconds
-ended the whole server (podster-uqb.138 focused run, 117b50c)."
-  (let ((limit (gensym "SECONDS")))
+ended the whole server (podster-uqb.138 focused run, 117b50c).
+
+An error in BODY is signalled again only after the deadline is out of force. A
+handler further out runs before the stack unwinds, so it ran under the deadline;
+if that had already passed, the handler's first wait -- Hunchentoot takes a lock
+to log the error -- signalled the bare deadline from where nothing here could
+catch it. A server stopped for longer than SECONDS (a paused virtual machine, a
+suspended laptop, SIGSTOP) with a handshake in flight exited when it resumed."
+  (let ((limit (gensym "SECONDS")) (results (gensym "RESULTS")) (failure (gensym "FAILURE")))
     `(let ((,limit ,seconds))
-       (handler-case (sb-sys:with-deadline (:seconds ,limit) ,@body)
-         (sb-sys:deadline-timeout ()
-           (error 'tls-handshake-timeout :seconds ,limit))))))
+       (multiple-value-bind (,results ,failure)
+           (handler-case (multiple-value-list (sb-sys:with-deadline (:seconds ,limit) ,@body))
+             (sb-sys:deadline-timeout ()
+               (values nil (make-condition 'tls-handshake-timeout :seconds ,limit)))
+             (error (condition) (values nil condition)))
+         (when ,failure (error ,failure))
+         (values-list ,results)))))
 
 (defun make-node-tls-channel (host port &rest options &key timeout &allow-other-keys)
   "Open an authenticated gRPC channel to HOST:PORT, bounding the whole TLS and

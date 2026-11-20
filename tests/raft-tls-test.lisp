@@ -332,3 +332,30 @@
           (is (not (equal (gr8s.security::cluster-pki-ca-fingerprint raft-pki) (gr8s.security::cluster-pki-ca-fingerprint node-pki))))
           (finishes (gr8s.security::validate-token raft-pki (gethash "token" output) "cp2"))
           (signals gr8s.security::pki-error (gr8s.security::validate-token node-pki (gethash "token" output) "cp2")))))))
+
+(test an-error-after-a-handshake-deadline-has-passed-reaches-its-handler
+  ;; podster-fao. A server stopped for longer than the handshake deadline resumes
+  ;; with the deadline already past; the handshake's next write then fails. The
+  ;; handler that logs that error takes a lock, as Hunchentoot's does, and under a
+  ;; deadline that has passed, taking a lock signals the deadline instead.
+  (let* ((lock (bt:make-lock "a log")) (logged nil)
+         ;; Another thread is logging, so the handler has to wait for the lock.
+         (other (bt:make-thread (lambda () (bt:with-lock-held (lock) (sleep 0.6))))))
+    (sleep 0.1)
+    (flet ((stopped-then-broken ()
+             ;; Pass the deadline without a wait that would notice it, as a
+             ;; stopped process does.
+             (let ((resume (+ (get-internal-real-time) (/ internal-time-units-per-second 5))))
+               (loop while (< (get-internal-real-time) resume)))
+             (error "Couldn't write: Broken pipe")))
+      (is (eq :dropped
+              (handler-case
+                  (handler-bind ((error (lambda (condition)
+                                          (bt:with-lock-held (lock) (setf logged condition)))))
+                    (gr8s.security::with-tls-handshake-deadline (0.05) (stopped-then-broken)))
+                (error () :dropped))))
+      (is (typep logged 'simple-error) "the handler saw the write failure, not the deadline"))
+    (bt:join-thread other)
+    (is (equal '(1 2) (multiple-value-list (gr8s.security::with-tls-handshake-deadline (5) (values 1 2)))))
+    (signals gr8s.security::tls-handshake-timeout
+      (gr8s.security::with-tls-handshake-deadline (0.05) (sleep 2)))))
