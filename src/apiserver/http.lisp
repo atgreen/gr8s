@@ -1373,7 +1373,10 @@ than wait for the next, which truncates any body that spans records in flight."
       (core-resource-error 413 "RequestEntityTooLarge"
                            "Request body of ~D octets exceeds the ~D octet limit"
                            content-length +max-request-body-bytes+))
+    ;; A body is read from the connection once. A follower that held this request
+    ;; for the leader, and then came to lead, has it already.
     (when (and (or chunked (and content-length (plusp content-length)))
+               (not (slot-value request 'hunchentoot::raw-post-data))
                (not form)
                (not (uiop:string-prefix-p "multipart/form-data" (or (hunchentoot:header-in :content-type request) ""))))
       (let ((stream (hunchentoot::content-stream request)))

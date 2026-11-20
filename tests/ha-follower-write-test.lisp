@@ -108,6 +108,24 @@ function that sets what the follower believes: (values self-leader-p leader-url)
      (is (equal "v" (configmap-value follower-store "mine" "k")))
      (is (null (configmap-value leader-store "mine" "k"))))))
 
+;; A handover does this to the member that takes over: the write it was carrying is
+;; refused by the member that led, and by then it leads itself (podster-f9u).
+(test a-follower-that-comes-to-lead-serves-a-write-it-had-offered-the-leader
+  (call-with-leader-and-follower
+   (lambda (leader-port leader-store follower-port follower-store believe)
+     (declare (ignore leader-port))
+     ;; The member it takes for the leader answers that it does not lead.
+     (funcall believe nil (format nil "http://127.0.0.1:~D" follower-port))
+     (let ((elected (bt:make-thread (lambda () (sleep 1) (funcall believe t nil))))
+           (started (get-internal-real-time)))
+       (is (= 201 (follower-write-request follower-port :post "/api/v1/namespaces/default/configmaps"
+                                          :content (follower-write-configmap-json "offered" "v"))))
+       (is (< (- (get-internal-real-time) started) (* 5 internal-time-units-per-second))
+           "the body it read for the leader is the body it serves, with no second read")
+       (bt:join-thread elected))
+     (is (equal "v" (configmap-value follower-store "offered" "k")))
+     (is (null (configmap-value leader-store "offered" "k"))))))
+
 (test a-write-no-leader-takes-is-refused-so-that-the-client-tries-again
   (call-with-leader-and-follower
    (lambda (leader-port leader-store follower-port follower-store believe)

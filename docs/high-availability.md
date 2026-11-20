@@ -237,8 +237,10 @@ $ gr8s member transfer-leadership gr8s2
 control-plane member gr8s2 now leads
 ```
 
-The command works through any member and returns once `NAME` leads. It exits 1,
-with the reason, when the handover is refused or does not happen:
+The command works through any member and returns once `NAME` leads. Writes that
+arrive during the handover wait for `NAME` and are not refused. The command exits
+with a non-zero status, and the reason, when the handover is refused or does not
+happen:
 
 - `NAME` is a witness or a learner. Only a voter can lead.
 - The leader has not heard from `NAME` in the last three seconds.
