@@ -108,6 +108,9 @@
 
 (defstruct raft-peer-link
   id (host "") (port 0) (role :voter)
+  ;; True unless this peer was given the cluster CA key: it is then sent log
+  ;; entries it can store and return but not read (seal.lisp).
+  (sealed nil)
   (lock (bt:make-lock "gr8s raft link"))
   (changed (bt:make-condition-variable :name "gr8s raft link changed"))
   (items '())
@@ -159,6 +162,8 @@
   (read-gate (make-raft-read-gate))
   ;; This member's RAFT-CREDENTIALS. Only in-process tests run without any.
   credentials
+  ;; A RAFT-SEAL-KEY on a member that holds the cluster CA key, else NIL.
+  seal-key
   ;; Only a WAL opened through STORAGE-PATH belongs to this member.
   owned-storage)
 
@@ -307,7 +312,10 @@ receiver installing the snapshot, and one before it is the transfer itself."
                                       (format t "~A~%" report)
                                       (finish-output))))))
                            (raft-link-send-snapshot member stub message :recipient-role (raft-peer-link-role link))))
-                         (raft-link-deliver-message stub message))
+                         (raft-link-deliver-message
+                          stub (if (raft-peer-link-sealed link)
+                                   (raft-seal-message (raft-member-seal-key member) message)
+                                   message)))
                    (error () (raft-link-drop link))))))
         (bt:with-lock-held ((raft-peer-link-lock link))
           (setf (raft-peer-link-active-items link) nil))))))
@@ -445,6 +453,12 @@ return can still reject a vote/log match; receipt is not quorum or apply health.
               (raft-peer-link-last-receive-term link) term)))))
 
 (defun raft-member-dispatch-message-unlocked (member message)
+  ;; A sealed entry is opened before it can reach this member's log, and one a
+  ;; witness sends is checked; a refusal sends no reply, like any lost message.
+  (setf message (raft-open-message
+                 (raft-member-seal-key member) message
+                 (eq :witness (gethash (getf message :from)
+                                       (raft-node-roles (raft-member-node member))))))
   (multiple-value-prog1
       (case (getf message :type)
         (:snapshot-chunk (raft-member-receive-snapshot-chunk member message))
@@ -457,6 +471,16 @@ return can still reject a vote/log match; receipt is not quorum or apply health.
         (t (handler-case (raft-handle-message (raft-member-node member) message)
              (raft-apply-error (condition) (warn "~A" condition) nil))))
     (raft-member-note-receive-unlocked member message)))
+
+(defun raft-member-require-key-holder (member peer action)
+  "Signal unless PEER, an authenticated member id, is a voter or is becoming one.
+A witness votes and stores the log; it is given no way to write to the store or
+to reach a node. PEER is NIL only when this member runs without credentials."
+  (when (and peer
+             (not (bt:with-lock-held ((raft-member-lock member))
+                    (raft-peer-holds-seal-key-p (raft-member-node member) peer))))
+    (gr8s.security::pki-fail "member-role-forbidden"
+                             "Raft member ~A is not a voter and may not ~A" peer action)))
 
 (defun raft-member-dispatch-message (member message)
   "Acquire optional outer snapshot barriers BEFORE the member mutex.
@@ -491,7 +515,8 @@ Normal replication continues while the barrier drains outstanding application wr
                                   ;; election timeout ~1-2s at a 50ms tick; well above gRPC call latency
                                   (timeout-fn (lambda () (+ 20 (random 20))))
                                   (heartbeat-ticks 2)
-                                  credentials)
+                                  credentials
+                                  (seal-key (raft-credentials-seal-key credentials)))
   "Create a member: a raft-node whose SEND-FN enqueues to per-peer outboxes, a
    RaftTransport gRPC server, and the delivery machinery. Peers are set with
    RAFT-MEMBER-SET-PEERS (so a fresh member cannot self-elect before it knows
@@ -500,7 +525,8 @@ Normal replication continues while the barrier drains outstanding application wr
    PREPARE-FN installs callbacks on the new member before recovery; VALIDATE-RECOVERY-FN
    must approve its recovered WAL before node mutation. AFTER-RECOVERY-FN runs
    under the member mutex with the recovered owned WAL, before listening.
-   INITIAL-ROLE keeps an unconfigured witness/learner from campaigning before join."
+   INITIAL-ROLE keeps an unconfigured witness/learner from campaigning before join.
+   SEAL-KEY defaults to the one a member holding the cluster CA key derives."
   (when (and storage storage-path) (error "Supply either storage or storage-path"))
   (dolist (callback (list prepare-fn validate-recovery-fn after-recovery-fn))
     (when (and callback (not (functionp callback))) (error "Invalid member startup callback")))
@@ -508,6 +534,7 @@ Normal replication continues while the barrier drains outstanding application wr
     (error "After-recovery callback requires an owned WAL path"))
   (unless (member initial-role '(nil :voter :witness :learner)) (error "Invalid initial Raft role"))
   (let* ((member (make-raft-member :host host :port port :credentials credentials
+                                  :seal-key seal-key
                                   :snapshot-directory snapshot-directory))
          (node (make-raft-node
                 :id id :peers nil
@@ -550,7 +577,9 @@ Normal replication continues while the barrier drains outstanding application wr
                         (make-instance 'gr8s.node.v1::raft-ack))
      :propose-handler
      (lambda (request context)
-       (when credentials (gr8s.security::authenticate-raft-peer credentials context))
+       (raft-member-require-key-holder
+        member (and credentials (gr8s.security::authenticate-raft-peer credentials context))
+        "propose a write")
        (let* ((wire (gr8s.node.v1::command request))
               (message (octets->raft-message wire))
               (command (getf message :command)))
@@ -606,6 +635,7 @@ Normal replication continues while the barrier drains outstanding application wr
          (when (and peer (not (equal peer source)))
            (gr8s.security::pki-fail "member-identity-mismatch"
                            "Raft member ~A relayed an operation as ~A" peer source))
+         (raft-member-require-key-holder member peer "relay a node operation")
          (handler-case
              (setf accepted
                    (and node-server payload
@@ -708,6 +738,11 @@ id, or NIL."
     (setf (raft-member-renewal-thread member)
           (bt:make-thread (lambda () (gr8s.security::raft-renewal-loop member))
                           :name (format nil "gr8s raft renewal ~A" (raft-node-id (raft-member-node member))))))
+  (when (and (raft-member-credentials member) (raft-member-seal-key member))
+    ;; Voters must agree on this to open what a witness returns to them.
+    (format t "gr8s raft: log entries are sealed for witnesses under key ~A~%"
+            (raft-seal-key-id (raft-member-seal-key member)))
+    (finish-output))
   (setf (raft-member-tick-thread member)
         (bt:make-thread (lambda () (raft-member-tick-loop member tick-seconds))
                         :name (format nil "gr8s raft tick ~A" (raft-node-id (raft-member-node member))))))

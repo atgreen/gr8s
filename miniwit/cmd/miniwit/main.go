@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// miniwit joins a gr8s HA control plane as a non-campaigning :witness
-// voting member: it enrolls for a member certificate, joins the cluster, serves
-// RaftTransport, and runs a follower that grants votes and acknowledges appends
-// without ever leading or applying a command.
+// miniwit joins a gr8s HA control plane as a :witness voting member: it enrolls
+// for a member certificate, joins the cluster, serves RaftTransport, and runs a
+// follower that grants votes and acknowledges appends without applying a command
+// or accepting a write. It campaigns only to hand its log to a voter that is
+// behind it.
 package main
 
 import (
@@ -109,6 +110,9 @@ func run(cfg config) error {
 	}
 	sender := transport.NewPeerSender(id, nil)
 	defer sender.Close()
+	// A committed membership change carries the address book; keep ours current
+	// so a stand-in can reach a voter that joined after we did.
+	follower.SetAddressSink(func(addrs map[string]string) { sender.UpdateAddresses(addrs) })
 	svc := transport.NewServer(cfg.memberID, follower, sender)
 	gs, err := transport.Serve(cfg.listen, id, svc)
 	if err != nil {
@@ -124,6 +128,12 @@ func run(cfg config) error {
 	}
 	sender.UpdateAddresses(res.Addresses)
 	log.Printf("joined the cluster as %s (%d peers known)", cfg.joinRole, len(res.Addresses))
+	if err := follower.SetMembership(res.Members); err != nil {
+		// Not fatal: without a membership the witness votes and stores as ever,
+		// and only cannot stand in until a config entry commits.
+		log.Printf("membership from join not recorded: %v", err)
+	}
+	go svc.RunClock(ctx, transport.TickEvery)
 
 	// 4. Keep the member certificate current; a voter signs the renewal.
 	go transport.RenewalLoop(ctx, id, cfg.memberID, pkiDir, sender.Addresses, cfg.renewBefore, transport.RenewCheckEvery)

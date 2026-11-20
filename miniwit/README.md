@@ -15,15 +15,17 @@ odd-numbered third vote.
 
 > **Status.** The wire codec, the mutual-TLS RaftTransport (server +
 > fire-and-forget Deliver clients), enrollment + join (with leader redirect),
-> the non-campaigning follower core, snapshot-chunk handling (including the
-> witness config-snapshot format), and byte-bounded log compaction are
-> implemented and unit/integration-tested — including a real mutual-TLS Deliver
-> round-trip between two Go endpoints. So is certificate renewal. It has run
-> as the witness of a live two-voter gr8s cluster: enrollment, join,
-> replication, a five-minute leader outage in which its vote elected the other
-> voter, a restart, and a renewal signed by a real voter. What is *not* yet
-> done is an automated end-to-end test against a throwaway cluster, so that
-> evidence is from one lab on one day. See *Roadmap* below.
+> the follower core, snapshot-chunk handling (including the witness
+> config-snapshot format), and byte-bounded log compaction are implemented and
+> unit/integration-tested — including a real mutual-TLS Deliver round-trip
+> between two Go endpoints. So is certificate renewal. It has run as the
+> witness of a live two-voter gr8s cluster: enrollment, join, replication, a
+> five-minute leader outage in which its vote elected the other voter, a
+> restart, and a renewal signed by a real voter. What is *not* yet done is an
+> automated end-to-end test against a throwaway cluster, so that evidence is
+> from one lab on one day. The stand-in (below) is newer still: it is tested
+> against a scripted voter and its messages match SBCL's output byte for byte,
+> but it has not yet run against a real gr8s voter. See *Roadmap* below.
 
 ## Why a witness can be this small
 
@@ -34,15 +36,24 @@ deliberately minimal Raft participant:
 
 - It **grants votes** and **acknowledges AppendEntries**, so the real voters can
   always reach a majority as long as one of them is alive.
-- It **never campaigns.** A witness that cannot serve the application must never
-  become leader, and a non-campaigning follower is still fully sufficient for
-  liveness: if a voter dies, the surviving voter campaigns and the witness's vote
-  elects it. So this program implements only the four *receive* handlers and the
-  four *reply* messages — no leader, candidate, or replication-sending logic.
+- It **never campaigns on its own.** It has no election timer. If a voter dies,
+  the surviving voter campaigns and the witness's vote elects it.
+- It **stands in when its own log is what blocks that election.** A witness
+  acknowledges an entry once it is stored; a voter must also apply it. So when a
+  leader fails under write load, the surviving voter is often an entry behind the
+  witness. The witness must refuse that voter (the entry may be committed), and
+  then nobody could win until the failed leader returned. Instead the witness
+  gets itself elected, sends the voter the entries it lacks, and tells the first
+  voter that holds its whole log to take over (`TIMEOUT-NOW`). This is ordinary
+  Raft, and mirrors `raft-witness-should-stand-in-p` in cl-raft. While it leads
+  it accepts no proposal, appends nothing (not even the usual no-op), and
+  commits nothing; it stands down after one election timeout if no voter has
+  replaced it, and stands in again when a voter next asks.
 - It **persists the Raft log for quorum but never applies commands.** Log entries
   are stored opaquely `(index, term, command)` so the witness can answer the
-  leader's log-match checks and report `match-index`; it never interprets a
-  command, because it has nothing to apply them to.
+  leader's log-match checks and report `match-index`. The one command it reads
+  is a committed `:RAFT-CONFIG`, for the membership: it has to know who the
+  voters and witnesses are to count a majority when it stands in.
 
 ## The protocol (reverse-engineered from gr8s + cl-raft)
 
@@ -55,7 +66,7 @@ Defined in `proto/gr8s/node/v1/node.proto` (vendored). Methods a witness uses:
 | `EnrollMember` | witness → any member | Exchange a one-time join token for a member certificate. `role="witness"`. Returns only `certificate` + `ca_certificate` (witnesses get **no** CA key, node CA, or SA signing key — voters only). |
 | `Join` | witness → any member | Ask to be admitted. A follower replies `accepted=false` with the leader's address (redirect); the leader proposes the membership change and returns the peer **address book**. |
 | `Deliver(RaftEnvelope) → RaftAck` | both ways | Carries **one** serialized Raft message. Fire-and-forget: replies come back as the peer's own `Deliver` calls. |
-| `Propose`, `RelayOperation`, `PatchManagement`, `RenewMember`, … | served by witness | **Stub.** A witness never originates writes, serves nodes, or issues certs. `Propose` → not-leader; the operation/patch calls → rejected; `Join`/`EnrollMember` served by the witness → rejected (it is never leader, holds no CA). `RenewMember` (self-renewal, client side) is needed eventually for cert rotation. |
+| `Propose`, `RelayOperation`, `PatchManagement`, `RenewMember`, … | served by witness | **Stub.** A witness never originates writes, serves nodes, or issues certs. `Propose` → not-leader, also while it stands in; the operation/patch calls → rejected; `Join`/`EnrollMember` served by the witness → rejected (it admits nobody, holds no CA). `RenewMember` is used from the client side only (see *Certificate renewal*). |
 
 `RaftEnvelope = { protocol_version, payload }`. `payload` is the Raft message,
 encoded as below. Every call is authenticated by the peer's mTLS client
@@ -82,6 +93,10 @@ Lisp form whose `:DATA` is an octet vector; the receiver accepts either
 
 ### Messages a witness handles
 
+A higher `:term` in any message but `:PRE-VOTE` (whose term is hypothetical) is
+adopted first: the vote is cleared, any stand-in ends, and the new term is on
+disk before anything is sent.
+
 Incoming (→ reply), with their plist fields (from `cl-raft/src/core.lisp`):
 
 - `:REQUEST-VOTE` `:term :from :last-log-index :last-log-term :leader-transfer`
@@ -91,7 +106,8 @@ Incoming (→ reply), with their plist fields (from `cl-raft/src/core.lisp`):
 - `:PRE-VOTE` `:term :from :last-log-index :last-log-term`
   → `:PRE-VOTE-REPLY :term :pre-term :from :granted`. Grant iff not leader, our
   leader-contact timer has expired, `msg.term > currentTerm`, and log up-to-date.
-  Changes **no** persistent state.
+  Changes **no** persistent state. A refusal for the last reason alone starts
+  the stand-in (below).
 - `:APPEND-ENTRIES` `:term :from :prev-log-index :prev-log-term :entries :leader-commit :read-seq`
   → `:APPEND-ENTRIES-REPLY :term :from :read-seq :success :match-index` (plus
   `:next-index`/`:applied-index`/`:capacity-limited` on the relevant paths).
@@ -100,17 +116,53 @@ Incoming (→ reply), with their plist fields (from `cl-raft/src/core.lisp`):
 - `:INSTALL-SNAPSHOT` `:term :from :last-index :last-term :state`
   → `:INSTALL-SNAPSHOT-REPLY :term :from :success :match-index`. The transport
   reassembles the binary chunks (and the witness config-snapshot form) into the
-  boundary before it reaches the handler.
+  boundary before it reaches the handler. The snapshot's membership is kept.
+- `:TIMEOUT-NOW` `:term :from` → nothing. Only a voter takes over on request.
+
+### Messages a witness originates when it stands in
+
+It stands in when it refuses a `:PRE-VOTE` and all of this holds: the
+membership is known and lists it as a witness; the candidate is a voter; no
+leader has been heard for an election timeout; the candidate's term is ahead;
+the candidate's log is behind the witness's (the only reason for refusing); and
+the candidate's last index is not below the witness's snapshot index, so the
+witness still holds every entry the candidate lacks.
+
+| Sent | When | Fields |
+|------|------|--------|
+| `:PRE-VOTE` to every voter and witness | on standing in (and again on each later refused `:PRE-VOTE`, which is how a lost message is recovered) | `:term` (current + 1) `:from :last-log-index :last-log-term` |
+| `:REQUEST-VOTE` to the same members | a majority granted the pre-vote; term + 1 and a vote for itself are on disk first | `:term :from :last-log-index :last-log-term :leader-transfer NIL` |
+| `:APPEND-ENTRIES` to every voter | a majority voted for it; then on each reply that leaves more to send, and every 100 ms | `:term :from :prev-log-index :prev-log-term :entries :leader-commit :read-seq 0`. At most 64 entries and about 1 MiB a batch; entries are the stored commands, unchanged. Nothing is sent to a voter that needs entries below the snapshot index. |
+| `:TIMEOUT-NOW` to one voter | the first voter whose `:match-index` reaches the witness's last index | `:term :from` |
+
+Replies it acts on: `:PRE-VOTE-REPLY` and `:REQUEST-VOTE-REPLY` (counted once
+per member, from voters and witnesses only; majority is ⌊n/2⌋+1 of those) and
+`:APPEND-ENTRIES-REPLY` (success moves `match`/`next` forward; failure backs
+`next` up to the reply's `:next-index`, or by one).
 
 ### Durable state (fsync before ack — Raft safety)
 
 - **Hard state:** `currentTerm`, `votedFor` — persisted *before* replying to a
-  vote or accepting a higher term.
+  vote, accepting a higher term, or asking for votes.
+- **Membership:** member id → `voter` / `witness` / `learner`, in the same
+  `hardstate.json`. It comes from the Join response, from each `:RAFT-CONFIG`
+  entry once it is committed, and from the membership inside an installed
+  snapshot. If the witness cannot be sure of it (a config or snapshot it cannot
+  read) it forgets it, and does not stand in until it learns it again: counting
+  a majority against too small a membership is the one unsafe direction.
 - **Log:** entries `(index, term, command-blob)` — persisted *before* a successful
   AppendEntries reply.
 - **Snapshot boundary:** `lastIncludedIndex`, `lastIncludedTerm` (the application
   payload is discarded — a witness has nothing to restore it into; only the
   boundary matters for log matching).
+
+A crash can fall between any two writes, so their order is part of the format.
+The boundary is written before the log file is trimmed to match it, and a
+restart skips entries at or below the boundary; the reverse order once left a
+file that read back as an empty log. Entries past a boundary this witness does
+not hold are removed before that boundary is written. A write that fails leaves
+memory as it was, so a retry is never acknowledged for entries that are not on
+disk, and a torn line is trimmed at restart before anything is appended after it.
 
 The on-disk log is compacted once it passes a byte bound, keeping only the most
 recent slice. Both bounds are tunable with `-max-log-bytes` and
@@ -207,8 +259,8 @@ would renew every hour.
 - ③ EnrollMember + Join with leader redirect ✅ — `internal/transport`
   (`enroll.go`, `join.go`). CSR/cert logic matches gr8s; the live handshake is
   confirmed in ⑦.
-- ④ non-campaigning follower core ✅ — `internal/raftcore`; the four handlers
-  mirror `cl-raft/src/core.lisp`, durable hard-state + log, unit-tested.
+- ④ follower core ✅ — `internal/raftcore`; the four handlers mirror
+  `cl-raft/src/core.lisp`, durable hard-state + log, unit-tested.
 - ⑤ snapshot chunk reassembly + boundary install ✅ — `internal/raftcore`
   (`snapshot.go`), including the witness config-snapshot form and byte-bounded
   log compaction (`-max-log-bytes`/`-retain-log-bytes`).
@@ -218,3 +270,6 @@ would renew every hour.
   **pending**. Enroll, join, replication, failover and renewal have each been
   exercised by hand against a live cluster, which confirms wire fidelity for
   those paths but is not a test anyone can re-run.
+- ⑧ stand-in for a voter that is behind the witness ✅ — `internal/raftcore`
+  (`standin.go`, `membership.go`); unit-tested, and run over mutual TLS against
+  a scripted voter. Not yet run against a real gr8s voter: that belongs in ⑦.

@@ -223,8 +223,29 @@ func (r *reader) readString() (Value, error) {
 }
 
 func (r *reader) readHash() (Value, error) {
-	// Only #( simple-vectors are expected on this wire; *read-eval* is off, so
-	// reject #. and anything else rather than guess.
+	// SBCL prints a base-string as #A((5) BASE-CHAR . "gr8s2") when
+	// *print-readably* is on. Raft messages are printed with it off, but the
+	// snapshot a witness is sent is printed to a file with it on
+	// (raft-link-send-snapshot), so a member id there may arrive this way. It is
+	// an ordinary string to us, and is written back as one.
+	if r.pos+2 < len(r.src) && (r.src[r.pos+1] == 'A' || r.src[r.pos+1] == 'a') && r.src[r.pos+2] == '(' {
+		start := r.pos
+		r.pos += 2
+		lst, err := r.readList()
+		if err != nil {
+			return nil, err
+		}
+		if l := lst.(List); l.Dotted && len(l.Items) == 3 {
+			if kind, ok := l.Items[1].(Sym); ok && (kind == "BASE-CHAR" || kind == "CHARACTER") {
+				if s, ok := l.Items[2].(Str); ok {
+					return s, nil
+				}
+			}
+		}
+		return nil, fmt.Errorf("lispwire: unsupported array at offset %d", start)
+	}
+	// Otherwise only #( simple-vectors are expected on this wire; *read-eval* is
+	// off, so reject #. and anything else rather than guess.
 	if r.pos+1 < len(r.src) && r.src[r.pos+1] == '(' {
 		r.pos++ // consume '#', leaving '(' for readList
 		lst, err := r.readList()
