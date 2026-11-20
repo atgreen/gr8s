@@ -6,6 +6,10 @@
 ;;;; after the node session validates Pod UID, assignment and desired revision.
 ;;;; Replayed cumulative counts do not create duplicate changes; all object
 ;;;; references and reporter identities come from authenticated server state.
+;;;;
+;;;; An occurrence that repeats, such as a probe failing every few seconds, has
+;;;; its first few counts published at once and after that at most once a minute:
+;;;; each publication is a write to every member of the control plane.
 
 (in-package #:gr8s.resources)
 
@@ -23,6 +27,23 @@
   (cond ((equal kind "lifecycle") +container-lifecycle-event-reasons+)
         ((equal kind "pod") +pod-runtime-event-reasons+)
         (t '("Unhealthy" "ProbeWarning"))))
+
+(defparameter *node-event-prompt-occurrences* 10
+  "How many occurrences of one Event are each published as soon as they are reported.")
+
+(defparameter *node-event-rewrite-seconds* 60
+  "Once an Event has occurred more often than that, the least time between rewrites of it.")
+
+(defun node-runtime-event-due-p (stored event)
+  "True when EVENT, a node's cumulative record, should replace what STORED shows:
+it has occurred again, and either it is still new or STORED is a minute behind."
+  (let ((count (gethash "count" event)))
+    (and (> count (gethash "count" stored 0))
+         (or (<= count *node-event-prompt-occurrences*)
+             (handler-case (>= (- (pod-deletion-time (gethash "lastTimestamp" event))
+                                  (pod-deletion-time (gethash "lastTimestamp" stored)))
+                               *node-event-rewrite-seconds*)
+               (error () t))))))
 
 (defun record-node-runtime-events (store pod node-name events)
   "Publish bounded same-Pod cumulative pages; ignore malformed or expired records."
@@ -49,11 +70,11 @@
                                         (kubernetes-error (error) (unless (= 404 (kubernetes-error-status-code error)) (error error)) nil))))
                        (if existing
                            (when (and (equal (pod-uid pod) (gethash "uid" (gethash "involvedObject" existing)))
-                                      (> (gethash "count" event) (gethash "count" existing 0)))
+                                      (node-runtime-event-due-p existing event))
                              (update-core-resource store "events" (pod-namespace pod) name
                                (lambda (old)
                                  (unless (and (equal (pod-uid pod) (gethash "uid" (gethash "involvedObject" old)))
-                                              (> (gethash "count" event) (gethash "count" old 0)))
+                                              (node-runtime-event-due-p old event))
                                    (return-from publication nil))
                                  (setf (gethash "count" old) (gethash "count" event)
                                        (gethash "lastTimestamp" old) (gethash "lastTimestamp" event)
@@ -75,4 +96,10 @@
                                           "source" (core-object "component" "kubelet" "host" node-name)
                                           "reportingComponent" "kubelet" "reportingInstance" node-name)
                              (pod-namespace pod)))))
-                 (error (condition) (format *error-output* "gr8s probe Event publication failed: ~A~%" condition))))))
+                 (error (condition)
+                   (format *error-output* "gr8s probe Event publication failed: ~A~%" condition)
+                   ;; No quorum: each further write would wait out its own
+                   ;; timeout. The node reports these cumulative records again.
+                   (when (and (typep condition 'kubernetes-error)
+                              (= 503 (kubernetes-error-status-code condition)))
+                     (return)))))))

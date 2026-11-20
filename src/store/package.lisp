@@ -8,7 +8,7 @@
   (:export
    #:*apply-update-manager*
    #:*core-write-active*
-   #:*local-plane-write*
+   #:*unreplicated-write*
    #:*pending-consensus-commit*
    #:*pending-node-commit*
    #:*pending-pod-commit*

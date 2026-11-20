@@ -35,11 +35,10 @@
    durable write made outside WITH-CORE-WRITE (e.g. a not-yet-converted
    controller path) publishes locally as before.")
 
-(defvar *local-plane-write* nil
-  "True while writing only local-plane resources (events). COMMIT-CORE-RESOURCES
-   then publishes locally and never replicates, so high-churn events stay off the
-   Raft log (podster-8ia.3). Each member keeps its own; agents/controllers on the
-   new leader regenerate them after failover.")
+(defvar *unreplicated-write* nil
+  "True while a member makes a change that is its own and not the cluster's: the
+   expiry of its Events. COMMIT-CORE-RESOURCES then publishes locally and proposes
+   nothing, on an HA store too.")
 
 (defvar *pending-pod-commit* nil
   "Changed Pod keys collected by WITH-STORE-LOCK. The transaction freezes their
