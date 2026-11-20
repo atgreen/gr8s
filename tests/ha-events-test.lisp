@@ -4,8 +4,11 @@
 ;;;; Purpose:
 ;;;; Every member of an HA control plane shows the same Events (podster-xm5). An
 ;;;; Event is written through Raft like any other object, wherever it is written,
-;;;; so a client sees it through whichever API server it asks. Each member expires
-;;;; its own copy, and a member whose copy differs takes the next write as it is.
+;;;; so a client sees it through whichever API server it asks. It leaves every
+;;;; member in the same write, an hour after its author's time, and a member whose
+;;;; copy differs takes the next write as it is. Nothing a member does alone takes
+;;;; a revision, so every member gives an object the same resourceVersion
+;;;; (podster-gts).
 
 (in-package #:gr8s/tests)
 (def-suite ha-events :in gr8s)
@@ -30,11 +33,30 @@
   (let ((event (ha-event store name)))
     (and event (gethash "count" event))))
 
-(defun ha-expire-events (store seconds-from-now)
-  "Run STORE's own Event expiry as it will run SECONDS-FROM-NOW."
+(defun ha-drop-event (store name)
+  "Make STORE lack an Event the other members hold, as after a snapshot."
+  (bt:with-lock-held ((gr8s.store::pod-store-lock store))
+    (remhash (gr8s.resources::core-resource-key "events" "default" name)
+             (gr8s.store::pod-store-resources store))))
+
+(defun ha-write-at (store seconds-from-now name)
+  "Write a ConfigMap through STORE as its author's clock will read SECONDS-FROM-NOW."
   (let ((gr8s.resources::*event-clock* (lambda () (+ (get-universal-time) seconds-from-now))))
-    (bt:with-lock-held ((gr8s.store::pod-store-lock store))
-      (gr8s.resources::expire-core-events-unlocked store))))
+    (gr8s.resources::create-core-resource store "configmaps" (configmap-input name "k" "v") "default")))
+
+(defun ha-revisions (stores)
+  (mapcar #'gr8s.store::pod-store-resource-revision stores))
+
+(defun ha-configmap-version (store name)
+  (let ((object (ignore-errors (gr8s.resources::get-core-resource store "configmaps" "default" name))))
+    (and object (gethash "resourceVersion" (gethash "metadata" object)))))
+
+(defun ha-members-agree-p (stores name)
+  "Whether STORES count alike and give ConfigMap NAME one resourceVersion."
+  (and (apply #'= (ha-revisions stores))
+       (ha-configmap-version (first stores) name)
+       (every (lambda (store) (equal (ha-configmap-version (first stores) name) (ha-configmap-version store name)))
+              stores)))
 
 (defun call-with-ha-event-cluster (function)
   "Call FUNCTION with the stores of a leader and two followers."
@@ -75,37 +97,87 @@
      (is (poll-until (lambda () (notany (lambda (s) (ha-has-event s "on-follower")) (list s1 s2 s3))) :timeout 10)
          "and its deletion"))))
 
-(test each-member-expires-its-own-copy-of-an-event
+(test an-event-leaves-every-member-in-the-same-write
   (call-with-ha-event-cluster
    (lambda (s1 s2 s3)
      (gr8s.resources::create-core-resource s1 "events" (ha-event-input "old") "default")
      (is (poll-until (lambda () (every (lambda (s) (ha-has-event s "old")) (list s1 s2 s3))) :timeout 10))
-     (dolist (store (list s1 s2 s3))
-       (ha-expire-events store (- gr8s.resources::*event-ttl-seconds* 60))
-       (is (ha-has-event store "old") "an Event lasts its hour on every member")
-       (ha-expire-events store (+ gr8s.resources::*event-ttl-seconds* 60))
-       (is-false (ha-has-event store "old") "and then each member drops its copy"))
-     ;; Expiry proposed nothing, and left the members able to agree on what follows.
-     (gr8s.resources::create-core-resource s1 "configmaps" (configmap-input "after" "k" "v") "default")
-     (is (poll-until (lambda () (every (lambda (s) (equal "v" (configmap-value s "after" "k"))) (list s1 s2 s3)))
-                     :timeout 10)))))
+     (ha-write-at s1 (- gr8s.resources::*event-ttl-seconds* 60) "early")
+     (is (poll-until (lambda () (every (lambda (s) (ha-configmap-version s "early")) (list s1 s2 s3))) :timeout 10))
+     (is (every (lambda (s) (ha-has-event s "old")) (list s1 s2 s3)) "an Event lasts its hour on every member")
+     ;; The write may come from any member; its time is what every member uses.
+     (ha-write-at s2 (+ gr8s.resources::*event-ttl-seconds* 60) "late")
+     (is (poll-until (lambda () (notany (lambda (s) (ha-has-event s "old")) (list s1 s2 s3))) :timeout 10)
+         "and then leaves all of them")
+     (is (poll-until (lambda () (ha-members-agree-p (list s1 s2 s3) "late")) :timeout 10)
+         "at one revision, so the members still count alike"))))
+
+(test nothing-a-member-does-alone-takes-a-revision
+  (call-with-ha-event-cluster
+   (lambda (s1 s2 s3)
+     (gr8s.resources::create-core-resource s1 "configmaps" (configmap-input "first" "k" "v") "default")
+     (is (poll-until (lambda () (ha-members-agree-p (list s1 s2 s3) "first")) :timeout 10))
+     ;; A watch or a list trims one member's history; a read asks it to expire Events.
+     (bt:with-lock-held ((gr8s.store::pod-store-lock s2))
+       (gr8s.resources::compact-template-history-unlocked s2 :checkpoint t)
+       (let ((gr8s.resources::*event-clock*
+               (lambda () (+ (get-universal-time) gr8s.resources::*event-ttl-seconds* 60))))
+         (gr8s.resources::expire-core-events-unlocked s2)))
+     (gr8s.resources::list-core-resources s3 "events")
+     (gr8s.resources::create-core-resource s1 "configmaps" (configmap-input "second" "k" "v") "default")
+     (is (poll-until (lambda () (ha-members-agree-p (list s1 s2 s3) "second")) :timeout 10)
+         "the next object has one resourceVersion on every member")
+     ;; So what a client read through a follower it can update through the leader.
+     (let ((read (gr8s.resources::get-core-resource s2 "configmaps" "default" "second")))
+       (finishes
+         (gr8s.resources::update-core-resource
+          s1 "configmaps" "default" "second"
+          (lambda (current)
+            (is (equal (gethash "resourceVersion" (gethash "metadata" read))
+                       (gethash "resourceVersion" (gethash "metadata" current))))
+            current)))))))
+
+(test a-member-left-behind-takes-the-numbering-and-reissues-its-versions
+  ;; Older versions let each member count for itself. After an upgrade the
+  ;; members must come to agree without being rebuilt.
+  (call-with-ha-event-cluster
+   (lambda (s1 s2 s3)
+     (gr8s.resources::create-core-resource s1 "configmaps" (configmap-input "held" "k" "v") "default")
+     (is (poll-until (lambda () (ha-members-agree-p (list s1 s2 s3) "held")) :timeout 10))
+     ;; Give one follower a revision and a version of its own, as an old one had.
+     (bt:with-lock-held ((gr8s.store::pod-store-lock s2))
+       (let ((index (gr8s.resources::copy-core-resource-index s2))
+             (key (gr8s.resources::core-resource-key "configmaps" "default" "held"))
+             (ahead (+ 500 (gr8s.store::pod-store-resource-revision s2)))
+             (gr8s.store::*unreplicated-write* t))
+         (let ((copy (gr8s.resources::copy-core-object (gethash key index))))
+           (setf (gethash "resourceVersion" (gethash "metadata" copy)) (write-to-string ahead)
+                 (gethash key index) copy))
+         (gr8s.resources::commit-core-resources s2 index ahead)))
+     (is-false (ha-members-agree-p (list s1 s2 s3) "held"))
+     (gr8s.resources::advertise-core-revision s2)
+     (is (poll-until (lambda () (and (ha-members-agree-p (list s1 s2 s3) "held")
+                                     (notany #'gr8s.store::pod-store-core-versions-stale (list s1 s2 s3))))
+                     :timeout 20)
+         "the members that were behind take the higher numbering, and every object one version")
+     (is (> (parse-integer (ha-configmap-version s1 "held")) 500)))))
 
 (test a-member-without-an-event-takes-the-next-write-of-it
-  ;; Members expire by their own clocks, and before Events were replicated each
-  ;; held different ones. A write that names a previous value a member does not
+  ;; A member that installed a snapshot holds its own Events, and before Events
+  ;; were replicated each member held different ones. A write that names a previous value a member does not
   ;; hold must not be refused there, or that member would never show the Event.
   (call-with-ha-event-cluster
    (lambda (s1 s2 s3)
      (gr8s.resources::create-core-resource s1 "events" (ha-event-input "counted") "default")
      (is (poll-until (lambda () (every (lambda (s) (ha-has-event s "counted")) (list s1 s2 s3))) :timeout 10))
-     (ha-expire-events s2 (+ gr8s.resources::*event-ttl-seconds* 60))
+     (ha-drop-event s2 "counted")
      (is-false (ha-has-event s2 "counted"))
      (gr8s.resources::update-core-resource s1 "events" "default" "counted"
                                            (lambda (event) (setf (gethash "count" event) 7) event))
      (is (poll-until (lambda () (every (lambda (s) (eql 7 (ha-event-count s "counted"))) (list s1 s2 s3))) :timeout 10)
          "the member that had dropped the Event holds it again")
      (gr8s.resources::delete-core-resource s1 "events" "default" "counted")
-     (ha-expire-events s3 0)
+     (ha-drop-event s3 "counted")
      (gr8s.resources::create-core-resource s1 "events" (ha-event-input "counted") "default")
      (gr8s.resources::delete-core-resource s1 "events" "default" "counted")
      (is (poll-until (lambda () (notany (lambda (s) (ha-has-event s "counted")) (list s1 s2 s3))) :timeout 10)
@@ -125,3 +197,19 @@
      (gr8s.resources::delete-template-collection s1 "default" "testevent-set=true" "" :resource "events")
      (is (poll-until (lambda () (notany (lambda (s) (ha-has-event s "selected")) (list s1 s2 s3))) :timeout 10))
      (is (every (lambda (s) (ha-has-event s "kept")) (list s1 s2 s3))))))
+
+(test a-version-this-server-has-not-reached-is-answered-as-too-large
+  ;; client-go lists again without a resourceVersion only when it recognises
+  ;; this cause; any other 504 it repeats until its informer gives up.
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let ((condition (handler-case
+                         (progn (gr8s.resources::template-list-page store "default" nil nil :resource "configmaps"
+                                                                    :resource-version "999999" :match "NotOlderThan")
+                                nil)
+                       (gr8s.model:kubernetes-error (condition) condition))))
+      (is (eql 504 (gr8s.model:kubernetes-error-status-code condition)))
+      (is (equal "Timeout" (gr8s.model:kubernetes-error-reason condition)))
+      (let ((details (gr8s.model:kubernetes-error-details condition)))
+        (is (eql 1 (gethash "retryAfterSeconds" details)))
+        (is (equal "ResourceVersionTooLarge" (gethash "reason" (aref (gethash "causes" details) 0))))))))

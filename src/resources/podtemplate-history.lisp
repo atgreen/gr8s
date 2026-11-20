@@ -103,7 +103,10 @@ The lists are replaced rather than changed by commits, so a caller may read them
             (let ((oldest (first (pod-store-template-history store))))
               (and oldest (> (- (funcall *podtemplate-clock*) (gethash "time" oldest))
                              *watch-history-seconds*))))
-    (commit-core-resources store (copy-core-resource-index store) (1+ (pod-store-resource-revision store)))))
+    ;; Trimming history changes no object, so it takes no revision: one taken
+    ;; here would be this member's alone, and members must count alike.
+    (let ((*unreplicated-write* t))
+      (commit-core-resources store (copy-core-resource-index store) (pod-store-resource-revision store)))))
 
 (defun check-template-revision-unlocked (store revision &optional (resource "podtemplates"))
   "Reject a revision that is in the future or that the journal has compacted."
@@ -191,7 +194,7 @@ The lists are replaced rather than changed by commits, so a caller may read them
         (when (and match (not (equal match "")) (null requested) (not (equal resource-version "0")))
           (core-resource-error 400 "BadRequest" "resourceVersionMatch requires resourceVersion"))
         (when (and requested (> requested (pod-store-resource-revision store)))
-          (core-resource-error 504 "Timeout" "Requested resourceVersion is newer than storage"))
+          (resource-version-too-large-error requested (pod-store-resource-revision store)))
         (when (and token (or (< revision (max (pod-store-template-history-floor store)
                          (if (equal resource "podtemplates") 0 (pod-store-resource-history-start store))))
                              (> (- (funcall *podtemplate-clock*) (gethash "issuedAt" token)) *podtemplate-history-seconds*)))

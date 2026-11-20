@@ -17,7 +17,7 @@
     (core-resource-error 410 "Expired" "too old resource version: ~D (~D)"
                          revision (pod-store-pod-watch-floor store)))
   (when (> revision (pod-store-pod-revision store))
-    (core-resource-error 504 "Timeout" "Requested resourceVersion is newer than storage")))
+    (gr8s.resources::resource-version-too-large-error revision (pod-store-pod-revision store))))
 
 (defun pod-watch-predicate (namespace labels fields)
   "Return a test for API views in NAMESPACE matching the LABELS and FIELDS selectors."
