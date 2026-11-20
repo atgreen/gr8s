@@ -1712,6 +1712,22 @@
           (gr8s.apiserver::stop-node-grpc-server owner)
           (gr8s.apiserver::stop-node-grpc-server origin))))))
 
+(test a-request-to-a-node-that-is-not-connected-says-so
+  ;; "Node operation timed out" named neither the node nor why (podster-xbf).
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (gr8s.controllers::register-node
+     store (gr8s.model::make-node-record :id "node-away" :name "worker-away" :pod-cidr "10.88.11.0/24"))
+    (let* ((server (gr8s.apiserver::%make-node-grpc-server :store store))
+           (request (make-instance 'gr8s.node.v1::operation-request
+                                   :operation-id "logs-while-away"
+                                   :kind gr8s.node.v1::+operationkind-operation_kind_exec+))
+           (operation (gr8s.apiserver::queue-node-operation server "worker-away" request))
+           (message (handler-case (progn (gr8s.apiserver::wait-for-node-operation server operation :timeout 1) nil)
+                      (runtime-error (condition) (runtime-error-message condition)))))
+      (is (search "Node worker-away did not answer within 1 second" message))
+      (is (search "its agent is not connected to the control plane" message)))))
+
 (test a-transient-peer-routing-miss-does-not-strand-a-node-operation-locally
   (with-temporary-store (store path)
     (declare (ignore path))
