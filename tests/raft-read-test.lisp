@@ -12,6 +12,26 @@
 
 (defun read-test-node (member) (gr8s.raft.transport::raft-member-node member))
 
+(defun read-test-membership-settled-p (members)
+  "True once every member is a voter and has applied the leader's whole log. A
+membership entry carries the members' addresses, so one still in flight would
+undo a test's change to a member's address book."
+  (flet ((observe (member function)
+           (bt:with-lock-held ((gr8s.raft.transport::raft-member-lock member))
+             (funcall function (read-test-node member)))))
+    (let ((last (observe (first members)
+                         (lambda (leader)
+                           (and (zerop (hash-table-count (cl-raft::raft-node-promotion-intents leader)))
+                                (every (lambda (member)
+                                         (eq :voter (gethash (cl-raft::raft-node-id (read-test-node member))
+                                                             (cl-raft::raft-node-roles leader))))
+                                       members)
+                                (cl-raft::raft-last-log-index leader))))))
+      (and last
+           (every (lambda (member)
+                    (observe member (lambda (node) (= last (cl-raft::raft-node-last-applied node)))))
+                  members)))))
+
 (defun call-with-read-test-cluster (function)
   "Call FUNCTION with three joined members (the first leads) and their stores."
   (let* ((ids '("a" "b" "c"))
@@ -34,6 +54,7 @@
                (poll-until (lambda () (eq :voter (cl-raft::raft-node-self-role (read-test-node joiner)))))))
            (gr8s.raft.transport::raft-member-propose a '(:set "k" "before"))
            (poll-until (lambda () (every (lambda (kv) (equal "before" (gethash "k" (cdr kv)))) kvs)))
+           (poll-until (lambda () (read-test-membership-settled-p members)))
            (funcall function members kvs))
       (dolist (member members) (ignore-errors (gr8s.raft.transport::stop-raft-member member))))))
 
