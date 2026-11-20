@@ -384,7 +384,7 @@
            (report (merge-pathnames "recovery-report.json" root))
            (stop (merge-pathnames "recovery-stop.txt" root))
            (log (merge-pathnames "recovery-child.log" root))
-           (process nil) (previous-version 2))
+           (process nil) (versions nil) (startup-revisions nil))
       (labels ((await-file (path)
                  (poll-until (lambda () (or (probe-file path) (not (sb-ext:process-alive-p process)))) :timeout 60)
                  (unless (probe-file path)
@@ -410,7 +410,7 @@
                  ;; The first startup has no proven suffix. Later kills retain
                  ;; the leader-confirmed boundary and replay B before listening.
                  (is (equal (if (zerop cycle) "A" "B") (gethash "baseline" startup)))
-                 (is (> (gethash "resourceRevision" startup) previous-version))
+                 (push (gethash "resourceRevision" startup) startup-revisions)
                  (is (= 9 (gethash "term" startup)))
                  (is (equal "source" (gethash "vote" startup)))
                  (is (= (if (zerop cycle) 42 43) (gethash "appliedIndex" startup)))
@@ -427,8 +427,7 @@
                    (is (equal "B" (gethash "value" result)))
                    (is (= 43 (gethash "appliedIndex" result)))
                    (is (= 44 (gethash "lastLogIndex" result)))
-                   (is (> (parse-integer (gethash "resourceVersion" result)) previous-version))
-                   (setf previous-version (parse-integer (gethash "resourceVersion" result))))
+                   (push (parse-integer (gethash "resourceVersion" result)) versions))
                  (is (= 200 (nth-value 1 (api api-port "/readyz"))))
                  (multiple-value-bind (body status) (api api-port "/api/v1/namespaces/default/configmaps/recover")
                    (is (= 200 status))
@@ -442,7 +441,14 @@
             (when (sb-ext:process-alive-p process)
               (sb-ext:process-kill process 9)
               (sb-ext:process-wait process))
-            (sb-ext:process-close process)))))))
+            (sb-ext:process-close process)))
+        ;; Every member numbers alike, so one that restarts must come to the
+        ;; versions it held: it replays what it applied before (podster-69p).
+        (is (= 3 (length versions)))
+        (is (apply #'= versions)
+            "the object has one version after every kill: ~S" versions)
+        (is (= (first startup-revisions) (second startup-revisions))
+            "and the member starts at one revision once it has a committed suffix: ~S" startup-revisions)))))
 
 (test startup-apply-failure-retries-without-accumulating-recovery-barriers
   (with-temporary-store (store root)

@@ -22,23 +22,38 @@
            (validate (gr8s.ha::make-member-generation-validator
                       member (gr8s.raft:raft-node-current-term node) index term digest :recover recover))
            (existing (gr8s.store::read-store-restore-intent root))
-           (descriptor nil))
+           (descriptor nil)
+           ;; A member that restarts replays the log it applied before, and so
+           ;; comes to the versions it held: it must not move them above its
+           ;; own, or it alone would renumber (podster-69p). What it held is
+           ;; noted so that the replay can be seen to reproduce it. A member
+           ;; that holds nothing takes the numbering it is given.
+           (expectation (and recover (plusp (pod-store-resource-revision store))
+                             (bt:with-lock-held ((pod-store-lock store))
+                               (cons (pod-store-resource-revision store)
+                                     (core-versions-digest (pod-store-resources store))))))
+           (keep (or expectation (zerop (pod-store-resource-revision store)))))
       (if existing
           (setf descriptor existing)
           (multiple-value-bind (generation incoming)
               (materialize-store-snapshot
                root path digest :expected-index index :expected-term term
-               :minimum-resource-revision (1+ (pod-store-resource-revision store))
+               :minimum-resource-revision (unless keep (1+ (pod-store-resource-revision store)))
                :minimum-pod-revision (1+ (max (pod-store-pod-revision store) (pod-store-pod-revision-ceiling store))))
             (declare (ignore generation))
             (setf descriptor incoming)))
-      (gr8s.store::reload-store-application
-       store (gethash "generation" descriptor) :call-with-member-lock #'funcall
-       :validate-recovery validate
-       ;; Live pending state follows a completed WAL replacement; startup state
-       ;; comes from the validated WAL. Recheck it before intent removal. The
-       ;; dispatch barrier keeps access closed until Raft publication completes.
-       :commit-recovery validate))))
+      (multiple-value-prog1
+          (let ((gr8s.store::*snapshot-keeps-resource-revisions* keep))
+            (gr8s.store::reload-store-application
+             store (gethash "generation" descriptor) :call-with-member-lock #'funcall
+             :validate-recovery validate
+             ;; Live pending state follows a completed WAL replacement; startup state
+             ;; comes from the validated WAL. Recheck it before intent removal. The
+             ;; dispatch barrier keeps access closed until Raft publication completes.
+             :commit-recovery validate))
+        (bt:with-lock-held ((pod-store-lock store))
+          (setf (gr8s.store::pod-store-core-recovery-expectation store) expectation)
+          (check-recovered-core-versions store))))))
 
 (defun member-store-restore-may-resume-p (member)
   (let* ((node (gr8s.raft.transport:raft-member-node member))
@@ -136,7 +151,10 @@ that gate blocked for a later ordinary RPC to retry under the same outer barrier
                     (when owns-gate
                       (bt:with-lock-held ((gr8s.raft.transport:raft-member-lock member))
                         (when (and startup-sync-required (member-store-startup-synchronized-p member message))
-                          (setf startup-sync-required nil))
+                          (setf startup-sync-required nil)
+                          ;; The log is replayed. Clients are let in only after this.
+                          (bt:with-lock-held ((pod-store-lock store))
+                            (check-recovered-core-versions store :replayed t)))
                         (ignore-errors
                           (when (and (not startup-sync-required) (member-store-restore-may-resume-p member))
                             (gr8s.store::resume-store-access store)

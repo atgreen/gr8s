@@ -1014,7 +1014,46 @@ changes, only notes, and are applied here."
         (commit-core-resources store resources revision
                                :workload-deletions workload-deletions
                                :job-controller-states job-controller-states))
+      (check-recovered-core-versions store)
       (list :core-ok))))
+
+(defun check-recovered-core-versions (store &key replayed)
+  "While a restarted member replays its log, see whether it has come to the
+   versions it held when it stopped. REPLAYED says the replay is over. The caller
+   holds STORE's lock.
+
+   The replay applies the transactions the member applied before, so it gives
+   each object the version it had, and the members go on numbering alike. If it
+   does not -- the member counted by itself under an older version, or a
+   revision it was raised to is not in the log it has left -- then a version it
+   gave out before could come to name other content. The member then does what
+   every restart once did: it takes revisions above all it gave out, and it asks
+   the members to compare what they hold."
+  (let ((expectation (gr8s.store::pod-store-core-recovery-expectation store))
+        (revision (pod-store-resource-revision store)))
+    (when expectation
+      (cond
+        ((and (= revision (car expectation))
+              (equal (cdr expectation) (core-versions-digest (pod-store-resources store))))
+         (setf (gr8s.store::pod-store-core-recovery-expectation store) nil))
+        ((or replayed (>= revision (car expectation)))
+         (setf (gr8s.store::pod-store-core-recovery-expectation store) nil)
+         (let ((fresh (1+ (max revision (car expectation))))
+               (resources (copy-core-resource-index store)))
+           (format *error-output* "~&gr8s: replaying the log did not give the versions this member held at revision ~D; renumbering from ~D~%"
+                   (car expectation) fresh)
+           (maphash (lambda (key object)
+                      (unless (member-expired-resource-p (first key))
+                        (let ((copy (copy-core-object object)))
+                          (setf (gethash "resourceVersion" (gethash "metadata" copy)) (write-to-string fresh)
+                                (gethash key resources) copy))))
+                    (pod-store-resources store))
+           ;; A watch from before must list again.
+           (setf (pod-store-resource-history-start store) fresh
+                 (gr8s.store::pod-store-core-version-round-wanted store) t)
+           (let ((*core-write-active* nil)
+                 (*unreplicated-write* t))
+             (commit-core-resources store resources fresh))))))))
 
 (defun propose-core-version-notes (store &rest notes)
   "Commit a transaction that changes nothing and carries NOTES."
