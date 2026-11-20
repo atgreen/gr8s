@@ -3022,6 +3022,9 @@ between later ones. An ordinary restart recovers within the first.")
                                  :debug-state-directory state-directory
                                  :debug-member-resolver (make-debug-member-resolver ha)
                                  :control-plane-membership-fn (make-control-plane-membership-fn ha)
+                                 ;; Pods write here. A follower carries their writes to the
+                                 ;; leader, as the external listener does (podster-0qf).
+                                 :leader-status-fn (when ha (lambda () (ha-control-plane-leader-status ha)))
                                  :linearizable-read-fn
                                  (when ha (lambda () (ha-control-plane-await-linearizable-read ha))))))
                         (setf (pod-store-in-cluster-config store)

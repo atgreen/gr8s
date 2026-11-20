@@ -41,11 +41,24 @@ does not become a write to every member each time.
 
 - **Controllers are leader-gated.** Reconciliation runs only on the leader. A
   follower idles until promotion.
-- **Leader-aware HTTP.** A follower answers a mutating API request with a 307 to
-  the current leader and preserves the path and query. It returns 503 when it
-  does not know the leader. A few POST paths that
-  persist nothing are served locally on any member rather than redirected: patch
-  rollouts, self/local subject access and rules reviews, and token reviews.
+- **Only the leader writes, and any member takes a write.** The leader handles
+  writes one at a time, and rules such as "no two Services hold one node port"
+  rest on that. A follower that receives a mutating API request carries it to
+  the leader itself and passes the answer back. It has authenticated the
+  client, and asks the leader, with its own administrative certificate, to act
+  as that client (impersonation, as `kubectl --as`); the leader authorizes,
+  validates and writes as it would for the client. Each carried write opens its
+  own connection, and until that connection is established the leader has seen
+  nothing of the write. So when the leader has just stopped, the follower holds
+  the write and offers it to whoever leads next, or serves it itself if that is
+  this member; the client waits out the election and no longer. A write that
+  was sent is never sent twice: if no answer comes, the client is told 504 and
+  that the write may or may not have been carried out. If no leader can take a
+  write within 30 seconds the follower answers 503 with `Retry-After`. A
+  request that upgrades its connection (exec, attach, port-forward, proxy) is a
+  conversation and is still answered with a 307 to the leader. A few POST paths
+  that persist nothing are served locally on any member: patch rollouts,
+  self/local subject access and rules reviews, and token reviews.
 - **A read is current unless it asks not to be.** As in Kubernetes, a GET, LIST
   or WATCH that names no `resourceVersion` is answered from a quorum: the member
   first asks the leader how far the log has been committed, the leader confirms

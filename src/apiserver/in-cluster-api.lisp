@@ -354,6 +354,7 @@ NIL to disable API audit logging. Bound by serve from --audit-log-path.")
      (make-instance 'gr8s-in-cluster-acceptor :address address :port port :store store
                     :runtime runtime :reconciler reconciler
                     :leader-status-fn leader-status-fn
+                    :relay-pki pki
                     :linearizable-read-fn linearizable-read-fn
                     :follows-a-leader-fn follows-a-leader-fn
                     :debug-state-directory debug-state-directory

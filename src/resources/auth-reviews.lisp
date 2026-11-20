@@ -301,14 +301,25 @@
     (when (and (= 4 (length parts)) (equal "system" (first parts)) (equal "serviceaccount" (second parts)))
       (values (third parts) (fourth parts)))))
 
+(defun impersonation-extra (request)
+  "The extra attributes REQUEST impersonates, as an alist of key to values: one
+Impersonate-Extra-<key> header for each key, the key percent-encoded."
+  (loop for (name . nil) in (hunchentoot:headers-in request)
+        for text = (string-downcase (string name))
+        when (and (uiop:string-prefix-p "impersonate-extra-" text) (> (length text) 18))
+          collect (cons (hunchentoot:url-decode (subseq text 18) hunchentoot::+utf-8+)
+                        (impersonation-header-values request name))))
+
 (defun impersonated-api-identity (store identity request)
   "Return the identity REQUEST impersonates, checking each attribute, or IDENTITY if it impersonates none."
   (let ((user (hunchentoot:header-in :impersonate-user request))
         (groups (impersonation-header-values request :impersonate-group))
-        (uid (hunchentoot:header-in :impersonate-uid request)))
+        (uid (hunchentoot:header-in :impersonate-uid request))
+        (extra nil))
     ;; Groups or a UID alone impersonate nobody, so the request keeps its own identity.
     (when (or (null user) (equal user ""))
       (return-from impersonated-api-identity identity))
+    (setf extra (impersonation-extra request))
     (flet ((refuse (what)
              (core-resource-error 403 "Forbidden" "User ~A cannot impersonate ~A"
                                   (api-identity-username identity) what)))
@@ -321,9 +332,19 @@
           (unless (impersonation-allowed-p store identity "groups" "" group) (refuse group)))
         (when (and uid (not (impersonation-allowed-p store identity "uids" "authentication.k8s.io" uid)))
           (refuse uid))
+        (loop for (key . values) in extra
+              do (dolist (value values)
+                   (unless (impersonation-allowed-p store identity (format nil "userextras/~A" key)
+                                                    "authentication.k8s.io" value)
+                     (refuse (format nil "~A=~A" key value)))))
         (let ((all (append groups
                            (when account-namespace
                              (list "system:serviceaccounts" (format nil "system:serviceaccounts:~A" account-namespace)))
                            (unless (equal user "system:anonymous") (list "system:authenticated")))))
           (make-api-user-identity :username user :uid uid
-                                  :groups (coerce (remove-duplicates all :test #'equal :from-end t) 'vector)))))))
+                                  :groups (coerce (remove-duplicates all :test #'equal :from-end t) 'vector)
+                                  :extra (when extra
+                                           (let ((table (make-hash-table :test #'equal)))
+                                             (loop for (key . values) in extra
+                                                   do (setf (gethash key table) (coerce values 'vector)))
+                                             table))))))))
