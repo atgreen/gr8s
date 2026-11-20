@@ -57,6 +57,15 @@ does not become a write to every member each time.
   `resourceVersion=0` accepts any version and is still served from the member's
   own state, as are discovery, health and the `gr8s.io` endpoints an operator
   uses to inspect a member that is cut off.
+- **The `kubernetes` Service leads to the members that can answer.** A Pod
+  finds the API at `10.96.0.1`. The leader keeps that Service's Endpoints and
+  EndpointSlice equal to the API listeners of the members it currently hears:
+  itself, and each other member that serves the API (a witness does not) from
+  which it has had a Raft message in the last three seconds. A member that is
+  stopped or cut off is taken out within a few seconds and put back when it
+  returns; a new leader takes the task over. A leader hears each follower
+  several times a second, so this needs no lease and writes only when the set
+  changes. Each member is published at the API URL it advertises to the cluster.
 - **A member that has lost the leader is not ready.** `/readyz` and
   `/readyz/etcd` answer 503 on a follower that has heard no leader for an
   election timeout, so a load balancer stops sending to it. `/livez` still

@@ -760,33 +760,129 @@ containers' and, as upstream's FindPort does, its restartable (sidecar) init con
                             always (and labels (equal value (gethash key labels)))))
               collect (list address target)))))
 
-(defun ensure-native-api-endpoints (store api-address api-port)
-  "Publish the API listener as the Kubernetes Service's Endpoints and EndpointSlice, as an API server does."
-  (flet ((ensure (resource object)
+(defun api-endpoint-order (endpoint)
+  (format nil "~A:~5,'0D" (first endpoint) (second endpoint)))
+
+(defun pod-reachable-api-endpoints (endpoints)
+  "ENDPOINTS, (address port) pairs, each once and in a fixed order, without any a
+Pod could not reach: a slice of IPv4 addresses holds no other kind, and a
+loopback address is the Pod's own."
+  (sort (remove-duplicates
+         (remove-if-not (lambda (endpoint)
+                          (and (cl-ppcre:scan "^\\d{1,3}(\\.\\d{1,3}){3}$" (first endpoint))
+                               (not (uiop:string-prefix-p "127." (first endpoint)))))
+                        endpoints)
+         :test #'equal)
+        #'string< :key #'api-endpoint-order))
+
+(defun native-api-endpoints-by-port (endpoints)
+  "ENDPOINTS as an alist of port to addresses, lowest port first."
+  (let ((groups nil))
+    (dolist (endpoint endpoints)
+      (push (first endpoint) (alexandria:assoc-value groups (second endpoint))))
+    (sort (mapcar (lambda (group) (cons (car group) (reverse (cdr group)))) groups) #'< :key #'car)))
+
+(defun native-api-slice-name (port first-port)
+  "A slice has one list of ports. Members nearly always share one; the slice for
+that port is the one a client knows by the Service's name."
+  (if (= port first-port) "kubernetes" (format nil "kubernetes-~D" port)))
+
+(defun published-native-api-endpoints (store)
+  "The (address port) pairs the kubernetes Service's Endpoints name, and those
+its slices name, each ordered as POD-REACHABLE-API-ENDPOINTS orders them."
+  (flet ((object (resource name)
+           (handler-case (get-core-resource store resource "default" name)
+             (kubernetes-error (condition)
+               (unless (= 404 (kubernetes-error-status-code condition)) (error condition))
+               nil))))
+    (let ((endpoints (object "endpoints" "kubernetes")))
+      (values
+       (sort (loop for subset across (or (and endpoints (gethash "subsets" endpoints)) #())
+                   append (loop for address across (gethash "addresses" subset #())
+                                collect (list (gethash "ip" address)
+                                              (gethash "port" (aref (gethash "ports" subset) 0)))))
+             #'string< :key #'api-endpoint-order)
+       (sort (loop for slice in (native-api-slices store)
+                   append (loop for endpoint across (gethash "endpoints" slice #())
+                                collect (list (aref (gethash "addresses" endpoint) 0)
+                                              (gethash "port" (aref (gethash "ports" slice) 0)))))
+             #'string< :key #'api-endpoint-order)))))
+
+(defun native-api-slices (store)
+  "The EndpointSlices this server wrote for the kubernetes Service."
+  (remove-if-not (lambda (slice)
+                   (let ((labels (gethash "labels" (gethash "metadata" slice))))
+                     (and labels
+                          (equal "kubernetes" (gethash "kubernetes.io/service-name" labels))
+                          (equal "gr8s-apiserver" (gethash "endpointslice.kubernetes.io/managed-by" labels)))))
+                 (list-core-resources store "endpointslices" "default")))
+
+(defun publish-native-api-endpoints (store endpoints)
+  "Publish ENDPOINTS, (address port) pairs as POD-REACHABLE-API-ENDPOINTS orders them, as the Kubernetes
+Service's Endpoints and EndpointSlices, as an API server does."
+  (flet ((ensure (resource name object)
            (handler-case (create-core-resource store resource object "default")
              (kubernetes-error (condition)
                (unless (= 409 (kubernetes-error-status-code condition)) (error condition))
                (update-core-resource
-                store resource "default" "kubernetes"
+                store resource "default" name
                 (lambda (existing)
                   (dolist (field (if (equal resource "endpoints")
                                      '("subsets") '("addressType" "endpoints" "ports")))
                     (setf (gethash field existing) (gethash field object)))
-                  existing))))))
-    (ensure "endpoints"
-            (core-object "metadata" (core-object "name" "kubernetes"
-                                                 ;; This server writes the slice itself below.
-                                                 "labels" (core-object "endpointslice.kubernetes.io/skip-mirror" "true"))
-                         "subsets" (vector (core-object "addresses" (vector (core-object "ip" api-address))
-                                                        "ports" (vector (core-object "name" "https" "port" api-port "protocol" "TCP"))))))
-    (ensure "endpointslices"
-            (core-object "metadata" (core-object "name" "kubernetes"
-                                                 "labels" (core-object "kubernetes.io/service-name" "kubernetes"
-                                                                       "endpointslice.kubernetes.io/managed-by" "gr8s-apiserver"))
-                         "addressType" "IPv4"
-                         "endpoints" (vector (core-object "addresses" (vector api-address)
-                                                          "conditions" (core-object "ready" t "serving" t "terminating" nil)))
-                         "ports" (vector (core-object "name" "https" "port" api-port "protocol" "TCP"))))))
+                  existing)))))
+         (ports (port) (vector (core-object "name" "https" "port" port "protocol" "TCP"))))
+    (let* ((groups (native-api-endpoints-by-port endpoints))
+           (first-port (car (first groups)))
+           (slice-names (mapcar (lambda (group) (native-api-slice-name (car group) first-port)) groups)))
+      (ensure "endpoints" "kubernetes"
+              (core-object "metadata" (core-object "name" "kubernetes"
+                                                   ;; This server writes the slices itself below.
+                                                   "labels" (core-object "endpointslice.kubernetes.io/skip-mirror" "true"))
+                           "subsets" (map 'vector
+                                          (lambda (group)
+                                            (core-object "addresses" (map 'vector (lambda (address) (core-object "ip" address))
+                                                                          (cdr group))
+                                                         "ports" (ports (car group))))
+                                          groups)))
+      (loop for (port . addresses) in groups
+            for name in slice-names
+            do (ensure "endpointslices" name
+                       (core-object "metadata" (core-object "name" name
+                                                            "labels" (core-object "kubernetes.io/service-name" "kubernetes"
+                                                                                  "endpointslice.kubernetes.io/managed-by" "gr8s-apiserver"))
+                                    "addressType" "IPv4"
+                                    "endpoints" (map 'vector
+                                                     (lambda (address)
+                                                       (core-object "addresses" (vector address)
+                                                                    "conditions" (core-object "ready" t "serving" t "terminating" nil)))
+                                                     addresses)
+                                    "ports" (ports port))))
+      (dolist (slice (native-api-slices store))
+        (let ((name (gethash "name" (gethash "metadata" slice))))
+          (unless (member name slice-names :test #'equal)
+            (delete-core-resource store "endpointslices" "default" name)))))))
+
+(defun ensure-native-api-endpoints (store api-address api-port)
+  "Publish this server's API listener as the Kubernetes Service's only endpoint."
+  (publish-native-api-endpoints store (list (list api-address api-port))))
+
+(defun reconcile-native-api-endpoints (store endpoints)
+  "Make the Kubernetes Service lead to ENDPOINTS, the (address port) API listeners
+of the members that can answer a client now, and to no other (podster-bn8). It
+was written once, by the member that founded the cluster, and went on leading
+to that member alone whether or not it was running. A pass that finds nothing a
+Pod could reach leaves what is published, and so does a store with no such
+Service."
+  (let ((wanted (pod-reachable-api-endpoints endpoints)))
+    (when (and wanted
+               (handler-case (get-core-resource store "services" "default" "kubernetes")
+                 (kubernetes-error (condition)
+                   (unless (= 404 (kubernetes-error-status-code condition)) (error condition))
+                   nil)))
+      (multiple-value-bind (endpoints slices) (published-native-api-endpoints store)
+        (unless (and (equal wanted endpoints) (equal wanted slices))
+          (publish-native-api-endpoints store wanted))))))
 
 (defun ensure-native-api-service (store &optional (api-address "127.0.0.1") (api-port 6443))
   "Publish the real native HTTPS listener as the reserved Kubernetes Service."

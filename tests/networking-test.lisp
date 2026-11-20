@@ -268,6 +268,56 @@
       (gr8s.controllers::reconcile-endpoints store)
       (is (= 1 (length (gr8s.resources::list-core-resources store "endpointslices" "default")))))))
 
+;;; podster-bn8: the kubernetes Service is where a Pod finds the API. It must lead
+;;; to every member that can answer, and to none that cannot.
+
+(defun api-service-endpoints (store)
+  "The (address port) pairs the kubernetes Service's Endpoints name, and those its slices name."
+  (flet ((sorted (pairs) (sort pairs #'string< :key (lambda (pair) (format nil "~A:~5,'0D" (first pair) (second pair))))))
+    (values
+     (sorted (loop for subset across (gethash "subsets" (gr8s.resources::get-core-resource store "endpoints" "default" "kubernetes"))
+                   append (loop for address across (gethash "addresses" subset)
+                                collect (list (gethash "ip" address) (gethash "port" (aref (gethash "ports" subset) 0))))))
+     (sorted (loop for slice in (gr8s.resources::list-core-resources store "endpointslices" "default")
+                   append (loop for endpoint across (gethash "endpoints" slice)
+                                collect (list (aref (gethash "addresses" endpoint) 0)
+                                              (gethash "port" (aref (gethash "ports" slice) 0)))))))))
+
+(test the-api-service-leads-to-every-member-that-serves-the-api
+  (with-temporary-store (store directory)
+    (values directory)
+    (gr8s.controllers::ensure-native-api-service store "192.0.2.10" 6443)
+    (flet ((both-name (expected)
+             (multiple-value-bind (endpoints slices) (api-service-endpoints store)
+               (is (equal expected endpoints))
+               (is (equal expected slices)))))
+      (gr8s.controllers::reconcile-native-api-endpoints store '(("192.0.2.11" 6443) ("192.0.2.10" 6443)))
+      (both-name '(("192.0.2.10" 6443) ("192.0.2.11" 6443)))
+      ;; A pass that finds the same members writes nothing.
+      (let ((revision (gr8s.store::pod-store-resource-revision store)))
+        (gr8s.controllers::reconcile-native-api-endpoints store '(("192.0.2.10" 6443) ("192.0.2.11" 6443)))
+        (is (= revision (gr8s.store::pod-store-resource-revision store))))
+      ;; The founder is gone: the Service no longer leads to it.
+      (gr8s.controllers::reconcile-native-api-endpoints store '(("192.0.2.11" 6443)))
+      (both-name '(("192.0.2.11" 6443)))
+      ;; Members may serve on different ports; a slice has one port list.
+      (gr8s.controllers::reconcile-native-api-endpoints store '(("192.0.2.11" 6443) ("192.0.2.12" 7443)))
+      (both-name '(("192.0.2.11" 6443) ("192.0.2.12" 7443)))
+      (gr8s.controllers::reconcile-native-api-endpoints store '(("192.0.2.12" 7443)))
+      (both-name '(("192.0.2.12" 7443)))
+      (is (= 1 (length (gr8s.resources::list-core-resources store "endpointslices" "default"))))
+      ;; Nothing a Pod could reach: what is published stays, as no answer is no reason to publish none.
+      (gr8s.controllers::reconcile-native-api-endpoints store '(("127.0.0.1" 6443)))
+      (gr8s.controllers::reconcile-native-api-endpoints store nil)
+      (both-name '(("192.0.2.12" 7443))))))
+
+(test a-store-without-the-api-service-is-given-no-endpoints
+  (with-temporary-store (store directory)
+    (values directory)
+    (gr8s.controllers::reconcile-native-api-endpoints store '(("192.0.2.11" 6443)))
+    (is (null (gr8s.resources::list-core-resources store "endpoints" "default")))
+    (is (null (gr8s.resources::list-core-resources store "endpointslices" "default")))))
+
 (test networking-api-serves-ingress-classes-cidrs-and-addresses
   (with-core-api (store path)
     (values store path)

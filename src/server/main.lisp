@@ -3098,6 +3098,8 @@ between later ones. An ordinary restart recovers within the first.")
                                       (run (reconcile-storage-version-migrations store))
                                       (run (reconcile-endpointslices store))
                                       (run (reconcile-endpoints store))
+                                      (run (reconcile-native-api-endpoints
+                                            store (and ha (ha-control-plane-live-api-endpoints ha))))
                                       (run (reconcile-service-ip-addresses store))
                                       (run (reconcile-service-load-balancer-status store))
                                       (run (reconcile-ingress-status store))
