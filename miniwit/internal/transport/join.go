@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/atgreen/gr8s/miniwit/internal/raftcore"
 	nodev1 "github.com/atgreen/gr8s/miniwit/proto/gr8s/node/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -18,9 +20,13 @@ import (
 type AddressBook map[string]string
 
 // JoinResult is what a successful Join returns: the peer address book the leader
-// sent, so the witness can reach every member to reply to.
+// sent, so the witness can reach every member to reply to, and each member's
+// role ("voter", "witness" or "learner"), so it can count a majority if it ever
+// has to stand in for a voter. Members is nil when the leader named a role this
+// program does not know: no membership is better than a wrong one.
 type JoinResult struct {
 	Addresses AddressBook
+	Members   map[string]string
 }
 
 const maxJoinRedirects = 3
@@ -53,7 +59,7 @@ func Join(ctx context.Context, id *Identity, selfID, selfHost string, selfPort u
 			for _, m := range resp.GetMembers() {
 				book[m.GetId()] = net.JoinHostPort(m.GetHost(), strconv.Itoa(int(m.GetPort())))
 			}
-			return &JoinResult{Addresses: book}, nil
+			return &JoinResult{Addresses: book, Members: memberRoles(resp.GetMembers())}, nil
 		case resp.GetLeaderHost() != "" && attempt < maxJoinRedirects:
 			host, port = resp.GetLeaderHost(), int(resp.GetLeaderPort())
 		default:
@@ -65,6 +71,21 @@ func Join(ctx context.Context, id *Identity, selfID, selfHost string, selfPort u
 		}
 	}
 	return nil, fmt.Errorf("join: exhausted %d leader redirects", maxJoinRedirects)
+}
+
+// memberRoles reads each member's role out of a Join response, or returns nil if
+// any of them is not one this program knows.
+func memberRoles(members []*nodev1.RaftMember) map[string]string {
+	roles := make(map[string]string, len(members))
+	for _, m := range members {
+		switch role := strings.ToLower(m.GetRole()); role {
+		case raftcore.RoleVoter, raftcore.RoleWitness, raftcore.RoleLearner:
+			roles[m.GetId()] = role
+		default:
+			return nil
+		}
+	}
+	return roles
 }
 
 func callJoin(ctx context.Context, creds credentials.TransportCredentials, addr string, req *nodev1.JoinRequest) (*nodev1.JoinResponse, error) {

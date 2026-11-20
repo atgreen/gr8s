@@ -3,6 +3,7 @@
 package raftcore
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -14,16 +15,24 @@ import (
 // memStore is an in-memory Store that counts durable writes, so tests can assert
 // persistence happened before an ack and can reload to check durability.
 type memStore struct {
-	hs    HardState
-	log   []Entry
-	saves int
+	hs      HardState
+	log     []Entry
+	saves   int
+	failPut error // when set, PutHardState fails with it and stores nothing
 }
 
 func (m *memStore) Load() (*State, error) {
 	return &State{HardState: m.hs, CommitIndex: m.hs.SnapshotIdx, Log: append([]Entry(nil), m.log...)}, nil
 }
-func (m *memStore) PutHardState(hs HardState) error { m.hs = hs; m.saves++; return nil }
-func (m *memStore) AppendLog(e []Entry) error        { m.log = append(m.log, e...); m.saves++; return nil }
+func (m *memStore) PutHardState(hs HardState) error {
+	if m.failPut != nil {
+		return m.failPut
+	}
+	m.hs = hs
+	m.saves++
+	return nil
+}
+func (m *memStore) AppendLog(e []Entry) error { m.log = append(m.log, e...); m.saves++; return nil }
 func (m *memStore) RewriteLog(e []Entry) error {
 	m.log = append([]Entry(nil), e...)
 	m.saves++
@@ -42,6 +51,19 @@ func newTestFollower(t *testing.T, init *State) (*Follower, *memStore) {
 	}
 	f.clock = func() time.Time { return time.Unix(1000, 0) }
 	return f, ms
+}
+
+// stepOne runs a Step that answers with at most one message, which is every
+// Step of a witness that is not standing in.
+func stepOne(f *Follower, payload []byte) (*Reply, error) {
+	out, err := f.Step(payload)
+	switch len(out) {
+	case 0:
+		return nil, err
+	case 1:
+		return &out[0], err
+	}
+	return nil, fmt.Errorf("expected at most one message, got %d", len(out))
 }
 
 func decodeReply(t *testing.T, r *Reply) *lispwire.Msg {
@@ -64,7 +86,7 @@ func rvPayload(term int64, from string, lastIdx, lastTrm int64) []byte {
 func TestGrantsVoteThenRefusesSecondCandidateSameTerm(t *testing.T) {
 	f, ms := newTestFollower(t, nil)
 
-	r, err := f.Step(rvPayload(5, "gvision", 0, 0))
+	r, err := stepOne(f, rvPayload(5, "gvision", 0, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +105,7 @@ func TestGrantsVoteThenRefusesSecondCandidateSameTerm(t *testing.T) {
 	}
 
 	// Same term, a different candidate: already voted, so refuse.
-	r2, _ := f.Step(rvPayload(5, "gr8s2", 0, 0))
+	r2, _ := stepOne(f, rvPayload(5, "gr8s2", 0, 0))
 	if decodeReply(t, r2).Bool("GRANTED") {
 		t.Fatal("must not grant a second vote in the same term")
 	}
@@ -92,7 +114,7 @@ func TestGrantsVoteThenRefusesSecondCandidateSameTerm(t *testing.T) {
 func TestRefusesVoteWithStaleLog(t *testing.T) {
 	// Our log is at index 10, term 4; a candidate behind that must be refused.
 	f, _ := newTestFollower(t, &State{CurrentTerm: 4, SnapshotIdx: 10, SnapshotTrm: 4})
-	r, _ := f.Step(rvPayload(5, "gvision", 9, 4)) // lower last-log-index
+	r, _ := stepOne(f, rvPayload(5, "gvision", 9, 4)) // lower last-log-index
 	if decodeReply(t, r).Bool("GRANTED") {
 		t.Fatal("must refuse a candidate whose log is less up-to-date")
 	}
@@ -100,7 +122,7 @@ func TestRefusesVoteWithStaleLog(t *testing.T) {
 
 func TestStepsDownOnHigherTerm(t *testing.T) {
 	f, _ := newTestFollower(t, &State{CurrentTerm: 3, VotedFor: "old"})
-	_, _ = f.Step(rvPayload(9, "gvision", 0, 0))
+	_, _ = stepOne(f, rvPayload(9, "gvision", 0, 0))
 	st := f.snapshotState()
 	if st.CurrentTerm != 9 {
 		t.Errorf("term = %d, want 9", st.CurrentTerm)
@@ -118,7 +140,7 @@ func TestPreVoteGrantedOnlyWithoutRecentLeader(t *testing.T) {
 	}
 	// Hear a leader via a heartbeat, then a pre-vote must be refused (healthy leader).
 	hb := appendPayload(6, "gvision", 0, 0, nil, 0, 1)
-	_, _ = f.Step(hb)
+	_, _ = stepOne(f, hb)
 	if decodeReply(t, mustStep(t, f, pv)).Bool("GRANTED") {
 		t.Fatal("pre-vote must be refused right after hearing a leader")
 	}
@@ -142,7 +164,7 @@ func TestAppendEntriesAppendsAndCommits(t *testing.T) {
 	// First establish the leader's term so prev-index 0 matches our empty log.
 	e1 := entryTriple(1, 2, lispwire.List{Items: []lispwire.Value{lispwire.Sym(":RAFT-BARRIER")}})
 	e2 := entryTriple(2, 2, lispwire.List{Items: []lispwire.Value{lispwire.Sym(":PUT"), lispwire.Str("k"), lispwire.Str("v")}})
-	r, err := f.Step(appendPayload(2, "gvision", 0, 0, []lispwire.Value{e1, e2}, 2, 7))
+	r, err := stepOne(f, appendPayload(2, "gvision", 0, 0, []lispwire.Value{e1, e2}, 2, 7))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +195,7 @@ func TestAppendEntriesAppendsAndCommits(t *testing.T) {
 func TestAppendEntriesRejectsLogMismatch(t *testing.T) {
 	// We hold index 5 @ term 3; leader claims prev-index 5 @ term 4 -> mismatch.
 	f, _ := newTestFollower(t, &State{CurrentTerm: 4, SnapshotIdx: 5, SnapshotTrm: 3})
-	r, _ := f.Step(appendPayload(4, "gvision", 5, 4, nil, 5, 1))
+	r, _ := stepOne(f, appendPayload(4, "gvision", 5, 4, nil, 5, 1))
 	m := decodeReply(t, r)
 	if m.Bool("SUCCESS") {
 		t.Fatal("append must be rejected when prev-log-term mismatches")
@@ -185,7 +207,7 @@ func TestInstallSnapshotSetsBoundary(t *testing.T) {
 	is := lispwire.NewReply("INSTALL-SNAPSHOT").Int("TERM", 6).Str("FROM", "gvision").
 		Int("LAST-INDEX", 100).Int("LAST-TERM", 5).
 		Raw("STATE", lispwire.Sym("NIL")).Encode()
-	r, err := f.Step(is)
+	r, err := stepOne(f, is)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,28 +227,44 @@ func TestInstallSnapshotSetsBoundary(t *testing.T) {
 	}
 }
 
-// The structural witness guarantee: Step only ever produces follower replies,
-// never a REQUEST-VOTE or APPEND-ENTRIES — so this member can never become leader.
-func TestNeverOriginatesElectionOrReplication(t *testing.T) {
-	f, _ := newTestFollower(t, nil)
+// A witness that does not know the membership cannot count a majority, so it
+// only ever answers: it never originates a PRE-VOTE, REQUEST-VOTE or
+// APPEND-ENTRIES, whatever it is sent. (With a membership it may stand in for a
+// voter that is behind it; standin_test.go.)
+func TestOriginatesNothingWithoutAMembership(t *testing.T) {
+	f, _ := newTestFollower(t, &State{
+		HardState: HardState{CurrentTerm: 4},
+		Log:       []Entry{{Index: 1, Term: 4, Command: `(:PUT "k" "v")`}},
+	})
 	inputs := [][]byte{
+		preVotePayload(5, "gvision", 0, 0), // behind our log: the stand-in trigger
 		rvPayload(5, "gvision", 0, 0),
-		appendPayload(5, "gvision", 0, 0, nil, 0, 1),
+		appendPayload(5, "gvision", 1, 4, nil, 0, 1),
+		lispwire.NewReply("PRE-VOTE-REPLY").Int("TERM", 5).Int("PRE-TERM", 6).Str("FROM", "gvision").Bool("GRANTED", true).Encode(),
+		lispwire.NewReply("REQUEST-VOTE-REPLY").Int("TERM", 5).Str("FROM", "gvision").Bool("GRANTED", true).Encode(),
+		lispwire.NewReply("APPEND-ENTRIES-REPLY").Int("TERM", 5).Str("FROM", "gvision").Bool("SUCCESS", true).Int("MATCH-INDEX", 1).Encode(),
+		lispwire.NewReply("TIMEOUT-NOW").Int("TERM", 5).Str("FROM", "gvision").Encode(),
 	}
 	for _, in := range inputs {
-		r, err := f.Step(in)
+		out, err := f.Step(in)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if r == nil {
-			continue
-		}
-		m := decodeReply(t, r)
-		switch m.Type {
-		case "REQUEST-VOTE", "PRE-VOTE", "APPEND-ENTRIES", "INSTALL-SNAPSHOT":
-			t.Fatalf("witness must never originate %s", m.Type)
+		for i := range out {
+			switch m := decodeReply(t, &out[i]); m.Type {
+			case "REQUEST-VOTE", "PRE-VOTE", "APPEND-ENTRIES", "INSTALL-SNAPSHOT", "TIMEOUT-NOW":
+				t.Fatalf("a witness without a membership must never originate %s", m.Type)
+			}
 		}
 	}
+	if out := f.Tick(); len(out) != 0 {
+		t.Fatalf("a follower's tick sends nothing, got %d messages", len(out))
+	}
+}
+
+func preVotePayload(term int64, from string, lastIdx, lastTrm int64) []byte {
+	return lispwire.NewReply("PRE-VOTE").Int("TERM", term).Str("FROM", from).
+		Int("LAST-LOG-INDEX", lastIdx).Int("LAST-LOG-TERM", lastTrm).Encode()
 }
 
 func bigEntries(n int64, termArg int64) []lispwire.Value {
@@ -244,7 +282,7 @@ func TestCompactionBoundsTheLog(t *testing.T) {
 
 	f, _ := newTestFollower(t, &State{CurrentTerm: 3})
 	// 150 entries of ~130 bytes each (~19 KB) far exceed the 2 KB threshold.
-	r, err := f.Step(appendPayload(3, "gvision", 0, 0, bigEntries(150, 3), 150, 1))
+	r, err := stepOne(f, appendPayload(3, "gvision", 0, 0, bigEntries(150, 3), 150, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +300,7 @@ func TestCompactionBoundsTheLog(t *testing.T) {
 	}
 	// A follow-up append at the head still matches after compaction.
 	more := []lispwire.Value{entryTriple(151, 3, lispwire.Sym("NIL"))}
-	r2, _ := f.Step(appendPayload(3, "gvision", 150, 3, more, 151, 2))
+	r2, _ := stepOne(f, appendPayload(3, "gvision", 150, 3, more, 151, 2))
 	if !decodeReply(t, r2).Bool("SUCCESS") {
 		t.Fatal("append at the head should still match after compaction")
 	}
@@ -286,7 +324,7 @@ func TestCompactionFreesDiskStorage(t *testing.T) {
 	}
 	f.clock = func() time.Time { return time.Unix(1000, 0) }
 
-	if _, err := f.Step(appendPayload(3, "gvision", 0, 0, bigEntries(150, 3), 150, 1)); err != nil {
+	if _, err := stepOne(f, appendPayload(3, "gvision", 0, 0, bigEntries(150, 3), 150, 1)); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(logPath(dir))
@@ -302,7 +340,7 @@ func TestCompactionFreesDiskStorage(t *testing.T) {
 
 func mustStep(t *testing.T, f *Follower, payload []byte) *Reply {
 	t.Helper()
-	r, err := f.Step(payload)
+	r, err := stepOne(f, payload)
 	if err != nil {
 		t.Fatal(err)
 	}

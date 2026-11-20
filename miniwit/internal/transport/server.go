@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"time"
 
 	"github.com/atgreen/gr8s/miniwit/internal/lispwire"
 	"github.com/atgreen/gr8s/miniwit/internal/raftcore"
@@ -19,9 +20,10 @@ import (
 )
 
 // Server implements the RaftTransport gRPC service for a witness. It serves
-// Deliver (feeding the follower and sending its reply back) and answers Join as a
-// non-leader redirect; every other method is refused, because a witness never
-// leads, issues certificates, or serves nodes.
+// Deliver (feeding the follower and sending on what it answers) and answers Join
+// as a non-leader redirect; every other method is refused, because a witness
+// never accepts a write, issues certificates, or serves nodes — not even in the
+// moment it leads to hand its log to a voter.
 type Server struct {
 	nodev1.UnimplementedRaftTransportServer
 	follower *raftcore.Follower
@@ -53,7 +55,8 @@ func Serve(listenAddr string, id *Identity, svc *Server) (*grpc.Server, error) {
 
 // Deliver authenticates the caller by its client-certificate CN, enforces that
 // the message's :FROM matches that identity (authenticated-raft-message), feeds
-// the message to the follower, and sends any reply back fire-and-forget.
+// the message to the follower, and sends what it answers fire-and-forget: usually
+// one reply to the caller, but a stand-in also addresses other members.
 func (s *Server) Deliver(ctx context.Context, env *nodev1.RaftEnvelope) (*nodev1.RaftAck, error) {
 	peerCN, err := peerMemberID(ctx)
 	if err != nil {
@@ -76,14 +79,19 @@ func (s *Server) Deliver(ctx context.Context, env *nodev1.RaftEnvelope) (*nodev1
 			log.Printf("debug: recv %s from=%s term=%d prev-log-index=%d last-index=%d bytes=%d", m.Type, peerCN, t, pli, li, len(payload))
 		}
 	}
-	reply, err := s.follower.Step(payload)
+	replies, err := s.follower.Step(payload)
 	if err != nil {
 		// A step error (e.g. a persistence failure) just means no reply; the peer
-		// retries. Log it rather than failing the fire-and-forget RPC.
+		// retries. Log it rather than failing the fire-and-forget RPC. Anything
+		// the step produced before it failed is still good to send.
 		log.Printf("miniwit: step from %s: %v", peerCN, err)
-		return &nodev1.RaftAck{}, nil
 	}
-	if reply != nil {
+	s.sendAll(replies)
+	return &nodev1.RaftAck{}, nil
+}
+
+func (s *Server) sendAll(replies []raftcore.Reply) {
+	for _, reply := range replies {
 		if debugEnabled {
 			if m, err := lispwire.DecodePayload(reply.Payload); err == nil {
 				ni, hasNI := m.Int("NEXT-INDEX")
@@ -93,13 +101,36 @@ func (s *Server) Deliver(ctx context.Context, env *nodev1.RaftEnvelope) (*nodev1
 		}
 		s.sender.Send(reply.To, reply.Payload)
 	}
-	return &nodev1.RaftAck{}, nil
 }
 
-// Join answers a joiner that contacted this witness: a witness is never leader,
-// so it redirects to the leader it last heard from, if any.
+// TickEvery is how often RunClock ticks the follower: gr8s's own Raft tick.
+const TickEvery = 50 * time.Millisecond
+
+// RunClock drives the follower's clock until ctx is done, sending whatever each
+// tick produces. A witness has no election timer, so a tick does nothing unless
+// it is standing in as leader: then it carries the heartbeats, and the limit on
+// how long the stand-in lasts.
+func (s *Server) RunClock(ctx context.Context, every time.Duration) {
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.sendAll(s.follower.Tick())
+		}
+	}
+}
+
+// Join answers a joiner that contacted this witness: a witness admits nobody, so
+// it redirects to the leader it last heard from, if any. While it stands in as
+// leader itself there is nobody to redirect to.
 func (s *Server) Join(ctx context.Context, req *nodev1.JoinRequest) (*nodev1.JoinResponse, error) {
 	leader := s.follower.LeaderID()
+	if leader == s.selfID {
+		leader = ""
+	}
 	resp := &nodev1.JoinResponse{Accepted: false, LeaderId: leader, Reason: "witness-cannot-admit"}
 	if leader != "" {
 		if addr, ok := s.sender.Address(leader); ok {

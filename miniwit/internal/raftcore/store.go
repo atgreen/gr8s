@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Package raftcore implements a non-campaigning Raft follower: it grants votes,
-// acknowledges AppendEntries, and accepts snapshots, so it contributes to quorum
-// without ever becoming leader or applying a command. The durable format is this
-// program's own private business — only the wire protocol (package lispwire) has
-// to match gr8s/cl-raft.
+// Package raftcore implements a Raft witness: it grants votes, acknowledges
+// AppendEntries, and accepts snapshots, so it contributes to quorum without
+// applying a command or accepting a proposal. It leads only to hand its log to a
+// voter that is behind it (standin.go). The durable format is this program's own
+// private business — only the wire protocol (package lispwire) has to match
+// gr8s/cl-raft.
 package raftcore
 
 import (
@@ -17,8 +18,10 @@ import (
 )
 
 // Entry is a stored log entry. Command is the Lisp-printed form of the command
-// (lispwire.Write), kept verbatim: a witness stores the data for redundancy but
-// never interprets or re-sends it — only Index and Term drive Raft matching.
+// (lispwire.Write), kept verbatim. A witness never interprets it, apart from
+// reading the membership out of a config entry: Index and Term drive Raft
+// matching. The command is sent on only when the witness stands in for a voter
+// that lacks the entry.
 type Entry struct {
 	Index   int64  `json:"i"`
 	Term    int64  `json:"t"`
@@ -26,14 +29,23 @@ type Entry struct {
 }
 
 // HardState is the small, rarely-changing durable state: the current term and
-// vote (Raft's persistent hard state) plus the snapshot boundary. commitIndex is
-// deliberately NOT here — Raft treats it as volatile and the leader re-advances
-// it after a restart, so persisting it would only add writes.
+// vote (Raft's persistent hard state), the snapshot boundary, and the cluster
+// membership. commitIndex is deliberately NOT here — Raft treats it as volatile
+// and the leader re-advances it after a restart, so persisting it would only add
+// writes.
+//
+// Members maps each member id to "voter", "witness" or "learner"; empty means
+// the membership is unknown (see membership.go). MembersIdx is the log index it
+// was last taken from — a committed config entry or a snapshot boundary — so the
+// entries the leader re-commits after a restart are not applied to it twice. The
+// map is replaced, never changed in place, so a HardState value can be copied.
 type HardState struct {
-	CurrentTerm int64  `json:"current_term"`
-	VotedFor    string `json:"voted_for"`
-	SnapshotIdx int64  `json:"snapshot_index"`
-	SnapshotTrm int64  `json:"snapshot_term"`
+	CurrentTerm int64             `json:"current_term"`
+	VotedFor    string            `json:"voted_for"`
+	SnapshotIdx int64             `json:"snapshot_index"`
+	SnapshotTrm int64             `json:"snapshot_term"`
+	Members     map[string]string `json:"members,omitempty"`
+	MembersIdx  int64             `json:"members_index,omitempty"`
 }
 
 // State is the full in-memory state the follower works from. CommitIndex starts
@@ -45,15 +57,15 @@ type State struct {
 }
 
 // Store persists the durable state. It separates the hard state (a tiny file
-// rewritten only on a term/vote/snapshot change) from the log (appended to, so a
+// rewritten only on a term/vote/snapshot/membership change) from the log (appended to, so a
 // routine AppendEntries writes only its new entries rather than the whole log) so
 // that steady following costs O(new entries) of I/O, not O(log size) — which
 // matters on the modest flash a firewall runs on. FileStore is the production
 // implementation; tests use an in-memory store.
 type Store interface {
 	Load() (*State, error)
-	PutHardState(HardState) error   // atomic small write; term/vote/snapshot changes
-	AppendLog(entries []Entry) error // append new entries + fsync; the hot path
+	PutHardState(HardState) error     // atomic small write; term/vote/snapshot changes
+	AppendLog(entries []Entry) error  // append new entries + fsync; the hot path
 	RewriteLog(entries []Entry) error // replace the whole log; truncation/snapshot only
 }
 

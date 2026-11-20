@@ -41,7 +41,7 @@ func TestSnapshotChunksReassembleAndInstallBoundary(t *testing.T) {
 	}
 	for i, c := range chunks {
 		frame := buildChunkFrame("gvision", 7, 120, 6, c.offset, 9, c.data, c.done)
-		r, err := f.Step(frame)
+		r, err := stepOne(f, frame)
 		if err != nil {
 			t.Fatalf("chunk %d: %v", i, err)
 		}
@@ -77,7 +77,7 @@ func TestSnapshotEarlyAckWhenAlreadyCommitted(t *testing.T) {
 	// The witness already has index 120 committed: it acks the first chunk at once
 	// without the rest of the transfer.
 	f, _ := newTestFollower(t, &State{CurrentTerm: 7, SnapshotIdx: 120, SnapshotTrm: 6, CommitIndex: 120})
-	r, err := f.Step(buildChunkFrame("gvision", 7, 120, 6, 0, 9, []byte{1, 2, 3}, false))
+	r, err := stepOne(f, buildChunkFrame("gvision", 7, 120, 6, 0, 9, []byte{1, 2, 3}, false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestWitnessLispFormSnapshotChunk(t *testing.T) {
 		Str("DIGEST", "0123456789012345678901234567890123456789012345678901234567890123").
 		Raw("DATA", lispwire.Vec{Items: []lispwire.Value{lispwire.Int(1), lispwire.Int(2), lispwire.Int(3)}}).
 		Bool("DONE", true).Encode()
-	r, err := f.Step(payload)
+	r, err := stepOne(f, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func TestWitnessLispFormSnapshotChunk(t *testing.T) {
 func TestSnapshotRejectsOutOfOrderChunk(t *testing.T) {
 	f, _ := newTestFollower(t, &State{CurrentTerm: 7})
 	// A chunk at offset 3 with no prior offset-0 chunk must be rejected.
-	_, err := f.Step(buildChunkFrame("gvision", 7, 120, 6, 3, 9, []byte{4, 5, 6}, false))
+	_, err := stepOne(f, buildChunkFrame("gvision", 7, 120, 6, 3, 9, []byte{4, 5, 6}, false))
 	if err == nil {
 		t.Fatal("expected an error for an out-of-order snapshot chunk")
 	}

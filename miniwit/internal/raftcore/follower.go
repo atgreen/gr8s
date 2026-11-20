@@ -4,24 +4,37 @@ package raftcore
 
 import (
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
 	"github.com/atgreen/gr8s/miniwit/internal/lispwire"
 )
 
-// Reply is a message to send back to a peer, fire-and-forget, as its own Deliver
-// call (gr8s's send model). To is the peer id; Payload is the encoded message.
+// Reply is a message to send to a peer, fire-and-forget, as its own Deliver call
+// (gr8s's send model). To is the peer id; Payload is the encoded message.
 type Reply struct {
 	To      string
 	Payload []byte
 }
 
-// Follower is a non-campaigning Raft member. It mirrors the follower-side logic
-// of cl-raft/src/core.lisp: step down on a newer term, grant votes under the
-// §5.4.1 up-to-date rule, append/overwrite under the log-match rule, and install
-// snapshot boundaries. It never starts an election, so it can never become
-// leader — which is exactly what a witness must guarantee.
+// raftRole is the Raft role (follower/candidate/leader), as distinct from the
+// membership role (voter/witness/learner) recorded in HardState.Members.
+type raftRole int
+
+const (
+	roleFollower raftRole = iota
+	roleCandidate
+	roleLeader
+)
+
+// Follower is a witness Raft member. It mirrors cl-raft/src/core.lisp: step down
+// on a newer term, grant votes under the §5.4.1 up-to-date rule, append/overwrite
+// under the log-match rule, and install snapshot boundaries. It has no election
+// timer, so it never campaigns on its own. The one exception is the stand-in
+// (standin.go): when it has to refuse a voter's Pre-Vote only because that voter
+// is behind its own log, it gets itself elected, copies its log to the voter and
+// hands leadership over. It never accepts a proposal and never applies a command.
 type Follower struct {
 	mu    sync.Mutex
 	id    string // this witness's member id == its certificate CN == its :FROM
@@ -30,14 +43,31 @@ type Follower struct {
 
 	leaderID          string
 	clock             func() time.Time
-	electionTimeout   time.Duration
+	electionTimeout   time.Duration     // Pre-Vote grants, and how long a stand-in may lead
 	lastLeaderContact time.Time         // for Pre-Vote: grant only when no leader seen recently
 	recv              *snapshotReceiver // in-progress chunked snapshot transfer, if any
+
+	// Stand-in state (standin.go). All of it is volatile: a restart mid-election
+	// just comes back as a follower that has voted for itself in that term.
+	role        raftRole
+	preVoteTerm int64               // term of the pre-election in flight; 0 when none
+	preVotes    map[string]struct{} // members that granted that pre-election, self included
+	votes       map[string]struct{} // members that voted for us in CurrentTerm, self included
+	nextIndex   map[string]int64    // leader only: per voter peer
+	matchIndex  map[string]int64    // leader only: per voter peer
+	successor   string              // leader only: the voter already sent TIMEOUT-NOW
+	leaderSince time.Time           // when this stand-in won; it leads one election timeout at most
+	lastAppend  time.Time           // when AppendEntries last went out to every voter
+
+	out         []Reply                          // messages produced by the Step/Tick in progress
+	logf        func(format string, args ...any) // transition log
+	onAddresses func(map[string]string)          // peer endpoints learned with a membership
 }
 
 // NewFollower loads durable state and returns a ready follower. electionTimeout
 // gates Pre-Vote grants (a witness grants only when it has heard no leader for at
-// least this long); it never drives an election here.
+// least this long) and bounds how long a stand-in leads; it never starts an
+// election by itself.
 func NewFollower(id string, store Store, electionTimeout time.Duration) (*Follower, error) {
 	st, err := store.Load()
 	if err != nil {
@@ -49,35 +79,58 @@ func NewFollower(id string, store Store, electionTimeout time.Duration) (*Follow
 		st:              st,
 		clock:           time.Now,
 		electionTimeout: electionTimeout,
+		logf:            log.Printf,
 	}, nil
 }
 
-// Step decodes one incoming RaftEnvelope payload and returns the reply to send,
-// or nil when the message warrants none. Messages a follower never originates
-// (vote/append replies) are ignored; snapshot chunks are phase 5.
-func (f *Follower) Step(payload []byte) (*Reply, error) {
+// Step decodes one incoming RaftEnvelope payload and returns the messages to
+// send in response, in order. There may be none, one (a reply), or several (a
+// refused Pre-Vote that starts a stand-in also asks every peer for its
+// pre-vote). Messages returned alongside an error were made before the failure
+// and are safe to send.
+func (f *Follower) Step(payload []byte) ([]Reply, error) {
 	msg, err := lispwire.DecodePayload(payload)
 	if err != nil {
 		return nil, err
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.out = nil
 	switch msg.Type {
 	case "REQUEST-VOTE":
-		return f.handleRequestVote(msg)
+		err = f.handleRequestVote(msg)
 	case "PRE-VOTE":
-		return f.handlePreVote(msg)
+		err = f.handlePreVote(msg)
 	case "APPEND-ENTRIES":
-		return f.handleAppendEntries(msg)
+		err = f.handleAppendEntries(msg)
 	case "INSTALL-SNAPSHOT":
-		return f.handleInstallSnapshot(msg)
+		err = f.handleInstallSnapshot(msg)
 	case "SNAPSHOT-CHUNK":
-		return f.handleSnapshotChunk(msg)
-	case "REQUEST-VOTE-REPLY", "PRE-VOTE-REPLY", "APPEND-ENTRIES-REPLY", "INSTALL-SNAPSHOT-REPLY":
-		return nil, nil // a non-campaigning, non-leading witness never acts on these
+		err = f.handleSnapshotChunk(msg)
+	case "PRE-VOTE-REPLY":
+		err = f.handlePreVoteReply(msg)
+	case "REQUEST-VOTE-REPLY":
+		err = f.handleRequestVoteReply(msg)
+	case "APPEND-ENTRIES-REPLY":
+		err = f.handleAppendEntriesReply(msg)
+	case "TIMEOUT-NOW", "INSTALL-SNAPSHOT-REPLY":
+		// Only a voter takes over on request (raft-handle-timeout-now), and a
+		// witness sends no snapshot for anyone to answer. Either can still carry
+		// a newer term.
+		term, _ := msg.Int("TERM")
+		err = f.stepDownIfStale(term)
 	default:
-		return nil, fmt.Errorf("raftcore: unexpected message type %q", msg.Type)
+		err = fmt.Errorf("raftcore: unexpected message type %q", msg.Type)
 	}
+	out := f.out
+	f.out = nil
+	return out, err
+}
+
+// send queues a message for the caller of Step or Tick to deliver. Anything that
+// must be durable before the message reveals it is persisted before this call.
+func (f *Follower) send(to string, payload []byte) {
+	f.out = append(f.out, Reply{To: to, Payload: payload})
 }
 
 // --- log helpers ----------------------------------------------------------
@@ -117,15 +170,38 @@ func (f *Follower) logTerm(index int64) (int64, bool) {
 // --- term / persistence ---------------------------------------------------
 
 // stepDownIfStale adopts a newer term and reverts to follower (clearing the
-// vote), persisting the hard state before returning (Raft safety).
+// vote), persisting the hard state before returning (Raft safety). Whatever this
+// member was doing in the old term -- a pre-election, a candidacy, leading as a
+// stand-in -- ends here.
 func (f *Follower) stepDownIfStale(term int64) error {
-	if term > f.st.CurrentTerm {
-		f.st.CurrentTerm = term
-		f.st.VotedFor = ""
-		f.leaderID = ""
-		return f.store.PutHardState(f.st.HardState)
+	if term <= f.st.CurrentTerm {
+		return nil
 	}
+	hs := f.st.HardState
+	hs.CurrentTerm = term
+	hs.VotedFor = ""
+	if err := f.store.PutHardState(hs); err != nil {
+		return err
+	}
+	f.st.HardState = hs
+	f.becomeFollower("")
 	return nil
+}
+
+// becomeFollower drops every candidate and leader role in the current term,
+// like raft-become-follower. With no known leader the contact time goes back to
+// "never", so a Pre-Vote can be granted at once; a caller that knows the leader
+// records the contact itself. The term and vote are the caller's business.
+func (f *Follower) becomeFollower(leader string) {
+	f.role = roleFollower
+	f.leaderID = leader
+	f.preVoteTerm = 0
+	f.preVotes, f.votes = nil, nil
+	f.nextIndex, f.matchIndex = nil, nil
+	f.successor = ""
+	if leader == "" {
+		f.lastLeaderContact = time.Time{}
+	}
 }
 
 func (f *Follower) upToDate(msgLastTerm, msgLastIndex int64) bool {
@@ -135,45 +211,55 @@ func (f *Follower) upToDate(msgLastTerm, msgLastIndex int64) bool {
 
 // --- handlers (mirror cl-raft/src/core.lisp) ------------------------------
 
-func (f *Follower) handleRequestVote(msg *lispwire.Msg) (*Reply, error) {
+func (f *Follower) handleRequestVote(msg *lispwire.Msg) error {
 	term, _ := msg.Int("TERM")
 	candidate, _ := msg.Str("FROM")
 	lastIdx, _ := msg.Int("LAST-LOG-INDEX")
 	lastTrm, _ := msg.Int("LAST-LOG-TERM")
 	if err := f.stepDownIfStale(term); err != nil {
-		return nil, err
+		return err
 	}
+	// While this member is a candidate or a stand-in leader it has voted for
+	// itself in this term, so the vote check alone refuses a rival.
 	grant := term == f.st.CurrentTerm &&
 		(f.st.VotedFor == "" || f.st.VotedFor == candidate) &&
 		f.upToDate(lastTrm, lastIdx)
 	if grant {
-		f.st.CurrentTerm = term
-		f.st.VotedFor = candidate
-		if err := f.store.PutHardState(f.st.HardState); err != nil {
-			return nil, err
+		hs := f.st.HardState
+		hs.VotedFor = candidate
+		if err := f.store.PutHardState(hs); err != nil {
+			return err
 		}
+		f.st.HardState = hs
 	}
-	payload := lispwire.NewReply("REQUEST-VOTE-REPLY").
-		Int("TERM", f.st.CurrentTerm).Str("FROM", f.id).Bool("GRANTED", grant).Encode()
-	return &Reply{To: candidate, Payload: payload}, nil
+	f.send(candidate, lispwire.NewReply("REQUEST-VOTE-REPLY").
+		Int("TERM", f.st.CurrentTerm).Str("FROM", f.id).Bool("GRANTED", grant).Encode())
+	return nil
 }
 
-func (f *Follower) handlePreVote(msg *lispwire.Msg) (*Reply, error) {
+func (f *Follower) handlePreVote(msg *lispwire.Msg) error {
 	term, _ := msg.Int("TERM")
 	from, _ := msg.Str("FROM")
-	lastIdx, _ := msg.Int("LAST-LOG-INDEX")
+	lastIdx, hasLastIdx := msg.Int("LAST-LOG-INDEX")
 	lastTrm, _ := msg.Int("LAST-LOG-TERM")
-	// Grant only when no leader has been heard for at least an election timeout,
-	// the candidate's hypothetical term is ahead of ours, and its log is at least
-	// as up-to-date. A witness is never leader, so that clause is always satisfied.
-	// Pre-Vote changes no persistent state.
-	grant := f.leaderContactElapsed() >= f.electionTimeout &&
-		term > f.st.CurrentTerm &&
-		f.upToDate(lastTrm, lastIdx)
-	payload := lispwire.NewReply("PRE-VOTE-REPLY").
+	// Grant only when this member is not leading, no leader has been heard for at
+	// least an election timeout, the candidate's hypothetical term is ahead of
+	// ours, and its log is at least as up-to-date. Pre-Vote changes no persistent
+	// state, and the term it names is hypothetical, so there is no step-down.
+	quiet := f.role != roleLeader &&
+		f.leaderContactElapsed() >= f.electionTimeout &&
+		term > f.st.CurrentTerm
+	upToDate := f.upToDate(lastTrm, lastIdx)
+	grant := quiet && upToDate
+	f.send(from, lispwire.NewReply("PRE-VOTE-REPLY").
 		Int("TERM", f.st.CurrentTerm).Int("PRE-TERM", term).
-		Str("FROM", f.id).Bool("GRANTED", grant).Encode()
-	return &Reply{To: from, Payload: payload}, nil
+		Str("FROM", f.id).Bool("GRANTED", grant).Encode())
+	// Refused for one reason only -- the candidate is behind our log -- and it is
+	// a voter we can serve from that log: stand in for it (standin.go).
+	if quiet && !upToDate && hasLastIdx && f.canStandInFor(from, lastIdx) {
+		return f.beginPreElection(from)
+	}
+	return nil
 }
 
 func (f *Follower) leaderContactElapsed() time.Duration {
@@ -183,14 +269,14 @@ func (f *Follower) leaderContactElapsed() time.Duration {
 	return f.clock().Sub(f.lastLeaderContact)
 }
 
-func (f *Follower) handleAppendEntries(msg *lispwire.Msg) (*Reply, error) {
+func (f *Follower) handleAppendEntries(msg *lispwire.Msg) error {
 	term, _ := msg.Int("TERM")
 	leader, _ := msg.Str("FROM")
 	readSeq, hasReadSeq := msg.Int("READ-SEQ")
 	if err := f.stepDownIfStale(term); err != nil {
-		return nil, err
+		return err
 	}
-	reply := func(success bool, matchIndex int64, extra func(*lispwire.Builder)) *Reply {
+	reply := func(success bool, matchIndex int64, extra func(*lispwire.Builder)) error {
 		b := lispwire.NewReply("APPEND-ENTRIES-REPLY").
 			Int("TERM", f.st.CurrentTerm).Str("FROM", f.id)
 		if hasReadSeq {
@@ -200,12 +286,17 @@ func (f *Follower) handleAppendEntries(msg *lispwire.Msg) (*Reply, error) {
 		if extra != nil {
 			extra(b)
 		}
-		return &Reply{To: leader, Payload: b.Encode()}
+		f.send(leader, b.Encode())
+		return nil
 	}
 	if term < f.st.CurrentTerm {
-		return reply(false, 0, nil), nil
+		return reply(false, 0, nil)
 	}
-	// Valid leader for our term.
+	// Valid leader for our term. If we were a candidate in it, the election is
+	// decided and we lost.
+	if f.role != roleFollower {
+		f.becomeFollower(leader)
+	}
 	f.leaderID = leader
 	f.lastLeaderContact = f.clock()
 	prevIndex, _ := msg.Int("PREV-LOG-INDEX")
@@ -213,24 +304,25 @@ func (f *Follower) handleAppendEntries(msg *lispwire.Msg) (*Reply, error) {
 	leaderCommit, _ := msg.Int("LEADER-COMMIT")
 
 	if prevIndex < f.st.SnapshotIdx {
-		return reply(false, 0, func(b *lispwire.Builder) { b.Int("NEXT-INDEX", f.st.SnapshotIdx+1) }), nil
+		return reply(false, 0, func(b *lispwire.Builder) { b.Int("NEXT-INDEX", f.st.SnapshotIdx+1) })
 	}
 	if prevIndex > f.lastLogIndex() {
 		// Our log is too short: hint the leader straight to our end instead of
 		// making it back up one index per round (standard Raft fast-backup, which
 		// gr8s's leader honors via :next-index). For a fresh witness this jumps
 		// the leader to the snapshot it must send to catch us up.
-		return reply(false, 0, func(b *lispwire.Builder) { b.Int("NEXT-INDEX", f.lastLogIndex()+1) }), nil
+		return reply(false, 0, func(b *lispwire.Builder) { b.Int("NEXT-INDEX", f.lastLogIndex()+1) })
 	}
 	if pt, ok := f.logTerm(prevIndex); prevIndex > 0 && (!ok || pt != prevTerm) {
 		// Term conflict within our log: reject so the leader backs up a step.
-		return reply(false, 0, nil), nil
+		return reply(false, 0, nil)
 	}
 
 	// Append/overwrite, skipping a matching prefix and truncating one conflict.
 	// Persist only what changed: a plain extension appends just the new entries
 	// (the hot path), a conflict rewrites the log, and a commit-index advance is
-	// in-memory only (Raft treats commitIndex as volatile).
+	// in-memory only (Raft treats commitIndex as volatile) unless it commits a
+	// membership change, which is written to the hard state.
 	entries := msg.Entries
 	var toAppend []lispwire.Entry
 	truncated := false
@@ -253,28 +345,28 @@ func (f *Follower) handleAppendEntries(msg *lispwire.Msg) (*Reply, error) {
 	switch {
 	case truncated:
 		if err := f.store.RewriteLog(f.st.Log); err != nil {
-			return nil, err
+			return err
 		}
 	case len(toAppend) > 0:
 		newStored := f.st.Log[int64(len(f.st.Log))-int64(len(toAppend)):]
 		if err := f.store.AppendLog(newStored); err != nil {
-			return nil, err
+			return err
 		}
 	}
 
 	lastNew := prevIndex + int64(len(entries))
-	if leaderCommit > f.st.CommitIndex {
-		f.st.CommitIndex = min64(leaderCommit, lastNew)
+	if err := f.advanceCommit(min64(leaderCommit, lastNew)); err != nil {
+		return err
 	}
 	// Keep the log bounded. A caught-up witness only ever receives AppendEntries
 	// (the leader never re-snapshots it), so without this its log would grow
 	// without end.
 	if err := f.maybeCompact(); err != nil {
-		return nil, err
+		return err
 	}
 	// A witness applies nothing, so everything committed is trivially applied.
 	applied := min64(lastNew, f.st.CommitIndex)
-	return reply(true, lastNew, func(b *lispwire.Builder) { b.Int("APPLIED-INDEX", applied) }), nil
+	return reply(true, lastNew, func(b *lispwire.Builder) { b.Int("APPLIED-INDEX", applied) })
 }
 
 // appendFrom appends the given wire entries (converted to stored entries). The
@@ -300,58 +392,71 @@ func (f *Follower) truncateFrom(from int64) {
 	}
 }
 
-func (f *Follower) handleInstallSnapshot(msg *lispwire.Msg) (*Reply, error) {
+func (f *Follower) handleInstallSnapshot(msg *lispwire.Msg) error {
 	term, _ := msg.Int("TERM")
 	leader, _ := msg.Str("FROM")
 	index, _ := msg.Int("LAST-INDEX")
 	lastTerm, _ := msg.Int("LAST-TERM")
 	if err := f.stepDownIfStale(term); err != nil {
-		return nil, err
-	}
-	fail := func() *Reply {
-		return &Reply{To: leader, Payload: lispwire.NewReply("INSTALL-SNAPSHOT-REPLY").
-			Int("TERM", f.st.CurrentTerm).Str("FROM", f.id).Bool("SUCCESS", false).Int("MATCH-INDEX", 0).Encode()}
+		return err
 	}
 	if term < f.st.CurrentTerm {
-		return fail(), nil
+		f.send(leader, lispwire.NewReply("INSTALL-SNAPSHOT-REPLY").
+			Int("TERM", f.st.CurrentTerm).Str("FROM", f.id).Bool("SUCCESS", false).Int("MATCH-INDEX", 0).Encode())
+		return nil
+	}
+	if f.role != roleFollower {
+		f.becomeFollower(leader)
 	}
 	f.leaderID = leader
 	f.lastLeaderContact = f.clock()
 	if index < 1 || lastTerm < 0 || lastTerm > term {
-		return nil, fmt.Errorf("raftcore: invalid snapshot boundary index=%d last-term=%d term=%d", index, lastTerm, term)
+		return fmt.Errorf("raftcore: invalid snapshot boundary index=%d last-term=%d term=%d", index, lastTerm, term)
 	}
 	if index > f.st.CommitIndex {
-		if err := f.installBoundary(index, lastTerm); err != nil {
-			return nil, err
+		state, _ := msg.Raw("STATE")
+		if err := f.installBoundary(index, lastTerm, state); err != nil {
+			return err
 		}
 	}
-	return &Reply{To: leader, Payload: lispwire.NewReply("INSTALL-SNAPSHOT-REPLY").
-		Int("TERM", f.st.CurrentTerm).Str("FROM", f.id).Bool("SUCCESS", true).Int("MATCH-INDEX", index).Encode()}, nil
+	f.send(leader, f.snapshotReply(index))
+	return nil
 }
 
 // installBoundary advances the snapshot boundary to (index, lastTerm): it keeps
 // any log suffix consistent with the boundary and discards the rest, then
 // persists. A witness stores only the boundary — the application payload has
 // nothing here to be restored into — so match-index/up-to-date checks stay
-// correct without holding the data.
-func (f *Follower) installBoundary(index, lastTerm int64) error {
-	if bt, ok := f.logTerm(index); ok && bt == lastTerm {
+// correct without holding the data. The one part of a snapshot a witness does
+// need is the membership frozen at the boundary; state is the snapshot envelope
+// when the transfer carried one this program could read, else nil.
+func (f *Follower) installBoundary(index, lastTerm int64, state lispwire.Value) error {
+	bt, ok := f.logTerm(index)
+	held := ok && bt == lastTerm
+	hs := f.st.HardState
+	addrs := f.membershipAcrossSnapshot(&hs, index, held, state)
+	if held {
 		f.truncateBefore(index)
 	} else {
 		f.st.Log = nil
 	}
-	f.st.SnapshotIdx = index
-	f.st.SnapshotTrm = lastTerm
-	if index > f.st.CommitIndex {
-		f.st.CommitIndex = index
-	}
+	hs.SnapshotIdx = index
+	hs.SnapshotTrm = lastTerm
 	// Rewrite the log first: if we crash between the two, a log whose entries sit
 	// beyond an un-advanced boundary is still consistent, whereas a boundary ahead
 	// of a stale log would orphan entries. Then record the new boundary.
 	if err := f.store.RewriteLog(f.st.Log); err != nil {
 		return err
 	}
-	return f.store.PutHardState(f.st.HardState)
+	if err := f.store.PutHardState(hs); err != nil {
+		return err
+	}
+	f.st.HardState = hs
+	if index > f.st.CommitIndex {
+		f.st.CommitIndex = index
+	}
+	f.learnAddresses(addrs)
+	return nil
 }
 
 // Log-compaction thresholds in bytes (vars so tests can lower them). Entry sizes
