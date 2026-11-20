@@ -23,7 +23,7 @@ refines(Why, What) :- restart_cause(Why), restart_effect(What).
 %% What a program wrote before it died says more than that it died.
 refines(Why, What) :-
     ( log_explanation(Why, _, _) ; access_explanation(Why, _, _) ),
-    ( What = "restarts-crash" ; restart_effect(What) ).
+    ( What = "restarts-crash" ; What = "restarted-earlier" ; restart_effect(What) ).
 refines("restarts-liveness-kill", "restarts-crash").
 refines("pod-unschedulable", "pod-PodScheduled-False").
 refines("pod-unschedulable", "event-FailedScheduling").
@@ -33,6 +33,7 @@ refines("openbao-sealed", "readiness-probe-failing").
 restart_cause("restarts-crash").
 restart_cause("restarts-oom").
 restart_cause("restarts-liveness-kill").
+restart_cause("restarted-earlier").
 
 restart_effect("container-restarts-five").
 restart_effect("waiting-CrashLoopBackOff").
@@ -123,9 +124,11 @@ node_pressure("node-PIDPressure-True").
 
 :- dynamic rule_of/2.                    % rule_of(Cause, Rule)
 
-%% consequence(?Cause): a cause that another cause, on its resource or beneath
-%% it, leads to. It is then listed under that one instead of beside it.
-consequence(Cause) :-
+%% consequence(?Cause, ?Through): a cause that another cause leads to. It is
+%% then listed under that one instead of beside it. Through is linked when
+%% the other cause is on its resource or beneath it, and across(Deeper) when
+%% no link joins the two resources.
+consequence(Cause, linked) :-
     cause_at(Resource, Cause),
     rule_of(Cause, Rule),
     once(leads_to(_, Rule)),
@@ -135,3 +138,27 @@ consequence(Cause) :-
     Deeper \== Cause,
     rule_of(Deeper, Why),
     leads_to(Why, Rule).
+consequence(Cause, across(Deeper)) :-
+    rule_of(Cause, Rule),
+    anywhere(Why, Rule),
+    rule_of(Deeper, Why),
+    Deeper \== Cause.
+
+%% anywhere(?Why, ?What): a finding of rule Why brings about findings of rule
+%% What wherever they are. The graph has no link for this: every program is a
+%% client of the control plane.
+anywhere("members-disagree", "api-answered-behind").
+
+%% urgency(?Rule, ?Rank): what to fix first; a lower rank is listed earlier.
+%% A fault in what everything stands on comes before the faults it may be
+%% behind. One that only matters once a workload runs comes after that workload's own.
+urgency(Rule, 0) :- foundation(Rule), !.
+urgency(Rule, 2) :- deferred(Rule), !.
+urgency(_, 1).
+
+%% foundation(?Rule): a fault of the cluster itself, in no namespace.
+foundation("members-disagree").
+
+%% deferred(?Rule): the Service is empty by configuration, and stays empty
+%% until the Pods it waits for are healthy whatever is done about it.
+deferred("service-label-never-set").

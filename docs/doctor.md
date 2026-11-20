@@ -7,6 +7,7 @@ gr8s doctor diagnose -n production               # one namespace
 gr8s doctor diagnose deployment/web -n production
 gr8s doctor diagnose pod/web -n production --kubeconfig FILE --json
 gr8s doctor diagnose --notes                     # also list configuration notes
+gr8s doctor diagnose --markdown > report.md      # the report as Markdown
 gr8s doctor impact node/worker-1                 # what stops if this goes away
 gr8s doctor impact secret/db-password -n production
 gr8s doctor host --state-directory /var/lib/gr8s   # existing host checks
@@ -77,6 +78,43 @@ explain the Pod's workload.
 The report lists problems, not findings. With more than three, it starts with a
 one-line list of them. Quoted output is cut to six lines in text; JSON has all of it.
 
+The report is written as Markdown. On a terminal it is rendered with styles and
+wrapped to the terminal's width, at most 100 columns; commands are never broken,
+so that they can be pasted. `NO_COLOR` turns the styles off. Into a pipe or a
+file it is plain text with one line to a paragraph, so that a phrase can be
+searched for. `--markdown` writes the Markdown itself, for an issue or a chat.
+cl-commonmark parses the Markdown and tuition wraps and styles it
+(`src/diagnostics/markdown.lisp`). Text from the API is escaped, and quoted
+output is fenced so that nothing in it can end its block. A timestamp in the
+text is said as how long ago it was, with the timestamp after it: "50 minutes
+ago (2026-11-20T19:26:00Z)", or after "since" as "for 8 hours (since ...)". Quoted output and JSON keep timestamps as they are.
+
+While it reads, the doctor shows a spinner and what it is reading now: a list
+of resources, the resource it is checking and how many remain, a crashed
+container's last log, a control-plane member. That line goes to standard error
+when it is a terminal and is wiped before the report, so a pipe or a file never
+holds it (`src/diagnostics/progress.lisp`).
+
+- Problems are listed in the order to fix them. `urgency/2` in `explanation.pl`
+  puts a fault of the cluster itself (`foundation/1`: control-plane members that
+  disagree) before everything else, and a Service left empty by configuration
+  (`deferred/1`) after the workload it waits for. Within those, the order is the
+  one below.
+- Each problem has a headline: the first clause of its summary, also `title` in JSON.
+- "Because of this" has one line for each *other* resource the cause explains.
+  Findings that restate the problem on the same resource (the Pod is not ready,
+  the restart counter) are in the JSON `impact` only.
+- A restart loop that has stopped is not a problem. A container that restarted
+  five times but whose current run has lasted an hour and is ready (`settled/2`
+  in `pods.pl`) gets `restarted-earlier`, a finding of severity `past`. It is
+  listed under the present cause that brought it about, if the rules know one,
+  and otherwise under "Recovered" (`recovered` in JSON). Recovered findings do
+  not count as problems or change the exit code.
+- A cause can reach a resource that no link joins it to. `anywhere/2` says
+  which do: members that disagree lead to `api-answered-behind` wherever a
+  program gave up on a stale answer, because every program is a client of the
+  control plane.
+
 - Each cause is shown once with the symptoms it explains under "Because of this".
 - The same finding on several Pods of one workload, or several users of one
   missing Secret or ConfigMap, is one problem naming all of them.
@@ -115,9 +153,11 @@ for them:
   A Warning's message is shown, cut at 800 characters. A probe failure is attached
   to the readiness, startup or liveness finding it explains; other Warnings become
   `event-*` findings, or `pod-warning-event` for a reason outside the catalog.
-- **The log of a run that crashed.** For a `restarts-crash` finding the last six
-  lines the previous run wrote are read with `kubectl logs --previous`, each cut
-  at 300 characters. A log that cannot be read is simply not shown.
+- **The log of a run that crashed.** For a `restarts-crash` or `restarted-earlier`
+  finding the last six lines the previous run wrote are read with
+  `kubectl logs --previous`, each cut at 300 characters. In text the logfmt
+  fields `ts`, `time` and `caller` are left out of them. A log that cannot be
+  read is simply not shown, and the step then says to read it.
 - **Application configuration.** For a Service that selects a label a known
   application sets on its own Pods, the ConfigMaps that Pod mounts are read and
   only one fact is kept: whether they mention the setting. Their text is not kept.
@@ -127,8 +167,9 @@ can run it can already read them, but they may contain whatever a program printe
 An Event list that cannot be read leaves the Pod's report incomplete.
 
 JSON keeps every finding in `groups`, grouped by rule and subject with the
-surveyed resources that reach it, and adds `problems` (rule, summary, resources,
-owner, `causeFound`, `reach` and the explained `impact`) and the `notes` count.
+surveyed resources that reach it, and adds `problems` (rule, title, summary, resources,
+owner, `causeFound`, `reach` and the explained `impact`), `recovered` (what has
+stopped, with `recoveredAt`) and the `notes` count.
 It also includes observations, individual reports, list coverage, limits and
 unreadable resources. Observation IDs are local to each resource report.
 
@@ -184,6 +225,7 @@ cluster as facts and asks the rule base; see `src/diagnostics/README.md`.
 | `restarts-crash` | A container that has restarted five times, or waits in CrashLoopBackOff, whose last run exited with a non-zero code for a reason other than OOMKilled. |
 | `restarts-oom` | The same, with a last run whose reason is OOMKilled. The finding names the memory limit. |
 | `restarts-liveness-kill` | The same, with a liveness probe, and either a Killing Event that mentions the liveness probe, or a recent liveness failure together with a last exit code of 137 or 143. Two clauses. A failed liveness check beside a run that exited by itself does not establish this. |
+| `restarted-earlier` | A container that has restarted five times, whose last run crashed or was OOMKilled, and whose current run began at least an hour ago, is ready and has started. The three rules above then do not hold. Severity `past`. |
 
 These rules describe the probe from the Pod spec, including an exec probe's command
 line, and suggest `kubectl exec` and `kubectl logs` commands. The doctor does not
@@ -229,6 +271,7 @@ is reported at most once per container and stands for the crash itself.
 | --- | --- |
 | `watches-unserved-kind` | That it could not list or sync a kind, in words that mean the kind was not found, and the API does not list that kind for the doctor either. |
 | `cannot-reach-api` | `connection refused`, on a line about the API server or naming the `kubernetes` Service's address. |
+| `api-answered-behind` | `resourceVersion is newer than storage` or `Too large resource version`: an API server refused a read that asked for a state newer than its own. Listed under `members-disagree` when that is found. |
 | `connection-refused` | `connection refused` to anything else. |
 | `name-not-resolved` | `no such host`. |
 | `port-in-use`, `disk-full`, `wrong-architecture` | `address already in use`, `no space left on device`, `exec format error`. |
@@ -261,7 +304,7 @@ Aggregated ClusterRoles are read as the API presents them.
 | `service-selector-empty` | A selector-bearing Service and a complete namespace Pod list with no matches. |
 | `service-waits-for-label` | A selector-bearing Service matches no Pod, but an active Pod in the complete namespace list agrees with most of the selector and lacks the remaining label keys entirely. A different value for a selector key is not a near match. Replaces `service-selector-empty` for that Service. |
 | `service-label-never-set` | As `service-waits-for-label`, where every missing label carries a known application's prefix (`openbao-`, `vault-`), the near-matching Pod runs that application and mounts at least one ConfigMap, every mounted ConfigMap is readable, and neither they nor the Pod's plain environment values mention `service_registration`. Replaces `service-waits-for-label`. All Services left empty by one ConfigMap are one problem. |
-| `members-disagree` | The `kubernetes` Service in namespace `default` has more than one endpoint, and Namespace `default`, read through each API server in turn, has different `resourceVersion`s. A member that cannot be reached from where the doctor runs is left out. |
+| `members-disagree` | The `kubernetes` Service in namespace `default` has more than one endpoint, and Namespace `default`, read through each API server in turn, has different `resourceVersion`s. One finding names the member with the highest version, compared as numbers, and every member that differs from it. A member that cannot be reached from where the doctor runs is left out. |
 | `service-named-port-missing` | A selected Pod lacks the named targetPort/protocol among regular containers and restartable init containers. Numeric targetPorts and completed Pods are excluded. |
 | `service-no-ready-backends` | Selected Pods exist, but all associated EndpointSlices have no ready endpoints. All slices are considered; unspecified readiness cannot prove failure. publishNotReadyAddresses Services are excluded. |
 | `pvc-consumer-bypasses-binding` | Pending PVC, WaitForFirstConsumer StorageClass, consuming Pod with nodeName, and no selected-node annotation. This suggests checking for scheduler bypass; nodeName alone does not prove how it was assigned. |

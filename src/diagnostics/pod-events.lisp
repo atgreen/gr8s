@@ -123,8 +123,11 @@ the log of a run that crashed. Attach each to the finding it explains."
                         (push (event-finding pod event id) findings))))
                 ;; A crash explains itself only in what the program wrote before it died.
                 (let ((crashes (loop for finding across (gethash "findings" report)
-                                     for lines = (and (equal "restarts-crash" (gethash "code" finding))
+                                     for lines = (and (member (gethash "code" finding) '("restarts-crash" "restarted-earlier")
+                                                              :test #'equal)
                                                       (previous-log getter pod ns (gethash "container" finding)))
+                                     for step = (and lines (first (known `(quoted_step ,(gethash "code" finding) ?step) '?step)))
+                                     when step do (setf (gethash "nextStep" finding) step)
                                      when lines
                                        do (setf (gethash "detailHeading" finding) "The last lines it wrote before exiting:"
                                                 (gethash "detail" finding)

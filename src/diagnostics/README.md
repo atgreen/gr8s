@@ -13,13 +13,13 @@ answers out.
 | --- | --- |
 | `catalog.pl` | 150 single-resource checks as `check/5` facts, the rule that tests their premises, and which checks are advisories. A premise is a term: `has(Path, Value)`, `below(Lower, Upper)`, `positive(Path)`, `at_least(Path, N)`, `nonempty(Path)` or `empty(Path)`. |
 | `references.pl` | Configuration a Pod requires and does not have. |
-| `pods.pl` | Why a running Pod is not ready and why a container keeps restarting, with their explanations. |
+| `pods.pl` | Why a running Pod is not ready and why a container keeps restarting, with their explanations, and when a restart loop has stopped (`settled/2`). |
 | `scheduling.pl` | Why no node will take a Pod that waits for one: each node is tried and the first thing that rules it out is named. |
 | `applications.pl` | What is known about particular programs: how to recognise them, what their own report or last words mean, what to run. |
 | `logs.pl` | What the last lines of a crashed run say, and `asks/1`: the facts those rules need from the cluster. |
 | `access.pl` | Why the API refused a ServiceAccount: bindings, roles, and which link is missing. |
 | `relations.pl` | Findings that need more than one resource, with their explanations. |
-| `explanation.pl` | Which findings are symptoms, which finding says more than another (`refines/2`), which cause brings about another (`leads_to/2`), and `verdict/2`: which causes explain an unhealthy resource, for certain or possibly. |
+| `explanation.pl` | Which findings are symptoms, which finding says more than another (`refines/2`), which cause brings about another on a linked resource (`leads_to/2`) or anywhere in the cluster (`anywhere/2`), `verdict/2`: which causes explain an unhealthy resource, for certain or possibly, and `urgency/2`: what to fix first. |
 | `impact.pl` | What stops working when a resource goes away, for `gr8s doctor impact`. |
 
 Each file declares the facts it expects with `:- dynamic`. A fact that was not
@@ -33,6 +33,11 @@ observed is absent, and a call to it fails.
   so the dumped `gr8s` image starts with them compiled. `prove` asserts a question's facts, asks, and
   retracts them; `known` asks the rule base alone.
 - `live.lisp`: the kubectl reader, the Pod reference facts and the single-report printer.
+- `progress.lisp`: the spinner and current step shown on a terminal while a
+  survey reads. `progress` names a step; it does nothing unless someone watches.
+- `markdown.lisp`: how a report reaches a reader. It is written as Markdown,
+  parsed by cl-commonmark, and wrapped and styled by tuition for a terminal, or
+  left plain and unwrapped for a pipe. `markdown-text` escapes text from the API.
 - `catalog.lisp`, `extended-catalog.lisp`: one resource as the observations the checks
   test. Lisp states what the API holds (a number as itself, a list as `count(N)`) for
   every field the checks of that kind read (`reads/2`); the rules do the comparing.
@@ -43,7 +48,7 @@ observed is absent, and a call to it fails.
   the log of a run that crashed, attached to the finding they explain, bounded.
 - `doctor.lisp`: command parsing, dependency traversal, grouping and request budgets.
 - `survey.lisp`: one LIST per kind, the dependency graph between the resources read,
-  causes with the symptoms they explain, and plain-language text output.
+  causes with the symptoms they explain, what has recovered, and the report as Markdown.
 
 Lisp builds the dependency graph between the resources it read and states it as
 `depends/2` and `hint/2` facts; `verdict/2` decides what explains what.

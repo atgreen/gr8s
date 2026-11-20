@@ -37,7 +37,7 @@ application_finding("openbao-sealed", Container, Name, Command) :-
 %% application's command in a suggested command line.
 remedy("openbao-uninitialized",
        "Pod ~A: ~A in container ~S has never been initialised, so it is sealed and reports that it is not ready.",
-       "Initialise it and keep the unseal keys and root token that prints, then unseal it.",
+       "Initialise it and keep the unseal keys and root token that prints, then unseal it: run the unseal command once for each key share its threshold asks for, three unless init was told otherwise.",
        ["operator init", "operator unseal"]).
 remedy("openbao-sealed",
        "Pod ~A: ~A in container ~S is sealed, so it reports that it is not ready.",

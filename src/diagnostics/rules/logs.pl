@@ -32,6 +32,9 @@ evidence("connection-refused", Container, [Address]) :-
     mentions(Line, "connection refused"),
     \+ about_api(Line),
     dialled(Line, Address).
+evidence("api-answered-behind", Container, []) :-
+    wrote(Container, Line),
+    behind(Line).
 evidence("name-not-resolved", Container, [Host]) :-
     wrote(Container, Line),
     mentions(Line, "no such host"),
@@ -68,6 +71,13 @@ names_kind(Line, Kind) :-
     string_concat("informer", _, Next),
     real_kind(Kind).
 
+%% An API server refuses a read that asks for a state newer than the one it
+%% holds. The client learned of that state from another server.
+%% gr8s: Requested resourceVersion is newer than storage
+%% kube-apiserver: Too large resource version: 85041, current: 77942
+behind(Line) :- mentions(Line, "resourceVersion is newer than storage"), !.
+behind(Line) :- mentions(Line, "Too large resource version"), !.
+
 not_found(Text) :- mentions(Text, "could not find the requested resource"), !.
 not_found(Text) :- mentions(Text, "route not found"), !.
 not_found(Text) :- mentions(Text, "no matches for kind"), !.
@@ -101,6 +111,9 @@ log_explanation("watches-unserved-kind",
 log_explanation("cannot-reach-api",
                 "Pod ~A: container ~S exits because it cannot reach the Kubernetes API at ~A: the connection is refused.",
                 "Check that the control plane is up and that the kubernetes Service in namespace default has ready endpoints. A program that starts while every API server is restarting fails this way.").
+log_explanation("api-answered-behind",
+                "Pod ~A: container ~S gives up because an API server answered it from a state older than one it had already been given.",
+                "This is a fault in the control plane, not in the program: its API servers do not hold the same state. Run `gr8s member list` to see which member leads and whether each is in contact, then run the doctor again to see whether the members still disagree.").
 log_explanation("connection-refused",
                 "Pod ~A: container ~S exits because a connection it needs, to ~A, is refused.",
                 "Check that what listens at that address is running and ready, and that the address is the right one.").

@@ -49,6 +49,8 @@ the Pod's findings so far; one that quotes a probe supplies the report."
                           "since" (gethash "since" source)
                           "summary" (format nil summary (field pod "metadata" "name") name container)
                           "detailHeading" (gethash "detailHeading" source) "detail" (gethash "detail" source)
+                          ;; The rule has read that report, and the summary says what it means.
+                          "detailRead" t
                           "nextStep" step
                           "commands" (map 'vector
                                           (lambda (argument)

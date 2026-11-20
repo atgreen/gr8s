@@ -82,7 +82,9 @@ with the lines of its container's previous run."
     (flet ((finding (code container summary step arguments)
              (let ((crash (car (find container crashes :test #'equal
                                      :key (lambda (entry) (gethash "container" (car entry)))))))
-               (object "code" code "rule" code "severity" "warning" "container" container
+               ;; What a run wrote is as current as the crash it explains.
+               (object "code" code "rule" code "severity" (gethash "severity" crash) "container" container
+                       "recoveredAt" (gethash "recoveredAt" crash)
                        "summary" (apply #'format nil summary (field pod "metadata" "name") container arguments)
                        "detailHeading" (gethash "detailHeading" crash) "detail" (gethash "detail" crash)
                        "nextStep" step "commands" (gethash "commands" crash)
