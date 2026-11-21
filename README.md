@@ -178,25 +178,6 @@ For multi-member operation, recovery, automatic checkpoints and heap sizing, see
   concurrency, networking, storage, compilers, and distributed systems in one
   project. See [For Common Lisp developers](#for-common-lisp-developers).
 
-## How is gr8s different from k3s?
-
-k3s is the closest comparison to gr8s. Both provide a Kubernetes-compatible
-cluster that you can operate with `kubectl`. k3s is a packaged Kubernetes
-distribution built from upstream components and familiar ecosystem add-ons.
-gr8s is an independent implementation: one native Common Lisp executable runs
-the API, controllers, scheduler, node agent, and embedded runtime. It uses its
-own datastore, with Raft replication, and an eBPF dataplane rather than
-assembling the usual separate control-plane and networking components.
-
-That architecture gives gr8s an integrated system to explore and develop,
-with features such as live Lisp inspection and a directly compiled eBPF
-dataplane. It also means its compatibility and operational behavior differ from
-k3s. gr8s passes the upstream Kubernetes v1.37 conformance tests, but is
-experimental and does not yet provide every k3s add-on or operational
-workflow. Check the
-[compatibility gaps](docs/k3s-gap-inventory.md), [API coverage](docs/kubernetes-surface.md),
-and [conformance results](docs/CONFORMANCE.md) for supported behavior and limitations.
-
 ## Use the gr8s dataplane with your own Kubernetes
 
 The gr8s eBPF dataplane also installs as a standalone DaemonSet on a cluster you
@@ -260,10 +241,10 @@ embeds the assets automatically; see
 
 ## Doctor
 
-`gr8s doctor diagnose` reads a cluster and says what is wrong and why. It
-links the resources it reads — a workload to the Pods it owns, a Service to
-the Pods it selects, a Pod to its Node, Secrets, ConfigMaps and claims — so
-the report names causes instead of listing every symptom. A missing Secret
+`gr8s doctor diagnose` reads any Kubernetes cluster, gr8s or not, and says what
+is wrong and why. It links the resources it reads — a workload to the Pods it
+owns, a Service to the Pods it selects, a Pod to its Node, Secrets, ConfigMaps
+and claims — so the report names causes instead of listing every symptom. A missing Secret
 is one problem, with the Pods and workloads it holds up listed beneath it.
 
 ```sh
