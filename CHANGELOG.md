@@ -51,6 +51,10 @@ write, and a witness stores the log sealed from its own host.
 
 ### Changed
 
+- Release builds move `ghcr.io/atgreen/gr8s-net:latest` to the release's
+  image as well as publishing its version tag.
+- Dependencies are re-pinned: ironclad 20261114 (from 20240503) and a newer
+  cl-cancel; unused pins are dropped.
 - `gr8s doctor` on its own prints help. The host checks are
   `gr8s doctor host`; `gr8s doctor --state-directory DIR [--fix]` still runs
   them.
