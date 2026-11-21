@@ -403,6 +403,44 @@
                    (close stream)))))
         (stop-server server)))))
 
+(test a-watch-never-holds-its-lease-against-a-checkpoint
+  ;; One checkpoint may follow another at once. A watch that has just taken its
+  ;; lease back from the first must give it up for the second, and not wait,
+  ;; holding it, for the store to open: the checkpoint is waiting for the lease.
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (let* ((stop nil) (passes 0) (ended nil)
+           (watch (bt:make-thread
+                   (lambda ()
+                     (handler-case
+                         (gr8s.store::call-with-store-request
+                          store
+                          (lambda ()
+                            (loop until stop
+                                  do (gr8s.apiserver::check-watch-store-access store)
+                                     (incf passes))))
+                       (error (condition) (setf ended condition))))
+                   :name "test watch pass"))
+           (timed-out 0))
+      (unwind-protect
+           (progn
+             (is (poll-until (lambda () (plusp passes)) :timeout 10) "the watch is running")
+             (dotimes (checkpoint 400)
+               (handler-case
+                   (progn (gr8s.store::quiesce-store-access store :timeout 2 :brief t)
+                          (gr8s.store::resume-store-access store)
+                          ;; Now and then the watch takes its lease back before the next.
+                          (when (zerop (mod checkpoint 3)) (sleep .001)))
+                 (error ()
+                   (incf timed-out)
+                   (return)))))
+        (setf stop t)
+        (ignore-errors (gr8s.store::resume-store-access store))
+        (bt:join-thread watch))
+      (is (zerop timed-out) "no checkpoint waited for the watch's lease")
+      (is (null ended) "and the watch went on: ~A" ended)
+      (is (plusp passes)))))
+
 (test a-watch-writing-to-a-slow-client-does-not-hold-up-a-checkpoint
   ;; Lab, 2026-11-19: kube-state-metrics watched all Secrets over a 2 MB/s link.
   ;; Six megabytes of Helm releases took three seconds to send, and a checkpoint

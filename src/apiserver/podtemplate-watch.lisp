@@ -14,20 +14,25 @@ moment and changes nothing a watch has read: the watch gives its lease up, waits
 for the store to open, and goes on. It used to end here whenever a checkpoint
 found it between two sends, and its client listed everything again (podster-0o5).
 A restore replaces what the watch has read, so the watch ends."
-  (when (gr8s.store::store-access-blocked-p store)
-    (flet ((expired ()
-             (core-resource-error 410 "Expired" "Application restore requires a fresh list/watch")))
-      ;; Taking the lease again waits a checkpoint out and is refused by a restore.
-      (handler-case (gr8s.store::call-with-store-request-suspended (lambda () nil))
-        (kubernetes-error () (expired)))
-      ;; A watch that holds no lease has nothing to give up, and waits as long.
-      (loop with deadline = (+ (get-internal-real-time)
-                               (* gr8s.store::*store-quiesce-patience-seconds* internal-time-units-per-second))
-            while (gr8s.store::store-access-blocked-p store)
-            do (unless (and (gr8s.store::pod-store-access-block-brief-p store)
-                            (< (get-internal-real-time) deadline))
-                 (expired))
-               (sleep .05)))))
+  (flet ((expired ()
+           (core-resource-error 410 "Expired" "Application restore requires a fresh list/watch")))
+    (loop with deadline = (+ (get-internal-real-time)
+                             (* gr8s.store::*store-quiesce-patience-seconds* internal-time-units-per-second))
+          while (gr8s.store::store-access-blocked-p store)
+          do (cond
+               ;; Whoever closed the store is waiting for this lease. Taking it
+               ;; again waits a checkpoint out and is refused by a restore. One
+               ;; checkpoint may follow another at once, so this is done for as
+               ;; long as the store is closed: a watch that waited here with its
+               ;; lease held would hold the next checkpoint up.
+               (gr8s.store::*store-request-lease*
+                (handler-case (gr8s.store::call-with-store-request-suspended (lambda () nil))
+                  (kubernetes-error () (expired))))
+               ;; A watch that holds no lease has nothing to give up, and waits as long.
+               ((and (gr8s.store::pod-store-access-block-brief-p store)
+                     (< (get-internal-real-time) deadline))
+                (sleep .05))
+               (t (expired))))))
 
 (defun template-watch-events (store namespace labels fields revision &key (resource "podtemplates"))
   "Read matching journal events after REVISION and the current storage watermark."
