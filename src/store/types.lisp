@@ -43,6 +43,8 @@
   ;; first, and whether it has reason to ask for a new one (podster-b5d).
   (core-version-marks nil)
   (core-version-round-wanted nil)
+  ;; How often this member, leading, has had Pods and Nodes renumbered since it started.
+  (core-pod-renumber-rounds 0)
   ;; While a restarted member replays its log: the revision it stopped at and a
   ;; digest of the versions it held, which the replay must reproduce (podster-69p).
   (core-recovery-expectation nil)

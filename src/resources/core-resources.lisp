@@ -848,6 +848,16 @@ Callbacks run under the store lock and must not read or write the store."
 (defconstant +core-version-renumber-keys+ 500
   "How many objects one transaction renumbers.")
 
+(defconstant +core-pod-renumber-margin+ 1024
+  "How far above the highest Pod revision a voter reported the members renumber
+their Pods and Nodes. A member's revision goes on rising between its report and
+the renumbering, and it must not have passed where they renumber to.")
+
+(defconstant +core-pod-renumber-rounds+ 3
+  "How many times a member that leads has the Pods and Nodes renumbered before it
+leaves them. Each time is followed by a round that shows whether they agree; if
+something keeps them apart, renumbering again would not help and would go on.")
+
 (defstruct core-version-mark
   "What this member held at a marker in the replicated log."
   id
@@ -855,12 +865,19 @@ Callbacks run under the store lock and must not read or write the store."
   revision
   ;; Of the version of every object it held there.
   digest
-  ;; Each member's name, with the revision and digest it last reported.
+  ;; Each member's name, with what it last reported: a list of its revision and
+  ;; digest, and of its Pod revision and digest when it runs a version that
+  ;; reports them.
   (reports (make-hash-table :test #'equal))
   ;; The revision this member last reported.
   reported
   ;; NIL, :STARTED, or :DONE when the members need no renumbering any more.
-  renumbering)
+  renumbering
+  ;; The same for the revision Pods and Nodes are numbered by: what this member
+  ;; counted at the marker, and a digest of the version each Pod and Node showed.
+  pod-revision
+  pod-digest
+  pod-renumbering)
 
 (defun find-core-version-mark (store id)
   (find id (gr8s.store::pod-store-core-version-marks store) :key #'core-version-mark-id :test #'equal))
@@ -981,12 +998,23 @@ changes, only notes, and are applied here."
               (when mark (setf (core-version-mark-renumbering mark) :done))))))
       (when reported-mark
         (setf (gethash (gethash "member" report) (core-version-mark-reports reported-mark))
-              (cons (gethash "revision" report) (gethash "digest" report))))
+              (list (gethash "revision" report) (gethash "digest" report)
+                    (gethash "podRevision" report) (gethash "podDigest" report))))
+      ;; Every member gives each Node, and each Pod's publication, one revision
+      ;; above what any of them counted. They apply this at one place in the log.
+      (let ((note (gethash "versionPodRenumber" delta)))
+        (when (hash-table-p note)
+          (renumber-pods-and-nodes-unlocked
+           store (1+ (max (pod-store-pod-revision store) (gethash "above" note))))
+          (let ((mark (find-core-version-mark store (gethash "mark" note))))
+            (when mark (setf (core-version-mark-pod-renumbering mark) :done)))))
       (let ((id (gethash "versionMark" delta)))
         (when (stringp id)
           (setf (gr8s.store::pod-store-core-version-marks store)
                 (loop for mark in (cons (make-core-version-mark :id id :revision revision
-                                                                :digest (core-versions-digest resources))
+                                                                :digest (core-versions-digest resources)
+                                                                :pod-revision (pod-store-pod-revision store)
+                                                                :pod-digest (pod-versions-digest store))
                                         (gr8s.store::pod-store-core-version-marks store))
                       repeat +core-version-marks-kept+
                       collect mark))))
@@ -1110,6 +1138,10 @@ changes, only notes, and are applied here."
       of it at the marker raises its revision by that much, and reports again.
    3. When every voter has reported the revision this member noted, they count
       alike. If their digests differ, the leader has them renumber every object.
+   4. Pods and Nodes are numbered by another revision. Each member notes and
+      reports that revision and a digest of what its Pods and Nodes show. If
+      those differ, the leader has every member give them one revision above
+      what any voter reported, and starts a round to see that they then agree.
 
    A voter that runs an older version, or is stopped, does not report, and the
    round waits: it puts its own marker in the log when it starts."
@@ -1118,31 +1150,73 @@ changes, only notes, and are applied here."
     (propose-core-version-mark store)
     (bt:with-lock-held ((pod-store-lock store))
       (setf (gr8s.store::pod-store-core-version-round-wanted store) nil)))
-  (let ((mark nil) (revision nil) (report-due nil) (settled nil) (alike nil))
+  (let ((mark nil) (revision nil) (report-due nil) (settled nil) (alike nil)
+        (pods-reported nil) (pods-alike nil) (pod-ceiling 0) (pod-rounds 0))
     (bt:with-lock-held ((pod-store-lock store))
-      (setf mark (first (gr8s.store::pod-store-core-version-marks store)))
+      (setf mark (first (gr8s.store::pod-store-core-version-marks store))
+            pod-rounds (gr8s.store::pod-store-core-pod-renumber-rounds store))
       (when mark
-        (let ((reports (core-version-mark-reports mark)))
+        (let* ((reports (core-version-mark-reports mark))
+               (voter-reports (mapcar (lambda (voter) (gethash voter reports)) voters)))
           (setf revision (core-version-mark-revision mark)
                 report-due (not (eql revision (core-version-mark-reported mark)))
-                settled (and voters
-                             (every (lambda (voter) (eql revision (car (gethash voter reports)))) voters))
-                alike (every (lambda (voter) (equal (core-version-mark-digest mark) (cdr (gethash voter reports))))
-                             voters))
+                settled (and voters (every (lambda (report) (eql revision (first report))) voter-reports))
+                alike (every (lambda (report) (equal (core-version-mark-digest mark) (second report))) voter-reports)
+                ;; A voter that runs an older version says nothing of its Pods.
+                pods-reported (and voters (every (lambda (report) (and (third report) (fourth report))) voter-reports))
+                pods-alike (and pods-reported
+                                (every (lambda (report)
+                                         (and (eql (core-version-mark-pod-revision mark) (third report))
+                                              (equal (core-version-mark-pod-digest mark) (fourth report))))
+                                       voter-reports))
+                pod-ceiling (reduce #'max voter-reports :key (lambda (report) (or (third report) 0))
+                                                        :initial-value (core-version-mark-pod-revision mark)))
           (when report-due (setf (core-version-mark-reported mark) revision))
-          (when (and settled alike) (setf (core-version-mark-renumbering mark) :done)))))
+          (when (and settled alike) (setf (core-version-mark-renumbering mark) :done))
+          (when (and settled pods-alike) (setf (core-version-mark-pod-renumbering mark) :done)))))
     (when report-due
       (handler-case
           (propose-core-version-notes
            store "versionReport" (core-object "mark" (core-version-mark-id mark) "member" member
-                                              "revision" revision "digest" (core-version-mark-digest mark)))
+                                              "revision" revision "digest" (core-version-mark-digest mark)
+                                              "podRevision" (core-version-mark-pod-revision mark)
+                                              "podDigest" (core-version-mark-pod-digest mark)))
         (kubernetes-error (condition)
           (bt:with-lock-held ((pod-store-lock store))
             (setf (core-version-mark-reported mark) nil))
           (error condition))))
     (when (and leader-p settled (not alike) (null (core-version-mark-renumbering mark)))
       (format *error-output* "~&gr8s: the members hold different versions of some objects; renumbering all~%")
-      (renumber-core-resources store mark))))
+      (renumber-core-resources store mark))
+    ;; Pods and Nodes are numbered by a revision of their own (podster-eb0). A
+    ;; member gives a change its author's number unless it has shown a higher
+    ;; one, so members that count apart show a Pod at different versions, and
+    ;; nothing brings them together: a Pod that is steady is not published again.
+    (when (and leader-p settled pods-reported (not pods-alike) (null (core-version-mark-pod-renumbering mark)))
+      (cond
+        ((>= pod-rounds +core-pod-renumber-rounds+)
+         (bt:with-lock-held ((pod-store-lock store))
+           (setf (core-version-mark-pod-renumbering mark) :done))
+         (format *error-output* "~&gr8s: the members still show Pods or Nodes at different versions after ~D renumberings; leaving them~%"
+                 pod-rounds))
+        (t
+         (format *error-output* "~&gr8s: the members show Pods or Nodes at different versions; renumbering them above ~D~%"
+                 (+ pod-ceiling +core-pod-renumber-margin+))
+         (bt:with-lock-held ((pod-store-lock store))
+           (setf (core-version-mark-pod-renumbering mark) :started))
+         (handler-case
+             (progn
+               (propose-core-version-notes
+                store "versionPodRenumber" (core-object "mark" (core-version-mark-id mark)
+                                                        "above" (+ pod-ceiling +core-pod-renumber-margin+)))
+               (bt:with-lock-held ((pod-store-lock store))
+                 (incf (gr8s.store::pod-store-core-pod-renumber-rounds store))
+                 ;; Another round shows whether they agree now.
+                 (setf (gr8s.store::pod-store-core-version-round-wanted store) t)))
+           (kubernetes-error (condition)
+             (bt:with-lock-held ((pod-store-lock store))
+               (setf (core-version-mark-pod-renumbering mark) nil))
+             (error condition))))))))
 
 (defun copy-core-resource-index (store)
   "Return a shallow copy of STORE's resource index: a fresh EQUAL table that shares

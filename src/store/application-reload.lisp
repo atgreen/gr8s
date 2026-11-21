@@ -27,7 +27,7 @@
     pod-store-credential-lock pod-store-service-account-signing-key pod-store-workload-lock
     pod-store-core-change-observers pod-store-gateway-dependency-revision
     pod-store-watch-journal-p pod-store-lock pod-store-image-tracker pod-store-consensus-commit-fn pod-store-consensus-write-lock
-    pod-store-core-recovery-expectation pod-store-pod-recovery-expectation)
+    pod-store-core-recovery-expectation pod-store-pod-recovery-expectation pod-store-core-pod-renumber-rounds)
   "Member-owned fields retained across reload; DATA-ROOT/LOADED-P are explicitly transitioned.")
 
 (defun reset-store-application (store)
