@@ -46,6 +46,8 @@
   ;; While a restarted member replays its log: the revision it stopped at and a
   ;; digest of the versions it held, which the replay must reproduce (podster-69p).
   (core-recovery-expectation nil)
+  ;; The same for the Pod and Node revision and the versions they showed (podster-eb0).
+  (pod-recovery-expectation nil)
   (core-journal-bytes 0)
   (core-checkpoint-bytes 0)
   (core-checkpoint-needed t)

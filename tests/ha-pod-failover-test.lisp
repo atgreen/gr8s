@@ -310,3 +310,95 @@
                             (equal uid (ha-pod-uid s3 "p1")))
                        "the Pod (and its identity) is not lost on failover")))
             (dolist (h (list h1 h2 h3)) (when h (ignore-errors (gr8s.ha::stop-ha-control-plane h))))))))))
+
+;;; podster-eb0: every member shows a Pod and a Node at one resourceVersion, and
+;;; a member that restarts shows them at the versions it showed before.
+
+(defun ha-pod-and-node-versions (store)
+  "The revision STORE counts Pods and Nodes by, and each version it shows, by name."
+  (bt:with-lock-held ((gr8s.store::pod-store-lock store))
+    (list (gr8s.store::pod-store-pod-revision store)
+          (sort (append
+                 (loop for pod being the hash-values of (gr8s.store::pod-store-pods store)
+                       collect (cons (format nil "pod/~A" (gr8s.model::pod-name pod))
+                                     (gr8s.resources::pod-shown-version pod)))
+                 (loop for node being the hash-values of (gr8s.store::pod-store-nodes store)
+                       collect (cons (format nil "node/~A" (gr8s.model::node-record-name node))
+                                     (parse-integer (gr8s.model::node-record-resource-version node)))))
+                #'string< :key #'car))))
+
+(defun ha-run-a-pod (store name node)
+  "Create Pod NAME through STORE, assign it to NODE and report it running."
+  (ha-make-pod store name)
+  (gr8s.store::with-store-lock (store)
+    (gr8s.controllers::persist-pod-assignment store (gr8s.store::get-pod-unlocked store "default" name) node))
+  (gr8s.controllers::update-pod-observed-status
+   store (gr8s.store::get-pod store "default" name)
+   (gr8s.resources::core-object
+    "phase" "Running"
+    "containerStatuses" (vector (gr8s.resources::core-object
+                                 "name" "main" "ready" t
+                                 "state" (gr8s.resources::core-object "running" (gr8s.resources::core-object)))))))
+
+(test a-member-that-restarts-shows-pods-and-nodes-at-the-versions-it-showed
+  (call-with-two-restartable-members
+   (lambda (s1 restart second)
+     (seed-ha-readiness-nodes s1)
+     (dolist (name '("p1" "p2" "p3")) (ha-run-a-pod s1 name "worker-a"))
+     (gr8s.controllers::mark-node-ready s1 "worker-a" (get-universal-time))
+     (is (poll-until (lambda () (equal (ha-pod-and-node-versions s1) (ha-pod-and-node-versions (funcall second))))
+                     :timeout 15)
+         "the members show every Pod and Node at one version: ~S and ~S"
+         (ha-pod-and-node-versions s1) (ha-pod-and-node-versions (funcall second)))
+     (let ((before (ha-pod-and-node-versions s1)))
+       (is (= 5 (length (second before))))
+       (dotimes (restarts 2)
+         (let ((s2 (funcall restart)))
+           (is (equal before (ha-pod-and-node-versions s2))
+               "the restarted member shows what it showed: ~S, not ~S" before (ha-pod-and-node-versions s2))
+           (is (equal before (ha-pod-and-node-versions s1)))))
+       ;; And what is written afterwards has one version on both.
+       (ha-run-a-pod s1 "p4" "worker-b")
+       (is (poll-until (lambda () (equal (ha-pod-and-node-versions s1) (ha-pod-and-node-versions (funcall second))))
+                       :timeout 15)
+           "a Pod written after the restart has one version too: ~S and ~S"
+           (ha-pod-and-node-versions s1) (ha-pod-and-node-versions (funcall second)))))))
+
+(test recovered-pod-and-node-versions-are-checked-against-what-the-member-showed
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (seed-ha-readiness-nodes store)
+    (ha-run-a-pod store "p1" "worker-a")
+    (let* ((shown (ha-pod-and-node-versions store))
+           (revision (first shown)))
+      (flet ((check (expectation &rest arguments)
+               (bt:with-lock-held ((gr8s.store::pod-store-lock store))
+                 (setf (gr8s.store::pod-store-pod-recovery-expectation store) expectation)
+                 (apply #'gr8s.resources::check-recovered-pod-versions store arguments)
+                 (gr8s.store::pod-store-pod-recovery-expectation store)))
+             (digest ()
+               (bt:with-lock-held ((gr8s.store::pod-store-lock store))
+                 (gr8s.resources::pod-versions-digest store))))
+        ;; The replay has not come to where the member stopped: nothing is decided.
+        (is (check (cons (+ revision 5) (digest))))
+        (is (equal shown (ha-pod-and-node-versions store)))
+        ;; It has come there, showing what the member showed.
+        (is (null (check (cons revision (digest)))))
+        (is (equal shown (ha-pod-and-node-versions store)))
+        ;; It is over, and never came there: one revision above all the member
+        ;; gave out or had reserved, for every Node and every Pod's publication.
+        (let ((reserved (gr8s.store::pod-store-pod-revision-ceiling store)))
+          (is (null (check (cons (+ revision 40) (digest)) :replayed t)))
+          (let* ((now (ha-pod-and-node-versions store))
+                 (fresh (first now)))
+            (is (> fresh (max reserved (+ revision 40))))
+            (is (every (lambda (entry) (= fresh (cdr entry))) (second now))
+                "every Pod and Node shows the new revision: ~S" now)
+            (is (= fresh (gr8s.store::pod-store-pod-revision-epoch-floor store))
+                "and a version from before is refused")
+            (is (= fresh (gr8s.store::pod-store-pod-watch-floor store)))
+            ;; The Pod can be read and updated at the version it now shows.
+            (let ((pod (gr8s.store::get-pod store "default" "p1")))
+              (is (equal "worker-a" (gr8s.model::pod-node-name pod)))
+              (finishes (gr8s.controllers::update-pod-observed-status
+                         store pod (gr8s.resources::core-object "phase" "Succeeded"))))))))))

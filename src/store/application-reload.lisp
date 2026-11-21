@@ -27,7 +27,7 @@
     pod-store-credential-lock pod-store-service-account-signing-key pod-store-workload-lock
     pod-store-core-change-observers pod-store-gateway-dependency-revision
     pod-store-watch-journal-p pod-store-lock pod-store-image-tracker pod-store-consensus-commit-fn pod-store-consensus-write-lock
-    pod-store-core-recovery-expectation)
+    pod-store-core-recovery-expectation pod-store-pod-recovery-expectation)
   "Member-owned fields retained across reload; DATA-ROOT/LOADED-P are explicitly transitioned.")
 
 (defun reset-store-application (store)
@@ -44,10 +44,11 @@
     (store-access-unavailable "Application reload requires a drained access gate")))
 
 (defvar *snapshot-keeps-resource-revisions* nil
-  "True while a member loads a snapshot whose resource revisions it keeps as they
-are, and does not move above its own: its own snapshot when it restarts, whose
-log it then replays, or the first one a new member is given. The control plane's
-members number alike, so a member must not renumber by itself (podster-69p).")
+  "True while a member loads a snapshot whose revisions it keeps as they are, and
+does not move above its own: its own snapshot when it restarts, whose log it then
+replays, or the first one a new member is given. This holds for the resource
+revision and for the Pod and Node revision. The control plane's members number
+alike, so a member must not renumber by itself (podster-69p, podster-eb0).")
 
 (defun check-store-reload-revisions (store id descriptor)
   "Reject stale staged clocks BEFORE intent or selection changes. Caller holds all barriers."
@@ -66,10 +67,10 @@ members number alike, so a member must not renumber by itself (podster-69p).")
     ;; A failed load may already have installed these exact clocks. Retry the
     ;; pending generation without demanding another revision bump.
     (unless (and (not (pod-store-application-loaded-p store)) (equal path (store-data-path store)))
-      (unless (and (or *snapshot-keeps-resource-revisions*
-                       (> (gethash "resourceEpochFloor" boundary) (pod-store-resource-revision store)))
-                   (> (gethash "podEpochFloor" boundary) (max (pod-store-pod-revision store)
-                                                           (pod-store-pod-revision-ceiling store))))
+      (unless (or *snapshot-keeps-resource-revisions*
+                  (and (> (gethash "resourceEpochFloor" boundary) (pod-store-resource-revision store))
+                       (> (gethash "podEpochFloor" boundary) (max (pod-store-pod-revision store)
+                                                               (pod-store-pod-revision-ceiling store)))))
         (error "Snapshot generation must be rematerialized above the member's revision clocks")))
     boundary))
 

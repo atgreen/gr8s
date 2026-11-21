@@ -63,7 +63,7 @@ same order however busy the cluster is. So the members agree in rounds:
 Clients see the renumbering as one modification of each object. It happens
 once after an upgrade; when the members already agree, a round changes nothing.
 A round waits for every voter, so it completes only when all of them run a
-version that takes part. Pods are numbered separately and are not covered.
+version that takes part.
 
 A member that restarts loads its last snapshot and applies the log after it
 again. That gives each object the version it had, so a restart changes no
@@ -75,6 +75,18 @@ out, logs that, and starts a round. This happens to a member that counted by
 itself under an older version, and not otherwise in ordinary operation. A
 member that is sent a snapshot because it fell too far behind also moves its
 revisions above its own, and the round that follows renumbers.
+
+Pods and Nodes are numbered by a second revision. A Pod shows the version of
+its last published status, and a member gives a replicated change the number
+its author gave it, unless the member has already shown a higher one: a watch
+that stands at a higher number must not miss the change. So the members show a
+Pod and a Node at one version while they count alike, and a member that counts
+ahead numbers what it is sent by itself. A restart keeps this revision as it
+keeps the other, checks the replay in the same way, and falls back in the same
+way: every Node and every Pod's publication then takes one revision above all
+the member gave out. Members whose second revisions already differ are not yet
+brought together by a round; they come to count alike when the member that is
+ahead leads, and a Pod or Node shows one version from its next change on.
 A kubelet's
 repeated Event (a probe that fails every few seconds) is shown at once for its
 first ten occurrences and then brought up to date once a minute, so that it

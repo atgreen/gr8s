@@ -101,6 +101,23 @@ application ingress/writer barriers. This function neither persists nor adopts R
              (error "Application snapshot does not advance the committed/applied boundary")))))
       t)))
 
+(defun store-raft-apply-command (store command)
+  "Apply one committed COMMAND to STORE, as every member does in log order."
+  (case (car command)
+    (:store-recovery-barrier :recovered)
+    (:core-state (prog1 (gr8s.resources::install-core-state-blob store (second command))
+                   (gr8s.resources::reconcile-pki-authority store)))
+    (:core-delta (prog1 (gr8s.resources::install-core-state-delta store (second command))
+                   (gr8s.resources::reconcile-pki-authority store)))
+    (:secrets-encryption (gr8s.resources::install-secret-encryption-command store (second command)))
+    (:pod-state (gr8s.store::install-pod-state-blob store (second command)))
+    (:pod-delta (gr8s.store::install-pod-state-delta store (second command)))
+    (:node-state (gr8s.store::install-node-state-blob store (second command)))
+    (:node-delta (gr8s.store::install-node-state-delta store (second command)))
+    (:image-tracker
+     (gr8s.image-distribution::tracker-apply-command (gr8s.store::pod-store-image-tracker store) (second command)))
+    (:node-enrollment (apply #'gr8s.controllers::install-node-enrollment-command store (second command)))))
+
 (defun make-store-raft-apply-function (store)
   "Use the same deterministic application dispatcher for new and recovered members.
 A failing install surfaces as RAFT-APPLY-ERROR so background apply drivers can
@@ -108,20 +125,13 @@ leave the entry un-applied and retry instead of crashing their thread."
   (lambda (command)
     (handler-case
         (when (consp command)
-          (case (car command)
-            (:store-recovery-barrier :recovered)
-            (:core-state (prog1 (gr8s.resources::install-core-state-blob store (second command))
-                           (gr8s.resources::reconcile-pki-authority store)))
-            (:core-delta (prog1 (gr8s.resources::install-core-state-delta store (second command))
-                           (gr8s.resources::reconcile-pki-authority store)))
-            (:secrets-encryption (gr8s.resources::install-secret-encryption-command store (second command)))
-            (:pod-state (gr8s.store::install-pod-state-blob store (second command)))
-            (:pod-delta (gr8s.store::install-pod-state-delta store (second command)))
-            (:node-state (gr8s.store::install-node-state-blob store (second command)))
-            (:node-delta (gr8s.store::install-node-state-delta store (second command)))
-            (:image-tracker
-             (gr8s.image-distribution::tracker-apply-command (gr8s.store::pod-store-image-tracker store) (second command)))
-            (:node-enrollment (apply #'gr8s.controllers::install-node-enrollment-command store (second command)))))
+          (multiple-value-prog1 (store-raft-apply-command store command)
+            ;; A member that has restarted is replaying its log. What its Pods and
+            ;; Nodes come to is compared with what they showed before it stopped.
+            (when (and (member (car command) '(:pod-state :pod-delta :node-state :node-delta :node-enrollment))
+                       (gr8s.store::pod-store-pod-recovery-expectation store))
+              (bt:with-lock-held ((gr8s.store::pod-store-lock store))
+                (gr8s.resources::check-recovered-pod-versions store)))))
       (raft-apply-error (condition) (error condition))
       (error (condition) (error 'raft-apply-error :underlying condition)))))
 
