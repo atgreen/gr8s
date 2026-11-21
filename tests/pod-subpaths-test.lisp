@@ -14,12 +14,18 @@
   (ensure-directories-exist path)
   (with-open-file (out path :direction :output :if-exists :supersede) (write-string text out)))
 
-(defun subpath-test-fd-count ()
-  "Count actual open descriptors while including this enumeration's own descriptor."
-  (let ((directory (sb-posix:opendir "/proc/self/fd")))
+(defun subpath-test-fd-count (root)
+  "Count this process's open descriptors that name something under ROOT. Every
+descriptor in the process cannot be counted: other threads open and close their
+own, and the count then changes by chance (podster-0o5)."
+  (let ((directory (sb-posix:opendir "/proc/self/fd"))
+        (prefix (string-right-trim "/" (namestring root))))
     (unwind-protect
          (loop for entry = (sb-posix:readdir directory) until (sb-alien:null-alien entry)
-               count (not (member (sb-posix:dirent-name entry) '("." "..") :test #'equal)))
+               count (let ((name (sb-posix:dirent-name entry)))
+                       (and (not (member name '("." "..") :test #'equal))
+                            (let ((target (ignore-errors (sb-posix:readlink (format nil "/proc/self/fd/~A" name)))))
+                              (and target (uiop:string-prefix-p prefix target))))))
       (sb-posix:closedir directory))))
 
 (test subpath-expression-uses-actual-environment-and-consumes-dollars-once
@@ -63,16 +69,20 @@
 (test subpath-makes-real-directories-and-releases-descriptors-on-failure
   (with-temporary-store (store directory)
     (values store)
-    (let* ((root (merge-pathnames "volume/" directory)) (before (subpath-test-fd-count)))
+    (let ((root (merge-pathnames "volume/" directory)))
       (ensure-directories-exist root)
+      (is (zerop (subpath-test-fd-count root)))
       (let ((descriptor (gr8s.kubelet::pin-volume-subpath root "a/b" :create-directory t)))
-        (unwind-protect (is (sb-posix:s-isdir (sb-posix:stat-mode (sb-posix:fstat descriptor))))
+        (unwind-protect (progn
+                          (is (sb-posix:s-isdir (sb-posix:stat-mode (sb-posix:fstat descriptor))))
+                          (is (= 1 (subpath-test-fd-count root)) "the count sees a descriptor under the volume"))
           (sb-posix:close descriptor)))
       (is (probe-file (merge-pathnames "a/b/" root)))
       (dotimes (index 32)
         (declare (ignore index))
         (handler-case (gr8s.kubelet::pin-volume-subpath root "absent") (gr8s.runtime::runtime-error () nil)))
-      (is (= before (subpath-test-fd-count))))))
+      (is (zerop (subpath-test-fd-count root))
+          "no failed attempt left a descriptor open"))))
 
 (test subpath-allows-absolute-links-inside-the-root-and-preserves-real-directory-mode
   (with-temporary-store (store directory)
