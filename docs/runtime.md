@@ -132,6 +132,55 @@ upstream conformance selection uses. Archives are imported again on every start;
 an import saves the network but not the disk work, since containerd still writes,
 flushes, and unpacks every layer.
 
+## Private registries and TLS trust
+
+Every pull goes through the node's image mirror, which fetches from the
+registry over https and verifies its certificate. A redirect, such as a blob
+handed off to a CDN, is verified against its own host's trust. By default that
+trust is the system roots, so a registry with a private or self-signed CA fails
+the pull: the Pod sits in `ImagePullBackOff`, and the event or the gr8s journal
+names the TLS error. There is no plain-http or skip-verify escape hatch.
+
+Trust a private CA for named registries in either of two ways.
+
+**Cluster-wide, with no restart.** Create a ClusterTrustBundle holding the CA
+and list the registries it vouches for in the `gr8s.io/registries` annotation
+(HOST or HOST:PORT, separated by commas or spaces):
+
+```sh
+kubectl get configmap kube-root-ca.crt -o jsonpath='{.data.ca\.crt}' > cluster-ca.pem
+kubectl apply -f - <<EOF
+apiVersion: certificates.k8s.io/v1
+kind: ClusterTrustBundle
+metadata:
+  name: lab-registry
+  annotations:
+    gr8s.io/registries: "registry.lab.example:30500"
+spec:
+  trustBundle: |
+$(sed 's/^/    /' cluster-ca.pem)
+EOF
+```
+
+Every node verifies exactly those registries against the bundle from its next
+snapshot; the CA is not trusted for any other host. Deleting the bundle, or
+dropping a host from the annotation, withdraws the trust the same way. The API
+server rejects a malformed or repeated host, and only this annotation crosses
+to the nodes. Each node keeps the trust it last received in
+`<state>/registry-trust/`, so it verifies the same way after a restart, before
+its first snapshot. Several bundles may name one registry and are all
+trusted, which lets a rotation add the new CA before removing the old.
+
+**Per node.** `gr8s serve` and `gr8s agent` take `--registry-ca HOST=FILE`
+(repeatable), and a bare `--registry-ca HOST` trusts the cluster CA. This needs
+a restart to change, and every node that pulls needs it. A registry named both
+ways trusts the CAs from both.
+
+Either way, the registry's certificate must name the address images use: an
+image reference by IP needs that IP in the certificate. For an in-cluster
+registry, a cert-manager Certificate from the `ca` ClusterIssuer is signed by
+the cluster CA in `kube-root-ca.crt`.
+
 ## A note on durability
 
 `--containerd-no-sync` is off by default and is for disposable test machines only.

@@ -7,6 +7,50 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ## [Unreleased]
 
+### Added
+
+- `--registry-ca HOST[=FILE]` on `gr8s serve` and `gr8s agent` (repeatable)
+  verifies registry HOST against FILE's CAs instead of the system roots. A
+  bare HOST trusts the cluster CA, for an in-cluster registry serving a
+  cert-manager certificate from the cluster's `ca` issuer.
+- Cluster-wide registry trust: a ClusterTrustBundle annotated
+  `gr8s.io/registries: "HOST[:PORT], ..."` makes its CAs trusted for exactly
+  those registries on every node, with no restart. Adding, rotating or
+  deleting the bundle takes effect from the next node snapshot; nodes keep the
+  last trust they received across restarts. A host also named by a node's
+  `--registry-ca` trusts both (podster-b0c).
+
+### Fixed
+
+- The Gateway proxies WebSocket upgrades. A handshake used to reach the
+  backend with its `Connection` and `Upgrade` headers stripped, so the
+  backend answered 400. It now replays the handshake to the backend and,
+  once the backend answers 101, relays the connection both ways, past the
+  listener's 20-second read timeout. The rule's rewrite and header filters
+  apply as on any request (podster-1fk).
+- A Certificate's `ipAddresses`, `uris` and `emailAddresses` reach the issued
+  leaf's subjectAltName. They used to be dropped while the Certificate still
+  reported Ready. Admission checks each IP address as cert-manager does, and
+  accepts any of these lists as the subject. The controller records the
+  identity a Secret was issued for, so a changed spec reissues at once
+  instead of at renewal, and a Secret issued before this fix reissues once
+  (podster-upj).
+
+### Security
+
+- The image mirror verifies every registry's TLS certificate. It used to
+  accept any certificate, so anyone on the path could answer a pull with
+  their own manifest for a tag. A registry must now present a certificate
+  for its name from a CA in the system roots, or one trusted for it by a
+  ClusterTrustBundle or `--registry-ca`.
+  A blob redirect is verified against its own host's trust, and must stay
+  on https (podster-sqb). **Upgrading:** pulls from a registry with a
+  private or self-signed certificate fail with a TLS verification error
+  until its CA is trusted: by a ClusterTrustBundle annotated
+  `gr8s.io/registries`, which nodes honor once the leader runs this release,
+  or by `--registry-ca` on each node, which also covers the rollout itself
+  (docs/runtime.md, "Private registries and TLS trust").
+
 ## [v1.37.2-gr8s.2] — 2026-11-21
 
 Third trial pre-release. A cluster doctor, miniwit as the witness of a

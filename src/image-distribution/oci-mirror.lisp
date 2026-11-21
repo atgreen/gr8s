@@ -59,24 +59,81 @@ mirror-routing headers never cross the loopback trust boundary."
     (error "Invalid registry path ~S" path))
   (format nil "https://~A~A" host path))
 
+(defvar *registry-ca-files* '()
+  "Alist of registry host (HOST or HOST:PORT, as image references name it) to a
+PEM file of the CAs trusted for that registry in place of the system roots:
+the node's --registry-ca, joined by cluster registry trust (registry-trust.lisp).
+Every other registry is verified against the system roots.")
+
+(defparameter +registry-redirect-limit+ 5)
+
+(defun registry-uri-host (uri)
+  "URI's authority as image references name a registry: HOST, or HOST:PORT
+when the port is not the https default."
+  (let ((port (puri:uri-port uri)))
+    (if (and port (/= port 443))
+        (format nil "~A:~D" (puri:uri-host uri) port)
+        (puri:uri-host uri))))
+
+(defun registry-host-key (host)
+  "HOST without an explicit default https port, so HOST:443 and HOST match."
+  (if (uiop:string-suffix-p host ":443")
+      (subseq host 0 (- (length host) 4))
+      host))
+
+(defun registry-tls-arguments (host)
+  "Drakma arguments that verify HOST's certificate: always required, against
+HOST's configured CA file when it has one, else the system roots."
+  (let ((ca-file (cdr (assoc (registry-host-key host) *registry-ca-files*
+                             :key #'registry-host-key :test #'string-equal))))
+    (list* :verify :required (and ca-file (list :ca-file (namestring ca-file))))))
+
+(defun registry-http-request (url headers &rest arguments)
+  "Drakma request to registry URL with its certificate verified, following up
+to +REGISTRY-REDIRECT-LIMIT+ redirects by hand so each hop is verified against
+its own host's trust (a blob redirect to a CDN must not be held to a private
+registry CA, nor a private CA honored for the CDN). Redirects must stay on
+https, and drop Authorization as drakma's own redirects do."
+  (loop with uri = (puri:parse-uri url)
+        for hop from 0
+        do (multiple-value-bind (body status response-headers)
+               (apply #'drakma:http-request uri
+                      :additional-headers headers :redirect nil :proxy nil
+                      (append arguments (registry-tls-arguments (registry-uri-host uri))))
+             (let ((location (and (member status '(301 302 303 307 308))
+                                  (drakma:header-value :location response-headers))))
+               (unless location
+                 (return (values body status response-headers)))
+               (when (streamp body) (close body :abort t))
+               (when (>= hop +registry-redirect-limit+)
+                 (error "Registry ~A redirected more than ~D times" url +registry-redirect-limit+))
+               (setf uri (puri:merge-uris location uri)
+                     headers (remove "authorization" headers
+                                     :key (lambda (header) (string-downcase (string (car header))))
+                                     :test #'string=))
+               (unless (eq :https (puri:uri-scheme uri))
+                 (error "Registry ~A redirected to non-https ~A" url (puri:render-uri uri nil)))))))
+
 (defun proxy-oci-registry-request (method host path headers)
   "Proxy a non-blob Distribution request, preserving auth challenges and media
-types. Drakma returns the byte body so manifests/configs remain exact."
+types. Drakma returns the byte body so manifests/configs remain exact. Redirects
+are returned to the client, not followed."
   (multiple-value-bind (body status response-headers)
-      (drakma:http-request
-       (upstream-registry-url host path) :method method
-       :additional-headers (upstream-request-headers headers)
-       :force-binary t :redirect nil :proxy nil)
+      (apply #'drakma:http-request
+             (upstream-registry-url host path) :method method
+             :additional-headers (upstream-request-headers headers)
+             :force-binary t :redirect nil :proxy nil
+             (registry-tls-arguments host))
     (values body status response-headers)))
 
 (defun fetch-oci-registry-blob (temporary host repository digest headers)
   "Stream one registry blob into TEMPORARY. Digest verification is deliberately
 owned by ENSURE-OCI-BLOB after this function returns."
   (multiple-value-bind (stream status response-headers)
-      (drakma:http-request
+      (registry-http-request
        (upstream-registry-url host (format nil "/v2/~A/blobs/~A" repository digest))
-       :method :get :additional-headers (upstream-request-headers headers)
-       :want-stream t :force-binary t :redirect 5 :proxy nil)
+       (upstream-request-headers headers)
+       :method :get :want-stream t :force-binary t)
     (declare (ignore response-headers))
     (unwind-protect
          (progn

@@ -16,6 +16,60 @@
     (core-resource-error 422 "Invalid" "~A must be an array of nonempty strings" context))
   value)
 
+(defun ipv4-literal-octets (string)
+  "The four octets of dotted-quad STRING, or NIL. Strict like Go's net.ParseIP:
+   no leading zeros, no fewer or more than four parts."
+  (let ((parts (uiop:split-string string :separator ".")))
+    (when (and (= 4 (length parts))
+               (every (lambda (part)
+                        (and (<= 1 (length part) 3) (every #'digit-char-p part)
+                             (or (= 1 (length part)) (char/= #\0 (char part 0)))
+                             (<= (parse-integer part) 255)))
+                      parts))
+      (coerce (mapcar #'parse-integer parts) '(simple-array (unsigned-byte 8) (4))))))
+
+(defun ipv6-literal-octets (string)
+  "The sixteen octets of IPv6 literal STRING, or NIL. Accepts one \"::\" and a
+   trailing embedded dotted quad; rejects zones and groups over four hex digits."
+  (labels ((groups (text allow-ipv4)
+             ;; TEXT's 16-bit groups as a list, or :invalid.
+             (if (zerop (length text))
+                 '()
+                 (loop with parts = (uiop:split-string text :separator ":")
+                       for (part . more) on parts
+                       for ipv4 = (and allow-ipv4 (null more) (find #\. part)
+                                       (ipv4-literal-octets part))
+                       if ipv4
+                         append (list (logior (ash (aref ipv4 0) 8) (aref ipv4 1))
+                                      (logior (ash (aref ipv4 2) 8) (aref ipv4 3)))
+                       else if (and (<= 1 (length part) 4)
+                                    (every (lambda (c) (digit-char-p c 16)) part))
+                              collect (parse-integer part :radix 16)
+                       else do (return :invalid)))))
+    (let* ((double (search "::" string))
+           (head (groups (if double (subseq string 0 double) string) (not double)))
+           (tail (and double (groups (subseq string (+ double 2)) t))))
+      (when (and (listp head) (listp tail)
+                 (not (and double (search "::" string :start2 (1+ double))))
+                 (if double
+                     (<= (+ (length head) (length tail)) 7)
+                     (= 8 (length head))))
+        (let ((all (append head (make-list (- 8 (length head) (length tail)) :initial-element 0) tail))
+              (octets (make-array 16 :element-type '(unsigned-byte 8))))
+          (loop for group in all
+                for index from 0 by 2
+                do (setf (aref octets index) (ldb (byte 8 8) group)
+                         (aref octets (1+ index)) (ldb (byte 8 0) group)))
+          octets)))))
+
+(defun certificate-ip-address-octets (address)
+  "The octets a certificate's iPAddress SAN carries for ADDRESS (4 for IPv4, 16
+   for IPv6), or NIL when ADDRESS is not an IP literal."
+  (and (stringp address)
+       (if (find #\: address)
+           (ipv6-literal-octets address)
+           (ipv4-literal-octets address))))
+
 (defun validate-rbac-rules (rules cluster-p)
   "Validate resource and nonresource RBAC policy rule shapes."
   (unless (and (vectorp rules) (not (stringp rules)))
@@ -154,13 +208,21 @@
        (require-nonempty-string (gethash "secretName" spec) "spec.secretName")
        (let ((ref (require-object (gethash "issuerRef" spec) "spec.issuerRef")))
          (require-nonempty-string (gethash "name" ref) "spec.issuerRef.name"))
-       (let ((dns-names (gethash "dnsNames" spec))
-             (common-name (gethash "commonName" spec)))
-         (when dns-names (bootstrap-string-array dns-names "spec.dnsNames"))
-         (unless (or (and dns-names (plusp (length dns-names)))
+       (let ((common-name (gethash "commonName" spec))
+             (alt-names 0))
+         (dolist (field '("dnsNames" "ipAddresses" "uris" "emailAddresses"))
+           (let ((names (gethash field spec)))
+             (when names
+               (bootstrap-string-array names (format nil "spec.~A" field))
+               (incf alt-names (length names)))))
+         (loop for address across (or (gethash "ipAddresses" spec) #())
+               unless (certificate-ip-address-octets address)
+                 do (core-resource-error 422 "Invalid"
+                                         "spec.ipAddresses: ~S is not a valid IP address" address))
+         (unless (or (plusp alt-names)
                      (and (stringp common-name) (plusp (length common-name))))
            (core-resource-error 422 "Invalid"
-                                "Certificate requires spec.commonName or a nonempty spec.dnsNames"))))
+                                "Certificate requires spec.commonName or one of spec.dnsNames, spec.ipAddresses, spec.uris or spec.emailAddresses"))))
       ((equal resource "certificaterequests")
        (let ((ref (require-object (gethash "issuerRef" spec) "spec.issuerRef")))
          (require-nonempty-string (gethash "name" ref) "spec.issuerRef.name"))))))
@@ -236,7 +298,17 @@
       (unless (equal signer (let ((value (gethash "signerName" old-spec))) (if (stringp value) value "")))
         (cluster-trust-bundle-invalid "spec.signerName: Invalid value: ~S: field is immutable" signer)))
     (unless (and old-spec (equal (gethash "trustBundle" spec) (gethash "trustBundle" old-spec)))
-      (validate-cluster-trust-bundle-anchors (gethash "trustBundle" spec)))))
+      (validate-cluster-trust-bundle-anchors (gethash "trustBundle" spec)))
+    (let ((registries (gethash gr8s.image-distribution::+registry-trust-annotation+
+                               (gethash "annotations" (gethash "metadata" object) (core-object)))))
+      (when registries
+        (handler-case (if (stringp registries)
+                          (gr8s.image-distribution::registry-trust-annotation-hosts registries)
+                          (error "must be a string"))
+          (error (condition)
+            (cluster-trust-bundle-invalid "metadata.annotations[~A]: Invalid value: ~S: ~A"
+                                          gr8s.image-distribution::+registry-trust-annotation+
+                                          registries condition)))))))
 
 (defun normalize-bootstrap-resource (resource input namespace name &optional store)
   "Copy, validate and default an implemented bootstrap API object."

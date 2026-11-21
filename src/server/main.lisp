@@ -194,6 +194,22 @@ unwind, so a startup that fails before READY=1 does not leak the thread."
       (error "duplicate WireGuard endpoint name: ~A" (first endpoint)))
     (append endpoints (list endpoint))))
 
+(defun add-registry-ca (registry-cas value)
+  "Append VALUE, a registry HOST[:PORT] optionally followed by =FILE, to
+REGISTRY-CAS. FILE holds the PEM CAs that registry is verified against instead
+of the system roots; a bare HOST trusts the cluster CA (:CLUSTER), for a
+registry serving a cert-manager certificate from the cluster's ca issuer."
+  (let* ((separator (position #\= value))
+         (host (subseq value 0 separator))
+         (file (and separator (subseq value (1+ separator)))))
+    (unless (gr8s.image-distribution::valid-registry-host-p host)
+      (error "--registry-ca needs a registry HOST or HOST:PORT, not ~S" host))
+    (when (assoc host registry-cas :test #'string-equal)
+      (error "duplicate --registry-ca for ~A" host))
+    (when (and file (not (and (uiop:absolute-pathname-p (pathname file)) (probe-file file))))
+      (error "--registry-ca file ~S must be an existing absolute path" file))
+    (append registry-cas (list (cons host (or file :cluster))))))
+
 (defun validate-cni-options (options)
   "Validate the managed-containerd CNI ownership and plugin search paths."
   (unless (member (getf options :cni-mode) '("native" "external") :test #'string=)
@@ -256,6 +272,7 @@ unwind, so a startup that fails before READY=1 does not leak the thread."
                        :containerd-socket "/run/containerd/containerd.sock"
                        :containerd-log-root "/var/log/gr8s/pods/"
                        :registry-credentials-file nil
+                       :registry-cas nil
                        :image-credential-provider-config nil
                        :image-credential-provider-bin-dir nil
                        :cni-mode "native"
@@ -374,6 +391,9 @@ unwind, so a startup that fails before READY=1 does not leak the thread."
                       (setf (getf options :containerd-log-root) value))
                      ((string= option "--registry-credentials-file")
                       (setf (getf options :registry-credentials-file) value))
+                     ((string= option "--registry-ca")
+                      (setf (getf options :registry-cas)
+                            (add-registry-ca (getf options :registry-cas) value)))
                      ((string= option "--image-credential-provider-config")
                       (setf (getf options :image-credential-provider-config) value))
                      ((string= option "--image-credential-provider-bin-dir")
@@ -473,6 +493,7 @@ unwind, so a startup that fails before READY=1 does not leak the thread."
                        :containerd-socket "/run/containerd/containerd.sock"
                        :containerd-log-root "/var/log/gr8s/pods/"
                        :registry-credentials-file nil
+                       :registry-cas nil
                        :image-credential-provider-config nil
                        :image-credential-provider-bin-dir nil
                        :cni-mode "native"
@@ -532,6 +553,9 @@ unwind, so a startup that fails before READY=1 does not leak the thread."
                 (setf (getf options :containerd-log-root) value))
                ((string= option "--registry-credentials-file")
                 (setf (getf options :registry-credentials-file) value))
+               ((string= option "--registry-ca")
+                (setf (getf options :registry-cas)
+                      (add-registry-ca (getf options :registry-cas) value)))
                ((string= option "--image-credential-provider-config")
                 (setf (getf options :image-credential-provider-config) value))
                ((string= option "--image-credential-provider-bin-dir")
@@ -2219,6 +2243,10 @@ agent masquerades Pod->apiserver traffic toward.")
             (multiple-value-bind (tracker-call tracker-close)
                 (gr8s.agent::make-image-tracker-rpc-client
                  host port node-name ca-certificate certificate private-key)
+              (gr8s.image-distribution::start-registry-trust
+               (agent-state-path options "registry-trust/")
+               (loop for (registry . file) in (getf options :registry-cas)
+                     collect (cons registry (if (eq file :cluster) ca-certificate file))))
               (setf image-distribution
                     (gr8s.security::start-node-image-distribution
                      (agent-state-path options "images/")
@@ -3561,6 +3589,25 @@ node, so use an IP or a host-resolvable name -- never a Service name or
 ClusterIP. Static `nfs:` PVs work too (reclaim policy must be `Retain`). See
 docs/persistent-storage.md for the full reference.
 
+## Private registries
+
+The image mirror verifies every registry's TLS certificate against the system
+roots. A Pod pulling from a registry with a private or self-signed CA sits in
+ImagePullBackOff, and the event or the gr8s journal names a TLS verification
+error. Prefer trusting the CA cluster-wide, with no restart: create a
+ClusterTrustBundle whose `spec.trustBundle` holds the CA PEM, annotated
+`gr8s.io/registries: HOST:PORT[, HOST:PORT...]`. From its next snapshot, every
+node verifies exactly those registries against it, and against nothing else;
+deleting the bundle withdraws the trust the same way. `kubectl get
+clustertrustbundles` shows what the cluster trusts.
+For an in-cluster registry with a certificate from the `ca` issuer, the PEM is
+the cluster CA (`ca.crt` in any namespace's `kube-root-ca.crt` ConfigMap).
+Per node, the service argument `--registry-ca HOST:PORT=/path/to/ca.pem` also
+works (a bare `--registry-ca HOST:PORT` trusts the cluster CA) and needs a
+restart; a host named both ways trusts both. The certificate must name the
+address images use: an image reference by IP needs that IP in the
+Certificate's `ipAddresses`. Never work around this with a plain-http registry.
+
 ## Live Lisp inspection with Slynk
 
 You can inspect a running process without restarting it or installing a debug
@@ -3697,7 +3744,7 @@ Do not assume Kubernetes compatibility means every upstream feature is supported
 
 In a source checkout, README.md and docs/building-and-testing.md cover setup;
 docs/installing.md covers systemd, upgrades, rollback, and cleanup;
-docs/runtime.md covers runtime payloads and air-gapped images;
+docs/runtime.md covers runtime payloads, air-gapped images, and registry TLS trust;
 docs/design-gr8s-trace.md describes tracing limits and authorization;
 docs/design-foreign-cluster-networking.md describes the foreign-cluster
 CNI/Gateway design, and deploy/ holds its chart and conformance harness.
@@ -3805,6 +3852,7 @@ No HA API may start from member-local certificate state before this converges."
                         ("--mtu N" "Pod interface MTU (default 1450; 1420 for wireguard)")
                         ("--runtime NAME" "containerd or fake")
                         ("--containerd-mode MODE" "managed or external")
+                        ("--registry-ca HOST[=FILE]" "Verify registry HOST against FILE's CAs (default: the cluster CA); repeatable")
                         ("--cni-mode MODE" "native or external")
                         ("--help, -h" "show help"))))
       ((equal path '("kubeconfig"))
@@ -3822,6 +3870,7 @@ No HA API may start from member-local certificate state before this converges."
                         ("--wireguard-endpoint NAME=IPV4:PORT" "WireGuard endpoint; repeatable")
                         ("--runtime NAME" "containerd or fake")
                         ("--containerd-mode MODE" "managed or external")
+                        ("--registry-ca HOST[=FILE]" "Verify registry HOST against FILE's CAs (default: the cluster CA); repeatable")
                         ("--cni-mode MODE" "native or external")
                         ("--help, -h" "show help"))))
       ((equal path '("net-agent"))

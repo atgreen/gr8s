@@ -500,3 +500,132 @@
           (com.inuoe.jzon:parse "{\"spec\":{\"from\":[{\"group\":\"gateway.networking.k8s.io\",\"kind\":\"HTTPRoute\",\"namespace\":\"source\"}],\"to\":[{\"group\":\"\",\"kind\":\"Service\"}]}}"))
     (let ((view (gr8s.agent::make-gateway-projection-store (gr8s.agent::gateway-resource-index objects))))
       (is (equal "RefNotPermitted" (gr8s.controllers::gateway-backend-reference-error view backend))))))
+
+;;; WebSocket upgrades (podster-1fk): the handshake reaches the backend with its
+;;; Upgrade intact, the 101 comes back, and the spliced connection carries bytes
+;;; both ways -- past the listener's ordinary read timeout.
+
+(defvar *gw-ws-backend-request* nil "The request head the WebSocket backend last received.")
+
+(defun gw-read-head (stream)
+  "Read octets from STREAM through the blank line ending an HTTP head; return it as a string."
+  (let ((head (make-array 0 :element-type 'character :adjustable t :fill-pointer 0)))
+    (loop for octet = (read-byte stream nil nil)
+          while octet
+          do (vector-push-extend (code-char octet) head)
+          until (and (>= (length head) 4) (string= (subseq head (- (length head) 4))
+                                                   (format nil "~C~C~C~C" #\Return #\Linefeed #\Return #\Linefeed))))
+    (coerce head 'simple-string)))
+
+(defun gw-head-header (head name)
+  (loop for line in (rest (uiop:split-string (string-right-trim '(#\Return #\Linefeed) head) :separator '(#\Linefeed)))
+        for colon = (position #\: line)
+        when (and colon (string-equal name (string-trim " " (subseq line 0 colon))))
+          return (string-trim '(#\Space #\Return) (subseq line (1+ colon)))))
+
+(defun gw-websocket-backend ()
+  "A backend that accepts a WebSocket handshake on /ws (then echoes raw bytes) and
+   refuses one anywhere else with 400. Returns (values port stop-fn)."
+  (let ((listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t :element-type '(unsigned-byte 8)))
+        (stopping nil))
+    (flet ((serve (raw)
+             (let ((stream (usocket:socket-stream raw)))
+               (ignore-errors
+                (let* ((head (gw-read-head stream))
+                       (path (second (uiop:split-string head :separator " ")))
+                       (key (gw-head-header head "Sec-WebSocket-Key")))
+                  (setf *gw-ws-backend-request* head)
+                  (if (and (string= (subseq path 0 (position #\? path)) "/ws") key
+                           (string-equal "websocket" (gw-head-header head "Upgrade")))
+                      (progn
+                        (write-sequence (trivial-utf-8:string-to-utf-8-bytes
+                                         (format nil "HTTP/1.1 101 Switching Protocols~C~CUpgrade: websocket~C~CConnection: Upgrade~C~CSec-WebSocket-Accept: ~A~C~C~C~C"
+                                                 #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed
+                                                 (gr8s.apiserver::websocket-accept-value key)
+                                                 #\Return #\Linefeed #\Return #\Linefeed))
+                                        stream)
+                        (finish-output stream)
+                        (loop for octet = (read-byte stream nil nil)
+                              while octet
+                              do (write-byte octet stream) (finish-output stream)))
+                      (progn
+                        (write-sequence (trivial-utf-8:string-to-utf-8-bytes
+                                         (format nil "HTTP/1.1 400 Bad Request~C~CContent-Length: 6~C~CConnection: close~C~C~C~Cno-ws!"
+                                                 #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed))
+                                        stream)
+                        (finish-output stream)))))
+               (ignore-errors (usocket:socket-close raw)))))
+      (let ((thread (bt:make-thread
+                     (lambda ()
+                       (loop until stopping
+                             do (when (usocket:wait-for-input listener :timeout 0.2 :ready-only t)
+                                  (handler-case
+                                      (let ((raw (usocket:socket-accept listener)))
+                                        (bt:make-thread (lambda () (serve raw)) :name "gw ws backend conn"))
+                                    (error () nil)))))
+                     :name "gw ws backend accept")))
+        (values (usocket:get-local-port listener)
+                (lambda ()
+                  (setf stopping t)
+                  (ignore-errors (bt:join-thread thread))
+                  (ignore-errors (usocket:socket-close listener))))))))
+
+(defun gw-websocket-handshake (port path)
+  "Open a connection to the Gateway on PORT and send a WebSocket handshake for
+   PATH on ws.example.com. Returns (values socket stream response-head)."
+  (let* ((socket (usocket:socket-connect "127.0.0.1" port :element-type '(unsigned-byte 8)))
+         (stream (usocket:socket-stream socket)))
+    (write-sequence (trivial-utf-8:string-to-utf-8-bytes
+                     (format nil "GET ~A HTTP/1.1~C~CHost: ws.example.com~C~CConnection: Upgrade~C~CUpgrade: websocket~C~CSec-WebSocket-Version: 13~C~CSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==~C~C~C~C"
+                             path #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed
+                             #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed))
+                    stream)
+    (finish-output stream)
+    (values socket stream (gw-read-head stream))))
+
+(test gateway-proxies-websocket-upgrades
+  (multiple-value-bind (backend-port stop-backend) (gw-websocket-backend)
+    (let* ((routes (list (gr8s.controllers::make-gw-route
+                          :namespace "default" :hostnames '("ws.example.com")
+                          :rules (list (gr8s.controllers::make-gw-rule
+                                        :matches (list (gr8s.controllers::make-gw-match :path-type :prefix :path "/"))
+                                        :backends (list (gr8s.controllers::make-gw-backend :name "ws" :port backend-port)))))))
+           (router (gr8s.controllers::build-gateway-router routes))
+           (resolver (lambda (b) (declare (ignore b)) (values "127.0.0.1" backend-port)))
+           ;; A one-second ordinary read timeout, so the idle check below is quick.
+           (gateway (let ((hunchentoot:*default-connection-timeout* 1))
+                      (gr8s.controllers::start-gateway-listener :port 0 :router router
+                                                                :resolver resolver :name "test")))
+           (listener-port (hunchentoot:acceptor-port gateway)))
+      (unwind-protect
+           (progn
+             (multiple-value-bind (socket stream head) (gw-websocket-handshake listener-port "/ws?src=cam")
+               (unwind-protect
+                    (progn
+                      (is (search "101" (subseq head 0 (position #\Return head))) "handshake answered ~S" head)
+                      (is (equal "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=" (gw-head-header head "Sec-WebSocket-Accept")))
+                      (is (string-equal "websocket" (gw-head-header head "Upgrade")))
+                      ;; The backend saw the upgrade, the query, and the forwarded host.
+                      (is (search "GET /ws?src=cam HTTP/1.1" *gw-ws-backend-request*))
+                      (is (string-equal "Upgrade" (gw-head-header *gw-ws-backend-request* "Connection")))
+                      (is (equal "ws.example.com" (gw-head-header *gw-ws-backend-request* "X-Forwarded-Host")))
+                      ;; Quiet past the listener's read timeout, then bytes still flow both ways.
+                      (sleep 2.5)
+                      (let ((payload (trivial-utf-8:string-to-utf-8-bytes "frame-bytes")))
+                        (write-sequence payload stream)
+                        (finish-output stream)
+                        (let ((echo (make-array (length payload) :element-type '(unsigned-byte 8))))
+                          (is (= (length payload) (read-sequence echo stream)))
+                          (is (equalp payload echo)))))
+                 (ignore-errors (usocket:socket-close socket))))
+             ;; A backend that refuses the upgrade answers as an ordinary response.
+             (multiple-value-bind (socket stream head) (gw-websocket-handshake listener-port "/elsewhere")
+               (unwind-protect
+                    (progn
+                      (is (search "400" (subseq head 0 (position #\Return head))) "refusal answered ~S" head)
+                      (let ((body (make-array 6 :element-type '(unsigned-byte 8))))
+                        (read-sequence body stream)
+                        (is (equal "no-ws!" (trivial-utf-8:utf-8-bytes-to-string body)))))
+                 (ignore-errors (usocket:socket-close socket)))))
+        (gr8s.controllers::stop-gateway-listener gateway)
+        (funcall stop-backend)))))
