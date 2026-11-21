@@ -25,7 +25,7 @@ chipz, ghcr.io/ocicl/chipz@sha256:0fcb137c11e22325a7c0917913dede9f1cab93de879024
 chunga, ghcr.io/ocicl/chunga@sha256:a2558d54ac5d4ccdbf49d7b51fcb074762d77e263ec67245f6d2928477b6d19a, chunga-20250814-1310e96/chunga.asd
 cl-base64, ghcr.io/ocicl/cl-base64@sha256:702412dbc1ed825e275fb23e22c29527eb786bf644e47c7621bf0dbb34e17c7e, cl-base64-20240503-80496b7/cl-base64.asd
 cl-base64-tests, ghcr.io/ocicl/cl-base64@sha256:702412dbc1ed825e275fb23e22c29527eb786bf644e47c7621bf0dbb34e17c7e, cl-base64-20240503-80496b7/cl-base64-tests.asd
-cl-cancel, ghcr.io/ocicl/cl-cancel@sha256:087ebcf41f19b84cd414a3f321fabb368ec44f2de4561e244aef440045dcd09e, cl-cancel-20261113-6e0db3c/cl-cancel.asd
+cl-cancel, ghcr.io/ocicl/cl-cancel@sha256:44ea72c9214e58f05db66543f49d50c746ede7d3222adf615b46914db8af7061, cl-cancel-20261121-e836de9/cl-cancel.asd
 cl-cel, ghcr.io/ocicl/cl-cel@sha256:e553bc176b4c9195e9274c3598091899f5abd1680b692365c3fc145a92b3b7d5, cl-cel-20261111-677573c/cl-cel.asd
 cl-commonmark, ghcr.io/ocicl/cl-commonmark@sha256:51d847f223132f1845398118798f9848a4d28d16965b372dd4f187d7c433e3f3, cl-commonmark-20260915-bd43508/cl-commonmark.asd
 cl-cronexpr, ghcr.io/ocicl/cl-cronexpr@sha256:ea461d15d34106acb971847d98fb3a67413b90cfe901fac1bca00f95118bb1f7, cl-cronexpr-20261111-0c4613b/cl-cronexpr.asd
