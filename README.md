@@ -44,7 +44,7 @@ version skew between components.
 | You would normally deploy | In gr8s |
 |---|---|
 | kube-apiserver, kube-controller-manager, kube-scheduler | Built in |
-| etcd | Built-in durable datastore, replicated with Raft for high availability; `gr8s backup` / `gr8s restore` |
+| etcd | Built-in durable datastore, replicated with Raft for high availability; `gr8s backup` / `gr8s restore`. Two-node HA takes [miniwit](#miniwit--a-tiny-third-raft-vote), a tiny Go arbiter you can deploy anywhere, even on a home router |
 | kubelet, containerd, runc, CNI plugins | Built in; containerd, runc, and CNI plugins are embedded and started on demand |
 | CNI, kube-proxy, NetworkPolicy controller | Built-in eBPF dataplane, with VXLAN or WireGuard between nodes |
 | CoreDNS | Built-in node-local cluster DNS |
