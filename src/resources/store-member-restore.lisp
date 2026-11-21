@@ -110,7 +110,9 @@
             (declare (ignore generation))
             (setf descriptor incoming)))
       (multiple-value-prog1
-          (let ((gr8s.store::*snapshot-keeps-resource-revisions* keep))
+          (let ((gr8s.store::*snapshot-keeps-resource-revisions* keep)
+                ;; The control plane says which Nodes are ready, not this member's clock.
+                (gr8s.store::*expire-node-leases-at-load* nil))
             (gr8s.store::reload-store-application
              store (gethash "generation" descriptor) :call-with-member-lock #'funcall
              :validate-recovery validate

@@ -691,13 +691,23 @@ installs, so it must come out identical on every member (podster-uvs)."
       (save-consensus-pod-revision-unlocked store)
       (list :node-ok (nreverse results)))))
 
+(defvar *expire-node-leases-at-load* t
+  "Whether a Node loaded from disk is not ready once its lease has run out by this
+machine's clock. A server on its own must decide that for itself: nothing else
+will. A member of a control plane must not (podster-lgi). Whether a Node is
+ready is replicated, and the member that admits node sessions ends a lease
+through the log once it has listened for a whole lease. A member that had been
+stopped for longer than a lease loaded every Node as not ready; the next renewal
+was then a change of readiness for it alone, it gave the Node a version that no
+other member gave it, and from then on it numbered Pods and Nodes by itself.")
+
 (defun load-store-application-files (store)
   "Load the selected application's files into empty indexes; caller owns synchronization."
     (ensure-directories-exist (nodes-path store))
     (dolist (file (directory (merge-pathnames "*.json" (store-data-path store))))
       (index-pod store (store-parse-pod file)))
     (dolist (file (directory (merge-pathnames "*.json" (nodes-path store))))
-      (let ((node (parse-node-record file)))
+      (let ((node (parse-node-record file :expire-leases *expire-node-leases-at-load*)))
         (setf (gethash (node-record-name node) (pod-store-nodes store)) node)))
     (funcall (store-policy-load-resources *store-policy*) store)
     (load-pod-status-state store)

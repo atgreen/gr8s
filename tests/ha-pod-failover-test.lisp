@@ -483,3 +483,48 @@
             (is (> (first now) (+ before 500 1024)) "above what the voter reported, with room to spare")
             (is (every (lambda (entry) (= (cdr entry) (cdr (first (second now))))) (second now))
                 "every Pod and Node shows one revision: ~S" now)))))))
+
+;;; podster-lgi: a member decides for itself that a Node's lease has run out
+;;; only where nothing else can tell it. A member of a control plane is told.
+
+(test a-member-that-was-down-past-a-lease-shows-nodes-as-the-others-do
+  ;; On the lab a restarted follower differed from the leader two seconds after it
+  ;; started. It had loaded every Node as not ready, because the leases had run
+  ;; out by its clock while it was down. The next heartbeat was then a change of
+  ;; readiness for it alone: it gave the Node a version that no other member did,
+  ;; and from then on it numbered by itself.
+  (call-with-two-restartable-members
+   (lambda (s1 restart second)
+     (seed-ha-readiness-nodes s1)
+     (ha-run-a-pod s1 "p1" "worker-a")
+     ;; A lease that has run out already, as one has by the time a member is back.
+     (let ((then (- (get-universal-time) 600)))
+       (gr8s.controllers::mark-node-ready s1 "worker-a" then)
+       (gr8s.controllers::mark-node-ready s1 "worker-b" then)
+       (is (poll-until (lambda () (equal (ha-pod-and-node-versions s1) (ha-pod-and-node-versions (funcall second))))
+                       :timeout 15))
+       (sleep 4)
+       ;; The member takes a snapshot while the Nodes are ready, as a running
+       ;; member does every few hundred writes. It starts again from that.
+       (let ((handle (funcall second :handle)))
+         (setf (gr8s.ha::ha-control-plane-compaction-entries handle) 1)
+         (is (poll-until
+              (lambda ()
+                (gr8s.ha::compact-ha-store-once handle)
+                (let ((node (gr8s.raft.transport::raft-member-node (gr8s.ha:ha-control-plane-member handle))))
+                  (= (cl-raft::raft-node-snapshot-index node) (cl-raft::raft-node-last-applied node))))
+              :timeout 15)
+             "the second member holds a snapshot of all it has applied"))
+       (let* ((before (ha-pod-and-node-versions s1))
+              (s2 (funcall restart)))
+         (is (ha-node-ready-p s2 "worker-a")
+             "the restarted member holds the Node as the control plane does: ready")
+         (is (equal before (ha-pod-and-node-versions s2)))
+         ;; The agent's next heartbeat renews the lease. It changes nothing a client sees.
+         (gr8s.controllers::mark-node-ready s1 "worker-a" (+ then 5))
+         (gr8s.controllers::mark-node-ready s1 "worker-b" (+ then 5))
+         (sleep 3)
+         (is (equal before (ha-pod-and-node-versions s1)) "a renewed lease takes no revision on the leader")
+         (is (equal before (ha-pod-and-node-versions s2))
+             "nor on the member that restarted: ~S, not ~S" before (ha-pod-and-node-versions s2))
+         (is (zerop (gr8s.store::pod-store-core-pod-renumber-rounds s1)) "so nothing had to be renumbered"))))))

@@ -332,7 +332,8 @@ the function returns the second member's store, which a restart replaces."
                                                                         :join-host "127.0.0.1" :join-port 1))
                           (is (poll-until (lambda () (not (gr8s.store::store-access-blocked-p s2))) :timeout 30))
                           s2)
-                        (lambda () s2)))
+                        ;; The second member's store, or with :HANDLE its control plane.
+                        (lambda (&optional what) (if (eq what :handle) h2 s2))))
           (when h2 (ignore-errors (gr8s.ha::stop-ha-control-plane h2)))
           (when h1 (ignore-errors (gr8s.ha::stop-ha-control-plane h1))))))))
 
