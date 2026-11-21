@@ -7,6 +7,75 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ## [Unreleased]
 
+## [v1.37.2-gr8s.2] — 2026-11-21
+
+Third trial pre-release. A cluster doctor, miniwit as the witness of a
+two-member control plane, and HA hardening from live operation: every member
+shows the same `resourceVersion`s and Events, a leadership handover refuses no
+write, and a witness stores the log sealed from its own host.
+
+### Added
+
+- `gr8s doctor diagnose [KIND/NAME]` reads a cluster through `kubectl` and
+  says what is wrong and why. It links workloads to the Pods they own,
+  Services to the Pods they select, and Pods to their Nodes, Secrets,
+  ConfigMaps and claims, and reports each cause once, with the symptoms it
+  explains beneath it, in the order to fix them. Each problem quotes its
+  evidence (conditions, recent Events, the last lines a crashed container
+  wrote) and suggests a next step. The report is styled for a terminal and
+  plain text in a pipe; `--markdown` and `--json` write it for an issue or
+  for tools. It only reads, and exits 0, 1 or 2 for no problems, problems
+  or incomplete coverage. The rules are Prolog, compiled into the binary
+  when it is built. See [Doctor](docs/doctor.md).
+- `gr8s doctor impact KIND/NAME` says what would stop working if a node,
+  workload, Secret, ConfigMap or claim went away, and where a drain would
+  be stopped by a PodDisruptionBudget.
+- `gr8s doctor host` times flushed writes in the state directory and names
+  the filesystem when they are slow: every Raft commit waits for one, and a
+  slow disk looks like a network fault. It also checks that the host's
+  in-kernel NFS client is available, and describes how the host firewall
+  admits the cluster ports.
+- `gr8s member transfer-leadership NAME` hands the leadership to a named
+  voter before the leader is restarted, so no election and no write waits
+  on it. It waits until NAME leads (podster-f9u).
+- `--dns-serve-zone ZONE` on `serve` and `agent` serves an external zone's
+  Gateway hostnames authoritatively from each node's address, so one static
+  forward replaces ExternalDNS. That listener refuses every name outside
+  its zones (podster-iga).
+- miniwit, a small Go Raft witness for a two-member control plane. It is
+  pure Go, so it cross-compiles to a static binary for any platform Go
+  targets, small enough for a home router such as pfSense, and renews its member certificate from a voter thirty days before it
+  expires. See `miniwit/README.md`.
+- `gr8s status` warns when an HA member is ready but stuck in an
+  interrupted application restore, where store-backed work fails silently.
+
+### Changed
+
+- `gr8s doctor` on its own prints help. The host checks are
+  `gr8s doctor host`; `gr8s doctor --state-directory DIR [--fix]` still runs
+  them.
+- A read that names no `resourceVersion` is confirmed with the leader, as
+  Kubernetes does with a quorum read of etcd. A member cut off from the
+  leader used to answer with state the cluster had moved past; it now
+  answers 503 with `Retry-After`, and its `/readyz` fails (podster-gxi).
+- A follower carries a write to the leader itself, as the client, instead
+  of redirecting the client with a 307. A client no longer loses a request
+  to its own timeout when the leader it was sent to has just stopped
+  (podster-l8i).
+- A request that arrives while a checkpoint has the store closed waits for
+  it, up to twenty seconds, and is then answered 429 with `Retry-After`. It
+  used to be answered 503, which Helm does not retry (podster-j76).
+- A drain that waits more than one second names the requests it waits on;
+  it used to wait five. The Raft clock thread reports each pass that runs
+  half a second late, with which thread held the member lock, and every
+  change of role, term or leader (podster-0tg).
+- cl-raft prints a WAL record once instead of twice: appending a 518 kB
+  entry falls from 155 ms to 23 ms, all of it under the member lock
+  (podster-9wb). cl-safe-yaml reads a single-line JSON apply in linear time;
+  large CRDs applied with server-side apply took 13 to 22 seconds each.
+- `gr8s network explain` authenticates through `--kubeconfig` like the other
+  operator commands, and `make kubeconfig` writes an `https://` URL.
+
 ### Fixed
 
 - HA node sessions survive checkpoints. A checkpoint quiesces the store for a
@@ -44,11 +113,9 @@ the Kubernetes API version with a gr8s release suffix (see
   rendering status. Unexpected programming errors are logged at the controller
   boundary without being reported as ordinary replica failures, and other
   workloads continue reconciling (podster-kag).
-
 - Keep HA node streams on the active publishing leader and reconnect them after
   demotion, preventing follower-owned agents from missing later Gateway routes.
   Fail queued operations if leadership changes during their handshake (podster-c28).
-
 - CRD CEL admission shares one request-size bound across nested unbounded
   collections, matching Kubernetes cardinality accounting. This admits the
   upstream AlertmanagerConfig CRD without raising validation cost limits
@@ -70,6 +137,65 @@ the Kubernetes API version with a gr8s release suffix (see
   recovery wait is deliberately unbounded (an operator ends a permanently
   lost quorum with `--cluster-reset`), so it now tells systemd it is still
   making progress rather than being killed as a hung start (podster-lmm).
+- Every HA member gives an object the same `resourceVersion`. Each member
+  used to count revisions for itself, so a client that read through a
+  follower and then updated was refused as a conflict. Revisions are now
+  taken only when a committed write is applied, and a version a member has
+  not reached is answered 504. Members that already differ compare what
+  they hold at one place in the log and renumber until they agree, and a
+  restart or a stopped member coming back no longer sets them apart again
+  (podster-gts, podster-b5d, podster-69p, podster-eb0, podster-lgi).
+- Every HA member shows the same Events. An Event was stored only on the
+  member it was written to, so `kubectl get events` through a follower
+  showed none of a node's. A kubelet publishes a repeating Event at once
+  for its first ten occurrences and once a minute after that (podster-xm5).
+- A leadership handover refuses no write. Under write load each handover
+  used to fail one or two (podster-f9u).
+- The `kubernetes` Service leads to every member that serves the API and is
+  heard from, not only to the founding member. Pods lost the API whenever
+  the founder stopped (podster-bn8).
+- A wiped member rejoining a busy cluster becomes a voter, and a joiner
+  that waits for recovery says why every thirty seconds; that report had
+  never printed. A snapshot transfer that keeps failing is logged instead
+  of retried in silence (podster-kiw).
+- A member whose store stays closed for a restore with no leader for three
+  minutes restarts itself, the manual fix for that wedge (podster-7l9).
+- A voter paused with SIGSTOP during a TLS handshake no longer exits with
+  `DEADLINE-TIMEOUT` when it resumes (podster-fao).
+- A checkpoint no longer ends a watch with 410 Expired, and no watch, log
+  follow, exec, attach, port-forward or proxy holds its store lease while it
+  writes to its client. One slow client or one `kubectl logs -f` used to
+  stall every checkpoint, failing writes for up to 30 seconds. A log follow
+  now ends when its client goes (podster-bbv, podster-0o5).
+- A valid token is not answered 401 while a checkpoint has the store
+  closed; kube-state-metrics crash-looped on that (podster-j76).
+- A webhook that exceeds its timeout is reported with one message, and a
+  finished HTTPS request no longer waits out its deadline (cl-cancel).
+- HTTPRoutes on a gr8s Gateway get `status`, with `Accepted` and
+  `ResolvedRefs`; tools reported every route as having no controller.
+- The Gateway forwards the client's `Authorization` header to the backend.
+  Backends that authenticate the caller, such as S3 SigV4, refused every
+  request through it (podster-8lq).
+- Secrets accept the `type` field selector. The Prometheus operator's
+  Secret informer never synced without it (podster-rml).
+- The kubelet serving certificate covers every local IPv4 address, the
+  node's InternalIP included, and the kubelet reviews its callers through
+  the local API server, following an HA leader redirect. Prometheus scrapes
+  and `kubectl` proxies to non-founding nodes failed TLS or timed out
+  (podster-6ls, podster-pxb).
+- A Pod can reach a service bound to another node's host address, such as
+  node-exporter or the kubelet. gr8s now SNATs that traffic in its own nft
+  table on every node, with or without firewalld (podster-v7c).
+- A reboot that reports a few kB less memory no longer stops the node agent
+  with `Resource policies or topology changed with live reservations`.
+
+### Security
+
+- An HA witness stores the log sealed with AES-256-GCM under a key only
+  voters hold, so Secret contents and signing keys no longer sit in
+  plaintext on the less-trusted witness host. A witness certificate can no
+  longer propose writes or relay operations such as exec through a voter
+  (podster-00c, podster-106).
 
 ## [v1.37.2-gr8s.1] — 2026-11-17
 
@@ -306,6 +432,7 @@ OpenSSL. Release artifacts cover Linux amd64 and arm64: binaries with
 checksums, tarballs carrying the installer and lifecycle scripts, and
 CycloneDX and SPDX SBOMs for the Lisp dependencies.
 
-[Unreleased]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.1...HEAD
+[Unreleased]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.2...HEAD
+[v1.37.2-gr8s.2]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.1...v1.37.2-gr8s.2
 [v1.37.2-gr8s.1]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.0...v1.37.2-gr8s.1
 [v1.37.2-gr8s.0]: https://github.com/atgreen/gr8s/releases/tag/v1.37.2-gr8s.0
