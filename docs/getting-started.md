@@ -9,22 +9,23 @@ for disconnected nodes.
 
 ## Start a cluster
 
-Build without root, then start the server as root and leave this terminal running:
+Install a [release binary](../README.md#getting-started), or build one without
+root with `make native` and use `build/gr8s` in place of `gr8s` below. Start the
+server as root and leave this terminal running:
 
 ```sh
-make native
-sudo build/gr8s serve \
-  --state-directory /tmp/gr8s-state \
-  --kubeconfig /tmp/gr8s.kubeconfig
+sudo gr8s serve
 ```
 
-The API uses HTTPS on port 6443 and writes an owner-only administrative kubeconfig.
-In another terminal, use `sudo` to read it:
+The API uses HTTPS on port 6443. In another terminal, save an administrative
+kubeconfig that only you can read, and point `kubectl` at it:
 
 ```sh
-sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig wait \
-  --for=condition=Ready node/gr8s-local --timeout=180s
-sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig get nodes -o wide
+(umask 077; sudo gr8s kubeconfig > ~/gr8s.kubeconfig)
+export KUBECONFIG=~/gr8s.kubeconfig
+
+kubectl wait --for=condition=Ready node/gr8s-local --timeout=180s
+kubectl get nodes -o wide
 ```
 
 Expect a node named `gr8s-local` with status `Ready`. Addresses, version, and age
@@ -36,12 +37,12 @@ are built into gr8s. See the [component map](kubernetes-users.md).
 Apply the [complete example manifest](../examples/getting-started.yaml):
 
 ```sh
-sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig apply -f examples/getting-started.yaml
-sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig -n gr8s-demo rollout status \
+kubectl apply -f examples/getting-started.yaml
+kubectl -n gr8s-demo rollout status \
   deployment/web --timeout=180s
-sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig -n gr8s-demo wait \
+kubectl -n gr8s-demo wait \
   --for=condition=Ready pod/client --timeout=180s
-sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig -n gr8s-demo get deploy,pods,svc
+kubectl -n gr8s-demo get deploy,pods,svc
 ```
 
 Expect `web` to have `READY 2/2`, two ready web Pods, a ready `client` Pod, and a
@@ -50,9 +51,9 @@ Expect `web` to have `READY 2/2`, two ready web Pods, a ready `client` Pod, and 
 Query DNS and make an HTTP request **inside the client Pod**:
 
 ```sh
-sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig -n gr8s-demo exec client -- \
+kubectl -n gr8s-demo exec client -- \
   nslookup web.gr8s-demo.svc.cluster.local
-sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig -n gr8s-demo exec client -- \
+kubectl -n gr8s-demo exec client -- \
   wget -qO- http://web.gr8s-demo.svc.cluster.local
 ```
 
@@ -65,11 +66,11 @@ backend; it does not require exposing a port on the host.
 Change the Pod template with a rolling restart, using the same image:
 
 ```sh
-sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig -n gr8s-demo rollout restart deployment/web
-sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig -n gr8s-demo rollout status \
+kubectl -n gr8s-demo rollout restart deployment/web
+kubectl -n gr8s-demo rollout status \
   deployment/web --timeout=180s
-sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig -n gr8s-demo get pods -l app=web
-sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig -n gr8s-demo exec client -- \
+kubectl -n gr8s-demo get pods -l app=web
+kubectl -n gr8s-demo exec client -- \
   wget -qO- http://web
 ```
 
@@ -82,7 +83,8 @@ after rollout, not uninterrupted traffic during it.
 | Symptom | First check |
 |---|---|
 | Build command missing or ASDF cannot find a system | Follow [host setup](building-and-testing.md#example-build-host-fedora-44); confirm ocicl setup and run `make deps` |
-| Cannot read kubeconfig | Use the `sudo kubectl` commands above; the file contains administrator credentials |
+| `gr8s kubeconfig` says the cluster PKI does not exist | Start `serve` first, and run both with `sudo` so they share root's state directory |
+| `kubectl` asks for credentials or reaches another cluster | Check that `KUBECONFIG` points at `~/gr8s.kubeconfig` in this terminal |
 | API connection refused | Keep `serve` running; inspect its first startup error and check for a port 6443 conflict |
 | Pod Pending or image pull failure | Run `describe pod` and inspect server output; check registry DNS, credentials, and connectivity |
 | DNS resolves but HTTP fails | Check ready Pods and `get endpointslices -l kubernetes.io/service-name=web` in `gr8s-demo` |
@@ -91,17 +93,18 @@ after rollout, not uninterrupted traffic during it.
 For a particular web Pod, use its name from `get pods`:
 
 ```sh
-sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig -n gr8s-demo describe pod POD_NAME
-sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig -n gr8s-demo logs POD_NAME
+kubectl -n gr8s-demo describe pod POD_NAME
+kubectl -n gr8s-demo logs POD_NAME
 ```
 
 ## Finish
 
 ```sh
-sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig delete namespace gr8s-demo
+kubectl delete namespace gr8s-demo
 ```
 
-Stop the server with Ctrl-C and wait for shutdown. The state directory preserves
-cluster identity and API state for the next start; `/tmp` may be cleared by the host.
+Stop the server with Ctrl-C and wait for shutdown. Root's `~/.local/state/gr8s`
+preserves cluster identity and API state for the next start; `--state-directory`
+picks another place.
 Use the [systemd installation guide](installing.md) for persistent operation, or
 [add a worker](building-and-testing.md#a-second-node) to try cross-node scheduling.

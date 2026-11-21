@@ -3,12 +3,12 @@
 [![CI](https://github.com/atgreen/gr8s/actions/workflows/test.yml/badge.svg)](https://github.com/atgreen/gr8s/actions/workflows/test.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-**Kubernetes, built from scratch in Common Lisp — with an eBPF dataplane you can run on its own.**
+**Kubernetes-compatible clusters, built from scratch in Common Lisp — with an eBPF dataplane you can run on its own.**
 
-**One executable provides a complete Kubernetes-compatible experience.** gr8s
-puts a Kubernetes API server, controllers, scheduler, node agent, container
-runtime, networking, DNS, ingress, storage, metrics, a dashboard, and the
-datastore into a single native binary. Copy it to a Linux machine, run `gr8s serve`, and use `kubectl` and
+**One executable is a complete Kubernetes-compatible cluster.** gr8s puts a
+Kubernetes-compatible API server, controllers, scheduler, node agent,
+container runtime, networking, DNS, ingress, storage, metrics, a dashboard,
+and the datastore into a single native binary. Copy it to a Linux machine, run `gr8s serve`, and use `kubectl` and
 standard Kubernetes manifests. The same file scales out: run it as
 `gr8s agent` to add worker nodes, or as `gr8s serve --join` to add
 control-plane members for a [highly available](docs/high-availability.md),
@@ -16,10 +16,10 @@ Raft-replicated control plane.
 
 > [!WARNING]
 > **This is an experiment.** gr8s is for people interested in exploring and
-> developing a new Kubernetes implementation. It does not promise compatibility
-> stability or operational reliability. It may fail or behave incorrectly.
+> developing a new Kubernetes-compatible implementation. It does not promise compatibility,
+> stability, or operational reliability. It may fail or behave incorrectly.
 >
-> The project also explores building a Kubernetes implementation through
+> The project also explores building a Kubernetes-compatible implementation through
 > human-guided AI development. It may never meet its goals. See
 > [Creation and development](#creation-and-development).
 
@@ -29,20 +29,10 @@ See the [results and evidence](docs/CONFORMANCE.md), and the
 [API coverage](docs/kubernetes-surface.md) and
 [known gaps](docs/k3s-gap-inventory.md) for the current scope.
 
-Run containers with embedded containerd/runc, choose
-[Kata Containers or gVisor](docs/runtime.md#runtimeclass--pluggable-runtimes)
-through `RuntimeClass`, or run virtual machines with [KubeVirt](docs/kubevirt.md).
-Explore the cluster through its integrated [Headlamp dashboard](#dashboard).
-[Whistler](https://github.com/atgreen/Whistler) JIT-compiles and loads programs
-written in a [bpftrace-compatible language](docs/design-gr8s-trace.md) for live
-kernel tracing of selected Pods. Inspect running control-plane and agent
-processes through [Slynk](https://github.com/joaotavora/sly), the Sly server —
-see [debugging a running cluster](docs/building-and-testing.md#debugging-a-running-cluster).
-
 Start with the [documentation guide](docs/index.md). If you already know Kubernetes,
 the [component map](docs/kubernetes-users.md) explains where familiar components live.
 
-## One binary, every feature
+## One binary, nothing else to install
 
 A gr8s cluster has nothing else to install, version, or keep in step. The
 release binary carries its own statically linked container runtime and CNI
@@ -72,22 +62,147 @@ The same file takes every role:
 gr8s serve              # control plane plus a local node: a complete cluster
 gr8s serve --join       # another control-plane member, for high availability
 gr8s agent              # a worker node joining that cluster
-gr8s witness            # a tie-breaking Raft member for two-node high availability
 gr8s net-agent          # just the eBPF dataplane, on a Kubernetes cluster you already run
 ```
 
+For two-node high availability, the tie-breaking third vote is
+[miniwit](#miniwit--a-tiny-third-raft-vote), a tiny Go program you can deploy
+almost anywhere: a small VM, a Raspberry Pi, or even a home router.
+
 Upgrading is replacing one file. The [systemd installer](docs/installing.md)
 verifies the new binary, restarts the service, and rolls back automatically if
-it does not become ready. Optional sandboxed runtimes are one command away:
-`gr8s runtime install gvisor` or `gr8s runtime install kata`.
+it does not become ready. Containers run with embedded containerd and runc;
+[Kata Containers or gVisor](docs/runtime.md#runtimeclass--pluggable-runtimes)
+are one command away (`gr8s runtime install gvisor` or `gr8s runtime install kata`),
+and virtual machines run with [KubeVirt](docs/kubevirt.md).
+
+## Getting started
+
+To run a cluster, you need **Linux 6.6+ with TCX eBPF support**, **root
+privileges**, and working cgroups. Install **`kubectl`** to use the Kubernetes
+API. Start with a disposable Linux VM.
+
+**1. Install** the binary from the
+[latest release](https://github.com/atgreen/gr8s/releases) (`amd64` or `arm64`):
+
+```sh
+VERSION=v1.37.2-gr8s.1 ARCH=amd64
+curl -fLO https://github.com/atgreen/gr8s/releases/download/$VERSION/gr8s-linux-$ARCH
+curl -fLO https://github.com/atgreen/gr8s/releases/download/$VERSION/gr8s-linux-$ARCH.sha256
+sha256sum -c gr8s-linux-$ARCH.sha256
+sudo install -m 0755 gr8s-linux-$ARCH /usr/local/bin/gr8s
+```
+
+**2. Start a cluster** and leave it running:
+
+```sh
+sudo gr8s serve
+```
+
+**3. Use it.** In another terminal, save a kubeconfig and deploy the
+[example](examples/getting-started.yaml). The node needs registry access for
+the nginx and BusyBox images.
+
+```sh
+(umask 077; sudo gr8s kubeconfig > ~/gr8s.kubeconfig)
+export KUBECONFIG=~/gr8s.kubeconfig
+
+kubectl wait --for=condition=Ready node/gr8s-local --timeout=180s
+kubectl apply -f https://raw.githubusercontent.com/atgreen/gr8s/main/examples/getting-started.yaml
+kubectl -n gr8s-demo rollout status deployment/web --timeout=180s
+kubectl -n gr8s-demo wait --for=condition=Ready pod/client --timeout=180s
+kubectl -n gr8s-demo exec client -- wget -qO- http://web.gr8s-demo.svc.cluster.local
+```
+
+Expect an HTML response containing `Welcome to nginx!`. The
+[full walkthrough](docs/getting-started.md) checks DNS, performs a rolling
+restart, and explains common failures. Remove the example with
+`kubectl delete namespace gr8s-demo`. Stop the server with Ctrl-C; cluster
+state persists in root's `~/.local/state/gr8s` for the next start
+(`--state-directory` picks another place).
+
+`gr8s serve` exposes one authenticated HTTPS Kubernetes API on `0.0.0.0:6443`;
+there is no unauthenticated localhost API. The kubeconfig embeds the cluster CA
+and an administrative client certificate, so keep it private.
+
+To build the binary yourself instead, install **SBCL** and **ocicl**, plus Go
+for the runtime payload and podman or docker and cpio for the embedded
+dashboard, and run `make native`; see the
+[build requirements](docs/building-and-testing.md#requirements). Every `gr8s`
+command works the same with `build/gr8s`.
+
+See [Building, running & testing](docs/building-and-testing.md) to add
+[worker nodes](docs/building-and-testing.md#a-second-node), use external
+containerd, or run tests. The runtime guide explains how to
+[preload images](docs/runtime.md#preloaded-images-airgap).
+
+For expiry inventory, leaf replacement, staged cluster-CA rotation, and
+ServiceAccount signer rotation, see [Certificate management](docs/certificate-management.md).
+Secrets encryption and key rotation are described in the
+[ConfigMap and Secret API guide](docs/configmap-secret-api.md).
+
+To manage a persistent server or agent with systemd, see
+[Installing and operating gr8s with systemd](docs/installing.md).
+It covers verified upgrades, rollback, scoped cleanup, and uninstall.
+
+For multi-member operation, recovery, automatic checkpoints and heap sizing, see
+[High availability](docs/high-availability.md).
+
+## Why gr8s?
+
+- **Nothing to assemble.** One file is the whole cluster, on every node, at one
+  version. Upgrading replaces that file, and the installer rolls back if the new
+  one does not become ready.
+- **Small clusters and slow links.** Two control-plane nodes and a witness give
+  high availability. The witness, [miniwit](#miniwit--a-tiny-third-raft-vote),
+  is small enough to put on whatever always-on box you have — the author's runs
+  on a FreeBSD pfSense router. Nodes fetch image layers from each other over BitTorrent v2,
+  so a rollout to many nodes normally costs the registry one download of each
+  layer, and [preloaded images](docs/runtime.md#preloaded-images-airgap) cover
+  airgapped nodes.
+- **A dataplane you can adopt piece by piece.** The eBPF networking stack also
+  runs on [a cluster you already have](#use-the-gr8s-dataplane-with-your-own-kubernetes),
+  as a full CNI or just as a Gateway or kube-proxy replacement.
+- **Debugging built into the cluster.** [`gr8s doctor`](#doctor) links causes to
+  symptoms. `gr8s debug trace` sends programs written in a
+  [bpftrace-compatible language](docs/design-gr8s-trace.md) to the nodes that
+  host selected Pods and attaches them in the agent process, with no bpftrace
+  binary or tracing DaemonSet. An authenticated
+  [Slynk](https://github.com/joaotavora/sly) tunnel opens a live REPL into any
+  control-plane or agent process; see
+  [debugging a running cluster](docs/building-and-testing.md#debugging-a-running-cluster).
+  `gr8s skill` prints built-in operator and AI agent guidance that works offline.
+- **An independent implementation to study.** The control plane and node agent
+  are written from scratch rather than packaged from upstream Kubernetes. gr8s
+  is an experiment in large systems programming in Common Lisp:
+  concurrency, networking, storage, compilers, and distributed systems in one
+  project. See [For Common Lisp developers](#for-common-lisp-developers).
+
+## How is gr8s different from k3s?
+
+k3s is the closest comparison to gr8s. Both provide a Kubernetes-compatible
+cluster that you can operate with `kubectl`. k3s is a packaged Kubernetes
+distribution built from upstream components and familiar ecosystem add-ons.
+gr8s is an independent implementation: one native Common Lisp executable runs
+the API, controllers, scheduler, node agent, and embedded runtime. It uses its
+own datastore, with Raft replication, and an eBPF dataplane rather than
+assembling the usual separate control-plane and networking components.
+
+That architecture gives gr8s an integrated system to explore and develop,
+with features such as live Lisp inspection and a directly compiled eBPF
+dataplane. It also means its compatibility and operational behavior differ from
+k3s. gr8s passes the upstream Kubernetes v1.37 conformance tests, but is
+experimental and does not yet provide every k3s add-on or operational
+workflow. Check the
+[compatibility gaps](docs/k3s-gap-inventory.md), [API coverage](docs/kubernetes-surface.md),
+and [conformance results](docs/CONFORMANCE.md) for supported behavior and limitations.
 
 ## Use the gr8s dataplane with your own Kubernetes
 
-gr8s is more than a Kubernetes distribution. Its eBPF dataplane also installs as
-a standalone DaemonSet on a cluster you already run — no gr8s control plane
-required. On a k3s cluster with `kube-proxy`, flannel, and the built-in
-NetworkPolicy controller disabled, gr8s provides a complete eBPF
-networking stack:
+The gr8s eBPF dataplane also installs as a standalone DaemonSet on a cluster you
+already run — no gr8s control plane required. On a k3s cluster with
+`kube-proxy`, flannel, and the built-in NetworkPolicy controller disabled, gr8s
+provides a complete eBPF networking stack:
 
 - **Pod networking and IPAM** over a VXLAN fabric (cross-node Pod-to-Pod), or an
   **encrypted WireGuard fabric** (`overlay.backend=wireguard`) that transparently
@@ -127,177 +242,6 @@ See [deploy/](deploy/) for the chart and conformance harness, and the
 [foreign-cluster networking design](docs/design-foreign-cluster-networking.md)
 for how it works.
 
-## Why gr8s?
-
-gr8s is an experiment in **large systems programming in Common Lisp**. A
-Kubernetes implementation exercises concurrency, networking, storage, compilers,
-and distributed systems in one project. Common Lisp brings several advantages
-to that work:
-
-- **A stable language definition.** Common Lisp is defined by
-  [ANSI INCITS 226-1994](https://www.lispworks.com/documentation/common-lisp.html).
-  The core language has a fixed specification, so development can build on the
-  same foundation for decades. Compiler and library upgrades are separate from
-  changes to the language itself.
-- **A rich library ecosystem.** Common Lisp libraries cover HTTP, gRPC,
-  cryptography, parsing, concurrency, and foreign-function interfaces. gr8s
-  [builds on these libraries](gr8s.asd), with pinned dependencies managed through
-  [ocicl](https://github.com/ocicl/ocicl).
-- **Fast native code.** SBCL's optimizing compiler generates native machine code.
-  Common Lisp programs can outperform Go on some workloads, as illustrated by
-  the Benchmarks Game's [SBCL](https://benchmarksgame-team.pages.debian.net/benchmarksgame/measurements/sbcl.html)
-  and [Go](https://benchmarksgame-team.pages.debian.net/benchmarksgame/measurements/go.html)
-  results. Performance depends on the program and its optimization.
-- **Development inside the running system.** The dynamic language, REPL, and
-  image-based tooling keep the loaded program available for inspection and
-  experimentation. Inspect objects, redefine functions, and compile changes
-  interactively. SBCL can [save the loaded Lisp environment as an executable](https://www.sbcl.org/manual/#Saving-a-Core-Image),
-  which is how gr8s packages its native binary.
-- **Native fix-and-continue debugging.** Conditions, restarts, and the interactive
-  debugger let you inspect a failure in context, correct a definition, and resume
-  through an available restart. With suitable debugging settings, SBCL can
-  [restart a stack frame using the redefined function](https://www.sbcl.org/manual/).
-  This makes short, focused debugging sessions part of the normal development
-  workflow. gr8s exposes that environment through its authenticated
-  [Slynk](https://github.com/joaotavora/sly) tunnel.
-
-Those language capabilities support an integrated Kubernetes system:
-
-- **Explore the cluster in a browser.** The integrated Headlamp dashboard
-  provides a Kubernetes web UI with live resource updates. `make native` embeds
-  the assets automatically; see
-  [dashboard assets](docs/building-and-testing.md#dashboard-assets).
-- **Trace workloads in the kernel.** `gr8s debug trace` sends programs written in a
-  bpftrace-compatible language to nodes hosting Pods selected through the
-  Kubernetes API. [Whistler](https://github.com/atgreen/Whistler) JIT-compiles them
-  to eBPF, then loads and attaches them in the agent process. No separate
-  bpftrace binary or tracing DaemonSet is needed.
-- **Inspect the running implementation.** The API, controllers, agent,
-  networking compiler, and datastore use Common Lisp. An authenticated Slynk
-  tunnel lets you inspect live control-plane and agent processes.
-- **Program the dataplane directly from Lisp.** The kernel handles Service load
-  balancing, NetworkPolicy, same-node forwarding, and Pod anti-spoofing.
-  [Whistler](https://github.com/atgreen/Whistler) compiles eBPF directly from Lisp,
-  without clang or LLVM.
-- The same executable can run a complete single-node cluster, a control plane,
-  or a worker agent. It embeds containerd and runc, includes CNI integration,
-  and supports preloaded images for airgapped nodes.
-- The Kubernetes API provides workload controllers, scheduling, RBAC, Services,
-  persistent storage, and custom resources. The
-  [compatibility reference](docs/kubernetes-surface.md) lists supported behavior
-  and limitations.
-- Control-plane state lives in a built-in durable store, with no external
-  database; Raft replicates it across control-plane members for high
-  availability. Certificates authenticate node enrollment and internal
-  communication.
-- Cross-node traffic uses VXLAN by default. An optional adaptive WireGuard
-  overlay selects paths between nodes.
-- Container images travel between nodes over BitTorrent v2. The control plane
-  runs a private tracker with one swarm per image layer. A layer the cluster
-  does not have yet is fetched from the registry by one node, and the others
-  download its pieces from every node that already holds them. Peers
-  authenticate each other with cluster certificates, and each piece is checked
-  against the layer's digest. A rollout to many nodes normally costs the registry
-  one download of each layer.
-
-Run `gr8s skill` for built-in operator and AI agent guidance, including first-response
-checks, live Slynk inspection, and selector-scoped kernel tracing. It works offline
-and can be saved with `gr8s skill > gr8s-guide.md`.
-
-## How is gr8s different from k3s?
-
-k3s is the closest comparison to gr8s. Both provide a Kubernetes-compatible
-cluster that you can operate with `kubectl`. k3s is a packaged Kubernetes
-distribution built from upstream components and familiar ecosystem add-ons.
-gr8s is an independent implementation: one native Common Lisp executable runs
-the API, controllers, scheduler, node agent, and embedded runtime. It uses its own datastore, with Raft
-replication, and an eBPF dataplane rather than assembling the usual separate control-plane and
-networking components.
-
-That architecture gives gr8s an integrated system to explore and develop,
-with features such as live Lisp inspection and a directly compiled eBPF
-dataplane. It also means its compatibility and operational behavior differ from
-k3s. gr8s passes the upstream Kubernetes v1.37 conformance tests, but is experimental and does not yet provide every k3s add-on or operational
-workflow. Check the
-[compatibility gaps](docs/k3s-gap-inventory.md), [API coverage](docs/kubernetes-surface.md),
-and [conformance results](docs/CONFORMANCE.md) for supported behavior and limitations.
-
-## Getting started
-
-To run a cluster, you need **Linux 6.6+ with TCX eBPF support**, **root
-privileges**, and working cgroups. Install **`kubectl`** to use the Kubernetes
-API. Start with a disposable Linux VM.
-
-Download the binary from the
-[latest release](https://github.com/atgreen/gr8s/releases) (`amd64` or `arm64`),
-check it, and start a single-node cluster:
-
-```sh
-VERSION=v1.37.2-gr8s.1 ARCH=amd64
-curl -fLO https://github.com/atgreen/gr8s/releases/download/$VERSION/gr8s-linux-$ARCH
-curl -fLO https://github.com/atgreen/gr8s/releases/download/$VERSION/gr8s-linux-$ARCH.sha256
-sha256sum -c gr8s-linux-$ARCH.sha256
-sudo install -m 0755 gr8s-linux-$ARCH /usr/local/bin/gr8s
-
-# Start a single-node cluster; leave this running.
-sudo gr8s serve \
-  --state-directory /tmp/gr8s-state \
-  --kubeconfig /tmp/gr8s.kubeconfig
-```
-
-That is the whole installation. To build the binary yourself instead, install
-the build toolchain (**SBCL** and **ocicl**, plus Go for the runtime payload and
-podman or docker and cpio for the embedded dashboard) and run `make native` from
-the repository root; see the
-[build requirements](docs/building-and-testing.md#requirements) and the
-[runtime payload details](docs/runtime.md#the-self-contained-payload). Commands
-below that use `gr8s` work the same with `build/gr8s`.
-
-`gr8s serve` exposes one authenticated HTTPS Kubernetes API. It listens on
-`0.0.0.0:6443` by default; there is no separate unauthenticated localhost HTTP
-API. The generated owner-only kubeconfig embeds the cluster CA and an
-administrative client certificate.
-
-In another terminal, deploy the [example](examples/getting-started.yaml). The
-server creates an owner-only kubeconfig, so these commands use `sudo` to read it.
-The node needs registry access for the nginx and BusyBox images.
-
-```sh
-sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig wait \
-  --for=condition=Ready node/gr8s-local --timeout=180s
-sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig apply -f examples/getting-started.yaml
-sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig -n gr8s-demo rollout status \
-  deployment/web --timeout=180s
-sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig -n gr8s-demo wait \
-  --for=condition=Ready pod/client --timeout=180s
-sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig -n gr8s-demo exec client -- \
-  wget -qO- http://web.gr8s-demo.svc.cluster.local
-```
-
-Expect two ready web replicas and an HTML response containing `Welcome to nginx!`.
-The [full walkthrough](docs/getting-started.md) checks DNS, performs a rolling
-restart, shows expected results, and explains common failures. Remove the example
-with `sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig delete namespace gr8s-demo`.
-Stop the server with Ctrl-C; the state directory preserves cluster state for the
-next start, although the host may clear `/tmp`.
-
-See [Building, running & testing](docs/building-and-testing.md) to add
-[worker nodes](docs/building-and-testing.md#a-second-node), use external
-containerd, or run tests. The runtime guide explains how to
-[preload images](docs/runtime.md#preloaded-images-airgap).
-
-For expiry inventory, leaf replacement, staged cluster-CA rotation, and
-ServiceAccount signer rotation, see [Certificate management](docs/certificate-management.md).
-Secrets encryption and key rotation are described in the
-[ConfigMap and Secret API guide](docs/configmap-secret-api.md).
-
-To manage a persistent server or agent with systemd, see
-[Installing and operating gr8s with systemd](docs/installing.md).
-It covers verified upgrades, rollback, scoped cleanup, and uninstall.
-
-For multi-member operation, recovery, automatic checkpoints and heap sizing, see
-[High availability](docs/high-availability.md).
-
 ## Dashboard
 
 `gr8s dashboard` opens a Kubernetes web UI in your browser. It serves the
@@ -306,15 +250,12 @@ separate install — and reverse-proxies the API over mutual TLS to the running
 cluster, with live resource updates.
 
 ```sh
-# With a cluster running, from another terminal:
-sudo gr8s dashboard --kubeconfig /tmp/gr8s.kubeconfig
+gr8s dashboard    # uses $KUBECONFIG, or ~/.kube/config
 ```
 
 It serves on loopback `http://127.0.0.1:8080` by default (change with `--port`)
-and launches your browser; `--no-launch` prints the URL instead. The process
-runs in the foreground until Ctrl-C. The assets are a hard prerequisite of
-`make native`, extracted automatically from the pinned Headlamp image before
-the executable is dumped; see
+and launches your browser; `--no-launch` prints the URL instead. `make native`
+embeds the assets automatically; see
 [dashboard assets](docs/building-and-testing.md#dashboard-assets).
 
 ## Doctor
@@ -326,9 +267,7 @@ the report names causes instead of listing every symptom. A missing Secret
 is one problem, with the Pods and workloads it holds up listed beneath it.
 
 ```sh
-# With a cluster running, from another terminal:
-sudo gr8s doctor diagnose --kubeconfig /tmp/gr8s.kubeconfig
-
+gr8s doctor diagnose                               # the whole cluster
 gr8s doctor diagnose -n production                 # one namespace
 gr8s doctor diagnose deployment/web -n production  # one resource and what it depends on
 gr8s doctor impact node/worker-1                   # what stops if this goes away
@@ -336,20 +275,14 @@ gr8s doctor impact node/worker-1                   # what stops if this goes awa
 
 Problems are listed in the order to fix them. Each one shows the evidence
 behind it — conditions, recent Events, the last lines a crashed container
-wrote — and a suggested next step. The report is styled for a terminal and
-plain text in a pipe. `--markdown` writes it as Markdown for an issue or a
-chat, and `--json` adds every finding and what could not be read.
-
-`diagnose` is read-only: it issues only `kubectl` GET requests, so it needs
-`kubectl` and sees what your credentials can read. It exits 0 when it found
-no problems in what it could read, 1 when it found problems, and 2 when
-coverage was incomplete. A cause is the deepest finding the doctor could
-see, not proof of a root cause.
+wrote — and a suggested next step. `diagnose` only reads, and a cause is the
+deepest finding the doctor could see, not proof of a root cause.
 
 `gr8s doctor impact KIND/NAME` follows the same links the other way, before
 you drain a node or delete a Secret. `gr8s doctor host` checks the kernel,
 cgroups, firewall and state directory of a machine before it runs a node.
-See [Doctor](docs/doctor.md) for the rules, coverage and limits.
+See [Doctor](docs/doctor.md) for output formats, exit codes, rules, coverage
+and limits.
 
 ## Kubernetes capabilities
 
@@ -406,32 +339,41 @@ AppendEntries, and tracks the Raft log boundary for quorum.
 
 miniwit is a self-contained Go module (its own `go.mod`, independent of the
 Lisp build) that speaks gr8s's `RaftTransport` gRPC/mTLS protocol — enroll,
-join, follow. It cross-compiles to a single static FreeBSD/amd64 binary, so it
-is small enough to run on a home router (pfSense). See
+join, follow. It is pure Go, so it cross-compiles to a single static binary
+for any platform Go targets: Linux, the BSDs, macOS, Windows, on amd64, arm64
+and more. That gives you a wide choice of where to put the third vote: a
+small cloud VM, a Raspberry Pi, or even a home router (the author runs it on
+a FreeBSD pfSense router). See
 [`miniwit/README.md`](miniwit/README.md) for the protocol, flags, and build and
 enroll/join instructions.
 
 ## Networking and security
 
 [Whistler](https://github.com/atgreen/Whistler) is the embedded Lisp-to-eBPF
-compiler. The agent uses it to compile and load networking programs at runtime.
-A socket load balancer directs Pod connections to ready Service backends.
-Programs at Pod veths enforce NetworkPolicy and anti-spoofing. A same-node fast
-path sends traffic directly to local Pods. The agent also implements Gateway
-API routing.
+compiler. The agent uses it to compile and load networking programs at runtime,
+without clang or LLVM. A socket load balancer directs Pod connections to ready
+Service backends. Programs at Pod veths enforce NetworkPolicy and anti-spoofing.
+A same-node fast path sends traffic directly to local Pods. The agent also
+implements Gateway API routing.
 
-For cross-node traffic, the WireGuard overlay uses authenticated endpoint
-advertisements, active path trials, and eBPF telemetry. It supports NAT
-traversal, encrypted relaying, packet-size discovery, and topology-aware sparse
-routing. `gr8s network explain NODE PEER` shows why it selected a path. Path
-health and locality also affect Service backend selection and image-peer
-ordering.
+For cross-node traffic, VXLAN is the default. The optional WireGuard overlay
+uses authenticated endpoint advertisements, active path trials, and eBPF
+telemetry. It supports NAT traversal, encrypted relaying, packet-size discovery,
+and topology-aware sparse routing. `gr8s network explain NODE PEER` shows why it
+selected a path. Path health and locality also affect Service backend selection
+and image-peer ordering.
 
 Internal TLS uses a pure-Lisp TLS 1.3 implementation. It prefers the hybrid
 [X25519MLKEM768](https://atgreen.github.io/repl-yell/posts/post-quantum-tls-primer/)
-key exchange, which combines classical and post-quantum cryptography. Classical X25519/P-256 is available as a fallback. Image
-distribution uses node certificates and mutual TLS to authenticate its private
-peer swarm. Each node can seed the verified blobs that it receives.
+key exchange, which combines classical and post-quantum cryptography. Classical
+X25519/P-256 is available as a fallback.
+
+Container images travel between nodes over BitTorrent v2. The control plane
+runs a private tracker with one swarm per image layer. A layer the cluster
+does not have yet is fetched from the registry by one node, and the others
+download its pieces from every node that already holds them. Peers
+authenticate each other with cluster certificates over mutual TLS, and each
+piece is checked against the layer's digest.
 
 See [Networking & the eBPF dataplane](docs/networking.md) for configuration,
 protocol details, and operational behavior.
@@ -451,8 +393,9 @@ then select the runtime with `RuntimeClass`. See
 ## For Common Lisp developers
 
 gr8s is a large, working Common Lisp system — roughly 100,000 lines of
-handwritten Lisp under [src/](src/), plus generated protocol bindings, spanning an API server, controllers, a scheduler, a node agent,
-a durable store with Raft replication, an eBPF compiler, and a TLS stack — built to be explored from a
+handwritten Lisp under [src/](src/), plus generated protocol bindings, spanning
+an API server, controllers, a scheduler, a node agent, a durable store with Raft
+replication, an eBPF compiler, and a TLS stack — built to be explored from a
 REPL while it runs.
 
 - **REPL into a live cluster.** `gr8s debug icl NODE` opens an
@@ -468,6 +411,12 @@ REPL while it runs.
   --node NODE --kubeconfig KUBECONFIG --local-port 4005` and point
   [Sly](https://github.com/joaotavora/sly) (or Lem's Lisp mode) at the
   printed loopback port; the tunnel stays open while the command runs.
+- **Fix and continue.** Conditions, restarts, and the interactive debugger let
+  you inspect a failure in context, correct a definition, and resume through an
+  available restart. With suitable debugging settings, SBCL can
+  [restart a stack frame using the redefined function](https://www.sbcl.org/manual/).
+  SBCL [saves the loaded Lisp environment as an executable](https://www.sbcl.org/manual/#Saving-a-Core-Image),
+  which is how gr8s packages its native binary.
 - **eBPF written in Lisp.** [Whistler](https://github.com/atgreen/Whistler)
   compiles the entire dataplane — Service load balancing, NetworkPolicy,
   tracing probes — from a Lisp DSL to eBPF at runtime, with no clang or LLVM.
@@ -475,6 +424,11 @@ REPL while it runs.
   [pure Lisp](#networking-and-security), and the repository
   [shims `cl+ssl`](cl+ssl.asd) so even vendored HTTP clients link the
   pure-Lisp TLS instead of OpenSSL.
+- **A stable language on a rich ecosystem.** Common Lisp is defined by
+  [ANSI INCITS 226-1994](https://www.lispworks.com/documentation/common-lisp.html),
+  so compiler and library upgrades are separate from changes to the language.
+  gr8s [builds on existing libraries](gr8s.asd) for HTTP, gRPC, cryptography,
+  parsing, and concurrency, and SBCL compiles it all to native code.
 - **Pinned, reproducible dependencies.** [ocicl](https://github.com/ocicl/ocicl)
   restores the dependency tree from a lockfile ([ocicl.csv](ocicl.csv)).
   The full-server source launcher and Makefile core-system Lisp commands use
@@ -512,9 +466,10 @@ follow the [testing guide](docs/building-and-testing.md#test-matrix).
 ## Versioning
 
 A gr8s version combines the Kubernetes API version with a gr8s release suffix.
-For example: `v1.37.2-gr8s.0`. The API version identifies the compatibility
-target. It does not show Kubernetes conformance. `gr8s version` and the
-Kubernetes `/version` endpoint report the running build's version.
+For example: `v1.37.2-gr8s.1`. The API version names the compatibility target;
+conformance is recorded separately in [Conformance results](docs/CONFORMANCE.md).
+`gr8s version` and the Kubernetes `/version` endpoint report the running build's
+version.
 
 ## Creation and development
 
