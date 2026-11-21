@@ -2,6 +2,61 @@
 ;;;; SPDX-License-Identifier: Apache-2.0
 (in-package #:gr8s.resources)
 
+(defun pod-shown-version (pod)
+  "The resourceVersion POD has through this member's API: that of its publication."
+  (or (gr8s.model::pod-status-revision pod) (parse-integer (gr8s.model::pod-resource-version pod))))
+
+(defun pod-versions-digest (store)
+  "A digest of the resourceVersion every Pod and Node shows through this member."
+  (let ((lines (sort (append
+                      (loop for pod being the hash-values of (pod-store-pods store)
+                            collect (format nil "pod ~S ~S ~D~%" (gr8s.store::pod-key (gr8s.model::pod-namespace pod) (gr8s.model::pod-name pod))
+                                            (gr8s.model::pod-uid pod) (pod-shown-version pod)))
+                      (loop for node being the hash-values of (pod-store-nodes store)
+                            collect (format nil "node ~S ~A~%" (gr8s.model::node-record-name node)
+                                            (gr8s.model::node-record-resource-version node))))
+                     #'string<))
+        (digest (ironclad:make-digest :sha256)))
+    (dolist (line lines)
+      (ironclad:update-digest digest (trivial-utf-8:string-to-utf-8-bytes line)))
+    (ironclad:byte-array-to-hex-string (ironclad:produce-digest digest))))
+
+(defun check-recovered-pod-versions (store &key replayed)
+  "While a restarted member replays its log, see whether its Pods and Nodes have
+   come to the versions they showed when it stopped. REPLAYED says the replay is
+   over. The caller holds STORE's lock.
+
+   This is CHECK-RECOVERED-CORE-VERSIONS for the Pod and Node revision. When the
+   replay does not reproduce what the member showed, it does what every restart
+   once did: every Node, and the publication of every Pod, takes one revision
+   above all the member gave out, and clients must use versions from then on."
+  (let ((expectation (gr8s.store::pod-store-pod-recovery-expectation store))
+        (revision (pod-store-pod-revision store)))
+    (when expectation
+      (cond
+        ((and (= revision (car expectation)) (equal (cdr expectation) (pod-versions-digest store)))
+         (setf (gr8s.store::pod-store-pod-recovery-expectation store) nil))
+        ((or replayed (>= revision (car expectation)))
+         (setf (gr8s.store::pod-store-pod-recovery-expectation store) nil)
+         (let ((fresh (1+ (max revision (car expectation) (gr8s.store::pod-store-pod-revision-ceiling store)))))
+           (format *error-output* "~&gr8s: replaying the log did not give the Pod and Node versions this member showed at revision ~D; renumbering from ~D~%"
+                   (car expectation) fresh)
+           (gr8s.store::advance-replicated-pod-revision-unlocked store fresh)
+           (loop for node being the hash-values of (pod-store-nodes store)
+                 do (setf (gr8s.model::node-record-resource-version node) (write-to-string fresh))
+                    (gr8s.store::persist-node store node))
+           (loop for key being the hash-keys of (pod-store-pods store) using (hash-value pod)
+                 do ;; Readers may hold the Pod they were given beyond the lock.
+                    (let ((copy (gr8s.model::copy-pod pod)))
+                      (setf (gr8s.model::pod-status-revision copy) fresh
+                            (gethash key (pod-store-pods store)) copy)
+                      (gr8s.store::persist-pod-publication store copy :revision fresh)))
+           ;; A version or a watch from before must not be taken for one from now.
+           (setf (gr8s.store::pod-store-pod-revision-epoch-floor store) fresh
+                 (gr8s.store::pod-store-pod-watch-floor store) fresh
+                 (gr8s.store::pod-store-node-watch-floor store) fresh)
+           (gr8s.store::save-consensus-pod-revision-unlocked store)))))))
+
 (defun restore-member-store-artifact (member store reference &key recover)
   "Restore a pending install or recovered WAL snapshot under verified barriers."
   (unless (and (gr8s.store::store-application-barriers-owned-p store)
@@ -32,14 +87,18 @@
                              (bt:with-lock-held ((pod-store-lock store))
                                (cons (pod-store-resource-revision store)
                                      (core-versions-digest (pod-store-resources store))))))
-           (keep (or expectation (zerop (pod-store-resource-revision store)))))
+           (keep (or expectation (zerop (pod-store-resource-revision store))))
+           (pod-expectation (and expectation
+                                 (bt:with-lock-held ((pod-store-lock store))
+                                   (cons (pod-store-pod-revision store) (pod-versions-digest store))))))
       (if existing
           (setf descriptor existing)
           (multiple-value-bind (generation incoming)
               (materialize-store-snapshot
                root path digest :expected-index index :expected-term term
                :minimum-resource-revision (unless keep (1+ (pod-store-resource-revision store)))
-               :minimum-pod-revision (1+ (max (pod-store-pod-revision store) (pod-store-pod-revision-ceiling store))))
+               :minimum-pod-revision (unless keep
+                                       (1+ (max (pod-store-pod-revision store) (pod-store-pod-revision-ceiling store)))))
             (declare (ignore generation))
             (setf descriptor incoming)))
       (multiple-value-prog1
@@ -52,8 +111,10 @@
              ;; dispatch barrier keeps access closed until Raft publication completes.
              :commit-recovery validate))
         (bt:with-lock-held ((pod-store-lock store))
-          (setf (gr8s.store::pod-store-core-recovery-expectation store) expectation)
-          (check-recovered-core-versions store))))))
+          (setf (gr8s.store::pod-store-core-recovery-expectation store) expectation
+                (gr8s.store::pod-store-pod-recovery-expectation store) pod-expectation)
+          (check-recovered-core-versions store)
+          (check-recovered-pod-versions store))))))
 
 (defun member-store-restore-may-resume-p (member)
   (let* ((node (gr8s.raft.transport:raft-member-node member))
@@ -154,7 +215,8 @@ that gate blocked for a later ordinary RPC to retry under the same outer barrier
                           (setf startup-sync-required nil)
                           ;; The log is replayed. Clients are let in only after this.
                           (bt:with-lock-held ((pod-store-lock store))
-                            (check-recovered-core-versions store :replayed t)))
+                            (check-recovered-core-versions store :replayed t)
+                            (check-recovered-pod-versions store :replayed t)))
                         (ignore-errors
                           (when (and (not startup-sync-required) (member-store-restore-may-resume-p member))
                             (gr8s.store::resume-store-access store)
