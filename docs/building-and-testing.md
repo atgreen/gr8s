@@ -75,8 +75,9 @@ Go, or JavaScript builds.
    section.
 2. Pin the `gr8s-net` chart to the new image tag — `image.tag` in
    [`deploy/chart/gr8s-net/values.yaml`](../deploy/chart/gr8s-net/values.yaml)
-   and `appVersion` in `Chart.yaml` — because a tag build publishes
-   `ghcr.io/atgreen/gr8s-net:<tag>` without moving `:latest`.
+   and `appVersion` in `Chart.yaml`. A tag build publishes
+   `ghcr.io/atgreen/gr8s-net:<tag>` and moves `:latest` to it, but the chart
+   names the exact release.
 3. Tag the release commit with the exact version and push the tag. The build
    fails unless `gr8s version` of the built binary equals the tag, and the tag
    must point at a clean, committed ref.
