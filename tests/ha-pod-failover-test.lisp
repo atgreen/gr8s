@@ -402,3 +402,84 @@
               (is (equal "worker-a" (gr8s.model::pod-node-name pod)))
               (finishes (gr8s.controllers::update-pod-observed-status
                          store pod (gr8s.resources::core-object "phase" "Succeeded"))))))))))
+
+(test the-members-renumber-pods-and-nodes-that-they-show-at-different-versions
+  ;; A Pod that is steady is not published again, so members that came to show it
+  ;; at different versions go on doing so. The round has them renumber.
+  (call-with-two-restartable-members
+   (lambda (s1 restart second)
+     (declare (ignore restart))
+     (let ((s2 (funcall second)))
+       (seed-ha-readiness-nodes s1)
+       (dolist (name '("p1" "p2" "p3")) (ha-run-a-pod s1 name "worker-a"))
+       (is (poll-until (lambda () (equal (ha-pod-and-node-versions s1) (ha-pod-and-node-versions s2))) :timeout 15))
+       ;; Let the rounds that the members' start began come to their end.
+       (sleep 4)
+       ;; One member numbers its Pods and Nodes by itself, as a restart once did.
+       (bt:with-lock-held ((gr8s.store::pod-store-lock s2))
+         (gr8s.resources::renumber-pods-and-nodes-unlocked
+          s2 (+ 40 (gr8s.store::pod-store-pod-revision s2))))
+       (let ((apart (first (ha-pod-and-node-versions s2))))
+         (is-false (equal (ha-pod-and-node-versions s1) (ha-pod-and-node-versions s2)))
+         (gr8s.resources::propose-core-version-mark s1)
+         (is (poll-until (lambda () (equal (ha-pod-and-node-versions s1) (ha-pod-and-node-versions s2))) :timeout 30)
+             "both show every Pod and Node at one version: ~S and ~S"
+             (ha-pod-and-node-versions s1) (ha-pod-and-node-versions s2))
+         (is (> (first (ha-pod-and-node-versions s1)) apart)
+             "at a revision above what either had given out")
+         ;; The round that follows finds them alike and leaves them.
+         (sleep 5)
+         (let ((settled (ha-pod-and-node-versions s1)))
+           (is (equal settled (ha-pod-and-node-versions s2)))
+           (gr8s.resources::propose-core-version-mark s2)
+           (sleep 5)
+           (is (equal settled (ha-pod-and-node-versions s1)) "another round changes nothing")
+           (is (equal settled (ha-pod-and-node-versions s2)))
+           (is (<= (gr8s.store::pod-store-core-pod-renumber-rounds s1) 1) "one renumbering was enough"))
+         ;; A Pod can be read and changed at the version it now shows, and the
+         ;; change has one version on both members.
+         (finishes (gr8s.controllers::update-pod-observed-status
+                    s1 (gr8s.store::get-pod s1 "default" "p2") (gr8s.resources::core-object "phase" "Succeeded")))
+         (is (poll-until (lambda () (equal (ha-pod-and-node-versions s1) (ha-pod-and-node-versions s2))) :timeout 15)
+             "a change after the renumbering has one version on both: ~S and ~S"
+             (ha-pod-and-node-versions s1) (ha-pod-and-node-versions s2)))))))
+
+(test pods-are-renumbered-only-when-every-voter-reports-them-and-not-without-end
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (seed-ha-readiness-nodes store)
+    (ha-run-a-pod store "p1" "worker-a")
+    (let ((renumberings 0))
+      ;; One member that commits what it proposes at once, and counts the renumberings.
+      (setf (gr8s.store::pod-store-consensus-commit-fn store)
+            (lambda (tag payload)
+              (when (and (eq tag :core-delta) (search "versionPodRenumber" payload)) (incf renumberings))
+              (ecase tag
+                (:core-delta (gr8s.resources::install-core-state-delta store payload))
+                (:pod-delta (gr8s.store::install-pod-state-delta store payload))
+                (:node-delta (gr8s.store::install-node-state-delta store payload)))))
+      (flet ((round-with (other)
+               "Start a round, report as this member, and have voter b report OTHER of its Pods."
+               (gr8s.resources::reconcile-core-versions store "a" '("a") t :ask t)
+               (let ((mark (first (gr8s.store::pod-store-core-version-marks store))))
+                 (setf (gethash "b" (gr8s.resources::core-version-mark-reports mark))
+                       (append (list (gr8s.resources::core-version-mark-revision mark)
+                                     (gr8s.resources::core-version-mark-digest mark))
+                               (funcall other mark))))
+               (gr8s.resources::reconcile-core-versions store "a" '("a" "b") t)))
+        ;; A voter that runs an older version says nothing of its Pods.
+        (round-with (lambda (mark) (declare (ignore mark)) (list nil nil)))
+        (is (zerop renumberings) "nothing is renumbered while a voter has not reported its Pods")
+        ;; A voter that shows what this member shows.
+        (round-with (lambda (mark) (list (gr8s.resources::core-version-mark-pod-revision mark)
+                                         (gr8s.resources::core-version-mark-pod-digest mark))))
+        (is (zerop renumberings) "nor when the voters agree")
+        ;; A voter that counted ahead and shows other versions, time after time.
+        (let ((before (first (ha-pod-and-node-versions store))))
+          (dotimes (attempt 6)
+            (round-with (lambda (mark) (list (+ 500 (gr8s.resources::core-version-mark-pod-revision mark)) "other versions"))))
+          (is (= 3 renumberings) "it renumbers, and gives up after three times: ~D" renumberings)
+          (let ((now (ha-pod-and-node-versions store)))
+            (is (> (first now) (+ before 500 1024)) "above what the voter reported, with room to spare")
+            (is (every (lambda (entry) (= (cdr entry) (cdr (first (second now))))) (second now))
+                "every Pod and Node shows one revision: ~S" now)))))))

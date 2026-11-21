@@ -500,6 +500,12 @@
                       (lambda () (<= (length (uiop:directory-files (merge-pathnames "snapshot-artifacts/" root))) 2))
                       :timeout 15)))
                (gr8s.ha::stop-ha-control-plane ha)
+               ;; The member writes on its own account too: a marker and a report
+               ;; when it starts, by which the members compare their versions.
+               ;; Those can pass the byte limit after the lines above, so the
+               ;; boundary a restart must come back to is the one it stopped at.
+               (setf boundary (cl-raft::raft-node-snapshot-index
+                               (gr8s.raft.transport::raft-member-node (gr8s.ha::ha-control-plane-member ha))))
                (is (null (gr8s.ha::ha-control-plane-compaction-thread ha)))
                (loop for row across (gr8s.ha::ha-control-plane-compaction-phase-times ha) do
                  (is (and row (plusp (aref row 0))))

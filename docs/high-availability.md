@@ -84,9 +84,20 @@ Pod and a Node at one version while they count alike, and a member that counts
 ahead numbers what it is sent by itself. A restart keeps this revision as it
 keeps the other, checks the replay in the same way, and falls back in the same
 way: every Node and every Pod's publication then takes one revision above all
-the member gave out. Members whose second revisions already differ are not yet
-brought together by a round; they come to count alike when the member that is
-ahead leads, and a Pod or Node shows one version from its next change on.
+the member gave out.
+
+A round compares this revision too. At the marker each member also notes its
+Pod revision and a digest of the version every Pod and Node shows, and reports
+them. If every voter has reported them and they are not all alike, the leader
+has every member give each Node, and each Pod's publication, one revision 1024
+above the highest any voter reported. The members apply that at one place in
+the log, so they come to the same revision. A watch on Pods or Nodes from before
+is told that it is too old, and its client lists again; that happens once. The
+leader then starts another round to see that the members agree, and renumbers
+again if they do not, three times at most before it logs that it leaves them.
+Without this a Pod that is steady kept the different versions for ever, because
+it is not published again. A voter that runs a version from before this says
+nothing of its Pods, and nothing is renumbered until it does.
 A kubelet's
 repeated Event (a probe that fails every few seconds) is shown at once for its
 first ten occurrences and then brought up to date once a minute, so that it

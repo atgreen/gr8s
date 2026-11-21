@@ -41,21 +41,29 @@
          (let ((fresh (1+ (max revision (car expectation) (gr8s.store::pod-store-pod-revision-ceiling store)))))
            (format *error-output* "~&gr8s: replaying the log did not give the Pod and Node versions this member showed at revision ~D; renumbering from ~D~%"
                    (car expectation) fresh)
-           (gr8s.store::advance-replicated-pod-revision-unlocked store fresh)
-           (loop for node being the hash-values of (pod-store-nodes store)
-                 do (setf (gr8s.model::node-record-resource-version node) (write-to-string fresh))
-                    (gr8s.store::persist-node store node))
-           (loop for key being the hash-keys of (pod-store-pods store) using (hash-value pod)
-                 do ;; Readers may hold the Pod they were given beyond the lock.
-                    (let ((copy (gr8s.model::copy-pod pod)))
-                      (setf (gr8s.model::pod-status-revision copy) fresh
-                            (gethash key (pod-store-pods store)) copy)
-                      (gr8s.store::persist-pod-publication store copy :revision fresh)))
-           ;; A version or a watch from before must not be taken for one from now.
-           (setf (gr8s.store::pod-store-pod-revision-epoch-floor store) fresh
-                 (gr8s.store::pod-store-pod-watch-floor store) fresh
-                 (gr8s.store::pod-store-node-watch-floor store) fresh)
-           (gr8s.store::save-consensus-pod-revision-unlocked store)))))))
+           (renumber-pods-and-nodes-unlocked store fresh)))))))
+
+(defun renumber-pods-and-nodes-unlocked (store fresh)
+  "Give every Node, and the publication of every Pod, the revision FRESH, and
+   count on from there. FRESH is above every revision this member gave out. The
+   caller holds STORE's lock. A Pod's desired revision is left alone: the
+   members compare by it."
+  (gr8s.store::advance-replicated-pod-revision-unlocked store fresh)
+  (loop for node being the hash-values of (pod-store-nodes store)
+        do (setf (gr8s.model::node-record-resource-version node) (write-to-string fresh))
+           (gr8s.store::persist-node store node))
+  (loop for key being the hash-keys of (pod-store-pods store) using (hash-value pod)
+        do ;; Readers may hold the Pod they were given beyond the lock.
+           (let ((copy (gr8s.model::copy-pod pod)))
+             (setf (gr8s.model::pod-status-revision copy) fresh
+                   (gethash key (pod-store-pods store)) copy)
+             (gr8s.store::persist-pod-publication store copy :revision fresh)))
+  ;; A version or a watch from before must not be taken for one from now: a
+  ;; client with either reads again.
+  (setf (gr8s.store::pod-store-pod-revision-epoch-floor store) fresh
+        (gr8s.store::pod-store-pod-watch-floor store) fresh
+        (gr8s.store::pod-store-node-watch-floor store) fresh)
+  (gr8s.store::save-consensus-pod-revision-unlocked store))
 
 (defun restore-member-store-artifact (member store reference &key recover)
   "Restore a pending install or recovered WAL snapshot under verified barriers."
