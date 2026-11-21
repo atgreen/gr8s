@@ -224,19 +224,25 @@ gr8s serve --join 10.0.0.1:7000 --node-name cp2 \
 # On cp1, create a separate witness token. Use its token and caPin below.
 gr8s join-token --role witness --node-name arb
 
-# On arb, run a headless quorum tie-breaker (no API, no workloads).
-gr8s witness --join 10.0.0.1:7000 --node-name arb \
-  --listen 10.0.0.3 --port 7000 --state-directory /var/lib/gr8s-witness \
-  --token "$WITNESS_TOKEN" --ca-pin "$CA_PIN"
+# On arb, run miniwit as the headless quorum tie-breaker (no API, no workloads).
+miniwit -join-address 10.0.0.1:7000 -node-name arb -member-id arb \
+  -listen 0.0.0.0:7000 -advertise 10.0.0.3:7000 -data-dir /var/lib/miniwit \
+  -join-token "$WITNESS_TOKEN" -ca-pin "$CA_PIN"
 ```
+
+[miniwit](../miniwit/README.md) is a small static Go binary, so `arb` can be
+almost any always-on machine: a small VM, a Raspberry Pi, or a router. See its
+README for building and flags. `gr8s witness` runs the same role from the gr8s
+binary, with `--join`, `--node-name`, `--listen`, `--port`, `--token` and
+`--ca-pin`.
 
 The addresses above are examples; use each machine's reachable address and allow
 member-to-member traffic on the chosen Raft ports. Run token creation against the
 same state directory as the issuing member (add `--state-directory PATH` if it
 uses a nondefault directory). Each token is bound to its role and node name and
 can be used only once; the joiner's `--node-name` must match. A member's Raft ID
-is its `--node-name` unless `serve`'s `--raft-id` or `witness`'s `--member-id`
-sets another.
+is its `--node-name` unless `serve`'s `--raft-id` sets another; miniwit takes
+both `-node-name` and `-member-id`.
 
 Requested voters first join as learners. Existing voters keep their quorum while
 the learner installs application state and catches up. The leader automatically
@@ -250,9 +256,10 @@ restart with the appropriate `--raft-init` or `--join` options; omitting them
 is refused before application initialization.
 
 For `serve`, the production Raft port defaults to **7000** and the listening
-address defaults to loopback. `witness` defaults to loopback and a
-kernel-assigned port, so pass `--port` when a witness must restart at a stable
-address. Set `--raft-listen` for a cluster spanning machines.
+address defaults to loopback. miniwit listens on `0.0.0.0:7000` by default;
+give it `-advertise` with the address the voters reach it at. (`gr8s witness`
+defaults to loopback and a kernel-assigned port, so pass `--port` when it must
+restart at a stable address.) Set `--raft-listen` for a cluster spanning machines.
 Use `--raft-port` to select another
 port, and `--raft-listen` to select the reachable member address. The address
 must not be a wildcard bind address. Each HA state directory records its member

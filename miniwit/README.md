@@ -4,26 +4,27 @@
 two full [gr8s](https://github.com/atgreen/gr8s) master nodes plus miniwit as
 the third Raft-cluster participant — it provides the deciding vote for leader
 election and split-brain scenarios without running the control-plane dataplane.
-It cross-compiles to FreeBSD and is small enough to run on a home router
-(pfSense).
+It cross-compiles to any platform Go targets, so you can put the third vote
+almost anywhere: a small cloud VM, a Raspberry Pi, or even a home router (the
+author runs it on a FreeBSD pfSense router).
 
 miniwit joins a gr8s HA control plane as a **`:witness`** — a voting Raft member
 that contributes to quorum but runs **no dataplane** (no containerd, eBPF,
-kubelet, or application store). It cross-compiles to `freebsd/amd64` (and
-`arm64`, `linux/*`) from any host, so a small always-on box can be the
-odd-numbered third vote.
+kubelet, or application store). It is pure Go, so it cross-compiles from any
+host to any `GOOS`/`GOARCH` Go supports, and any small always-on box can be
+the odd-numbered third vote.
 
 > **Status.** The wire codec, the mutual-TLS RaftTransport (server +
 > fire-and-forget Deliver clients), enrollment + join (with leader redirect),
 > the follower core, snapshot-chunk handling (including the witness
 > config-snapshot format), and byte-bounded log compaction are implemented and
 > unit/integration-tested — including a real mutual-TLS Deliver round-trip
-> between two Go endpoints. So is certificate renewal. It has run as the
-> witness of a live two-voter gr8s cluster: enrollment, join, replication, a
-> five-minute leader outage in which its vote elected the other voter, a
-> restart, and a renewal signed by a real voter. What is *not* yet done is an
-> automated end-to-end test against a throwaway cluster, so that evidence is
-> from one lab on one day. The stand-in (below) is newer still: it is tested
+> between two Go endpoints. So is certificate renewal. It is the witness of a
+> live two-voter gr8s cluster in ongoing use, where it has been through
+> enrollment, join, replication, a five-minute leader outage in which its vote
+> elected the other voter, a restart, and a renewal signed by a real voter.
+> What is *not* yet done is an automated end-to-end test against a throwaway
+> cluster that anyone can re-run. The stand-in (below) is newer still: it is tested
 > against a scripted voter and its messages match SBCL's output byte for byte,
 > but it has not yet run against a real gr8s voter. See *Roadmap* below.
 
@@ -174,10 +175,12 @@ recent slice. Both bounds are tunable with `-max-log-bytes` and
 go test ./...
 go build -o miniwit ./cmd/miniwit                                   # host
 GOOS=freebsd GOARCH=amd64 go build -o miniwit ./cmd/miniwit         # pfSense/FreeBSD
+GOOS=linux GOARCH=arm64 go build -o miniwit ./cmd/miniwit           # Raspberry Pi
 ```
 
-Pure Go (`CGO_ENABLED=0` automatically when cross-compiling): the FreeBSD binary
-is static and self-contained.
+Pure Go (`CGO_ENABLED=0` automatically when cross-compiling): set `GOOS` and
+`GOARCH` for the target, and the binary is static and self-contained.
+`go tool dist list` prints every target.
 
 ## Run
 
