@@ -10,9 +10,11 @@ at committed apply.
 Every replica checks all conditions before changing any resource, controller
 state map, encryption policy, history or revision. Comparison includes UID and
 object content, with case-sensitive JSON equality. It excludes the object's
-member-local `metadata.resourceVersion`. Local Events and restored revision
-epochs can make those numbers differ across members holding the same replicated
-state. Controller-map changes have per-key presence and value conditions too.
+`metadata.resourceVersion`. Every member gives an object the same version, but
+members that ran an earlier release may still differ until a round has brought
+them together, and a version must not decide whether a write applies meanwhile
+(see [HA consistency](high-availability.md)). Controller-map changes have
+per-key presence and value conditions too.
 
 A rejected entry is a committed no-op, returning `(:core-conflict)`. This lets
 Raft advance its applied boundary normally. The proposing writer maps that result

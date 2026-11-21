@@ -222,15 +222,34 @@ configuration-only projection of store snapshots, without application artifacts
 or an application artifact retainer. Voters and learners retain the full
 application snapshot path.
 
-Snapshot installation retains the bounded resource history while translating
-its revision interval into a fresh local watch epoch. Public resource versions
-are member-local, so sharing a Raft log alone does not justify reusing another
-member's numbering. Existing watch cursors expire at the new epoch floor;
-history entries, their old/new object versions, and current objects are rebased
-consistently. Versions older than the retained interval clamp to the requested
-minimum. The interval width remains unchanged, and overflow is rejected before
-the generation is completed or selected. Generic application reloads retain
-their existing resource and Pod epoch fences.
+Every member gives an object the same public resource version, so a snapshot
+keeps its numbering wherever that is safe:
+
+- **A member that restarts** loads its own last snapshot and applies the log
+  after it again, which gives each object the version it had. The member notes
+  its revision and a digest of its versions before it loads the snapshot, and
+  the replay must come to both. It does the same for the revision that numbers
+  Pods and Nodes.
+- **A new member** takes the numbering of the first snapshot it is given.
+- **A member that is sent a snapshot because it fell too far behind** cannot
+  show that its earlier numbering agrees with the snapshot's. The snapshot's
+  retained resource history is translated into a fresh watch epoch above every
+  revision the member gave out. Existing watch cursors expire at the new epoch
+  floor; history entries, their old/new object versions, and current objects
+  are rebased consistently. Versions older than the retained interval clamp to
+  the requested minimum. The interval width remains unchanged, and overflow is
+  rejected before the generation is completed or selected.
+- **A restarted member whose replay does not reproduce what it held** gives
+  every object it holds one revision above all it gave out, and moves the start
+  of its watch history there, so that a watch from before lists again. For Pods
+  and Nodes it does the same and raises their epoch floor. It logs this. It
+  happens to a member that counted by itself under an earlier release.
+
+In both of these cases the member then differs from the others, and the next
+round brings the members to one numbering again.
+
+Generic application reloads retain their existing resource and Pod epoch
+fences. [HA consistency](high-availability.md) describes rounds.
 
 Internal admission callers can propose a learner with `:promotion-role :voter`
 to record its requested eventual role. The intent becomes effective with the

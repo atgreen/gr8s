@@ -116,6 +116,21 @@ before any installed file is published.
 
 ## Upgrade and recovery
 
+To upgrade a control plane that has several members, upgrade one member at a
+time and wait until it is ready before the next. Take the leader last, and
+hand its leadership to a voter that is already upgraded first, so that the
+other members do not have to notice its silence and hold an election:
+
+```sh
+gr8s member list                          # shows which member leads
+gr8s member transfer-leadership NAME      # NAME is an upgraded voter
+```
+
+Members that ran a release from before every member numbered objects alike
+bring their numbering together once, when the last of them has been upgraded:
+clients see each object modified once, and a watch on Pods or Nodes lists
+again. See [HA consistency](high-availability.md).
+
 Re-run `install.sh` with the replacement binary or release digest and the
 desired persisted arguments. The installer retains exactly one prior binary as
 `/usr/local/bin/gr8s.previous`, atomically publishes the new files, restarts the

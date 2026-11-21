@@ -33,7 +33,10 @@ the same later write, at that write's author's time: no member drops one by its
 own clock, so an idle cluster keeps an expired Event until its next write.
 Events are not part of a snapshot, so a member that caught up from one may show
 fewer until they are next written; a write of an Event is therefore applied
-whatever a member held before, and the newest wins.
+whatever a member held before, and the newest wins. A kubelet's repeated Event
+(a probe that fails every few seconds) is shown at once for its first ten
+occurrences and then brought up to date once a minute, so that it does not
+become a write to every member each time.
 
 **Every member gives an object the same `resourceVersion`.** A client may read
 through one member and write through another, and a version it was given by one
@@ -108,10 +111,6 @@ tell it, and holds a Node whose lease has run out as not ready when it loads it.
 After every member of a control plane has been stopped for longer than a lease,
 a Node whose agent is gone is still shown ready until the new leader has
 listened for one lease.
-A kubelet's
-repeated Event (a probe that fails every few seconds) is shown at once for its
-first ten occurrences and then brought up to date once a minute, so that it
-does not become a write to every member each time.
 
 ## Around the datastore
 

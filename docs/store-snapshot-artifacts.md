@@ -36,7 +36,7 @@ JSON parsing also limits strings to 2 MiB and nesting to 128 levels.
 | `imageTrackerConfig`, `imageTrackerOrigin`, `imageTrackerSwarm`, `imageTrackerPeer`, `imageTrackerMetainfoChunk` | Replicated image tracker state; see [replicated image tracker state](#replicated-image-tracker-state) |
 | `end` | Count of preceding records |
 
-Local Events and their history are excluded. The writer enumerates store indexes.
+Events and their history are excluded. The writer enumerates store indexes.
 it does not recursively copy directories or include member-private PKI, Raft WAL,
 transfer scratch, or arbitrary files. Kubernetes Secret resources and the shared
 template token key are application state and are included. Cluster identity and
@@ -229,7 +229,7 @@ The identity validation index still grows with object count.
 
 The materializer preserves resource/Pod revisions, retained history floors and the
 shared template token key. Pod and Node watches restart at the captured committed
-clock because their transient journals are not included. Local Events remain
+clock because their transient journals are not included. Events remain
 excluded. Stable member credentials, signing keys, PKI and Raft files are neither
 copied nor changed.
 
@@ -393,8 +393,8 @@ generation UUID. The access gate must already be fully drained and blocked. It
 preserves the store object, member paths, locks, configuration, signing-key object,
 consensus callback and watch configuration. It replaces application tables,
 controller state and transient watch journals, and invalidates verified-token,
-projected-token and Pod certificate caches. Local Events are discarded and may be
-regenerated. A test requires every store slot to have an explicit reload policy.
+projected-token and Pod certificate caches. Events are discarded; one that is
+written again is replicated to this member like any other write. A test requires every store slot to have an explicit reload policy.
 
 The helper takes locks in this order: workload, credentials, consensus writer,
 caller-supplied member barrier, then raw store. It durably begins/selects the
@@ -517,13 +517,22 @@ capture/reload and fresh-process verification, and the restore integration
 checks. Four 16 MiB metainfo payloads fit the probe's unchanged 384 MiB heap;
 this is source-loaded SBCL validation, distinct from production CLI and VM tests.
 
-Established watches cooperate with the access gate. When draining begins, Pod,
-Node and durable-resource watches emit a Kubernetes `ERROR` event with status
-`410 Expired`, close their streams, and release their request leases. Clients
-must relist after access resumes. This avoids waiting for the watch's normal
-five-minute timeout before a restore can acquire its barrier. A blocked socket
-write can still delay a request; the gate's drain timeout remains authoritative
-and leaves the application unchanged if requests cannot drain.
+Established watches cooperate with the access gate, and what they do depends on
+who closed it:
+
+- **A restore** replaces what a watch has read. Pod, Node and durable-resource
+  watches emit a Kubernetes `ERROR` event with status `410 Expired`, close
+  their streams, and release their request leases. Clients must relist after
+  access resumes. This avoids waiting for the watch's normal five-minute
+  timeout before a restore can acquire its barrier.
+- **A checkpoint** closes the store for a moment and changes nothing a watch
+  has read. A watch gives its request lease up, waits for the store to open,
+  takes the lease again and goes on. It does this as often as it finds the
+  store closed, because one checkpoint may follow another at once.
+
+A watch holds no lease while it writes to its client, so a slow client does not
+hold a checkpoint or a restore up. The gate's drain timeout remains
+authoritative and leaves the application unchanged if requests cannot drain.
 
 Stream termination releases request leases. Revision safety additionally depends
 on validation against the member's committed/applied boundary and
@@ -553,9 +562,15 @@ clock, shifting revisions upward when needed while preserving the interval's
 width and events. Current objects and history's old/new object versions use the
 same offset; versions preceding the interval clamp to the requested minimum.
 History byte estimates are invalidated after translation. Old watches and signed
-continuation pages expire at the fresh floor. Generic reload and member-boundary
-checks continue to require a fresh epoch; sharing a Raft log does not establish
-that public revision numbers are interchangeable between replicas.
+continuation pages expire at the fresh floor.
+
+Member recovery supplies these minima only when a member cannot show that its
+earlier numbering agrees with the control plane's: when it is sent a snapshot
+because it fell too far behind, or when replaying its log does not reproduce
+the versions it held. A member that restarts, and a new member, load the
+snapshot without minima and keep its numbering, because every member gives an
+object the same public revision. See
+[member recovery](raft-member-recovery.md).
 
 Pod minima advance local publication clocks when needed. Canonical Pod desired
 and observation revisions support replicated delta preconditions and agent
