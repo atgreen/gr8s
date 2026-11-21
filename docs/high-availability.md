@@ -98,6 +98,16 @@ again if they do not, three times at most before it logs that it leaves them.
 Without this a Pod that is steady kept the different versions for ever, because
 it is not published again. A voter that runs a version from before this says
 nothing of its Pods, and nothing is renumbered until it does.
+
+Whether a Node is ready is replicated like the rest of it. The member that
+admits node sessions ends a lease, through the log, once it has listened for a
+whole lease; no other member decides that a lease has run out. A member that
+loads its Nodes when it starts therefore keeps them as the control plane last
+said, however long it was stopped. A server that runs on its own has nothing to
+tell it, and holds a Node whose lease has run out as not ready when it loads it.
+After every member of a control plane has been stopped for longer than a lease,
+a Node whose agent is gone is still shown ready until the new leader has
+listened for one lease.
 A kubelet's
 repeated Event (a probe that fails every few seconds) is shown at once for its
 first ten occurrences and then brought up to date once a minute, so that it
