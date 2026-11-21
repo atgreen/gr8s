@@ -246,3 +246,9 @@ jobs:
           echo "$GH_TOKEN" | podman login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           podman build -f deploy/Containerfile -t "$IMAGE:$TAG" .
           podman push "$IMAGE:$TAG"
+          # A release also moves :latest. Every release is a trial pre-release,
+          # so there is no stable one for :latest to stay on.
+          if [ "$TAG" != latest ]; then
+            podman tag "$IMAGE:$TAG" "$IMAGE:latest"
+            podman push "$IMAGE:latest"
+          fi
