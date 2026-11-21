@@ -317,6 +317,40 @@ runs in the foreground until Ctrl-C. The assets are a hard prerequisite of
 the executable is dumped; see
 [dashboard assets](docs/building-and-testing.md#dashboard-assets).
 
+## Doctor
+
+`gr8s doctor diagnose` reads a cluster and says what is wrong and why. It
+links the resources it reads — a workload to the Pods it owns, a Service to
+the Pods it selects, a Pod to its Node, Secrets, ConfigMaps and claims — so
+the report names causes instead of listing every symptom. A missing Secret
+is one problem, with the Pods and workloads it holds up listed beneath it.
+
+```sh
+# With a cluster running, from another terminal:
+sudo gr8s doctor diagnose --kubeconfig /tmp/gr8s.kubeconfig
+
+gr8s doctor diagnose -n production                 # one namespace
+gr8s doctor diagnose deployment/web -n production  # one resource and what it depends on
+gr8s doctor impact node/worker-1                   # what stops if this goes away
+```
+
+Problems are listed in the order to fix them. Each one shows the evidence
+behind it — conditions, recent Events, the last lines a crashed container
+wrote — and a suggested next step. The report is styled for a terminal and
+plain text in a pipe. `--markdown` writes it as Markdown for an issue or a
+chat, and `--json` adds every finding and what could not be read.
+
+`diagnose` is read-only: it issues only `kubectl` GET requests, so it needs
+`kubectl` and sees what your credentials can read. It exits 0 when it found
+no problems in what it could read, 1 when it found problems, and 2 when
+coverage was incomplete. A cause is the deepest finding the doctor could
+see, not proof of a root cause.
+
+`gr8s doctor impact KIND/NAME` follows the same links the other way, before
+you drain a node or delete a Secret. `gr8s doctor host` checks the kernel,
+cgroups, firewall and state directory of a machine before it runs a node.
+See [Doctor](docs/doctor.md) for the rules, coverage and limits.
+
 ## Kubernetes capabilities
 
 The implemented API surface includes:
@@ -467,6 +501,7 @@ follow the [testing guide](docs/building-and-testing.md#test-matrix).
 - [Networking & the eBPF dataplane](docs/networking.md)
 - [Runtime & the container stack](docs/runtime.md)
 - [High availability](docs/high-availability.md)
+- [Doctor: diagnose, impact, and host checks](docs/doctor.md)
 - [Source map and developer walkthrough](docs/development.md)
 - [Design & compatibility boundary](docs/design.md)
 - [Multi-node design](docs/multi-node-design.md)
