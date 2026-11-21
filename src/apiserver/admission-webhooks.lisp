@@ -396,6 +396,9 @@ cache, address/verify-name split and socket-close-on-deadline live in the client
             (cl-cancel:deadline-exceeded () (failure "context deadline exceeded"))
             (sb-sys:deadline-timeout () (failure "context deadline exceeded"))
             (usocket:timeout-error () (failure "context deadline exceeded"))
+            ;; The socket's own read timeout can fire first. It is the same
+            ;; deadline, and its report names a Lisp stream (podster-0o5).
+            (sb-sys:io-timeout () (failure "context deadline exceeded"))
             (error (condition) (failure (remove #\Newline (princ-to-string condition)))))
         (unless (<= 200 code 299) (failure (format nil "unexpected status ~D" code)))
         (handler-case (com.inuoe.jzon:parse response

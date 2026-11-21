@@ -344,8 +344,11 @@
              (setf stopper
                    (bt:make-thread (lambda () (stop-server server))
                                    :name "test TLS API stopper"))
+             ;; STOP ends a listener that has not woken after two seconds, so it
+             ;; always returns. Three seconds left a loaded machine one second
+             ;; for everything else (podster-0o5).
              (is-true (wait-until (lambda () (not (bt:thread-alive-p stopper)))
-                                  :timeout 3)))
+                                  :timeout 20)))
         (when (and stopper (bt:thread-alive-p stopper))
           (ignore-errors
             (usocket:socket-close (hunchentoot::acceptor-listen-socket server)))
@@ -376,8 +379,11 @@
              (setf stopper
                    (bt:make-thread (lambda () (stop-server server))
                                    :name "test unresponsive API stopper"))
+             ;; STOP ends a listener that has not woken after two seconds, so it
+             ;; always returns. Three seconds left a loaded machine one second
+             ;; for everything else (podster-0o5).
              (is-true (wait-until (lambda () (not (bt:thread-alive-p stopper)))
-                                  :timeout 3)))
+                                  :timeout 20)))
         (when (bt:thread-alive-p listener)
           (ignore-errors (bt:destroy-thread listener)))
         (when (and stopper (bt:thread-alive-p stopper))

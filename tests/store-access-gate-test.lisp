@@ -353,6 +353,94 @@
   (is (eq :sent (gr8s.store::call-with-store-request-suspended (lambda () :sent)))
       "outside a request the function is simply called"))
 
+(test a-checkpoint-does-not-end-a-watch-that-is-between-two-sends
+  ;; The watch has sent what there is and waits for more, holding its lease. It
+  ;; must give the lease up for the checkpoint and go on afterwards. It used to
+  ;; end with 410 Expired, and whether a watch was between two sends or in one
+  ;; when a checkpoint began was chance (podster-0o5).
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (ha-make-pod store "watched")
+    (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "watched-node" :name "watched-node" :pod-cidr "10.89.0.0/20"))
+    (gr8s.resources::create-core-resource store "configmaps" (core-fixture "ConfigMap" "watched") "default")
+    (let ((server (start-http-test-server :store store :runtime (make-fake-runtime)))
+          (changes
+            (list (cons "/api/v1/pods" (lambda () (ha-make-pod store "another")))
+                  (cons "/api/v1/nodes"
+                        (lambda ()
+                          (gr8s.controllers::register-node
+                           store (gr8s.model::make-node-record :id "another-node" :name "another-node"
+                                                               :pod-cidr "10.89.16.0/20"))))
+                  (cons "/api/v1/configmaps"
+                        (lambda ()
+                          (gr8s.resources::create-core-resource store "configmaps" (core-fixture "ConfigMap" "another")
+                                                                "default"))))))
+      (unwind-protect
+           (loop for (path . change) in changes do
+             (sb-sys:with-deadline (:seconds 30)
+               (multiple-value-bind (stream code)
+                   (drakma:http-request
+                    (format nil "http://127.0.0.1:~D~A" *http-test-port* path) :want-stream t
+                    :parameters '(("watch" . "true") ("resourceVersion" . "0") ("timeoutSeconds" . "300")))
+                 (unwind-protect
+                      (progn
+                        (is (= 200 code))
+                        (is (equal "ADDED" (gethash "type" (read-template-watch-event stream))))
+                        ;; Let the watch come to rest between two sends.
+                        (sleep .3)
+                        (dotimes (checkpoint 3)
+                          (is (eq store (gr8s.store::quiesce-store-access store :timeout 3 :brief t))
+                              "the watch gives its lease up for the checkpoint")
+                          (is (zerop (gr8s.store::pod-store-active-requests store)))
+                          (sleep .2)
+                          (gr8s.store::resume-store-access store))
+                        (funcall change)
+                        (let ((event (read-template-watch-event stream)))
+                          (is (equal "ADDED" (gethash "type" event))
+                              "the watch on ~A goes on after the checkpoints: ~A" path
+                              (gethash "message" (gethash "object" event)))
+                          (is (equal "another" (subseq (gethash "name" (gethash "metadata" (gethash "object" event) (gr8s.resources::core-object)) "-------") 0 7)))))
+                   (close stream)))))
+        (stop-server server)))))
+
+(test a-watch-never-holds-its-lease-against-a-checkpoint
+  ;; One checkpoint may follow another at once. A watch that has just taken its
+  ;; lease back from the first must give it up for the second, and not wait,
+  ;; holding it, for the store to open: the checkpoint is waiting for the lease.
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (let* ((stop nil) (passes 0) (ended nil)
+           (watch (bt:make-thread
+                   (lambda ()
+                     (handler-case
+                         (gr8s.store::call-with-store-request
+                          store
+                          (lambda ()
+                            (loop until stop
+                                  do (gr8s.apiserver::check-watch-store-access store)
+                                     (incf passes))))
+                       (error (condition) (setf ended condition))))
+                   :name "test watch pass"))
+           (timed-out 0))
+      (unwind-protect
+           (progn
+             (is (poll-until (lambda () (plusp passes)) :timeout 10) "the watch is running")
+             (dotimes (checkpoint 400)
+               (handler-case
+                   (progn (gr8s.store::quiesce-store-access store :timeout 2 :brief t)
+                          (gr8s.store::resume-store-access store)
+                          ;; Now and then the watch takes its lease back before the next.
+                          (when (zerop (mod checkpoint 3)) (sleep .001)))
+                 (error ()
+                   (incf timed-out)
+                   (return)))))
+        (setf stop t)
+        (ignore-errors (gr8s.store::resume-store-access store))
+        (bt:join-thread watch))
+      (is (zerop timed-out) "no checkpoint waited for the watch's lease")
+      (is (null ended) "and the watch went on: ~A" ended)
+      (is (plusp passes)))))
+
 (test a-watch-writing-to-a-slow-client-does-not-hold-up-a-checkpoint
   ;; Lab, 2026-11-19: kube-state-metrics watched all Secrets over a 2 MB/s link.
   ;; Six megabytes of Helm releases took three seconds to send, and a checkpoint

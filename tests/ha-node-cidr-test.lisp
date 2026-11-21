@@ -21,12 +21,17 @@
     (and node (gr8s.model::node-record-ready-p node))))
 
 (defun seed-ha-readiness-nodes (store)
+  "Register two Nodes in STORE as replication would have given them to it. Two
+stores seeded apart must hold the same Nodes: a Node registered without a
+creation time takes the current second, and a change to a Node is applied only
+where the Node is what its author held, so stores seeded on either side of a
+second took different changes (podster-5lo)."
   (gr8s.controllers::register-node
    store (gr8s.model::make-node-record :id "node-a" :name "worker-a"
-                                :pod-cidr "10.88.0.0/20"))
+                                :pod-cidr "10.88.0.0/20" :creation-timestamp "2026-01-01T00:00:00Z"))
   (gr8s.controllers::register-node
    store (gr8s.model::make-node-record :id "node-b" :name "worker-b"
-                                :pod-cidr "10.88.16.0/20")))
+                                :pod-cidr "10.88.16.0/20" :creation-timestamp "2026-01-01T00:00:00Z")))
 
 (defun apply-ha-node-command (store command)
   (case (first command)

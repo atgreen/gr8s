@@ -1012,3 +1012,25 @@ FIRST-OCTET, when given, is the request line's already-read first byte."
       (setf deny nil)
       (gr8s.controllers::collect-orphaned-api-objects reconciler)
       (signals kubernetes-error (gr8s.resources::get-core-resource store "configmaps" "alpha" "orphan")))))
+
+(test a-webhook-that-is-too-slow-is-reported-the-same-whichever-timer-ends-the-call
+  ;; The request's deadline and the socket's own read timeout are both the
+  ;; webhook's timeoutSeconds. The second, when it came first, was reported as an
+  ;; I/O timeout on a Lisp stream (podster-0o5).
+  (let ((original (symbol-function 'gr8s.apiserver::admission-https-post))
+        (webhook (gr8s.resources::core-object
+                  "name" "slow.example.com" "timeoutSeconds" 1
+                  "clientConfig" (gr8s.resources::core-object "url" "https://localhost:9/slow"))))
+    (unwind-protect
+         (dolist (signal-it (list (lambda () (error 'sb-sys:io-timeout :stream *standard-input* :direction :input :seconds 1))
+                                  (lambda () (error 'usocket:timeout-error))
+                                  (lambda () (error 'cl-cancel:deadline-exceeded))))
+           (setf (symbol-function 'gr8s.apiserver::admission-https-post)
+                 (lambda (&rest arguments) (declare (ignore arguments)) (funcall signal-it)))
+           (handler-case
+               (progn (gr8s.apiserver::admission-call-webhook nil webhook "{}")
+                      (fail "the call returned"))
+             (gr8s.apiserver::admission-call-failure (condition)
+               (is (equal "failed to call webhook: Post \"https://localhost:9/slow?timeout=1s\": context deadline exceeded"
+                          (gr8s.apiserver::admission-call-failure-message condition))))))
+      (setf (symbol-function 'gr8s.apiserver::admission-https-post) original))))
