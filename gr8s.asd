@@ -85,7 +85,8 @@
                                            (:file "tracker")
                                            (:file "peer-wire")
                                            (:file "oci-cache")
-                                           (:file "oci-mirror")))
+                                           (:file "oci-mirror")
+                                           (:file "registry-trust")))
                              (:module "model"
                               :serial t
                               :components ((:file "package")
@@ -558,6 +559,7 @@
                              (:file "host-redirect-test")
                              (:file "host-firewall-test")
                              (:file "clustertrustbundle-test")
+                             (:file "registry-trust-test")
                              (:file "podcertificaterequest-test")
                              (:file "containerd-test")
                              (:file "container-lifecycle-test")

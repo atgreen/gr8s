@@ -163,6 +163,82 @@
         (let ((after (gethash "renewalTime" (gethash "status" (gr8s.resources::get-core-resource store "certificates" "certs" "web")))))
           (is (not (equal before after))))))))
 
+(defun cm-openssl-san (cert-pem directory)
+  "The subjectAltName text openssl prints for CERT-PEM."
+  (uiop:run-program (list "openssl" "x509" "-noout" "-ext" "subjectAltName" "-subject"
+                          "-in" (namestring (cm-write-temp cert-pem directory "san.crt")))
+                    :output :string))
+
+(test certificate-ip-address-literals-are-strict
+  (flet ((octets (address) (gr8s.resources::certificate-ip-address-octets address)))
+    (is (equalp #(10 77 77 21) (octets "10.77.77.21")))
+    (is (equalp #(0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1) (octets "::1")))
+    (is (equalp #(#xfd 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1) (octets "fd00::1")))
+    (is (equalp #(0 0 0 0 0 0 0 0 0 0 #xff #xff 1 2 3 4) (octets "::ffff:1.2.3.4")))
+    (is (equalp #(0 1 0 2 0 3 0 4 0 5 0 6 0 7 0 8) (octets "1:2:3:4:5:6:7:8")))
+    (dolist (bad '("01.2.3.4" "1.2.3" "1.2.3.4.5" "256.1.1.1" "" "host.example"
+                   "fe80::1%eth0" "1::2::3" "1:2:3:4:5:6:7:8:9" "1:2:3:4:5:6:7:8::" "10000::1"
+                   "1.2.3.4::" ":::" "1:2:3:4:5:6:7"))
+      (is (null (octets bad)) "~S should not parse as an IP address" bad))))
+
+(test cert-manager-validates-ip-addresses
+  (with-core-api (store directory)
+    (values store directory)
+    (check-core-status 201 "/api/v1/namespaces" :method :post
+                       :object (cm-parse "{\"apiVersion\":\"v1\",\"kind\":\"Namespace\",\"metadata\":{\"name\":\"certs\"}}"))
+    (flet ((certificate (name ips)
+             (cm-parse (format nil "{\"apiVersion\":\"cert-manager.io/v1\",\"kind\":\"Certificate\",\"metadata\":{\"name\":~S,\"namespace\":\"certs\"},\"spec\":{\"secretName\":\"s\",\"issuerRef\":{\"name\":\"selfsigned\"},\"ipAddresses\":[~{~S~^,~}]}}" name ips))))
+      ;; ipAddresses alone are a subject, as in cert-manager.
+      (check-core-status 201 "/apis/cert-manager.io/v1/namespaces/certs/certificates"
+                         :method :post :object (certificate "ip-only" '("10.77.77.21" "fd00::1")))
+      (check-core-status 422 "/apis/cert-manager.io/v1/namespaces/certs/certificates"
+                         :method :post :object (certificate "bad-ip" '("10.77.77.21" "01.2.3.4"))))))
+
+(test cert-manager-issues-every-subject-alt-name
+  (with-temporary-store (store directory)
+    (gr8s.resources::create-core-resource store "clusterissuers" (cm-parse *cm-selfsigned-issuer*) nil)
+    (gr8s.resources::create-core-resource store "certificates"
+      (cm-parse "{\"apiVersion\":\"cert-manager.io/v1\",\"kind\":\"Certificate\",\"metadata\":{\"name\":\"reg\",\"namespace\":\"certs\"},\"spec\":{\"secretName\":\"reg-tls\",\"issuerRef\":{\"name\":\"selfsigned\",\"kind\":\"ClusterIssuer\"},\"dnsNames\":[\"registry.example.com\"],\"ipAddresses\":[\"10.77.77.21\",\"fd00::1\"],\"uris\":[\"spiffe://lab/registry\"],\"emailAddresses\":[\"ops@example.com\"]}}")
+      "certs")
+    (gr8s.controllers::reconcile-certificates store nil)
+    (let ((san (cm-openssl-san (cm-secret-pem store "certs" "reg-tls" "tls.crt") directory)))
+      (dolist (expected '("DNS:registry.example.com" "IP Address:10.77.77.21" "IP Address:FD00:0:0:0:0:0:0:1"
+                          "URI:spiffe://lab/registry" "email:ops@example.com" "CN=registry.example.com"))
+        (is (search expected san) "~A missing from ~A" expected san)))
+    ;; With only IP addresses, the first one names the subject.
+    (gr8s.resources::create-core-resource store "certificates"
+      (cm-parse "{\"apiVersion\":\"cert-manager.io/v1\",\"kind\":\"Certificate\",\"metadata\":{\"name\":\"bare\",\"namespace\":\"certs\"},\"spec\":{\"secretName\":\"bare-tls\",\"issuerRef\":{\"name\":\"selfsigned\",\"kind\":\"ClusterIssuer\"},\"ipAddresses\":[\"192.0.2.7\"]}}")
+      "certs")
+    (gr8s.controllers::reconcile-certificates store nil)
+    (let ((san (cm-openssl-san (cm-secret-pem store "certs" "bare-tls" "tls.crt") directory)))
+      (is (search "IP Address:192.0.2.7" san))
+      (is (search "CN=192.0.2.7" san)))))
+
+(test cert-manager-reissues-when-identity-changes
+  (with-temporary-store (store directory)
+    (gr8s.resources::create-core-resource store "clusterissuers" (cm-parse *cm-selfsigned-issuer*) nil)
+    (gr8s.resources::create-core-resource store "certificates" (cm-parse *cm-certificate*) "certs")
+    (gr8s.controllers::reconcile-certificates store nil)
+    (flet ((certificate () (gr8s.resources::get-core-resource store "certificates" "certs" "web")))
+      (is (not (gr8s.controllers::cm-certificate-needs-issue-p store (certificate))))
+      ;; Adding an IP address to the spec reissues the leaf with it.
+      (gr8s.resources::update-core-resource store "certificates" "certs" "web"
+        (lambda (object)
+          (setf (gethash "ipAddresses" (gethash "spec" object)) (vector "10.0.0.9"))
+          object))
+      (is (gr8s.controllers::cm-certificate-needs-issue-p store (certificate)))
+      (gr8s.controllers::reconcile-certificates store nil)
+      (is (not (gr8s.controllers::cm-certificate-needs-issue-p store (certificate))))
+      (is (search "IP Address:10.0.0.9"
+                  (cm-openssl-san (cm-secret-pem store "certs" "web-tls" "tls.crt") directory)))
+      ;; A Secret issued before identities were recorded (no annotation) reissues once.
+      (gr8s.resources::update-core-resource store "secrets" "certs" "web-tls"
+        (lambda (secret)
+          (remhash "gr8s.io/certificate-identity" (gethash "annotations" (gethash "metadata" secret)))
+          secret))
+      (is (gr8s.controllers::cm-certificate-needs-issue-p store (certificate)))
+      (gr8s.controllers::reconcile-certificates store nil)
+      (is (not (gr8s.controllers::cm-certificate-needs-issue-p store (certificate)))))))
 
 (test managed-ca-leaf-passes-strict-openssl-chain-validation
   (with-temporary-pki (pki root)

@@ -109,6 +109,13 @@
        ;; them would leave a signerName+selector volume matching nothing.
        (when (gethash "labels" source)
          (setf (gethash "labels" metadata) (copy-core-object (gethash "labels" source))))
+       ;; Of the annotations, only the registries the bundle is trusted for:
+       ;; the node's image mirror verifies them against it.
+       (let ((registries (gethash gr8s.image-distribution::+registry-trust-annotation+
+                                  (gethash "annotations" source (core-object)))))
+         (when registries
+           (setf (gethash "annotations" metadata)
+                 (core-object gr8s.image-distribution::+registry-trust-annotation+ registries))))
        (setf (gethash "spec" result) (copy-core-object (gethash "spec" object))))
       ((equal kind "PodCertificateRequest")
        ;; The node created this request's public key and now needs the signed

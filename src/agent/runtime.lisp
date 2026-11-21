@@ -1953,6 +1953,17 @@ Service grant and receiver envelope changes still run their original safety path
          (not (gr8s.store::json-value-equal-p (node-runtime-discovery-resources node-runtime) resources))
          (nth-value 1 (gateway-node-cached-statuses node-runtime assignments)))))
 
+(defun install-snapshot-registry-trust (resources)
+  "Verify registries against the ClusterTrustBundles in a snapshot's decoded
+RESOURCES. A failure keeps the trust already installed."
+  (handler-case
+      (gr8s.image-distribution::install-cluster-registry-trust
+       (gr8s.image-distribution::cluster-registry-trust
+        (loop for key being the hash-keys of resources using (hash-value object)
+              when (equal "clustertrustbundles" (first key)) collect object)))
+    (error (condition)
+      (format *error-output* "gr8s: registry trust update failed: ~A~%" condition))))
+
 (defun reconcile-node-snapshot (node-runtime snapshot)
   "Apply one control-plane SNAPSHOT to this node and return the assigned Pods' observed
 statuses. Errors unless the runtime is running, and waits briefly for a restarting
@@ -1987,6 +1998,7 @@ or Gateway listeners did not converge, so the revision is retried."
           (error (condition)
             (setf (node-runtime-applied-snapshot node-runtime) nil)
             (error condition)))
+      (install-snapshot-registry-trust public-resources)
       (let ((gateway-update (node-gateway-update-p node-runtime snapshot public-resources))
             (convergence-ready t)
             (gateway-failure nil))

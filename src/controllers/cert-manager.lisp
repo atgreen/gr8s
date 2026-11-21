@@ -62,9 +62,26 @@
 ;;; ---------------------------------------------------------------------------
 ;;; Leaf issuance (reuses the gr8s PKI signing primitives).
 
-(defun cm-server-leaf-extensions (dns-names)
+(defun cm-subject-alt-names (&key dns-names ip-addresses uris email-addresses)
+  "The DER GeneralNames for a SAN: rfc822Name [1], dNSName [2], URI [6] and
+   iPAddress [7] (4 or 16 octets), or NIL when there are none."
+  (flet ((ia5 (tag names)
+           (loop for name in names
+                 collect (pure-tls/acme::encode-der tag (flexi-streams:string-to-octets
+                                                         name :external-format :ascii)))))
+    (let ((names (append (ia5 #x81 email-addresses)
+                         (ia5 #x82 dns-names)
+                         (ia5 #x86 uris)
+                         (loop for address in ip-addresses
+                               collect (pure-tls/acme::encode-der
+                                        #x87 (or (gr8s.resources::certificate-ip-address-octets address)
+                                                 (error "Certificate ipAddress ~S is not an IP address" address)))))))
+      (when names
+        (apply #'pure-tls/acme::encode-sequence names)))))
+
+(defun cm-server-leaf-extensions (dns-names &key ip-addresses uris email-addresses)
   "basicConstraints CA:FALSE (critical), keyUsage digitalSignature+keyEncipherment,
-   EKU serverAuth, and a SAN over DNS-NAMES."
+   EKU serverAuth, and a SAN over DNS-NAMES, IP-ADDRESSES, URIS and EMAIL-ADDRESSES."
   (let ((extensions
           (list (pure-tls/acme::encode-critical-extension +oid-basic-constraints+
                   (pure-tls/acme::encode-sequence))
@@ -72,15 +89,18 @@
                   (pure-tls/acme::encode-bit-string (vector #xA0) 5))  ; digitalSignature + keyEncipherment
                 (pure-tls/acme::encode-extension +oid-extended-key-usage+
                   (pure-tls/acme::encode-sequence
-                   (pure-tls/acme::encode-oid '(1 3 6 1 5 5 7 3 1)))))))  ; serverAuth
-    (when dns-names
+                   (pure-tls/acme::encode-oid '(1 3 6 1 5 5 7 3 1))))))  ; serverAuth
+        (alt-names (cm-subject-alt-names :dns-names dns-names :ip-addresses ip-addresses
+                                         :uris uris :email-addresses email-addresses)))
+    (when alt-names
       (setf extensions
             (append extensions
                     (list (pure-tls/acme::encode-extension pure-tls/acme::*oid-subject-alt-name*
-                            (pure-tls/acme::encode-san-extension dns-names))))))
+                                                           alt-names)))))
     extensions))
 
-(defun cm-issue-leaf (&key common-name dns-names duration-seconds issuer-subject-der signer-key issuer-certificate)
+(defun cm-issue-leaf (&key common-name dns-names ip-addresses uris email-addresses
+                           duration-seconds issuer-subject-der signer-key issuer-certificate)
   "Mint an EC P-256 server leaf. For a CA issuer pass ISSUER-SUBJECT-DER and
    SIGNER-KEY (the CA); for selfSigned leave both NIL (issuer = subject, signed
    with the leaf's own key). Returns (values cert-pem key-pem not-before not-after)."
@@ -89,7 +109,7 @@
            (duration (or duration-seconds *cert-manager-default-duration*))
            (not-before (- now 300))
            (not-after (+ now duration))
-           (common-name (or common-name (first dns-names) ""))
+           (common-name (or common-name (first dns-names) (first ip-addresses) ""))
            (subject (pure-tls/acme::encode-subject common-name))
            (issuer (or issuer-subject-der subject))
            (signer (or signer-key private-key))
@@ -103,7 +123,8 @@
                  subject
                  (pure-tls/acme::encode-ec-public-key public-key)
                  (pure-tls/acme::encode-x509-extensions
-                  (append (cm-server-leaf-extensions dns-names)
+                  (append (cm-server-leaf-extensions dns-names :ip-addresses ip-addresses
+                                                     :uris uris :email-addresses email-addresses)
                           (gr8s.security::certificate-key-identifier-extensions
                            (gr8s.security::subject-public-key-identifier (pure-tls/acme::encode-ec-public-key public-key))
                            (if issuer-certificate
@@ -143,6 +164,31 @@
 ;;; ---------------------------------------------------------------------------
 ;;; Secret + status writes.
 
+(defparameter +cm-identity-annotation+ "gr8s.io/certificate-identity"
+  "Secret annotation holding the digest of the Certificate identity it was issued
+   for, so a changed spec (or a leaf issued before a field was honored) reissues.")
+
+(defun cm-string-list (spec field)
+  "Certificate SPEC's FIELD as a list of strings; absent or JSON null is empty."
+  (let ((value (gethash field spec)))
+    (if (vectorp value) (coerce value 'list) '())))
+
+(defun cm-certificate-identity (spec)
+  "A digest of what the issued leaf must say for SPEC: its subject, every SAN
+   list, and the issuer that signs it."
+  (let ((issuer-ref (gethash "issuerRef" spec)))
+    (ironclad:byte-array-to-hex-string
+     (ironclad:digest-sequence
+      :sha256
+      (trivial-utf-8:string-to-utf-8-bytes
+       (with-standard-io-syntax
+         (prin1-to-string
+          (list (gethash "commonName" spec)
+                (cm-string-list spec "dnsNames") (cm-string-list spec "ipAddresses")
+                (cm-string-list spec "uris") (cm-string-list spec "emailAddresses")
+                (and (hash-table-p issuer-ref) (gethash "kind" issuer-ref))
+                (and (hash-table-p issuer-ref) (gethash "name" issuer-ref))))))))))
+
 (defun cm-tls-secret-data (cert-pem key-pem)
   "Build the data map for a kubernetes.io/tls Secret: base64-encoded \"tls.crt\"
    and \"tls.key\" entries from CERT-PEM and KEY-PEM."
@@ -150,11 +196,17 @@
                "tls.key" (ag-grpc:base64-encode (trivial-utf-8:string-to-utf-8-bytes key-pem))))
 
 (defun cm-write-tls-secret (store namespace secret-name cert-pem key-pem certificate)
-  "Create or update the kubernetes.io/tls Secret, owned by CERTIFICATE."
-  (let ((data (cm-tls-secret-data cert-pem key-pem)))
+  "Create or update the kubernetes.io/tls Secret, owned by CERTIFICATE and
+   annotated with the identity it was issued for."
+  (let ((data (cm-tls-secret-data cert-pem key-pem))
+        (identity (cm-certificate-identity (gethash "spec" certificate))))
     (if (ignore-errors (get-core-resource store "secrets" namespace secret-name))
         (update-core-resource store "secrets" namespace secret-name
           (lambda (existing)
+            (let ((metadata (gethash "metadata" existing)))
+              (unless (hash-table-p (gethash "annotations" metadata))
+                (setf (gethash "annotations" metadata) (core-object)))
+              (setf (gethash +cm-identity-annotation+ (gethash "annotations" metadata)) identity))
             (setf (gethash "type" existing) "kubernetes.io/tls"
                   (gethash "data" existing) data)
             existing))
@@ -163,6 +215,7 @@
                         "apiVersion" "v1" "kind" "Secret"
                         "metadata" (core-object
                                     "name" secret-name "namespace" namespace
+                                    "annotations" (core-object +cm-identity-annotation+ identity)
                                     "ownerReferences"
                                     (vector (core-object "apiVersion" "cert-manager.io/v1"
                                                          "kind" "Certificate"
@@ -197,17 +250,23 @@
 ;;; Reconciliation.
 
 (defun cm-certificate-needs-issue-p (store certificate)
-  "True when CERTIFICATE has no usable Secret, no status, or its renewalTime has
-   arrived."
+  "True when CERTIFICATE has no usable Secret, its Secret was issued for a
+   different identity (or before the identity was recorded), it has no status,
+   or its renewalTime has arrived."
   (let* ((metadata (gethash "metadata" certificate))
          (namespace (gethash "namespace" metadata))
          (spec (gethash "spec" certificate))
          (secret-name (gethash "secretName" spec))
          (status (gethash "status" certificate))
-         (secret (and secret-name (ignore-errors (get-core-resource store "secrets" namespace secret-name)))))
+         (secret (and secret-name (ignore-errors (get-core-resource store "secrets" namespace secret-name))))
+         (annotations (and secret (gethash "annotations" (gethash "metadata" secret)))))
     (cond ((null secret) t)
           ((null (and (hash-table-p (gethash "data" secret))
                       (gethash "tls.crt" (gethash "data" secret)))) t)
+          ((not (equal (cm-certificate-identity spec)
+                       (and (hash-table-p annotations)
+                            (gethash +cm-identity-annotation+ annotations))))
+           t)
           ((null (hash-table-p status)) t)
           (t (let ((renewal (cm-parse-rfc3339 (gethash "renewalTime" status))))
                (or (null renewal) (>= (funcall *cert-manager-clock*) renewal)))))))
@@ -227,7 +286,10 @@
         (when issuer-subject-der                       ; NIL => unsupported issuer type
           (multiple-value-bind (cert-pem key-pem not-before not-after)
               (cm-issue-leaf :common-name (gethash "commonName" spec)
-                             :dns-names (coerce (gethash "dnsNames" spec #()) 'list)
+                             :dns-names (cm-string-list spec "dnsNames")
+                             :ip-addresses (cm-string-list spec "ipAddresses")
+                             :uris (cm-string-list spec "uris")
+                             :email-addresses (cm-string-list spec "emailAddresses")
                              :duration-seconds (cm-parse-duration (gethash "duration" spec))
                              :issuer-subject-der (unless (eq issuer-subject-der :self-signed) issuer-subject-der)
                              :signer-key (unless (eq issuer-subject-der :self-signed) signer-key)

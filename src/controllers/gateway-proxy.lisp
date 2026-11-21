@@ -194,34 +194,56 @@
     (setf (hunchentoot:header-out :location) location)
     (gateway-error-response (or (getf data :status-code) 302) "")))
 
+(defun gateway-backend-request-target (dispatch request)
+  "The path and query REQUEST is forwarded with, after the matched rule's URL rewrite."
+  (let* ((rewrite (gateway-find-filter (gw-dispatch-filters dispatch) :rewrite))
+         (path (if rewrite
+                   (gateway-apply-path-modifier (hunchentoot:script-name request)
+                                                (gw-dispatch-match dispatch) (getf rewrite :path))
+                   (hunchentoot:script-name request)))
+         (query (hunchentoot:query-string request)))
+    (format nil "~A~@[?~A~]" path (and query (plusp (length query)) query))))
+
+(defun gateway-backend-request-headers (dispatch request)
+  "REQUEST's end-to-end headers after the rule's request header modifier, led by
+   the (possibly rewritten) Host and the X-Forwarded-* the backend sees."
+  (let* ((rewrite (gateway-find-filter (gw-dispatch-filters dispatch) :rewrite))
+         (orig-host (hunchentoot:header-in* :host))
+         (scheme (if (hunchentoot:acceptor-ssl-p hunchentoot:*acceptor*) "https" "http")))
+    (append (list (cons "Host" (or (and rewrite (getf rewrite :hostname)) orig-host))
+                  (cons "X-Forwarded-Host" orig-host)
+                  (cons "X-Forwarded-Proto" scheme)
+                  (cons "X-Forwarded-Uri" (hunchentoot:script-name request)))
+            ;; The Gateway is a pass-through proxy: the client's Authorization is meant
+            ;; for the backend app (e.g. an S3 server's SigV4 check), so keep it.
+            (gateway-apply-header-ops
+             (pod-proxy-end-to-end-headers (gateway-request-headers request)
+                                           :request t :consume-credential nil)
+             (gateway-find-filter (gw-dispatch-filters dispatch) :request-headers)))))
+
+(defun gateway-set-response-head (dispatch code response-headers &key (filter #'pod-proxy-end-to-end-headers))
+  "Make the reply carry the backend's CODE and RESPONSE-HEADERS (keyword alist):
+   FILTER drops what is not forwarded, then the rule's response header modifier."
+  (setf (hunchentoot:return-code*) code (hunchentoot:content-type*) nil)
+  (dolist (header (gateway-apply-header-ops
+                   (funcall filter (mapcar (lambda (h) (cons (string-downcase (string (car h))) (cdr h)))
+                                           response-headers))
+                   (gateway-find-filter (gw-dispatch-filters dispatch) :response-headers)))
+    (let ((name (intern (string-upcase (car header)) :keyword)))
+      (case name
+        (:content-length (setf (hunchentoot:header-out name) (parse-integer (cdr header))))
+        (:content-type (setf (hunchentoot:header-out name) (cdr header)))
+        (t (push (cons name (cdr header))
+                 (slot-value hunchentoot:*reply* 'hunchentoot::headers-out)))))))
+
 (defun gateway-proxy-exchange (dispatch request target method)
   "Proxy REQUEST to TARGET (\"http://host:port\"), applying the matched rule's
    URL rewrite and request/response header modifiers, and streaming the real
    upstream status, headers and framed body back. Shares header hygiene and body
    copying with the Pod proxy."
-  (let* ((rewrite (gateway-find-filter (gw-dispatch-filters dispatch) :rewrite))
-         (req-ops (gateway-find-filter (gw-dispatch-filters dispatch) :request-headers))
-         (resp-ops (gateway-find-filter (gw-dispatch-filters dispatch) :response-headers))
-         (path (if rewrite
-                   (gateway-apply-path-modifier (hunchentoot:script-name request)
-                                                (gw-dispatch-match dispatch) (getf rewrite :path))
-                   (hunchentoot:script-name request)))
-         (query (hunchentoot:query-string request))
-         (url (format nil "~A~A~@[?~A~]" target path (and query (plusp (length query)) query)))
-         (orig-host (hunchentoot:header-in* :host))
-         (host (or (and rewrite (getf rewrite :hostname)) orig-host))
-         (scheme (if (hunchentoot:acceptor-ssl-p hunchentoot:*acceptor*) "https" "http"))
-         ;; The Gateway is a pass-through proxy: the client's Authorization is meant
-         ;; for the backend app (e.g. an S3 server's SigV4 check), so keep it.
-         (headers (gateway-apply-header-ops
-                   (pod-proxy-end-to-end-headers (gateway-request-headers request)
-                                                 :request t :consume-credential nil)
-                   req-ops))
-         (body (hunchentoot:raw-post-data :force-binary t)))
-    (setf headers (append (list (cons "Host" host) (cons "X-Forwarded-Host" orig-host)
-                                (cons "X-Forwarded-Proto" scheme)
-                                (cons "X-Forwarded-Uri" (hunchentoot:script-name request)))
-                          headers))
+  (let ((url (concatenate 'string target (gateway-backend-request-target dispatch request)))
+        (headers (gateway-backend-request-headers dispatch request))
+        (body (hunchentoot:raw-post-data :force-binary t)))
     (handler-case
         (multiple-value-bind (upstream code response-headers)
             (drakma:http-request url :method method :content body
@@ -232,23 +254,89 @@
                                      :preserve-uri t :connection-timeout 10 :verify nil)
           (unwind-protect
                (progn
-                 (setf (hunchentoot:return-code*) code (hunchentoot:content-type*) nil)
-                 (dolist (header (gateway-apply-header-ops
-                                  (pod-proxy-end-to-end-headers
-                                   (mapcar (lambda (h) (cons (string-downcase (string (car h))) (cdr h)))
-                                           response-headers))
-                                  resp-ops))
-                   (let ((name (intern (string-upcase (car header)) :keyword)))
-                     (case name
-                       (:content-length (setf (hunchentoot:header-out name) (parse-integer (cdr header))))
-                       (:content-type (setf (hunchentoot:header-out name) (cdr header)))
-                       (t (push (cons name (cdr header))
-                                (slot-value hunchentoot:*reply* 'hunchentoot::headers-out))))))
+                 (gateway-set-response-head dispatch code response-headers)
                  (let ((client (hunchentoot:send-headers)))
                    (unless (or (eq method :head) (member code '(204 304)))
                      (pod-proxy-copy-body upstream client response-headers))))
             (when (streamp upstream) (ignore-errors (close upstream)))))
       (error (condition)
+        (if hunchentoot::*headers-sent*
+            (error condition)
+            (gateway-error-response 502 "the gateway backend connection failed: ~A" condition))))))
+
+;;; ---------------------------------------------------------------------------
+;;; WebSocket upgrades (podster-1fk). Connection and Upgrade are hop-by-hop, so
+;;; the ordinary exchange strips them and a backend sees a plain GET. A WebSocket
+;;; handshake instead gets its own backend connection: the handshake is replayed
+;;; with its Upgrade intact, and once the backend answers 101 the two connections
+;;; are spliced byte for byte, as the Pod proxy relays an upgraded exec stream.
+
+(defvar *gateway-connection-socket* nil
+  "The client socket of the connection the current Gateway request arrived on.")
+
+(defparameter +gateway-upgrade-idle-timeout-seconds+ (* 60 60)
+  "How long an upgraded connection's client may stay quiet. A live view that only
+   receives sends nothing upstream, and Hunchentoot's own read timeout is 20s.")
+
+(defmethod hunchentoot:process-connection :around ((acceptor gateway-acceptor) socket)
+  (let ((*gateway-connection-socket* socket))
+    (call-next-method)))
+
+(defun gateway-websocket-request-p ()
+  "True when the current request is a WebSocket handshake. Other upgrade protocols
+   (h2c) are not proxied as upgrades, as in Envoy's default."
+  (and (upgrade-request-p)
+       (find "websocket"
+             (uiop:split-string (hunchentoot:header-in* :upgrade) :separator '(#\, #\Space #\Tab))
+             :test #'string-equal)))
+
+(defun gateway-upgrade-response-headers (headers)
+  "A 101's headers minus body framing; Connection, Upgrade and Sec-WebSocket-* are
+   the point of the response, so unlike other hop-by-hop fields they are kept."
+  (remove-if (lambda (header) (member (car header) '("content-length" "transfer-encoding")
+                                      :test #'string-equal))
+             headers))
+
+(defun gateway-upgrade-exchange (dispatch request target method)
+  "Replay REQUEST's WebSocket handshake to TARGET (\"http://host:port\") with the
+   rule's rewrite and header modifiers. On 101, answer the client with the
+   backend's handshake response and relay both directions until either side
+   closes; any other answer is returned as an ordinary response."
+  (let ((headers (gateway-backend-request-headers dispatch request))
+        (socket nil))
+    (handler-case
+        (multiple-value-bind (connected stream) (proxy-upgrade-backend target)
+          (setf socket connected)
+          (proxy-write-upgrade-request
+           stream method (gateway-backend-request-target dispatch request)
+           (cdr (assoc "Host" headers :test #'string-equal))
+           (append (rest headers)
+                   (list (cons "Connection" "Upgrade")
+                         (cons "Upgrade" (hunchentoot:header-in* :upgrade))))
+           (or (hunchentoot:raw-post-data :force-binary t) #()))
+          (multiple-value-bind (code response-headers)
+              (parse-http-response-head (read-http-response-head stream))
+            (cond
+              ((= code 101)
+               (gateway-set-response-head dispatch code response-headers
+                                          :filter #'gateway-upgrade-response-headers)
+               (let ((client (hunchentoot::start-output 101 nil)))
+                 (finish-output client)
+                 (when *gateway-connection-socket*
+                   (ignore-errors
+                    (setf (sb-impl::fd-stream-timeout (usocket:socket-stream *gateway-connection-socket*))
+                          (coerce +gateway-upgrade-idle-timeout-seconds+ 'single-float))))
+                 (relay-runtime-stream client stream socket)))
+              (t
+               (unwind-protect
+                    (progn
+                      (gateway-set-response-head dispatch code response-headers)
+                      (let ((client (hunchentoot:send-headers)))
+                        (unless (or (eq method :head) (member code '(204 304)))
+                          (pod-proxy-copy-body stream client response-headers))))
+                 (ignore-errors (usocket:socket-close socket)))))))
+      (error (condition)
+        (when socket (ignore-errors (usocket:socket-close socket)))
         (if hunchentoot::*headers-sent*
             (error condition)
             (gateway-error-response 502 "the gateway backend connection failed: ~A" condition))))))
@@ -275,10 +363,10 @@
                  (gateway-error-response 500 "Matched rule has no backend")
                  (multiple-value-bind (host port invalid-reason) (gateway-resolve-backend acceptor backend)
                    (if host
-                       (gateway-proxy-exchange
-                        dispatch request
-                        (format nil "http://~A:~A" (if (find #\: host) (format nil "[~A]" host) host) port)
-                        (hunchentoot:request-method request))
+                       (funcall (if (gateway-websocket-request-p) #'gateway-upgrade-exchange #'gateway-proxy-exchange)
+                                dispatch request
+                                (format nil "http://~A:~A" (if (find #\: host) (format nil "[~A]" host) host) port)
+                                (hunchentoot:request-method request))
                        (gateway-error-response (if invalid-reason 500 503) "No reachable backend for ~A"
                                                (gw-backend-name backend))))))))
       (gateway-count-request (gateway-acceptor-name acceptor)

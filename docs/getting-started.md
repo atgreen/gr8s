@@ -86,7 +86,7 @@ after rollout, not uninterrupted traffic during it.
 | `gr8s kubeconfig` says the cluster PKI does not exist | Start `serve` first, and run both with `sudo` so they share root's state directory |
 | `kubectl` asks for credentials or reaches another cluster | Check that `KUBECONFIG` points at `~/gr8s.kubeconfig` in this terminal |
 | API connection refused | Keep `serve` running; inspect its first startup error and check for a port 6443 conflict |
-| Pod Pending or image pull failure | Run `describe pod` and inspect server output; check registry DNS, credentials, and connectivity |
+| Pod Pending or image pull failure | Run `describe pod` and inspect server output; check registry DNS, credentials, and connectivity; a TLS verification error means the registry's CA needs [trusting](runtime.md#private-registries-and-tls-trust) |
 | DNS resolves but HTTP fails | Check ready Pods and `get endpointslices -l kubernetes.io/service-name=web` in `gr8s-demo` |
 | BPF, mount, cgroup, or route setup fails | Check root privileges, kernel support, and existing routes; use a fresh disposable VM rather than a restricted container |
 

@@ -101,7 +101,16 @@ Private registries work through the `imagePullSecrets` of a Pod or its
 ServiceAccount, matched as the kubelet matches them apart from `[...]` host
 patterns. `gr8s serve` and `gr8s agent` also accept a Docker `config.json` via
 `--registry-credentials-file`; Pod credentials are tried before these node-wide
-credentials. Kubelet v1 executable credential-provider plugins are configured
+credentials. Every registry's TLS certificate is verified against the system
+roots. A registry with a private CA is trusted cluster-wide by a
+ClusterTrustBundle annotated `gr8s.io/registries: "HOST[:PORT], ..."`: every
+node verifies exactly those registries against its `spec.trustBundle`, from
+the next node snapshot, and keeps the last trust it received across restarts.
+The annotation is validated on write, and only it crosses to nodes. Per node,
+`--registry-ca HOST=FILE` (repeatable) does the same, and a bare
+`--registry-ca HOST` trusts the cluster CA, for a registry serving a
+cert-manager certificate from the cluster's `ca` issuer. A host named by both
+trusts the union. Kubelet v1 executable credential-provider plugins are configured
 with `--image-credential-provider-config` and
 `--image-credential-provider-bin-dir`. Matching, arguments and environment,
 response cache scopes and durations, validation, and fallback ordering follow
