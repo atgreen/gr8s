@@ -368,10 +368,10 @@ storage needs. You run two full gr8s master nodes plus miniwit as the third
 Raft-cluster participant: it provides the deciding vote for leader election and
 split-brain scenarios without running the API, controllers or workloads. It
 stores the Raft log sealed, so it can read who the members are and nothing
-else, and it holds no cluster state. It never campaigns on its own. When a leader fails and the surviving
-master is an entry or two behind the witness, the witness leads for a moment,
-only to give that master the entries it lacks and hand leadership to it; it
-commits nothing itself.
+else, and it holds no cluster state. It never campaigns on its own. When a
+leader fails and the surviving master is an entry or two behind the witness,
+the witness leads for a moment, only to give that master the entries it lacks
+and hand leadership to it; it commits nothing itself.
 
 miniwit is a self-contained Go module (its own `go.mod`, independent of the
 Lisp build) that speaks gr8s's `RaftTransport` gRPC/mTLS protocol — enroll,
