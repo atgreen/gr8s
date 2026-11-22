@@ -7,6 +7,15 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ## [Unreleased]
 
+## [v1.37.2-gr8s.5] — 2026-11-22
+
+Sixth trial pre-release. Flow observability: every node reports dropped
+traffic and new connections, which `gr8s doctor observe`, the stock `hubble`
+CLI and a Hubble UI tab in `gr8s dashboard` read, and the dashboard gains a
+tab for any app the cluster declares with a `DashboardTab`. It also fixes nodes
+flapping NotReady under a busy stream through a member that doesn't hold their
+sessions, slow proxied requests through such a member, and pulls from quay.io.
+
 ### Added
 
 - Flow events (podster-e9a). The endpoint guards report drops, with their
@@ -15,7 +24,9 @@ the Kubernetes API version with a gr8s release suffix (see
   names each event's Pod and keeps the last 4,096. Nothing leaves the node
   until someone asks. `GET /apis/gr8s.io/v1/flows` (and per namespace, with
   `?watch=true`) merges every node's events and names the peer and, for a
-  policy drop, the NetworkPolicies isolating the Pod.
+  policy drop, the NetworkPolicies isolating the Pod. **Upgrading:** a Pod
+  already running reports no flow events until it is recreated, unless its
+  node runs the Service packet pipeline (docs/networking.md, "Flow events").
 - `gr8s doctor observe` prints flow events, filtered by namespace, Pod, node
   or verdict, once or following. `gr8s doctor diagnose` reports a Pod's recent
   NetworkPolicy drops as a finding naming the isolating policies.
@@ -579,7 +590,8 @@ OpenSSL. Release artifacts cover Linux amd64 and arm64: binaries with
 checksums, tarballs carrying the installer and lifecycle scripts, and
 CycloneDX and SPDX SBOMs for the Lisp dependencies.
 
-[Unreleased]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.4...HEAD
+[Unreleased]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.5...HEAD
+[v1.37.2-gr8s.5]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.4...v1.37.2-gr8s.5
 [v1.37.2-gr8s.4]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.3...v1.37.2-gr8s.4
 [v1.37.2-gr8s.3]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.2...v1.37.2-gr8s.3
 [v1.37.2-gr8s.2]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.1...v1.37.2-gr8s.2
