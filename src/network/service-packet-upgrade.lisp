@@ -19,6 +19,30 @@
           (subseq info 8 16)
           (sort (packet-program-map-ids (netlink-read-integer info 4 4)) #'<))))
 
+(defun packet-program-map-fd (program-id predicate)
+  "Open the map of program PROGRAM-ID whose kernel info PREDICATE accepts, or return NIL.
+The loader gives kernel maps no names to match, so a map is known by its shape."
+  (dolist (map-id (packet-program-map-ids program-id))
+    (let ((attribute (whistler/loader::make-attr-buf)))
+      (whistler/loader::put-u32 attribute 0 map-id)
+      (let ((fd (whistler/loader::%bpf 14 attribute 12 "packet map by ID")))
+        (if (funcall predicate (bpf-object-kernel-info fd))
+            (return fd)
+            (sb-posix:close fd))))))
+
+(defun packet-program-flow-ring-fd (program-id)
+  "Open the flow-event ring program PROGRAM-ID writes to, or return NIL: its only ring buffer."
+  (packet-program-map-fd program-id
+                         (lambda (info) (= +bpf-map-type-ringbuf+ (netlink-read-integer info 0 4)))))
+
+(defun packet-program-flow-config-fd (program-ids)
+  "Open the flow-event settings the programs PROGRAM-IDS read, or return NIL: their only
+one-word, one-entry array. An endpoint's entry guard tail-calls its stages, and the
+stages are the ones that read the settings, so every program is searched."
+  (loop for id in program-ids
+        for fd = (and id (plusp id) (packet-program-map-fd id #'flow-config-map-p))
+        when fd return fd))
+
 (defun load-packet-upgrade-blocker ()
   "Load a map-free classifier that drops every frame during a legacy upgrade."
   (whistler/loader::load-program
@@ -121,7 +145,16 @@ or :PENDING. Errors leave pinned blockers intact and must keep GC deferred."
                      for value = (whistler/loader:map-lookup map (service-lb-bytes index 4))
                      collect (and value (netlink-read-integer value 0 4))))
              (block-pins (path)
-               (append (when (probe-file path) (list path)) (cni-policy-staged-links (namestring path)))))
+               (append (when (probe-file path) (list path)) (cni-policy-staged-links (namestring path))))
+             (node-root ()
+               (uiop:pathname-parent-directory-pathname (uiop:ensure-directory-pathname shared-root)))
+             (shared-ring ()
+               ;; The node's flow-event ring and settings sit beside the shared Service maps.
+               (let ((ring (open-flow-events-ring (node-root))))
+                 (and ring (own (whistler/loader:map-info-fd ring)))))
+             (shared-config ()
+               (let ((config (open-flow-config (node-root))))
+                 (and config (own (whistler/loader:map-info-fd config))))))
       (unwind-protect
            (let* ((stage-fd (open-pin (merge-pathnames "gr8s_pkt_stages" directory)))
                   (stage-map (cni-policy-map-info stage-fd "gr8s_pkt_stages"))
@@ -147,7 +180,10 @@ or :PENDING. Errors leave pinned blockers intact and must keep GC deferred."
                                     collect (list (netlink-read-integer metadata 4 4)
                                                   (netlink-read-integer metadata 8 4)))
                               (netlink-read-integer (info stage-fd) 4 4)
-                              (stage-ids stage-map)))
+                              (stage-ids stage-map)
+                              ;; A ring or settings pinned since the last visit are a change to make.
+                              (let ((ring (shared-ring))) (and ring (netlink-read-integer (info ring) 4 4)))
+                              (let ((config (shared-config))) (and config (netlink-read-integer (info config) 4 4)))))
                       (blocked-p () (some (lambda (link) (block-pins (getf link :block-path))) links))
                       (entry-programs-first-p ()
                         (every (lambda (link)
@@ -171,6 +207,22 @@ or :PENDING. Errors leave pinned blockers intact and must keep GC deferred."
                             (fd (open-pin (merge-pathnames name (uiop:ensure-directory-pathname shared-root)))))
                        (cni-policy-map-info fd name)
                        (push (cons name fd) replacements)))
+                   ;; Binding to the node's ring moves an endpoint off a private one.
+                   ;; Without it the guard keeps the ring it has, so an unchanged
+                   ;; endpoint stays current.
+                   (let ((ring (or (shared-ring)
+                                   (let ((old (packet-program-flow-ring-fd
+                                               (netlink-read-integer (getf (first links) :info) 8 4))))
+                                     (and old (own old))))))
+                     (when ring
+                       (push (cons +flow-events-map-name+ ring) replacements)))
+                   (let ((config (or (shared-config)
+                                     (let ((old (packet-program-flow-config-fd
+                                                 (cons (netlink-read-integer (getf (first links) :info) 8 4)
+                                                       (stage-ids stage-map)))))
+                                       (and old (own old))))))
+                     (when config
+                       (push (cons +flow-config-map-name+ config) replacements)))
                    (let* ((identity (cni-policy-map-info (cdr (assoc "endpoint_identity" replacements
                                                                    :test #'equal)) "endpoint_identity"))
                           (value (whistler/loader:map-lookup identity (service-lb-bytes 0 4))))
@@ -182,8 +234,14 @@ or :PENDING. Errors leave pinned blockers intact and must keep GC deferred."
                    (load-egress-policy-object
                     object replacements :publish-stages nil :load-programs #'load-packet-upgrade-programs
                     :create-map (lambda (map)
-                                  (invalid-cni "retained endpoint is missing pinned map ~A"
-                                               (whistler/loader:map-info-name map))))
+                                  ;; A guard from before flow events had no ring or settings;
+                                  ;; give it private ones.
+                                  (if (member (whistler/loader:map-info-name map)
+                                              (list +flow-events-map-name+ +flow-config-map-name+)
+                                              :test #'equal)
+                                      (own (whistler/loader::create-map map))
+                                      (invalid-cni "retained endpoint is missing pinned map ~A"
+                                                   (whistler/loader:map-info-name map)))))
                    (dolist (program (egress-policy-object-programs object))
                      (own (whistler/loader:prog-info-fd (cdr program)))))
                  (dolist (link links)

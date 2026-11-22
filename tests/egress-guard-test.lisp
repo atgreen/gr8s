@@ -19,7 +19,8 @@
                           :key (lambda (program) (getf program :name)))))
         (is (equalp (getf (first plain-programs) :insns) (getf policy :insns)))
         (is (equalp (getf (first plain-programs) :relocs) (getf policy :relocs)))))
-    (is (= 27 (length maps)))
+    ;; 17 policy maps, the flow-event ring and settings, and the shared Service maps.
+    (is (= 29 (length maps)))
     (is (= 5 (length programs)))
     (let ((stages (find "gr8s_pkt_stages" maps :test #'equal :key (lambda (map) (getf map :name)))))
       (is (eq :prog-array (getf stages :type)))
@@ -48,7 +49,9 @@
                             :section-name "classifier" :insns #()))))
      :update (lambda (map key value)
                (push (list (whistler/loader:map-info-name map) key value) writes)))
-    (is (= 17 (length created)))
+    ;; The 16 policy maps, the stage table, and private flow-event ring and settings.
+    (is (= 19 (length created)))
+    (is (member "flow_events" created :test #'equal))
     (dolist (entry shared) (is (not (member (car entry) created :test #'equal))))
     (is (equalp (list (list "gr8s_pkt_stages" #(0 0 0 0) (gr8s.network::service-lb-bytes 1004 4))
                      (list "gr8s_pkt_stages" #(1 0 0 0) (gr8s.network::service-lb-bytes 1003 4))
@@ -61,8 +64,12 @@
 (test egress-guard-compiles-in-process-to-the-policy-maps
   (multiple-value-bind (map-specs prog-specs) (gr8s.network::compile-egress-guard)
     ;; The maps the CNI pins, with the schemas endpoint-policy checks: the three guard
-    ;; maps, the NetworkPolicy maps the agent writes, and the redirect tables.
-    (is (= (length gr8s.network::+cni-policy-map-specs+) (length map-specs)))
+    ;; maps, the NetworkPolicy maps the agent writes, and the redirect tables. The
+    ;; node's flow-event ring and settings are the two maps it doesn't pin per Pod.
+    (is (= (+ 2 (length gr8s.network::+cni-policy-map-specs+)) (length map-specs)))
+    (is (eq :array (getf (egress-map-spec map-specs "flow_config") :type)))
+    (is (eq :ringbuf (getf (egress-map-spec map-specs "flow_events") :type)))
+    (is (null (assoc "flow_events" gr8s.network::+cni-policy-map-specs+ :test #'equal)))
     (loop for (name type key-size value-size max-entries flags) in gr8s.network::+cni-policy-map-specs+
           for spec = (egress-map-spec map-specs name)
           do (is (and spec
@@ -120,8 +127,13 @@
                             collect (cons name (whistler/loader::make-prog-info
                                                 :name name :section-name "classifier"
                                                 :type 3 :insns #() :fd fd)))))
-    ;; Every map except the reused endpoint_identity was created.
-    (is (= (1- (length gr8s.network::+cni-policy-map-specs+)) (length created)))
+    ;; Every map except the reused endpoint_identity was created, with a private
+    ;; one-page flow-event ring and private settings, since none were passed.
+    (is (= (1+ (length gr8s.network::+cni-policy-map-specs+)) (length created)))
+    (is (member "flow_config" created :test #'string=))
+    (is (= gr8s.network::+private-flow-events-bytes+
+           (whistler/loader::map-info-max-entries
+            (gr8s.network::egress-policy-object-find-map object "flow_events"))))
     (is (not (member "endpoint_identity" created :test #'string=)))
     (is (member "rejected_spoofs" created :test #'string=))
     (is (member "traffic_stats" created :test #'string=))
@@ -131,7 +143,7 @@
     ;; The reused map keeps its pinned fd; both programs load against every map.
     (is (= 555 (whistler/loader:map-info-fd
                 (gr8s.network::egress-policy-object-find-map object "endpoint_identity"))))
-    (is (= (length gr8s.network::+cni-policy-map-specs+) (length loaded-with)))
+    (is (= (+ 2 (length gr8s.network::+cni-policy-map-specs+)) (length loaded-with)))
     (is (= 901 (whistler/loader:prog-info-fd
                 (gr8s.network::egress-policy-object-find-program object "gr8s_egress_guard"))))
     (is (= 902 (whistler/loader:prog-info-fd
@@ -174,7 +186,7 @@
     ;; Both program fds and every map fd are closed.
     (is (member 901 closed))
     (is (member 902 closed))
-    (is (= (+ 2 (length gr8s.network::+cni-policy-map-specs+)) (length closed)))))
+    (is (= (+ 4 (length gr8s.network::+cni-policy-map-specs+)) (length closed)))))
 
 (test service-guard-can-load-replacements-without-publishing-live-stages
   (let* ((map-spec '(:name "gr8s_pkt_stages" :type :prog-array :key-size 4

@@ -51,7 +51,7 @@ version skew between components.
 | Ingress controller, Gateway API implementation, LoadBalancer provider | Built in |
 | local-path provisioner, NFS volumes | Built in; CSI drivers still work |
 | metrics-server, cAdvisor | Built in; `kubectl top` and Prometheus scrapes work |
-| Kubernetes dashboard | Built-in Headlamp UI: `gr8s dashboard` |
+| Kubernetes dashboard | Built-in Headlamp and Hubble UIs: `gr8s dashboard` |
 | Certificate management | Automatic leaf renewal, staged CA rotation, one-time join tokens |
 | bpftrace, debug tooling | `gr8s debug trace` and a live Lisp REPL into any node |
 | Registry mirror, peer-to-peer image distribution (Dragonfly, Kraken, Spegel) | Built-in BitTorrent v2: nodes share image layers with each other instead of each pulling from the registry |
@@ -230,17 +230,38 @@ for how it works.
 
 ## Dashboard
 
-`gr8s dashboard` opens a Kubernetes web UI in your browser. It serves the
-[Headlamp](https://headlamp.dev) frontend — embedded in the binary, with no
-separate install — and reverse-proxies the API over mutual TLS to the running
-cluster, with live resource updates.
+`gr8s dashboard` opens a Kubernetes web UI in your browser, with two tabs. The
+Headlamp tab serves the [Headlamp](https://headlamp.dev) frontend and
+reverse-proxies the API over mutual TLS to the running cluster, with live
+resource updates. The Hubble tab serves Hubble UI's service map and flow table
+from the cluster's [flow events](docs/networking.md#flow-events). Both are
+embedded in the binary, with no separate install.
 
 ```sh
 gr8s dashboard    # uses $KUBECONFIG, or ~/.kube/config
 ```
 
+The cluster's own apps can add tabs too. A cluster-scoped `DashboardTab`
+(`deploy/crds/dashboardtabs.dashboard.gr8s.io.yaml`) names a Service, and every
+dashboard shows it as a tab, reached through the cluster API's `services/proxy`:
+
+```yaml
+apiVersion: dashboard.gr8s.io/v1
+kind: DashboardTab
+metadata: {name: grafana}
+spec:
+  title: Grafana
+  service: {namespace: monitoring, name: grafana, port: 80}
+```
+
+Creating one is an RBAC decision (`create` on `dashboardtabs`), since it reaches
+every reader. Each app tab is served from a loopback origin of its own, behind
+a per-tab secret, so an app's code can't reach the Headlamp proxy that acts with
+the reader's credentials.
+
 It serves on loopback `http://127.0.0.1:8080` by default (change with `--port`)
-and launches your browser; `--no-launch` prints the URL instead. `make native`
+and launches your browser; `--no-launch` prints the URL instead. It prints only
+that URL; `--verbose` logs every request and server error. `make native`
 embeds the assets automatically; see
 [dashboard assets](docs/building-and-testing.md#dashboard-assets).
 
@@ -263,6 +284,19 @@ Problems are listed in the order to fix them. Each one shows the evidence
 behind it — conditions, recent Events, the last lines a crashed container
 wrote — and a suggested next step. `diagnose` only reads, and a cause is the
 deepest finding the doctor could see, not proof of a root cause.
+
+On a gr8s cluster, `gr8s doctor observe` shows the drops the network makes and
+why, and `diagnose` counts a Pod's recent NetworkPolicy drops among its problems:
+
+```text
+$ gr8s doctor observe -n shop --verdict dropped
+02:23:51.128 gr8s-local: shop/cart:47022 -> shop/db:8080 TCP DROPPED by policy (shop/deny-egress)
+```
+
+`gr8s dashboard`'s Hubble tab shows them as Hubble UI's service map and flow
+table, and `gr8s doctor observe --serve` offers them
+as Hubble's Observer API, so the stock `hubble` CLI can read them; see
+[flow events](docs/networking.md#flow-events).
 
 `gr8s doctor impact KIND/NAME` follows the same links the other way, before
 you drain a node or delete a Secret. `gr8s doctor host` checks the kernel,

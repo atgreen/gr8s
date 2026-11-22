@@ -37,3 +37,7 @@
 (defpackage #:gr8s.node.v1
   (:use #:cl)
   (:shadow #:labels #:phase))
+
+(defpackage #:gr8s.hubble.observer
+  (:use #:cl)
+  (:shadow #:type #:labels #:identity #:first))

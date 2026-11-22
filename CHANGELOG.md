@@ -7,6 +7,66 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ## [Unreleased]
 
+### Added
+
+- Flow events (podster-e9a). The endpoint guards report drops, with their
+  reason, and every Pod's new connections, once each (`--flow-events drops`
+  limits that to Pods a NetworkPolicy isolates), to one ring per node; the agent
+  names each event's Pod and keeps the last 4,096. Nothing leaves the node
+  until someone asks. `GET /apis/gr8s.io/v1/flows` (and per namespace, with
+  `?watch=true`) merges every node's events and names the peer and, for a
+  policy drop, the NetworkPolicies isolating the Pod.
+- `gr8s doctor observe` prints flow events, filtered by namespace, Pod, node
+  or verdict, once or following. `gr8s doctor diagnose` reports a Pod's recent
+  NetworkPolicy drops as a finding naming the isolating policies.
+- `gr8s doctor observe --serve` serves Hubble's Observer gRPC API (`GetFlows`,
+  `GetNodes`, `ServerStatus`, health) on `127.0.0.1:4245` from the flows API,
+  so the stock `hubble` CLI works against gr8s, with Hubble's filters applied
+  as Hubble applies them.
+- `gr8s dashboard` opens one page with two tabs, Headlamp and Hubble UI, both
+  embedded in the image and served on one loopback port under one unguessable
+  session path. Hubble UI's backend is implemented in gr8s: the namespace
+  list, service map and flow table. It prints only its URL; `--verbose` logs
+  every request and server error to stderr.
+- `DashboardTab` (`dashboard.gr8s.io/v1`, cluster-scoped) adds a tab for one
+  of the cluster's apps to every `gr8s dashboard`, proxied through the cluster
+  API's `services/proxy` and served from a loopback origin of its own, behind a
+  per-tab secret, away from the Headlamp proxy's credentials.
+- L7 flows for Gateway traffic: each HTTP request the Gateway proxy answers is
+  a flow with its method, host, path (never the query string), status,
+  latency and route, shown by `doctor observe`, Hubble and Hubble UI.
+- On foreign clusters, `gr8s net-agent` collects its node's flow events and
+  serves them on loopback (`--flow-port`, default 4246). `doctor observe` and
+  the dashboard's Hubble tab reach every agent through the cluster API's `pods/portforward`
+  when the cluster doesn't serve the gr8s.io API, so a reader needs only
+  Kubernetes RBAC and no node opens a port.
+
+### Fixed
+
+- An IPv4-only Pod's interface has IPv6 turned off, so the kernel's IPv6
+  link-local traffic (router solicitations, MLD reports) is no longer dropped
+  and counted as spoofed by its guard.
+- Nodes no longer flap NotReady while a busy operation runs through a member
+  that doesn't hold their sessions. The leader relayed each frame of an
+  agent's output to the member that started the operation with an RPC, inside
+  the loop that also reads that agent's heartbeats, and every node's frames
+  waited on one link. Following flows through such a member delayed every
+  node's heartbeats past their lease. Output for another member now waits in
+  a queue of its own, sent by its own thread, and a node sends its flow events
+  in batches (podster-8kl).
+- Requests through the `pods/proxy` and `services/proxy` subresources, and
+  webhook calls, are fast again on a member that doesn't hold the node's
+  session. Since v1.37.2-gr8s.3 each write the API server made on a connection
+  through an agent went to the node as its own message, and through another
+  member each was a round trip: about 2.3 seconds per request, so a dashboard
+  tab for an app like Grafana appeared blank for minutes. A connection now sends
+  what it has gathered when it is flushed (podster-tjp).
+- Pulls of images not yet on a node work again from registries that redirect
+  blobs to a signed CDN URL, such as quay.io. Since v1.37.2-gr8s.3 the image
+  mirror escaped such a URL's query a second time, the CDN refused it with
+  403, and containerd saw the mirror answer 503 and retried without end
+  (podster-dq2).
+
 ## [v1.37.2-gr8s.3] — 2026-11-22
 
 Fourth trial pre-release. Agents connect to the control plane, and the control

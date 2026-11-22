@@ -167,7 +167,7 @@
          (created nil) (writes nil))
     (unwind-protect
          (progn
-           (is (= 30 (length (gr8s.network::egress-policy-object-map-specs object))))
+           (is (= 32 (length (gr8s.network::egress-policy-object-map-specs object))))
            (is (= 11 (length (gr8s.network::egress-policy-object-program-specs object))))
            (signals gr8s.network::cni-error
              (gr8s.network::load-egress-policy-object object (rest replacements)
@@ -180,7 +180,7 @@
                           map)
             :load-programs
             (lambda (specs maps)
-              (is (= 30 (length maps)))
+              (is (= 32 (length maps)))
               (loop for spec in specs for fd from 3000
                     for name = (getf spec :name)
                     collect (cons name (whistler/loader::make-prog-info
@@ -189,7 +189,9 @@
             :update (lambda (map key value)
                       (is (equal "gr8s_nat_stages" (whistler/loader:map-info-name map)))
                       (push (cons key value) writes)))
-           (is (= 17 (length created)))
+           ;; The 17 local maps, and a private flow-event ring.
+           (is (= 19 (length created)))
+           (is (member "flow_events" created :test #'equal))
            (is (notany (lambda (name) (assoc name replacements :test #'equal)) created))
            (is (= 8 (length writes)))
            (is (equalp (loop for index below 8 collect (gr8s.network::service-lb-bytes index 4))

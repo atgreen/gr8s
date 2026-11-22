@@ -437,7 +437,9 @@ prevResult and only installs, checks, or removes its policy datapath."
        (attach-tcx (lambda (fd index direction)
                      (whistler/loader:attach-tcx fd index :direction direction)))
        (close-fd #'sb-posix:close)
-       (close-object #'close-egress-policy-object))
+       (close-object #'close-egress-policy-object)
+       (open-flow-events #'open-flow-events-ring)
+       (open-flow-config #'open-flow-config))
   "Install, or re-converge, this Pod's egress and ingress guards and their BPF
    maps. Opens and validates any already-pinned maps, compiles and loads the
    Whistler object, seeds the endpoint-identity map, pins the maps, and attaches
@@ -486,6 +488,14 @@ prevResult and only installs, checks, or removes its policy datapath."
                  (let ((fd (funcall open-pinned path)))
                    (push (cons name fd) opened)
                    (funcall validate-map fd name)))))
+           ;; The node's flow-event ring and settings, when its agent collects flow events.
+           (let* ((root (cni-configuration-map-pin-root configuration))
+                  (ring (and root (funcall open-flow-events root)))
+                  (config (and root (funcall open-flow-config root))))
+             (when ring
+               (push (cons +flow-events-map-name+ (whistler/loader:map-info-fd ring)) opened))
+             (when config
+               (push (cons +flow-config-map-name+ (whistler/loader:map-info-fd config)) opened)))
            (let ((*cni-service-packets* (cni-service-profile configuration)))
              (setf object (funcall open-object (cni-configuration-program configuration))))
            (funcall load-object object opened)
@@ -531,9 +541,11 @@ prevResult and only installs, checks, or removes its policy datapath."
                       (cni-configuration-service-return-address configuration)))
       (when link-fd (funcall close-fd link-fd))
       (let ((owned (when object
-                     (loop for spec in (append (cni-local-policy-map-specs configuration)
-                                              (cni-shared-service-map-specs configuration))
-                           for map = (ignore-errors (funcall object-map object (first spec)))
+                     (loop for name in (list* +flow-events-map-name+ +flow-config-map-name+
+                                              (mapcar #'first
+                                                      (append (cni-local-policy-map-specs configuration)
+                                                              (cni-shared-service-map-specs configuration))))
+                           for map = (ignore-errors (funcall object-map object name))
                            when map collect (funcall map-fd map)))))
         (when object (funcall close-object object))
         (dolist (entry opened)

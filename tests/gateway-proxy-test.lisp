@@ -629,3 +629,46 @@
                  (ignore-errors (usocket:socket-close socket)))))
         (gr8s.controllers::stop-gateway-listener gateway)
         (funcall stop-backend)))))
+
+(test gateway-reports-each-request-as-an-l7-flow
+  (let* ((backend (hunchentoot:start (make-instance 'gw-echo-acceptor :address "127.0.0.1" :port 0)))
+         (backend-port (hunchentoot:acceptor-port backend))
+         (routes (list (gr8s.controllers::make-gw-route
+                        :namespace "shop" :name "web" :hostnames '("app.example.com")
+                        :rules (list (gr8s.controllers::make-gw-rule
+                                      :matches (list (gr8s.controllers::make-gw-match :path-type :prefix :path "/"))
+                                      :backends (list (gr8s.controllers::make-gw-backend :name "echo" :port backend-port)))))))
+         (gateway (gr8s.controllers::start-gateway-listener
+                   :port 0 :router (gr8s.controllers::build-gateway-router routes) :name "shop/edge"
+                   :resolver (lambda (b) (declare (ignore b)) (values "127.0.0.1" backend-port))))
+         (listener-port (hunchentoot:acceptor-port gateway))
+         (flows nil) (lock (bt:make-lock)))
+    ;; Listener threads see the global value, not a binding.
+    (setf gr8s.controllers::*gateway-flow-sink*
+          (lambda (flow) (bt:with-lock-held (lock) (push flow flows))))
+    (unwind-protect
+         (progn
+           (is (= 200 (gw-raw-request listener-port "app.example.com" "/cart?token=secret")))
+           (is (= 404 (gw-raw-request listener-port "nope.org" "/x")))
+           (let ((flows (bt:with-lock-held (lock) (reverse flows))))
+             (is (= 2 (length flows)))
+             (let* ((flow (first flows)) (l7 (gethash "l7" flow)))
+               (is (equal "FORWARDED" (gethash "verdict" flow)))
+               (is (equal "ingress" (gethash "direction" flow)))
+               (is (equal "127.0.0.1" (gethash "podAddress" flow)))
+               (is (= backend-port (gethash "podPort" flow)))
+               (is (equal "127.0.0.1" (gethash "peerAddress" flow)))
+               (is (equal (list "GET" "app.example.com" "/cart" 200 listener-port)
+                          (list (gethash "method" l7) (gethash "host" l7) (gethash "path" l7)
+                                (gethash "code" l7) (gethash "listenerPort" l7))))
+               (is (equal "shop/web" (gethash "route" l7)))
+               ;; What the proxy knows of the backend, even when its address names a node.
+               (is (equal '("shop" "echo") (list (gethash "namespace" flow) (gethash "service" flow))))
+               (is (<= 0 (gethash "latencyNs" l7))))
+             ;; No route, no backend: the request is still a flow, of nobody's Pod.
+             (let ((flow (second flows)))
+               (is (= 404 (gethash "code" (gethash "l7" flow))))
+               (is (null (nth-value 1 (gethash "podAddress" flow)))))))
+      (setf gr8s.controllers::*gateway-flow-sink* nil)
+      (gr8s.controllers::stop-gateway-listener gateway)
+      (hunchentoot:stop backend))))

@@ -1,0 +1,436 @@
+// SPDX-FileCopyrightText: 2026 Anthony Green
+// SPDX-License-Identifier: Apache-2.0
+//
+// The part of Hubble's Observer API gr8s serves (podster-e9a.5), so the stock
+// `hubble` CLI and UI can read gr8s flow events. Trimmed from Cilium's
+// api/v1/observer/observer.proto and api/v1/flow/flow.proto (Apache-2.0):
+// messages, field numbers and enum values are unchanged, so it is wire
+// compatible; fields gr8s never fills are left out, and the google.protobuf
+// Timestamp and UInt32Value messages are restated here with their wire layout,
+// as the other trimmed protos in this directory restate what they import.
+// FlowFilter keeps every field Hubble's clients send, so that a filter gr8s
+// can't apply is reported, not silently widened.
+//
+// The end of the file adds the messages of Hubble UI's own backend API, from
+// cilium/hubble-ui backend/proto/ui/*.proto and customprotocol.proto
+// (Apache-2.0), for `gr8s hubble ui`. They travel as plain HTTP bodies, not
+// gRPC, so only their field numbers matter.
+
+syntax = "proto3";
+
+package observer;
+
+service Observer {
+  rpc GetFlows(GetFlowsRequest) returns (stream GetFlowsResponse) {}
+  rpc GetNodes(GetNodesRequest) returns (GetNodesResponse) {}
+  rpc ServerStatus(ServerStatusRequest) returns (ServerStatusResponse) {}
+}
+
+// google.protobuf.Timestamp
+message Timestamp {
+  int64 seconds = 1;
+  int32 nanos = 2;
+}
+
+// google.protobuf.UInt32Value
+message UInt32Value {
+  uint32 value = 1;
+}
+
+// google.protobuf.BoolValue
+message BoolValue {
+  bool value = 1;
+}
+
+message ServerStatusRequest {}
+
+message ServerStatusResponse {
+  uint64 num_flows = 1;
+  uint64 max_flows = 2;
+  uint64 seen_flows = 3;
+  uint64 uptime_ns = 4;
+  UInt32Value num_connected_nodes = 5;
+  UInt32Value num_unavailable_nodes = 6;
+  repeated string unavailable_nodes = 7;
+  string version = 8;
+  double flows_rate = 9;
+}
+
+message GetFlowsRequest {
+  uint64 number = 1;
+  bool follow = 3;
+  repeated FlowFilter blacklist = 5;
+  repeated FlowFilter whitelist = 6;
+  Timestamp since = 7;
+  Timestamp until = 8;
+  bool first = 9;
+}
+
+message GetFlowsResponse {
+  oneof response_types {
+    Flow flow = 1;
+  }
+  string node_name = 1000;
+  Timestamp time = 1001;
+}
+
+message GetNodesRequest {}
+
+message GetNodesResponse {
+  repeated Node nodes = 1;
+}
+
+// relay.NodeState
+enum NodeState {
+  UNKNOWN_NODE_STATE = 0;
+  NODE_CONNECTED = 1;
+  NODE_UNAVAILABLE = 2;
+  NODE_GONE = 3;
+  NODE_ERROR = 4;
+}
+
+message Node {
+  string name = 1;
+  string version = 2;
+  string address = 3;
+  NodeState state = 4;
+}
+
+// flow.Flow
+message Flow {
+  Timestamp time = 1;
+  Verdict verdict = 2;
+  IP IP = 5;
+  Layer4 l4 = 6;
+  Endpoint source = 8;
+  Endpoint destination = 9;
+  FlowType Type = 10;
+  string node_name = 11;
+  Layer7 l7 = 15;
+  CiliumEventType event_type = 19;
+  TrafficDirection traffic_direction = 22;
+  uint32 policy_match_type = 23;
+  DropReason drop_reason_desc = 25;
+  BoolValue is_reply = 26;
+  // Deprecated in Cilium, but what `hubble observe` prints in parentheses.
+  string Summary = 100000;
+  repeated Policy egress_denied_by = 21004;
+  repeated Policy ingress_denied_by = 21005;
+}
+
+// Cilium monitor message types: 1 drop (sub_type: the drop reason), 4 trace,
+// 5 policy verdict.
+message CiliumEventType {
+  int32 type = 1;
+  int32 sub_type = 2;
+}
+
+enum FlowType {
+  UNKNOWN_TYPE = 0;
+  L3_L4 = 1;
+  L7 = 2;
+  SOCK = 3;
+}
+
+enum Verdict {
+  VERDICT_UNKNOWN = 0;
+  FORWARDED = 1;
+  DROPPED = 2;
+  ERROR = 3;
+  AUDIT = 4;
+  REDIRECTED = 5;
+  TRACED = 6;
+  TRANSLATED = 7;
+}
+
+enum TrafficDirection {
+  TRAFFIC_DIRECTION_UNKNOWN = 0;
+  INGRESS = 1;
+  EGRESS = 2;
+}
+
+enum IPVersion {
+  IP_NOT_USED = 0;
+  IPv4 = 1;
+  IPv6 = 2;
+}
+
+// The flow.DropReason values gr8s reports.
+enum DropReason {
+  DROP_REASON_UNKNOWN = 0;
+  INVALID_SOURCE_IP = 132;
+  POLICY_DENIED = 133;
+  INVALID_PACKET_DROPPED = 134;
+  UNSUPPORTED_L3_PROTOCOL = 139;
+}
+
+enum L7FlowType {
+  UNKNOWN_L7_TYPE = 0;
+  REQUEST = 1;
+  RESPONSE = 2;
+  SAMPLE = 3;
+}
+
+// A Gateway request's L7 record, as Cilium's proxy reports one.
+message Layer7 {
+  L7FlowType type = 1;
+  uint64 latency_ns = 2;
+  oneof record {
+    HTTP http = 101;
+  }
+}
+
+message HTTP {
+  uint32 code = 1;
+  string method = 2;
+  string url = 3;
+  string protocol = 4;
+}
+
+message IP {
+  string source = 1;
+  string destination = 2;
+  IPVersion ipVersion = 3;
+}
+
+message Layer4 {
+  oneof protocol {
+    TCP TCP = 1;
+    UDP UDP = 2;
+    ICMPv4 ICMPv4 = 3;
+    ICMPv6 ICMPv6 = 4;
+    SCTP SCTP = 5;
+  }
+}
+
+message TCP {
+  uint32 source_port = 1;
+  uint32 destination_port = 2;
+}
+
+message UDP {
+  uint32 source_port = 1;
+  uint32 destination_port = 2;
+}
+
+message SCTP {
+  uint32 source_port = 1;
+  uint32 destination_port = 2;
+}
+
+message ICMPv4 {
+  uint32 type = 1;
+  uint32 code = 2;
+}
+
+message ICMPv6 {
+  uint32 type = 1;
+  uint32 code = 2;
+}
+
+message Workload {
+  string name = 1;
+  string kind = 2;
+}
+
+message Endpoint {
+  uint32 ID = 1;
+  uint32 identity = 2;
+  string namespace = 3;
+  repeated string labels = 4;
+  string pod_name = 5;
+  repeated Workload workloads = 6;
+  string cluster_name = 7;
+}
+
+message Policy {
+  string name = 1;
+  string namespace = 2;
+  repeated string labels = 3;
+  uint64 revision = 4;
+  string kind = 5;
+}
+
+message FlowFilter {
+  repeated string source_ip = 1;
+  repeated string source_pod = 2;
+  repeated string destination_ip = 3;
+  repeated string destination_pod = 4;
+  repeated Verdict verdict = 5;
+  repeated string protocol = 12;
+  repeated string source_port = 13;
+  repeated string destination_port = 14;
+  repeated string node_name = 24;
+  repeated IPVersion ip_version = 25;
+  repeated TrafficDirection traffic_direction = 30;
+  repeated DropReason drop_reason_desc = 33;
+  // Refused: gr8s can't apply these.
+  repeated string source_fqdn = 7;
+  repeated string destination_fqdn = 8;
+  repeated string http_status_code = 9;
+  repeated string source_label = 10;
+  repeated string destination_label = 11;
+  repeated string source_service = 16;
+  repeated string destination_service = 17;
+  repeated string dns_query = 18;
+  repeated uint32 source_identity = 19;
+  repeated uint32 destination_identity = 20;
+  repeated string http_method = 21;
+  repeated string http_path = 22;
+  repeated bool reply = 15;
+}
+
+// Hubble UI: customprotocol.Message and its parts.
+message Message {
+  Meta meta = 1;
+  Body body = 2;
+}
+
+message Meta {
+  string trace_id = 1;
+  string channel_id = 2;
+  string route_name = 3;
+  bool is_terminated = 4;
+  bool is_not_ready = 5;
+  bool is_error = 6;
+  repeated MessageError errors = 7;
+  int64 poll_delay_ms = 8;
+  bool is_empty = 9;
+}
+
+// customprotocol.Error
+message MessageError {
+  uint32 kind = 1;
+  uint32 code = 2;
+  string message = 3;
+}
+
+message Body {
+  bytes content = 1;
+}
+
+// Hubble UI: ui.proto
+enum EventType {
+  UNKNOWN_EVENT = 0;
+  FLOW = 1;
+  K8S_NAMESPACE_STATE = 2;
+  SERVICE_STATE = 3;
+  SERVICE_LINK_STATE = 4;
+  FLOWS = 5;
+  STATUS = 6;
+}
+
+enum StateChange {
+  UNKNOWN_STATE_CHANGE = 0;
+  ADDED = 1;
+  MODIFIED = 2;
+  DELETED = 3;
+  EXISTS = 4;
+}
+
+enum IPProtocol {
+  UNKNOWN_IP_PROTOCOL = 0;
+  TCP = 1;
+  UDP = 2;
+  ICMP_V4 = 3;
+  ICMP_V6 = 4;
+}
+
+message GetEventsRequest {
+  repeated EventType event_types = 1;
+  repeated EventFilter blacklist = 2;
+  repeated EventFilter whitelist = 3;
+  Timestamp since = 4;
+}
+
+message EventFilter {
+  oneof filter {
+    FlowFilter flow_filter = 2;
+  }
+}
+
+message GetEventsResponse {
+  string node = 1;
+  Timestamp timestamp = 2;
+  repeated Event events = 3;
+}
+
+message Event {
+  oneof event {
+    ServiceState service_state = 5;
+    ServiceLinkState service_link_state = 6;
+    Flows flows = 7;
+  }
+}
+
+message Flows {
+  repeated Flow flows = 1;
+}
+
+message Service {
+  string id = 1;
+  string name = 2;
+  string namespace = 3;
+  repeated string labels = 4;
+  repeated string dns_names = 5;
+  Timestamp creation_timestamp = 9;
+  repeated Workload workloads = 10;
+  uint32 identity = 12;
+}
+
+message ServiceState {
+  Service service = 1;
+  StateChange type = 2;
+}
+
+message ServiceLink {
+  string id = 1;
+  string source_id = 2;
+  string destination_id = 3;
+  uint32 destination_port = 4;
+  IPProtocol ip_protocol = 5;
+  Verdict verdict = 6;
+}
+
+message ServiceLinkState {
+  ServiceLink service_link = 1;
+  StateChange type = 2;
+}
+
+message GetControlStreamResponse {
+  oneof event {
+    NamespaceStates namespaces = 1;
+    Notification notification = 2;
+  }
+}
+
+message NamespaceStates {
+  repeated NamespaceState namespaces = 1;
+}
+
+message NamespaceState {
+  NamespaceDescriptor namespace = 1;
+  StateChange type = 2;
+}
+
+message NamespaceDescriptor {
+  string id = 1;
+  string name = 2;
+  Timestamp creation_timestamp = 3;
+}
+
+message Notification {
+  oneof notification {
+    GetStatusResponse status = 3;
+  }
+}
+
+message GetStatusResponse {
+  GetNodesResponse nodes = 1;
+  ServerStatusResponse server_status = 2;
+  FlowStats flows = 4;
+}
+
+message FlowStats {
+  float per_second = 1;
+}

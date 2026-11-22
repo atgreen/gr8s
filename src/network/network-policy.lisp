@@ -280,18 +280,35 @@ Pods or Namespaces: defaulted policyTypes, and rules whose peers are only ipBloc
                        collect (list name (%np-proto-keyword (gethash "protocol" port))
                                      (gethash "containerPort" port)))))
 
+(defun pod-status-addresses (status)
+  "The addresses Pod STATUS reports, podIPs first, else podIP."
+  (and (hash-table-p status)
+       (let ((plural (gethash "podIPs" status)))
+         (or (and (vectorp plural)
+                  (loop for entry across plural
+                        for address = (and (hash-table-p entry) (gethash "ip" entry))
+                        when (stringp address) collect address))
+             (let ((single (gethash "podIP" status)))
+               (and (stringp single) (list single)))))))
+
+(defun pod-object-np-pod (object)
+  "The np-pod for Pod OBJECT as the Kubernetes API returns it, or NIL when it has
+no address or has finished."
+  (let* ((status (gethash "status" object))
+         (addresses (pod-status-addresses status))
+         (metadata (gethash "metadata" object (core-object))))
+    (when (and addresses
+               (not (member (gethash "phase" status) '("Succeeded" "Failed") :test #'equal)))
+      (make-np-pod :name (gethash "name" metadata) :namespace (gethash "namespace" metadata)
+                   :labels (gethash "labels" metadata (core-object))
+                   :ip (first addresses) :ips addresses
+                   :ports (np-container-ports object)))))
+
 (defun network-policy-cluster-pods (store)
   "Every nonterminal Pod with at least one address that policy can select."
   (loop for pod in (list-pods store)
         for status = (gr8s.store:pod-reported-status store pod)
-        for addresses = (and (hash-table-p status)
-                             (let ((plural (gethash "podIPs" status)))
-                               (or (and (vectorp plural)
-                                        (loop for entry across plural
-                                              for address = (and (hash-table-p entry) (gethash "ip" entry))
-                                              when (stringp address) collect address))
-                                   (let ((single (gethash "podIP" status)))
-                                     (and (stringp single) (list single))))))
+        for addresses = (pod-status-addresses status)
         for object = (pod-to-object pod)
         when (and addresses
                   (not (member (gethash "phase" status) '("Succeeded" "Failed") :test #'equal)))

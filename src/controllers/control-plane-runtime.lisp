@@ -302,6 +302,20 @@ client holds the node back instead of its output piling up here."
        :stdin stdin :stdout stdout :stderr stderr :tty tty
        :acknowledges-output t)))))
 
+(defun start-control-plane-flows-session (runtime node-name &key follow)
+  "Ask NODE-NAME for its recent flow events, and with FOLLOW its new ones, returning an exec
+session whose STDOUT carries one JSON object per line."
+  (make-control-plane-exec-session
+   (queue-node-operation
+    (control-plane-runtime-node-server runtime)
+    node-name
+    (make-instance
+     'gr8s.node.v1::operation-request
+     :operation-id (generate-uid)
+     :kind gr8s.node.v1::+operationkind-operation_kind_flows+
+     :flows-follow follow
+     :acknowledges-output t))))
+
 (defmethod runtime-start-exec-session
     ((runtime control-plane-runtime) uid container command
      &key stdin stdout stderr tty)

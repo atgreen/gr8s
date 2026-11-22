@@ -60,6 +60,7 @@ Checkup is an alias for diagnose without a target. Host retains the local host c
                             (values value state))))))
           (augment-causal-report report observed kind ns getter)
           (augment-pod-events report observed kind ns getter)
+          (augment-pod-flows report observed kind ns getter)
           (augment-pod-placement report observed kind getter)
           (list report observed (resource-links observed kind ns))))
     (error (condition)

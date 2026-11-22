@@ -101,6 +101,44 @@
     (bt:with-lock-held (*gateway-metrics-lock*)
       (incf (gethash key *gateway-request-counts* 0)))))
 
+(defvar *gateway-flow-sink* nil
+  "A function given one flow object, as the agent's flow events are, for each request a
+Gateway listener answers (podster-e9a.8), or NIL. The agent sets it while it collects.")
+
+(defun gateway-request-flow (acceptor request dispatch backend-host backend-port started)
+  "The flow event for REQUEST, answered by ACCEPTOR through DISPATCH, if it matched, to
+BACKEND-HOST:BACKEND-PORT, if one was reached, having started at internal time STARTED.
+The backend Pod is the flow's Pod and the client its peer. The path keeps no query. The
+backend's namespace and Service are recorded too: a host-network backend's address
+names its node, not a Pod."
+  (let ((flow (core-object "verdict" "FORWARDED" "direction" "ingress" "protocol" "TCP"
+                           "peerAddress" (hunchentoot:remote-addr request)
+                           "peerPort" (hunchentoot:remote-port request)
+                           "l7" (core-object
+                                 "type" "http"
+                                 "method" (symbol-name (hunchentoot:request-method request))
+                                 "host" (or (gateway-request-host request) "")
+                                 "path" (hunchentoot:script-name request)
+                                 "code" (hunchentoot:return-code*)
+                                 "latencyNs" (round (* (- (get-internal-real-time) started) 1000000000)
+                                                    internal-time-units-per-second)
+                                 ;; Gateways on one port share its listener, so the port
+                                 ;; names it; the route names the HTTPRoute.
+                                 "listenerPort" (hunchentoot:acceptor-port acceptor)))))
+    (when (and dispatch (gw-dispatch-route-key dispatch))
+      (setf (gethash "route" (gethash "l7" flow)) (gw-dispatch-route-key dispatch)))
+    (let ((backend (and dispatch (gw-dispatch-backend dispatch)))
+          (route-key (and dispatch (gw-dispatch-route-key dispatch))))
+      (when backend
+        (setf (gethash "namespace" flow)
+              (or (gw-backend-namespace backend)
+                  (and route-key (subseq route-key 0 (position #\/ route-key))))
+              (gethash "service" flow) (gw-backend-name backend))))
+    (when backend-host
+      (setf (gethash "podAddress" flow) backend-host)
+      (when (integerp backend-port) (setf (gethash "podPort" flow) backend-port)))
+    flow))
+
 (defun gateway-metrics-text ()
   "Render the gateway request counters in Prometheus text format."
   (with-output-to-string (stream)
@@ -342,7 +380,9 @@
             (gateway-error-response 502 "the gateway backend connection failed: ~A" condition))))))
 
 (defmethod hunchentoot:acceptor-dispatch-request ((acceptor gateway-acceptor) request)
-  (let ((dispatch (gateway-dispatch-for-request acceptor request)))
+  (let ((dispatch (gateway-dispatch-for-request acceptor request))
+        (started (get-internal-real-time))
+        (backend-host nil) (backend-port nil))
     (prog1
         (cond
           ((null dispatch)
@@ -362,6 +402,7 @@
              (if (null backend)
                  (gateway-error-response 500 "Matched rule has no backend")
                  (multiple-value-bind (host port invalid-reason) (gateway-resolve-backend acceptor backend)
+                   (setf backend-host host backend-port port)
                    (if host
                        (funcall (if (gateway-websocket-request-p) #'gateway-upgrade-exchange #'gateway-proxy-exchange)
                                 dispatch request
@@ -371,7 +412,12 @@
                                                (gw-backend-name backend))))))))
       (gateway-count-request (gateway-acceptor-name acceptor)
                              (and dispatch (gw-dispatch-route-key dispatch))
-                             (hunchentoot:return-code*)))))
+                             (hunchentoot:return-code*))
+      (let ((sink *gateway-flow-sink*))
+        (when sink
+          ;; A flow is an observation: failing to make one never fails the request.
+          (ignore-errors
+           (funcall sink (gateway-request-flow acceptor request dispatch backend-host backend-port started))))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Backend resolution + listener lifecycle.

@@ -333,6 +333,10 @@ registry serving a cert-manager certificate from the cluster's ca issuer."
                       (unless (member value '("vxlan" "wireguard") :test #'string=)
                         (error "overlay backend must be vxlan or wireguard"))
                       (setf (getf options :overlay-backend) value))
+                     ((string= option "--flow-events")
+                      (unless (member value '("connections" "drops") :test #'string=)
+                        (error "--flow-events must be connections or drops"))
+                      (setf (getf options :flow-events) value))
                      ((string= option "--pod-network-egress")
                       (unless (member value '("agent" "direct") :test #'string=)
                         (error "Pod network egress must be agent or direct"))
@@ -519,6 +523,10 @@ registry serving a cert-manager certificate from the cluster's ca issuer."
                        (getf options :wireguard-endpoints) value)))
                ((string= option "--server")
                 (setf (getf options :server) value))
+               ((string= option "--flow-events")
+                (unless (member value '("connections" "drops") :test #'string=)
+                  (error "--flow-events must be connections or drops"))
+                (setf (getf options :flow-events) value))
                ((string= option "--token")
                 (setf (getf options :token) value))
                ((string= option "--ca-pin")
@@ -867,7 +875,8 @@ authenticated tunnel as slynk and launches ICL's browser mode (icl -b
            plain)
        socket host port base-path))))
 
-(defun write-debug-http-request (stream method host port target token &key websocket-key)
+(defun write-debug-http-request (stream method host port target token
+                                 &key websocket-key (websocket-protocol "gr8s.slynk.v1"))
   (write-sequence
    (gr8s.protocol::ascii-octets
     (with-output-to-string (request)
@@ -881,7 +890,7 @@ authenticated tunnel as slynk and launches ICL's browser mode (icl -b
           (line "Upgrade: websocket")
           (line "Sec-WebSocket-Version: 13")
           (line "Sec-WebSocket-Key: ~A" websocket-key)
-          (line "Sec-WebSocket-Protocol: gr8s.slynk.v1"))
+          (line "Sec-WebSocket-Protocol: ~A" websocket-protocol))
         (when token (line "Authorization: Bearer ~A" token))
         ;; No request here has a body, and a POST must say so.
         (when (equal method "POST") (line "Content-Length: 0"))
@@ -940,20 +949,21 @@ authenticated tunnel as slynk and launches ICL's browser mode (icl -b
 (defun random-websocket-key ()
   (ag-grpc:base64-encode (secure-random-octets 16)))
 
-(defun open-debug-websocket (config target)
+(defun open-debug-websocket (config target &key (protocol "gr8s.slynk.v1"))
   (multiple-value-bind (stream socket host port base-path) (open-debug-api-stream config)
     (let ((key (random-websocket-key)))
       (handler-case
           (progn
             (write-debug-http-request stream "GET" host port
                                       (concatenate 'string base-path target)
-                                      (getf config :token) :websocket-key key)
+                                      (getf config :token) :websocket-key key
+                                      :websocket-protocol protocol)
             (multiple-value-bind (status headers)
                 (gr8s.protocol::parse-http-response-head
                  (gr8s.protocol::read-http-response-head stream))
               (declare (ignore headers))
               (unless (= status 101)
-                (error "Slynk API rejected the WebSocket upgrade with HTTP ~D" status)))
+                (error "the Kubernetes API rejected the WebSocket upgrade with HTTP ~D" status)))
             (values stream socket))
         (error (condition)
           (ignore-errors (close stream))
@@ -1088,6 +1098,8 @@ authenticated tunnel as slynk and launches ICL's browser mode (icl -b
   "Parse `gr8s doctor' options: --state-directory/--cluster-pod-cidr VALUE, or a
 bare positional state directory for backward compatibility.  A missing
 :state-directory leaves run-doctor to use the shared default-state-directory."
+  (when (equal (first arguments) "observe")
+    (return-from parse-doctor-options (parse-doctor-observe-options (rest arguments))))
   (let ((route (gr8s-diagnose:doctor-command-route arguments)))
     (when route (return-from parse-doctor-options route)))
   (when (equal (first arguments) "host") (setf arguments (rest arguments)))
@@ -1275,29 +1287,32 @@ transfer encoding (watch streams arrive chunked)."
   "Forward the browser REQUEST to the running cluster's API over an mTLS stream
 built from the kubeconfig CONFIG -- the same connection `gr8s debug slynk' uses --
 returning the upstream body as octets and copying its status and content type.
-METHOD is a keyword; TARGET is the apiserver path+query."
-  (let ((body (ignore-errors (hunchentoot:raw-post-data :force-binary t :request request))))
-    (multiple-value-bind (stream socket host port base-path) (open-debug-api-stream config)
-      (unwind-protect
-           (handler-case
-               (progn
-                 (write-dashboard-proxy-request
-                  stream (symbol-name method) host port
-                  (concatenate 'string base-path target) (getf config :token)
-                  (hunchentoot:header-in :content-type request) body)
-                 (multiple-value-bind (status headers)
-                     (gr8s.protocol::parse-http-response-head
-                      (gr8s.protocol::read-http-response-head stream))
-                   (setf (hunchentoot:return-code*) status
-                         (hunchentoot:content-type*)
-                         (or (cdr (assoc :content-type headers)) "application/json"))
-                   (read-dashboard-proxy-body stream headers)))
-             (error (condition)
-               (setf (hunchentoot:return-code*) hunchentoot:+http-bad-gateway+
-                     (hunchentoot:content-type*) "text/plain")
-               (format nil "gr8s dashboard upstream error: ~A" condition)))
-        (ignore-errors (close stream))
-        (ignore-errors (usocket:socket-close socket))))))
+METHOD is a keyword; TARGET is the apiserver path+query. An API server that can't
+be reached, or fails mid-answer, is a 502 with the reason, not a server error."
+  (let ((body (ignore-errors (hunchentoot:raw-post-data :force-binary t :request request)))
+        (stream nil) (socket nil))
+    (unwind-protect
+         (handler-case
+             (multiple-value-bind (opened opened-socket host port base-path) (open-debug-api-stream config)
+               (setf stream opened socket opened-socket)
+               (write-dashboard-proxy-request
+                stream (symbol-name method) host port
+                (concatenate 'string base-path target) (getf config :token)
+                (hunchentoot:header-in :content-type request) body)
+               (multiple-value-bind (status headers)
+                   (gr8s.protocol::parse-http-response-head
+                    (gr8s.protocol::read-http-response-head stream))
+                 (setf (hunchentoot:return-code*) status
+                       (hunchentoot:content-type*)
+                       (or (cdr (assoc :content-type headers)) "application/json"))
+                 (read-dashboard-proxy-body stream headers)))
+           (error (condition)
+             (setf (hunchentoot:return-code*) hunchentoot:+http-bad-gateway+
+                   (hunchentoot:content-type*) "text/plain")
+             (format nil "gr8s dashboard: the cluster API at ~A is unreachable: ~A"
+                     (getf config :server) condition)))
+      (when stream (ignore-errors (close stream)))
+      (when socket (ignore-errors (usocket:socket-close socket))))))
 
 ;;; The /wsMultiplexer live-update relay.
 ;;;
@@ -1515,6 +1530,9 @@ relaying every watch event back. Returns when the WebSocket closes."
         (ignore-errors (close client)))
       "")))
 
+(defvar *dashboard-verbose* nil
+  "True when `gr8s dashboard --verbose' asked for every request and server error on stderr.")
+
 (defclass dashboard-command-acceptor (hunchentoot:easy-acceptor)
   ((proxy-fn :initarg :proxy-fn :reader dashboard-acceptor-proxy-fn)
    (multiplexer-fn :initarg :multiplexer-fn :reader dashboard-acceptor-multiplexer-fn))
@@ -1532,12 +1550,13 @@ relaying every watch event back. Returns when the WebSocket closes."
 (defun parse-dashboard-options (arguments)
   "Parse `gr8s dashboard' options."
   (let ((options (list :command :dashboard
-                       :kubeconfig nil :port 8080 :browser nil :no-launch nil))
+                       :kubeconfig nil :port 8080 :browser nil :no-launch nil :verbose nil))
         (rest arguments))
     (loop while (and rest (uiop:string-prefix-p "--" (first rest)))
           do (let ((option (pop rest)))
                (cond
                  ((string= option "--no-launch") (setf (getf options :no-launch) t))
+                 ((string= option "--verbose") (setf (getf options :verbose) t))
                  (t
                   (unless rest (error "~A requires a value" option))
                   (let ((value (pop rest)))
@@ -1547,34 +1566,56 @@ relaying every watch event back. Returns when the WebSocket closes."
                       ((string= option "--browser") (setf (getf options :browser) value))
                       (t (error "unknown dashboard option: ~A" option))))))))
     (when rest
-      (error "usage: gr8s dashboard [--kubeconfig PATH] [--port N] [--browser CMD] [--no-launch]"))
+      (error "usage: gr8s dashboard [--kubeconfig PATH] [--port N] [--browser CMD] [--no-launch] [--verbose]"))
     options))
 
 (defun run-dashboard-command (options)
-  "Serve the embedded Kubernetes dashboard (Headlamp) and open it in a browser,
-like `icl -b'. A foreground process: it starts a loopback web server that serves
-the frontend and reverse-proxies the frontend's Kubernetes calls over mTLS to the
-running cluster (authenticating with the kubeconfig, as `gr8s debug slynk' does),
-opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
-/dashboard/<token> path so other local processes cannot reach it."
+  "Serve the embedded dashboards and open them in a browser, like `icl -b'. A
+foreground process: it starts a loopback web server with a page of two tabs, the
+Kubernetes dashboard (Headlamp) and Hubble UI, reverse-proxies Headlamp's
+Kubernetes calls over mTLS to the running cluster (authenticating with the
+kubeconfig, as `gr8s debug slynk' does), serves Hubble UI's backend from the
+cluster's flow events, opens the browser, and runs until Ctrl-C. Everything lives
+under an unguessable per-session token so other local processes cannot reach it.
+OPTIONS' :tab, \"hubble\", opens on the Hubble tab. Only with :verbose does it log
+each request and each worker error."
   (unless (gr8s.apiserver::dashboard-assets-present-p)
     (error "this gr8s build has no embedded dashboard; rebuild with 'make dashboard-assets'"))
   (let* ((kubeconfig (or (getf options :kubeconfig) (default-client-kubeconfig)))
          (config (dashboard-kubeconfig-config kubeconfig))
          (port (getf options :port 8080))
          (token (dashboard-session-token))
-         (url (format nil "http://127.0.0.1:~D/dashboard/~A/" port token))
-         (acceptor (make-instance 'dashboard-command-acceptor
+         (hubble-p (gr8s.apiserver::hubble-ui-assets-present-p))
+         (hubble-base (format nil "/hubble/~A/" token))
+         (hubble-backend (and hubble-p (make-hubble-ui-backend config)))
+         (apps (make-dashboard-apps config))
+         (url (format nil "http://127.0.0.1:~D/ui/~A/~@[#~A~]" port token (getf options :tab)))
+         (sweeper nil)
+         (verbose (getf options :verbose))
+         (acceptor (make-instance 'gr8s-dashboard-acceptor
                                   :address "127.0.0.1" :port port
+                                  :access-log-destination (and verbose *error-output*)
+                                  :message-log-destination (and verbose *error-output*)
+                                  :shell-path (format nil "/ui/~A/" token)
+                                  :tabs (append (list (list "headlamp" (format nil "/dashboard/~A/" token) "Headlamp"))
+                                                (and hubble-p (list (list "hubble" hubble-base "Hubble"))))
+                                  :hubble-backend hubble-backend :hubble-base (and hubble-p hubble-base)
+                                  :apps apps
                                   :proxy-fn (lambda (method target request)
                                               (dashboard-proxy-forward config method target request))
                                   :multiplexer-fn (lambda (request)
                                                     (serve-dashboard-multiplexer config request)))))
     ;; Acceptor worker threads read the base globally, so set it (one-shot process).
     (setf gr8s.apiserver::*dashboard-base* (format nil "/dashboard/~A" token)
+          *dashboard-verbose* verbose
           *shutdown-requested* nil)
     (install-shutdown-handlers)
     (hunchentoot:start acceptor)
+    (when hubble-backend
+      (setf sweeper (bt:make-thread (lambda ()
+                                      (loop until *shutdown-requested*
+                                            do (sleep 2) (expire-hubble-ui-channels hubble-backend)))
+                                    :name "gr8s hubble ui channels")))
     (unwind-protect
          (progn
            (format t "gr8s dashboard: ~A~%  cluster API ~A (via ~A)~%"
@@ -1591,7 +1632,12 @@ opens the browser, and runs until Ctrl-C. The UI lives under an unguessable
                  (format t "Serving the dashboard. Press Ctrl-C to stop.~%")))
            (finish-output)
            (loop until *shutdown-requested* do (sleep 0.2)))
-      (ignore-errors (hunchentoot:stop acceptor)))
+      (ignore-errors (hunchentoot:stop acceptor))
+      (stop-dashboard-apps apps)
+      (when sweeper (ignore-errors (bt:join-thread sweeper)))
+      (when hubble-backend
+        (maphash (lambda (id channel) (declare (ignore id)) (stop-hubble-ui-channel channel))
+                 (hubble-ui-backend-channels hubble-backend))))
     0))
 
 (defun parse-net-agent-options (arguments)
@@ -1625,10 +1671,36 @@ service LB, the Gateway -- is independently selectable; at least one must be."
                     (setf (getf options :listenerset-api-group) value))
                    ((equal option "--service-lb")
                     (setf (getf options :service-lb) (string= value "true")))
+                   ((equal option "--flow-events")
+                    (unless (member value '("connections" "drops") :test #'string=)
+                      (error "--flow-events must be connections or drops"))
+                    (setf (getf options :flow-events) value))
+                   ((equal option "--flow-port")
+                    (let ((port (parse-integer value)))
+                      (unless (<= 0 port 65535) (error "--flow-port must be 0 to 65535"))
+                      (setf (getf options :flow-port) port)))
                    (t (error "unknown net-agent option: ~A" option))))
     (unless (or (getf options :cni) (getf options :gateway) (getf options :service-lb))
       (error "net-agent with --cni false needs --gateway or --service-lb"))
     options))
+
+(defun start-net-agent-flows (view node-name bpf-root port)
+  "Collect this node's flow events from BPF-ROOT, naming Pods from VIEW, and serve them
+on loopback PORT (none with 0). Return a function that stops both, or NIL when the
+node can't collect them."
+  (handler-case
+      (let* ((collector (gr8s.agent::start-flow-collector
+                         bpf-root node-name view :pod-lookup #'gr8s.agent::reported-pod-at-address))
+             (listener (handler-case (and (plusp port) (gr8s.agent::start-flow-listener collector :port port))
+                         (error (condition)
+                           (format *error-output* "~&gr8s net-agent: flow port ~D unavailable: ~A~%" port condition)
+                           nil))))
+        (lambda ()
+          (when listener (gr8s.agent::stop-flow-listener listener))
+          (gr8s.agent::stop-flow-collector collector)))
+    (error (condition)
+      (format *error-output* "~&gr8s net-agent: flow events unavailable: ~A~%" condition)
+      nil)))
 
 (defun run-net-agent-command (options)
   "Run the foreign-cluster network services agent until shutdown is requested."
@@ -1661,11 +1733,18 @@ service LB, the Gateway -- is independently selectable; at least one must be."
      :wireguard-public-key wireguard-public-key
      :wireguard-listen-port (or (getf options :wireguard-listen-port) 51820)
      :extra-factory
-     (when (or (getf options :gateway) (getf options :service-lb))
+     (when (or (getf options :gateway) (getf options :service-lb) (getf options :cni))
        (lambda (view)
          (setf (gr8s.resources::foreign-resource-view-listenerset-group view)
                (getf options :listenerset-api-group))
          (let ((convergers '()) (stoppers '()))
+           (when (getf options :cni)
+             ;; The guards' flow events, for readers that come through the cluster
+             ;; API's pods/portforward. Without CAP_BPF the node just has none.
+             (let ((stopper (start-net-agent-flows
+                             view node-name (or (getf options :bpf-root) "/sys/fs/bpf/gr8s")
+                             (getf options :flow-port gr8s.agent::+default-flow-listener-port+))))
+               (when stopper (push stopper stoppers))))
            (when (getf options :gateway)
              (multiple-value-bind (converger stopper)
                  (gr8s.controllers:start-foreign-gateway
@@ -3801,7 +3880,7 @@ No HA API may start from member-local certificate state before this converges."
     ("backup" "Capture and verify encrypted state backups")
     ("restore" "Restore a state backup into a fresh state directory")
     ("skill" "Print guidance for operators and AI agents")
-    ("dashboard" "Open the Kubernetes dashboard (Headlamp) in a browser")
+    ("dashboard" "Open the dashboards (Headlamp and Hubble UI) in a browser")
     ("version" "Print version information") ("notices" "Print license notices")))
 
 (defun print-help-rows (rows)
@@ -3818,8 +3897,21 @@ No HA API may start from member-local certificate state before this converges."
       ((equal path '("doctor"))
        (page "Diagnose resources, survey a cluster, or check the host" "COMMAND [OPTIONS]"
              :commands '(("diagnose [KIND/NAME]" "Find the causes behind current problems")
+                          ("observe" "Show recent flows and the drops NetworkPolicies cause")
                           ("impact KIND/NAME" "Say what would stop working if a resource went away")
                           ("host" "Run local host checks (legacy doctor options)"))))
+      ((and (equal (first path) "doctor") (equal (second path) "observe"))
+       (page "Show the cluster's recent flow events: drops with their reason, and new connections"
+             "[OPTIONS]"
+             :options '(("-f, --follow" "Keep printing new events until interrupted")
+                        ("-n, --namespace NAME" "Only flows with a Pod in NAME on either side")
+                        ("--pod NAME" "Only flows of the Pod NAME, on either side")
+                        ("--node NAME" "Only flows seen on node NAME")
+                        ("--verdict dropped|forwarded" "Only drops, or only allowed connections")
+                        ("--kubeconfig FILE" "Cluster credentials (default $KUBECONFIG or ~/.kube/config)")
+                        ("--json" "Print each event as the API sends it, one JSON object per line")
+                        ("--serve" "Serve them as Hubble's Observer API instead, for the stock hubble CLI")
+                        ("--listen HOST:PORT" "Where --serve listens (default 127.0.0.1:4245, where hubble looks)"))))
       ((and (equal (first path) "doctor") (equal (second path) "impact"))
        (page "What would stop working if a resource went away; read-only"
              "KIND/NAME [OPTIONS]"
@@ -3847,12 +3939,13 @@ No HA API may start from member-local certificate state before this converges."
       ((equal path '("skill"))
        (simple "Print offline Markdown guidance for operators and AI agents" ""))
       ((equal path '("dashboard"))
-       (page "Serve the Kubernetes dashboard (Headlamp) and open it in a browser; runs until Ctrl-C"
+       (page "Serve the dashboards, Headlamp and Hubble UI, and open them in a browser; runs until Ctrl-C"
              "[OPTIONS]"
              :options '(("--kubeconfig PATH" "Cluster kubeconfig (default $KUBECONFIG or ~/.kube/config)")
                         ("--port N" "Loopback port to serve on (default 8080)")
                         ("--browser CMD" "Browser launcher (default xdg-open/open)")
                         ("--no-launch" "Print the dashboard URL instead of launching a browser")
+                        ("--verbose" "Log every request and server error to stderr")
                         ("--help, -h" "show help"))))
       ((equal path '("serve"))
        (page "Run the control plane and local node agent" "[OPTIONS]"
@@ -3871,6 +3964,7 @@ No HA API may start from member-local certificate state before this converges."
                         ("--pod-network-egress MODE" "agent (default) or direct: reach webhook, aggregated-API and proxied Pods and nodes through their agents, or by route")
                         ("--mtu N" "Pod interface MTU (default 1450; 1420 for wireguard)")
                         ("--runtime NAME" "containerd or fake")
+                        ("--flow-events WHAT" "connections (default): report every Pod's new connections and drops; drops: drops and isolated Pods' connections only")
                         ("--containerd-mode MODE" "managed or external")
                         ("--registry-ca HOST[=FILE]" "Verify registry HOST against FILE's CAs (default: the cluster CA); repeatable")
                         ("--cni-mode MODE" "native or external")
@@ -3889,6 +3983,7 @@ No HA API may start from member-local certificate state before this converges."
                         ("--node-address IPV4" "Node address to advertise")
                         ("--wireguard-endpoint NAME=IPV4:PORT" "WireGuard endpoint; repeatable")
                         ("--runtime NAME" "containerd or fake")
+                        ("--flow-events WHAT" "connections (default): report every Pod's new connections and drops; drops: drops and isolated Pods' connections only")
                         ("--containerd-mode MODE" "managed or external")
                         ("--registry-ca HOST[=FILE]" "Verify registry HOST against FILE's CAs (default: the cluster CA); repeatable")
                         ("--cni-mode MODE" "native or external")
@@ -3907,6 +4002,8 @@ No HA API may start from member-local certificate state before this converges."
                         ("--mtu N" "Pod interface MTU (default 1450)")
                         ("--overlay-backend NAME" "vxlan or wireguard (default vxlan)")
                         ("--wireguard-listen-port PORT" "Shared WireGuard UDP port (default 51820)")
+                        ("--flow-port PORT" "Loopback port serving flow events to port-forwards (default 4246; 0: none)")
+                        ("--flow-events WHAT" "connections (default) or drops: which flow events this node reports")
                         ("--help, -h" "show help"))))
       ((equal path '("cni-install"))
        (page "Install this binary as the node's CNI plugin (the net-agent init step)"
@@ -4103,6 +4200,9 @@ No HA API may start from member-local certificate state before this converges."
                                    (:witness "witness arbiter")))
               (install-stale-timeout-guard)
               (install-memory-hooks))
+            (when (member (getf options :command) '(:serve :agent :net-agent))
+              (setf gr8s.network::*report-every-connection*
+                    (not (equal "drops" (getf options :flow-events)))))
             (case (getf options :command)
               (:help (print-help (getf options :help-path)) 0)
               (:version (format t "gr8s ~A~%" +gr8s-version+) 0)
@@ -4157,6 +4257,8 @@ No HA API may start from member-local certificate state before this converges."
               (:member-transfer-leadership (run-member-transfer-leadership-command options))
               (:doctor-cluster
                (gr8s-diagnose:doctor-main (getf options :arguments)))
+              (:doctor-observe (run-doctor-observe options))
+              (:hubble-serve (run-hubble-serve options))
               (:doctor
                (if (plusp (apply #'run-doctor
                                  (append

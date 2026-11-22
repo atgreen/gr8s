@@ -41,7 +41,9 @@
 
 (defun service-nat-local-map-specs ()
   (loop for spec in (service-nat-map-specs)
-        unless (member (first spec) +service-nat-shared-map-names+ :test #'equal)
+        unless (or (member (first spec) +service-nat-shared-map-names+ :test #'equal)
+                   (member (first spec) (list +flow-events-map-name+ +flow-config-map-name+)
+                           :test #'equal))
           collect spec))
 
 (defun service-nat-tail-form (index)

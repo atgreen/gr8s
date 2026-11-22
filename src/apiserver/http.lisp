@@ -1489,6 +1489,11 @@ the request for drain diagnostics. Debug tunnels route without a lease."
                 (cl-ppcre:scan "^/apis/gr8s[.]io/v1/namespaces/[^/]+/traces$" path))
            (serve-trace-websocket store reconciler
                                   (nth 5 (uiop:split-string path :separator '(#\/)))))
+          ((and store (eq method :get) (string= path "/apis/gr8s.io/v1/flows"))
+           (serve-flows store reconciler nil))
+          ((and store (eq method :get)
+                (cl-ppcre:scan "^/apis/gr8s[.]io/v1/namespaces/[^/]+/flows$" path))
+           (serve-flows store reconciler (nth 5 (uiop:split-string path :separator '(#\/)))))
           ((and store (eq method :get)
                 (cl-ppcre:scan "^/apis/gr8s[.]io/v1/(nodes|controlplanemembers)/[^/]+/slynk$" path))
            (serve-slynk-websocket store runtime reconciler path))

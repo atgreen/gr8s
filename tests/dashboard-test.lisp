@@ -221,3 +221,11 @@
     (is (equal "{\"type\":\"ADDED\",\"object\":{\"n\":1}}" (first events)))
     (is (equal "MODIFIED" (gethash "type" (com.inuoe.jzon:parse (second events)))))
     (is (equal "DELETED" (gethash "type" (com.inuoe.jzon:parse (third events)))))))
+
+(test the-dashboard-command-logs-requests-only-when-asked
+  (let ((quiet (gr8s.server::parse-dashboard-options '("--no-launch")))
+        (verbose (gr8s.server::parse-dashboard-options '("--verbose" "--port" "8193"))))
+    (is-false (getf quiet :verbose))
+    (is-true (getf verbose :verbose))
+    (is (= 8193 (getf verbose :port))))
+  (signals error (gr8s.server::parse-dashboard-options '("--verbose" "extra"))))

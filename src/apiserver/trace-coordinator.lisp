@@ -52,6 +52,9 @@
                 "resources" (vector (core-object "name" "traces" "singularName" "trace"
                                                   "namespaced" t "kind" "Trace"
                                                   "verbs" #("create"))
+                                    (core-object "name" "flows" "singularName" "flow"
+                                                 "namespaced" t "kind" "Flow"
+                                                 "verbs" #("list" "watch"))
                                     (core-object "name" "patchrollouts" "singularName" "patchrollout"
                                                  "namespaced" nil "kind" "PatchRollout"
                                                  "verbs" #("create" "get" "list"))

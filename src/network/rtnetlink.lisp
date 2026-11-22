@@ -248,6 +248,26 @@ Refuse foreign links; concurrent endpoint ADD requests share this interface."
         (write-line "1" stream))))
   nil)
 
+(defun network-interface-ipv6-sysctl (name)
+  "The disable_ipv6 sysctl of interface NAME in the calling thread's network namespace."
+  (format nil "/proc/sys/net/ipv6/conf/~A/disable_ipv6" (validate-network-interface-name name)))
+
+(defun disable-network-interface-ipv6 (name)
+  "Turn IPv6 off on interface NAME, so it sends none of IPv6's link-local traffic
+(duplicate address detection, router solicitations, MLD reports). A kernel without
+IPv6 has nothing to turn off."
+  (let ((path (network-interface-ipv6-sysctl name)))
+    (when (probe-file path)
+      (with-open-file (stream path :direction :output :if-exists :overwrite)
+        (write-line "1" stream))))
+  nil)
+
+(defun network-interface-ipv6-disabled-p (name)
+  "True when interface NAME has no IPv6, whether turned off or absent from the kernel."
+  (let ((path (network-interface-ipv6-sysctl name)))
+    (or (not (probe-file path))
+        (string= "1" (string-trim '(#\Space #\Newline) (uiop:read-file-string path))))))
+
 (defun veth-scoped-gateway-addresses (gateways)
   "Return the IPv6 link-local gateways that must live on each host veth."
   (remove-if-not (lambda (address) (find #\: address)) gateways))
@@ -309,6 +329,10 @@ Refuse foreign links; concurrent endpoint ADD requests share this interface."
          (set-network-link-owner peer owner)
          (set-network-link-mtu peer mtu)
          (set-network-link-up "lo")
+         ;; An IPv4-only Pod's guard drops every IPv6 packet as spoofed; turn
+         ;; IPv6 off before the link comes up so the Pod never sends any.
+         (unless (some (lambda (item) (find #\: item)) addresses)
+           (disable-network-interface-ipv6 peer))
          (loop for item in addresses
                do (add-network-address peer item (if (find #\: item) 128 32)))
          (set-network-link-up peer)
