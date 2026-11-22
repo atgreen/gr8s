@@ -7,12 +7,19 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ## [Unreleased]
 
+## [v1.37.2-gr8s.4] — 2026-11-22
+
+Fifth trial pre-release, to fix image pulls on Fedora 44: since
+v1.37.2-gr8s.3 they failed, because registry TLS verification found no
+system CA bundle there.
+
 ### Fixed
 
-- Pulls from public registries work on Fedora 44 and RHEL 9 again. Since
+- Pulls from public registries work on Fedora 44 again. Since
   v1.37.2-gr8s.3, the image mirror verifies registry TLS against the system
   roots, but its TLS library looked only in older bundle locations, found
-  none on these systems, and refused every registry with "No trusted root
+  none there (the bundle is /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem),
+  and refused every registry with "No trusted root
   certificates available". gr8s now names the distribution's bundle in
   `SSL_CERT_FILE` at startup when neither it nor `SSL_CERT_DIR` is set
   (podster-8ak).
@@ -512,7 +519,8 @@ OpenSSL. Release artifacts cover Linux amd64 and arm64: binaries with
 checksums, tarballs carrying the installer and lifecycle scripts, and
 CycloneDX and SPDX SBOMs for the Lisp dependencies.
 
-[Unreleased]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.3...HEAD
+[Unreleased]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.4...HEAD
+[v1.37.2-gr8s.4]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.3...v1.37.2-gr8s.4
 [v1.37.2-gr8s.3]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.2...v1.37.2-gr8s.3
 [v1.37.2-gr8s.2]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.1...v1.37.2-gr8s.2
 [v1.37.2-gr8s.1]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.0...v1.37.2-gr8s.1
