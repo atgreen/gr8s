@@ -123,6 +123,8 @@ planner groups by: its name and its region/zone."
   ;; (VARIANT TARGET-MEMBER NODE-NAME PAYLOAD) -> accepting member id or NIL.
   ;; HA installs this peer relay; single-node servers leave it NIL.
   operation-router
+  ;; Origin member id -> ROUTED-OPERATION-OUTBOX of agent output on its way back there.
+  (routed-outboxes (make-hash-table :test #'equal))
   ;; Handles @control-plane/ID operation frames addressed to this process.
   member-operation-handler
   (lock (bt:make-lock "gr8s node sessions"))
@@ -778,8 +780,137 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
     (bt:condition-notify (pending-node-operation-finished operation)))
   operation)
 
+;;; Agent output for an operation another member started goes back to that member. An
+;;; agent's session reads its envelopes one at a time, heartbeats among them, so it only
+;;; queues that output: a relay is an RPC per frame, and a busy stream of them held up
+;;; every node's heartbeats until their leases expired (podster-8kl).
+
+(defparameter *routed-outbox-limit-bytes* (* 32 1024 1024)
+  "How much agent output may wait for one origin member. Past it, the operations whose
+output doesn't fit fail, rather than this member holding ever more of it.")
+
+(defparameter *routed-outbox-idle-seconds* 30
+  "How long a sender with nothing to send waits before it ends.")
+
+(defparameter +routed-origin-unavailable+ "Operation origin is unavailable")
+(defparameter +routed-origin-behind+ "Operation origin is not keeping up with its output")
+
+(defstruct (routed-operation-outbox (:constructor make-routed-operation-outbox (origin)))
+  "Agent output on its way to ORIGIN, the member that started its operations, in the order
+the agents sent it. One thread sends it."
+  origin
+  ;; (OPERATION VARIANT PAYLOAD) lists, oldest first, and the last cons for appending.
+  (frames nil)
+  (last nil)
+  (bytes 0)
+  ;; Set by the sender as it ends; a closed outbox takes nothing more.
+  (closed-p nil)
+  (lock (bt:make-lock "gr8s routed operation outbox"))
+  (ready (bt:make-condition-variable :name "gr8s routed operation outbox ready")))
+
+(defun routed-frame-bytes (variant payload)
+  (if (eq variant :operation-stream)
+      (length (slot-value payload 'gr8s.node.v1::data))
+      0))
+
+(defun routed-output-lost-p (operation)
+  "True once some of OPERATION's output couldn't go back to its origin, so the rest means
+nothing to its reader."
+  (let ((error (pending-node-operation-error operation)))
+    (or (eq error +routed-origin-unavailable+) (eq error +routed-origin-behind+))))
+
+(defun enqueue-routed-operation-frame (server operation variant payload)
+  "Queue (VARIANT PAYLOAD), agent output for OPERATION, for the member that started it.
+Return NIL, queueing nothing, when it is stream output that would take that member's
+outbox past *ROUTED-OUTBOX-LIMIT-BYTES*."
+  (let ((origin (pending-node-operation-origin-member operation))
+        (size (routed-frame-bytes variant payload)))
+    (loop
+      (let ((outbox nil) (new-p nil))
+        (bt:with-lock-held ((node-grpc-server-lock server))
+          (setf outbox (gethash origin (node-grpc-server-routed-outboxes server)))
+          (unless outbox
+            (setf outbox (make-routed-operation-outbox origin) new-p t
+                  (gethash origin (node-grpc-server-routed-outboxes server)) outbox)))
+        (when new-p (start-routed-operation-sender server outbox))
+        (bt:with-lock-held ((routed-operation-outbox-lock outbox))
+          ;; A sender that just ended has left the table; the next pass makes another.
+          (unless (routed-operation-outbox-closed-p outbox)
+            (when (and (plusp size)
+                       (> (+ size (routed-operation-outbox-bytes outbox)) *routed-outbox-limit-bytes*))
+              (return nil))
+            (let ((cell (list (list operation variant payload))))
+              (if (routed-operation-outbox-last outbox)
+                  (setf (cdr (routed-operation-outbox-last outbox)) cell)
+                  (setf (routed-operation-outbox-frames outbox) cell))
+              (setf (routed-operation-outbox-last outbox) cell))
+            (incf (routed-operation-outbox-bytes outbox) size)
+            (bt:condition-notify (routed-operation-outbox-ready outbox))
+            (return t)))))))
+
+(defun take-routed-operation-frame (server outbox)
+  "Remove and return OUTBOX's oldest frame, waiting for one. Return NIL, closing OUTBOX, once
+it is empty and SERVER is stopping or it has been idle for *ROUTED-OUTBOX-IDLE-SECONDS*."
+  (let ((idle-since (get-internal-real-time)))
+    (loop
+      (bt:with-lock-held ((routed-operation-outbox-lock outbox))
+        (let ((cell (routed-operation-outbox-frames outbox)))
+          (when cell
+            (unless (setf (routed-operation-outbox-frames outbox) (cdr cell))
+              (setf (routed-operation-outbox-last outbox) nil))
+            (decf (routed-operation-outbox-bytes outbox)
+                  (routed-frame-bytes (second (car cell)) (third (car cell))))
+            (return (car cell))))
+        (bt:condition-wait (routed-operation-outbox-ready outbox)
+                           (routed-operation-outbox-lock outbox) :timeout 1))
+      (when (or (node-grpc-server-stopping-p server)
+                (> (- (get-internal-real-time) idle-since)
+                   (* *routed-outbox-idle-seconds* internal-time-units-per-second)))
+        ;; The server lock first, as an enqueue takes them.
+        (bt:with-lock-held ((node-grpc-server-lock server))
+          (bt:with-lock-held ((routed-operation-outbox-lock outbox))
+            (unless (routed-operation-outbox-frames outbox)
+              (setf (routed-operation-outbox-closed-p outbox) t)
+              (let ((outboxes (node-grpc-server-routed-outboxes server))
+                    (origin (routed-operation-outbox-origin outbox)))
+                (when (eq outbox (gethash origin outboxes))
+                  (remhash origin outboxes)))
+              (return nil))))))))
+
+(defun send-routed-operation-frame (server outbox operation variant payload)
+  "Relay one frame of OPERATION's output to OUTBOX's origin, failing OPERATION if it can't."
+  (let ((router (node-grpc-server-operation-router server))
+        (origin (routed-operation-outbox-origin outbox))
+        (node-name (pending-node-operation-node-name operation)))
+    (flet ((relay ()
+             (or (and router
+                      (handler-case (funcall router variant origin node-name payload)
+                        (error () nil)))
+                 (finish-node-operation operation :error +routed-origin-unavailable+))))
+      (ecase variant
+        (:operation-stream
+         (unless (routed-output-lost-p operation)
+           (relay)))
+        (:operation-response
+         (relay)
+         (when (member (slot-value payload 'gr8s.node.v1::status)
+                       (list gr8s.node.v1::+operationstatus-operation_status_complete+
+                             gr8s.node.v1::+operationstatus-operation_status_failed+))
+           (release-node-operation server operation)))))))
+
+(defun start-routed-operation-sender (server outbox)
+  (bt:make-thread
+   (lambda ()
+     (loop for frame = (take-routed-operation-frame server outbox)
+           while frame
+           do (handler-case (apply #'send-routed-operation-frame server outbox frame)
+                (error (condition)
+                  (format *error-output* "gr8s: relaying operation output to ~A failed: ~A~%"
+                          (routed-operation-outbox-origin outbox) condition)))))
+   :name (format nil "gr8s operation output to ~A" (routed-operation-outbox-origin outbox))))
+
 (defun note-node-operation-stream (server node-name message)
-  "Append MESSAGE locally, or return it to the peer that originated a routed
+  "Append MESSAGE locally, or queue it for the peer that originated a routed
 operation. No-op when no operation matches MESSAGE's id, or when NODE-NAME is not
 the node the operation was addressed to."
   (let ((operation
@@ -796,13 +927,11 @@ the node the operation was addressed to."
                (pending-node-operation-node-name operation)))
       (t
        (let ((origin (pending-node-operation-origin-member operation)))
-         (if origin
-             (let ((router (node-grpc-server-operation-router server)))
-               (unless (and router
-                            (funcall router :operation-stream origin
-                                     (pending-node-operation-node-name operation) message))
-                 (finish-node-operation operation :error "Operation origin is unavailable")))
-             (record-node-operation-stream operation message)))))))
+         (cond
+           ((null origin) (record-node-operation-stream operation message))
+           ((routed-output-lost-p operation))
+           ((not (enqueue-routed-operation-frame server operation :operation-stream message))
+            (finish-node-operation operation :error +routed-origin-behind+))))))))
 
 (defun record-node-operation-response (operation response)
   "Record terminal RESPONSE on OPERATION. Returns true for a terminal response."
@@ -834,16 +963,8 @@ the node the operation was addressed to."
                      nil)))
       (let ((origin (pending-node-operation-origin-member operation)))
         (if origin
-            (let ((terminal
-                    (member (slot-value response 'gr8s.node.v1::status)
-                            (list gr8s.node.v1::+operationstatus-operation_status_complete+
-                                  gr8s.node.v1::+operationstatus-operation_status_failed+)))
-                  (router (node-grpc-server-operation-router server)))
-              (unless (and router
-                           (funcall router :operation-response origin
-                                    (pending-node-operation-node-name operation) response))
-                (finish-node-operation operation :error "Operation origin is unavailable"))
-              (when terminal (release-node-operation server operation)))
+            ;; Behind the operation's output, which its sender releases it after.
+            (enqueue-routed-operation-frame server operation :operation-response response)
             (record-node-operation-response operation response))))))
 
 (defun fail-node-session-operations (server session)
