@@ -677,3 +677,24 @@
     (is-true (parse-pod (pod-with "{\"name\":\"\",\"generateName\":\"\",\"labels\":{\"a\":\"b\"}}")))
     (signals kubernetes-error (parse-pod (pod-with "{\"name\":\"fixed\"}")))
     (signals kubernetes-error (parse-pod (pod-with "{\"generateName\":\"fixed-\"}")))))
+(test nfs-reclaim-runs-only-on-a-node-its-class-allows
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let ((class (nfs-class)))
+      (setf (gethash "allowedTopologies" class)
+            (vector (gr8s.resources::core-object
+                     "matchLabelExpressions"
+                     (vector (gr8s.resources::core-object "key" "kubernetes.io/hostname" "values" #("worker-b"))))))
+      (gr8s.resources::create-core-resource store "storageclasses" class nil))
+    (ready-node store "worker-a" "a" "10.64.0.0/20")
+    (ready-node store "worker-b" "b" "10.64.16.0/20")
+    (let ((volume (gr8s.resources::core-object
+                   "spec" (gr8s.resources::core-object
+                           "storageClassName" "shared"
+                           "nfs" (gr8s.resources::core-object "server" "10.0.0.5" "path" "/export/k8s/pvc-x")))))
+      (is (equal "worker-b" (gr8s.model::node-record-name
+                             (gr8s.resources::storage-volume-reclaim-node store volume))))
+      (is (equal "worker-b" (gr8s.model::node-record-name
+                             (gr8s.resources::storage-volume-reclaim-node store volume '("worker-b")))))
+      (gr8s.controllers::mark-node-not-ready store "worker-b")
+      (is (null (gr8s.resources::storage-volume-reclaim-node store volume))))))
