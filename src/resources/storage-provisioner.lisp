@@ -124,13 +124,19 @@ A node-local directory can't serve Pods on several nodes, so it refuses shared m
          (builtin-provisioner-p (gethash +provisioned-by-annotation+ (gethash "annotations" metadata (core-object)))))))
 
 (defun storage-volume-reclaim-node (store volume &optional excluded)
-  "Choose the node that can reach VOLUME's data: its own, or for NFS any Ready one.
-NFS prefers a node not named in EXCLUDED, falling back to one that is, so that a
-failure on every node starts another round instead of giving up."
+  "Choose the node that can reach VOLUME's data: its own, or for NFS any Ready one
+its StorageClass's allowedTopologies admits. NFS prefers a node not named in
+EXCLUDED, falling back to one that is, so that a failure on every node starts
+another round instead of giving up."
   (flet ((ready (node) (and node (node-record-ready-p node) node)))
     (if (gethash "nfs" (gethash "spec" volume))
-        (let ((candidates (sort (remove-if-not #'ready (copy-list (list-nodes store))) #'string<
-                                :key #'node-record-name)))
+        (let* ((class-name (gethash "storageClassName" (gethash "spec" volume) ""))
+               (class (and (plusp (length class-name))
+                           (get-core-resource store "storageclasses" nil class-name)))
+               (candidates (sort (remove-if-not (lambda (node)
+                                                  (and (ready node) (storage-class-topology-matches-p class node)))
+                                                (copy-list (list-nodes store)))
+                                 #'string< :key #'node-record-name)))
           (or (find-if-not (lambda (node) (member (node-record-name node) excluded :test #'equal)) candidates)
               (first candidates)))
         (let ((term (aref (gethash "nodeSelectorTerms"
