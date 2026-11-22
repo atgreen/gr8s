@@ -7,6 +7,16 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ## [Unreleased]
 
+### Fixed
+
+- Pulls from public registries work on Fedora 44 and RHEL 9 again. Since
+  v1.37.2-gr8s.3, the image mirror verifies registry TLS against the system
+  roots, but its TLS library looked only in older bundle locations, found
+  none on these systems, and refused every registry with "No trusted root
+  certificates available". gr8s now names the distribution's bundle in
+  `SSL_CERT_FILE` at startup when neither it nor `SSL_CERT_DIR` is set
+  (podster-8ak).
+
 ## [v1.37.2-gr8s.3] — 2026-11-22
 
 Fourth trial pre-release. Agents connect to the control plane, and the control
