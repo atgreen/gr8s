@@ -7,6 +7,14 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ## [Unreleased]
 
+## [v1.37.2-gr8s.3] — 2026-11-22
+
+Fourth trial pre-release. Agents connect to the control plane, and the control
+plane never connects to an agent: the API server now reaches webhooks,
+aggregated APIs and the proxy subresources through each node's own session, so
+no node needs a route from the control plane. The image mirror verifies
+registry TLS, with per-registry and cluster-wide private CA trust.
+
 ### Added
 
 - `--registry-ca HOST[=FILE]` on `gr8s serve` and `gr8s agent` (repeatable)
@@ -494,7 +502,8 @@ OpenSSL. Release artifacts cover Linux amd64 and arm64: binaries with
 checksums, tarballs carrying the installer and lifecycle scripts, and
 CycloneDX and SPDX SBOMs for the Lisp dependencies.
 
-[Unreleased]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.2...HEAD
+[Unreleased]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.3...HEAD
+[v1.37.2-gr8s.3]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.2...v1.37.2-gr8s.3
 [v1.37.2-gr8s.2]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.1...v1.37.2-gr8s.2
 [v1.37.2-gr8s.1]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.0...v1.37.2-gr8s.1
 [v1.37.2-gr8s.0]: https://github.com/atgreen/gr8s/releases/tag/v1.37.2-gr8s.0

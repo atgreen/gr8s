@@ -1,7 +1,7 @@
 image:
   repository: ghcr.io/atgreen/gr8s-net
   # Pinned to the exact release; :latest moves with every release.
-  tag: v1.37.2-gr8s.2
+  tag: v1.37.2-gr8s.3
   pullPolicy: IfNotPresent
 
 # Host paths the agent owns.
