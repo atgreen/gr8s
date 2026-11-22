@@ -12,6 +12,7 @@ autoload, ghcr.io/ocicl/mgl-pax-bootstrap@sha256:1c15644701ad5b8e441b2724c265c99
 babel, ghcr.io/ocicl/babel@sha256:9d9fcde71acc2b5c39572de4f11756a08c1d8801caa86c581b85dabaa35928b3, babel-20250905-4eaf3f2/babel.asd
 babel-streams, ghcr.io/ocicl/babel@sha256:9d9fcde71acc2b5c39572de4f11756a08c1d8801caa86c581b85dabaa35928b3, babel-20250905-4eaf3f2/babel-streams.asd
 babel-tests, ghcr.io/ocicl/babel@sha256:9d9fcde71acc2b5c39572de4f11756a08c1d8801caa86c581b85dabaa35928b3, babel-20250905-4eaf3f2/babel-tests.asd
+bobbin, ghcr.io/ocicl/bobbin@sha256:7368d88e9f1d8a94b9bddf5e1887e384ef738235570142dd1cfe98c90077cc13, bobbin-20240503-b454e82/bobbin.asd
 bordeaux-threads, ghcr.io/ocicl/bordeaux-threads@sha256:bbb32afe3987e102149cc019f4f7366a05f7a37d1503f5f86a27745e671c320a, bordeaux-threads-0.9.4/bordeaux-threads.asd
 cffi, ghcr.io/ocicl/cffi@sha256:ff62b9cedea80fe2c6ea0701757e2b301b6ee9aafa1ae720966ff2611e94f76b, cffi-20260821-787d3cd/cffi.asd
 cffi-examples, ghcr.io/ocicl/cffi@sha256:ff62b9cedea80fe2c6ea0701757e2b301b6ee9aafa1ae720966ff2611e94f76b, cffi-20260821-787d3cd/cffi-examples.asd
@@ -35,11 +36,13 @@ cl-ppcre, ghcr.io/ocicl/cl-ppcre@sha256:bf073924cf4fd5957a4fd961a95d446ed0e53fa3
 cl-ppcre-unicode, ghcr.io/ocicl/cl-ppcre@sha256:bf073924cf4fd5957a4fd961a95d446ed0e53fa32a5002cbd2d52182874f45e5, cl-ppcre-20250606-a2ea581/cl-ppcre-unicode.asd
 cl-raft, ghcr.io/ocicl/cl-raft@sha256:885b2b57383b8a90fcd9bd07cc6f365f737345c40edcf0a7bf91a841d3890a85, cl-raft-20261120-9ae2c11/cl-raft.asd
 cl-re2, ghcr.io/ocicl/cl-re2@sha256:a767d3c0ea04370b19170fdae5de52e48d836444799d7b8dd0d382a5cc1597c1, cl-re2-20261112-a6ddb92/cl-re2.asd
+cl-reexport, ghcr.io/ocicl/cl-reexport@sha256:c795feb3e3727a19e61797187eb31bac1e855b1332335d26752200a28e9b9da8, cl-reexport-20240503-03ad7a0/cl-reexport.asd
 cl-rtnetlink, ghcr.io/ocicl/cl-rtnetlink@sha256:b63b5e664e766b82f4319499ce86ecfde7b258dfb3343dd41f294507655470dd, cl-rtnetlink-20261111-d11ab3d/cl-rtnetlink.asd
 cl-safe-yaml, ghcr.io/ocicl/cl-safe-yaml@sha256:8c6427c73608354a931cf3815692cac243072c2fd41daee11f5cced7100a9722, cl-safe-yaml-20261119-2d07720/cl-safe-yaml.asd
 cl-torrent, ghcr.io/ocicl/cl-torrent@sha256:a3b958b5d7f6e9996dd11471388921baf3834bd0b312a6836ec69bd4db3ac4c7, cl-torrent-20261111-a40202d/cl-torrent.asd
 cl-wireguard-overlay, ghcr.io/ocicl/cl-wireguard-overlay@sha256:972cea63d5016019e7c3953cfa48acf78a3c010e31ac978cfc6ca90d7d169a12, cl-wireguard-overlay-20261111-10a3ce8/cl-wireguard-overlay.asd
 cl-work-queue, ghcr.io/ocicl/cl-work-queue@sha256:1435346d5e89a003bf96d6d4a62e18258f9b671fb65c070e0473dfb67c94602e, cl-work-queue-20261111-893291d/cl-work-queue.asd
+clingon, ghcr.io/ocicl/clingon@sha256:1f9eece16c6709101ab5b675ac530be5411f27843a5368392870bb2d1f8870ba, clingon-20261106-0dac242/clingon.asd
 closer-mop, ghcr.io/ocicl/closer-mop@sha256:39ec579e68118a8be57a7882812ff31094a031f88b77f11cf4434a92261f1126, closer-mop-20260329-04db182/closer-mop.asd
 com.inuoe.jzon, ghcr.io/ocicl/com.inuoe.jzon@sha256:b0cfbc3d8fb3c09526d92575b40b13a68ad93be7edeb48fd69dcea053c5611a5, jzon-20251113-f05afbb/com.inuoe.jzon.asd
 com.inuoe.jzon-tests, ghcr.io/ocicl/com.inuoe.jzon@sha256:b0cfbc3d8fb3c09526d92575b40b13a68ad93be7edeb48fd69dcea053c5611a5, jzon-20251113-f05afbb/com.inuoe.jzon-tests.asd
@@ -100,3 +103,4 @@ usocket-server, ghcr.io/ocicl/usocket@sha256:282856b819b22a4319ba30a15605ee934aa
 usocket-test, ghcr.io/ocicl/usocket@sha256:282856b819b22a4319ba30a15605ee934aa23292a471fd29ea4d3f2074b3f16d, usocket-0.8.8/usocket-test.asd
 version-string, ghcr.io/ocicl/version-string@sha256:eb8f45786af7fd6f792aecada1f905870f1d79abfaee0ceb774a94824ad9b14f, cl-version-string-20251228-668f2fa/version-string.asd
 whistler, ghcr.io/ocicl/whistler@sha256:f21c0e72c94032a5c603ac9d0e87cb137735cf27494273c61cfa9e6d55c6afa0, whistler-20261110-c73f6ec/whistler.asd
+with-user-abort, ghcr.io/ocicl/with-user-abort@sha256:c19560034f9909a7afb4110b5efd939a9f1e829d9ef9887797b98679f290c480, with-user-abort-20240503-a3db02e/with-user-abort.asd
