@@ -190,6 +190,27 @@ endpoint ports; optional relaying also needs its configured UDP port range. See
 replace VXLAN transport requirements for that backend. Gateway/Ingress, NodePort,
 and LoadBalancer listeners additionally need the workload's configured ports.
 
+#### A control plane in another network
+
+Every agent opens its own connection to the control plane. Desired state,
+status, logs, exec and port-forward all travel over that connection, so a
+`--disable-agent` control plane needs only inbound TCP 6443 and 7443, and it can
+live behind NAT or in another network from its workers.
+
+A control plane still has to reach some Pods and nodes: admission and CRD
+conversion webhooks, aggregated API servers such as metrics-server, and the
+`pods/proxy`, `services/proxy` and `nodes/proxy` subresources. The API server
+doesn't connect to those itself. It asks the agent on the endpoint's node to
+open the connection, over the agent's own session, as Kubernetes's
+konnectivity agent does. An agent connects only to its own Pods and its own
+address.
+
+These are dialed directly: Pods and the kubelet on the control plane's own
+local node, a webhook configured by `url`, a Service of type `ExternalName`,
+and an endpoint on no node, such as the control plane's own address.
+`serve --pod-network-egress direct` dials everything directly instead, for a
+control plane that has a route to every Pod and node.
+
 ## Build & run the self-contained server
 
 Build the static runtime payload and dump it into the SBCL executable:

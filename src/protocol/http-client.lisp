@@ -23,6 +23,10 @@
 ;;;;     Closing the raw socket (not the TLS stream) avoids a close-notify write
 ;;;;     that could itself block after the deadline has passed.
 ;;;;
+;;;;   * A pluggable dial.  DIAL, when given, opens the transport instead of a TCP
+;;;;     socket: a control plane with no route to Pod IPs reaches a webhook through
+;;;;     its node agent this way.  Any binary Lisp stream can be a transport.
+;;;;
 ;;;;   * Bounded retry on transport-transient failures (connection refused/reset,
 ;;;;     premature EOF).  Off by default (MAX-ATTEMPTS 1); honest HTTP status codes
 ;;;;     are never retried -- that is the caller's failure policy.
@@ -31,6 +35,9 @@
   (:use #:cl)
   (:export #:https-request
            #:call-with-http-response
+           #:transport-stream
+           #:close-transport
+           #:shutdown-transport
            #:http-client-error
            #:http-client-error-message
            #:http-response-too-large
@@ -44,6 +51,32 @@
              (write-string (http-client-error-message condition) stream))))
 
 (define-condition http-response-too-large (http-client-error) ())
+
+;;; ---------------------------------------------------------------------------
+;;; Transports
+;;;
+;;; What a connection runs over: a usocket socket, or a binary Lisp stream that a
+;;; DIAL function returned.  Shutting a transport down ends a blocked read without
+;;; freeing a descriptor the reading thread may still use; closing frees it.
+
+(defgeneric transport-stream (transport)
+  (:method ((transport usocket:usocket)) (usocket:socket-stream transport))
+  (:method ((transport stream)) transport))
+
+(defgeneric close-transport (transport)
+  (:method ((transport usocket:usocket)) (usocket:socket-close transport))
+  (:method ((transport stream)) (close transport :abort t)))
+
+(defgeneric shutdown-transport (transport)
+  (:method ((transport usocket:usocket)) (usocket:socket-shutdown transport :io))
+  (:method ((transport stream)) (close transport :abort t)))
+
+(defun dial-transport (dial host port connect-timeout)
+  "Open a transport to HOST:PORT, through DIAL when given."
+  (if dial
+      (funcall dial host port connect-timeout)
+      (usocket:socket-connect host port :element-type '(unsigned-byte 8)
+                                        :timeout connect-timeout :nodelay t)))
 
 (define-condition http-connection-closed (http-client-error) ()
   (:documentation "The peer closed the connection before (or during) its response.
@@ -191,7 +224,7 @@ status codes are never here -- a 5xx is the caller's failure policy, not ours.")
 ;;; captures each of those, so reuse can never cross a trust boundary.
 
 (defstruct (pooled-connection (:constructor %make-pooled-connection))
-  socket stream key (idle-since (get-internal-real-time)))
+  transport stream key (idle-since (get-internal-real-time)))
 
 (defvar *connection-pool* (make-hash-table :test 'equal)
   "Pool key -> list of idle POOLED-CONNECTIONs.")
@@ -213,14 +246,15 @@ of the trusted certificates.  Distinct trust must never share a pooled connectio
                     (mapcar #'pure-tls::x509-certificate-raw-der trust-certificates)))))))
 
 (defun connection-key (host port server-name insecure trust-certificates auto-load-system-ca
-                       client-certificate client-key)
-  (list host port server-name (and insecure t)
+                       client-certificate client-key dial)
+  ;; A dialled connection isn't a direct one, though HOST alone fixes its route.
+  (list host port server-name (and insecure t) (and dial t)
         (and client-certificate (namestring client-certificate))
         (and client-key (namestring client-key))
         (trust-fingerprint trust-certificates auto-load-system-ca insecure)))
 
 (defun close-pooled (conn)
-  (ignore-errors (usocket:socket-close (pooled-connection-socket conn))))
+  (ignore-errors (close-transport (pooled-connection-transport conn))))
 
 (defun pool-checkout (key)
   "Take an idle, not-timed-out connection for KEY, or NIL; close any timed-out ones
@@ -244,35 +278,34 @@ passed over."
     (when closep (close-pooled conn))))
 
 (defun open-connection (host port server-name insecure trust-certificates auto-load-system-ca
-                        client-certificate client-key connect-timeout)
-  "Dial HOST:PORT and complete the TLS handshake; return (values socket stream).
-A fresh session-ticket cache per connection keeps one request's trust from
-vouching for another's resumed session to the same host."
+                        client-certificate client-key connect-timeout &optional dial)
+  "Dial HOST:PORT, through DIAL when given, and complete the TLS handshake; return
+(values transport stream).  A fresh session-ticket cache per connection keeps one
+request's trust from vouching for another's resumed session to the same host."
   (let ((pure-tls:*session-ticket-cache* (make-hash-table :test 'equal))
-        (socket (usocket:socket-connect host port :element-type '(unsigned-byte 8)
-                                                   :timeout connect-timeout :nodelay t)))
+        (transport (dial-transport dial host port connect-timeout)))
     (handler-case
-        (values socket
+        (values transport
                 (pure-tls:make-tls-client-stream
-                 (usocket:socket-stream socket)
+                 (transport-stream transport)
                  :hostname server-name
                  :context (make-client-context trust-certificates auto-load-system-ca insecure)
                  :verify (if insecure pure-tls:+verify-none+ pure-tls:+verify-required+)
                  :client-certificate (and client-certificate (namestring client-certificate))
                  :client-key (and client-key (namestring client-key))))
       (error (condition)
-        (ignore-errors (usocket:socket-close socket))
+        (ignore-errors (close-transport transport))
         (error condition)))))
 
-(defun exchange (socket stream method target host-header headers body body-limit keep-alive
+(defun exchange (transport stream method target host-header headers body body-limit keep-alive
                  context timeout)
   "Write one request and read its response over the existing STREAM, bounded by a
-cl-cancel timeout derived from CONTEXT, whose monitor force-closes the socket on a
+cl-cancel timeout derived from CONTEXT, whose monitor force-closes the transport on a
 deadline or cancellation.  Returns (values code response-headers body-octets
 reusable-p); REUSABLE-P is true only when the connection may be pooled afterwards
 -- a kept-alive, framed response the server did not mark Connection: close."
   (cl-cancel:with-timeout-context (ctx timeout (cl-cancel:ensure-cancellable context))
-    (let ((monitor (cl-cancel:close-stream-on-cancel (usocket:socket-stream socket) ctx)))
+    (let ((monitor (cl-cancel:close-stream-on-cancel (transport-stream transport) ctx)))
       (unwind-protect
            (handler-bind ((error (lambda (condition)
                                    (declare (ignore condition))
@@ -301,19 +334,19 @@ a fresh one.  A deadline or cancellation is not here, so it propagates instead."
 
 (defun attempt-request (host port server-name host-header method target headers body
                         trust-certificates auto-load-system-ca insecure client-certificate client-key
-                        timeout body-limit context reuse)
+                        timeout body-limit context reuse dial)
   "One request/response, returning (values code headers body-octets).  With REUSE, a
 keep-alive connection is taken from the pool when one waits and returned to it when
 the response leaves it reusable; otherwise the connection is closed afterwards."
   (let ((host-header (or host-header (format nil "~A:~D" server-name port)))
         (key (and reuse (connection-key host port server-name insecure trust-certificates
-                                        auto-load-system-ca client-certificate client-key))))
+                                        auto-load-system-ca client-certificate client-key dial))))
     ;; 1. Reuse a waiting connection, discarding any that proves dead.
     (when reuse
       (loop for pooled = (pool-checkout key) while pooled do
         (handler-case
             (multiple-value-bind (code headers body reusable)
-                (exchange (pooled-connection-socket pooled) (pooled-connection-stream pooled)
+                (exchange (pooled-connection-transport pooled) (pooled-connection-stream pooled)
                           method target host-header headers body body-limit t context timeout)
               (if reusable (pool-checkin pooled) (close-pooled pooled))
               (return-from attempt-request (values code headers body)))
@@ -321,23 +354,23 @@ the response leaves it reusable; otherwise the connection is closed afterwards."
             (close-pooled pooled)
             (unless (stale-connection-p condition) (error condition))))))
     ;; 2. A fresh connection; pooled on success when REUSE and the response allows.
-    (multiple-value-bind (socket stream)
+    (multiple-value-bind (transport stream)
         (open-connection host port server-name insecure trust-certificates auto-load-system-ca
-                         client-certificate client-key timeout)
+                         client-certificate client-key timeout dial)
       (let ((keep nil))
         (unwind-protect
              (multiple-value-bind (code headers body reusable)
-                 (exchange socket stream method target host-header headers body body-limit reuse
+                 (exchange transport stream method target host-header headers body body-limit reuse
                            context timeout)
                (when (and reuse reusable)
-                 (pool-checkin (%make-pooled-connection :socket socket :stream stream :key key))
+                 (pool-checkin (%make-pooled-connection :transport transport :stream stream :key key))
                  (setf keep t))
                (return-from attempt-request (values code headers body)))
-          (unless keep (ignore-errors (usocket:socket-close socket))))))))
+          (unless keep (ignore-errors (close-transport transport))))))))
 
 (defun https-request (&key host port server-name host-header (method :get) target headers body
                            trust-certificates (auto-load-system-ca nil) (insecure nil) (reuse nil)
-                           client-certificate client-key
+                           client-certificate client-key dial
                            (timeout 10) (max-attempts 1) (retry-interval 1)
                            (body-limit +default-response-limit+)
                            (context cl-cancel:*current-cancel-context*))
@@ -346,7 +379,9 @@ TRUST-CERTIFICATES (or the system roots when AUTO-LOAD-SYSTEM-CA) for SERVER-NAM
 and return (values status-code response-headers body-octets).
 
 HOST is dialed; SERVER-NAME is what the certificate must match and what SNI/Host
-carry (HOST-HEADER overrides the Host line).  METHOD is a keyword; HEADERS an alist;
+carry (HOST-HEADER overrides the Host line).  DIAL, when given, is a function of
+HOST, PORT and a connect timeout that returns the transport, a usocket socket or a
+binary stream, to use instead of a TCP connection.  METHOD is a keyword; HEADERS an alist;
 BODY an octet vector.  INSECURE skips certificate verification entirely (for an
 endpoint that opts out, e.g. insecureSkipTLSVerify).  REUSE keeps the connection
 alive and pools it for the next request with the identical endpoint, trust and
@@ -360,7 +395,8 @@ returned, never retried."
            (handler-case
                (return (attempt-request host port server-name host-header method target headers body
                                         trust-certificates auto-load-system-ca insecure
-                                        client-certificate client-key timeout body-limit context reuse))
+                                        client-certificate client-key timeout body-limit context reuse
+                                        dial))
              (error (condition)
                (if (and (< attempt max-attempts) (retryable-p condition))
                    (when (plusp retry-interval) (cl-cancel:sleep-fractional retry-interval))
@@ -427,27 +463,26 @@ returned, never retried."
 (defun call-with-http-response
     (function &key host port server-name host-header (method :get) target headers body
                    trust-certificates (auto-load-system-ca nil) (insecure nil) plain
-                   client-certificate client-key (connect-timeout 10) timeout
+                   client-certificate client-key dial (connect-timeout 10) timeout
                    (context cl-cancel:*current-cancel-context*) on-connect)
   "Send one request and call FUNCTION with (code headers body-stream), the body
 readable incrementally while the response arrives.  PLAIN skips TLS entirely (an
-http:// endpoint); otherwise the chain verifies like HTTPS-REQUEST.  TIMEOUT, when
+http:// endpoint); otherwise the chain verifies like HTTPS-REQUEST.  DIAL is as there.  TIMEOUT, when
 given, bounds the whole call through a cl-cancel deadline whose monitor closes the
 socket; a watch passes NIL and lives until the server or ON-CONNECT's closer ends
 it.  ON-CONNECT, when given, receives a function that closes the connection from
 another thread.  The connection always closes when FUNCTION returns or unwinds."
   (let ((server-name (or server-name host)))
-    (multiple-value-bind (socket stream)
+    (multiple-value-bind (transport stream)
         ;; usocket's :timeout becomes the socket's read timeout, which would end
         ;; an idle watch; bound only the dial and handshake with a deadline.
         (handler-case
             (sb-sys:with-deadline (:seconds connect-timeout)
               (if plain
-                  (let ((socket (usocket:socket-connect host port :element-type '(unsigned-byte 8)
-                                                                  :nodelay t)))
-                    (values socket (usocket:socket-stream socket)))
+                  (let ((transport (dial-transport dial host port nil)))
+                    (values transport (transport-stream transport)))
                   (open-connection host port server-name insecure trust-certificates
-                                   auto-load-system-ca client-certificate client-key nil)))
+                                   auto-load-system-ca client-certificate client-key nil dial)))
           (sb-sys:deadline-timeout ()
             (error 'http-client-error :message "connection setup timed out")))
       (unwind-protect
@@ -461,7 +496,7 @@ another thread.  The connection always closes when FUNCTION returns or unwinds."
                                ;; Shutdown wakes or pre-empts the reader with end
                                ;; of file, and the reader's own unwind closes.
                                (lambda ()
-                                 (ignore-errors (usocket:socket-shutdown socket :io)))))
+                                 (ignore-errors (shutdown-transport transport)))))
                     (write-request stream method target
                                    (or host-header (format nil "~A:~D" server-name port))
                                    headers (or body #()) nil)
@@ -470,7 +505,7 @@ another thread.  The connection always closes when FUNCTION returns or unwinds."
                                (response-body-stream stream response-headers)))))
              (if timeout
                  (cl-cancel:with-timeout-context (ctx timeout (cl-cancel:ensure-cancellable context))
-                   (let ((monitor (cl-cancel:close-stream-on-cancel (usocket:socket-stream socket) ctx)))
+                   (let ((monitor (cl-cancel:close-stream-on-cancel (transport-stream transport) ctx)))
                      (unwind-protect
                           (handler-bind ((error (lambda (condition)
                                                   (declare (ignore condition))
@@ -480,4 +515,4 @@ another thread.  The connection always closes when FUNCTION returns or unwinds."
                        (funcall monitor))))
                  (converse)))
         (ignore-errors (close stream))
-        (ignore-errors (usocket:socket-close socket))))))
+        (ignore-errors (close-transport transport))))))

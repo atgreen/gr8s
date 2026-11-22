@@ -2630,7 +2630,7 @@ that reconnects or restarts gets the answer without a second deletion racing the
 (defun dispatch-node-operation (node-runtime variant payload emit)
   "Dispatch one operation-protocol envelope (VARIANT, PAYLOAD) to its handler, emitting
 replies through EMIT. A new request starts the matching operation (metrics, volume
-reclaim, port-forward, streamed exec/attach, or a synchronous op); input and cancel are
+reclaim, port-forward, dial, streamed exec/attach, or a synchronous op); input and cancel are
 routed to the live operation; a closed session abandons all operations. A request that
 errors becomes a failed response; an error on any other variant is re-signaled."
   (handler-case
@@ -2646,6 +2646,9 @@ errors becomes a failed response; an error on any other variant is re-signaled."
            ((= (slot-value payload 'gr8s.node.v1::kind)
                gr8s.node.v1::+operationkind-operation_kind_port_forward+)
             (start-node-port-forward-operation node-runtime payload emit))
+           ((= (slot-value payload 'gr8s.node.v1::kind)
+               gr8s.node.v1::+operationkind-operation_kind_dial+)
+            (start-node-dial-operation node-runtime payload emit))
            ((= (slot-value payload 'gr8s.node.v1::kind)
                gr8s.node.v1::+operationkind-operation_kind_slynk+)
             (start-node-slynk-operation node-runtime payload emit))

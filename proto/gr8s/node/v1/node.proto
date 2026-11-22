@@ -330,7 +330,7 @@ message OperationStream {
   StreamChannel channel = 3;
   bytes data = 4;
   bool eof = 5;
-  // PORT_FORWARD: how much more input the node has written to the Pod.
+  // PORT_FORWARD and DIAL: how much more input the node has written to the Pod.
   uint64 acknowledged_bytes = 6;
 }
 
@@ -454,6 +454,9 @@ enum OperationKind {
   OPERATION_KIND_PATCH = 9;
   // Privileged, explicitly authorized on-demand debugger byte stream.
   OPERATION_KIND_SLYNK = 10;
+  // A TCP connection the node opens to a Pod on it, for a control plane with no
+  // route to Pod IPs (webhooks, aggregated APIs). Bytes flow as PORT_FORWARD's do.
+  OPERATION_KIND_DIAL = 11;
 }
 
 message OperationRequest {
@@ -488,6 +491,9 @@ message OperationRequest {
   // values rather than accepting an unbounded tracing session.
   uint64 trace_duration_milliseconds = 19;
   bytes patch_command_json = 20;
+  // DIAL: the address the node connects to, at PORT. The node refuses one outside
+  // its own Pod CIDRs and node address.
+  string dial_address = 21;
 }
 
 message OperationInput {
@@ -498,7 +504,7 @@ message OperationInput {
   uint32 rows = 5;
   uint32 columns = 6;
   bool eof = 7;
-  // PORT_FORWARD, and EXEC or ATTACH that ACKNOWLEDGES_OUTPUT: how much more output has
+  // PORT_FORWARD, DIAL, and EXEC or ATTACH that ACKNOWLEDGES_OUTPUT: how much more output has
   // reached the client.
   uint64 acknowledged_bytes = 8;
 }

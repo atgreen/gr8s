@@ -91,6 +91,8 @@
    #:runtime-reconcile-containers
    #:runtime-release-exec-session
    #:runtime-release-port-forward
+   #:runtime-start-dial
+   #:open-dial-stream
    #:runtime-runs-containers-p
    #:runtime-send-exec-session-input
    #:runtime-start-attach-session

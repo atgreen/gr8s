@@ -22,8 +22,8 @@
 
 (test http-client-pool-key-never-crosses-a-trust-or-endpoint-boundary
   (flet ((key (&key (host "h") (port 443) (name "s") insecure (certs (list (http-client-test-cert '(1 2 3))))
-                    auto-system cert key-path)
-           (gr8s.http-client::connection-key host port name insecure certs auto-system cert key-path)))
+                    auto-system cert key-path dial)
+           (gr8s.http-client::connection-key host port name insecure certs auto-system cert key-path dial)))
     (let ((base (key)))
       ;; Identical inputs share a key, so the connection can be reused.
       (is (equal base (key)))
@@ -34,6 +34,8 @@
       (is (not (equal base (key :name "other"))))
       (is (not (equal base (key :insecure t))))
       (is (not (equal base (key :cert #p"/tmp/client.crt" :key-path #p"/tmp/client.key"))))
+      ;; A connection through a node agent is never handed to a direct request.
+      (is (not (equal base (key :dial (lambda (host port timeout) (list host port timeout))))))
       ;; Insecure and system-root trust are distinct buckets from pinned certs and
       ;; from each other.
       (is (not (equal (key :insecure t :certs nil)
@@ -44,7 +46,7 @@
 ;;; isolation, idle-timeout eviction, and the per-key idle cap.
 
 (defun http-client-test-connection (key)
-  (gr8s.http-client::%make-pooled-connection :socket :fake :stream :fake :key key))
+  (gr8s.http-client::%make-pooled-connection :transport :fake :stream :fake :key key))
 
 (test http-client-pool-checkin-checkout-isolation-and-eviction
   (let ((gr8s.http-client::*connection-pool* (make-hash-table :test 'equal))

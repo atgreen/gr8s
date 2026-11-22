@@ -243,23 +243,25 @@
 ;;; Reaching the registered server
 
 (defun aggregator-connect (store apiservice aggregator)
-  "Open a verified TLS connection to APIService's Service, returning its socket and stream."
+  "Open a verified TLS connection to APIService's Service, returning its transport and stream."
   (let* ((service (apiservice-service apiservice))
          (spec (gethash "spec" apiservice))
          (bundle (gethash "caBundle" spec))
          (server-name (format nil "~A.~A.svc" (gethash "name" service) (gethash "namespace" service)))
          (socket nil)
          (pure-tls:*session-ticket-cache* (make-hash-table :test 'equal)))
-    (multiple-value-bind (address port) (admission-service-endpoint store service)
+    (multiple-value-bind (address port node) (admission-service-endpoint store service)
       (handler-case
-          (let ((connected nil))
+          (let ((connected nil) (dial (pod-network-dial node store address)))
             (unwind-protect
                  (sb-sys:with-deadline (:seconds +aggregator-probe-timeout+)
-                   (setf socket (usocket:socket-connect address port :element-type '(unsigned-byte 8)
-                                                                     :timeout +aggregator-probe-timeout+ :nodelay t))
+                   (setf socket (if dial
+                                    (funcall dial address port +aggregator-probe-timeout+)
+                                    (usocket:socket-connect address port :element-type '(unsigned-byte 8)
+                                                                         :timeout +aggregator-probe-timeout+ :nodelay t)))
                    (let* ((insecure (gethash "insecureSkipTLSVerify" spec))
                           (stream (pure-tls:make-tls-client-stream
-                                   (usocket:socket-stream socket)
+                                   (gr8s.http-client:transport-stream socket)
                                    :hostname server-name
                                    :context (if insecure
                                                 (pure-tls:make-tls-context :verify-mode pure-tls:+verify-none+
@@ -270,7 +272,7 @@
                                    :client-key (namestring (aggregator-key-path aggregator)))))
                      (setf connected t)
                      (values socket stream)))
-              (when (and socket (not connected)) (ignore-errors (usocket:socket-close socket)))))
+              (when (and socket (not connected)) (ignore-errors (gr8s.http-client:close-transport socket)))))
         (sb-sys:deadline-timeout ()
           (error "timed out connecting to ~A" server-name))))))
 
@@ -319,9 +321,9 @@ its own aggregator-connect; this is only for request/response callers.)"
          (bundle (gethash "caBundle" spec))
          (insecure (and (gethash "insecureSkipTLSVerify" spec) t))
          (server-name (format nil "~A.~A.svc" (gethash "name" service) (gethash "namespace" service))))
-    (multiple-value-bind (address port) (admission-service-endpoint store service)
+    (multiple-value-bind (address port node) (admission-service-endpoint store service)
       (gr8s.http-client:https-request
-       :host address :port port :server-name server-name
+       :host address :port port :server-name server-name :dial (pod-network-dial node store address)
        :host-header (format nil "~A:~D" server-name (gethash "port" service))
        :method method :target target :headers headers
        :trust-certificates (and bundle (not insecure)
@@ -470,7 +472,7 @@ shutting it down only wakes the read, and leaves the descriptor its own until th
                           do (sleep 1)
                              (when (and (not done) (client-connection-closed-p fd))
                                (setf gone t)
-                               (ignore-errors (usocket:socket-shutdown socket :io))
+                               (ignore-errors (gr8s.http-client:shutdown-transport socket))
                                (return))))
                   :name "gr8s aggregated watch client")))
     (lambda ()
@@ -523,7 +525,7 @@ TARGET is the request line's path, the current request's own unless given."
         (when stop-watching (funcall stop-watching))
         (when socket
           (aggregator-forget-connection aggregator socket)
-          (ignore-errors (usocket:socket-close socket)))))))
+          (ignore-errors (gr8s.http-client:close-transport socket)))))))
 
 (defun aggregated-api-route (store path)
   "Return the external APIService owning PATH's version and T, or NIL and whether PATH is only its group."
@@ -683,5 +685,5 @@ TARGET is the request line's path, the current request's own unless given."
     ;; another connection, and a connection is forgotten before it is closed.
     (bt:with-lock-held ((aggregator-lock aggregator))
       (dolist (socket (aggregator-connections aggregator))
-        (ignore-errors (usocket:socket-shutdown socket :io))))
+        (ignore-errors (gr8s.http-client:shutdown-transport socket))))
     (ignore-errors (bt:join-thread (aggregator-thread aggregator)))))

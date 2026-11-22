@@ -34,7 +34,9 @@ into the binary — and proxies the cluster API. See
 ## Processes and defaults
 
 - `gr8s serve` runs a control plane and local agent. `--disable-agent` selects a
-  control plane without local workloads.
+  control plane without local workloads. Agents always dial the control plane,
+  so it can sit in a different network from its workers: see
+  [a control plane in another network](building-and-testing.md#a-control-plane-in-another-network).
 - `gr8s agent` joins another machine using a one-time node-bound token and CA pin.
   It persists a private key and certificate for reconnects.
 - `gr8s witness` is an optional Raft quorum participant without an API or workloads.

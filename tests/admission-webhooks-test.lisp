@@ -686,6 +686,36 @@ FIRST-OCTET, when given, is the request line's already-read first byte."
     (let ((body (check-core-status 400 "/api/v1/namespaces/beta/configmaps" :method :post :object (admission-test-configmap "a"))))
       (is (search "reached /via-service?timeout=5s" (gethash "message" body))))))
 
+(test service-webhooks-reach-a-pod-through-its-node-when-told-to
+  (with-admission-api (store)
+    (with-admission-handler (path request) (admission-test-deny (format nil "reached ~A" path)))
+    (check-core-status 201 "/api/v1/namespaces/alpha/services" :method :post
+      :object (gr8s.resources::core-object "apiVersion" "v1" "kind" "Service" "metadata" (gr8s.resources::core-object "name" "hook")
+                                 "spec" (gr8s.resources::core-object "ports" (vector (gr8s.resources::core-object "port" 8443 "targetPort" *admission-test-port*)))))
+    (admission-test-config "ValidatingWebhookConfiguration" "service"
+                           (admission-test-webhook "service.example.com" "/s"
+                             "clientConfig" (gr8s.resources::core-object "service" (gr8s.resources::core-object "namespace" "alpha" "name" "hook" "port" 8443 "path" "/via-node")
+                                                               "caBundle" *admission-test-bundle*)))
+    (gr8s.store::with-store-lock (store)
+      (setf (gethash (gr8s.resources::core-resource-key "endpointslices" "alpha" "hook-1") (gr8s.store::pod-store-resources store))
+            (gr8s.resources::core-object "apiVersion" "discovery.k8s.io/v1" "kind" "EndpointSlice" "addressType" "IPv4"
+                               "metadata" (gr8s.resources::core-object "name" "hook-1" "namespace" "alpha"
+                                                             "labels" (gr8s.resources::core-object "kubernetes.io/service-name" "hook"))
+                               "ports" (vector (gr8s.resources::core-object "port" *admission-test-port* "protocol" "TCP"))
+                               "endpoints" (vector (gr8s.resources::core-object "addresses" #("127.0.0.1")
+                                                                                "nodeName" "worker-hook")))))
+    (let ((dialled nil))
+      (setf gr8s.apiserver::*pod-network-dialer*
+            (lambda (node address port timeout)
+              (push (list node address port) dialled)
+              (usocket:socket-connect address port :element-type '(unsigned-byte 8) :timeout timeout)))
+      (unwind-protect
+           (let ((body (check-core-status 400 "/api/v1/namespaces/beta/configmaps" :method :post
+                                          :object (admission-test-configmap "a"))))
+             (is (search "reached /via-node?timeout=5s" (gethash "message" body)))
+             (is (equal (list "worker-hook" "127.0.0.1" *admission-test-port*) (first dialled))))
+        (setf gr8s.apiserver::*pod-network-dialer* nil)))))
+
 (test match-conditions-select-and-failure-policy-governs-their-errors
   (with-admission-api (store)
     (values store)

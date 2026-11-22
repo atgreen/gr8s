@@ -320,3 +320,42 @@
         (is (not (allowed "hello" "default" :post)))
         (gr8s.resources::delete-core-resource store "rolebindings" "default" "pod-proxy-reader")
         (is (not (allowed "hello" "default" :get)))))))
+
+(test pod-proxy-reaches-the-pod-through-its-node-when-told-to
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let* ((address (pod-proxy-test-address))
+           (object (com.inuoe.jzon:parse *valid-pod-json*))
+           (upstream (make-instance 'pod-proxy-test-upstream :address address :port 0 :access-log-destination nil))
+           (frontend nil)
+           (dialled nil))
+      (hunchentoot:start upstream)
+      (setf (gethash "containerPort" (aref (gethash "ports" (aref (gethash "containers" (gethash "spec" object)) 0)) 0))
+            (hunchentoot:acceptor-port upstream)
+            (gethash "nodeName" (gethash "spec" object)) "worker-proxy")
+      ;; Set, not bound: the API server answers on its own threads.
+      (setf gr8s.apiserver::*pod-network-dialer*
+            (lambda (node host port timeout)
+              (push (list node host port) dialled)
+              (usocket:socket-connect host port :element-type '(unsigned-byte 8) :timeout timeout)))
+      (unwind-protect
+           (progn
+             (setf frontend (start-http-test-server :store store :runtime (make-fake-runtime)))
+             (let ((pod (create-pod store (parse-pod object))))
+               (gr8s.kubelet::save-pod-observation store pod (gr8s.resources::core-object "phase" "Running" "podIP" address)))
+             (multiple-value-bind (bytes code) (proxy-api-request "/plain")
+               (is (= 200 code)) (is (equalp #(0 255 1 2 127) bytes)))
+             (multiple-value-bind (bytes code)
+                 (sb-sys:with-deadline (:seconds 5) (proxy-api-request "/chunks"))
+               (is (= 200 code)) (is (equalp #(0 255 1 2 127) bytes)))
+             (multiple-value-bind (bytes code)
+                 (proxy-api-request "/echo" :method :post
+                                    :content (make-array 3 :element-type '(unsigned-byte 8) :initial-contents '(7 0 255))
+                                    :content-type "application/octet-stream")
+               (is (= 201 code)) (is (equalp #(7 0 255) bytes)))
+             (is (= 3 (length dialled)))
+             (is (every (lambda (call) (equal (list "worker-proxy" address (hunchentoot:acceptor-port upstream)) call))
+                        dialled)))
+        (setf gr8s.apiserver::*pod-network-dialer* nil)
+        (when frontend (stop-server frontend))
+        (hunchentoot:stop upstream)))))
