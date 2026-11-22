@@ -4179,6 +4179,27 @@ No HA API may start from member-local certificate state before this converges."
     (format t "   Kubernetes API v~A.~A · ~A~%~%" major minor role))
   (finish-output))
 
+(defparameter +system-ca-bundles+
+  '("/etc/ssl/certs/ca-certificates.crt"                ; Debian, Ubuntu, Alpine
+    "/etc/pki/tls/certs/ca-bundle.crt"                  ; RHEL 8, older Fedora
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem" ; Fedora 41+, RHEL 9+
+    "/etc/ssl/ca-bundle.pem"                            ; openSUSE
+    "/etc/ssl/cert.pem")                                ; macOS, Alpine
+  "Where distributions keep the system CA bundle, most common first.")
+
+(defun ensure-system-ca-bundle (&key (getenv #'uiop:getenv) (setenv #'sb-posix:setenv)
+                                     (exists-p #'probe-file))
+  "Name this host's CA bundle in SSL_CERT_FILE when neither it nor SSL_CERT_DIR is set.
+pure-tls, which verifies registries, webhooks and foreign API servers, looks in fewer
+places than distributions now use: on Fedora 44 it finds none, verifies against nothing,
+and refuses every public registry (podster-8ak). Returns the bundle named, or NIL."
+  (unless (or (plusp (length (funcall getenv "SSL_CERT_FILE")))
+              (plusp (length (funcall getenv "SSL_CERT_DIR"))))
+    (let ((bundle (find-if exists-p +system-ca-bundles+)))
+      (when bundle
+        (funcall setenv "SSL_CERT_FILE" bundle 1)
+        bundle))))
+
 (defun main-with-environment (arguments environment cni-entry)
   "The gr8s entry point, with its environment reader and CNI handler injected so
    tests can drive it. Writes the CNI plugin image when the first argument is the
@@ -4295,6 +4316,7 @@ No HA API may start from member-local certificate state before this converges."
   "The gr8s process entry point: dispatch ARGUMENTS (the command-line arguments by
    default) with the real environment and CNI handler. Returns the process exit
    code."
+  (ensure-system-ca-bundle)
   (main-with-environment arguments
                          #'uiop:getenv
                          (lambda () (cni-main))))
