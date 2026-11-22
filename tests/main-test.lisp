@@ -1052,3 +1052,26 @@
   (let ((options (parse-cli-options '("doctor" "host" "--state-directory" "/tmp/test-state"))))
     (is (eq :doctor (getf options :command)))
     (is (equal "/tmp/test-state" (getf options :state-directory)))))
+
+(test the-system-ca-bundle-is-found-where-the-distribution-keeps-it
+  (let ((set nil))
+    (flet ((ensure (environment existing)
+             (setf set nil)
+             (gr8s.server::ensure-system-ca-bundle
+              :getenv (lambda (name) (cdr (assoc name environment :test #'equal)))
+              :setenv (lambda (name value overwrite) (push (list name value overwrite) set))
+              :exists-p (lambda (path) (member path existing :test #'equal)))))
+      ;; Fedora 44 has only the extracted bundle, which pure-tls doesn't look for.
+      (is (equal "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"
+                 (ensure nil '("/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"))))
+      (is (equal '(("SSL_CERT_FILE" "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem" 1)) set))
+      ;; The most common path wins where there are several.
+      (is (equal "/etc/ssl/certs/ca-certificates.crt"
+                 (ensure nil '("/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"
+                               "/etc/ssl/certs/ca-certificates.crt"))))
+      ;; An operator's own choice stands, and with no bundle nothing is set.
+      (is (null (ensure '(("SSL_CERT_FILE" . "/custom.pem")) '("/etc/ssl/cert.pem"))))
+      (is (null (ensure '(("SSL_CERT_DIR" . "/custom/")) '("/etc/ssl/cert.pem"))))
+      (is (null (ensure nil nil)))
+      (is (null set)))))
+
