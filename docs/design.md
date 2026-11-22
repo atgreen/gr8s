@@ -23,7 +23,8 @@ kubectl / Kubernetes clients
              |
        controllers + scheduler
              |
-       revisioned node protocol over mutual TLS
+       revisioned node protocol: one gRPC stream per node,
+       opened by the agent, over mutual TLS
              |
        agent + Pod reconciler
           /              \
@@ -31,6 +32,13 @@ kubectl / Kubernetes clients
           |                       |
          runc                 kernel links + eBPF
 ```
+
+The agent opens the node protocol's connection, and the control plane never
+opens one to a node. Desired state, status, logs, exec, attach, port-forward,
+metrics, tracing, debugging, and the API server's own connections into Pods and
+nodes (webhooks, aggregated APIs and the proxy subresources) all travel over
+that one stream. Nodes need no inbound port and no route from the control
+plane; see [a control plane in another network](building-and-testing.md#a-control-plane-in-another-network).
 
 The control plane owns API identities, desired state, placement, enrollment,
 Pod CIDR assignment, and the desired snapshot sent to each node. Controllers

@@ -83,11 +83,11 @@
                        for frame = (fake-spdy-read-frame stream)
                        collect (cons (third frame) (second frame))))))
 
-(defmacro with-forwarding-agent ((runtime pod stream-listener) &body body)
-  "Run BODY with a real agent session behind control-plane RUNTIME, for assigned POD.
+(defmacro with-forwarding-agent ((runtime pod stream-listener &optional (node-runtime (gensym "NODE"))) &body body)
+  "Run BODY with a real agent session, NODE-RUNTIME, behind control-plane RUNTIME, for assigned POD.
 Forwarding URLs lead to STREAM-LISTENER, where the test plays the container runtime."
   (let ((store (gensym "STORE")) (path (gensym "PATH")) (node-server (gensym "SERVER")) (fake (gensym "FAKE"))
-        (node-runtime (gensym "NODE")) (control (gensym "CONTROL")) (agent (gensym "AGENT")))
+        (control (gensym "CONTROL")) (agent (gensym "AGENT")))
     `(with-temporary-store (,store ,path)
        (gr8s.controllers::register-node ,store (gr8s.model::make-node-record :id "forward-node" :name "worker-forward"
                                                          :pod-cidr "10.88.7.0/24"))

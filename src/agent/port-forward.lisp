@@ -76,6 +76,14 @@
                                                    :external-format '(:utf-8 :replacement #\?)))
         (finish-node-exec-operation operation))))
 
+(defgeneric deliver-port-forward-input (operation data eof)
+  (:documentation "Write DATA, then end of input when EOF, to where OPERATION's connection leads."))
+
+(defmethod deliver-port-forward-input ((operation node-port-forward-operation) data eof)
+  (when (or eof (plusp (length data)))
+    (spdy-write-data (node-exec-operation-session operation)
+                     (node-port-forward-operation-data-stream operation) data :fin eof)))
+
 (defun run-node-port-forward-writer (operation)
   "Write queued data to the Pod, acknowledging each piece, until the client ends or the operation does."
   (handler-case
@@ -88,9 +96,7 @@
                        (pop (node-port-forward-operation-input operation)))))
           (unless entry (return))
           (destructuring-bind (data . eof) entry
-            (when (or eof (plusp (length data)))
-              (spdy-write-data (node-exec-operation-session operation)
-                               (node-port-forward-operation-data-stream operation) data :fin eof))
+            (deliver-port-forward-input operation data eof)
             (when (plusp (length data))
               (emit-port-forward-stream operation :acknowledged (length data)))
             (when eof (return)))))

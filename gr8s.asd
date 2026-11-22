@@ -243,7 +243,8 @@
                                            ))
                              (:module "runtime"
                               :serial t
-                              :components ((:file "core")))
+                              :components ((:file "core")
+                                           (:file "dial-stream")))
                              (:file "kubelet/runtime-deletion")
                              (:file "kubelet/pod-conditions")
                              (:file "runtime/runtime-assets")
@@ -341,6 +342,7 @@
                              (:module "apiserver"
                               :serial t
                               :components ((:file "integration")
+                                           (:file "pod-network-dial")
                                            (:file "pod-http-proxy")
                                            (:file "debug-server")
                                            (:file "autoscaling-api")
@@ -444,6 +446,7 @@
                                            (:file "gateway-config")
                                            (:file "trace")
                                            (:file "port-forward")
+                                           (:file "dial")
                                            (:file "slynk-debug")
                                            ))
                              (:module "diagnostics"
@@ -638,6 +641,7 @@
                              (:file "pod-logs-test")
                              (:file "batch-resources-test")
                              (:file "admission-webhooks-test")
+                             (:file "dial-test")
                              (:file "pod-security-admission-test")
                              (:file "crd-conversion-test")
                              (:file "crd-validation-rules-test")

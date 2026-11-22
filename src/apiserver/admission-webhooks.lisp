@@ -265,7 +265,7 @@ Configuration resources are exempt so a bad webhook can always be removed."
                 "request" (admission-review-request hook attributes))))
 
 (defun admission-service-endpoint (store service)
-  "Route to a ready endpoint of SERVICE, returning its address and port."
+  "Route to a ready endpoint of SERVICE, returning its address, port and node, if known."
   (let* ((namespace (gethash "namespace" service)) (name (gethash "name" service))
          (port (gethash "port" service 443))
          (object (handler-case (get-core-resource store "services" namespace name)
@@ -295,12 +295,14 @@ Configuration resources are exempt so a bad webhook can always be removed."
                                         t))
                       when ready
                         do (loop for address across (gethash "addresses" endpoint #())
-                                 do (push (cons address (gethash "port" slice-port)) candidates))))))))
+                                 do (push (list address (gethash "port" slice-port)
+                                                (let ((node (gethash "nodeName" endpoint)))
+                                                  (and (stringp node) (plusp (length node)) node)))
+                                          candidates))))))))
       (unless candidates
         (error 'admission-call-failure
                :message (format nil "no endpoints available for service \"~A/~A\"" namespace name)))
-      (let ((chosen (nth (random (length candidates)) candidates)))
-        (values (car chosen) (cdr chosen))))))
+      (values-list (nth (random (length candidates)) candidates)))))
 
 (defun admission-read-line (stream)
   "Read one CRLF-terminated ASCII header line."
@@ -339,8 +341,8 @@ Configuration resources are exempt so a bad webhook can always be removed."
              :certificates (admission-ca-certificates (core-base64-bytes bundle "caBundle")))))
     context))
 
-(defun admission-https-post (&key address port server-name host-header target body bundle timeout)
-  "POST BODY over verified TLS to SERVER-NAME at ADDRESS within TIMEOUT seconds,
+(defun admission-https-post (&key address port server-name host-header target body bundle timeout dial)
+  "POST BODY over verified TLS to SERVER-NAME at ADDRESS, through DIAL when given, within TIMEOUT seconds,
 returning the status code and body octets.  A thin wrapper over the shared HTTP
 client: it trusts exactly the webhook's caBundle (or the system roots without one)
 and caps the response at +ADMISSION-MAXIMUM-RESPONSE+.  The private session-ticket
@@ -362,6 +364,7 @@ cache, address/verify-name split and socket-close-on-deadline live in the client
        ;; only fast transport failures (refused/reset/EOF) retry, so a hung backend
        ;; still fails once at the deadline rather than multiplying it.
        :max-attempts 3 :retry-interval 1/4
+       :dial dial
        :timeout timeout
        :body-limit +admission-maximum-response+)
     (declare (ignore headers))
@@ -387,11 +390,12 @@ cache, address/verify-name split and socket-close-on-deadline live in the client
                     :message (format nil "failed to call webhook: Post ~S: ~A" location reason))))
       (multiple-value-bind (code response)
           (handler-case
-              (multiple-value-bind (address port)
+              (multiple-value-bind (address port node)
                   (if service (admission-service-endpoint store service) (values server-name visible-port))
                 (admission-https-post :address address :port port :server-name server-name :target target
                                       :host-header (format nil "~A:~D" server-name visible-port)
-                                      :body body :bundle (gethash "caBundle" config) :timeout timeout))
+                                      :body body :bundle (gethash "caBundle" config) :timeout timeout
+                                      :dial (pod-network-dial node store address)))
             (admission-call-failure (condition) (failure (admission-call-failure-message condition)))
             (cl-cancel:deadline-exceeded () (failure "context deadline exceeded"))
             (sb-sys:deadline-timeout () (failure "context deadline exceeded"))

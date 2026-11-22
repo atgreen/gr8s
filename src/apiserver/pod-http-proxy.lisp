@@ -63,7 +63,8 @@
                          (if (equal scheme "https") 443 80))))
         (values (format nil "~A://~A:~A" scheme
                         (if (find #\: address) (format nil "[~A]" address) address) port)
-                (pod-uid pod))))))
+                (pod-uid pod)
+                (pod-node-name pod))))))
 
 (defun pod-proxy-end-to-end-headers (headers &key request (consume-credential t))
   "Strip connection-scoped fields from forwarded HEADERS, and on a REQUEST also the
@@ -155,8 +156,32 @@
                    attributes))))
    :simple-calls t))
 
-(defun proxy-http-exchange (target prefix-pattern method)
-  "Forward the current request to TARGET; PREFIX-PATTERN delimits the API prefix of its URL."
+(defun proxy-backend-connect (target dial)
+  "Open TARGET's connection through DIAL, returning the transport and a byte stream
+that carries TLS for an https TARGET. A proxied backend's certificate isn't checked,
+as Kubernetes doesn't check it."
+  (let* ((uri (puri:parse-uri target))
+         (https (eq (puri:uri-scheme uri) :https))
+         (host (puri:uri-host uri))
+         (port (or (puri:uri-port uri) (if https 443 80)))
+         (transport (funcall dial host port 10)))
+    (handler-case
+        (values transport
+                (if https
+                    (pure-tls:make-tls-client-stream
+                     (gr8s.http-client:transport-stream transport) :hostname host
+                     :context (pure-tls:make-tls-context :verify-mode pure-tls:+verify-none+
+                                                         :auto-load-system-ca nil)
+                     :verify pure-tls:+verify-none+)
+                    (gr8s.http-client:transport-stream transport))
+                (format nil "~A:~D" (if (find #\: host) (format nil "[~A]" host) host) port))
+      (error (condition)
+        (ignore-errors (gr8s.http-client:close-transport transport))
+        (error condition)))))
+
+(defun proxy-http-exchange (target prefix-pattern method &optional dial)
+  "Forward the current request to TARGET, through DIAL when given; PREFIX-PATTERN delimits
+the API prefix of its URL."
   (let* ((raw (hunchentoot:request-uri*))
          (question (position #\? raw))
          (raw-path (subseq raw 0 question))
@@ -170,7 +195,8 @@
          (headers (pod-proxy-end-to-end-headers
                    (mapcar (lambda (header) (cons (string-downcase (string (car header))) (cdr header)))
                            (hunchentoot:headers-in*)) :request t))
-         (body (hunchentoot:raw-post-data :force-binary t)))
+         (body (hunchentoot:raw-post-data :force-binary t))
+         (dialled nil))
     ;; A page's relative links need the trailing slash, so a read is sent back for it.
     (when (and (equal suffix "") (member method '(:get :head)))
       (setf (hunchentoot:header-out :location)
@@ -184,7 +210,12 @@
             (drakma:http-request url :method method :content body :content-type (hunchentoot:header-in* :content-type)
                                     :additional-headers headers :proxy nil :redirect nil :keep-alive nil :close t
                                     :user-agent nil :accept nil :force-binary t :want-stream t :decode-content nil
-                                    :preserve-uri t :connection-timeout 10 :verify nil)
+                                    :preserve-uri t :connection-timeout 10 :verify nil
+                                    ;; Drakma takes a given stream as connected, framed as it frames its own.
+                                    :stream (when dial
+                                              (setf dialled (nth-value 1 (proxy-backend-connect target dial)))
+                                              (flexi-streams:make-flexi-stream
+                                               (chunga:make-chunked-stream dialled) :external-format :latin-1)))
           (unwind-protect
                (let* ((end-to-end (pod-proxy-end-to-end-headers
                                    (mapcar (lambda (header) (cons (string-downcase (string (car header))) (cdr header))) response-headers)))
@@ -216,8 +247,10 @@
                        (write-sequence page client)
                        (unless (or (eq method :head) (member code '(204 304)))
                          (pod-proxy-copy-body upstream client response-headers)))))
-            (when (streamp upstream) (ignore-errors (close upstream)))))
+            (when (streamp upstream) (ignore-errors (close upstream)))
+            (when dialled (ignore-errors (close dialled)))))
       (error (condition)
+        (when dialled (ignore-errors (close dialled)))
         (if hunchentoot::*headers-sent*
             (error condition)
             (core-resource-error 503 "ServiceUnavailable" "Proxied HTTP connection failed: ~A" condition))))))
@@ -258,8 +291,10 @@
   (when (plusp (length body)) (write-sequence body stream))
   (finish-output stream))
 
-(defun proxy-upgrade-backend (target)
-  "Connect to TARGET and return its socket and HTTP or HTTPS byte stream."
+(defun proxy-upgrade-backend (target &optional dial)
+  "Connect to TARGET, through DIAL when given, and return its transport and HTTP or HTTPS byte stream."
+  (when dial
+    (return-from proxy-upgrade-backend (proxy-backend-connect target dial)))
   (let* ((uri (puri:parse-uri target))
          (scheme (puri:uri-scheme uri))
          (host (puri:uri-host uri))
@@ -276,8 +311,9 @@
                 (usocket:socket-stream socket))
             (format nil "~A:~D" (if (find #\: host) (format nil "[~A]" host) host) port))))
 
-(defun proxy-upgrade-exchange (target prefix-pattern method)
-  "Forward an HTTP Upgrade handshake to TARGET and relay its byte stream in both directions."
+(defun proxy-upgrade-exchange (target prefix-pattern method &optional dial)
+  "Forward an HTTP Upgrade handshake to TARGET, through DIAL when given, and relay its byte
+stream in both directions."
   (let* ((raw (hunchentoot:request-uri*))
          (question (position #\? raw))
          (raw-path (subseq raw 0 question))
@@ -288,7 +324,7 @@
          (body (or (hunchentoot:raw-post-data :force-binary t) #()))
          (socket nil))
     (handler-case
-        (multiple-value-bind (connected stream authority) (proxy-upgrade-backend target)
+        (multiple-value-bind (connected stream authority) (proxy-upgrade-backend target dial)
           (setf socket connected)
           (proxy-write-upgrade-request
            stream method backend-path authority
@@ -306,7 +342,7 @@
               (extend-api-connection-idle-timeout)
               (relay-runtime-stream client stream socket))))
       (error (condition)
-        (when socket (ignore-errors (usocket:socket-close socket)))
+        (when socket (ignore-errors (gr8s.http-client:close-transport socket)))
         (if hunchentoot::*headers-sent*
             (error condition)
             (core-resource-error 503 "ServiceUnavailable"
@@ -317,13 +353,15 @@
   (unless (member method *pod-proxy-methods*)
     (core-resource-error 405 "MethodNotAllowed" "Unsupported Pod proxy method"))
   (admit-pod-proxy store namespace id)
-  (let ((target (pod-proxy-target store namespace id))
-        (prefix "^/api/v1/namespaces/[^/]+/pods/[^/]+/proxy(?=/|$)"))
-    ;; The exchange takes as long as the workload behind it; the store's part is done.
-    (gr8s.store::release-store-request)
-    (if (upgrade-request-p)
-        (proxy-upgrade-exchange target prefix method)
-        (proxy-http-exchange target prefix method))))
+  (multiple-value-bind (target uid node) (pod-proxy-target store namespace id)
+    (declare (ignore uid))
+    (let ((prefix "^/api/v1/namespaces/[^/]+/pods/[^/]+/proxy(?=/|$)")
+          (dial (pod-network-dial node)))
+      ;; The exchange takes as long as the workload behind it; the store's part is done.
+      (gr8s.store::release-store-request)
+      (if (upgrade-request-p)
+          (proxy-upgrade-exchange target prefix method dial)
+          (proxy-http-exchange target prefix method dial)))))
 
 ;;; Service proxy
 
@@ -359,18 +397,20 @@
         (unless endpoints
           (core-resource-error 503 "ServiceUnavailable" "no endpoints available for service ~S" name))
         (destructuring-bind (address target) (nth (random (length endpoints)) endpoints)
-          (format nil "~A://~A:~A" scheme address target))))))
+          (values (format nil "~A://~A:~A" scheme address target)
+                  address))))))
 
 (defun service-http-proxy-response (store namespace id method)
   "Proxy an ordinary HTTP exchange to one ready backend of a Service port."
   (unless (member method *pod-proxy-methods*)
     (core-resource-error 405 "MethodNotAllowed" "Unsupported Service proxy method"))
-  (let ((target (service-proxy-target store namespace id))
-        (prefix "^/api/v1/namespaces/[^/]+/services/[^/]+/proxy(?=/|$)"))
-    (gr8s.store::release-store-request)
-    (if (upgrade-request-p)
-        (proxy-upgrade-exchange target prefix method)
-        (proxy-http-exchange target prefix method))))
+  (multiple-value-bind (target address) (service-proxy-target store namespace id)
+    (let ((prefix "^/api/v1/namespaces/[^/]+/services/[^/]+/proxy(?=/|$)")
+          (dial (pod-network-dial nil store address)))
+      (gr8s.store::release-store-request)
+      (if (upgrade-request-p)
+          (proxy-upgrade-exchange target prefix method dial)
+          (proxy-http-exchange target prefix method dial)))))
 
 ;;; Node proxy
 

@@ -19,6 +19,13 @@ the Kubernetes API version with a gr8s release suffix (see
   deleting the bundle takes effect from the next node snapshot; nodes keep the
   last trust they received across restarts. A host also named by a node's
   `--registry-ca` trusts both (podster-b0c).
+- A control plane with no route to Pod IPs reaches webhooks, aggregated API
+  servers and the `pods/proxy`, `services/proxy` and `nodes/proxy`
+  subresources through the agent on the endpoint's node, as Kubernetes's
+  konnectivity agent does. The agent opens the connection, and its bytes travel
+  over the agent's existing session, so no node needs to be reachable from the
+  control plane. An agent connects only to its own Pods and its own address.
+  `serve --pod-network-egress direct` restores direct dialing (podster-he2).
 
 ### Fixed
 
@@ -35,6 +42,13 @@ the Kubernetes API version with a gr8s release suffix (see
   identity a Secret was issued for, so a changed spec reissues at once
   instead of at renewal, and a Secret issued before this fix reissues once
   (podster-upj).
+- An NFS volume's directory is deleted only from a node its StorageClass's
+  `allowedTopologies` admits. Cleanup used to pick any Ready node, so a node
+  with no route to the NFS server could take the first attempt, fail, and log
+  an error before another node succeeded (podster-hlc).
+- `make generate-protocol` works again. The `ocicl.csv` refresh in
+  v1.37.2-gr8s.2 dropped `clingon`, which the protocol generator needs
+  (podster-1gx).
 
 ### Security
 

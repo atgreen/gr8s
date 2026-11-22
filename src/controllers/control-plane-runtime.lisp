@@ -359,6 +359,18 @@ direction waits for acknowledgements, so a long download neither piles up here n
        :pod-uid uid
        :port port)))))
 
+(defmethod runtime-start-dial ((runtime control-plane-runtime) node-name address port)
+  (make-control-plane-port-forward
+   (queue-node-operation
+    (control-plane-runtime-node-server runtime)
+    node-name
+    (make-instance
+     'gr8s.node.v1::operation-request
+     :operation-id (generate-uid)
+     :kind gr8s.node.v1::+operationkind-operation_kind_dial+
+     :dial-address address
+     :port port))))
+
 (defmethod runtime-port-forward-send
     ((runtime control-plane-runtime) (session control-plane-port-forward) data &key eof)
   (let ((operation (control-plane-port-forward-operation session)))

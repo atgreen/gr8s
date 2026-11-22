@@ -46,8 +46,11 @@ CNI operation fails rather than making an unrecorded network change.
 
 ## Agent protocol
 
-The node initiates every management connection. Nodes expose no management
-listener on the cluster network. A private, versioned ag-gRPC bidirectional
+The node initiates every management connection, and the control plane never
+connects to a node. Nodes expose no management listener on the cluster network
+and need no route from the control plane: everything the control plane asks of
+a node, including the API server's own connections into its Pods, travels over
+the one stream the agent opened. A private, versioned ag-gRPC bidirectional
 stream over TLS carries:
 
 - node registration and capabilities;

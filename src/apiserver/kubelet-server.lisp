@@ -177,7 +177,7 @@ Both are issued afresh, so an address that changed is covered."
 ;;; HTTPS requests with client credentials
 
 (defun tls-http-request (&key address port server-name (method :get) target headers body
-                              trust-certificates client-certificate client-key (timeout 10))
+                              trust-certificates client-certificate client-key dial (timeout 10))
   "Send one HTTP/1.1 request over TLS verified against TRUST-CERTIFICATES for SERVER-NAME,
 presenting CLIENT-CERTIFICATE when given. Return the status, lowercase headers and body octets."
   ;; The transport lives in the shared client; keep this entry point's contract,
@@ -186,7 +186,7 @@ presenting CLIENT-CERTIFICATE when given. Return the status, lowercase headers a
       (gr8s.http-client:https-request
        :host address :port port :server-name server-name :method method :target target
        :headers headers :body body :trust-certificates trust-certificates
-       :client-certificate client-certificate :client-key client-key :timeout timeout)
+       :client-certificate client-certificate :client-key client-key :dial dial :timeout timeout)
     ((or cl-cancel:deadline-exceeded sb-sys:deadline-timeout) ()
       (error "no answer from ~A:~D within ~D seconds" address port timeout))))
 
@@ -609,7 +609,8 @@ sorted HTML listing, a file as itself, and a directory named without its trailin
                                   :target (concatenate 'string suffix (or query ""))
                                   :headers '(("Accept" . "*/*"))
                                   :trust-certificates (if (listp ca) ca (list ca))
-                                  :client-certificate certificate :client-key key)
+                                  :client-certificate certificate :client-key key
+                                  :dial (pod-network-dial name))
               (error (condition)
                 (core-resource-error 503 "ServiceUnavailable" "error trying to reach the kubelet of node ~A: ~A"
                                      name (remove #\Newline (princ-to-string condition)))))

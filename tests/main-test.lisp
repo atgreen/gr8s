@@ -156,6 +156,16 @@
     (is (string= "containerd" (getf agent-options :runtime)))
     (is (string= "managed" (getf agent-options :containerd-mode)))))
 
+(test serve-reaches-pods-through-agents-unless-told-to-route
+  (flet ((through-agents-p (&rest arguments)
+           (gr8s.server::serve-dials-pods-through-agents-p (parse-cli-options (cons "serve" arguments)))))
+    (is-true (through-agents-p) "no node needs to be reachable from the control plane")
+    (is-true (through-agents-p "--disable-agent"))
+    (is-true (through-agents-p "--pod-network-egress" "agent"))
+    (is-false (through-agents-p "--pod-network-egress" "direct"))
+    (is-false (through-agents-p "--disable-agent" "--pod-network-egress" "direct")))
+  (signals error (parse-cli-options '("serve" "--pod-network-egress" "auto"))))
+
 (test cli-doctor-parses-state-directory-flag-positional-and-cidr
   ;; Bare doctor now shows command help without probing the host.
   (let ((options (parse-cli-options '("doctor"))))

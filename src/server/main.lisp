@@ -256,6 +256,7 @@ registry serving a cert-manager certificate from the cluster's ca issuer."
                        :wireguard-relay-max-channels 1024
                        :node-name "gr8s-local"
                        :disable-agent nil
+                       :pod-network-egress "agent"
                        :raft-compaction :auto
                        :cluster-pod-cidr +default-cluster-pod-cidr+
                        :cluster-pod-cidrs (vector +default-cluster-pod-cidr+)
@@ -332,6 +333,10 @@ registry serving a cert-manager certificate from the cluster's ca issuer."
                       (unless (member value '("vxlan" "wireguard") :test #'string=)
                         (error "overlay backend must be vxlan or wireguard"))
                       (setf (getf options :overlay-backend) value))
+                     ((string= option "--pod-network-egress")
+                      (unless (member value '("agent" "direct") :test #'string=)
+                        (error "Pod network egress must be agent or direct"))
+                      (setf (getf options :pod-network-egress) value))
                      ((string= option "--node-listen")
                       (setf (getf options :node-listen)
                             (format-ipv4-integer (parse-ipv4-integer value))))
@@ -2740,6 +2745,11 @@ worker keeps its existing cadence. LEADER-GATE still gates every pass."
           (error () nil)))))
   nil)
 
+(defun serve-dials-pods-through-agents-p (options)
+  "Return whether serve reaches Pods and nodes through their agents' own sessions, so that no
+node needs to be reachable from the control plane. Only --pod-network-egress direct says not."
+  (not (equal "direct" (getf options :pod-network-egress "agent"))))
+
 (defun serve-bootstraps-cluster-p (options local-agent ha)
   "Return whether serve creates the standard namespaces and default ClusterRoles at startup.
 A single control plane is a real cluster whether its agents are local or remote, so it
@@ -2989,6 +2999,15 @@ between later ones. An ordinary restart recovers within the first.")
                 (getf options :wireguard-relay-max-channels))))
            (let* ((runtime (make-control-plane-runtime store node-server))
                   (reconciler (make-reconciler store runtime)))
+             (setf gr8s.apiserver::*pod-network-dialer*
+                   (when (serve-dials-pods-through-agents-p options)
+                     (let ((local-node (unless (getf options :disable-agent) (getf options :node-name))))
+                       (lambda (node address port timeout)
+                         ;; This host's own Pods and kubelet are reached on this host.
+                         (if (equal node local-node)
+                             (usocket:socket-connect address port :element-type '(unsigned-byte 8)
+                                                                  :timeout timeout :nodelay t)
+                             (gr8s.runtime:open-dial-stream runtime node address port))))))
              (when ha
                (install-member-slynk-handler node-server state-directory store reconciler))
              (unless (getf options :disable-agent)
@@ -3849,6 +3868,7 @@ No HA API may start from member-local certificate state before this converges."
                         ("--raft-compaction" "Enable automatic HA checkpoints (the HA default)")
                         ("--no-raft-compaction" "Disable automatic HA checkpoints for diagnostics")
                         ("--overlay-backend NAME" "vxlan or wireguard")
+                        ("--pod-network-egress MODE" "agent (default) or direct: reach webhook, aggregated-API and proxied Pods and nodes through their agents, or by route")
                         ("--mtu N" "Pod interface MTU (default 1450; 1420 for wireguard)")
                         ("--runtime NAME" "containerd or fake")
                         ("--containerd-mode MODE" "managed or external")

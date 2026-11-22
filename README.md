@@ -160,6 +160,11 @@ For multi-member operation, recovery, automatic checkpoints and heap sizing, see
   so a rollout to many nodes normally costs the registry one download of each
   layer, and [preloaded images](docs/runtime.md#preloaded-images-airgap) cover
   airgapped nodes.
+- **Workers the control plane never has to reach.** Each agent opens one
+  persistent, mutually authenticated connection to the control plane, and
+  everything the control plane asks of that node travels over it. Workers can
+  sit behind NAT, on a home network or in another cloud, with no port open to
+  the control plane; see [how it fits together](#how-it-fits-together).
 - **A dataplane you can adopt piece by piece.** The eBPF networking stack also
   runs on [a cluster you already have](#use-the-gr8s-dataplane-with-your-own-kubernetes),
   as a full CNI or just as a Gateway or kube-proxy replacement.
@@ -288,7 +293,8 @@ supported operations, validation evidence, and limitations.
 ```text
 kubectl -> Kubernetes API -> controllers and scheduler -> desired state
                                                         |
-                                                  node protocol
+                                 one persistent gRPC session per node,
+                                       opened by the agent (mTLS)
                                                         |
                                                      agent
                                                    /       \
@@ -298,10 +304,32 @@ kubectl -> Kubernetes API -> controllers and scheduler -> desired state
 ```
 
 `gr8s serve` runs the control plane and a local agent. Worker nodes run
-`gr8s agent` and connect through an authenticated gRPC protocol. The control
-plane schedules work and publishes the desired state. Agents reconcile
-containers and networking, then report their status. By default, each agent
-manages its own containerd instance.
+`gr8s agent`. The control plane schedules work and publishes the desired state.
+Agents reconcile containers and networking, then report their status. By
+default, each agent manages its own containerd instance.
+
+**Agents connect to the control plane; the control plane never connects to an
+agent.** Each agent opens one persistent gRPC stream over mutual TLS when it
+starts, and reopens it if it drops. Everything the control plane sends that node
+travels over that stream:
+
+- desired state and node configuration;
+- `kubectl exec`, `attach`, `logs`, `cp` and `port-forward`;
+- calls the API server makes into Pods: admission and conversion webhooks,
+  aggregated APIs such as metrics-server, and the `pods/proxy`,
+  `services/proxy` and `nodes/proxy` subresources;
+- metrics, volume cleanup, `gr8s debug trace` and the Slynk debugger.
+
+So a worker opens no port to the control plane, and it doesn't have to be
+reachable from it: it can sit behind NAT or a firewall, on a home network, or in
+another cloud. The control plane listens on TCP 6443 for the API and 7443 for
+agents. A standard Kubernetes cluster needs the konnectivity proxy for this; in
+gr8s it is how the node protocol works. See
+[a control plane in another network](docs/building-and-testing.md#a-control-plane-in-another-network).
+
+Pod traffic between nodes still crosses the overlay, so nodes must be able to
+send to each other: over VXLAN, or over WireGuard, which can traverse NAT and
+relay.
 
 For a replicated control plane, Raft supports three voting members or two
 members and a witness. A quorum can continue after a leader fails. A single-node
