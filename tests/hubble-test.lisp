@@ -540,11 +540,18 @@
       (values stream (parse-integer (trivial-utf-8:utf-8-bytes-to-string head) :start 9 :end 12)))))
 
 (test the-dashboard-agent-tab-runs-an-agent-on-a-terminal
-  ;; podster-2ry: a pseudo-terminal behind a WebSocket, running only what the catalogue names.
-  (let* ((agent (gr8s.server::make-dashboard-agent
+  ;; podster-2ry: a pseudo-terminal behind a WebSocket, running only an agent the tab offers.
+  (let* ((directory (uiop:ensure-directory-pathname
+                     (sb-posix:mkdtemp (namestring (merge-pathnames "gr8s-agents-XXXXXX" (uiop:temporary-directory))))))
+         (agents-file (merge-pathnames "dashboard-agents.json" directory))
+         (agent (gr8s.server::make-dashboard-agent
                  "/tmp/kubeconfig-for-test"
-                 :choices (lambda ()
-                            '(("echo" "Echo" ("/bin/sh" "-c" "read go; stty size; echo kube=$KUBECONFIG; read line; echo got:$line; exit 3"))))))
+                 :agents-file agents-file
+                 :choices-function
+                 (lambda ()
+                   (list (list :id "echo" :label "Echo" :program "/bin/sh" :builtin nil
+                               :command '("sh" "-c" "read go; stty size; echo kube=$KUBECONFIG; read line; echo got:$line; exit 3"))
+                         (list :id "absent" :label "Absent" :program nil :builtin t :command '("absent"))))))
          (acceptor (make-instance 'gr8s.server::gr8s-dashboard-acceptor
                                   :address "127.0.0.1" :port 0 :shell-path "/ui/tok/"
                                   :tabs '(("agent" "/agent/tok/" "Agent"))
@@ -563,12 +570,31 @@
                     (gr8s.protocol::write-websocket-frame stream opcode (trivial-utf-8:string-to-utf-8-bytes text)
                                                           :masked-p t)))
              (is (search "<script src=\"xterm.js\"></script>" (get-path "/agent/tok/")))
-             (is (equal "[{\"id\":\"echo\",\"label\":\"Echo\"}]" (get-path "/agent/tok/agents")))
+             (let ((offered (com.inuoe.jzon:parse (get-path "/agent/tok/agents"))))
+               (is (equal '("echo" "absent") (map 'list (lambda (entry) (gethash "id" entry)) offered)))
+               (is (eq t (gethash "installed" (aref offered 0))))
+               (is (eq nil (gethash "installed" (aref offered 1))))
+               (is (equalp #("sh" "-c" "read go; stty size; echo kube=$KUBECONFIG; read line; echo got:$line; exit 3")
+                           (gethash "command" (aref offered 0)))))
+             ;; podster-9et: the reader's own agents are saved from this dashboard's page alone.
+             (flet ((post-agents (body &optional (origin (format nil "http://127.0.0.1:~D" port)))
+                      (nth-value 1 (drakma:http-request (format nil "http://127.0.0.1:~D/agent/tok/agents" port)
+                                                        :method :post :proxy nil :content body
+                                                        :content-type "application/json"
+                                                        :additional-headers (list (cons "Origin" origin))))))
+               (let ((mine "[{\"id\":\"mine\",\"label\":\"Mine\",\"command\":[\"mine\",\"{guide-file}\"]}]"))
+                 (is (= 403 (post-agents mine "http://evil.example")))
+                 (is (null (probe-file agents-file)))
+                 (is (= 400 (post-agents "[{\"id\":\"claude\",\"label\":\"x\",\"command\":[\"x\"]}]")))
+                 (is (= 400 (post-agents "{\"not\":\"a list\"}")))
+                 (is (= 200 (post-agents mine)))
+                 (is (equal '(("mine" "Mine" ("mine" "{guide-file}"))) (gr8s.server::read-custom-agents agents-file)))))
              (when (third (assoc "xterm.js" gr8s.server::+dashboard-agent-assets+ :test #'equal))
                (is (= 200 (nth-value 1 (get-path "/agent/tok/xterm.js")))))
              ;; Another site's page can't open a terminal, and only the catalogue runs.
              (is (= 403 (nth-value 1 (agent-test-websocket port "/agent/tok/pty?agent=echo" :origin "http://evil.example"))))
              (is (= 404 (nth-value 1 (agent-test-websocket port "/agent/tok/pty?agent=sh"))))
+             (is (= 404 (nth-value 1 (agent-test-websocket port "/agent/tok/pty?agent=absent"))))
              (multiple-value-bind (stream status) (agent-test-websocket port "/agent/tok/pty?agent=echo")
                (is (= 101 status))
                (send stream 1 "{\"type\":\"resize\",\"cols\":99,\"rows\":33}")
@@ -589,7 +615,8 @@
                  (is (= 3 (gethash "code" exit))))
                (close stream))
              (is-true (wait-until (lambda () (null (gr8s.server::dashboard-agent-sessions agent))) :timeout 5))))
-      (hunchentoot:stop acceptor))))
+      (hunchentoot:stop acceptor)
+      (uiop:delete-directory-tree directory :validate t))))
 
 (defun agent-test-frames (stream &key (until (lambda (text exits) (declare (ignore text exits)) nil)))
   "Read STREAM's frames until it closes or UNTIL, given the output so far and the control
@@ -608,7 +635,9 @@ messages, says so; return (values output control-messages)."
   ;; An agent runs on when its page goes, shows its latest output to the next, and ends when stopped.
   (let* ((agent (gr8s.server::make-dashboard-agent
                  "/tmp/kubeconfig-for-test"
-                 :choices (lambda () '(("loop" "Loop" ("/bin/sh" "-c" "echo started; while read line; do echo got:$line; done"))))))
+                 :choices-function
+                 (lambda () (list (list :id "loop" :label "Loop" :program "/bin/sh" :builtin nil
+                                        :command '("sh" "-c" "echo started; while read line; do echo got:$line; done"))))))
          (acceptor (make-instance 'gr8s.server::gr8s-dashboard-acceptor
                                   :address "127.0.0.1" :port 0 :shell-path "/ui/tok/"
                                   :tabs '(("agent" "/agent/tok/" "Agent"))
