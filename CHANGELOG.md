@@ -26,8 +26,8 @@ the Kubernetes API version with a gr8s release suffix (see
 - `gr8s dashboard` opens one page with two tabs, Headlamp and Hubble UI, both
   embedded in the image and served on one loopback port under one unguessable
   session path. Hubble UI's backend is implemented in gr8s: the namespace
-  list, service map and flow table. It prints only its URL; `--verbose` logs
-  every request and server error to stderr.
+  list, service map and flow table. The page has a gr8s icon. It prints only
+  its URL; `--verbose` logs every request and server error to stderr.
 - `DashboardTab` (`dashboard.gr8s.io/v1`, cluster-scoped) adds a tab for one
   of the cluster's apps to every `gr8s dashboard`, proxied through the cluster
   API's `services/proxy` and served from a loopback origin of its own, behind a

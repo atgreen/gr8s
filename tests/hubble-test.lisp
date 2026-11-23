@@ -386,7 +386,9 @@
              (is (search "data-src=\"/dashboard/tok/\">Headlamp</button>" page))
              (is (search "data-src=\"/hubble/tok/\">Hubble</button>" page))
              (is (search "id=\"frame-hubble\" title=\"Hubble\"" page))
-             (is (search "show(location.hash.slice(1) || 'headlamp')" page)))
+             (is (search "show(location.hash.slice(1) || 'headlamp')" page))
+             ;; Its browser tab has the gr8s icon, inline, so no other request serves it.
+             (is (search "<link rel=\"icon\" type=\"image/svg+xml\" href=\"data:image/svg+xml," page)))
            (is (= 200 (nth-value 1 (get-path "/ui/tok"))))
            ;; Each tab's app answers under the same token.
            (is (search "\"clusters\"" (get-path "/dashboard/tok/config")))
