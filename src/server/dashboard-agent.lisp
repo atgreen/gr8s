@@ -52,15 +52,40 @@ A shell is offered as well.")
         when (and candidate (ignore-errors (sb-posix:access candidate sb-posix:x-ok) t))
           return candidate))
 
-(defun installed-agent-choices ()
-  "(id label argv) for each agent installed here, then the reader's shell."
+(defun gr8s-program ()
+  "This gr8s executable, or, run from source, the one on PATH; NIL if neither."
+  (let ((runtime sb-ext:*runtime-pathname*))
+    (if (and runtime (not (search "sbcl" (pathname-name runtime))))
+        runtime
+        (dashboard-find-program "gr8s"))))
+
+(defun agent-mcp-arguments (id gr8s kubeconfig)
+  "The arguments that give agent ID `gr8s mcp' for KUBECONFIG, run by GR8S, as a tool
+server; NIL for an agent that can only be told so in its own settings (Gemini CLI)."
+  (let ((arguments (list "mcp" "--kubeconfig" kubeconfig)))
+    (cond ((null gr8s) nil)
+          ((equal id "claude")
+           (list "--mcp-config"
+                 (com.inuoe.jzon:stringify
+                  (gr8s-diagnose::object "mcpServers"
+                                         (gr8s-diagnose::object "gr8s" (gr8s-diagnose::object "type" "stdio" "command" gr8s
+                                                                                              "args" (coerce arguments 'vector)))))))
+          ;; Codex reads each -c value as TOML; a JSON string or array of strings is one.
+          ((equal id "codex")
+           (list "-c" (format nil "mcp_servers.gr8s.command=~A" (com.inuoe.jzon:stringify gr8s))
+                 "-c" (format nil "mcp_servers.gr8s.args=~A" (com.inuoe.jzon:stringify (coerce arguments 'vector))))))))
+
+(defun installed-agent-choices (kubeconfig &key (gr8s (gr8s-program)))
+  "(id label argv) for each agent installed here, given `gr8s mcp' for KUBECONFIG when it
+can be, then the reader's shell."
   (append (loop for (id label program) in +dashboard-agent-catalogue+
                 for path = (dashboard-find-program program)
-                when path collect (list id label (list path)))
+                when path collect (list id label (list* path (agent-mcp-arguments id (and gr8s (namestring gr8s)) kubeconfig))))
           (let ((shell (or (uiop:getenv "SHELL") (dashboard-find-program "bash") "/bin/sh")))
             (list (list "shell" "Shell" (list shell "-l"))))))
 
-(defstruct (dashboard-agent (:constructor make-dashboard-agent (kubeconfig &key (choices #'installed-agent-choices))))
+(defstruct (dashboard-agent (:constructor make-dashboard-agent
+                                (kubeconfig &key (choices (lambda () (installed-agent-choices kubeconfig))))))
   "The Agent tab: what it runs and the sessions running."
   kubeconfig
   ;; () -> (id label argv) list.

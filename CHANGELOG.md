@@ -16,6 +16,10 @@ the Kubernetes API version with a gr8s release suffix (see
   terminal opens only from the dashboard's own page, and each agent ends with
   its tab's connection or the dashboard. The terminal is xterm.js, embedded
   like the other frontends (podster-2ry).
+- `gr8s mcp` serves an AI agent read-only Model Context Protocol tools on
+  stdio: `doctor_diagnose`, `doctor_impact`, `observe_flows` and
+  `cluster_status`, with the kubeconfig's credentials. The dashboard's Agent
+  tab registers it for Claude Code and Codex (podster-j53).
 
 ### Fixed
 

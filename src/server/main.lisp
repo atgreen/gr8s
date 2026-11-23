@@ -1925,6 +1925,8 @@ needs no shell/coreutils/util-linux. Returns 0."
      (parse-doctor-options (rest arguments)))
     ((string= "dashboard" (first arguments))
      (parse-dashboard-options (rest arguments)))
+    ((string= "mcp" (first arguments))
+     (parse-mcp-options (rest arguments)))
     (t (error "unknown command: ~A" (first arguments))))))
 
 (defun parse-trace-duration (text)
@@ -3886,6 +3888,7 @@ No HA API may start from member-local certificate state before this converges."
     ("restore" "Restore a state backup into a fresh state directory")
     ("skill" "Print guidance for operators and AI agents")
     ("dashboard" "Open the dashboards (Headlamp, Hubble UI and an agent terminal) in a browser")
+    ("mcp" "Serve read-only cluster tools to an AI agent over MCP (stdio)")
     ("version" "Print version information") ("notices" "Print license notices")))
 
 (defun print-help-rows (rows)
@@ -3943,6 +3946,11 @@ No HA API may start from member-local certificate state before this converges."
                         ("--fix" "Repair supported local host problems"))))
       ((equal path '("skill"))
        (simple "Print offline Markdown guidance for operators and AI agents" ""))
+      ((equal path '("mcp"))
+       (page "Serve the doctor, flows and control-plane state to an AI agent as Model Context Protocol tools, on stdin and stdout"
+             "[OPTIONS]"
+             :options '(("--kubeconfig PATH" "Cluster kubeconfig (default $KUBECONFIG or ~/.kube/config)")
+                        ("--help, -h" "show help"))))
       ((equal path '("dashboard"))
        (page "Serve the dashboards, Headlamp, Hubble UI and an agent terminal, and open them in a browser; runs until Ctrl-C"
              "[OPTIONS]"
@@ -4254,6 +4262,7 @@ and refuses every public registry (podster-8ak). Returns the bundle named, or NI
                0)
               (:trace (run-trace-command options))
               (:dashboard (run-dashboard-command options))
+              (:mcp (run-mcp-command options))
               (:debug-slynk (run-debug-slynk-command options))
               (:wireguard-rotate-key
                (rotate-wireguard-node-key options))

@@ -237,8 +237,9 @@ resource updates. The Hubble tab serves Hubble UI's service map and flow table
 from the cluster's [flow events](docs/networking.md#flow-events). The Agent tab
 is a terminal running an AI coding agent you have installed (Claude Code, Codex
 or Gemini CLI) or a shell. It runs on your machine, with your own login, and
-with `KUBECONFIG` naming the dashboard's cluster; nothing is deployed to the
-cluster. All three are embedded in the binary, with no separate install.
+with `KUBECONFIG` naming the dashboard's cluster, and with [`gr8s mcp`](#mcp)
+registered for Claude Code and Codex; nothing is deployed to the cluster. All
+three are embedded in the binary, with no separate install.
 
 ```sh
 gr8s dashboard    # uses $KUBECONFIG, or ~/.kube/config
@@ -267,6 +268,25 @@ and launches your browser; `--no-launch` prints the URL instead. It prints only
 that URL; `--verbose` logs every request and server error. `make native`
 embeds the assets automatically; see
 [dashboard assets](docs/building-and-testing.md#dashboard-assets).
+
+## MCP
+
+`gr8s mcp` serves an AI agent what gr8s knows about a cluster as [Model Context
+Protocol](https://modelcontextprotocol.io) tools, on stdin and stdout, with the
+kubeconfig's credentials. Every tool only reads:
+
+- `doctor_diagnose`: the `gr8s doctor diagnose` report, for the cluster, a
+  namespace or one resource, as Markdown.
+- `doctor_impact`: what would stop working if a resource went away.
+- `observe_flows`: recent flow events, filtered by namespace, Pod, node or verdict.
+- `cluster_status`: the control plane's members and leader, and each node's readiness.
+
+```sh
+claude mcp add gr8s -- gr8s mcp --kubeconfig ~/.kube/config
+codex mcp add gr8s -- gr8s mcp --kubeconfig ~/.kube/config
+```
+
+The dashboard's Agent tab registers it for the agents it starts.
 
 ## Doctor
 
