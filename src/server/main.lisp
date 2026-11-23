@@ -1588,6 +1588,8 @@ each request and each worker error."
          (hubble-p (gr8s.apiserver::hubble-ui-assets-present-p))
          (hubble-base (format nil "/hubble/~A/" token))
          (hubble-backend (and hubble-p (make-hubble-ui-backend config)))
+         (agent-base (format nil "/agent/~A/" token))
+         (agent (make-dashboard-agent (namestring (truename kubeconfig))))
          (apps (make-dashboard-apps config))
          (url (format nil "http://127.0.0.1:~D/ui/~A/~@[#~A~]" port token (getf options :tab)))
          (sweeper nil)
@@ -1598,7 +1600,9 @@ each request and each worker error."
                                   :message-log-destination (and verbose *error-output*)
                                   :shell-path (format nil "/ui/~A/" token)
                                   :tabs (append (list (list "headlamp" (format nil "/dashboard/~A/" token) "Headlamp"))
-                                                (and hubble-p (list (list "hubble" hubble-base "Hubble"))))
+                                                (and hubble-p (list (list "hubble" hubble-base "Hubble")))
+                                                (list (list "agent" agent-base "Agent")))
+                                  :agent agent :agent-base agent-base
                                   :hubble-backend hubble-backend :hubble-base (and hubble-p hubble-base)
                                   :apps apps
                                   :proxy-fn (lambda (method target request)
@@ -1633,6 +1637,7 @@ each request and each worker error."
            (finish-output)
            (loop until *shutdown-requested* do (sleep 0.2)))
       (ignore-errors (hunchentoot:stop acceptor))
+      (stop-dashboard-agents agent)
       (stop-dashboard-apps apps)
       (when sweeper (ignore-errors (bt:join-thread sweeper)))
       (when hubble-backend
@@ -3880,7 +3885,7 @@ No HA API may start from member-local certificate state before this converges."
     ("backup" "Capture and verify encrypted state backups")
     ("restore" "Restore a state backup into a fresh state directory")
     ("skill" "Print guidance for operators and AI agents")
-    ("dashboard" "Open the dashboards (Headlamp and Hubble UI) in a browser")
+    ("dashboard" "Open the dashboards (Headlamp, Hubble UI and an agent terminal) in a browser")
     ("version" "Print version information") ("notices" "Print license notices")))
 
 (defun print-help-rows (rows)
@@ -3939,7 +3944,7 @@ No HA API may start from member-local certificate state before this converges."
       ((equal path '("skill"))
        (simple "Print offline Markdown guidance for operators and AI agents" ""))
       ((equal path '("dashboard"))
-       (page "Serve the dashboards, Headlamp and Hubble UI, and open them in a browser; runs until Ctrl-C"
+       (page "Serve the dashboards, Headlamp, Hubble UI and an agent terminal, and open them in a browser; runs until Ctrl-C"
              "[OPTIONS]"
              :options '(("--kubeconfig PATH" "Cluster kubeconfig (default $KUBECONFIG or ~/.kube/config)")
                         ("--port N" "Loopback port to serve on (default 8080)")

@@ -31,7 +31,7 @@ TEST_EVAL := --eval '(require :asdf)' --eval '(asdf:test-system :gr8s)'
 OCICL ?= ocicl
 OCICL_STAMP := ocicl/.ocicl-installed
 
-.PHONY: hubble-ui-assets dashboard-assets-from-source dashboard-assets-compress test-raft-snapshots test-raft-checkpoint-memory test-pod-transactions test-pod-transaction-memory test-core-recovery test-core-recovery-memory all help containerd-bundle dashboard-assets generate-protocol test-protocol-generation test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api test-install-lifecycle check smoke smoke-two-node run kubeconfig notices native clean deps
+.PHONY: hubble-ui-assets xterm-assets dashboard-assets-from-source dashboard-assets-compress test-raft-snapshots test-raft-checkpoint-memory test-pod-transactions test-pod-transaction-memory test-core-recovery test-core-recovery-memory all help containerd-bundle dashboard-assets generate-protocol test-protocol-generation test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api test-install-lifecycle check smoke smoke-two-node run kubeconfig notices native clean deps
 
 all: native
 
@@ -101,6 +101,7 @@ dashboard-assets:
 	rm -rf assets/dashboard
 	$(MAKE) $(DASHBOARD_MARKER)
 	$(MAKE) hubble-ui-assets
+	$(MAKE) xterm-assets
 
 # Hubble UI's built frontend (cilium/hubble-ui, Apache-2.0) for `gr8s hubble ui`,
 # from the image Cilium's chart pins, with gr8s serving its backend API itself.
@@ -127,6 +128,36 @@ $(HUBBLE_UI_MARKER):
 hubble-ui-assets:
 	rm -rf assets/hubble-ui
 	$(MAKE) $(HUBBLE_UI_MARKER)
+
+# xterm.js (MIT) for the dashboard's Agent tab: the published npm tarballs, pinned
+# by version and SHA-256; only the browser bundles and the stylesheet are kept.
+XTERM_VERSION ?= 6.0.0
+XTERM_SHA256 ?= 908e66e04af6c8dc6b00dd3b54de088e2e81e5ed866284fd6c2fb3c2d1c7a3f6
+XTERM_FIT_VERSION ?= 0.11.0
+XTERM_FIT_SHA256 ?= 26003b4517a132b64e4ff228fd88a5fda3fff5e606c76093f6dcff772e9ecec0
+XTERM_MARKER := assets/xterm/xterm.js
+
+$(XTERM_MARKER):
+	rm -rf assets/xterm build/xterm
+	mkdir -p assets/xterm build/xterm
+	curl -fsSL -o build/xterm/xterm.tgz \
+	  https://registry.npmjs.org/@xterm/xterm/-/xterm-$(XTERM_VERSION).tgz
+	curl -fsSL -o build/xterm/addon-fit.tgz \
+	  https://registry.npmjs.org/@xterm/addon-fit/-/addon-fit-$(XTERM_FIT_VERSION).tgz
+	echo "$(XTERM_SHA256)  build/xterm/xterm.tgz" | sha256sum -c --quiet
+	echo "$(XTERM_FIT_SHA256)  build/xterm/addon-fit.tgz" | sha256sum -c --quiet
+	tar -xzf build/xterm/xterm.tgz -O package/css/xterm.css > assets/xterm/xterm.css
+	tar -xzf build/xterm/addon-fit.tgz -O package/lib/addon-fit.js > assets/xterm/addon-fit.js
+	tar -xzf build/xterm/xterm.tgz -O package/LICENSE > assets/xterm/xterm.LICENSE.txt
+	tar -xzf build/xterm/addon-fit.tgz -O package/LICENSE > assets/xterm/addon-fit.LICENSE.txt
+	tar -xzf build/xterm/xterm.tgz -O package/lib/xterm.js > build/xterm/xterm.js
+	mv build/xterm/xterm.js $(XTERM_MARKER)
+	rm -rf build/xterm
+	touch src/server/dashboard-agent.lisp
+
+xterm-assets:
+	rm -rf assets/xterm
+	$(MAKE) $(XTERM_MARKER)
 
 dashboard-assets-from-source:
 	npm --prefix "$(HEADLAMP)/frontend" ci
@@ -401,7 +432,7 @@ notices:
 
 native: build/gr8s
 
-build/gr8s: $(CONTAINERD_BUNDLE_MARKER) $(DASHBOARD_MARKER) $(NODE_PROTOCOL_LISP) scripts/build-native.lisp scripts/bootstrap.lisp ocicl.csv $(LISP_SOURCES)
+build/gr8s: $(CONTAINERD_BUNDLE_MARKER) $(DASHBOARD_MARKER) $(XTERM_MARKER) $(NODE_PROTOCOL_LISP) scripts/build-native.lisp scripts/bootstrap.lisp ocicl.csv $(LISP_SOURCES)
 	$(SBCL) --noinform $(LISP_BOOTSTRAP) --non-interactive --load scripts/build-native.lisp
 
 clean:

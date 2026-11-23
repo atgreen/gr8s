@@ -492,6 +492,8 @@
                                            (:file "doctor-observe")
                                            (:file "hubble-observer")
                                            (:file "hubble-ui")
+                                           (:static-file "dashboard-agent.html")
+                                           (:file "dashboard-agent" :depends-on ("dashboard-agent.html"))
                                            (:file "dashboard-shell")
                                            (:file "dashboard-apps")
                                            (:file "reconciliation-metrics")

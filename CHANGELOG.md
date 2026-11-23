@@ -7,6 +7,16 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ## [Unreleased]
 
+### Added
+
+- `gr8s dashboard` has an Agent tab: a terminal running an AI coding agent you
+  have installed (Claude Code, Codex, Gemini CLI) or your shell, on your own
+  machine with your own login, and with `KUBECONFIG` naming the dashboard's
+  cluster. Nothing is deployed to the cluster. Only those programs run, a
+  terminal opens only from the dashboard's own page, and each agent ends with
+  its tab's connection or the dashboard. The terminal is xterm.js, embedded
+  like the other frontends (podster-2ry).
+
 ## [v1.37.2-gr8s.5] — 2026-11-22
 
 Sixth trial pre-release. Flow observability: every node reports dropped

@@ -515,3 +515,74 @@
            (signals error (drakma:http-request (concatenate 'string origin "/") :proxy nil :connection-timeout 2)))
       (gr8s.server::stop-dashboard-apps apps)
       (hunchentoot:stop upstream))))
+
+(defun agent-test-websocket (port path &key (origin (format nil "http://127.0.0.1:~D" port)))
+  "Open a WebSocket to PATH on the loopback PORT, returning (values stream status)."
+  (let* ((socket (usocket:socket-connect "127.0.0.1" port :element-type '(unsigned-byte 8)))
+         (stream (usocket:socket-stream socket)))
+    (write-sequence (trivial-utf-8:string-to-utf-8-bytes
+                     (format nil "GET ~A HTTP/1.1~C~CHost: 127.0.0.1:~D~C~COrigin: ~A~C~CUpgrade: websocket~C~CConnection: Upgrade~C~CSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==~C~CSec-WebSocket-Version: 13~C~C~C~C"
+                             path #\Return #\Linefeed port #\Return #\Linefeed origin #\Return #\Linefeed
+                             #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed
+                             #\Return #\Linefeed))
+                    stream)
+    (finish-output stream)
+    ;; The response head, up to its blank line.
+    (let ((head (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+      (loop for byte = (read-byte stream nil)
+            while byte
+            do (vector-push-extend byte head)
+            until (and (>= (length head) 4) (equalp (subseq head (- (length head) 4)) #(13 10 13 10))))
+      (values stream (parse-integer (trivial-utf-8:utf-8-bytes-to-string head) :start 9 :end 12)))))
+
+(test the-dashboard-agent-tab-runs-an-agent-on-a-terminal
+  ;; podster-2ry: a pseudo-terminal behind a WebSocket, running only what the catalogue names.
+  (let* ((agent (gr8s.server::make-dashboard-agent
+                 "/tmp/kubeconfig-for-test"
+                 :choices (lambda ()
+                            '(("echo" "Echo" ("/bin/sh" "-c" "read go; stty size; echo kube=$KUBECONFIG; read line; echo got:$line; exit 3"))))))
+         (acceptor (make-instance 'gr8s.server::gr8s-dashboard-acceptor
+                                  :address "127.0.0.1" :port 0 :shell-path "/ui/tok/"
+                                  :tabs '(("agent" "/agent/tok/" "Agent"))
+                                  :agent agent :agent-base "/agent/tok/"
+                                  :proxy-fn (lambda (&rest arguments) (declare (ignore arguments)) "proxied")
+                                  :multiplexer-fn nil
+                                  :access-log-destination nil :message-log-destination nil)))
+    (hunchentoot:start acceptor)
+    (unwind-protect
+         (let ((port (hunchentoot:acceptor-port acceptor)))
+           (flet ((get-path (path)
+                    (multiple-value-bind (body status)
+                        (drakma:http-request (format nil "http://127.0.0.1:~D~A" port path) :proxy nil :force-binary t)
+                      (values (trivial-utf-8:utf-8-bytes-to-string body) status)))
+                  (send (stream opcode text)
+                    (gr8s.protocol::write-websocket-frame stream opcode (trivial-utf-8:string-to-utf-8-bytes text)
+                                                          :masked-p t)))
+             (is (search "<script src=\"xterm.js\"></script>" (get-path "/agent/tok/")))
+             (is (equal "[{\"id\":\"echo\",\"label\":\"Echo\"}]" (get-path "/agent/tok/agents")))
+             (when (third (assoc "xterm.js" gr8s.server::+dashboard-agent-assets+ :test #'equal))
+               (is (= 200 (nth-value 1 (get-path "/agent/tok/xterm.js")))))
+             ;; Another site's page can't open a terminal, and only the catalogue runs.
+             (is (= 403 (nth-value 1 (agent-test-websocket port "/agent/tok/pty?agent=echo" :origin "http://evil.example"))))
+             (is (= 404 (nth-value 1 (agent-test-websocket port "/agent/tok/pty?agent=sh"))))
+             (multiple-value-bind (stream status) (agent-test-websocket port "/agent/tok/pty?agent=echo")
+               (is (= 101 status))
+               (send stream 1 "{\"type\":\"resize\",\"cols\":99,\"rows\":33}")
+               (sleep 0.2)
+               (send stream 2 (format nil "go~C" #\Return))
+               (send stream 2 (format nil "hello~C" #\Return))
+               (let ((output (make-string-output-stream)) (exit nil))
+                 (loop (multiple-value-bind (opcode payload) (gr8s.protocol::read-websocket-frame stream)
+                         (case opcode
+                           (2 (write-string (sb-ext:octets-to-string payload :external-format :latin-1) output))
+                           (1 (setf exit (com.inuoe.jzon:parse payload)))
+                           (8 (return)))))
+                 (let ((text (get-output-stream-string output)))
+                   (is (search "33 99" text))
+                   (is (search "kube=/tmp/kubeconfig-for-test" text))
+                   (is (search "got:hello" text)))
+                 (is (equal "exit" (gethash "type" exit)))
+                 (is (= 3 (gethash "code" exit))))
+               (close stream))
+             (is-true (wait-until (lambda () (null (gr8s.server::dashboard-agent-sessions agent))) :timeout 5))))
+      (hunchentoot:stop acceptor))))

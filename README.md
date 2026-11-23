@@ -230,12 +230,15 @@ for how it works.
 
 ## Dashboard
 
-`gr8s dashboard` opens a Kubernetes web UI in your browser, with two tabs. The
+`gr8s dashboard` opens a Kubernetes web UI in your browser, with three tabs. The
 Headlamp tab serves the [Headlamp](https://headlamp.dev) frontend and
 reverse-proxies the API over mutual TLS to the running cluster, with live
 resource updates. The Hubble tab serves Hubble UI's service map and flow table
-from the cluster's [flow events](docs/networking.md#flow-events). Both are
-embedded in the binary, with no separate install.
+from the cluster's [flow events](docs/networking.md#flow-events). The Agent tab
+is a terminal running an AI coding agent you have installed (Claude Code, Codex
+or Gemini CLI) or a shell. It runs on your machine, with your own login, and
+with `KUBECONFIG` naming the dashboard's cluster; nothing is deployed to the
+cluster. All three are embedded in the binary, with no separate install.
 
 ```sh
 gr8s dashboard    # uses $KUBECONFIG, or ~/.kube/config
