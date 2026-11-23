@@ -59,28 +59,34 @@ A shell is offered as well.")
         runtime
         (dashboard-find-program "gr8s"))))
 
-(defun agent-mcp-arguments (id gr8s kubeconfig)
-  "The arguments that give agent ID `gr8s mcp' for KUBECONFIG, run by GR8S, as a tool
-server; NIL for an agent that can only be told so in its own settings (Gemini CLI)."
-  (let ((arguments (list "mcp" "--kubeconfig" kubeconfig)))
-    (cond ((null gr8s) nil)
-          ((equal id "claude")
-           (list "--mcp-config"
+(defun agent-arguments (id gr8s kubeconfig)
+  "The arguments that start agent ID knowing gr8s: the guide `gr8s skill' prints, in its
+context from the start, and `gr8s mcp' for KUBECONFIG, run by GR8S when there is one, as a
+tool server. NIL for an agent that takes neither on its command line (Gemini CLI)."
+  (let ((arguments (list "mcp" "--kubeconfig" kubeconfig))
+        (guide (with-output-to-string (out) (print-skill out))))
+    (cond ((equal id "claude")
+           (list* "--append-system-prompt" guide
+                  ;; --mcp-config takes several values, so it comes last.
+                  (when gr8s
+                    (list "--mcp-config"
                  (com.inuoe.jzon:stringify
                   (gr8s-diagnose::object "mcpServers"
                                          (gr8s-diagnose::object "gr8s" (gr8s-diagnose::object "type" "stdio" "command" gr8s
-                                                                                              "args" (coerce arguments 'vector)))))))
+                                                                                              "args" (coerce arguments 'vector)))))))))
           ;; Codex reads each -c value as TOML; a JSON string or array of strings is one.
           ((equal id "codex")
-           (list "-c" (format nil "mcp_servers.gr8s.command=~A" (com.inuoe.jzon:stringify gr8s))
-                 "-c" (format nil "mcp_servers.gr8s.args=~A" (com.inuoe.jzon:stringify (coerce arguments 'vector))))))))
+           (list* "-c" (format nil "developer_instructions=~A" (com.inuoe.jzon:stringify guide))
+                  (when gr8s
+                    (list "-c" (format nil "mcp_servers.gr8s.command=~A" (com.inuoe.jzon:stringify gr8s))
+                          "-c" (format nil "mcp_servers.gr8s.args=~A" (com.inuoe.jzon:stringify (coerce arguments 'vector))))))))))
 
 (defun installed-agent-choices (kubeconfig &key (gr8s (gr8s-program)))
   "(id label argv) for each agent installed here, given `gr8s mcp' for KUBECONFIG when it
 can be, then the reader's shell."
   (append (loop for (id label program) in +dashboard-agent-catalogue+
                 for path = (dashboard-find-program program)
-                when path collect (list id label (list* path (agent-mcp-arguments id (and gr8s (namestring gr8s)) kubeconfig))))
+                when path collect (list id label (list* path (agent-arguments id (and gr8s (namestring gr8s)) kubeconfig))))
           (let ((shell (or (uiop:getenv "SHELL") (dashboard-find-program "bash") "/bin/sh")))
             (list (list "shell" "Shell" (list shell "-l"))))))
 

@@ -275,6 +275,9 @@ embeds the assets automatically; see
 Protocol](https://modelcontextprotocol.io) tools, on stdin and stdout, with the
 kubeconfig's credentials. Every tool only reads:
 
+- `gr8s_guide`: the guide `gr8s skill` prints, on how gr8s differs from other
+  Kubernetes distributions and how to operate it. The server's instructions
+  tell the agent to read it first.
 - `doctor_diagnose`: the `gr8s doctor diagnose` report, for the cluster, a
   namespace or one resource, as Markdown.
 - `doctor_impact`: what would stop working if a resource went away.
@@ -286,7 +289,8 @@ claude mcp add gr8s -- gr8s mcp --kubeconfig ~/.kube/config
 codex mcp add gr8s -- gr8s mcp --kubeconfig ~/.kube/config
 ```
 
-The dashboard's Agent tab registers it for the agents it starts.
+The dashboard's Agent tab registers it for the agents it starts, and gives
+Claude Code and Codex the guide in their context from the start.
 
 ## Doctor
 

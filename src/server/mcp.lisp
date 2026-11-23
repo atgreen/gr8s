@@ -20,8 +20,10 @@
   "MCP revisions this server speaks, newest first.")
 
 (defparameter +mcp-instructions+
-  "Read-only tools for the gr8s cluster of this server's kubeconfig. Start with
-doctor_diagnose to find what is wrong and why: it links resources and names
+  "Read-only tools for the gr8s cluster of this server's kubeconfig. Before
+operating or troubleshooting gr8s, call gr8s_guide once: gr8s is
+Kubernetes-compatible but not a stock distribution, and the guide says how it
+differs and which commands to use. Then use doctor_diagnose to find what is wrong and why: it links resources and names
 causes, with what each one holds up and the next step. doctor_impact says what
 would stop working if a resource went away. observe_flows shows recent network
 flows, including those a NetworkPolicy dropped. cluster_status shows the control
@@ -152,9 +154,17 @@ cluster.")
                                 (and ready (or (gethash "lastHeartbeatTime" ready) (gethash "lastTransitionTime" ready)))
                                 (gethash "kubeletVersion" (gethash "nodeInfo" (gethash "status" node))))))))))))
 
+(defun mcp-gr8s-guide (arguments kubeconfig)
+  (declare (ignore arguments kubeconfig))
+  (with-output-to-string (out) (print-skill out)))
+
 (defun mcp-tools ()
   "(name title description schema function) for each tool."
   (list
+   (list "gr8s_guide" "How to operate gr8s"
+         "Return the gr8s operator and agent guide, as `gr8s skill` prints it: how gr8s differs from other Kubernetes distributions, its commands, and how to troubleshoot it. Read it once before operating or troubleshooting gr8s."
+         (mcp-schema nil)
+         #'mcp-gr8s-guide)
    (list "doctor_diagnose" "Diagnose the cluster"
          "Run `gr8s doctor diagnose`: find what is wrong in the whole cluster, a namespace, or around one resource, and why. Returns a Markdown report: each problem with its cause, the resources it holds up, and what to do. A whole-cluster survey reads every resource and can take half a minute."
          (mcp-schema '(("namespace" "string" "Limit the survey to this namespace.")
