@@ -30,6 +30,7 @@
                (:file "causal")
                (:file "logs")
                (:file "pod-events")
+               (:file "flows")
                (:file "scheduling")
                (:file "survey")
                (:file "impact")))

@@ -31,7 +31,7 @@ TEST_EVAL := --eval '(require :asdf)' --eval '(asdf:test-system :gr8s)'
 OCICL ?= ocicl
 OCICL_STAMP := ocicl/.ocicl-installed
 
-.PHONY: dashboard-assets-from-source dashboard-assets-compress test-raft-snapshots test-raft-checkpoint-memory test-pod-transactions test-pod-transaction-memory test-core-recovery test-core-recovery-memory all help containerd-bundle dashboard-assets generate-protocol test-protocol-generation test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api test-install-lifecycle check smoke smoke-two-node run kubeconfig notices native clean deps
+.PHONY: hubble-ui-assets dashboard-assets-from-source dashboard-assets-compress test-raft-snapshots test-raft-checkpoint-memory test-pod-transactions test-pod-transaction-memory test-core-recovery test-core-recovery-memory all help containerd-bundle dashboard-assets generate-protocol test-protocol-generation test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api test-install-lifecycle check smoke smoke-two-node run kubeconfig notices native clean deps
 
 all: native
 
@@ -100,6 +100,33 @@ $(DASHBOARD_MARKER):
 dashboard-assets:
 	rm -rf assets/dashboard
 	$(MAKE) $(DASHBOARD_MARKER)
+	$(MAKE) hubble-ui-assets
+
+# Hubble UI's built frontend (cilium/hubble-ui, Apache-2.0) for `gr8s hubble ui`,
+# from the image Cilium's chart pins, with gr8s serving its backend API itself.
+HUBBLE_UI_IMAGE ?= quay.io/cilium/hubble-ui@sha256:049a80a03585c043d0c3121bdc518c72b0fd42bae07e4bcce0fdb8f1e88041d0
+# ^ v0.13.6
+HUBBLE_UI_MARKER := assets/hubble-ui/index.html
+
+$(HUBBLE_UI_MARKER):
+	rm -rf assets/hubble-ui build/hubble-ui-rootfs
+	mkdir -p assets/hubble-ui build/hubble-ui-rootfs
+	tool=$$(command -v podman || command -v docker) && \
+	  cid=$$("$$tool" create "$(HUBBLE_UI_IMAGE)") && \
+	  { "$$tool" export "$$cid" | tar -x -C build/hubble-ui-rootfs app; \
+	    status=$$?; "$$tool" rm "$$cid" >/dev/null; exit $$status; }
+	cd build/hubble-ui-rootfs/app && \
+	  find . -type f ! -name '*.map' -print0 | cpio -pd0 --quiet "$(CURDIR)/assets/hubble-ui"
+	rm -rf build/hubble-ui-rootfs
+	cd "$(CURDIR)/assets/hubble-ui" && \
+	  find . -type f \( -name '*.js' -o -name '*.css' -o -name '*.svg' -o -name '*.txt' \) -print0 | \
+	  xargs -0 -r gzip -9 -n
+	@echo "embedded $$(find assets/hubble-ui -type f | wc -l) Hubble UI asset files ($$(du -sh assets/hubble-ui | cut -f1))"
+	touch src/apiserver/hubble-ui-assets.lisp
+
+hubble-ui-assets:
+	rm -rf assets/hubble-ui
+	$(MAKE) $(HUBBLE_UI_MARKER)
 
 dashboard-assets-from-source:
 	npm --prefix "$(HEADLAMP)/frontend" ci
@@ -386,6 +413,7 @@ test-doctor:
 	$(SBCL) --noinform --no-sysinit --no-userinit --script tests/doctor/references-test.lisp
 	$(SBCL) --noinform --no-sysinit --no-userinit --script tests/doctor/catalog-test.lisp
 	$(SBCL) --noinform --no-sysinit --no-userinit --script tests/doctor/doctor-test.lisp
+	$(SBCL) --noinform --no-sysinit --no-userinit --script tests/doctor/flows-test.lisp
 	$(SBCL) --noinform --no-sysinit --no-userinit --script tests/doctor/causal-test.lisp
 	$(SBCL) --noinform --no-sysinit --no-userinit --script tests/doctor/survey-test.lisp
 	python3 tests/doctor/diagnose-cli-test.py

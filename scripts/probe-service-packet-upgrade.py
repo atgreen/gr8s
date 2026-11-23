@@ -121,6 +121,10 @@ def main():
         send()
         assert allowed() > before, "recovered endpoint did not pass traffic"
         evaluate("cached-generation", "(gr8s.network::upgrade-probe-current 1)")
+        evaluate("shared-flow-ring", "(gr8s.network::upgrade-probe-shared-ring)")
+        before = allowed()
+        send()
+        assert allowed() > before, "endpoint on the shared flow ring did not pass traffic"
         report["passed"] = True
     except (Exception, KeyboardInterrupt) as error:
         report.update(passed=False, error=f"{type(error).__name__}: {error}")

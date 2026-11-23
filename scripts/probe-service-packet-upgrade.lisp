@@ -110,6 +110,61 @@
         (assert (not (probe-file pin))) (assert (null (cni-policy-staged-links pin)))))
     (list :passed t :map-and-link-ids-preserved t :gc-enabled t)))
 
+(defun upgrade-probe-guard-ring-id ()
+  "The map ID of the flow-event ring the endpoint's egress guard writes to."
+  (let ((link (whistler/loader:open-pinned-object
+               (concatenate 'string (namestring (third (upgrade-probe-paths))) "tcx-ingress"))))
+    (unwind-protect
+         (let ((ring (packet-program-flow-ring-fd
+                      (netlink-read-integer (bpf-object-kernel-info link) 8 4))))
+           (assert ring)
+           (unwind-protect (netlink-read-integer (bpf-object-kernel-info ring) 4 4)
+             (sb-posix:close ring)))
+      (sb-posix:close link))))
+
+(defun upgrade-probe-guard-config-id ()
+  "The map ID of the flow-event settings the endpoint's stage programs read."
+  (let ((stages (whistler/loader:open-pinned-object
+                 (concatenate 'string (namestring (third (upgrade-probe-paths))) "gr8s_pkt_stages"))))
+    (unwind-protect
+         (let* ((map (cni-policy-map-info stages "gr8s_pkt_stages"))
+                (config (packet-program-flow-config-fd
+                         (loop for index below 3
+                               for value = (whistler/loader:map-lookup map (service-lb-bytes index 4))
+                               collect (and value (netlink-read-integer value 0 4))))))
+           (assert config)
+           (unwind-protect (netlink-read-integer (bpf-object-kernel-info config) 4 4)
+             (sb-posix:close config)))
+      (sb-posix:close stages))))
+
+(defun upgrade-probe-shared-ring ()
+  "Once the node pins its flow-event ring and settings, one refresh moves the guard
+onto both and the next finds it current."
+  (let* ((path (merge-pathnames "gr8s_pkt_stages" (third (upgrade-probe-paths))))
+         (private (upgrade-probe-guard-ring-id))
+         (private-config (upgrade-probe-guard-config-id))
+         (ring (open-flow-events-ring *upgrade-probe-root* :create t))
+         (config (open-flow-config *upgrade-probe-root* :create t))
+         (shared (netlink-read-integer (bpf-object-kernel-info (whistler/loader:map-info-fd ring)) 4 4))
+         (shared-config (netlink-read-integer (bpf-object-kernel-info (whistler/loader:map-info-fd config)) 4 4)))
+    (unwind-protect
+         (progn
+           (assert (/= private shared))
+           (assert (/= private-config shared-config))
+           (assert (service-packet-gc-compatible-p *upgrade-probe-dataplane* :paths (constantly (list path))))
+           (assert (= 2 (service-lb-dataplane-upgrade-completed *upgrade-probe-dataplane*)))
+           (assert (= shared (upgrade-probe-guard-ring-id)))
+           (assert (= shared-config (upgrade-probe-guard-config-id)))
+           (clrhash (service-lb-dataplane-upgrade-cache *upgrade-probe-dataplane*))
+           (assert (service-packet-gc-compatible-p *upgrade-probe-dataplane* :paths (constantly (list path))))
+           (assert (= 2 (service-lb-dataplane-upgrade-completed *upgrade-probe-dataplane*)))
+           (list :passed t :private-ring private :shared-ring shared
+                 :private-config private-config :shared-config shared-config))
+      (sb-posix:close (whistler/loader:map-info-fd ring))
+      (sb-posix:close (whistler/loader:map-info-fd config))
+      (ignore-errors (delete-file (flow-events-pin-path *upgrade-probe-root*)))
+      (ignore-errors (delete-file (flow-config-pin-path *upgrade-probe-root*))))))
+
 (defun upgrade-probe-cleanup ()
   (when *upgrade-probe-configuration*
     (destructuring-bind (map-path link-path directory) (upgrade-probe-paths)

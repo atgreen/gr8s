@@ -457,6 +457,9 @@ enum OperationKind {
   // A TCP connection the node opens to a Pod on it, for a control plane with no
   // route to Pod IPs (webhooks, aggregated APIs). Bytes flow as PORT_FORWARD's do.
   OPERATION_KIND_DIAL = 11;
+  // The node's recent flow events, then, with FLOWS_FOLLOW, new ones as they
+  // happen, as JSON lines on STDOUT until cancelled.
+  OPERATION_KIND_FLOWS = 12;
 }
 
 message OperationRequest {
@@ -494,6 +497,8 @@ message OperationRequest {
   // DIAL: the address the node connects to, at PORT. The node refuses one outside
   // its own Pod CIDRs and node address.
   string dial_address = 21;
+  // FLOWS: keep streaming new flow events after the recent ones.
+  bool flows_follow = 22;
 }
 
 message OperationInput {

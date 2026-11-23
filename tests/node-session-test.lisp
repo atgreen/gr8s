@@ -3064,3 +3064,111 @@
              (is (equal "Node disconnected" (gr8s.apiserver::pending-node-operation-error operation))))
         (when operation (gr8s.apiserver::release-node-operation server operation))
         (gr8s.apiserver::stop-node-grpc-server server)))))
+
+(defun make-routed-test-operation (server operation-id)
+  "Register a shadow operation that member \"origin\" started on node \"worker\"."
+  (let ((operation (gr8s.apiserver::make-pending-node-operation
+                    "worker" (make-instance 'gr8s.node.v1::operation-request
+                                            :operation-id operation-id
+                                            :kind gr8s.node.v1::+operationkind-operation_kind_exec+))))
+    (setf (gr8s.apiserver::pending-node-operation-origin-member operation) "origin")
+    (bt:with-lock-held ((gr8s.apiserver::node-grpc-server-lock server))
+      (setf (gethash operation-id (gr8s.apiserver::node-grpc-server-operations server)) operation))
+    operation))
+
+(defun routed-test-stream (operation-id sequence text)
+  (make-instance 'gr8s.node.v1::operation-stream
+                 :operation-id operation-id :sequence sequence
+                 :channel gr8s.node.v1::+streamchannel-stream_channel_stdout+
+                 :data (trivial-utf-8:string-to-utf-8-bytes text)))
+
+(defun routed-test-response (operation-id)
+  (make-instance 'gr8s.node.v1::operation-response
+                 :operation-id operation-id
+                 :status gr8s.node.v1::+operationstatus-operation_status_complete+))
+
+(test a-slow-origin-member-does-not-hold-up-the-agent-session
+  ;; Relaying a frame took an RPC inside the agent's envelope loop, so a busy flow stream
+  ;; held back every node's heartbeats until their leases expired (podster-8kl).
+  (let* ((server (gr8s.apiserver::%make-node-grpc-server))
+         (operation (make-routed-test-operation server "routed-slow"))
+         (gate (bt:make-lock)) (open nil) (opened (bt:make-condition-variable))
+         (seen nil) (targets nil) (seen-lock (bt:make-lock)))
+    (setf (gr8s.apiserver::node-grpc-server-operation-router server)
+          (lambda (variant target-member node-name payload)
+            (bt:with-lock-held (seen-lock) (push (list target-member node-name) targets))
+            (bt:with-lock-held (gate)
+              (loop until open do (bt:condition-wait opened gate :timeout 0.1)))
+            (bt:with-lock-held (seen-lock)
+              (push (if (eq variant :operation-stream)
+                        (trivial-utf-8:utf-8-bytes-to-string (slot-value payload 'gr8s.node.v1::data))
+                        variant)
+                    seen))
+            "origin"))
+    (unwind-protect
+         (let ((start (get-internal-real-time)))
+           (dolist (text '("one" "two" "three"))
+             (gr8s.apiserver::note-node-operation-stream
+              server "worker" (routed-test-stream "routed-slow" 1 text)))
+           (gr8s.apiserver::note-node-operation-response server "worker" (routed-test-response "routed-slow"))
+           (is (< (- (get-internal-real-time) start) (* 0.5 internal-time-units-per-second)))
+           (bt:with-lock-held (gate) (setf open t) (bt:condition-notify opened))
+           ;; In the agent's order, and the response releases the operation once it is sent.
+           (is-true (wait-until (lambda () (bt:with-lock-held (seen-lock) (= 4 (length seen)))) :timeout 5))
+           (is (equal '("one" "two" "three" :operation-response) (reverse seen)))
+           (is (every (lambda (target) (equal '("origin" "worker") target)) targets))
+           (is-true (wait-until (lambda () (null (gr8s.apiserver::find-node-operation server "routed-slow")))
+                                :timeout 5))
+           (is-false (gr8s.apiserver::pending-node-operation-done-p operation)))
+      (bt:with-lock-held (gate) (setf open t) (bt:condition-notify opened))
+      (setf (gr8s.apiserver::node-grpc-server-stopping-p server) t))))
+
+(test routed-output-that-cannot-reach-its-origin-fails-the-operation
+  (let* ((server (gr8s.apiserver::%make-node-grpc-server))
+         (lost (make-routed-test-operation server "routed-lost"))
+         (seen nil) (seen-lock (bt:make-lock)))
+    (setf (gr8s.apiserver::node-grpc-server-operation-router server)
+          (lambda (variant target-member node-name payload)
+            (declare (ignore target-member node-name))
+            (let ((text (and (eq variant :operation-stream)
+                             (trivial-utf-8:utf-8-bytes-to-string (slot-value payload 'gr8s.node.v1::data)))))
+              (bt:with-lock-held (seen-lock) (push (or text variant) seen))
+              ;; The first frame is lost.
+              (and (not (equal text "one")) "origin"))))
+    (unwind-protect
+         (progn
+           (dolist (text '("one" "two"))
+             (gr8s.apiserver::note-node-operation-stream server "worker" (routed-test-stream "routed-lost" 1 text)))
+           (gr8s.apiserver::note-node-operation-response server "worker" (routed-test-response "routed-lost"))
+           (is-true (wait-until (lambda () (null (gr8s.apiserver::find-node-operation server "routed-lost")))
+                                :timeout 5))
+           ;; Output after a lost frame means nothing to its reader; the end still goes.
+           (is (equal '("one" :operation-response) (bt:with-lock-held (seen-lock) (reverse seen))))
+           (is (equal "Operation origin is unavailable" (gr8s.apiserver::pending-node-operation-error lost))))
+      (setf (gr8s.apiserver::node-grpc-server-stopping-p server) t))))
+
+(test routed-output-past-the-outbox-limit-fails-its-operation
+  (let* ((server (gr8s.apiserver::%make-node-grpc-server))
+         (operation (make-routed-test-operation server "routed-full"))
+         (gate (bt:make-lock)) (open nil)
+         (seen nil) (seen-lock (bt:make-lock)))
+    (setf (gr8s.apiserver::node-grpc-server-operation-router server)
+          (lambda (variant target-member node-name payload)
+            (declare (ignore target-member node-name payload))
+            (loop until (bt:with-lock-held (gate) open) do (sleep 0.01))
+            (bt:with-lock-held (seen-lock) (push variant seen))
+            "origin"))
+    (unwind-protect
+         (let ((gr8s.apiserver::*routed-outbox-limit-bytes* 10))
+           ;; The sender may already hold the first frame; the later ones overflow.
+           (dolist (text '("0123456789" "0123456789" "0123456789"))
+             (gr8s.apiserver::note-node-operation-stream server "worker" (routed-test-stream "routed-full" 1 text)))
+           (is (search "not keeping up" (gr8s.apiserver::pending-node-operation-error operation)))
+           (gr8s.apiserver::note-node-operation-response server "worker" (routed-test-response "routed-full"))
+           (bt:with-lock-held (gate) (setf open t))
+           (is-true (wait-until (lambda () (null (gr8s.apiserver::find-node-operation server "routed-full")))
+                                :timeout 5))
+           (is (eq :operation-response (bt:with-lock-held (seen-lock) (first seen))))
+           (is (<= (bt:with-lock-held (seen-lock) (count :operation-stream seen)) 2)))
+      (bt:with-lock-held (gate) (setf open t))
+      (setf (gr8s.apiserver::node-grpc-server-stopping-p server) t))))

@@ -112,6 +112,15 @@ After every member of a control plane has been stopped for longer than a lease,
 a Node whose agent is gone is still shown ready until the new leader has
 listened for one lease.
 
+Agents keep their sessions with the leader. A member that serves a request
+needing a node, such as logs, exec, a flow stream or a proxied request, asks the
+member holding that node's session to run it, and the agent's output comes back
+over the link between the two members. That output waits in a queue for the
+member it goes to, sent by a thread of its own, so a slow member or a busy
+stream never holds up an agent's heartbeats, which arrive on the same session.
+Past 32 MiB waiting for one member, the operations whose output doesn't fit
+fail rather than the queue growing further.
+
 ## Around the datastore
 
 - **Controllers are leader-gated.** Reconciliation runs only on the leader. A

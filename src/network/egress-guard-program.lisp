@@ -24,9 +24,57 @@
    is null (a map lookup that missed)."
   `(when (/= ,pointer 0) (atomic-add ,pointer 0 ,delta)))
 
-(defmacro drop-pod-packet (reason)
+;; One flow event, written to the node's flow-events ring buffer for the agent
+;; to read (podster-e9a.1). The endpoint is the guarded interface's ifindex, and
+;; its IPv4 address where the guard has it. A policy event carries the flow key
+;; the decision used, so the agent can name the policies isolating the Pod. The
+;; layout is decoded by FLOW-EVENT-FROM-OCTETS in flow-events.lisp.
+(defstruct flow-event
+  (ifindex u32)                          ; 0
+  (endpoint u32)                         ; 4: IPv4, host order, or 0
+  (kind u8)                              ; 8: 1 drop, 2 new connection allowed
+  (reason u8)                            ; 9: 1 spoof, 2 malformed, 3 unsupported, 4 policy
+  (direction u8)                         ; 10: 1 from the Pod, 2 to the Pod
+  (family u8)                            ; 11: 4, 6, or 0 when the packet wasn't parsed
+  (proto u8) (pad0 u8)                   ; 12
+  (pod-port u16) (peer-port u16) (pad1 u16) ; 14, 16, 18; network order
+  (length u32)                           ; 20: packet length
+  (peer (array u32 4)))                  ; 24: peer address, network order
+
+(defmacro emit-flow-event (kind reason &key (direction 1) flow family (endpoint 0))
+  "Write a flow event straight into the ring, with no stack copy, since every
+   guard is near the 512-byte stack limit. FLOW, a netpol flow key on the stack,
+   supplies the peer, ports and protocol; FAMILY (4 or 6) says which key type it
+   is. ENDPOINT is the Pod's IPv4 address in host order, or 0. A reserved entry
+   isn't zeroed, so every field is written."
+  (flet ((key (field) (if (eql family 6)
+                          (intern (format nil "NETPOL-FLOW-KEY-V6-~A" field) :whistler)
+                          (intern (format nil "NETPOL-FLOW-KEY-~A" field) :whistler))))
+    `(with-ringbuf (fev flow-events (sizeof flow-event))
+       (store u32 fev 0 (ctx u32 40))
+       (store u32 fev 4 ,endpoint)
+       (store u8 fev 8 ,kind)
+       (store u8 fev 9 ,reason)
+       (store u8 fev 10 ,direction)
+       (store u8 fev 11 ,(or family 0))
+       (store u8 fev 12 ,(if flow `(,(key "PROTO") ,flow) 0))
+       (store u8 fev 13 0)
+       (store u16 fev 14 ,(if flow `(,(key "POD-PORT") ,flow) 0))
+       (store u16 fev 16 ,(if flow `(,(key "PEER-PORT") ,flow) 0))
+       (store u16 fev 18 0)
+       (store u32 fev 20 (ctx u32 0))
+       ,@(if (eql family 6)
+             (loop for word below 4
+                   collect `(store u32 fev ,(+ 24 (* 4 word)) (,(key "PEER") ,flow ,word)))
+             `((store u32 fev 24 ,(if flow `(,(key "PEER") ,flow) 0))
+               (store u32 fev 28 0) (store u32 fev 32 0) (store u32 fev 36 0))))))
+
+(defmacro drop-pod-packet (reason &rest event)
   "Count a dropped packet and its bytes, bump the per-REASON counter (:spoof,
-   :malformed, :unsupported or :policy), and return TC_ACT_SHOT from the program."
+   :malformed, :unsupported or :policy), report it as a flow event, and return
+   TC_ACT_SHOT from the program. EVENT holds EMIT-FLOW-EVENT's keywords: a policy
+   drop passes the :FLOW key it decided on, its :FAMILY and :DIRECTION. Without
+   :ENDPOINT, the egress guard's IDENTITY supplies the Pod's address."
   `(progn
      (add-pod-counter dropped-packets 1)
      (add-pod-counter dropped-bytes (ctx u32 0))
@@ -35,7 +83,22 @@
         (:malformed '(add-pod-counter malformed 1))
         (:unsupported '(add-pod-counter unsupported 1))
         (:policy '(add-pod-counter policy-drops 1)))
+     (emit-flow-event 1 ,(ecase reason (:spoof 1) (:malformed 2) (:unsupported 3) (:policy 4))
+                      ,@(if (getf event :endpoint)
+                            event
+                            (list* :endpoint '(if (/= identity 0) (load u32 identity 0) 0) event)))
      (return TC_ACT_SHOT)))
+
+(defmacro record-netpol-flow (flows flow stamp opens &rest event)
+  "Record FLOW in FLOWS as passing now. The first time, when an isolated Pod's
+   connection is allowed or, on a node reporting every connection, any Pod's
+   connection is first seen, report it as a flow event with EVENT's keywords --
+   if OPENS, which is 0 for a TCP packet other than a connection's first (SYN
+   without ACK). A reply seen first, to a connection opened by a peer whose
+   packets aren't recorded (the node gateway's probes), is no new connection."
+  `(if (= (map-update-ptr ,flows ,flow ,stamp 1) 0) ; BPF_NOEXIST: a new connection
+       (when (/= ,opens 0) (emit-flow-event 2 0 :flow ,flow ,@event))
+       (map-update-ptr ,flows ,flow ,stamp 0)))
 
 ;; Keys for the map-driven NetworkPolicy rules. The LPM-trie keys use the
 ;; kernel's {prefixlen, data} layout. An address is stored as the packet
@@ -158,7 +221,15 @@
     ;; and must be delivered via the loopback ingress to dodge the host firewall's
     ;; INPUT path (iif=lo is trusted), extending the DNS gateway lo-trick.
     (defmap host-redirect-v4 :type :hash
-      :key-size 4 :value-size 1 :max-entries 64 :map-flags 1))) ; NO_PREALLOC
+      :key-size 4 :value-size 1 :max-entries 64 :map-flags 1) ; NO_PREALLOC
+    ;; Flow events for the agent (podster-e9a.1). The agent shares one ring buffer,
+    ;; sized by +FLOW-EVENTS-BYTES+, across every endpoint on the node; an endpoint
+    ;; loaded without it gets a private one-page ring nobody reads.
+    (defmap flow-events :type :ringbuf :max-entries 262144)
+    ;; The node's flow-event settings, shared like the ring: [0] bit 0 records every
+    ;; Pod's new connections, not only isolated Pods' (podster-nno). An endpoint
+    ;; loaded without the node's map gets a private zeroed one: drops only.
+    (defmap flow-config :type :array :key-size 4 :value-size 4 :max-entries 1)))
 
 (defparameter gr8s.network::*egress-guard-program-forms*
   '((defprog gr8s-egress-guard (:type :tc :section "classifier" :license "GPL")
@@ -175,6 +246,7 @@
             (identity (map-lookup endpoint-identity 0))
             (egress-mode (map-lookup netpol-mode 0))
             (ingress-mode (map-lookup netpol-mode 1))
+            (reporting (map-lookup flow-config 0))
             (data u64 (tc-data)) (data-end u64 (tc-data-end)))
         (when (> (+ data 14) data-end) (drop-pod-packet :malformed))
         ;; Keep all helpers before packet bounds proofs. Whistler may otherwise
@@ -251,17 +323,26 @@
                    ;; NetworkPolicy (map-driven; the agent rewrites the maps on policy
                    ;; change). Egress isolation allows a packet that its rules allow, or
                    ;; that answers a connection the ingress guard admitted. Either
-                   ;; isolation records the connection, so that its replies pass.
+                   ;; isolation records the connection, so that its replies pass; so does
+                   ;; a node reporting every connection, which then reports it once.
+                   ;; A connection recorded before the Pod was isolated keeps passing
+                   ;; until it goes quiet, as an established one.
                    (let ((egress-on u32 (if (/= egress-mode 0) (load u32 egress-mode 0) 0))
-                         (ingress-on u32 (if (/= ingress-mode 0) (load u32 ingress-mode 0) 0)))
-                     (when (or (/= egress-on 0) (/= ingress-on 0))
+                         (ingress-on u32 (if (/= ingress-mode 0) (load u32 ingress-mode 0) 0))
+                         (report-on u32 (if (/= reporting 0) (logand (load u32 reporting 0) 1) 0)))
+                     (when (or (/= egress-on 0) (/= ingress-on 0) (/= report-on 0))
                        ;; Copy every packet field into the stack key BEFORE any helper
                        ;; call: Whistler rematerializes a let-bound packet load at its
                        ;; uses, and a load after a helper call reads clobbered registers.
                        (let ((fkey (make-netpol-flow-key))
-                             (has-port u8 0))
+                             (has-port u8 0)
+                             (opens u8 1))
                          (setf (netpol-flow-key-peer fkey) (load u32 ip 16)
                                (netpol-flow-key-proto fkey) (load u8 ip 9))
+                         ;; TCP flags: SYN (2) without ACK (16) opens a connection.
+                         (when (and (= (load u8 ip 9) 6) (= (logand (load u8 ip 0) 15) 5)
+                                    (<= (+ data 48) data-end))
+                           (setf opens (if (= (logand (load u8 ip 33) #x12) 2) 1 0)))
                          (when (and (= (logand (load u8 ip 0) 15) 5) (<= (+ data 38) data-end))
                            (setf (netpol-flow-key-pod-port fkey) (load u16 ip 20)
                                  (netpol-flow-key-peer-port fkey) (load u16 ip 22)
@@ -273,12 +354,12 @@
                                                       (netpol-flow-key-peer-port fkey) has-port)
                                       0)
                                (let ((flow (map-lookup-ptr netpol-flows fkey)))
-                                 (when (= flow 0) (drop-pod-packet :policy))
+                                 (when (= flow 0) (drop-pod-packet :policy :flow fkey :family 4))
                                  (when (> (- now (load u64 flow 0)) (netpol-flow-lifetime (netpol-flow-key-proto fkey)))
-                                   (drop-pod-packet :policy)))))
+                                   (drop-pod-packet :policy :flow fkey :family 4)))))
                            (let ((stamp (make-netpol-flow-stamp)))
                              (setf (netpol-flow-stamp-ns stamp) now)
-                             (map-update-ptr netpol-flows fkey stamp 0))))))
+                             (record-netpol-flow netpol-flows fkey stamp opens :family 4 :endpoint (if (/= identity 0) (load u32 identity 0) 0)))))))
                    ;; Same-node Pod->Pod fast path. Policy has allowed the packet
                    ;; above; if the destination is a Pod on this node, deliver it
                    ;; straight to that Pod's veth via bpf_redirect, bypassing the
@@ -318,10 +399,16 @@
                    ;; not expose a transport port here, so they can match only
                    ;; rules that allow every port for their next-header value.
                    (let ((egress-on u32 (if (/= egress-mode 0) (load u32 egress-mode 0) 0))
-                         (ingress-on u32 (if (/= ingress-mode 0) (load u32 ingress-mode 0) 0)))
-                     (when (or (/= egress-on 0) (/= ingress-on 0))
+                         (ingress-on u32 (if (/= ingress-mode 0) (load u32 ingress-mode 0) 0))
+                         (report-on u32 (if (and (/= reporting 0)
+                                              ;; Not a link-local peer (fe80::/10): its neighbor and
+                                              ;; MLD chatter is housekeeping, not a connection.
+                                              (/= (logand (load u32 ip 24) #xc0ff) #x80fe))
+                                         (logand (load u32 reporting 0) 1) 0)))
+                     (when (or (/= egress-on 0) (/= ingress-on 0) (/= report-on 0))
                        (let ((fkey (make-netpol-flow-key-v6))
-                             (has-port u8 0))
+                             (has-port u8 0)
+                             (opens u8 1))
                          (setf (netpol-flow-key-v6-peer fkey 0) (load u32 ip 24)
                                (netpol-flow-key-v6-peer fkey 1) (load u32 ip 28)
                                (netpol-flow-key-v6-peer fkey 2) (load u32 ip 32)
@@ -336,6 +423,8 @@
                            (setf (netpol-flow-key-v6-pod-port fkey) (load u16 ip 40)
                                  (netpol-flow-key-v6-peer-port fkey) (load u16 ip 42)
                                  has-port 1))
+                         (when (and (= (load u8 ip 6) 6) (<= (+ data 68) data-end))
+                           (setf opens (if (= (logand (load u8 ip 53) #x12) 2) 1 0)))
                          (let ((now u64 (ktime-get-ns)))
                            (when (/= egress-on 0)
                              (when (= (netpol-allowed-v6
@@ -348,13 +437,13 @@
                                        (netpol-flow-key-v6-peer-port fkey) has-port)
                                       0)
                                (let ((flow (map-lookup-ptr netpol-flows-v6 fkey)))
-                                 (when (= flow 0) (drop-pod-packet :policy))
+                                 (when (= flow 0) (drop-pod-packet :policy :flow fkey :family 6))
                                  (when (> (- now (load u64 flow 0))
                                           (netpol-flow-lifetime (netpol-flow-key-v6-proto fkey)))
-                                   (drop-pod-packet :policy)))))
+                                   (drop-pod-packet :policy :flow fkey :family 6)))))
                            (let ((stamp (make-netpol-flow-stamp)))
                              (setf (netpol-flow-stamp-ns stamp) now)
-                             (map-update-ptr netpol-flows-v6 fkey stamp 0))))))))
+                             (record-netpol-flow netpol-flows-v6 fkey stamp opens :family 6 :endpoint (if (/= identity 0) (load u32 identity 0) 0)))))))))
                 ((= protocol #x0806)
                  (when (> (+ data 42) data-end) (drop-pod-packet :malformed))
                  (let ((arp u64 (+ data 14)))
@@ -385,6 +474,7 @@
             (ipv4 u8 0)
             (ipv6 u8 0)
             (peer u32 0)
+            (pod-addr u32 0)
             (peer6-0 u32 0)
             (peer6-1 u32 0)
             (peer6-2 u32 0)
@@ -392,17 +482,22 @@
             (proto u8 0)
             (sport u16 0)
             (dport u16 0)
-            (has-port u8 0))
+            (has-port u8 0)
+            (opens u8 1))
         (when (and (<= (+ data 34) data-end)
                    (= (eth-type data) #x0800)
                    (= (logand (load u8 data 14) #xf0) #x40))
           (setf ipv4 1
                 peer (load u32 data 26)
+                pod-addr (load u32 data 30)
                 proto (load u8 data 23))
           (when (and (= (logand (load u8 data 14) 15) 5) (<= (+ data 38) data-end))
             (setf sport (load u16 data 34)
                   dport (load u16 data 36)
-                  has-port 1)))
+                  has-port 1))
+          ;; TCP flags: SYN (2) without ACK (16) opens a connection.
+          (when (and (= proto 6) (= (logand (load u8 data 14) 15) 5) (<= (+ data 48) data-end))
+            (setf opens (if (= (logand (load u8 data 47) #x12) 2) 1 0))))
         (when (and (<= (+ data 54) data-end)
                    (= (eth-type data) #x86dd)
                    (= (logand (load u8 data 14) #xf0) #x60))
@@ -416,7 +511,9 @@
                      (<= (+ data 58) data-end))
             (setf sport (load u16 data 54)
                   dport (load u16 data 56)
-                  has-port 1)))
+                  has-port 1))
+          (when (and (= proto 6) (<= (+ data 68) data-end))
+            (setf opens (if (= (logand (load u8 data 67) #x12) 2) 1 0))))
         ;; Resolve the shared mode/counter pointers once. Keeping duplicate
         ;; literal-key lookups in separate family branches lets the compiler
         ;; coalesce their stack keys across control-flow paths, leaving the
@@ -426,11 +523,13 @@
               (dropped-packets (map-lookup traffic-stats 2))
               (dropped-bytes (map-lookup traffic-stats 3))
               (egress-mode (map-lookup netpol-mode 0))
-              (ingress-mode (map-lookup netpol-mode 1)))
+              (ingress-mode (map-lookup netpol-mode 1))
+              (reporting (map-lookup flow-config 0)))
           (when (and (= ipv4 1) (/= (ntohl peer) #xa9fe0101))
             (let ((egress-on u32 (if (/= egress-mode 0) (load u32 egress-mode 0) 0))
-                  (ingress-on u32 (if (/= ingress-mode 0) (load u32 ingress-mode 0) 0)))
-              (when (or (/= egress-on 0) (/= ingress-on 0))
+                  (ingress-on u32 (if (/= ingress-mode 0) (load u32 ingress-mode 0) 0))
+                  (report-on u32 (if (/= reporting 0) (logand (load u32 reporting 0) 1) 0)))
+              (when (or (/= egress-on 0) (/= ingress-on 0) (/= report-on 0))
                 (let ((now u64 (ktime-get-ns)))
                   ;; Whistler builds a stack struct's address in r1 whatever r1 holds,
                   ;; so the key is made just after a helper call, when r1 is free.
@@ -444,20 +543,27 @@
                                                peer proto dport has-port)
                                0)
                         (let ((flow (map-lookup-ptr netpol-flows fkey)))
-                          (when (= flow 0) (drop-pod-packet :policy))
+                          (when (= flow 0) (drop-pod-packet :policy :flow fkey :family 4 :direction 2 :endpoint (ntohl pod-addr)))
                           (when (> (- now (load u64 flow 0)) (netpol-flow-lifetime proto))
-                            (drop-pod-packet :policy)))))
+                            (drop-pod-packet :policy :flow fkey :family 4 :direction 2 :endpoint (ntohl pod-addr))))))
                     (let ((stamp (make-netpol-flow-stamp)))
                       (setf (netpol-flow-stamp-ns stamp) now)
-                      (map-update-ptr netpol-flows fkey stamp 0)))))))
+                      (record-netpol-flow netpol-flows fkey stamp opens :family 4 :direction 2 :endpoint (ntohl pod-addr))))))))
           ;; fe80::1 is the node gateway on every routed Pod interface. As with
           ;; 169.254.1.1 above, node-originated traffic is outside Pod isolation.
           (when (and (= ipv6 1)
                      (not (and (= peer6-0 #x000080fe) (= peer6-1 0)
                                (= peer6-2 0) (= peer6-3 #x01000000))))
             (let ((egress-on u32 (if (/= egress-mode 0) (load u32 egress-mode 0) 0))
-                  (ingress-on u32 (if (/= ingress-mode 0) (load u32 ingress-mode 0) 0)))
-              (when (or (/= egress-on 0) (/= ingress-on 0))
+                  (ingress-on u32 (if (/= ingress-mode 0) (load u32 ingress-mode 0) 0))
+                  (report-on u32 (if (and (/= reporting 0)
+                                       ;; Not a link-local peer (fe80::/10), nor the unspecified
+                                       ;; address (::) duplicate address detection and MLD send
+                                       ;; from: that chatter is housekeeping, not a connection.
+                                       (/= (logand peer6-0 #xc0ff) #x80fe)
+                                       (or (/= peer6-0 0) (/= peer6-1 0) (/= peer6-2 0) (/= peer6-3 0)))
+                                  (logand (load u32 reporting 0) 1) 0)))
+              (when (or (/= egress-on 0) (/= ingress-on 0) (/= report-on 0))
                 (let ((now u64 (ktime-get-ns))
                       (fkey (make-netpol-flow-key-v6)))
                   (setf (netpol-flow-key-v6-peer fkey 0) peer6-0
@@ -475,10 +581,10 @@
                                                 proto dport has-port)
                              0)
                       (let ((flow (map-lookup-ptr netpol-flows-v6 fkey)))
-                        (when (= flow 0) (drop-pod-packet :policy))
+                        (when (= flow 0) (drop-pod-packet :policy :flow fkey :family 6 :direction 2 :endpoint 0))
                         (when (> (- now (load u64 flow 0)) (netpol-flow-lifetime proto))
-                          (drop-pod-packet :policy)))))
+                          (drop-pod-packet :policy :flow fkey :family 6 :direction 2 :endpoint 0)))))
                   (let ((stamp (make-netpol-flow-stamp)))
                     (setf (netpol-flow-stamp-ns stamp) now)
-                    (map-update-ptr netpol-flows-v6 fkey stamp 0)))))))
+                    (record-netpol-flow netpol-flows-v6 fkey stamp opens :family 6 :direction 2)))))))
         TC_ACT_OK))))

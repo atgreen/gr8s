@@ -853,3 +853,93 @@ dropped packets/bytes, NetworkPolicy drops (`gr8s_endpoint_policy_drops_total`),
 rejections, malformed/unsupported packets, sample timestamps, and node readiness. An unreadable map sets
 `gr8s_endpoint_telemetry_available` to zero and omits its counter series instead
 of reporting false zero traffic.
+
+### Flow events
+
+The endpoint guards also report individual flows. Each node pins one ring
+buffer, `flow_events`, in its private bpffs, and every endpoint's guards write
+to it:
+
+- **Drops**, with their reason: `policy`, `spoof`, `malformed` or
+  `unsupported`. A policy drop carries the flow it refused, as seen from the
+  Pod: the peer, both ports, the protocol and the direction.
+- **New connections**, once each, in the direction they started: every Pod's
+  by default, or with `--flow-events drops` (on `serve`, `agent` and
+  `net-agent`) only those of Pods a NetworkPolicy isolates, the first time
+  policy allows them. The guards keep each Pod's recent connections in its
+  flow table, so a connection is reported once however many packets it has;
+  a connection open before a policy isolates its Pod keeps passing until it
+  goes quiet, as an established one. The setting is node-wide, in a
+  `flow_config` map pinned beside the ring.
+- **Gateway requests.** The agent's Gateway proxy reports each HTTP request it
+  answers as an L7 flow from the client to the backend Pod: its method, host,
+  path (never the query string), status, latency, route and listener port.
+  `doctor observe` prints it as `HTTP GET host/path 200 12.0ms`; Hubble shows
+  it as an `http-response` and applies `--http-method`, `--http-status` and
+  `--http-path` to it.
+
+A Pod's guards bind to the ring when the CNI installs them. After an upgrade
+from a release without flow events, a Pod that was already running reports
+none until it is recreated, unless its node runs the Service packet pipeline,
+whose upgrade moves existing guards onto the ring. The same holds for any later
+change to the guards: a running Pod keeps the guard it was created with. A
+guard from before v1.37.2-gr8s.5, for instance, reports a Pod's replies to an
+incoming connection as connections of their own; restart the Pod to replace it. An IPv4-only Pod has IPv6
+turned off on its interface, so the kernel's IPv6 link-local chatter never
+reaches its guard as spoofed traffic.
+
+The agent reads the ring, names the local Pod each event belongs to, and keeps
+the most recent 4,096. Nothing leaves the node until someone asks: the
+control plane then opens a `FLOWS` operation on each node's existing session,
+which sends events in batches of up to 64 KiB, at most ten a second while
+following, merges the streams, and names the peer Pod and, for a policy drop, the
+NetworkPolicies that isolate the Pod in that direction. A drop under
+Kubernetes NetworkPolicy has no single deciding rule: the Pod is isolated by
+every policy that selects it, and none of their rules allowed the traffic.
+
+`GET /apis/gr8s.io/v1/flows` streams them as one JSON object per line, and
+`?watch=true` keeps the stream open for new ones.
+`/apis/gr8s.io/v1/namespaces/NAMESPACE/flows` returns the flows either side of
+which is in NAMESPACE. RBAC authorizes these as `list` and `watch` of the
+gr8s.io resource `flows`.
+
+```sh
+gr8s doctor observe                                # every node's recent flow events
+gr8s doctor observe -n shop -f --verdict dropped   # follow one namespace's drops
+gr8s doctor observe --pod cart --json              # one Pod's flows, as JSON lines
+```
+
+`gr8s doctor observe --serve` serves Hubble's Observer gRPC API on `127.0.0.1:4245` (`--listen` moves it), from
+the same API and with the kubeconfig's credentials, so the stock `hubble` CLI
+works against gr8s:
+
+```sh
+gr8s doctor observe --serve &
+hubble observe --verdict DROPPED --namespace shop
+```
+
+It serves `GetFlows`, `GetNodes` and `ServerStatus`. It applies Hubble's flow
+filters on the server, as Hubble does, and refuses one it can't apply
+(Services) instead of widening it; one on DNS names matches nothing. Flows carry Pod labels as
+`k8s:` labels and a numeric identity derived from the Pod's name, since gr8s
+has no Cilium security identities.
+
+`gr8s dashboard` serves Hubble UI's embedded frontend as its Hubble tab, beside
+Headlamp, on a loopback port under an unguessable path. gr8s implements Hubble UI's backend itself: the UI's two streams,
+the namespaces and the service map, read the same flows API with the
+kubeconfig's credentials. A card is one Pod identity, as in Cilium, and an
+address gr8s doesn't know as a Pod is the world. The service map shows what
+flow events show: drops and new connections, not each packet or byte.
+
+On a foreign cluster, where gr8s-net provides the network and nothing serves
+`/apis/gr8s.io/v1/flows`, each `gr8s net-agent` collects its node's flow
+events the same way and serves them on `127.0.0.1:4246` (`--flow-port`). It
+opens no port on the node: the agent Pod is on the host network, and a reader
+reaches it through the cluster API's `pods/portforward`, which the kubelet
+connects to loopback. `gr8s doctor observe` (with or without `--serve`) and
+`gr8s dashboard`'s Hubble tab do this by themselves when the cluster doesn't serve the
+gr8s.io API: they find the agent Pods by their `app.kubernetes.io/name=gr8s-net`
+label, read every node's stream, and name peers and isolating policies from
+the Pods and NetworkPolicies they list. The reader's credentials need `list`
+of Pods and NetworkPolicies, and `create` of `pods/portforward` in the
+gr8s-net namespace.

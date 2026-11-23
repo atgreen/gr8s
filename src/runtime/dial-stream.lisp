@@ -84,11 +84,18 @@
   (vector-push-extend byte (slot-value stream 'output))
   byte)
 
+(defparameter +dial-stream-buffer-bytes+ (* 64 1024)
+  "How much a dial stream gathers before it sends without being asked. A client writes a
+request in many small pieces; each piece sent is a frame, which reaching a node through
+another control-plane member costs a round trip (podster-tjp).")
+
 (defmethod trivial-gray-streams:stream-write-sequence ((stream dial-stream) sequence start end &key)
-  (dial-stream-flush stream)
-  (let ((end (or end (length sequence))))
-    (when (< start end)
-      (dial-stream-send stream (coerce (subseq sequence start end) '(simple-array (unsigned-byte 8) (*))))))
+  (let ((output (slot-value stream 'output))
+        (end (or end (length sequence))))
+    (loop for index from start below end
+          do (vector-push-extend (elt sequence index) output))
+    (when (>= (length output) +dial-stream-buffer-bytes+)
+      (dial-stream-flush stream)))
   sequence)
 
 (defmethod trivial-gray-streams:stream-force-output ((stream dial-stream))

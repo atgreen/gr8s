@@ -87,6 +87,7 @@
   ;; control-plane userspace proxy).
   service-lb
   service-lb-controller
+  flow-collector                        ; this node's flow events (podster-e9a)
   (service-risk-ready-revision nil) ; current snapshot's local v2 risk map was read back
   (service-selection-ready-revision nil) ; grant-matched Service tables converged
   (service-selection-grant-digest nil) ; last fully approved selection in this agent process
@@ -1311,11 +1312,14 @@ just the DNS server; for any other runtime, nothing."
             (call-with-service-lb
              node-runtime
              (lambda ()
-               (call-with-agent-cni-server
-                node-runtime
-                (lambda () (call-with-dns-server body :address +dns-pod-server-address+
-                                                 :forward-rules (node-runtime-dns-forward-rules node-runtime)
-                                                 :resolver resolver)))))
+               (call-with-flow-collector
+                node-runtime (managed-containerd-bpf-directory (node-runtime-manager node-runtime))
+                (lambda ()
+                  (call-with-agent-cni-server
+                   node-runtime
+                   (lambda () (call-with-dns-server body :address +dns-pod-server-address+
+                                                    :forward-rules (node-runtime-dns-forward-rules node-runtime)
+                                                    :resolver resolver)))))))
             (call-with-dns-server body :address +dns-pod-server-address+
                                        :forward-rules (node-runtime-dns-forward-rules node-runtime)
                                        :resolver resolver))
@@ -2649,6 +2653,9 @@ errors becomes a failed response; an error on any other variant is re-signaled."
            ((= (slot-value payload 'gr8s.node.v1::kind)
                gr8s.node.v1::+operationkind-operation_kind_dial+)
             (start-node-dial-operation node-runtime payload emit))
+           ((= (slot-value payload 'gr8s.node.v1::kind)
+               gr8s.node.v1::+operationkind-operation_kind_flows+)
+            (start-node-flows-operation node-runtime payload emit))
            ((= (slot-value payload 'gr8s.node.v1::kind)
                gr8s.node.v1::+operationkind-operation_kind_slynk+)
             (start-node-slynk-operation node-runtime payload emit))

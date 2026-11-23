@@ -325,11 +325,15 @@ skip certificate verification -- against the next one."
         (registry-tls-test-leaf cdn-pki directory "cdn" :ip-addresses '("127.0.0.2"))
       (multiple-value-bind (cdn-port stop-cdn)
           (registry-tls-test-backend cdn-certificate cdn-key
-                                     (lambda (path) (declare (ignore path)) (values 200 nil "blob bytes"))
+                                     ;; A signed CDN URL serves only its exact query.
+                                     (lambda (path)
+                                       (if (search "Credential=AKIA%2F20261122" path)
+                                           (values 200 nil "blob bytes")
+                                           (values 403 nil "signature mismatch")))
                                      :address "127.0.0.2")
         (multiple-value-bind (registry-certificate registry-key)
             (registry-tls-test-leaf registry-pki directory "registry" :ip-addresses '("127.0.0.1"))
-          (let ((redirect-to (format nil "https://127.0.0.2:~D/blob" cdn-port)))
+          (let ((redirect-to (format nil "https://127.0.0.2:~D/blob?X-Amz-Credential=AKIA%2F20261122" cdn-port)))
             (multiple-value-bind (registry-port stop-registry)
                 (registry-tls-test-backend registry-certificate registry-key
                                            (lambda (path)
@@ -350,7 +354,8 @@ skip certificate verification -- against the next one."
                        (let ((gr8s.image-distribution::*registry-ca-files*
                                (list (cons registry (registry-tls-test-ca registry-pki)))))
                          (signals error (fetch "library/app")))
-                       ;; Each host verified against its own CA: the blob arrives.
+                       ;; Each host verified against its own CA: the blob arrives, its signed
+                         ;; query sent as the registry gave it (podster-dq2).
                        (let ((gr8s.image-distribution::*registry-ca-files*
                                (list (cons registry (registry-tls-test-ca registry-pki))
                                      (cons cdn (registry-tls-test-ca cdn-pki)))))

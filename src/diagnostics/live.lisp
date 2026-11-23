@@ -208,7 +208,8 @@
   "Read through kubectl. A NIL KUBECONFIG leaves kubectl its own default configuration.
 Kind PreviousLog with name POD/CONTAINER reads the last lines of that
 container's previous run, as an object with a text field. Kind MemberView with
-name HOST:PORT reads Namespace default through that one API server."
+name HOST:PORT reads Namespace default through that one API server. Kind Flows
+reads a gr8s cluster's recent flow events, as a list of them."
   (lambda (kind namespace name)
     (cond ((equal kind "PreviousLog")
            (progress "Reading the last log of Pod ~A" (subseq name 0 (position #\/ name))))
@@ -217,6 +218,7 @@ name HOST:PORT reads Namespace default through that one API server."
     (handler-case
         (let* ((log (equal kind "PreviousLog"))
                (member (equal kind "MemberView"))
+               (flows (equal kind "Flows"))
                (slash (and log (position #\/ name)))
                (process
                  (uiop:launch-program
@@ -228,6 +230,7 @@ name HOST:PORT reads Namespace default through that one API server."
                                        "--previous" "--tail=40" "--namespace" namespace))
                             (member (list "--server" (format nil "https://~A" name)
                                           "get" "namespace" "default" "-o" "json"))
+                            (flows (list "get" "--raw" (flows-raw-path namespace)))
                             (t (append (list "get" (string-downcase kind))
                                       (when name (list name "--ignore-not-found"))
                                       (when (namespaced-kind-p kind)
@@ -243,9 +246,10 @@ name HOST:PORT reads Namespace default through that one API server."
                                  do (when (>= size (* 8 1024 1024)) (error "Response too large."))
                                     (write-char character out)))))
                    (cond ((not (zerop (uiop:wait-process process))) (values nil :unknown))
-                         ((zerop (length (string-trim '(#\Space #\Tab #\Newline #\Return) text)))
+                         ((and (not flows) (zerop (length (string-trim '(#\Space #\Tab #\Newline #\Return) text))))
                           (values nil :absent))
                          (log (values (object "text" text) :present))
+                         (flows (values (flows-list-from-text text) :present))
                          (t (values (com.inuoe.jzon:parse text) :present)))))
             (when (uiop:process-alive-p process) (uiop:terminate-process process :urgent t))
             (uiop:wait-process process)

@@ -42,6 +42,12 @@ Headlamp  (embedded web UI, served by 'gr8s dashboard')  -  Apache-2.0
     The frontend bundles third-party JavaScript whose own license texts
     are reproduced in the EMBEDDED WEB UI section below.
 
+Hubble UI  (embedded web UI, served by 'gr8s dashboard')  -  Apache-2.0
+    Copyright Authors of Hubble
+    https://github.com/cilium/hubble-ui
+    The frontend bundles third-party JavaScript whose own license texts
+    are reproduced in the EMBEDDED WEB UI section below.
+
 libzstd  (linked at runtime)  -  BSD-3-Clause
     Copyright Meta Platforms, Inc.
     https://github.com/facebook/zstd
@@ -56,40 +62,44 @@ Kata Containers  (optional, fetched by 'gr8s runtime install kata')  -  Apache-2
 COMPONENTS
   printf '\n\n'
 
-  # Third-party license texts the Headlamp webpack build emits next to the
-  # bundled JavaScript (one *.LICENSE.txt per chunk; many are byte-identical,
-  # so reproduce each distinct text once). Collected from the embedded frontend
-  # tree -- the exact bytes `gr8s dashboard` serves -- so the attribution
-  # matches what ships. Absent when the dashboard assets are not vendored.
-  assets_dir="$project_root/assets/dashboard"
+  # Third-party license texts each embedded frontend's webpack build emits next
+  # to the bundled JavaScript (one *.LICENSE.txt per chunk; many are
+  # byte-identical, so reproduce each distinct text once). Collected from the
+  # embedded trees -- the exact bytes `gr8s dashboard'
+  # serve -- so the attribution matches what ships. Absent when not vendored.
   license_text() {
     case "$1" in
       *.gz) gzip -cd -- "$1" ;;
       *) cat -- "$1" ;;
     esac
   }
-  if [ -n "$(find "$assets_dir" -type f \( -name '*.LICENSE.txt' -o -name '*.LICENSE.txt.gz' \) -print -quit 2>/dev/null)" ]; then
-    printf '================================================================================\n'
-    printf 'EMBEDDED WEB UI (HEADLAMP DASHBOARD) THIRD-PARTY LICENSES\n'
-    printf '================================================================================\n\n'
-    printf 'License texts emitted by the Headlamp frontend build for the JavaScript it\n'
-    printf 'bundles. Each distinct text is reproduced once, labeled by an emitting bundle.\n\n'
-    seen=$(mktemp)
-    find "$assets_dir" -type f \( -name '*.LICENSE.txt' -o -name '*.LICENSE.txt.gz' \) | sort | while IFS= read -r license; do
-      case "$license" in *.gz) gzip -t -- "$license" ;; esac
-      digest=$(license_text "$license" | sha256sum | cut -d' ' -f1)
-      if ! grep -qx "$digest" "$seen" 2>/dev/null; then
-        printf '%s\n' "$digest" >> "$seen"
-        printf -- '-------- %s --------\n' "${license#"$assets_dir"/}"
-        license_text "$license"
-        printf '\n'
-      fi
-    done
-    rm -f "$seen"
-    printf '\n\n'
-  else
-    echo "collect-notices: no vendored dashboard assets; skipping web UI licenses" >&2
-  fi
+  web_ui_licenses() {
+    assets_dir="$project_root/assets/$1"
+    if [ -n "$(find "$assets_dir" -type f \( -name '*.LICENSE.txt' -o -name '*.LICENSE.txt.gz' \) -print -quit 2>/dev/null)" ]; then
+      printf '================================================================================\n'
+      printf 'EMBEDDED WEB UI (%s) THIRD-PARTY LICENSES\n' "$2"
+      printf '================================================================================\n\n'
+      printf 'License texts emitted by the %s frontend build for the JavaScript it\n' "$3"
+      printf 'bundles. Each distinct text is reproduced once, labeled by an emitting bundle.\n\n'
+      seen=$(mktemp)
+      find "$assets_dir" -type f \( -name '*.LICENSE.txt' -o -name '*.LICENSE.txt.gz' \) | sort | while IFS= read -r license; do
+        case "$license" in *.gz) gzip -t -- "$license" ;; esac
+        digest=$(license_text "$license" | sha256sum | cut -d' ' -f1)
+        if ! grep -qx "$digest" "$seen" 2>/dev/null; then
+          printf '%s\n' "$digest" >> "$seen"
+          printf -- '-------- %s --------\n' "${license#"$assets_dir"/}"
+          license_text "$license"
+          printf '\n'
+        fi
+      done
+      rm -f "$seen"
+      printf '\n\n'
+    else
+      echo "collect-notices: no vendored $1 assets; skipping its web UI licenses" >&2
+    fi
+  }
+  web_ui_licenses dashboard "HEADLAMP DASHBOARD" Headlamp
+  web_ui_licenses hubble-ui "HUBBLE UI" "Hubble UI"
 
   ocicl collect-licenses
 } > "$output"

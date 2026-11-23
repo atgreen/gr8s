@@ -50,7 +50,7 @@
   ;; refusals were missing from dropped_packets.
   (labels ((policy-drop-sites (tree)
              (cond ((atom tree) 0)
-                   ((equal tree '(whistler::drop-pod-packet :policy)) 1)
+                   ((and (eq (first tree) 'whistler::drop-pod-packet) (eq (second tree) :policy)) 1)
                    (t (reduce #'+ (mapcar #'policy-drop-sites tree)))))
            (bare-policy-counts (tree)
              (cond ((atom tree) 0)

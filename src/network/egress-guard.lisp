@@ -10,6 +10,18 @@
 
 (in-package #:gr8s.network)
 
+(defparameter +flow-events-map-name+ "flow_events"
+  "The guards' flow-event ring buffer: shared by every endpoint on a node, and never
+pinned under one.")
+
+(defparameter +flow-config-map-name+ "flow_config"
+  "The guards' flow-event settings: one word, shared by every endpoint on a node like
+the ring, and never pinned under one. Bit 0 reports every Pod's new connections.")
+
+(defparameter +private-flow-events-bytes+ 4096
+  "The ring an endpoint gets when no shared one is supplied: one page, which nobody
+reads, so a guard loads whether or not the node collects flow events.")
+
 (defun compile-egress-guard (&key service-packets)
   "JIT-compile the per-endpoint egress guard. Returns (values map-specs
 prog-specs), the same shape as compile-service-lb."
@@ -103,7 +115,9 @@ the upgrade path publishes only after both directions are quiescent."
                                 :type (whistler/compiler:resolve-map-type (getf spec :type))
                                 :key-size (getf spec :key-size)
                                 :value-size (getf spec :value-size)
-                                :max-entries (getf spec :max-entries)
+                                :max-entries (if (and (null fd) (string= name +flow-events-map-name+))
+                                                 +private-flow-events-bytes+
+                                                 (getf spec :max-entries))
                                 :flags (getf spec :flags))
                     do (if fd
                            (setf (whistler/loader:map-info-fd info) fd)

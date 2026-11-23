@@ -13,13 +13,16 @@ lengths and uninitialized stack reads.
 import ctypes
 import ipaddress
 import json
+import mmap
 import os
 import platform
 import struct
 import sys
 
 MASK = (1 << 64) - 1
-ARRAY, HASH, LRU_HASH, LPM_TRIE = 2, 1, 9, 11
+ARRAY, HASH, LRU_HASH, LPM_TRIE, RINGBUF = 2, 1, 9, 11, 27
+FLOW_EVENT_SIZE = 40
+EEXIST = 17
 EXPECTED_MAPS = {'rejected_spoofs': (ARRAY, 4, 8, 1, 0),
                  'endpoint_identity': (ARRAY, 4, 32, 1, 128),
                  'traffic_stats': (ARRAY, 4, 8, 7, 0),
@@ -35,7 +38,9 @@ EXPECTED_MAPS = {'rejected_spoofs': (ARRAY, 4, 8, 1, 0),
                  'netpol_flows': (LRU_HASH, 12, 8, 4096, 0),
                  'netpol_flows_v6': (LRU_HASH, 24, 8, 4096, 0),
                  'local_pod_v4': (LPM_TRIE, 8, 16, 4096, 1),
-                 'host_redirect_v4': (HASH, 4, 1, 64, 1)}
+                 'host_redirect_v4': (HASH, 4, 1, 64, 1),
+                 'flow_events': (RINGBUF, 0, 0, 262144, 0),
+                 'flow_config': (ARRAY, 4, 4, 1, 0)}
 TC_ACT_OK, TC_ACT_SHOT = 0, 2
 
 
@@ -85,6 +90,8 @@ class Maps:
         self.ids, self.descriptors, self.memory = ids, descriptors, memory
         self.names = {fd: name for name, fd in ids.items()}
         self.entries = {name: {} for name in ids}
+        self.ring = []
+        self.reserved = {}
         self.next_address = 0x400000
         for name, (kind, key_size, value_size, count, _) in descriptors.items():
             if kind == ARRAY:
@@ -105,16 +112,21 @@ class Maps:
             return max(matches)[1] if matches else 0
         return self.entries[name].get(bytes(key), 0)
 
-    def update(self, name, key, value):
+    def update(self, name, key, value, flags=0):
+        """Store VALUE at KEY; with BPF_NOEXIST (1), refuse an existing KEY with -EEXIST."""
         kind, key_size, value_size, count, _ = self.descriptors[name]
         assert len(key) == key_size and len(value) == value_size
         key = bytes(key)
         if kind == ARRAY:
             assert key in self.entries[name]
+        if flags == 1 and key in self.entries[name]:
+            return -EEXIST & MASK
+        assert flags in (0, 1), flags
         if key not in self.entries[name]:
             assert len(self.entries[name]) < count
             self.entries[name][key] = self.allocate(value_size)
         self.memory[self.entries[name][key]][:] = value
+        return 0
 
     def value(self, name, key):
         address = self.entries[name].get(bytes(key))
@@ -135,6 +147,7 @@ class Machine:
         self.memory[0x300000] = bytearray(512)
         context = self.memory[0x200000]
         struct.pack_into('<I', context, 0, len(packet) if logical_length is None else logical_length)
+        struct.pack_into('<I', context, 40, 7)  # ifindex
         struct.pack_into('<II', context, 76, 0x100000, 0x100000 + len(packet))
 
     def region(self, address, size):
@@ -171,12 +184,22 @@ class Machine:
             if helper == 1:
                 r[0] = self.maps.lookup(name, key)
             else:
-                self.maps.update(name, key, self.read_bytes(r[3], value_size))
-                r[0] = 0
+                r[0] = self.maps.update(name, key, self.read_bytes(r[3], value_size), r[4])
         elif helper == 5:
             r[0] = self.clock[0]
         elif helper == 23:
             r[0] = 7
+        elif helper == 131:
+            # bpf_ringbuf_reserve: a record nothing else may touch until it's submitted.
+            assert self.maps.descriptors[self.maps.names[r[1]]][0] == RINGBUF and r[3] == 0
+            address = self.maps.allocate(r[2])
+            self.maps.reserved[address] = r[2]
+            r[0] = address
+        elif helper in (132, 133):
+            size = self.maps.reserved.pop(r[1])
+            if helper == 132:
+                self.maps.ring.append(bytes(self.memory[r[1]][:size]))
+            r[0] = 0
         else:
             raise AssertionError(f'unexpected helper {helper}')
         r[1:6] = [0xdeadbeef] * 5
@@ -271,6 +294,12 @@ class Interpreter:
     def advance(self, seconds):
         self.clock[0] += int(seconds * 1e9)
 
+    def events(self):
+        """Take the flow events written since the last call."""
+        assert not self.maps.reserved, 'a reserved flow event was never submitted'
+        taken, self.maps.ring = self.maps.ring, []
+        return taken
+
     def close(self):
         pass
 
@@ -311,9 +340,32 @@ class Kernel:
                     raise RuntimeError(f'kernel rejected {program}: {error}\n{log.value.decode()}') from error
                 self.fds.append(fd)
                 self.program_fds[program] = fd
+            ring = self.map_fds['flow_events']
+            page = mmap.PAGESIZE
+            self.ring_size = descriptors['flow_events'][3]
+            self.consumer = mmap.mmap(ring, page, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
+            self.producer = mmap.mmap(ring, page + 2 * self.ring_size, mmap.MAP_SHARED,
+                                      mmap.PROT_READ, offset=page)
         except BaseException:
             self.close()
             raise
+
+    def events(self):
+        """Take the flow events the kernel has committed since the last call."""
+        page = mmap.PAGESIZE
+        produced = struct.unpack_from('<Q', self.producer, 0)[0]
+        consumed = struct.unpack_from('<Q', self.consumer, 0)[0]
+        taken = []
+        while consumed < produced:
+            header = struct.unpack_from('<I', self.producer, page + consumed % self.ring_size)[0]
+            assert not header & (1 << 31), 'an uncommitted flow event'
+            length = header & 0x3fffffff
+            if not header & (1 << 30):
+                start = page + (consumed + 8) % self.ring_size
+                taken.append(bytes(self.producer[start:start + length]))
+            consumed += (length + 8 + 7) & ~7
+        struct.pack_into('<Q', self.consumer, 0, consumed)
+        return taken
 
     def bpf(self, command, attr):
         buffer = ctypes.create_string_buffer(attr)
@@ -376,6 +428,10 @@ class Kernel:
                             struct.pack('<Q', max(0, stamp - int(seconds * 1e9))))
 
     def close(self):
+        for view in ('producer', 'consumer'):
+            if getattr(self, view, None) is not None:
+                getattr(self, view).close()
+                setattr(self, view, None)
         for fd in reversed(self.fds):
             os.close(fd)
         self.fds.clear()
@@ -389,6 +445,21 @@ GATEWAY6 = ipaddress.IPv6Address('fe80::1').packed
 TCP, UDP, ICMP = 6, 17, 1
 
 
+REASONS = {'spoof': 1, 'malformed': 2, 'unsupported': 3, 'policy': 4}
+
+
+def flow_event(raw):
+    """Decode one ring record as the guards lay out FLOW-EVENT."""
+    assert len(raw) == FLOW_EVENT_SIZE, len(raw)
+    ifindex, endpoint, kind, reason, direction, family, protocol = struct.unpack_from('<IIBBBBB', raw)
+    length = struct.unpack_from('<I', raw, 20)[0]
+    peer = raw[24:28] if family == 4 else raw[24:40]
+    return {'ifindex': ifindex, 'endpoint': endpoint, 'kind': kind, 'reason': reason,
+            'direction': direction, 'family': family, 'protocol': protocol,
+            'pod_port': int.from_bytes(raw[14:16], 'big'), 'peer_port': int.from_bytes(raw[16:18], 'big'),
+            'length': length, 'peer': bytes(peer)}
+
+
 def ethernet(protocol, payload, mac=MAC):
     return bytes.fromhex('02aabbccddee') + mac + struct.pack('>H', protocol) + payload
 
@@ -397,10 +468,10 @@ def ipv4(source=IP, mac=MAC):
     return ethernet(0x0800, bytes([0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0]) + source + bytes([10, 88, 2, 2]), mac)
 
 
-def datagram(source, destination, protocol, sport=0, dport=0, mac=MAC):
+def datagram(source, destination, protocol, sport=0, dport=0, mac=MAC, flags=0x02):
     """An IPv4 packet carrying a minimal L4 header with ports (or an ICMP echo)."""
     if protocol == TCP:
-        l4 = struct.pack('>HHIIBBHHH', sport, dport, 1, 0, 0x50, 0x02, 1024, 0, 0)
+        l4 = struct.pack('>HHIIBBHHH', sport, dport, 1, 0, 0x50, flags, 1024, 0, 0)
     elif protocol == UDP:
         l4 = struct.pack('>HHHH', sport, dport, 8, 0)
     else:
@@ -409,10 +480,10 @@ def datagram(source, destination, protocol, sport=0, dport=0, mac=MAC):
     return ethernet(0x0800, header + bytes(source) + bytes(destination) + l4, mac)
 
 
-def datagram6(source, destination, protocol, sport=0, dport=0, mac=MAC):
+def datagram6(source, destination, protocol, sport=0, dport=0, mac=MAC, flags=0x02):
     """An IPv6 packet carrying a minimal TCP, UDP, or ICMPv6 header."""
     if protocol == TCP:
-        l4 = struct.pack('>HHIIBBHHH', sport, dport, 1, 0, 0x50, 0x02, 1024, 0, 0)
+        l4 = struct.pack('>HHIIBBHHH', sport, dport, 1, 0, 0x50, flags, 1024, 0, 0)
     elif protocol == UDP:
         l4 = struct.pack('>HHHH', sport, dport, 8, 0)
     else:
@@ -468,12 +539,23 @@ def main(path, kernel=False):
         # Linux's test-run skb constructor requires an Ethernet header and
         # cannot represent a separately specified non-linear packet length.
         if kernel and (len(packet) < 14 or logical_length is not None):
-            return
+            return []
         reset()
         configure(configured)
+        backend.events()
         result = backend.run('gr8s_egress_guard', packet, logical_length)
         assert result == (TC_ACT_OK if allowed else TC_ACT_SHOT), (count, packet.hex(), result)
         size = len(packet) if logical_length is None else logical_length
+        # Every drop is reported once, with its reason; nothing allowed is reported as a drop.
+        events = [flow_event(raw) for raw in backend.events()]
+        drops = [event for event in events if event['kind'] == 1]
+        if allowed:
+            assert not drops, (count, drops)
+        else:
+            assert len(drops) == 1, (count, events)
+            assert drops[0]['reason'] == REASONS[reason], (count, drops)
+            assert drops[0]['direction'] == 1 and drops[0]['length'] == size, (count, drops)
+            assert drops[0]['endpoint'] == (0x0a580102 if configured else 0), (count, drops)
         assert stat(0) == int(allowed)
         assert stat(1) == (size if allowed else 0)
         assert stat(2) == int(not allowed)
@@ -483,15 +565,29 @@ def main(path, kernel=False):
         assert stat(5) == int(reason == 'unsupported')
         assert stat(6) == int(reason == 'policy')
         count += 1
+        return events
 
     def inbound(packet, allowed):
         """The ingress guard's verdict for one packet to the Pod."""
         nonlocal count
         reset()
+        backend.events()
         result = backend.run('gr8s_ingress_guard', packet)
         assert result == (TC_ACT_OK if allowed else TC_ACT_SHOT), (count, packet.hex(), result)
         assert stat(6) == int(not allowed)
+        events = [flow_event(raw) for raw in backend.events()]
+        drops = [event for event in events if event['kind'] == 1]
+        assert len(drops) == int(not allowed), (count, events)
+        if drops:
+            assert drops[0]['reason'] == REASONS['policy'] and drops[0]['direction'] == 2, (count, drops)
         count += 1
+        return events
+
+    def single(events, kind):
+        """The one event of KIND among EVENTS."""
+        found = [event for event in events if event['kind'] == kind]
+        assert len(found) == 1, events
+        return found[0]
 
     mode(0, 0)
     # The endpoint identity and anti-spoofing guard.
@@ -524,6 +620,36 @@ def main(path, kernel=False):
     packet = bytearray(ipv4()); packet[17] = 100
     check(packet, True, logical_length=114)
 
+    # A node reporting every connection reports a Pod no policy isolates, once per
+    # connection and in either direction; without it, such a Pod reports none.
+    seen, seen6 = bytes([10, 88, 9, 9]), ipaddress.IPv6Address('fd49::9').packed
+    assert not [e for e in check(datagram(IP, seen, TCP, 41000, 443), True) if e['kind'] == 2]
+    backend.update('flow_config', struct.pack('<I', 0), struct.pack('<I', 1))
+    new = single(check(datagram(IP, seen, TCP, 41001, 443), True), 2)
+    assert (new['direction'], new['endpoint'], new['pod_port'], new['peer_port'], new['peer']) \
+        == (1, 0x0a580102, 41001, 443, seen), new
+    assert not check(datagram(IP, seen, TCP, 41001, 443), True)
+    new = single(inbound(datagram(seen, IP, TCP, 5555, 8080), True), 2)
+    assert (new['direction'], new['pod_port'], new['peer_port'], new['peer']) == (2, 8080, 5555, seen), new
+    assert not [e for e in inbound(datagram(seen, IP, TCP, 5555, 8080), True) if e['kind'] == 2]
+    new = single(check(datagram6(IP6, seen6, UDP, 41002, 53), True), 2)
+    assert (new['family'], new['peer']) == (6, seen6), new
+    # A reply seen first, to a connection opened by a peer whose packets aren't recorded
+    # (the node gateway's probes), is no new connection; its opening packet is.
+    probe = bytes([169, 254, 1, 1])
+    assert not [e for e in check(datagram(IP, probe, TCP, 8080, 56400, flags=0x12), True) if e['kind'] == 2]
+    assert not [e for e in check(datagram(IP, seen, TCP, 41004, 443, flags=0x10), True) if e['kind'] == 2]
+    assert not [e for e in inbound(datagram(seen, IP, TCP, 5556, 8080, flags=0x12), True) if e['kind'] == 2]
+    assert not [e for e in check(datagram6(IP6, seen6, TCP, 41005, 443, flags=0x12), True) if e['kind'] == 2]
+    assert not [e for e in inbound(datagram6(seen6, IP6, TCP, 5557, 8080, flags=0x10), True) if e['kind'] == 2]
+    single(check(datagram6(IP6, seen6, TCP, 41006, 443), True), 2)
+    # Link-local neighbors' housekeeping isn't a connection.
+    local6 = ipaddress.IPv6Address('fe80::da:1').packed
+    assert not [e for e in inbound(datagram6(local6, IP6, UDP, 5353, 5353), True) if e['kind'] == 2]
+    assert not [e for e in inbound(datagram6(bytes(16), IP6, UDP, 5353, 5353), True) if e['kind'] == 2]
+    assert not [e for e in check(datagram6(IP6, local6, UDP, 41003, 5353), True) if e['kind'] == 2]
+    backend.update('flow_config', struct.pack('<I', 0), struct.pack('<I', 0))
+
     peer, other, outside = bytes([10, 88, 2, 2]), bytes([10, 88, 3, 3]), bytes([192, 0, 2, 7])
     # Egress isolation: 10.88.2.0/24 on UDP 53 and TCP 8000-8080; 10.0.0.0/8 on everything
     # except 10.88.3.0/24; UDP on every port to 192.0.2.0/24.
@@ -548,6 +674,15 @@ def main(path, kernel=False):
     check(datagram(IP, outside, TCP, 40000, 9999), False, 'policy')
     check(datagram(IP, bytes([172, 16, 0, 1]), UDP, 40000, 53), False, 'policy')
     check(arp(), True)
+    # A policy drop names the flow it refused, from the Pod's side.
+    drop = single(check(datagram(IP, peer, UDP, 40001, 54), False, 'policy'), 1)
+    assert (drop['family'], drop['protocol'], drop['pod_port'], drop['peer_port'], drop['peer']) \
+        == (4, UDP, 40001, 54, peer), drop
+    # An isolated Pod's new connection is reported once, when it's first allowed.
+    allowed = single(check(datagram(IP, peer, TCP, 40002, 8000), True), 2)
+    assert (allowed['reason'], allowed['direction'], allowed['endpoint'], allowed['pod_port'],
+            allowed['peer_port'], allowed['peer']) == (0, 1, 0x0a580102, 40002, 8000, peer), allowed
+    assert not check(datagram(IP, peer, TCP, 40002, 8000), True)
 
     peer6 = ipaddress.IPv6Address('fd43::2').packed
     other6 = ipaddress.IPv6Address('fd44::3').packed
@@ -560,7 +695,9 @@ def main(path, kernel=False):
     backend.update('netpol_egress_ports_v6', port_key(1, UDP, 53), b'\x01')
     backend.update('netpol_egress_ports_v6', port_key(2, TCP), b'\x01')
     check(datagram6(IP6, peer6, UDP, 40000, 53), True)
-    check(datagram6(IP6, peer6, UDP, 40000, 54), False, 'policy')
+    drop = single(check(datagram6(IP6, peer6, UDP, 40000, 54), False, 'policy'), 1)
+    assert (drop['family'], drop['protocol'], drop['pod_port'], drop['peer_port'], drop['peer']) \
+        == (6, UDP, 40000, 54, peer6), drop
     check(datagram6(IP6, outside6, TCP, 40000, 443), True)
     check(datagram6(IP6, other6, TCP, 40000, 443), False, 'policy')
 
@@ -589,7 +726,10 @@ def main(path, kernel=False):
     backend.update('netpol_ingress_cidr', cidr_key('10.88.2.0/24'), struct.pack('<I', 1))
     backend.update('netpol_ingress_ports', port_key(1, TCP, 80), b'\x01')
     inbound(datagram(peer, IP, TCP, 5555, 80), True)
-    inbound(datagram(peer, IP, TCP, 5555, 81), False)
+    # An inbound refusal names the Pod by its address and the peer that tried.
+    drop = single(inbound(datagram(peer, IP, TCP, 5555, 81), False), 1)
+    assert (drop['endpoint'], drop['family'], drop['pod_port'], drop['peer_port'], drop['peer']) \
+        == (0x0a580102, 4, 81, 5555, peer), drop
     inbound(datagram(other, IP, TCP, 5555, 80), False)
     inbound(datagram(GATEWAY, IP, TCP, 5555, 8080), True)
     inbound(arp(), True)

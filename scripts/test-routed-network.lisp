@@ -19,6 +19,10 @@
              (push context contexts)
              (configure-routed-veth context address)
              (check-routed-cni-link context address)
+             ;; An IPv4-only Pod sends no IPv6 link-local traffic for its guard to drop.
+             (call-with-cni-network-namespace
+              (cni-context-netns context)
+              (lambda () (assert (network-interface-ipv6-disabled-p "eth0"))))
              (assert (network-address-present-p +node-gateway-interface+ +node-gateway-address+ 32))
              (assert (not (network-address-present-p (routed-cni-host-name context)
                                                      +node-gateway-address+ 32)))

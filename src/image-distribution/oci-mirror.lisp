@@ -93,12 +93,13 @@ HOST's configured CA file when it has one, else the system roots."
 to +REGISTRY-REDIRECT-LIMIT+ redirects by hand so each hop is verified against
 its own host's trust (a blob redirect to a CDN must not be held to a private
 registry CA, nor a private CA honored for the CDN). Redirects must stay on
-https, and drop Authorization as drakma's own redirects do."
+https, and drop Authorization as drakma's own redirects do. Each URI goes as
+given: a CDN's signed URL breaks if drakma escapes its query again (podster-dq2)."
   (loop with uri = (puri:parse-uri url)
         for hop from 0
         do (multiple-value-bind (body status response-headers)
                (apply #'drakma:http-request uri
-                      :additional-headers headers :redirect nil :proxy nil
+                      :additional-headers headers :redirect nil :proxy nil :preserve-uri t
                       (append arguments (registry-tls-arguments (registry-uri-host uri))))
              (let ((location (and (member status '(301 302 303 307 308))
                                   (drakma:header-value :location response-headers))))

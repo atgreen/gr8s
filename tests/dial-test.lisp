@@ -106,3 +106,27 @@
                       (is (search "reached /through-agent" (trivial-utf-8:utf-8-bytes-to-string body))))
                  (funcall stop))))
         (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore)))))
+
+(defclass recording-dial-runtime () ((sends :initform nil :accessor recording-dial-runtime-sends)))
+(defmethod gr8s.runtime:runtime-port-forward-send ((runtime recording-dial-runtime) session data &key eof)
+  (declare (ignore session eof))
+  (push (copy-seq data) (recording-dial-runtime-sends runtime)))
+
+(test a-dialled-connection-sends-a-request-written-in-pieces-at-once
+  ;; Each send is a frame, a round trip when another member relays it (podster-tjp).
+  (let* ((runtime (make-instance 'recording-dial-runtime))
+         (stream (make-instance 'gr8s.runtime::dial-stream :runtime runtime :session nil)))
+    (dolist (piece '("GET" " " "/" " " "HTTP/1.1" (13 10) "Host: pod" (13 10) (13 10)))
+      (if (stringp piece)
+          (write-sequence (trivial-utf-8:string-to-utf-8-bytes piece) stream)
+          (dolist (octet piece) (write-byte octet stream))))
+    (is (null (recording-dial-runtime-sends runtime)))
+    (finish-output stream)
+    (is (equal (list (format nil "GET / HTTP/1.1~C~CHost: pod~C~C~C~C" #\Return #\Linefeed
+                             #\Return #\Linefeed #\Return #\Linefeed))
+               (mapcar #'trivial-utf-8:utf-8-bytes-to-string (recording-dial-runtime-sends runtime))))
+    ;; A large write still goes without waiting to be asked.
+    (write-sequence (make-array (* 2 gr8s.runtime::+dial-stream-buffer-bytes+)
+                                :element-type '(unsigned-byte 8) :initial-element 65)
+                    stream)
+    (is (= 2 (length (recording-dial-runtime-sends runtime))))))

@@ -187,7 +187,7 @@ def exercise(runner):
 def main():
     programs, ids, descriptors = packet.read_fixture(
         sys.argv[1], names=("gr8s_egress_guard", "gr8s_ingress_guard", *STAGES))
-    assert len(descriptors) == 27
+    assert len(descriptors) == 29  # with the flow_events ring and flow_config
     runner = (packet.Kernel if "--kernel" in sys.argv[2:] else GuardInterpreter)(programs, ids, descriptors)
     try:
         for index, name in enumerate(STAGES):
