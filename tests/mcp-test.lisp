@@ -93,6 +93,13 @@
   (let* ((directory (uiop:ensure-directory-pathname
                      (sb-posix:mkdtemp (namestring (merge-pathnames "gr8s-agents-XXXXXX" (uiop:temporary-directory))))))
          (saved (uiop:getenv "PATH")))
+    (flet ((installed-argvs (gr8s)
+             ;; (id . argv) of each agent offered that is installed.
+             (let ((agent (gr8s.server::make-dashboard-agent "/home/u/kc.yaml" :gr8s gr8s
+                                                             :agents-file (merge-pathnames "none.json" directory))))
+               (loop for choice in (gr8s.server::dashboard-agent-choices agent)
+                     when (getf choice :program)
+                       collect (cons (getf choice :id) (gr8s.server::choice-argv agent choice))))))
     (unwind-protect
          (progn
            (dolist (name '("claude" "codex" "gemini"))
@@ -100,9 +107,9 @@
                (alexandria:write-string-into-file (format nil "#!/bin/sh~%") path)
                (sb-posix:chmod (namestring path) #o755)))
            (setf (uiop:getenv "PATH") (namestring directory))
-           (let ((choices (gr8s.server::installed-agent-choices "/home/u/kc.yaml" :gr8s "/opt/gr8s")))
+           (let ((choices (installed-argvs "/opt/gr8s")))
              (is (equal '("claude" "codex" "gemini" "shell") (mapcar #'first choices)))
-             (destructuring-bind (claude codex gemini shell) (mapcar #'third choices)
+             (destructuring-bind (claude codex gemini shell) (mapcar #'rest choices)
                ;; Each starts with the guide in its context, then gr8s mcp.
                (is (equal "--append-system-prompt" (second claude)))
                (is (uiop:string-prefix-p "# gr8s operator and agent guide" (third claude)))
@@ -120,10 +127,10 @@
                (is (equal "-l" (second shell)))))
            ;; Without a gr8s to run, they still start with the guide, and without gr8s mcp.
            (destructuring-bind (claude codex gemini shell)
-               (mapcar #'third (gr8s.server::installed-agent-choices "/home/u/kc.yaml" :gr8s nil))
+               (mapcar #'rest (installed-argvs nil))
              (declare (ignore gemini shell))
              (is (= 3 (length claude)))
              (is (= 3 (length codex)))
              (is (notany (lambda (argument) (search "mcp_servers" argument)) codex))))
       (setf (uiop:getenv "PATH") saved)
-      (uiop:delete-directory-tree directory :validate t))))
+      (uiop:delete-directory-tree directory :validate t)))))

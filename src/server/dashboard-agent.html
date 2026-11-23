@@ -6,40 +6,133 @@
 <title>gr8s agent</title>
 <link rel="stylesheet" href="xterm.css">
 <style>
-:root { --bg: #ffffff; --panel: #f6f7f9; --line: #d9dde3; --text: #24292f; --muted: #6b7481; --accent: #1f6feb; --bad: #cf222e; }
+:root { color-scheme: light dark; --bg: #ffffff; --panel: #f6f7f9; --line: #d9dde3; --text: #24292f; --muted: #6b7481; --accent: #1f6feb; --bad: #cf222e;
+  --term: #15181d; }
 @media (prefers-color-scheme: dark) {
   :root { --bg: #15181d; --panel: #1d2026; --line: #343a44; --text: #d6dae0; --muted: #9aa3ae; --accent: #58a6ff; --bad: #ff7b72; }
 }
+[hidden] { display: none !important; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
   font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
 body { display: flex; flex-direction: column; }
-header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px;
-  background: var(--panel); border-bottom: 1px solid var(--line); flex: none; }
-header .label { color: var(--muted); }
-button { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line);
-  border-radius: 4px; padding: 3px 10px; cursor: pointer; }
-button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-#status { margin-left: auto; color: var(--muted); }
-#status.bad { color: var(--bad); }
-[hidden] { display: none !important; }
-#terminal { flex: 1; min-height: 0; padding: 4px 0 0 8px; background: #15181d; }
-#empty { flex: 1; display: grid; place-items: center; color: var(--muted); text-align: center; padding: 24px; }
+button, input { font: inherit; color: var(--text); }
+button { background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 3px 10px; cursor: pointer; }
+button:focus-visible, input:focus-visible, [role="tab"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+button:disabled { cursor: default; opacity: .5; }
+
+header { display: flex; align-items: stretch; gap: 4px; padding: 6px 8px 0; background: var(--panel);
+  border-bottom: 1px solid var(--line); flex: none; min-height: 34px; }
+#tabs { display: flex; align-items: flex-end; gap: 2px; flex: 1; min-width: 0; overflow-x: auto; overflow-y: hidden;
+  scrollbar-width: thin; }
+[role="tab"] { display: flex; align-items: center; gap: 6px; padding: 5px 6px 5px 10px; white-space: nowrap;
+  border: 1px solid transparent; border-bottom: none; border-radius: 6px 6px 0 0; color: var(--muted); cursor: pointer; }
+[role="tab"]:hover { color: var(--text); }
+[role="tab"][aria-selected="true"] { background: var(--term); color: #d6dae0; border-color: var(--line); }
+[role="tab"] .dot { width: 7px; height: 7px; border-radius: 50%; background: #3fb950; flex: none; }
+[role="tab"].exited .dot { background: var(--muted); }
+[role="tab"].bad .dot { background: var(--bad); }
+[role="tab"] .close { border: 0; background: none; padding: 0 4px; line-height: 1; color: inherit; opacity: .7; font-size: 15px; }
+[role="tab"] .close:hover { opacity: 1; }
+.tools { display: flex; align-items: center; gap: 4px; padding-bottom: 6px; position: relative; }
+.icon { display: inline-grid; place-items: center; width: 28px; height: 26px; padding: 0; }
+.icon svg { width: 16px; height: 16px; }
+
+#menu { position: absolute; right: 32px; top: 100%; z-index: 10; min-width: 200px; margin: 0; padding: 4px; list-style: none;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.18); }
+#menu button { display: flex; justify-content: space-between; gap: 16px; width: 100%; border: 0; text-align: left; padding: 6px 10px; }
+#menu button:not(:disabled):hover, #menu button:focus-visible { background: var(--panel); }
+#menu .note { color: var(--muted); font-size: 12px; }
+#menu .rule { border-top: 1px solid var(--line); margin: 4px 0; }
+
+main { flex: 1; min-height: 0; position: relative; background: var(--term); }
+.terminal { position: absolute; inset: 0; padding: 4px 0 0 8px; color-scheme: dark; }
+.terminal .xterm-viewport { background-color: var(--term) !important; }
+#empty { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; padding: 24px;
+  background: var(--bg); color: var(--muted); }
+#empty p { max-width: 60ch; margin: 0 auto 8px; }
+#status { position: absolute; right: 12px; bottom: 8px; z-index: 5; padding: 3px 8px; border-radius: 4px;
+  background: rgba(0,0,0,.55); color: #d6dae0; font-size: 12px; }
+#status.bad { color: #ff7b72; }
+
+dialog { width: min(720px, calc(100vw - 32px)); max-height: calc(100vh - 48px); padding: 0; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--bg); color: var(--text); box-shadow: 0 12px 40px rgba(0,0,0,.3); }
+dialog::backdrop { background: rgba(0,0,0,.35); }
+dialog header { padding: 12px 16px; align-items: center; background: var(--panel); }
+dialog h2 { font-size: 15px; margin: 0; flex: 1; }
+dialog section { padding: 12px 16px; overflow: auto; }
+dialog h3 { font-size: 13px; margin: 4px 0 8px; }
+table { width: 100%; border-collapse: collapse; }
+td, th { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: normal; }
+td code { font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; }
+td.actions, td:first-child { white-space: nowrap; }
+td.actions { text-align: right; }
+.muted { color: var(--muted); }
+.missing { color: var(--bad); }
+form { display: grid; gap: 8px; margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 6px; }
+label { display: grid; gap: 3px; }
+input[type="text"] { padding: 5px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); }
+input.command { font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.help { color: var(--muted); font-size: 12px; margin: 0; }
+.help code { font-size: 11px; }
+.row { display: flex; gap: 8px; align-items: center; }
+#form-error { color: var(--bad); flex: 1; }
 </style>
 </head>
 <body>
 <header>
-  <span class="label">Start</span>
-  <span id="choices"></span>
-  <span id="running-label" class="label" hidden>Running</span>
-  <span id="running"></span>
-  <button id="stop" hidden>Stop</button>
-  <span id="status" role="status"></span>
+  <div id="tabs" role="tablist" aria-label="Agents running"></div>
+  <div class="tools">
+    <button id="add" class="icon" title="Start an agent" aria-label="Start an agent" aria-haspopup="menu" aria-expanded="false">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg>
+    </button>
+    <button id="gear" class="icon" title="Agent settings" aria-label="Agent settings">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round">
+        <path d="M6.9 1.5h2.2l.4 1.9 1.3.6 1.7-1 1.5 1.5-1 1.7.6 1.3 1.9.4v2.2l-1.9.4-.6 1.3 1 1.7-1.5 1.5-1.7-1-1.3.6-.4 1.9H6.9l-.4-1.9-1.3-.6-1.7 1-1.5-1.5 1-1.7-.6-1.3-1.9-.4V6.9l1.9-.4.6-1.3-1-1.7 1.5-1.5 1.7 1 1.3-.6z"/>
+        <circle cx="8" cy="8" r="2.2"/>
+      </svg>
+    </button>
+    <ul id="menu" role="menu" hidden></ul>
+  </div>
 </header>
-<div id="empty">Start an agent: it runs on this machine with your own login, and with
-KUBECONFIG naming this dashboard's cluster. It keeps running when you switch tabs or
-reload this page; Stop ends it.</div>
-<div id="terminal" hidden></div>
+<main>
+  <div id="empty">
+    <div>
+      <p>Press <strong>+</strong> to start an agent. It runs on this machine with your own login, and with
+      KUBECONFIG naming this dashboard's cluster.</p>
+      <p>Each agent gets a tab. It keeps running when you switch tabs or reload this page; closing its tab stops it.
+      The gear defines agents of your own.</p>
+    </div>
+  </div>
+  <div id="status" role="status" hidden></div>
+</main>
+
+<dialog id="settings" aria-labelledby="settings-title">
+  <header><h2 id="settings-title">Agents</h2><button id="settings-close">Done</button></header>
+  <section>
+    <table>
+      <thead><tr><th>Name</th><th>Command</th><th></th></tr></thead>
+      <tbody id="agent-rows"></tbody>
+    </table>
+    <div class="row" style="margin-top: 12px"><button id="new-agent">Add an agent…</button></div>
+    <form id="agent-form" hidden>
+      <h3 id="form-title">Add an agent</h3>
+      <label>Name <input type="text" id="agent-label" maxlength="64" required placeholder="Aider"></label>
+      <label>Command
+        <input type="text" id="agent-command" class="command" required spellcheck="false"
+               placeholder="aider --read {guide-file}"></label>
+      <p class="help">A program, on your PATH or by path, and its arguments; quote an argument with spaces.
+        These are replaced when the agent starts:
+        <code>{guide}</code> the gr8s guide's text, <code>{guide-file}</code> a file holding it,
+        <code>{mcp-config}</code> JSON naming <code>gr8s mcp</code> as an MCP server (the <code>mcpServers</code> form),
+        <code>{mcp-config-file}</code> a file holding it, <code>{kubeconfig}</code> this dashboard's kubeconfig, and
+        <code>{gr8s}</code> the gr8s program. Every agent runs with KUBECONFIG set.</p>
+      <div class="row"><span id="form-error" role="alert"></span>
+        <button type="button" id="form-cancel">Cancel</button><button type="submit" id="form-save">Save</button></div>
+    </form>
+  </section>
+</dialog>
+
 <script src="xterm.js"></script>
 <script src="addon-fit.js"></script>
 <script>
@@ -47,107 +140,319 @@ reload this page; Stop ends it.</div>
 const base = location.pathname.replace(/[^/]*$/, "");
 const $ = (id) => document.getElementById(id);
 const remembered = "gr8s-agent-session";
-let socket = null, term = null, fit = null, current = null, exited = false, retries = 0;
+let agents = [];     // what /agents offers
+const tabs = [];     // one per agent shown: {id, agent, label, term, fit, socket, pane, tab, exited, retries}
+let active = null;
 
-function status(text, bad) { $("status").textContent = text; $("status").className = bad ? "bad" : ""; }
+function status(text, bad) {
+  $("status").textContent = text || "";
+  $("status").className = bad ? "bad" : "";
+  $("status").hidden = !text;
+}
 function remember(id) { try { id ? sessionStorage.setItem(remembered, id) : sessionStorage.removeItem(remembered); } catch {} }
 function recalled() { try { return sessionStorage.getItem(remembered); } catch { return null; } }
 
-function sendSize() {
-  if (socket && socket.readyState === WebSocket.OPEN && term)
-    socket.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+// ---- Tabs, each with its own terminal and connection.
+
+function tabName(entry) {
+  const same = tabs.filter((t) => t.agent === entry.agent);
+  return same.length > 1 ? entry.label + " " + (same.indexOf(entry) + 1) : entry.label;
 }
 
-function ensureTerminal() {
-  $("empty").hidden = true;
-  $("terminal").hidden = false;
-  if (term) return;
-  term = new Terminal({ cursorBlink: true, fontSize: 13, scrollback: 5000,
-                        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
-                        theme: { background: "#15181d" } });
-  fit = new FitAddon.FitAddon();
-  term.loadAddon(fit);
-  term.open($("terminal"));
-  term.onData((data) => { if (socket && socket.readyState === WebSocket.OPEN) socket.send(new TextEncoder().encode(data)); });
-  term.onResize(sendSize);
-  new ResizeObserver(() => { if (!$("terminal").hidden) fit.fit(); }).observe($("terminal"));
+function renderTabs() {
+  for (const entry of tabs) {
+    entry.tab.querySelector(".name").textContent = tabName(entry);
+    entry.tab.setAttribute("aria-selected", String(entry === active));
+    entry.tab.tabIndex = entry === active ? 0 : -1;
+    entry.tab.classList.toggle("exited", entry.exited !== null);
+    entry.tab.classList.toggle("bad", entry.exited !== null && entry.exited !== 0);
+    entry.tab.title = entry.exited === null ? tabName(entry) + " is running"
+                                            : tabName(entry) + " exited with code " + entry.exited;
+    entry.pane.hidden = entry !== active;
+  }
+  $("empty").hidden = tabs.length > 0;
 }
 
-// Show the agent behind QUERY, "agent=ID" to start one or "session=ID" to attach.
-function connect(query, label) {
-  if (socket) { const old = socket; socket = null; old.close(); }
-  ensureTerminal();
-  term.reset();
-  fit.fit();
-  exited = false;
+function sendSize(entry) {
+  if (entry.socket && entry.socket.readyState === WebSocket.OPEN)
+    entry.socket.send(JSON.stringify({ type: "resize", cols: entry.term.cols, rows: entry.term.rows }));
+}
+
+function makeTab(agent, label) {
+  const entry = { id: null, agent, label, socket: null, exited: null, retries: 0 };
+  entry.pane = document.createElement("div");
+  entry.pane.className = "terminal";
+  entry.pane.hidden = true;
+  document.querySelector("main").append(entry.pane);
+  entry.term = new Terminal({ cursorBlink: true, fontSize: 13, scrollback: 5000,
+                              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
+                              theme: { background: "#15181d" } });
+  entry.fit = new FitAddon.FitAddon();
+  entry.term.loadAddon(entry.fit);
+  entry.term.open(entry.pane);
+  entry.term.onData((data) => {
+    if (entry.socket && entry.socket.readyState === WebSocket.OPEN) entry.socket.send(new TextEncoder().encode(data));
+  });
+  entry.term.onResize(() => sendSize(entry));
+  new ResizeObserver(() => { if (!entry.pane.hidden) entry.fit.fit(); }).observe(entry.pane);
+
+  entry.tab = document.createElement("div");
+  entry.tab.setAttribute("role", "tab");
+  entry.tab.innerHTML = '<span class="dot"></span><span class="name"></span>' +
+                        '<button class="close" aria-label="Close">×</button>';
+  entry.tab.onclick = (event) => { if (!event.target.closest(".close")) activate(entry); };
+  entry.tab.querySelector(".close").onclick = () => closeTab(entry);
+  entry.tab.onkeydown = (event) => {
+    const i = tabs.indexOf(entry);
+    if (event.key === "ArrowRight" && tabs[i + 1]) { activate(tabs[i + 1]); tabs[i + 1].tab.focus(); }
+    else if (event.key === "ArrowLeft" && tabs[i - 1]) { activate(tabs[i - 1]); tabs[i - 1].tab.focus(); }
+    else if (event.key === "Delete") closeTab(entry);
+  };
+  $("tabs").append(entry.tab);
+  tabs.push(entry);
+  return entry;
+}
+
+function activate(entry) {
+  active = entry;
+  renderTabs();
+  if (!entry) { remember(null); status(""); return; }
+  if (entry.id) remember(entry.id);
+  entry.fit.fit();
+  sendSize(entry);
+  entry.term.focus();
+  entry.tab.scrollIntoView({ block: "nearest", inline: "nearest" });
+  status(entry.exited === null ? "" : tabName(entry) + " exited with code " + entry.exited + ".", entry.exited !== 0);
+}
+
+function closeTab(entry) {
+  if (entry.exited === null) {
+    if (!confirm("Stop " + tabName(entry) + "?")) return;
+    if (entry.socket && entry.socket.readyState === WebSocket.OPEN) entry.socket.send(JSON.stringify({ type: "stop" }));
+  }
+  entry.closed = true;
+  if (entry.socket) { const socket = entry.socket; entry.socket = null; socket.close(); }
+  entry.term.dispose();
+  entry.pane.remove();
+  entry.tab.remove();
+  const i = tabs.indexOf(entry);
+  tabs.splice(i, 1);
+  if (active === entry) activate(tabs[i] || tabs[i - 1] || null);
+  else renderTabs();
+}
+
+// Show the agent behind QUERY in ENTRY: "agent=ID" to start one, "session=ID" to attach.
+function connect(entry, query) {
   const url = new URL(base + "pty?" + query, location.href);
   url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(url);
   ws.binaryType = "arraybuffer";
-  socket = ws;
-  status((query.startsWith("agent=") ? "Starting " : "Attaching to ") + label + "\u2026");
-  ws.onopen = () => { retries = 0; $("stop").hidden = false; sendSize(); term.focus(); };
+  entry.socket = ws;
+  ws.onopen = () => { entry.retries = 0; sendSize(entry); if (entry === active) status(""); };
   ws.onmessage = (event) => {
-    if (typeof event.data !== "string") { term.write(new Uint8Array(event.data)); return; }
+    if (typeof event.data !== "string") { entry.term.write(new Uint8Array(event.data)); return; }
     const message = JSON.parse(event.data);
     if (message.type === "session") {
-      current = message;
-      remember(message.id);
-      status(message.label + " is running.");
-      refreshRunning();
+      entry.id = message.id;
+      entry.label = message.label;
+      if (entry === active) remember(entry.id);
+      renderTabs();
     } else if (message.type === "exit") {
-      exited = true;
-      remember(null);
-      status((current ? current.label : label) + " exited with code " + message.code + ".", message.code !== 0);
-      refreshRunning();
+      entry.exited = message.code;
+      renderTabs();
+      if (entry === active) status(tabName(entry) + " exited with code " + message.code + ".", message.code !== 0);
     }
   };
   ws.onclose = () => {
-    if (socket !== ws) return;
-    socket = null;
-    $("stop").hidden = true;
+    if (entry.socket !== ws) return;
+    entry.socket = null;
     // A connection lost while the agent runs is only the page's: attach again.
-    if (!exited && current && retries < 30) {
-      retries += 1;
-      status("Reconnecting to " + current.label + "\u2026");
-      setTimeout(() => { if (!socket) connect("session=" + encodeURIComponent(current.id), current.label); }, 1000);
+    if (entry.exited === null && !entry.closed && entry.id && entry.retries < 30) {
+      entry.retries += 1;
+      if (entry === active) status("Reconnecting to " + tabName(entry) + "…");
+      setTimeout(() => { if (!entry.socket && !entry.closed) connect(entry, "session=" + encodeURIComponent(entry.id)); }, 1000);
+    } else if (entry.exited === null && !entry.id) {
+      entry.exited = -1;
+      renderTabs();
+      if (entry === active) status(entry.label + " could not start.", true);
     }
   };
 }
 
-async function refreshRunning() {
-  let sessions = [];
-  try { sessions = await (await fetch(base + "sessions")).json(); } catch {}
-  $("running").replaceChildren(...sessions.map((session) => {
-    const button = document.createElement("button");
-    button.textContent = session.label;
-    button.title = "Show this " + session.label;
-    button.setAttribute("aria-pressed", String(!!current && current.id === session.id && !exited));
-    button.onclick = () => { current = session; connect("session=" + encodeURIComponent(session.id), session.label); };
-    return button;
-  }));
-  $("running-label").hidden = sessions.length === 0;
-  return sessions;
+function start(choice) {
+  const entry = makeTab(choice.id, choice.label);
+  activate(entry);
+  entry.fit.fit();
+  status("Starting " + choice.label + "…");
+  connect(entry, "agent=" + encodeURIComponent(choice.id));
 }
 
-$("stop").onclick = () => {
-  if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "stop" }));
-};
+// ---- The + menu.
 
-fetch(base + "agents").then((response) => response.json()).then((choices) => {
-  for (const choice of choices) {
+function closeMenu() { $("menu").hidden = true; $("add").setAttribute("aria-expanded", "false"); }
+
+function renderMenu() {
+  const items = [];
+  let ruled = false;
+  for (const choice of agents) {
+    if (!choice.builtin && !ruled) { items.push(Object.assign(document.createElement("li"), { className: "rule" })); ruled = true; }
+    const li = document.createElement("li");
     const button = document.createElement("button");
-    button.textContent = choice.label;
-    button.onclick = () => { current = null; connect("agent=" + encodeURIComponent(choice.id), choice.label); };
-    $("choices").append(button, " ");
+    button.setAttribute("role", "menuitem");
+    button.innerHTML = '<span class="label"></span><span class="note"></span>';
+    button.querySelector(".label").textContent = choice.label;
+    if (!choice.installed) {
+      button.disabled = true;
+      button.querySelector(".note").textContent = "not installed";
+      button.title = choice.command[0] + " is not on this machine's PATH";
+    }
+    button.onclick = () => { closeMenu(); start(choice); };
+    li.append(button);
+    items.push(li);
   }
-}).catch((error) => status("Could not list the agents: " + error.message, true));
+  $("menu").replaceChildren(...items);
+}
 
-// Back where this page left off: the agent it showed, if it still runs.
-refreshRunning().then((sessions) => {
-  const session = sessions.find((s) => s.id === recalled());
-  if (session) { current = session; connect("session=" + encodeURIComponent(session.id), session.label); }
+$("add").onclick = (event) => {
+  event.stopPropagation();
+  if (!$("menu").hidden) return closeMenu();
+  $("menu").hidden = false;
+  $("add").setAttribute("aria-expanded", "true");
+  const first = $("menu").querySelector("button:not(:disabled)");
+  if (first) first.focus();
+};
+document.addEventListener("click", (event) => { if (!event.target.closest("#menu")) closeMenu(); });
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !$("menu").hidden) { closeMenu(); $("add").focus(); }
+  if (!$("menu").hidden && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+    const items = [...$("menu").querySelectorAll("button:not(:disabled)")];
+    const i = items.indexOf(document.activeElement);
+    const next = items[(i + (event.key === "ArrowDown" ? 1 : items.length - 1)) % items.length];
+    if (next) { event.preventDefault(); next.focus(); }
+  }
 });
+
+async function loadAgents() {
+  agents = await (await fetch(base + "agents")).json();
+  renderMenu();
+  renderSettings();
+}
+
+// ---- Settings: the agents, and the reader's own.
+
+// A command line's words, as a shell would split them: quotes group, a backslash escapes.
+function splitCommand(line) {
+  const words = [];
+  let word = null, quote = null;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote) {
+      if (c === quote) quote = null;
+      else if (c === "\\" && quote === '"' && i + 1 < line.length) word += line[++i];
+      else word += c;
+    } else if (c === "'" || c === '"') { quote = c; word = word ?? ""; }
+    else if (c === "\\" && i + 1 < line.length) word = (word ?? "") + line[++i];
+    else if (/\s/.test(c)) { if (word !== null) words.push(word); word = null; }
+    else word = (word ?? "") + c;
+  }
+  if (quote) throw new Error("a quote is not closed");
+  if (word !== null) words.push(word);
+  return words;
+}
+function joinCommand(words) {
+  return words.map((w) => /^[\w@%+=:,./{}-]+$/.test(w) ? w : "'" + w.replace(/'/g, "'\\''") + "'").join(" ");
+}
+
+let editing = null;   // the id of the agent the form edits, or "" for a new one
+
+function custom() { return agents.filter((a) => !a.builtin).map((a) => ({ id: a.id, label: a.label, command: a.command })); }
+
+function renderSettings() {
+  const rows = agents.map((choice) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = '<td></td><td><code></code> <span class="note"></span></td><td class="actions"></td>';
+    tr.cells[0].textContent = choice.label;
+    tr.querySelector("code").textContent = joinCommand(choice.command);
+    const note = tr.querySelector(".note");
+    if (!choice.installed) { note.textContent = "not found"; note.className = "missing"; }
+    else if (choice.builtin) { note.textContent = choice.gr8s ? "built in, with the gr8s guide and MCP" : "built in"; note.className = "muted"; }
+    if (!choice.builtin) {
+      const edit = Object.assign(document.createElement("button"), { textContent: "Edit" });
+      edit.onclick = () => openForm(choice);
+      const remove = Object.assign(document.createElement("button"), { textContent: "Delete" });
+      remove.onclick = () => {
+        if (confirm("Delete " + choice.label + "?"))
+          save(custom().filter((a) => a.id !== choice.id)).catch((error) => alert("Could not delete it: " + error.message));
+      };
+      tr.cells[2].append(edit, " ", remove);
+    }
+    return tr;
+  });
+  $("agent-rows").replaceChildren(...rows);
+}
+
+function openForm(choice) {
+  editing = choice ? choice.id : "";
+  $("form-title").textContent = choice ? "Edit " + choice.label : "Add an agent";
+  $("agent-label").value = choice ? choice.label : "";
+  $("agent-command").value = choice ? joinCommand(choice.command) : "";
+  $("form-error").textContent = "";
+  $("agent-form").hidden = false;
+  $("new-agent").hidden = true;
+  $("agent-label").focus();
+}
+function closeForm() { editing = null; $("agent-form").hidden = true; $("new-agent").hidden = false; }
+
+function slug(label) {
+  const stem = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "agent";
+  const taken = new Set(agents.map((a) => a.id));
+  let id = stem;
+  for (let n = 2; taken.has(id); n++) id = stem + "-" + n;
+  return id;
+}
+
+async function save(list) {
+  const response = await fetch(base + "agents", { method: "POST", headers: { "Content-Type": "application/json" },
+                                                  body: JSON.stringify(list) });
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error || response.statusText);
+  agents = body;
+  renderMenu();
+  renderSettings();
+}
+
+$("agent-form").onsubmit = async (event) => {
+  event.preventDefault();
+  let command;
+  try { command = splitCommand($("agent-command").value); }
+  catch (error) { $("form-error").textContent = "The command: " + error.message + "."; return; }
+  const label = $("agent-label").value.trim();
+  if (!command.length) { $("form-error").textContent = "Give a command to run."; return; }
+  const list = custom();
+  if (editing) Object.assign(list.find((a) => a.id === editing), { label, command });
+  else list.push({ id: slug(label), label, command });
+  $("form-save").disabled = true;
+  try { await save(list); closeForm(); }
+  catch (error) { $("form-error").textContent = error.message; }
+  finally { $("form-save").disabled = false; }
+};
+$("form-cancel").onclick = closeForm;
+$("new-agent").onclick = () => openForm(null);
+$("gear").onclick = () => { closeMenu(); closeForm(); $("settings").showModal(); };
+$("settings-close").onclick = () => $("settings").close();
+$("settings").addEventListener("close", () => { if (active) active.term.focus(); });
+
+// ---- Back where this page left off: a tab for each agent still running.
+
+loadAgents().catch((error) => status("Could not list the agents: " + error.message, true));
+fetch(base + "sessions").then((response) => response.json()).then((sessions) => {
+  for (const session of sessions) {
+    const entry = makeTab(session.agent, session.label);
+    entry.id = session.id;
+    connect(entry, "session=" + encodeURIComponent(session.id));
+  }
+  activate(tabs.find((entry) => entry.id === recalled()) || tabs[0] || null);
+}).catch(() => renderTabs());
 </script>
 </body>
 </html>

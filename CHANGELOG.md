@@ -9,13 +9,17 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
-- `gr8s dashboard` has an Agent tab: a terminal running an AI coding agent you
+- `gr8s dashboard` has an Agent tab: terminals running AI coding agents you
   have installed (Claude Code, Codex, Gemini CLI) or your shell, on your own
   machine with your own login, and with `KUBECONFIG` naming the dashboard's
-  cluster. Nothing is deployed to the cluster. Only those programs run, a
-  terminal opens only from the dashboard's own page, and each agent ends with
-  its tab's connection or the dashboard. The terminal is xterm.js, embedded
-  like the other frontends (podster-2ry).
+  cluster. Nothing is deployed to the cluster. **+** starts an agent in a tab
+  of its own; an agent keeps running when you switch tabs or reload the page,
+  and ends when you close its tab or stop the dashboard. The gear defines
+  agents of your own, a name and a command line that can name the gr8s guide,
+  a `gr8s mcp` server config, the kubeconfig and gr8s; they are kept in
+  `$XDG_CONFIG_HOME/gr8s/dashboard-agents.json`. A terminal opens, and agents
+  are defined, only from the dashboard's own page. The terminal is xterm.js,
+  embedded like the other frontends (podster-2ry, podster-9et).
 - `gr8s mcp` serves an AI agent read-only Model Context Protocol tools on
   stdio: `gr8s_guide` (the guide `gr8s skill` prints, which its instructions
   say to read first), `doctor_diagnose`, `doctor_impact`, `observe_flows` and

@@ -235,10 +235,15 @@ Headlamp tab serves the [Headlamp](https://headlamp.dev) frontend and
 reverse-proxies the API over mutual TLS to the running cluster, with live
 resource updates. The Hubble tab serves Hubble UI's service map and flow table
 from the cluster's [flow events](docs/networking.md#flow-events). The Agent tab
-is a terminal running an AI coding agent you have installed (Claude Code, Codex
-or Gemini CLI) or a shell. It runs on your machine, with your own login, and
-with `KUBECONFIG` naming the dashboard's cluster, and with [`gr8s mcp`](#mcp)
+runs AI coding agents you have installed (Claude Code, Codex or Gemini CLI), or
+a shell, each in a terminal tab of its own: **+** starts one, and closing its
+tab stops it. They run on your machine, with your own login, and with
+`KUBECONFIG` naming the dashboard's cluster, and with [`gr8s mcp`](#mcp)
 registered for Claude Code and Codex; nothing is deployed to the cluster. The
+gear defines other agents: a name and a command line, in which `{guide}` or
+`{guide-file}` names the gr8s guide, `{mcp-config}` or `{mcp-config-file}` an
+MCP config for `gr8s mcp`, `{kubeconfig}` the kubeconfig and `{gr8s}` gr8s.
+They are kept in `$XDG_CONFIG_HOME/gr8s/dashboard-agents.json`. The
 REPL tab shows [ICL](https://github.com/atgreen/icl)'s browser REPL connected
 to a running control-plane member or node agent, as `gr8s debug icl` connects
 it; it needs an ICL with `--embed-origin` on your PATH. All four are embedded
