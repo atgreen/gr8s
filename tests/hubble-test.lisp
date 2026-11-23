@@ -470,7 +470,11 @@
     (is (equal "/api/v1/namespaces/m/services/g:80/proxy/ofrep?x=1" target)))
   (is (null (gr8s.server::dashboard-app-redirect-member nil 302 '((:location . "https://elsewhere/")))))
   (is (null (gr8s.server::dashboard-app-redirect-member nil 307 '((:location . "/relative")))))
-  (is (equal "default-src 'self'" (gr8s.server::dashboard-app-csp "default-src 'self'; frame-ancestors 'none'"))))
+  (is (equal "default-src 'self'" (gr8s.server::dashboard-app-csp "default-src 'self'; frame-ancestors 'none'")))
+  ;; Hunchentoot interns only names already known, so an app's own header comes as a string.
+  (is (equal '(("accept" . "*/*") ("x-grafana-device-id" . "abc"))
+             (gr8s.server::dashboard-app-request-headers
+              nil '((:accept . "*/*") ("X-Grafana-Device-Id" . "abc") (:authorization . "Bearer t"))))))
 
 (test a-dashboard-app-tab-is-its-own-origin-behind-a-secret
   (let* ((upstream (hunchentoot:start (make-instance 'dashboard-app-upstream :address "127.0.0.1" :port 0)))
@@ -652,4 +656,76 @@ messages, says so; return (values output control-messages)."
                (close stream))
              (is-true (wait-until (lambda () (zerop (length (sessions)))) :timeout 5))
              (is (= 404 (nth-value 1 (agent-test-websocket port (format nil "/agent/tok/pty?session=~A" id)))))))
+      (hunchentoot:stop acceptor))))
+
+(test the-dashboard-lisp-tab-starts-icl-on-a-tunnel
+  ;; ICL's browser REPL, connected to a gr8s process, in a frame the dashboard's origin may show.
+  (is (equal "http://127.0.0.1:41234/icl/C6D18548DFC69F93F6F00515500A7367"
+             (gr8s.server::icl-browser-url "Direct your browser to http://127.0.0.1:41234/icl/C6D18548DFC69F93F6F00515500A7367")))
+  (is (null (gr8s.server::icl-browser-url "; Browser-only mode (connected to 127.0.0.1:4005)")))
+  ;; SBCL, whatever the reader's ICL configuration names.
+  (is (equal '("-b" "--no-open" "--no-banner" "--lisp" "sbcl" "--embed-origin" "http://127.0.0.1:8080"
+               "--connect" "127.0.0.1:4005")
+             (gr8s.server::icl-arguments 4005 "http://127.0.0.1:8080")))
+  (let ((directory (uiop:ensure-directory-pathname
+                    (sb-posix:mkdtemp (namestring (merge-pathnames "gr8s-icl-XXXXXX" (uiop:temporary-directory)))))))
+    (unwind-protect
+         (flet ((fake (name help)
+                  (let ((path (merge-pathnames name directory)))
+                    (alexandria:write-string-into-file (format nil "#!/bin/sh~%echo '~A'~%" help) path)
+                    (sb-posix:chmod (namestring path) #o755)
+                    (namestring path))))
+           (is-true (gr8s.server::icl-embeds-p (fake "new" "      --embed-origin <ITEM>  Let a page ...")))
+           (is-false (gr8s.server::icl-embeds-p (fake "old" "      --no-open  Don't open")))
+           (is-false (gr8s.server::icl-embeds-p nil)))
+      (uiop:delete-directory-tree directory :validate t)))
+  (let* ((started nil)
+         (lisp (gr8s.server::make-dashboard-lisp
+                nil :icl "/usr/bin/icl"
+                    :start (lambda (lisp target origin)
+                             (declare (ignore lisp))
+                             (push (list target origin) started)
+                             (let ((session (gr8s.server::%make-lisp-session target)))
+                               (setf (gr8s.server::lisp-session-url session) "http://127.0.0.1:5/icl/AB")
+                               session))))
+         (acceptor (make-instance 'gr8s.server::gr8s-dashboard-acceptor
+                                  :address "127.0.0.1" :port 0 :shell-path "/ui/tok/"
+                                  :tabs '(("lisp" "/lisp/tok/" "Lisp"))
+                                  :lisp lisp :lisp-base "/lisp/tok/"
+                                  :proxy-fn (lambda (&rest arguments) (declare (ignore arguments)) "proxied")
+                                  :multiplexer-fn nil
+                                  :access-log-destination nil :message-log-destination nil)))
+    (hunchentoot:start acceptor)
+    (unwind-protect
+         (let* ((port (hunchentoot:acceptor-port acceptor))
+                (origin (format nil "http://127.0.0.1:~D" port)))
+           (flet ((call (path &key (method :post) (from origin))
+                    (multiple-value-bind (body status)
+                        (drakma:http-request (format nil "http://127.0.0.1:~D/lisp/tok/~A" port path)
+                                             :method method :proxy nil
+                                             :additional-headers (when from (list (cons "Origin" from))))
+                      (values (if (stringp body) body (trivial-utf-8:utf-8-bytes-to-string body)) status))))
+             (is (search "<title>gr8s lisp</title>" (call "" :method :get)))
+             ;; Only this dashboard's page, by POST, starts a REPL, in a member or a node.
+             (is (= 405 (nth-value 1 (call "connect?kind=member&name=gr8s2" :method :get))))
+             (is (= 403 (nth-value 1 (call "connect?kind=member&name=gr8s2" :from "http://evil.example"))))
+             (is (= 400 (nth-value 1 (call "connect?kind=pod&name=gr8s2"))))
+             (is (= 400 (nth-value 1 (call "connect?kind=member&name=../etc"))))
+             (let ((session (com.inuoe.jzon:parse (call "connect?kind=member&name=gr8s2"))))
+               (is (equal "http://127.0.0.1:5/icl/AB" (gethash "url" session)))
+               (is (equal (list (list '("member" "gr8s2") origin)) started)))
+             ;; Asking again finds the one running.
+             (call "connect?kind=member&name=gr8s2")
+             (is (= 1 (length started)))
+             (let ((targets (com.inuoe.jzon:parse (call "targets" :method :get))))
+               (is (= 1 (length (gethash "sessions" targets)))))
+             (is (eq t (gethash "stopped" (com.inuoe.jzon:parse (call "disconnect?kind=member&name=gr8s2")))))
+             (is (zerop (length (gethash "sessions" (com.inuoe.jzon:parse (call "targets" :method :get)))))))
+           ;; Without ICL the page says so.
+           (setf (gr8s.server::dashboard-lisp-icl lisp) nil)
+           (multiple-value-bind (body status)
+               (drakma:http-request (format nil "http://127.0.0.1:~D/lisp/tok/connect?kind=node&name=n1" port)
+                                    :method :post :proxy nil :additional-headers (list (cons "Origin" origin)))
+             (is (= 409 status))
+             (is (search "ICL is not installed" (if (stringp body) body (trivial-utf-8:utf-8-bytes-to-string body))))))
       (hunchentoot:stop acceptor))))

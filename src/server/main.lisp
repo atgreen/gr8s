@@ -1589,6 +1589,8 @@ each request and each worker error."
          (hubble-base (format nil "/hubble/~A/" token))
          (hubble-backend (and hubble-p (make-hubble-ui-backend config)))
          (agent-base (format nil "/agent/~A/" token))
+         (lisp-base (format nil "/lisp/~A/" token))
+         (lisp (make-dashboard-lisp config))
          (agent (make-dashboard-agent (namestring (truename kubeconfig))))
          (apps (make-dashboard-apps config))
          (url (format nil "http://127.0.0.1:~D/ui/~A/~@[#~A~]" port token (getf options :tab)))
@@ -1601,8 +1603,10 @@ each request and each worker error."
                                   :shell-path (format nil "/ui/~A/" token)
                                   :tabs (append (list (list "headlamp" (format nil "/dashboard/~A/" token) "Headlamp"))
                                                 (and hubble-p (list (list "hubble" hubble-base "Hubble")))
-                                                (list (list "agent" agent-base "Agent")))
+                                                (list (list "agent" agent-base "Agent"))
+                                                (list (list "lisp" lisp-base "Lisp")))
                                   :agent agent :agent-base agent-base
+                                  :lisp lisp :lisp-base lisp-base
                                   :hubble-backend hubble-backend :hubble-base (and hubble-p hubble-base)
                                   :apps apps
                                   :proxy-fn (lambda (method target request)
@@ -1638,6 +1642,7 @@ each request and each worker error."
            (loop until *shutdown-requested* do (sleep 0.2)))
       (ignore-errors (hunchentoot:stop acceptor))
       (stop-dashboard-agents agent)
+      (stop-dashboard-lisp lisp)
       (stop-dashboard-apps apps)
       (when sweeper (ignore-errors (bt:join-thread sweeper)))
       (when hubble-backend

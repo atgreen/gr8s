@@ -496,6 +496,8 @@
                                            (:file "hubble-ui")
                                            (:static-file "dashboard-agent.html")
                                            (:file "dashboard-agent" :depends-on ("dashboard-agent.html"))
+                                           (:static-file "dashboard-lisp.html")
+                                           (:file "dashboard-lisp" :depends-on ("dashboard-lisp.html" "dashboard-agent"))
                                            (:file "dashboard-shell")
                                            (:file "dashboard-apps")
                                            (:file "reconciliation-metrics")

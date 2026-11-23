@@ -22,6 +22,11 @@ the Kubernetes API version with a gr8s release suffix (see
   `cluster_status`, with the kubeconfig's credentials. The dashboard's Agent
   tab registers it for Claude Code and Codex, and starts them with the guide
   in their context (podster-j53).
+- `gr8s dashboard` has a Lisp tab: ICL's browser REPL inside a running
+  control-plane member or node agent, through the same authenticated Slynk
+  tunnel as `gr8s debug icl`, with ICL started on your machine on SBCL. It
+  needs an ICL that takes `--embed-origin`, which lets the dashboard frame it.
+  A session outlives the page; Disconnect ends it.
 
 ### Fixed
 

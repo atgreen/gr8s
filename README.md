@@ -230,7 +230,7 @@ for how it works.
 
 ## Dashboard
 
-`gr8s dashboard` opens a Kubernetes web UI in your browser, with three tabs. The
+`gr8s dashboard` opens a Kubernetes web UI in your browser, with four tabs. The
 Headlamp tab serves the [Headlamp](https://headlamp.dev) frontend and
 reverse-proxies the API over mutual TLS to the running cluster, with live
 resource updates. The Hubble tab serves Hubble UI's service map and flow table
@@ -238,8 +238,11 @@ from the cluster's [flow events](docs/networking.md#flow-events). The Agent tab
 is a terminal running an AI coding agent you have installed (Claude Code, Codex
 or Gemini CLI) or a shell. It runs on your machine, with your own login, and
 with `KUBECONFIG` naming the dashboard's cluster, and with [`gr8s mcp`](#mcp)
-registered for Claude Code and Codex; nothing is deployed to the cluster. All
-three are embedded in the binary, with no separate install.
+registered for Claude Code and Codex; nothing is deployed to the cluster. The
+Lisp tab shows [ICL](https://github.com/atgreen/icl)'s browser REPL connected
+to a running control-plane member or node agent, as `gr8s debug icl` connects
+it; it needs an ICL with `--embed-origin` on your PATH. All four are embedded
+in the binary, with no separate install.
 
 ```sh
 gr8s dashboard    # uses $KUBECONFIG, or ~/.kube/config
