@@ -586,3 +586,70 @@
                (close stream))
              (is-true (wait-until (lambda () (null (gr8s.server::dashboard-agent-sessions agent))) :timeout 5))))
       (hunchentoot:stop acceptor))))
+
+(defun agent-test-frames (stream &key (until (lambda (text exits) (declare (ignore text exits)) nil)))
+  "Read STREAM's frames until it closes or UNTIL, given the output so far and the control
+messages, says so; return (values output control-messages)."
+  (let ((output (make-string-output-stream)) (text "") (controls nil))
+    (loop (multiple-value-bind (opcode payload) (gr8s.protocol::read-websocket-frame stream)
+            (case opcode
+              (2 (write-string (sb-ext:octets-to-string payload :external-format :latin-1) output)
+                 (setf text (concatenate 'string text (get-output-stream-string output))))
+              (1 (push (com.inuoe.jzon:parse payload) controls))
+              (8 (return))))
+          (when (funcall until text controls) (return)))
+    (values text (reverse controls))))
+
+(test the-dashboard-agent-outlives-its-page
+  ;; An agent runs on when its page goes, shows its latest output to the next, and ends when stopped.
+  (let* ((agent (gr8s.server::make-dashboard-agent
+                 "/tmp/kubeconfig-for-test"
+                 :choices (lambda () '(("loop" "Loop" ("/bin/sh" "-c" "echo started; while read line; do echo got:$line; done"))))))
+         (acceptor (make-instance 'gr8s.server::gr8s-dashboard-acceptor
+                                  :address "127.0.0.1" :port 0 :shell-path "/ui/tok/"
+                                  :tabs '(("agent" "/agent/tok/" "Agent"))
+                                  :agent agent :agent-base "/agent/tok/"
+                                  :proxy-fn (lambda (&rest arguments) (declare (ignore arguments)) "proxied")
+                                  :multiplexer-fn nil
+                                  :access-log-destination nil :message-log-destination nil)))
+    (hunchentoot:start acceptor)
+    (unwind-protect
+         (let ((port (hunchentoot:acceptor-port acceptor)) (id nil))
+           (flet ((type-line (stream text)
+                    (gr8s.protocol::write-websocket-frame
+                     stream 2 (trivial-utf-8:string-to-utf-8-bytes (format nil "~A~C" text #\Return)) :masked-p t))
+                  (sessions ()
+                    (com.inuoe.jzon:parse (drakma:http-request (format nil "http://127.0.0.1:~D/agent/tok/sessions" port)
+                                                               :proxy nil))))
+             (let ((stream (agent-test-websocket port "/agent/tok/pty?agent=loop")))
+               (multiple-value-bind (text controls)
+                   (agent-test-frames stream :until (lambda (text controls) (and controls (search "started" text))))
+                 (declare (ignore text))
+                 (is (equal "session" (gethash "type" (first controls))))
+                 (setf id (gethash "id" (first controls))))
+               (type-line stream "one")
+               (agent-test-frames stream :until (lambda (text controls) (declare (ignore controls)) (search "got:one" text)))
+               ;; The page goes; the agent doesn't.
+               (close stream))
+             (sleep 0.3)
+             (is (equal (list id) (map 'list (lambda (session) (gethash "id" session)) (sessions))))
+             (let ((stream (agent-test-websocket port (format nil "/agent/tok/pty?session=~A" id))))
+               ;; The next page sees what it missed, then the live terminal.
+               (multiple-value-bind (text controls)
+                   (agent-test-frames stream :until (lambda (text controls) (and controls (search "got:one" text))))
+                 (is (equal id (gethash "id" (first controls))))
+                 (is (search "started" text)))
+               (type-line stream "two")
+               (agent-test-frames stream :until (lambda (text controls) (declare (ignore controls)) (search "got:two" text)))
+               ;; Stop ends it, by hanging up its terminal.
+               (gr8s.protocol::write-websocket-frame stream 1 (trivial-utf-8:string-to-utf-8-bytes "{\"type\":\"stop\"}")
+                                                     :masked-p t)
+               (multiple-value-bind (text controls) (agent-test-frames stream)
+                 (declare (ignore text))
+                 (let ((exit (find "exit" controls :key (lambda (c) (gethash "type" c)) :test #'equal)))
+                   ;; The shell's read ends when its terminal hangs up, and so does the shell.
+                   (is-true exit)))
+               (close stream))
+             (is-true (wait-until (lambda () (zerop (length (sessions)))) :timeout 5))
+             (is (= 404 (nth-value 1 (agent-test-websocket port (format nil "/agent/tok/pty?session=~A" id)))))))
+      (hunchentoot:stop acceptor))))

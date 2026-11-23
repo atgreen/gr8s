@@ -31,11 +31,14 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 <header>
   <span class="label">Start</span>
   <span id="choices"></span>
+  <span id="running-label" class="label" hidden>Running</span>
+  <span id="running"></span>
   <button id="stop" hidden>Stop</button>
   <span id="status" role="status"></span>
 </header>
 <div id="empty">Start an agent: it runs on this machine with your own login, and with
-KUBECONFIG naming this dashboard's cluster.</div>
+KUBECONFIG naming this dashboard's cluster. It keeps running when you switch tabs or
+reload this page; Stop ends it.</div>
 <div id="terminal" hidden></div>
 <script src="xterm.js"></script>
 <script src="addon-fit.js"></script>
@@ -43,71 +46,108 @@ KUBECONFIG naming this dashboard's cluster.</div>
 "use strict";
 const base = location.pathname.replace(/[^/]*$/, "");
 const $ = (id) => document.getElementById(id);
-let socket = null, term = null, fit = null, current = null;
+const remembered = "gr8s-agent-session";
+let socket = null, term = null, fit = null, current = null, exited = false, retries = 0;
 
 function status(text, bad) { $("status").textContent = text; $("status").className = bad ? "bad" : ""; }
+function remember(id) { try { id ? sessionStorage.setItem(remembered, id) : sessionStorage.removeItem(remembered); } catch {} }
+function recalled() { try { return sessionStorage.getItem(remembered); } catch { return null; } }
 
 function sendSize() {
   if (socket && socket.readyState === WebSocket.OPEN && term)
     socket.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
 }
 
-function stop() {
-  if (socket) socket.close();
-}
-
-function start(choice) {
-  stop();
-  current = choice;
-  for (const button of $("choices").children) button.setAttribute("aria-pressed", button.dataset.id === choice.id);
+function ensureTerminal() {
   $("empty").hidden = true;
   $("terminal").hidden = false;
-  if (!term) {
-    term = new Terminal({ cursorBlink: true, fontSize: 13, scrollback: 5000,
-                          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
-                          theme: { background: "#15181d" } });
-    fit = new FitAddon.FitAddon();
-    term.loadAddon(fit);
-    term.open($("terminal"));
-    term.onData((data) => { if (socket && socket.readyState === WebSocket.OPEN) socket.send(new TextEncoder().encode(data)); });
-    term.onResize(sendSize);
-    new ResizeObserver(() => { if (!$("terminal").hidden) fit.fit(); }).observe($("terminal"));
-  }
+  if (term) return;
+  term = new Terminal({ cursorBlink: true, fontSize: 13, scrollback: 5000,
+                        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
+                        theme: { background: "#15181d" } });
+  fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open($("terminal"));
+  term.onData((data) => { if (socket && socket.readyState === WebSocket.OPEN) socket.send(new TextEncoder().encode(data)); });
+  term.onResize(sendSize);
+  new ResizeObserver(() => { if (!$("terminal").hidden) fit.fit(); }).observe($("terminal"));
+}
+
+// Show the agent behind QUERY, "agent=ID" to start one or "session=ID" to attach.
+function connect(query, label) {
+  if (socket) { const old = socket; socket = null; old.close(); }
+  ensureTerminal();
   term.reset();
   fit.fit();
-  const url = new URL(base + "pty?agent=" + encodeURIComponent(choice.id), location.href);
+  exited = false;
+  const url = new URL(base + "pty?" + query, location.href);
   url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(url);
   ws.binaryType = "arraybuffer";
   socket = ws;
-  status("Starting " + choice.label + "…");
-  ws.onopen = () => { status(choice.label + " is running."); $("stop").hidden = false; sendSize(); term.focus(); };
+  status((query.startsWith("agent=") ? "Starting " : "Attaching to ") + label + "\u2026");
+  ws.onopen = () => { retries = 0; $("stop").hidden = false; sendSize(); term.focus(); };
   ws.onmessage = (event) => {
-    if (typeof event.data === "string") {
-      const message = JSON.parse(event.data);
-      if (message.type === "exit") status(choice.label + " exited with code " + message.code + ".", message.code !== 0);
-    } else {
-      term.write(new Uint8Array(event.data));
+    if (typeof event.data !== "string") { term.write(new Uint8Array(event.data)); return; }
+    const message = JSON.parse(event.data);
+    if (message.type === "session") {
+      current = message;
+      remember(message.id);
+      status(message.label + " is running.");
+      refreshRunning();
+    } else if (message.type === "exit") {
+      exited = true;
+      remember(null);
+      status((current ? current.label : label) + " exited with code " + message.code + ".", message.code !== 0);
+      refreshRunning();
     }
   };
   ws.onclose = () => {
     if (socket !== ws) return;
     socket = null;
     $("stop").hidden = true;
-    if (!/exited/.test($("status").textContent)) status(choice.label + " stopped.");
+    // A connection lost while the agent runs is only the page's: attach again.
+    if (!exited && current && retries < 30) {
+      retries += 1;
+      status("Reconnecting to " + current.label + "\u2026");
+      setTimeout(() => { if (!socket) connect("session=" + encodeURIComponent(current.id), current.label); }, 1000);
+    }
   };
 }
 
-$("stop").onclick = stop;
+async function refreshRunning() {
+  let sessions = [];
+  try { sessions = await (await fetch(base + "sessions")).json(); } catch {}
+  $("running").replaceChildren(...sessions.map((session) => {
+    const button = document.createElement("button");
+    button.textContent = session.label;
+    button.title = "Show this " + session.label;
+    button.setAttribute("aria-pressed", String(!!current && current.id === session.id && !exited));
+    button.onclick = () => { current = session; connect("session=" + encodeURIComponent(session.id), session.label); };
+    return button;
+  }));
+  $("running-label").hidden = sessions.length === 0;
+  return sessions;
+}
+
+$("stop").onclick = () => {
+  if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "stop" }));
+};
+
 fetch(base + "agents").then((response) => response.json()).then((choices) => {
   for (const choice of choices) {
     const button = document.createElement("button");
     button.textContent = choice.label;
-    button.dataset.id = choice.id;
-    button.onclick = () => start(choice);
+    button.onclick = () => { current = null; connect("agent=" + encodeURIComponent(choice.id), choice.label); };
     $("choices").append(button, " ");
   }
 }).catch((error) => status("Could not list the agents: " + error.message, true));
+
+// Back where this page left off: the agent it showed, if it still runs.
+refreshRunning().then((sessions) => {
+  const session = sessions.find((s) => s.id === recalled());
+  if (session) { current = session; connect("session=" + encodeURIComponent(session.id), session.label); }
+});
 </script>
 </body>
 </html>

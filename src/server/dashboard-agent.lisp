@@ -10,12 +10,13 @@
 ;;;; KUBECONFIG naming the dashboard's cluster. Nothing is deployed to the cluster.
 ;;;;
 ;;;; The page at /agent/<token>/ is xterm.js (assets/xterm/, `make xterm-assets');
-;;;; /agent/<token>/pty?agent=ID is a WebSocket to a pseudo-terminal running that
-;;;; agent. Only commands from this file's catalogue run, never one a page names.
+;;;; /agent/<token>/pty?agent=ID starts that agent on a pseudo-terminal and attaches a
+;;;; WebSocket to it; ?session=ID attaches to one already running, which keeps running
+;;;; when its page goes. Only commands from this file's catalogue run, never one a page names.
 ;;;; Binary frames carry the terminal's bytes both ways; the page's text frames are
 ;;;; JSON control ({"type":"resize","cols":C,"rows":R}), and the server's last text
-;;;; frame reports the exit ({"type":"exit","code":N}). A WebSocket's agent ends
-;;;; when it closes, and every agent ends with the dashboard.
+;;;; frame reports the exit ({"type":"exit","code":N}). An agent ends when it exits, when a
+;;;; page sends {"type":"stop"}, or with the dashboard; never because a page went away.
 
 (in-package #:gr8s.server)
 
@@ -129,8 +130,130 @@ so the process ends when the agent does; closing the terminal hangs its session 
                         :directory (uiop:getcwd)
                         :environment (dashboard-agent-environment agent))))
 
+(defparameter +agent-backlog-bytes+ (* 1024 1024)
+  "How much of an agent's latest output a session keeps, to show a page that attaches.")
+
+(defstruct (agent-session (:constructor %make-agent-session (id choice label process fd)))
+  "One agent on its pseudo-terminal. It outlives the pages that show it: a page attaches,
+and leaves, and the agent runs on until it exits, a page stops it, or the dashboard ends."
+  id choice label process fd
+  ;; The latest output, at most +AGENT-BACKLOG-BYTES+, for the next page that attaches.
+  (backlog (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
+  ;; The attached page's WebSocket stream, or NIL.
+  client
+  (lock (bt:make-lock "gr8s dashboard agent session")))
+
+(defun new-agent-session-id ()
+  (format nil "~(~{~2,'0X~}~)" (coerce (secure-random-octets 16) 'list)))
+
+(defun agent-session-send (session opcode payload)
+  "Send a frame to SESSION's page, if one is attached and still listening; the caller holds
+SESSION's lock. A page that can't be written to is detached, never the agent ended."
+  (let ((client (agent-session-client session)))
+    (when client
+      (handler-case (gr8s.protocol::write-websocket-frame client opcode payload)
+        (error () (setf (agent-session-client session) nil))))))
+
+(defun agent-session-control (session &rest pairs)
+  (agent-session-send session 1 (trivial-utf-8:string-to-utf-8-bytes
+                                 (com.inuoe.jzon:stringify (apply #'gr8s-diagnose::object pairs)))))
+
+(defun hang-up-agent-session (session)
+  "End SESSION's agent: closing its terminal hangs up the agent's session, and setsid exits."
+  (let ((process (agent-session-process session)))
+    (ignore-errors (close (sb-ext:process-pty process)))
+    (when (sb-ext:process-alive-p process)
+      (ignore-errors (sb-ext:process-kill process sb-unix:sighup)))))
+
+(defun start-agent-session (agent choice)
+  "Start CHOICE, (id label argv), on a new pseudo-terminal, as a session of AGENT."
+  (let* ((process (start-dashboard-agent-process agent (third choice)))
+         (session (%make-agent-session (new-agent-session-id) (first choice) (second choice) process
+                                       (sb-sys:fd-stream-fd (sb-ext:process-pty process)))))
+    (bt:with-lock-held ((dashboard-agent-lock agent))
+      (push session (dashboard-agent-sessions agent)))
+    ;; The terminal's output, kept and shown to the page attached, until the agent ends.
+    (bt:make-thread
+     (lambda ()
+       (let ((buffer (make-array 16384 :element-type '(unsigned-byte 8)))
+             (fd (agent-session-fd session)))
+         (handler-case
+             (loop (let ((n (sb-sys:with-pinned-objects (buffer)
+                              (sb-unix:unix-read fd (sb-sys:vector-sap buffer) (length buffer)))))
+                     (unless (and n (plusp n)) (return))
+                     (let ((data (subseq buffer 0 n)))
+                       (bt:with-lock-held ((agent-session-lock session))
+                         (let* ((backlog (agent-session-backlog session))
+                                (over (- (+ (length backlog) n) +agent-backlog-bytes+)))
+                           (when (plusp over)
+                             (replace backlog backlog :start2 over)
+                             (decf (fill-pointer backlog) over))
+                           (loop for octet across data do (vector-push-extend octet backlog)))
+                         (agent-session-send session 2 data)))))
+           (error () nil)))
+       (sb-ext:process-wait process)
+       (bt:with-lock-held ((dashboard-agent-lock agent))
+         (setf (dashboard-agent-sessions agent) (remove session (dashboard-agent-sessions agent))))
+       (bt:with-lock-held ((agent-session-lock session))
+         (agent-session-control session "type" "exit" "code" (or (sb-ext:process-exit-code process) 0))
+         (agent-session-send session 8 (make-array 0 :element-type '(unsigned-byte 8))))
+       (ignore-errors (sb-ext:process-close process)))
+     :name "gr8s dashboard agent output")
+    session))
+
+(defun attach-agent-session (session stream)
+  "Show SESSION on STREAM, a page's WebSocket, until the page leaves or stops the agent:
+first who it is and its latest output, then all it writes; the page's keys and resizes go
+to the agent. A page that attaches takes over from one attached before it."
+  (bt:with-lock-held ((agent-session-lock session))
+    (agent-session-send session 8 (make-array 0 :element-type '(unsigned-byte 8)))
+    (setf (agent-session-client session) stream)
+    (agent-session-control session "type" "session" "id" (agent-session-id session)
+                           "agent" (agent-session-choice session) "label" (agent-session-label session))
+    (let ((backlog (agent-session-backlog session)))
+      (when (plusp (length backlog))
+        (agent-session-send session 2 (coerce backlog '(simple-array (unsigned-byte 8) (*)))))))
+  (let ((fd (agent-session-fd session)) (process (agent-session-process session)))
+    (flet ((to-pty (octets)
+             (sb-sys:with-pinned-objects (octets)
+               (loop with done = 0
+                     while (< done (length octets))
+                     do (let ((n (sb-unix:unix-write fd octets done (- (length octets) done))))
+                          (unless (and n (plusp n)) (return))
+                          (incf done n))))))
+      (unwind-protect
+           (handler-case
+               (loop (multiple-value-bind (opcode payload) (gr8s.protocol::read-websocket-frame stream)
+                       (case opcode
+                         (2 (to-pty payload))
+                         (1 (let* ((message (ignore-errors (com.inuoe.jzon:parse payload)))
+                                   (type (and (hash-table-p message) (gethash "type" message))))
+                              (cond ((equal type "stop") (hang-up-agent-session session))
+                                    ((equal type "resize")
+                                     (let ((columns (gethash "cols" message)) (rows (gethash "rows" message)))
+                                       (when (and (typep columns '(integer 1 1000)) (typep rows '(integer 1 1000)))
+                                         (set-pty-size fd rows columns)
+                                         ;; Without setsid it isn't the controlling terminal; say so ourselves.
+                                         (ignore-errors (sb-ext:process-kill process sb-unix:sigwinch))))))))
+                         (8 (return))
+                         (9 (bt:with-lock-held ((agent-session-lock session))
+                              (when (eq stream (agent-session-client session))
+                                (agent-session-send session 10 payload)))))))
+             (error () nil))
+        ;; The page has gone; the agent runs on.
+        (bt:with-lock-held ((agent-session-lock session))
+          (when (eq stream (agent-session-client session))
+            (setf (agent-session-client session) nil)))
+        (ignore-errors (close stream))))))
+
+(defun stop-dashboard-agents (agent)
+  "End every agent the tab started."
+  (mapc #'hang-up-agent-session (bt:with-lock-held ((dashboard-agent-lock agent)) (dashboard-agent-sessions agent))))
+
 (defun dashboard-agent-websocket (request)
-  "Complete REQUEST's WebSocket upgrade and return the raw connection stream."
+  "Complete REQUEST's WebSocket upgrade and return the raw connection stream, which may then
+stay quiet as long as the agent does: the server's idle timeout would hang up a terminal
+whose reader is only watching."
   (setf (hunchentoot:return-code*) 101
         (hunchentoot:content-type*) nil
         (hunchentoot:header-out :connection) "Upgrade"
@@ -139,6 +262,11 @@ so the process ends when the agent does; closing the terminal hangs its session 
         (gr8s.apiserver::websocket-accept-value (hunchentoot:header-in :sec-websocket-key request)))
   (let ((stream (hunchentoot::start-output 101 nil)))
     (finish-output stream)
+    (loop for inner = stream then (cond ((typep inner 'flexi-streams:flexi-stream) (flexi-streams:flexi-stream-stream inner))
+                                        ((typep inner 'chunga:chunked-stream) (chunga:chunked-stream-stream inner)))
+          while inner
+          when (typep inner 'sb-sys:fd-stream)
+            do (setf (sb-impl::fd-stream-timeout inner) nil) (return))
     stream))
 
 (defun dashboard-agent-same-origin-p (request)
@@ -147,73 +275,6 @@ so another site's page can't open a terminal here even if it learned the path."
   (let ((origin (hunchentoot:header-in :origin request))
         (host (hunchentoot:header-in :host request)))
     (and origin host (string= origin (concatenate 'string "http://" host)))))
-
-(defun run-dashboard-agent-session (agent stream argv)
-  "Relay STREAM, a WebSocket, to a new pseudo-terminal running ARGV until either ends."
-  (let* ((process (start-dashboard-agent-process agent argv))
-         (fd (sb-sys:fd-stream-fd (sb-ext:process-pty process)))
-         (write-lock (bt:make-lock "gr8s dashboard agent writer")))
-    (flet ((send (opcode payload)
-             (bt:with-lock-held (write-lock)
-               (gr8s.protocol::write-websocket-frame stream opcode payload)))
-           (to-pty (octets)
-             (sb-sys:with-pinned-objects (octets)
-               (loop with done = 0
-                     while (< done (length octets))
-                     do (let ((n (sb-unix:unix-write fd octets done (- (length octets) done))))
-                          (unless (and n (plusp n)) (return))
-                          (incf done n))))))
-      (bt:with-lock-held ((dashboard-agent-lock agent))
-        (push process (dashboard-agent-sessions agent)))
-      (let ((reader
-              ;; The terminal's output, as it comes, until the agent ends.
-              (bt:make-thread
-               (lambda ()
-                 (let ((buffer (make-array 16384 :element-type '(unsigned-byte 8))))
-                   (handler-case
-                       (loop (let ((n (sb-sys:with-pinned-objects (buffer)
-                                        (sb-unix:unix-read fd (sb-sys:vector-sap buffer) (length buffer)))))
-                               (unless (and n (plusp n)) (return))
-                               (send 2 (subseq buffer 0 n))))
-                     (error () nil)))
-                 (sb-ext:process-wait process)
-                 (ignore-errors
-                  (send 1 (trivial-utf-8:string-to-utf-8-bytes
-                           (com.inuoe.jzon:stringify
-                            (gr8s-diagnose::object "type" "exit" "code" (or (sb-ext:process-exit-code process) 0))))))
-                 (ignore-errors (send 8 (make-array 0 :element-type '(unsigned-byte 8)))))
-               :name "gr8s dashboard agent output")))
-        (unwind-protect
-             ;; The page's keys, and its control messages.
-             (handler-case
-                 (loop (multiple-value-bind (opcode payload) (gr8s.protocol::read-websocket-frame stream)
-                         (case opcode
-                           (2 (to-pty payload))
-                           (1 (let ((message (ignore-errors (com.inuoe.jzon:parse payload))))
-                                (when (and (hash-table-p message) (equal "resize" (gethash "type" message)))
-                                  (let ((columns (gethash "cols" message)) (rows (gethash "rows" message)))
-                                    (when (and (typep columns '(integer 1 1000)) (typep rows '(integer 1 1000)))
-                                      (set-pty-size fd rows columns)
-                                      ;; Without setsid it isn't the controlling terminal; say so ourselves.
-                                      (ignore-errors (sb-ext:process-kill process sb-unix:sigwinch)))))))
-                           (8 (return))
-                           (9 (send 10 payload)))))
-               (error () nil))
-          ;; Closing the terminal hangs up the agent's session; setsid then exits too.
-          (ignore-errors (close (sb-ext:process-pty process)))
-          (when (sb-ext:process-alive-p process)
-            (ignore-errors (sb-ext:process-kill process sb-unix:sighup)))
-          (ignore-errors (bt:join-thread reader))
-          (ignore-errors (sb-ext:process-close process))
-          (ignore-errors (close stream))
-          (bt:with-lock-held ((dashboard-agent-lock agent))
-            (setf (dashboard-agent-sessions agent) (remove process (dashboard-agent-sessions agent)))))))))
-
-(defun stop-dashboard-agents (agent)
-  "End every agent the tab started, by hanging up its terminal."
-  (dolist (process (bt:with-lock-held ((dashboard-agent-lock agent)) (dashboard-agent-sessions agent)))
-    (ignore-errors (close (sb-ext:process-pty process)))
-    (ignore-errors (sb-ext:process-kill process sb-unix:sighup))))
 
 (defun dashboard-agent-dispatch (agent base request)
   "Serve the Agent tab under BASE, /agent/<token>/: the page, its assets, the agents
@@ -235,9 +296,24 @@ installed, and a terminal."
           (coerce (loop for (id label) in (funcall (dashboard-agent-choices agent))
                         collect (gr8s-diagnose::object "id" id "label" label))
                   'vector)))
+        ((equal rest "sessions")
+         (setf (hunchentoot:content-type*) "application/json")
+         (com.inuoe.jzon:stringify
+          (coerce (loop for session in (reverse (bt:with-lock-held ((dashboard-agent-lock agent))
+                                                  (copy-list (dashboard-agent-sessions agent))))
+                        collect (gr8s-diagnose::object "id" (agent-session-id session)
+                                                       "agent" (agent-session-choice session)
+                                                       "label" (agent-session-label session)))
+                  'vector)))
         ((equal rest "pty")
-         (let ((choice (assoc (hunchentoot:get-parameter "agent" request) (funcall (dashboard-agent-choices agent))
-                              :test #'equal)))
+         ;; ?agent=ID starts that agent; ?session=ID attaches to one running.
+         (let* ((wanted (hunchentoot:get-parameter "session" request))
+                (session (and wanted (find wanted (bt:with-lock-held ((dashboard-agent-lock agent))
+                                                    (copy-list (dashboard-agent-sessions agent)))
+                                           :key #'agent-session-id :test #'equal)))
+                (choice (and (null wanted)
+                             (assoc (hunchentoot:get-parameter "agent" request) (funcall (dashboard-agent-choices agent))
+                                    :test #'equal))))
            (cond ((not (and (string-equal (hunchentoot:header-in :upgrade request) "websocket")
                             (hunchentoot:header-in :sec-websocket-key request)))
                   (setf (hunchentoot:return-code*) hunchentoot:+http-bad-request+ (hunchentoot:content-type*) "text/plain")
@@ -245,8 +321,9 @@ installed, and a terminal."
                  ((not (dashboard-agent-same-origin-p request))
                   (setf (hunchentoot:return-code*) hunchentoot:+http-forbidden+ (hunchentoot:content-type*) "text/plain")
                   "a terminal opens only from the dashboard's own page")
-                 ((null choice) (not-found))
-                 (t (run-dashboard-agent-session agent (dashboard-agent-websocket request) (third choice))
+                 ((not (or session choice)) (not-found))
+                 (t (let ((stream (dashboard-agent-websocket request)))
+                      (attach-agent-session (or session (start-agent-session agent choice)) stream))
                     ""))))
         (t (let ((asset (assoc rest +dashboard-agent-assets+ :test #'equal)))
              (if (and asset (third asset))
