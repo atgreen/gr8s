@@ -58,7 +58,7 @@ Authorization, which the API server would take as the reader's, and not the tabs
 own secret cookies."
   (declare (ignore app))
   (loop for (name . value) in (gr8s.apiserver::pod-proxy-end-to-end-headers
-                               (mapcar (lambda (header) (cons (string-downcase (symbol-name (car header))) (cdr header)))
+                               (mapcar (lambda (header) (cons (string-downcase (string (car header))) (cdr header)))
                                        headers)
                                :request t)
         unless (or (string-equal name "authorization") (string-equal name "referer"))
