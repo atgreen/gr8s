@@ -280,6 +280,25 @@ Rules may ask for facts only the cluster can supply (`asks/1`): whether the API
 serves a kind, the address of the `kubernetes` Service, and the bindings and
 roles below. The doctor reads them only then.
 
+### Rules over a failed image pull
+
+For a container that waits in `ImagePullBackOff` or `ErrImagePull`, the error
+the kubelet reported, in the waiting state's message or a `Failed to pull image`
+Event aimed at that container, is given to `rules/pulls.pl`. The first rule
+below that matches is one finding for the container, with the error as its
+detail, and the back-off and the Event are listed beneath it. An error none of
+them recognises leaves the kubelet's own findings.
+
+| Rule | The pull error says |
+| --- | --- |
+| `image-mirror-unavailable` | It came from `http://127.0.0.1:PORT/v2/`: the gr8s image mirror on the node, not the registry, could not supply the image. |
+| `registry-tls-untrusted` | `x509:` or `failed to verify certificate`. |
+| `image-pull-rate-limited` | `toomanyrequests` or `429 Too Many Requests`. |
+| `image-pull-unauthorized` | `unauthorized`, `authorization failed`, `401 Unauthorized` or `403 Forbidden`. |
+| `image-not-found` | `manifest unknown` or `: not found`. |
+| `registry-name-not-resolved` | `no such host`. |
+| `registry-unreachable` | `connection refused`, `i/o timeout` or `no route to host`. |
+
 ### Access rules
 
 A line saying a ServiceAccount `is forbidden` to do something is parsed for the

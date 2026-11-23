@@ -41,6 +41,13 @@ the Kubernetes API version with a gr8s release suffix (see
   when the cluster doesn't serve the gr8s.io API, so a reader needs only
   Kubernetes RBAC and no node opens a port.
 
+- `gr8s doctor diagnose` reports a failed image pull as one finding named by
+  the error the kubelet reported: the node's gr8s image mirror, an untrusted
+  registry certificate, a rate limit, refused credentials, a missing image, an
+  unresolvable or unreachable registry. The back-off and the `Failed` Event
+  are listed beneath it instead of standing as two findings with generic
+  advice (podster-6id).
+
 ### Fixed
 
 - An IPv4-only Pod's interface has IPv6 turned off, so the kernel's IPv6

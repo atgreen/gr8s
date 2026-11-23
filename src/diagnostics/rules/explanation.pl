@@ -25,10 +25,17 @@ refines(Why, What) :-
     ( log_explanation(Why, _, _) ; access_explanation(Why, _, _) ),
     ( What = "restarts-crash" ; What = "restarted-earlier" ; restart_effect(What) ).
 refines("restarts-liveness-kill", "restarts-crash").
+%% What a pull error names says more than that the pull failed.
+refines(Why, What) :- pull_explanation(Why, _, _), pull_symptom(What).
 refines("pod-unschedulable", "pod-PodScheduled-False").
 refines("pod-unschedulable", "event-FailedScheduling").
 refines("openbao-uninitialized", "readiness-probe-failing").
 refines("openbao-sealed", "readiness-probe-failing").
+
+pull_symptom("waiting-ImagePullBackOff").
+pull_symptom("waiting-ErrImagePull").
+pull_symptom("event-Failed").
+pull_symptom("event-BackOff").
 
 restart_cause("restarts-crash").
 restart_cause("restarts-oom").
