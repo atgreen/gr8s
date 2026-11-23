@@ -115,10 +115,24 @@ heartbeats buffering locally for minutes before EOF surfaces: after a laptop
 resume the agent kept writing into a dead session for 2m22s and the node sat
 NotReady the whole time (podster-ao6).")
 
+(defun set-tcp-nodelay (socket)
+  "Send SOCKET's writes at once (TCP_NODELAY). A gRPC call is several small HTTP/2
+writes each way; with Nagle's algorithm each waits for the last to be acknowledged,
+and a delayed ACK holds it about 40ms, so a call relayed between members cost ~45ms
+however near they were (podster-1wk). On a listening socket it holds for every
+connection accepted from it. Best-effort."
+  (ignore-errors
+    (cffi:with-foreign-object (value :int)
+      (setf (cffi:mem-ref value :int) 1)
+      (cffi:foreign-funcall "setsockopt"
+                            :int (sb-bsd-sockets:socket-file-descriptor (usocket:socket socket))
+                            :int 6 :int 1 :pointer value :unsigned-int 4 :int)))) ; IPPROTO_TCP TCP_NODELAY
+
 (defun harden-node-channel-socket (socket)
   "Bound dead-peer detection on SOCKET with TCP_USER_TIMEOUT (unacknowledged
-sends) and keep-alive probes (a fully idle direction). Best-effort: an
-unsupported option never blocks the connection."
+sends) and keep-alive probes (a fully idle direction), and send its writes at
+once. Best-effort: an unsupported option never blocks the connection."
+  (set-tcp-nodelay socket)
   (ignore-errors
     (let ((fd (sb-bsd-sockets:socket-file-descriptor (usocket:socket socket))))
       (cffi:with-foreign-object (value :int)

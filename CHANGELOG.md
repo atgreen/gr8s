@@ -38,6 +38,12 @@ the Kubernetes API version with a gr8s release suffix (see
   v1.37.2-gr8s.5 the image lacked the new image-pull rules' code, so every
   unhealthy Pod was reported as a diagnosis error and the report as
   incomplete.
+- Operations relayed between control-plane members are no longer slowed by
+  about 45ms a message. Their gRPC connections sent small writes under Nagle's
+  algorithm, and a delayed ACK held each: an exec, a log stream, a proxied
+  request or a REPL through a member other than the one holding the node's
+  session answered in about 90ms instead of a few. Node and member channels
+  now set TCP_NODELAY at both ends (podster-1wk).
 
 ## [v1.37.2-gr8s.5] — 2026-11-22
 
