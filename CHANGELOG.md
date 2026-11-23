@@ -7,6 +7,16 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ## [Unreleased]
 
+## [v1.37.2-gr8s.6] — 2026-11-23
+
+Seventh trial pre-release. `gr8s dashboard` gains an Agent tab, running AI
+coding agents in terminal tabs with the cluster's kubeconfig, and a REPL tab,
+ICL's REPL inside a running gr8s process; and `gr8s mcp` gives AI agents
+read-only tools for the cluster. It fixes `gr8s doctor diagnose`, which in
+v1.37.2-gr8s.5 failed on every unhealthy Pod, app tabs that failed on a
+request header gr8s didn't know, and the latency of operations relayed between
+control-plane members.
+
 ### Added
 
 - `gr8s dashboard` has an Agent tab: terminals running AI coding agents you
@@ -29,7 +39,7 @@ the Kubernetes API version with a gr8s release suffix (see
 - `gr8s dashboard` has a REPL tab: ICL's browser REPL inside a running
   control-plane member or node agent, through the same authenticated Slynk
   tunnel as `gr8s debug icl`, with ICL started on your machine on SBCL. It
-  needs an ICL that takes `--embed-origin`, which lets the dashboard frame it.
+  needs ICL 1.26.0 or later, whose `--embed-origin` lets the dashboard frame it.
   A session outlives the page; Disconnect ends it.
 
 ### Fixed
@@ -44,6 +54,8 @@ the Kubernetes API version with a gr8s release suffix (see
   request or a REPL through a member other than the one holding the node's
   session answered in about 90ms instead of a few. Node and member channels
   now set TCP_NODELAY at both ends (podster-1wk).
+- A dashboard app tab, such as Grafana's, no longer fails requests that carry
+  a header gr8s doesn't know by name, such as `X-Grafana-Device-Id`.
 
 ## [v1.37.2-gr8s.5] — 2026-11-22
 
@@ -636,7 +648,8 @@ OpenSSL. Release artifacts cover Linux amd64 and arm64: binaries with
 checksums, tarballs carrying the installer and lifecycle scripts, and
 CycloneDX and SPDX SBOMs for the Lisp dependencies.
 
-[Unreleased]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.5...HEAD
+[Unreleased]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.6...HEAD
+[v1.37.2-gr8s.6]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.5...v1.37.2-gr8s.6
 [v1.37.2-gr8s.5]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.4...v1.37.2-gr8s.5
 [v1.37.2-gr8s.4]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.3...v1.37.2-gr8s.4
 [v1.37.2-gr8s.3]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.2...v1.37.2-gr8s.3
