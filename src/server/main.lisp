@@ -1604,7 +1604,7 @@ each request and each worker error."
                                   :tabs (append (list (list "headlamp" (format nil "/dashboard/~A/" token) "Headlamp"))
                                                 (and hubble-p (list (list "hubble" hubble-base "Hubble")))
                                                 (list (list "agent" agent-base "Agent"))
-                                                (list (list "lisp" lisp-base "Lisp")))
+                                                (list (list "repl" lisp-base "REPL")))
                                   :agent agent :agent-base agent-base
                                   :lisp lisp :lisp-base lisp-base
                                   :hubble-backend hubble-backend :hubble-base (and hubble-p hubble-base)

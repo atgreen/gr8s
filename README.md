@@ -239,7 +239,7 @@ is a terminal running an AI coding agent you have installed (Claude Code, Codex
 or Gemini CLI) or a shell. It runs on your machine, with your own login, and
 with `KUBECONFIG` naming the dashboard's cluster, and with [`gr8s mcp`](#mcp)
 registered for Claude Code and Codex; nothing is deployed to the cluster. The
-Lisp tab shows [ICL](https://github.com/atgreen/icl)'s browser REPL connected
+REPL tab shows [ICL](https://github.com/atgreen/icl)'s browser REPL connected
 to a running control-plane member or node agent, as `gr8s debug icl` connects
 it; it needs an ICL with `--embed-origin` on your PATH. All four are embedded
 in the binary, with no separate install.

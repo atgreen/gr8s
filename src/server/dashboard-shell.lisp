@@ -83,7 +83,7 @@ tab shown first.")
    (tabs :initarg :tabs :reader gr8s-dashboard-tabs)
    (hubble-backend :initarg :hubble-backend :initform nil :reader gr8s-dashboard-hubble-backend)
    (hubble-base :initarg :hubble-base :initform nil :reader gr8s-dashboard-hubble-base)
-   ;; The Lisp tab (dashboard-lisp.lisp), served under LISP-BASE.
+   ;; The REPL tab (dashboard-lisp.lisp), served under LISP-BASE.
    (lisp :initarg :lisp :initform nil :reader gr8s-dashboard-lisp)
    (lisp-base :initarg :lisp-base :initform nil :reader gr8s-dashboard-lisp-base)
    ;; The Agent tab (dashboard-agent.lisp), served under AGENT-BASE.

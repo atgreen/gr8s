@@ -690,7 +690,7 @@ messages, says so; return (values output control-messages)."
                                session))))
          (acceptor (make-instance 'gr8s.server::gr8s-dashboard-acceptor
                                   :address "127.0.0.1" :port 0 :shell-path "/ui/tok/"
-                                  :tabs '(("lisp" "/lisp/tok/" "Lisp"))
+                                  :tabs '(("repl" "/lisp/tok/" "REPL"))
                                   :lisp lisp :lisp-base "/lisp/tok/"
                                   :proxy-fn (lambda (&rest arguments) (declare (ignore arguments)) "proxied")
                                   :multiplexer-fn nil
@@ -705,7 +705,7 @@ messages, says so; return (values output control-messages)."
                                              :method method :proxy nil
                                              :additional-headers (when from (list (cons "Origin" from))))
                       (values (if (stringp body) body (trivial-utf-8:utf-8-bytes-to-string body)) status))))
-             (is (search "<title>gr8s lisp</title>" (call "" :method :get)))
+             (is (search "<title>gr8s REPL</title>" (call "" :method :get)))
              ;; Only this dashboard's page, by POST, starts a REPL, in a member or a node.
              (is (= 405 (nth-value 1 (call "connect?kind=member&name=gr8s2" :method :get))))
              (is (= 403 (nth-value 1 (call "connect?kind=member&name=gr8s2" :from "http://evil.example"))))

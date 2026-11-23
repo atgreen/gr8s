@@ -2,7 +2,7 @@
 ;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Purpose:
-;;;; The Lisp tab of `gr8s dashboard': ICL's browser REPL, connected to a running
+;;;; The REPL tab of `gr8s dashboard': ICL's browser REPL, connected to a running
 ;;;; gr8s process -- a control-plane member or a node's agent -- as `gr8s debug icl'
 ;;;; connects it, shown in the tab. The dashboard opens the same authenticated Slynk
 ;;;; tunnel through the cluster API, starts ICL on this machine (`icl -b --lisp sbcl
@@ -22,7 +22,7 @@
 (defstruct (dashboard-lisp (:constructor make-dashboard-lisp
                                (config &key (icl (dashboard-find-program "icl"))
                                             (start #'start-lisp-session))))
-  "The Lisp tab: the cluster it reaches, ICL, and the sessions running."
+  "The REPL tab: the cluster it reaches, ICL, and the sessions running."
   config icl
   ;; (dashboard-lisp target origin) -> a started LISP-SESSION, or an error.
   start
@@ -140,7 +140,7 @@ session once ICL has said where its page is."
     (coerce (nreverse targets) 'vector)))
 
 (defun dashboard-lisp-dispatch (lisp base request)
-  "Serve the Lisp tab under BASE, /lisp/<token>/."
+  "Serve the REPL tab under BASE, /lisp/<token>/."
   (let ((rest (subseq (hunchentoot:script-name request) (min (length base) (length (hunchentoot:script-name request))))))
     (setf (hunchentoot:header-out :cache-control) "no-store")
     (flet ((json (status value)
