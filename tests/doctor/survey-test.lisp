@@ -731,3 +731,56 @@
   ;; What is not a past timestamp is left as it is.
   (assert (equal "at 2026-01-02T00:00:00Z" (with-ages "at 2026-01-02T00:00:00Z")))
   (assert (equal "TLS To T" (with-ages "TLS To T"))))
+
+;; A failed image pull is one problem, named by what the pull error says, with
+;; the kubelet's back-off and its Failed event beneath it (podster-6id).
+(flet ((puller (error &key (reason "ImagePullBackOff") (message t) (init t))
+         (let ((image "quay.io/prometheus-operator/prometheus-config-reloader:v0.95.2"))
+           (thing "Pod" "prom-0"
+                  :spec (object "nodeName" "n1"
+                                (if init "initContainers" "containers")
+                                (vector (object "name" "reloader" "image" image)))
+                  :status (object "conditions" (vector (object "type" "Ready" "status" "False"))
+                                  (if init "initContainerStatuses" "containerStatuses")
+                                  (vector (object "name" "reloader" "image" image "ready" nil "restartCount" 0
+                                                  "state" (object "waiting"
+                                                                  (apply #'object "reason" reason
+                                                                         (when message
+                                                                           (list "message"
+                                                                                 (format nil "Back-off pulling image ~S: ErrImagePull: ~A"
+                                                                                         image error)))))))))))
+       (pull-failed (error &key (init t))
+         (let ((event (happened "prom-0" "Failed"
+                                (format nil "Failed to pull image \"quay.io/x:1\": ~A" error))))
+           (setf (gethash "fieldPath" (gethash "involvedObject" event))
+                 (if init "spec.initContainers{reloader}" "spec.containers{reloader}"))
+           event)))
+  (let* ((mirror (concatenate 'string "gRPC error 2 (UNKNOWN): failed to pull and unpack image: failed to copy: "
+                              "httpReadSeeker: failed open: unexpected status from GET request to "
+                              "http://127.0.0.1:38805/v2/prometheus-operator/prometheus-config-reloader/blobs/"
+                              "sha256:fbaaf910?ns=quay.io: 503 Service Unavailable"))
+         (report (survey (puller mirror) (pull-failed mirror)))
+         (problem (first (problems report))))
+    (assert (equal '("image-mirror-unavailable") (problem-rules report)))
+    (assert (search "gr8s image mirror on its node" (gethash "summary" problem)))
+    (assert (search "\"reloader\"" (gethash "summary" problem)))
+    (assert (subsetp '("waiting-ImagePullBackOff" "event-Failed") (impact-rules problem) :test #'equal))
+    (assert (search "503 Service Unavailable" (gethash "detail" problem))))
+  ;; The waiting state alone is enough, and so is the Event alone.
+  (assert (equal '("image-not-found")
+                 (problem-rules (survey (puller "failed to resolve reference \"quay.io/x:1\": quay.io/x:1: not found"
+                                                :init nil)))))
+  (assert (equal '("image-pull-unauthorized")
+                 (problem-rules (survey (puller nil :reason "ErrImagePull" :message nil :init nil)
+                                        (pull-failed "pull access denied, repository does not exist or may require authorization: server message: insufficient_scope: authorization failed"
+                                                     :init nil)))))
+  (assert (equal '("registry-name-not-resolved")
+                 (problem-rules (survey (puller "dial tcp: lookup registry.example on 10.96.0.10:53: no such host")))))
+  (assert (equal '("registry-unreachable")
+                 (problem-rules (survey (puller "dial tcp 192.0.2.7:443: i/o timeout")))))
+  (assert (equal '("image-pull-rate-limited")
+                 (problem-rules (survey (puller "429 Too Many Requests - Server message: toomanyrequests: You have reached your pull rate limit")))))
+  (assert (equal '("registry-tls-untrusted")
+                 (problem-rules (survey (puller "tls: failed to verify certificate: x509: certificate signed by unknown authority")))))
+  ;; An error the rules don't recognise leaves the kubelet's own finding.
+  (assert (equal '("waiting-ImagePullBackOff") (problem-rules (survey (puller "something unexpected"))))))

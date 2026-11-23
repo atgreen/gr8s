@@ -139,6 +139,9 @@ the log of a run that crashed. Attach each to the finding it explains."
                                                                 (last lines 6))))
                                        and collect (cons finding lines))))
                   (setf findings (append (reverse (log-findings pod ns getter crashes)) findings)))
+                ;; A failed pull explains itself only in the error the kubelet reported.
+                (setf findings (append (reverse (pull-findings pod events (field (aref (gethash "evidence" report) 0) "id")))
+                                       findings))
                 (setf findings (append (reverse (application-findings pod ns (coerce (gethash "findings" report) 'list)))
                                        findings))))
           (setf (gethash "evidence" report)

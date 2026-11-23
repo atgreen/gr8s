@@ -37,7 +37,7 @@ is simply absent."
     `(defparameter ,variable (load-rule-base ',programs))))
 
 (define-rule-base *rules*
-  "catalog" "references" "pods" "scheduling" "applications" "logs" "access" "relations" "explanation" "impact")
+  "catalog" "references" "pods" "scheduling" "applications" "logs" "pulls" "access" "relations" "explanation" "impact")
 
 (defvar *rules-lock* (sb-thread:make-mutex :name "gr8s doctor rules")
   "Facts are asserted into the one rule base, so one question is asked at a time.")
