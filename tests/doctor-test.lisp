@@ -671,3 +671,16 @@
                (is-false (search "PRIVATE-STATE-ERROR" output)))))
       (setf (symbol-function 'gr8s.network::host-firewalld-active-p) legacy)
       (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
+
+(test the-gr8s-image-carries-every-doctor-file
+  ;; gr8s.asd lists the doctor's files again for the image; when the two lists
+  ;; drifted, pulls.lisp was missing from v1.37.2-gr8s.5 and every Pod the doctor
+  ;; read closely failed with an undefined function.
+  (flet ((names (component)
+           (sort (mapcar #'asdf:component-name (asdf:component-children component)) #'string<)))
+    (let ((standalone (asdf:find-system
+                       (progn (asdf:load-asd (asdf:system-relative-pathname "gr8s" "src/diagnostics/gr8s-doctor.asd"))
+                              "gr8s-doctor")))
+          (image (asdf:find-component "gr8s" '("src" "diagnostics"))))
+      (is (equal (names standalone) (names image))))
+    (is-true (fboundp 'gr8s-diagnose::pull-findings))))

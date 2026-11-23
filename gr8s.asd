@@ -466,13 +466,14 @@
                                            (:static-file "rules/scheduling.pl")
                                            (:static-file "rules/applications.pl")
                                            (:static-file "rules/logs.pl")
+                                           (:static-file "rules/pulls.pl")
                                            (:static-file "rules/access.pl")
                                            (:static-file "rules/relations.pl")
                                            (:static-file "rules/explanation.pl")
                                            (:static-file "rules/impact.pl")
                                            (:file "rules") (:file "progress") (:file "live") (:file "markdown")
                                            (:file "catalog") (:file "extended-catalog") (:file "readiness") (:file "applications") (:file "doctor")
-                                           (:file "causal") (:file "logs") (:file "pod-events") (:file "flows") (:file "scheduling") (:file "survey") (:file "impact")))
+                                           (:file "causal") (:file "logs") (:file "pulls") (:file "pod-events") (:file "flows") (:file "scheduling") (:file "survey") (:file "impact")))
                              (:module "server"
                               :serial t
                               :components ((:file "integration")

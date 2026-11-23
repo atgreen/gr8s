@@ -17,6 +17,13 @@ the Kubernetes API version with a gr8s release suffix (see
   its tab's connection or the dashboard. The terminal is xterm.js, embedded
   like the other frontends (podster-2ry).
 
+### Fixed
+
+- `gr8s doctor diagnose` works again on the Pods it reads closely. In
+  v1.37.2-gr8s.5 the image lacked the new image-pull rules' code, so every
+  unhealthy Pod was reported as a diagnosis error and the report as
+  incomplete.
+
 ## [v1.37.2-gr8s.5] — 2026-11-22
 
 Sixth trial pre-release. Flow observability: every node reports dropped
