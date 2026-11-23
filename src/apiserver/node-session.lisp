@@ -2374,6 +2374,8 @@ socket are released rather than leaked. Safe to call more than once."
           do (sleep 0.01))
         (unless (ag-grpc::server-socket grpc-server)
           (error "Node gRPC server failed to start listening"))
+        ;; Connections accepted from it inherit TCP_NODELAY.
+        (gr8s.security::set-tcp-nodelay (ag-grpc::server-socket grpc-server))
         (setf (node-grpc-server-port server)
           (usocket:get-local-port (ag-grpc::server-socket grpc-server))
           (node-grpc-server-monitor-thread server)

@@ -659,6 +659,8 @@ Normal replication continues while the barrier drains outstanding application wr
     (unless (ag-grpc::server-socket server)
       (stop-raft-member member)
       (error "raft member ~A gRPC server failed to start" id))
+    ;; Connections accepted from it inherit TCP_NODELAY.
+    (gr8s.security::set-tcp-nodelay (ag-grpc::server-socket server))
     (setf (raft-member-port member) (usocket:get-local-port (ag-grpc::server-socket server)))
     member))
 

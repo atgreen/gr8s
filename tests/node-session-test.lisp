@@ -3172,3 +3172,41 @@
            (is (<= (bt:with-lock-held (seen-lock) (count :operation-stream seen)) 2)))
       (bt:with-lock-held (gate) (setf open t))
       (setf (gr8s.apiserver::node-grpc-server-stopping-p server) t))))
+
+(defun tcp-nodelay-p (socket)
+  "Whether SOCKET, a usocket, sends its writes at once."
+  (cffi:with-foreign-objects ((value :int) (size :unsigned-int))
+    (setf (cffi:mem-ref size :unsigned-int) 4)
+    (cffi:foreign-funcall "getsockopt" :int (sb-bsd-sockets:socket-file-descriptor (usocket:socket socket))
+                          :int 6 :int 1 :pointer value :pointer size :int)
+    (= 1 (cffi:mem-ref value :int))))
+
+(test node-and-member-channels-send-their-writes-at-once
+  ;; podster-1wk: Nagle and delayed ACKs cost every relayed gRPC call about 45ms.
+  (let ((listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t :element-type '(unsigned-byte 8))))
+    (unwind-protect
+         (progn
+           (is-false (tcp-nodelay-p listener))
+           (gr8s.security::set-tcp-nodelay listener)
+           (is-true (tcp-nodelay-p listener))
+           (let* ((client (gr8s.security::harden-node-channel-socket
+                           (usocket:socket-connect "127.0.0.1" (usocket:get-local-port listener)
+                                                   :element-type '(unsigned-byte 8))))
+                  (accepted (usocket:socket-accept listener)))
+             (unwind-protect
+                  (progn (is-true (tcp-nodelay-p client))
+                         ;; An accepted connection inherits its listener's.
+                         (is-true (tcp-nodelay-p accepted)))
+               (usocket:socket-close accepted)
+               (usocket:socket-close client))))
+      (usocket:socket-close listener)))
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let ((server (gr8s.apiserver::start-node-grpc-server store :host "127.0.0.1" :port 0)))
+      (unwind-protect
+           (is-true (tcp-nodelay-p (ag-grpc::server-socket (gr8s.apiserver::node-grpc-server-grpc-server server))))
+        (gr8s.apiserver::stop-node-grpc-server server))))
+  (let ((member (gr8s.raft.transport::start-raft-member "nodelay" :port 0)))
+    (unwind-protect
+         (is-true (tcp-nodelay-p (ag-grpc::server-socket (gr8s.raft.transport::raft-member-grpc-server member))))
+      (gr8s.raft.transport::stop-raft-member member))))
