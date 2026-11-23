@@ -7,6 +7,38 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ## [Unreleased]
 
+### Added
+
+- `gr8s dashboard` has an Agent tab: terminals running AI coding agents you
+  have installed (Claude Code, Codex, Gemini CLI) or your shell, on your own
+  machine with your own login, and with `KUBECONFIG` naming the dashboard's
+  cluster. Nothing is deployed to the cluster. **+** starts an agent in a tab
+  of its own; an agent keeps running when you switch tabs or reload the page,
+  and ends when you close its tab or stop the dashboard. The gear defines
+  agents of your own, a name and a command line that can name the gr8s guide,
+  a `gr8s mcp` server config, the kubeconfig and gr8s; they are kept in
+  `$XDG_CONFIG_HOME/gr8s/dashboard-agents.json`. A terminal opens, and agents
+  are defined, only from the dashboard's own page. The terminal is xterm.js,
+  embedded like the other frontends (podster-2ry, podster-9et).
+- `gr8s mcp` serves an AI agent read-only Model Context Protocol tools on
+  stdio: `gr8s_guide` (the guide `gr8s skill` prints, which its instructions
+  say to read first), `doctor_diagnose`, `doctor_impact`, `observe_flows` and
+  `cluster_status`, with the kubeconfig's credentials. The dashboard's Agent
+  tab registers it for Claude Code and Codex, and starts them with the guide
+  in their context (podster-j53).
+- `gr8s dashboard` has a REPL tab: ICL's browser REPL inside a running
+  control-plane member or node agent, through the same authenticated Slynk
+  tunnel as `gr8s debug icl`, with ICL started on your machine on SBCL. It
+  needs an ICL that takes `--embed-origin`, which lets the dashboard frame it.
+  A session outlives the page; Disconnect ends it.
+
+### Fixed
+
+- `gr8s doctor diagnose` works again on the Pods it reads closely. In
+  v1.37.2-gr8s.5 the image lacked the new image-pull rules' code, so every
+  unhealthy Pod was reported as a diagnosis error and the report as
+  incomplete.
+
 ## [v1.37.2-gr8s.5] — 2026-11-22
 
 Sixth trial pre-release. Flow observability: every node reports dropped

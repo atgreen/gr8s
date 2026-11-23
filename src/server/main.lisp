@@ -1588,6 +1588,10 @@ each request and each worker error."
          (hubble-p (gr8s.apiserver::hubble-ui-assets-present-p))
          (hubble-base (format nil "/hubble/~A/" token))
          (hubble-backend (and hubble-p (make-hubble-ui-backend config)))
+         (agent-base (format nil "/agent/~A/" token))
+         (lisp-base (format nil "/lisp/~A/" token))
+         (lisp (make-dashboard-lisp config))
+         (agent (make-dashboard-agent (namestring (truename kubeconfig))))
          (apps (make-dashboard-apps config))
          (url (format nil "http://127.0.0.1:~D/ui/~A/~@[#~A~]" port token (getf options :tab)))
          (sweeper nil)
@@ -1598,7 +1602,11 @@ each request and each worker error."
                                   :message-log-destination (and verbose *error-output*)
                                   :shell-path (format nil "/ui/~A/" token)
                                   :tabs (append (list (list "headlamp" (format nil "/dashboard/~A/" token) "Headlamp"))
-                                                (and hubble-p (list (list "hubble" hubble-base "Hubble"))))
+                                                (and hubble-p (list (list "hubble" hubble-base "Hubble")))
+                                                (list (list "agent" agent-base "Agent"))
+                                                (list (list "repl" lisp-base "REPL")))
+                                  :agent agent :agent-base agent-base
+                                  :lisp lisp :lisp-base lisp-base
                                   :hubble-backend hubble-backend :hubble-base (and hubble-p hubble-base)
                                   :apps apps
                                   :proxy-fn (lambda (method target request)
@@ -1633,6 +1641,8 @@ each request and each worker error."
            (finish-output)
            (loop until *shutdown-requested* do (sleep 0.2)))
       (ignore-errors (hunchentoot:stop acceptor))
+      (stop-dashboard-agents agent)
+      (stop-dashboard-lisp lisp)
       (stop-dashboard-apps apps)
       (when sweeper (ignore-errors (bt:join-thread sweeper)))
       (when hubble-backend
@@ -1920,6 +1930,8 @@ needs no shell/coreutils/util-linux. Returns 0."
      (parse-doctor-options (rest arguments)))
     ((string= "dashboard" (first arguments))
      (parse-dashboard-options (rest arguments)))
+    ((string= "mcp" (first arguments))
+     (parse-mcp-options (rest arguments)))
     (t (error "unknown command: ~A" (first arguments))))))
 
 (defun parse-trace-duration (text)
@@ -3880,7 +3892,8 @@ No HA API may start from member-local certificate state before this converges."
     ("backup" "Capture and verify encrypted state backups")
     ("restore" "Restore a state backup into a fresh state directory")
     ("skill" "Print guidance for operators and AI agents")
-    ("dashboard" "Open the dashboards (Headlamp and Hubble UI) in a browser")
+    ("dashboard" "Open the dashboards (Headlamp, Hubble UI and an agent terminal) in a browser")
+    ("mcp" "Serve read-only cluster tools to an AI agent over MCP (stdio)")
     ("version" "Print version information") ("notices" "Print license notices")))
 
 (defun print-help-rows (rows)
@@ -3938,8 +3951,13 @@ No HA API may start from member-local certificate state before this converges."
                         ("--fix" "Repair supported local host problems"))))
       ((equal path '("skill"))
        (simple "Print offline Markdown guidance for operators and AI agents" ""))
+      ((equal path '("mcp"))
+       (page "Serve the doctor, flows and control-plane state to an AI agent as Model Context Protocol tools, on stdin and stdout"
+             "[OPTIONS]"
+             :options '(("--kubeconfig PATH" "Cluster kubeconfig (default $KUBECONFIG or ~/.kube/config)")
+                        ("--help, -h" "show help"))))
       ((equal path '("dashboard"))
-       (page "Serve the dashboards, Headlamp and Hubble UI, and open them in a browser; runs until Ctrl-C"
+       (page "Serve the dashboards, Headlamp, Hubble UI and an agent terminal, and open them in a browser; runs until Ctrl-C"
              "[OPTIONS]"
              :options '(("--kubeconfig PATH" "Cluster kubeconfig (default $KUBECONFIG or ~/.kube/config)")
                         ("--port N" "Loopback port to serve on (default 8080)")
@@ -4249,6 +4267,7 @@ and refuses every public registry (podster-8ak). Returns the bundle named, or NI
                0)
               (:trace (run-trace-command options))
               (:dashboard (run-dashboard-command options))
+              (:mcp (run-mcp-command options))
               (:debug-slynk (run-debug-slynk-command options))
               (:wireguard-rotate-key
                (rotate-wireguard-node-key options))
