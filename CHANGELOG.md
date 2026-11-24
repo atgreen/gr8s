@@ -7,6 +7,17 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ## [Unreleased]
 
+## [v1.37.2-gr8s.8] — 2026-11-24
+
+Ninth trial pre-release. `gr8s upgrade` rolls a cluster onto a signed release,
+host by host: the voters one at a time, the leader last after handing its
+leadership on, then the agents, with a quorum check before each step, a record
+to resume from, and rollback. Releases are now published as signed OCI
+artifacts for it to install from. A Gateway sends PROXY protocol v2 to TCP and
+TLS route backends that ask for it, so they can see their clients' addresses.
+Nodes report the release their own agent runs. Hosts on v1.37.2-gr8s.7 or older
+move to this release once with `sudo gr8s upgrade self --to v1.37.2-gr8s.8`.
+
 ### Added
 
 - `gr8s upgrade` rolls a cluster onto a signed gr8s release, host by host,
@@ -752,7 +763,8 @@ OpenSSL. Release artifacts cover Linux amd64 and arm64: binaries with
 checksums, tarballs carrying the installer and lifecycle scripts, and
 CycloneDX and SPDX SBOMs for the Lisp dependencies.
 
-[Unreleased]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.7...HEAD
+[Unreleased]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.8...HEAD
+[v1.37.2-gr8s.8]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.7...v1.37.2-gr8s.8
 [v1.37.2-gr8s.7]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.6...v1.37.2-gr8s.7
 [v1.37.2-gr8s.6]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.5...v1.37.2-gr8s.6
 [v1.37.2-gr8s.5]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.4...v1.37.2-gr8s.5
