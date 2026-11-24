@@ -576,20 +576,37 @@ names its node, not a Pod."
            (port (and service (gateway-service-port service (gw-backend-port backend)))))
       (values (unless (and service port) "BackendNotFound") service port))))
 
+(defun service-proxy-protocol (service)
+  "The PROXY protocol version SERVICE asks its TCPRoute/TLSRoute/GRPCRoute traffic
+   to carry, from its gr8s.io/proxy-protocol annotation: 2 for \"v2\", else NIL.
+   The backend opts in because one not expecting the header would break."
+  (let* ((metadata (and (hash-table-p service) (gethash "metadata" service)))
+         (annotations (and (hash-table-p metadata) (gethash "annotations" metadata))))
+    (when (and (hash-table-p annotations)
+               (equal (gethash "gr8s.io/proxy-protocol" annotations) "v2"))
+      2)))
+
 (defun make-service-backend-resolver (store)
-  "Resolve a valid Service reference; invalid references carry an HTTP500 reason."
+  "Resolve a valid Service reference to (values host port), and NIL and the PROXY
+   protocol version after them for a Service that asks for one (podster-0gz);
+   invalid references carry an HTTP500 reason as the third value."
   (lambda (backend)
     (multiple-value-bind (reason service service-port) (gateway-backend-reference-error store backend)
       (if reason
           (values nil nil reason)
-          (let ((endpoints (ignore-errors (service-pod-endpoints store service service-port))))
+          (let ((endpoints (ignore-errors (service-pod-endpoints store service service-port)))
+                (proxy-protocol (service-proxy-protocol service)))
             (if endpoints
                 (let ((endpoint (nth (random (length endpoints)) endpoints)))
-                  (values (first endpoint) (second endpoint)))
+                  (if proxy-protocol
+                      (values (first endpoint) (second endpoint) nil proxy-protocol)
+                      (values (first endpoint) (second endpoint))))
                 (let ((cluster-ip (gethash "clusterIP" (gethash "spec" service))))
                   (when (and (stringp cluster-ip) (plusp (length cluster-ip))
                              (not (equal cluster-ip "None")))
-                    (values cluster-ip (gethash "port" service-port))))))))))
+                    (if proxy-protocol
+                        (values cluster-ip (gethash "port" service-port) nil proxy-protocol)
+                        (values cluster-ip (gethash "port" service-port)))))))))))
 
 (defun start-gateway-listener (&key (address "127.0.0.1") port router resolver (name "gateway") tls)
   "Start a Gateway listener acceptor on PORT. ROUTER is a compiled dispatch fn

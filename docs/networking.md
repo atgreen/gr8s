@@ -468,7 +468,12 @@ Supported today:
   `kubernetes.io/tls` Secret through the in-image pure-tls stack.
 - **L4 routing** for TCPRoute (TCP splice) and TLSRoute/GRPCRoute (SNI
   passthrough: the TLS ClientHello SNI is peeked without terminating and used to
-  pick the backend).
+  pick the backend). The agent opens its own connection to the backend, so the
+  backend sees the node as its peer. To learn the client, annotate the backend
+  Service `gr8s.io/proxy-protocol: v2`: the agent then sends a PROXY protocol v2
+  header with the client's address and port and the address it dialed, before
+  any client byte (the replayed ClientHello included). The backend must expect
+  the header, and should accept it only from the nodes' addresses.
 - **Per-route observability and protection**:
   `gr8s_gateway_requests_total{gateway,route,code}` on `/metrics`, and a per-route
   token-bucket rate limiter (`gr8s.io/rate-limit-rps` → HTTP 429).

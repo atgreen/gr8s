@@ -27,6 +27,12 @@ the Kubernetes API version with a gr8s release suffix (see
   for each architecture and a `release.json` signed with the gr8s release key
   (Ed25519). A host installs only a package that release.json, under a key the
   gr8s it runs carries, vouches for.
+- A TCPRoute, TLSRoute or GRPCRoute backend can learn the client's address. The
+  gateway connects to the backend itself, so the backend saw the node as every
+  client. A backend Service annotated `gr8s.io/proxy-protocol: v2` is now sent a
+  PROXY protocol v2 header naming the client and the address it dialed, ahead of
+  the client's first byte, so it can, for example, keep passthrough TLS and still
+  record who connected. Other backends are unchanged (podster-0gz).
 
 ### Changed
 
@@ -42,6 +48,9 @@ the Kubernetes API version with a gr8s release suffix (see
 - A request relayed to a control-plane member that had restarted since the last
   one no longer fails once with "Broken pipe": a connection that fails under the
   frame is replaced and the frame sent again (podster-3ao).
+- `gr8s dashboard` no longer exits on a flow of a protocol gr8s can't name,
+  such as IGMP: its Hubble UI feed put the protocol's number where text goes,
+  and nothing caught the error (podster-atf).
 
 ## [v1.37.2-gr8s.7] — 2026-11-23
 

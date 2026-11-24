@@ -7,7 +7,9 @@
 ;;;; ClientHello SNI (gateway-sni, without terminating) and steers the connection
 ;;;; to the backend whose TLSRoute/GRPCRoute hostname matches -- SNI passthrough,
 ;;;; the agent as the L4 gateway. Backends and weighting reuse the HTTP router's
-;;;; GW-BACKEND; byte copying is a pair of threads per connection.
+;;;; GW-BACKEND; byte copying is a pair of threads per connection. The backend sees
+;;;; the agent as its peer; a Service annotated gr8s.io/proxy-protocol: v2 is sent
+;;;; a PROXY protocol v2 header naming the original client first (podster-0gz).
 
 (in-package #:gr8s.controllers)
 
@@ -79,6 +81,44 @@
   (when tcp-routes (gw-pick-weighted (l4-tcp-route-backends (first tcp-routes)))))
 
 ;;; ---------------------------------------------------------------------------
+;;; PROXY protocol v2 (haproxy.org/download/2.9/doc/proxy-protocol.txt, section 2.2).
+
+(defparameter +proxy-v2-signature+
+  (coerce #(#x0D #x0A #x0D #x0A #x00 #x0D #x0A #x51 #x55 #x49 #x54 #x0A)
+          '(simple-array (unsigned-byte 8) (12))))
+
+(defun proxy-protocol-v2-header (source source-port destination destination-port)
+  "A PROXY protocol v2 header for a TCP connection from SOURCE:SOURCE-PORT to
+   DESTINATION:DESTINATION-PORT, each address a 4-octet IPv4 vector. Without both
+   addresses it is the LOCAL command, which tells the receiver to use the
+   connection's own addresses."
+  (let ((addresses-p (and (= (length source) 4) (= (length destination) 4)))
+        (header (make-array (+ 16 12) :element-type '(unsigned-byte 8) :initial-element 0)))
+    (replace header +proxy-v2-signature+)
+    (cond (addresses-p
+           (setf (aref header 12) #x21          ; version 2, PROXY
+                 (aref header 13) #x11          ; TCP over IPv4
+                 (aref header 15) 12)           ; address block length
+           (replace header source :start1 16)
+           (replace header destination :start1 20)
+           (setf (aref header 24) (ldb (byte 8 8) source-port) (aref header 25) (ldb (byte 8 0) source-port)
+                 (aref header 26) (ldb (byte 8 8) destination-port)
+                 (aref header 27) (ldb (byte 8 0) destination-port))
+           header)
+          (t (setf (aref header 12) #x20)       ; version 2, LOCAL; family and length 0
+             (subseq header 0 16)))))
+
+(defun proxy-protocol-v2-header-for (client-socket)
+  "The PROXY v2 header describing CLIENT-SOCKET: its peer is the original client
+   and, since sk_lookup steers the connection without rewriting it, its local
+   name is the address the client dialed."
+  (multiple-value-bind (source source-port) (ignore-errors (sb-bsd-sockets:socket-peername client-socket))
+    (multiple-value-bind (destination destination-port) (ignore-errors (sb-bsd-sockets:socket-name client-socket))
+      (if (and source destination)
+          (proxy-protocol-v2-header source source-port destination destination-port)
+          (proxy-protocol-v2-header #() 0 #() 0)))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Byte plumbing.
 
 (defun l4-copy (from-socket to-socket)
@@ -125,15 +165,23 @@
   mode dispatcher resolver)             ; dispatcher is hot-swappable
 
 (defun l4-connect-backend (resolver backend)
-  "Resolve BACKEND and open a socket to it, or NIL."
+  "Resolve BACKEND and open a socket to it. Returns (values socket proxy-protocol),
+   the version of PROXY header the backend asked for, or NIL."
   (when backend
-    (multiple-value-bind (host port) (resolve-gateway-backend backend resolver)
+    (multiple-value-bind (host port reason proxy-protocol) (resolve-gateway-backend backend resolver)
+      (declare (ignore reason))
       (when host
         (handler-case
             (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
               (sb-bsd-sockets:socket-connect socket (sb-bsd-sockets:make-inet-address host) port)
-              socket)
+              (values socket proxy-protocol))
           (error () nil))))))
+
+(defun l4-send-all (socket octets)
+  "Send all of OCTETS on SOCKET."
+  (let ((sent 0) (end (length octets)))
+    (loop while (< sent end)
+          do (incf sent (sb-bsd-sockets:socket-send socket (subseq octets sent end) (- end sent))))))
 
 (defun l4-peek-client-hello (client-socket)
   "Read exactly one TLS ClientHello record from CLIENT-SOCKET. Returns
@@ -165,7 +213,14 @@
            (:tls (multiple-value-bind (bytes sni) (l4-peek-client-hello client-socket)
                    (setf prefix bytes prefix-end (length bytes)
                          backend (funcall dispatcher sni)))))
-         (let ((backend-socket (l4-connect-backend resolver backend)))
+         (multiple-value-bind (backend-socket proxy-protocol) (l4-connect-backend resolver backend)
+           (when backend-socket
+             ;; The header must precede every client byte, the replayed ClientHello
+             ;; included; a backend that cannot take it gets no connection.
+             (when (eql proxy-protocol 2)
+               (unless (ignore-errors (l4-send-all backend-socket (proxy-protocol-v2-header-for client-socket)) t)
+                 (ignore-errors (sb-bsd-sockets:socket-close backend-socket))
+                 (setf backend-socket nil))))
            (when backend-socket
              (let ((closed nil))
                (flet ((close-both ()
