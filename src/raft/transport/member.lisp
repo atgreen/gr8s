@@ -674,27 +674,40 @@ Normal replication continues while the barrier drains outstanding application wr
           (slot-value request (find-symbol (symbol-name variant) :gr8s.node.v1)) payload)
     request))
 
-(defun raft-link-relay-operation (member link variant node-name payload)
+(defun raft-link-relay-stub (member link)
+  "LINK's operation-relay stub, connecting it first when it has none. Return the stub and
+whether it was connected just now."
+  (let ((stub (raft-peer-link-relay-stub link)))
+    (if stub
+        (values stub nil)
+        (let ((channel (gr8s.security::make-raft-channel
+                        (raft-member-credentials member)
+                        (raft-peer-link-host link) (raft-peer-link-port link) 2)))
+          (setf (raft-peer-link-relay-channel link) channel
+                (raft-peer-link-relay-stub link) (gr8s.node.v1::make-raft-transport-stub channel))
+          (values (raft-peer-link-relay-stub link) t)))))
+
+(defun raft-link-relay-operation (member link variant node-name payload
+                                  &key (relay #'gr8s.node.v1::raft-transport-relay-operation))
   "Send one operation frame to LINK. Return true when that peer accepted it, and as a
-second value the reason it gave when it did not."
+second value the reason it gave when it did not. A cached connection the peer has since
+dropped, as a restart does, fails as it is written to: the frame never reached the new
+process, so it goes again once on a new connection (podster-3ao). A timeout doesn't:
+the frame may have arrived, and an operation must not start twice."
   (bt:with-lock-held ((raft-peer-link-relay-lock link))
-    (handler-case
-        (let ((stub
-                (or (raft-peer-link-relay-stub link)
-                    (let ((channel
-                            (gr8s.security::make-raft-channel
-                             (raft-member-credentials member)
-                             (raft-peer-link-host link) (raft-peer-link-port link) 2)))
-                      (setf (raft-peer-link-relay-channel link) channel
-                            (raft-peer-link-relay-stub link)
-                            (gr8s.node.v1::make-raft-transport-stub channel))))))
-          (let ((result (gr8s.node.v1::raft-transport-relay-operation
-                         stub (make-routed-operation member variant node-name payload) :timeout 3)))
-            (values (slot-value result 'gr8s.node.v1::accepted)
-                    (slot-value result 'gr8s.node.v1::error-message))))
-      ((or error sb-ext:timeout) (condition)
-        (raft-link-drop-relay link)
-        (values nil (princ-to-string condition))))))
+    (loop
+      (multiple-value-bind (stub fresh) (raft-link-relay-stub member link)
+        (handler-case
+            (let ((result (funcall relay stub (make-routed-operation member variant node-name payload)
+                                   :timeout 3)))
+              (return (values (slot-value result 'gr8s.node.v1::accepted)
+                              (slot-value result 'gr8s.node.v1::error-message))))
+          ((or error sb-ext:timeout) (condition)
+            (raft-link-drop-relay link)
+            ;; A deadline, or the peer's own answer, is an error too: only a
+            ;; connection that failed under the frame sends it again.
+            (unless (and (not fresh) (typep condition '(or stream-error usocket:socket-error)))
+              (return (values nil (princ-to-string condition))))))))))
 
 (defun raft-member-route-node-operation (member variant target-member node-name payload)
   "Route a node-operation frame through MEMBER's authenticated peer links.

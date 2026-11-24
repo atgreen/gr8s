@@ -131,6 +131,49 @@ bring their numbering together once, when the last of them has been upgraded:
 clients see each object modified once, and a watch on Pods or Nodes lists
 again. See [HA consistency](high-availability.md).
 
+### Upgrading with `gr8s upgrade`
+
+`gr8s upgrade` does the same, host by host, through the cluster API. Each release
+is published as a signed OCI artifact, `ghcr.io/atgreen/gr8s-packages:VERSION`,
+holding its RPMs, DEBs and executables. A host installs the one it was installed
+from, and only after checking the release's Ed25519 signature against the release
+keys the gr8s it runs carries.
+
+```sh
+gr8s upgrade plan  --to v1.37.2-gr8s.8    # what would happen; changes nothing
+gr8s upgrade apply --to v1.37.2-gr8s.8    # do it, after asking
+gr8s upgrade status                       # how far it has come
+gr8s upgrade rollback                     # each host back to the release it ran
+```
+
+`apply` upgrades the voters one at a time, the leader last after handing its
+leadership on, then the agents, and waits for each host to come back on the
+release. It refuses a step that would leave too few votes for a quorum while a
+voter restarts; `--allow-quorum-loss` accepts the outage instead. A node that is
+away is upgraded when it returns. The witness has no API to be upgraded through:
+run `sudo gr8s upgrade self --to VERSION` on its host. Progress is kept in a
+`ClusterUpgrade` (`kubectl get clusterupgrades`), so running `apply` again
+carries on from where it stopped.
+
+When every voter runs the release, `apply` finalizes the upgrade: the cluster may
+then use the store and log formats the release introduces. A member running a
+release too old for those formats refuses to start, saying so. `rollback` is
+possible only until then.
+
+For a cluster that can't reach ghcr.io, copy a release to your own registry, then
+name it there:
+
+```sh
+gr8s upgrade mirror --from v1.37.2-gr8s.8 --to registry.example:5000/gr8s/packages:v1.37.2-gr8s.8
+gr8s upgrade apply --to registry.example:5000/gr8s/packages:v1.37.2-gr8s.8
+```
+
+Hosts check the registry's certificate as they check it for images (`--registry-ca`
+on `serve` and `agent`). A host running a gr8s from before `gr8s upgrade` must be
+upgraded once with `sudo gr8s upgrade self --to VERSION`, or as below.
+
+### Upgrading by hand
+
 Re-run `install.sh` with the replacement binary or release digest and the
 desired persisted arguments. The installer retains exactly one prior binary as
 `/usr/local/bin/gr8s.previous`, atomically publishes the new files, restarts the

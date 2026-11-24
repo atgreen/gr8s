@@ -884,7 +884,8 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
                                   (generate-node-key-and-csr node-name private-key-path)
                                   #())
                               :boot-id (generate-uid)
-                              :agent-version "gr8s"
+                              :agent-version (gr8s.foundation::kubernetes-git-version)
+                              :agent-architecture (gr8s.resources::native-node-architecture)
                               :underlay-address
                               (or underlay-address (node-channel-underlay-address channel))
                               :capabilities (node-session-capabilities capabilities gateway-config-handler one-shot-p)

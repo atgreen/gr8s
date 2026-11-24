@@ -2679,6 +2679,27 @@ file it begins. A slow client holds the reading up: the file is never read whole
     (error (condition)
       (finish-node-exec-operation operation :error (princ-to-string condition)))))
 
+(defun start-node-upgrade-operation (node-runtime request emit)
+  "Upgrade this host as REQUEST, an UPGRADE operation, asks, reporting each step."
+  (let ((operation (make-node-exec-operation node-runtime request nil nil emit)))
+    (remember-node-exec-operation node-runtime operation)
+    (emit-node-exec-response operation gr8s.node.v1::+operationstatus-operation_status_accepted+)
+    (setf (node-exec-operation-thread operation)
+          (bt:make-thread
+           (lambda ()
+             (handler-case
+                 (progn
+                   (gr8s.upgrade:run-host-upgrade (slot-value request 'gr8s.node.v1::upgrade-reference)
+                                     (lambda (line)
+                                       (emit-node-exec-stream operation gr8s.node.v1::+streamchannel-stream_channel_stdout+
+                                                              (trivial-utf-8:string-to-utf-8-bytes
+                                                               (format nil "~A~%" line)))))
+                   (finish-node-exec-operation operation))
+               (error (condition)
+                 (finish-node-exec-operation operation :error (princ-to-string condition)))))
+           :name "gr8s host upgrade"))
+    operation))
+
 (defun start-node-logs-operation (node-runtime request emit)
   "Stream the log REQUEST names, as RUN-NODE-LOGS-OPERATION does."
   (assigned-operation-pod node-runtime request)
@@ -2723,6 +2744,9 @@ errors becomes a failed response; an error on any other variant is re-signaled."
            ((= (slot-value payload 'gr8s.node.v1::kind)
                gr8s.node.v1::+operationkind-operation_kind_logs+)
             (start-node-logs-operation node-runtime payload emit))
+           ((= (slot-value payload 'gr8s.node.v1::kind)
+               gr8s.node.v1::+operationkind-operation_kind_upgrade+)
+            (start-node-upgrade-operation node-runtime payload emit))
            ((= (slot-value payload 'gr8s.node.v1::kind)
                gr8s.node.v1::+operationkind-operation_kind_slynk+)
             (start-node-slynk-operation node-runtime payload emit))

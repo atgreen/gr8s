@@ -597,8 +597,12 @@ otherwise, with the reasons and messages upstream kubelet uses."
                "daemonEndpoints" (core-object "kubeletEndpoint" (core-object "Port" (node-record-kubelet-port node)))
                "capacity" (node-resource-list node)
                "allocatable" (node-resource-list node :allocatable t)
-               "nodeInfo" (core-object "operatingSystem" "linux" "architecture" (native-node-architecture)
-                                        "kubeletVersion" (kubernetes-git-version)))))))
+               ;; What the node's agent reported. An agent too old to report its version
+               ;; shows none, rather than the control plane's: a node that hasn't been
+               ;; upgraded must not look as if it had (podster-igs).
+               "nodeInfo" (core-object "operatingSystem" "linux"
+                                       "architecture" (or (node-record-agent-architecture node) (native-node-architecture))
+                                       "kubeletVersion" (or (node-record-agent-version node) "v0.0.0-unknown")))))))
 
 (defun node-write-input (node method)
   "Return the requested Node object from a typed or JSON PUT, or a patch applied to NODE's view."

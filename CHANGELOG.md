@@ -7,6 +7,41 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ## [Unreleased]
 
+### Added
+
+- `gr8s upgrade` rolls a cluster onto a signed gr8s release, host by host,
+  through the cluster API (podster-igs). `plan` shows each host's step and
+  refuses what isn't safe: a voter whose restart would leave too few votes for
+  a quorum, a downgrade, a release with no package for a host's architecture.
+  `apply` upgrades the voters one at a time, hands the leadership on before
+  upgrading the leader, then the agents, and waits for each host to come back
+  on the release; a node that is away is upgraded when it returns. Progress is
+  kept in a `ClusterUpgrade`, so `apply` resumes, and `status` and `rollback`
+  read it. `finalize` lets the cluster use a release's new formats once every
+  voter runs it; a member too old for them refuses to start. `self` upgrades
+  one host as root, as for the witness, `mirror` copies a release to another
+  registry, and `publish` is what the release workflow pushes with.
+- Releases are published as a signed OCI artifact,
+  `ghcr.io/atgreen/gr8s-packages:<tag>`, holding the RPMs, DEBs and executables
+  for each architecture and a `release.json` signed with the gr8s release key
+  (Ed25519). A host installs only a package that release.json, under a key the
+  gr8s it runs carries, vouches for.
+
+### Changed
+
+- A Node reports the gr8s release and architecture its own agent runs, in
+  `nodeInfo.kubeletVersion` and `nodeInfo.architecture`; they were the control
+  plane's. A node whose agent is too old to report them shows
+  `v0.0.0-unknown`, and `gr8s status` warns of it.
+- `/version` names the platform's real architecture, and adds
+  `gr8sFormatLevel`, the newest store format the member reads.
+
+### Fixed
+
+- A request relayed to a control-plane member that had restarted since the last
+  one no longer fails once with "Broken pipe": a connection that fails under the
+  frame is replaced and the frame sent again (podster-3ao).
+
 ## [v1.37.2-gr8s.7] — 2026-11-23
 
 Eighth trial pre-release. Container logs no longer stop the server: a log is
