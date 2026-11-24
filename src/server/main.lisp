@@ -961,9 +961,15 @@ authenticated tunnel as slynk and launches ICL's browser mode (icl -b
             (multiple-value-bind (status headers)
                 (gr8s.protocol::parse-http-response-head
                  (gr8s.protocol::read-http-response-head stream))
-              (declare (ignore headers))
               (unless (= status 101)
-                (error "the Kubernetes API rejected the WebSocket upgrade with HTTP ~D" status)))
+                ;; A Kubernetes Status body says why.
+                (let* ((length (min (* 64 1024) (or (ignore-errors (parse-integer (cdr (assoc :content-length headers)))) 0)))
+                       (body (make-array length :element-type '(unsigned-byte 8)))
+                       (message (ignore-errors
+                                 (read-sequence body stream)
+                                 (gethash "message" (com.inuoe.jzon:parse body)))))
+                  (error "the Kubernetes API rejected the WebSocket upgrade with HTTP ~D~@[: ~A~]"
+                         status (and (stringp message) message)))))
             (values stream socket))
         (error (condition)
           (ignore-errors (close stream))
@@ -1289,6 +1295,15 @@ built from the kubeconfig CONFIG -- the same connection `gr8s debug slynk' uses 
 returning the upstream body as octets and copying its status and content type.
 METHOD is a keyword; TARGET is the apiserver path+query. An API server that can't
 be reached, or fails mid-answer, is a 502 with the reason, not a server error."
+  (when (dashboard-websocket-request-p request)
+    (return-from dashboard-proxy-forward
+      (if (and (eq method :get) (gr8s.apiserver::true-parameter-p (hunchentoot:get-parameter "watch" request)))
+          (serve-dashboard-websocket-watch config target request)
+          ;; Answered at once: a handshake left waiting holds up every other
+          ;; WebSocket the browser opens to the dashboard.
+          (progn (setf (hunchentoot:return-code*) hunchentoot:+http-not-implemented+
+                       (hunchentoot:content-type*) "text/plain")
+                 "gr8s dashboard: only watches are relayed over a WebSocket"))))
   (let ((body (ignore-errors (hunchentoot:raw-post-data :force-binary t :request request)))
         (stream nil) (socket nil))
     (unwind-protect
@@ -1529,6 +1544,98 @@ relaying every watch event back. Returns when the WebSocket closes."
         (stop-all)
         (ignore-errors (close client)))
       "")))
+
+;;; Headlamp also watches some resources over a WebSocket of their own, as the Kubernetes
+;;; API allows: a GET ?watch=1 upgraded, each event a text message. The cluster API
+;;; watches over chunked HTTP only, so the dashboard answers the upgrade itself and relays
+;;; the watch. Passed on as a plain GET, the watch never ended, so the browser's handshake
+;;; waited it out -- minutes -- and Chrome, which opens one WebSocket to a host at a time,
+;;; held every other one behind it: the Agent tab's terminals stayed blank (podster-c7r).
+
+(defun keep-websocket-open (stream)
+  "Let STREAM, a WebSocket hunchentoot has handed over, stay quiet as long as its two ends
+like: the server's idle timeout would hang up a watch, or a terminal, with nothing to say.
+Return STREAM."
+  (loop for inner = stream then (cond ((typep inner 'flexi-streams:flexi-stream) (flexi-streams:flexi-stream-stream inner))
+                                      ((typep inner 'chunga:chunked-stream) (chunga:chunked-stream-stream inner)))
+        while inner
+        when (typep inner 'sb-sys:fd-stream)
+          do (setf (sb-impl::fd-stream-timeout inner) nil) (return))
+  stream)
+
+(defun dashboard-websocket-request-p (request)
+  "Whether REQUEST asks for a WebSocket."
+  (and (string-equal (hunchentoot:header-in :upgrade request) "websocket")
+       (hunchentoot:header-in :sec-websocket-key request)))
+
+(defun serve-dashboard-websocket-watch (config target request)
+  "Answer REQUEST's WebSocket upgrade at once, then send each event of the watch of
+TARGET, on the running cluster's API, as a text message, until either side ends it."
+  (let* ((offered (remove "" (mapcar (lambda (name) (string-trim " " name))
+                                     (uiop:split-string (or (hunchentoot:header-in :sec-websocket-protocol request) "")
+                                                        :separator '(#\,)))
+                          :test #'string=))
+         (write-lock (bt:make-lock "gr8s dashboard watch socket writer"))
+         (upstream-lock (bt:make-lock "gr8s dashboard watch socket upstream"))
+         (upstream nil)
+         (open t)
+         ;; The close status the browser gets: a normal one, unless the watch was refused.
+         (closing '(3 232))
+         client reader)
+    (setf (hunchentoot:return-code*) 101
+          (hunchentoot:content-type*) nil
+          (hunchentoot:header-out :connection) "Upgrade"
+          (hunchentoot:header-out :upgrade) "websocket"
+          (hunchentoot:header-out :sec-websocket-accept)
+          (gr8s.apiserver::websocket-accept-value (hunchentoot:header-in :sec-websocket-key request)))
+    ;; A browser that offered protocols needs one of them back.
+    (when offered (setf (hunchentoot:header-out :sec-websocket-protocol) (first offered)))
+    (setf client (keep-websocket-open (hunchentoot::start-output 101 nil)))
+    (finish-output client)
+    (labels ((send (opcode payload)
+               (bt:with-lock-held (write-lock)
+                 (ignore-errors (gr8s.protocol::write-websocket-frame client opcode payload))))
+             (hang-up ()
+               (bt:with-lock-held (upstream-lock)
+                 (setf open nil)
+                 (when upstream
+                   (ignore-errors (usocket:socket-shutdown upstream :io))))))
+      (setf reader (bt:make-thread
+                    (lambda ()
+                      (handler-case
+                          (loop (multiple-value-bind (opcode payload) (gr8s.protocol::read-websocket-frame client)
+                                  (case opcode
+                                    (8 (return))
+                                    (9 (send 10 payload)))))
+                        (error () nil))
+                      ;; The browser has gone: so has the watch.
+                      (hang-up))
+                    :name "gr8s dashboard watch socket reader"))
+      (unwind-protect
+           (handler-case
+               (multiple-value-bind (stream socket host port base-path) (open-debug-api-stream config)
+                 (unwind-protect
+                      (when (bt:with-lock-held (upstream-lock) (and open (setf upstream socket)))
+                        (write-dashboard-proxy-request stream "GET" host port (concatenate 'string base-path target)
+                                                       (getf config :token) nil nil)
+                        (multiple-value-bind (status headers)
+                            (gr8s.protocol::parse-http-response-head (gr8s.protocol::read-http-response-head stream))
+                          (if (= status 200)
+                              (stream-watch-events stream headers
+                                                   (lambda (event) (send 1 (trivial-utf-8:string-to-utf-8-bytes event)))
+                                                   (lambda () open))
+                              ;; A watch refused ends in a close the browser reads as an error.
+                              (setf closing (append '(3 243) (coerce (trivial-utf-8:string-to-utf-8-bytes
+                                                                      (format nil "upstream watch returned HTTP ~D" status))
+                                                                     'list))))))
+                   (ignore-errors (close stream))
+                   (ignore-errors (usocket:socket-close socket))))
+             (error () nil))
+        (send 8 (coerce closing '(vector (unsigned-byte 8))))
+        (hang-up)
+        (ignore-errors (close client))
+        (ignore-errors (bt:join-thread reader))))
+    ""))
 
 (defvar *dashboard-verbose* nil
   "True when `gr8s dashboard --verbose' asked for every request and server error on stderr.")
@@ -3735,8 +3842,10 @@ does not require starting gr8s with --debug-slynk-port.
 ICL-related runs on the node. --no-launch prints the `icl -b --connect` line
 instead, for when icl is not installed or to compose another Slynk client.
 
-In the GR8S package, useful forms include (debug-threads), (debug-backtraces),
-(debug-pod \"default\" \"web\"), and (debug-journal 20). These helpers inspect the
+Useful forms include (debug-threads), (debug-backtraces), (debug-pod \"default\"
+\"web\"), and (debug-journal 20). They live in the GR8S.APISERVER package, and a
+Slynk session starts in CL-USER: evaluate (in-package :gr8s.apiserver) first, or
+qualify them, as in (gr8s.apiserver::debug-threads). These helpers inspect the
 target process's local context; choose the node/member relevant to the failure.
 Slynk evaluates Lisp with the process's privileges: inspect first and obtain
 operator authorization before evaluating forms that mutate live state.
@@ -3836,6 +3945,41 @@ Composes with `--dns-forward ZONE=IP` (stub-forward a zone OUT); they are
 independent -- a cluster can forward some zones upstream and serve one zone
 authoritatively. The served answer carries a short TTL so a gateway change is
 picked up within seconds. Pods resolve the same names through the cluster DNS.
+
+## Dashboard tabs for the cluster's own apps
+
+`gr8s dashboard` shows Headlamp, Hubble UI, an Agent terminal and a REPL. A
+cluster-scoped `DashboardTab` (`dashboard.gr8s.io/v1`) adds a tab for one of the
+cluster's own web apps, such as Grafana, to every reader's dashboard. Its CRD is
+not built in, and release packages don't carry it; install it once per cluster:
+
+    kubectl apply -f https://raw.githubusercontent.com/atgreen/gr8s/main/deploy/crds/dashboardtabs.dashboard.gr8s.io.yaml
+
+Then name the app's Service:
+
+    kubectl apply -f - <<'EOF'
+    apiVersion: dashboard.gr8s.io/v1
+    kind: DashboardTab
+    metadata: {name: grafana}
+    spec:
+      title: Grafana     # the tab's label, at most 40 characters; the name by default
+      service: {namespace: monitoring, name: grafana, port: 80}   # port by number or name
+      path: /            # where the tab opens in the app; / by default
+    EOF
+
+The dashboard reads the DashboardTabs each time its page loads: reload it to see
+a new tab. Deleting a DashboardTab removes its tab. The app is reached through the
+cluster API's services/proxy with the reader's kubeconfig, so no Ingress or route
+to Pods is needed, but each reader needs `get` on `services/proxy` in the app's
+namespace. Check the path the tab uses with
+`kubectl get --raw /api/v1/namespaces/NS/services/NAME:PORT/proxy/`. List the
+tabs with `kubectl get dashboardtabs`.
+
+Creating a DashboardTab is an RBAC decision (`create` on `dashboardtabs`): it
+puts the app in front of every reader. Each app tab is served from a loopback
+origin of its own, behind a per-tab secret, so the app's code can't reach the
+Headlamp proxy that acts with the reader's credentials. The dashboard frames the
+app even when it sends X-Frame-Options or a CSP frame-ancestors directive.
 
 ## Maintenance and agent working practices
 

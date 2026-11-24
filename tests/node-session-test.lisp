@@ -1565,6 +1565,8 @@
              (merge-pathnames "worker-a/identity.json" path))
            (control (gr8s.agent::make-node-session-control))
            (agent-thread nil)
+           ;; An agent from before logs were streamed answers a LOGS request whole.
+           (old-agent t)
            (control-runtime
              (gr8s.controllers::make-control-plane-runtime store server))
            (reconciler (make-reconciler store control-runtime))
@@ -1583,12 +1585,15 @@
                           node-runtime snapshot))
                        :operation-handler
                        (lambda (variant payload emit)
-                         (unless (eq variant :operation-request)
-                           (error "Unexpected operation payload ~S" variant))
-                         (dolist (reply
-                                  (gr8s.agent::handle-node-operation
-                                   node-runtime payload))
-                           (funcall emit (car reply) (cdr reply))))
+                         (if (or (not (eq variant :operation-request))
+                                 (and (not old-agent)
+                                      (= (slot-value payload 'gr8s.node.v1::kind)
+                                         gr8s.node.v1::+operationkind-operation_kind_logs+)))
+                             (gr8s.agent::dispatch-node-operation node-runtime variant payload emit)
+                             (dolist (reply
+                                      (gr8s.agent::handle-node-operation
+                                       node-runtime payload))
+                               (funcall emit (car reply) (cdr reply)))))
                        :reconnect-delay 0.01
                        :control control))
                     :name "gr8s remote log test agent"))
@@ -1610,6 +1615,32 @@
                    "hello from worker-a\n")
              (is (string= "hello from worker-a\n"
                           (runtime-logs control-runtime (pod-uid pod) "web")))
+             (flet ((send-logs (&rest selection)
+                      (let* ((pieces nil) (offsets nil)
+                             (end (apply #'gr8s.runtime:runtime-send-logs control-runtime (pod-uid pod) "web"
+                                         (lambda (piece offset) (push piece pieces) (push offset offsets))
+                                         selection)))
+                        (values (trivial-utf-8:utf-8-bytes-to-string
+                                 (apply #'concatenate '(vector (unsigned-byte 8)) (reverse pieces)))
+                                (reverse offsets) end))))
+               ;; An older agent sends the whole log whatever is asked: what precedes
+               ;; the offset is dropped here.
+               (multiple-value-bind (text offsets end) (send-logs :start-offset 6)
+                 (is (string= "from worker-a\n" text))
+                 (is (equal '(6) offsets))
+                 (is (= 20 end)))
+               (setf old-agent nil)
+               ;; A current one begins where it's asked, and says where.
+               (multiple-value-bind (text offsets end) (send-logs :start-offset 6)
+                 (is (string= "from worker-a\n" text))
+                 (is (equal '(6) offsets))
+                 (is (= 20 end)))
+               ;; An offset past the end means the file was replaced: begin again.
+               (multiple-value-bind (text offsets end) (send-logs :start-offset 99)
+                 (is (string= "hello from worker-a\n" text))
+                 (is (equal '(0) offsets))
+                 (is (= 20 end)))
+               (setf old-agent t))
              (gr8s.runtime::set-fake-runtime-exec-result
               fake-runtime
               (gr8s.runtime::make-runtime-exec-result

@@ -332,6 +332,10 @@ message OperationStream {
   bool eof = 5;
   // PORT_FORWARD and DIAL: how much more input the node has written to the Pod.
   uint64 acknowledged_bytes = 6;
+  // LOGS: data begins at byte log_offset of the log file. An older node doesn't say,
+  // and sends the whole file from its start.
+  bool log_positioned = 7;
+  uint64 log_offset = 8;
 }
 
 message ServerHello {
@@ -499,6 +503,14 @@ message OperationRequest {
   string dial_address = 21;
   // FLOWS: keep streaming new flow events after the recent ones.
   bool flows_follow = 22;
+  // LOGS: where in the log file to begin -- with log_tail, no earlier than its last
+  // log_tail_lines lines; else no earlier than the entries at or after
+  // log_since_unix_seconds, when not zero; else at byte log_start_offset. A node may
+  // begin earlier, never later. An older node ignores them and sends the whole file.
+  bool log_tail = 23;
+  uint64 log_tail_lines = 24;
+  int64 log_since_unix_seconds = 25;
+  uint64 log_start_offset = 26;
 }
 
 message OperationInput {

@@ -675,7 +675,8 @@ Normal replication continues while the barrier drains outstanding application wr
     request))
 
 (defun raft-link-relay-operation (member link variant node-name payload)
-  "Send one operation frame to LINK. Return true when that peer accepted it."
+  "Send one operation frame to LINK. Return true when that peer accepted it, and as a
+second value the reason it gave when it did not."
   (bt:with-lock-held ((raft-peer-link-relay-lock link))
     (handler-case
         (let ((stub
@@ -687,24 +688,26 @@ Normal replication continues while the barrier drains outstanding application wr
                       (setf (raft-peer-link-relay-channel link) channel
                             (raft-peer-link-relay-stub link)
                             (gr8s.node.v1::make-raft-transport-stub channel))))))
-          (slot-value
-           (gr8s.node.v1::raft-transport-relay-operation
-            stub (make-routed-operation member variant node-name payload) :timeout 3)
-           'gr8s.node.v1::accepted))
-      ((or error sb-ext:timeout) ()
+          (let ((result (gr8s.node.v1::raft-transport-relay-operation
+                         stub (make-routed-operation member variant node-name payload) :timeout 3)))
+            (values (slot-value result 'gr8s.node.v1::accepted)
+                    (slot-value result 'gr8s.node.v1::error-message))))
+      ((or error sb-ext:timeout) (condition)
         (raft-link-drop-relay link)
-        nil))))
+        (values nil (princ-to-string condition))))))
 
 (defun raft-member-route-node-operation (member variant target-member node-name payload)
   "Route a node-operation frame through MEMBER's authenticated peer links.
 With TARGET-MEMBER, send only there. Without it, offer a request to peers until
 the member owning NODE-NAME's live agent session accepts it. Returns that peer's
-id, or NIL."
+id, or NIL and, from TARGET-MEMBER, the reason it gave."
   (if target-member
       (let ((link (gethash target-member (raft-member-links member))))
-        (and link
-             (raft-link-relay-operation member link variant node-name payload)
-             target-member))
+        (if link
+            (multiple-value-bind (accepted reason)
+                (raft-link-relay-operation member link variant node-name payload)
+              (values (and accepted target-member) reason))
+            (values nil "it is not a peer of this member")))
       (let ((links nil))
         (maphash (lambda (id link) (declare (ignore id)) (push link links))
                  (raft-member-links member))

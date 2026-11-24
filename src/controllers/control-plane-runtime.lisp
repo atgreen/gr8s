@@ -219,6 +219,56 @@
               (slot-value message 'gr8s.node.v1::data))
              output)))))))
 
+(defparameter *node-log-output-timeout-seconds* 30
+  "How long a log read waits for the node's next piece before giving up on it.")
+
+(defmethod runtime-send-logs ((runtime control-plane-runtime) uid container function
+                              &key previous tail-lines since (start-offset 0))
+  "Ask the Pod's node for the log, a piece at a time, acknowledging each once FUNCTION
+has taken it. An older node ignores the selection and sends its whole file, saying
+nothing of where its pieces begin: they begin at its start, and what precedes
+START-OFFSET is dropped here."
+  (let ((pod (control-plane-pod-by-uid runtime uid)))
+    (unless (and pod (pod-node-name pod))
+      (error 'runtime-error :message "Pod is not assigned to a node"))
+    (let* ((request (make-instance
+                     'gr8s.node.v1::operation-request
+                     :operation-id (generate-uid)
+                     :kind gr8s.node.v1::+operationkind-operation_kind_logs+
+                     :namespace (pod-namespace pod) :pod (pod-name pod) :pod-uid uid
+                     :container container :stdout t :previous (not (null previous))
+                     :acknowledges-output t
+                     :log-tail (not (null tail-lines)) :log-tail-lines (or tail-lines 0)
+                     :log-since-unix-seconds (if since (- since (encode-universal-time 0 0 0 1 1 1970 0)) 0)
+                     :log-start-offset start-offset))
+           (session (make-control-plane-exec-session
+                     (queue-node-operation (control-plane-runtime-node-server runtime) (pod-node-name pod) request)))
+           ;; Where the next byte begins in the file, once the node has sent any.
+           (position nil)
+           (done nil))
+      (unwind-protect
+           (loop for cursor = 0 then next
+                 for (message next finished) = (multiple-value-list
+                                                (runtime-next-exec-session-output
+                                                 runtime session cursor :timeout *node-log-output-timeout-seconds*))
+                 until finished
+                 do (let* ((data (slot-value message 'gr8s.node.v1::data))
+                           (offset (if (slot-value message 'gr8s.node.v1::log-positioned)
+                                       (slot-value message 'gr8s.node.v1::log-offset)
+                                       (or position 0)))
+                           (skip (if (slot-value message 'gr8s.node.v1::log-positioned)
+                                     0
+                                     (min (length data) (max 0 (- start-offset offset))))))
+                      (setf position (+ offset (length data)))
+                      (when (or (slot-value message 'gr8s.node.v1::log-positioned) (< skip (length data)))
+                        (funcall function (if (plusp skip) (subseq data skip) data) (+ offset skip))))
+                 finally (runtime-exec-session-exit-code runtime session)
+                         (setf done t)
+                         (return (or position start-offset)))
+        (unless done
+          (ignore-errors (runtime-cancel-exec-session runtime session "log reader finished")))
+        (runtime-release-exec-session runtime session)))))
+
 (defmethod runtime-exec-url
     ((runtime control-plane-runtime) uid container command
      &key stdin stdout stderr tty)

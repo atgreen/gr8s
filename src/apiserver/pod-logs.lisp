@@ -12,25 +12,41 @@
   "^(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})) (?:stdout|stderr) ([PF]) (.*)$"
   "One CRI log line: its RFC 3339 time, stream, partial or full tag, and content.")
 
+(defstruct (log-entry-joiner (:constructor make-log-entry-joiner ()))
+  "The parts of an entry whose lines, tagged P, wait for the line that ends it."
+  (parts nil)
+  (time nil))
+
+(defun join-log-line (joiner line function &key (terminated t))
+  "Call FUNCTION with the (time . text) entry that LINE, one log line without its newline,
+completes, if any; its text ends in a newline. A partial line joins the next one and keeps
+the first part's time. A line that is not in CRI format is an entry of its own, with a NIL
+time and, unless it was TERMINATED, no newline."
+  (multiple-value-bind (match groups) (cl-ppcre:scan-to-strings +cri-log-line+ line)
+    (if match
+        (progn
+          (unless (log-entry-joiner-time joiner) (setf (log-entry-joiner-time joiner) (aref groups 0)))
+          (push (aref groups 2) (log-entry-joiner-parts joiner))
+          (when (equal (aref groups 1) "F")
+            (funcall function (cons (log-entry-joiner-time joiner)
+                                    (format nil "~{~A~}~%" (reverse (log-entry-joiner-parts joiner)))))
+            (setf (log-entry-joiner-parts joiner) nil (log-entry-joiner-time joiner) nil)))
+        (funcall function (cons nil (if terminated (format nil "~A~%" line) line))))))
+
+(defun finish-log-entries (joiner function)
+  "Call FUNCTION with the unfinished entry JOINER holds, without a newline, if any."
+  (when (log-entry-joiner-parts joiner)
+    (funcall function (cons (log-entry-joiner-time joiner)
+                            (format nil "~{~A~}" (reverse (log-entry-joiner-parts joiner)))))
+    (setf (log-entry-joiner-parts joiner) nil (log-entry-joiner-time joiner) nil)))
+
 (defun parse-pod-log-entries (raw)
-  "Return (time . text) entries from RAW, with text ending in the line's newline.
-A partial line joins the next one and keeps the first part's time. A line that is
-not in CRI format is kept whole, with a NIL time."
-  (let ((entries nil) (pending nil) (pending-time nil))
-    (dolist (line (uiop:split-string (string-right-trim '(#\Newline) raw) :separator '(#\Newline)))
-      (multiple-value-bind (match groups) (cl-ppcre:scan-to-strings +cri-log-line+ line)
-        (if match
-            (let ((time (aref groups 0)) (tag (aref groups 1)) (content (aref groups 2)))
-              (unless pending-time (setf pending-time time))
-              (push content pending)
-              (when (equal tag "F")
-                (push (cons pending-time
-                            (format nil "~{~A~}~%" (reverse pending)))
-                      entries)
-                (setf pending nil pending-time nil)))
-            (push (cons nil (format nil "~A~%" line)) entries))))
-    (when pending
-      (push (cons pending-time (format nil "~{~A~}" (reverse pending))) entries))
+  "Return (time . text) entries from RAW, as JOIN-LOG-LINE makes them."
+  (let ((entries nil) (joiner (make-log-entry-joiner)))
+    (flet ((collect (entry) (push entry entries)))
+      (dolist (line (uiop:split-string (string-right-trim '(#\Newline) raw) :separator '(#\Newline)))
+        (join-log-line joiner line #'collect))
+      (finish-log-entries joiner #'collect))
     (nreverse entries)))
 
 (defun pod-log-entry-seconds (time)
@@ -88,13 +104,94 @@ Text with no CRI lines, as from a non-CRI runtime, passes through unless a filte
           (time (or (ignore-errors (pod-deletion-time time))
                     (core-resource-error 400 "BadRequest" "Invalid sinceTime"))))))
 
-(defun format-pod-logs-for-request (raw)
-  "Apply the current request's log options to RAW."
-  (format-pod-logs raw
-                   :tail-lines (log-integer-parameter "tailLines" 0)
-                   :limit-bytes (log-integer-parameter "limitBytes" 1)
-                   :timestamps (true-parameter-p (hunchentoot:parameter "timestamps"))
-                   :since (pod-logs-since)))
+(defun pod-log-request-options ()
+  "The current request's log selection, as keyword arguments of SEND-POD-LOGS."
+  (list :tail-lines (log-integer-parameter "tailLines" 0)
+        :limit-bytes (log-integer-parameter "limitBytes" 1)
+        :timestamps (true-parameter-p (hunchentoot:parameter "timestamps"))
+        :since (pod-logs-since)))
+
+(defparameter +log-write-batch-bytes+ (* 64 1024)
+  "How much clean log text SEND-POD-LOGS gathers before passing it on.")
+
+(defun send-pod-logs (reconciler pod container write
+                      &key previous tail-lines limit-bytes timestamps since (start-offset 0) (last-line t))
+  "Call WRITE with CONTAINER's log for POD as clean text, a string at a time, as the
+selection options ask, reading the log a piece at a time: only TAIL-LINES entries are
+ever held. Begin at byte START-OFFSET of the log file, and with LAST-LINE take a last line
+that has no newline yet. Return the offset after the last line taken, from which a follow
+goes on, whether LIMIT-BYTES was reached, and how many bytes were written."
+  (let ((joiner (make-log-entry-joiner))
+        (line (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
+        ;; The file offset after the last whole line, and where LINE's bytes begin.
+        (taken start-offset)
+        (tail nil) (tail-end nil) (tail-count 0)
+        (written 0)
+        ;; Text on its way to WRITE, which takes it in batches rather than line by line.
+        (batch (make-string-output-stream)) (batched 0))
+    (labels ((flush ()
+               (when (plusp batched)
+                 (funcall write (get-output-stream-string batch))
+                 (setf batched 0)))
+             (out (text size)
+               (write-string text batch)
+               (when (>= (incf batched size) +log-write-batch-bytes+) (flush)))
+             (show (entry)
+               (let* ((text (if (and timestamps (car entry)) (concatenate 'string (car entry) " " (cdr entry)) (cdr entry)))
+                      (size (trivial-utf-8:utf-8-byte-length text)))
+                 (when (and limit-bytes (>= (+ written size) limit-bytes))
+                   (let ((rest (truncate-log-bytes text (- limit-bytes written))))
+                     (out rest (trivial-utf-8:utf-8-byte-length rest))
+                     (flush)
+                     (setf written limit-bytes)
+                     (throw 'pod-log-limit t)))
+                 (out text size)
+                 (incf written size)))
+             (select (entry)
+               (let ((seconds (and since (pod-log-entry-seconds (car entry)))))
+                 (cond ((and seconds (< seconds since)))
+                       ((null tail-lines) (show entry))
+                       ((zerop tail-lines))
+                       (t (let ((cell (list entry)))
+                            (if tail-end (setf (cdr tail-end) cell) (setf tail cell))
+                            (setf tail-end cell)
+                            (when (> (incf tail-count) tail-lines)
+                              (pop tail)
+                              (decf tail-count)))))))
+             (take-line (bytes start end &key (terminated t))
+               (join-log-line joiner (sb-ext:octets-to-string bytes :start start :end end
+                                                                    :external-format '(:utf-8 :replacement #\?))
+                              #'select :terminated terminated)))
+      (let ((limited
+              (catch 'pod-log-limit
+                (reconciler-send-logs
+                 reconciler (pod-uid pod) container
+                 (lambda (piece offset)
+                   ;; A piece that doesn't go on from the last one starts the file again.
+                   (unless (= offset (+ taken (length line)))
+                     (setf (fill-pointer line) 0 taken offset))
+                   (loop for start = 0 then (1+ newline)
+                         for newline = (position 10 piece :start start)
+                         while newline
+                         do (if (zerop (length line))
+                                (take-line piece start newline)
+                                (progn
+                                  (loop for index from start below newline do (vector-push-extend (aref piece index) line))
+                                  (take-line line 0 (length line))
+                                  (setf (fill-pointer line) 0)))
+                            (setf taken (+ offset newline 1))
+                         finally (loop for index from start below (length piece)
+                                       do (vector-push-extend (aref piece index) line)))
+                   (flush))
+                 :previous previous :tail-lines tail-lines :since since :start-offset start-offset)
+                (when (and last-line (plusp (length line)))
+                  (take-line line 0 (length line) :terminated nil)
+                  (incf taken (length line)))
+                (finish-log-entries joiner #'select)
+                (mapc #'show tail)
+                (flush)
+                nil)))
+        (values taken limited written)))))
 
 (defun pod-container-finished-p (store pod container)
   "Return whether CONTAINER's latest report shows it terminated, or POD is gone or finished."
@@ -112,66 +209,83 @@ Text with no CRI lines, as from a non-CRI runtime, passes through unless a filte
           (or (and status (member (gethash "phase" status) '("Succeeded" "Failed") :test #'equal))
               (and item (hash-table-p (gethash "state" item)) (gethash "terminated" (gethash "state" item))))))))
 
-(defun serve-followed-pod-logs (store reconciler pod container text offset)
-  "Send TEXT, then stream whole new log lines past OFFSET until the container ends or the client leaves."
-  (setf (hunchentoot:content-type*) "text/plain; charset=utf-8")
-  (let ((stream (hunchentoot:send-headers))
-        (timestamps (true-parameter-p (hunchentoot:parameter "timestamps"))))
-    (flet ((send (string)
-             (when (plusp (length string))
-               (write-sequence (trivial-utf-8:string-to-utf-8-bytes string) stream)
+(defun serve-followed-pod-logs (store reconciler pod container options)
+  "Send CONTAINER's log as OPTIONS select it, then whole new lines as they are written,
+until the container ends, the client leaves, or OPTIONS' limitBytes is reached."
+  (let ((stream nil) (limit (getf options :limit-bytes)))
+    (flet ((send-text (text)
+             (unless stream
+               (setf (hunchentoot:content-type*) "text/plain; charset=utf-8"
+                     stream (hunchentoot:send-headers))
+               ;; A follow lasts as long as its client likes; it must not hold the
+               ;; request lease a checkpoint waits for.
+               (gr8s.store::release-store-request))
+             (when (plusp (length text))
+               (write-sequence (trivial-utf-8:string-to-utf-8-bytes text) stream)
                (finish-output stream))))
-      (handler-case
-          (progn
-            (send text)
-            ;; A follow lasts as long as its client likes; it must not hold the
-            ;; request lease a checkpoint waits for.
-            (gr8s.store::release-store-request)
+      (multiple-value-bind (offset limited written)
+          (apply #'send-pod-logs reconciler pod container #'send-text :last-line nil options)
+        (send-text "")
+        (handler-case
             (loop
-              ;; A quiet container sends nothing, so a failed send would never
-              ;; tell us the client has gone.
-              (when (api-watch-client-departed-p) (return))
-              (let* ((finished (handler-case (pod-container-finished-p store pod container)
-                                 ;; The store is closed for a moment; ask again next time.
-                                 (kubernetes-error () nil)))
-                     (raw (handler-case (or (reconciler-logs reconciler (pod-uid pod) container) "")
-                            (runtime-error () "")))
-                     (end (position #\Newline raw :from-end t)))
-                (when (and end (>= end offset))
-                  (send (format-pod-logs (subseq raw offset (1+ end)) :timestamps timestamps))
-                  (setf offset (1+ end)))
+              (when (or limited
+                        ;; A quiet container sends nothing, so a failed send would never
+                        ;; tell us the client has gone.
+                        (api-watch-client-departed-p))
+                (return))
+              (let ((finished (handler-case (pod-container-finished-p store pod container)
+                                ;; The store is closed for a moment; ask again next time.
+                                (kubernetes-error () nil))))
+                (handler-case
+                    (multiple-value-bind (next now-limited more)
+                        (send-pod-logs reconciler pod container #'send-text
+                                       :last-line nil :start-offset offset
+                                       :timestamps (getf options :timestamps)
+                                       :limit-bytes (and limit (- limit written)))
+                      (setf offset next limited now-limited)
+                      (incf written more))
+                  (runtime-error () nil))
                 (when finished (return)))
-              (sleep 1)))
-        ;; The headers have gone, so nothing can be reported; a client hanging
-        ;; up, whatever the transport makes of it, is how a follow usually ends.
-        (error () nil))))
+              (sleep 1))
+          ;; The headers have gone, so nothing can be reported; a client hanging
+          ;; up, whatever the transport makes of it, is how a follow usually ends.
+          (error () nil)))))
   nil)
 
-(defun serve-pod-logs-websocket (text)
-  "Answer an upgraded log request with TEXT in the protocol the client asked for."
+(defun serve-pod-logs-websocket (send)
+  "Answer an upgraded log request in the protocol the client asked for, with what SEND
+writes: SEND is called with a function of one string."
   (let* ((key (hunchentoot:header-in* :sec-websocket-key))
          (requested (uiop:split-string (or (hunchentoot:header-in* :sec-websocket-protocol) "")
                                        :separator '(#\, #\Space #\Tab)))
          (protocol (find-if (lambda (name) (find name requested :test #'string-equal))
                             '("binary.k8s.io" "base64.binary.k8s.io")))
-         (bytes (trivial-utf-8:string-to-utf-8-bytes text)))
+         (client nil))
     (unless (and key (plusp (length key)))
       (bad-exec-request "Pod logs over WebSocket require Sec-WebSocket-Key"))
     (unless protocol
       (bad-exec-request "Pod logs over WebSocket require a supported protocol"))
-    (setf (hunchentoot:return-code*) 101
-          (hunchentoot:content-type*) nil
-          (hunchentoot:header-out :connection) "Upgrade"
-          (hunchentoot:header-out :upgrade) "websocket"
-          (hunchentoot:header-out :sec-websocket-accept) (websocket-accept-value key)
-          (hunchentoot:header-out :sec-websocket-protocol) protocol)
-    (let ((client (hunchentoot::start-output 101 nil)))
-      (finish-output client)
-      (when (plusp (length bytes))
-        (if (equal protocol "binary.k8s.io")
-            (write-websocket-frame client 2 bytes)
-            (write-websocket-frame client 1 (trivial-utf-8:string-to-utf-8-bytes
-                                             (ag-grpc:base64-encode bytes)))))
+    (flet ((send-text (text)
+             ;; The upgrade waits for the log to be found: until then, an error can
+             ;; still be answered as one.
+             (unless client
+               (setf (hunchentoot:return-code*) 101
+                     (hunchentoot:content-type*) nil
+                     (hunchentoot:header-out :connection) "Upgrade"
+                     (hunchentoot:header-out :upgrade) "websocket"
+                     (hunchentoot:header-out :sec-websocket-accept) (websocket-accept-value key)
+                     (hunchentoot:header-out :sec-websocket-protocol) protocol
+                     client (hunchentoot::start-output 101 nil))
+               (finish-output client)
+               (gr8s.store::release-store-request))
+             (let ((bytes (trivial-utf-8:string-to-utf-8-bytes text)))
+               (when (plusp (length bytes))
+                 (if (equal protocol "binary.k8s.io")
+                     (write-websocket-frame client 2 bytes)
+                     (write-websocket-frame client 1 (trivial-utf-8:string-to-utf-8-bytes
+                                                      (ag-grpc:base64-encode bytes))))))))
+      (funcall send #'send-text)
+      (send-text "")
       (write-websocket-frame client 8 (make-array 2 :element-type '(unsigned-byte 8)
                                                     :initial-contents '(3 232))))
     nil))

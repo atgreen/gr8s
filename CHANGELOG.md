@@ -7,6 +7,56 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ## [Unreleased]
 
+### Added
+
+- Container logs are rotated, as kubelet rotates them: past 10 MiB a log is
+  renamed with the time, the container starts a new file, and five files are
+  kept, the one being written among them. The agent looks every 10 seconds.
+  Before, a log grew without bound; one reached 471 MB in a day and a half
+  (podster-xps).
+- `gr8s skill` explains how to add a dashboard tab for one of the cluster's
+  own apps with a `DashboardTab`, including where to get its CRD, which
+  release packages don't carry (podster-032).
+
+### Changed
+
+- Reading a container's log no longer reads the whole file. The node sends it
+  a piece at a time, as the client takes it, and begins where the request
+  does: `tailLines` is found from the end of the file and `sinceSeconds` or
+  `sinceTime` by bisecting it, and `limitBytes` stops the read. A followed log
+  reads only what was written since. An older node, which sends the whole file,
+  still works. Before, a log was read whole and copied several times, and a
+  follow read it again every second (podster-0gf).
+
+### Fixed
+
+- `kubectl logs` on a large container log no longer stops the server. A
+  request for a 471 MB log exhausted a member's 2 GiB heap, and the server
+  exited (podster-0gf).
+- The dashboard's REPL tab, and `gr8s debug icl --member`, can again reach a
+  control-plane member whose earlier debug session was lost: a member now ends
+  a session whose origin no longer holds it, after half a minute, instead of
+  keeping its one debug session taken until it restarts. A member that refuses
+  a session says why, as a 503 with the reason, instead of an HTTP 500
+  (podster-bkm).
+- Terminals in the dashboard's Agent tab start at once. Headlamp watches some
+  resources over WebSockets of their own, which the dashboard passed to the
+  cluster as plain watch requests that never answered; Chrome opens one
+  WebSocket to a host at a time, so a terminal waited behind them for minutes.
+  The dashboard now relays those watches itself, and answers its other
+  WebSockets (Headlamp's exec, attach and log views, which never worked
+  through it) with 501 at once (podster-c7r, podster-db5).
+- The Agent tab's terminals echo what is typed: a shell's input showed nothing.
+- A dashboard app tab keeps every cookie the app sets: the API proxy joined
+  several `Set-Cookie` headers into one, and a browser keeps only the first,
+  so Grafana's login didn't stick.
+- A dashboard app tab no longer passes the browser's `Origin` on to the app,
+  which sees another host behind the API proxy and refused it as cross-site
+  (Grafana). The tab refuses a request whose `Origin` is another page's.
+- The REPL tab says that it needs ICL 1.26.0 or later.
+- The README and `gr8s skill` name the package the Slynk debug helpers are in,
+  `GR8S.APISERVER`.
+
 ## [v1.37.2-gr8s.6] — 2026-11-23
 
 Seventh trial pre-release. `gr8s dashboard` gains an Agent tab, running AI

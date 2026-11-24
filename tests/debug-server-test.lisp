@@ -245,6 +245,31 @@
         (is (null (bt:with-lock-held (gr8s.apiserver::*member-slynk-operations-lock*)
                     (gethash "member-debug-1" gr8s.apiserver::*member-slynk-operations*))))))))
 
+(test member-slynk-operation-ends-when-its-origin-no-longer-holds-it
+  ;; The origin gave the operation up and no cancel came: without this, the member's
+  ;; one Slynk session stays taken and every later client is refused (podster-bkm).
+  (with-temporary-store (store directory)
+    (let ((probe-seconds gr8s.apiserver::*member-slynk-origin-probe-seconds*)
+          (response nil))
+      (setf gr8s.apiserver::*member-slynk-origin-probe-seconds* 0.05)
+      (unwind-protect
+           (flet ((emit (variant payload)
+                    (when (eq variant :operation-response) (setf response payload))
+                    ;; The origin takes nothing: it no longer holds the operation.
+                    (eq variant :operation-response)))
+             (is-true
+              (gr8s.apiserver::dispatch-member-slynk-operation
+               directory store nil "cp-1" :operation-request
+               (make-instance 'gr8s.node.v1::operation-request
+                              :operation-id "member-debug-orphan"
+                              :kind gr8s.node.v1::+operationkind-operation_kind_slynk+)
+               #'emit))
+             (is-true (wait-until (lambda () (null gr8s.apiserver::*on-demand-debug-session*)) :timeout 5))
+             (is (search "no longer holds it" (slot-value response 'gr8s.node.v1::error-message))))
+        (setf gr8s.apiserver::*member-slynk-origin-probe-seconds* probe-seconds)
+        (let ((session gr8s.apiserver::*on-demand-debug-session*))
+          (when session (gr8s.apiserver::stop-on-demand-debug-session session)))))))
+
 (test member-slynk-tunnel-routes-to-the-exact-selected-member
   (with-temporary-store (store directory)
     (let* ((origin (gr8s.apiserver::%make-node-grpc-server :store store))

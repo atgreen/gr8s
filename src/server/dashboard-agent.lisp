@@ -259,24 +259,59 @@ terminal xterm.js can draw."
                                               sb-sys:system-area-pointer))
      fd #x5414 (sb-alien:alien-sap size))))
 
+(defun open-agent-terminal ()
+  "Open a new pseudo-terminal; return (values MASTER-FD SLAVE-PATH). It keeps the kernel's
+termios, ECHO on: SBCL's RUN-PROGRAM :PTY turns echo off, and readline then echoes nothing
+typed (a shell's prompt shows, its input doesn't)."
+  (let ((master (sb-alien:alien-funcall (sb-alien:extern-alien "posix_openpt" (function sb-alien:int sb-alien:int))
+                                        (logior sb-unix:o_rdwr sb-unix:o_noctty))))
+    (when (minusp master)
+      (error "gr8s dashboard: no pseudo-terminal: ~A" (sb-int:strerror)))
+    (let ((path (and (zerop (sb-alien:alien-funcall
+                             (sb-alien:extern-alien "grantpt" (function sb-alien:int sb-alien:int)) master))
+                     (zerop (sb-alien:alien-funcall
+                             (sb-alien:extern-alien "unlockpt" (function sb-alien:int sb-alien:int)) master))
+                     (sb-alien:alien-funcall
+                      (sb-alien:extern-alien "ptsname" (function sb-alien:c-string sb-alien:int)) master))))
+      (unless path
+        (sb-unix:unix-close master)
+        (error "gr8s dashboard: no pseudo-terminal: ~A" (sb-int:strerror)))
+      (values master path))))
+
 (defun start-dashboard-agent-process (agent argv)
   "Run ARGV on a new pseudo-terminal, as the leader of a session whose controlling terminal
-it is, so that resizes and job control reach it; return the process. setsid waits for it,
-so the process ends when the agent does; closing the terminal hangs its session up."
-  (let ((setsid (dashboard-find-program "setsid")))
-    (sb-ext:run-program (if setsid setsid (first argv))
-                        (if setsid (list* "--ctty" "--wait" argv) (rest argv))
-                        :pty t :wait nil :input t :output t :error nil
-                        :directory (uiop:getcwd)
-                        :environment (dashboard-agent-environment agent))))
+it is, so that resizes and job control reach it; return the process and a stream on the
+terminal's master. setsid waits for it, so the process ends when the agent does; closing the
+terminal hangs its session up."
+  (multiple-value-bind (master path) (open-agent-terminal)
+    (let ((terminal (sb-sys:make-fd-stream master :input t :output t :element-type '(unsigned-byte 8)
+                                                  :name "agent terminal" :auto-close t))
+          (setsid (dashboard-find-program "setsid")))
+      (handler-bind ((error (lambda (condition)
+                              (declare (ignore condition))
+                              (close terminal))))
+        (let ((slave (sb-sys:make-fd-stream
+                      (or (sb-unix:unix-open path (logior sb-unix:o_rdwr sb-unix:o_noctty) 0)
+                          (error "gr8s dashboard: can't open ~A: ~A" path (sb-int:strerror)))
+                      :input t :output t :element-type '(unsigned-byte 8) :name path :auto-close t)))
+          (unwind-protect
+               (values (sb-ext:run-program (if setsid setsid (first argv))
+                                           (if setsid (list* "--ctty" "--wait" argv) (rest argv))
+                                           :wait nil :input slave :output slave :error slave
+                                           :directory (uiop:getcwd)
+                                           :environment (dashboard-agent-environment agent))
+                       terminal)
+            ;; Only the agent keeps the slave open, so the master reads EOF when it ends.
+            (close slave)))))))
 
 (defparameter +agent-backlog-bytes+ (* 1024 1024)
   "How much of an agent's latest output a session keeps, to show a page that attaches.")
 
-(defstruct (agent-session (:constructor %make-agent-session (id choice label process fd)))
+(defstruct (agent-session (:constructor %make-agent-session (id choice label process terminal
+                                                             &aux (fd (sb-sys:fd-stream-fd terminal)))))
   "One agent on its pseudo-terminal. It outlives the pages that show it: a page attaches,
 and leaves, and the agent runs on until it exits, a page stops it, or the dashboard ends."
-  id choice label process fd
+  id choice label process terminal fd
   ;; The latest output, at most +AGENT-BACKLOG-BYTES+, for the next page that attaches.
   (backlog (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
   ;; The attached page's WebSocket stream, or NIL.
@@ -298,48 +333,62 @@ SESSION's lock. A page that can't be written to is detached, never the agent end
   (agent-session-send session 1 (trivial-utf-8:string-to-utf-8-bytes
                                  (com.inuoe.jzon:stringify (apply #'gr8s-diagnose::object pairs)))))
 
+(defun agent-terminal-session (fd)
+  "The session whose controlling terminal has its master on FD (TIOCGSID, Linux), or NIL."
+  (sb-alien:with-alien ((session sb-alien:int))
+    (when (zerop (sb-alien:alien-funcall
+                  (sb-alien:extern-alien "ioctl" (function sb-alien:int sb-alien:int sb-alien:unsigned-long
+                                                           (* sb-alien:int)))
+                  fd #x5429 (sb-alien:addr session)))
+      session)))
+
 (defun hang-up-agent-session (session)
-  "End SESSION's agent: closing its terminal hangs up the agent's session, and setsid exits."
-  (let ((process (agent-session-process session)))
-    (ignore-errors (close (sb-ext:process-pty process)))
+  "End SESSION's agent as a terminal hangup does: SIGHUP to the session on it, and to setsid.
+Closing the master can't hang it up while the output thread is reading it; that thread
+closes it once the agent has gone."
+  (let ((process (agent-session-process session))
+        (leader (agent-terminal-session (agent-session-fd session))))
+    (when leader
+      (sb-unix:unix-kill (- leader) sb-unix:sighup))
     (when (sb-ext:process-alive-p process)
       (ignore-errors (sb-ext:process-kill process sb-unix:sighup)))))
 
 (defun start-agent-session (agent choice)
   "Start CHOICE, as DASHBOARD-AGENT-CHOICES offers it, on a new pseudo-terminal, as a session of AGENT."
-  (let* ((process (start-dashboard-agent-process agent (choice-argv agent choice)))
-         (session (%make-agent-session (new-agent-session-id) (getf choice :id) (getf choice :label) process
-                                       (sb-sys:fd-stream-fd (sb-ext:process-pty process)))))
-    (bt:with-lock-held ((dashboard-agent-lock agent))
-      (push session (dashboard-agent-sessions agent)))
-    ;; The terminal's output, kept and shown to the page attached, until the agent ends.
-    (bt:make-thread
-     (lambda ()
-       (let ((buffer (make-array 16384 :element-type '(unsigned-byte 8)))
-             (fd (agent-session-fd session)))
-         (handler-case
-             (loop (let ((n (sb-sys:with-pinned-objects (buffer)
-                              (sb-unix:unix-read fd (sb-sys:vector-sap buffer) (length buffer)))))
-                     (unless (and n (plusp n)) (return))
-                     (let ((data (subseq buffer 0 n)))
-                       (bt:with-lock-held ((agent-session-lock session))
-                         (let* ((backlog (agent-session-backlog session))
-                                (over (- (+ (length backlog) n) +agent-backlog-bytes+)))
-                           (when (plusp over)
-                             (replace backlog backlog :start2 over)
-                             (decf (fill-pointer backlog) over))
-                           (loop for octet across data do (vector-push-extend octet backlog)))
-                         (agent-session-send session 2 data)))))
-           (error () nil)))
-       (sb-ext:process-wait process)
-       (bt:with-lock-held ((dashboard-agent-lock agent))
-         (setf (dashboard-agent-sessions agent) (remove session (dashboard-agent-sessions agent))))
-       (bt:with-lock-held ((agent-session-lock session))
-         (agent-session-control session "type" "exit" "code" (or (sb-ext:process-exit-code process) 0))
-         (agent-session-send session 8 (make-array 0 :element-type '(unsigned-byte 8))))
-       (ignore-errors (sb-ext:process-close process)))
-     :name "gr8s dashboard agent output")
-    session))
+  (multiple-value-bind (process terminal) (start-dashboard-agent-process agent (choice-argv agent choice))
+    (let ((session (%make-agent-session (new-agent-session-id) (getf choice :id) (getf choice :label)
+                                        process terminal)))
+      (bt:with-lock-held ((dashboard-agent-lock agent))
+        (push session (dashboard-agent-sessions agent)))
+      ;; The terminal's output, kept and shown to the page attached, until the agent ends.
+      (bt:make-thread
+       (lambda ()
+         (let ((buffer (make-array 16384 :element-type '(unsigned-byte 8)))
+               (fd (agent-session-fd session)))
+           (handler-case
+               (loop (let ((n (sb-sys:with-pinned-objects (buffer)
+                                (sb-unix:unix-read fd (sb-sys:vector-sap buffer) (length buffer)))))
+                       (unless (and n (plusp n)) (return))
+                       (let ((data (subseq buffer 0 n)))
+                         (bt:with-lock-held ((agent-session-lock session))
+                           (let* ((backlog (agent-session-backlog session))
+                                  (over (- (+ (length backlog) n) +agent-backlog-bytes+)))
+                             (when (plusp over)
+                               (replace backlog backlog :start2 over)
+                               (decf (fill-pointer backlog) over))
+                             (loop for octet across data do (vector-push-extend octet backlog)))
+                           (agent-session-send session 2 data)))))
+             (error () nil)))
+         (sb-ext:process-wait process)
+         (bt:with-lock-held ((dashboard-agent-lock agent))
+           (setf (dashboard-agent-sessions agent) (remove session (dashboard-agent-sessions agent))))
+         (bt:with-lock-held ((agent-session-lock session))
+           (agent-session-control session "type" "exit" "code" (or (sb-ext:process-exit-code process) 0))
+           (agent-session-send session 8 (make-array 0 :element-type '(unsigned-byte 8))))
+         (ignore-errors (close terminal))
+         (ignore-errors (sb-ext:process-close process)))
+       :name "gr8s dashboard agent output")
+      session)))
 
 (defun attach-agent-session (session stream)
   "Show SESSION on STREAM, a page's WebSocket, until the page leaves or stops the agent:
@@ -404,12 +453,7 @@ whose reader is only watching."
         (gr8s.apiserver::websocket-accept-value (hunchentoot:header-in :sec-websocket-key request)))
   (let ((stream (hunchentoot::start-output 101 nil)))
     (finish-output stream)
-    (loop for inner = stream then (cond ((typep inner 'flexi-streams:flexi-stream) (flexi-streams:flexi-stream-stream inner))
-                                        ((typep inner 'chunga:chunked-stream) (chunga:chunked-stream-stream inner)))
-          while inner
-          when (typep inner 'sb-sys:fd-stream)
-            do (setf (sb-impl::fd-stream-timeout inner) nil) (return))
-    stream))
+    (keep-websocket-open stream)))
 
 (defun dashboard-agent-same-origin-p (request)
   "Whether REQUEST's page is this dashboard's: a browser sends Origin with every WebSocket,

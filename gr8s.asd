@@ -245,6 +245,7 @@
                              (:module "runtime"
                               :serial t
                               :components ((:file "core")
+                                           (:file "log-files")
                                            (:file "dial-stream")))
                              (:file "kubelet/runtime-deletion")
                              (:file "kubelet/pod-conditions")

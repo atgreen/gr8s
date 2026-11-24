@@ -474,7 +474,8 @@
   ;; Hunchentoot interns only names already known, so an app's own header comes as a string.
   (is (equal '(("accept" . "*/*") ("x-grafana-device-id" . "abc"))
              (gr8s.server::dashboard-app-request-headers
-              nil '((:accept . "*/*") ("X-Grafana-Device-Id" . "abc") (:authorization . "Bearer t"))))))
+              nil '((:accept . "*/*") ("X-Grafana-Device-Id" . "abc") (:authorization . "Bearer t")
+                    (:origin . "http://127.0.0.1:42021"))))))
 
 (test a-dashboard-app-tab-is-its-own-origin-behind-a-secret
   (let* ((upstream (hunchentoot:start (make-instance 'dashboard-app-upstream :address "127.0.0.1" :port 0)))
@@ -514,6 +515,14 @@
              ;; The app's own cookie goes back to it.
              (is (search "grafana_session=abc" cookie))
              (is (not (search "gr8s-tab-" cookie))))
+           ;; Another local page carries the cookie too, but not this tab's Origin.
+           (is (= 403 (nth-value 1 (drakma:http-request (concatenate 'string origin "/api/health") :proxy nil :cookie-jar jar
+                                                        :additional-headers '(("Origin" . "http://127.0.0.1:1"))))))
+           ;; The tab's own Origin is welcome, and stays here: the app sees another Host.
+           (is (= 200 (nth-value 1 (drakma:http-request (concatenate 'string origin "/public/a.js") :proxy nil :cookie-jar jar
+                                                        :additional-headers (list (cons "Origin" origin))))))
+           (is (equal "/api/v1/namespaces/monitoring/services/grafana:80/proxy/public/a.js"
+                      (first (first *dashboard-app-upstream-seen*))))
            ;; A DashboardTab that's gone takes its server with it.
            (is (null (gr8s.server::dashboard-apps-tabs apps :list-tabs (constantly (com.inuoe.jzon:parse "{\"items\":[]}")))))
            (signals error (drakma:http-request (concatenate 'string origin "/") :proxy nil :connection-timeout 2)))
@@ -608,6 +617,8 @@
                            (1 (setf exit (com.inuoe.jzon:parse payload)))
                            (8 (return)))))
                  (let ((text (get-output-stream-string output)))
+                   ;; The terminal echoes what's typed, as it arrives.
+                   (is (search (format nil "go~C~Chello~C~C" #\Return #\Newline #\Return #\Newline) text))
                    (is (search "33 99" text))
                    (is (search "kube=/tmp/kubeconfig-for-test" text))
                    (is (search "got:hello" text)))

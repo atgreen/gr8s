@@ -71,7 +71,12 @@
    #:runtime-exec-sync
    #:runtime-exec-url
    #:runtime-forget-pod-finalization
+   #:runtime-log-file
    #:runtime-logs
+   #:runtime-rotate-logs
+   #:runtime-send-logs
+   #:rotate-log-file
+   #:send-log-file
    #:runtime-network-metrics
    #:runtime-next-exec-session-output
    #:runtime-observe
