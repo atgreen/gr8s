@@ -7,6 +7,15 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ## [Unreleased]
 
+## [v1.37.2-gr8s.7] — 2026-11-23
+
+Eighth trial pre-release. Container logs no longer stop the server: a log is
+read a piece at a time, from where the request begins, and rotated as kubelet
+rotates it. In v1.37.2-gr8s.6, `kubectl logs` on a 471 MB log exhausted a
+member's heap. The dashboard's Agent tab starts its terminals at once instead
+of after minutes, and its REPL tab reaches a member whose earlier debug session
+was lost.
+
 ### Added
 
 - Container logs are rotated, as kubelet rotates them: past 10 MiB a log is
@@ -698,7 +707,8 @@ OpenSSL. Release artifacts cover Linux amd64 and arm64: binaries with
 checksums, tarballs carrying the installer and lifecycle scripts, and
 CycloneDX and SPDX SBOMs for the Lisp dependencies.
 
-[Unreleased]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.6...HEAD
+[Unreleased]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.7...HEAD
+[v1.37.2-gr8s.7]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.6...v1.37.2-gr8s.7
 [v1.37.2-gr8s.6]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.5...v1.37.2-gr8s.6
 [v1.37.2-gr8s.5]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.4...v1.37.2-gr8s.5
 [v1.37.2-gr8s.4]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.3...v1.37.2-gr8s.4
