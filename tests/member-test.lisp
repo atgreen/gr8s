@@ -97,7 +97,7 @@
     (unwind-protect
          (progn
            (setf (symbol-function 'gr8s.server::read-debug-kubeconfig)
-                 (lambda (path) (declare (ignore path)) (list :server "https://127.0.0.1:6443"))
+                 (lambda (path &optional context) (declare (ignore path context)) (list :server "https://127.0.0.1:6443"))
                  (symbol-function 'gr8s.server::debug-api-request-json)
                  (lambda (config method target)
                    (declare (ignore config))
@@ -201,7 +201,7 @@
     (unwind-protect
          (progn
            (setf (symbol-function 'gr8s.server::read-debug-kubeconfig)
-                 (lambda (path) (declare (ignore path)) (list :server "https://127.0.0.1:6443"))
+                 (lambda (path &optional context) (declare (ignore path context)) (list :server "https://127.0.0.1:6443"))
                  (symbol-function 'gr8s.server::debug-api-request-json)
                  (lambda (config method target)
                    (declare (ignore config method target))
@@ -335,7 +335,7 @@ a function of the method and the target that returns a body, a status and header
     (unwind-protect
          (progn
            (setf (symbol-function 'gr8s.server::read-debug-kubeconfig)
-                 (lambda (path) (declare (ignore path)) (list :server "https://127.0.0.1:6443"))
+                 (lambda (path &optional context) (declare (ignore path context)) (list :server "https://127.0.0.1:6443"))
                  (symbol-function 'gr8s.server::debug-api-request-json)
                  (lambda (config method target) (funcall answer config method target)))
            (funcall function))

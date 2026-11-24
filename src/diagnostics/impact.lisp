@@ -82,7 +82,7 @@
       (object "target" target
               "status" (if warnings "incomplete" "complete")
               "effects" (coerce (sort effects #'string< :key (lambda (effect) (gethash "resource" effect))) 'vector)
-              "warnings" (coerce (reverse warnings) 'vector)))))
+              "warnings" (coerce (append (read-failure-warnings) (reverse warnings)) 'vector)))))
 
 (defun print-impact (report)
   (let ((effects (coerce (gethash "effects" report) 'list))

@@ -271,6 +271,10 @@ names its node, not a Pod."
       (case name
         (:content-length (setf (hunchentoot:header-out name) (parse-integer (cdr header))))
         (:content-type (setf (hunchentoot:header-out name) (cdr header)))
+        ;; A browser takes one cookie from each Set-Cookie line, and drakma joined them.
+        (:set-cookie (dolist (cookie (pod-proxy-split-set-cookie (cdr header)))
+                       (push (cons name cookie)
+                             (slot-value hunchentoot:*reply* 'hunchentoot::headers-out))))
         (t (push (cons name (cdr header))
                  (slot-value hunchentoot:*reply* 'hunchentoot::headers-out)))))))
 

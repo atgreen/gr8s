@@ -12,9 +12,44 @@
 (defparameter *podtemplate-schema*
   (com.inuoe.jzon:parse (asdf:system-relative-pathname :gr8s "schema/podtemplate-v1.json")))
 
+(defparameter *merge-only-definitions*
+  (let ((schemas (gethash "schemas" (com.inuoe.jzon:parse
+                                      (asdf:system-relative-pathname :gr8s "schema/openapi-v1.json"))))
+        (definitions (make-hash-table :test #'equal)))
+    (labels ((plain (value)
+               ;; OpenAPI v3 wraps a lone reference as allOf: [{$ref}]; the merge follows a bare $ref.
+               (cond ((hash-table-p value)
+                      (let ((all-of (gethash "allOf" value)))
+                        (if (and (vectorp all-of) (= 1 (length all-of)) (hash-table-p (aref all-of 0))
+                                 (gethash "$ref" (aref all-of 0)))
+                            (core-object "$ref" (gethash "$ref" (aref all-of 0)))
+                            (let ((copy (make-hash-table :test #'equal)))
+                              (maphash (lambda (key child) (setf (gethash key copy) (plain child))) value)
+                              copy))))
+                     ((and (vectorp value) (not (stringp value))) (map 'vector #'plain value))
+                     (t value)))
+             (add (name)
+               (unless (or (gethash name definitions)
+                           (gethash name (gethash "definitions" *podtemplate-schema*)))
+                 (let ((definition (plain (gethash name schemas))))
+                   (setf (gethash name definitions) definition)
+                   (labels ((walk (value)
+                              (cond ((hash-table-p value)
+                                     (let ((ref (gethash "$ref" value)))
+                                       (when (stringp ref) (add (car (last (uiop:split-string ref :separator '(#\/)))))))
+                                     (maphash (lambda (key child) (declare (ignore key)) (walk child)) value))
+                                    ((and (vectorp value) (not (stringp value))) (map nil #'walk value)))))
+                     (walk definition))))))
+      (add "io.k8s.api.core.v1.Service"))
+    definitions)
+  "Upstream definitions, from the pinned OpenAPI document, that only strategic merge patches
+consult: the Service and what it references, for its port list's merge key. Field validation
+reads *PODTEMPLATE-SCHEMA* alone, so these change how a patch merges and nothing else.")
+
 (defun template-schema (name)
   "Return a pinned Kubernetes structural definition by NAME."
   (or (gethash name (gethash "definitions" *podtemplate-schema*))
+      (gethash name *merge-only-definitions*)
       (error "Unknown template schema ~A" name)))
 
 (defun resolve-template-schema (schema)

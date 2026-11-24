@@ -237,6 +237,23 @@
               :violations-fn (lambda (&rest args) (declare (ignore args)) nil)
               :deleter (lambda (name) (error "must not delete ~A" name))))))
 
+(test doctor-refuses-a-mistyped-command-as-a-state-directory
+  ;; podster-m6w: 'gr8s doctor diagnosis' checked an empty ./diagnosis/ state directory,
+  ;; found a running node's routes stale, and advised the --fix that tears them down.
+  (flet ((message (arguments)
+           (handler-case (progn (gr8s.server::parse-doctor-options arguments) nil)
+             (error (condition) (princ-to-string condition)))))
+    (is (search "did you mean 'diagnose'" (message '("diagnosis"))))
+    (is (search "did you mean 'observe'" (message '("obsrve"))))
+    (let ((text (message '("frobnicate"))))
+      (is (search "unknown doctor command: frobnicate" text))
+      (is (null (search "did you mean" text)))))
+  ;; A path, or a word naming a directory that exists, is still a state directory.
+  (is (equal "/srv/gr8s" (getf (gr8s.server::parse-doctor-options '("/srv/gr8s")) :state-directory)))
+  (let ((here (car (last (pathname-directory (uiop:getcwd))))))
+    (uiop:with-current-directory ((uiop:pathname-parent-directory-pathname (uiop:getcwd)))
+      (is (equal here (getf (gr8s.server::parse-doctor-options (list here)) :state-directory))))))
+
 (test doctor-parses-fix-flag
   (let ((options (gr8s.server::parse-doctor-options '("--fix"))))
     (is (eq t (getf options :fix))))
@@ -684,3 +701,87 @@
           (image (asdf:find-component "gr8s" '("src" "diagnostics"))))
       (is (equal (names standalone) (names image))))
     (is-true (fboundp 'gr8s-diagnose::pull-findings))))
+
+;;; podster-71m: gr8s doctor reads through gr8s's own API client, not kubectl.
+
+(test doctor-api-getter-reads-the-cluster-as-kubectl-did
+  (with-core-api (store path)
+    (values path)
+    (gr8s.resources::create-core-resource
+     store "configmaps" (core-fixture "ConfigMap" "settings") "default")
+    (let ((getter (gr8s.server::doctor-api-getter
+                   (list :server (format nil "http://127.0.0.1:~D" *core-api-port*))))
+          (gr8s-diagnose::*read-failures* nil))
+      (multiple-value-bind (list state) (funcall getter "ConfigMap" "default" nil)
+        (is (eq :present state))
+        (let ((item (find "settings" (gethash "items" list) :test #'equal
+                          :key (lambda (item) (gethash "name" (gethash "metadata" item))))))
+          (is (hash-table-p item))
+          ;; As kubectl -o json gives each listed item its kind.
+          (is (equal "ConfigMap" (gethash "kind" item)))
+          (is (equal "v1" (gethash "apiVersion" item)))))
+      (multiple-value-bind (object state) (funcall getter "ConfigMap" "default" "settings")
+        (is (eq :present state))
+        (is (equal "settings" (gethash "name" (gethash "metadata" object)))))
+      (is (eq :absent (nth-value 1 (funcall getter "ConfigMap" "default" "missing"))))
+      (is (eq :present (nth-value 1 (funcall getter "Namespace" nil nil))) "a cluster-scoped list")
+      (is (eq :unknown (nth-value 1 (funcall getter "NoSuchKind" nil nil))))
+      (is (null gr8s-diagnose::*read-failures*) "a kind the cluster doesn't serve is no failure"))))
+
+(test doctor-api-getter-says-why-a-read-failed
+  (let* ((closed (let ((socket (usocket:socket-listen "127.0.0.1" 0)))
+                   (prog1 (usocket:get-local-port socket) (usocket:socket-close socket))))
+         (getter (gr8s.server::doctor-api-getter (list :server (format nil "http://127.0.0.1:~D" closed))))
+         (gr8s-diagnose::*read-failures* nil))
+    (is (eq :unknown (nth-value 1 (funcall getter "Pod" nil nil))))
+    (is (= 1 (length gr8s-diagnose::*read-failures*)))
+    (is (search (format nil "127.0.0.1:~D" closed) (first gr8s-diagnose::*read-failures*)))
+    ;; A previous log or a member that can't be reached is expected, not a failure.
+    (funcall getter "PreviousLog" "default" "web/app")
+    (funcall getter "MemberView" nil (format nil "127.0.0.1:~D" closed))
+    (is (= 1 (length gr8s-diagnose::*read-failures*)))
+    (is (search "Could not read from the cluster: "
+                (first (gr8s-diagnose::read-failure-warnings))))))
+
+(test gr8s-doctor-diagnoses-without-kubectl
+  ;; The whole run, as `gr8s doctor diagnose' makes it, with no kubectl on PATH.
+  (with-core-api (store path)
+    (values store)
+    (let ((kubeconfig (merge-pathnames "kubeconfig" path))
+          (old-path (uiop:getenv "PATH")))
+      (with-open-file (out kubeconfig :direction :output :if-exists :supersede)
+        (format out "apiVersion: v1~%kind: Config~%current-context: test~%clusters:~%- name: test~%  cluster: {server: \"http://127.0.0.1:~D\"}~%users:~%- name: test~%  user: {}~%contexts:~%- name: test~%  context: {cluster: test, user: test}~%"
+                *core-api-port*))
+      (unwind-protect
+           (progn
+             (sb-posix:setenv "PATH" "/nonexistent" 1)
+             (let* ((json (with-output-to-string (*standard-output*)
+                            (let ((gr8s-diagnose::*call-with-getter* #'gr8s.server::call-with-doctor-api-getter))
+                              (gr8s-diagnose:doctor-main
+                               (list "diagnose" "--kubeconfig" (namestring kubeconfig) "--json")))))
+                    (report (com.inuoe.jzon:parse json)))
+               (is (not (equal "incomplete" (gethash "status" report))) "~A" (gethash "warnings" report))
+               (is (every (lambda (entry) (not (equal "unknown" (gethash "result" entry))))
+                          (gethash "coverage" report)))))
+        (sb-posix:setenv "PATH" old-path 1)))))
+
+(test doctor-without-kubectl-says-so
+  ;; The doctor on its own still reads through kubectl, and says when it can't run it.
+  (let ((old-path (uiop:getenv "PATH")))
+    (unwind-protect
+         (let ((gr8s-diagnose::*read-failures* nil))
+           (sb-posix:setenv "PATH" "/nonexistent" 1)
+           (is (eq :unknown (nth-value 1 (funcall (gr8s-diagnose::kubectl-getter nil nil) "Pod" nil nil))))
+           (is (search "kubectl" (format nil "~{~A~}" gr8s-diagnose::*read-failures*))))
+      (sb-posix:setenv "PATH" old-path 1))))
+
+(test gr8s-doctor-says-when-a-file-is-not-a-kubeconfig
+  (let ((empty (uiop:with-temporary-file (:pathname path :keep t) path)))
+    (unwind-protect
+         (let* ((said (make-string-output-stream))
+                (code (let ((*error-output* said)
+                            (gr8s-diagnose::*call-with-getter* #'gr8s.server::call-with-doctor-api-getter))
+                        (gr8s-diagnose:doctor-main (list "diagnose" "--kubeconfig" (namestring empty))))))
+           (is (= 2 code))
+           (is (search "is not a kubeconfig" (get-output-stream-string said))))
+      (ignore-errors (delete-file empty)))))

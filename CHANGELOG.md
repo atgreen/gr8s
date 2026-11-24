@@ -7,6 +7,48 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ## [Unreleased]
 
+### Fixed
+
+- `gr8s doctor diagnose` and `impact`, and the MCP doctor tools, read the cluster
+  with gr8s's own API client instead of running `kubectl`, so they work on a host
+  without it, such as a control-plane member, where they defaulted to the
+  member's own kubeconfig. Before, every kind came back "unknown" with no reason.
+  A failed read now says why (the HTTP status and the server's message, or that
+  it didn't answer), and the standalone `scripts/gr8s-doctor`, which still uses
+  `kubectl`, says when it can't run it (podster-71m).
+- `kubectl apply` of a Service whose ports changed works. A strategic merge patch
+  to a Service was applied as a plain JSON merge patch, so the directives kubectl
+  sends (`$setElementOrder/ports`, `{"$patch": "delete"}`) were rejected as
+  unknown fields (422), and a patch naming one port replaced the whole list.
+  Services now merge as upstream does, ports keyed by their port number
+  (podster-0i0).
+- `gr8s doctor` refuses a word that is neither a command nor a directory, and
+  suggests the command meant: `gr8s doctor diagnosis` checked an empty
+  `./diagnosis/` state directory, found the node's live routes stale, and
+  advised a `--fix` that would have torn them down (podster-m6w).
+- `gr8s status` compares each control-plane member's own `/version` too, so a
+  member without a Node (`serve --disable-agent`) on another release shows as
+  skew (podster-gta).
+- A Gateway passes on each of a backend's `Set-Cookie` headers on its own line,
+  as the Pod proxy already did. It joined them into one with commas, so a browser
+  kept only the first cookie: an OIDC login that sets a verifier and a state
+  cookie together lost the state and looped back to the login page (podster-qnr).
+- A worker joined with `gr8s agent` now serves the kubelet's endpoints
+  (`/stats/summary`, `/metrics/resource`, `/metrics/cadvisor`) on 10250, as a
+  control-plane member's own node does; `--kubelet-port` moves them, and 0 turns
+  them off. It gets its kubelet's certificates from the control plane over its
+  node identity, through a new `IssueKubeletCredentials` node RPC, and admits the
+  port through firewalld. Before, it ran without them, so the Node proxy answered
+  "does not serve /stats/summary" for it, and Prometheus could not scrape it. An
+  agent whose kubelet endpoint is off for want of certificates now says so
+  (podster-b55).
+- `/stats/summary` reports the node's filesystem (`node.fs`): the one under
+  `/var/lib/kubelet`, which DiskPressure watches. Headlamp shows it as the node's
+  ephemeral storage, and left that empty on every node (podster-b55).
+- A Node's `Ready` condition carries its `lastTransitionTime`: when the node's
+  ready lease began, or for a node that isn't ready, when it was last heard from.
+  Headlamp works out a node's uptime from it, and showed "NaNy" (podster-zac).
+
 ## [v1.37.2-gr8s.8] — 2026-11-24
 
 Ninth trial pre-release. `gr8s upgrade` rolls a cluster onto a signed release,
