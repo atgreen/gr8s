@@ -40,6 +40,8 @@
    #:node-record-extended-resources
    #:node-record-id
    #:node-record-kubelet-port
+   #:node-record-agent-version
+   #:node-record-agent-architecture
    #:node-record-labels
    #:node-record-last-heartbeat
    #:node-record-lease-deadline

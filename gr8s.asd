@@ -88,6 +88,13 @@
                                            (:file "oci-cache")
                                            (:file "oci-mirror")
                                            (:file "registry-trust")))
+                             (:module "upgrade"
+                              :serial t
+                              :components ((:file "package")
+                                           (:file "version")
+                                           (:file "artifact")
+                                           (:file "install")
+                                           (:file "plan")))
                              (:module "model"
                               :serial t
                               :components ((:file "package")
@@ -355,6 +362,7 @@
                                            (:file "resource-metrics-api")
                                            (:file "http")
                                            (:file "slynk-tunnel")
+                                           (:file "upgrade-http")
                                            (:file "pod-port-forward")
                                            (:file "pod-exec-spdy")
                                            (:file "pod-binding")
@@ -489,6 +497,7 @@
                                            (:file "backup-restore")
                                            (:file "status")
                                            (:file "member")
+                                           (:file "upgrade")
                                            (:file "main")
                                            (:file "foreign-flows")
                                            (:file "doctor-observe")
@@ -662,6 +671,7 @@
                              (:file "pod-watch-test")
                              (:file "pod-status-http-test")
                              (:file "pod-logs-test")
+                             (:file "upgrade-test")
                              (:file "batch-resources-test")
                              (:file "admission-webhooks-test")
                              (:file "dial-test")

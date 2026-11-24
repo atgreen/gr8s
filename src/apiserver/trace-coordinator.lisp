@@ -62,6 +62,10 @@
                                                  "singularName" "controlplanemember"
                                                  "namespaced" nil "kind" "ControlPlaneMember"
                                                  "verbs" #("get" "list" "delete"))
+                                    (core-object "name" "nodes/upgrade" "singularName" ""
+                                                 "namespaced" nil "kind" "Status" "verbs" #("create"))
+                                    (core-object "name" "controlplanemembers/upgrade" "singularName" ""
+                                                 "namespaced" nil "kind" "Status" "verbs" #("create"))
                                     (core-object "name" "controlplanemembers/leadership"
                                                  "singularName" ""
                                                  "namespaced" nil "kind" "ControlPlaneMember"

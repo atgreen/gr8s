@@ -876,7 +876,8 @@ authenticated tunnel as slynk and launches ICL's browser mode (icl -b
        socket host port base-path))))
 
 (defun write-debug-http-request (stream method host port target token
-                                 &key websocket-key (websocket-protocol "gr8s.slynk.v1"))
+                                 &key websocket-key (websocket-protocol "gr8s.slynk.v1") body)
+  "Write one request; BODY, when given, is an object sent as JSON."
   (write-sequence
    (gr8s.protocol::ascii-octets
     (with-output-to-string (request)
@@ -892,10 +893,14 @@ authenticated tunnel as slynk and launches ICL's browser mode (icl -b
           (line "Sec-WebSocket-Key: ~A" websocket-key)
           (line "Sec-WebSocket-Protocol: ~A" websocket-protocol))
         (when token (line "Authorization: Bearer ~A" token))
-        ;; No request here has a body, and a POST must say so.
-        (when (equal method "POST") (line "Content-Length: 0"))
+        (cond (body
+               (line "Content-Type: application/json")
+               (line "Content-Length: ~D" (length (gr8s.resources:stringify-to-utf-8-bytes body))))
+              ;; A POST without a body must say so.
+              ((member method '("POST" "PUT") :test #'equal) (line "Content-Length: 0")))
         (line ""))))
    stream)
+  (when body (write-sequence (gr8s.resources:stringify-to-utf-8-bytes body) stream))
   (finish-output stream))
 
 (defun call-with-debug-kubeconfig (path function)
@@ -919,15 +924,16 @@ authenticated tunnel as slynk and launches ICL's browser mode (icl -b
              (funcall function config))
         (dolist (file temporary) (ignore-errors (delete-file file)))))))
 
-(defun debug-api-request-json (config method target)
-  "Send METHOD to TARGET on CONFIG's server. Returns (values parsed-body status
-   headers): the JSON body parsed when there is one (NIL otherwise), the HTTP
-   status, and the response headers, leaving non-200 handling to the caller."
+(defun debug-api-request-json (config method target &key body)
+  "Send METHOD to TARGET on CONFIG's server, with BODY as JSON when given. Returns
+   (values parsed-body status headers): the JSON body parsed when there is one (NIL
+   otherwise), the HTTP status, and the response headers, leaving non-200 handling
+   to the caller."
   (multiple-value-bind (stream socket host port base-path) (open-debug-api-stream config)
     (unwind-protect
          (progn
            (write-debug-http-request stream method host port (concatenate 'string base-path target)
-                                     (getf config :token))
+                                     (getf config :token) :body body)
            (multiple-value-bind (status headers)
                (gr8s.protocol::parse-http-response-head
                 (gr8s.protocol::read-http-response-head stream))
@@ -2031,6 +2037,8 @@ needs no shell/coreutils/util-linux. Returns 0."
      (parse-restore-options (rest arguments)))
     ((string= "status" (first arguments))
      (parse-status-options (rest arguments)))
+    ((string= "upgrade" (first arguments))
+     (parse-upgrade-options (rest arguments)))
     ((string= "member" (first arguments))
      (parse-member-options (rest arguments)))
     ((string= "doctor" (first arguments))
@@ -3077,6 +3085,7 @@ between later ones. An ordinary restart recovers within the first.")
            (setf memory-monitor (start-memory-monitor store))
            (setf ha (maybe-start-ha-control-plane store pki options))
            (unless (wait-for-ha-application ha) (return-from serve-owned 0))
+           (check-cluster-format-level store)
            (when ha
              (ensure-ha-pki-authority store ha)
              ;; Extraction can promote a different CA than the one loaded before
@@ -3981,6 +3990,20 @@ origin of its own, behind a per-tab secret, so the app's code can't reach the
 Headlamp proxy that acts with the reader's credentials. The dashboard frames the
 app even when it sends X-Frame-Options or a CSP frame-ancestors directive.
 
+## Upgrading gr8s
+
+Upgrade with `gr8s upgrade`, not by copying binaries: `gr8s upgrade plan --to
+VERSION` shows each host's step and refuses what isn't safe (a voter whose restart
+would cost the quorum, a downgrade); `gr8s upgrade apply --to VERSION` carries it
+out, voters one at a time with the leader last, then agents, and records progress
+in a ClusterUpgrade (`gr8s upgrade status`). Releases are signed OCI artifacts in
+ghcr.io/atgreen/gr8s-packages; a host checks the signature before installing.
+A host running a gr8s from before `gr8s upgrade` is upgraded on the host with
+`sudo gr8s upgrade self --to VERSION`. A witness needn't run the release (it
+stores the log without reading it); miniwit, the Go witness, isn't gr8s at all. `gr8s status` warns when
+agents and the server run different releases. Ask before applying: every host
+restarts.
+
 ## Maintenance and agent working practices
 
 Persistent state contains cluster identity and data. Preserve it across restarts;
@@ -4029,6 +4052,7 @@ No HA API may start from member-local certificate state before this converges."
     ("doctor" "Diagnose resources, survey a cluster, or check the host")
     ("status" "Show cluster health at a glance")
     ("member" "List or remove HA control-plane members, or move the leadership")
+    ("upgrade" "Roll the cluster onto a signed gr8s release, host by host")
     ("debug" "Inspect live processes and trace Pods")
     ("wireguard" "Manage WireGuard identity")
     ("network" "Inspect cluster networking") ("certificate" "Manage certificates")
@@ -4271,6 +4295,26 @@ No HA API may start from member-local certificate state before this converges."
              :options '(("--kubeconfig PATH" "Cluster kubeconfig (default $KUBECONFIG or ~/.kube/config)")
                         ("--output FORMAT" "text (default) or json")
                         ("--help, -h" "show help"))))
+      ((equal path '("upgrade"))
+       (page "Roll the cluster onto a signed gr8s release, host by host" "COMMAND [OPTIONS]"
+             :commands '(("plan --to VERSION" "Show what apply would do, and why it is safe or not; changes nothing")
+                         ("apply --to VERSION" "Upgrade each host in turn: voters one at a time, the leader last, then agents")
+                         ("status" "Show the latest upgrade, host by host")
+                         ("rollback" "Return each host to the release it ran before the latest upgrade")
+                         ("finalize" "Let the cluster use the release's formats, once every voter runs it")
+                         ("self --to VERSION" "Upgrade this host, as root, without the cluster")
+                         ("mirror --from REF --to REF" "Copy a release to another registry, by digest")
+                         ("publish --to REF FILES..." "Push release packages as a signed artifact (the release workflow)"))
+             :options '(("--to VERSION|REF" "The release: a version in --repository, or REGISTRY/REPOSITORY:TAG")
+                        ("--repository REPO" "Where releases are published (default ghcr.io/atgreen/gr8s-packages)")
+                        ("--registry-ca HOST=FILE" "Trust FILE's CAs for registry HOST (repeatable)")
+                        ("--kubeconfig PATH" "Cluster kubeconfig (default $KUBECONFIG or ~/.kube/config)")
+                        ("--yes" "apply without asking")
+                        ("--allow-quorum-loss" "apply even when a voter's restart leaves no quorum: the API stops meanwhile")
+                        ("--allow-downgrade" "apply an older release than a host runs (rollback does this itself)")
+                        ("--no-finalize" "apply without raising the cluster's format level at the end")
+                        ("--key-file PATH" "publish: the Ed25519 release key (or GR8S_RELEASE_SIGNING_KEY)")
+                        ("--help, -h" "show help"))))
       ((equal path '("member"))
        (page "List or remove HA control-plane members, or move the leadership" "COMMAND [OPTIONS]"
              :commands '(("list" "Show the durable membership, with contact state (default)")
@@ -4436,6 +4480,14 @@ and refuses every public registry (podster-8ak). Returns the bundle named, or NI
                (run-backup-command options))
               (:restore (run-restore-command options))
               (:status (run-status-command options))
+              (:upgrade-plan (run-upgrade-plan-command options))
+              (:upgrade-apply (run-upgrade-apply-command options))
+              (:upgrade-status (run-upgrade-status-command options))
+              (:upgrade-rollback (run-upgrade-rollback-command options))
+              (:upgrade-finalize (run-upgrade-finalize-command options))
+              (:upgrade-self (run-upgrade-self-command options))
+              (:upgrade-publish (run-upgrade-publish-command options))
+              (:upgrade-mirror (run-upgrade-mirror-command options))
               (:member-list (run-member-list-command options))
               (:member-remove (run-member-remove-command options))
               (:member-transfer-leadership (run-member-transfer-leadership-command options))

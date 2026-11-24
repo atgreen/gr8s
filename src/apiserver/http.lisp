@@ -165,7 +165,9 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
                   "buildDate" "1970-01-01T00:00:00Z"
                   "goVersion" "common-lisp"
                   "compiler" "sbcl"
-                  "platform" "linux/amd64"))))
+                  "platform" (format nil "linux/~A" (gr8s.upgrade::host-architecture))
+                  ;; The newest format this member reads, for `gr8s upgrade finalize'.
+                  "gr8sFormatLevel" gr8s.upgrade:+gr8s-format-level+))))
 
 (defun api-versions-response ()
   "Answer /api with the single core API version (v1) this server serves."
@@ -1514,6 +1516,9 @@ the request for drain diagnostics. Debug tunnels route without a lease."
           ((and (eq method :delete)
                 (cl-ppcre:scan "^/apis/gr8s[.]io/v1/controlplanemembers/[^/]+$" path))
            (serve-control-plane-member-delete path))
+          ((and (eq method :post)
+                (cl-ppcre:scan "^/apis/gr8s[.]io/v1/(nodes|controlplanemembers)/[^/]+/upgrade$" path))
+           (serve-host-upgrade store runtime path))
           ((and (eq method :post)
                 (cl-ppcre:scan "^/apis/gr8s[.]io/v1/controlplanemembers/[^/]+/leadership$" path))
            (serve-control-plane-member-leadership path))

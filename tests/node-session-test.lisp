@@ -1743,6 +1743,41 @@
           (gr8s.apiserver::stop-node-grpc-server owner)
           (gr8s.apiserver::stop-node-grpc-server origin))))))
 
+(test a-relay-to-a-restarted-member-reconnects-within-the-request
+  ;; The leader's cached relay connection to a member that had restarted failed the
+  ;; next request with "Broken pipe"; only the one after it went through (podster-3ao).
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let* ((origin-member (gr8s.raft.transport::start-raft-member "origin" :port 0))
+           (owner-member (gr8s.raft.transport::start-raft-member "owner" :port 0))
+           (port (gr8s.raft.transport::raft-member-port owner-member))
+           (accepted 0))
+      (flet ((serve (member)
+               (let ((server (gr8s.apiserver::%make-node-grpc-server :store store)))
+                 (setf (gr8s.apiserver::node-grpc-server-member-operation-handler server)
+                       (lambda (origin variant payload)
+                         (declare (ignore origin variant payload))
+                         (incf accepted)))
+                 (gr8s.raft.transport::configure-raft-node-operation-routing member server)))
+             (relay (id)
+               (gr8s.raft.transport::raft-member-route-node-operation
+                origin-member :operation-request "owner" "@control-plane/owner"
+                (make-instance 'gr8s.node.v1::operation-request
+                               :operation-id id :kind gr8s.node.v1::+operationkind-operation_kind_slynk+))))
+        (unwind-protect
+             (progn
+               (serve owner-member)
+               (gr8s.raft.transport::raft-member-set-peers origin-member (list (list "owner" "127.0.0.1" port)))
+               (is (equal "owner" (relay "before-restart")))
+               ;; The member restarts on the same address; the origin's connection is now stale.
+               (gr8s.raft.transport::stop-raft-member owner-member)
+               (setf owner-member (gr8s.raft.transport::start-raft-member "owner" :port port))
+               (serve owner-member)
+               (is (equal "owner" (relay "after-restart")) "the first request after the restart goes through")
+               (is (= 2 accepted) "and arrives once"))
+          (gr8s.raft.transport::stop-raft-member owner-member)
+          (gr8s.raft.transport::stop-raft-member origin-member))))))
+
 (test a-request-to-a-node-that-is-not-connected-says-so
   ;; "Node operation timed out" named neither the node nor why (podster-xbf).
   (with-temporary-store (store path)

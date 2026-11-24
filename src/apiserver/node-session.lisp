@@ -1778,6 +1778,10 @@ PATIENCE seconds the 503 is signalled as it stands."
                                             (node-capacity-from-entries (slot-value hello 'gr8s.node.v1::capacity)))
                       (update-node-kubelet-port (node-grpc-server-store server) node-name
                                                 (or (slot-value hello 'gr8s.node.v1::kubelet-port) 0))
+                      (update-node-agent-info (node-grpc-server-store server) node-name
+                                              (slot-value hello 'gr8s.node.v1::agent-version)
+                                              (slot-value hello 'gr8s.node.v1::agent-architecture))
+                      (upgrade-returning-node server node-name (slot-value hello 'gr8s.node.v1::agent-version))
                       (let ((session (make-node-agent-session stream)))
                         (setf (node-agent-session-node-id session) (node-record-id node)
                               (node-agent-session-deltas-p session)

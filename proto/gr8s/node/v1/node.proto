@@ -164,6 +164,9 @@ message NodeHello {
   // Signed by the node's existing private key. The authenticated session binds
   // the requested CN to node_name, so this cannot mint another identity.
   bytes certificate_request = 13;
+  // The Kubernetes architecture of the agent's executable (amd64, arm64). An older
+  // agent leaves it empty, and agent_version reads just "gr8s".
+  string agent_architecture = 14;
 }
 
 message Heartbeat {
@@ -464,6 +467,9 @@ enum OperationKind {
   // The node's recent flow events, then, with FLOWS_FOLLOW, new ones as they
   // happen, as JSON lines on STDOUT until cancelled.
   OPERATION_KIND_FLOWS = 12;
+  // Install the gr8s release UPGRADE_REFERENCE names, checked against its signature,
+  // and restart on it. Done is the host's next hello reporting the release.
+  OPERATION_KIND_UPGRADE = 13;
 }
 
 message OperationRequest {
@@ -511,6 +517,8 @@ message OperationRequest {
   uint64 log_tail_lines = 24;
   int64 log_since_unix_seconds = 25;
   uint64 log_start_offset = 26;
+  // UPGRADE: the signed release artifact, REGISTRY/REPOSITORY:TAG or @sha256:DIGEST.
+  string upgrade_reference = 27;
 }
 
 message OperationInput {

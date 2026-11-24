@@ -204,7 +204,7 @@
     (if skewed
         (make-status-check "versions"
                            :warn (format nil "server at ~A; ~A" cluster (status-join-names skewed))
-                           "upgrade agents to the server's release")
+                           (format nil "gr8s upgrade plan --to ~A" cluster))
         (make-status-check "versions"
                            :ok (format nil "all members and agents at ~A" cluster)))))
 

@@ -78,6 +78,10 @@
   wireguard-reflexive-observed-at
   ;; The port of the node's authenticated kubelet endpoints, or 0 when it serves none.
   (kubelet-port 0)
+  ;; What the node's agent said of itself when it last connected: the gr8s version
+  ;; it runs and its executable's architecture, or NIL from an agent too old to say.
+  agent-version
+  agent-architecture
   (ready-p nil)
   ;; Why the node's container runtime is down while its agent still holds the
   ;; lease, or NIL. Not persisted: the next heartbeat reports it again.

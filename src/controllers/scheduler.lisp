@@ -1159,6 +1159,25 @@ Call with STORE's lock held."
           (setf (node-record-kubelet-port node) port)
           (publish-node-change-unlocked store old node))))))
 
+(defun update-node-agent-info (store node-name version architecture)
+  "Persist the gr8s VERSION and executable ARCHITECTURE NODE-NAME's agent reported on
+connecting, which its Node advertises. An agent too old to report them sends the version
+\"gr8s\" and no architecture: it is recorded as not knowing (NIL)."
+  (let ((version (and (stringp version) (uiop:string-prefix-p "v" version) version))
+        (architecture (and (stringp architecture) (plusp (length architecture)) architecture)))
+    (with-store-lock (store)
+      (let ((node (get-node-unlocked store node-name)))
+        (when (and node (not (and (equal version (node-record-agent-version node))
+                                  (equal architecture (node-record-agent-architecture node)))))
+          (let ((updated (copy-node-record node))
+                (old (node-api-object node)))
+            (setf (node-record-agent-version updated) version
+                  (node-record-agent-architecture updated) architecture)
+            (persist-node store updated)
+            (setf (node-record-agent-version node) version
+                  (node-record-agent-architecture node) architecture)
+            (publish-node-change-unlocked store old node)))))))
+
 (defun record-node-certificate-issuer (store node-name fingerprint)
   "Persist the CA fingerprint proven by NODE-NAME's authenticated session."
   (with-store-lock (store)

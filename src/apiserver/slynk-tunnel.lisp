@@ -137,6 +137,8 @@ OPERATION once the member that started it no longer holds it."
   (let ((id (slot-value payload 'gr8s.node.v1::operation-id)))
     (case variant
       (:operation-request
+       (when (= (slot-value payload 'gr8s.node.v1::kind) gr8s.node.v1::+operationkind-operation_kind_upgrade+)
+         (return-from dispatch-member-slynk-operation (start-member-upgrade-operation payload emit-router)))
        (unless (= (slot-value payload 'gr8s.node.v1::kind)
                   gr8s.node.v1::+operationkind-operation_kind_slynk+)
          (return-from dispatch-member-slynk-operation nil))
