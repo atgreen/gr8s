@@ -290,3 +290,32 @@ request function and the registry's objects, by (repository reference)."
   (signals error (gr8s.server::parse-upgrade-options '("bogus")))
   (is (equal "clusterupgrades.upgrade.gr8s.io"
              (gethash "name" (gethash "metadata" (gr8s.server::cluster-upgrade-crd))))))
+
+(test a-registry-that-asks-for-basic-credentials-gets-them
+  ;; zot reads anonymously and asks for a login, with Basic, to write.
+  (uiop:with-temporary-file (:pathname scratch :keep nil)
+    (let* ((directory (uiop:ensure-directory-pathname (format nil "~A.d" (namestring scratch))))
+           (key (test-release-key))
+           (objects (make-hash-table :test #'equal)) (uploads 0) (refused 0))
+      (ensure-directories-exist directory)
+      (let ((gr8s.upgrade::*registry-http*
+              (lambda (url headers &key (method :get) content want-stream basic-authorization &allow-other-keys)
+                (declare (ignore headers))
+                (multiple-value-bind (status body response-headers)
+                    (if (and (member method '(:post :put)) (not (equal basic-authorization '("pusher" "secret"))))
+                        (progn (incf refused) (values 401 #() '((:www-authenticate . "Basic realm=\"Authorization Required\""))))
+                        (fake-registry-answer objects (lambda () (incf uploads)) (puri:parse-uri url) method content))
+                  (values (if want-stream (flexi-streams:make-in-memory-input-stream (coerce body '(vector (unsigned-byte 8)))) body)
+                          status response-headers)))))
+        (unwind-protect
+             (let ((package (write-test-package directory "gr8s-linux-amd64" "an executable")))
+               (signals gr8s.upgrade:upgrade-error
+                 (gr8s.upgrade:publish-release-artifact "zot.example/gr8s/packages:v1" "v1.37.2-gr8s.9" (list package) key
+                                                        :username "someone" :password "wrong"))
+               (is (plusp refused))
+               (is (stringp (gr8s.upgrade:publish-release-artifact "zot.example/gr8s/packages:v1" "v1.37.2-gr8s.9" (list package) key
+                                                                   :username "pusher" :password "secret")))
+               ;; Reading needs no login.
+               (is (equal "v1.37.2-gr8s.9" (gr8s.upgrade:release-artifact-version
+                                           (gr8s.upgrade:fetch-release-artifact "zot.example/gr8s/packages:v1" :keys (list key))))))
+          (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))))

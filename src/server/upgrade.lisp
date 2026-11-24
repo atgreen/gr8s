@@ -127,17 +127,24 @@ can't reach, or one too old to be upgraded through it."
   (call-with-upgrade-registry
    options
    (lambda (username password)
-     (let ((prepared (gr8s.upgrade:prepare-host-upgrade (release-reference options)
-                                                        :username username :password password)))
-       (format output "release ~A verified; installing its ~A package~%" (getf prepared :version) (getf prepared :format))
+     ;; The gr8s the services run, wherever this command runs from.
+     (let* ((program (gr8s.upgrade:installed-gr8s-program))
+            (prepared (gr8s.upgrade:prepare-host-upgrade (release-reference options)
+                                                         :format (gr8s.upgrade:host-package-format program)
+                                                         :username username :password password)))
+       (format output "release ~A verified; installing its ~A package over ~A~%"
+               (getf prepared :version) (getf prepared :format) program)
        (finish-output output)
        ;; Run here, not as a transient unit: this command isn't the service it restarts.
-       (format output "~A" (gr8s.upgrade:install-host-upgrade prepared :unit nil))
+       (format output "~A" (gr8s.upgrade:install-host-upgrade prepared :unit nil :program program))
        (when (equal "binary" (getf prepared :format))
          ;; A package restarts the services itself; a bare executable doesn't.
          (uiop:run-program '("systemctl" "try-restart" "gr8s-server.service" "gr8s-agent.service")
                            :ignore-error-status t))
-       (format output "this host now has ~A~%" (getf prepared :version))
+       (let ((installed (gr8s.upgrade:installed-program-version program)))
+         (unless (equal installed (getf prepared :version))
+           (error "~A still reports ~A after installing ~A" program installed (getf prepared :version)))
+         (format output "~A is ~A~%" program installed))
        0))))
 
 ;;; Talking to the cluster through whichever member answers.

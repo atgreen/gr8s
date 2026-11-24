@@ -28,6 +28,8 @@
    #:mirror-release-artifact
    #:parse-artifact-reference
    #:host-package-format
+   #:installed-gr8s-program
+   #:installed-program-version
    #:prepare-host-upgrade
    #:install-host-upgrade
    #:run-host-upgrade

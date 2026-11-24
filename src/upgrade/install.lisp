@@ -41,6 +41,31 @@
 (defun program-available-p (name)
   (ignore-errors (zerop (run-program-status "sh" "-c" (format nil "command -v ~A >/dev/null" name)))))
 
+(defun installed-gr8s-program ()
+  "The gr8s this host's services run: the executable of a running gr8s-server or
+gr8s-agent, else the gr8s on PATH, else this one. `gr8s upgrade self' may run from
+anywhere, and must upgrade the gr8s that is installed, not itself."
+  (or (loop for unit in '("gr8s-server.service" "gr8s-agent.service")
+            for pid = (ignore-errors
+                       (parse-integer (string-trim '(#\Newline #\Space)
+                                                   (nth-value 1 (run-program-status "systemctl" "show" "-p" "MainPID" "--value" unit)))))
+            for executable = (and pid (plusp pid)
+                                  (ignore-errors (sb-posix:readlink (format nil "/proc/~D/exe" pid))))
+            when executable
+              return (let ((deleted (search " (deleted)" executable)))
+                       (if deleted (subseq executable 0 deleted) executable)))
+      (let ((path (string-trim '(#\Newline #\Space)
+                               (nth-value 1 (run-program-status "sh" "-c" "command -v gr8s")))))
+        (and (plusp (length path)) (probe-file path) (namestring (truename path))))
+      (gr8s-program)))
+
+(defun installed-program-version (program)
+  "What PROGRAM says its release is, or NIL."
+  (multiple-value-bind (status output) (run-program-status program "version")
+    (and (zerop status)
+         (let ((words (uiop:split-string (string-trim '(#\Newline) (first (uiop:split-string output :separator '(#\Newline)))))))
+           (second words)))))
+
 (defun host-package-format (&optional (program (gr8s-program)))
   "How gr8s was installed: \"rpm\" or \"deb\" when that package manager owns PROGRAM,
 else \"binary\"."

@@ -103,9 +103,37 @@ registry repository tag-or-digest)."
   "The function a registry request goes through, as REGISTRY-HTTP-REQUEST takes its
 arguments: a URL, headers, then drakma's keywords. Tests stand a registry in for it.")
 
-(defstruct (registry-session (:constructor make-registry-session (registry repository &key username password)))
+(defstruct (registry-session (:constructor %make-registry-session (registry repository username password)))
   "Requests to one repository of one registry, with the bearer token it last handed out."
   registry repository username password token)
+
+(defun registry-auth-files ()
+  "Where podman and Docker keep registry logins, the ones podman reads first."
+  (remove nil (list (uiop:getenv "REGISTRY_AUTH_FILE")
+                    (let ((runtime (uiop:getenv "XDG_RUNTIME_DIR")))
+                      (and runtime (format nil "~A/containers/auth.json" runtime)))
+                    (namestring (merge-pathnames ".config/containers/auth.json" (user-homedir-pathname)))
+                    (namestring (merge-pathnames ".docker/config.json" (user-homedir-pathname))))))
+
+(defun stored-registry-credentials (registry)
+  "The login `podman login' or `docker login' stored for REGISTRY: (values username password)."
+  (dolist (file (registry-auth-files))
+    (let* ((object (ignore-errors (com.inuoe.jzon:parse (uiop:read-file-string file))))
+           (entry (and (hash-table-p object) (hash-table-p (gethash "auths" object))
+                       (gethash registry (gethash "auths" object))))
+           (auth (and (hash-table-p entry) (gethash "auth" entry)))
+           (pair (and (stringp auth)
+                      (ignore-errors (trivial-utf-8:utf-8-bytes-to-string (ag-grpc:base64-decode auth)))))
+           (colon (and pair (position #\: pair))))
+      (when colon (return (values (subseq pair 0 colon) (subseq pair (1+ colon))))))))
+
+(defun make-registry-session (registry repository &key username password)
+  "A session with REGISTRY's REPOSITORY, logged in as USERNAME, or as the login stored
+for REGISTRY, if any."
+  (if username
+      (%make-registry-session registry repository username password)
+      (multiple-value-bind (stored-username stored-password) (stored-registry-credentials registry)
+        (%make-registry-session registry repository stored-username stored-password))))
 
 (defun challenge-parameters (header)
   "The parameters of a WWW-Authenticate Bearer challenge, as an alist."
@@ -153,11 +181,18 @@ body status headers)."
                   :force-binary t arguments)))
     (multiple-value-bind (body status response-headers) (attempt)
       (let ((challenge (and (= status 401) (drakma:header-value :www-authenticate response-headers))))
-        (if (and challenge (uiop:string-prefix-p "bearer" (string-downcase challenge)))
-            (progn
-              (setf (registry-session-token session) (fetch-registry-token session challenge))
-              (attempt))
-            (values body status response-headers))))))
+        (cond ((and challenge (uiop:string-prefix-p "bearer" (string-downcase challenge)))
+               (setf (registry-session-token session) (fetch-registry-token session challenge))
+               (attempt))
+              ;; A registry such as zot or distribution's htpasswd asks for the
+              ;; credentials themselves, on every request.
+              ((and challenge (uiop:string-prefix-p "basic" (string-downcase challenge))
+                    (registry-session-username session))
+               (apply *registry-http* url headers :force-binary t
+                      :basic-authorization (list (registry-session-username session)
+                                                 (registry-session-password session))
+                      arguments))
+              (t (values body status response-headers)))))))
 
 (defun sha256-digest (octets)
   (concatenate 'string "sha256:" (octets-hex (ironclad:digest-sequence :sha256 octets))))
