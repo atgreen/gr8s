@@ -17,6 +17,12 @@
       (invalid-pod "unsupported public Service discovery kind"))
     (dolist (key '("name" "namespace" "uid" "resourceVersion"))
       (when (gethash key source) (setf (gethash key metadata) (gethash key source))))
+    ;; The one annotation a node acts on: the Gateway it runs sends a Service that
+    ;; asks for it a PROXY protocol header (podster-0gz).
+    (when (equal kind "Service")
+      (let ((value (gethash "gr8s.io/proxy-protocol" (gethash "annotations" source (core-object)))))
+        (when (stringp value)
+          (setf (gethash "annotations" metadata) (core-object "gr8s.io/proxy-protocol" value)))))
     (when (equal kind "EndpointSlice")
       (setf (gethash "labels" metadata)
             (core-object "kubernetes.io/service-name"
