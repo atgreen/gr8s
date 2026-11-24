@@ -150,8 +150,10 @@ gr8s upgrade rollback                     # each host back to the release it ran
 leadership on, then the agents, and waits for each host to come back on the
 release. It refuses a step that would leave too few votes for a quorum while a
 voter restarts; `--allow-quorum-loss` accepts the outage instead. A node that is
-away is upgraded when it returns. The witness has no API to be upgraded through:
-run `sudo gr8s upgrade self --to VERSION` on its host. Progress is kept in a
+away is upgraded when it returns. A witness needn't run the release, since it
+stores the log without reading it, and `apply` leaves it be: upgrade a
+`gr8s witness` with `sudo gr8s upgrade self --to VERSION` on its host, and
+[miniwit](../miniwit/README.md) by replacing its binary. Progress is kept in a
 `ClusterUpgrade` (`kubectl get clusterupgrades`), so running `apply` again
 carries on from where it stopped.
 

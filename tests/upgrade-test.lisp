@@ -183,7 +183,7 @@ request function and the registry's objects, by (repository reference)."
 
 (test a-healthy-cluster-upgrades-voters-one-at-a-time-and-the-leader-last
   (multiple-value-bind (steps problems) (plan-summary (lab-hosts))
-    (is (equal '(("gr8s2" :upgrade) ("gvision" :upgrade "gr8s2") ("pfwit" :manual) ("gr8s-local" :upgrade)) steps))
+    (is (equal '(("gr8s2" :upgrade) ("gvision" :upgrade "gr8s2") ("pfwit" :optional) ("gr8s-local" :upgrade)) steps))
     (is (null problems))))
 
 (test an-upgrade-that-would-lose-quorum-is-refused
@@ -203,7 +203,7 @@ request function and the registry's objects, by (repository reference)."
     (is (null problems))))
 
 (test hosts-at-the-release-are-skipped-and-a-downgrade-is-a-rollback
-  (is (equal '(:skip :skip :manual :skip)
+  (is (equal '(:skip :skip :optional :skip)
              (mapcar #'second (plan-summary (lab-hosts :version "v1.37.2-gr8s.8")))))
   (multiple-value-bind (steps problems) (plan-summary (lab-hosts :version "v1.37.2-gr8s.9"))
     (declare (ignore steps))

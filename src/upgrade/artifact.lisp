@@ -163,7 +163,9 @@ for REGISTRY, if any."
                  (list :basic-authorization (list (registry-session-username session)
                                                   (registry-session-password session)))))
       (unless (= status 200)
-        (upgrade-fail "registry ~A refused a token (HTTP ~D)" (registry-session-registry session) status))
+        (upgrade-fail "registry ~A refused access to ~A (HTTP ~D): it doesn't exist there, isn't public, or needs a login~@[ other than ~A's~]"
+                      (registry-session-registry session) (registry-session-repository session) status
+                      (registry-session-username session)))
       (let ((object (com.inuoe.jzon:parse body)))
         (or (gethash "token" object) (gethash "access_token" object)
             (upgrade-fail "registry ~A's token answer has no token" (registry-session-registry session)))))))

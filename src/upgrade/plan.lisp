@@ -12,7 +12,8 @@
 ;;;; upgraded only if the votes still cast without it make a quorum: with three votes
 ;;;; and one voter already down, upgrading another would stop the cluster. The
 ;;;; witness votes too, but has no API to upgrade it through: it is upgraded by hand,
-;;;; and it applies no log, so a release's formats don't concern it. A worker that is
+;;;; and it applies no log, so it needn't run the release at all: a witness may be
+;;;; miniwit, which isn't gr8s, rather than `gr8s witness'. A worker that is
 ;;;; away is upgraded when it comes back (podster-igs.8).
 
 (in-package #:gr8s.upgrade)
@@ -31,7 +32,7 @@
 \"voter\", \"witness\" or NIL for a worker; :leader; :contact, as the leader sees a
 member; :ready, whether its node is Ready (T for a member without one); :version,
 NIL when it can't say. Return (values steps problems). A step is a plist of :host
-and :action -- :upgrade, :skip, :manual or :on-reconnect -- with :transfer-to, the
+and :action -- :upgrade, :skip, :manual, :optional (a witness) or :on-reconnect -- with :transfer-to, the
 voter to hand the leadership to first, and :reason. PROBLEMS are why the upgrade
 should not start; none means it may."
   (let* ((target-version (or (parse-gr8s-version target) (upgrade-fail "~S is not a gr8s version" target)))
@@ -77,7 +78,9 @@ should not start; none means it may."
       (let ((voter-steps (nreverse steps)) (witness-steps nil) (agent-steps nil))
         (setf steps nil)
         (dolist (host (remove-if-not (lambda (host) (equal "witness" (getf host :role))) hosts))
-          (add-step host :manual :reason "a witness, with no API to upgrade it through"))
+          ;; A witness stores the log without reading it, so it needn't run the
+          ;; release. It may not be gr8s at all: miniwit is a witness of its own.
+          (add-step host :optional :reason "a witness stores the log without reading it, so it needn't run this release"))
         (setf witness-steps (nreverse steps) steps nil)
         (dolist (host (sort (remove-if (lambda (host) (getf host :role)) (copy-list hosts)) #'string<
                             :key (lambda (host) (getf host :name))))

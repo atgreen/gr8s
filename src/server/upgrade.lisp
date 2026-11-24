@@ -265,6 +265,8 @@ rollback, a member already on an older release doesn't know every route."
       (:skip "nothing: it runs the release")
       (:upgrade (if transfer (format nil "hand the leadership to ~A, then upgrade" transfer) "upgrade"))
       (:manual (format nil "~A; on its host: sudo gr8s upgrade self --to ~A" (getf step :reason) reference))
+      (:optional (format nil "optional: ~A. A gr8s witness: sudo gr8s upgrade self --to ~A; miniwit: replace its binary"
+                         (getf step :reason) reference))
       (:on-reconnect "upgrade when its node returns"))))
 
 (defun print-upgrade-plan (hosts steps problems artifact reference output)
@@ -424,6 +426,7 @@ reason to stop, so a failure is only reported."
           (:skip (note-host-state api record name "Done" "runs the release already"))
           (:manual (note-host-state api record name "Manual" (upgrade-step-text step reference))
            (format output "~A: ~A~%" name (upgrade-step-text step reference)))
+          (:optional (note-host-state api record name "Optional" (getf step :reason)))
           (:on-reconnect (note-host-state api record name "OnReconnect" "upgrades when its node returns")
            (format output "~A: away; it upgrades when its node returns~%" name))
           (:upgrade

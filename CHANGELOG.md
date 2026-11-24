@@ -18,8 +18,9 @@ the Kubernetes API version with a gr8s release suffix (see
   on the release; a node that is away is upgraded when it returns. Progress is
   kept in a `ClusterUpgrade`, so `apply` resumes, and `status` and `rollback`
   read it. `finalize` lets the cluster use a release's new formats once every
-  voter runs it; a member too old for them refuses to start. `self` upgrades
-  one host as root, as for the witness, `mirror` copies a release to another
+  voter runs it; a member too old for them refuses to start. A witness needn't
+  run the release, and is left be. `self` upgrades one host as root, as one
+  running a gr8s from before `gr8s upgrade`, `mirror` copies a release to another
   registry, and `publish` is what the release workflow pushes with.
 - Releases are published as a signed OCI artifact,
   `ghcr.io/atgreen/gr8s-packages:<tag>`, holding the RPMs, DEBs and executables

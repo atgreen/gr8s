@@ -3998,8 +3998,9 @@ would cost the quorum, a downgrade); `gr8s upgrade apply --to VERSION` carries i
 out, voters one at a time with the leader last, then agents, and records progress
 in a ClusterUpgrade (`gr8s upgrade status`). Releases are signed OCI artifacts in
 ghcr.io/atgreen/gr8s-packages; a host checks the signature before installing.
-The witness, and any host running a gr8s from before `gr8s upgrade`, is upgraded
-on the host with `sudo gr8s upgrade self --to VERSION`. `gr8s status` warns when
+A host running a gr8s from before `gr8s upgrade` is upgraded on the host with
+`sudo gr8s upgrade self --to VERSION`. A witness needn't run the release (it
+stores the log without reading it); miniwit, the Go witness, isn't gr8s at all. `gr8s status` warns when
 agents and the server run different releases. Ask before applying: every host
 restarts.
 
