@@ -3851,6 +3851,10 @@ does not require starting gr8s with --debug-slynk-port.
 ICL-related runs on the node. --no-launch prints the `icl -b --connect` line
 instead, for when icl is not installed or to compose another Slynk client.
 
+A member or agent allows one debug session at a time: \"already has an active
+Slynk session\" means someone is connected now. On a control-plane member, one
+left behind by a client that went away ends by itself within half a minute.
+
 Useful forms include (debug-threads), (debug-backtraces), (debug-pod \"default\"
 \"web\"), and (debug-journal 20). They live in the GR8S.APISERVER package, and a
 Slynk session starts in CL-USER: evaluate (in-package :gr8s.apiserver) first, or
@@ -3900,6 +3904,15 @@ NetworkPolicy that admits a backend's traffic by `namespaceSelector` or
 policy in the backend's namespace cuts its routes off: the gateway answers
 `the gateway backend connection failed: ... TIMEOUT`. When a route times out,
 look for NetworkPolicies in the backend namespace before anything else.
+
+The gateway also connects to the backend itself, so a backend behind a TCPRoute,
+TLSRoute or GRPCRoute sees the node as every client. When it needs the client's
+address (an agent registry, an audit log), annotate its Service
+`gr8s.io/proxy-protocol: v2` and have the backend accept PROXY protocol v2 from
+the address it sees the gateway connect from: the gateway then sends a header
+naming the client before any other byte. Annotate only a backend that expects
+the header; any other breaks. A NodePort with `externalTrafficPolicy: Local`
+keeps client addresses too, but pins the Pod to the node clients dial.
 
 ## Built-in APIs -- do not install upstream duplicates
 
@@ -3990,6 +4003,17 @@ origin of its own, behind a per-tab secret, so the app's code can't reach the
 Headlamp proxy that acts with the reader's credentials. The dashboard frames the
 app even when it sends X-Frame-Options or a CSP frame-ancestors directive.
 
+## Container logs
+
+A container's log is `/var/log/gr8s/pods/POD-UID/CONTAINER.log` on its node
+(`CONTAINER.N.log` for its Nth restart). Past 10 MiB it is rotated, as kubelet
+rotates one: renamed `CONTAINER.log.TIME` (UTC), with five files kept in all.
+`kubectl logs` reads only the file being written, as with kubelet; read the
+rotated ones on the node. `--tail`, `--since` and `--limit-bytes` read only that
+much of the file, so ask for them on a busy container: an agent from before
+v1.37.2-gr8s.7 read the whole file into memory instead, and a 471 MB log once
+took a member's API down.
+
 ## Upgrading gr8s
 
 Upgrade with `gr8s upgrade`, not by copying binaries: `gr8s upgrade plan --to
@@ -3999,10 +4023,18 @@ out, voters one at a time with the leader last, then agents, and records progres
 in a ClusterUpgrade (`gr8s upgrade status`). Releases are signed OCI artifacts in
 ghcr.io/atgreen/gr8s-packages; a host checks the signature before installing.
 A host running a gr8s from before `gr8s upgrade` is upgraded on the host with
-`sudo gr8s upgrade self --to VERSION`. A witness needn't run the release (it
-stores the log without reading it); miniwit, the Go witness, isn't gr8s at all. `gr8s status` warns when
-agents and the server run different releases. Ask before applying: every host
+`sudo gr8s upgrade self --to VERSION`, once: the first move onto a release that
+has the command. A witness needn't run the release (it stores the log without
+reading it); miniwit, the Go witness, isn't gr8s at all. Before starting another
+upgrade, read `gr8s upgrade status` (or `kubectl get clusterupgrades`); `apply`
+resumes an unfinished one. A registry that refuses access (ghcr.io answers 403)
+holds no such release, or it isn't public. Ask before applying: every host
 restarts.
+
+`kubectl get nodes` shows the release each node's agent runs; `v0.0.0-unknown`
+is an agent from before agents reported it, due an upgrade. `gr8s status` warns
+when agents and members run different releases, which is expected only during
+an upgrade.
 
 ## Maintenance and agent working practices
 
