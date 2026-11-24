@@ -476,6 +476,20 @@ AUTH is a (username . password) credential for the registry."
            (ensure-cri-status "StartContainer" status))
       (ag-grpc:channel-close channel))))
 
+(defun cri-reopen-container-log (socket-path container-id &key (timeout 10))
+  "Have the running CONTAINER-ID write its log to a new file at its log path."
+  (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
+    (unwind-protect
+         (multiple-value-bind (response status)
+             (gr8s.cri.v1::runtime-service-reopen-container-log
+              (gr8s.cri.v1::make-runtime-service-stub channel)
+              (make-instance 'gr8s.cri.v1::reopen-container-log-request
+                             :container-id container-id)
+              :timeout timeout)
+           (declare (ignore response))
+           (ensure-cri-status "ReopenContainerLog" status))
+      (ag-grpc:channel-close channel))))
+
 (defun cri-container-metrics (socket-path &key (timeout 30))
   "Return every gr8s container's CPU seconds used and working set, by Pod UID and container name."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)) (pods (make-hash-table :test #'equal)))

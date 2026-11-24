@@ -75,26 +75,59 @@
       (error (condition)
         (finish-member-slynk-operation operation :error (princ-to-string condition))))))
 
+(defparameter *member-slynk-origin-probe-seconds* 10
+  "How often a member's Slynk operation asks the member that started it whether it still
+holds it. That member may restart, or give the operation up when a relay fails, and no
+cancel comes then; three asks it doesn't take end the operation, which frees this
+process's one Slynk session for the next client.")
+
+(defun member-slynk-origin-holds-p (operation)
+  "Whether the member that started OPERATION still holds it: that member takes an empty
+output frame, which shows its client nothing, only while it does."
+  (ignore-errors
+   (funcall (member-slynk-operation-emit operation) :operation-stream
+            (make-instance 'gr8s.node.v1::operation-stream
+                           :operation-id (member-slynk-operation-id operation)
+                           :channel gr8s.node.v1::+streamchannel-stream_channel_stdout+))))
+
 (defun run-member-slynk-writer (operation)
-  "Write queued client input without blocking the member mTLS relay handler."
+  "Write queued client input without blocking the member mTLS relay handler, and end
+OPERATION once the member that started it no longer holds it."
   (handler-case
-      (loop
-        (let ((entry
+      (let ((misses 0) (probe-at 0))
+        (flet ((next-probe ()
+                 (setf probe-at (+ (get-internal-real-time)
+                                   (* *member-slynk-origin-probe-seconds* internal-time-units-per-second)))))
+          (next-probe)
+          (loop
+            (multiple-value-bind (entry finished-p)
                 (bt:with-lock-held ((member-slynk-operation-lock operation))
                   (loop until (or (member-slynk-operation-input operation)
-                                  (member-slynk-operation-finished-p operation))
+                                  (member-slynk-operation-finished-p operation)
+                                  (>= (get-internal-real-time) probe-at))
                         do (bt:condition-wait (member-slynk-operation-changed operation)
                                               (member-slynk-operation-lock operation) :timeout 0.2))
-                  (pop (member-slynk-operation-input operation)))))
-          (unless entry (return))
-          (destructuring-bind (data . eof) entry
-            (when (plusp (length data))
-              (write-sequence data (member-slynk-operation-stream operation))
-              (finish-output (member-slynk-operation-stream operation)))
-            (when eof
-              (ignore-errors (usocket:socket-shutdown
-                              (member-slynk-operation-socket operation) :output))
-              (return)))))
+                  (values (pop (member-slynk-operation-input operation))
+                          (member-slynk-operation-finished-p operation)))
+              (cond
+                (entry
+                 (destructuring-bind (data . eof) entry
+                   (when (plusp (length data))
+                     (write-sequence data (member-slynk-operation-stream operation))
+                     (finish-output (member-slynk-operation-stream operation)))
+                   (when eof
+                     (ignore-errors (usocket:socket-shutdown
+                                     (member-slynk-operation-socket operation) :output))
+                     (return))))
+                (finished-p (return))
+                (t
+                 (next-probe)
+                 (if (member-slynk-origin-holds-p operation)
+                     (setf misses 0)
+                     (when (>= (incf misses) 3)
+                       (finish-member-slynk-operation
+                        operation :error "the member that started this Slynk session no longer holds it")
+                       (return)))))))))
     (error (condition)
       (finish-member-slynk-operation operation :error (princ-to-string condition)))))
 
@@ -271,7 +304,10 @@
 
 (defun serve-member-slynk-websocket (runtime member-id)
   (validate-slynk-websocket-request)
-  (serve-operation-slynk-websocket runtime (start-member-slynk-tunnel runtime member-id)))
+  (serve-operation-slynk-websocket
+   runtime (handler-case (start-member-slynk-tunnel runtime member-id)
+             (runtime-error (condition)
+               (core-resource-error 503 "ServiceUnavailable" "~A" condition)))))
 
 (defun relay-local-slynk-output (socket client)
   (let ((buffer (make-array 65536 :element-type '(unsigned-byte 8)))

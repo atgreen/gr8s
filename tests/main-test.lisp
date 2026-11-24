@@ -1045,6 +1045,13 @@
     (is (search "Wipe-and-rejoin checklist" output))
     (is (search "gr8s doctor --fix" output))))
 
+(test skill-explains-how-to-add-a-dashboard-tab
+  (let ((output (with-output-to-string (stream) (gr8s.server::print-skill stream))))
+    (is (search "Dashboard tabs for the cluster's own apps" output))
+    (is (search "dashboardtabs.dashboard.gr8s.io.yaml" output))
+    (is (search "kind: DashboardTab" output))
+    (is (search "services/proxy" output))))
+
 (test cli-doctor-subcommands
   (is (eq :doctor-cluster (getf (parse-cli-options '("doctor" "checkup" "--json")) :command)))
   (is (equal '("diagnose" "pod/web" "--kubeconfig" "test.config")

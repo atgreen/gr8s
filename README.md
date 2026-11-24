@@ -485,9 +485,11 @@ REPL while it runs.
   one step (`--no-launch` prints the `icl -b --connect` line instead). ICL
   brings syntax highlighting, completion, a TUI object inspector, package
   and class browsers, flame-graph profiling, and notebooks. Built-in
-  helpers in the `GR8S` package — `(debug-threads)`, `(debug-backtraces)`,
+  helpers — `(debug-threads)`, `(debug-backtraces)`,
   `(debug-pod "default" "web")`, `(debug-journal 20)` — inspect the node's
-  local context.
+  local context. They live in the `GR8S.APISERVER` package and a session
+  starts in `CL-USER`, so evaluate `(in-package :gr8s.apiserver)` first, or
+  qualify them: `(gr8s.apiserver::debug-threads)`.
 - **If you'd rather attach with Emacs or Lem**, run `gr8s debug slynk
   --node NODE --kubeconfig KUBECONFIG --local-port 4005` and point
   [Sly](https://github.com/joaotavora/sly) (or Lem's Lisp mode) at the

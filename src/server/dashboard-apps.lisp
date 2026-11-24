@@ -55,13 +55,14 @@ through its prefix, so a path already under it goes as is."
 (defun dashboard-app-request-headers (app headers)
   "HEADERS to send on to APP: not those the connection or the API proxy owns, not
 Authorization, which the API server would take as the reader's, and not the tabs'
-own secret cookies."
+own secret cookies. Nor Origin: the tab checked it against its own, and past the API
+proxy the app sees another Host, so its CSRF guard (Grafana's) would refuse it."
   (declare (ignore app))
   (loop for (name . value) in (gr8s.apiserver::pod-proxy-end-to-end-headers
                                (mapcar (lambda (header) (cons (string-downcase (string (car header))) (cdr header)))
                                        headers)
                                :request t)
-        unless (or (string-equal name "authorization") (string-equal name "referer"))
+        unless (member name '("authorization" "referer" "origin") :test #'string-equal)
           collect (cons name
                         (if (string-equal name "cookie")
                             (format nil "~{~A~^; ~}"
@@ -190,7 +191,10 @@ leader; the browser can't follow that to the API server, so the dashboard does."
        (hunchentoot:set-cookie (dashboard-app-cookie app) :value (dashboard-app-secret app)
                                :path "/" :http-only t :same-site "Strict")
        (hunchentoot:redirect (dashboard-app-path app) :code hunchentoot:+http-moved-temporarily+))
-      ((not (equal (hunchentoot:cookie-in (dashboard-app-cookie app) request) (dashboard-app-secret app)))
+      ((or (not (equal (hunchentoot:cookie-in (dashboard-app-cookie app) request) (dashboard-app-secret app)))
+           ;; Every loopback port is the same site, so the cookie alone admits another
+           ;; local page's requests; one that names its origin must name this one.
+           (and (hunchentoot:header-in :origin request) (not (dashboard-agent-same-origin-p request))))
        (setf (hunchentoot:return-code*) hunchentoot:+http-forbidden+
              (hunchentoot:content-type*) "text/plain")
        "gr8s dashboard: open this app from its dashboard tab")

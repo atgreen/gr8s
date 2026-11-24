@@ -19,11 +19,13 @@ header .label { color: var(--muted); }
 select, button { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line);
   border-radius: 4px; padding: 3px 8px; }
 button { cursor: pointer; }
+button:disabled { cursor: default; opacity: .5; }
 button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 #status { margin-left: auto; color: var(--muted); }
 #status.bad { color: var(--bad); }
 #empty { flex: 1; display: grid; place-items: center; color: var(--muted); text-align: center; padding: 24px; max-width: 70ch; margin: 0 auto; }
-#empty code { background: var(--panel); padding: 1px 4px; border-radius: 3px; }
+#empty p { margin: 0; }
+#empty code { white-space: nowrap; background: var(--panel); padding: 1px 4px; border-radius: 3px; }
 iframe { flex: 1; width: 100%; border: 0; }
 </style>
 </head>
@@ -35,8 +37,8 @@ iframe { flex: 1; width: 100%; border: 0; }
   <button id="disconnect" hidden>Disconnect</button>
   <span id="status" role="status"></span>
 </header>
-<div id="empty">Connect to a gr8s process to open ICL's REPL inside it. It is the running control
-plane or agent, not a copy: what you evaluate changes it at once.</div>
+<div id="empty"><p>Connect to a gr8s process to open ICL's REPL inside it. It is the running control
+plane or agent, not a copy: what you evaluate changes it at once.</p></div>
 <iframe id="icl" title="ICL" hidden></iframe>
 <script>
 "use strict";
@@ -95,11 +97,12 @@ fetch(base + "targets").then((response) => response.json()).then((data) => {
   }
   if (!data.icl) {
     $("connect").disabled = true;
-    $("empty").innerHTML = "This tab needs <a href=\"https://github.com/atgreen/icl\" target=\"_blank\" rel=\"noopener\">ICL</a>, which is not on this machine's PATH.";
+    $("empty").innerHTML = "<p>This tab needs <a href=\"https://github.com/atgreen/icl\" target=\"_blank\" rel=\"noopener\">ICL</a> " +
+      "1.26.0 or later, which is not on this machine's PATH.</p>";
   } else if (!data.embeds) {
     $("connect").disabled = true;
-    $("empty").innerHTML = "This ICL is too old to show inside the dashboard (it has no <code>--embed-origin</code>). " +
-      "Upgrade ICL, or run <code>gr8s debug icl NODE</code> to open it in a window of its own.";
+    $("empty").innerHTML = "<p>This ICL is too old to show inside the dashboard: it needs ICL 1.26.0 or later, " +
+      "for <code>--embed-origin</code>. Upgrade ICL, or run <code>gr8s debug icl NODE</code> to open it in a window of its own.</p>";
   }
   // Back where this page left off: a REPL already running.
   if (data.sessions.length) show(data.sessions[0]);

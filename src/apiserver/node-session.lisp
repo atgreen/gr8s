@@ -516,10 +516,12 @@ outside SERVER's lock because a peer RPC may take seconds."
       (when (gethash operation-id (node-grpc-server-operations server))
         (error "Member operation ~A already exists" operation-id))
       (setf (gethash operation-id (node-grpc-server-operations server)) operation))
-    (let ((owner (funcall router :operation-request member-id node-name request)))
+    (multiple-value-bind (owner reason) (funcall router :operation-request member-id node-name request)
       (unless owner
         (release-node-operation server operation)
-        (error "control-plane member ~A did not accept the debug operation" member-id))
+        (error 'runtime-error
+               :message (format nil "control-plane member ~A refused the debug session~@[: ~A~]"
+                                member-id (and (plusp (length reason)) reason))))
       (setf (pending-node-operation-remote-member operation) owner))
     operation))
 
