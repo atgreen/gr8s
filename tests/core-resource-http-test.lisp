@@ -70,6 +70,40 @@
                                   (gr8s.resources::core-object "uid" (gethash "uid" (gethash "metadata" original)))))
       (check-core-status 404 item))))
 
+(test service-strategic-merge-honors-kubectl-apply-directives
+  ;; podster-0i0: kubectl apply of a Service that drops a port sends $setElementOrder/ports
+  ;; and a {"$patch":"delete"} list element; gr8s answered 422 and the apply failed.
+  (with-core-api (store path)
+    (values store path)
+    (let ((item "/api/v1/namespaces/default/services/dirq"))
+      (check-core-status 201 "/api/v1/namespaces/default/services" :method :post
+        :object (com.inuoe.jzon:parse "{\"apiVersion\":\"v1\",\"kind\":\"Service\",
+          \"metadata\":{\"name\":\"dirq\",\"namespace\":\"default\"},
+          \"spec\":{\"type\":\"NodePort\",\"selector\":{\"app\":\"dirq\"},
+                    \"ports\":[{\"name\":\"http\",\"port\":8080,\"targetPort\":8080,\"nodePort\":30080},
+                               {\"name\":\"grpc\",\"port\":50051,\"targetPort\":50051,\"nodePort\":30051}]}}"))
+      (let* ((patched (check-core-status 200 item :method :patch
+                        :content-type "application/strategic-merge-patch+json"
+                        :object (com.inuoe.jzon:parse "{\"spec\":{
+                          \"$setElementOrder/ports\":[{\"port\":50051}],
+                          \"ports\":[{\"$patch\":\"delete\",\"port\":8080},{\"nodePort\":null,\"port\":50051}],
+                          \"type\":\"ClusterIP\"}}")))
+             (spec (gethash "spec" patched))
+             (ports (coerce (gethash "ports" spec) 'list)))
+        (is (equal "ClusterIP" (gethash "type" spec)))
+        (is (equal '(50051) (mapcar (lambda (port) (gethash "port" port)) ports)))
+        (is (equal "grpc" (gethash "name" (first ports))))
+        (is (null (nth-value 1 (gethash "nodePort" (first ports)))))
+        (is (null (nth-value 1 (gethash "$setElementOrder/ports" spec)))))
+      ;; Ports merge by their port number rather than the list being replaced.
+      (let ((ports (coerce (gethash "ports" (gethash "spec"
+                             (check-core-status 200 item :method :patch
+                               :content-type "application/strategic-merge-patch+json"
+                               :object (com.inuoe.jzon:parse
+                                        "{\"spec\":{\"ports\":[{\"name\":\"metrics\",\"port\":9090,\"targetPort\":9090}]}}"))))
+                           'list)))
+        (is (equal '(9090 50051) (sort (mapcar (lambda (port) (gethash "port" port)) ports) #'<)))))))
+
 (test secret-http-normalizes-stringdata-and-enforces-delete-preconditions
   (with-core-api (store path)
     (values store path)

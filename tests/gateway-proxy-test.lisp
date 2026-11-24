@@ -280,6 +280,42 @@
       (gr8s.controllers::stop-gateway-listener gateway)
       (hunchentoot:stop backend))))
 
+(defclass gw-cookie-acceptor (hunchentoot:acceptor) ())
+
+(defmethod hunchentoot:acceptor-dispatch-request ((acceptor gw-cookie-acceptor) request)
+  (declare (ignore request))
+  ;; Two cookies in one response, as an OIDC login sets its verifier and state.
+  (hunchentoot:set-cookie "verifier" :value "v1" :path "/" :http-only t
+                                     :expires (encode-universal-time 0 0 12 25 11 2026 0))
+  (hunchentoot:set-cookie "state" :value "s1" :path "/")
+  "cookies")
+
+(test gateway-forwards-each-set-cookie-on-its-own-line
+  "podster-qnr: a browser takes one cookie per Set-Cookie line, so the Gateway must not
+pass on the comma-joined line its HTTP client makes of several, Expires dates and all."
+  (let* ((backend (hunchentoot:start (make-instance 'gw-cookie-acceptor :address "127.0.0.1" :port 0)))
+         (backend-port (hunchentoot:acceptor-port backend))
+         (routes (list (gr8s.controllers::make-gw-route
+                        :namespace "default" :hostnames '("app.example.com")
+                        :rules (list (gr8s.controllers::make-gw-rule
+                                      :matches (list (gr8s.controllers::make-gw-match :path-type :prefix :path "/"))
+                                      :backends (list (gr8s.controllers::make-gw-backend :name "cookies" :port backend-port)))))))
+         (router (gr8s.controllers::build-gateway-router routes))
+         (resolver (lambda (b) (declare (ignore b)) (values "127.0.0.1" backend-port)))
+         (gateway (gr8s.controllers::start-gateway-listener :port 0 :router router :resolver resolver :name "test"))
+         (listener-port (hunchentoot:acceptor-port gateway)))
+    (unwind-protect
+         (multiple-value-bind (code headers) (gw-raw-request listener-port "app.example.com" "/-/auth/login")
+           (is (= 200 code))
+           (let ((cookies (loop for (name . value) in headers
+                                when (string-equal name "set-cookie") collect value)))
+             (is (= 2 (length cookies)))
+             (is (find-if (lambda (c) (and (uiop:string-prefix-p "verifier=v1" c) (search "GMT" c) (search "HttpOnly" c)))
+                          cookies))
+             (is (find-if (lambda (c) (uiop:string-prefix-p "state=s1" c)) cookies))))
+      (gr8s.controllers::stop-gateway-listener gateway)
+      (hunchentoot:stop backend))))
+
 (test gateway-forwards-the-client-authorization-to-the-backend
   ;; podster-8lq: the Gateway is a pass-through proxy, so the end user's
   ;; Authorization must reach the backend app (e.g. an S3 server validating a

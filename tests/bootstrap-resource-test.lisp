@@ -102,6 +102,23 @@ True (with the kubelet reason) for a signal its heartbeat reported."
       (is (equal "True" (gethash "status" condition)))
       (is (equal "KubeletHasInsufficientMemory" (gethash "reason" condition))))))
 
+(test node-ready-condition-carries-its-transition-time
+  "The Ready condition says when it last changed (clients such as Headlamp derive
+a node's uptime from it): when the ready lease began, or, for a node that is not
+ready, when it was last heard from."
+  (let ((node (gr8s.model::make-node-record :id "t" :name "tnode" :pod-cidr "10.88.1.0/24"))
+        (since (encode-universal-time 1 2 3 4 5 2026 0)))
+    (flet ((transition () (gethash "lastTransitionTime"
+                                   (node-condition-of-type (gr8s.resources::node-api-object node) "Ready"))))
+      (is (null (transition)) "a node never heard from has no transition time")
+      (setf (gr8s.model::node-record-ready-p node) t
+            (gr8s.model::node-record-ready-since node) since
+            (gr8s.model::node-record-last-heartbeat node) (+ since 600))
+      (is (equal "2026-05-04T03:02:01Z" (transition)))
+      (setf (gr8s.model::node-record-ready-p node) nil
+            (gr8s.model::node-record-ready-since node) nil)
+      (is (equal "2026-05-04T03:12:01Z" (transition))))))
+
 (test node-pressure-conditions-carry-the-kubelets-messages
   (let ((node (gr8s.model::make-node-record :id "m" :name "mnode" :pod-cidr "10.88.1.0/24")))
     (flet ((message (type) (gethash "message" (node-condition-of-type (gr8s.resources::node-api-object node) type))))

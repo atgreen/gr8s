@@ -510,11 +510,14 @@ registry serving a cert-manager certificate from the cluster's ca issuer."
                        :cni-bin-dirs nil
                        :wireguard-endpoints nil
                        :dns-forward-rules nil
-                       :dns-serve-zones nil)))
+                       :dns-serve-zones nil
+                       :kubelet-port +kubelet-default-port+)))
     (loop while arguments
           for option = (first arguments)
           for value = (option-value arguments option)
           do (cond
+               ((string= option "--kubelet-port")
+                (setf (getf options :kubelet-port) (if (equal value "0") 0 (parse-port value))))
                ((string= option "--node-address")
                 (setf (getf options :node-address) (canonical-node-underlay-address value)))
                ((string= option "--wireguard-endpoint")
@@ -811,12 +814,15 @@ authenticated tunnel as slynk and launches ICL's browser mode (icl -b
             :key (lambda (entry) (gethash "name" entry)))
       (error "kubeconfig refers to missing entry ~S" name)))
 
-(defun read-debug-kubeconfig (path)
-  "Return server, token, CA, client certificate and key from PATH's current context."
+(defun read-debug-kubeconfig (path &optional context-name)
+  "Return server, token, CA, client certificate and key from PATH's CONTEXT-NAME, by
+default its current context."
   (let* ((file (truename path))
-         (root (gr8s.resources:parse-yaml (uiop:read-file-string file)))
+         (root (let ((root (gr8s.resources:parse-yaml (uiop:read-file-string file))))
+                 (unless (hash-table-p root) (error "~A is not a kubeconfig" (namestring file)))
+                 root))
          (context-entry (kubeconfig-named-entry
-                         (gethash "contexts" root #()) (gethash "current-context" root)))
+                         (gethash "contexts" root #()) (or context-name (gethash "current-context" root))))
          (context (gethash "context" context-entry))
          (cluster (gethash "cluster" (kubeconfig-named-entry
                                       (gethash "clusters" root #()) (gethash "cluster" context))))
@@ -903,13 +909,14 @@ authenticated tunnel as slynk and launches ICL's browser mode (icl -b
   (when body (write-sequence (gr8s.resources:stringify-to-utf-8-bytes body) stream))
   (finish-output stream))
 
-(defun call-with-debug-kubeconfig (path function)
+(defun call-with-debug-kubeconfig (path function &key context)
   "Call FUNCTION with PATH's current-context connection config. The TLS client
    takes only file paths, while `gr8s kubeconfig` emits inline certificate data,
    so certificate-authority-data and friends are materialized into private
    temporary files for the duration of the call and removed on the way out
-   (podster-7jb). Explicit file paths pass through untouched."
-  (let ((config (read-debug-kubeconfig path))
+   (podster-7jb). Explicit file paths pass through untouched. CONTEXT names
+   another context than the current one."
+  (let ((config (read-debug-kubeconfig path context))
         (temporary nil))
     (labels ((materialize (data-key file-key suffix)
                (when (and (null (getf config file-key)) (getf config data-key))
@@ -1131,11 +1138,39 @@ bare positional state directory for backward compatibility.  A missing
                ((and (not positional-seen)
                      (plusp (length option))
                      (char/= (char option 0) #\-))
+                ;; A bare word is a state directory only if it names one: a mistyped
+                ;; subcommand checked as an empty state directory makes a running
+                ;; node's routes look stale, and the advice is a --fix that tears them down.
+                (unless (or (find #\/ option) (uiop:directory-exists-p option))
+                  (error "unknown doctor command: ~A~@[ (did you mean '~A'?)~]; see 'gr8s doctor --help'"
+                         option (nearest-doctor-command option)))
                 (setf (getf options :state-directory) option
                       positional-seen t
                       arguments (rest arguments)))
                (t (error "unknown doctor option: ~A" option))))
     options))
+
+(defparameter +doctor-commands+ '("diagnose" "observe" "impact" "host" "checkup")
+  "The words `gr8s doctor' takes as a command.")
+
+(defun nearest-doctor-command (word)
+  "The doctor command WORD most likely misspells, or NIL when none is close."
+  (flet ((distance (a b)
+           ;; Levenshtein distance, one row at a time.
+           (let ((row (coerce (loop for i to (length b) collect i) 'vector)))
+             (loop for i from 1 to (length a)
+                   do (let ((previous (aref row 0)))
+                        (setf (aref row 0) i)
+                        (loop for j from 1 to (length b)
+                              do (let ((above (aref row j)))
+                                   (setf (aref row j)
+                                         (min (1+ above) (1+ (aref row (1- j)))
+                                              (+ previous (if (char-equal (char a (1- i)) (char b (1- j))) 0 1))))
+                                   (setf previous above)))))
+             (aref row (length b)))))
+    (let ((best (first (sort (copy-list +doctor-commands+) #'< :key (lambda (command) (distance word command))))))
+      (when (<= (distance word best) (max 2 (floor (length best) 3)))
+        best))))
 
 (defun parse-wireguard-options (arguments)
   "Parse `gr8s wireguard rotate-key --state-directory DIR'. The key is replaced
@@ -2504,12 +2539,28 @@ agent masquerades Pod->apiserver traffic toward.")
         (unwind-protect
              (progn
                (start-node-runtime node-runtime)
+               ;; serve issues its own agent's kubelet certificates (CONTROL marks that
+               ;; agent); a standalone agent gets them from the control plane, and its
+               ;; kubelet, with no API server beside it, asks that host's to review callers.
+               (when (and (null control) (managed-containerd-options-p options)
+                          (plusp (or (getf options :kubelet-port) 0)))
+                 (unless (getf options :kubelet-api-server)
+                   (setf (getf options :kubelet-api-server)
+                         (format nil "~A:~D" host +in-cluster-api-port+)))
+                 (when (gr8s.agent::kubelet-credentials-due-p (getf options :state-directory))
+                   (gr8s.agent::request-kubelet-credentials
+                    host port node-name (getf options :state-directory)
+                    :underlay-address (getf options :node-address))))
                (setf kubelet (start-agent-kubelet-server
                               options node-name runtime
                               :network-metrics-function
                               (lambda ()
                                 (gr8s.agent:node-runtime-wireguard-metrics-text
                                  node-runtime))))
+               ;; serve admits its own agent's kubelet port; a standalone agent admits its own.
+               (when (and kubelet (null control))
+                 (ignore-errors
+                   (ensure-control-plane-firewall nil :kubelet-port (getf options :kubelet-port))))
                ;; Enrolled, runtime up, kubelet serving: the node is ready even
                ;; though the session below reconnects for the process lifetime.
                (notify-service-manager-ready)
@@ -4130,7 +4181,7 @@ No HA API may start from member-local certificate state before this converges."
              "KIND/NAME [OPTIONS]"
              :options '(("KIND/NAME" "A node, workload, Pod, Secret, ConfigMap or claim")
                         ("-n, --namespace NAME" "Namespace of the resource")
-                        ("--kubeconfig FILE" "Cluster credentials (default: kubectl's own configuration)")
+                        ("--kubeconfig FILE" "Cluster credentials (default: KUBECONFIG, ~/.kube/config, then a member's own)")
                         ("--context NAME" "Kubeconfig context")
                         ("--json" "Emit the affected resources as JSON"))))
       ((and (equal (first path) "doctor")
@@ -4139,7 +4190,7 @@ No HA API may start from member-local certificate state before this converges."
              "[KIND/NAME] [OPTIONS]"
              :options '(("KIND/NAME" "One resource; default is everything you can see")
                         ("-n, --namespace NAME" "Survey or look in one namespace")
-                        ("--kubeconfig FILE" "Cluster credentials (default: kubectl's own configuration)")
+                        ("--kubeconfig FILE" "Cluster credentials (default: KUBECONFIG, ~/.kube/config, then a member's own)")
                         ("--context NAME" "Kubeconfig context")
                         ("--notes" "Also list configuration and history notes")
                         ("--markdown" "Write the report as Markdown instead of rendering it")
@@ -4199,6 +4250,7 @@ No HA API may start from member-local certificate state before this converges."
                         ("--token TOKEN" "Cluster join token") ("--ca-pin SHA256" "Cluster CA fingerprint")
                         ("--node-name NAME" "Node name") ("--state-directory DIR" "Folder holding node state")
                         ("--node-address IPV4" "Node address to advertise")
+                        ("--kubelet-port PORT" "Port of the kubelet's endpoints (default 10250; 0 turns them off)")
                         ("--wireguard-endpoint NAME=IPV4:PORT" "WireGuard endpoint; repeatable")
                         ("--runtime NAME" "containerd or fake")
                         ("--flow-events WHAT" "connections (default): report every Pod's new connections and drops; drops: drops and isolated Pods' connections only")
@@ -4524,7 +4576,8 @@ and refuses every public registry (podster-8ak). Returns the bundle named, or NI
               (:member-remove (run-member-remove-command options))
               (:member-transfer-leadership (run-member-transfer-leadership-command options))
               (:doctor-cluster
-               (gr8s-diagnose:doctor-main (getf options :arguments)))
+               (let ((gr8s-diagnose::*call-with-getter* #'call-with-doctor-api-getter))
+                 (gr8s-diagnose:doctor-main (getf options :arguments))))
               (:doctor-observe (run-doctor-observe options))
               (:hubble-serve (run-hubble-serve options))
               (:doctor

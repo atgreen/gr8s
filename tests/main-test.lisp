@@ -577,6 +577,19 @@
   (dolist (address '("127.0.0.1" "0.0.0.0" "224.0.0.1" "255.255.255.255" "192.0.2.1/24"))
     (signals error (gr8s.server::parse-serve-options (list "--node-address" address)))))
 
+(test agent-serves-kubelet-endpoints-by-default
+  "A standalone agent serves the kubelet's endpoints on 10250 as serve's own agent
+does; --kubelet-port moves them, and 0 turns them off."
+  (flet ((agent-options (&rest more)
+           (gr8s.server::parse-agent-options
+            (append '("--server" "192.0.2.1:7443" "--token" "test" "--ca-pin" "test"
+                      "--node-name" "worker-a" "--state-directory" "/tmp/worker-a")
+                    more))))
+    (is (eql 10250 (getf (agent-options) :kubelet-port)))
+    (is (eql 10251 (getf (agent-options "--kubelet-port" "10251") :kubelet-port)))
+    (is (eql 0 (getf (agent-options "--kubelet-port" "0") :kubelet-port)))
+    (signals error (agent-options "--kubelet-port" "not-a-port"))))
+
 (test wireguard-endpoint-options-are-named-repeatable-and-validated
   (let ((options
           (gr8s.server::parse-agent-options

@@ -70,22 +70,28 @@ cluster.")
 
 ;;; The tools. Each takes the arguments object and the kubeconfig, and returns text.
 
-(defun mcp-doctor-getter (kubeconfig)
-  (gr8s-diagnose::bounded-getter (gr8s-diagnose::kubectl-getter kubeconfig nil)))
+(defun call-with-mcp-doctor-getter (kubeconfig function)
+  "Call FUNCTION with a bounded doctor getter reading through gr8s's API client."
+  (let ((gr8s-diagnose::*call-with-getter* #'call-with-doctor-api-getter))
+    (gr8s-diagnose::call-with-doctor-getter kubeconfig nil function)))
 
 (defun mcp-doctor-diagnose (arguments kubeconfig)
   (let* ((namespace (mcp-namespace-argument arguments))
          (target (mcp-target-argument arguments))
-         (getter (mcp-doctor-getter kubeconfig))
-         (report (if target
-                     (gr8s-diagnose::diagnose-target target namespace getter)
-                     (gr8s-diagnose::checkup namespace getter))))
+         (report (call-with-mcp-doctor-getter
+                  kubeconfig
+                  (lambda (getter)
+                    (if target
+                        (gr8s-diagnose::diagnose-target target namespace getter)
+                        (gr8s-diagnose::checkup namespace getter))))))
     (gr8s-diagnose::survey-markdown report :notes (eq t (gethash "notes" arguments)))))
 
 (defun mcp-doctor-impact (arguments kubeconfig)
-  (let ((report (gr8s-diagnose::impact-target (mcp-target-argument arguments :required t)
-                                              (mcp-namespace-argument arguments)
-                                              (mcp-doctor-getter kubeconfig))))
+  (let* ((target (mcp-target-argument arguments :required t))
+         (namespace (mcp-namespace-argument arguments))
+         (report (call-with-mcp-doctor-getter
+                  kubeconfig
+                  (lambda (getter) (gr8s-diagnose::impact-target target namespace getter)))))
     (with-output-to-string (*standard-output*)
       (gr8s-diagnose::print-impact report))))
 

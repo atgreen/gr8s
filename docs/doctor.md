@@ -13,9 +13,12 @@ gr8s doctor impact secret/db-password -n production
 gr8s doctor host --state-directory /var/lib/gr8s   # existing host checks
 ```
 
-`diagnose` only issues kubectl GET requests (`checkup` is an alias for `diagnose` without a target). `--kubeconfig FILE` selects
-a configuration; without it kubectl uses its own default (`KUBECONFIG` or
-`~/.kube/config`). `--context NAME` selects a context within it. They reject `--fix`.
+`diagnose` only issues GET requests (`checkup` is an alias for `diagnose` without a target). `--kubeconfig FILE` selects
+a configuration; without it the doctor uses kubectl's default (the first file in
+`KUBECONFIG`, then `~/.kube/config`), and on a control-plane member the server's
+own `/var/lib/gr8s/server/kubeconfig`. `--context NAME` selects a context within it.
+They reject `--fix`. When a read fails, the report says why: the HTTP status and
+the API server's message, or that the server didn't answer.
 The host subcommand retains the original host behavior, including opt-in `--fix`;
 legacy forms such as `doctor --state-directory DIR --fix` continue to work.
 
@@ -39,7 +42,8 @@ A source-only runner, `scripts/gr8s-doctor`, runs the same diagnosis/checkup cod
 without loading the entire gr8s server. It does not run host checks. It requires
 SBCL, kubectl and the pinned Lisp dependencies (`make deps` at the repository
 root restores them, ag-prolog among them).
-Native gr8s embeds the Lisp code but still requires kubectl for cluster access.
+Native gr8s embeds the Lisp code and reads the cluster with its own API client,
+so it needs no kubectl.
 
 ## Diagnose
 

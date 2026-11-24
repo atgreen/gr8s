@@ -501,6 +501,7 @@
                                            (:file "main")
                                            (:file "foreign-flows")
                                            (:file "doctor-observe")
+                                           (:file "doctor-api")
                                            (:file "mcp")
                                            (:file "hubble-observer")
                                            (:file "hubble-ui")

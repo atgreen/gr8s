@@ -1404,6 +1404,70 @@
         (when channel (ignore-errors (ag-grpc:channel-close channel)))
         (gr8s.apiserver::stop-node-grpc-server server)))))
 
+(test standalone-agent-gets-kubelet-credentials-from-the-control-plane
+  "An enrolled agent gets its kubelet's certificates over its node identity: the control
+plane, not the request, names the subject and addresses, and its kubelet then serves with
+them. A node can't claim another's address or name."
+  (with-temporary-store (store path)
+    (gr8s.controllers::register-node
+     store (gr8s.model::make-node-record :id "other-id" :name "other" :pod-cidr "10.80.16.0/20"
+                                         :underlay-address "10.99.0.8"))
+    (let* ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" path)))
+           (server (gr8s.apiserver::start-node-grpc-server store :host "127.0.0.1" :port 0 :pki pki))
+           (port (gr8s.apiserver::node-grpc-server-port server))
+           (directory (merge-pathnames "kubelet-node/" path)))
+      (unwind-protect
+           (progn
+             (gr8s.agent::enroll-node-over-grpc
+              "127.0.0.1" port "kubelet-node" (gr8s.security::create-join-token pki "kubelet-node")
+              (gr8s.security::cluster-pki-ca-fingerprint pki)
+              (merge-pathnames "node.key" directory) (merge-pathnames "node.crt" directory)
+              (merge-pathnames "ca.crt" directory))
+             (is-true (gr8s.agent::kubelet-credentials-due-p directory))
+             (let ((*error-output* (make-broadcast-stream)))
+               (is-false (gr8s.agent::request-kubelet-credentials
+                          "127.0.0.1" port "kubelet-node" directory :underlay-address "10.99.0.8")
+                         "another node's address is refused")
+               (is-false (gr8s.agent::request-kubelet-credentials
+                          "127.0.0.1" port "other" directory :underlay-address "10.99.0.9")
+                         "another node's name is refused"))
+             (is-true (gr8s.agent::request-kubelet-credentials
+                       "127.0.0.1" port "kubelet-node" directory :underlay-address "10.99.0.7"))
+             (is-false (gr8s.agent::kubelet-credentials-due-p directory))
+             (is (equal "10.99.0.7" (gr8s.model::node-record-underlay-address
+                                     (gr8s.controllers::get-node store "kubelet-node"))))
+             (multiple-value-bind (certificate key client-certificate client-key)
+                 (gr8s.apiserver::kubelet-credential-paths directory)
+               (flet ((openssl (path &rest arguments)
+                        (uiop:run-program (append (list "openssl" "x509" "-noout" "-in" (namestring path)) arguments)
+                                          :output :string)))
+                 (is (search "CN=system:node:kubelet-node" (remove #\Space (openssl certificate "-subject"))))
+                 (is (search "O=system:nodes" (remove #\Space (openssl client-certificate "-subject"))))
+                 (let ((names (openssl certificate "-ext" "subjectAltName")))
+                   (is (search "DNS:kubelet-node" names))
+                   (is (search "IP Address:10.99.0.7" names))
+                   (is (search "IP Address:127.0.0.1" names))))
+               ;; The kubelet serves with the issued RSA key, and accepts the issued client certificate.
+               (let* ((kubelet (gr8s.apiserver::start-kubelet-server
+                                :address "127.0.0.1" :port 0 :certificate certificate :key key
+                                :node-name "kubelet-node"
+                                :auth (gr8s.apiserver::make-kubelet-auth
+                                       :client-ca (gr8s.security::cluster-pki-ca-certificate pki)
+                                       :review (lambda (review)
+                                                 (declare (ignore review))
+                                                 (gr8s.resources::core-object
+                                                  "status" (gr8s.resources::core-object "allowed" t))))
+                                :stats-function #'kubelet-test-node-stats))
+                      (kubelet-port (hunchentoot:acceptor-port kubelet)))
+                 (unwind-protect
+                      (is (= 200 (gr8s.apiserver::tls-http-request
+                                  :address "127.0.0.1" :port kubelet-port :server-name "127.0.0.1"
+                                  :target "/metrics/resource"
+                                  :trust-certificates (list (gr8s.security::cluster-pki-ca-certificate pki))
+                                  :client-certificate client-certificate :client-key client-key)))
+                   (gr8s.apiserver::stop-kubelet-server kubelet)))))
+        (gr8s.apiserver::stop-node-grpc-server server)))))
+
 (test ha-enrollment-replicates-an-ordered-node-operation
   (with-temporary-store (store path)
     (gr8s.controllers::register-node

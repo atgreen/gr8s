@@ -552,6 +552,21 @@ otherwise, with the reasons and messages upstream kubelet uses."
                  "reason" reason
                  "message" (cdr (assoc reason +node-pressure-messages+ :test #'equal)))))
 
+(defun node-ready-condition (node)
+  "NODE's Ready condition, following its session lease. Its lastTransitionTime,
+from which clients such as Headlamp derive uptime, is when the ready lease began,
+or for a node that is not ready the last time it was heard from. There is no
+lastHeartbeatTime: renewing the lease must not change the object clients see."
+  (let* ((ready (node-record-ready-p node))
+         (condition (core-object "type" "Ready"
+                                 "status" (if ready "True" "False")
+                                 "reason" (if ready "AgentReady" "AgentNotReady")
+                                 "message" "Readiness follows the gr8s node session lease"))
+         (since (if ready (node-record-ready-since node) (node-record-last-heartbeat node))))
+    (when since
+      (setf (gethash "lastTransitionTime" condition) (current-timestamp since)))
+    condition))
+
 (defun node-api-object (node)
   "Serialize a registered worker with readiness taken from its live lease."
   (let ((address (node-reported-address node)))
@@ -579,10 +594,7 @@ otherwise, with the reasons and messages upstream kubelet uses."
                "conditions" (vector (if (and (node-record-ready-p node) (node-record-runtime-down-message node))
                                         (core-object "type" "Ready" "status" "False" "reason" "KubeletNotReady"
                                                      "message" (node-record-runtime-down-message node))
-                                        (core-object "type" "Ready"
-                                                     "status" (if (node-record-ready-p node) "True" "False")
-                                                     "reason" (if (node-record-ready-p node) "AgentReady" "AgentNotReady")
-                                                     "message" "Readiness follows the gr8s node session lease"))
+                                        (node-ready-condition node))
                                     ;; The standard kubelet pressure conditions, driven by the
                                     ;; agent's last heartbeat so a pressured node is visible and
                                     ;; avoidable rather than silently Ready.
