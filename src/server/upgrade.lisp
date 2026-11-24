@@ -159,18 +159,28 @@ API, so that while one member restarts another answers."
     (setf (getf member :server) api-url)
     member))
 
-(defun upgrade-api-call (api method target &key body avoid)
-  "Send METHOD to TARGET through the first member that answers, never through the
-member named AVOID; return (values body status headers)."
+(defun upgrade-api-call (api method target &key body avoid prefer (pass-statuses '()))
+  "Send METHOD to TARGET through the first member that answers, the member named
+PREFER first, never the one named AVOID; return (values body status headers). A member
+that answers with one of PASS-STATUSES passes the request on to the next: during a
+rollback, a member already on an older release doesn't know every route."
   (let* ((avoided (cdr (assoc avoid (upgrade-api-members api) :test #'equal)))
+         (preferred (cdr (assoc prefer (upgrade-api-members api) :test #'equal)))
          (configs (remove-duplicates
                    (remove (and avoided (getf avoided :server))
-                           (cons (upgrade-api-config api) (mapcar #'cdr (upgrade-api-members api)))
+                           (append (and preferred (list preferred))
+                                   (list (upgrade-api-config api)) (mapcar #'cdr (upgrade-api-members api)))
                            :key (lambda (config) (getf config :server)) :test #'equal)
                    :key (lambda (config) (getf config :server)) :test #'equal :from-end t))
-         (failure nil))
-    (dolist (config configs (error "no control-plane member answered ~A ~A: ~A" method target failure))
-      (handler-case (return (debug-api-request-json config method target :body body))
+         (failure nil) (passed nil))
+    (dolist (config configs (if passed
+                                (values-list passed)
+                                (error "no control-plane member answered ~A ~A: ~A" method target failure)))
+      (handler-case
+          (let ((answer (multiple-value-list (debug-api-request-json config method target :body body))))
+            (if (member (second answer) pass-statuses)
+                (setf passed answer)
+                (return (values-list answer))))
         (error (condition) (setf failure condition))))))
 
 (defun json-path (object &rest keys)
@@ -254,12 +264,12 @@ member named AVOID; return (values body status headers)."
     (ecase (getf step :action)
       (:skip "nothing: it runs the release")
       (:upgrade (if transfer (format nil "hand the leadership to ~A, then upgrade" transfer) "upgrade"))
-      (:manual (format nil "by hand, on the host: sudo gr8s upgrade self --to ~A (~A)" reference (getf step :reason)))
+      (:manual (format nil "~A; on its host: sudo gr8s upgrade self --to ~A" (getf step :reason) reference))
       (:on-reconnect "upgrade when its node returns"))))
 
 (defun print-upgrade-plan (hosts steps problems artifact reference output)
-  (format output "Target  ~A  ~A@~A  (signature verified)~%~%"
-          (gr8s.upgrade:release-artifact-version artifact) reference (gr8s.upgrade:release-artifact-digest artifact))
+  (format output "Target  ~A  ~A  (signature verified)~%~%"
+          (gr8s.upgrade:release-artifact-version artifact) reference)
   (format output "~16A ~9A ~24A ~A~%" "HOST" "ROLE" "NOW" "STEP")
   (loop for step in steps
         for host = (find (getf step :host) hosts :key (lambda (host) (getf host :name)) :test #'equal)
@@ -391,7 +401,10 @@ reason to stop, so a failure is only reported."
                         (format nil "/apis/gr8s.io/v1/~:[nodes~;controlplanemembers~]/~A/upgrade"
                                 (getf host :role) (if (getf host :role) (getf host :name) (getf host :node)))
                         :body (core-object "reference" reference)
-                        :avoid (getf host :name))
+                        ;; A member upgrades itself: it runs the release that knows how,
+                        ;; and answers before it restarts.
+                        :prefer (and (getf host :role) (getf host :name))
+                        :pass-statuses '(404))
     (unless (eql status 200) (error "~A: ~A" (getf host :name) (member-api-error-message body status)))
     (format output "~{  ~A~%~}" (uiop:split-string (or (gethash "message" body) "") :separator '(#\Newline))))
   (finish-output output)
@@ -403,7 +416,10 @@ reason to stop, so a failure is only reported."
     (let* ((name (getf step :host))
            (host (find name hosts :key (lambda (host) (getf host :name)) :test #'equal))
            (entry (cluster-upgrade-host record name)))
-      (unless (equal "Done" (gethash "state" entry))
+      (declare (ignore entry))
+      ;; What each host runs now decides, not what the record says it did: a host
+      ;; rolled back since is upgraded again, one at the release is a :skip.
+      (progn
         (ecase (getf step :action)
           (:skip (note-host-state api record name "Done" "runs the release already"))
           (:manual (note-host-state api record name "Manual" (upgrade-step-text step reference))

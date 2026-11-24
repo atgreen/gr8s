@@ -26,6 +26,13 @@
     (list (slot-value endpoint 'gr8s.hubble.observer::namespace)
           (slot-value endpoint 'gr8s.hubble.observer::pod-name))))
 
+(test a-flow-of-a-protocol-gr8s-cannot-name-still-becomes-a-hubble-flow
+  ;; An agent gives the number of a protocol it can't name, such as IGMP's 2; the
+  ;; dashboard died serializing it as the flow's summary (podster-atf).
+  (let ((flow (gr8s.server::hubble-flow (hubble-test-flow "protocol" 2))))
+    (is (equal "2" (slot-value flow 'gr8s.hubble.observer::summary)))
+    (is (plusp (length (ag-proto:serialize-to-bytes flow))))))
+
 (test gr8s-flows-become-hubble-flows
   (let* ((flow (gr8s.server::hubble-flow (hubble-test-flow)))
          (ip (slot-value flow 'gr8s.hubble.observer::ip))

@@ -319,3 +319,9 @@ request function and the registry's objects, by (repository reference)."
                (is (equal "v1.37.2-gr8s.9" (gr8s.upgrade:release-artifact-version
                                            (gr8s.upgrade:fetch-release-artifact "zot.example/gr8s/packages:v1" :keys (list key))))))
           (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))))
+
+(test a-downgrade-takes-the-agents-down-before-the-control-plane
+  ;; An older control plane can't send an upgrade at all: in the lab, a member already
+  ;; back on v1.37.2-gr8s.7 answered the next member's upgrade with "route not found".
+  (is (equal '("gr8s-local" "pfwit" "gr8s2" "gvision")
+             (mapcar #'first (plan-summary (lab-hosts :version "v1.37.2-gr8s.9") :allow-downgrade t)))))

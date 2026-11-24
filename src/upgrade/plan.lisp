@@ -61,7 +61,7 @@ should not start; none means it may."
              (add-step host :skip :reason "runs the release already")
              (setf upgraded-voter (or upgraded-voter host)))
             ((not (host-voting-p host))
-             (add-step host :manual :reason (format nil "the leader can't reach it (~A); upgrade it by hand: sudo gr8s upgrade self" (getf host :contact))))
+             (add-step host :manual :reason (format nil "the leader can't reach it (~A)" (getf host :contact))))
             (t
              (when (and (< (1- voting) quorum) (not allow-quorum-loss))
                (problem "upgrading ~A would leave ~D of ~D votes while it restarts, and quorum needs ~D"
@@ -74,11 +74,20 @@ should not start; none means it may."
                        (add-step host :upgrade :reason "the only voter: the API is away while it restarts")))
                  (add-step host :upgrade))
              (unless (eq host leader) (setf upgraded-voter (or upgraded-voter host)))))))
-      (dolist (host (remove-if-not (lambda (host) (equal "witness" (getf host :role))) hosts))
-        (add-step host :manual :reason "a witness has no API to upgrade through: on its host, run sudo gr8s upgrade self"))
-      (dolist (host (sort (remove-if (lambda (host) (getf host :role)) (copy-list hosts)) #'string<
-                          :key (lambda (host) (getf host :name))))
-        (cond ((host-at-version-p host target) (add-step host :skip :reason "runs the release already"))
-              ((not (getf host :ready)) (add-step host :on-reconnect :reason "its node is not Ready: it upgrades when it returns"))
-              (t (add-step host :upgrade))))
-      (values (nreverse steps) (nreverse problems)))))
+      (let ((voter-steps (nreverse steps)) (witness-steps nil) (agent-steps nil))
+        (setf steps nil)
+        (dolist (host (remove-if-not (lambda (host) (equal "witness" (getf host :role))) hosts))
+          (add-step host :manual :reason "a witness, with no API to upgrade it through"))
+        (setf witness-steps (nreverse steps) steps nil)
+        (dolist (host (sort (remove-if (lambda (host) (getf host :role)) (copy-list hosts)) #'string<
+                            :key (lambda (host) (getf host :name))))
+          (cond ((host-at-version-p host target) (add-step host :skip :reason "runs the release already"))
+                ((not (getf host :ready)) (add-step host :on-reconnect :reason "its node is not Ready: it upgrades when it returns"))
+                (t (add-step host :upgrade))))
+        (setf agent-steps (nreverse steps))
+        ;; Agents follow the control plane up, and lead it down: a newer control plane
+        ;; works with older agents, and an older one can't send an upgrade at all.
+        (values (if (some (lambda (host) (eql 1 (compare-gr8s-versions (getf host :version) target))) hosts)
+                    (append agent-steps witness-steps voter-steps)
+                    (append voter-steps witness-steps agent-steps))
+                (nreverse problems))))))
