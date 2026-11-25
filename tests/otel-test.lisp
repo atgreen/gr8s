@@ -114,8 +114,8 @@
           (previous gr8s.otel::*otel-configuration*))
      (declare (ignorable ,endpoint))
      ;; Spans an earlier test queued are not this collector's.
-     (bt:with-lock-held (gr8s.otel::*otel-lock*)
-       (setf gr8s.otel::*otel-queue* '() gr8s.otel::*otel-queued* 0))
+     (gr8s.otel::clear-otel-queue gr8s.otel::*span-queue*)
+     (gr8s.otel::clear-otel-queue gr8s.otel::*log-queue*)
      (setf *otel-test-received* '()
            gr8s.otel::*otel-configuration*
            (gr8s.otel::make-otel-configuration :endpoint ,endpoint :headers ,headers
@@ -222,3 +222,71 @@
             (gw-raw-request port "app.example.com" "/")
             (is (null (gw-request-header-seen "traceparent")) "and starts none")))
       (setf gr8s.otel::*otel-configuration* previous))))
+
+;;; Flow events as OTLP log records (podster-krg.2)
+
+(defun otel-test-log-records ()
+  "Every log record the test collector has been sent."
+  (bt:with-lock-held (*otel-test-received-lock*)
+    (loop for (path nil nil request) in *otel-test-received*
+          when (equal path "/v1/logs")
+            append (loop for resource across (gethash "resourceLogs" request)
+                         append (loop for scope across (gethash "scopeLogs" resource)
+                                      append (coerce (gethash "logRecords" scope) 'list))))))
+
+(test otel-flow-logs-are-opt-in
+  (with-otel-environment ("OTEL_EXPORTER_OTLP_ENDPOINT" "http://collector:4318")
+    (is (null (gr8s.otel::otel-logs-endpoint (gr8s.otel::read-otel-configuration)))
+        "a traces endpoint alone sends no flow logs"))
+  (with-otel-environment ("OTEL_EXPORTER_OTLP_ENDPOINT" "http://collector:4318/" "OTEL_LOGS_EXPORTER" "otlp")
+    (is (equal "http://collector:4318/v1/logs" (gr8s.otel::otel-logs-endpoint (gr8s.otel::read-otel-configuration)))))
+  (with-otel-environment ("OTEL_LOGS_EXPORTER" "otlp" "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT" "http://loki:3100/otlp/v1/logs")
+    (is (equal "http://loki:3100/otlp/v1/logs" (gr8s.otel::otel-logs-endpoint (gr8s.otel::read-otel-configuration))))))
+
+(test otel-flow-events-become-log-records
+  (flet ((attribute (record key)
+           (let ((a (find key (gethash "attributes" record) :key (lambda (a) (gethash "key" a)) :test #'equal)))
+             (and a (let ((v (gethash "value" a))) (or (gethash "stringValue" v) (gethash "intValue" v)))))))
+    ;; A policy drop leaving a Pod: WARN, the Pod as source, the peer as destination.
+    (let ((record (gr8s.otel::flow-log-record
+                   (com.inuoe.jzon:parse "{\"time\":\"2026-11-25T19:51:59.070606Z\",\"node\":\"gr8s-local\",\"verdict\":\"DROPPED\",
+                     \"reason\":\"policy\",\"direction\":\"egress\",\"protocol\":\"TCP\",\"namespace\":\"cave\",\"pod\":\"cave-0\",
+                     \"podAddress\":\"10.80.32.2\",\"podPort\":41000,\"peerAddress\":\"192.0.73.2\",\"peerPort\":443,
+                     \"peerName\":\"secure.gravatar.com\",\"policies\":[\"cave/deny-out\"]}"))))
+      (is (= 13 (gethash "severityNumber" record)))
+      (is (equal "1795636319070606000" (gethash "timeUnixNano" record)) "the event's own time, to the microsecond")
+      (is (search "DROPPED cave/cave-0 -> secure.gravatar.com:443 TCP (policy)" (gethash "stringValue" (gethash "body" record))))
+      (is (equal "10.80.32.2" (attribute record "source.address")))
+      (is (equal "443" (attribute record "destination.port")))
+      (is (equal "tcp" (attribute record "network.transport")))
+      (is (equal "cave/deny-out" (attribute record "gr8s.flow.policies")))
+      (is (null (gethash "traceId" record))))
+    ;; A Gateway request: INFO, its HTTP attributes, and the trace it was recorded in.
+    (let ((record (gr8s.otel::flow-log-record
+                   (com.inuoe.jzon:parse "{\"time\":\"2026-11-25T19:00:00Z\",\"verdict\":\"FORWARDED\",\"direction\":\"ingress\",
+                     \"protocol\":\"TCP\",\"namespace\":\"cave\",\"pod\":\"cave-0\",\"peerAddress\":\"10.77.77.10\",
+                     \"l7\":{\"method\":\"GET\",\"host\":\"cave.lab\",\"path\":\"/\",\"code\":200,\"latencyNs\":742000000,
+                     \"route\":\"cave/cave\",\"traceId\":\"5da861bf3c5419a485b367745c0597f6\"}}"))))
+      (is (= 9 (gethash "severityNumber" record)))
+      (is (equal "5da861bf3c5419a485b367745c0597f6" (gethash "traceId" record)))
+      (is (equal "200" (attribute record "http.response.status_code")))
+      (is (equal "742" (attribute record "gr8s.gateway.latency_ms")))
+      (is (equal "10.77.77.10" (attribute record "source.address")) "the client sent the request in"))))
+
+(test otel-flow-logs-go-to-the-logs-endpoint
+  (with-otel-collector (endpoint)
+    (setf (gr8s.otel::otel-logs-endpoint gr8s.otel::*otel-configuration*)
+          (concatenate 'string (subseq endpoint 0 (search "/v1/traces" endpoint)) "/v1/logs"))
+    (gr8s.otel:emit-flow-log (com.inuoe.jzon:parse "{\"time\":\"2026-11-25T19:00:00Z\",\"verdict\":\"FORWARDED\",
+      \"direction\":\"egress\",\"protocol\":\"UDP\",\"pod\":\"p\",\"namespace\":\"n\",\"peerAddress\":\"1.1.1.1\",\"peerPort\":53}"))
+    (let ((records (loop repeat 100 for r = (otel-test-log-records) until r do (sleep 0.1) finally (return r))))
+      (is (= 1 (length records)))
+      (let ((request (fourth (find "/v1/logs" *otel-test-received* :key #'first :test #'equal))))
+        (is (equal "gr8s-flows"
+                   (gethash "stringValue" (gethash "value" (find "service.name"
+                                                                 (gethash "attributes" (gethash "resource" (aref (gethash "resourceLogs" request) 0)))
+                                                                 :key (lambda (a) (gethash "key" a)) :test #'equal)))))))
+    ;; With flow logs off, nothing is queued.
+    (setf (gr8s.otel::otel-logs-endpoint gr8s.otel::*otel-configuration*) nil)
+    (gr8s.otel:emit-flow-log (com.inuoe.jzon:parse "{\"verdict\":\"FORWARDED\"}"))
+    (is (zerop (gr8s.otel::otel-queue-count gr8s.otel::*log-queue*)))))

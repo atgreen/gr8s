@@ -20,7 +20,9 @@
   (headers '())                 ; ((name . value) ...) sent with each export
   (sampler "parentbased_always_on")
   (ratio 1d0)                   ; for the traceidratio samplers
-  (resource '()))               ; ((key . value) ...)
+  (resource '())                ; ((key . value) ...)
+  logs-endpoint                 ; the logs URL when OTEL_LOGS_EXPORTER=otlp, else NIL
+  (logs-headers '()))
 
 (defun otel-environment (name)
   (let ((value (uiop:getenv name)))
@@ -53,6 +55,15 @@
         (let ((base (otel-environment "OTEL_EXPORTER_OTLP_ENDPOINT")))
           (and base (concatenate 'string (string-right-trim "/" base) "/v1/traces"))))))
 
+(defun otel-logs-endpoint-from-environment ()
+  "The URL flow log records are sent to, or NIL. Flow events far outnumber spans, so they
+go only when OTEL_LOGS_EXPORTER says otlp, not merely because an endpoint is set."
+  (when (and (equalp "otlp" (otel-environment "OTEL_LOGS_EXPORTER"))
+             (not (equalp "true" (otel-environment "OTEL_SDK_DISABLED"))))
+    (or (otel-environment "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
+        (let ((base (otel-environment "OTEL_EXPORTER_OTLP_ENDPOINT")))
+          (and base (concatenate 'string (string-right-trim "/" base) "/v1/logs"))))))
+
 (defun read-otel-configuration ()
   (let ((resource (otel-key-values (otel-environment "OTEL_RESOURCE_ATTRIBUTES"))))
     (flet ((default (key value) (unless (assoc key resource :test #'equal) (push (cons key value) resource))))
@@ -68,7 +79,10 @@
                                           (let ((*read-eval* nil) (*read-default-float-format* 'double-float))
                                             (read-from-string (otel-environment "OTEL_TRACES_SAMPLER_ARG")))))))
               (if (realp ratio) (max 0d0 (min 1d0 (float ratio 1d0))) 1d0))
-     :resource (reverse resource))))
+     :resource (reverse resource)
+     :logs-endpoint (otel-logs-endpoint-from-environment)
+     :logs-headers (otel-key-values (or (otel-environment "OTEL_EXPORTER_OTLP_LOGS_HEADERS")
+                                        (otel-environment "OTEL_EXPORTER_OTLP_HEADERS"))))))
 
 (defvar *otel-configuration* nil "The configuration, read from the environment when first needed.")
 
@@ -162,43 +176,78 @@ headers' values, or NIL), joining that trace or starting one; NIL when tracing i
     span))
 
 ;;; ---------------------------------------------------------------------------
-;;; OTLP/HTTP export, JSON-encoded
+;;; OTLP/HTTP export, JSON-encoded. Each signal has a bounded queue that one thread sends
+;;; in batches; a full queue drops, a failed send loses its batch, and both are counted.
 
-(defparameter +otel-queue-limit+ 2048 "The most finished spans waiting to be sent.")
-(defparameter +otel-batch-size+ 512 "The most spans in one export request.")
-(defparameter +otel-flush-seconds+ 2 "How long a span waits for others to batch with.")
+(defparameter +otel-queue-limit+ 2048 "The most finished items of a signal waiting to be sent.")
+(defparameter +otel-batch-size+ 512 "The most items in one export request.")
+(defparameter +otel-flush-seconds+ 2 "How long an item waits for others to batch with.")
 (defparameter +otel-export-seconds+ 5 "How long one export request may take.")
 
-(defvar *otel-lock* (bt:make-lock "gr8s otel"))
-(defvar *otel-ready* (bt:make-condition-variable :name "gr8s otel spans"))
-(defvar *otel-queue* '() "Finished spans, newest first.")
-(defvar *otel-queued* 0)
-(defvar *otel-exporter* nil "The thread that sends spans, started with the first one.")
-(defvar *otel-counts* (list :exported 0 :dropped 0 :failed 0)
-  "Spans sent, dropped from a full queue, and lost with a failed export.")
+(defstruct (otel-queue (:constructor make-otel-queue (name send)))
+  name                                  ; for the thread and the counters
+  send                                  ; function of a batch: true when the collector took it
+  (items '()) (count 0) thread
+  (lock (bt:make-lock "gr8s otel queue"))
+  (ready (bt:make-condition-variable :name "gr8s otel queue"))
+  (counts (list :exported 0 :dropped 0 :failed 0)))
 
-(defun otel-count (key &optional (by 1))
-  (incf (getf *otel-counts* key) by))
+(defun otel-enqueue (queue item)
+  "Queue ITEM for QUEUE's thread, started with the first item; drop it when the queue is full."
+  (bt:with-lock-held ((otel-queue-lock queue))
+    (if (>= (otel-queue-count queue) +otel-queue-limit+)
+        (incf (getf (otel-queue-counts queue) :dropped))
+        (progn (push item (otel-queue-items queue)) (incf (otel-queue-count queue))
+               (unless (and (otel-queue-thread queue) (bt:thread-alive-p (otel-queue-thread queue)))
+                 (setf (otel-queue-thread queue)
+                       (bt:make-thread (lambda () (otel-export-loop queue))
+                                       :name (format nil "gr8s otel ~A exporter" (otel-queue-name queue)))))
+               (when (>= (otel-queue-count queue) +otel-batch-size+)
+                 (bt:condition-notify (otel-queue-ready queue)))))))
 
-(defun enqueue-span (span)
-  (bt:with-lock-held (*otel-lock*)
-    (if (>= *otel-queued* +otel-queue-limit+)
-        (otel-count :dropped)
-        (progn (push span *otel-queue*) (incf *otel-queued*)
-               (unless (and *otel-exporter* (bt:thread-alive-p *otel-exporter*))
-                 (setf *otel-exporter* (bt:make-thread #'otel-export-loop :name "gr8s otel exporter")))
-               (when (>= *otel-queued* +otel-batch-size+) (bt:condition-notify *otel-ready*))))))
-
-(defun take-span-batch ()
-  "Wait up to +OTEL-FLUSH-SECONDS+ for a full batch; take the oldest spans, at most a batch."
-  (bt:with-lock-held (*otel-lock*)
-    (when (< *otel-queued* +otel-batch-size+)
-      (bt:condition-wait *otel-ready* *otel-lock* :timeout +otel-flush-seconds+))
-    (let* ((oldest (reverse *otel-queue*))
+(defun take-otel-batch (queue)
+  "Wait up to +OTEL-FLUSH-SECONDS+ for a full batch; take the oldest items, at most a batch."
+  (bt:with-lock-held ((otel-queue-lock queue))
+    (when (< (otel-queue-count queue) +otel-batch-size+)
+      (bt:condition-wait (otel-queue-ready queue) (otel-queue-lock queue) :timeout +otel-flush-seconds+))
+    (let* ((oldest (reverse (otel-queue-items queue)))
            (batch (subseq oldest 0 (min +otel-batch-size+ (length oldest)))))
-      (setf *otel-queue* (reverse (nthcdr (length batch) oldest))
-            *otel-queued* (length *otel-queue*))
+      (setf (otel-queue-items queue) (reverse (nthcdr (length batch) oldest))
+            (otel-queue-count queue) (length (otel-queue-items queue)))
       batch)))
+
+(defun clear-otel-queue (queue)
+  "Forget what QUEUE holds."
+  (bt:with-lock-held ((otel-queue-lock queue))
+    (setf (otel-queue-items queue) '() (otel-queue-count queue) 0)))
+
+(defun otel-export-loop (queue)
+  (loop
+    (let ((batch (take-otel-batch queue)))
+      (when batch
+        (let ((sent (ignore-errors
+                     (handler-case
+                         (sb-ext:with-timeout (* 2 +otel-export-seconds+)
+                           (funcall (otel-queue-send queue) batch))
+                       (sb-ext:timeout () nil)))))
+          (bt:with-lock-held ((otel-queue-lock queue))
+            (incf (getf (otel-queue-counts queue) (if sent :exported :failed)) (length batch))))))))
+
+(defun otel-post (url headers object)
+  "POST OBJECT as JSON to URL with HEADERS; true when the collector took it."
+  (multiple-value-bind (body status)
+      (drakma:http-request url :method :post :content-type "application/json"
+                               :content (gr8s.resources::stringify-to-utf-8-bytes object)
+                               :additional-headers headers
+                               :connection-timeout +otel-export-seconds+ :want-stream nil
+                               :force-binary t :redirect nil :user-agent "gr8s-otel")
+    (declare (ignore body))
+    (and (integerp status) (<= 200 status 299))))
+
+(defvar *span-queue* (make-otel-queue "spans" (lambda (spans) (export-spans (otel-configuration) spans)))
+  "Finished, sampled spans on their way to the collector.")
+
+(defun enqueue-span (span) (otel-enqueue *span-queue* span))
 
 (defun otel-attribute (key value)
   (gr8s.resources::core-object
@@ -239,32 +288,6 @@ headers' values, or NIL), joining that trace or starting one; NIL when tracing i
                                   "spans" (map 'vector #'span-object spans)))))))
 
 (defun export-spans (configuration spans)
-  "Send SPANS to the configured endpoint; true when the collector took them."
-  (multiple-value-bind (body status)
-      (drakma:http-request (otel-endpoint configuration)
-                           :method :post :content-type "application/json"
-                           :content (gr8s.resources::stringify-to-utf-8-bytes
-                                     (spans-request-object configuration spans))
-                           :additional-headers (otel-headers configuration)
-                           :connection-timeout +otel-export-seconds+ :want-stream nil
-                           :force-binary t :redirect nil :user-agent "gr8s-otel")
-    (declare (ignore body))
-    (and (integerp status) (<= 200 status 299))))
-
-(defun otel-export-loop ()
-  (loop
-    (let ((batch (take-span-batch)))
-      (when batch
-        (let ((sent (ignore-errors
-                     (handler-case
-                         (sb-ext:with-timeout (* 2 +otel-export-seconds+)
-                           (export-spans (otel-configuration) batch))
-                       (sb-ext:timeout () nil)))))
-          (bt:with-lock-held (*otel-lock*)
-            (otel-count (if sent :exported :failed) (length batch))))))))
-
-(defun otel-metrics-text ()
-  "Prometheus text for the span exporter's counters."
-  (bt:with-lock-held (*otel-lock*)
-    (format nil "# HELP gr8s_otel_spans_total Spans the OTLP exporter sent, dropped from a full queue, or lost to a failed export.~%# TYPE gr8s_otel_spans_total counter~%~{gr8s_otel_spans_total{result=\"~(~A~)\"} ~D~%~}"
-            *otel-counts*)))
+  "Send SPANS to the configured traces endpoint; true when the collector took them."
+  (otel-post (otel-endpoint configuration) (otel-headers configuration)
+             (spans-request-object configuration spans)))

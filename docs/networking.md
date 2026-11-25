@@ -527,6 +527,22 @@ counted on `/metrics` as `gr8s_otel_spans_total{result}`. With tracing off, a
 client's `traceparent` passes through to the backend unchanged. A traced
 request's flow event carries its trace id (`l7.traceId`).
 
+An agent can also send its [flow events](#flow-events) as OTLP **log
+records**, to a logs backend such as Loki or anything behind an OpenTelemetry
+Collector. Flow events far outnumber spans, so this is opt-in:
+`OTEL_LOGS_EXPORTER=otlp`, with the logs going to
+`OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, or `OTEL_EXPORTER_OTLP_ENDPOINT`'s
+`/v1/logs` (headers from `OTEL_EXPORTER_OTLP_LOGS_HEADERS` or the general
+ones). Each event is one record of service `gr8s-flows`: a WARN for a drop,
+INFO otherwise, with a one-line body (`DROPPED cave/cave-0 ->
+secure.gravatar.com:443 TCP (policy)`) and OTel's attributes --
+`source.address`/`.port` and `destination.address`/`.port` from the Pod's side,
+`network.transport`, `k8s.namespace.name`, `k8s.pod.name`, `k8s.node.name` --
+plus `gr8s.flow.verdict`, `.reason`, `.direction`, `.policies` and
+`.peer.name`; a Gateway request adds its HTTP attributes and its trace id, so a
+logs backend links the record to its trace. The records share the spans'
+queueing and limits, counted as `gr8s_otel_log_records_total`.
+
 
 GatewayClass and Gateway expose `/status` subresources. The control plane
 publishes Gateway addresses only after a ready node reports that the current
