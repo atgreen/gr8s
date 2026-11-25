@@ -388,8 +388,9 @@ spamming the log on every poll.")
   "The child-process environment: the inherited environment with PATH replaced
    by one that puts MANAGER's binary directory first, then any runtime-addon bin
    directories, then the inherited PATH -- so containerd can exec runc and addon
-   shims by name. With no addons the result is byte-identical to the prior
-   \"PATH=<prefix>:<inherited>\" form."
+   shims by name. OpenTelemetry's OTEL_* variables are left out: they configure the
+   agent's own tracing, and containerd, which has OTel built in, would otherwise
+   trace every CRI call the kubelet makes to the same collector (podster-krg)."
   (let* ((prefix (managed-containerd-binary-directory manager))
          ;; Runtime-addon bin dirs join the PATH so containerd can exec their
          ;; shim binaries (e.g. containerd-shim-runsc-v1) by name; runc's own
@@ -405,7 +406,8 @@ spamming the log on every poll.")
                     #-sbcl nil))
     (cons (format nil "PATH=~{~A:~}~A" (cons prefix addon-directories) path)
           (remove-if (lambda (entry)
-                       (uiop:string-prefix-p "PATH=" entry))
+                       (or (uiop:string-prefix-p "PATH=" entry)
+                           (uiop:string-prefix-p "OTEL_" entry)))
                      inherited))))
 
 (defun managed-containerd-command (manager)

@@ -657,3 +657,21 @@
     (bt:make-thread (lambda () (sleep 0.1) (gr8s.kubelet::note-runtime-available availability)))
     (is (gr8s.kubelet::wait-for-runtime-available availability 5))
     (is (null (gr8s.kubelet::runtime-availability-message availability)))))
+
+(test managed-containerd-does-not-inherit-the-agents-otel-settings
+  ;; An agent traced with OTEL_EXPORTER_OTLP_ENDPOINT must not switch on containerd's
+  ;; own tracing, which would send a trace for every CRI call the kubelet makes.
+  (let ((saved (uiop:getenv "OTEL_EXPORTER_OTLP_ENDPOINT")))
+    (unwind-protect
+         (progn
+           (sb-posix:setenv "OTEL_EXPORTER_OTLP_ENDPOINT" "http://collector:4318" 1)
+           (let ((environment (gr8s.kubelet::managed-containerd-environment
+                               (gr8s.kubelet::make-managed-containerd
+                                :state-directory "/var/lib/gr8s/" :executable "/opt/gr8s/bin/containerd"
+                                :oci-runtime "/opt/gr8s/bin/runc" :cni-bin-directory "/opt/gr8s/bin/cni/"
+                                :platform "linux/amd64"))))
+             (is (notany (lambda (entry) (uiop:string-prefix-p "OTEL_" entry)) environment))
+             (is (find-if (lambda (entry) (uiop:string-prefix-p "PATH=" entry)) environment))))
+      (if saved
+          (sb-posix:setenv "OTEL_EXPORTER_OTLP_ENDPOINT" saved 1)
+          (sb-posix:unsetenv "OTEL_EXPORTER_OTLP_ENDPOINT")))))
