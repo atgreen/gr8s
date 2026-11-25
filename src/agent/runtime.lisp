@@ -2457,8 +2457,11 @@ failed response carrying ERROR. Idempotent; a second call does nothing."
              :exit-code exit-code))))))
 
 (defun node-exec-status-exit-code (data)
-  "Parse the runtime's SPDY error-stream status DATA and return the command's exit code: 0
-on \"Success\", otherwise the ExitCode cause, defaulting to 1 (also 1 on any parse error)."
+  "Parse the runtime's SPDY error-stream status DATA: (values exit-code failure). The exit
+code is 0 on \"Success\", else the ExitCode cause. A failure with no exit code -- the
+command never started, say its executable is missing -- returns the status's message as
+FAILURE, to report as the runtime does, not as a bare exit code (podster-dcz). Unreadable
+DATA is exit code 1."
   (handler-case
       (let* ((status
                (com.inuoe.jzon:parse data))
@@ -2466,11 +2469,16 @@ on \"Success\", otherwise the ExitCode cause, defaulting to 1 (also 1 on any par
              (causes (and details (gethash "causes" details))))
         (if (equal "Success" (gethash "status" status))
             0
-            (or (loop for cause across causes
-                      when (string= "ExitCode" (gethash "reason" cause ""))
-                        return (parse-integer (gethash "message" cause "")
-                                              :junk-allowed t))
-                1)))
+            (let ((code (loop for cause across (or causes #())
+                              when (string= "ExitCode" (gethash "reason" cause ""))
+                                return (parse-integer (gethash "message" cause "")
+                                                      :junk-allowed t))))
+              (if code
+                  code
+                  (let ((message (gethash "message" status)))
+                    (values 1 (if (and (stringp message) (plusp (length message)))
+                                  message
+                                  "the command failed to start")))))))
     (error () 1)))
 
 (defun wait-for-node-exec-output-window (operation size)
@@ -2545,12 +2553,15 @@ sequence number under the operation lock."
             (finish-node-exec-operation operation :error (princ-to-string condition)))
           (return-from run-node-exec-reader nil)))))
   ;; A stream that ended without a status was closed from this side.
-  (when (plusp (length (node-exec-operation-status-octets operation)))
-    (bt:with-lock-held ((node-exec-operation-lock operation))
-      (setf (node-exec-operation-exit-code operation)
-            (node-exec-status-exit-code (coerce (node-exec-operation-status-octets operation)
-                                                '(simple-array (unsigned-byte 8) (*)))))))
-  (finish-node-exec-operation operation))
+  (let ((failure nil))
+    (when (plusp (length (node-exec-operation-status-octets operation)))
+      (multiple-value-bind (code message)
+          (node-exec-status-exit-code (coerce (node-exec-operation-status-octets operation)
+                                              '(simple-array (unsigned-byte 8) (*))))
+        (bt:with-lock-held ((node-exec-operation-lock operation))
+          (setf (node-exec-operation-exit-code operation) code))
+        (setf failure message)))
+    (finish-node-exec-operation operation :error failure)))
 
 (defun start-node-exec-operation (node-runtime request emit)
   "Start a streamed exec or attach for REQUEST: open the connection to the runtime's
