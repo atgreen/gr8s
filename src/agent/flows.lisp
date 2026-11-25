@@ -140,7 +140,10 @@ its Pod's name here."
                   (mod (flow-collector-count collector) +recent-flow-capacity+))
             (coerce line '(simple-array (unsigned-byte 8) (*))))
       (incf (flow-collector-count collector))
-      (bt:condition-notify (flow-collector-changed collector)))))
+      (bt:condition-notify (flow-collector-changed collector))))
+  ;; And to an OpenTelemetry collector, when flow logs are on (podster-krg.2). An
+  ;; observation never fails the flow it observes.
+  (ignore-errors (gr8s.otel:emit-flow-log object)))
 
 (defun note-flow-record (collector record)
   "Keep ring event RECORD among the recent events and wake any follower."

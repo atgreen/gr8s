@@ -16,4 +16,6 @@
    #:span-tracestate
    #:span-set-attribute
    #:end-span
+   #:emit-flow-log
+   #:logs-enabled-p
    #:otel-metrics-text))

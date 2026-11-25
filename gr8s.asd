@@ -404,7 +404,8 @@
                              (:module "otel"
                               :serial t
                               :components ((:file "package")
-                                           (:file "traces")))
+                                           (:file "traces")
+                                           (:file "logs")))
                              (:module "controllers"
                               :serial t
                               :components ((:file "integration")
