@@ -401,6 +401,10 @@
                                            (:file "leader-relay")
                                            (:file "kubelet-server")
                                            ))
+                             (:module "otel"
+                              :serial t
+                              :components ((:file "package")
+                                           (:file "traces")))
                              (:module "controllers"
                               :serial t
                               :components ((:file "integration")
@@ -652,6 +656,7 @@
                              (:file "gateway-sni-test")
                              (:file "gateway-router-test")
                              (:file "gateway-proxy-test")
+                             (:file "otel-test")
                              (:file "gateway-l4-test")
                              (:file "gateway-controller-test")
                              (:file "gateway-fast-path-test")

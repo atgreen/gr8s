@@ -40,6 +40,12 @@ the Kubernetes API version with a gr8s release suffix (see
   (podster-5hv.8), and the Network tab draws each such site as a node of its
   own: `grafana → secure.gravatar.com` instead of `grafana → world`.
 
+- Gateway tracing with OpenTelemetry (podster-krg.1): an agent configured with
+  OTel's standard environment variables (`OTEL_EXPORTER_OTLP_ENDPOINT` and the
+  rest) records a SERVER span for each request its Gateway listeners answer,
+  joining the client's W3C trace or starting one, hands the backend its span as
+  the `traceparent`, and exports spans over OTLP/HTTP. Off unless configured.
+
 ### Removed
 
 - `gr8s dashboard`'s Hubble tab, and the Hubble UI bundle it embedded: the
