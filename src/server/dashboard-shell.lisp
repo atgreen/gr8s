@@ -44,7 +44,7 @@ iframe[hidden] { display: none; }
 <body>
 <nav role=\"tablist\" aria-label=\"gr8s dashboard\">
   <span class=\"name\">gr8s</span>
-  ~:{<button role=\"tab\" id=\"tab-~A\" aria-controls=\"frame-~:*~A\" data-src=\"~A\">~A</button>~}
+  ~:{<button role=\"tab\" id=\"tab-~A\" aria-controls=\"frame-~:*~A\" data-src=\"~A\" data-traces=\"~A\">~A</button>~}
 </nav>
 <main>
   ~:{<iframe id=\"frame-~A\" title=\"~A\" referrerpolicy=\"no-referrer\" hidden></iframe>~}
@@ -65,6 +65,18 @@ function show(name) {
 }
 for (const t of tabs) t.addEventListener('click', () => show(t.id.slice(4)));
 for (const f of document.querySelectorAll('iframe')) f.addEventListener('load', () => { f.dataset.loaded = '1'; });
+// The Network tab opens a trace in the tab whose app shows them (a DashboardTab's
+// spec.traces): {open: 'trace', traceId}. Its frame loads the app at that path.
+window.addEventListener('message', (event) => {
+  const network = document.getElementById('frame-network'), d = event.data;
+  if (event.origin !== location.origin || !network || event.source !== network.contentWindow) return;
+  if (!d || d.open !== 'trace' || typeof d.traceId !== 'string' || !/^[0-9a-f]{32}$/.test(d.traceId)) return;
+  const tab = tabs.find(t => t.dataset.traces);
+  if (!tab) return;
+  const frame = document.getElementById(tab.getAttribute('aria-controls'));
+  frame.src = tab.dataset.src + '?next=' + encodeURIComponent(tab.dataset.traces.split('{traceId}').join(d.traceId));
+  show(tab.id.slice(4));
+});
 // The Network tab opens a resource in Headlamp: {open: 'headlamp', path: 'c/gr8s/...'}. Only
 // that frame, on this page's own origin, is heard, and only a path inside the Headlamp tab.
 window.addEventListener('message', (event) => {
@@ -95,11 +107,17 @@ show(location.hash.slice(1) || '~A');
 tab shown first.")
 
 (defun dashboard-shell-html (tabs initial)
-  "The dashboard page for TABS, each (name src label), showing INITIAL first."
-  (format nil +dashboard-shell-html+
-          tabs
-          (mapcar (lambda (tab) (list (first tab) (third tab))) tabs)
-          initial))
+  "The dashboard page for TABS, each (name src label &optional traces), showing INITIAL
+first. TRACES is the path in the tab's app that shows one trace, with {traceId} in it.
+Every field is escaped: a DashboardTab's title and paths come from the cluster."
+  (let ((tabs (mapcar (lambda (tab)
+                        (destructuring-bind (name src label &optional traces) tab
+                          (mapcar #'hunchentoot:escape-for-html (list name src (or traces "") label))))
+                      tabs)))
+    (format nil +dashboard-shell-html+
+            (mapcar (lambda (tab) (list (first tab) (second tab) (third tab) (fourth tab))) tabs)
+            (mapcar (lambda (tab) (list (first tab) (fourth tab))) tabs)
+            (hunchentoot:escape-for-html initial))))
 
 (defclass gr8s-dashboard-acceptor (dashboard-command-acceptor)
   ((shell-path :initarg :shell-path :reader gr8s-dashboard-shell-path)

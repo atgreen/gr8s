@@ -112,6 +112,7 @@ aside { width: 380px; flex: none; background: var(--surface); border: 1px solid 
 aside h2 { font-size: 15px; font-weight: 600; margin: 0 0 2px; word-break: break-all; }
 aside h3 { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin: 16px 0 6px; }
 aside .sub { color: var(--muted); margin-bottom: 10px; }
+aside td, aside th { overflow-wrap: anywhere; }
 table { width: 100%; border-collapse: collapse; font-size: 12px; }
 th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
 th { color: var(--muted); font-weight: 500; }
@@ -451,14 +452,31 @@ function cell(text, cls) { return el('td', cls, text); }
 function row(...cells) { const tr = el('tr'); tr.append(...cells); return tr; }
 function head(...names) { return row(...names.map((n) => el('th', null, n))); }
 
+// The panel is redrawn on every poll only when what it shows has changed, built whole
+// before it replaces the old one, and keeps where the reader had scrolled: rebuilding it
+// every two seconds made it flash and lost the scroll.
+let panelKey = null, panelSequence = 0;
+function setPanel(selection, data, nodes) {
+  const aside = $('details');
+  const key = selection + '\u0000' + JSON.stringify(data);
+  if (key === panelKey) return;
+  const same = panelKey !== null && panelKey.startsWith(selection + '\u0000');
+  const top = aside.scrollTop, left = aside.scrollLeft;
+  panelKey = key;
+  aside.replaceChildren(...nodes);
+  aside.scrollTop = same ? top : 0;
+  aside.scrollLeft = same ? left : 0;
+}
+
 async function showDetails() {
   const aside = $('details');
+  const sequence = ++panelSequence;
   $('showhealth').setAttribute('aria-pressed', selected?.type === 'health');
-  if (!selected) { aside.hidden = true; cy.resize(); return; }
+  if (!selected) { aside.hidden = true; panelKey = null; cy.resize(); return; }
   if (aside.hidden) { aside.hidden = false; cy.resize(); }
   const window = $('window').value;
   const nodeName = (id) => (graph.nodes.find((n) => n.id === id) || { name: id }).name;
-  if (selected.type === 'health') { showHealthList(aside); return; }
+  if (selected.type === 'health') { showHealthList(); return; }
   if (selected.type === 'node') {
     const node = graph.nodes.find((n) => n.id === selected.id);
     if (!node) { select(null); return; }
@@ -475,8 +493,11 @@ async function showDetails() {
     const sub = el('div', 'sub', kindLabel(node) + (node.namespace ? ' in ' + node.namespace : ''));
     if (headlampPath(node.kind, node.namespace, node.name))
       sub.append(' · ', headlampLink('Open in Headlamp', node.kind, node.namespace, node.name));
-    aside.replaceChildren(el('h2', null, node.name), sub, ...healthSection(node),
-      ...isolationSection(node), el('h3', null, 'Connections'), table);
+    setPanel('node:' + node.id,
+      [node, window, graph.edges.filter((e) => e.source === node.id || e.target === node.id)
+                                .map((e) => [e.id, e.ports, e[window]]), health.at, health.problems.length],
+      [el('h2', null, node.name), sub, ...healthSection(node), ...isolationSection(node),
+       el('h3', null, 'Connections'), table]);
     return;
   }
   const edge = graph.edges.find((e) => e.id === selected.id);
@@ -487,24 +508,64 @@ async function showDetails() {
     counts.append(row(cell(label), ...['m1', 'm5', 'm15'].map((w) => cell(edge[w][key], 'num'))));
   const flows = el('table');
   flows.append(head('Time', 'From → to', 'Port', 'Verdict'));
-  // The panel redraws with every poll; the policy view keeps its element, and re-reads the
-  // policies only every 15 s, so a suggestion being copied stays put.
-  const fresh = policyView && policyView.edge === edge.id && Date.now() - policyView.at < 15000;
-  if (!fresh) policyView = { edge: edge.id, at: Date.now(), node: el('div') };
-  const policy = policyView.node;
-  aside.replaceChildren(el('h2', null, nodeName(edge.source) + ' → ' + nodeName(edge.target)),
-    el('div', 'sub', edge.ports.join(' ') + (edge.latencyMs != null ? ' · median ' + edge.latencyMs + ' ms' : '')),
-    counts, el('h3', null, 'Policy'), policy, el('h3', null, 'Latest flows'), flows);
-  if (!fresh) explainEdge(edge, policy);
-  try {
-    for (const f of await (await fetch('flows?edge=' + encodeURIComponent(edge.id))).json()) {
+  // The policy view keeps its element across redraws and re-reads the policies every
+  // 15 s, in place, so a suggestion being copied stays put.
+  if (!policyView || policyView.edge !== edge.id) policyView = { edge: edge.id, at: 0, node: el('div') };
+  if (Date.now() - policyView.at >= 15000) { policyView.at = Date.now(); explainEdge(edge, policyView.node); }
+  // The flows first, so the panel is swapped in whole.
+  let latest;
+  try { latest = await (await fetch('flows?edge=' + encodeURIComponent(edge.id))).json(); }
+  catch (error) { latest = { error: error.message }; }
+  if (sequence !== panelSequence) return;  // a newer redraw has started
+  const traces = el('div');
+  if (Array.isArray(latest)) {
+    showTraces(latest, traces);
+    for (const f of latest) {
       const [from, to, port] = flowSides(f);
       const http = f.l7 ? ' ' + f.l7.method + ' ' + f.l7.path + ' → ' + f.l7.code : '';
       flows.append(row(cell((f.time || '').slice(11, 19)), cell(from + ' → ' + to + http),
         cell((port == null ? '' : port + '/') + (f.protocol || '')),
         cell(f.verdict.toLowerCase() + dropReason(f), f.verdict === 'DROPPED' ? 'dropped' : '')));
     }
-  } catch (error) { flows.append(row(cell('Cannot read the flows: ' + error.message))); }
+  } else flows.append(row(cell('Cannot read the flows: ' + latest.error)));
+  setPanel('edge:' + edge.id, [edge.ports, edge.latencyMs, edge.m1, edge.m5, edge.m15, latest],
+    [el('h2', null, nodeName(edge.source) + ' → ' + nodeName(edge.target)),
+     el('div', 'sub', edge.ports.join(' ') + (edge.latencyMs != null ? ' · median ' + edge.latencyMs + ' ms' : '')),
+     counts, traces, el('h3', null, 'Policy'), policyView.node, el('h3', null, 'Latest flows'), flows]);
+}
+
+// The edge's traced requests, slowest first (podster-krg.3): a Gateway's request carries
+// the trace it was recorded in, which the dashboard's trace tab -- a DashboardTab with
+// spec.traces, such as Grafana with Tempo -- opens.
+function traceTab() {
+  try { return window.parent !== window && window.parent.document.querySelector('[role=tab][data-traces]:not([data-traces=""])'); }
+  catch (error) { return null; }
+}
+
+function showTraces(flows, into) {
+  const traced = flows.filter((f) => f.l7 && /^[0-9a-f]{32}$/.test(f.l7.traceId || ''))
+    .sort((a, b) => (b.l7.latencyNs || 0) - (a.l7.latencyNs || 0)).slice(0, 8);
+  if (!traced.length) { into.replaceChildren(); return; }
+  const tab = traceTab();
+  const table = el('table');
+  table.append(head('Time', 'Request', 'Status', 'Latency'));
+  for (const f of traced) {
+    const request = cell(f.l7.method + ' ' + f.l7.path);
+    if (tab) {
+      const a = el('a', 'link', f.l7.method + ' ' + f.l7.path);
+      a.href = '#'; a.title = 'Open trace ' + f.l7.traceId + ' in ' + tab.textContent;
+      a.onclick = (event) => {
+        event.preventDefault();
+        window.parent.postMessage({ open: 'trace', traceId: f.l7.traceId }, location.origin);
+      };
+      request.replaceChildren(a);
+    }
+    table.append(row(cell((f.time || '').slice(11, 19)), request,
+      cell(String(f.l7.code), f.l7.code >= 500 ? 'dropped' : ''), cell((f.l7.latencyNs / 1e6).toFixed(0) + ' ms', 'num')));
+  }
+  into.replaceChildren(el('h3', null, 'Traces'), table,
+    el('div', 'note', tab ? 'The slowest recent requests; each opens its trace in ' + tab.textContent + '.'
+                          : 'The slowest recent requests. A DashboardTab with spec.traces (Grafana with Tempo, say) makes each one open its trace.'));
 }
 
 // Headlamp's page for a resource, when this page is a tab of the dashboard beside it.
@@ -589,7 +650,7 @@ function healthSection(node) {
   return out;
 }
 
-function showHealthList(aside) {
+function showHealthList() {
   const onMap = (p) => [...p.nodes, ...p.affectedNodes].some((id) => graph.nodes.some((n) => n.id === id));
   const items = [el('h2', null, 'Health'),
     el('div', 'sub', health.at ? 'The doctor read the cluster ' + ago(new Date(health.at * 1000).toISOString())
@@ -600,7 +661,8 @@ function showHealthList(aside) {
   if (elsewhere.length) items.push(el('h3', null, 'Not on the map (no traffic seen)'), ...elsewhere.map((p) => problemBox(p, false)));
   for (const w of health.warnings || []) items.push(el('div', 'note', w));
   items.push(el('div', 'note', 'Drops are on the map\'s edges, not listed here. A cause is the deepest finding the doctor could see, not proof of a root cause.'));
-  aside.replaceChildren(...items);
+  setPanel('health', [health, Math.floor((Date.now() / 1000 - (health.at || 0)) / 60),
+                      graph.nodes.map((n) => n.id)], items);
 }
 
 function isolationSection(node) {
@@ -653,11 +715,16 @@ const DROP_REASONS = {
 };
 
 async function explainEdge(edge, into) {
-  into.replaceChildren(el('div', 'note', 'Reading the policies…'));
+  // Re-read every 15 s: the first read says so; a later one changes the view only when
+  // the explanation has changed.
+  if (!into.childNodes.length) into.replaceChildren(el('div', 'note', 'Reading the policies…'));
   let explained;
   try { explained = await (await fetch('explain?edge=' + encodeURIComponent(edge.id))).json(); }
   catch (error) { into.replaceChildren(el('div', 'note', 'Cannot read the policies: ' + error.message)); return; }
   if (selected?.id !== edge.id) return;
+  const key = JSON.stringify(explained);
+  if (into.dataset.key === key) return;
+  into.dataset.key = key;
   if (!explained.length) {
     into.replaceChildren(el('div', 'note', 'No Pod-to-Pod connection here to explain: policy applies to Pods.'));
     return;

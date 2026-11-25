@@ -46,6 +46,12 @@ the Kubernetes API version with a gr8s release suffix (see
   joining the client's W3C trace or starting one, hands the backend its span as
   the `traceparent`, and exports spans over OTLP/HTTP. Off unless configured.
 
+- The Network tab links a Gateway edge to its traces (podster-krg.3): the edge
+  lists its slowest recent requests, and a `DashboardTab` that shows traces
+  (`spec.traces`, a path with `{traceId}` in it, such as Grafana Explore's for
+  Tempo) opens each one. The dashboard page now also escapes every tab field it
+  draws, a cluster's `DashboardTab` title among them.
+
 - Flow events as OpenTelemetry log records (podster-krg.2): with
   `OTEL_LOGS_EXPORTER=otlp`, each agent sends its flow events -- connections,
   drops and why, Gateway requests with their trace ids -- over OTLP/HTTP to the
@@ -58,6 +64,11 @@ the Kubernetes API version with a gr8s release suffix (see
   still serves Hubble's Observer API for the `hubble` CLI.
 
 ### Fixed
+
+- The Network tab's side panel no longer redraws itself every two seconds. It
+  flashed and lost its scroll position on each poll; it now changes only when
+  what it shows has, keeps where you had scrolled, and wraps long names instead
+  of scrolling sideways.
 
 - NetworkPolicy no longer drops IPv6 neighbor discovery and MLD (podster-6cy).
   An isolated Pod's ICMPv6 (and MLD behind a hop-by-hop header) to or from a
