@@ -505,11 +505,22 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
          (when (eq *node-session-interruption-tag* tag)
            (throw tag :interrupted)))))))
 
+(defvar *status-report-due* nil
+  "True when the agent has something to report before its next status interval: a local
+Pod's new address, which other nodes' NetworkPolicy maps need before they admit its
+traffic (podster-auf).")
+
+(defun request-status-report ()
+  "Have the status reporter send the node's status now rather than at its next interval."
+  (setf *status-report-due* t))
+
 (defun agent-session-status-reporter (session heartbeat-interval finished-p status-provider tag)
-  "Report status on its own thread: a slow provider must not delay the heartbeat."
+  "Report status on its own thread: a slow provider must not delay the heartbeat. Reports
+each HEARTBEAT-INTERVAL, and at once when REQUEST-STATUS-REPORT asks."
   (with-node-session-interruption (tag)
     (loop until (funcall finished-p)
-          do (handler-case
+          do (setf *status-report-due* nil)
+             (handler-case
                  (let ((status (funcall status-provider)))
                    (when status
                      (unless (typep status 'gr8s.node.v1::node-status)
@@ -519,7 +530,8 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
                  (format *error-output* "gr8s status reporting failed: ~A~%" condition)))
              (let ((deadline (+ (get-internal-real-time)
                                 (* (funcall heartbeat-interval) internal-time-units-per-second))))
-               (loop until (or (funcall finished-p) (>= (get-internal-real-time) deadline))
+               (loop until (or (funcall finished-p) (>= (get-internal-real-time) deadline)
+                               *status-report-due*)
                      do (sleep 0.05))))))
 
 (defun agent-session-watchdog (finished-p last-progress on-stall)

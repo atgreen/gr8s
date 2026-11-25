@@ -9,6 +9,27 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- A NetworkPolicy no longer cuts an idle connection after two hours. The policy
+  guards admitted a TCP connection's replies for 2 hours after its last packet,
+  exactly Linux's default `tcp_keepalive_time`, so an idle pooled connection's
+  first keepalive arrived just too late, was dropped, and the connection died
+  (seen with Postgres). Replies now stay admitted for 5 days, as conntrack keeps
+  an established connection; the flow maps are LRU, so this costs no memory
+  (podster-af3).
+- A new Pod's first connections to Pods behind an ingress policy on other nodes
+  are refused for much less time: about half a second, under TCP's first
+  retransmission, rather than up to 7-11 seconds under load. The agent reports a
+  Pod's new address at once instead of at its next 7-second status report, and
+  the control plane sends it to the other nodes at once instead of on its next
+  one-second pass (podster-auf).
+- `gr8s dashboard` no longer burns a CPU core after a watch ends. When the
+  cluster ended a watch (a member restarting, say), the relay closed the
+  browser's socket while its reader thread was still waiting on it, and that
+  thread then polled the dead descriptor without pause, for as long as the
+  dashboard ran. The dashboard's other relays (the multiplexer's watches and
+  the REPL tab's tunnel) had the same race. A relay now only shuts a socket
+  down to wake a reader, and closes it once the reader has finished
+  (podster-gek).
 - `gr8s doctor diagnose` and `impact`, and the MCP doctor tools, read the cluster
   with gr8s's own API client instead of running `kubectl`, so they work on a host
   without it, such as a control-plane member, where they defaulted to the

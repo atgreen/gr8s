@@ -1568,6 +1568,9 @@ deletion deadline cannot postpone an earlier one. Holds the store lock."
     ;; select it may not change when it gets one, so no snapshot would follow.
     (when (and (stringp address) (plusp (length address))
                (not (equal address (and (hash-table-p before) (gethash "podIP" before)))))
+      ;; Other nodes admit this Pod's traffic only once the control plane has its
+      ;; address, so report it now rather than at the next status interval.
+      (request-status-report)
       (handler-case (converge-node-network-policies node-runtime)
         (error (condition)
           (format *error-output* "gr8s: NetworkPolicy convergence failed: ~A~%" condition)))))
