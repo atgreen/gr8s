@@ -463,7 +463,7 @@ notices:
 
 native: build/gr8s
 
-build/gr8s: $(CONTAINERD_BUNDLE_MARKER) $(DASHBOARD_MARKER) $(XTERM_MARKER) $(NODE_PROTOCOL_LISP) scripts/build-native.lisp scripts/bootstrap.lisp ocicl.csv $(LISP_SOURCES)
+build/gr8s: $(CONTAINERD_BUNDLE_MARKER) $(DASHBOARD_MARKER) $(XTERM_MARKER) $(GRAPH_MARKER) $(NODE_PROTOCOL_LISP) scripts/build-native.lisp scripts/bootstrap.lisp ocicl.csv $(LISP_SOURCES)
 	$(SBCL) --noinform $(LISP_BOOTSTRAP) --non-interactive --load scripts/build-native.lisp
 
 clean:

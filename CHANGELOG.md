@@ -65,6 +65,10 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- `make native` in a fresh checkout embeds the Network tab's graph assets. The
+  binary's build didn't depend on them, so it built without them and the tab
+  had no graph; release builds, which fetch every asset first, were unaffected.
+
 - The Network tab's side panel no longer redraws itself every two seconds. It
   flashed and lost its scroll position on each poll; it now changes only when
   what it shows has, keeps where you had scrolled, and wraps long names instead
