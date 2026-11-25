@@ -167,9 +167,12 @@
 
 ;; How long a connection's replies stay allowed after its last packet.
 (defmacro netpol-flow-lifetime (proto)
-  "Nanoseconds a connection's replies stay admitted after its last packet: 2h for TCP
-   (PROTO 6), 3min otherwise."
-  `(if (= ,proto 6) 7200000000000 180000000000))
+  "Nanoseconds a connection's replies stay admitted after its last packet: 5 days for TCP
+   (PROTO 6), as conntrack keeps an ESTABLISHED connection, 3min otherwise. TCP's must be
+   well above tcp_keepalive_time (2h by default): an idle connection's first keepalive
+   comes then, and dropped it is the end of the connection (podster-af3). The flow maps
+   are LRU, so the length costs no memory."
+  `(if (= ,proto 6) 432000000000000 180000000000))
 
 (defparameter gr8s.network::*egress-guard-map-forms*
   '((defmap rejected-spoofs :type :array

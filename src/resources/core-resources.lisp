@@ -747,6 +747,18 @@ Callbacks run under the store lock and must not read or write the store."
               (error (condition)
                 (format *error-output* "gr8s resource change observer failed: ~A~%" condition))))))))
 
+(defun notify-pod-address-changes (store)
+  "Signal the resource-change observers that a Pod's addresses changed, with no desired
+resource changes. NetworkPolicy peers resolve to Pod addresses and go to every node with
+service discovery, so a new Pod's address must not wait for the next periodic pass: until
+peers have it, their ingress policy drops its traffic (podster-auf). Call under the store lock."
+  (let ((*core-resource-change-scope* :full)
+        (*core-resource-changes* nil))
+    (dolist (observer (gr8s.store::pod-store-core-change-observers store))
+      (handler-case (funcall observer)
+        (error (condition)
+          (format *error-output* "gr8s resource change observer failed: ~A~%" condition))))))
+
 (defun commit-core-resources (store resources revision
                               &key (workload-deletions (pod-store-workload-deletions store))
                                 (job-controller-states (pod-store-job-controller-states store)))

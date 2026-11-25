@@ -367,3 +367,51 @@
              (is (= 1 full))
              (is (= 0 gateway)))
         (stop-reconciliation-worker worker)))))
+
+(test a-pod-getting-an-address-wakes-the-reconciler
+  ;; podster-auf: NetworkPolicy peers resolve to Pod addresses that every node learns
+  ;; with service discovery, so a new address must not wait for the periodic pass.
+  (with-temporary-store (store path)
+    (values path)
+    (let* ((pod (create-pod store (parse-pod (com.inuoe.jzon:parse "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",
+                  \"metadata\":{\"name\":\"web\",\"namespace\":\"default\"},
+                  \"spec\":{\"containers\":[{\"name\":\"main\",\"image\":\"example\"}]}}"))))
+           (notifications 0)
+           (observer (lambda () (incf notifications))))
+      (gr8s.resources::add-core-resource-change-observer store observer)
+      (flet ((observe (&rest status)
+               (gr8s.kubelet::save-pod-observation store pod (apply #'gr8s.resources::core-object status))))
+        (observe "phase" "Pending")
+        (is (= 0 notifications) "no address yet")
+        (observe "phase" "Pending" "podIP" "10.80.0.9" "podIPs" (vector (gr8s.resources::core-object "ip" "10.80.0.9")))
+        (is (= 1 notifications) "the Pod got its address")
+        (observe "phase" "Running" "podIP" "10.80.0.9" "podIPs" (vector (gr8s.resources::core-object "ip" "10.80.0.9")))
+        (is (= 1 notifications) "a status change that keeps the address")
+        (observe "phase" "Running" "podIP" "10.80.0.10" "podIPs" (vector (gr8s.resources::core-object "ip" "10.80.0.10")))
+        (is (= 2 notifications) "a new address")))))
+
+(test a-requested-status-report-goes-out-before-the-interval
+  ;; podster-auf: the agent reports a Pod's new address at once, not at the next interval.
+  ;; The flag is process-wide, as the reporter's thread must see it: reset it, don't bind it.
+  (setf gr8s.agent::*status-report-due* nil)
+  (let ((sent nil) (done nil))
+    (let ((reporter (bt:make-thread
+                     (lambda ()
+                       (handler-bind ((error #'continue))
+                         (let ((*error-output* (make-broadcast-stream)))
+                           (gr8s.agent::agent-session-status-reporter
+                            :session (lambda () 60) (lambda () done)
+                            (lambda () (push (get-internal-real-time) sent) nil)
+                            (gensym "tag")))))
+                     :name "status reporter under test")))
+      (unwind-protect
+           (progn
+             (loop repeat 100 until sent do (sleep 0.01))
+             (is (= 1 (length sent)) "the first report goes out at once")
+             (sleep 0.3)
+             (is (= 1 (length sent)) "then it waits for its 60-second interval")
+             (gr8s.agent::request-status-report)
+             (loop repeat 100 until (= 2 (length sent)) do (sleep 0.01))
+             (is (= 2 (length sent)) "a requested report goes out within a moment"))
+        (setf done t)
+        (bt:join-thread reporter)))))

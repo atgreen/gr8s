@@ -12,13 +12,18 @@
 (defun save-pod-observation (store pod status &key validator)
   "Persist an actual observation only while POD's exact desired UID/revision exists.
 VALIDATOR may normalize COPY or reject it while the observation lock is held."
-  (let ((copy (copy-pod-status-value status)) (changed nil))
+  (let ((copy (copy-pod-status-value status)) (changed nil) (readdressed nil))
     (with-store-lock (store)
       (unless (current-status-pod-p store pod) (return-from save-pod-observation nil))
       (when validator (funcall validator copy))
       (let ((uid (pod-uid pod)))
         (unless (and (equal (pod-resource-version pod) (gethash uid (pod-store-pod-observed-resource-versions store)))
                      (equalp copy (gethash uid (pod-store-pod-observed-statuses store))))
+          (let ((before (gethash uid (pod-store-pod-observed-statuses store))))
+            (setf readdressed
+                  (not (and (hash-table-p before)
+                            (equalp (gethash "podIP" before) (gethash "podIP" copy))
+                            (equalp (gethash "podIPs" before) (gethash "podIPs" copy))))))
           (persist-pod-status-state store pod :status copy :resource-version (pod-resource-version pod))
           (setf (gethash uid (pod-store-pod-observed-statuses store)) copy
                 (gethash uid (pod-store-pod-observed-resource-versions store)) (pod-resource-version pod)
@@ -29,5 +34,8 @@ VALIDATOR may normalize COPY or reject it while the observation lock is held."
       ;; Otherwise each member derives the same status lazily under a different
       ;; local revision and a follower's resumable watch can never replay it.
       (add-pod-status-conditions store pod (copy-pod-status-value copy))
-      (with-store-lock (store) (note-pod-state-change store pod)))
+      (with-store-lock (store)
+        (note-pod-state-change store pod)
+        (when (and readdressed (plusp (length (gethash "podIP" copy ""))))
+          (gr8s.resources::notify-pod-address-changes store))))
     copy))

@@ -435,6 +435,65 @@
       (hunchentoot:stop acceptor)
       (setf gr8s.apiserver::*dashboard-base* base))))
 
+;;; podster-gek: when a watch ended upstream, the relay closed the browser's socket under
+;;; its reader thread, which then polled the dead descriptor at full speed forever.
+
+(defun dashboard-watch-reader-threads ()
+  (count "gr8s dashboard watch socket reader" (bt:all-threads) :key #'bt:thread-name :test #'equal))
+
+(test a-dashboard-watch-the-cluster-ends-leaves-no-thread-behind
+  (let* ((upstream (usocket:socket-listen "127.0.0.1" 0 :reuse-address t :element-type '(unsigned-byte 8)))
+         (server (bt:make-thread
+                  (lambda ()
+                    ;; The cluster API: answer one watch, then end it at once.
+                    (let* ((socket (usocket:socket-accept upstream))
+                           (stream (usocket:socket-stream socket)))
+                      (ignore-errors (gr8s.protocol::read-http-response-head stream))
+                      (write-sequence (trivial-utf-8:string-to-utf-8-bytes
+                                       (format nil "HTTP/1.1 200 OK~C~CContent-Type: application/json~C~CTransfer-Encoding: chunked~C~C~C~C0~C~C~C~C"
+                                               #\Return #\Newline #\Return #\Newline #\Return #\Newline #\Return #\Newline
+                                               #\Return #\Newline #\Return #\Newline))
+                                      stream)
+                      (finish-output stream)
+                      (usocket:socket-close socket)))
+                  :name "fake cluster watch"))
+         (config (list :server (format nil "http://127.0.0.1:~D" (usocket:get-local-port upstream))))
+         (acceptor (make-instance 'gr8s.server::gr8s-dashboard-acceptor
+                                  :address "127.0.0.1" :port 0 :shell-path "/ui/tok/"
+                                  :tabs '(("headlamp" "/dashboard/tok/" "Headlamp"))
+                                  :proxy-fn (lambda (method target request)
+                                              (gr8s.server::dashboard-proxy-forward config method target request))
+                                  :multiplexer-fn nil
+                                  :access-log-destination nil :message-log-destination nil))
+         (base gr8s.apiserver::*dashboard-base*)
+         (before (dashboard-watch-reader-threads))
+         (browser nil))
+    (setf gr8s.apiserver::*dashboard-base* "/dashboard/tok")
+    (hunchentoot:start acceptor)
+    (unwind-protect
+         (let ((stream (progn (setf browser (usocket:socket-connect "127.0.0.1" (hunchentoot:acceptor-port acceptor)
+                                                                     :element-type '(unsigned-byte 8)))
+                              (usocket:socket-stream browser))))
+           (write-sequence (trivial-utf-8:string-to-utf-8-bytes
+                            (format nil "GET /dashboard/tok/clusters/gr8s/api/v1/pods?watch=true HTTP/1.1~C~CHost: 127.0.0.1~C~CUpgrade: websocket~C~CConnection: Upgrade~C~CSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==~C~CSec-WebSocket-Version: 13~C~C~C~C"
+                                    #\Return #\Newline #\Return #\Newline #\Return #\Newline #\Return #\Newline
+                                    #\Return #\Newline #\Return #\Newline #\Return #\Newline))
+                           stream)
+           (finish-output stream)
+           (is (= 101 (gr8s.protocol::parse-http-response-head (gr8s.protocol::read-http-response-head stream))))
+           ;; The watch ended upstream, so the relay says goodbye...
+           (is (= 8 (gr8s.protocol::read-websocket-frame stream)))
+           ;; ...and, with the browser still connected, leaves no reader behind.
+           (is-true (loop repeat 50
+                          when (<= (dashboard-watch-reader-threads) before) return t
+                          do (sleep 0.1))
+                    "the watch's reader thread is still running"))
+      (when browser (ignore-errors (usocket:socket-close browser)))
+      (hunchentoot:stop acceptor)
+      (ignore-errors (bt:join-thread server))
+      (usocket:socket-close upstream)
+      (setf gr8s.apiserver::*dashboard-base* base))))
+
 ;;; DashboardTabs: the cluster's apps as dashboard tabs (podster-ckt).
 
 (defvar *dashboard-app-upstream-seen* nil)

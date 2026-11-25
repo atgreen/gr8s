@@ -750,6 +750,17 @@ def main(path, kernel=False):
     # A connection's replies stop passing once it has been idle past its lifetime.
     backend.advance(181)
     check(datagram(IP, other, UDP, 7000, 6000), False, 'policy')
+    # A TCP connection idle past tcp_keepalive_time (2h) still gets its peer's keepalives
+    # in: TCP replies stay admitted for days, as conntrack keeps ESTABLISHED (podster-af3).
+    mode(0, 1)
+    check(datagram(IP, outside, TCP, 42000, 443), True)
+    check(datagram6(IP6, outside6, TCP, 42000, 443), True)
+    backend.advance(7200 + 75)
+    inbound(datagram(outside, IP, TCP, 443, 42000), True)
+    inbound(datagram6(outside6, IP6, TCP, 443, 42000), True)
+    backend.advance(5 * 86400 + 1)
+    inbound(datagram(outside, IP, TCP, 443, 42000), False)
+    inbound(datagram6(outside6, IP6, TCP, 443, 42000), False)
     backend.close()
     name = 'Linux kernel' if kernel else 'emitted bytecode'
     sizes = ', '.join(f'{len(code) // 8} {program}' for program, code in sorted(programs.items()))

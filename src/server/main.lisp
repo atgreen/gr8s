@@ -1518,9 +1518,10 @@ relaying every watch event back. Returns when the WebSocket closes."
                (bt:with-lock-held (watches-lock)
                  (when (eq (gethash key watches) watch) (remhash key watches))))
              (shut (socket)
+               ;; Wake the watch thread reading SOCKET; run-dashboard-watch closes it on its
+               ;; way out. Closing it here, under that read, would leave the read spinning.
                (when socket
-                 (ignore-errors (usocket:socket-shutdown socket :io))
-                 (ignore-errors (usocket:socket-close socket))))
+                 (ignore-errors (usocket:socket-shutdown socket :io))))
              (stop-watch (key)
                ;; Read the socket under the lock: the watch thread also publishes it
                ;; there, so we never miss a socket that was just opened.
@@ -1593,16 +1594,32 @@ relaying every watch event back. Returns when the WebSocket closes."
 ;;; waited it out -- minutes -- and Chrome, which opens one WebSocket to a host at a time,
 ;;; held every other one behind it: the Agent tab's terminals stayed blank (podster-c7r).
 
+(defun websocket-fd-stream (stream)
+  "The socket's fd-stream beneath STREAM, a WebSocket hunchentoot has handed over, or NIL."
+  (loop for inner = stream then (cond ((typep inner 'flexi-streams:flexi-stream) (flexi-streams:flexi-stream-stream inner))
+                                      ((typep inner 'chunga:chunked-stream) (chunga:chunked-stream-stream inner)))
+        while inner
+        when (typep inner 'sb-sys:fd-stream) return inner))
+
 (defun keep-websocket-open (stream)
   "Let STREAM, a WebSocket hunchentoot has handed over, stay quiet as long as its two ends
 like: the server's idle timeout would hang up a watch, or a terminal, with nothing to say.
 Return STREAM."
-  (loop for inner = stream then (cond ((typep inner 'flexi-streams:flexi-stream) (flexi-streams:flexi-stream-stream inner))
-                                      ((typep inner 'chunga:chunked-stream) (chunga:chunked-stream-stream inner)))
-        while inner
-        when (typep inner 'sb-sys:fd-stream)
-          do (setf (sb-impl::fd-stream-timeout inner) nil) (return))
+  (let ((fd-stream (websocket-fd-stream stream)))
+    (when fd-stream (setf (sb-impl::fd-stream-timeout fd-stream) nil)))
   stream)
+
+(defun stop-reading-websocket (stream)
+  "Wake a thread blocked reading STREAM, a WebSocket hunchentoot has handed over, with an
+end of file, leaving STREAM open: close it only once that thread is done with it. A stream
+closed under a blocked read leaves the read polling a dead descriptor forever, which SBCL's
+wait answers at once, so the thread spins (podster-gek)."
+  (let ((fd-stream (websocket-fd-stream stream)))
+    (when (and fd-stream (open-stream-p fd-stream))
+      ;; shutdown(fd, SHUT_RD): later reads see end of file; what is written still goes out.
+      (sb-alien:alien-funcall
+       (sb-alien:extern-alien "shutdown" (function sb-alien:int sb-alien:int sb-alien:int))
+       (sb-sys:fd-stream-fd fd-stream) 0))))
 
 (defun dashboard-websocket-request-p (request)
   "Whether REQUEST asks for a WebSocket."
@@ -1674,8 +1691,10 @@ TARGET, on the running cluster's API, as a text message, until either side ends 
              (error () nil))
         (send 8 (coerce closing '(vector (unsigned-byte 8))))
         (hang-up)
-        (ignore-errors (close client))
-        (ignore-errors (bt:join-thread reader))))
+        ;; The reader may still be waiting on the browser: wake it, and close only once it has gone.
+        (ignore-errors (stop-reading-websocket client))
+        (ignore-errors (bt:join-thread reader))
+        (ignore-errors (close client))))
     ""))
 
 (defvar *dashboard-verbose* nil

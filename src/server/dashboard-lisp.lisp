@@ -51,14 +51,29 @@ own, and if it ever did, it would be the one gr8s runs on."
   (destructuring-bind (kind name) target
     (format nil "/apis/gr8s.io/v1/~A/~A/slynk" (if (equal kind "member") "controlplanemembers" "nodes") name)))
 
+(defun wake-socket (socket)
+  "Make a thread blocked reading, or accepting on, SOCKET (a usocket) return, without closing
+SOCKET under it: a socket closed under a blocked read leaves the read polling a dead
+descriptor, which SBCL answers at once, and the thread spins (podster-gek)."
+  (when socket
+    (ignore-errors (sb-bsd-sockets:socket-shutdown (usocket:socket socket) :direction :io))))
+
 (defun stop-lisp-session (session)
+  "Ask SESSION to end, from any thread: stop ICL and wake the tunnel's blocked reads. The
+tunnel thread, which owns the sockets, closes them once its relays have finished."
   (with-slots (process listener remote remote-socket) session
     (when process (ignore-errors (sb-ext:process-kill process sb-unix:sigterm)))
-    (when listener (ignore-errors (usocket:socket-close listener)))
+    (wake-socket listener)
     (when remote
       (ignore-errors (gr8s.protocol::write-websocket-frame
-                      remote 8 (make-array 2 :element-type '(unsigned-byte 8) :initial-contents '(3 232)) :masked-p t))
-      (ignore-errors (close remote)))
+                      remote 8 (make-array 2 :element-type '(unsigned-byte 8) :initial-contents '(3 232)) :masked-p t)))
+    (wake-socket remote-socket)))
+
+(defun close-lisp-session (session)
+  "Release SESSION's sockets, by the thread that owns them, once nothing reads them."
+  (with-slots (listener remote remote-socket) session
+    (when listener (ignore-errors (usocket:socket-close listener)))
+    (when remote (ignore-errors (close remote)))
     (when remote-socket (ignore-errors (usocket:socket-close remote-socket)))))
 
 (defun start-lisp-session (lisp target origin)
@@ -66,30 +81,41 @@ own, and if it ever did, it would be the one gr8s runs on."
 session once ICL has said where its page is."
   (let* ((session (%make-lisp-session target))
          (config (dashboard-lisp-config lisp))
-         (write-lock (bt:make-lock "gr8s dashboard lisp tunnel")))
-    (handler-bind ((error (lambda (condition) (declare (ignore condition)) (stop-lisp-session session))))
+         (write-lock (bt:make-lock "gr8s dashboard lisp tunnel"))
+         (tunnel nil))
+    (handler-bind ((error (lambda (condition)
+                            (declare (ignore condition))
+                            (stop-lisp-session session)
+                            ;; Once the tunnel thread runs it owns the sockets and closes them.
+                            (unless tunnel (close-lisp-session session)))))
       (multiple-value-bind (remote remote-socket) (open-debug-websocket config (lisp-target-path target))
         (setf (lisp-session-remote session) remote (lisp-session-remote-socket session) remote-socket
               (lisp-session-listener session) (usocket:socket-listen "127.0.0.1" 0 :reuse-address t
                                                                                   :element-type '(unsigned-byte 8))))
-      ;; ICL's one connection, relayed through the tunnel until either side ends.
-      (bt:make-thread
-       (lambda ()
-         (let ((local-socket (ignore-errors (usocket:socket-accept (lisp-session-listener session)))))
-           (ignore-errors (usocket:socket-close (lisp-session-listener session)))
-           (when local-socket
-             (let ((local (usocket:socket-stream local-socket)))
-               (bt:make-thread (lambda ()
-                                 (ignore-errors (relay-local-slynk-to-websocket local (lisp-session-remote session) write-lock))
-                                 (ignore-errors (usocket:socket-shutdown (lisp-session-remote-socket session) :io)))
-                               :name "gr8s dashboard lisp local")
-               (ignore-errors (relay-websocket-to-local-slynk (lisp-session-remote session) local write-lock))
-               (ignore-errors (usocket:socket-close local-socket))))
-           ;; The tunnel is gone, and with it the session.
-           (stop-lisp-session session)
-           (bt:with-lock-held ((dashboard-lisp-lock lisp))
-             (setf (dashboard-lisp-sessions lisp) (remove session (dashboard-lisp-sessions lisp))))))
-       :name "gr8s dashboard lisp tunnel")
+      ;; ICL's one connection, relayed through the tunnel until either side ends. This
+      ;; thread owns the session's sockets from here on.
+      (setf tunnel
+            (bt:make-thread
+             (lambda ()
+               (let ((local-socket (ignore-errors (usocket:socket-accept (lisp-session-listener session)))))
+                 (when local-socket
+                   (let* ((local (usocket:socket-stream local-socket))
+                          (outbound (bt:make-thread
+                                     (lambda ()
+                                       (ignore-errors (relay-local-slynk-to-websocket local (lisp-session-remote session) write-lock))
+                                       (wake-socket (lisp-session-remote-socket session)))
+                                     :name "gr8s dashboard lisp local")))
+                     (ignore-errors (relay-websocket-to-local-slynk (lisp-session-remote session) local write-lock))
+                     ;; ICL's side may still be read: wake it, and close only once it has finished.
+                     (wake-socket local-socket)
+                     (ignore-errors (bt:join-thread outbound))
+                     (ignore-errors (usocket:socket-close local-socket))))
+                 ;; The tunnel is gone, and with it the session.
+                 (stop-lisp-session session)
+                 (close-lisp-session session)
+                 (bt:with-lock-held ((dashboard-lisp-lock lisp))
+                   (setf (dashboard-lisp-sessions lisp) (remove session (dashboard-lisp-sessions lisp))))))
+             :name "gr8s dashboard lisp tunnel"))
       (let* ((process (sb-ext:run-program (dashboard-lisp-icl lisp)
                                           (icl-arguments (usocket:get-local-port (lisp-session-listener session)) origin)
                                           :wait nil :input nil :output :stream :error :output
