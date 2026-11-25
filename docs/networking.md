@@ -886,6 +886,15 @@ to it:
   it as an `http-response` and applies `--http-method`, `--http-status` and
   `--http-path` to it.
 
+A flow to an address outside the cluster carries `peerName`: the name a Pod
+on that node asked the node's DNS server about to get the address, such as
+`secure.gravatar.com` for `192.0.73.2`. The server notes the A and AAAA answers
+it forwards upstream under the name asked for, not the end of a CNAME chain,
+and an address keeps its latest name for six hours (4,096 addresses per node
+at most). Two names that share an address, as on a CDN, show whichever was
+asked last. An address no Pod looked up has no name, nor has one a Pod
+resolved before the node's agent last started and hasn't looked up since.
+
 A Pod's guards bind to the ring when the CNI installs them. After an upgrade
 from a release without flow events, a Pod that was already running reports
 none until it is recreated, unless its node runs the Service packet pipeline,
@@ -944,7 +953,10 @@ once over the last 1, 5 and 15 minutes, with its drops, HTTP errors and median
 latency, and keeps its latest flows; the map shows what flow events show, drops
 and new connections, not each packet or byte. A card's icon is the app's own
 favicon when it has a web UI, read through the Service proxy, else the
-software its image shows it to be, else its kind.
+software its image shows it to be, else its kind. A peer outside the cluster
+is drawn as its DNS name when its flows carry one (`peerName`, below), so each
+site the cluster talks to is a node of its own; an address no Pod looked up is
+the world, or the bare address for a private one.
 
 Selecting an edge explains its connections under NetworkPolicy, as the
 dataplane reads it: for each distinct source, destination, port and protocol,
@@ -960,6 +972,15 @@ workload a policy isolates; its panel says which, each way. The view is in the
 page's URL (`#ns=cave&edge=…`), so it can be linked. A policy's name, and a
 selected workload's "Open in Headlamp", open that resource in the dashboard's
 Headlamp tab, to read or edit it there.
+
+The tab asks [`gr8s doctor`](doctor.md) about the whole cluster every minute
+and draws its problems on the map: a card with a red edge is a workload a
+problem is about, one with an amber edge is held up by a problem elsewhere,
+and its panel shows each problem with its evidence, next step and what it holds
+up. Health, in the header, lists them all, including those about resources
+with no traffic on the map. NetworkPolicy drops are left to the edges. A drop the
+dataplane made for another reason, such as its anti-spoofing check, is named
+as such in an edge's Policy section rather than explained by policy.
 
 On a foreign cluster, where gr8s-net provides the network and nothing serves
 `/apis/gr8s.io/v1/flows`, each `gr8s net-agent` collects its node's flow

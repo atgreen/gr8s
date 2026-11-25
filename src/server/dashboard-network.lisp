@@ -296,15 +296,22 @@ Gateway API's routes, and the NetworkPolicies and Namespaces policy reads."
             (values here there (gethash "peerPort" flow))
             (values there here (gethash "podPort" flow)))))))
 
-(defun network-end-name (end)
-  (if (eq (first end) :pod)
-      (format nil "~A/~A" (gr8s.network::np-pod-namespace (second end)) (gr8s.network::np-pod-name (second end)))
-      (second end)))
+(defun network-end-name (end &optional flow)
+  "END's name: namespace/name for a Pod; for an address, the DNS name FLOW reached it by
+too, when it has one."
+  (let ((name (and flow (gethash "peerName" flow))))
+    (cond ((eq (first end) :pod)
+           (format nil "~A/~A" (gr8s.network::np-pod-namespace (second end)) (gr8s.network::np-pod-name (second end))))
+          ((and (stringp name) (equal (second end) (gethash "peerAddress" flow)))
+           (format nil "~A (~A)" name (second end)))
+          (t (second end)))))
 
 (defun network-explain-flows (topology flows)
   "Explain each distinct connection among FLOWS under TOPOLOGY's policies, at most
 +NETWORK-EXPLAINED-CONNECTIONS+: one per source workload, destination, port and protocol,
-named by an example Pod or address, with how many of FLOWS were dropped."
+named by an example Pod or address, with how many of FLOWS were dropped. A drop the dataplane
+made for another reason than policy (anti-spoofing, a malformed or unsupported packet) is
+its own entry, with that \"dropReason\" and no policy verdict: policy played no part."
   (let ((seen (make-hash-table :test #'equal))
         (explained '()))
     (dolist (flow flows)
@@ -317,18 +324,23 @@ named by an example Pod or address, with how many of FLOWS were dropped."
                            (network-end-name end))
                        (second end))))
             (let* ((protocol (gethash "protocol" flow ""))
-                   (key (list (key source) (key destination) port protocol))
                    (dropped (equal (gethash "verdict" flow) "DROPPED"))
+                   (reason (let ((reason (gethash "reason" flow)))
+                             (and dropped (stringp reason) (not (equal reason "policy")) reason)))
+                   (key (list (key source) (key destination) port protocol reason))
                    (entry (gethash key seen)))
               (cond
                 (entry (when dropped (incf (gethash "dropped" entry))))
                 ((< (hash-table-count seen) +network-explained-connections+)
                  (let ((entry (gr8s-diagnose::object
-                               "source" (network-end-name source) "destination" (network-end-name destination)
+                               "source" (network-end-name source flow) "destination" (network-end-name destination flow)
                                "port" (or port 'null) "protocol" protocol "dropped" (if dropped 1 0)
-                               "explanation" (gr8s.network::explain-network-connection
-                                              (network-topology-policies topology) source destination port protocol
-                                              (network-topology-namespace-labels topology)))))
+                               "dropReason" (or reason 'null)
+                               "explanation" (if reason
+                                                 'null
+                                                 (gr8s.network::explain-network-connection
+                                                  (network-topology-policies topology) source destination port protocol
+                                                  (network-topology-namespace-labels topology))))))
                    (setf (gethash key seen) entry)
                    (push entry explained)))))))))
     (nreverse explained)))
@@ -359,10 +371,13 @@ or NIL when it has no Pod policy can select."
         (t :world)))
 
 (defun network-peer-workload (topology flow)
-  "The workload at the far end of FLOW: the Pod the flow names, else whatever owns its address."
+  "The workload at the far end of FLOW: the Pod the flow names, else whatever owns its address.
+An address outside the cluster is drawn as the DNS name a Pod asked for to reach it, when the
+flow carries one (podster-5hv.8), so each site the cluster talks to is a node of its own."
   (let ((pod (gethash "peerPod" flow))
         (namespace (gethash "peerNamespace" flow))
-        (address (gethash "peerAddress" flow "")))
+        (address (gethash "peerAddress" flow ""))
+        (name (let ((name (gethash "peerName" flow))) (and (stringp name) (plusp (length name)) name))))
     (or (and pod namespace
              (or (gethash (cons namespace pod) (network-topology-pods topology))
                  (list namespace "Pod" pod)))
@@ -372,8 +387,8 @@ or NIL when it has no Pod policy can select."
           (and node (list nil "Node" node)))
         (ecase (network-address-class address)
           (:lan (list nil "LAN" "link-local"))
-          (:private (list nil "External" address))
-          (:world (list nil "World" "world"))))))
+          (:private (list nil "External" (or name address)))
+          (:world (list nil "World" (or name "world")))))))
 
 (defun network-gateway-client (topology flow)
   "Who made the request a Gateway's record FLOW describes, as the graph draws it: the world
@@ -558,9 +573,10 @@ arriving at a Pod from another known Pod isn't counted: its source counted it le
                     (when (> (length ports) 3) (list (format nil "+~D" (- (length ports) 3)))))
             'vector)))
 
-(defun network-graph-object (graph &optional (now (get-universal-time)) (favicon-p (constantly nil)))
+(defun network-graph-object (graph &optional (now (get-universal-time)) (favicon-p (constantly nil))
+                                             (health-of (constantly nil)))
   "GRAPH as the page draws it: its nodes, and its edges with their counts over the last
-1, 5 and 15 minutes."
+1, 5 and 15 minutes. HEALTH-OF gives a node's doctor summary, or NIL."
   (bt:with-lock-held ((network-graph-lock graph))
     (flet ((window (edge seconds)
              (let ((totals (network-edge-window edge now seconds)))
@@ -575,7 +591,8 @@ arriving at a Pod from another known Pod isn't counted: its source counted it le
                                                               "favicon" (and (funcall favicon-p id) t)
                                                               "isolation" (or (network-workload-isolation
                                                                                (network-graph-topology graph) workload)
-                                                                              'null))))
+                                                                              'null)
+                                                              "health" (or (funcall health-of id) 'null))))
                        'vector)
        "edges" (coerce (loop for edge being the hash-values of (network-graph-edges graph)
                              collect (let ((latencies (sort (mapcar #'cdr (network-edge-latencies edge)) #'<)))
@@ -616,6 +633,72 @@ arriving at a Pod from another known Pod isn't counted: its source counted it le
                                (setf (gethash "edge" copy) id)
                                copy))
                            (network-edge-recent edge)))))
+
+;;; The doctor on the map (podster-5hv.4): its problems on the nodes they are about, and the
+;;; nodes those problems hold up.
+
+(defparameter +network-doctor-seconds+ 60 "How often the dashboard asks the doctor about the cluster.")
+
+(defparameter +network-doctor-skipped-rules+ '("network-policy-drops")
+  "Problems the map already draws, as drops on its edges.")
+
+(defun network-target-node-id (topology target)
+  "The id of the map node the doctor's TARGET, Kind/namespace/name or Kind/name, is drawn
+as: a Pod as its workload, anything else as itself."
+  (when (stringp target)
+    (let ((parts (uiop:split-string target :separator "/")))
+      (case (length parts)
+        (2 (format nil "~A/~A" (first parts) (second parts)))
+        (3 (destructuring-bind (kind namespace name) parts
+             (network-workload-id
+              (or (and (equal kind "Pod") (gethash (cons namespace name) (network-topology-pods topology)))
+                  (list namespace kind name)))))))))
+
+(defun network-health-problems (topology report)
+  "The problems of the doctor's survey REPORT, each with \"nodes\", the map nodes it is
+about, and \"affectedNodes\", the ones it holds up; those the map draws otherwise left out."
+  (loop for problem across (or (gethash "problems" report) #())
+        for rule = (gethash "rule" problem)
+        unless (member rule +network-doctor-skipped-rules+ :test #'equal)
+          collect (let* ((copy (alexandria:copy-hash-table problem))
+                         (owner (gethash "owner" problem))
+                         (nodes (remove-duplicates
+                                 (append (map 'list (lambda (target) (network-target-node-id topology target))
+                                              (or (gethash "resources" problem) #()))
+                                         (and (stringp owner) (list (network-target-node-id topology owner))))
+                                 :test #'equal))
+                         (impact (gethash "impact" problem))
+                         (affected (remove-duplicates
+                                    (loop for entry across (if (vectorp impact) impact #())
+                                          for id = (network-target-node-id topology (gethash "target" entry))
+                                          unless (member id nodes :test #'equal) collect id)
+                                    :test #'equal)))
+                    (setf (gethash "nodes" copy) (coerce (remove nil nodes) 'vector)
+                          (gethash "affectedNodes" copy) (coerce (remove nil affected) 'vector))
+                    copy)))
+
+(defun network-health-summaries (problems)
+  "Node id -> its summary for the map: how many problems are about it, how many hold it up,
+and the first one's title."
+  (let ((summaries (make-hash-table :test #'equal)))
+    (flet ((summary (id)
+             (or (gethash id summaries)
+                 (setf (gethash id summaries) (gr8s-diagnose::object "problems" 0 "affectedBy" 0 "title" 'null)))))
+      (dolist (problem problems)
+        (loop for id across (gethash "nodes" problem)
+              do (let ((summary (summary id)))
+                   (incf (gethash "problems" summary))
+                   (when (eq 'null (gethash "title" summary))
+                     (setf (gethash "title" summary) (gethash "title" problem)))))
+        (loop for id across (gethash "affectedNodes" problem)
+              do (incf (gethash "affectedBy" (summary id))))))
+    summaries))
+
+(defun call-with-network-doctor-getter (config function)
+  "Call FUNCTION with a bounded doctor getter reading the cluster through CONFIG."
+  (let ((gr8s-diagnose::*read-failures* nil)
+        (gr8s-diagnose::*progress* nil))
+    (funcall function (gr8s-diagnose::bounded-getter (doctor-api-getter config)))))
 
 ;;; Favicons: a workload's own icon, read from its web UI through the API's Service proxy
 
@@ -723,6 +806,10 @@ may show. ENDPOINT is (namespace service port https-p)."
   ;; lock, taken with no other held, so drawing the graph can ask it under the graph's.
   (favicons (make-hash-table :test #'equal))
   (favicons-lock (bt:make-lock "gr8s network favicons"))
+  ;; The doctor's latest survey: (universal-time problems summaries warnings), problems
+  ;; mapped onto the graph. Its own lock, like the favicons'.
+  (health nil)
+  (health-lock (bt:make-lock "gr8s network health"))
   (lock (bt:make-lock "gr8s dashboard network"))
   started stopping flows-closer threads)
 
@@ -764,6 +851,34 @@ Namespaces."
                (bt:with-lock-held ((dashboard-network-favicons-lock network))
                  (setf (gethash id (dashboard-network-favicons network)) (list* now (or found (list nil nil)))))))))
 
+(defun refresh-dashboard-network-health (network)
+  "Ask the doctor about the whole cluster, and map its problems onto the graph."
+  (let* ((report (call-with-network-doctor-getter (dashboard-network-config network)
+                                                  (lambda (getter) (gr8s-diagnose::checkup nil getter))))
+         (graph (dashboard-network-graph network))
+         (problems (bt:with-lock-held ((network-graph-lock graph))
+                     (network-health-problems (network-graph-topology graph) report))))
+    (bt:with-lock-held ((dashboard-network-health-lock network))
+      (setf (dashboard-network-health network)
+            (list (get-universal-time) problems (network-health-summaries problems)
+                  (gethash "warnings" report #()))))))
+
+(defun dashboard-network-node-health (network id)
+  "Node ID's doctor summary, or NIL."
+  (bt:with-lock-held ((dashboard-network-health-lock network))
+    (let ((health (dashboard-network-health network)))
+      (and health (gethash id (third health))))))
+
+(defun dashboard-network-health-object (network)
+  "The doctor's latest problems as the page reads them, or a note that it hasn't answered."
+  (bt:with-lock-held ((dashboard-network-health-lock network))
+    (let ((health (dashboard-network-health network)))
+      (if health
+          (gr8s-diagnose::object "at" (- (first health) 2208988800)
+                                 "problems" (coerce (second health) 'vector)
+                                 "warnings" (fourth health))
+          (gr8s-diagnose::object "at" 'null "problems" #() "warnings" #())))))
+
 (defun dashboard-network-favicon (network id)
   "(values octets content-type) of node ID's favicon, or NIL."
   (bt:with-lock-held ((dashboard-network-favicons-lock network))
@@ -786,6 +901,15 @@ Namespaces."
                            (ignore-errors (refresh-dashboard-network-topology network))
                            (network-graph-expire (dashboard-network-graph network) (get-universal-time))))
                 :name "gr8s network topology")
+               (bt:make-thread
+                (lambda ()
+                  (loop until (stopping)
+                        do (handler-case (refresh-dashboard-network-health network)
+                             (error (condition)
+                               (when *dashboard-verbose*
+                                 (format *error-output* "gr8s network: doctor: ~A~%" condition))))
+                           (loop repeat (* 10 +network-doctor-seconds+) until (stopping) do (sleep 0.1))))
+                :name "gr8s network doctor")
                (bt:make-thread
                 (lambda ()
                   (loop until (stopping)
@@ -852,7 +976,10 @@ and an edge's flows."
         ((equal rest "graph")
          (start-dashboard-network network)
          (json (network-graph-object (dashboard-network-graph network) (get-universal-time)
-                                     (lambda (id) (dashboard-network-favicon network id)))))
+                                     (lambda (id) (dashboard-network-favicon network id))
+                                     (lambda (id) (dashboard-network-node-health network id)))))
+        ((equal rest "health")
+         (json (dashboard-network-health-object network)))
         ((equal rest "favicon")
          (multiple-value-bind (octets type) (dashboard-network-favicon network (hunchentoot:get-parameter "node" request))
            (if octets
