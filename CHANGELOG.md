@@ -57,6 +57,12 @@ the Kubernetes API version with a gr8s release suffix (see
   drops and why, Gateway requests with their trace ids -- over OTLP/HTTP to the
   logs endpoint, one record per event with OTel's network attributes.
 
+- `gr8s dashboard` on a port a dashboard already serves says so -- "gr8s
+  dashboard is already running at URL" -- and opens that one, instead of
+  failing with `USOCKET:ADDRESS-IN-USE-ERROR`; a port another program holds is
+  named as such, with `--port` to choose another. A running dashboard records
+  its URL in a private file under `$XDG_RUNTIME_DIR/gr8s/`, removed when it exits.
+
 ### Removed
 
 - `gr8s dashboard`'s Hubble tab, and the Hubble UI bundle it embedded: the

@@ -1278,6 +1278,68 @@ The new identity takes effect when the node agent next starts."
   "A fresh unguessable URL-path token for one dashboard session (192 bits of hex)."
   (format nil "~(~{~2,'0X~}~)" (coerce (secure-random-octets 24) 'list)))
 
+(defun dashboard-session-file (port)
+  "Where the dashboard serving PORT records its URL for this user: a private file in
+$XDG_RUNTIME_DIR (else the cache directory), so a second `gr8s dashboard' can point at
+the one already running instead of failing on the port."
+  (let ((runtime (uiop:getenv "XDG_RUNTIME_DIR")))
+    (merge-pathnames (format nil "gr8s/dashboard-~D.json" port)
+                     (if (and runtime (plusp (length runtime)))
+                         (uiop:ensure-directory-pathname runtime)
+                         (uiop:xdg-cache-home)))))
+
+(defun dashboard-kubeconfig-name (kubeconfig)
+  "KUBECONFIG's full path, so two spellings of one file compare equal."
+  (namestring (or (ignore-errors (truename kubeconfig)) kubeconfig)))
+
+(defun record-dashboard-session (port url kubeconfig)
+  "Note this process's dashboard on PORT, readable only by this user."
+  (let ((file (dashboard-session-file port)))
+    (ensure-directories-exist file)
+    (with-open-file (out file :direction :output :if-exists :supersede)
+      (sb-posix:chmod (namestring file) #o600)
+      (com.inuoe.jzon:stringify (core-object "pid" (sb-posix:getpid) "port" port
+                                             "url" url "kubeconfig" (dashboard-kubeconfig-name kubeconfig))
+                                :stream out))))
+
+(defun forget-dashboard-session (port)
+  "Remove PORT's session record, when it is still this process's."
+  (let* ((file (dashboard-session-file port))
+         (session (ignore-errors (com.inuoe.jzon:parse file))))
+    (when (and (hash-table-p session) (eql (gethash "pid" session) (sb-posix:getpid)))
+      (ignore-errors (delete-file file)))))
+
+(defun running-dashboard-session (port)
+  "The session record of a live dashboard on PORT, or NIL: its process must still exist."
+  (let ((session (ignore-errors (com.inuoe.jzon:parse (dashboard-session-file port)))))
+    (when (and (hash-table-p session)
+               (eql (gethash "port" session) port)
+               (integerp (gethash "pid" session))
+               (stringp (gethash "url" session))
+               (ignore-errors (sb-posix:kill (gethash "pid" session) 0) t))
+      session)))
+
+(defun report-dashboard-port-in-use (port options kubeconfig)
+  "Say why the dashboard can't take PORT: point at the dashboard already there, opening
+it unless OPTIONS say :no-launch, or name the port as another program's. The exit code."
+  (let ((session (running-dashboard-session port)))
+    (cond
+      (session
+       (let ((url (gethash "url" session))
+             (theirs (gethash "kubeconfig" session)))
+         (format t "gr8s dashboard is already running at ~A~%" url)
+         (unless (equal theirs (dashboard-kubeconfig-name kubeconfig))
+           (format t "  (for ~A; for ~A, start another with --port)~%" theirs (dashboard-kubeconfig-name kubeconfig)))
+         (unless (getf options :no-launch)
+           (ignore-errors
+            (uiop:launch-program (list (or (getf options :browser) (default-browser-opener)) url)
+                                 :output :interactive :error-output :interactive)))
+         0))
+      (t
+       (format *error-output* "gr8s dashboard: port ~D is in use by another program; choose another with --port N~%"
+               port)
+       1))))
+
 (defun dashboard-kubeconfig-config (path)
   "Read kubeconfig PATH into a config plist for OPEN-DEBUG-API-STREAM, writing any
 inline certificate/key/CA data out to 0600 temp files."
@@ -1791,7 +1853,11 @@ each request and each worker error."
           *dashboard-verbose* verbose
           *shutdown-requested* nil)
     (install-shutdown-handlers)
-    (hunchentoot:start acceptor)
+    (handler-case (hunchentoot:start acceptor)
+      (usocket:address-in-use-error ()
+        (stop-dashboard-agents agent)
+        (return-from run-dashboard-command (report-dashboard-port-in-use port options kubeconfig))))
+    (ignore-errors (record-dashboard-session port url kubeconfig))
     (unwind-protect
          (progn
            (format t "gr8s dashboard: ~A~%  cluster API ~A (via ~A)~%"
@@ -1809,6 +1875,7 @@ each request and each worker error."
            (finish-output)
            (loop until *shutdown-requested* do (sleep 0.2)))
       (ignore-errors (hunchentoot:stop acceptor))
+      (ignore-errors (forget-dashboard-session port))
       (stop-dashboard-agents agent)
       (stop-dashboard-lisp lisp)
       (stop-dashboard-network network)

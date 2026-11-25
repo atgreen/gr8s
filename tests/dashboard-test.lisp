@@ -676,3 +676,44 @@
                     :test #'equal)))
         (is (= 1 (gethash "flows" (gethash "m1" (edge "Clients/LAN clients" "gateway/Gateway/labdroid"))))
             "counted once, on the client's edge")))))
+
+(test a-second-dashboard-points-at-the-one-already-running
+  ;; `gr8s dashboard' on a port a dashboard already serves names that dashboard's URL
+  ;; instead of failing on ADDRESS-IN-USE; another program's port is named as such.
+  (let* ((directory (uiop:ensure-directory-pathname
+                     (sb-posix:mkdtemp (namestring (merge-pathnames "gr8s-runtime-XXXXXX" (uiop:temporary-directory))))))
+         (saved (uiop:getenv "XDG_RUNTIME_DIR"))
+         (kubeconfig (merge-pathnames "kc.yaml" directory)))
+    (unwind-protect
+         (progn
+           (sb-posix:setenv "XDG_RUNTIME_DIR" (namestring directory) 1)
+           (with-open-file (out kubeconfig :direction :output) (write-string "x" out))
+           (is (null (gr8s.server::running-dashboard-session 18555)) "no record, nothing running")
+           (gr8s.server::record-dashboard-session 18555 "http://127.0.0.1:18555/ui/tok/" kubeconfig)
+           (let ((file (gr8s.server::dashboard-session-file 18555)))
+             (is (= #o600 (logand #o777 (sb-posix:stat-mode (sb-posix:stat (namestring file))))) "private to this user"))
+           (is (equal "http://127.0.0.1:18555/ui/tok/"
+                      (gethash "url" (gr8s.server::running-dashboard-session 18555))))
+           (is (null (gr8s.server::running-dashboard-session 18556)) "a record is for its own port")
+           (let ((text (with-output-to-string (*standard-output*)
+                         (is (= 0 (gr8s.server::report-dashboard-port-in-use 18555 '(:no-launch t) kubeconfig))))))
+             (is (search "gr8s dashboard is already running at http://127.0.0.1:18555/ui/tok/" text))
+             (is (null (search "--port" text)) "same kubeconfig: no advice"))
+           (let ((text (with-output-to-string (*standard-output*)
+                         (gr8s.server::report-dashboard-port-in-use 18555 '(:no-launch t) "/elsewhere/kc.yaml"))))
+             (is (search "start another with --port" text) "another cluster's dashboard"))
+           ;; A record whose process is gone is no dashboard: the port is another program's.
+           (let ((file (gr8s.server::dashboard-session-file 18555)))
+             (with-open-file (out file :direction :output :if-exists :supersede)
+               (write-string "{\"pid\":999999999,\"port\":18555,\"url\":\"http://x/\",\"kubeconfig\":\"k\"}" out)))
+           (is (null (gr8s.server::running-dashboard-session 18555)))
+           (let ((*error-output* (make-broadcast-stream)))
+             (is (= 1 (gr8s.server::report-dashboard-port-in-use 18555 '(:no-launch t) kubeconfig))))
+           ;; Leaving removes the record, but only one this process wrote.
+           (gr8s.server::forget-dashboard-session 18555)
+           (is (probe-file (gr8s.server::dashboard-session-file 18555)) "another process's record stays")
+           (gr8s.server::record-dashboard-session 18555 "http://127.0.0.1:18555/ui/tok/" kubeconfig)
+           (gr8s.server::forget-dashboard-session 18555)
+           (is (null (probe-file (gr8s.server::dashboard-session-file 18555)))))
+      (if saved (sb-posix:setenv "XDG_RUNTIME_DIR" saved 1) (sb-posix:unsetenv "XDG_RUNTIME_DIR"))
+      (uiop:delete-directory-tree directory :validate t))))
