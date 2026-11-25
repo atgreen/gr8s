@@ -181,7 +181,7 @@ That path needs Node.js/npm in addition to `cpio` and `gzip`. See
 | Agent → server | TCP 7443, mutual TLS after enrollment, listens on loopback until configured | Remote workers; set `--node-listen` |
 | Node ↔ node | UDP 4789 | Default VXLAN overlay |
 | Raft member ↔ member | TCP 7000, loopback until configured | HA only; set `--raft-listen` |
-| Node kubelet-compatible API | TCP 10250 | Metrics/stats clients where the endpoint is enabled |
+| Control plane → node kubelet-compatible API | TCP 10250, mutual TLS | Every node with managed containerd, workers included (`--kubelet-port`, 0 to disable): the Node proxy, `kubectl top`, metrics scrapes; each node opens it in firewalld itself |
 | Node → registries/resolvers | Registry HTTPS and DNS | Image pulls and upstream DNS |
 
 WireGuard is opt-in with `--overlay-backend wireguard`. Allow the advertised UDP

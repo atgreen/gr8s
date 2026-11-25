@@ -80,7 +80,10 @@ than requiring a new program for each policy.
 
 Policy supports `podSelector`, `namespaceSelector`, combined selectors,
 `ipBlock` with `except`, protocol/port ranges, and direction-specific default deny.
-Connection state permits reply traffic for allowed flows. A refused packet is dropped
+Connection state permits reply traffic for allowed flows: for 5 days after a TCP
+connection's last packet, as conntrack keeps an established connection (well past
+the 2-hour `tcp_keepalive_time`, so an idle connection's keepalives get through),
+and 3 minutes for other protocols. A refused packet is dropped
 silently, with no reset or ICMP reply, so a client sees a timeout rather than an
 error. Each Pod endpoint counts the packets policy refused, in both directions, as
 `gr8s_endpoint_policy_drops_total`; they are also included in
