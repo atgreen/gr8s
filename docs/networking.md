@@ -21,7 +21,11 @@ The [Whistler](https://github.com/atgreen/Whistler) classifier attaches to each 
 path) as a persistent TCX link. It uses an agent-initialized map to check the
 exact IPAM IPv4 address and interface MAC, validates ARP sender identity, and
 drops malformed or unsupported frames. It counts accepted/dropped packets and
-bytes, rejected spoofs, malformed packets, and unsupported protocols.
+bytes, rejected spoofs, malformed packets, and unsupported protocols. A
+multicast the host itself sends out a Pod's veth -- an mDNS query from
+avahi-daemon, say -- comes back to the host as a `PACKET_LOOPBACK` copy received
+on that veth; the guard passes it unjudged and uncounted, since it isn't the
+Pod's and never enters it, and only the host's own stack makes such a copy.
 
 Identity initialization precedes TCX attachment; replacement links are attached
 and pinned before atomically replacing the old pin. Existing counter maps survive

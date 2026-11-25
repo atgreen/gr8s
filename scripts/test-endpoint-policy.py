@@ -135,7 +135,7 @@ class Maps:
 
 class Machine:
     """Interpret one program run over PACKET against MAPS."""
-    def __init__(self, code, maps, packet, clock, logical_length=None):
+    def __init__(self, code, maps, packet, clock, logical_length=None, pkt_type=0):
         self.code, self.maps, self.clock = code, maps, clock
         self.memory = maps.memory
         self.stack_initialized = set()
@@ -147,6 +147,7 @@ class Machine:
         self.memory[0x300000] = bytearray(512)
         context = self.memory[0x200000]
         struct.pack_into('<I', context, 0, len(packet) if logical_length is None else logical_length)
+        struct.pack_into('<I', context, 4, pkt_type)
         struct.pack_into('<I', context, 40, 7)  # ifindex
         struct.pack_into('<II', context, 76, 0x100000, 0x100000 + len(packet))
 
@@ -288,8 +289,8 @@ class Interpreter:
     def lookup(self, name, key):
         return self.maps.value(name, key)
 
-    def run(self, program, packet, logical_length=None):
-        return Machine(self.programs[program], self.maps, packet, self.clock, logical_length).run()
+    def run(self, program, packet, logical_length=None, pkt_type=0):
+        return Machine(self.programs[program], self.maps, packet, self.clock, logical_length, pkt_type).run()
 
     def advance(self, seconds):
         self.clock[0] += int(seconds * 1e9)
@@ -392,8 +393,9 @@ class Kernel:
             return None
         return value_buffer.raw
 
-    def run(self, program, packet, logical_length=None):
-        assert logical_length is None
+    def run(self, program, packet, logical_length=None, pkt_type=0):
+        # A test run's skb takes its type from its destination MAC; it can't be PACKET_LOOPBACK.
+        assert logical_length is None and pkt_type == 0
         data = ctypes.create_string_buffer(bytes(packet))
         attr = ctypes.create_string_buffer(struct.pack('<IIIIQQII', self.program_fds[program],
                                                        0, len(packet), 0, ctypes.addressof(data), 0, 1, 0))
@@ -643,6 +645,20 @@ def main(path, kernel=False):
     assert not [e for e in check(datagram6(IP6, seen6, TCP, 41005, 443, flags=0x12), True) if e['kind'] == 2]
     assert not [e for e in inbound(datagram6(seen6, IP6, TCP, 5557, 8080, flags=0x10), True) if e['kind'] == 2]
     single(check(datagram6(IP6, seen6, TCP, 41006, 443), True), 2)
+    # podster-4yh: the host's own multicast out the veth (avahi's mDNS from its link-local
+    # address to ff02::fb) comes back as a PACKET_LOOPBACK copy received on the veth. It
+    # isn't the Pod's, so it passes unjudged and uncounted; the same bytes as a Pod's
+    # packet are still a spoof.
+    if not kernel:
+        host_mac = bytes.fromhex('02ff3fcecfe3')
+        mdns = datagram6(ipaddress.IPv6Address('fe80::c558:ffff:fe84:9af9').packed,
+                         ipaddress.IPv6Address('ff02::fb').packed, UDP, 5353, 5353, mac=host_mac)
+        reset(); configure(True); backend.events()
+        assert backend.run('gr8s_egress_guard', mdns, None, 5) == TC_ACT_OK
+        assert not backend.events(), 'a loopback copy is no flow event'
+        assert all(stat(i) == 0 for i in range(7))
+        assert struct.unpack('<Q', backend.lookup('rejected_spoofs', struct.pack('<I', 0)))[0] == 0
+        check(mdns, False, 'spoof')
     # Link-local neighbors' housekeeping isn't a connection.
     local6 = ipaddress.IPv6Address('fe80::da:1').packed
     assert not [e for e in inbound(datagram6(local6, IP6, UDP, 5353, 5353), True) if e['kind'] == 2]

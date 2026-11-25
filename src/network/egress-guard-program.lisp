@@ -236,6 +236,12 @@
 
 (defparameter gr8s.network::*egress-guard-program-forms*
   '((defprog gr8s-egress-guard (:type :tc :section "classifier" :license "GPL")
+      ;; A multicast the host sends out the veth -- avahi's mDNS, say -- comes back to
+      ;; the host as a PACKET_LOOPBACK copy received on the same veth (dev_loopback_xmit),
+      ;; with the host's addresses, never entering the Pod. It isn't the Pod's packet, so
+      ;; it is passed unjudged and uncounted: as Pod traffic it was a spoof drop, on mDNS's
+      ;; doubling schedule up to hourly (podster-4yh). Only the host makes PACKET_LOOPBACK.
+      (when (= (ctx u32 4) 5) (return TC_ACT_OK))
       ;; Look up every counter before branching. This also ensures Whistler's
       ;; cached constant map-key stack slots dominate every use on every path.
       (let ((allowed-packets (map-lookup traffic-stats 0))
