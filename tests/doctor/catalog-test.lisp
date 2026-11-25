@@ -16,14 +16,22 @@
                    (:positive (list (list 'observed "location" path 1)))
                    (:at_least (list (list 'observed "location" path (svref premise 2))))
                    (:nonempty (list (list 'observed "location" path (vector 'count 1))))
-                   (:empty (list (list 'observed "location" path (vector 'count 0)))))))
+                   (:empty (list (list 'observed "location" path (vector 'count 0))))
+                   ;; Satisfied by what is absent: it needs no observation.
+                   (:unless nil))))
              (answers (premises &optional (actual-kind kind))
                (prove (cons (list 'kind actual-kind) (mapcan #'evidence premises))
                       `((finding ,id ?location ? ?)) '?location)))
       (assert (equal '("location") (answers premises)))
       (assert (null (answers premises "UnrelatedKind")))
-      (loop for i below (length premises)
-            do (assert (null (answers (loop for p in premises for j from 0 unless (= i j) collect p))))))))
+      ;; Each premise is needed -- but an UNLESS holds without evidence, so dropping one
+      ;; changes nothing; observing what it excludes must block the finding instead.
+      (loop for premise in premises for i from 0
+            do (if (string-equal (symbol-name (svref premise 0)) "UNLESS")
+                   (assert (null (prove (cons (list 'kind kind)
+                                              (append (mapcan #'evidence premises) (evidence (svref premise 1))))
+                                        `((finding ,id ?location ? ?)) '?location)))
+                   (assert (null (answers (loop for p in premises for j from 0 unless (= i j) collect p)))))))))
 ;; A counter that was not observed is unknown, and an equal one is not below.
 (flet ((deficit (ready wanted)
          (prove (append '((kind "Deployment"))
@@ -60,7 +68,7 @@
                    (setf cursor (or (gethash part cursor)
                                     (setf (gethash part cursor) (object)))))
                  (setf (gethash (car (last path)) cursor) value))))
-      (dolist (premise premises)
+      (dolist (premise (remove "UNLESS" premises :test #'string-equal :key (lambda (p) (symbol-name (svref p 0)))))
         (let* ((operator (intern (symbol-name (svref premise 0)) :keyword))
                (path (svref premise 1))
                ;; The rule file writes JSON booleans as the atoms true and false.
@@ -165,3 +173,18 @@
     (assert (= 1 (length findings)))
     (assert (search words (gethash "summary" (first findings))))))
 (format t "Namespace, unknown/replaced resources, init and ephemeral integrations passed.~%")
+;; podster-191: a finished Pod is not ready by design, so readiness findings are for
+;; Pods still meant to run; a failed one has findings of its own.
+(flet ((codes (phase)
+         (map 'list (lambda (f) (gethash "code" f))
+              (catalog-findings (object "metadata" (object "name" "job-x")
+                                        "status" (object "phase" phase
+                                                         "conditions" (vector (object "type" "Ready" "status" "False")
+                                                                              (object "type" "ContainersReady" "status" "False"))))
+                                "Pod" "u1"))))
+  (assert (member "pod-Ready-False" (codes "Running") :test #'equal))
+  (assert (member "pod-ContainersReady-False" (codes "Running") :test #'equal))
+  (dolist (finished '("Succeeded" "Failed"))
+    (assert (not (member "pod-Ready-False" (codes finished) :test #'equal)))
+    (assert (not (member "pod-ContainersReady-False" (codes finished) :test #'equal)))))
+(format t "Finished Pods are not reported not ready.~%")
