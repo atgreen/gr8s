@@ -700,6 +700,15 @@ def main(path, kernel=False):
         == (6, UDP, 40000, 54, peer6), drop
     check(datagram6(IP6, outside6, TCP, 40000, 443), True)
     check(datagram6(IP6, other6, TCP, 40000, 443), False, 'policy')
+    # Neighbor discovery and MLD to link-scope peers keep the interface working, so
+    # egress isolation lets them out (podster-6cy); other link-scope traffic stays policy's.
+    solicited = ipaddress.IPv6Address('ff02::1:ff00:1').packed
+    check(datagram6(IP6, solicited, 58), True)
+    check(datagram6(IP6, ipaddress.IPv6Address('ff02::2').packed, 58), True)
+    check(datagram6(IP6, ipaddress.IPv6Address('ff02::16').packed, 0), True)
+    check(datagram6(IP6, ipaddress.IPv6Address('fe80::da:1').packed, 58), True)
+    check(datagram6(IP6, ipaddress.IPv6Address('ff02::fb').packed, UDP, 5353, 5353), False, 'policy')
+    check(datagram6(IP6, other6, 58), False, 'policy')
 
     # IPv6 ingress isolation and the fixed link-local node gateway exemption.
     mode(0, 1)
@@ -709,6 +718,12 @@ def main(path, kernel=False):
     inbound(datagram6(peer6, IP6, TCP, 5555, 81), False)
     inbound(datagram6(other6, IP6, TCP, 5555, 80), False)
     inbound(datagram6(GATEWAY6, IP6, TCP, 5555, 8080), True)
+    # Neighbor discovery and MLD from a link-local or unspecified source pass ingress
+    # isolation; a link-local neighbor's UDP is still policy's (podster-6cy).
+    inbound(datagram6(ipaddress.IPv6Address('fe80::da:1').packed, IP6, 58), True)
+    inbound(datagram6(bytes(16), IP6, 0), True)
+    inbound(datagram6(ipaddress.IPv6Address('fe80::da:1').packed, IP6, UDP, 5353, 5353), False)
+    inbound(datagram6(other6, IP6, 58), False)
     # Replies to an IPv6 connection opened by the Pod pass ingress isolation.
     check(datagram6(IP6, outside6, TCP, 41000, 443), True)
     inbound(datagram6(outside6, IP6, TCP, 443, 41000), True)

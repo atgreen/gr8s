@@ -401,7 +401,17 @@
                    ;; IPv6 has a fixed 40-byte base header. Extension headers do
                    ;; not expose a transport port here, so they can match only
                    ;; rules that allow every port for their next-header value.
-                   (let ((egress-on u32 (if (/= egress-mode 0) (load u32 egress-mode 0) 0))
+                   ;; Neighbor discovery and MLD (ICMPv6, or MLD behind a hop-by-hop
+                   ;; header) to a link-scope peer -- fe80::/10, ff02::/16 or the
+                   ;; unspecified :: -- keep the interface working, so NetworkPolicy
+                   ;; does not govern them, as Cilium always admits NDP (podster-6cy).
+                   (let ((egress-on u32 (if (and (/= egress-mode 0)
+                                                 (not (and (or (= (load u8 ip 6) 58) (= (load u8 ip 6) 0))
+                                                           (or (= (logand (load u32 ip 24) #xc0ff) #x80fe)
+                                                               (= (logand (load u32 ip 24) #xffff) #x02ff)
+                                                               (and (= (load u32 ip 24) 0) (= (load u32 ip 28) 0)
+                                                                    (= (load u32 ip 32) 0) (= (load u32 ip 36) 0))))))
+                                            (load u32 egress-mode 0) 0))
                          (ingress-on u32 (if (/= ingress-mode 0) (load u32 ingress-mode 0) 0))
                          (report-on u32 (if (and (/= reporting 0)
                                               ;; Not a link-local peer (fe80::/10): its neighbor and
@@ -554,9 +564,14 @@
                       (record-netpol-flow netpol-flows fkey stamp opens :family 4 :direction 2 :endpoint (ntohl pod-addr))))))))
           ;; fe80::1 is the node gateway on every routed Pod interface. As with
           ;; 169.254.1.1 above, node-originated traffic is outside Pod isolation.
+          ;; Neighbor discovery and MLD from a link-local or unspecified source are
+          ;; interface housekeeping, outside Pod isolation too (podster-6cy).
           (when (and (= ipv6 1)
                      (not (and (= peer6-0 #x000080fe) (= peer6-1 0)
-                               (= peer6-2 0) (= peer6-3 #x01000000))))
+                               (= peer6-2 0) (= peer6-3 #x01000000)))
+                     (not (and (or (= proto 58) (= proto 0))
+                               (or (= (logand peer6-0 #xc0ff) #x80fe)
+                                   (and (= peer6-0 0) (= peer6-1 0) (= peer6-2 0) (= peer6-3 0))))))
             (let ((egress-on u32 (if (/= egress-mode 0) (load u32 egress-mode 0) 0))
                   (ingress-on u32 (if (/= ingress-mode 0) (load u32 ingress-mode 0) 0))
                   (report-on u32 (if (and (/= reporting 0)
