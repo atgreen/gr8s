@@ -238,7 +238,7 @@ resource updates. The Network tab draws the cluster's traffic from its
 Services, Gateways and the clients outside, with rates, drops, HTTP errors and
 latency, and the flows behind every edge. For each connection it says which
 NetworkPolicy rule allows it, or why it was dropped and the rule that would
-allow it. The Agent tab
+allow it. [`gr8s doctor`](#doctor)'s findings are drawn on the map. The Agent tab
 runs AI coding agents you have installed (Claude Code, Codex or Gemini CLI), or
 a shell, each in a terminal tab of its own: **+** starts one, and closing its
 tab stops it. They run on your machine, with your own login, and with

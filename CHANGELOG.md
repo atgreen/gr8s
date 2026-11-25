@@ -31,6 +31,15 @@ the Kubernetes API version with a gr8s release suffix (see
   in the URL so it can be linked. A policy's name, and a selected workload,
   open that resource in the Headlamp tab.
 
+- The Network tab shows `gr8s doctor` on the map (podster-5hv.4): it surveys
+  the cluster every minute and marks the workloads a problem is about and the
+  ones it holds up, with each problem's evidence and next step in their panels
+  and every problem under Health.
+- Flow events name a peer outside the cluster by the DNS name a Pod looked up
+  to reach it (`peerName`), as the node's DNS server saw it answered
+  (podster-5hv.8), and the Network tab draws each such site as a node of its
+  own: `grafana → secure.gravatar.com` instead of `grafana → world`.
+
 ### Removed
 
 - `gr8s dashboard`'s Hubble tab, and the Hubble UI bundle it embedded: the

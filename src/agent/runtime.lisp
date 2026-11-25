@@ -1335,10 +1335,12 @@ just the DNS server; for any other runtime, nothing."
                    node-runtime
                    (lambda () (call-with-dns-server body :address +dns-pod-server-address+
                                                     :forward-rules (node-runtime-dns-forward-rules node-runtime)
-                                                    :resolver resolver)))))))
+                                                    :resolver resolver
+                                                    :starter #'gr8s.network::start-name-recording-dns-server)))))))
             (call-with-dns-server body :address +dns-pod-server-address+
                                        :forward-rules (node-runtime-dns-forward-rules node-runtime)
-                                       :resolver resolver))
+                                       :resolver resolver
+                                       :starter #'gr8s.network::start-name-recording-dns-server))
         (funcall body))))
 
 (defun call-with-external-cni-dns-gateway

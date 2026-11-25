@@ -414,3 +414,49 @@
       (let ((flow (com.inuoe.jzon:parse "{\"podAddress\":\"10.77.77.21\"}")))
         (gr8s.controllers::enrich-flow context flow)
         (is (null (nth-value 1 (gethash "pod" flow))))))))
+
+;;; DNS names for peers outside the cluster (podster-5hv.8)
+
+(defun dns-names-test-response (question &rest answers)
+  "An encoded DNS response to QUESTION (a name) whose answers are (name address) lists."
+  (0conf:encode-message
+   (0conf:make-dns-message
+    :flags 0conf:+flag-response+
+    :questions (list (0conf:make-question :name question :qtype 0conf:+type-a+))
+    :answers (loop for (name address) in answers
+                   collect (if (find #\: address)
+                               (make-instance '0conf:aaaa-record :name name :address (0conf:parse-ipv6 address) :ttl 60)
+                               (make-instance '0conf:a-record :name name :address (0conf:parse-ipv4 address) :ttl 60))))))
+
+(test dns-answers-name-the-addresses-they-give
+  (let ((gr8s.network::*dns-names* (make-hash-table :test #'equal))
+        (gr8s.network::*dns-names-lock* (bt:make-lock)))
+    ;; The name the Pod asked for, not the CDN name at the end of the CNAME chain.
+    (gr8s.network::note-dns-response
+     (dns-names-test-response "Secure.Gravatar.com." '("gravatar.wp.example." "192.0.73.2")
+                              '("gravatar.wp.example." "2001:db8::2"))
+     1000)
+    (is (equal "secure.gravatar.com" (gr8s.network::dns-name-for-address "192.0.73.2" 1001)))
+    (is (equal "secure.gravatar.com" (gr8s.network::dns-name-for-address "2001:db8:0:0:0:0:0:2" 1001))
+        "an IPv6 address is keyed as flow events write it")
+    (is (null (gr8s.network::dns-name-for-address "192.0.73.3" 1001)))
+    ;; The latest answer wins; an old one is forgotten.
+    (gr8s.network::note-dns-response (dns-names-test-response "grafana.com." '("grafana.com." "192.0.73.2")) 2000)
+    (is (equal "grafana.com" (gr8s.network::dns-name-for-address "192.0.73.2" 2001)))
+    (is (null (gr8s.network::dns-name-for-address "192.0.73.2" (+ 2000 gr8s.network::+dns-name-seconds+))))
+    ;; The table forgets its stalest addresses beyond its limit.
+    (let ((gr8s.network::+dns-name-limit+ 2))
+      (gr8s.network::note-dns-response (dns-names-test-response "a.example." '("a.example." "198.51.100.1")) 3000)
+      (gr8s.network::note-dns-response (dns-names-test-response "b.example." '("b.example." "198.51.100.2")) 3001)
+      (gr8s.network::note-dns-response (dns-names-test-response "c.example." '("c.example." "198.51.100.3")) 3002)
+      (is (= 2 (hash-table-count gr8s.network::*dns-names*)))
+      (is (null (gr8s.network::dns-name-for-address "198.51.100.1" 3003))))
+    ;; The forwarder returns the response as it came, and notes it; an unreadable one too.
+    (let* ((response (dns-names-test-response "h3.labdroid.net." '("h3.labdroid.net." "192.168.1.10")))
+           (forward (gr8s.network::dns-name-recording-forwarder (lambda (packet upstreams timeout)
+                                                                    (declare (ignore packet upstreams timeout))
+                                                                    response))))
+      (is (eq response (funcall forward #() nil 1)))
+      (is (equal "h3.labdroid.net" (gr8s.network::dns-name-for-address "192.168.1.10")))
+      (let ((garbage (make-array 3 :element-type '(unsigned-byte 8) :initial-element 7)))
+        (is (eq garbage (funcall (gr8s.network::dns-name-recording-forwarder (constantly garbage)) #() nil 1)))))))

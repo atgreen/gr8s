@@ -109,6 +109,10 @@ without the Pod's address (an IPv6 Pod's) finds it by the interface it was seen 
       (let ((port (gr8s.network::flow-record-pod-port record)))
         (put "podPort" (and (plusp port) port)))
       (put "peerAddress" (gr8s.network::flow-record-peer record))
+      ;; The name a Pod on this node asked DNS for to reach the peer, as Hubble's DNS proxy
+      ;; names a flow's destination.
+      (put "peerName" (let ((peer (gr8s.network::flow-record-peer record)))
+                        (and peer (gr8s.network::dns-name-for-address peer))))
       (let ((port (gr8s.network::flow-record-peer-port record)))
         (put "peerPort" (and (plusp port) port)))
       (multiple-value-bind (namespace name)

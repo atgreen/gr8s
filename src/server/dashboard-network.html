@@ -60,6 +60,9 @@ main { flex: 1; display: flex; min-height: 0; margin: 12px 16px; gap: 12px; }
 .card.hover { border-color: var(--line-strong); box-shadow: 0 2px 4px rgba(16, 24, 40, .08), 0 10px 24px rgba(16, 24, 40, .14); }
 .card.selected { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow); }
 .card.faded { opacity: .28; }
+/* The doctor: a problem about the workload, or one elsewhere that holds it up. */
+.card.cause { box-shadow: inset 4px 0 0 var(--bad), var(--shadow); }
+.card.affected { box-shadow: inset 4px 0 0 var(--warn), var(--shadow); }
 .card .top { display: flex; align-items: center; gap: 10px; }
 .tile { position: relative; width: 34px; height: 34px; flex: none; border-radius: 9px; background: var(--tile); display: grid; place-items: center; }
 .tile img { width: 20px; height: 20px; display: block; object-fit: contain; image-rendering: auto; }
@@ -86,6 +89,18 @@ main { flex: 1; display: flex; min-height: 0; margin: 12px 16px; gap: 12px; }
   border: 1px solid var(--line); border-radius: 8px; overflow: auto; white-space: pre; }
 .suggestion button { font: inherit; font-size: 11px; color: var(--muted);
   background: var(--surface); border: 1px solid var(--line-strong); border-radius: 6px; padding: 1px 7px; cursor: pointer; }
+.problem { border: 1px solid var(--line); border-left: 4px solid var(--bad); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
+.problem.held { border-left-color: var(--warn); }
+.problem .title { font-weight: 600; }
+.problem .meta { color: var(--faint); font-size: 11.5px; margin-top: 2px; }
+.problem p { margin: 6px 0 0; }
+.problem .next { color: var(--muted); }
+.problem pre { margin: 6px 0 0; padding: 6px 8px; font: 11.5px/1.45 ui-monospace, "SF Mono", Menlo, monospace; background: var(--bg);
+  border: 1px solid var(--line); border-radius: 8px; overflow: auto; }
+.problem ul { margin: 6px 0 0; padding-left: 18px; }
+.pill { display: inline-block; min-width: 18px; margin-left: 6px; padding: 0 6px; border-radius: 999px; font-size: 11px; font-weight: 600;
+  color: var(--bad); background: var(--bad-soft); text-align: center; }
+.pill.ok { color: var(--muted); background: var(--tile); }
 .note { color: var(--faint); font-size: 11.5px; margin-top: 4px; }
 .ports { display: flex; flex-wrap: nowrap; gap: 4px; margin-top: 8px; overflow: hidden; }
 .chip { flex: none; font-size: 10.5px; font-weight: 500; color: var(--chip-text); background: var(--chip); border-radius: 6px;
@@ -126,6 +141,7 @@ a.link:hover { text-decoration: underline; }
   </span>
   <button id="tidy" class="plain" title="Lay the graph out again">Tidy</button>
   <button id="showflows" class="plain" aria-pressed="false" title="The latest flows, as the filters select them">Flows</button>
+  <button id="showhealth" class="plain" aria-pressed="false" title="What the doctor finds wrong in the cluster">Health<span id="healthcount" class="pill ok">…</span></button>
   <span id="status" role="status">Reading the cluster's flows…</span>
 </header>
 <main>
@@ -154,6 +170,8 @@ const CARD_WIDTH = 220, CARD_HEIGHT = 58, CARD_PORTS_HEIGHT = 26;
 const KIND_TINT = { Node: '--kind-node', Service: '--kind-service', Gateway: '--kind-service', Clients: '--kind-outside', LAN: '--kind-outside', External: '--kind-outside', World: '--kind-outside' };
 let graph = { nodes: [], edges: [] };
 let mode = 'live', laidOut = false, selected = null, cy = null, policyView = null;
+// The doctor's latest survey, read every 15 s.
+let health = { at: null, problems: [], warnings: [] }, healthRead = 0;
 const cards = new Map();
 
 function rate(n, window) {
@@ -256,7 +274,10 @@ function renderCard(node, window) {
   const ports = inboundPorts(node.id, window);
   const dropped = droppedTo(node.id, window);
   const isolated = isolatedBy(node);
-  const key = JSON.stringify([node.name, node.kind, node.software, node.icon, node.favicon, ports.slice(0, 3), ports.length, dropped, isolated]);
+  const h = node.health;
+  card.classList.toggle('cause', !!(h && h.problems));
+  card.classList.toggle('affected', !!(h && !h.problems && h.affectedBy));
+  const key = JSON.stringify([node.name, node.kind, node.software, node.icon, node.favicon, ports.slice(0, 3), ports.length, dropped, isolated, h]);
   if (card.dataset.key === key) return ports.length ? CARD_HEIGHT + CARD_PORTS_HEIGHT : CARD_HEIGHT;
   card.dataset.key = key;
   const names = el('div', 'names');
@@ -281,7 +302,9 @@ function renderCard(node, window) {
   }
   card.replaceChildren(...parts);
   card.title = node.name + ' (' + kindLabel(node) + (node.namespace ? ' in ' + node.namespace : '') + ')'
-    + (isolated.length ? '\nIsolated by ' + isolated.join(', ') : '');
+    + (isolated.length ? '\nIsolated by ' + isolated.join(', ') : '')
+    + (h && h.problems ? '\n' + h.title + (h.problems > 1 ? ' (and ' + (h.problems - 1) + ' more)' : '') : '')
+    + (h && h.affectedBy ? '\nHeld up by ' + h.affectedBy + ' problem' + (h.affectedBy > 1 ? 's' : '') + ' elsewhere' : '');
   const height = ports.length ? CARD_HEIGHT + CARD_PORTS_HEIGHT : CARD_HEIGHT;
   card.style.height = height + 'px';
   return height;
@@ -391,6 +414,13 @@ async function poll() {
     const response = await fetch('graph');
     if (!response.ok) throw new Error('HTTP ' + response.status);
     graph = await response.json();
+    if (Date.now() - healthRead > 15000) {
+      healthRead = Date.now();
+      try { health = await (await fetch('health')).json(); } catch (error) { /* keep the last */ }
+      const count = health.problems.length;
+      $('healthcount').textContent = health.at ? count : '…';
+      $('healthcount').className = 'pill' + (count ? '' : ' ok');
+    }
     namespaces();
     draw();
     if (selected) showDetails();
@@ -423,10 +453,12 @@ function head(...names) { return row(...names.map((n) => el('th', null, n))); }
 
 async function showDetails() {
   const aside = $('details');
+  $('showhealth').setAttribute('aria-pressed', selected?.type === 'health');
   if (!selected) { aside.hidden = true; cy.resize(); return; }
   if (aside.hidden) { aside.hidden = false; cy.resize(); }
   const window = $('window').value;
   const nodeName = (id) => (graph.nodes.find((n) => n.id === id) || { name: id }).name;
+  if (selected.type === 'health') { showHealthList(aside); return; }
   if (selected.type === 'node') {
     const node = graph.nodes.find((n) => n.id === selected.id);
     if (!node) { select(null); return; }
@@ -443,7 +475,7 @@ async function showDetails() {
     const sub = el('div', 'sub', kindLabel(node) + (node.namespace ? ' in ' + node.namespace : ''));
     if (headlampPath(node.kind, node.namespace, node.name))
       sub.append(' · ', headlampLink('Open in Headlamp', node.kind, node.namespace, node.name));
-    aside.replaceChildren(el('h2', null, node.name), sub,
+    aside.replaceChildren(el('h2', null, node.name), sub, ...healthSection(node),
       ...isolationSection(node), el('h3', null, 'Connections'), table);
     return;
   }
@@ -503,6 +535,74 @@ function policyLinks(names) {
   return out;
 }
 
+// ---- The doctor on the map
+
+// A doctor's target, Kind/namespace/name, as text: a link to its node when the map draws it.
+function targetLink(target, nodeId) {
+  const parts = target.split('/'), text = parts[0] + ' ' + parts.slice(1).join('/');
+  if (!nodeId || !graph.nodes.some((n) => n.id === nodeId)) return document.createTextNode(text);
+  const a = el('a', 'link', text); a.href = '#';
+  a.onclick = (event) => { event.preventDefault(); select({ type: 'node', id: nodeId }); };
+  return a;
+}
+
+function ago(iso) {
+  const seconds = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
+  return seconds < 90 ? 'just now' : seconds < 5400 ? Math.round(seconds / 60) + ' minutes ago'
+    : seconds < 129600 ? Math.round(seconds / 3600) + ' hours ago' : Math.round(seconds / 86400) + ' days ago';
+}
+
+function problemBox(problem, held) {
+  const box = el('div', 'problem' + (held ? ' held' : ''));
+  box.append(el('div', 'title', problem.title));
+  const meta = [problem.causeFound ? 'cause' : 'symptom; the doctor found no deeper cause'];
+  if (problem.since) meta.push('since ' + ago(problem.since));
+  box.append(el('div', 'meta', meta.join(' · ')));
+  if (problem.summary && problem.summary !== problem.title) box.append(el('p', null, problem.summary));
+  if (problem.nextStep) box.append(el('p', 'next', problem.nextStep));
+  if (problem.commands && problem.commands.length) box.append(el('pre', null, problem.commands.join('\n')));
+  const where = el('p', 'next');
+  where.append('About ');
+  problem.resources.forEach((target, i) => where.append(i ? ', ' : '', targetLink(target, problem.nodes[i] || problem.nodes[0])));
+  box.append(where);
+  if (Array.isArray(problem.impact) && problem.impact.length) {
+    const list = el('ul');
+    for (const entry of problem.impact.slice(0, 8)) {
+      const li = el('li'); li.append(targetLink(entry.target, null), entry.certain ? '' : ' (possibly)'); list.append(li);
+    }
+    if (problem.impact.length > 8) list.append(el('li', null, (problem.impact.length - 8) + ' more'));
+    box.append(el('div', 'meta', 'Holds up'), list);
+  }
+  return box;
+}
+
+function healthSection(node) {
+  const about = health.problems.filter((p) => p.nodes.includes(node.id));
+  const held = health.problems.filter((p) => p.affectedNodes.includes(node.id));
+  if (!about.length && !held.length) return [];
+  const out = [el('h3', null, 'Health')];
+  for (const p of about) out.push(problemBox(p, false));
+  if (held.length) {
+    out.push(el('div', 'note', 'Held up by a problem elsewhere:'));
+    for (const p of held) out.push(problemBox(p, true));
+  }
+  return out;
+}
+
+function showHealthList(aside) {
+  const onMap = (p) => [...p.nodes, ...p.affectedNodes].some((id) => graph.nodes.some((n) => n.id === id));
+  const items = [el('h2', null, 'Health'),
+    el('div', 'sub', health.at ? 'The doctor read the cluster ' + ago(new Date(health.at * 1000).toISOString())
+      + '; it reads it again every minute.' : 'The doctor is reading the cluster…')];
+  if (health.at && !health.problems.length) items.push(el('div', 'note', 'The doctor finds nothing wrong it can see.'));
+  const shown = health.problems.filter(onMap), elsewhere = health.problems.filter((p) => !onMap(p));
+  if (shown.length) items.push(el('h3', null, 'On the map'), ...shown.map((p) => problemBox(p, false)));
+  if (elsewhere.length) items.push(el('h3', null, 'Not on the map (no traffic seen)'), ...elsewhere.map((p) => problemBox(p, false)));
+  for (const w of health.warnings || []) items.push(el('div', 'note', w));
+  items.push(el('div', 'note', 'Drops are on the map\'s edges, not listed here. A cause is the deepest finding the doctor could see, not proof of a root cause.'));
+  aside.replaceChildren(...items);
+}
+
 function isolationSection(node) {
   if (!node.isolation) return [];
   const { ingress, egress } = node.isolation;
@@ -546,6 +646,12 @@ function explainSide(label, side) {
   return out;
 }
 
+const DROP_REASONS = {
+  spoof: 'Dropped by gr8s\'s anti-spoofing check, not by NetworkPolicy: the Pod sent a packet from an address that isn\'t its own.',
+  malformed: 'Dropped as malformed by the dataplane, not by NetworkPolicy.',
+  unsupported: 'Dropped by the dataplane, not by NetworkPolicy: a kind of packet it doesn\'t forward.',
+};
+
 async function explainEdge(edge, into) {
   into.replaceChildren(el('div', 'note', 'Reading the policies…'));
   let explained;
@@ -557,8 +663,17 @@ async function explainEdge(edge, into) {
     return;
   }
   // Denied first: those are what needs a fix.
-  explained.sort((a, b) => (b.explanation.verdict === 'denied') - (a.explanation.verdict === 'denied') || b.dropped - a.dropped);
+  const refused = (c) => c.dropReason || c.explanation.verdict === 'denied';
+  explained.sort((a, b) => refused(b) - refused(a) || b.dropped - a.dropped);
   const boxes = explained.map((c) => {
+    if (c.dropReason) {
+      const box = el('div', 'policy denied');
+      const conn = el('div', 'conn', c.source + ' → ' + (c.destination || 'an unknown address')
+        + (c.port != null ? ' ' + c.port + '/' : ' ') + (c.protocol || ''));
+      conn.append(el('span', 'verdict', 'dropped · ' + c.dropped));
+      box.append(conn, el('div', 'side', DROP_REASONS[c.dropReason] || 'The dataplane dropped it (' + c.dropReason + '), not NetworkPolicy.'));
+      return box;
+    }
     const { egress, ingress, verdict } = c.explanation;
     const box = el('div', 'policy' + (verdict === 'denied' ? ' denied' : ''));
     const conn = el('div', 'conn', c.source + ' → ' + c.destination + ' ' + (c.port != null ? c.port + '/' : '') + c.protocol);
@@ -619,6 +734,7 @@ document.fonts.ready.then(() => {
   $('live').onclick = () => setMode('live');
   $('flow').onclick = () => setMode('flow');
   $('tidy').onclick = () => { laidOut = false; draw(); };
+  $('showhealth').onclick = () => select(selected?.type === 'health' ? null : { type: 'health', id: 'health' });
   $('showflows').onclick = () => {
     const open = $('flowtable').hidden;
     $('flowtable').hidden = !open;
@@ -634,7 +750,8 @@ document.fonts.ready.then(() => {
   if ('flows' in linked) $('showflows').click();
   poll().then(() => {
     // A linked selection, once the graph it names has been read.
-    if (linked.edge && graph.edges.some((e) => e.id === linked.edge)) select({ type: 'edge', id: linked.edge });
+    if ('health' in linked) select({ type: 'health', id: 'health' });
+    else if (linked.edge && graph.edges.some((e) => e.id === linked.edge)) select({ type: 'edge', id: linked.edge });
     else if (linked.node && graph.nodes.some((n) => n.id === linked.node)) select({ type: 'node', id: linked.node });
     if (selected) cy.fit(undefined, 40);
   });

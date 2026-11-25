@@ -571,4 +571,61 @@
             (is (search "app: lonely" (gethash "suggestion" (gethash "ingress" explanation)))))
           (is (equal "allowed" (gethash "verdict" (gethash "explanation" allowed))))
           (is (= 1 (gethash "rule" (aref (gethash "allowedBy" (gethash "ingress" (gethash "explanation" allowed))) 0))))))
-      (is (null (gr8s.server::network-graph-edge-explanation graph "no-such-edge"))))))
+      (is (null (gr8s.server::network-graph-edge-explanation graph "no-such-edge")))
+      ;; A drop the dataplane made for another reason than policy says so, with no verdict.
+      (gr8s.server::network-graph-note-flow
+       graph (network-test-flow "pod" "lonely" "peerPod" "cave-0" "peerNamespace" "cave" "peerAddress" "10.80.0.5"
+                                "peerPort" 8080 "verdict" "DROPPED" "reason" "spoof"))
+      (let* ((edge (gethash "id" (aref (gethash "edges" (gr8s.server::network-graph-object graph)) 0)))
+             (spoofed (find "spoof" (gr8s.server::network-graph-edge-explanation graph edge)
+                            :key (lambda (entry) (gethash "dropReason" entry)) :test #'equal)))
+        (is (= 1 (gethash "dropped" spoofed)))
+        (is (eq 'null (gethash "explanation" spoofed)))))))
+
+(test network-health-maps-the-doctors-problems-onto-the-map
+  ;; podster-5hv.4: a problem marks the nodes it is about, its Pods as their workloads, and
+  ;; the nodes it holds up; drops, which the map draws already, are left out.
+  (let* ((topology (network-test-topology))
+         (report (com.inuoe.jzon:parse
+                  "{\"problems\":[
+                     {\"rule\":\"crash-loop\",\"title\":\"Pod cave-runner-b4-x keeps restarting\",
+                      \"resources\":[\"Pod/cave/cave-runner-b4-x\"],\"owner\":\"Deployment/cave/cave-runner\",
+                      \"impact\":[{\"target\":\"Service/cave/cave\",\"certain\":true},
+                                  {\"target\":\"Pod/cave/cave-runner-b4-x\",\"certain\":true}]},
+                     {\"rule\":\"node-not-ready\",\"title\":\"Node gvision is not ready\",
+                      \"resources\":[\"Node/gvision\"],\"owner\":false,\"impact\":[]},
+                     {\"rule\":\"network-policy-drops\",\"title\":\"drops\",
+                      \"resources\":[\"Pod/cave/cave-pg-0\"],\"owner\":\"StatefulSet/cave/cave-pg\",\"impact\":[]}]}"))
+         (problems (gr8s.server::network-health-problems topology report))
+         (summaries (gr8s.server::network-health-summaries problems)))
+    (is (= 2 (length problems)) "drops are left to the edges")
+    (is (equalp #("cave/Deployment/cave-runner") (gethash "nodes" (first problems))) "a Pod is drawn as its workload")
+    (is (equalp #("cave/Service/cave") (gethash "affectedNodes" (first problems))) "the problem's own node isn't also affected")
+    (is (equalp #("Node/gvision") (gethash "nodes" (second problems))))
+    (let ((runner (gethash "cave/Deployment/cave-runner" summaries))
+          (service (gethash "cave/Service/cave" summaries)))
+      (is (= 1 (gethash "problems" runner)))
+      (is (equal "Pod cave-runner-b4-x keeps restarting" (gethash "title" runner)))
+      (is (= 0 (gethash "problems" service)))
+      (is (= 1 (gethash "affectedBy" service))))
+    (is (null (gethash "cave/StatefulSet/cave-pg" summaries))))
+  (is (equal "Node/gvision" (gr8s.server::network-target-node-id (gr8s.server::make-network-topology) "Node/gvision"))))
+
+(test network-graph-names-outside-peers-by-dns
+  ;; podster-5hv.8: a peer outside the cluster is drawn as the name a Pod looked up.
+  (let ((graph (gr8s.server::make-network-graph)))
+    (setf (gr8s.server::network-graph-topology graph) (network-test-topology))
+    (gr8s.server::network-graph-note-flow graph (network-test-flow "peerAddress" "192.0.73.2" "peerPort" 443
+                                                                   "peerName" "secure.gravatar.com"))
+    (gr8s.server::network-graph-note-flow graph (network-test-flow "peerAddress" "203.0.113.9" "peerPort" 443))
+    (gr8s.server::network-graph-note-flow graph (network-test-flow "peerAddress" "192.168.1.10" "peerPort" 8080
+                                                                   "peerName" "h3.labdroid.net"))
+    (let ((names (map 'list (lambda (node) (list (gethash "kind" node) (gethash "name" node)))
+                      (gethash "nodes" (gr8s.server::network-graph-object graph)))))
+      (is (member '("World" "secure.gravatar.com") names :test #'equal))
+      (is (member '("World" "world") names :test #'equal) "an address no Pod looked up stays the world")
+      (is (member '("External" "h3.labdroid.net") names :test #'equal))))
+  (is (equal "secure.gravatar.com (192.0.73.2)"
+             (gr8s.server::network-end-name '(:address "192.0.73.2")
+                                            (gr8s.resources::core-object "peerAddress" "192.0.73.2"
+                                                                         "peerName" "secure.gravatar.com")))))
