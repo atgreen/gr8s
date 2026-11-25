@@ -65,6 +65,13 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- A host running avahi-daemon (or any mDNS responder) no longer shows its Pods
+  dropping spoofed packets on mDNS's schedule, doubling from a Pod's start up to
+  hourly (podster-4yh). The host's mDNS query out each Pod veth came back to it
+  as a loopback copy received on that veth, which the egress guard took for the
+  Pod's traffic from the wrong address. The guard now passes the host's own
+  loopback copies; a Pod can't make one.
+
 - `make native` in a fresh checkout embeds the Network tab's graph assets. The
   binary's build didn't depend on them, so it built without them and the tab
   had no graph; release builds, which fetch every asset first, were unaffected.
