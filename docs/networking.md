@@ -80,6 +80,10 @@ than requiring a new program for each policy.
 
 Policy supports `podSelector`, `namespaceSelector`, combined selectors,
 `ipBlock` with `except`, protocol/port ranges, and direction-specific default deny.
+IPv6 neighbor discovery and MLD (ICMPv6, or MLD behind a hop-by-hop header) to or
+from a link-scope peer -- `fe80::/10`, `ff02::/16` or the unspecified `::` -- are
+not subject to NetworkPolicy: they keep the Pod's interface working, and Cilium
+likewise always admits NDP. Other link-local traffic, such as mDNS, is.
 Connection state permits reply traffic for allowed flows: for 5 days after a TCP
 connection's last packet, as conntrack keeps an established connection (well past
 the 2-hour `tcp_keepalive_time`, so an idle connection's keepalives get through),

@@ -59,6 +59,13 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- NetworkPolicy no longer drops IPv6 neighbor discovery and MLD (podster-6cy).
+  An isolated Pod's ICMPv6 (and MLD behind a hop-by-hop header) to or from a
+  link-scope peer -- fe80::/10, ff02::/16 or the unspecified address -- passes
+  as interface housekeeping, as Cilium always admits NDP; without it a
+  dual-stack Pod's IPv6 could not resolve its neighbors. Other link-local
+  traffic, such as mDNS, is still the policy's to allow.
+
 - `kubectl exec` of a command that can't start says why, as Kubernetes does
   (podster-dcz): `executable file not found in $PATH`, not a bare "command
   terminated with exit code 1". The agent dropped the runtime's reason when a
