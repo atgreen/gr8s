@@ -480,6 +480,53 @@ Supported today:
 - **Per-route observability and protection**:
   `gr8s_gateway_requests_total{gateway,route,code}` on `/metrics`, and a per-route
   token-bucket rate limiter (`gr8s.io/rate-limit-rps` → HTTP 429).
+- **Tracing**, with OpenTelemetry: see below.
+
+### Gateway tracing (OpenTelemetry)
+
+An agent can trace the HTTP requests its Gateway listeners answer and send the
+spans to an OpenTelemetry collector, or to anything that takes OTLP: Tempo,
+Jaeger, Honeycomb, Grafana Cloud. Each request gets one SERVER span, named by
+its method and route (`GET shop/web`), with OTel's HTTP attributes
+(`http.request.method`, `url.path`, `http.route`, `http.response.status_code`,
+`client.address`, `server.address`), the backend it reached
+(`network.peer.address`, `k8s.namespace.name`) and the listener. A 5xx reply is
+an error span. A request that arrives with a W3C `traceparent` joins that
+trace; one without starts a trace. The backend is sent a `traceparent` naming
+the Gateway's span as its parent, and the client's `tracestate`, so an
+application instrumented with OpenTelemetry continues the trace: a trace shows
+the browser's request, the Gateway's hop and the application's own work.
+
+Tracing is off until an agent has somewhere to send spans. It reads OTel's
+standard environment variables when it starts, so set them on the agent's
+service and restart it, for example with `systemctl edit gr8s-server`:
+
+```ini
+[Service]
+Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://collector.lab:4318
+Environment=OTEL_TRACES_SAMPLER=parentbased_traceidratio
+Environment=OTEL_TRACES_SAMPLER_ARG=0.1
+```
+
+| Variable | Meaning |
+|---|---|
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | The URL spans are posted to, as given |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Otherwise, a base URL; spans go to its `/v1/traces` |
+| `OTEL_EXPORTER_OTLP_HEADERS`, `..._TRACES_HEADERS` | `name=value,...` headers sent with each export, such as an API key |
+| `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG` | `parentbased_always_on` (the default), `parentbased_traceidratio` with a ratio, `always_on`, `always_off`, `traceidratio`, `parentbased_always_off` |
+| `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | The spans' resource; the service is `gr8s-gateway` unless set |
+| `OTEL_SDK_DISABLED=true` | Off, whatever else is set |
+
+gr8s sends OTLP over HTTP with JSON encoding, which every OTLP receiver accepts
+on its HTTP port (4318 by convention), not gRPC (4317). A parent-based sampler
+follows the caller's decision, so a trace is recorded whole or not at all; a
+ratio sampler decides by the trace id, the same way on every node. Tracing
+never slows a request: spans wait in a queue of 2,048 that one thread sends
+every two seconds, or at 512, and a full queue or a failed export drops spans,
+counted on `/metrics` as `gr8s_otel_spans_total{result}`. With tracing off, a
+client's `traceparent` passes through to the backend unchanged. A traced
+request's flow event carries its trace id (`l7.traceId`).
+
 
 GatewayClass and Gateway expose `/status` subresources. The control plane
 publishes Gateway addresses only after a ready node reports that the current

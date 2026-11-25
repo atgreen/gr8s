@@ -101,6 +101,9 @@
     (bt:with-lock-held (*gateway-metrics-lock*)
       (incf (gethash key *gateway-request-counts* 0)))))
 
+(defvar *gateway-span* nil
+  "The OTel span of the request being answered (podster-krg.1), or NIL when tracing is off.")
+
 (defvar *gateway-flow-sink* nil
   "A function given one flow object, as the agent's flow events are, for each request a
 Gateway listener answers (podster-e9a.8), or NIL. The agent sets it while it collects.")
@@ -127,6 +130,8 @@ names its node, not a Pod."
                                  "listenerPort" (hunchentoot:acceptor-port acceptor)))))
     (when (and dispatch (gw-dispatch-route-key dispatch))
       (setf (gethash "route" (gethash "l7" flow)) (gw-dispatch-route-key dispatch)))
+    (when (and *gateway-span* (gr8s.otel:span-sampled-p *gateway-span*))
+      (setf (gethash "traceId" (gethash "l7" flow)) (gr8s.otel:span-trace-id *gateway-span*)))
     (let ((backend (and dispatch (gw-dispatch-backend dispatch)))
           (route-key (and dispatch (gw-dispatch-route-key dispatch))))
       (when backend
@@ -147,7 +152,9 @@ names its node, not a Pod."
         (format stream "# HELP gr8s_gateway_requests_total Gateway HTTP requests by route and code.~%")
         (format stream "# TYPE gr8s_gateway_requests_total counter~%")
         (loop for key being the hash-keys of *gateway-request-counts* using (hash-value count)
-              do (format stream "gr8s_gateway_requests_total{~A} ~D~%" key count))))))
+              do (format stream "gr8s_gateway_requests_total{~A} ~D~%" key count))))
+    (when (gr8s.otel:tracing-enabled-p)
+      (write-string (gr8s.otel:otel-metrics-text) stream))))
 
 (defstruct gw-token-bucket (tokens 0d0 :type double-float) (last 0d0 :type double-float))
 (defvar *gateway-rate-lock* (bt:make-lock "gr8s gateway rate"))
@@ -254,10 +261,55 @@ names its node, not a Pod."
                   (cons "X-Forwarded-Uri" (hunchentoot:script-name request)))
             ;; The Gateway is a pass-through proxy: the client's Authorization is meant
             ;; for the backend app (e.g. an S3 server's SigV4 check), so keep it.
-            (gateway-apply-header-ops
-             (pod-proxy-end-to-end-headers (gateway-request-headers request)
-                                           :request t :consume-credential nil)
-             (gateway-find-filter (gw-dispatch-filters dispatch) :request-headers)))))
+            (gateway-trace-headers
+             (gateway-apply-header-ops
+              (pod-proxy-end-to-end-headers (gateway-request-headers request)
+                                            :request t :consume-credential nil)
+              (gateway-find-filter (gw-dispatch-filters dispatch) :request-headers))))))
+
+(defun gateway-trace-headers (headers)
+  "HEADERS with the trace context the backend continues: the Gateway's span as the
+parent, when the request is traced; else HEADERS as they came, a client's traceparent
+passing through."
+  (if *gateway-span*
+      (append (remove-if (lambda (header) (member (car header) '("traceparent" "tracestate") :test #'string-equal))
+                         headers)
+              (list (cons "traceparent" (gr8s.otel:span-traceparent *gateway-span*)))
+              (let ((state (gr8s.otel:span-tracestate *gateway-span*)))
+                (and state (list (cons "tracestate" state)))))
+      headers))
+
+(defun gateway-start-span (acceptor request dispatch)
+  "The SERVER span for REQUEST, joining the client's trace; NIL when tracing is off.
+Named, as OTel's HTTP conventions ask, by the method and the route that matched."
+  (let ((method (symbol-name (hunchentoot:request-method request)))
+        (route (and dispatch (gw-dispatch-route-key dispatch))))
+    (gr8s.otel:start-server-span
+     (if route (format nil "~A ~A" method route) method)
+     :traceparent (hunchentoot:header-in* :traceparent request)
+     :tracestate (hunchentoot:header-in* :tracestate request)
+     :attributes `(("http.request.method" . ,method)
+                   ("url.path" . ,(hunchentoot:script-name request))
+                   ("url.scheme" . ,(if (hunchentoot:acceptor-ssl-p acceptor) "https" "http"))
+                   ("server.address" . ,(or (gateway-request-host request) ""))
+                   ("server.port" . ,(hunchentoot:acceptor-port acceptor))
+                   ("client.address" . ,(hunchentoot:remote-addr request))
+                   ("user_agent.original" . ,(or (hunchentoot:header-in* :user-agent request) ""))
+                   ("gr8s.gateway.listener" . ,(gateway-acceptor-name acceptor))
+                   ,@(when route `(("http.route" . ,route) ("gr8s.gateway.route" . ,route)))))))
+
+(defun gateway-end-span (span dispatch backend-host backend-port)
+  "Finish SPAN with the reply's status and the backend reached; a 5xx is an error."
+  (when span
+    (let ((code (hunchentoot:return-code*))
+          (backend (and dispatch (gw-dispatch-backend dispatch))))
+      (gr8s.otel:span-set-attribute span "http.response.status_code" code)
+      (gr8s.otel:span-set-attribute span "network.peer.address" backend-host)
+      (gr8s.otel:span-set-attribute span "network.peer.port" (and (integerp backend-port) backend-port))
+      (when backend
+        (gr8s.otel:span-set-attribute span "k8s.namespace.name" (gw-backend-namespace backend))
+        (gr8s.otel:span-set-attribute span "gr8s.backend.service" (gw-backend-name backend)))
+      (gr8s.otel:end-span span :error (>= code 500) :message (and (>= code 500) (format nil "HTTP ~D" code))))))
 
 (defun gateway-set-response-head (dispatch code response-headers &key (filter #'pod-proxy-end-to-end-headers))
   "Make the reply carry the backend's CODE and RESPONSE-HEADERS (keyword alist):
@@ -384,9 +436,11 @@ names its node, not a Pod."
             (gateway-error-response 502 "the gateway backend connection failed: ~A" condition))))))
 
 (defmethod hunchentoot:acceptor-dispatch-request ((acceptor gateway-acceptor) request)
-  (let ((dispatch (gateway-dispatch-for-request acceptor request))
-        (started (get-internal-real-time))
-        (backend-host nil) (backend-port nil))
+  (let* ((dispatch (gateway-dispatch-for-request acceptor request))
+         (started (get-internal-real-time))
+         ;; Tracing is an observation too: a span that can't be made leaves none.
+         (*gateway-span* (ignore-errors (gateway-start-span acceptor request dispatch)))
+         (backend-host nil) (backend-port nil))
     (prog1
         (cond
           ((null dispatch)
@@ -421,7 +475,8 @@ names its node, not a Pod."
         (when sink
           ;; A flow is an observation: failing to make one never fails the request.
           (ignore-errors
-           (funcall sink (gateway-request-flow acceptor request dispatch backend-host backend-port started))))))))
+           (funcall sink (gateway-request-flow acceptor request dispatch backend-host backend-port started)))))
+      (ignore-errors (gateway-end-span *gateway-span* dispatch backend-host backend-port)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Backend resolution + listener lifecycle.
