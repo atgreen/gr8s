@@ -65,6 +65,11 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- The Network tab's side panel no longer redraws itself every two seconds. It
+  flashed and lost its scroll position on each poll; it now changes only when
+  what it shows has, keeps where you had scrolled, and wraps long names instead
+  of scrolling sideways.
+
 - NetworkPolicy no longer drops IPv6 neighbor discovery and MLD (podster-6cy).
   An isolated Pod's ICMPv6 (and MLD behind a hop-by-hop header) to or from a
   link-scope peer -- fe80::/10, ff02::/16 or the unspecified address -- passes
