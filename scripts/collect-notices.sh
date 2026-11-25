@@ -42,15 +42,16 @@ Headlamp  (embedded web UI, served by 'gr8s dashboard')  -  Apache-2.0
     The frontend bundles third-party JavaScript whose own license texts
     are reproduced in the EMBEDDED WEB UI section below.
 
-Hubble UI  (embedded web UI, served by 'gr8s dashboard')  -  Apache-2.0
-    Copyright Authors of Hubble
-    https://github.com/cilium/hubble-ui
-    The frontend bundles third-party JavaScript whose own license texts
-    are reproduced in the EMBEDDED WEB UI section below.
-
 xterm.js and its fit addon  (embedded terminal, served by 'gr8s dashboard')  -  MIT
     Copyright The xterm.js authors
     https://github.com/xtermjs/xterm.js
+    Their license texts are reproduced in the EMBEDDED WEB UI section below.
+
+Cytoscape.js, layout-base, cose-base, cytoscape-fcose, dagre and cytoscape-dagre
+    (graph drawing and layouts for the Network tab, served by 'gr8s dashboard')  -  MIT
+    Copyright The Cytoscape Consortium; iVis@Bilkent; Chris Pettitt; and contributors
+    https://github.com/cytoscape/cytoscape.js  https://github.com/iVis-at-Bilkent/cytoscape.js-fcose
+    https://github.com/dagrejs/dagre  https://github.com/cytoscape/cytoscape.js-dagre
     Their license texts are reproduced in the EMBEDDED WEB UI section below.
 
 libzstd  (linked at runtime)  -  BSD-3-Clause
@@ -104,8 +105,8 @@ COMPONENTS
     fi
   }
   web_ui_licenses dashboard "HEADLAMP DASHBOARD" Headlamp
-  web_ui_licenses hubble-ui "HUBBLE UI" "Hubble UI"
   web_ui_licenses xterm "XTERM.JS" "xterm.js"
+  web_ui_licenses graph "NETWORK GRAPH" "Network tab graph"
 
   ocicl collect-licenses
 } > "$output"

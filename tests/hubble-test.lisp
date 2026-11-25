@@ -122,12 +122,10 @@
            (destination (slot-value service-flow 'gr8s.hubble.observer::destination)))
       (is (equal "gvision" (slot-value destination 'gr8s.hubble.observer::namespace)))
       (is (/= 2 (slot-value destination 'gr8s.hubble.observer::identity)))
-      (is (equal "gvision" (gr8s.server::hubble-ui-service-name destination "id")))
-      ;; Hubble UI titles a card with no app label by its workload, else "Unknown App".
+      ;; Named by its workload, so a client can show the Service rather than "Unknown App".
       (is (equal '("gvision")
                  (mapcar (lambda (workload) (slot-value workload 'gr8s.hubble.observer::name))
-                         (slot-value (gr8s.server::hubble-ui-service destination "id")
-                                     'gr8s.hubble.observer::workloads)))))
+                         (slot-value destination 'gr8s.hubble.observer::workloads)))))
     (signals error (gr8s.server::check-hubble-filter (hubble-filter :http-status-code '("2xx"))))
     (signals error (gr8s.server::check-hubble-filter (hubble-filter :http-path '("(unclosed"))))))
 
@@ -221,10 +219,10 @@
         (when grpc (ignore-errors (ag-grpc:server-stop grpc)))
         (when api (stop-server api))))))
 
-;;; The dashboard's Hubble tab: Hubble UI's backend
+;;; The dashboard
 
-(test hubble-ui-draws-a-workloads-replicas-as-one-card
-  ;; podster-u0e: as with Cilium's identities, a card is a label set, not a Pod.
+(test hubble-identities-follow-the-workload-not-the-pod
+  ;; podster-u0e: as with Cilium's identities, an identity is a label set, not a Pod.
   (flet ((runner (pod hash &optional (component "runner"))
            (gr8s.server::hubble-flow
             (hubble-test-flow "pod" pod "podLabels"
@@ -242,171 +240,14 @@
       (is (= (source-identity a) (source-identity b)) "replicas share an identity")
       (is (= (source-identity a) (source-identity rolled)) "so does a replica of the next rollout")
       (is (/= (source-identity a) (source-identity pg)) "another component is another card")
-      (is (null (find-if (lambda (label) (search "pod-template-hash" label)) (source-labels a))))
-      (let ((map (gr8s.server::make-hubble-ui-map)))
-        (gr8s.server::hubble-ui-map-changes map a)
-        (is (notany (lambda (event) (eq :service-state (gr8s.hubble.observer::event-case event)))
-                    (gr8s.server::hubble-ui-map-changes map b))
-            "the second replica adds no card")))))
+      (is (null (find-if (lambda (label) (search "pod-template-hash" label)) (source-labels a)))))))
 
-(test hubble-ui-derives-cards-and-arrows-as-its-backend-does
-  (let* ((map (gr8s.server::make-hubble-ui-map))
-         (dropped (gr8s.server::hubble-flow (hubble-test-flow)))
-         (forwarded (gr8s.server::hubble-flow (hubble-test-flow "verdict" "FORWARDED" "reason" nil "policies" #())))
-         (outside (gr8s.server::hubble-flow (hubble-test-flow "peerPod" nil "peerNamespace" nil "peerAddress" "192.0.2.7"))))
-    (flet ((kinds (events) (mapcar (lambda (event) (gr8s.hubble.observer::event-case event)) events))
-           (link (events)
-             (slot-value (slot-value (find :service-link-state events :key #'gr8s.hubble.observer::event-case)
-                                     'gr8s.hubble.observer::service-link-state)
-                         'gr8s.hubble.observer::service-link)))
-      (let ((events (gr8s.server::hubble-ui-map-changes map dropped)))
-        ;; Two new cards and their arrow.
-        (is (equal '(:service-state :service-state :service-link-state) (kinds events)))
-        (let ((cart (slot-value (slot-value (first events) 'gr8s.hubble.observer::service-state)
-                                'gr8s.hubble.observer::service)))
-          (is (equal "cart" (slot-value cart 'gr8s.hubble.observer::name)))
-          (is (equal (princ-to-string (gr8s.server::hubble-identity "shop" (gr8s.resources::core-object "app" "cart")))
-                     (slot-value cart 'gr8s.hubble.observer::id))))
-        (is (equal (format nil "~D TCP ~D:443" (gr8s.server::hubble-identity "shop" (gr8s.resources::core-object "app" "cart"))
-                           (gr8s.server::hubble-identity "data" nil))
-                   (slot-value (link events) 'gr8s.hubble.observer::id))))
-      ;; Seen again, nothing changes; a new verdict modifies the arrow.
-      (is (null (gr8s.server::hubble-ui-map-changes map dropped)))
-      (let ((events (gr8s.server::hubble-ui-map-changes map forwarded)))
-        (is (equal '(:service-link-state) (kinds events)))
-        (is (= gr8s.hubble.observer::+statechange-modified+
-               (slot-value (slot-value (first events) 'gr8s.hubble.observer::service-link-state)
-                           'gr8s.hubble.observer::proto-type))))
-      ;; The world has its own card for each side.
-      (is (equal "world-receiver" (slot-value (link (gr8s.server::hubble-ui-map-changes map outside))
-                                              'gr8s.hubble.observer::destination-id))))))
-
-(defun hubble-ui-post (backend route &key channel body terminate)
-  "Send one Message to ROUTE as Hubble UI does, returning the reply Message."
-  (let ((reply (gr8s.server::answer-hubble-ui-request
-                backend route
-                (ag-proto:serialize-to-bytes
-                 (make-instance 'gr8s.hubble.observer::message
-                                :meta (make-instance 'gr8s.hubble.observer::meta
-                                                     :trace-id "t1" :route-name route
-                                                     :channel-id (or channel "")
-                                                     :is-not-ready (and channel (not terminate) t)
-                                                     :is-terminated terminate)
-                                :body (make-instance 'gr8s.hubble.observer::body
-                                                     :content (or body (make-array 0 :element-type '(unsigned-byte 8)))))))))
-    (and reply (ag-proto:deserialize-from-bytes 'gr8s.hubble.observer::message reply))))
-
-(defun hubble-ui-meta (message slot)
-  (slot-value (slot-value message 'gr8s.hubble.observer::meta) slot))
-
-(defun hubble-ui-payload (message)
-  (let ((body (slot-value message 'gr8s.hubble.observer::body)))
-    (and body (plusp (length (slot-value body 'gr8s.hubble.observer::content)))
-         (slot-value body 'gr8s.hubble.observer::content))))
-
-(defun hubble-ui-poll-until (backend route channel predicate)
-  "Poll CHANNEL until a payload satisfies PREDICATE, returning that payload's bytes, or NIL."
-  (loop repeat 100
-        for reply = (hubble-ui-post backend route :channel channel)
-        for payload = (hubble-ui-payload reply)
-        do (is (plusp (hubble-ui-meta reply 'gr8s.hubble.observer::poll-delay-ms)))
-        when (and payload (funcall predicate payload)) return payload
-        do (sleep 0.05)))
-
-(test hubble-ui-streams-namespaces-and-the-service-map-over-its-protocol
-  (with-forwarding-agent (runtime pod listener node-runtime)
-    (values pod listener)
-    (let ((collector (gr8s.agent::%make-flow-collector
-                      nil "worker-forward"
-                      (lambda (address) (and (equal address "10.88.7.4") (values "default" "hello")))))
-          (api nil))
-      (setf (gr8s.agent::node-runtime-flow-collector node-runtime) collector)
-      (gr8s.agent::note-flow-record collector (test-flow-record :pod-port 4001))
-      (unwind-protect
-           (let* ((store (gr8s.controllers::control-plane-runtime-store runtime))
-                  (backend (gr8s.server::make-hubble-ui-backend nil)))
-             (gr8s.resources::create-core-resource
-              store "namespaces"
-              (gr8s.resources::core-object "apiVersion" "v1" "kind" "Namespace"
-                                           "metadata" (gr8s.resources::core-object "name" "default"))
-              nil)
-             (setf api (start-http-test-server :store store :runtime runtime)
-                   (gr8s.server::hubble-ui-backend-config backend)
-                   (list :server (format nil "http://127.0.0.1:~D" *http-test-port*)))
-             ;; control-stream: the server names the channel, then sends the namespaces.
-             (let* ((opened (hubble-ui-post backend "control-stream"))
-                    (channel (hubble-ui-meta opened 'gr8s.hubble.observer::channel-id)))
-               (is (cl-ppcre:scan "^[0-9a-f]{16}$" channel))
-               (is (equal "t1" (hubble-ui-meta opened 'gr8s.hubble.observer::trace-id)))
-               (let* ((payload (or (hubble-ui-payload opened)
-                                   (hubble-ui-poll-until backend "control-stream" channel (constantly t))))
-                      (response (ag-proto:deserialize-from-bytes
-                                 'gr8s.hubble.observer::get-control-stream-response payload))
-                      (namespaces (slot-value (slot-value response 'gr8s.hubble.observer::namespaces)
-                                              'gr8s.hubble.observer::namespaces)))
-                 (is (find "default" namespaces :test #'equal
-                                                :key (lambda (state)
-                                                       (slot-value (slot-value state 'gr8s.hubble.observer::namespace)
-                                                                   'gr8s.hubble.observer::name))))
-                 ;; Hubble UI lists only a namespace with an id.
-                 (is (every (lambda (state)
-                              (plusp (length (slot-value (slot-value state 'gr8s.hubble.observer::namespace)
-                                                         'gr8s.hubble.observer::id))))
-                            namespaces)))
-               (is (hubble-ui-meta (hubble-ui-post backend "control-stream" :channel channel :terminate t)
-                                   'gr8s.hubble.observer::is-terminated)))
-             ;; service-map-stream: Hubble UI's own request for namespace default.
-             (let* ((request (make-instance
-                              'gr8s.hubble.observer::get-events-request
-                              :event-types (list 5 3 4)
-                              :whitelist (mapcar (lambda (filter)
-                                                   (let ((event (make-instance 'gr8s.hubble.observer::event-filter
-                                                                               :flow-filter filter)))
-                                                     (setf (gr8s.hubble.observer::filter-case event) :flow-filter)
-                                                     event))
-                                                 (list (hubble-filter :source-pod '("default/") :reply '(nil))
-                                                       (hubble-filter :destination-pod '("default/") :reply '(nil))))))
-                    (opened (hubble-ui-post backend "service-map-stream"
-                                            :body (ag-proto:serialize-to-bytes request)))
-                    (channel (hubble-ui-meta opened 'gr8s.hubble.observer::channel-id))
-                    (payload (or (hubble-ui-payload opened)
-                                 (hubble-ui-poll-until backend "service-map-stream" channel (constantly t))))
-                    (response (and payload (ag-proto:deserialize-from-bytes
-                                            'gr8s.hubble.observer::get-events-response payload)))
-                    (kinds (mapcar #'gr8s.hubble.observer::event-case
-                                   (and response (slot-value response 'gr8s.hubble.observer::events)))))
-               (is (equal :flows (first kinds)))
-               (is (= 2 (count :service-state kinds)))
-               (is (= 1 (count :service-link-state kinds)))
-               (hubble-ui-post backend "service-map-stream" :channel channel :terminate t))
-             (is (null (hubble-ui-post backend "no-such-stream"))))
-        (when api (stop-server api))))))
-
-(test hubble-ui-serves-its-app-under-the-session-path
-  (if (not (gr8s.apiserver::hubble-ui-assets-present-p))
-      (skip "Hubble UI assets aren't vendored; run make hubble-ui-assets")
-      (let ((acceptor (make-instance 'gr8s.server::hubble-ui-acceptor
-                                     :address "127.0.0.1" :port 0 :base "/hubble/abc/"
-                                     :backend (gr8s.server::make-hubble-ui-backend nil))))
-        (hunchentoot:start acceptor)
-        (unwind-protect
-             (flet ((get-path (path)
-                      (drakma:http-request (format nil "http://127.0.0.1:~D~A" (hunchentoot:acceptor-port acceptor) path)
-                                           :proxy nil :force-binary t)))
-               (let ((index (trivial-utf-8:utf-8-bytes-to-string (get-path "/hubble/abc/"))))
-                 (is (search "<base href=\"/hubble/abc/\">" index))
-                 (is (search "Hubble UI" index)))
-               ;; The app's own routes fall back to index.html; other paths aren't served.
-               (is (search "Hubble UI" (trivial-utf-8:utf-8-bytes-to-string (get-path "/hubble/abc/somewhere"))))
-               (is (= 404 (nth-value 1 (get-path "/other")))))
-          (hunchentoot:stop acceptor)))))
-
-(test the-dashboard-serves-headlamp-and-hubble-as-tabs-of-one-page
+(test the-dashboard-serves-headlamp-and-the-network-view-as-tabs-of-one-page
   (let ((acceptor (make-instance 'gr8s.server::gr8s-dashboard-acceptor
                                  :address "127.0.0.1" :port 0
                                  :shell-path "/ui/tok/"
-                                 :tabs '(("headlamp" "/dashboard/tok/" "Headlamp") ("hubble" "/hubble/tok/" "Hubble"))
-                                 :hubble-backend (gr8s.server::make-hubble-ui-backend nil) :hubble-base "/hubble/tok/"
+                                 :tabs '(("headlamp" "/dashboard/tok/" "Headlamp") ("network" "/network/tok/" "Network"))
+                                 :network (gr8s.server::make-dashboard-network nil) :network-base "/network/tok/"
                                  :proxy-fn (lambda (&rest arguments) (declare (ignore arguments)) "proxied")
                                  :multiplexer-fn nil
                                  :access-log-destination nil :message-log-destination nil))
@@ -422,16 +263,17 @@
                     (values (trivial-utf-8:utf-8-bytes-to-string body) status))))
            (let ((page (get-path "/ui/tok/")))
              (is (search "data-src=\"/dashboard/tok/\">Headlamp</button>" page))
-             (is (search "data-src=\"/hubble/tok/\">Hubble</button>" page))
-             (is (search "id=\"frame-hubble\" title=\"Hubble\"" page))
+             (is (search "data-src=\"/network/tok/\">Network</button>" page))
+             (is (search "id=\"frame-network\" title=\"Network\"" page))
              (is (search "show(location.hash.slice(1) || 'headlamp')" page))
              ;; Its browser tab has the gr8s icon, inline, so no other request serves it.
              (is (search "<link rel=\"icon\" type=\"image/svg+xml\" href=\"data:image/svg+xml," page)))
            (is (= 200 (nth-value 1 (get-path "/ui/tok"))))
            ;; Each tab's app answers under the same token.
            (is (search "\"clusters\"" (get-path "/dashboard/tok/config")))
-           (when (gr8s.apiserver::hubble-ui-assets-present-p)
-             (is (search "<base href=\"/hubble/tok/\">" (get-path "/hubble/tok/"))))
+           (is (search "<title>gr8s Network</title>" (get-path "/network/tok/")))
+           (when (second (assoc "cytoscape.js" gr8s.server::+dashboard-network-assets+ :test #'equal))
+             (is (= 200 (nth-value 1 (get-path "/network/tok/assets/cytoscape.js")))))
            (is (= 404 (nth-value 1 (get-path "/ui/other/")))))
       (hunchentoot:stop acceptor)
       (setf gr8s.apiserver::*dashboard-base* base))))

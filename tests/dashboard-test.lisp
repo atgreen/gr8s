@@ -289,3 +289,241 @@
              (gr8s.server::stop-dashboard-agents agent)
              (is (null (probe-file context)))))
       (uiop:delete-directory-tree directory :validate t))))
+
+;;;; The Network tab's graph (podster-5hv)
+
+(defun network-test-topology ()
+  (flet ((objects (text) (coerce (com.inuoe.jzon:parse text) 'list)))
+    (gr8s.server::build-network-topology
+     (objects "[{\"metadata\":{\"namespace\":\"cave\",\"name\":\"cave-runner-b4-x\",
+                \"ownerReferences\":[{\"kind\":\"ReplicaSet\",\"name\":\"cave-runner-b4\"}]},
+                \"spec\":{\"containers\":[{\"image\":\"registry.lab.example:30500/cave-runner:k8sjobs3\"}]},\"status\":{\"podIP\":\"10.80.16.4\"}},
+               {\"metadata\":{\"namespace\":\"cave\",\"name\":\"cave-pg-0\",
+                \"ownerReferences\":[{\"kind\":\"StatefulSet\",\"name\":\"cave-pg\"}]},
+                \"spec\":{\"containers\":[{\"image\":\"docker.io/library/postgres:17\"}]},\"status\":{\"podIP\":\"10.80.0.4\"}},
+               {\"metadata\":{\"namespace\":\"cave\",\"name\":\"lonely\"},
+                \"spec\":{\"containers\":[{\"image\":\"busybox\"}]},\"status\":{\"podIP\":\"10.80.0.9\"}},
+               {\"metadata\":{\"namespace\":\"monitoring\",\"name\":\"exporter-a\",
+                \"ownerReferences\":[{\"kind\":\"DaemonSet\",\"name\":\"node-exporter\"}]},
+                \"spec\":{\"hostNetwork\":true,\"containers\":[{\"image\":\"quay.io/prometheus/node-exporter\"}]},
+                \"status\":{\"podIP\":\"10.77.77.21\"}}]")
+     (objects "[{\"metadata\":{\"namespace\":\"cave\",\"name\":\"cave-runner-b4\",
+                \"ownerReferences\":[{\"kind\":\"Deployment\",\"name\":\"cave-runner\"}]}}]")
+     (objects "[{\"metadata\":{\"namespace\":\"cave\",\"name\":\"cave\"},\"spec\":{\"clusterIP\":\"10.96.0.20\"}}]")
+     (objects "[{\"metadata\":{\"name\":\"gvision\"},\"spec\":{\"podCIDR\":\"10.80.0.0/20\"},
+                \"status\":{\"addresses\":[{\"type\":\"InternalIP\",\"address\":\"10.77.77.21\"}]}}]"))))
+
+(defun network-test-flow (&rest pairs)
+  (let ((flow (gr8s.resources::core-object "time" "2026-11-25T12:00:00Z" "verdict" "FORWARDED" "direction" "egress"
+                                           "protocol" "TCP" "namespace" "cave" "pod" "cave-runner-b4-x"
+                                           "podPort" 41000 "length" 100)))
+    (loop for (key value) on pairs by #'cddr do (setf (gethash key flow) value))
+    flow))
+
+(test network-topology-resolves-workloads-services-and-nodes
+  (let ((topology (network-test-topology)))
+    (flet ((pod (namespace name) (gethash (cons namespace name) (gr8s.server::network-topology-pods topology))))
+      (is (equal '("cave" "Deployment" "cave-runner") (pod "cave" "cave-runner-b4-x")) "through its ReplicaSet")
+      (is (equal '("cave" "StatefulSet" "cave-pg") (pod "cave" "cave-pg-0")))
+      (is (equal '("cave" "Pod" "lonely") (pod "cave" "lonely")) "a Pod nothing owns")
+      (is (equal '("cave" "StatefulSet" "cave-pg") (gethash "10.80.0.4" (gr8s.server::network-topology-addresses topology))))
+      (is (null (gethash "10.77.77.21" (gr8s.server::network-topology-addresses topology)))
+          "a host-network Pod's address stays its node's")
+      (is (equal "gvision" (gethash "10.77.77.21" (gr8s.server::network-topology-nodes topology))))
+      (is (equal "gvision" (gethash "10.80.0.0" (gr8s.server::network-topology-nodes topology))) "the Pod gateway")
+      (is (equal '("cave" "Service" "cave") (gethash "10.96.0.20" (gr8s.server::network-topology-services topology))))
+      (is (equal '("postgresql" "PostgreSQL")
+                 (multiple-value-list (gr8s.server::network-workload-software topology '("cave" "StatefulSet" "cave-pg")))))
+      (is (equal '("lucide-layers" nil)
+                 (multiple-value-list (gr8s.server::network-workload-software topology '("cave" "Deployment" "cave-runner"))))
+          "an image from a registry isn't a registry: the kind's icon"))))
+
+(test network-graph-counts-each-connection-once
+  (let ((graph (gr8s.server::make-network-graph))
+        (now (encode-universal-time 30 0 12 25 11 2026 0)))
+    (setf (gr8s.server::network-graph-topology graph) (network-test-topology))
+    (flet ((note (&rest pairs) (gr8s.server::network-graph-note-flow graph (apply #'network-test-flow pairs)))
+           (edge (source target)
+             (find-if (lambda (e) (and (equal source (gethash "source" e)) (equal target (gethash "target" e))))
+                      (coerce (gethash "edges" (gr8s.server::network-graph-object graph now)) 'list))))
+      ;; The runner dials Postgres: seen leaving the runner, and arriving at cave-pg-0.
+      (note "peerAddress" "10.80.0.4" "peerPort" 5432)
+      (note "namespace" "cave" "pod" "cave-pg-0" "direction" "ingress" "podPort" 5432
+            "peerAddress" "10.80.16.4" "peerPort" 41000)
+      (let ((e (edge "cave/Deployment/cave-runner" "cave/StatefulSet/cave-pg")))
+        (is (= 1 (gethash "flows" (gethash "m1" e))) "counted once, where it left")
+        (is (equalp #("5432/TCP") (gethash "ports" e))))
+      ;; A connection the destination's policy refused counts, and as dropped.
+      (note "namespace" "cave" "pod" "cave-pg-0" "direction" "ingress" "verdict" "DROPPED" "podPort" 5432
+            "peerAddress" "10.80.0.9" "peerPort" 41001 "policies" #("cave/cave-pg"))
+      (let ((e (edge "cave/Pod/lonely" "cave/StatefulSet/cave-pg")))
+        (is (= 1 (gethash "dropped" (gethash "m1" e)))))
+      ;; Link-local neighbours are one LAN node; anything public is the world.
+      (note "direction" "ingress" "peerAddress" "fe80::1d:9aff:fec9:7d4a" "podPort" 5353 "protocol" "UDP")
+      (note "direction" "ingress" "peerAddress" "fe80::91:34ff:fe29:d9dd" "podPort" 3702 "protocol" "UDP")
+      (is (= 2 (gethash "flows" (gethash "m1" (edge "LAN/link-local" "cave/Deployment/cave-runner")))))
+      (note "peerAddress" "140.82.112.3" "peerPort" 443)
+      (is (edge "cave/Deployment/cave-runner" "World/world"))
+      ;; The node's Pod gateway is the node.
+      (note "direction" "ingress" "peerAddress" "10.80.0.0" "podPort" 8080)
+      (is (edge "Node/gvision" "cave/Deployment/cave-runner"))
+      ;; A Gateway request with HTTP 502, and its latency.
+      (note "peerAddress" "10.96.0.20" "peerPort" 8080
+            "l7" (gr8s.resources::core-object "method" "GET" "path" "/" "code" 502 "latencyNs" 4000000))
+      (let ((e (edge "cave/Deployment/cave-runner" "cave/Service/cave")))
+        (is (= 1 (gethash "errors" (gethash "m1" e))))
+        (is (= 4 (gethash "latencyMs" e))))
+      (is (= 1 (length (gr8s.server::network-graph-edge-flows
+                        graph "cave/Deployment/cave-runner>cave/StatefulSet/cave-pg")))
+          "the edge's flows show the connection once too"))))
+
+(test network-graph-windows-and-expiry
+  (let* ((graph (gr8s.server::make-network-graph))
+         (now (encode-universal-time 0 30 12 25 11 2026 0))
+         (stamp (lambda (seconds-ago)
+                  (multiple-value-bind (s m h d mo y) (decode-universal-time (- now seconds-ago) 0)
+                    (format nil "~4,'0D-~2,'0D-~2,'0DT~2,'0D:~2,'0D:~2,'0DZ" y mo d h m s)))))
+    (setf (gr8s.server::network-graph-topology graph) (network-test-topology))
+    (dolist (ago '(5 30 200 600 1200))
+      (gr8s.server::network-graph-note-flow
+       graph (network-test-flow "time" (funcall stamp ago) "peerAddress" "10.80.0.4" "peerPort" 5432)))
+    (let ((e (aref (gethash "edges" (gr8s.server::network-graph-object graph now)) 0)))
+      (is (= 2 (gethash "flows" (gethash "m1" e))))
+      (is (= 3 (gethash "flows" (gethash "m5" e))))
+      (is (= 4 (gethash "flows" (gethash "m15" e))) "the 20-minute-old flow is outside every window"))
+    (gr8s.server::network-graph-expire graph (+ now 3600))
+    (let ((object (gr8s.server::network-graph-object graph (+ now 3600))))
+      (is (zerop (length (gethash "edges" object))))
+      (is (zerop (length (gethash "nodes" object))) "and its nodes with it"))))
+
+(test network-graph-keeps-the-latest-flows-with-their-edges
+  (let ((graph (gr8s.server::make-network-graph)))
+    (setf (gr8s.server::network-graph-topology graph) (network-test-topology))
+    (gr8s.server::network-graph-note-flow graph (network-test-flow "peerAddress" "10.80.0.4" "peerPort" 5432))
+    ;; ICMP has no port, and a flow may name no protocol: no empty port entry results.
+    (gr8s.server::network-graph-note-flow graph (network-test-flow "peerAddress" "140.82.112.3" "protocol" "" "peerPort" nil))
+    (let ((latest (gr8s.server::network-graph-latest-flows graph)))
+      (is (= 2 (length latest)))
+      (is (equal "cave/Deployment/cave-runner>World/world" (gethash "edge" (first latest))) "newest first")
+      (is (equal "cave/Deployment/cave-runner>cave/StatefulSet/cave-pg" (gethash "edge" (second latest)))))
+    (let ((world (find "World/world" (coerce (gethash "edges" (gr8s.server::network-graph-object graph)) 'list)
+                       :key (lambda (e) (gethash "target" e)) :test #'equal)))
+      (is (zerop (length (gethash "ports" world)))))))
+
+;;; Favicons (podster-5hv)
+
+(defparameter *network-test-png*
+  (coerce #(#x89 #x50 #x4e #x47 #x0d #x0a #x1a #x0a 0 0 0 13 #x49 #x48 #x44 #x52) '(simple-array (unsigned-byte 8) (*))))
+
+(test network-favicon-pieces
+  (is (equal "image/png" (gr8s.server::network-image-type *network-test-png*)))
+  (is (equal "image/x-icon" (gr8s.server::network-image-type (coerce #(0 0 1 0 1 0) '(vector (unsigned-byte 8))))))
+  (is (equal "image/svg+xml" (gr8s.server::network-image-type
+                                (trivial-utf-8:string-to-utf-8-bytes "<?xml version=\"1.0\"?>
+<svg xmlns=\"http://www.w3.org/2000/svg\"/>")))
+      "an SVG, which the page shows in an <img> and the dashboard serves sandboxed")
+  (is (null (gr8s.server::network-image-type (trivial-utf-8:string-to-utf-8-bytes "<html><script>alert(1)</script>")))
+      "not an image at all")
+  (is (equal '("/static/fav32.png" "favicon.ico" "/logo.svg")
+             (gr8s.server::network-page-icon-links
+              "<html><head><link rel=\"stylesheet\" href=\"/a.css\"><link rel=\"icon\" type=\"image/png\" href=\"/static/fav32.png\">
+               <LINK REL='shortcut icon' HREF='favicon.ico'><link rel=\"icon\" href=\"/logo.svg\"></head></html>")))
+  (let ((base "/api/v1/namespaces/cave/services/cave:8080/proxy"))
+    (is (equal (concatenate 'string base "/static/i.png") (gr8s.server::network-proxy-target base "/login" "/static/i.png")))
+    (is (equal (concatenate 'string base "/app/i.png") (gr8s.server::network-proxy-target base "/app/login" "i.png")))
+    (is (null (gr8s.server::network-proxy-target base "/" "https://cdn.example/i.png")) "a link off the app is not followed"))
+  (flet ((ports (text) (gr8s.server::network-service-web-ports (com.inuoe.jzon:parse text))))
+    (is (equal '((9444 nil) (8080 nil))
+               (ports "{\"spec\":{\"ports\":[{\"name\":\"grpc\",\"port\":9444,\"appProtocol\":\"http\"},{\"name\":\"metrics\",\"port\":9100},{\"name\":\"http\",\"port\":8080}]}}"))
+        "named or app-protocolled http first, in order; an unknown port is not a web UI")
+    (is (equal '((443 t)) (ports "{\"spec\":{\"ports\":[{\"name\":\"https\",\"port\":443}]}}")))))
+
+(defvar *network-favicon-test-requests* nil)
+
+(defclass network-favicon-api (hunchentoot:acceptor) ()
+  (:default-initargs :access-log-destination nil :message-log-destination nil))
+
+(defmethod hunchentoot:acceptor-dispatch-request ((acceptor network-favicon-api) request)
+  ;; Plays the cluster API's Service proxy for two apps: cave (an icon link behind a redirect)
+  ;; and plain (only an SVG link, and no /favicon.ico).
+  (let ((path (hunchentoot:script-name request))
+        (cave "/api/v1/namespaces/cave/services/cave:8080/proxy")
+        (plain "/api/v1/namespaces/cave/services/plain:80/proxy"))
+    (push path *network-favicon-test-requests*)
+    (cond ((equal path (concatenate 'string cave "/"))
+           (hunchentoot:redirect (concatenate 'string cave "/login") :code 302))
+          ((equal path (concatenate 'string cave "/login"))
+           "<html><head><link rel=\"icon\" href=\"/static/cave.png\"></head></html>")
+          ((equal path (concatenate 'string cave "/static/cave.png"))
+           (setf (hunchentoot:content-type*) "image/png") *network-test-png*)
+          ((equal path (concatenate 'string plain "/")) "<link rel=icon href=/logo.svg>")
+          ((equal path (concatenate 'string plain "/logo.svg"))
+           (setf (hunchentoot:content-type*) "image/svg+xml") "<svg xmlns=\"http://www.w3.org/2000/svg\"/>")
+          (t (setf (hunchentoot:return-code*) 404) ""))))
+
+(test network-favicon-is-read-through-the-service-proxy
+  (let ((api (hunchentoot:start (make-instance 'network-favicon-api :address "127.0.0.1" :port 0))))
+    (unwind-protect
+         (let ((config (list :server (format nil "http://127.0.0.1:~D" (hunchentoot:acceptor-port api)))))
+           (setf *network-favicon-test-requests* nil)
+           (multiple-value-bind (octets type) (gr8s.server::fetch-network-favicon config '("cave" "cave" 8080 nil))
+             (is (equal "image/png" type) "the page's icon link, after the redirect to /login")
+             (is (equalp *network-test-png* octets)))
+           (is (equal "image/svg+xml" (nth-value 1 (gr8s.server::fetch-network-favicon config '("cave" "plain" 80 nil))))
+               "an app whose only icon is an SVG, as cave's is")
+           (is (every (lambda (path) (uiop:string-prefix-p "/api/v1/namespaces/cave/services/" path))
+                      *network-favicon-test-requests*)
+               "only ever through the Service proxy"))
+      (hunchentoot:stop api))))
+
+(test network-graph-draws-the-gateway-between-clients-and-backends
+  ;; podster-5hv: traffic a Gateway relays reads client -> Gateway -> backend, not node -> backend.
+  (let* ((graph (gr8s.server::make-network-graph))
+         (topology (flet ((objects (text) (coerce (com.inuoe.jzon:parse text) 'list)))
+                     (gr8s.server::build-network-topology
+                      (objects "[{\"metadata\":{\"namespace\":\"cave\",\"name\":\"cave-0\",\"labels\":{\"app\":\"cave\"},
+                                 \"ownerReferences\":[{\"kind\":\"StatefulSet\",\"name\":\"cave\"}]},
+                                 \"spec\":{\"containers\":[{\"image\":\"cave:1\"}]},\"status\":{\"podIP\":\"10.80.32.5\"}}]")
+                      nil
+                      (objects "[{\"metadata\":{\"namespace\":\"cave\",\"name\":\"cave\"},
+                                 \"spec\":{\"clusterIP\":\"10.96.0.26\",\"selector\":{\"app\":\"cave\"},
+                                          \"ports\":[{\"name\":\"http\",\"port\":8080,\"targetPort\":8080}]}}]")
+                      (objects "[{\"metadata\":{\"name\":\"gvision\"},\"spec\":{\"podCIDR\":\"10.80.0.0/20\"},
+                                 \"status\":{\"addresses\":[{\"type\":\"InternalIP\",\"address\":\"10.77.77.21\"}]}},
+                                {\"metadata\":{\"name\":\"gr8s-local\"},\"spec\":{\"podCIDR\":\"10.80.32.0/20\"},
+                                 \"status\":{\"addresses\":[{\"type\":\"InternalIP\",\"address\":\"10.77.77.10\"}]}}]")
+                      (objects "[{\"metadata\":{\"namespace\":\"cave\",\"name\":\"cave\"},
+                                 \"spec\":{\"parentRefs\":[{\"name\":\"labdroid\",\"namespace\":\"gateway\"}],
+                                          \"rules\":[{\"backendRefs\":[{\"name\":\"cave\",\"port\":8080}]}]}}]")))))
+    (setf (gr8s.server::network-graph-topology graph) topology)
+    (flet ((note (&rest pairs)
+             (let ((flow (gr8s.resources::core-object "time" "2026-11-25T12:00:00Z" "verdict" "FORWARDED" "protocol" "TCP")))
+               (loop for (key value) on pairs by #'cddr do (setf (gethash key flow) value))
+               (gr8s.server::network-graph-note-flow graph flow)))
+           (edge (source target)
+             (find-if (lambda (e) (and (equal source (gethash "source" e)) (equal target (gethash "target" e))))
+                      (coerce (gethash "edges" (gr8s.server::network-graph-object graph (encode-universal-time 30 0 12 25 11 2026 0))) 'list))))
+      ;; The Gateway's record of a request from the laptop, which failed upstream.
+      (note "direction" "ingress" "peerAddress" "10.77.77.10" "namespace" "cave" "service" "cave"
+            "l7" (gr8s.resources::core-object "method" "GET" "path" "/" "code" 502 "latencyNs" 3000000
+                                              "listenerPort" 443 "route" "cave/cave"))
+      ;; The same request arriving at cave-0, from gvision's host across the overlay.
+      (note "direction" "ingress" "namespace" "cave" "pod" "cave-0" "podPort" 8080 "peerAddress" "10.80.0.0" "peerPort" 40000)
+      ;; gvision's host on another port of cave-0: the node itself, not the Gateway.
+      (note "direction" "ingress" "namespace" "cave" "pod" "cave-0" "podPort" 9090 "peerAddress" "10.80.0.0" "peerPort" 40001)
+      (let ((in (edge "Clients/LAN clients" "gateway/Gateway/labdroid")))
+        (is (not (null in)) "LAN clients -> Gateway, from the request record, though the laptop is also a node")
+        (is (equalp #("443/TCP") (gethash "ports" in)))
+        (is (= 1 (gethash "errors" (gethash "m1" in))))
+        (is (= 3 (gethash "latencyMs" in))))
+      (note "direction" "ingress" "peerAddress" "140.82.112.3" "namespace" "cave" "service" "cave"
+            "l7" (gr8s.resources::core-object "method" "GET" "path" "/" "code" 200 "latencyNs" 1000000
+                                              "listenerPort" 443 "route" "cave/cave"))
+      (is (edge "World/world" "gateway/Gateway/labdroid") "an internet client is the world")
+      (is (edge "gateway/Gateway/labdroid" "cave/StatefulSet/cave") "Gateway -> backend, not gvision -> backend")
+      (is (null (edge "Node/gvision" "cave/StatefulSet/cave-8080"))
+          "no stray node edge")
+      (is (edge "Node/gvision" "cave/StatefulSet/cave") "the node's own traffic to another port stays the node's")
+      (let ((gateway (find "gateway/Gateway/labdroid" (coerce (gethash "nodes" (gr8s.server::network-graph-object graph)) 'list)
+                           :key (lambda (n) (gethash "id" n)) :test #'equal)))
+        (is (equal "lucide-door-open" (gethash "icon" gateway)))))))

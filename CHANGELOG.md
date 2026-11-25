@@ -7,6 +7,28 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ## [Unreleased]
 
+### Added
+
+- `gr8s dashboard` has a Network tab: a live map of the cluster's traffic,
+  drawn from its flow events (podster-5hv). A node is a workload (a Pod
+  resolved through its owners to its Deployment, StatefulSet, DaemonSet or
+  Job), a Service, a Gateway, a cluster node, the LAN or the world; traffic a
+  Gateway relays reads client → Gateway → backend. Edges carry their ports,
+  rate, drops, HTTP errors and median latency over the last 1, 5 or 15
+  minutes; picking one shows its counts and latest flows, with the policy that
+  dropped a connection. Cards show the app's own favicon when it has a web UI,
+  else a logo for recognised software, else an icon for its kind. A live
+  layout keeps nodes where they are as traffic changes, and a flow layout lays
+  traffic out left to right; a flow table follows the same filters. Its
+  scripts, icons and font (Cytoscape.js, Simple Icons, Lucide, Inter) are
+  embedded, pinned by version and checksum.
+
+### Removed
+
+- `gr8s dashboard`'s Hubble tab, and the Hubble UI bundle it embedded: the
+  Network tab replaces it. The Hubble API stays: `gr8s doctor observe --serve`
+  still serves Hubble's Observer API for the `hubble` CLI.
+
 ### Fixed
 
 - The dashboard's Hubble tab draws a workload's replicas as one card. Each Pod

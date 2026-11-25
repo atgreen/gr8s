@@ -2,14 +2,14 @@
 ;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Purpose:
-;;;; One `gr8s dashboard' for both of gr8s's web UIs (podster-d33): a small page
-;;;; with a Headlamp tab and a Hubble tab, each the app gr8s already serves, in a
-;;;; same-origin frame. One loopback server and one unguessable session token cover
-;;;; all three: the page at /ui/<token>/, Headlamp at /dashboard/<token>/ and Hubble
-;;;; UI at /hubble/<token>/. Each frame keeps its state while the other tab is
-;;;; showing, and Hubble's is loaded only once its tab is first opened, so its
-;;;; streams don't run for a reader who never looks at flows. The cluster's
-;;;; DashboardTabs add tabs for its own apps, each from an origin of its own.
+;;;; One `gr8s dashboard' for gr8s's web UIs (podster-d33): a small page of tabs --
+;;;; Headlamp, the Network view, an Agent terminal and a REPL -- each the app gr8s
+;;;; serves, in a same-origin frame. One loopback server and one unguessable session
+;;;; token cover them all: the page at /ui/<token>/, Headlamp at /dashboard/<token>/,
+;;;; the Network view at /network/<token>/ and so on. Each frame keeps its state while
+;;;; another tab is showing, and is loaded only once its tab is first opened, so the
+;;;; Network view doesn't follow flows for a reader who never looks at them. The
+;;;; cluster's DashboardTabs add tabs for its own apps, each from an origin of its own.
 
 (in-package #:gr8s.server)
 
@@ -81,22 +81,22 @@ tab shown first.")
 (defclass gr8s-dashboard-acceptor (dashboard-command-acceptor)
   ((shell-path :initarg :shell-path :reader gr8s-dashboard-shell-path)
    (tabs :initarg :tabs :reader gr8s-dashboard-tabs)
-   (hubble-backend :initarg :hubble-backend :initform nil :reader gr8s-dashboard-hubble-backend)
-   (hubble-base :initarg :hubble-base :initform nil :reader gr8s-dashboard-hubble-base)
    ;; The REPL tab (dashboard-lisp.lisp), served under LISP-BASE.
    (lisp :initarg :lisp :initform nil :reader gr8s-dashboard-lisp)
    (lisp-base :initarg :lisp-base :initform nil :reader gr8s-dashboard-lisp-base)
    ;; The Agent tab (dashboard-agent.lisp), served under AGENT-BASE.
    (agent :initarg :agent :initform nil :reader gr8s-dashboard-agent)
    (agent-base :initarg :agent-base :initform nil :reader gr8s-dashboard-agent-base)
+   ;; The Network tab (dashboard-network.lisp), served under NETWORK-BASE.
+   (network :initarg :network :initform nil :reader gr8s-dashboard-network)
+   (network-base :initarg :network-base :initform nil :reader gr8s-dashboard-network-base)
    ;; The cluster's DashboardTabs' apps, each on its own origin (dashboard-apps.lisp).
    (apps :initarg :apps :initform nil :reader gr8s-dashboard-apps))
-  (:documentation "The loopback server of `gr8s dashboard': the tabbed page, Headlamp, and Hubble UI."))
+  (:documentation "The loopback server of `gr8s dashboard': the tabbed page and its tabs' apps."))
 
 (defmethod hunchentoot:acceptor-dispatch-request ((acceptor gr8s-dashboard-acceptor) request)
   (let ((path (hunchentoot:script-name request))
-        (shell (gr8s-dashboard-shell-path acceptor))
-        (hubble (gr8s-dashboard-hubble-base acceptor)))
+        (shell (gr8s-dashboard-shell-path acceptor)))
     (cond
       ((or (string= path shell) (string= path (string-right-trim "/" shell)))
        (setf (hunchentoot:content-type*) "text/html; charset=utf-8"
@@ -107,8 +107,9 @@ tab shown first.")
                            (and (gr8s-dashboard-apps acceptor)
                                 (dashboard-apps-tabs (gr8s-dashboard-apps acceptor))))))
          (dashboard-shell-html tabs (first (first tabs)))))
-      ((and hubble (uiop:string-prefix-p hubble path))
-       (hubble-ui-dispatch (gr8s-dashboard-hubble-backend acceptor) hubble request))
+      ((and (gr8s-dashboard-network-base acceptor)
+            (uiop:string-prefix-p (gr8s-dashboard-network-base acceptor) path))
+       (dashboard-network-dispatch (gr8s-dashboard-network acceptor) (gr8s-dashboard-network-base acceptor) request))
       ((and (gr8s-dashboard-lisp-base acceptor)
             (uiop:string-prefix-p (gr8s-dashboard-lisp-base acceptor) path))
        (dashboard-lisp-dispatch (gr8s-dashboard-lisp acceptor) (gr8s-dashboard-lisp-base acceptor) request))

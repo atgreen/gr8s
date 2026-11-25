@@ -26,9 +26,10 @@ first file that exists, then ~/.kube/config), else, on a control-plane member, t
                              "/var/lib/gr8s/server/kubeconfig")))
       (error "No kubeconfig found: pass --kubeconfig FILE")))
 
-(defun doctor-api-get (config target)
-  "GET TARGET on CONFIG's server. Return (values body-octets status), bounded in time and size."
-  (sb-ext:with-timeout +doctor-api-request-seconds+
+(defun doctor-api-get (config target &key (limit +doctor-api-response-limit+) (seconds +doctor-api-request-seconds+))
+  "GET TARGET on CONFIG's server. Return (values body-octets status headers), bounded in time
+by SECONDS and in size by LIMIT octets."
+  (sb-ext:with-timeout seconds
     (multiple-value-bind (stream socket host port base-path) (open-debug-api-stream config)
       (unwind-protect
            (progn
@@ -39,8 +40,8 @@ first file that exists, then ~/.kube/config), else, on a control-plane member, t
                (values (gr8s.http-client::read-response-body
                         stream (mapcar (lambda (header) (cons (string-downcase (string (car header))) (cdr header)))
                                        headers)
-                        :limit +doctor-api-response-limit+)
-                       status)))
+                        :limit limit)
+                       status headers)))
         (ignore-errors (close stream))
         (ignore-errors (usocket:socket-close socket))))))
 

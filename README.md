@@ -51,7 +51,7 @@ version skew between components.
 | Ingress controller, Gateway API implementation, LoadBalancer provider | Built in |
 | local-path provisioner, NFS volumes | Built in; CSI drivers still work |
 | metrics-server, cAdvisor | Built in; `kubectl top` and Prometheus scrapes work |
-| Kubernetes dashboard | Built-in Headlamp and Hubble UIs: `gr8s dashboard` |
+| Kubernetes dashboard | Built-in Headlamp and a live network map: `gr8s dashboard` |
 | Certificate management | Automatic leaf renewal, staged CA rotation, one-time join tokens |
 | bpftrace, debug tooling | `gr8s debug trace` and a live Lisp REPL into any node |
 | Registry mirror, peer-to-peer image distribution (Dragonfly, Kraken, Spegel) | Built-in BitTorrent v2: nodes share image layers with each other instead of each pulling from the registry |
@@ -233,8 +233,10 @@ for how it works.
 `gr8s dashboard` opens a Kubernetes web UI in your browser, with four tabs. The
 Headlamp tab serves the [Headlamp](https://headlamp.dev) frontend and
 reverse-proxies the API over mutual TLS to the running cluster, with live
-resource updates. The Hubble tab serves Hubble UI's service map and flow table
-from the cluster's [flow events](docs/networking.md#flow-events). The Agent tab
+resource updates. The Network tab draws the cluster's traffic from its
+[flow events](docs/networking.md#flow-events): a live map of workloads,
+Services, Gateways and the clients outside, with rates, drops (and the policy
+that dropped them), HTTP errors and latency, and the flows behind every edge. The Agent tab
 runs AI coding agents you have installed (Claude Code, Codex or Gemini CLI), or
 a shell, each in a terminal tab of its own: **+** starts one, and closing its
 tab stops it. They run on your machine, with your own login, and with
@@ -328,8 +330,8 @@ $ gr8s doctor observe -n shop --verdict dropped
 02:23:51.128 gr8s-local: shop/cart:47022 -> shop/db:8080 TCP DROPPED by policy (shop/deny-egress)
 ```
 
-`gr8s dashboard`'s Hubble tab shows them as Hubble UI's service map and flow
-table, and `gr8s doctor observe --serve` offers them
+`gr8s dashboard`'s Network tab draws them as a live map with its flow table,
+and `gr8s doctor observe --serve` offers them
 as Hubble's Observer API, so the stock `hubble` CLI can read them; see
 [flow events](docs/networking.md#flow-events).
 

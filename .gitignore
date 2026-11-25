@@ -14,5 +14,5 @@ __pycache__/
 
 # Vendored Headlamp frontend build embedded into the dashboard (make dashboard-assets)
 /assets/dashboard/
-/assets/hubble-ui/
 /assets/xterm/
+/assets/graph/

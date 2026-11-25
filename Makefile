@@ -31,7 +31,7 @@ TEST_EVAL := --eval '(require :asdf)' --eval '(asdf:test-system :gr8s)'
 OCICL ?= ocicl
 OCICL_STAMP := ocicl/.ocicl-installed
 
-.PHONY: hubble-ui-assets xterm-assets dashboard-assets-from-source dashboard-assets-compress test-raft-snapshots test-raft-checkpoint-memory test-pod-transactions test-pod-transaction-memory test-core-recovery test-core-recovery-memory all help containerd-bundle dashboard-assets generate-protocol test-protocol-generation test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api test-install-lifecycle check smoke smoke-two-node run kubeconfig notices native clean deps
+.PHONY: xterm-assets graph-assets dashboard-assets-from-source dashboard-assets-compress test-raft-snapshots test-raft-checkpoint-memory test-pod-transactions test-pod-transaction-memory test-core-recovery test-core-recovery-memory all help containerd-bundle dashboard-assets generate-protocol test-protocol-generation test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api test-install-lifecycle check smoke smoke-two-node run kubeconfig notices native clean deps
 
 all: native
 
@@ -100,34 +100,8 @@ $(DASHBOARD_MARKER):
 dashboard-assets:
 	rm -rf assets/dashboard
 	$(MAKE) $(DASHBOARD_MARKER)
-	$(MAKE) hubble-ui-assets
 	$(MAKE) xterm-assets
-
-# Hubble UI's built frontend (cilium/hubble-ui, Apache-2.0) for `gr8s hubble ui`,
-# from the image Cilium's chart pins, with gr8s serving its backend API itself.
-HUBBLE_UI_IMAGE ?= quay.io/cilium/hubble-ui@sha256:049a80a03585c043d0c3121bdc518c72b0fd42bae07e4bcce0fdb8f1e88041d0
-# ^ v0.13.6
-HUBBLE_UI_MARKER := assets/hubble-ui/index.html
-
-$(HUBBLE_UI_MARKER):
-	rm -rf assets/hubble-ui build/hubble-ui-rootfs
-	mkdir -p assets/hubble-ui build/hubble-ui-rootfs
-	tool=$$(command -v podman || command -v docker) && \
-	  cid=$$("$$tool" create "$(HUBBLE_UI_IMAGE)") && \
-	  { "$$tool" export "$$cid" | tar -x -C build/hubble-ui-rootfs app; \
-	    status=$$?; "$$tool" rm "$$cid" >/dev/null; exit $$status; }
-	cd build/hubble-ui-rootfs/app && \
-	  find . -type f ! -name '*.map' -print0 | cpio -pd0 --quiet "$(CURDIR)/assets/hubble-ui"
-	rm -rf build/hubble-ui-rootfs
-	cd "$(CURDIR)/assets/hubble-ui" && \
-	  find . -type f \( -name '*.js' -o -name '*.css' -o -name '*.svg' -o -name '*.txt' \) -print0 | \
-	  xargs -0 -r gzip -9 -n
-	@echo "embedded $$(find assets/hubble-ui -type f | wc -l) Hubble UI asset files ($$(du -sh assets/hubble-ui | cut -f1))"
-	touch src/apiserver/hubble-ui-assets.lisp
-
-hubble-ui-assets:
-	rm -rf assets/hubble-ui
-	$(MAKE) $(HUBBLE_UI_MARKER)
+	$(MAKE) graph-assets
 
 # xterm.js (MIT) for the dashboard's Agent tab: the published npm tarballs, pinned
 # by version and SHA-256; only the browser bundles and the stylesheet are kept.
@@ -158,6 +132,63 @@ $(XTERM_MARKER):
 xterm-assets:
 	rm -rf assets/xterm
 	$(MAKE) $(XTERM_MARKER)
+
+# Cytoscape.js and its fcose and dagre layouts (MIT) for the dashboard's Network tab:
+# the published npm tarballs, pinned by version and SHA-256 (name version sha256 file).
+GRAPH_PACKAGES := \
+  cytoscape 3.30.2 8e9bfaaf9f5f461642355b0d17c6cf1d0d58c5cb9e00ac983e2d242fd1cfb928 dist/cytoscape.min.js \
+  layout-base 2.0.1 34165e46d8c4b9d719a592e39a60fa5f7324c21a3edd02733e1116b17013defd layout-base.js \
+  cose-base 2.2.0 612ec91a30b7f2dc158cca4846eeea1b7f89a97fc672951da3c1932107de6da8 cose-base.js \
+  cytoscape-fcose 2.2.0 4e1f30e1821fdd4b66f21043c8ea40a8e2ad0ba75e4ccdd2c24d289cf5595432 cytoscape-fcose.js \
+  dagre 0.8.5 ffaf576ea24546aed65aa2bed174d77fe4fbfe7985aa6c4a7cd0293c1994c4ed dist/dagre.min.js \
+  cytoscape-dagre 2.5.0 cbb58d8e719b0c0ed891a140ab050af8aac35a11b0b51f0b4ec46238fce47577 cytoscape-dagre.js
+# The Network tab's icons and font: software logos from Simple Icons (CC0), each in its
+# brand colour; generic icons from Lucide (ISC); Inter (OFL) in three weights.
+SIMPLE_ICONS_VERSION ?= 16.37.0
+SIMPLE_ICONS_SHA256 ?= cd9faf0e6faa8a8fdd15e9632ab4c86fcae4b986fe552b87673149847f2f671d
+SIMPLE_ICONS := postgresql mysql mariadb redis mongodb apachekafka rabbitmq elasticsearch opensearch \
+  grafana prometheus nginx envoyproxy vault openbao etcd minio kubernetes
+LUCIDE_VERSION ?= 1.71.0
+LUCIDE_SHA256 ?= c53ba25989d0893250e1cb0a949e4ec04a4d9ed92bcc3f68246b2e1e31b78815
+LUCIDE_ICONS := server globe network box layers database boxes timer split router archive hard-drive key-round door-open users
+INTER_VERSION ?= 5.3.0
+INTER_SHA256 ?= 02034af8d41dcc67ac8eab88f642e129bb8a2e8922abf30229c32725f54d8fd6
+GRAPH_MARKER := assets/graph/cytoscape.js
+
+$(GRAPH_MARKER):
+	rm -rf assets/graph build/graph
+	mkdir -p assets/graph build/graph
+	set -e; set -- $(GRAPH_PACKAGES); while [ $$# -gt 0 ]; do \
+	  curl -fsSL -o build/graph/$$1.tgz https://registry.npmjs.org/$$1/-/$$1-$$2.tgz; \
+	  echo "$$3  build/graph/$$1.tgz" | sha256sum -c --quiet; \
+	  tar -xzf build/graph/$$1.tgz -O package/$$4 > assets/graph/$$1.js; \
+	  tar -xzf build/graph/$$1.tgz -O package/LICENSE > assets/graph/$$1.LICENSE.txt; \
+	  shift 4; done
+	mkdir -p assets/graph/icons assets/graph/fonts
+	curl -fsSL -o build/graph/simple-icons.tgz https://registry.npmjs.org/simple-icons/-/simple-icons-$(SIMPLE_ICONS_VERSION).tgz
+	echo "$(SIMPLE_ICONS_SHA256)  build/graph/simple-icons.tgz" | sha256sum -c --quiet
+	tar -xzf build/graph/simple-icons.tgz -O package/data/simple-icons.json > build/graph/simple-icons.json
+	set -e; for icon in $(SIMPLE_ICONS); do \
+	  tar -xzf build/graph/simple-icons.tgz -O package/icons/$$icon.svg > assets/graph/icons/$$icon.svg; \
+	  colour=$$(python3 -c "import json,sys; d=json.load(open('build/graph/simple-icons.json')); d=d['icons'] if isinstance(d,dict) else d; print(next(i['hex'] for i in d if i.get('slug', i['title'].lower().replace(' ', '')) == sys.argv[1]))" $$icon); \
+	  sed -i "s|<svg |<svg fill=\"#$$colour\" |" assets/graph/icons/$$icon.svg; done
+	tar -xzf build/graph/simple-icons.tgz -O package/LICENSE.md > assets/graph/simple-icons.LICENSE.txt
+	curl -fsSL -o build/graph/lucide-static.tgz https://registry.npmjs.org/lucide-static/-/lucide-static-$(LUCIDE_VERSION).tgz
+	echo "$(LUCIDE_SHA256)  build/graph/lucide-static.tgz" | sha256sum -c --quiet
+	set -e; for icon in $(LUCIDE_ICONS); do \
+	  tar -xzf build/graph/lucide-static.tgz -O package/icons/$$icon.svg > assets/graph/icons/lucide-$$icon.svg; done
+	tar -xzf build/graph/lucide-static.tgz -O package/LICENSE > assets/graph/lucide-static.LICENSE.txt
+	curl -fsSL -o build/graph/inter.tgz https://registry.npmjs.org/@fontsource/inter/-/inter-$(INTER_VERSION).tgz
+	echo "$(INTER_SHA256)  build/graph/inter.tgz" | sha256sum -c --quiet
+	set -e; for weight in 400 500 600; do \
+	  tar -xzf build/graph/inter.tgz -O package/files/inter-latin-$$weight-normal.woff2 > assets/graph/fonts/inter-$$weight.woff2; done
+	tar -xzf build/graph/inter.tgz -O package/LICENSE > assets/graph/inter.LICENSE.txt
+	rm -rf build/graph
+	touch src/server/dashboard-network.lisp
+
+graph-assets:
+	rm -rf assets/graph
+	$(MAKE) $(GRAPH_MARKER)
 
 dashboard-assets-from-source:
 	npm --prefix "$(HEADLAMP)/frontend" ci
