@@ -61,7 +61,7 @@ main { flex: 1; display: flex; min-height: 0; margin: 12px 16px; gap: 12px; }
 .card.selected { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow); }
 .card.faded { opacity: .28; }
 .card .top { display: flex; align-items: center; gap: 10px; }
-.tile { width: 34px; height: 34px; flex: none; border-radius: 9px; background: var(--tile); display: grid; place-items: center; }
+.tile { position: relative; width: 34px; height: 34px; flex: none; border-radius: 9px; background: var(--tile); display: grid; place-items: center; }
 .tile img { width: 20px; height: 20px; display: block; object-fit: contain; image-rendering: auto; }
 .tile .mask { width: 20px; height: 20px; -webkit-mask: var(--icon) center / contain no-repeat; mask: var(--icon) center / contain no-repeat; }
 .names { min-width: 0; flex: 1; }
@@ -69,6 +69,24 @@ main { flex: 1; display: flex; min-height: 0; margin: 12px 16px; gap: 12px; }
 .kind { color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .badge { flex: none; align-self: flex-start; font-size: 10.5px; font-weight: 600; color: var(--bad); background: var(--bad-soft);
   border-radius: 999px; padding: 1px 7px; }
+.shield { position: absolute; right: -5px; bottom: -5px; width: 17px; height: 17px; padding: 1.5px; border-radius: 50%;
+  color: var(--accent); background: var(--surface); box-shadow: 0 0 0 1px var(--line); }
+.shield svg { display: block; width: 14px; height: 14px; }
+.policy { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
+.policy.denied { border-color: var(--bad); background: var(--bad-soft); }
+.policy .conn { font-weight: 600; word-break: break-all; }
+.policy .verdict { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; margin-left: 6px; }
+.policy.denied .verdict { color: var(--bad); }
+.policy .side { margin-top: 6px; color: var(--muted); }
+.policy .side b { color: var(--text); font-weight: 500; }
+.suggestion { margin-top: 8px; }
+.suggestion .bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;
+  color: var(--muted); font-size: 11.5px; }
+.suggestion pre { margin: 0; padding: 8px 10px; font: 11.5px/1.45 ui-monospace, "SF Mono", Menlo, monospace; background: var(--bg);
+  border: 1px solid var(--line); border-radius: 8px; overflow: auto; white-space: pre; }
+.suggestion button { font: inherit; font-size: 11px; color: var(--muted);
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: 6px; padding: 1px 7px; cursor: pointer; }
+.note { color: var(--faint); font-size: 11.5px; margin-top: 4px; }
 .ports { display: flex; flex-wrap: nowrap; gap: 4px; margin-top: 8px; overflow: hidden; }
 .chip { flex: none; font-size: 10.5px; font-weight: 500; color: var(--chip-text); background: var(--chip); border-radius: 6px;
   padding: 1px 6px; white-space: nowrap; }
@@ -85,6 +103,8 @@ th { color: var(--muted); font-weight: 500; }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
 .dropped { color: var(--bad); }
 .link { color: var(--accent); cursor: pointer; }
+a.link { text-decoration: none; }
+a.link:hover { text-decoration: underline; }
 #flowtable { flex: none; height: 34%; overflow: auto; margin: 0 16px 12px; background: var(--surface); border: 1px solid var(--line);
   border-radius: 12px; box-shadow: var(--shadow); }
 #flowtable th { position: sticky; top: 0; background: var(--surface); }
@@ -133,7 +153,7 @@ const css = (name) => getComputedStyle(document.documentElement).getPropertyValu
 const CARD_WIDTH = 220, CARD_HEIGHT = 58, CARD_PORTS_HEIGHT = 26;
 const KIND_TINT = { Node: '--kind-node', Service: '--kind-service', Gateway: '--kind-service', Clients: '--kind-outside', LAN: '--kind-outside', External: '--kind-outside', World: '--kind-outside' };
 let graph = { nodes: [], edges: [] };
-let mode = 'live', laidOut = false, selected = null, cy = null;
+let mode = 'live', laidOut = false, selected = null, cy = null, policyView = null;
 const cards = new Map();
 
 function rate(n, window) {
@@ -198,7 +218,12 @@ function iconTile(node) {
   if (node.favicon) {
     // The app's own icon, read from its web UI by the dashboard; a raster image, never SVG.
     const img = el('img'); img.src = 'favicon?node=' + encodeURIComponent(node.id); img.alt = '';
-    img.onerror = () => { node.favicon = false; tile.replaceWith(iconTile(node)); };
+    img.onerror = () => {
+      node.favicon = false;
+      const plain = iconTile(node);
+      if (isolatedBy(node).length) plain.append(shield());
+      tile.replaceWith(plain);
+    };
     tile.append(img);
   } else if (node.icon.startsWith('lucide-')) {
     const mask = el('div', 'mask');
@@ -211,18 +236,35 @@ function iconTile(node) {
   return tile;
 }
 
+// The NetworkPolicies that isolate a workload's Pods, either way.
+function isolatedBy(node) {
+  const i = node.isolation;
+  return i ? [...new Set([...i.ingress, ...i.egress])] : [];
+}
+
+function shield() {
+  const span = el('span', 'shield');
+  span.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true">'
+    + '<path d="M12 3 4.5 6v5.5c0 4.6 3.2 8.2 7.5 9.5 4.3-1.3 7.5-4.9 7.5-9.5V6z"/><path d="m9 12 2 2 4-4" stroke-linecap="round"/></svg>';
+  span.title = 'A NetworkPolicy isolates it';
+  return span;
+}
+
 function renderCard(node, window) {
   let card = cards.get(node.id);
   if (!card) { card = el('div', 'card'); $('cards').append(card); cards.set(node.id, card); }
   const ports = inboundPorts(node.id, window);
   const dropped = droppedTo(node.id, window);
-  const key = JSON.stringify([node.name, node.kind, node.software, node.icon, node.favicon, ports.slice(0, 3), ports.length, dropped]);
+  const isolated = isolatedBy(node);
+  const key = JSON.stringify([node.name, node.kind, node.software, node.icon, node.favicon, ports.slice(0, 3), ports.length, dropped, isolated]);
   if (card.dataset.key === key) return ports.length ? CARD_HEIGHT + CARD_PORTS_HEIGHT : CARD_HEIGHT;
   card.dataset.key = key;
   const names = el('div', 'names');
   names.append(el('div', 'name', node.name), el('div', 'kind', kindLabel(node)));
   const top = el('div', 'top');
-  top.append(iconTile(node), names);
+  const tile = iconTile(node);
+  if (isolated.length) tile.append(shield());
+  top.append(tile, names);
   if (dropped) top.append(el('span', 'badge', dropped + ' dropped'));
   const parts = [top];
   if (ports.length) {
@@ -238,7 +280,8 @@ function renderCard(node, window) {
     parts.push(row);
   }
   card.replaceChildren(...parts);
-  card.title = node.name + ' (' + kindLabel(node) + (node.namespace ? ' in ' + node.namespace : '') + ')';
+  card.title = node.name + ' (' + kindLabel(node) + (node.namespace ? ' in ' + node.namespace : '') + ')'
+    + (isolated.length ? '\nIsolated by ' + isolated.join(', ') : '');
   const height = ports.length ? CARD_HEIGHT + CARD_PORTS_HEIGHT : CARD_HEIGHT;
   card.style.height = height + 'px';
   return height;
@@ -323,10 +366,24 @@ function draw() {
 }
 
 function namespaces() {
-  const select = $('namespace'), current = select.value;
+  const select = $('namespace'), current = linked.ns ?? select.value;
   const names = [...new Set(graph.nodes.map((n) => n.namespace).filter(Boolean))].sort();
   select.replaceChildren(new Option('All namespaces', ''), ...names.map((n) => new Option(n, n)));
   select.value = names.includes(current) ? current : '';
+  delete linked.ns;
+}
+
+// The view lives in the URL's hash, so it can be linked: #ns=cave&window=m15&edge=…&flows
+const linked = Object.fromEntries(new URLSearchParams(location.hash.slice(1)));
+function saveView() {
+  const view = new URLSearchParams();
+  if ($('namespace').value) view.set('ns', $('namespace').value);
+  if ($('window').value !== 'm5') view.set('window', $('window').value);
+  if ($('verdict').value !== 'all') view.set('verdict', $('verdict').value);
+  if (selected) view.set(selected.type, selected.id);
+  if (!$('flowtable').hidden) view.set('flows', '');
+  const hash = view.toString().replace(/flows=(&|$)/, 'flows$1');
+  history.replaceState(null, '', hash ? '#' + hash : location.pathname + location.search);
 }
 
 async function poll() {
@@ -358,7 +415,7 @@ function mark() {
   if (selected.type === 'node' && cards.get(selected.id)) cards.get(selected.id).classList.add('selected');
 }
 
-function select(what) { selected = what; mark(); showDetails(); }
+function select(what) { selected = what; mark(); showDetails(); saveView(); }
 
 function cell(text, cls) { return el('td', cls, text); }
 function row(...cells) { const tr = el('tr'); tr.append(...cells); return tr; }
@@ -383,8 +440,11 @@ async function showDetails() {
       table.append(row(cell(out ? '→' : '←'), peer, cell(e.ports.join(' ')), cell(rate(e[window].flows, window), 'num'),
         cell(e[window].dropped || '', e[window].dropped ? 'num dropped' : 'num')));
     }
-    aside.replaceChildren(el('h2', null, node.name), el('div', 'sub', kindLabel(node) + (node.namespace ? ' in ' + node.namespace : '')),
-      el('h3', null, 'Connections'), table);
+    const sub = el('div', 'sub', kindLabel(node) + (node.namespace ? ' in ' + node.namespace : ''));
+    if (headlampPath(node.kind, node.namespace, node.name))
+      sub.append(' · ', headlampLink('Open in Headlamp', node.kind, node.namespace, node.name));
+    aside.replaceChildren(el('h2', null, node.name), sub,
+      ...isolationSection(node), el('h3', null, 'Connections'), table);
     return;
   }
   const edge = graph.edges.find((e) => e.id === selected.id);
@@ -395,9 +455,15 @@ async function showDetails() {
     counts.append(row(cell(label), ...['m1', 'm5', 'm15'].map((w) => cell(edge[w][key], 'num'))));
   const flows = el('table');
   flows.append(head('Time', 'From → to', 'Port', 'Verdict'));
+  // The panel redraws with every poll; the policy view keeps its element, and re-reads the
+  // policies only every 15 s, so a suggestion being copied stays put.
+  const fresh = policyView && policyView.edge === edge.id && Date.now() - policyView.at < 15000;
+  if (!fresh) policyView = { edge: edge.id, at: Date.now(), node: el('div') };
+  const policy = policyView.node;
   aside.replaceChildren(el('h2', null, nodeName(edge.source) + ' → ' + nodeName(edge.target)),
     el('div', 'sub', edge.ports.join(' ') + (edge.latencyMs != null ? ' · median ' + edge.latencyMs + ' ms' : '')),
-    counts, el('h3', null, 'Latest flows'), flows);
+    counts, el('h3', null, 'Policy'), policy, el('h3', null, 'Latest flows'), flows);
+  if (!fresh) explainEdge(edge, policy);
   try {
     for (const f of await (await fetch('flows?edge=' + encodeURIComponent(edge.id))).json()) {
       const [from, to, port] = flowSides(f);
@@ -407,6 +473,100 @@ async function showDetails() {
         cell(f.verdict.toLowerCase() + dropReason(f), f.verdict === 'DROPPED' ? 'dropped' : '')));
     }
   } catch (error) { flows.append(row(cell('Cannot read the flows: ' + error.message))); }
+}
+
+// Headlamp's page for a resource, when this page is a tab of the dashboard beside it.
+const HEADLAMP_KINDS = { Deployment: 'deployments', StatefulSet: 'statefulsets', DaemonSet: 'daemonsets', Job: 'jobs',
+                         Pod: 'pods', Service: 'services', NetworkPolicy: 'networkpolicies' };
+function headlampPath(kind, namespace, name) {
+  if (window.parent === window) return null;
+  if (kind === 'Node') return 'c/gr8s/nodes/' + encodeURIComponent(name);
+  return HEADLAMP_KINDS[kind] && namespace
+    ? 'c/gr8s/' + HEADLAMP_KINDS[kind] + '/' + encodeURIComponent(namespace) + '/' + encodeURIComponent(name) : null;
+}
+function headlampLink(text, kind, namespace, name) {
+  const path = headlampPath(kind, namespace, name);
+  if (!path) return document.createTextNode(text);
+  const a = el('a', 'link', text);
+  a.href = '#'; a.title = 'Open ' + kind + ' ' + (namespace ? namespace + '/' : '') + name + ' in Headlamp';
+  a.onclick = (event) => { event.preventDefault(); window.parent.postMessage({ open: 'headlamp', path }, location.origin); };
+  return a;
+}
+// "namespace/name" of NetworkPolicies, each a link to it in Headlamp.
+function policyLinks(names) {
+  const out = [];
+  names.forEach((qualified, i) => {
+    if (i) out.push(document.createTextNode(', '));
+    const [namespace, name] = qualified.split('/');
+    out.push(headlampLink(qualified, 'NetworkPolicy', namespace, name));
+  });
+  return out;
+}
+
+function isolationSection(node) {
+  if (!node.isolation) return [];
+  const { ingress, egress } = node.isolation;
+  const line = (label, names, open) => {
+    const div = el('div', 'side');
+    div.append(el('b', null, label + ': '));
+    if (names.length) div.append('only what ', ...policyLinks(names), ' allows');
+    else div.append(open);
+    return div;
+  };
+  const box = el('div', 'policy');
+  box.append(line('Arriving', ingress, 'open, no policy isolates it'), line('Leaving', egress, 'open, no policy isolates it'));
+  return [el('h3', null, 'Policy'), box];
+}
+
+const VERDICT_TEXT = { open: 'open: no policy isolates it this way', 'not-a-pod': 'outside the cluster: no policy applies here' };
+
+function explainSide(label, side) {
+  const div = el('div', 'side');
+  div.append(el('b', null, label + ': '));
+  if (side.verdict === 'allowed') {
+    div.append('allowed by ');
+    side.allowedBy.forEach((a, i) => div.append(i ? ', ' : '', ...policyLinks([a.policy]), ' (rule ' + a.rule + ')'));
+  } else if (side.verdict === 'denied') {
+    div.append('denied: ', ...policyLinks(side.isolatedBy), side.isolatedBy.length > 1 ? ' isolate' : ' isolates',
+      ' it, and no rule admits this');
+  } else div.append(VERDICT_TEXT[side.verdict]);
+  const out = [div];
+  if (side.suggestion) {
+    const box = el('div', 'suggestion'), bar = el('div', 'bar'), copy = el('button', null, 'Copy');
+    const pre = el('pre', null, side.suggestion.replace(/^#.*\n/, ''));
+    bar.append(el('span', null, (side.suggestion.match(/^# (.*):\n/) || [, 'Suggested rule'])[1]), copy);
+    copy.onclick = async () => {
+      try { await navigator.clipboard.writeText(side.suggestion); copy.textContent = 'Copied'; }
+      catch (error) { copy.textContent = 'Select and copy'; }
+      setTimeout(() => { copy.textContent = 'Copy'; }, 1500);
+    };
+    box.append(bar, pre);
+    out.push(box);
+  }
+  return out;
+}
+
+async function explainEdge(edge, into) {
+  into.replaceChildren(el('div', 'note', 'Reading the policies…'));
+  let explained;
+  try { explained = await (await fetch('explain?edge=' + encodeURIComponent(edge.id))).json(); }
+  catch (error) { into.replaceChildren(el('div', 'note', 'Cannot read the policies: ' + error.message)); return; }
+  if (selected?.id !== edge.id) return;
+  if (!explained.length) {
+    into.replaceChildren(el('div', 'note', 'No Pod-to-Pod connection here to explain: policy applies to Pods.'));
+    return;
+  }
+  // Denied first: those are what needs a fix.
+  explained.sort((a, b) => (b.explanation.verdict === 'denied') - (a.explanation.verdict === 'denied') || b.dropped - a.dropped);
+  const boxes = explained.map((c) => {
+    const { egress, ingress, verdict } = c.explanation;
+    const box = el('div', 'policy' + (verdict === 'denied' ? ' denied' : ''));
+    const conn = el('div', 'conn', c.source + ' → ' + c.destination + ' ' + (c.port != null ? c.port + '/' : '') + c.protocol);
+    conn.append(el('span', 'verdict', verdict + (c.dropped ? ' · ' + c.dropped + ' dropped' : '')));
+    box.append(conn, ...explainSide('Leaving ' + c.source, egress), ...explainSide('Arriving at ' + c.destination, ingress));
+    return box;
+  });
+  into.replaceChildren(...boxes, el('div', 'note', 'As the policies are now; a suggested rule is a starting point to review, never applied for you.'));
 }
 
 function dropReason(f) {
@@ -452,7 +612,7 @@ function setMode(next) {
   draw();
 }
 
-const refilter = () => { laidOut = false; draw(); if (!$('flowtable').hidden) showFlows(); };
+const refilter = () => { laidOut = false; draw(); if (!$('flowtable').hidden) showFlows(); saveView(); };
 
 document.fonts.ready.then(() => {
   makeGraph();
@@ -465,11 +625,19 @@ document.fonts.ready.then(() => {
     $('showflows').setAttribute('aria-pressed', open);
     if (open) showFlows();
     cy.resize();
+    saveView();
   };
   for (const id of ['namespace', 'window', 'verdict']) $(id).onchange = refilter;
   $('search').oninput = refilter;
-  if (location.hash.includes('flows')) $('showflows').click();
-  poll();
+  for (const id of ['window', 'verdict'])
+    if (linked[id] && [...$(id).options].some((o) => o.value === linked[id])) $(id).value = linked[id];
+  if ('flows' in linked) $('showflows').click();
+  poll().then(() => {
+    // A linked selection, once the graph it names has been read.
+    if (linked.edge && graph.edges.some((e) => e.id === linked.edge)) select({ type: 'edge', id: linked.edge });
+    else if (linked.node && graph.nodes.some((n) => n.id === linked.node)) select({ type: 'node', id: linked.node });
+    if (selected) cy.fit(undefined, 40);
+  });
   setInterval(() => { if (!document.hidden) poll(); }, 2000);
 });
 </script>

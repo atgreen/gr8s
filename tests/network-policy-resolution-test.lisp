@@ -419,3 +419,85 @@ Return (values result final-contents events)."
            (is (= 1 converged)))
       (sb-int:unencapsulate 'gr8s.agent::converge-node-network-policies-unlocked 'npr-count)
       (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))
+
+;;; Explaining a connection (podster-5hv.3)
+
+(defun npr-spec (namespace name spec)
+  (let ((object (npr-policy namespace spec)))
+    (setf (gethash "name" (gethash "metadata" object)) name)
+    (gr8s.network::parse-network-policy-json object)))
+
+(defun npr-explain (specs source destination port &optional (protocol "TCP") (namespace-labels (make-hash-table :test #'equal)))
+  (gr8s.network::explain-network-connection specs source destination port protocol namespace-labels))
+
+(defun npr-side (explanation side &optional (key "verdict"))
+  (gethash key (gethash side explanation)))
+
+(test npr-explains-open-allowed-and-denied-connections
+  (let* ((web (list :pod (npr-pod "web-7c9-x" "shop" "10.0.0.5" "app" "web" "pod-template-hash" "7c9")))
+         (db (list :pod (gr8s.network::make-np-pod :name "db-0" :namespace "shop" :ip "10.0.0.9"
+                                                   :labels (gr8s.network::np-labels "app" "db")
+                                                   :ports '(("pg" :tcp 5432)))))
+         (lonely (list :pod (npr-pod "lonely" "shop" "10.0.0.7" "app" "lonely")))
+         (specs (list (npr-spec "shop" "db" "{\"podSelector\":{\"matchLabels\":{\"app\":\"db\"}},
+                        \"ingress\":[{\"ports\":[{\"port\":9187}]},
+                                     {\"from\":[{\"podSelector\":{\"matchLabels\":{\"app\":\"web\"}}}],
+                                      \"ports\":[{\"port\":\"pg\"}]}]}"))))
+    ;; Nothing isolates web, so leaving it is open; db's second rule admits it by named port.
+    (let ((e (npr-explain specs web db 5432)))
+      (is (equal "allowed" (gethash "verdict" e)))
+      (is (equal "open" (npr-side e "egress")))
+      (is (equal "allowed" (npr-side e "ingress")))
+      (is (equalp #("shop/db") (npr-side e "ingress" "isolatedBy")))
+      (let ((by (aref (npr-side e "ingress" "allowedBy") 0)))
+        (is (equal "shop/db" (gethash "policy" by)))
+        (is (= 2 (gethash "rule" by)))))
+    ;; The first rule has no peers, so it admits anyone on 9187.
+    (is (equal "allowed" (gethash "verdict" (npr-explain specs lonely db 9187))))
+    ;; lonely to pg matches neither rule: denied, with a rule selecting lonely by its app label.
+    (let* ((e (npr-explain specs lonely db 5432))
+           (suggestion (npr-side e "ingress" "suggestion")))
+      (is (equal "denied" (gethash "verdict" e)))
+      (is (equalp #() (npr-side e "ingress" "allowedBy")))
+      (is (search "# Add to shop/db, under spec.ingress:" suggestion))
+      (is (search "app: lonely" suggestion))
+      (is (search "port: 5432" suggestion))
+      (is (null (search "namespaceSelector" suggestion)) "same namespace"))
+    ;; A Pod's suggestion leaves out the labels that tell replicas apart.
+    (let ((suggestion (npr-side (npr-explain (list (npr-spec "shop" "deny" "{\"podSelector\":{}}")) web db 80)
+                                "ingress" "suggestion")))
+      (is (search "app: web" suggestion))
+      (is (null (search "pod-template-hash" suggestion))))))
+
+(test npr-explains-namespaces-blocks-and-egress
+  (let* ((prom (list :pod (npr-pod "prom-0" "monitoring" "10.0.1.4" "app.kubernetes.io/name" "prometheus")))
+         (api (list :pod (npr-pod "api-1" "shop" "10.0.0.6" "app" "api")))
+         (outside (list :address "203.0.113.8"))
+         (namespace-labels (let ((table (make-hash-table :test #'equal)))
+                             (setf (gethash "monitoring" table) (gr8s.network::np-labels "kubernetes.io/metadata.name" "monitoring"))
+                             table))
+         (specs (list (npr-spec "shop" "api" "{\"podSelector\":{\"matchLabels\":{\"app\":\"api\"}},
+                        \"policyTypes\":[\"Ingress\",\"Egress\"],
+                        \"ingress\":[{\"from\":[{\"ipBlock\":{\"cidr\":\"203.0.113.0/24\",\"except\":[\"203.0.113.8/32\"]}}]}],
+                        \"egress\":[{\"to\":[{\"ipBlock\":{\"cidr\":\"0.0.0.0/0\"}}],\"ports\":[{\"port\":443}]}]}"))))
+    ;; A Pod in another namespace gets a namespaceSelector beside its podSelector.
+    (let ((suggestion (npr-side (npr-explain specs prom api 8080 "TCP" namespace-labels) "ingress" "suggestion")))
+      (is (search "app.kubernetes.io/name: prometheus" suggestion))
+      (is (search "kubernetes.io/metadata.name: monitoring" suggestion)))
+    ;; The excepted address is denied, and the suggestion names it as a /32.
+    (let ((e (npr-explain specs outside api 8080)))
+      (is (equal "denied" (gethash "verdict" e)))
+      (is (equal "not-a-pod" (npr-side e "egress")))
+      (is (search "cidr: 203.0.113.8/32" (npr-side e "ingress" "suggestion"))))
+    (is (equal "allowed" (gethash "verdict" (npr-explain specs (list :address "203.0.113.9") api 8080))))
+    ;; Egress: 443 out is allowed, 80 is denied leaving api.
+    (is (equal "allowed" (npr-side (npr-explain specs api outside 443) "egress")))
+    (let ((e (npr-explain specs api outside 80)))
+      (is (equal "denied" (npr-side e "egress")))
+      (is (search "spec.egress:" (npr-side e "egress" "suggestion")))
+      (is (equal "not-a-pod" (npr-side e "ingress"))))
+    ;; ICMP can't be named by a port, so only a port-less rule would admit it.
+    (is (search "No ports" (npr-side (npr-explain specs prom api nil "ICMPv4" namespace-labels) "ingress" "suggestion")))
+    (multiple-value-bind (ingress egress) (gr8s.network::np-pod-isolation specs (second api))
+      (is (equal '("shop/api") ingress))
+      (is (equal '("shop/api") egress)))))

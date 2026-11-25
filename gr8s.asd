@@ -281,6 +281,7 @@
                                            (:file "service-packet-upgrade")
                                            (:file "network-policy-program")
                                            (:file "network-policy")
+                                           (:file "network-policy-explain")
                                            (:file "vxlan")
                                            (:file "wireguard-telemetry-program")
                                            (:file "wireguard-telemetry")
