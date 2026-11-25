@@ -515,6 +515,27 @@ persists that assignment and restores IPAM before restarting reconciliation. con
 requests to the agent's private Unix socket. CNI ADD retains its durable lease
 through partial failures; DEL releases it only after removing policy and links.
 
+### Traffic leaving the cluster
+
+A Pod's address means nothing outside the cluster: a router upstream has no
+route back to `10.80.x`, so a Pod's packet to the LAN or the internet would go
+out and its reply never come. Each agent therefore masquerades traffic from its
+node's Pod CIDRs to any address outside the cluster's Pod CIDRs as the node's
+own address, as Flannel, Calico and Cilium do by default. The rule is an nftables
+table of its own, `gr8s-egress`, which the agent replaces whenever the node's
+network changes and removes when the node leaves. Pod-to-Pod traffic, on one
+node or across the overlay, keeps its addresses, so NetworkPolicy and flow
+events see the real peer; a Service's ClusterIP has already been translated to
+a Pod's address by then. Masquerading applies when a connection starts, so the
+replies of a connection made *to* a Pod, through a NodePort or the Gateway, are
+not rewritten. An egress NetworkPolicy still sees the Pod's own address: the
+guard runs at the Pod's veth, before the node translates anything.
+
+On a network that routes the Pod CIDRs to the nodes itself (BGP, or static
+routes on the router), start the agents with `--pod-masquerade off` and Pods
+reach the outside with their own addresses; the agent then removes the table.
+
+
 For packet-Service endpoints with IPv4, CNI ADD reserves a private IPv4 Service
 translation address from the node's pool in addition to the ordinary Pod lease.
 After policy installation succeeds, ADD installs a `/32` host return route and
