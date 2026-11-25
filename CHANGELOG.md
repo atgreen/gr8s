@@ -54,6 +54,12 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- `kubectl exec` of a command that can't start says why, as Kubernetes does
+  (podster-dcz): `executable file not found in $PATH`, not a bare "command
+  terminated with exit code 1". The agent dropped the runtime's reason when a
+  status had no exit code. This is what distroless images (no shell, no
+  coreutils) hit: exec works in them, but only for programs they contain.
+
 - Pods can reach the LAN and the internet (podster-swq). gr8s masqueraded Pod
   traffic only to other nodes and the API, so a Pod's packets left with its
   private address and replies never came back. Each agent now masquerades its
