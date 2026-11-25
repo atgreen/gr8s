@@ -51,6 +51,7 @@ version skew between components.
 | Ingress controller, Gateway API implementation, LoadBalancer provider | Built in |
 | local-path provisioner, NFS volumes | Built in; CSI drivers still work |
 | metrics-server, cAdvisor | Built in; `kubectl top` and Prometheus scrapes work |
+| OpenTelemetry for ingress and network flows | Built in: the Gateway traces every request it serves and joins your applications' traces; flow events ship as logs, both over OTLP |
 | Kubernetes dashboard | Built-in Headlamp and a live network map: `gr8s dashboard` |
 | Certificate management | Automatic leaf renewal, staged CA rotation, one-time join tokens |
 | bpftrace, debug tooling | `gr8s debug trace` and a live Lisp REPL into any node |
@@ -354,7 +355,7 @@ The implemented API surface includes:
 | Configuration and identity | ConfigMaps, Secrets, ServiceAccounts, bound tokens, RBAC, certificate issuance, admission webhooks, CEL admission policies |
 | Networking | ClusterIP, NodePort and LoadBalancer Services, EndpointSlices, NetworkPolicy, Gateway API, cluster DNS |
 | Storage | PersistentVolumes and Claims, StorageClasses, local-path provisioning, NFS, CSI drivers |
-| Observability | Metrics endpoints, [Lisp heap/GC, Raft and filesystem metrics](docs/control-plane-metrics.md), cAdvisor and API server/scheduler series, resource metrics for `kubectl top` |
+| Observability | Metrics endpoints, [Lisp heap/GC, Raft and filesystem metrics](docs/control-plane-metrics.md), cAdvisor and API server/scheduler series, resource metrics for `kubectl top`, OpenTelemetry: Gateway request traces and flow events as logs over OTLP |
 | Extensibility | Schema-backed custom resources, defaulting, pruning, validation, finalizers |
 
 Support varies by feature. This overview does not imply complete upstream
@@ -459,6 +460,18 @@ does not have yet is fetched from the registry by one node, and the others
 download its pieces from every node that already holds them. Peers
 authenticate each other with cluster certificates over mutual TLS, and each
 piece is checked against the layer's digest.
+
+The Gateway speaks OpenTelemetry. It records a span for every request it serves,
+joins the trace a client's W3C `traceparent` names or starts one, and hands the
+backend its span as the parent, so an instrumented application's spans nest
+under it: one trace shows the browser's request, the Gateway's hop and the
+application's own work. Agents can also ship their flow events -- connections,
+drops and why -- as OTLP log records, each Gateway request linked to its trace.
+Both are configured with OpenTelemetry's standard `OTEL_*` environment
+variables and send to any OTLP receiver: an OpenTelemetry Collector, Tempo,
+Jaeger, Loki or a vendor. A dashboard tab that shows traces (Grafana with Tempo,
+for one) lets the Network view open a slow edge's requests as traces;
+[`deploy/lab`](deploy/lab) has a working Tempo setup.
 
 See [Networking & the eBPF dataplane](docs/networking.md) for configuration,
 protocol details, and operational behavior.
