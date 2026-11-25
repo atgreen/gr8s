@@ -85,6 +85,8 @@
                  :id id :name (hubble-ui-service-name endpoint id)
                  :namespace (slot-value endpoint 'gr8s.hubble.observer::namespace)
                  :labels (slot-value endpoint 'gr8s.hubble.observer::labels)
+                 ;; Hubble UI titles a card with no app label by its workload.
+                 :workloads (slot-value endpoint 'gr8s.hubble.observer::workloads)
                  :identity (slot-value endpoint 'gr8s.hubble.observer::identity)
                  :creation-timestamp (hubble-now)))
 

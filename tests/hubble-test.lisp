@@ -122,7 +122,12 @@
            (destination (slot-value service-flow 'gr8s.hubble.observer::destination)))
       (is (equal "gvision" (slot-value destination 'gr8s.hubble.observer::namespace)))
       (is (/= 2 (slot-value destination 'gr8s.hubble.observer::identity)))
-      (is (equal "gvision" (gr8s.server::hubble-ui-service-name destination "id"))))
+      (is (equal "gvision" (gr8s.server::hubble-ui-service-name destination "id")))
+      ;; Hubble UI titles a card with no app label by its workload, else "Unknown App".
+      (is (equal '("gvision")
+                 (mapcar (lambda (workload) (slot-value workload 'gr8s.hubble.observer::name))
+                         (slot-value (gr8s.server::hubble-ui-service destination "id")
+                                     'gr8s.hubble.observer::workloads)))))
     (signals error (gr8s.server::check-hubble-filter (hubble-filter :http-status-code '("2xx"))))
     (signals error (gr8s.server::check-hubble-filter (hubble-filter :http-path '("(unclosed"))))))
 
