@@ -926,15 +926,22 @@ hubble observe --verdict DROPPED --namespace shop
 It serves `GetFlows`, `GetNodes` and `ServerStatus`. It applies Hubble's flow
 filters on the server, as Hubble does, and refuses one it can't apply
 (Services) instead of widening it; one on DNS names matches nothing. Flows carry Pod labels as
-`k8s:` labels and a numeric identity derived from the Pod's name, since gr8s
-has no Cilium security identities.
+`k8s:` labels and a numeric identity derived, as Cilium's are, from the Pod's
+namespace and labels without the ones that tell replicas apart
+(`pod-template-hash` and the like), so a workload's replicas share one.
 
-`gr8s dashboard` serves Hubble UI's embedded frontend as its Hubble tab, beside
-Headlamp, on a loopback port under an unguessable path. gr8s implements Hubble UI's backend itself: the UI's two streams,
-the namespaces and the service map, read the same flows API with the
-kubeconfig's credentials. A card is one Pod identity, as in Cilium, and an
-address gr8s doesn't know as a Pod is the world. The service map shows what
-flow events show: drops and new connections, not each packet or byte.
+`gr8s dashboard`'s Network tab draws the same flows as a service map, on a
+loopback port under an unguessable path, read with the kubeconfig's
+credentials. A node of the map is a workload -- a Pod resolved through its
+owners to its Deployment, StatefulSet, DaemonSet or Job -- or a Service, a
+Gateway, a cluster node, the LAN, or the world. A Gateway sits between the
+clients it serves (the world for a public address, the LAN's clients for a
+private one) and the workloads its routes send to. An edge counts a connection
+once over the last 1, 5 and 15 minutes, with its drops, HTTP errors and median
+latency, and keeps its latest flows; the map shows what flow events show, drops
+and new connections, not each packet or byte. A card's icon is the app's own
+favicon when it has a web UI, read through the Service proxy, else the
+software its image shows it to be, else its kind.
 
 On a foreign cluster, where gr8s-net provides the network and nothing serves
 `/apis/gr8s.io/v1/flows`, each `gr8s net-agent` collects its node's flow
@@ -942,7 +949,7 @@ events the same way and serves them on `127.0.0.1:4246` (`--flow-port`). It
 opens no port on the node: the agent Pod is on the host network, and a reader
 reaches it through the cluster API's `pods/portforward`, which the kubelet
 connects to loopback. `gr8s doctor observe` (with or without `--serve`) and
-`gr8s dashboard`'s Hubble tab do this by themselves when the cluster doesn't serve the
+`gr8s dashboard`'s Network tab do this by themselves when the cluster doesn't serve the
 gr8s.io API: they find the agent Pods by their `app.kubernetes.io/name=gr8s-net`
 label, read every node's stream, and name peers and isolating policies from
 the Pods and NetworkPolicies they list. The reader's credentials need `list`

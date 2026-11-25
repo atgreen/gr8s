@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gr8s Network</title>
+<style>
+@font-face { font-family: "Inter"; font-weight: 400; font-display: swap; src: url(fonts/inter-400.woff2) format("woff2"); }
+@font-face { font-family: "Inter"; font-weight: 500; font-display: swap; src: url(fonts/inter-500.woff2) format("woff2"); }
+@font-face { font-family: "Inter"; font-weight: 600; font-display: swap; src: url(fonts/inter-600.woff2) format("woff2"); }
+:root {
+  --bg: #f4f6f9; --dots: #dde2ea; --surface: #ffffff; --line: #e3e7ed; --line-strong: #cfd6df;
+  --text: #1f2733; --muted: #6a7587; --faint: #98a2b3; --accent: #2f6fed; --accent-soft: #e8efff;
+  --bad: #d92d20; --bad-soft: #fdecea; --warn: #c27c0e; --edge: #a3adbb; --group: rgba(225, 231, 239, 0.55);
+  --chip: #f2edfe; --chip-text: #6941c6; --tile: #f2f4f7; --shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 6px 16px rgba(16, 24, 40, 0.08);
+  --kind-workload: #2f6fed; --kind-node: #667085; --kind-service: #7a5af8; --kind-outside: #12a150;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #11151b; --dots: #1e252e; --surface: #1a2029; --line: #2a323d; --line-strong: #39424f;
+    --text: #e4e8ee; --muted: #9aa4b2; --faint: #6d7785; --accent: #6a9bff; --accent-soft: #1d2a45;
+    --bad: #ff6b5f; --bad-soft: #3a1d1b; --warn: #e2a33a; --edge: #5d6876; --group: rgba(40, 48, 59, 0.55);
+    --chip: #2a2140; --chip-text: #c3a9ff; --tile: #232a35; --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 18px rgba(0, 0, 0, 0.35);
+    --kind-workload: #6a9bff; --kind-node: #a0a9b6; --kind-service: #a38bff; --kind-outside: #3ccb7f;
+  }
+}
+[hidden] { display: none !important; }
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+  font: 13px/1.4 "Inter", system-ui, -apple-system, "Segoe UI", sans-serif; font-feature-settings: "cv11", "tnum"; }
+body { display: flex; flex-direction: column; }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 16px; margin: 12px 16px 0;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); flex: none; }
+.group { display: inline-flex; align-items: center; gap: 6px; }
+.label { color: var(--muted); font-size: 12px; }
+select, input { font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--line-strong);
+  border-radius: 8px; padding: 5px 9px; }
+input[type=search] { width: 190px; }
+.segmented { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 8px; overflow: hidden; }
+.segmented button, .plain { font: inherit; font-weight: 500; color: var(--muted); background: var(--surface); border: 0;
+  padding: 5px 12px; cursor: pointer; }
+.segmented button + button { border-left: 1px solid var(--line-strong); }
+.segmented button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+.plain { border: 1px solid var(--line-strong); border-radius: 8px; }
+.plain[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#status { margin-left: auto; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+#status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--kind-outside); }
+#status.bad { color: var(--bad); }
+#status.bad::before { background: var(--bad); }
+main { flex: 1; display: flex; min-height: 0; margin: 12px 16px; gap: 12px; }
+#stage { flex: 1; position: relative; min-width: 0; border-radius: 12px; overflow: hidden; border: 1px solid var(--line);
+  background-color: var(--bg); background-image: radial-gradient(var(--dots) 1px, transparent 1px); background-size: 18px 18px; }
+#graph, #cards { position: absolute; inset: 0; }
+#cards { pointer-events: none; overflow: hidden; }
+#empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 14px; }
+.card { position: absolute; left: 0; top: 0; width: 220px; padding: 10px 12px; background: var(--surface);
+  border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); transform-origin: 0 0;
+  transition: opacity .15s, box-shadow .15s, border-color .15s; will-change: transform; }
+.card.hover { border-color: var(--line-strong); box-shadow: 0 2px 4px rgba(16, 24, 40, .08), 0 10px 24px rgba(16, 24, 40, .14); }
+.card.selected { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow); }
+.card.faded { opacity: .28; }
+.card .top { display: flex; align-items: center; gap: 10px; }
+.tile { width: 34px; height: 34px; flex: none; border-radius: 9px; background: var(--tile); display: grid; place-items: center; }
+.tile img { width: 20px; height: 20px; display: block; object-fit: contain; image-rendering: auto; }
+.tile .mask { width: 20px; height: 20px; -webkit-mask: var(--icon) center / contain no-repeat; mask: var(--icon) center / contain no-repeat; }
+.names { min-width: 0; flex: 1; }
+.name { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kind { color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.badge { flex: none; align-self: flex-start; font-size: 10.5px; font-weight: 600; color: var(--bad); background: var(--bad-soft);
+  border-radius: 999px; padding: 1px 7px; }
+.ports { display: flex; flex-wrap: nowrap; gap: 4px; margin-top: 8px; overflow: hidden; }
+.chip { flex: none; font-size: 10.5px; font-weight: 500; color: var(--chip-text); background: var(--chip); border-radius: 6px;
+  padding: 1px 6px; white-space: nowrap; }
+.chip .proto { opacity: .65; margin-left: 2px; }
+.chip.more { color: var(--muted); background: var(--tile); }
+aside { width: 380px; flex: none; background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: var(--shadow); overflow: auto; padding: 16px; }
+aside h2 { font-size: 15px; font-weight: 600; margin: 0 0 2px; word-break: break-all; }
+aside h3 { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin: 16px 0 6px; }
+aside .sub { color: var(--muted); margin-bottom: 10px; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 500; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.dropped { color: var(--bad); }
+.link { color: var(--accent); cursor: pointer; }
+#flowtable { flex: none; height: 34%; overflow: auto; margin: 0 16px 12px; background: var(--surface); border: 1px solid var(--line);
+  border-radius: 12px; box-shadow: var(--shadow); }
+#flowtable th { position: sticky; top: 0; background: var(--surface); }
+#flowtable th, #flowtable td { padding: 6px 12px; white-space: nowrap; }
+#flowtable tbody tr { cursor: pointer; }
+#flowtable tbody tr:hover { background: var(--bg); }
+</style>
+</head>
+<body>
+<header>
+  <span class="group"><span class="label">Namespace</span><select id="namespace"><option value="">All namespaces</option></select></span>
+  <span class="group"><span class="label">Last</span>
+    <select id="window"><option value="m1">1 minute</option><option value="m5" selected>5 minutes</option><option value="m15">15 minutes</option></select></span>
+  <select id="verdict" aria-label="Verdict"><option value="all">All traffic</option><option value="dropped">Dropped only</option></select>
+  <input id="search" type="search" placeholder="Find a workload" aria-label="Find a workload">
+  <span class="segmented" role="group" aria-label="Layout">
+    <button id="live" aria-pressed="true" title="Stable layout: nodes stay where they are as traffic changes">Live</button>
+    <button id="flow" aria-pressed="false" title="Left to right, by where traffic flows">Flow</button>
+  </span>
+  <button id="tidy" class="plain" title="Lay the graph out again">Tidy</button>
+  <button id="showflows" class="plain" aria-pressed="false" title="The latest flows, as the filters select them">Flows</button>
+  <span id="status" role="status">Reading the cluster's flows…</span>
+</header>
+<main>
+  <div id="stage">
+    <div id="graph"></div>
+    <div id="cards"></div>
+    <div id="empty" hidden></div>
+  </div>
+  <aside id="details" hidden></aside>
+</main>
+<section id="flowtable" hidden>
+  <table><thead><tr><th>Time</th><th>Source</th><th>Destination</th><th>Port</th><th>Verdict</th><th>Details</th></tr></thead>
+  <tbody id="flowrows"></tbody></table>
+</section>
+<script src="assets/cytoscape.js"></script>
+<script src="assets/layout-base.js"></script>
+<script src="assets/cose-base.js"></script>
+<script src="assets/cytoscape-fcose.js"></script>
+<script src="assets/dagre.js"></script>
+<script src="assets/cytoscape-dagre.js"></script>
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const CARD_WIDTH = 220, CARD_HEIGHT = 58, CARD_PORTS_HEIGHT = 26;
+const KIND_TINT = { Node: '--kind-node', Service: '--kind-service', Gateway: '--kind-service', Clients: '--kind-outside', LAN: '--kind-outside', External: '--kind-outside', World: '--kind-outside' };
+let graph = { nodes: [], edges: [] };
+let mode = 'live', laidOut = false, selected = null, cy = null;
+const cards = new Map();
+
+function rate(n, window) {
+  const r = n / { m1: 1, m5: 5, m15: 15 }[window];
+  return (r >= 10 ? Math.round(r) : Math.round(r * 10) / 10) + '/min';
+}
+function kindLabel(node) { return node.software ? node.kind + ' · ' + node.software : node.kind; }
+function el(tag, className, text) { const e = document.createElement(tag); if (className) e.className = className; if (text != null) e.textContent = text; return e; }
+
+function makeGraph() {
+  cy = cytoscape({ container: $('graph'), minZoom: 0.15, maxZoom: 2.5, wheelSensitivity: 0.25, style: [
+    // The cards are HTML drawn over these nodes; the nodes only hold their place and take clicks.
+    { selector: 'node', style: { shape: 'round-rectangle', width: 'data(width)', height: 'data(height)',
+      'background-opacity': 0, 'border-width': 0, label: '' } },
+    { selector: 'node[?group]', style: { 'background-color': css('--group'), 'background-opacity': 1, shape: 'round-rectangle',
+      'corner-radius': 14, label: 'data(label)', 'text-valign': 'top', 'text-halign': 'center', 'text-margin-y': -6,
+      'font-family': 'Inter, system-ui, sans-serif', 'font-size': 12, 'font-weight': 600, color: css('--muted'), padding: 22 } },
+    { selector: 'edge', style: { width: 'data(width)', 'line-color': css('--edge'), 'target-arrow-color': css('--edge'),
+      'target-arrow-shape': 'triangle', 'arrow-scale': 0.9, 'curve-style': 'bezier', 'control-point-step-size': 40,
+      label: 'data(label)', 'font-family': 'Inter, system-ui, sans-serif', 'font-size': 10, 'font-weight': 500, color: css('--muted'),
+      'text-background-color': css('--surface'), 'text-background-opacity': 1, 'text-background-padding': 3,
+      'text-background-shape': 'round-rectangle', 'text-border-color': css('--line'), 'text-border-width': 1, 'text-border-opacity': 1 } },
+    { selector: 'edge[?errors]', style: { 'line-color': css('--warn'), 'target-arrow-color': css('--warn'), color: css('--warn') } },
+    { selector: 'edge[?dropped]', style: { 'line-color': css('--bad'), 'target-arrow-color': css('--bad'), 'line-style': 'dashed',
+      'line-dash-pattern': [6, 4], color: css('--bad') } },
+    { selector: 'edge.hover, edge:selected', style: { 'line-color': css('--accent'), 'target-arrow-color': css('--accent'), color: css('--accent'), 'z-index': 10 } },
+    { selector: '.faded', style: { opacity: 0.18 } }] });
+  cy.on('tap', 'node[!group]', (event) => select({ type: 'node', id: event.target.id() }));
+  cy.on('tap', 'edge', (event) => select({ type: 'edge', id: event.target.id() }));
+  cy.on('tap', (event) => { if (event.target === cy) select(null); });
+  cy.on('mouseover', 'node[!group]', (event) => { const c = cards.get(event.target.id()); if (c) c.classList.add('hover'); $('graph').style.cursor = 'pointer'; });
+  cy.on('mouseout', 'node[!group]', (event) => { const c = cards.get(event.target.id()); if (c) c.classList.remove('hover'); $('graph').style.cursor = ''; });
+  cy.on('mouseover', 'edge', (event) => { event.target.addClass('hover'); $('graph').style.cursor = 'pointer'; });
+  cy.on('mouseout', 'edge', (event) => { event.target.removeClass('hover'); $('graph').style.cursor = ''; });
+  let frame = null;
+  cy.on('render', () => { if (!frame) frame = requestAnimationFrame(() => { frame = null; placeCards(); }); });
+}
+
+// Each card follows its node: same centre, scaled with the zoom.
+function placeCards() {
+  const zoom = cy.zoom();
+  cy.nodes('[!group]').forEach((node) => {
+    const card = cards.get(node.id());
+    if (!card) return;
+    const p = node.renderedPosition();
+    const w = node.data('width'), h = node.data('height');
+    card.style.transform = `translate(${p.x - (w * zoom) / 2}px, ${p.y - (h * zoom) / 2}px) scale(${zoom})`;
+  });
+}
+
+function inboundPorts(id, window) {
+  const counts = new Map();
+  for (const e of graph.edges) if (e.target === id && e[window].flows > 0)
+    for (const port of e.ports) if (!port.startsWith('+')) counts.set(port, (counts.get(port) || 0) + e[window].flows);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([port]) => port);
+}
+
+function droppedTo(id, window) { return graph.edges.reduce((n, e) => n + (e.target === id ? e[window].dropped : 0), 0); }
+
+function iconTile(node) {
+  const tile = el('div', 'tile');
+  if (node.favicon) {
+    // The app's own icon, read from its web UI by the dashboard; a raster image, never SVG.
+    const img = el('img'); img.src = 'favicon?node=' + encodeURIComponent(node.id); img.alt = '';
+    img.onerror = () => { node.favicon = false; tile.replaceWith(iconTile(node)); };
+    tile.append(img);
+  } else if (node.icon.startsWith('lucide-')) {
+    const mask = el('div', 'mask');
+    mask.style.setProperty('--icon', `url(icons/${node.icon}.svg)`);
+    mask.style.background = `var(${KIND_TINT[node.kind] || '--kind-workload'})`;
+    tile.append(mask);
+  } else {
+    const img = el('img'); img.src = `icons/${node.icon}.svg`; img.alt = ''; tile.append(img);
+  }
+  return tile;
+}
+
+function renderCard(node, window) {
+  let card = cards.get(node.id);
+  if (!card) { card = el('div', 'card'); $('cards').append(card); cards.set(node.id, card); }
+  const ports = inboundPorts(node.id, window);
+  const dropped = droppedTo(node.id, window);
+  const key = JSON.stringify([node.name, node.kind, node.software, node.icon, node.favicon, ports.slice(0, 3), ports.length, dropped]);
+  if (card.dataset.key === key) return ports.length ? CARD_HEIGHT + CARD_PORTS_HEIGHT : CARD_HEIGHT;
+  card.dataset.key = key;
+  const names = el('div', 'names');
+  names.append(el('div', 'name', node.name), el('div', 'kind', kindLabel(node)));
+  const top = el('div', 'top');
+  top.append(iconTile(node), names);
+  if (dropped) top.append(el('span', 'badge', dropped + ' dropped'));
+  const parts = [top];
+  if (ports.length) {
+    // Whole chips only: the three busiest ports, then how many more.
+    const row = el('div', 'ports');
+    for (const port of ports.slice(0, 3)) {
+      const [number, proto] = port.includes('/') ? port.split('/') : ['', port];
+      const chip = el('span', 'chip', number || proto);
+      if (number) chip.append(el('span', 'proto', proto.toLowerCase()));
+      row.append(chip);
+    }
+    if (ports.length > 3) row.append(el('span', 'chip more', '+' + (ports.length - 3)));
+    parts.push(row);
+  }
+  card.replaceChildren(...parts);
+  card.title = node.name + ' (' + kindLabel(node) + (node.namespace ? ' in ' + node.namespace : '') + ')';
+  const height = ports.length ? CARD_HEIGHT + CARD_PORTS_HEIGHT : CARD_HEIGHT;
+  card.style.height = height + 'px';
+  return height;
+}
+
+function visibleGraph() {
+  const window = $('window').value, namespace = $('namespace').value, verdict = $('verdict').value;
+  const search = $('search').value.trim().toLowerCase();
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  let edges = graph.edges.filter((e) => e[window].flows > 0 && (verdict === 'all' || e[window].dropped > 0));
+  if (namespace) {
+    const touches = (e) => (byId.get(e.source) || {}).namespace === namespace || (byId.get(e.target) || {}).namespace === namespace;
+    // A Gateway feeding the namespace brings the traffic into it: keep that hop too.
+    const gateways = new Set(edges.filter(touches).map((e) => e.source).filter((id) => (byId.get(id) || {}).kind === 'Gateway'));
+    edges = edges.filter((e) => touches(e) || gateways.has(e.target));
+  }
+  if (search) edges = edges.filter((e) => [e.source, e.target].some((id) => (byId.get(id) || { name: '' }).name.toLowerCase().includes(search)));
+  const ids = new Set(edges.flatMap((e) => [e.source, e.target]));
+  return { nodes: graph.nodes.filter((n) => ids.has(n.id)), edges, window };
+}
+
+function elements(view) {
+  const groups = [...new Set(view.nodes.map((n) => n.namespace).filter(Boolean))].sort();
+  const els = groups.map((ns) => ({ group: 'nodes', data: { id: 'ns:' + ns, label: ns, group: true } }));
+  for (const n of view.nodes) {
+    const height = renderCard(n, view.window);
+    els.push({ group: 'nodes', data: { id: n.id, width: CARD_WIDTH, height, parent: n.namespace ? 'ns:' + n.namespace : undefined } });
+  }
+  for (const e of view.edges) {
+    const w = e[view.window];
+    const parts = [e.ports.join(' '), rate(w.flows, view.window)];
+    if (w.dropped) parts.push(w.dropped + ' dropped');
+    if (w.errors) parts.push(w.errors + ' errors');
+    els.push({ group: 'edges', data: { id: e.id, source: e.source, target: e.target, label: parts.filter(Boolean).join(' · '),
+      width: Math.min(6, 1.2 + Math.log2(1 + w.flows) * 0.7), dropped: w.dropped > 0, errors: w.errors > 0 } });
+  }
+  return els;
+}
+
+function layout(pinned) {
+  if (mode === 'flow') return cy.layout({ name: 'dagre', rankDir: 'LR', nodeSep: 40, rankSep: 120, fit: !laidOut, padding: 40 }).run();
+  const settings = { name: 'fcose', quality: 'proof', animate: false, nodeRepulsion: 12000, idealEdgeLength: 170,
+    nodeSeparation: 90, randomize: !pinned, fit: !pinned, padding: 40 };
+  if (pinned && pinned.length) settings.fixedNodeConstraint = pinned;
+  cy.layout(settings).run();
+}
+
+function draw() {
+  const view = visibleGraph();
+  const empty = view.edges.length === 0;
+  $('empty').hidden = !empty;
+  $('graph').hidden = empty;
+  $('cards').hidden = empty;
+  if (empty) {
+    $('empty').textContent = graph.edges.length ? 'Nothing matches the filters.' : 'No traffic seen yet.';
+    return;
+  }
+  const wanted = elements(view);
+  const wantedIds = new Set(wanted.map((e) => e.data.id));
+  for (const [id, card] of cards) if (!wantedIds.has(id)) { card.remove(); cards.delete(id); }
+  const pinned = [];
+  cy.batch(() => {
+    cy.elements().filter((e) => !wantedIds.has(e.id())).remove();
+    cy.nodes('[!group]').forEach((n) => pinned.push({ nodeId: n.id(), position: { ...n.position() } }));
+    for (const item of wanted) {
+      const existing = cy.getElementById(item.data.id);
+      if (existing.nonempty()) { existing.data(item.data); continue; }
+      if (item.group === 'nodes' && !item.data.group) {
+        // A new node starts beside a node it talks to, so the layout only has to nudge it.
+        const neighbour = view.edges.map((e) => e.source === item.data.id ? e.target : e.target === item.data.id ? e.source : null)
+          .map((id) => id && cy.getElementById(id)).find((n) => n && n.nonempty());
+        if (neighbour) item.position = { x: neighbour.position().x + 80, y: neighbour.position().y + 80 };
+      }
+      cy.add(item);
+    }
+  });
+  const added = cy.nodes('[!group]').filter((n) => !pinned.some((p) => p.nodeId === n.id()));
+  if (!laidOut) { layout(); laidOut = true; }
+  else if (added.nonempty()) layout(mode === 'live' ? pinned : null);
+  placeCards();
+  if (selected) mark();
+}
+
+function namespaces() {
+  const select = $('namespace'), current = select.value;
+  const names = [...new Set(graph.nodes.map((n) => n.namespace).filter(Boolean))].sort();
+  select.replaceChildren(new Option('All namespaces', ''), ...names.map((n) => new Option(n, n)));
+  select.value = names.includes(current) ? current : '';
+}
+
+async function poll() {
+  try {
+    const response = await fetch('graph');
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    graph = await response.json();
+    namespaces();
+    draw();
+    if (selected) showDetails();
+    if (!$('flowtable').hidden) await showFlows();
+    $('status').textContent = graph.nodes.length + ' workloads · ' + graph.edges.length + ' connections';
+    $('status').className = '';
+  } catch (error) {
+    $('status').textContent = 'Cannot read the graph: ' + error.message;
+    $('status').className = 'bad';
+  }
+}
+
+function mark() {
+  cy.elements().removeClass('faded');
+  for (const card of cards.values()) card.classList.remove('faded', 'selected');
+  if (!selected) return;
+  const item = cy.getElementById(selected.id);
+  if (item.empty()) return;
+  const near = selected.type === 'node' ? item.closedNeighborhood() : item.union(item.connectedNodes());
+  cy.elements().not(near).not(near.parents()).not('[?group]').addClass('faded');
+  for (const [id, card] of cards) if (!near.getElementById(id).nonempty()) card.classList.add('faded');
+  if (selected.type === 'node' && cards.get(selected.id)) cards.get(selected.id).classList.add('selected');
+}
+
+function select(what) { selected = what; mark(); showDetails(); }
+
+function cell(text, cls) { return el('td', cls, text); }
+function row(...cells) { const tr = el('tr'); tr.append(...cells); return tr; }
+function head(...names) { return row(...names.map((n) => el('th', null, n))); }
+
+async function showDetails() {
+  const aside = $('details');
+  if (!selected) { aside.hidden = true; cy.resize(); return; }
+  if (aside.hidden) { aside.hidden = false; cy.resize(); }
+  const window = $('window').value;
+  const nodeName = (id) => (graph.nodes.find((n) => n.id === id) || { name: id }).name;
+  if (selected.type === 'node') {
+    const node = graph.nodes.find((n) => n.id === selected.id);
+    if (!node) { select(null); return; }
+    const table = el('table');
+    table.append(head('', 'Peer', 'Ports', 'Rate', 'Dropped'));
+    for (const e of graph.edges.filter((e) => (e.source === node.id || e.target === node.id) && e[window].flows > 0)
+                               .sort((a, b) => b[window].flows - a[window].flows)) {
+      const out = e.source === node.id;
+      const peer = cell(nodeName(out ? e.target : e.source), 'link');
+      peer.onclick = () => select({ type: 'edge', id: e.id });
+      table.append(row(cell(out ? '→' : '←'), peer, cell(e.ports.join(' ')), cell(rate(e[window].flows, window), 'num'),
+        cell(e[window].dropped || '', e[window].dropped ? 'num dropped' : 'num')));
+    }
+    aside.replaceChildren(el('h2', null, node.name), el('div', 'sub', kindLabel(node) + (node.namespace ? ' in ' + node.namespace : '')),
+      el('h3', null, 'Connections'), table);
+    return;
+  }
+  const edge = graph.edges.find((e) => e.id === selected.id);
+  if (!edge) { select(null); return; }
+  const counts = el('table');
+  counts.append(head('', '1 min', '5 min', '15 min'));
+  for (const [label, key] of [['Flows', 'flows'], ['Dropped', 'dropped'], ['HTTP 5xx', 'errors']])
+    counts.append(row(cell(label), ...['m1', 'm5', 'm15'].map((w) => cell(edge[w][key], 'num'))));
+  const flows = el('table');
+  flows.append(head('Time', 'From → to', 'Port', 'Verdict'));
+  aside.replaceChildren(el('h2', null, nodeName(edge.source) + ' → ' + nodeName(edge.target)),
+    el('div', 'sub', edge.ports.join(' ') + (edge.latencyMs != null ? ' · median ' + edge.latencyMs + ' ms' : '')),
+    counts, el('h3', null, 'Latest flows'), flows);
+  try {
+    for (const f of await (await fetch('flows?edge=' + encodeURIComponent(edge.id))).json()) {
+      const [from, to, port] = flowSides(f);
+      const http = f.l7 ? ' ' + f.l7.method + ' ' + f.l7.path + ' → ' + f.l7.code : '';
+      flows.append(row(cell((f.time || '').slice(11, 19)), cell(from + ' → ' + to + http),
+        cell((port == null ? '' : port + '/') + (f.protocol || '')),
+        cell(f.verdict.toLowerCase() + dropReason(f), f.verdict === 'DROPPED' ? 'dropped' : '')));
+    }
+  } catch (error) { flows.append(row(cell('Cannot read the flows: ' + error.message))); }
+}
+
+function dropReason(f) {
+  if (f.verdict !== 'DROPPED') return '';
+  return f.policies && f.policies.length ? ' by ' + f.policies.join(', ') : f.reason ? ' (' + f.reason + ')' : '';
+}
+
+// A flow's two ends, named as the graph names them: the Pod where the flow has one, else the
+// node of the graph it was counted on (a Gateway, LAN clients, a node), with its address.
+function flowSides(f) {
+  const nodeName = (id) => { const n = graph.nodes.find((n) => n.id === id); return n ? n.name + ' (' + n.kind + ')' : null; };
+  const [sourceId, targetId] = (f.edge || '>').split('>');
+  const peerName = (id) => f.peerPod ? (f.peerNamespace ? f.peerNamespace + '/' : '') + f.peerPod
+    : (nodeName(id) || '') + (f.peerAddress ? ' · ' + f.peerAddress : '');
+  const pod = f.pod ? (f.namespace ? f.namespace + '/' : '') + f.pod : null;
+  if (f.l7 && f.l7.route) return [peerName(sourceId), nodeName(targetId) || f.l7.route, f.l7.listenerPort];
+  return f.direction === 'egress' ? [pod, peerName(targetId), f.peerPort] : [peerName(sourceId), pod, f.podPort];
+}
+
+async function showFlows() {
+  const namespace = $('namespace').value, verdict = $('verdict').value;
+  const search = $('search').value.trim().toLowerCase();
+  const rows = [];
+  for (const f of await (await fetch('flows')).json()) {
+    if (verdict === 'dropped' && f.verdict !== 'DROPPED') continue;
+    if (namespace && f.namespace !== namespace && f.peerNamespace !== namespace) continue;
+    const [from, to, port] = flowSides(f);
+    if (search && !(from + ' ' + to).toLowerCase().includes(search)) continue;
+    const detail = f.verdict === 'DROPPED' ? dropReason(f).trim() : f.l7 ? f.l7.method + ' ' + f.l7.path + ' → ' + f.l7.code : '';
+    const tr = row(cell((f.time || '').slice(11, 19)), cell(from), cell(to), cell((port == null ? '' : port + '/') + (f.protocol || '')),
+      cell(f.verdict.toLowerCase(), f.verdict === 'DROPPED' ? 'dropped' : ''), cell(detail));
+    tr.onclick = () => select({ type: 'edge', id: f.edge });
+    rows.push(tr);
+  }
+  $('flowrows').replaceChildren(...rows);
+}
+
+function setMode(next) {
+  mode = next;
+  $('live').setAttribute('aria-pressed', mode === 'live');
+  $('flow').setAttribute('aria-pressed', mode === 'flow');
+  laidOut = false;
+  draw();
+}
+
+const refilter = () => { laidOut = false; draw(); if (!$('flowtable').hidden) showFlows(); };
+
+document.fonts.ready.then(() => {
+  makeGraph();
+  $('live').onclick = () => setMode('live');
+  $('flow').onclick = () => setMode('flow');
+  $('tidy').onclick = () => { laidOut = false; draw(); };
+  $('showflows').onclick = () => {
+    const open = $('flowtable').hidden;
+    $('flowtable').hidden = !open;
+    $('showflows').setAttribute('aria-pressed', open);
+    if (open) showFlows();
+    cy.resize();
+  };
+  for (const id of ['namespace', 'window', 'verdict']) $(id).onchange = refilter;
+  $('search').oninput = refilter;
+  if (location.hash.includes('flows')) $('showflows').click();
+  poll();
+  setInterval(() => { if (!document.hidden) poll(); }, 2000);
+});
+</script>
+</body>
+</html>

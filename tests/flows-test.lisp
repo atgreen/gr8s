@@ -192,7 +192,7 @@
                (list (getf options :host) (getf options :port) (getf options :namespace)))))
   (is (= 9000 (getf (gr8s.server::parse-doctor-observe-options '("--serve" "--listen" "0.0.0.0:9000")) :port)))
   (signals error (gr8s.server::parse-doctor-observe-options '("--serve" "--listen" "nowhere")))
-  ;; gr8s hubble is gone: the dashboard has Hubble UI, and observe --serve its API.
+  ;; gr8s hubble is gone: the dashboard has the Network view, and observe --serve the Hubble API.
   (signals error (gr8s.server::parse-cli-options '("hubble" "serve"))))
 
 (test doctor-observe-prints-the-pods-side-first-for-its-own-traffic

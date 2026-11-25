@@ -60,7 +60,7 @@ without the labels that differ between replicas."
 (defun hubble-identity (namespace labels)
   "A stable numeric identity, past Cilium's reserved range, for Pods in NAMESPACE with
 LABELS. As Cilium's, it follows the label set, not the Pod: a workload's replicas share
-one, and so one card in Hubble UI (podster-u0e)."
+one, and so one card in a service map (podster-u0e)."
   (+ 256 (mod (sxhash (format nil "~{~A~^,~}" (hubble-labels namespace labels))) 65000)))
 
 (defun hubble-service-identity (namespace service)

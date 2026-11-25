@@ -1738,13 +1738,13 @@ TARGET, on the running cluster's API, as a text message, until either side ends 
 
 (defun run-dashboard-command (options)
   "Serve the embedded dashboards and open them in a browser, like `icl -b'. A
-foreground process: it starts a loopback web server with a page of two tabs, the
-Kubernetes dashboard (Headlamp) and Hubble UI, reverse-proxies Headlamp's
-Kubernetes calls over mTLS to the running cluster (authenticating with the
-kubeconfig, as `gr8s debug slynk' does), serves Hubble UI's backend from the
-cluster's flow events, opens the browser, and runs until Ctrl-C. Everything lives
+foreground process: it starts a loopback web server with a page of tabs -- the
+Kubernetes dashboard (Headlamp), the Network view, an Agent terminal and a REPL --
+reverse-proxies Headlamp's Kubernetes calls over mTLS to the running cluster
+(authenticating with the kubeconfig, as `gr8s debug slynk' does), draws the Network
+view from the cluster's flow events, opens the browser, and runs until Ctrl-C. Everything lives
 under an unguessable per-session token so other local processes cannot reach it.
-OPTIONS' :tab, \"hubble\", opens on the Hubble tab. Only with :verbose does it log
+OPTIONS' :tab, a tab's name such as \"network\", opens on that tab. Only with :verbose does it log
 each request and each worker error."
   (unless (gr8s.apiserver::dashboard-assets-present-p)
     (error "this gr8s build has no embedded dashboard; rebuild with 'make dashboard-assets'"))
@@ -1752,16 +1752,14 @@ each request and each worker error."
          (config (dashboard-kubeconfig-config kubeconfig))
          (port (getf options :port 8080))
          (token (dashboard-session-token))
-         (hubble-p (gr8s.apiserver::hubble-ui-assets-present-p))
-         (hubble-base (format nil "/hubble/~A/" token))
-         (hubble-backend (and hubble-p (make-hubble-ui-backend config)))
          (agent-base (format nil "/agent/~A/" token))
          (lisp-base (format nil "/lisp/~A/" token))
+         (network-base (format nil "/network/~A/" token))
+         (network (make-dashboard-network config))
          (lisp (make-dashboard-lisp config))
          (agent (make-dashboard-agent (namestring (truename kubeconfig))))
          (apps (make-dashboard-apps config))
          (url (format nil "http://127.0.0.1:~D/ui/~A/~@[#~A~]" port token (getf options :tab)))
-         (sweeper nil)
          (verbose (getf options :verbose))
          (acceptor (make-instance 'gr8s-dashboard-acceptor
                                   :address "127.0.0.1" :port port
@@ -1769,12 +1767,12 @@ each request and each worker error."
                                   :message-log-destination (and verbose *error-output*)
                                   :shell-path (format nil "/ui/~A/" token)
                                   :tabs (append (list (list "headlamp" (format nil "/dashboard/~A/" token) "Headlamp"))
-                                                (and hubble-p (list (list "hubble" hubble-base "Hubble")))
+                                                (list (list "network" network-base "Network"))
                                                 (list (list "agent" agent-base "Agent"))
                                                 (list (list "repl" lisp-base "REPL")))
                                   :agent agent :agent-base agent-base
                                   :lisp lisp :lisp-base lisp-base
-                                  :hubble-backend hubble-backend :hubble-base (and hubble-p hubble-base)
+                                  :network network :network-base network-base
                                   :apps apps
                                   :proxy-fn (lambda (method target request)
                                               (dashboard-proxy-forward config method target request))
@@ -1786,11 +1784,6 @@ each request and each worker error."
           *shutdown-requested* nil)
     (install-shutdown-handlers)
     (hunchentoot:start acceptor)
-    (when hubble-backend
-      (setf sweeper (bt:make-thread (lambda ()
-                                      (loop until *shutdown-requested*
-                                            do (sleep 2) (expire-hubble-ui-channels hubble-backend)))
-                                    :name "gr8s hubble ui channels")))
     (unwind-protect
          (progn
            (format t "gr8s dashboard: ~A~%  cluster API ~A (via ~A)~%"
@@ -1810,11 +1803,8 @@ each request and each worker error."
       (ignore-errors (hunchentoot:stop acceptor))
       (stop-dashboard-agents agent)
       (stop-dashboard-lisp lisp)
-      (stop-dashboard-apps apps)
-      (when sweeper (ignore-errors (bt:join-thread sweeper)))
-      (when hubble-backend
-        (maphash (lambda (id channel) (declare (ignore id)) (stop-hubble-ui-channel channel))
-                 (hubble-ui-backend-channels hubble-backend))))
+      (stop-dashboard-network network)
+      (stop-dashboard-apps apps))
     0))
 
 (defun parse-net-agent-options (arguments)
@@ -4040,7 +4030,7 @@ picked up within seconds. Pods resolve the same names through the cluster DNS.
 
 ## Dashboard tabs for the cluster's own apps
 
-`gr8s dashboard` shows Headlamp, Hubble UI, an Agent terminal and a REPL. A
+`gr8s dashboard` shows Headlamp, the Network view, an Agent terminal and a REPL. A
 cluster-scoped `DashboardTab` (`dashboard.gr8s.io/v1`) adds a tab for one of the
 cluster's own web apps, such as Grafana, to every reader's dashboard. Its CRD is
 not built in, and release packages don't carry it; install it once per cluster:
@@ -4162,7 +4152,7 @@ No HA API may start from member-local certificate state before this converges."
     ("backup" "Capture and verify encrypted state backups")
     ("restore" "Restore a state backup into a fresh state directory")
     ("skill" "Print guidance for operators and AI agents")
-    ("dashboard" "Open the dashboards (Headlamp, Hubble UI and an agent terminal) in a browser")
+    ("dashboard" "Open the dashboards (Headlamp, the Network view, an agent terminal and a REPL) in a browser")
     ("mcp" "Serve read-only cluster tools to an AI agent over MCP (stdio)")
     ("version" "Print version information") ("notices" "Print license notices")))
 
@@ -4227,7 +4217,7 @@ No HA API may start from member-local certificate state before this converges."
              :options '(("--kubeconfig PATH" "Cluster kubeconfig (default $KUBECONFIG or ~/.kube/config)")
                         ("--help, -h" "show help"))))
       ((equal path '("dashboard"))
-       (page "Serve the dashboards, Headlamp, Hubble UI and an agent terminal, and open them in a browser; runs until Ctrl-C"
+       (page "Serve the dashboards, Headlamp, the Network view, an agent terminal and a REPL, and open them in a browser; runs until Ctrl-C"
              "[OPTIONS]"
              :options '(("--kubeconfig PATH" "Cluster kubeconfig (default $KUBECONFIG or ~/.kube/config)")
                         ("--port N" "Loopback port to serve on (default 8080)")
