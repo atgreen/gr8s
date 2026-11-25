@@ -264,3 +264,49 @@
                  ((search "--add-source" (format nil "~{~A~^ ~}" argv)) (values "boom" 1))
                  (t (values "" 0)))))
     (is (null (gr8s.network::ensure-overlay-firewall "10.80.0.0/20" :runner #'runner)))))
+
+(test pod-egress-snat-masquerades-what-leaves-the-cluster
+  ;; podster-swq: a Pod's traffic to anything outside the cluster's Pod CIDRs takes the
+  ;; node's address, so its replies find their way back; Pod-to-Pod keeps its addresses.
+  (let ((rs (gr8s.network::pod-egress-snat-nft-ruleset "10.80.32.0/20" '("10.80.0.0/12"))))
+    (is (search "add table ip gr8s-egress" rs))
+    (is (search "type nat hook postrouting" rs))
+    (is (search "ip saddr { 10.80.32.0/20 } ip daddr != { 10.80.0.0/12 } masquerade" rs))
+    (is (search "delete table ip6 gr8s-egress" rs) "no IPv6 Pod CIDR: no IPv6 rule"))
+  (let ((rs (gr8s.network::pod-egress-snat-nft-ruleset '("10.80.32.0/20" "fd80:32::/64")
+                                                       '("10.80.0.0/12" "fd80::/48"))))
+    (is (search "ip saddr { 10.80.32.0/20 } ip daddr != { 10.80.0.0/12 } masquerade" rs))
+    (is (search "ip6 saddr { fd80:32::/64 } ip6 daddr != { fd80::/48 } masquerade" rs)))
+  (let ((rs (gr8s.network::pod-egress-snat-nft-ruleset nil nil)))
+    (is (search "delete table ip gr8s-egress" rs))
+    (is (search "delete table ip6 gr8s-egress" rs))
+    (is (not (search "masquerade" rs)))))
+
+(test the-agent-applies-and-withdraws-the-pod-egress-masquerade
+  (let ((applied '())
+        (runtime (gr8s.agent::%make-node-runtime :manager t))
+        (network (gr8s.resources::core-object "nodePodCIDRs" #("10.80.32.0/20")
+                                              "clusterPodCIDRs" #("10.80.0.0/12")))
+        (ensure (fdefinition 'gr8s.network::ensure-pod-egress-snat))
+        (remove (fdefinition 'gr8s.network::remove-pod-egress-snat)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'gr8s.network::ensure-pod-egress-snat)
+                 (lambda (pods clusters) (push (list :ensure pods clusters) applied) t)
+                 (fdefinition 'gr8s.network::remove-pod-egress-snat)
+                 (lambda () (push :remove applied) t))
+           (let ((gr8s.network::*masquerade-pod-egress* t))
+             (gr8s.agent::ensure-node-runtime-pod-egress-snat runtime network)
+             (gr8s.agent::ensure-node-runtime-pod-egress-snat runtime network)
+             (is (equal '((:ensure ("10.80.32.0/20") ("10.80.0.0/12"))) applied) "once per identity"))
+           (setf applied '())
+           (let ((gr8s.network::*masquerade-pod-egress* nil))
+             (gr8s.agent::ensure-node-runtime-pod-egress-snat runtime network)
+             (is (equal '(:remove) applied) "--pod-masquerade off withdraws it"))
+           ;; An agent that starts with it off still withdraws an earlier run's table.
+           (setf applied '())
+           (let ((gr8s.network::*masquerade-pod-egress* nil))
+             (gr8s.agent::ensure-node-runtime-pod-egress-snat (gr8s.agent::%make-node-runtime :manager t) network)
+             (is (equal '(:remove) applied))))
+      (setf (fdefinition 'gr8s.network::ensure-pod-egress-snat) ensure
+            (fdefinition 'gr8s.network::remove-pod-egress-snat) remove))))

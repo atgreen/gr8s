@@ -48,6 +48,12 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- Pods can reach the LAN and the internet (podster-swq). gr8s masqueraded Pod
+  traffic only to other nodes and the API, so a Pod's packets left with its
+  private address and replies never came back. Each agent now masquerades its
+  Pods' traffic leaving the cluster's Pod network, as other CNIs do;
+  `--pod-masquerade off` keeps Pod addresses on networks that route them.
+
 - The dashboard's Hubble tab draws a workload's replicas as one card. Each Pod
   had its own identity, so a Deployment of four showed as four identical cards;
   identities now follow a Pod's namespace and labels, leaving out the labels that

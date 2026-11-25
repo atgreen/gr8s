@@ -169,6 +169,55 @@
   "Withdraw the Pod->remote-node masquerade, deleting the gr8s-overlay tables."
   (funcall runner (overlay-snat-nft-ruleset nil nil)))
 
+;;; Pod traffic leaving the cluster (podster-swq). A Pod's address means nothing outside
+;;; the cluster's Pod network: a router upstream has no route back to it, so a Pod's
+;;; packet to the LAN or the internet goes out and its reply never comes. Like Flannel,
+;;; Calico and Cilium, gr8s masquerades it as the node's address -- traffic from this
+;;; node's Pod CIDRs to anything outside the cluster's Pod CIDRs. Pod-to-Pod traffic keeps
+;;; its addresses, so policy and flows see the real peer; a ClusterIP is already a Pod's
+;;; address when this runs, translated by the Service dataplane. Masquerade NATs a
+;;; connection only when it starts, so the replies of a connection made to a Pod pass as
+;;; they are. A network that routes Pod CIDRs itself turns it off (--pod-masquerade off).
+
+(defvar *masquerade-pod-egress* t
+  "Whether this node masquerades its Pods' traffic leaving the cluster's Pod network.")
+
+(defun pod-egress-snat-nft-ruleset (pod-cidrs cluster-cidrs)
+  "An nft script (for `nft -f -`) masquerading traffic from this node's POD-CIDRS to
+   destinations outside the cluster's CLUSTER-CIDRS, one rule per address family that
+   has both. The gr8s-egress table is replaced atomically per family; a family without
+   both has its table removed, so an empty call tears the tables down."
+  (let ((pods (if (stringp pod-cidrs) (list pod-cidrs) pod-cidrs))
+        (clusters (if (stringp cluster-cidrs) (list cluster-cidrs) cluster-cidrs))
+        (lines '()))
+    (dolist (family '("ip" "ip6"))
+      (flet ((of-family (cidrs) (remove-if-not (lambda (c) (string= family (overlay-snat-address-family c))) cidrs)))
+        (let ((fam-pods (of-family pods)) (fam-clusters (of-family clusters)))
+          (push (format nil "add table ~A gr8s-egress" family) lines)
+          (if (and fam-pods fam-clusters)
+              (progn
+                (push (format nil "flush table ~A gr8s-egress" family) lines)
+                (push (format nil "add chain ~A gr8s-egress postrouting ~
+                                   { type nat hook postrouting priority 100 ; policy accept ; }"
+                              family)
+                      lines)
+                (push (format nil "add rule ~A gr8s-egress postrouting ~
+                                   ~A saddr { ~{~A~^, ~} } ~A daddr != { ~{~A~^, ~} } masquerade"
+                              family family fam-pods family fam-clusters)
+                      lines))
+              (push (format nil "delete table ~A gr8s-egress" family) lines)))))
+    (format nil "~{~A~%~}" (nreverse lines))))
+
+(defun ensure-pod-egress-snat (pod-cidrs cluster-cidrs &key (runner #'run-overlay-snat-nft))
+  "Masquerade this node's Pod traffic leaving the cluster's Pod network; RUNNER's result,
+   or NIL without both CIDR lists. Idempotent: an atomic per-family replace."
+  (when (and pod-cidrs cluster-cidrs)
+    (funcall runner (pod-egress-snat-nft-ruleset pod-cidrs cluster-cidrs))))
+
+(defun remove-pod-egress-snat (&key (runner #'run-overlay-snat-nft))
+  "Withdraw the Pod egress masquerade, deleting the gr8s-egress tables."
+  (funcall runner (pod-egress-snat-nft-ruleset nil nil)))
+
 (defun ensure-overlay-firewall
     (node-pod-cidr &key (runner #'host-firewall-run)
                         (interface +node-vxlan-interface+)
