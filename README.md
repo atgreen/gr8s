@@ -271,6 +271,13 @@ spec:
   service: {namespace: monitoring, name: grafana, port: 80}
 ```
 
+A tab whose app shows traces can say where, with `{traceId}` in the path, and
+the Network tab's trace links open there; for Grafana with a Tempo data source:
+
+```yaml
+  traces: '/explore?schemaVersion=1&orgId=1&panes=%7B%22t%22%3A%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22datasource%22%3A%7B%22type%22%3A%22tempo%22%2C%22uid%22%3A%22tempo%22%7D%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22{traceId}%22%7D%5D%7D%7D'
+```
+
 Creating one is an RBAC decision (`create` on `dashboardtabs`), since it reaches
 every reader. Each app tab is served from a loopback origin of its own, behind
 a per-tab secret, so an app's code can't reach the Headlamp proxy that acts with

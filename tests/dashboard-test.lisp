@@ -629,3 +629,50 @@
              (gr8s.server::network-end-name '(:address "192.0.73.2")
                                             (gr8s.resources::core-object "peerAddress" "192.0.73.2"
                                                                          "peerName" "secure.gravatar.com")))))
+
+(test network-graph-lists-a-gateway-request-on-its-backend-edge
+  ;; podster-krg.3: a slow backend's edge has the requests the Gateway sent it, and their
+  ;; traces, though the request was counted on the client's edge.
+  (let* ((graph (gr8s.server::make-network-graph))
+         (topology (flet ((objects (text) (coerce (com.inuoe.jzon:parse text) 'list)))
+                     (gr8s.server::build-network-topology
+                      (objects "[{\"metadata\":{\"namespace\":\"cave\",\"name\":\"cave-0\",\"labels\":{\"app\":\"cave\"},
+                                 \"ownerReferences\":[{\"kind\":\"StatefulSet\",\"name\":\"cave\"}]},
+                                 \"spec\":{\"containers\":[{\"image\":\"cave:1\"}]},\"status\":{\"podIP\":\"10.80.32.5\"}}]")
+                      nil
+                      (objects "[{\"metadata\":{\"namespace\":\"cave\",\"name\":\"cave\"},
+                                 \"spec\":{\"clusterIP\":\"10.96.0.26\",\"selector\":{\"app\":\"cave\"},
+                                          \"ports\":[{\"name\":\"http\",\"port\":8080,\"targetPort\":8080}]}}]")
+                      (objects "[{\"metadata\":{\"name\":\"gvision\"},\"spec\":{\"podCIDR\":\"10.80.0.0/20\"},
+                                 \"status\":{\"addresses\":[{\"type\":\"InternalIP\",\"address\":\"10.77.77.21\"}]}},
+                                {\"metadata\":{\"name\":\"gr8s-local\"},\"spec\":{\"podCIDR\":\"10.80.32.0/20\"},
+                                 \"status\":{\"addresses\":[{\"type\":\"InternalIP\",\"address\":\"10.77.77.10\"}]}}]")
+                      (objects "[{\"metadata\":{\"namespace\":\"cave\",\"name\":\"cave\"},
+                                 \"spec\":{\"parentRefs\":[{\"name\":\"labdroid\",\"namespace\":\"gateway\"}],
+                                          \"rules\":[{\"backendRefs\":[{\"name\":\"cave\",\"port\":8080}]}]}}]")))))
+    (setf (gr8s.server::network-graph-topology graph) topology)
+    (flet ((note (&rest pairs)
+             (let ((flow (gr8s.resources::core-object "time" "2026-11-25T12:00:00Z" "verdict" "FORWARDED" "protocol" "TCP")))
+               (loop for (key value) on pairs by #'cddr do (setf (gethash key flow) value))
+               (gr8s.server::network-graph-note-flow graph flow)))
+           (edge (source target)
+             (find-if (lambda (e) (and (equal source (gethash "source" e)) (equal target (gethash "target" e))))
+                      (coerce (gethash "edges" (gr8s.server::network-graph-object graph (encode-universal-time 30 0 12 25 11 2026 0))) 'list))))
+      ;; The Gateway's own connection to cave-0 draws Gateway -> cave.
+      (note "direction" "ingress" "namespace" "cave" "pod" "cave-0" "podPort" 8080 "peerAddress" "10.80.0.0" "peerPort" 40000)
+      (let ((before (gethash "flows" (gethash "m1" (edge "gateway/Gateway/labdroid" "cave/StatefulSet/cave")))))
+        ;; A traced request the Gateway sent to cave-0.
+        (note "direction" "ingress" "peerAddress" "10.77.77.10" "namespace" "cave" "service" "cave"
+              "podAddress" "10.80.32.5" "podPort" 8080
+              "l7" (gr8s.resources::core-object "method" "GET" "path" "/slow" "code" 200 "latencyNs" 742000000
+                                                "listenerPort" 443 "route" "cave/cave"
+                                                "traceId" "5da861bf3c5419a485b367745c0597f6"))
+        (let* ((backend (edge "gateway/Gateway/labdroid" "cave/StatefulSet/cave"))
+               (flows (gr8s.server::network-graph-edge-flows graph (gethash "id" backend))))
+          (is (= before (gethash "flows" (gethash "m1" backend))) "not counted twice")
+          (is (= 742 (gethash "latencyMs" backend)) "the backend's edge has the request's latency")
+          (is (find "5da861bf3c5419a485b367745c0597f6" flows
+                    :key (lambda (f) (let ((l7 (gethash "l7" f))) (and (hash-table-p l7) (gethash "traceId" l7))))
+                    :test #'equal)))
+        (is (= 1 (gethash "flows" (gethash "m1" (edge "Clients/LAN clients" "gateway/Gateway/labdroid"))))
+            "counted once, on the client's edge")))))

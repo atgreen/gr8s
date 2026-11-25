@@ -52,3 +52,11 @@ spec:
                   type: string
                   pattern: '^/'
                   description: Where the tab opens in the app; / by default.
+                traces:
+                  type: string
+                  pattern: '^/[^/\\].*\{traceId\}'
+                  maxLength: 2048
+                  description: >-
+                    Where the app shows one trace: a path with {traceId} in it, such as
+                    Grafana Explore's for a Tempo data source. The Network tab's trace
+                    links open here.

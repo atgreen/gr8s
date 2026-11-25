@@ -492,12 +492,15 @@ async function showDetails() {
   const fresh = policyView && policyView.edge === edge.id && Date.now() - policyView.at < 15000;
   if (!fresh) policyView = { edge: edge.id, at: Date.now(), node: el('div') };
   const policy = policyView.node;
+  const traces = el('div');
   aside.replaceChildren(el('h2', null, nodeName(edge.source) + ' → ' + nodeName(edge.target)),
     el('div', 'sub', edge.ports.join(' ') + (edge.latencyMs != null ? ' · median ' + edge.latencyMs + ' ms' : '')),
-    counts, el('h3', null, 'Policy'), policy, el('h3', null, 'Latest flows'), flows);
+    counts, traces, el('h3', null, 'Policy'), policy, el('h3', null, 'Latest flows'), flows);
   if (!fresh) explainEdge(edge, policy);
   try {
-    for (const f of await (await fetch('flows?edge=' + encodeURIComponent(edge.id))).json()) {
+    const latest = await (await fetch('flows?edge=' + encodeURIComponent(edge.id))).json();
+    showTraces(latest, traces);
+    for (const f of latest) {
       const [from, to, port] = flowSides(f);
       const http = f.l7 ? ' ' + f.l7.method + ' ' + f.l7.path + ' → ' + f.l7.code : '';
       flows.append(row(cell((f.time || '').slice(11, 19)), cell(from + ' → ' + to + http),
@@ -505,6 +508,40 @@ async function showDetails() {
         cell(f.verdict.toLowerCase() + dropReason(f), f.verdict === 'DROPPED' ? 'dropped' : '')));
     }
   } catch (error) { flows.append(row(cell('Cannot read the flows: ' + error.message))); }
+}
+
+// The edge's traced requests, slowest first (podster-krg.3): a Gateway's request carries
+// the trace it was recorded in, which the dashboard's trace tab -- a DashboardTab with
+// spec.traces, such as Grafana with Tempo -- opens.
+function traceTab() {
+  try { return window.parent !== window && window.parent.document.querySelector('[role=tab][data-traces]:not([data-traces=""])'); }
+  catch (error) { return null; }
+}
+
+function showTraces(flows, into) {
+  const traced = flows.filter((f) => f.l7 && /^[0-9a-f]{32}$/.test(f.l7.traceId || ''))
+    .sort((a, b) => (b.l7.latencyNs || 0) - (a.l7.latencyNs || 0)).slice(0, 8);
+  if (!traced.length) { into.replaceChildren(); return; }
+  const tab = traceTab();
+  const table = el('table');
+  table.append(head('Time', 'Request', 'Status', 'Latency'));
+  for (const f of traced) {
+    const request = cell(f.l7.method + ' ' + f.l7.path);
+    if (tab) {
+      const a = el('a', 'link', f.l7.method + ' ' + f.l7.path);
+      a.href = '#'; a.title = 'Open trace ' + f.l7.traceId + ' in ' + tab.textContent;
+      a.onclick = (event) => {
+        event.preventDefault();
+        window.parent.postMessage({ open: 'trace', traceId: f.l7.traceId }, location.origin);
+      };
+      request.replaceChildren(a);
+    }
+    table.append(row(cell((f.time || '').slice(11, 19)), request,
+      cell(String(f.l7.code), f.l7.code >= 500 ? 'dropped' : ''), cell((f.l7.latencyNs / 1e6).toFixed(0) + ' ms', 'num')));
+  }
+  into.replaceChildren(el('h3', null, 'Traces'), table,
+    el('div', 'note', tab ? 'The slowest recent requests; each opens its trace in ' + tab.textContent + '.'
+                          : 'The slowest recent requests. A DashboardTab with spec.traces (Grafana with Tempo, say) makes each one open its trace.'));
 }
 
 // Headlamp's page for a resource, when this page is a tab of the dashboard beside it.

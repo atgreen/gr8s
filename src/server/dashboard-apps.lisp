@@ -22,8 +22,9 @@
 (defparameter +dashboard-app-bootstrap+ "/.gr8s-tab/"
   "The path prefix whose next segment is an app tab's secret, setting its cookie.")
 
-(defstruct (dashboard-app (:constructor make-dashboard-app (name title namespace service port path)))
-  name title namespace service port path acceptor secret)
+(defstruct (dashboard-app (:constructor make-dashboard-app (name title namespace service port path
+                                                            &optional traces)))
+  name title namespace service port path traces acceptor secret)
 
 (defun dashboard-tab-object-app (object)
   "The app a DashboardTab OBJECT describes, or NIL when it names no Service."
@@ -33,7 +34,16 @@
          (port (gethash "port" service)))
     (when (and name (gethash "namespace" service) (gethash "name" service) port)
       (make-dashboard-app name (gethash "title" spec name) (gethash "namespace" service)
-                          (gethash "name" service) port (gethash "path" spec "/")))))
+                          (gethash "name" service) port (gethash "path" spec "/")
+                          (dashboard-app-local-path (gethash "traces" spec))))))
+
+(defun dashboard-app-local-path (path)
+  "PATH when it is a path within an app -- one leading slash, no scheme or authority,
+no backslash or control character -- else NIL."
+  (and (stringp path) (> (length path) 0) (char= #\/ (char path 0))
+       (not (and (> (length path) 1) (member (char path 1) '(#\/ #\\))))
+       (notany (lambda (char) (or (char= char #\\) (< (char-code char) 32) (= (char-code char) 127))) path)
+       path))
 
 (defun dashboard-app-proxy-prefix (app)
   "The cluster API path that proxies to APP's Service."
@@ -190,7 +200,10 @@ leader; the browser can't follow that to the API server, so the dashboard does."
        ;; The frame's first load: keep the secret as a cookie, then show the app.
        (hunchentoot:set-cookie (dashboard-app-cookie app) :value (dashboard-app-secret app)
                                :path "/" :http-only t :same-site "Strict")
-       (hunchentoot:redirect (dashboard-app-path app) :code hunchentoot:+http-moved-temporarily+))
+       ;; NEXT lands the frame on a path within the app, as a trace link does.
+       (hunchentoot:redirect (or (dashboard-app-local-path (hunchentoot:get-parameter "next" request))
+                                 (dashboard-app-path app))
+                             :code hunchentoot:+http-moved-temporarily+))
       ((or (not (equal (hunchentoot:cookie-in (dashboard-app-cookie app) request) (dashboard-app-secret app)))
            ;; Every loopback port is the same site, so the cookie alone admits another
            ;; local page's requests; one that names its origin must name this one.
@@ -233,7 +246,8 @@ each new one and stopping those whose DashboardTab is gone."
                               (format nil "http://127.0.0.1:~D~A~A"
                                       (hunchentoot:acceptor-port (dashboard-app-acceptor app))
                                       +dashboard-app-bootstrap+ (dashboard-app-secret app))
-                              (dashboard-app-title app))))))))
+                              (dashboard-app-title app)
+                              (dashboard-app-traces app))))))))
 
 (defun start-dashboard-app (config app)
   "Serve APP on a loopback port of its own, with a fresh secret."

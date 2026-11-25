@@ -1059,7 +1059,11 @@ is text to review; the dashboard changes nothing. A card with a shield is a
 workload a policy isolates; its panel says which, each way. The view is in the
 page's URL (`#ns=cave&edge=…`), so it can be linked. A policy's name, and a
 selected workload's "Open in Headlamp", open that resource in the dashboard's
-Headlamp tab, to read or edit it there.
+Headlamp tab, to read or edit it there. An edge the Gateway carries lists its
+slowest recent requests under Traces, each with its status and latency; when a
+dashboard tab shows traces (a `DashboardTab` with `spec.traces`, such as
+Grafana with Tempo), each one opens its trace there -- the Gateway's span and,
+for an instrumented backend, the backend's own beneath it.
 
 The tab asks [`gr8s doctor`](doctor.md) about the whole cluster every minute
 and draws its problems on the map: a card with a red edge is a workload a

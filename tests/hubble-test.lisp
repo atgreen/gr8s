@@ -262,8 +262,10 @@
                                            :proxy nil :force-binary t)
                     (values (trivial-utf-8:utf-8-bytes-to-string body) status))))
            (let ((page (get-path "/ui/tok/")))
-             (is (search "data-src=\"/dashboard/tok/\">Headlamp</button>" page))
-             (is (search "data-src=\"/network/tok/\">Network</button>" page))
+             (is (search "data-src=\"/dashboard/tok/\" data-traces=\"\">Headlamp</button>" page))
+             (is (search "data-src=\"/network/tok/\" data-traces=\"\">Network</button>" page))
+             ;; The page opens a trace only in the tab that shows traces, and only by id.
+             (is (search "d.open !== 'trace'" page))
              (is (search "id=\"frame-network\" title=\"Network\"" page))
              ;; Only the Network frame, on the page's own origin, may open a Headlamp path.
              (is (search "event.origin !== location.origin" page))
@@ -403,6 +405,20 @@
     (is (equal "/" (gr8s.server::dashboard-app-location app "/api/v1/namespaces/m/services/g:80/proxy")))
     (is (equal "https://elsewhere/" (gr8s.server::dashboard-app-location app "https://elsewhere/"))))
   (is (null (gr8s.server::dashboard-tab-object-app (com.inuoe.jzon:parse "{\"metadata\":{\"name\":\"x\"},\"spec\":{}}"))))
+  ;; podster-krg.3: spec.traces, the path showing one trace, is a path within the app.
+  (let ((app (gr8s.server::dashboard-tab-object-app
+              (com.inuoe.jzon:parse "{\"metadata\":{\"name\":\"g\"},\"spec\":{\"traces\":\"/explore?q={traceId}\",\"service\":{\"namespace\":\"m\",\"name\":\"g\",\"port\":80}}}"))))
+    (is (equal "/explore?q={traceId}" (gr8s.server::dashboard-app-traces app))))
+  (dolist (bad (list "//evil.example/{traceId}" "/\\evil" "https://evil/{traceId}" "explore" ""
+                     (format nil "/a~Cb" #\Newline) nil 7))
+    (is (null (gr8s.server::dashboard-app-local-path bad)) "~S is not a path within the app" bad))
+  ;; Every tab field is escaped into the page: a DashboardTab's title comes from the cluster.
+  (let ((page (gr8s.server::dashboard-shell-html
+               '(("app-x" "http://127.0.0.1:1/.gr8s-tab/s" "<img src=x onerror=alert(1)>" "/t?a=1&b=\"{traceId}\""))
+               "app-x")))
+    (is (null (search "<img" page)))
+    (is (search "&lt;img src=x onerror=alert(1)&gt;" page))
+    (is (search "data-traces=\"/t?a=1&amp;b=&quot;{traceId}&quot;\"" page)))
   ;; A follower's 307 to the leader is followed by the dashboard, to the same path there.
   (multiple-value-bind (member target)
       (gr8s.server::dashboard-app-redirect-member
@@ -451,6 +467,19 @@
              ;; The tab's secret and the reader's Authorization stay here.
              (is (not (search "gr8s-tab-" (or cookie ""))))
              (is (null authorization)))
+           ;; A trace link lands the frame on a path within the app (podster-krg.3); a NEXT
+           ;; that leaves the app lands on its home instead.
+           ;; (PRESERVE-URI: drakma would encode the escapes a second time, as a browser doesn't.)
+           (drakma:http-request (concatenate 'string bootstrap "?next=" (drakma:url-encode "/explore?panes=1" :utf-8))
+                                :proxy nil :cookie-jar jar :preserve-uri t)
+           (is (equal "/api/v1/namespaces/monitoring/services/grafana:80/proxy/explore?panes=1"
+                      (first (first *dashboard-app-upstream-seen*))))
+           (multiple-value-bind (body status headers)
+               (drakma:http-request (concatenate 'string bootstrap "?next=" (drakma:url-encode "//evil.example/" :utf-8))
+                                    :proxy nil :cookie-jar jar :redirect nil :preserve-uri t)
+             (declare (ignore body))
+             (is (= 302 status))
+             (is (equal (concatenate 'string origin "/") (cdr (assoc :location headers)))))
            (drakma:http-request (concatenate 'string origin "/api/health") :proxy nil :cookie-jar jar)
            (destructuring-bind (uri cookie authorization) (first *dashboard-app-upstream-seen*)
              (declare (ignore authorization))

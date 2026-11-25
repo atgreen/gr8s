@@ -530,7 +530,24 @@ arriving at a Pod from another known Pod isn't counted: its source counted it le
                       (network-graph-latest-count graph) +network-latest-flows+))
               (when (> (length (network-edge-recent edge)) +network-recent-flows+)
                 (setf (network-edge-recent edge)
-                      (subseq (network-edge-recent edge) 0 +network-recent-flows+))))))))))
+                      (subseq (network-edge-recent edge) 0 +network-recent-flows+)))
+              (when (and (hash-table-p l7) (equal "Gateway" (second target)))
+                (network-graph-note-backend-request graph topology target-id flow time)))))))))
+
+(defun network-graph-note-backend-request (graph topology gateway-id flow time)
+  "List FLOW, a request GATEWAY-ID answered, on the edge from the Gateway to the backend
+it reached as well, with its latency, so a slow backend's edge has its requests and their
+traces (podster-krg.3). It was counted on the client's edge, so it is not counted again;
+an edge the Gateway's own connections haven't drawn yet gets none."
+  (let* ((backend (gethash (gethash "podAddress" flow "") (network-topology-addresses topology)))
+         (edge (and backend (gethash (cons gateway-id (network-workload-id backend)) (network-graph-edges graph))))
+         (l7 (gethash "l7" flow)))
+    (when edge
+      (when (plusp (gethash "latencyNs" l7 0))
+        (push (cons time (gethash "latencyNs" l7)) (network-edge-latencies edge)))
+      (push flow (network-edge-recent edge))
+      (when (> (length (network-edge-recent edge)) +network-recent-flows+)
+        (setf (network-edge-recent edge) (subseq (network-edge-recent edge) 0 +network-recent-flows+))))))
 
 (defun network-edge-window (edge now seconds)
   "EDGE's (flows dropped errors bytes) over the last SECONDS before NOW."
