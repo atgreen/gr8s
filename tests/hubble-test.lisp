@@ -26,6 +26,13 @@
     (list (slot-value endpoint 'gr8s.hubble.observer::namespace)
           (slot-value endpoint 'gr8s.hubble.observer::pod-name))))
 
+(test a-flow-of-a-protocol-gr8s-cannot-name-still-becomes-a-hubble-flow
+  ;; An agent gives the number of a protocol it can't name, such as IGMP's 2; the
+  ;; dashboard died serializing it as the flow's summary (podster-atf).
+  (let ((flow (gr8s.server::hubble-flow (hubble-test-flow "protocol" 2))))
+    (is (equal "2" (slot-value flow 'gr8s.hubble.observer::summary)))
+    (is (plusp (length (ag-proto:serialize-to-bytes flow))))))
+
 (test gr8s-flows-become-hubble-flows
   (let* ((flow (gr8s.server::hubble-flow (hubble-test-flow)))
          (ip (slot-value flow 'gr8s.hubble.observer::ip))
@@ -475,7 +482,12 @@
     (is (equal "/api/v1/namespaces/m/services/g:80/proxy/ofrep?x=1" target)))
   (is (null (gr8s.server::dashboard-app-redirect-member nil 302 '((:location . "https://elsewhere/")))))
   (is (null (gr8s.server::dashboard-app-redirect-member nil 307 '((:location . "/relative")))))
-  (is (equal "default-src 'self'" (gr8s.server::dashboard-app-csp "default-src 'self'; frame-ancestors 'none'"))))
+  (is (equal "default-src 'self'" (gr8s.server::dashboard-app-csp "default-src 'self'; frame-ancestors 'none'")))
+  ;; Hunchentoot interns only names already known, so an app's own header comes as a string.
+  (is (equal '(("accept" . "*/*") ("x-grafana-device-id" . "abc"))
+             (gr8s.server::dashboard-app-request-headers
+              nil '((:accept . "*/*") ("X-Grafana-Device-Id" . "abc") (:authorization . "Bearer t")
+                    (:origin . "http://127.0.0.1:42021"))))))
 
 (test a-dashboard-app-tab-is-its-own-origin-behind-a-secret
   (let* ((upstream (hunchentoot:start (make-instance 'dashboard-app-upstream :address "127.0.0.1" :port 0)))
@@ -515,8 +527,257 @@
              ;; The app's own cookie goes back to it.
              (is (search "grafana_session=abc" cookie))
              (is (not (search "gr8s-tab-" cookie))))
+           ;; Another local page carries the cookie too, but not this tab's Origin.
+           (is (= 403 (nth-value 1 (drakma:http-request (concatenate 'string origin "/api/health") :proxy nil :cookie-jar jar
+                                                        :additional-headers '(("Origin" . "http://127.0.0.1:1"))))))
+           ;; The tab's own Origin is welcome, and stays here: the app sees another Host.
+           (is (= 200 (nth-value 1 (drakma:http-request (concatenate 'string origin "/public/a.js") :proxy nil :cookie-jar jar
+                                                        :additional-headers (list (cons "Origin" origin))))))
+           (is (equal "/api/v1/namespaces/monitoring/services/grafana:80/proxy/public/a.js"
+                      (first (first *dashboard-app-upstream-seen*))))
            ;; A DashboardTab that's gone takes its server with it.
            (is (null (gr8s.server::dashboard-apps-tabs apps :list-tabs (constantly (com.inuoe.jzon:parse "{\"items\":[]}")))))
            (signals error (drakma:http-request (concatenate 'string origin "/") :proxy nil :connection-timeout 2)))
       (gr8s.server::stop-dashboard-apps apps)
       (hunchentoot:stop upstream))))
+
+(defun agent-test-websocket (port path &key (origin (format nil "http://127.0.0.1:~D" port)))
+  "Open a WebSocket to PATH on the loopback PORT, returning (values stream status)."
+  (let* ((socket (usocket:socket-connect "127.0.0.1" port :element-type '(unsigned-byte 8)))
+         (stream (usocket:socket-stream socket)))
+    (write-sequence (trivial-utf-8:string-to-utf-8-bytes
+                     (format nil "GET ~A HTTP/1.1~C~CHost: 127.0.0.1:~D~C~COrigin: ~A~C~CUpgrade: websocket~C~CConnection: Upgrade~C~CSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==~C~CSec-WebSocket-Version: 13~C~C~C~C"
+                             path #\Return #\Linefeed port #\Return #\Linefeed origin #\Return #\Linefeed
+                             #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed
+                             #\Return #\Linefeed))
+                    stream)
+    (finish-output stream)
+    ;; The response head, up to its blank line.
+    (let ((head (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+      (loop for byte = (read-byte stream nil)
+            while byte
+            do (vector-push-extend byte head)
+            until (and (>= (length head) 4) (equalp (subseq head (- (length head) 4)) #(13 10 13 10))))
+      (values stream (parse-integer (trivial-utf-8:utf-8-bytes-to-string head) :start 9 :end 12)))))
+
+(test the-dashboard-agent-tab-runs-an-agent-on-a-terminal
+  ;; podster-2ry: a pseudo-terminal behind a WebSocket, running only an agent the tab offers.
+  (let* ((directory (uiop:ensure-directory-pathname
+                     (sb-posix:mkdtemp (namestring (merge-pathnames "gr8s-agents-XXXXXX" (uiop:temporary-directory))))))
+         (agents-file (merge-pathnames "dashboard-agents.json" directory))
+         (agent (gr8s.server::make-dashboard-agent
+                 "/tmp/kubeconfig-for-test"
+                 :agents-file agents-file
+                 :choices-function
+                 (lambda ()
+                   (list (list :id "echo" :label "Echo" :program "/bin/sh" :builtin nil
+                               :command '("sh" "-c" "read go; stty size; echo kube=$KUBECONFIG; read line; echo got:$line; exit 3"))
+                         (list :id "absent" :label "Absent" :program nil :builtin t :command '("absent"))))))
+         (acceptor (make-instance 'gr8s.server::gr8s-dashboard-acceptor
+                                  :address "127.0.0.1" :port 0 :shell-path "/ui/tok/"
+                                  :tabs '(("agent" "/agent/tok/" "Agent"))
+                                  :agent agent :agent-base "/agent/tok/"
+                                  :proxy-fn (lambda (&rest arguments) (declare (ignore arguments)) "proxied")
+                                  :multiplexer-fn nil
+                                  :access-log-destination nil :message-log-destination nil)))
+    (hunchentoot:start acceptor)
+    (unwind-protect
+         (let ((port (hunchentoot:acceptor-port acceptor)))
+           (flet ((get-path (path)
+                    (multiple-value-bind (body status)
+                        (drakma:http-request (format nil "http://127.0.0.1:~D~A" port path) :proxy nil :force-binary t)
+                      (values (trivial-utf-8:utf-8-bytes-to-string body) status)))
+                  (send (stream opcode text)
+                    (gr8s.protocol::write-websocket-frame stream opcode (trivial-utf-8:string-to-utf-8-bytes text)
+                                                          :masked-p t)))
+             (is (search "<script src=\"xterm.js\"></script>" (get-path "/agent/tok/")))
+             (let ((offered (com.inuoe.jzon:parse (get-path "/agent/tok/agents"))))
+               (is (equal '("echo" "absent") (map 'list (lambda (entry) (gethash "id" entry)) offered)))
+               (is (eq t (gethash "installed" (aref offered 0))))
+               (is (eq nil (gethash "installed" (aref offered 1))))
+               (is (equalp #("sh" "-c" "read go; stty size; echo kube=$KUBECONFIG; read line; echo got:$line; exit 3")
+                           (gethash "command" (aref offered 0)))))
+             ;; podster-9et: the reader's own agents are saved from this dashboard's page alone.
+             (flet ((post-agents (body &optional (origin (format nil "http://127.0.0.1:~D" port)))
+                      (nth-value 1 (drakma:http-request (format nil "http://127.0.0.1:~D/agent/tok/agents" port)
+                                                        :method :post :proxy nil :content body
+                                                        :content-type "application/json"
+                                                        :additional-headers (list (cons "Origin" origin))))))
+               (let ((mine "[{\"id\":\"mine\",\"label\":\"Mine\",\"command\":[\"mine\",\"{guide-file}\"]}]"))
+                 (is (= 403 (post-agents mine "http://evil.example")))
+                 (is (null (probe-file agents-file)))
+                 (is (= 400 (post-agents "[{\"id\":\"claude\",\"label\":\"x\",\"command\":[\"x\"]}]")))
+                 (is (= 400 (post-agents "{\"not\":\"a list\"}")))
+                 (is (= 200 (post-agents mine)))
+                 (is (equal '(("mine" "Mine" ("mine" "{guide-file}"))) (gr8s.server::read-custom-agents agents-file)))))
+             (when (third (assoc "xterm.js" gr8s.server::+dashboard-agent-assets+ :test #'equal))
+               (is (= 200 (nth-value 1 (get-path "/agent/tok/xterm.js")))))
+             ;; Another site's page can't open a terminal, and only the catalogue runs.
+             (is (= 403 (nth-value 1 (agent-test-websocket port "/agent/tok/pty?agent=echo" :origin "http://evil.example"))))
+             (is (= 404 (nth-value 1 (agent-test-websocket port "/agent/tok/pty?agent=sh"))))
+             (is (= 404 (nth-value 1 (agent-test-websocket port "/agent/tok/pty?agent=absent"))))
+             (multiple-value-bind (stream status) (agent-test-websocket port "/agent/tok/pty?agent=echo")
+               (is (= 101 status))
+               (send stream 1 "{\"type\":\"resize\",\"cols\":99,\"rows\":33}")
+               (sleep 0.2)
+               (send stream 2 (format nil "go~C" #\Return))
+               (send stream 2 (format nil "hello~C" #\Return))
+               (let ((output (make-string-output-stream)) (exit nil))
+                 (loop (multiple-value-bind (opcode payload) (gr8s.protocol::read-websocket-frame stream)
+                         (case opcode
+                           (2 (write-string (sb-ext:octets-to-string payload :external-format :latin-1) output))
+                           (1 (setf exit (com.inuoe.jzon:parse payload)))
+                           (8 (return)))))
+                 (let ((text (get-output-stream-string output)))
+                   ;; The terminal echoes what's typed, as it arrives.
+                   (is (search (format nil "go~C~Chello~C~C" #\Return #\Newline #\Return #\Newline) text))
+                   (is (search "33 99" text))
+                   (is (search "kube=/tmp/kubeconfig-for-test" text))
+                   (is (search "got:hello" text)))
+                 (is (equal "exit" (gethash "type" exit)))
+                 (is (= 3 (gethash "code" exit))))
+               (close stream))
+             (is-true (wait-until (lambda () (null (gr8s.server::dashboard-agent-sessions agent))) :timeout 5))))
+      (hunchentoot:stop acceptor)
+      (uiop:delete-directory-tree directory :validate t))))
+
+(defun agent-test-frames (stream &key (until (lambda (text exits) (declare (ignore text exits)) nil)))
+  "Read STREAM's frames until it closes or UNTIL, given the output so far and the control
+messages, says so; return (values output control-messages)."
+  (let ((output (make-string-output-stream)) (text "") (controls nil))
+    (loop (multiple-value-bind (opcode payload) (gr8s.protocol::read-websocket-frame stream)
+            (case opcode
+              (2 (write-string (sb-ext:octets-to-string payload :external-format :latin-1) output)
+                 (setf text (concatenate 'string text (get-output-stream-string output))))
+              (1 (push (com.inuoe.jzon:parse payload) controls))
+              (8 (return))))
+          (when (funcall until text controls) (return)))
+    (values text (reverse controls))))
+
+(test the-dashboard-agent-outlives-its-page
+  ;; An agent runs on when its page goes, shows its latest output to the next, and ends when stopped.
+  (let* ((agent (gr8s.server::make-dashboard-agent
+                 "/tmp/kubeconfig-for-test"
+                 :choices-function
+                 (lambda () (list (list :id "loop" :label "Loop" :program "/bin/sh" :builtin nil
+                                        :command '("sh" "-c" "echo started; while read line; do echo got:$line; done"))))))
+         (acceptor (make-instance 'gr8s.server::gr8s-dashboard-acceptor
+                                  :address "127.0.0.1" :port 0 :shell-path "/ui/tok/"
+                                  :tabs '(("agent" "/agent/tok/" "Agent"))
+                                  :agent agent :agent-base "/agent/tok/"
+                                  :proxy-fn (lambda (&rest arguments) (declare (ignore arguments)) "proxied")
+                                  :multiplexer-fn nil
+                                  :access-log-destination nil :message-log-destination nil)))
+    (hunchentoot:start acceptor)
+    (unwind-protect
+         (let ((port (hunchentoot:acceptor-port acceptor)) (id nil))
+           (flet ((type-line (stream text)
+                    (gr8s.protocol::write-websocket-frame
+                     stream 2 (trivial-utf-8:string-to-utf-8-bytes (format nil "~A~C" text #\Return)) :masked-p t))
+                  (sessions ()
+                    (com.inuoe.jzon:parse (drakma:http-request (format nil "http://127.0.0.1:~D/agent/tok/sessions" port)
+                                                               :proxy nil))))
+             (let ((stream (agent-test-websocket port "/agent/tok/pty?agent=loop")))
+               (multiple-value-bind (text controls)
+                   (agent-test-frames stream :until (lambda (text controls) (and controls (search "started" text))))
+                 (declare (ignore text))
+                 (is (equal "session" (gethash "type" (first controls))))
+                 (setf id (gethash "id" (first controls))))
+               (type-line stream "one")
+               (agent-test-frames stream :until (lambda (text controls) (declare (ignore controls)) (search "got:one" text)))
+               ;; The page goes; the agent doesn't.
+               (close stream))
+             (sleep 0.3)
+             (is (equal (list id) (map 'list (lambda (session) (gethash "id" session)) (sessions))))
+             (let ((stream (agent-test-websocket port (format nil "/agent/tok/pty?session=~A" id))))
+               ;; The next page sees what it missed, then the live terminal.
+               (multiple-value-bind (text controls)
+                   (agent-test-frames stream :until (lambda (text controls) (and controls (search "got:one" text))))
+                 (is (equal id (gethash "id" (first controls))))
+                 (is (search "started" text)))
+               (type-line stream "two")
+               (agent-test-frames stream :until (lambda (text controls) (declare (ignore controls)) (search "got:two" text)))
+               ;; Stop ends it, by hanging up its terminal.
+               (gr8s.protocol::write-websocket-frame stream 1 (trivial-utf-8:string-to-utf-8-bytes "{\"type\":\"stop\"}")
+                                                     :masked-p t)
+               (multiple-value-bind (text controls) (agent-test-frames stream)
+                 (declare (ignore text))
+                 (let ((exit (find "exit" controls :key (lambda (c) (gethash "type" c)) :test #'equal)))
+                   ;; The shell's read ends when its terminal hangs up, and so does the shell.
+                   (is-true exit)))
+               (close stream))
+             (is-true (wait-until (lambda () (zerop (length (sessions)))) :timeout 5))
+             (is (= 404 (nth-value 1 (agent-test-websocket port (format nil "/agent/tok/pty?session=~A" id)))))))
+      (hunchentoot:stop acceptor))))
+
+(test the-dashboard-lisp-tab-starts-icl-on-a-tunnel
+  ;; ICL's browser REPL, connected to a gr8s process, in a frame the dashboard's origin may show.
+  (is (equal "http://127.0.0.1:41234/icl/C6D18548DFC69F93F6F00515500A7367"
+             (gr8s.server::icl-browser-url "Direct your browser to http://127.0.0.1:41234/icl/C6D18548DFC69F93F6F00515500A7367")))
+  (is (null (gr8s.server::icl-browser-url "; Browser-only mode (connected to 127.0.0.1:4005)")))
+  ;; SBCL, whatever the reader's ICL configuration names.
+  (is (equal '("-b" "--no-open" "--no-banner" "--lisp" "sbcl" "--embed-origin" "http://127.0.0.1:8080"
+               "--connect" "127.0.0.1:4005")
+             (gr8s.server::icl-arguments 4005 "http://127.0.0.1:8080")))
+  (let ((directory (uiop:ensure-directory-pathname
+                    (sb-posix:mkdtemp (namestring (merge-pathnames "gr8s-icl-XXXXXX" (uiop:temporary-directory)))))))
+    (unwind-protect
+         (flet ((fake (name help)
+                  (let ((path (merge-pathnames name directory)))
+                    (alexandria:write-string-into-file (format nil "#!/bin/sh~%echo '~A'~%" help) path)
+                    (sb-posix:chmod (namestring path) #o755)
+                    (namestring path))))
+           (is-true (gr8s.server::icl-embeds-p (fake "new" "      --embed-origin <ITEM>  Let a page ...")))
+           (is-false (gr8s.server::icl-embeds-p (fake "old" "      --no-open  Don't open")))
+           (is-false (gr8s.server::icl-embeds-p nil)))
+      (uiop:delete-directory-tree directory :validate t)))
+  (let* ((started nil)
+         (lisp (gr8s.server::make-dashboard-lisp
+                nil :icl "/usr/bin/icl"
+                    :start (lambda (lisp target origin)
+                             (declare (ignore lisp))
+                             (push (list target origin) started)
+                             (let ((session (gr8s.server::%make-lisp-session target)))
+                               (setf (gr8s.server::lisp-session-url session) "http://127.0.0.1:5/icl/AB")
+                               session))))
+         (acceptor (make-instance 'gr8s.server::gr8s-dashboard-acceptor
+                                  :address "127.0.0.1" :port 0 :shell-path "/ui/tok/"
+                                  :tabs '(("repl" "/lisp/tok/" "REPL"))
+                                  :lisp lisp :lisp-base "/lisp/tok/"
+                                  :proxy-fn (lambda (&rest arguments) (declare (ignore arguments)) "proxied")
+                                  :multiplexer-fn nil
+                                  :access-log-destination nil :message-log-destination nil)))
+    (hunchentoot:start acceptor)
+    (unwind-protect
+         (let* ((port (hunchentoot:acceptor-port acceptor))
+                (origin (format nil "http://127.0.0.1:~D" port)))
+           (flet ((call (path &key (method :post) (from origin))
+                    (multiple-value-bind (body status)
+                        (drakma:http-request (format nil "http://127.0.0.1:~D/lisp/tok/~A" port path)
+                                             :method method :proxy nil
+                                             :additional-headers (when from (list (cons "Origin" from))))
+                      (values (if (stringp body) body (trivial-utf-8:utf-8-bytes-to-string body)) status))))
+             (is (search "<title>gr8s REPL</title>" (call "" :method :get)))
+             ;; Only this dashboard's page, by POST, starts a REPL, in a member or a node.
+             (is (= 405 (nth-value 1 (call "connect?kind=member&name=gr8s2" :method :get))))
+             (is (= 403 (nth-value 1 (call "connect?kind=member&name=gr8s2" :from "http://evil.example"))))
+             (is (= 400 (nth-value 1 (call "connect?kind=pod&name=gr8s2"))))
+             (is (= 400 (nth-value 1 (call "connect?kind=member&name=../etc"))))
+             (let ((session (com.inuoe.jzon:parse (call "connect?kind=member&name=gr8s2"))))
+               (is (equal "http://127.0.0.1:5/icl/AB" (gethash "url" session)))
+               (is (equal (list (list '("member" "gr8s2") origin)) started)))
+             ;; Asking again finds the one running.
+             (call "connect?kind=member&name=gr8s2")
+             (is (= 1 (length started)))
+             (let ((targets (com.inuoe.jzon:parse (call "targets" :method :get))))
+               (is (= 1 (length (gethash "sessions" targets)))))
+             (is (eq t (gethash "stopped" (com.inuoe.jzon:parse (call "disconnect?kind=member&name=gr8s2")))))
+             (is (zerop (length (gethash "sessions" (com.inuoe.jzon:parse (call "targets" :method :get)))))))
+           ;; Without ICL the page says so.
+           (setf (gr8s.server::dashboard-lisp-icl lisp) nil)
+           (multiple-value-bind (body status)
+               (drakma:http-request (format nil "http://127.0.0.1:~D/lisp/tok/connect?kind=node&name=n1" port)
+                                    :method :post :proxy nil :additional-headers (list (cons "Origin" origin)))
+             (is (= 409 status))
+             (is (search "ICL is not installed" (if (stringp body) body (trivial-utf-8:utf-8-bytes-to-string body))))))
+      (hunchentoot:stop acceptor))))

@@ -82,6 +82,28 @@
     (write-private-text-atomically certificate-path certificate-pem)
     (delete-file manifest-path)))
 
+(defun kubelet-certificate-pem (pki public-key common-name organization &key server addresses dns-names)
+  "Sign PUBLIC-KEY, a SubjectPublicKeyInfo, as COMMON-NAME in ORGANIZATION: a client certificate,
+or with SERVER a serving one for ADDRESSES and DNS-NAMES. Return its PEM followed by the CA's."
+  (let ((der (certificate-der
+              (pure-tls/acme::encode-subject +pki-ca-common-name+)
+              (encode-kubelet-subject common-name organization)
+              public-key
+              (append
+               (list (pure-tls/acme::encode-critical-extension
+                      +oid-key-usage+ (pure-tls/acme::encode-bit-string #(#x80) 7))
+                     (pure-tls/acme::encode-extension
+                      +oid-extended-key-usage+
+                      (pure-tls/acme::encode-sequence
+                       (pure-tls/acme::encode-oid (if server '(1 3 6 1 5 5 7 3 1) +oid-client-auth+)))))
+               (when server
+                 (list (pure-tls/acme::encode-extension pure-tls/acme::*oid-subject-alt-name*
+                                                        (kubelet-san-extension addresses dns-names)))))
+              (cluster-pki-ca-private-key pki) :issuer-certificate (cluster-pki-ca-certificate pki))))
+    (concatenate 'string (pure-tls/acme::wrap-pem "CERTIFICATE" der)
+                 (pure-tls/acme::wrap-pem
+                  "CERTIFICATE" (pure-tls::x509-certificate-raw-der (cluster-pki-ca-certificate pki))))))
+
 (defun issue-cluster-certificate (pki certificate-path key-path common-name organization
                                   &key server (addresses nil) (dns-names nil) rotate-key)
   "Issue COMMON-NAME while preserving an existing key, so renewal replaces one file.
@@ -100,28 +122,11 @@ An initial interrupted key-first creation is retryable; a certificate without it
               (unless (and (getf parameters :x) encoded-public)
                 (pki-fail "invalid-leaf-key" "Private key ~A must be a P-256 EC key" key-path))
               (values private (ironclad:make-public-key :secp256r1 :y encoded-public))))
-    (let* ((der (certificate-der
-                (pure-tls/acme::encode-subject +pki-ca-common-name+)
-                (encode-kubelet-subject common-name organization)
-                (pure-tls/acme::encode-ec-public-key public)
-                (append
-                 (list (pure-tls/acme::encode-critical-extension
-                        +oid-key-usage+ (pure-tls/acme::encode-bit-string #(#x80) 7))
-                       (pure-tls/acme::encode-extension
-                        +oid-extended-key-usage+
-                        (pure-tls/acme::encode-sequence
-                         (pure-tls/acme::encode-oid (if server '(1 3 6 1 5 5 7 3 1) +oid-client-auth+)))))
-                 (when server
-                   (list (pure-tls/acme::encode-extension pure-tls/acme::*oid-subject-alt-name*
-                                                          (kubelet-san-extension addresses dns-names)))))
-                (cluster-pki-ca-private-key pki) :issuer-certificate (cluster-pki-ca-certificate pki)))
-           (key-pem (and new-key-p (pure-tls/acme::encode-ec-private-key-pem private)))
+    (let* ((key-pem (and new-key-p (pure-tls/acme::encode-ec-private-key-pem private)))
            (certificate-pem
-             (concatenate 'string (pure-tls/acme::wrap-pem "CERTIFICATE" der)
-                          (pure-tls/acme::wrap-pem
-                           "CERTIFICATE"
-                           (pure-tls::x509-certificate-raw-der
-                            (cluster-pki-ca-certificate pki))))))
+             (kubelet-certificate-pem pki (pure-tls/acme::encode-ec-public-key public)
+                                      common-name organization
+                                      :server server :addresses addresses :dns-names dns-names)))
       (ensure-directories-exist certificate-path)
       (handler-case
           (if (and rotate-key old-key-pem (probe-file certificate-path))
@@ -626,6 +631,9 @@ returning it, or NIL. A port another process holds leaves the node without one, 
   (let ((port (or (getf options :kubelet-port) 0))
         (directory (uiop:ensure-directory-pathname (getf options :state-directory))))
     (multiple-value-bind (certificate key client-certificate client-key) (kubelet-credential-paths directory)
+      (when (and (plusp port) (not (and (probe-file certificate) (probe-file client-certificate))))
+        (format *error-output* "gr8s kubelet endpoints on port ~D are off: no kubelet certificates in ~A~%"
+                port (namestring directory)))
       (when (and (plusp port) (probe-file certificate) (probe-file client-certificate))
         (handler-case
             (let ((ca (first (pure-tls:load-certificate-chain (merge-pathnames "ca.crt" directory)))))

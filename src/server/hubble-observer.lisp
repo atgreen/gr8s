@@ -128,7 +128,10 @@ it sends and the destination of traffic it receives."
                         (gethash "policies" flow #())))
          (dropped (equal "DROPPED" (gethash "verdict" flow)))
          (reason (hubble-drop-reason (gethash "reason" flow)))
-         (l7 (gethash "l7" flow)))
+         (l7 (gethash "l7" flow))
+         ;; An agent names the protocols it knows and gives the others' numbers.
+         (protocol (let ((protocol (gethash "protocol" flow "")))
+                     (if (stringp protocol) protocol (princ-to-string protocol)))))
     (make-instance
      'gr8s.hubble.observer::flow
      :time (hubble-timestamp (gethash "time" flow ""))
@@ -161,7 +164,7 @@ it sends and the destination of traffic it receives."
                   (format nil "HTTP/1.1 ~D ~Dms (~A http://~A~A)" (gethash "code" l7 0)
                           (floor (gethash "latencyNs" l7 0) 1000000)
                           (gethash "method" l7 "") (gethash "host" l7 "") (gethash "path" l7 ""))
-                  (gethash "protocol" flow ""))
+                  protocol)
      :l7 (and l7 (hubble-l7 l7))
      :node-name (gethash "node" flow "")
      :traffic-direction (if ingress gr8s.hubble.observer::+trafficdirection-ingress+

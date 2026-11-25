@@ -165,7 +165,9 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
                   "buildDate" "1970-01-01T00:00:00Z"
                   "goVersion" "common-lisp"
                   "compiler" "sbcl"
-                  "platform" "linux/amd64"))))
+                  "platform" (format nil "linux/~A" (gr8s.upgrade::host-architecture))
+                  ;; The newest format this member reads, for `gr8s upgrade finalize'.
+                  "gr8sFormatLevel" gr8s.upgrade:+gr8s-format-level+))))
 
 (defun api-versions-response ()
   "Answer /api with the single core API version (v1) this server serves."
@@ -745,16 +747,28 @@ With RECONCILER, an existing Pod shows the status and revision a read of it woul
         (error 'kubernetes-error :status-code 400 :reason "BadRequest"
                :message (format nil "container ~S in pod ~S is waiting to start: ~A" container name
                                 (gethash "reason" (gethash "waiting" (gethash "state" observed)) "ContainerCreating")))))
-    (let* ((previous (true-parameter-p (hunchentoot:parameter "previous")))
-           (raw (or (reconciler-logs reconciler (pod-uid pod) container :previous previous) ""))
-           (text (format-pod-logs-for-request raw)))
+    (let ((previous (true-parameter-p (hunchentoot:parameter "previous")))
+          (options (pod-log-request-options)))
       (cond
-        ((upgrade-request-p) (serve-pod-logs-websocket text))
+        ((upgrade-request-p)
+         (serve-pod-logs-websocket
+          (lambda (write) (apply #'send-pod-logs reconciler pod container write :previous previous options))))
         ((and (true-parameter-p (hunchentoot:parameter "follow")) (not previous))
-         (serve-followed-pod-logs store reconciler pod container text (length raw)))
+         (serve-followed-pod-logs store reconciler pod container options))
         (t
-         (setf (hunchentoot:content-type*) "text/plain; charset=utf-8")
-         text)))))
+         ;; A log can be far larger than memory, so it goes out as it is read. The
+         ;; headers wait for its first text: until then, an error is answered as one.
+         (let ((stream nil))
+           (setf (hunchentoot:content-type*) "text/plain; charset=utf-8")
+           (apply #'send-pod-logs reconciler pod container
+                  (lambda (text)
+                    (unless stream
+                      (setf stream (hunchentoot:send-headers))
+                      (gr8s.store::release-store-request))
+                    (write-sequence (trivial-utf-8:string-to-utf-8-bytes text) stream)
+                    (finish-output stream))
+                  :previous previous options)
+           (if stream nil "")))))))
 
 (defstruct exec-options
   command
@@ -1502,6 +1516,9 @@ the request for drain diagnostics. Debug tunnels route without a lease."
           ((and (eq method :delete)
                 (cl-ppcre:scan "^/apis/gr8s[.]io/v1/controlplanemembers/[^/]+$" path))
            (serve-control-plane-member-delete path))
+          ((and (eq method :post)
+                (cl-ppcre:scan "^/apis/gr8s[.]io/v1/(nodes|controlplanemembers)/[^/]+/upgrade$" path))
+           (serve-host-upgrade store runtime path))
           ((and (eq method :post)
                 (cl-ppcre:scan "^/apis/gr8s[.]io/v1/controlplanemembers/[^/]+/leadership$" path))
            (serve-control-plane-member-leadership path))

@@ -292,6 +292,15 @@
       (is (equal (concatenate 'string prefix "/target?x=a%2Fb#fragment")
                  (gr8s.apiserver::pod-proxy-rewrite-location location target prefix frontend))))))
 
+(test pod-proxy-splits-the-set-cookies-drakma-joined
+  ;; Grafana's login sets two; joined, the browser keeps only the first.
+  (is (equal '("grafana_session=abc; Path=/; HttpOnly; SameSite=Lax" "grafana_session_expiry=1795471337; Path=/")
+             (gr8s.apiserver::pod-proxy-split-set-cookie
+              "grafana_session=abc; Path=/; HttpOnly; SameSite=Lax,grafana_session_expiry=1795471337; Path=/")))
+  ;; An Expires date's comma is not the start of another cookie.
+  (is (equal '("a=1; Expires=Mon, 23 Nov 2026 21:52:22 GMT; Path=/" "b=2")
+             (gr8s.apiserver::pod-proxy-split-set-cookie "a=1; Expires=Mon, 23 Nov 2026 21:52:22 GMT; Path=/, b=2"))))
+
 (test pod-proxy-rbac-requires-a-separate-scoped-proxy-grant
   (with-temporary-store (store directory)
     (service-account-test-store store "proxy-reader" "default")

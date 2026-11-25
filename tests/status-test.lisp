@@ -117,7 +117,17 @@
     (is (eq :ok (check-field (gr8s.server::status-version-check version matched) :status)))
     (let ((check (gr8s.server::status-version-check version skewed)))
       (is (eq :warn (check-field check :status)))
-      (is (search "old at v1.37.1-gr8s.9" (check-field check :detail))))))
+      (is (search "old at v1.37.1-gr8s.9" (check-field check :detail))))
+    ;; A member with no Node of its own (serve --disable-agent) is compared by its
+    ;; own /version; one that couldn't be asked isn't counted as skewed (podster-gta).
+    (is (eq :ok (check-field (gr8s.server::status-version-check
+                              version matched '((:name "cp2" :version "v1.37.2-gr8s.0")
+                                                (:name "cp3" :version nil)))
+                             :status)))
+    (let ((check (gr8s.server::status-version-check
+                  version matched '((:name "cp2" :version "v1.37.1-gr8s.9")))))
+      (is (eq :warn (check-field check :status)))
+      (is (search "member cp2 at v1.37.1-gr8s.9" (check-field check :detail))))))
 
 (test control-plane-check-flags-a-member-stuck-in-application-restore
   (flet ((check (&rest members) (gr8s.server::status-control-plane-check members)))

@@ -48,6 +48,11 @@ Hubble UI  (embedded web UI, served by 'gr8s dashboard')  -  Apache-2.0
     The frontend bundles third-party JavaScript whose own license texts
     are reproduced in the EMBEDDED WEB UI section below.
 
+xterm.js and its fit addon  (embedded terminal, served by 'gr8s dashboard')  -  MIT
+    Copyright The xterm.js authors
+    https://github.com/xtermjs/xterm.js
+    Their license texts are reproduced in the EMBEDDED WEB UI section below.
+
 libzstd  (linked at runtime)  -  BSD-3-Clause
     Copyright Meta Platforms, Inc.
     https://github.com/facebook/zstd
@@ -100,6 +105,7 @@ COMPONENTS
   }
   web_ui_licenses dashboard "HEADLAMP DASHBOARD" Headlamp
   web_ui_licenses hubble-ui "HUBBLE UI" "Hubble UI"
+  web_ui_licenses xterm "XTERM.JS" "xterm.js"
 
   ocicl collect-licenses
 } > "$output"

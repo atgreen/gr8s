@@ -229,3 +229,63 @@
     (is-true (getf verbose :verbose))
     (is (= 8193 (getf verbose :port))))
   (signals error (gr8s.server::parse-dashboard-options '("--verbose" "extra"))))
+
+(test the-agent-tab-keeps-the-readers-own-agents
+  ;; podster-9et: agents the reader defines persist, and a bad one is refused or skipped.
+  (let* ((directory (uiop:ensure-directory-pathname
+                     (sb-posix:mkdtemp (namestring (merge-pathnames "gr8s-agents-XXXXXX" (uiop:temporary-directory))))))
+         (file (merge-pathnames "gr8s/dashboard-agents.json" directory)))
+    (unwind-protect
+         (progn
+           (is (null (gr8s.server::read-custom-agents file)))
+           (gr8s.server::write-custom-agents '(("aider" "Aider" ("aider" "--read" "{guide-file}"))
+                                               ("goose" "Goose" ("goose" "session")))
+                                             file)
+           (is (equal '(("aider" "Aider" ("aider" "--read" "{guide-file}")) ("goose" "Goose" ("goose" "session")))
+                      (gr8s.server::read-custom-agents file)))
+           (is (= #o600 (logand #o777 (sb-posix:stat-mode (sb-posix:stat (namestring file))))))
+           ;; One unsound entry, edited in by hand, is left out; the rest survive.
+           (alexandria:write-string-into-file
+            "[{\"id\":\"ok\",\"label\":\"OK\",\"command\":[\"ok\"]},{\"id\":\"Bad Id\",\"label\":\"x\",\"command\":[\"x\"]},{\"id\":\"none\",\"label\":\"No command\",\"command\":[]}]"
+            file :if-exists :supersede)
+           (is (equal '(("ok" "OK" ("ok"))) (gr8s.server::read-custom-agents file)))
+           (flet ((problem (id label command &optional taken)
+                    (gr8s.server::custom-agent-problem id label command taken)))
+             (is (null (problem "my-agent" "My agent" '("prog" "--flag"))))
+             (is (search "lowercase" (problem "My Agent" "x" '("prog"))))
+             (is (search "built-in" (problem "claude" "x" '("prog"))))
+             (is (search "built-in" (problem "shell" "x" '("prog"))))
+             (is (search "two agents" (problem "a" "x" '("prog") '("a"))))
+             (is (search "name" (problem "a" "" '("prog"))))
+             (is (search "name" (problem "a" (format nil "two~%lines") '("prog"))))
+             (is (search "command" (problem "a" "A" '())))
+             (is (search "command" (problem "a" "A" '(""))))))
+      (uiop:delete-directory-tree directory :validate t))))
+
+(test the-agent-tab-fills-in-a-readers-agents-placeholders
+  ;; podster-9et: a command line of the reader's names the guide, gr8s mcp, the kubeconfig
+  ;; and gr8s; each is replaced, files in a private directory the tab removes when it stops.
+  (let* ((directory (uiop:ensure-directory-pathname
+                     (sb-posix:mkdtemp (namestring (merge-pathnames "gr8s-agents-XXXXXX" (uiop:temporary-directory))))))
+         (agent (gr8s.server::make-dashboard-agent "/home/u/kc.yaml" :gr8s "/opt/gr8s"
+                                                   :agents-file (merge-pathnames "agents.json" directory))))
+    (unwind-protect
+         (let ((argv (gr8s.server::choice-argv
+                      agent (list :id "mine" :label "Mine" :program "/usr/bin/mine" :builtin nil
+                                  :command '("mine" "--guide={guide-file}" "--mcp" "{mcp-config-file}"
+                                             "--kc" "{kubeconfig}" "{gr8s} mcp" "{mcp-config}" "a\\b {nothing}")))))
+           (is (equal "/usr/bin/mine" (first argv)))
+           (let ((guide (subseq (second argv) (length "--guide="))))
+             (is (uiop:string-prefix-p "# gr8s operator and agent guide" (uiop:read-file-string guide)))
+             (is (= #o700 (logand #o777 (sb-posix:stat-mode (sb-posix:stat (directory-namestring guide)))))))
+           (let ((server (gethash "gr8s" (gethash "mcpServers" (com.inuoe.jzon:parse (pathname (fourth argv)))))))
+             (is (equal "/opt/gr8s" (gethash "command" server)))
+             (is (equalp #("mcp" "--kubeconfig" "/home/u/kc.yaml") (gethash "args" server))))
+           (is (equal '("--kc" "/home/u/kc.yaml" "/opt/gr8s mcp") (subseq argv 4 7)))
+           (is (equal (uiop:read-file-string (fourth argv)) (eighth argv)))
+           ;; Text that names no placeholder, backslashes included, is passed as it is.
+           (is (equal "a\\b {nothing}" (ninth argv)))
+           (let ((context (gr8s.server::dashboard-agent-context-directory agent)))
+             (gr8s.server::stop-dashboard-agents agent)
+             (is (null (probe-file context)))))
+      (uiop:delete-directory-tree directory :validate t))))

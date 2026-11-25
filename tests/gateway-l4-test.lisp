@@ -143,3 +143,151 @@
           (gr8s.controllers::stop-l4-listener listener)
           (funcall stop-a)
           (funcall stop-b))))))
+
+;;; PROXY protocol v2 to opted-in backends (podster-0gz).
+
+(defun l4-start-recording-backend (count)
+  "Accept one connection on a kernel-assigned port, read exactly COUNT bytes, reply
+   \"ok\" and close. Returns (values stop-fn port box); (car BOX) holds the bytes."
+  (let* ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp))
+         (box (list nil))
+         (port nil)
+         (thread nil))
+    (setf (sb-bsd-sockets:sockopt-reuse-address socket) t)
+    (sb-bsd-sockets:socket-bind socket #(127 0 0 1) 0)
+    (setf port (nth-value 1 (sb-bsd-sockets:socket-name socket)))
+    (sb-bsd-sockets:socket-listen socket 8)
+    (setf thread
+          (bt:make-thread
+           (lambda ()
+             (handler-case
+                 (let ((client (sb-bsd-sockets:socket-accept socket))
+                       (buffer (make-array count :element-type '(unsigned-byte 8))))
+                   (unwind-protect
+                        (multiple-value-bind (buf n)
+                            (sb-ext:with-timeout 4 (sb-bsd-sockets:socket-receive client buffer count :waitall t))
+                          (declare (ignore buf))
+                          (setf (car box) (subseq buffer 0 (or n 0)))
+                          (sb-bsd-sockets:socket-send client (babel:string-to-octets "ok") 2))
+                     (ignore-errors (sb-bsd-sockets:socket-close client))))
+               (error () nil)))
+           :name "l4 test recording backend"))
+    (values (lambda ()
+              (when (bt:thread-alive-p thread)
+                (ignore-errors
+                 (let ((waker (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+                   (unwind-protect (sb-bsd-sockets:socket-connect waker #(127 0 0 1) port)
+                     (ignore-errors (sb-bsd-sockets:socket-close waker))))))
+              (ignore-errors (bt:join-thread thread))
+              (ignore-errors (sb-bsd-sockets:socket-close socket)))
+            port
+            box)))
+
+(defun l4-client-exchange (port send)
+  "Connect to PORT, send SEND, read the reply. Returns (values reply local-port)."
+  (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+    (unwind-protect
+         (progn
+           (sb-bsd-sockets:socket-connect socket #(127 0 0 1) port)
+           (let ((local-port (nth-value 1 (sb-bsd-sockets:socket-name socket)))
+                 (buffer (make-array 16 :element-type '(unsigned-byte 8))))
+             (sb-bsd-sockets:socket-send socket send (length send))
+             (multiple-value-bind (buf n)
+                 (handler-case (sb-ext:with-timeout 4 (sb-bsd-sockets:socket-receive socket buffer 16))
+                   (error () (values nil 0)))
+               (declare (ignore buf))
+               (values (if (and n (plusp n)) (babel:octets-to-string (subseq buffer 0 n)) "")
+                       local-port))))
+      (ignore-errors (sb-bsd-sockets:socket-close socket)))))
+
+(defun l4-call-with-recording-route (mode count proxy-protocol function)
+  "Run FUNCTION with the port of a MODE listener whose only backend records COUNT
+   bytes and resolves with PROXY-PROTOCOL; FUNCTION gets (port box)."
+  (multiple-value-bind (stop backend-port box) (l4-start-recording-backend count)
+    (let* ((resolver (lambda (b) (declare (ignore b)) (values "127.0.0.1" backend-port nil proxy-protocol)))
+           (dispatcher (lambda (sni) (declare (ignore sni)) (l4-backend "rec" backend-port)))
+           (listener (gr8s.controllers::start-l4-listener :port 0 :mode mode :dispatcher dispatcher
+                                                          :resolver resolver :name "proxy-v2")))
+      (unwind-protect (funcall function (gr8s.controllers::l4-listener-port listener) box)
+        (gr8s.controllers::stop-l4-listener listener)
+        (funcall stop)))))
+
+(defun l4-u16 (octets start) (logior (ash (aref octets start) 8) (aref octets (1+ start))))
+
+(test proxy-v2-header-encodes-tcp-over-ipv4
+  (let ((header (gr8s.controllers::proxy-protocol-v2-header #(10 77 77 5) 41234 #(10 77 77 21) 50051)))
+    (is (= 28 (length header)))
+    (is (equalp gr8s.controllers::+proxy-v2-signature+ (subseq header 0 12)))
+    (is (= #x21 (aref header 12)))
+    (is (= #x11 (aref header 13)))
+    (is (= 12 (l4-u16 header 14)))
+    (is (equalp #(10 77 77 5) (subseq header 16 20)))
+    (is (equalp #(10 77 77 21) (subseq header 20 24)))
+    (is (= 41234 (l4-u16 header 24)))
+    (is (= 50051 (l4-u16 header 26)))))
+
+(test proxy-v2-header-without-addresses-is-local
+  (let ((header (gr8s.controllers::proxy-protocol-v2-header #() 0 #() 0)))
+    (is (= 16 (length header)))
+    (is (= #x20 (aref header 12)))
+    (is (zerop (aref header 13)))
+    (is (zerop (l4-u16 header 14)))))
+
+(test proxy-protocol-annotation-opts-a-service-in
+  (flet ((service (annotations)
+           (com.inuoe.jzon:parse
+            (format nil "{\"metadata\":{\"name\":\"s\",\"annotations\":~A}}" annotations))))
+    (is (= 2 (gr8s.controllers::service-proxy-protocol (service "{\"gr8s.io/proxy-protocol\":\"v2\"}"))))
+    (is (null (gr8s.controllers::service-proxy-protocol (service "{\"gr8s.io/proxy-protocol\":\"v1\"}"))))
+    (is (null (gr8s.controllers::service-proxy-protocol (service "{}"))))
+    (is (null (gr8s.controllers::service-proxy-protocol (com.inuoe.jzon:parse "{\"metadata\":{}}"))))))
+
+(test gateway-l4-tcp-sends-proxy-v2-header-first
+  (l4-call-with-recording-route
+   :tcp (+ 28 4) 2
+   (lambda (port box)
+     (multiple-value-bind (reply client-port) (l4-client-exchange port (babel:string-to-octets "ping"))
+       (is (equal "ok" reply))
+       (let ((got (car box)))
+         (is (= 32 (length got)))
+         (when (= 32 (length got))
+           (is (equalp gr8s.controllers::+proxy-v2-signature+ (subseq got 0 12)))
+           (is (= #x11 (aref got 13)))
+           (is (equalp #(127 0 0 1) (subseq got 16 20)) "source is the client")
+           (is (= client-port (l4-u16 got 24)) "source port is the client's")
+           (is (= port (l4-u16 got 26)) "destination port is the one the client dialed")
+           (is (equal "ping" (babel:octets-to-string (subseq got 28))))))))))
+
+(test gateway-l4-tls-sends-proxy-v2-header-before-client-hello
+  (l4-call-with-recording-route
+   :tls (+ 28 5) 2
+   (lambda (port box)
+     (l4-client-exchange port (gwsni-client-hello :server-name "dirq.test"))
+     (let ((got (car box)))
+       (is (= 33 (length got)))
+       (when (= 33 (length got))
+         (is (equalp gr8s.controllers::+proxy-v2-signature+ (subseq got 0 12)))
+         (is (= 22 (aref got 28)) "the replayed ClientHello follows the header"))))))
+
+(test gateway-l4-sends-no-header-without-opt-in
+  (l4-call-with-recording-route
+   :tcp 4 nil
+   (lambda (port box)
+     (l4-client-exchange port (babel:string-to-octets "ping"))
+     (is (equal "ping" (babel:octets-to-string (or (car box) #())))))))
+
+(test the-proxy-protocol-annotation-reaches-the-node-gateway
+  ;; Nodes get Services stripped of annotations; the node's Gateway must still see
+  ;; this one, or a Service asking for PROXY v2 would silently get none.
+  (let* ((service (com.inuoe.jzon:parse
+                   "{\"kind\":\"Service\",\"metadata\":{\"name\":\"dirq\",\"namespace\":\"dirq\",
+                     \"annotations\":{\"gr8s.io/proxy-protocol\":\"v2\",\"secret\":\"keep out\"}},
+                     \"spec\":{\"ports\":[{\"port\":50051}]}}"))
+         (public (gr8s.kubelet::service-discovery-public-object service))
+         (annotations (gethash "annotations" (gethash "metadata" public))))
+    (is (equal "v2" (gethash "gr8s.io/proxy-protocol" annotations)))
+    (is (null (gethash "secret" annotations)) "other annotations stay behind")
+    (is (= 2 (gr8s.controllers::service-proxy-protocol public))))
+  (is (null (gethash "annotations"
+                     (gethash "metadata" (gr8s.kubelet::service-discovery-public-object
+                                          (com.inuoe.jzon:parse "{\"kind\":\"Service\",\"metadata\":{\"name\":\"plain\"},\"spec\":{}}")))))))

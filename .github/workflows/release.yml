@@ -214,6 +214,43 @@ jobs:
           gh release create "$RELEASE_TAG" --prerelease --verify-tag \
             --notes-file release-notes.md release/*
 
+  # The packages and executables as one signed OCI artifact, which `gr8s upgrade'
+  # installs from: ghcr.io/<owner>/gr8s-packages:<tag>. The release key signs it;
+  # without the GR8S_RELEASE_SIGNING_KEY secret there is nothing to sign with, and
+  # the job says so rather than publishing an artifact no host would trust.
+  upgrade-artifact:
+    name: Publish signed upgrade packages
+    needs: [build, packages]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - name: Download binaries and packages
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release
+
+      - name: Push and sign the release artifact
+        env:
+          GR8S_RELEASE_SIGNING_KEY: ${{ secrets.GR8S_RELEASE_SIGNING_KEY }}
+          GR8S_REGISTRY_USERNAME: ${{ github.actor }}
+          GR8S_REGISTRY_PASSWORD: ${{ github.token }}
+          REFERENCE: ghcr.io/${{ github.repository_owner }}/gr8s-packages:${{ github.ref_name }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [ -z "$GR8S_RELEASE_SIGNING_KEY" ]; then
+            echo "::warning::GR8S_RELEASE_SIGNING_KEY is not set: no upgrade artifact published"
+            exit 0
+          fi
+          chmod +x release/gr8s-linux-amd64
+          release/gr8s-linux-amd64 upgrade publish --to "$REFERENCE" --version "$RELEASE_TAG" \
+            release/gr8s-*.rpm release/gr8s_*.deb release/gr8s-linux-amd64 release/gr8s-linux-arm64
+
   image:
     name: Publish gr8s-net container image
     needs: build

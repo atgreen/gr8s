@@ -47,7 +47,9 @@ nanocores, memory in bytes. A slot left NIL was not measured."
   name
   start-time
   usage
-  pods)
+  pods
+  ;; The filesystem under the kubelet's root, as FILESYSTEM-STATISTICS measures it, or NIL.
+  filesystem)
 
 ;;; Containers, from the CRI runtime
 
@@ -279,7 +281,14 @@ alists of /proc/meminfo in kB and the root memory.stat in bytes."
   "Measure NODE-NAME and every Pod RUNTIME runs on it."
   (make-kubelet-node-stats :name node-name :start-time (node-boot-time)
                            :usage (measure-node-usage)
-                           :pods (runtime-kubelet-pod-stats runtime)))
+                           :pods (runtime-kubelet-pod-stats runtime)
+                           :filesystem (measure-node-filesystem)))
+
+(defun measure-node-filesystem ()
+  "Measure the filesystem under the kubelet's root, the one DiskPressure watches, or failing
+that the one /var/lib is on, which the Node's ephemeral-storage capacity reports."
+  (or (ignore-errors (filesystem-statistics "/var/lib/kubelet/"))
+      (ignore-errors (filesystem-statistics "/var/lib/"))))
 
 ;;; Prometheus text, as the kubelet's registry gathers /metrics/resource
 
@@ -421,15 +430,31 @@ sorted by name; a family without samples is left out, as a Prometheus registry g
     (when memory (setf (gethash "memory" object) memory))
     object))
 
+(defun kubelet-summary-filesystem (statistics usage)
+  "Return the FsStats object for STATISTICS, FILESYSTEM-STATISTICS' list, measured with USAGE.
+A filesystem that counts no inodes (Btrfs) leaves them out."
+  (destructuring-bind (capacity available used inodes free-inodes used-inodes) statistics
+    (let ((object (core-object "time" (unix-nanoseconds-timestamp (and usage (kubelet-usage-time usage)))
+                               "availableBytes" available "capacityBytes" capacity "usedBytes" used)))
+      (when (plusp inodes)
+        (setf (gethash "inodesFree" object) free-inodes
+              (gethash "inodes" object) inodes
+              (gethash "inodesUsed" object) used-inodes))
+      object)))
+
 (defun kubelet-stats-summary-object (stats &key cpu-and-memory-only)
   "Return STATS as the kubelet's stats Summary. CPU-AND-MEMORY-ONLY leaves out filesystem use,
 as only_cpu_and_memory=true asks."
   (let ((node (kubelet-node-stats-usage stats)))
     (core-object
-     "node" (add-kubelet-usage-fields
-             (core-object "nodeName" (kubelet-node-stats-name stats)
-                          "startTime" (rfc3339-from-unix (or (kubelet-node-stats-start-time stats) 0)))
-             node)
+     "node" (let ((object (add-kubelet-usage-fields
+                           (core-object "nodeName" (kubelet-node-stats-name stats)
+                                        "startTime" (rfc3339-from-unix (or (kubelet-node-stats-start-time stats) 0)))
+                           node)))
+              (when (and (not cpu-and-memory-only) (kubelet-node-stats-filesystem stats))
+                (setf (gethash "fs" object)
+                      (kubelet-summary-filesystem (kubelet-node-stats-filesystem stats) node)))
+              object)
      "pods" (map 'vector
                  (lambda (pod)
                    (add-kubelet-usage-fields

@@ -194,17 +194,26 @@
       ((null claims) (make-status-check "storage" :ok "no PersistentVolumeClaims"))
       (t (make-status-check "storage" :ok (format nil "all ~D PVCs bound" (length claims)))))))
 
-(defun status-version-check (server-version nodes)
+(defun status-version-check (server-version nodes &optional members)
+  "Compare each node's agent and each control-plane member with the serving API's
+release. MEMBERS are plists with :name and :version, the member's own /version, so a
+member without a Node (serve --disable-agent) is compared too; NIL means it could
+not be asked, which is not skew."
   (let* ((cluster (or (and server-version (gethash "gitVersion" server-version)) "unknown"))
-         (skewed (loop for node in nodes
-                       for version = (status-get node "status" "nodeInfo" "kubeletVersion")
-                       unless (equal version cluster)
-                         collect (format nil "~A at ~A" (status-get node "metadata" "name")
-                                         (or version "unknown")))))
+         (skewed (append
+                  (loop for node in nodes
+                        for version = (status-get node "status" "nodeInfo" "kubeletVersion")
+                        unless (equal version cluster)
+                          collect (format nil "~A at ~A" (status-get node "metadata" "name")
+                                          (or version "unknown")))
+                  (loop for member in members
+                        for version = (getf member :version)
+                        when (and version (not (equal version cluster)))
+                          collect (format nil "member ~A at ~A" (getf member :name) version)))))
     (if skewed
         (make-status-check "versions"
                            :warn (format nil "server at ~A; ~A" cluster (status-join-names skewed))
-                           "upgrade agents to the server's release")
+                           (format nil "gr8s upgrade plan --to ~A" cluster))
         (make-status-check "versions"
                            :ok (format nil "all members and agents at ~A" cluster)))))
 
@@ -311,18 +320,30 @@ an unreachable member never hangs `gr8s status`."
             (ignore-errors (usocket:socket-close socket)))))
     (error () :unreachable)))
 
+(defun status-member-version (config api-url)
+  "The gitVersion a member's own /version reports at its advertised API-URL, or NIL
+when it can't be asked. Bounded like STATUS-MEMBER-READYZ."
+  (ignore-errors
+    (sb-ext:with-timeout 5
+      (gethash "gitVersion" (debug-api-get-json (list* :server api-url config) "/version")))))
+
 (defun status-probe-control-plane-members (config)
-  "List each control-plane member as (:name :readyz), probing those that advertise
-an API-URL. Returns NIL when the membership API is absent (a single control plane)."
+  "List each control-plane member as (:name :readyz :version), probing those that
+advertise an API-URL. Returns NIL when the membership API is absent (a single control plane)."
   (loop for member in (ignore-errors (status-fetch-items config "/apis/gr8s.io/v1/controlplanemembers"))
         for api-url = (status-get member "spec" "apiURL")
         collect (list :name (status-get member "metadata" "name")
-                      :readyz (if api-url (status-member-readyz config api-url) :unprobed))))
+                      :readyz (if api-url (status-member-readyz config api-url) :unprobed)
+                      :version (and api-url (status-member-version config api-url)))))
 
 (defun collect-cluster-status (config)
   "Fetch and analyze; optional API groups are allowed to be absent."
   (multiple-value-bind (ready milliseconds) (status-api-probe config)
     (let* ((version (ignore-errors (debug-api-get-json config "/version")))
+           ;; Probe each HA member's readiness and release directly: an interrupted
+           ;; recovery can leave a member Ready yet store-blocked (podster-ftb), which
+           ;; only its own /readyz reveals. A single control plane has no membership API.
+           (members (status-probe-control-plane-members config))
            (nodes (status-fetch-items config "/api/v1/nodes"))
            (pods (status-fetch-items config "/api/v1/pods?limit=5000"))
            (checks
@@ -345,11 +366,7 @@ an API-URL. Returns NIL when the membership API is absent (a single control plan
                            (status-fetch-items config "/apis/networking.k8s.io/v1/ingresses")))
               (status-storage-check (status-fetch-items config "/api/v1/persistentvolumeclaims")
                                     (status-fetch-items config "/api/v1/persistentvolumes"))
-              (status-version-check version nodes)))
-           ;; Probe each HA member's readiness directly: an interrupted recovery
-           ;; can leave a member Ready yet store-blocked (podster-ftb), which only
-           ;; its own /readyz reveals. A single control plane has no membership API.
-           (members (status-probe-control-plane-members config)))
+              (status-version-check version nodes members))))
       (when members
         (setf checks (append checks (list (status-control-plane-check members)))))
       (multiple-value-bind (events total-warnings)

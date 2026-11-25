@@ -116,6 +116,8 @@ without input, and a client without WebSocket pings (any before v5.channel.k8s.i
    (the dashboard's login check POSTs a SelfSubjectRulesReview; a redirect to the
    leader's API URL fails and surfaces as \"Error Authenticating\")."
   (or (equal script-name "/apis/gr8s.io/v1/patchrollouts")
+      ;; An upgrade request is carried to its host, from any member.
+      (cl-ppcre:scan "^/apis/gr8s[.]io/v1/(nodes|controlplanemembers)/[^/]+/upgrade$" script-name)
       (and (uiop:string-prefix-p "/apis/authorization.k8s.io/v1/" script-name)
            (loop for review in '("selfsubjectrulesreviews" "selfsubjectaccessreviews"
                                  "localsubjectaccessreviews")

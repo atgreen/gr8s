@@ -14,6 +14,9 @@ service NodeService {
   // Private swarm coordination. The node_name is bound to the mTLS client
   // certificate by the server and is never accepted as a bearer identity.
   rpc TrackImage(ImageTrackerRequest) returns (ImageTrackerResponse);
+  // Certificates for the node's kubelet endpoint, as kubelet TLS bootstrap would
+  // issue them. The node_name is bound to the mTLS client certificate.
+  rpc IssueKubeletCredentials(KubeletCredentialsRequest) returns (KubeletCredentialsResponse);
 }
 
 message ImageTrackerRequest {
@@ -44,6 +47,26 @@ message ImageTrackerResponse {
   bytes infohash = 5;
   repeated ImageTrackerPeer peers = 6;
   string error_message = 7;
+}
+
+// Each request is signed by a key that never leaves the node, with the node's
+// name as its common name. The control plane chooses the certificates' subjects
+// and names: system:node:NAME in system:nodes, and for the serving certificate
+// the node's name, its address and loopback.
+message KubeletCredentialsRequest {
+  string node_name = 1;
+  bytes serving_certificate_request = 2;
+  bytes client_certificate_request = 3;
+  // The underlay address the node's hello reports, claimed under the same rule
+  // (no other node may hold it) so a first certificate already names it. Empty
+  // keeps the address the control plane has recorded.
+  string underlay_address = 4;
+}
+
+// PEM certificate chains, each the leaf then its issuing CA.
+message KubeletCredentialsResponse {
+  bytes serving_certificate = 1;
+  bytes client_certificate = 2;
 }
 
 message EnrollRequest {
@@ -164,6 +187,9 @@ message NodeHello {
   // Signed by the node's existing private key. The authenticated session binds
   // the requested CN to node_name, so this cannot mint another identity.
   bytes certificate_request = 13;
+  // The Kubernetes architecture of the agent's executable (amd64, arm64). An older
+  // agent leaves it empty, and agent_version reads just "gr8s".
+  string agent_architecture = 14;
 }
 
 message Heartbeat {
@@ -332,6 +358,10 @@ message OperationStream {
   bool eof = 5;
   // PORT_FORWARD and DIAL: how much more input the node has written to the Pod.
   uint64 acknowledged_bytes = 6;
+  // LOGS: data begins at byte log_offset of the log file. An older node doesn't say,
+  // and sends the whole file from its start.
+  bool log_positioned = 7;
+  uint64 log_offset = 8;
 }
 
 message ServerHello {
@@ -460,6 +490,9 @@ enum OperationKind {
   // The node's recent flow events, then, with FLOWS_FOLLOW, new ones as they
   // happen, as JSON lines on STDOUT until cancelled.
   OPERATION_KIND_FLOWS = 12;
+  // Install the gr8s release UPGRADE_REFERENCE names, checked against its signature,
+  // and restart on it. Done is the host's next hello reporting the release.
+  OPERATION_KIND_UPGRADE = 13;
 }
 
 message OperationRequest {
@@ -499,6 +532,16 @@ message OperationRequest {
   string dial_address = 21;
   // FLOWS: keep streaming new flow events after the recent ones.
   bool flows_follow = 22;
+  // LOGS: where in the log file to begin -- with log_tail, no earlier than its last
+  // log_tail_lines lines; else no earlier than the entries at or after
+  // log_since_unix_seconds, when not zero; else at byte log_start_offset. A node may
+  // begin earlier, never later. An older node ignores them and sends the whole file.
+  bool log_tail = 23;
+  uint64 log_tail_lines = 24;
+  int64 log_since_unix_seconds = 25;
+  uint64 log_start_offset = 26;
+  // UPGRADE: the signed release artifact, REGISTRY/REPOSITORY:TAG or @sha256:DIGEST.
+  string upgrade_reference = 27;
 }
 
 message OperationInput {

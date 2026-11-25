@@ -413,7 +413,8 @@ of RECOVERED is on FOCUS or beneath it."
               (remove-if-not (lambda (entry) (member (gethash "target" entry) below :test #'equal)) recovered)))))
 
 (defun survey-report (target origins warnings coverage &optional (resources (make-hash-table :test #'equal)) focus)
-  "FOCUS, a resource key, narrows a survey to one diagnosed resource."
+  "FOCUS, a resource key, narrows a survey to one diagnosed resource. Why reads failed leads the warnings."
+  (setf warnings (append (read-failure-warnings) warnings))
   (let ((reports (remove-duplicates (loop for origin in origins append (cdr origin)) :test #'eq)))
     (progress "Working out what causes what")
     (multiple-value-bind (problems notes recovered) (explain-findings reports resources)

@@ -7,6 +7,213 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ## [Unreleased]
 
+### Fixed
+
+- `gr8s doctor diagnose` and `impact`, and the MCP doctor tools, read the cluster
+  with gr8s's own API client instead of running `kubectl`, so they work on a host
+  without it, such as a control-plane member, where they defaulted to the
+  member's own kubeconfig. Before, every kind came back "unknown" with no reason.
+  A failed read now says why (the HTTP status and the server's message, or that
+  it didn't answer), and the standalone `scripts/gr8s-doctor`, which still uses
+  `kubectl`, says when it can't run it (podster-71m).
+- `kubectl apply` of a Service whose ports changed works. A strategic merge patch
+  to a Service was applied as a plain JSON merge patch, so the directives kubectl
+  sends (`$setElementOrder/ports`, `{"$patch": "delete"}`) were rejected as
+  unknown fields (422), and a patch naming one port replaced the whole list.
+  Services now merge as upstream does, ports keyed by their port number
+  (podster-0i0).
+- `gr8s doctor` refuses a word that is neither a command nor a directory, and
+  suggests the command meant: `gr8s doctor diagnosis` checked an empty
+  `./diagnosis/` state directory, found the node's live routes stale, and
+  advised a `--fix` that would have torn them down (podster-m6w).
+- `gr8s status` compares each control-plane member's own `/version` too, so a
+  member without a Node (`serve --disable-agent`) on another release shows as
+  skew (podster-gta).
+- A Gateway passes on each of a backend's `Set-Cookie` headers on its own line,
+  as the Pod proxy already did. It joined them into one with commas, so a browser
+  kept only the first cookie: an OIDC login that sets a verifier and a state
+  cookie together lost the state and looped back to the login page (podster-qnr).
+- A worker joined with `gr8s agent` now serves the kubelet's endpoints
+  (`/stats/summary`, `/metrics/resource`, `/metrics/cadvisor`) on 10250, as a
+  control-plane member's own node does; `--kubelet-port` moves them, and 0 turns
+  them off. It gets its kubelet's certificates from the control plane over its
+  node identity, through a new `IssueKubeletCredentials` node RPC, and admits the
+  port through firewalld. Before, it ran without them, so the Node proxy answered
+  "does not serve /stats/summary" for it, and Prometheus could not scrape it. An
+  agent whose kubelet endpoint is off for want of certificates now says so
+  (podster-b55).
+- `/stats/summary` reports the node's filesystem (`node.fs`): the one under
+  `/var/lib/kubelet`, which DiskPressure watches. Headlamp shows it as the node's
+  ephemeral storage, and left that empty on every node (podster-b55).
+- A Node's `Ready` condition carries its `lastTransitionTime`: when the node's
+  ready lease began, or for a node that isn't ready, when it was last heard from.
+  Headlamp works out a node's uptime from it, and showed "NaNy" (podster-zac).
+
+## [v1.37.2-gr8s.8] — 2026-11-24
+
+Ninth trial pre-release. `gr8s upgrade` rolls a cluster onto a signed release,
+host by host: the voters one at a time, the leader last after handing its
+leadership on, then the agents, with a quorum check before each step, a record
+to resume from, and rollback. Releases are now published as signed OCI
+artifacts for it to install from. A Gateway sends PROXY protocol v2 to TCP and
+TLS route backends that ask for it, so they can see their clients' addresses.
+Nodes report the release their own agent runs. Hosts on v1.37.2-gr8s.7 or older
+move to this release once with `sudo gr8s upgrade self --to v1.37.2-gr8s.8`.
+
+### Added
+
+- `gr8s upgrade` rolls a cluster onto a signed gr8s release, host by host,
+  through the cluster API (podster-igs). `plan` shows each host's step and
+  refuses what isn't safe: a voter whose restart would leave too few votes for
+  a quorum, a downgrade, a release with no package for a host's architecture.
+  `apply` upgrades the voters one at a time, hands the leadership on before
+  upgrading the leader, then the agents, and waits for each host to come back
+  on the release; a node that is away is upgraded when it returns. Progress is
+  kept in a `ClusterUpgrade`, so `apply` resumes, and `status` and `rollback`
+  read it. `finalize` lets the cluster use a release's new formats once every
+  voter runs it; a member too old for them refuses to start. A witness needn't
+  run the release, and is left be. `self` upgrades one host as root, as one
+  running a gr8s from before `gr8s upgrade`, `mirror` copies a release to another
+  registry, and `publish` is what the release workflow pushes with.
+- Releases are published as a signed OCI artifact,
+  `ghcr.io/atgreen/gr8s-packages:<tag>`, holding the RPMs, DEBs and executables
+  for each architecture and a `release.json` signed with the gr8s release key
+  (Ed25519). A host installs only a package that release.json, under a key the
+  gr8s it runs carries, vouches for.
+- A TCPRoute, TLSRoute or GRPCRoute backend can learn the client's address. The
+  gateway connects to the backend itself, so the backend saw the node as every
+  client. A backend Service annotated `gr8s.io/proxy-protocol: v2` is now sent a
+  PROXY protocol v2 header naming the client and the address it dialed, ahead of
+  the client's first byte, so it can, for example, keep passthrough TLS and still
+  record who connected. Other backends are unchanged (podster-0gz).
+
+### Changed
+
+- A Node reports the gr8s release and architecture its own agent runs, in
+  `nodeInfo.kubeletVersion` and `nodeInfo.architecture`; they were the control
+  plane's. A node whose agent is too old to report them shows
+  `v0.0.0-unknown`, and `gr8s status` warns of it.
+- `/version` names the platform's real architecture, and adds
+  `gr8sFormatLevel`, the newest store format the member reads.
+
+### Fixed
+
+- A request relayed to a control-plane member that had restarted since the last
+  one no longer fails once with "Broken pipe": a connection that fails under the
+  frame is replaced and the frame sent again (podster-3ao).
+- `gr8s dashboard` no longer exits on a flow of a protocol gr8s can't name,
+  such as IGMP: its Hubble UI feed put the protocol's number where text goes,
+  and nothing caught the error (podster-atf).
+
+## [v1.37.2-gr8s.7] — 2026-11-23
+
+Eighth trial pre-release. Container logs no longer stop the server: a log is
+read a piece at a time, from where the request begins, and rotated as kubelet
+rotates it. In v1.37.2-gr8s.6, `kubectl logs` on a 471 MB log exhausted a
+member's heap. The dashboard's Agent tab starts its terminals at once instead
+of after minutes, and its REPL tab reaches a member whose earlier debug session
+was lost.
+
+### Added
+
+- Container logs are rotated, as kubelet rotates them: past 10 MiB a log is
+  renamed with the time, the container starts a new file, and five files are
+  kept, the one being written among them. The agent looks every 10 seconds.
+  Before, a log grew without bound; one reached 471 MB in a day and a half
+  (podster-xps).
+- `gr8s skill` explains how to add a dashboard tab for one of the cluster's
+  own apps with a `DashboardTab`, including where to get its CRD, which
+  release packages don't carry (podster-032).
+
+### Changed
+
+- Reading a container's log no longer reads the whole file. The node sends it
+  a piece at a time, as the client takes it, and begins where the request
+  does: `tailLines` is found from the end of the file and `sinceSeconds` or
+  `sinceTime` by bisecting it, and `limitBytes` stops the read. A followed log
+  reads only what was written since. An older node, which sends the whole file,
+  still works. Before, a log was read whole and copied several times, and a
+  follow read it again every second (podster-0gf).
+
+### Fixed
+
+- `kubectl logs` on a large container log no longer stops the server. A
+  request for a 471 MB log exhausted a member's 2 GiB heap, and the server
+  exited (podster-0gf).
+- The dashboard's REPL tab, and `gr8s debug icl --member`, can again reach a
+  control-plane member whose earlier debug session was lost: a member now ends
+  a session whose origin no longer holds it, after half a minute, instead of
+  keeping its one debug session taken until it restarts. A member that refuses
+  a session says why, as a 503 with the reason, instead of an HTTP 500
+  (podster-bkm).
+- Terminals in the dashboard's Agent tab start at once. Headlamp watches some
+  resources over WebSockets of their own, which the dashboard passed to the
+  cluster as plain watch requests that never answered; Chrome opens one
+  WebSocket to a host at a time, so a terminal waited behind them for minutes.
+  The dashboard now relays those watches itself, and answers its other
+  WebSockets (Headlamp's exec, attach and log views, which never worked
+  through it) with 501 at once (podster-c7r, podster-db5).
+- The Agent tab's terminals echo what is typed: a shell's input showed nothing.
+- A dashboard app tab keeps every cookie the app sets: the API proxy joined
+  several `Set-Cookie` headers into one, and a browser keeps only the first,
+  so Grafana's login didn't stick.
+- A dashboard app tab no longer passes the browser's `Origin` on to the app,
+  which sees another host behind the API proxy and refused it as cross-site
+  (Grafana). The tab refuses a request whose `Origin` is another page's.
+- The REPL tab says that it needs ICL 1.26.0 or later.
+- The README and `gr8s skill` name the package the Slynk debug helpers are in,
+  `GR8S.APISERVER`.
+
+## [v1.37.2-gr8s.6] — 2026-11-23
+
+Seventh trial pre-release. `gr8s dashboard` gains an Agent tab, running AI
+coding agents in terminal tabs with the cluster's kubeconfig, and a REPL tab,
+ICL's REPL inside a running gr8s process; and `gr8s mcp` gives AI agents
+read-only tools for the cluster. It fixes `gr8s doctor diagnose`, which in
+v1.37.2-gr8s.5 failed on every unhealthy Pod, app tabs that failed on a
+request header gr8s didn't know, and the latency of operations relayed between
+control-plane members.
+
+### Added
+
+- `gr8s dashboard` has an Agent tab: terminals running AI coding agents you
+  have installed (Claude Code, Codex, Gemini CLI) or your shell, on your own
+  machine with your own login, and with `KUBECONFIG` naming the dashboard's
+  cluster. Nothing is deployed to the cluster. **+** starts an agent in a tab
+  of its own; an agent keeps running when you switch tabs or reload the page,
+  and ends when you close its tab or stop the dashboard. The gear defines
+  agents of your own, a name and a command line that can name the gr8s guide,
+  a `gr8s mcp` server config, the kubeconfig and gr8s; they are kept in
+  `$XDG_CONFIG_HOME/gr8s/dashboard-agents.json`. A terminal opens, and agents
+  are defined, only from the dashboard's own page. The terminal is xterm.js,
+  embedded like the other frontends (podster-2ry, podster-9et).
+- `gr8s mcp` serves an AI agent read-only Model Context Protocol tools on
+  stdio: `gr8s_guide` (the guide `gr8s skill` prints, which its instructions
+  say to read first), `doctor_diagnose`, `doctor_impact`, `observe_flows` and
+  `cluster_status`, with the kubeconfig's credentials. The dashboard's Agent
+  tab registers it for Claude Code and Codex, and starts them with the guide
+  in their context (podster-j53).
+- `gr8s dashboard` has a REPL tab: ICL's browser REPL inside a running
+  control-plane member or node agent, through the same authenticated Slynk
+  tunnel as `gr8s debug icl`, with ICL started on your machine on SBCL. It
+  needs ICL 1.26.0 or later, whose `--embed-origin` lets the dashboard frame it.
+  A session outlives the page; Disconnect ends it.
+
+### Fixed
+
+- `gr8s doctor diagnose` works again on the Pods it reads closely. In
+  v1.37.2-gr8s.5 the image lacked the new image-pull rules' code, so every
+  unhealthy Pod was reported as a diagnosis error and the report as
+  incomplete.
+- Operations relayed between control-plane members are no longer slowed by
+  about 45ms a message. Their gRPC connections sent small writes under Nagle's
+  algorithm, and a delayed ACK held each: an exec, a log stream, a proxied
+  request or a REPL through a member other than the one holding the node's
+  session answered in about 90ms instead of a few. Node and member channels
+  now set TCP_NODELAY at both ends (podster-1wk).
+- A dashboard app tab, such as Grafana's, no longer fails requests that carry
+  a header gr8s doesn't know by name, such as `X-Grafana-Device-Id`.
+
 ## [v1.37.2-gr8s.5] — 2026-11-22
 
 Sixth trial pre-release. Flow observability: every node reports dropped
@@ -598,7 +805,10 @@ OpenSSL. Release artifacts cover Linux amd64 and arm64: binaries with
 checksums, tarballs carrying the installer and lifecycle scripts, and
 CycloneDX and SPDX SBOMs for the Lisp dependencies.
 
-[Unreleased]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.5...HEAD
+[Unreleased]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.8...HEAD
+[v1.37.2-gr8s.8]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.7...v1.37.2-gr8s.8
+[v1.37.2-gr8s.7]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.6...v1.37.2-gr8s.7
+[v1.37.2-gr8s.6]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.5...v1.37.2-gr8s.6
 [v1.37.2-gr8s.5]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.4...v1.37.2-gr8s.5
 [v1.37.2-gr8s.4]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.3...v1.37.2-gr8s.4
 [v1.37.2-gr8s.3]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.2...v1.37.2-gr8s.3

@@ -549,6 +549,29 @@ A container running as any user can write here, and a user mount at the path tak
 (defmethod runtime-logs
     ((runtime containerd-runtime) uid container-name &key tail previous)
   (declare (ignore tail))
+  (let ((path (runtime-log-file runtime uid container-name :previous previous)))
+    (if (probe-file path) (uiop:read-file-string path) "")))
+
+(defmethod runtime-rotate-logs ((runtime containerd-runtime))
+  (let ((socket (containerd-runtime-socket-path runtime)))
+    (dolist (summary (cri-list-containers socket :labels (list (cons +gr8s-managed-label+ "true"))))
+      (when (= (cri-container-summary-state summary) gr8s.cri.v1::+containerstate-container_running+)
+        (let ((uid (cdr (assoc +gr8s-uid-label+ (cri-container-summary-labels summary) :test #'string=))))
+          (when uid
+            (handler-case
+                (let ((info (cri-container-status socket (cri-container-summary-id summary))))
+                  (rotate-log-file
+                   (merge-pathnames (container-attempt-log-path (cri-container-info-name info)
+                                                                (cri-container-info-attempt info))
+                                    (containerd-pod-log-directory runtime uid))
+                   (lambda () (cri-reopen-container-log socket (cri-container-summary-id summary)))))
+              ;; One container's log is no reason to leave the others growing.
+              (error (condition)
+                (format *error-output* "gr8s: rotating the log of container ~A failed: ~A~%"
+                        (cri-container-summary-id summary) condition)))))))))
+
+(defmethod runtime-log-file
+    ((runtime containerd-runtime) uid container-name &key previous)
   (call-containerd-runtime
    (lambda ()
      (let* ((container (containerd-owned-container runtime uid container-name))
@@ -569,7 +592,7 @@ A container running as any user can write here, and a user mount at the path tak
            (error 'kubernetes-error
                   :status-code 400 :reason "BadRequest"
                   :message (format nil "previous terminated container ~S not found" container-name)))
-         (if (probe-file path) (uiop:read-file-string path) ""))))))
+         path)))))
 
 (defun containerd-owned-container (runtime uid container-name)
   "Find the gr8s-owned container named CONTAINER-NAME in Pod UID's sandbox on

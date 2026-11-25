@@ -204,6 +204,18 @@
                    (safe-text (gethash "name" observation)) (gethash "result" observation) id))
   (format stream "~%~A~%" (gethash "scope" report)))
 
+(defvar *read-failures* nil
+  "Why reads from the cluster failed during this run, newest first, each said once.")
+
+(defun note-read-failure (control &rest arguments)
+  "Record why a read failed, so the report can say it once rather than only that it is incomplete."
+  (let ((text (apply #'format nil control arguments)))
+    (unless (member text *read-failures* :test #'equal) (push text *read-failures*))))
+
+(defun read-failure-warnings ()
+  "The run's read failures, as report warnings."
+  (mapcar (lambda (reason) (format nil "Could not read from the cluster: ~A" reason)) (reverse *read-failures*)))
+
 (defun kubectl-getter (kubeconfig context)
   "Read through kubectl. A NIL KUBECONFIG leaves kubectl its own default configuration.
 Kind PreviousLog with name POD/CONTAINER reads the last lines of that
@@ -236,7 +248,7 @@ reads a gr8s cluster's recent flow events, as a list of them."
                                       (when (namespaced-kind-p kind)
                                         (if namespace (list "--namespace" namespace) (list "--all-namespaces")))
                                       (list "-o" "json")))))
-                  :output :stream :error-output nil)))
+                  :output :stream :error-output :stream)))
           (unwind-protect
                (sb-ext:with-timeout 15
                  (let ((text
@@ -245,7 +257,14 @@ reads a gr8s cluster's recent flow events, as a list of them."
                                  for size from 0 while character
                                  do (when (>= size (* 8 1024 1024)) (error "Response too large."))
                                     (write-char character out)))))
-                   (cond ((not (zerop (uiop:wait-process process))) (values nil :unknown))
+                   (cond ((not (zerop (uiop:wait-process process)))
+                          ;; A container with no previous run, or a member this client can't
+                          ;; reach, is expected; only a resource read that failed is a reason.
+                          (unless (or log member flows)
+                            (let ((said (ignore-errors (read-line (uiop:process-info-error-output process) nil nil))))
+                              (note-read-failure "kubectl get ~(~A~)~@[: ~A~]" kind
+                                                 (and said (string-trim '(#\Space #\Return) said)))))
+                          (values nil :unknown))
                          ((and (not flows) (zerop (length (string-trim '(#\Space #\Tab #\Newline #\Return) text))))
                           (values nil :absent))
                          (log (values (object "text" text) :present))
@@ -254,8 +273,15 @@ reads a gr8s cluster's recent flow events, as a list of them."
             (when (uiop:process-alive-p process) (uiop:terminate-process process :urgent t))
             (uiop:wait-process process)
             (uiop:close-streams process)))
-      (sb-ext:timeout () (values nil :unknown))
-      (error () (values nil :unknown)))))
+      (sb-ext:timeout ()
+        (note-read-failure "kubectl gave no answer within 15 seconds")
+        (values nil :unknown))
+      (error (condition)
+        (note-read-failure "~A"
+                           (if (search "kubectl" (princ-to-string condition))
+                               "kubectl could not be run; is it installed and on PATH?"
+                               (remove #\Newline (princ-to-string condition))))
+        (values nil :unknown)))))
 
 (defun main (arguments)
   (handler-case
@@ -280,7 +306,8 @@ reads a gr8s cluster's recent flow events, as a list of them."
                      (plusp (length namespace))
                      (every (lambda (c) (find c "abcdefghijklmnopqrstuvwxyz0123456789-")) namespace))
           (error "Specify a KIND/NAME target."))
-        (let ((report (diagnose-resource kind name namespace (kubectl-getter kubeconfig context))))
+        (let ((report (let ((*read-failures* nil))
+                        (diagnose-resource kind name namespace (kubectl-getter kubeconfig context)))))
           (if json (progn (com.inuoe.jzon:stringify report :stream *standard-output*) (terpri))
               (print-report report))
           (cond ((equal "incomplete" (gethash "status" report)) 2)

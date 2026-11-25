@@ -552,6 +552,21 @@ otherwise, with the reasons and messages upstream kubelet uses."
                  "reason" reason
                  "message" (cdr (assoc reason +node-pressure-messages+ :test #'equal)))))
 
+(defun node-ready-condition (node)
+  "NODE's Ready condition, following its session lease. Its lastTransitionTime,
+from which clients such as Headlamp derive uptime, is when the ready lease began,
+or for a node that is not ready the last time it was heard from. There is no
+lastHeartbeatTime: renewing the lease must not change the object clients see."
+  (let* ((ready (node-record-ready-p node))
+         (condition (core-object "type" "Ready"
+                                 "status" (if ready "True" "False")
+                                 "reason" (if ready "AgentReady" "AgentNotReady")
+                                 "message" "Readiness follows the gr8s node session lease"))
+         (since (if ready (node-record-ready-since node) (node-record-last-heartbeat node))))
+    (when since
+      (setf (gethash "lastTransitionTime" condition) (current-timestamp since)))
+    condition))
+
 (defun node-api-object (node)
   "Serialize a registered worker with readiness taken from its live lease."
   (let ((address (node-reported-address node)))
@@ -579,10 +594,7 @@ otherwise, with the reasons and messages upstream kubelet uses."
                "conditions" (vector (if (and (node-record-ready-p node) (node-record-runtime-down-message node))
                                         (core-object "type" "Ready" "status" "False" "reason" "KubeletNotReady"
                                                      "message" (node-record-runtime-down-message node))
-                                        (core-object "type" "Ready"
-                                                     "status" (if (node-record-ready-p node) "True" "False")
-                                                     "reason" (if (node-record-ready-p node) "AgentReady" "AgentNotReady")
-                                                     "message" "Readiness follows the gr8s node session lease"))
+                                        (node-ready-condition node))
                                     ;; The standard kubelet pressure conditions, driven by the
                                     ;; agent's last heartbeat so a pressured node is visible and
                                     ;; avoidable rather than silently Ready.
@@ -597,8 +609,12 @@ otherwise, with the reasons and messages upstream kubelet uses."
                "daemonEndpoints" (core-object "kubeletEndpoint" (core-object "Port" (node-record-kubelet-port node)))
                "capacity" (node-resource-list node)
                "allocatable" (node-resource-list node :allocatable t)
-               "nodeInfo" (core-object "operatingSystem" "linux" "architecture" (native-node-architecture)
-                                        "kubeletVersion" (kubernetes-git-version)))))))
+               ;; What the node's agent reported. An agent too old to report its version
+               ;; shows none, rather than the control plane's: a node that hasn't been
+               ;; upgraded must not look as if it had (podster-igs).
+               "nodeInfo" (core-object "operatingSystem" "linux"
+                                       "architecture" (or (node-record-agent-architecture node) (native-node-architecture))
+                                       "kubeletVersion" (or (node-record-agent-version node) "v0.0.0-unknown")))))))
 
 (defun node-write-input (node method)
   "Return the requested Node object from a typed or JSON PUT, or a patch applied to NODE's view."

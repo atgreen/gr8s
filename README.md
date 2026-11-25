@@ -86,7 +86,7 @@ API. Start with a disposable Linux VM.
 [latest release](https://github.com/atgreen/gr8s/releases) (`amd64` or `arm64`):
 
 ```sh
-VERSION=v1.37.2-gr8s.5 ARCH=amd64
+VERSION=v1.37.2-gr8s.8 ARCH=amd64
 curl -fLO https://github.com/atgreen/gr8s/releases/download/$VERSION/gr8s-linux-$ARCH
 curl -fLO https://github.com/atgreen/gr8s/releases/download/$VERSION/gr8s-linux-$ARCH.sha256
 sha256sum -c gr8s-linux-$ARCH.sha256
@@ -230,12 +230,24 @@ for how it works.
 
 ## Dashboard
 
-`gr8s dashboard` opens a Kubernetes web UI in your browser, with two tabs. The
+`gr8s dashboard` opens a Kubernetes web UI in your browser, with four tabs. The
 Headlamp tab serves the [Headlamp](https://headlamp.dev) frontend and
 reverse-proxies the API over mutual TLS to the running cluster, with live
 resource updates. The Hubble tab serves Hubble UI's service map and flow table
-from the cluster's [flow events](docs/networking.md#flow-events). Both are
-embedded in the binary, with no separate install.
+from the cluster's [flow events](docs/networking.md#flow-events). The Agent tab
+runs AI coding agents you have installed (Claude Code, Codex or Gemini CLI), or
+a shell, each in a terminal tab of its own: **+** starts one, and closing its
+tab stops it. They run on your machine, with your own login, and with
+`KUBECONFIG` naming the dashboard's cluster, and with [`gr8s mcp`](#mcp)
+registered for Claude Code and Codex; nothing is deployed to the cluster. The
+gear defines other agents: a name and a command line, in which `{guide}` or
+`{guide-file}` names the gr8s guide, `{mcp-config}` or `{mcp-config-file}` an
+MCP config for `gr8s mcp`, `{kubeconfig}` the kubeconfig and `{gr8s}` gr8s.
+They are kept in `$XDG_CONFIG_HOME/gr8s/dashboard-agents.json`. The
+REPL tab shows [ICL](https://github.com/atgreen/icl)'s browser REPL connected
+to a running control-plane member or node agent, as `gr8s debug icl` connects
+it; it needs an ICL with `--embed-origin` on your PATH. All four are embedded
+in the binary, with no separate install.
 
 ```sh
 gr8s dashboard    # uses $KUBECONFIG, or ~/.kube/config
@@ -264,6 +276,29 @@ and launches your browser; `--no-launch` prints the URL instead. It prints only
 that URL; `--verbose` logs every request and server error. `make native`
 embeds the assets automatically; see
 [dashboard assets](docs/building-and-testing.md#dashboard-assets).
+
+## MCP
+
+`gr8s mcp` serves an AI agent what gr8s knows about a cluster as [Model Context
+Protocol](https://modelcontextprotocol.io) tools, on stdin and stdout, with the
+kubeconfig's credentials. Every tool only reads:
+
+- `gr8s_guide`: the guide `gr8s skill` prints, on how gr8s differs from other
+  Kubernetes distributions and how to operate it. The server's instructions
+  tell the agent to read it first.
+- `doctor_diagnose`: the `gr8s doctor diagnose` report, for the cluster, a
+  namespace or one resource, as Markdown.
+- `doctor_impact`: what would stop working if a resource went away.
+- `observe_flows`: recent flow events, filtered by namespace, Pod, node or verdict.
+- `cluster_status`: the control plane's members and leader, and each node's readiness.
+
+```sh
+claude mcp add gr8s -- gr8s mcp --kubeconfig ~/.kube/config
+codex mcp add gr8s -- gr8s mcp --kubeconfig ~/.kube/config
+```
+
+The dashboard's Agent tab registers it for the agents it starts, and gives
+Claude Code and Codex the guide in their context from the start.
 
 ## Doctor
 
@@ -450,9 +485,11 @@ REPL while it runs.
   one step (`--no-launch` prints the `icl -b --connect` line instead). ICL
   brings syntax highlighting, completion, a TUI object inspector, package
   and class browsers, flame-graph profiling, and notebooks. Built-in
-  helpers in the `GR8S` package — `(debug-threads)`, `(debug-backtraces)`,
+  helpers — `(debug-threads)`, `(debug-backtraces)`,
   `(debug-pod "default" "web")`, `(debug-journal 20)` — inspect the node's
-  local context.
+  local context. They live in the `GR8S.APISERVER` package and a session
+  starts in `CL-USER`, so evaluate `(in-package :gr8s.apiserver)` first, or
+  qualify them: `(gr8s.apiserver::debug-threads)`.
 - **If you'd rather attach with Emacs or Lem**, run `gr8s debug slynk
   --node NODE --kubeconfig KUBECONFIG --local-port 4005` and point
   [Sly](https://github.com/joaotavora/sly) (or Lem's Lisp mode) at the

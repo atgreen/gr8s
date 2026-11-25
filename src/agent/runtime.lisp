@@ -69,6 +69,8 @@
   (operations (make-hash-table :test #'equal))
   (operations-lock (bt:make-lock "gr8s node runtime operations"))
   (reclaim-queue (make-volume-reclaim-queue))
+  ;; The internal real time at which to look next for container logs to rotate.
+  (next-log-rotation 0)
   (lock (bt:make-lock "gr8s node runtime"))
   (state-changed (bt:make-condition-variable :name "gr8s node runtime state"))
   (apply-lock (bt:make-lock "gr8s node snapshot application"))
@@ -1140,6 +1142,19 @@ the runtime lock."
               (node-runtime-state-changed node-runtime)
               (node-runtime-lock node-runtime)))))
 
+(defparameter +container-log-rotation-seconds+ 10
+  "How often the agent looks for container logs to rotate, as kubelet does.")
+
+(defun rotate-node-container-logs (node-runtime)
+  "Rotate the logs of this node's running containers that have grown too large, at most
+every +CONTAINER-LOG-ROTATION-SECONDS+. Fail-soft: the next look tries again."
+  (when (>= (get-internal-real-time) (node-runtime-next-log-rotation node-runtime))
+    (setf (node-runtime-next-log-rotation node-runtime)
+          (+ (get-internal-real-time) (* +container-log-rotation-seconds+ internal-time-units-per-second)))
+    (handler-case (runtime-rotate-logs (node-runtime-runtime node-runtime))
+      (error (condition)
+        (format *error-output* "gr8s: container log rotation failed: ~A~%" condition)))))
+
 (defun run-node-runtime-body (node-runtime)
   "Run the agent's main loop: start the reconciliation worker (which each tick repairs the
 cached network and re-converges NetworkPolicy and host-port forwarders, fail-soft), mark
@@ -1183,7 +1198,8 @@ health-check servers and runtime deletions."
                                         (converge-host-port-forwarders (node-runtime-host-port-forwarders node-runtime)
                                                                        (node-runtime-store node-runtime))
                                       (error (condition)
-                                        (format *error-output* "gr8s: host port convergence failed: ~A~%" condition))))
+                                        (format *error-output* "gr8s: host port convergence failed: ~A~%" condition)))
+                                    (rotate-node-container-logs node-runtime))
                 :observer (lambda (pod status) (cache-node-observation node-runtime pod status))))
          (bt:with-lock-held ((node-runtime-lock node-runtime))
            (setf (node-runtime-state node-runtime) :running)
@@ -2631,6 +2647,75 @@ that reconnects or restarts gets the answer without a second deletion racing the
                                            :exit-code 1 :message (princ-to-string condition))))))
    :name "gr8s container metrics"))
 
+(defun node-log-selection (request)
+  "The keyword arguments of RUNTIME-SEND-LOGS that REQUEST, a LOGS operation, selects."
+  (let ((since (slot-value request 'gr8s.node.v1::log-since-unix-seconds)))
+    (list :previous (slot-value request 'gr8s.node.v1::previous)
+          :tail-lines (and (slot-value request 'gr8s.node.v1::log-tail)
+                           (slot-value request 'gr8s.node.v1::log-tail-lines))
+          :since (and (plusp since) (+ since (encode-universal-time 0 0 0 1 1 1970 0)))
+          :start-offset (slot-value request 'gr8s.node.v1::log-start-offset))))
+
+(defun run-node-logs-operation (operation uid container selection)
+  "Send CONTAINER's log as SELECTION asks, a piece at a time, each saying where in the
+file it begins. A slow client holds the reading up: the file is never read whole."
+  (handler-case
+      (let ((request (node-exec-operation-request operation)))
+        (apply #'runtime-send-logs
+               (node-runtime-runtime (node-exec-operation-node-runtime operation)) uid container
+               (lambda (piece offset)
+                 (unless (wait-for-node-exec-output-window operation (length piece))
+                   (return-from run-node-logs-operation))
+                 (let ((stream (node-operation-stream
+                                request gr8s.node.v1::+streamchannel-stream_channel_stdout+ piece
+                                :sequence (bt:with-lock-held ((node-exec-operation-lock operation))
+                                            (incf (node-exec-operation-sequence operation)))
+                                :eof nil)))
+                   (setf (slot-value stream 'gr8s.node.v1::log-positioned) t
+                         (slot-value stream 'gr8s.node.v1::log-offset) offset)
+                   (funcall (node-exec-operation-emit operation) :operation-stream stream)))
+               selection)
+        (finish-node-exec-operation operation))
+    (error (condition)
+      (finish-node-exec-operation operation :error (princ-to-string condition)))))
+
+(defun start-node-upgrade-operation (node-runtime request emit)
+  "Upgrade this host as REQUEST, an UPGRADE operation, asks, reporting each step."
+  (let ((operation (make-node-exec-operation node-runtime request nil nil emit)))
+    (remember-node-exec-operation node-runtime operation)
+    (emit-node-exec-response operation gr8s.node.v1::+operationstatus-operation_status_accepted+)
+    (setf (node-exec-operation-thread operation)
+          (bt:make-thread
+           (lambda ()
+             (handler-case
+                 (progn
+                   (gr8s.upgrade:run-host-upgrade (slot-value request 'gr8s.node.v1::upgrade-reference)
+                                     (lambda (line)
+                                       (emit-node-exec-stream operation gr8s.node.v1::+streamchannel-stream_channel_stdout+
+                                                              (trivial-utf-8:string-to-utf-8-bytes
+                                                               (format nil "~A~%" line)))))
+                   (finish-node-exec-operation operation))
+               (error (condition)
+                 (finish-node-exec-operation operation :error (princ-to-string condition)))))
+           :name "gr8s host upgrade"))
+    operation))
+
+(defun start-node-logs-operation (node-runtime request emit)
+  "Stream the log REQUEST names, as RUN-NODE-LOGS-OPERATION does."
+  (assigned-operation-pod node-runtime request)
+  (let ((operation (make-node-exec-operation node-runtime request nil nil emit)))
+    (remember-node-exec-operation node-runtime operation)
+    (emit-node-exec-response operation gr8s.node.v1::+operationstatus-operation_status_accepted+)
+    (setf (node-exec-operation-thread operation)
+          (bt:make-thread
+           (lambda ()
+             (run-node-logs-operation operation
+                                      (slot-value request 'gr8s.node.v1::pod-uid)
+                                      (slot-value request 'gr8s.node.v1::container)
+                                      (node-log-selection request)))
+           :name "gr8s log stream"))
+    operation))
+
 (defun dispatch-node-operation (node-runtime variant payload emit)
   "Dispatch one operation-protocol envelope (VARIANT, PAYLOAD) to its handler, emitting
 replies through EMIT. A new request starts the matching operation (metrics, volume
@@ -2656,6 +2741,12 @@ errors becomes a failed response; an error on any other variant is re-signaled."
            ((= (slot-value payload 'gr8s.node.v1::kind)
                gr8s.node.v1::+operationkind-operation_kind_flows+)
             (start-node-flows-operation node-runtime payload emit))
+           ((= (slot-value payload 'gr8s.node.v1::kind)
+               gr8s.node.v1::+operationkind-operation_kind_logs+)
+            (start-node-logs-operation node-runtime payload emit))
+           ((= (slot-value payload 'gr8s.node.v1::kind)
+               gr8s.node.v1::+operationkind-operation_kind_upgrade+)
+            (start-node-upgrade-operation node-runtime payload emit))
            ((= (slot-value payload 'gr8s.node.v1::kind)
                gr8s.node.v1::+operationkind-operation_kind_slynk+)
             (start-node-slynk-operation node-runtime payload emit))

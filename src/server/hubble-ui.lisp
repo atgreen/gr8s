@@ -195,7 +195,12 @@ until the channel stops."
     (flet ((flush ()
              (let ((flows (bt:with-lock-held (lock) (prog1 (nreverse batch) (setf batch nil)))))
                (when flows
-                 (hubble-ui-enqueue channel (ag-proto:serialize-to-bytes (hubble-ui-events-response map flows)))))))
+                 ;; A batch that can't be sent is lost, not the dashboard with it (podster-atf).
+                 (handler-case
+                     (hubble-ui-enqueue channel (ag-proto:serialize-to-bytes (hubble-ui-events-response map flows)))
+                   (error (condition)
+                     (format *error-output* "gr8s dashboard: dropped ~D flows Hubble UI couldn't be sent: ~A~%"
+                             (length flows) condition)))))))
       ;; Batches go out every 50ms, as Hubble UI's backend sends them, or at 500 flows.
       (let ((flusher (bt:make-thread
                       (lambda ()

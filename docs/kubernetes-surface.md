@@ -334,7 +334,13 @@ implemented alongside stored-resource watches; see
 
 The local agent serves the kubelet's endpoints on port 10250 (`serve
 --kubelet-port`, 0 to disable) only when the node runs managed containerd; under
-any other runtime the kubelet port is forced to 0. The endpoints are
+any other runtime the kubelet port is forced to 0. A worker joined with `gr8s
+agent` serves them too: over its node identity it asks the control plane for its
+kubelet's serving and client certificates, as kubelet TLS bootstrap would, and
+asks again on a start within 90 days of their expiry. Their keys never leave the node, and the
+control plane names the certificates itself (`system:node:NAME` for the node's
+name, its address and loopback). That kubelet has the API server of the member it
+joined through review its callers. The endpoints are
 `/metrics/resource`, `/metrics/cadvisor`,
 `/stats/summary`, `/metrics`, and `/healthz`, measured from CRI container
 statistics and the cgroup v2 files of each container, sandbox, and the root.

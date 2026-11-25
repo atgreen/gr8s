@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gr8s REPL</title>
+<style>
+:root { --bg: #ffffff; --panel: #f6f7f9; --line: #d9dde3; --text: #24292f; --muted: #6b7481; --accent: #1f6feb; --bad: #cf222e; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #15181d; --panel: #1d2026; --line: #343a44; --text: #d6dae0; --muted: #9aa3ae; --accent: #58a6ff; --bad: #ff7b72; }
+}
+[hidden] { display: none !important; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+  font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+body { display: flex; flex-direction: column; }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px;
+  background: var(--panel); border-bottom: 1px solid var(--line); flex: none; }
+header .label { color: var(--muted); }
+select, button { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 4px; padding: 3px 8px; }
+button { cursor: pointer; }
+button:disabled { cursor: default; opacity: .5; }
+button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#status { margin-left: auto; color: var(--muted); }
+#status.bad { color: var(--bad); }
+#empty { flex: 1; display: grid; place-items: center; color: var(--muted); text-align: center; padding: 24px; max-width: 70ch; margin: 0 auto; }
+#empty p { margin: 0; }
+#empty code { white-space: nowrap; background: var(--panel); padding: 1px 4px; border-radius: 3px; }
+iframe { flex: 1; width: 100%; border: 0; }
+</style>
+</head>
+<body>
+<header>
+  <label class="label" for="target">REPL in</label>
+  <select id="target"></select>
+  <button id="connect">Connect</button>
+  <button id="disconnect" hidden>Disconnect</button>
+  <span id="status" role="status"></span>
+</header>
+<div id="empty"><p>Connect to a gr8s process to open ICL's REPL inside it. It is the running control
+plane or agent, not a copy: what you evaluate changes it at once.</p></div>
+<iframe id="icl" title="ICL" hidden></iframe>
+<script>
+"use strict";
+const base = location.pathname.replace(/[^/]*$/, "");
+const $ = (id) => document.getElementById(id);
+let shown = null;
+
+function status(text, bad) { $("status").textContent = text; $("status").className = bad ? "bad" : ""; }
+function key(target) { return target.kind + "/" + target.name; }
+
+function show(session) {
+  shown = session;
+  if ($("icl").src !== session.url) $("icl").src = session.url;
+  $("icl").hidden = false;
+  $("empty").hidden = true;
+  $("disconnect").hidden = false;
+  $("target").value = key(session);
+  status("ICL in " + (session.kind === "member" ? "control-plane member " : "node ") + session.name + ".");
+}
+
+async function post(action, target) {
+  const response = await fetch(base + action + "?kind=" + encodeURIComponent(target.kind) +
+                               "&name=" + encodeURIComponent(target.name), { method: "POST" });
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error || response.statusText);
+  return body;
+}
+
+$("connect").onclick = async () => {
+  const [kind, name] = $("target").value.split("/");
+  $("connect").disabled = true;
+  status("Opening a tunnel to " + name + " and starting ICL…");
+  try { show(await post("connect", { kind, name })); }
+  catch (error) { status("Could not connect: " + error.message, true); }
+  finally { $("connect").disabled = false; }
+};
+
+$("disconnect").onclick = async () => {
+  if (!shown) return;
+  try { await post("disconnect", shown); } catch {}
+  $("icl").src = "about:blank";
+  $("icl").hidden = true;
+  $("empty").hidden = false;
+  $("disconnect").hidden = true;
+  status("Disconnected from " + shown.name + ".");
+  shown = null;
+};
+
+fetch(base + "targets").then((response) => response.json()).then((data) => {
+  for (const target of data.targets) {
+    const option = document.createElement("option");
+    option.value = key(target);
+    option.textContent = (target.kind === "member" ? "Control plane: " : "Node: ") + target.name +
+                         (target.leader ? " (leader)" : "");
+    $("target").append(option);
+  }
+  if (!data.icl) {
+    $("connect").disabled = true;
+    $("empty").innerHTML = "<p>This tab needs <a href=\"https://github.com/atgreen/icl\" target=\"_blank\" rel=\"noopener\">ICL</a> " +
+      "1.26.0 or later, which is not on this machine's PATH.</p>";
+  } else if (!data.embeds) {
+    $("connect").disabled = true;
+    $("empty").innerHTML = "<p>This ICL is too old to show inside the dashboard: it needs ICL 1.26.0 or later, " +
+      "for <code>--embed-origin</code>. Upgrade ICL, or run <code>gr8s debug icl NODE</code> to open it in a window of its own.</p>";
+  }
+  // Back where this page left off: a REPL already running.
+  if (data.sessions.length) show(data.sessions[0]);
+}).catch((error) => status("Could not list the cluster's processes: " + error.message, true));
+</script>
+</body>
+</html>

@@ -884,7 +884,8 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
                                   (generate-node-key-and-csr node-name private-key-path)
                                   #())
                               :boot-id (generate-uid)
-                              :agent-version "gr8s"
+                              :agent-version (gr8s.foundation::kubernetes-git-version)
+                              :agent-architecture (gr8s.resources::native-node-architecture)
                               :underlay-address
                               (or underlay-address (node-channel-underlay-address channel))
                               :capabilities (node-session-capabilities capabilities gateway-config-handler one-shot-p)
@@ -1111,6 +1112,53 @@ plist interface without leaking generated protocol classes into that layer."
                         :peer-id (slot-value peer 'gr8s.node.v1::peer-id)
                         :complete (slot-value peer 'gr8s.node.v1::complete)))
                 (slot-value response 'gr8s.node.v1::peers))))
+
+(defun kubelet-credentials-due-p (directory)
+  "Whether the kubelet certificates under DIRECTORY are missing or due for renewal."
+  (multiple-value-bind (certificate key client-certificate client-key) (kubelet-credential-paths directory)
+    (declare (ignore key client-key))
+    (or (gr8s.apiserver::certificate-renewal-due-p certificate gr8s.apiserver::+certificate-leaf-renewal-seconds+)
+        (gr8s.apiserver::certificate-renewal-due-p client-certificate gr8s.apiserver::+certificate-leaf-renewal-seconds+))))
+
+(defun request-kubelet-credentials
+    (host port node-name directory &key underlay-address (timeout 10))
+  "Get NODE-NAME's kubelet serving and client certificates from the control plane at
+HOST:PORT over the node's own mTLS identity, as kubelet TLS bootstrap would, and write
+them under DIRECTORY beside keys that never leave it. UNDERLAY-ADDRESS is the address
+the node's hello reports, by default the one this connection leaves from. Return true
+when they were issued; otherwise say why and keep whatever certificates are there."
+  (let ((directory (uiop:ensure-directory-pathname directory)))
+    (multiple-value-bind (certificate key client-certificate client-key) (kubelet-credential-paths directory)
+      (handler-case
+          (let ((channel (make-node-tls-channel
+                          host port :timeout timeout
+                          :ca-certificate-path (merge-pathnames "ca.crt" directory)
+                          :certificate-path (merge-pathnames "node.crt" directory)
+                          :private-key-path (merge-pathnames "node.key" directory))))
+            (unwind-protect
+                 (let ((response
+                         (gr8s.node.v1::node-service-issue-kubelet-credentials
+                          (gr8s.node.v1::make-node-service-stub channel)
+                          (make-instance
+                           'gr8s.node.v1::kubelet-credentials-request
+                           :node-name node-name
+                           :serving-certificate-request (generate-node-key-and-csr node-name key)
+                           :client-certificate-request (generate-node-key-and-csr node-name client-key)
+                           :underlay-address (or underlay-address (node-channel-underlay-address channel)))
+                          :timeout timeout)))
+                   (flet ((save (path octets)
+                            (when (zerop (length octets))
+                              (error "the control plane returned no certificate"))
+                            (write-private-text-atomically
+                             path (babel:octets-to-string octets :encoding :utf-8))))
+                     (save certificate (slot-value response 'gr8s.node.v1::serving-certificate))
+                     (save client-certificate (slot-value response 'gr8s.node.v1::client-certificate)))
+                   t)
+              (ignore-errors (ag-grpc:channel-close channel))))
+        (error (condition)
+          (format *error-output* "gr8s could not get kubelet credentials from ~A:~D: ~A~%"
+                  host port (remove #\Newline (princ-to-string condition)))
+          nil)))))
 
 (defun make-image-tracker-rpc-client
     (host port node-name ca-certificate-path certificate-path private-key-path

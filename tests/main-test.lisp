@@ -577,6 +577,19 @@
   (dolist (address '("127.0.0.1" "0.0.0.0" "224.0.0.1" "255.255.255.255" "192.0.2.1/24"))
     (signals error (gr8s.server::parse-serve-options (list "--node-address" address)))))
 
+(test agent-serves-kubelet-endpoints-by-default
+  "A standalone agent serves the kubelet's endpoints on 10250 as serve's own agent
+does; --kubelet-port moves them, and 0 turns them off."
+  (flet ((agent-options (&rest more)
+           (gr8s.server::parse-agent-options
+            (append '("--server" "192.0.2.1:7443" "--token" "test" "--ca-pin" "test"
+                      "--node-name" "worker-a" "--state-directory" "/tmp/worker-a")
+                    more))))
+    (is (eql 10250 (getf (agent-options) :kubelet-port)))
+    (is (eql 10251 (getf (agent-options "--kubelet-port" "10251") :kubelet-port)))
+    (is (eql 0 (getf (agent-options "--kubelet-port" "0") :kubelet-port)))
+    (signals error (agent-options "--kubelet-port" "not-a-port"))))
+
 (test wireguard-endpoint-options-are-named-repeatable-and-validated
   (let ((options
           (gr8s.server::parse-agent-options
@@ -1044,6 +1057,13 @@
     (is (search "--cluster-reset" output))
     (is (search "Wipe-and-rejoin checklist" output))
     (is (search "gr8s doctor --fix" output))))
+
+(test skill-explains-how-to-add-a-dashboard-tab
+  (let ((output (with-output-to-string (stream) (gr8s.server::print-skill stream))))
+    (is (search "Dashboard tabs for the cluster's own apps" output))
+    (is (search "dashboardtabs.dashboard.gr8s.io.yaml" output))
+    (is (search "kind: DashboardTab" output))
+    (is (search "services/proxy" output))))
 
 (test cli-doctor-subcommands
   (is (eq :doctor-cluster (getf (parse-cli-options '("doctor" "checkup" "--json")) :command)))

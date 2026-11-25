@@ -85,6 +85,11 @@
                       (when (and request consume-credential) '("authorization")))))
     (remove-if (lambda (header) (member (car header) hop :test #'string-equal)) headers)))
 
+(defun pod-proxy-split-set-cookie (value)
+  "The cookies in VALUE, a Set-Cookie that drakma joined with commas from several. A
+comma begins another cookie only where NAME= follows; Expires dates hold commas too."
+  (cl-ppcre:split ",\\s*(?=[^;,=\\s]+=)" value))
+
 (defun pod-proxy-rewrite-location (location target prefix frontend)
   "Keep same-server absolute redirects within the proxy URL; preserve external and relative redirects."
   (let* ((uri (puri:parse-uri location)) (path (or (puri:uri-path uri) "")))
@@ -238,6 +243,10 @@ the API prefix of its URL."
                        (:content-type (setf (hunchentoot:header-out name) (cdr header)))
                        (:location (setf (hunchentoot:header-out name)
                                         (pod-proxy-rewrite-location (cdr header) target prefix frontend)))
+                       ;; A browser takes one cookie from each Set-Cookie line.
+                       (:set-cookie (dolist (cookie (pod-proxy-split-set-cookie (cdr header)))
+                                      (push (cons name cookie)
+                                            (slot-value hunchentoot:*reply* 'hunchentoot::headers-out))))
                        (t (push (cons name (cdr header))
                                 (slot-value hunchentoot:*reply* 'hunchentoot::headers-out))))))
                  (when (and page (not (hunchentoot:header-out :content-length)))

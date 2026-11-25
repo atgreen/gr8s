@@ -153,6 +153,27 @@ resource_scrape_error 1
                 :pods (list (gr8s.kubelet::make-kubelet-pod-stats :name "a\"b\\c" :namespace "n" :containers nil
                                                           :usage (kubelet-test-usage 1 1 1))))))))
 
+(test stats-summary-reports-the-node-filesystem
+  "The node's fs is the filesystem under the kubelet's root, which clients such as Headlamp
+show as ephemeral storage. Inodes a filesystem doesn't count (Btrfs) are left out, and
+only_cpu_and_memory leaves out the whole of it."
+  (let ((stats (kubelet-test-node-stats)))
+    (setf (gr8s.kubelet::kubelet-node-stats-filesystem stats) '(1000 400 600 50 20 30))
+    (let ((fs (gethash "fs" (gethash "node" (gr8s.kubelet::kubelet-stats-summary-object stats)))))
+      (is (equal '(1000 400 600 50 20 30)
+                 (mapcar (lambda (key) (gethash key fs))
+                         '("capacityBytes" "availableBytes" "usedBytes" "inodes" "inodesFree" "inodesUsed"))))
+      (is (equal "2023-11-14T22:13:40Z" (gethash "time" fs))))
+    (is (null (gethash "fs" (gethash "node" (gr8s.kubelet::kubelet-stats-summary-object
+                                            stats :cpu-and-memory-only t)))))
+    (setf (gr8s.kubelet::kubelet-node-stats-filesystem stats) '(1000 400 600 0 0 0))
+    (let ((fs (gethash "fs" (gethash "node" (gr8s.kubelet::kubelet-stats-summary-object stats)))))
+      (is (= 600 (gethash "usedBytes" fs)))
+      (is (null (nth-value 1 (gethash "inodes" fs))))))
+  (is (null (gethash "fs" (gethash "node" (gr8s.kubelet::kubelet-stats-summary-object
+                                          (kubelet-test-node-stats)))))
+      "an unmeasured filesystem is left out"))
+
 (test stats-summary-has-the-kubelet-shape
   (let* ((summary (gr8s.kubelet::kubelet-stats-summary-object (kubelet-test-node-stats)))
          (node (gethash "node" summary))

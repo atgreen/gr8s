@@ -1404,6 +1404,70 @@
         (when channel (ignore-errors (ag-grpc:channel-close channel)))
         (gr8s.apiserver::stop-node-grpc-server server)))))
 
+(test standalone-agent-gets-kubelet-credentials-from-the-control-plane
+  "An enrolled agent gets its kubelet's certificates over its node identity: the control
+plane, not the request, names the subject and addresses, and its kubelet then serves with
+them. A node can't claim another's address or name."
+  (with-temporary-store (store path)
+    (gr8s.controllers::register-node
+     store (gr8s.model::make-node-record :id "other-id" :name "other" :pod-cidr "10.80.16.0/20"
+                                         :underlay-address "10.99.0.8"))
+    (let* ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" path)))
+           (server (gr8s.apiserver::start-node-grpc-server store :host "127.0.0.1" :port 0 :pki pki))
+           (port (gr8s.apiserver::node-grpc-server-port server))
+           (directory (merge-pathnames "kubelet-node/" path)))
+      (unwind-protect
+           (progn
+             (gr8s.agent::enroll-node-over-grpc
+              "127.0.0.1" port "kubelet-node" (gr8s.security::create-join-token pki "kubelet-node")
+              (gr8s.security::cluster-pki-ca-fingerprint pki)
+              (merge-pathnames "node.key" directory) (merge-pathnames "node.crt" directory)
+              (merge-pathnames "ca.crt" directory))
+             (is-true (gr8s.agent::kubelet-credentials-due-p directory))
+             (let ((*error-output* (make-broadcast-stream)))
+               (is-false (gr8s.agent::request-kubelet-credentials
+                          "127.0.0.1" port "kubelet-node" directory :underlay-address "10.99.0.8")
+                         "another node's address is refused")
+               (is-false (gr8s.agent::request-kubelet-credentials
+                          "127.0.0.1" port "other" directory :underlay-address "10.99.0.9")
+                         "another node's name is refused"))
+             (is-true (gr8s.agent::request-kubelet-credentials
+                       "127.0.0.1" port "kubelet-node" directory :underlay-address "10.99.0.7"))
+             (is-false (gr8s.agent::kubelet-credentials-due-p directory))
+             (is (equal "10.99.0.7" (gr8s.model::node-record-underlay-address
+                                     (gr8s.controllers::get-node store "kubelet-node"))))
+             (multiple-value-bind (certificate key client-certificate client-key)
+                 (gr8s.apiserver::kubelet-credential-paths directory)
+               (flet ((openssl (path &rest arguments)
+                        (uiop:run-program (append (list "openssl" "x509" "-noout" "-in" (namestring path)) arguments)
+                                          :output :string)))
+                 (is (search "CN=system:node:kubelet-node" (remove #\Space (openssl certificate "-subject"))))
+                 (is (search "O=system:nodes" (remove #\Space (openssl client-certificate "-subject"))))
+                 (let ((names (openssl certificate "-ext" "subjectAltName")))
+                   (is (search "DNS:kubelet-node" names))
+                   (is (search "IP Address:10.99.0.7" names))
+                   (is (search "IP Address:127.0.0.1" names))))
+               ;; The kubelet serves with the issued RSA key, and accepts the issued client certificate.
+               (let* ((kubelet (gr8s.apiserver::start-kubelet-server
+                                :address "127.0.0.1" :port 0 :certificate certificate :key key
+                                :node-name "kubelet-node"
+                                :auth (gr8s.apiserver::make-kubelet-auth
+                                       :client-ca (gr8s.security::cluster-pki-ca-certificate pki)
+                                       :review (lambda (review)
+                                                 (declare (ignore review))
+                                                 (gr8s.resources::core-object
+                                                  "status" (gr8s.resources::core-object "allowed" t))))
+                                :stats-function #'kubelet-test-node-stats))
+                      (kubelet-port (hunchentoot:acceptor-port kubelet)))
+                 (unwind-protect
+                      (is (= 200 (gr8s.apiserver::tls-http-request
+                                  :address "127.0.0.1" :port kubelet-port :server-name "127.0.0.1"
+                                  :target "/metrics/resource"
+                                  :trust-certificates (list (gr8s.security::cluster-pki-ca-certificate pki))
+                                  :client-certificate client-certificate :client-key client-key)))
+                   (gr8s.apiserver::stop-kubelet-server kubelet)))))
+        (gr8s.apiserver::stop-node-grpc-server server)))))
+
 (test ha-enrollment-replicates-an-ordered-node-operation
   (with-temporary-store (store path)
     (gr8s.controllers::register-node
@@ -1565,6 +1629,8 @@
              (merge-pathnames "worker-a/identity.json" path))
            (control (gr8s.agent::make-node-session-control))
            (agent-thread nil)
+           ;; An agent from before logs were streamed answers a LOGS request whole.
+           (old-agent t)
            (control-runtime
              (gr8s.controllers::make-control-plane-runtime store server))
            (reconciler (make-reconciler store control-runtime))
@@ -1583,12 +1649,15 @@
                           node-runtime snapshot))
                        :operation-handler
                        (lambda (variant payload emit)
-                         (unless (eq variant :operation-request)
-                           (error "Unexpected operation payload ~S" variant))
-                         (dolist (reply
-                                  (gr8s.agent::handle-node-operation
-                                   node-runtime payload))
-                           (funcall emit (car reply) (cdr reply))))
+                         (if (or (not (eq variant :operation-request))
+                                 (and (not old-agent)
+                                      (= (slot-value payload 'gr8s.node.v1::kind)
+                                         gr8s.node.v1::+operationkind-operation_kind_logs+)))
+                             (gr8s.agent::dispatch-node-operation node-runtime variant payload emit)
+                             (dolist (reply
+                                      (gr8s.agent::handle-node-operation
+                                       node-runtime payload))
+                               (funcall emit (car reply) (cdr reply)))))
                        :reconnect-delay 0.01
                        :control control))
                     :name "gr8s remote log test agent"))
@@ -1610,6 +1679,32 @@
                    "hello from worker-a\n")
              (is (string= "hello from worker-a\n"
                           (runtime-logs control-runtime (pod-uid pod) "web")))
+             (flet ((send-logs (&rest selection)
+                      (let* ((pieces nil) (offsets nil)
+                             (end (apply #'gr8s.runtime:runtime-send-logs control-runtime (pod-uid pod) "web"
+                                         (lambda (piece offset) (push piece pieces) (push offset offsets))
+                                         selection)))
+                        (values (trivial-utf-8:utf-8-bytes-to-string
+                                 (apply #'concatenate '(vector (unsigned-byte 8)) (reverse pieces)))
+                                (reverse offsets) end))))
+               ;; An older agent sends the whole log whatever is asked: what precedes
+               ;; the offset is dropped here.
+               (multiple-value-bind (text offsets end) (send-logs :start-offset 6)
+                 (is (string= "from worker-a\n" text))
+                 (is (equal '(6) offsets))
+                 (is (= 20 end)))
+               (setf old-agent nil)
+               ;; A current one begins where it's asked, and says where.
+               (multiple-value-bind (text offsets end) (send-logs :start-offset 6)
+                 (is (string= "from worker-a\n" text))
+                 (is (equal '(6) offsets))
+                 (is (= 20 end)))
+               ;; An offset past the end means the file was replaced: begin again.
+               (multiple-value-bind (text offsets end) (send-logs :start-offset 99)
+                 (is (string= "hello from worker-a\n" text))
+                 (is (equal '(0) offsets))
+                 (is (= 20 end)))
+               (setf old-agent t))
              (gr8s.runtime::set-fake-runtime-exec-result
               fake-runtime
               (gr8s.runtime::make-runtime-exec-result
@@ -1711,6 +1806,41 @@
           (gr8s.raft.transport::stop-raft-member origin-member)
           (gr8s.apiserver::stop-node-grpc-server owner)
           (gr8s.apiserver::stop-node-grpc-server origin))))))
+
+(test a-relay-to-a-restarted-member-reconnects-within-the-request
+  ;; The leader's cached relay connection to a member that had restarted failed the
+  ;; next request with "Broken pipe"; only the one after it went through (podster-3ao).
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let* ((origin-member (gr8s.raft.transport::start-raft-member "origin" :port 0))
+           (owner-member (gr8s.raft.transport::start-raft-member "owner" :port 0))
+           (port (gr8s.raft.transport::raft-member-port owner-member))
+           (accepted 0))
+      (flet ((serve (member)
+               (let ((server (gr8s.apiserver::%make-node-grpc-server :store store)))
+                 (setf (gr8s.apiserver::node-grpc-server-member-operation-handler server)
+                       (lambda (origin variant payload)
+                         (declare (ignore origin variant payload))
+                         (incf accepted)))
+                 (gr8s.raft.transport::configure-raft-node-operation-routing member server)))
+             (relay (id)
+               (gr8s.raft.transport::raft-member-route-node-operation
+                origin-member :operation-request "owner" "@control-plane/owner"
+                (make-instance 'gr8s.node.v1::operation-request
+                               :operation-id id :kind gr8s.node.v1::+operationkind-operation_kind_slynk+))))
+        (unwind-protect
+             (progn
+               (serve owner-member)
+               (gr8s.raft.transport::raft-member-set-peers origin-member (list (list "owner" "127.0.0.1" port)))
+               (is (equal "owner" (relay "before-restart")))
+               ;; The member restarts on the same address; the origin's connection is now stale.
+               (gr8s.raft.transport::stop-raft-member owner-member)
+               (setf owner-member (gr8s.raft.transport::start-raft-member "owner" :port port))
+               (serve owner-member)
+               (is (equal "owner" (relay "after-restart")) "the first request after the restart goes through")
+               (is (= 2 accepted) "and arrives once"))
+          (gr8s.raft.transport::stop-raft-member owner-member)
+          (gr8s.raft.transport::stop-raft-member origin-member))))))
 
 (test a-request-to-a-node-that-is-not-connected-says-so
   ;; "Node operation timed out" named neither the node nor why (podster-xbf).
@@ -3172,3 +3302,41 @@
            (is (<= (bt:with-lock-held (seen-lock) (count :operation-stream seen)) 2)))
       (bt:with-lock-held (gate) (setf open t))
       (setf (gr8s.apiserver::node-grpc-server-stopping-p server) t))))
+
+(defun tcp-nodelay-p (socket)
+  "Whether SOCKET, a usocket, sends its writes at once."
+  (cffi:with-foreign-objects ((value :int) (size :unsigned-int))
+    (setf (cffi:mem-ref size :unsigned-int) 4)
+    (cffi:foreign-funcall "getsockopt" :int (sb-bsd-sockets:socket-file-descriptor (usocket:socket socket))
+                          :int 6 :int 1 :pointer value :pointer size :int)
+    (= 1 (cffi:mem-ref value :int))))
+
+(test node-and-member-channels-send-their-writes-at-once
+  ;; podster-1wk: Nagle and delayed ACKs cost every relayed gRPC call about 45ms.
+  (let ((listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t :element-type '(unsigned-byte 8))))
+    (unwind-protect
+         (progn
+           (is-false (tcp-nodelay-p listener))
+           (gr8s.security::set-tcp-nodelay listener)
+           (is-true (tcp-nodelay-p listener))
+           (let* ((client (gr8s.security::harden-node-channel-socket
+                           (usocket:socket-connect "127.0.0.1" (usocket:get-local-port listener)
+                                                   :element-type '(unsigned-byte 8))))
+                  (accepted (usocket:socket-accept listener)))
+             (unwind-protect
+                  (progn (is-true (tcp-nodelay-p client))
+                         ;; An accepted connection inherits its listener's.
+                         (is-true (tcp-nodelay-p accepted)))
+               (usocket:socket-close accepted)
+               (usocket:socket-close client))))
+      (usocket:socket-close listener)))
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let ((server (gr8s.apiserver::start-node-grpc-server store :host "127.0.0.1" :port 0)))
+      (unwind-protect
+           (is-true (tcp-nodelay-p (ag-grpc::server-socket (gr8s.apiserver::node-grpc-server-grpc-server server))))
+        (gr8s.apiserver::stop-node-grpc-server server))))
+  (let ((member (gr8s.raft.transport::start-raft-member "nodelay" :port 0)))
+    (unwind-protect
+         (is-true (tcp-nodelay-p (ag-grpc::server-socket (gr8s.raft.transport::raft-member-grpc-server member))))
+      (gr8s.raft.transport::stop-raft-member member))))

@@ -516,10 +516,12 @@ outside SERVER's lock because a peer RPC may take seconds."
       (when (gethash operation-id (node-grpc-server-operations server))
         (error "Member operation ~A already exists" operation-id))
       (setf (gethash operation-id (node-grpc-server-operations server)) operation))
-    (let ((owner (funcall router :operation-request member-id node-name request)))
+    (multiple-value-bind (owner reason) (funcall router :operation-request member-id node-name request)
       (unless owner
         (release-node-operation server operation)
-        (error "control-plane member ~A did not accept the debug operation" member-id))
+        (error 'runtime-error
+               :message (format nil "control-plane member ~A refused the debug session~@[: ~A~]"
+                                member-id (and (plusp (length reason)) reason))))
       (setf (pending-node-operation-remote-member operation) owner))
     operation))
 
@@ -1776,6 +1778,10 @@ PATIENCE seconds the 503 is signalled as it stands."
                                             (node-capacity-from-entries (slot-value hello 'gr8s.node.v1::capacity)))
                       (update-node-kubelet-port (node-grpc-server-store server) node-name
                                                 (or (slot-value hello 'gr8s.node.v1::kubelet-port) 0))
+                      (update-node-agent-info (node-grpc-server-store server) node-name
+                                              (slot-value hello 'gr8s.node.v1::agent-version)
+                                              (slot-value hello 'gr8s.node.v1::agent-architecture))
+                      (upgrade-returning-node server node-name (slot-value hello 'gr8s.node.v1::agent-version))
                       (let ((session (make-node-agent-session stream)))
                         (setf (node-agent-session-node-id session) (node-record-id node)
                               (node-agent-session-deltas-p session)
@@ -2237,6 +2243,38 @@ socket are released rather than leaked. Safe to call more than once."
       (error "~A" (getf result :message)))
     result))
 
+(defun handle-kubelet-credentials-request (server request context)
+  "Sign the kubelet serving and client certificates of the node authenticated by mTLS,
+as kubelet TLS bootstrap would. Each request only proves the node holds its key: the
+subject is system:node:NAME in system:nodes, and the serving certificate names the node,
+its underlay address and loopback, so no node can be issued another's kubelet identity."
+  (let ((pki (node-grpc-server-pki server))
+        (store (node-grpc-server-store server))
+        (node-name (slot-value request 'gr8s.node.v1::node-name))
+        (address (slot-value request 'gr8s.node.v1::underlay-address)))
+    (unless pki
+      (error "This control plane holds no cluster CA to issue kubelet credentials with"))
+    (authenticate-node-peer pki context node-name)
+    (when (plusp (length address))
+      (update-node-underlay-address store node-name address))
+    (let ((subject (format nil "system:node:~A" node-name))
+          (underlay (node-record-underlay-address (get-node store node-name))))
+      (flet ((public-key (csr)
+               (nth-value 1 (gr8s.security::parse-and-verify-node-csr csr node-name)))
+             (octets (pem)
+               (babel:string-to-octets pem :encoding :utf-8)))
+        (let ((serving (public-key (slot-value request 'gr8s.node.v1::serving-certificate-request)))
+              (client (public-key (slot-value request 'gr8s.node.v1::client-certificate-request))))
+          (make-instance
+           'gr8s.node.v1::kubelet-credentials-response
+           :serving-certificate
+           (octets (kubelet-certificate-pem
+                    pki serving subject "system:nodes" :server t
+                    :addresses (remove "" (list underlay "127.0.0.1") :test #'equal)
+                    :dns-names (list node-name)))
+           :client-certificate
+           (octets (kubelet-certificate-pem pki client subject "system:nodes"))))))))
+
 (defun handle-image-tracker-request (server request context)
   "Execute one tracker operation for the node identity authenticated by mTLS."
   (let* ((node-name (slot-value request 'gr8s.node.v1::node-name))
@@ -2358,7 +2396,9 @@ socket are released rather than leaked. Safe to call more than once."
      :connect-handler (lambda (context stream)
                         (handle-node-connect server context stream))
      :track-image-handler (lambda (request context)
-                            (handle-image-tracker-request server request context)))
+                            (handle-image-tracker-request server request context))
+     :issue-kubelet-credentials-handler (lambda (request context)
+                                          (handle-kubelet-credentials-request server request context)))
         (when pki
           (gr8s.node.v1::register-enrollment-service-service
        grpc-server
@@ -2374,6 +2414,8 @@ socket are released rather than leaked. Safe to call more than once."
           do (sleep 0.01))
         (unless (ag-grpc::server-socket grpc-server)
           (error "Node gRPC server failed to start listening"))
+        ;; Connections accepted from it inherit TCP_NODELAY.
+        (gr8s.security::set-tcp-nodelay (ag-grpc::server-socket grpc-server))
         (setf (node-grpc-server-port server)
           (usocket:get-local-port (ag-grpc::server-socket grpc-server))
           (node-grpc-server-monitor-thread server)

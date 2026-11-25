@@ -18,7 +18,7 @@ What cannot be read is reported as incomplete. Configuration notes need --notes.
 The report is wrapped and styled for a terminal and plain for a pipe; --markdown
 writes it as Markdown.
 Impact says what would stop working if a node, workload, Secret, ConfigMap or
-claim went away. Without --kubeconfig, kubectl uses its own default configuration.
+claim went away. Without --kubeconfig, the doctor uses kubectl's default configuration.
 Checkup is an alias for diagnose without a target. Host retains the local host checks.~%"))
 
 (defun resource-target (kind ns name)
@@ -172,6 +172,18 @@ The third return value records the original collection time, including cache hit
           (values nil :unknown)
           (progn (incf requests) (funcall getter kind ns name))))))
 
+(defvar *call-with-getter*
+  (lambda (kubeconfig context function) (funcall function (kubectl-getter kubeconfig context)))
+  "How a doctor run reads the cluster: a function of KUBECONFIG, CONTEXT and a function of one
+getter, which it calls for the whole run. The doctor on its own reads through kubectl; gr8s
+binds its own API client, so a host without kubectl can be diagnosed.")
+
+(defun call-with-doctor-getter (kubeconfig context function)
+  "Call FUNCTION with the run's bounded getter, collecting why reads fail."
+  (let ((*read-failures* nil))
+    (funcall *call-with-getter* kubeconfig context
+             (lambda (getter) (funcall function (bounded-getter getter))))))
+
 (defun doctor-main (arguments)
   (handler-case
       (let ((command (pop arguments)) (namespace nil) (kubeconfig nil) (context nil) (json nil) (target nil)
@@ -201,14 +213,17 @@ The third return value records the original collection time, including cache hit
           (unless target (error "Specify the KIND/NAME whose loss to consider."))
           (let ((report (call-with-progress
                          (lambda ()
-                           (impact-target target namespace (bounded-getter (kubectl-getter kubeconfig context)))))))
+                           (call-with-doctor-getter kubeconfig context
+                                                    (lambda (getter) (impact-target target namespace getter)))))))
             (if json (progn (com.inuoe.jzon:stringify report :stream *standard-output*) (terpri))
                 (print-impact report))
             (return-from doctor-main (if (equal "incomplete" (gethash "status" report)) 2 0))))
-        (let* ((getter (bounded-getter (kubectl-getter kubeconfig context)))
-               (report (call-with-progress
-                        (lambda ()
-                          (if target (diagnose-target target namespace getter) (checkup namespace getter))))))
+        (let ((report (call-with-progress
+                       (lambda ()
+                         (call-with-doctor-getter
+                          kubeconfig context
+                          (lambda (getter)
+                            (if target (diagnose-target target namespace getter) (checkup namespace getter))))))))
           (if json (progn (com.inuoe.jzon:stringify report :stream *standard-output*) (terpri))
               (print-survey report :notes notes :markdown markdown))
           (cond ((equal "incomplete" (gethash "status" report)) 2)

@@ -853,6 +853,22 @@ read and write behind it."
      (runtime-logs (reconciler-runtime reconciler)
                    uid container :tail tail :previous previous))))
 
+(defun reconciler-send-logs (reconciler uid container function
+                             &rest selection &key previous tail-lines since start-offset)
+  "Call FUNCTION with CONTAINER's log for the Pod UID a piece at a time, as
+RUNTIME-SEND-LOGS does. Only finding a log file is serialized under the reconciler lock:
+a slow reader must not hold up every Pod's reconciliation."
+  (declare (ignore tail-lines since start-offset))
+  (let* ((runtime (reconciler-runtime reconciler))
+         (path (and (runtime-runs-containers-p runtime)
+                    (call-with-runtime-serialized
+                     reconciler (lambda () (runtime-log-file runtime uid container :previous previous))))))
+    (if path
+        (apply #'send-log-file path function
+               (loop for (key value) on selection by #'cddr unless (eq key :previous) collect key and collect value))
+        (call-with-runtime-serialized
+         reconciler (lambda () (apply #'runtime-send-logs runtime uid container function selection))))))
+
 (defun reconciler-exec-url
     (reconciler uid container command &key stdin stdout stderr tty)
   "Return a one-time streaming exec URL for running COMMAND in CONTAINER of the Pod
