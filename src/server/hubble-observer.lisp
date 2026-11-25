@@ -41,19 +41,31 @@
        (+ (slot-value timestamp 'gr8s.hubble.observer::seconds)
           (/ (slot-value timestamp 'gr8s.hubble.observer::nanos) 1000000000))))
 
-(defun hubble-identity (namespace pod)
-  "A stable numeric identity for Pod NAMESPACE/POD, past Cilium's reserved range, or 0."
-  (if pod
-      (+ 256 (mod (sxhash (format nil "~A/~A" namespace pod)) 65000))
-      0))
+(defparameter +hubble-per-pod-label-keys+
+  '("pod-template-hash" "pod-template-generation" "controller-revision-hash"
+    "statefulset.kubernetes.io/pod-name" "apps.kubernetes.io/pod-index"
+    "controller-uid" "batch.kubernetes.io/controller-uid" "batch.kubernetes.io/job-completion-index")
+  "Labels that tell one replica from another, which Cilium leaves out of an identity.")
 
 (defun hubble-labels (namespace labels)
-  "Cilium-style k8s: labels for a Pod in NAMESPACE with LABELS."
+  "Cilium-style k8s: labels for a Pod in NAMESPACE with LABELS: those of its identity,
+without the labels that differ between replicas."
   (sort (append (when namespace (list (format nil "k8s:io.kubernetes.pod.namespace=~A" namespace)))
                 (when (hash-table-p labels)
                   (loop for key being the hash-keys of labels using (hash-value value)
-                        collect (format nil "k8s:~A=~A" key value))))
+                        unless (member key +hubble-per-pod-label-keys+ :test #'equal)
+                          collect (format nil "k8s:~A=~A" key value))))
         #'string<))
+
+(defun hubble-identity (namespace labels)
+  "A stable numeric identity, past Cilium's reserved range, for Pods in NAMESPACE with
+LABELS. As Cilium's, it follows the label set, not the Pod: a workload's replicas share
+one, and so one card in Hubble UI (podster-u0e)."
+  (+ 256 (mod (sxhash (format nil "~{~A~^,~}" (hubble-labels namespace labels))) 65000)))
+
+(defun hubble-service-identity (namespace service)
+  "A stable numeric identity for Service NAMESPACE/SERVICE seen without its Pod."
+  (+ 256 (mod (sxhash (format nil "~A/service/~A" namespace service)) 65000)))
 
 (defun hubble-endpoint (namespace pod labels &optional service)
   "A flow's side: a Pod; a Service whose Pod isn't known by address (a Gateway's
@@ -62,12 +74,12 @@ doesn't know at all, Cilium's world endpoint (identity 2, reserved:world), as Hu
 shows traffic leaving the cluster."
   (cond (pod
          (make-instance 'gr8s.hubble.observer::endpoint
-                        :identity (hubble-identity namespace pod)
+                        :identity (hubble-identity namespace labels)
                         :namespace (or namespace "") :pod-name pod
                         :labels (hubble-labels namespace labels)))
         ((and namespace service)
          (make-instance 'gr8s.hubble.observer::endpoint
-                        :identity (hubble-identity namespace (concatenate 'string "service/" service))
+                        :identity (hubble-service-identity namespace service)
                         :namespace namespace
                         :labels (hubble-labels namespace nil)
                         :workloads (list (make-instance 'gr8s.hubble.observer::workload
