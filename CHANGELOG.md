@@ -71,6 +71,12 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- The `kubernetes` Service carries the labels kube-apiserver gives it,
+  `component: apiserver` and `provider: kubernetes` (podster-c6e), and a cluster
+  whose Service lacks them gains them. Monitoring finds the API server by them:
+  kube-prometheus-stack's apiserver ServiceMonitor found nothing, which led to
+  scraping every node on 6443, agents that don't serve the API included.
+
 - A host running avahi-daemon (or any mDNS responder) no longer shows its Pods
   dropping spoofed packets on mDNS's schedule, doubling from a Pod's start up to
   hourly (podster-4yh). The host's mDNS query out each Pod veth came back to it

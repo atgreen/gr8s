@@ -264,6 +264,10 @@
       (is (= 6443 (gethash "port" (aref (gethash "ports" (aref (gethash "subsets" endpoints) 0)) 0))))
       (is (= 6443 (gethash "port" (aref (gethash "ports" slice) 0))))
       (is (equal "True" (gethash "status" (aref (gethash "conditions" (gethash "status" cidr)) 0))))
+      ;; Labelled as kube-apiserver labels it, so monitoring finds the API (podster-c6e).
+      (let ((labels (gethash "labels" (gethash "metadata" (gr8s.resources::get-core-resource store "services" "default" "kubernetes")))))
+        (is (equal "apiserver" (gethash "component" labels)))
+        (is (equal "kubernetes" (gethash "provider" labels))))
       ;; The server writes that slice itself, so the mirror leaves it alone.
       (gr8s.controllers::reconcile-endpoints store)
       (is (= 1 (length (gr8s.resources::list-core-resources store "endpointslices" "default")))))))
@@ -992,3 +996,21 @@ A fixed or random port in the ephemeral range can already be taken on a shared h
                                                                                       "ipBlock" (gr8s.resources::core-object "cidr" "10.0.0.0/16"
                                                                                                                    "except" #("10.1.0.0/24"))))))))
          "alpha")))))
+
+(test an-unlabelled-api-service-gains-the-standard-labels
+  ;; podster-c6e: a cluster whose kubernetes Service was made without labels gains them,
+  ;; keeping any of its own.
+  (with-temporary-store (store directory)
+    (values directory)
+    (gr8s.resources::create-core-resource
+     store "services"
+     (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "kubernetes"
+                                                                          "labels" (gr8s.resources::core-object "team" "infra"))
+                                  "spec" (gr8s.resources::core-object "clusterIP" "10.96.0.1"
+                                                                      "ports" (vector (gr8s.resources::core-object "name" "https" "port" 443 "targetPort" 6443))))
+     "default")
+    (gr8s.controllers::ensure-native-api-service store "192.0.2.10" 6443)
+    (let ((labels (gethash "labels" (gethash "metadata" (gr8s.resources::get-core-resource store "services" "default" "kubernetes")))))
+      (is (equal "apiserver" (gethash "component" labels)))
+      (is (equal "kubernetes" (gethash "provider" labels)))
+      (is (equal "infra" (gethash "team" labels))))))

@@ -884,12 +884,21 @@ Service."
         (unless (and (equal wanted endpoints) (equal wanted slices))
           (publish-native-api-endpoints store wanted))))))
 
+(defparameter +native-api-service-labels+ '(("component" . "apiserver") ("provider" . "kubernetes"))
+  "The labels kube-apiserver gives the kubernetes Service, which monitoring finds the API
+by (kube-prometheus-stack's apiserver ServiceMonitor selects on them).")
+
 (defun ensure-native-api-service (store &optional (api-address "127.0.0.1") (api-port 6443))
-  "Publish the real native HTTPS listener as the reserved Kubernetes Service."
+  "Publish the real native HTTPS listener as the reserved Kubernetes Service, labelled as
+kube-apiserver labels it; a Service made before it carried the labels gains them."
   (prog1
       (handler-case
           (create-core-resource store "services"
-           (core-object "metadata" (core-object "name" "kubernetes")
+           (core-object "metadata" (core-object "name" "kubernetes"
+                                                "labels" (let ((labels (core-object)))
+                                                           (loop for (key . value) in +native-api-service-labels+
+                                                                 do (setf (gethash key labels) value))
+                                                           labels))
                         "spec" (core-object "clusterIP" "10.96.0.1"
                                              "ports" (vector (core-object "name" "https" "port" 443 "targetPort" api-port))))
            "default")
@@ -901,8 +910,13 @@ Service."
             (update-core-resource
              store "services" "default" "kubernetes"
              (lambda (service)
-               (let ((ports (gethash "ports" (gethash "spec" service))))
-                 (setf (gethash "targetPort" (aref ports 0)) api-port))
+               (let ((ports (gethash "ports" (gethash "spec" service)))
+                     (metadata (gethash "metadata" service)))
+                 (setf (gethash "targetPort" (aref ports 0)) api-port)
+                 ;; Labels of the Service's own are kept; the standard two are added.
+                 (let ((labels (or (gethash "labels" metadata) (setf (gethash "labels" metadata) (core-object)))))
+                   (loop for (key . value) in +native-api-service-labels+
+                         do (setf (gethash key labels) value))))
                service)))))
     (ensure-native-api-endpoints store api-address api-port)
     (ensure-default-service-cidr store)))
