@@ -235,8 +235,10 @@ Headlamp tab serves the [Headlamp](https://headlamp.dev) frontend and
 reverse-proxies the API over mutual TLS to the running cluster, with live
 resource updates. The Network tab draws the cluster's traffic from its
 [flow events](docs/networking.md#flow-events): a live map of workloads,
-Services, Gateways and the clients outside, with rates, drops (and the policy
-that dropped them), HTTP errors and latency, and the flows behind every edge. The Agent tab
+Services, Gateways and the clients outside, with rates, drops, HTTP errors and
+latency, and the flows behind every edge. For each connection it says which
+NetworkPolicy rule allows it, or why it was dropped and the rule that would
+allow it. The Agent tab
 runs AI coding agents you have installed (Claude Code, Codex or Gemini CLI), or
 a shell, each in a terminal tab of its own: **+** starts one, and closing its
 tab stops it. They run on your machine, with your own login, and with

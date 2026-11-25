@@ -265,6 +265,10 @@
              (is (search "data-src=\"/dashboard/tok/\">Headlamp</button>" page))
              (is (search "data-src=\"/network/tok/\">Network</button>" page))
              (is (search "id=\"frame-network\" title=\"Network\"" page))
+             ;; Only the Network frame, on the page's own origin, may open a Headlamp path.
+             (is (search "event.origin !== location.origin" page))
+             (is (search "event.source !== network.contentWindow" page))
+             (is (search "d.open !== 'headlamp'" page))
              (is (search "show(location.hash.slice(1) || 'headlamp')" page))
              ;; Its browser tab has the gr8s icon, inline, so no other request serves it.
              (is (search "<link rel=\"icon\" type=\"image/svg+xml\" href=\"data:image/svg+xml," page)))

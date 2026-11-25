@@ -527,3 +527,48 @@
       (let ((gateway (find "gateway/Gateway/labdroid" (coerce (gethash "nodes" (gr8s.server::network-graph-object graph)) 'list)
                            :key (lambda (n) (gethash "id" n)) :test #'equal)))
         (is (equal "lucide-door-open" (gethash "icon" gateway)))))))
+
+(test network-graph-explains-an-edges-connections-under-policy
+  ;; podster-5hv.3: an edge's connections, explained by the policies the dataplane reads,
+  ;; and a workload's card names the policies that isolate it.
+  (flet ((objects (text) (coerce (com.inuoe.jzon:parse text) 'list)))
+    (let* ((topology (gr8s.server::build-network-topology
+                      (objects "[{\"metadata\":{\"namespace\":\"cave\",\"name\":\"cave-0\",\"labels\":{\"app\":\"cave\"},
+                                   \"ownerReferences\":[{\"kind\":\"StatefulSet\",\"name\":\"cave\"}]},
+                                  \"spec\":{\"containers\":[]},\"status\":{\"podIP\":\"10.80.0.5\"}},
+                                 {\"metadata\":{\"namespace\":\"cave\",\"name\":\"lonely\",\"labels\":{\"app\":\"lonely\"}},
+                                  \"spec\":{\"containers\":[]},\"status\":{\"podIP\":\"10.80.0.9\"}}]")
+                      '() '() '() '()
+                      (objects "[{\"metadata\":{\"namespace\":\"cave\",\"name\":\"cave\"},
+                                  \"spec\":{\"podSelector\":{\"matchLabels\":{\"app\":\"cave\"}},
+                                            \"ingress\":[{\"ports\":[{\"port\":8080}]}]}},
+                                 {\"metadata\":{\"namespace\":\"cave\",\"name\":\"bad\"},
+                                  \"spec\":{\"podSelector\":{},\"ingress\":[{\"ports\":[{\"protocol\":\"BOGUS\"}]}]}}]")
+                      (objects "[{\"metadata\":{\"name\":\"cave\",\"labels\":{\"kubernetes.io/metadata.name\":\"cave\"}}}]")))
+           (graph (gr8s.server::make-network-graph)))
+      (is (= 1 (length (gr8s.server::network-topology-policies topology))) "an unparsable policy is skipped")
+      (setf (gr8s.server::network-graph-topology graph) topology)
+      (dolist (port '(5432 5432 8080))
+        (gr8s.server::network-graph-note-flow
+         graph (network-test-flow "pod" "lonely" "peerPod" "cave-0" "peerNamespace" "cave"
+                                  "peerAddress" "10.80.0.5" "peerPort" port
+                                  "verdict" (if (= port 5432) "DROPPED" "FORWARDED"))))
+      (let* ((object (gr8s.server::network-graph-object graph))
+             (edge (gethash "id" (aref (gethash "edges" object) 0)))
+             (explained (gr8s.server::network-graph-edge-explanation graph edge)))
+        (flet ((node (name) (find name (gethash "nodes" object) :key (lambda (node) (gethash "name" node)) :test #'equal)))
+          (is (equalp #("cave/cave") (gethash "ingress" (gethash "isolation" (node "cave")))))
+          (is (equalp #() (gethash "ingress" (gethash "isolation" (node "lonely"))))))
+        ;; Two distinct connections: 5432 (twice, dropped) and 8080.
+        (is (= 2 (length explained)))
+        (let ((denied (find 5432 explained :key (lambda (entry) (gethash "port" entry))))
+              (allowed (find 8080 explained :key (lambda (entry) (gethash "port" entry)))))
+          (is (equal "cave/lonely" (gethash "source" denied)))
+          (is (equal "cave/cave-0" (gethash "destination" denied)))
+          (is (= 2 (gethash "dropped" denied)))
+          (let ((explanation (gethash "explanation" denied)))
+            (is (equal "denied" (gethash "verdict" explanation)))
+            (is (search "app: lonely" (gethash "suggestion" (gethash "ingress" explanation)))))
+          (is (equal "allowed" (gethash "verdict" (gethash "explanation" allowed))))
+          (is (= 1 (gethash "rule" (aref (gethash "allowedBy" (gethash "ingress" (gethash "explanation" allowed))) 0))))))
+      (is (null (gr8s.server::network-graph-edge-explanation graph "no-such-edge"))))))

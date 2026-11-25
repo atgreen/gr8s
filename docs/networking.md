@@ -946,6 +946,21 @@ and new connections, not each packet or byte. A card's icon is the app's own
 favicon when it has a web UI, read through the Service proxy, else the
 software its image shows it to be, else its kind.
 
+Selecting an edge explains its connections under NetworkPolicy, as the
+dataplane reads it: for each distinct source, destination, port and protocol,
+whether a policy isolates the source leaving and the destination arriving, and
+which rule of which policy allows the connection. For a denied connection, it
+names the policies that isolate the end that refused it and suggests the
+smallest rule to add to one of them: the peer selected by the labels that say
+what it is (`app.kubernetes.io/name` and its companions, else `app`), never
+the labels that tell replicas apart, in a `namespaceSelector` too when it is
+in another namespace, or as a `/32` ipBlock when it isn't a Pod. The suggestion
+is text to review; the dashboard changes nothing. A card with a shield is a
+workload a policy isolates; its panel says which, each way. The view is in the
+page's URL (`#ns=cave&edge=…`), so it can be linked. A policy's name, and a
+selected workload's "Open in Headlamp", open that resource in the dashboard's
+Headlamp tab, to read or edit it there.
+
 On a foreign cluster, where gr8s-net provides the network and nothing serves
 `/apis/gr8s.io/v1/flows`, each `gr8s net-agent` collects its node's flow
 events the same way and serves them on `127.0.0.1:4246` (`--flow-port`). It

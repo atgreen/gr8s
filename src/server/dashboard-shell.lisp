@@ -64,6 +64,29 @@ function show(name) {
   history.replaceState(null, '', '#' + tab.id.slice(4));
 }
 for (const t of tabs) t.addEventListener('click', () => show(t.id.slice(4)));
+for (const f of document.querySelectorAll('iframe')) f.addEventListener('load', () => { f.dataset.loaded = '1'; });
+// The Network tab opens a resource in Headlamp: {open: 'headlamp', path: 'c/gr8s/...'}. Only
+// that frame, on this page's own origin, is heard, and only a path inside the Headlamp tab.
+window.addEventListener('message', (event) => {
+  const network = document.getElementById('frame-network'), d = event.data;
+  if (event.origin !== location.origin || !network || event.source !== network.contentWindow) return;
+  if (!d || d.open !== 'headlamp' || typeof d.path !== 'string' || !/^c\\/[A-Za-z0-9._\\/-]+$/.test(d.path) || d.path.includes('..')) return;
+  const tab = tabs.find(t => t.id === 'tab-headlamp');
+  if (!tab) return;
+  const frame = document.getElementById(tab.getAttribute('aria-controls'));
+  const url = tab.dataset.src + d.path;
+  if (frame.dataset.loaded) {
+    show('headlamp');
+    try {
+      // Headlamp's router follows the history: navigate without reloading it.
+      frame.contentWindow.history.pushState(null, '', url);
+      frame.contentWindow.dispatchEvent(new PopStateEvent('popstate'));
+      return;
+    } catch (error) { /* fall through and load it there */ }
+  }
+  frame.src = url;
+  show('headlamp');
+});
 show(location.hash.slice(1) || '~A');
 </script>
 </body>

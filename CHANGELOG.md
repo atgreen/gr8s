@@ -23,6 +23,14 @@ the Kubernetes API version with a gr8s release suffix (see
   scripts, icons and font (Cytoscape.js, Simple Icons, Lucide, Inter) are
   embedded, pinned by version and checksum.
 
+- The Network tab explains NetworkPolicy (podster-5hv.3): selecting an edge
+  shows, for each connection behind it, which rule of which policy allows it
+  each way, or which policies refused it and the smallest rule that would
+  allow it, ready to copy. Cards of workloads a policy isolates carry a
+  shield. The view (namespace, window, verdict, selection, flow table) is kept
+  in the URL so it can be linked. A policy's name, and a selected workload,
+  open that resource in the Headlamp tab.
+
 ### Removed
 
 - `gr8s dashboard`'s Hubble tab, and the Hubble UI bundle it embedded: the

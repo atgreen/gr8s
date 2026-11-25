@@ -99,7 +99,17 @@ compiled: octets when BINARY, else text. NIL when `make graph-assets' has not ru
   ;; "namespace/name" of a route -> the Gateway it hangs from, (namespace "Gateway" name)
   (routes (make-hash-table :test #'equal))
   ;; (workload . target port) a route sends to -> the Gateway that sends it there
-  (gateway-backends (make-hash-table :test #'equal)))
+  (gateway-backends (make-hash-table :test #'equal))
+  ;; NetworkPolicy, as the dataplane reads it: np-specs, namespace -> labels, and each
+  ;; running Pod as an np-pod by (namespace . name) and by address
+  (policies '())
+  (namespace-labels (make-hash-table :test #'equal))
+  (policy-pods (make-hash-table :test #'equal))
+  ;; workload -> one of its np-pods, which its replicas' isolation is the same as
+  (workload-policy-pods (make-hash-table :test #'equal)))
+
+(defparameter +network-explained-connections+ 12
+  "The most distinct connections an edge's explanation covers.")
 
 (defparameter +network-web-ports+ '(80 8080 3000 8000 9090 443 8443)
   "Port numbers a web UI usually answers on.")
@@ -164,9 +174,9 @@ ReplicaSet to a Deployment; the Pod itself when nothing does. REPLICASETS maps
                      :key (lambda (entry) (gethash "port" entry)))))
     (and entry (let ((target (gethash "targetPort" entry port))) (and (integerp target) target)))))
 
-(defun build-network-topology (pods replicasets services nodes &optional routes)
-  "A NETWORK-TOPOLOGY from lists of Pod, ReplicaSet, Service and Node objects, and the
-Gateway API's routes."
+(defun build-network-topology (pods replicasets services nodes &optional routes policies namespaces)
+  "A NETWORK-TOPOLOGY from lists of Pod, ReplicaSet, Service and Node objects, the
+Gateway API's routes, and the NetworkPolicies and Namespaces policy reads."
   (let ((topology (make-network-topology))
         (by-name (make-hash-table :test #'equal)))
     (dolist (replicaset replicasets)
@@ -244,7 +254,93 @@ Gateway API's routes."
                 do (setf (gethash (gethash "address" address) (network-topology-nodes topology)) name))
         (let ((gateway (and (plusp (length cidr)) (network-pod-cidr-gateway cidr))))
           (when gateway (setf (gethash gateway (network-topology-nodes topology)) name)))))
+    ;; A policy the dataplane can't parse (an unsupported protocol) explains nothing.
+    (setf (network-topology-policies topology)
+          (loop for policy in policies
+                for spec = (ignore-errors (gr8s.network::parse-network-policy-json policy))
+                when spec collect spec))
+    (dolist (namespace namespaces)
+      (let ((metadata (gethash "metadata" namespace)))
+        (setf (gethash (gethash "name" metadata) (network-topology-namespace-labels topology))
+              (gethash "labels" metadata (make-hash-table :test #'equal)))))
+    (dolist (pod pods)
+      (let ((np-pod (ignore-errors (gr8s.network::pod-object-np-pod pod)))
+            (metadata (gethash "metadata" pod)))
+        (when (and np-pod (not (eq t (gethash "hostNetwork" (gethash "spec" pod)))))
+          (let ((workload (gethash (cons (gethash "namespace" metadata) (gethash "name" metadata))
+                                   (network-topology-pods topology))))
+            (setf (gethash (cons (gethash "namespace" metadata) (gethash "name" metadata))
+                           (network-topology-policy-pods topology))
+                  np-pod)
+            (dolist (address (gr8s.network::np-pod-addresses np-pod))
+              (setf (gethash address (network-topology-policy-pods topology)) np-pod))
+            (unless (gethash workload (network-topology-workload-policy-pods topology))
+              (setf (gethash workload (network-topology-workload-policy-pods topology)) np-pod))))))
     topology))
+
+;;; Why a connection is allowed or dropped (podster-5hv.3)
+
+(defun network-flow-policy-ends (topology flow)
+  "(values source destination port) of FLOW as NetworkPolicy sees them: each end
+(:pod np-pod) or (:address ip), or NIL when FLOW names no Pod."
+  (let ((pod (and (gethash "pod" flow)
+                  (gethash (cons (gethash "namespace" flow) (gethash "pod" flow)) (network-topology-policy-pods topology))))
+        (peer (let ((name (gethash "peerPod" flow))
+                    (address (gethash "peerAddress" flow "")))
+                (or (and name (gethash (cons (gethash "peerNamespace" flow) name) (network-topology-policy-pods topology)))
+                    (and (plusp (length address)) (gethash address (network-topology-policy-pods topology)))))))
+    (when pod
+      (let ((here (list :pod pod))
+            (there (if peer (list :pod peer) (list :address (gethash "peerAddress" flow "")))))
+        (if (equal (gethash "direction" flow) "egress")
+            (values here there (gethash "peerPort" flow))
+            (values there here (gethash "podPort" flow)))))))
+
+(defun network-end-name (end)
+  (if (eq (first end) :pod)
+      (format nil "~A/~A" (gr8s.network::np-pod-namespace (second end)) (gr8s.network::np-pod-name (second end)))
+      (second end)))
+
+(defun network-explain-flows (topology flows)
+  "Explain each distinct connection among FLOWS under TOPOLOGY's policies, at most
++NETWORK-EXPLAINED-CONNECTIONS+: one per source workload, destination, port and protocol,
+named by an example Pod or address, with how many of FLOWS were dropped."
+  (let ((seen (make-hash-table :test #'equal))
+        (explained '()))
+    (dolist (flow flows)
+      (multiple-value-bind (source destination port) (network-flow-policy-ends topology flow)
+        (when source
+          (flet ((key (end)
+                   (if (eq (first end) :pod)
+                       (or (gethash (cons (gr8s.network::np-pod-namespace (second end)) (gr8s.network::np-pod-name (second end)))
+                                    (network-topology-pods topology))
+                           (network-end-name end))
+                       (second end))))
+            (let* ((protocol (gethash "protocol" flow ""))
+                   (key (list (key source) (key destination) port protocol))
+                   (dropped (equal (gethash "verdict" flow) "DROPPED"))
+                   (entry (gethash key seen)))
+              (cond
+                (entry (when dropped (incf (gethash "dropped" entry))))
+                ((< (hash-table-count seen) +network-explained-connections+)
+                 (let ((entry (gr8s-diagnose::object
+                               "source" (network-end-name source) "destination" (network-end-name destination)
+                               "port" (or port 'null) "protocol" protocol "dropped" (if dropped 1 0)
+                               "explanation" (gr8s.network::explain-network-connection
+                                              (network-topology-policies topology) source destination port protocol
+                                              (network-topology-namespace-labels topology)))))
+                   (setf (gethash key seen) entry)
+                   (push entry explained)))))))))
+    (nreverse explained)))
+
+(defun network-workload-isolation (topology workload)
+  "An object naming the policies that isolate WORKLOAD's Pods, \"ingress\" and \"egress\",
+or NIL when it has no Pod policy can select."
+  (let ((pod (gethash workload (network-topology-workload-policy-pods topology))))
+    (when pod
+      (multiple-value-bind (ingress egress)
+          (gr8s.network::np-pod-isolation (network-topology-policies topology) pod)
+        (gr8s-diagnose::object "ingress" (coerce ingress 'vector) "egress" (coerce egress 'vector))))))
 
 (defun network-address-class (address)
   "How an address that isn't a Pod's, a Service's or a node's should be drawn:
@@ -476,7 +572,10 @@ arriving at a Pod from another known Pod isn't counted: its source counted it le
                                        (gr8s-diagnose::object "id" id "namespace" (or (first workload) 'null)
                                                               "kind" (second workload) "name" (third workload)
                                                               "icon" icon "software" (or software 'null)
-                                                              "favicon" (and (funcall favicon-p id) t))))
+                                                              "favicon" (and (funcall favicon-p id) t)
+                                                              "isolation" (or (network-workload-isolation
+                                                                               (network-graph-topology graph) workload)
+                                                                              'null))))
                        'vector)
        "edges" (coerce (loop for edge being the hash-values of (network-graph-edges graph)
                              collect (let ((latencies (sort (mapcar #'cdr (network-edge-latencies edge)) #'<)))
@@ -490,6 +589,13 @@ arriving at a Pod from another known Pod isn't counted: its source counted it le
                                                         (round (nth (floor (length latencies) 2) latencies) 1000000)
                                                         'null))))
                        'vector)))))
+
+(defun network-graph-edge-explanation (graph id)
+  "Explain the connections behind the edge named ID; NIL when there is no such edge."
+  (bt:with-lock-held ((network-graph-lock graph))
+    (loop for edge being the hash-values of (network-graph-edges graph)
+          when (equal id (network-edge-id edge))
+            return (network-explain-flows (network-graph-topology graph) (network-edge-recent edge)))))
 
 (defun network-graph-latest-flows (graph)
   "The cluster's latest counted flows, newest first, each with its edge's id as \"edge\"."
@@ -624,7 +730,8 @@ may show. ENDPOINT is (namespace service port https-p)."
   (coerce (gethash "items" (or (ignore-errors (debug-api-get-json config resource)) (make-hash-table)) #()) 'list))
 
 (defun refresh-dashboard-network-topology (network)
-  "Re-read the cluster's Pods, ReplicaSets, Services and Nodes."
+  "Re-read the cluster's Pods, ReplicaSets, Services, Nodes, routes, NetworkPolicies and
+Namespaces."
   (let ((config (dashboard-network-config network)))
     (let ((topology (build-network-topology (dashboard-network-items config "/api/v1/pods")
                                             (dashboard-network-items config "/apis/apps/v1/replicasets")
@@ -632,7 +739,9 @@ may show. ENDPOINT is (namespace service port https-p)."
                                             (dashboard-network-items config "/api/v1/nodes")
                                             (loop for kind in '("httproutes" "grpcroutes" "tlsroutes" "tcproutes")
                                                   append (dashboard-network-items
-                                                          config (format nil "/apis/gateway.networking.k8s.io/v1/~A" kind))))))
+                                                          config (format nil "/apis/gateway.networking.k8s.io/v1/~A" kind)))
+                                            (dashboard-network-items config "/apis/networking.k8s.io/v1/networkpolicies")
+                                            (dashboard-network-items config "/api/v1/namespaces"))))
       (bt:with-lock-held ((network-graph-lock (dashboard-network-graph network)))
         (setf (network-graph-topology (dashboard-network-graph network)) topology)))))
 
@@ -754,6 +863,10 @@ and an edge's flows."
                             (hunchentoot:header-out :cache-control) "max-age=3600")
                       octets)
                (progn (setf (hunchentoot:return-code*) 404 (hunchentoot:content-type*) "text/plain") "no favicon"))))
+        ((equal rest "explain")
+         (let ((explained (network-graph-edge-explanation (dashboard-network-graph network)
+                                                          (hunchentoot:get-parameter "edge" request))))
+           (json (coerce explained 'vector))))
         ((equal rest "flows")
          (let ((edge (hunchentoot:get-parameter "edge" request)))
            (json (coerce (if edge
