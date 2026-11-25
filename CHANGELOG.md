@@ -54,6 +54,12 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- `kubectl exec` of a command that can't start says why, as Kubernetes does
+  (podster-dcz): `executable file not found in $PATH`, not a bare "command
+  terminated with exit code 1". The agent dropped the runtime's reason when a
+  status had no exit code. This is what distroless images (no shell, no
+  coreutils) hit: exec works in them, but only for programs they contain.
+
 - `gr8s doctor` no longer reports a finished Pod as not ready (podster-191). A
   Job's Pod that completed is not ready by design, but the readiness checks
   flagged it, so a cluster with CronJobs always had a problem to read past. The

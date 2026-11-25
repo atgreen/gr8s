@@ -670,7 +670,18 @@
     (is (= 0 (gr8s.agent::node-exec-status-exit-code (gr8s.apiserver::exec-exit-status-bytes 0))))
     (is (= 7 (gr8s.agent::node-exec-status-exit-code (gr8s.apiserver::exec-exit-status-bytes 7))))
     (is (= 0 (gr8s.agent::node-exec-status-exit-code (frame "{\"status\":\"Success\"}"))))
-    (is (= 1 (gr8s.agent::node-exec-status-exit-code (frame "{\"status\":\"Failure\"}"))))))
+    (is (= 1 (gr8s.agent::node-exec-status-exit-code (frame "{\"status\":\"Failure\"}"))))
+    ;; podster-dcz: a command that never started is reported with the runtime's reason,
+    ;; as a kubelet reports it, not as a bare exit code 1.
+    (multiple-value-bind (code failure)
+        (gr8s.agent::node-exec-status-exit-code
+         (frame "{\"status\":\"Failure\",\"reason\":\"InternalError\",\"message\":\"OCI runtime exec failed: exec: \\\"sh\\\": executable file not found in $PATH\"}"))
+      (is (= 1 code))
+      (is (search "executable file not found" failure)))
+    (is (equal "the command failed to start"
+               (nth-value 1 (gr8s.agent::node-exec-status-exit-code (frame "{\"status\":\"Failure\"}")))))
+    (is (null (nth-value 1 (gr8s.agent::node-exec-status-exit-code (gr8s.apiserver::exec-exit-status-bytes 7))))
+        "an exit code is not a failure to start")))
 
 (test ending-agent-session-abandons-its-interactive-exec-operations
   (with-temporary-store (store path)
