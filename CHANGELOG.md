@@ -9,6 +9,11 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- The dashboard's Hubble tab draws a workload's replicas as one card. Each Pod
+  had its own identity, so a Deployment of four showed as four identical cards;
+  identities now follow a Pod's namespace and labels, leaving out the labels that
+  tell replicas apart (`pod-template-hash` and the like), as Cilium's do
+  (podster-u0e).
 - A NetworkPolicy no longer cuts an idle connection after two hours. The policy
   guards admitted a TCP connection's replies for 2 hours after its last packet,
   exactly Linux's default `tcp_keepalive_time`, so an idle pooled connection's

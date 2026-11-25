@@ -223,6 +223,32 @@
 
 ;;; The dashboard's Hubble tab: Hubble UI's backend
 
+(test hubble-ui-draws-a-workloads-replicas-as-one-card
+  ;; podster-u0e: as with Cilium's identities, a card is a label set, not a Pod.
+  (flet ((runner (pod hash &optional (component "runner"))
+           (gr8s.server::hubble-flow
+            (hubble-test-flow "pod" pod "podLabels"
+                              (gr8s.resources::core-object "app.kubernetes.io/name" "cave"
+                                                           "app.kubernetes.io/component" component
+                                                           "pod-template-hash" hash))))
+         (source-identity (flow) (slot-value (slot-value flow 'gr8s.hubble.observer::source)
+                                      'gr8s.hubble.observer::identity))
+         (source-labels (flow) (slot-value (slot-value flow 'gr8s.hubble.observer::source)
+                                    'gr8s.hubble.observer::labels)))
+    (let ((a (runner "cave-runner-x9bbb" "b497c20a25"))
+          (b (runner "cave-runner-4zrnv" "b497c20a25"))
+          (rolled (runner "cave-runner-7qkpd" "c51e0b9f11"))
+          (pg (runner "cave-pg-0" "unused" "pg")))
+      (is (= (source-identity a) (source-identity b)) "replicas share an identity")
+      (is (= (source-identity a) (source-identity rolled)) "so does a replica of the next rollout")
+      (is (/= (source-identity a) (source-identity pg)) "another component is another card")
+      (is (null (find-if (lambda (label) (search "pod-template-hash" label)) (source-labels a))))
+      (let ((map (gr8s.server::make-hubble-ui-map)))
+        (gr8s.server::hubble-ui-map-changes map a)
+        (is (notany (lambda (event) (eq :service-state (gr8s.hubble.observer::event-case event)))
+                    (gr8s.server::hubble-ui-map-changes map b))
+            "the second replica adds no card")))))
+
 (test hubble-ui-derives-cards-and-arrows-as-its-backend-does
   (let* ((map (gr8s.server::make-hubble-ui-map))
          (dropped (gr8s.server::hubble-flow (hubble-test-flow)))
@@ -239,10 +265,10 @@
         (let ((cart (slot-value (slot-value (first events) 'gr8s.hubble.observer::service-state)
                                 'gr8s.hubble.observer::service)))
           (is (equal "cart" (slot-value cart 'gr8s.hubble.observer::name)))
-          (is (equal (princ-to-string (gr8s.server::hubble-identity "shop" "cart-0"))
+          (is (equal (princ-to-string (gr8s.server::hubble-identity "shop" (gr8s.resources::core-object "app" "cart")))
                      (slot-value cart 'gr8s.hubble.observer::id))))
-        (is (equal (format nil "~D TCP ~D:443" (gr8s.server::hubble-identity "shop" "cart-0")
-                           (gr8s.server::hubble-identity "data" "db-0"))
+        (is (equal (format nil "~D TCP ~D:443" (gr8s.server::hubble-identity "shop" (gr8s.resources::core-object "app" "cart"))
+                           (gr8s.server::hubble-identity "data" nil))
                    (slot-value (link events) 'gr8s.hubble.observer::id))))
       ;; Seen again, nothing changes; a new verdict modifies the arrow.
       (is (null (gr8s.server::hubble-ui-map-changes map dropped)))
