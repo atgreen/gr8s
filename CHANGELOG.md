@@ -54,6 +54,12 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- `gr8s doctor` no longer reports a finished Pod as not ready (podster-191). A
+  Job's Pod that completed is not ready by design, but the readiness checks
+  flagged it, so a cluster with CronJobs always had a problem to read past. The
+  readiness checks now skip Succeeded and Failed Pods; a failed Pod keeps the
+  findings about its exit.
+
 - Pods can reach the LAN and the internet (podster-swq). gr8s masqueraded Pod
   traffic only to other nodes and the API, so a Pod's packets left with its
   private address and replies never came back. Each agent now masquerades its

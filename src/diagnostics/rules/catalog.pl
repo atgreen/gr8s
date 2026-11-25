@@ -38,6 +38,9 @@ premise(nonempty(Path), Location) :-
     N > 0.
 premise(empty(Path), Location) :-
     observed(Location, Path, count(0)).
+%% unless(Premise): Premise does not hold at a location the others have bound.
+premise(unless(Premise), Location) :-
+    \+ premise(Premise, Location).
 
 %% premise_path(+Premise, ?Path): the fields a premise reads.
 premise_path(has(Path, _), Path).
@@ -47,6 +50,7 @@ premise_path(positive(Path), Path).
 premise_path(at_least(Path, _), Path).
 premise_path(nonempty(Path), Path).
 premise_path(empty(Path), Path).
+premise_path(unless(Premise), Path) :- premise_path(Premise, Path).
 
 %% reads(?Kind, ?Path): a check of resources of Kind reads the field Path.
 reads(Kind, Path) :-
@@ -245,13 +249,16 @@ check("pod-PodScheduled-Unknown", "Pod", [has("condition.PodScheduled", "Unknown
 check("pod-Initialized-False", "Pod", [has("condition.Initialized", "False")],
       "The Pod's init containers have not finished.",
       "Inspect init container status and logs.").
-check("pod-Ready-False", "Pod", [has("condition.Ready", "False")],
+%% A finished Pod is not ready by design; a failed one has findings of its own (podster-191).
+check("pod-Ready-False", "Pod", [has("condition.Ready", "False"),
+                                 unless(has("status.phase", "Succeeded")), unless(has("status.phase", "Failed"))],
       "The Pod is not ready, so Services do not send it traffic.",
       "Find the container or readiness gate that is holding the Pod back.").
 check("pod-Ready-Unknown", "Pod", [has("condition.Ready", "Unknown")],
       "The Pod's readiness is unknown, usually because its node stopped reporting.",
       "Check node reachability and status reporting.").
-check("pod-ContainersReady-False", "Pod", [has("condition.ContainersReady", "False")],
+check("pod-ContainersReady-False", "Pod", [has("condition.ContainersReady", "False"),
+                                           unless(has("status.phase", "Succeeded")), unless(has("status.phase", "Failed"))],
       "At least one container in the Pod is not ready.",
       "Check each container's state and its readiness check.").
 check("pod-PodReadyToStartContainers-False", "Pod", [has("condition.PodReadyToStartContainers", "False")],
