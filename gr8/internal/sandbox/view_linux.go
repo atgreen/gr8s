@@ -80,6 +80,11 @@ func buildView(hostRoot string, config Config) (*view, error) {
 			return nil, err
 		}
 	}
+	// The runtime directory the sockets were bound into is the caller's alone, as
+	// on the host.
+	for _, path := range config.Sockets {
+		_ = os.Chmod(filepath.Join(hostRoot, filepath.Dir(path)), 0o700)
+	}
 	for _, file := range result.saved {
 		if err := copyIn(filepath.Join(hostRoot, file.path), file); err != nil {
 			return nil, err
@@ -152,6 +157,10 @@ func holdBinds(hostRoot string, config Config) ([]heldBind, error) {
 				wants = append(wants, wanted{path, false, false})
 			}
 		}
+	}
+	// The display and audio sockets live in /run, which the sandbox gets fresh.
+	for _, path := range config.Sockets {
+		wants = append(wants, wanted{path, false, false})
 	}
 	sort.SliceStable(wants, func(i, j int) bool { return len(wants[i].path) < len(wants[j].path) })
 	var binds []heldBind

@@ -20,12 +20,15 @@ type Config struct {
 	Placeholders []string
 	ReadOnly     []string
 	ReadWrite    []string
-	Env          []string
-	Command      []string
+	// Sockets are the host's Wayland and audio sockets, bound at the same paths in
+	// the sandbox's fresh /run (podster-wv1w.15).
+	Sockets []string
+	Env     []string
+	Command []string
 }
 
 // ParseArgs parses launch's arguments: --cwd DIR, then any of --home DIR,
-// --ro PATH, --rw PATH and --env NAME=VALUE, then -- and the command.
+// --ro PATH, --rw PATH, --socket PATH and --env NAME=VALUE, then -- and the command.
 func ParseArgs(args []string) (Config, error) {
 	var config Config
 	for len(args) > 0 {
@@ -53,6 +56,11 @@ func ParseArgs(args []string) (Config, error) {
 			config.ReadOnly = append(config.ReadOnly, value)
 		case "--rw":
 			config.ReadWrite = append(config.ReadWrite, value)
+		case "--socket":
+			if !strings.HasPrefix(value, "/run/user/") {
+				return Config{}, fmt.Errorf("--socket must be in a user's runtime directory, not %q", value)
+			}
+			config.Sockets = append(config.Sockets, value)
 		case "--env":
 			config.Env = append(config.Env, value)
 		default:

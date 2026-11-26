@@ -37,6 +37,8 @@ type Options struct {
 	ReadWrite  []string
 	Env        []string
 	Allow      []string // hostnames this run alone may reach
+	NoDisplay  bool     // withhold the Wayland display
+	NoAudio    bool     // withhold the audio sockets
 	Command    []string
 	// Placeholders are NAME=VALUE stand-ins the profile sets, such as an API key the
 	// node egress proxy overwrites with the real one.
@@ -150,6 +152,13 @@ func launchFlags(options Options) []string {
 	}
 	for _, path := range options.PlaceholderFiles {
 		flags = append(flags, "--placeholder", path)
+	}
+	desktop := DesktopFor(os.Getenv, os.Getuid(), !options.NoDisplay, !options.NoAudio, isSocket)
+	for _, socket := range desktop.Sockets {
+		flags = append(flags, "--socket", socket)
+	}
+	for _, entry := range desktop.Env {
+		flags = append(flags, "--env", entry)
 	}
 	return append(flags, "--trust", TrustMount+"/"+TrustFile)
 }
