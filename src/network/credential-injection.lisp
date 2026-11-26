@@ -79,6 +79,12 @@ profile name), each profile's in written order."
                                             (< (or pa 1000) (or pb 1000))))))
         append (security-profile-spec-rules profile)))
 
+(defun pod-credential-hosts (pod profiles)
+  "The domain patterns POD's injected credentials are bound to, in rule order, once each."
+  (remove-duplicates (loop for rule in (pod-injection-rules pod profiles)
+                           append (copy-list (injection-rule-domains rule)))
+                     :test #'equal :from-end t))
+
 (defun injection-host-p (rules host)
   "True when one of RULES names HOST: the proxy must terminate TLS for it."
   (some (lambda (rule) (some (lambda (domain) (egress-domain-matches-p domain host)) (injection-rule-domains rule)))

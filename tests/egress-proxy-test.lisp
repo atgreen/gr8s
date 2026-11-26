@@ -328,11 +328,12 @@ the body, over TLS when TLS-CHAIN is given. Returns (values stop port)."
     (when (and (>= (length path) 4) (string= "/v1/" path :end2 4))
       (values "anthropic" '("x-api-key") value))))
 
-(defun egress-test-request (stream host path)
-  "Send one request through STREAM and read the response. Returns (values status body)."
+(defun egress-test-request (stream host path &key (stand-in t))
+  "Send one request through STREAM, with a stand-in x-api-key unless STAND-IN is NIL, and
+read the response. Returns (values status body)."
   (write-sequence (gr8s.controllers::egress-http-head-octets
                    (format nil "GET ~A HTTP/1.1" path)
-                   `(("Host" . ,host) ("x-api-key" . "gr8s-injected") ("Accept" . "*/*")))
+                   `(("Host" . ,host) ,@(and stand-in '(("x-api-key" . "gr8s-injected"))) ("Accept" . "*/*")))
                   stream)
   (force-output stream)
   (multiple-value-bind (status-line headers)
@@ -385,13 +386,17 @@ are the proxy's (podster-wv1w.11)."
                       (is (= 200 status))
                       (is (search "x-api-key: sk-real" body))
                       (is (not (search "gr8s-injected" body))))
-                    ;; Same connection, another path: passed as it came.
-                    (multiple-value-bind (status body) (egress-test-request stream "api.example.test" "/health")
-                      (is (= 200 status))
-                      (is (search "x-api-key: gr8s-injected" body)))
                     ;; A Host other than the one the connection named: refused.
                     (is (= 421 (egress-test-request stream "evil.example.test" "/v1/messages"))))
-               (ignore-errors (sb-bsd-sockets:socket-close socket)))))
+               (ignore-errors (sb-bsd-sockets:socket-close socket)))
+             ;; Another path: nothing injects there, so the stand-in would reach the
+             ;; server: refused, saying why (podster-wv1w.12).
+             (multiple-value-bind (stream socket) (egress-test-client port)
+               (unwind-protect
+                    (multiple-value-bind (status body) (egress-test-request stream "api.example.test" "/health")
+                      (is (= 403 status))
+                      (is (search "x-api-key carries a gr8 stand-in credential, which no rule injects for GET api.example.test/health" body)))
+                 (ignore-errors (sb-bsd-sockets:socket-close socket))))))
       (funcall stop))))
 
 (test egress-proxy-refuses-a-request-whose-credential-is-missing
@@ -493,15 +498,26 @@ are the proxy's (podster-wv1w.11)."
                         ;; The leaf is the egress CA's, not the server's own.
                         (let ((leaf (first (pure-tls:tls-peer-certificate-chain tls))))
                           (is (member "gr8s egress" (pure-tls::certificate-issuer-common-names leaf) :test #'equal)))
-                        (multiple-value-bind (status body) (egress-test-request tls "web.example.test" "/index.html")
+                        (multiple-value-bind (status body)
+                            (egress-test-request tls "web.example.test" "/index.html" :stand-in nil)
                           (is (= 200 status))
-                          ;; Nothing is injected; the stand-in passes as it came.
-                          (is (search "x-api-key: gr8s-injected" body)))
+                          (is (search "GET /index.html" body)))
                         ;; Fronting is refused under Enforce.
                         (is (= 421 (egress-test-request tls "evil.example.test" "/"))))
-                   (ignore-errors (sb-bsd-sockets:socket-close socket)))))
+                   (ignore-errors (sb-bsd-sockets:socket-close socket)))
+                 ;; Nothing injects for this host: a stand-in is refused, and why.
+                 (multiple-value-bind (raw socket) (egress-test-client port)
+                   (unwind-protect
+                        (let ((tls (pure-tls:make-tls-client-stream raw :hostname "web.example.test"
+                                                                        :verify pure-tls:+verify-none+)))
+                          (multiple-value-bind (status body) (egress-test-request tls "web.example.test" "/v1/x")
+                            (is (= 403 status))
+                            (is (search "no rule injects for GET web.example.test/v1/x" body))))
+                     (ignore-errors (sb-bsd-sockets:socket-close socket))))))
           (funcall stop))
-        (is (equal '(("web.example.test" "GET" "/" 421 nil nil)
+        (is (equal '(("web.example.test" "GET" "/v1/x" 403 nil
+                      "x-api-key carries a gr8 stand-in credential, which no rule injects for GET web.example.test/v1/x")
+                     ("web.example.test" "GET" "/" 421 nil nil)
                      ("web.example.test" "GET" "/index.html" 200 nil nil))
                    requests))))))
 
@@ -518,12 +534,20 @@ are the proxy's (podster-wv1w.11)."
                                                            (push (list path code audit) requests)))
                (multiple-value-bind (stream socket) (egress-test-client port)
                  (unwind-protect
-                      (multiple-value-bind (status body) (egress-test-request stream "evil.example.test" "/x")
+                      (multiple-value-bind (status body)
+                          (egress-test-request stream "evil.example.test" "/x" :stand-in nil)
                         (is (= 200 status))
                         (is (search "Host: evil.example.test" body)))
+                      ;; A stand-in nothing injects is reported too, and goes as it came:
+                      ;; it is worthless anywhere it isn't swapped.
+                      (multiple-value-bind (status body) (egress-test-request stream "web.example.test" "/y")
+                        (is (= 200 status))
+                        (is (search "x-api-key: gr8s-injected" body)))
                    (ignore-errors (sb-bsd-sockets:socket-close socket)))))
           (funcall stop))
-        (is (equal '(("/x" 200 "Host evil.example.test is not web.example.test")) requests))))))
+        (is (equal '(("/y" 200 "x-api-key carries a gr8 stand-in credential, which no rule injects for GET web.example.test/y")
+                     ("/x" 200 "Host evil.example.test is not web.example.test"))
+                   requests))))))
 
 (test egress-proxy-relays-an-inspected-sandbox-undecrypted-without-a-ca
   ;; No egress CA on the node: nothing to present, so the TLS goes through as it came
@@ -545,3 +569,25 @@ are the proxy's (podster-wv1w.11)."
                    (ignore-errors (sb-bsd-sockets:socket-close socket)))))
           (funcall stop))
         (is (equal '("web.example.test") asked))))))
+
+(test egress-proxy-says-where-a-refused-stand-ins-credentials-are-bound
+  (multiple-value-bind (stop upstream) (egress-echo-upstream)
+    (multiple-value-bind (table address) (egress-test-synthetic-address "web.example.test")
+      (unwind-protect
+           (let ((proxy (gr8s.controllers::start-egress-proxy
+                         :decide (lambda (peer host address port) (declare (ignore peer host address port)) (values t nil))
+                         :connect (lambda (address port) (declare (ignore address port))
+                                    (gr8s.controllers::egress-default-connect "127.0.0.1" upstream))
+                         :inspect (lambda (peer host) (declare (ignore peer host)) (list :enforcement :enforce))
+                         :bindings (lambda (peer) (declare (ignore peer)) '("api.anthropic.com" "*.github.com"))
+                         :names table
+                         :dialed (lambda (socket) (declare (ignore socket)) (values address 80)))))
+             (unwind-protect
+                  (multiple-value-bind (stream socket) (egress-test-client (gr8s.controllers::egress-proxy-port proxy))
+                    (unwind-protect
+                         (multiple-value-bind (status body) (egress-test-request stream "web.example.test" "/")
+                           (is (= 403 status))
+                           (is (search "this Pod's credentials are bound to api.anthropic.com, *.github.com" body)))
+                      (ignore-errors (sb-bsd-sockets:socket-close socket))))
+               (gr8s.controllers::stop-egress-proxy proxy)))
+        (funcall stop)))))
