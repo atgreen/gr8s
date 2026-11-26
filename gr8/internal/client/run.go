@@ -39,6 +39,7 @@ type Options struct {
 	Allow      []string // hostnames this run alone may reach
 	NoDisplay  bool     // withhold the Wayland display
 	NoAudio    bool     // withhold the audio sockets
+	NoGPU      bool     // withhold the GPU render nodes
 	Command    []string
 	// Placeholders are NAME=VALUE stand-ins the profile sets, such as an API key the
 	// node egress proxy overwrites with the real one.
@@ -85,6 +86,7 @@ func Run(options Options) (int, error) {
 		Launcher:  launcher,
 		Command:   filepath.Base(options.Command[0]),
 		Identity:  identity,
+		GPU:       !options.NoGPU && nodeOffersGPU(ctx, clientset, node),
 	}, randomSuffix())
 	// The policy goes first, so the command never starts without it.
 	if len(options.Allow) > 0 {
@@ -128,6 +130,16 @@ func Run(options Options) (int, error) {
 		launchFlags(options)...)
 	argv = append(append(argv, "--"), options.Command...)
 	return execInPod(ctx, config, clientset, pod, argv)
+}
+
+// nodeOffersGPU says whether node offers GPU render nodes to Pods.
+func nodeOffersGPU(ctx context.Context, clientset kubernetes.Interface, name string) bool {
+	node, err := clientset.CoreV1().Nodes().Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return false
+	}
+	quantity, ok := node.Status.Allocatable[GPUResource]
+	return ok && !quantity.IsZero()
 }
 
 func (options Options) logf(format string, arguments ...any) {

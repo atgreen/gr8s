@@ -256,3 +256,13 @@ func TestDesktopForBindsOnlyTheCallersDisplayAndAudio(t *testing.T) {
 		t.Errorf("bound %+v", got)
 	}
 }
+
+func TestNewPodAsksForTheGPUOnlyWhenWanted(t *testing.T) {
+	with := NewPod(PodRequest{Namespace: "gr8", Command: "glxgears", GPU: true}, "x")
+	if quantity := with.Spec.Containers[0].Resources.Limits[GPUResource]; quantity.String() != "1" {
+		t.Errorf("limits %v", with.Spec.Containers[0].Resources.Limits)
+	}
+	if without := NewPod(PodRequest{Namespace: "gr8", Command: "ls"}, "x"); len(without.Spec.Containers[0].Resources.Limits) != 0 {
+		t.Errorf("limits %v", without.Spec.Containers[0].Resources.Limits)
+	}
+}

@@ -72,7 +72,8 @@ func run() int {
 		fmt.Fprintf(flags.Output(), "usage: gr8 [flags] COMMAND [ARG...]\n\n"+
 			"Run COMMAND in a sandboxed Pod on this host's gr8s node. It sees the host's\n"+
 			"files, may write only the working directory, may reach only the hostnames a\n"+
-			"ClusterNetworkPolicy or --allow permits, and gets the Wayland display and audio.\n\n")
+			"ClusterNetworkPolicy or --allow permits, and gets the Wayland display, audio\n"+
+			"and GPU.\n\n")
 		flags.PrintDefaults()
 	}
 	flags.StringVar(&options.Kubeconfig, "kubeconfig", "", "kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)")
@@ -82,6 +83,7 @@ func run() int {
 	flags.BoolVar(&options.Keep, "keep", false, "keep the Pod after the command exits")
 	flags.BoolVar(&options.NoDisplay, "no-display", false, "withhold the Wayland display")
 	flags.BoolVar(&options.NoAudio, "no-audio", false, "withhold audio (and the microphone)")
+	flags.BoolVar(&options.NoGPU, "no-gpu", false, "withhold the GPU render nodes")
 	flags.BoolVar(&options.Verbose, "v", false, "report the Pod gr8 creates")
 	flags.Var(&readOnly, "ro", "also allow reading `PATH` (repeatable)")
 	flags.Var(&readWrite, "rw", "also allow writing `PATH` (repeatable)")

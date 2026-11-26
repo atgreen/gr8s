@@ -8,7 +8,10 @@
 (defparameter *device-plugin-directory* #P"/var/lib/kubelet/device-plugins/")
 (defvar *device-plugin-watch* nil)
 
-(defstruct device-plugin resource endpoint options channel thread (devices nil))
+(defstruct device-plugin resource endpoint options channel thread (devices nil)
+  ;; A plugin built into the agent answers here, (method request) -> response,
+  ;; rather than over a Unix socket.
+  local)
 (defstruct (device-plugin-manager (:constructor %make-device-plugin-manager))
   directory checkpoint socket-path listener server thread
   (running nil)
@@ -112,7 +115,58 @@
                                      (when (eq *device-plugin-watch* plugin)
                                        (throw plugin :stopped))))))))
 
-(defparameter *device-plugin-call* #'device-plugin-unary
+(defun device-plugin-call (plugin method request response-type)
+  "Call METHOD of PLUGIN: built into the agent, or over its Unix endpoint."
+  (if (device-plugin-local plugin)
+      (funcall (device-plugin-local plugin) method request)
+      (device-plugin-unary plugin method request response-type)))
+
+(defparameter *gr8s-dri-resource* "gr8s.io/dri"
+  "The GPU render nodes a Pod asks for with this extended resource (podster-wv1w.16).")
+
+(defparameter *gr8s-dri-slots* 16
+  "How many Pods at once may hold the node's render nodes: they are shared, not handed out.")
+
+(defvar *dri-directory* "/dev/dri/"
+  "Where the node's GPU render nodes are; tests point it elsewhere.")
+
+(defun dri-render-nodes (&optional (directory *dri-directory*))
+  "This node's GPU render nodes, /dev/dri/renderD*. The card* nodes are left out: a
+renderer needs none, and they also drive the display."
+  (sort (loop for entry in (ignore-errors (directory (concatenate 'string directory "renderD*")))
+              collect (namestring entry))
+        #'string<))
+
+(defun make-dri-device-plugin (&key (render-nodes (dri-render-nodes)))
+  "The device plugin built into the agent for RENDER-NODES (podster-wv1w.16), or NIL
+without any: *GR8S-DRI-SLOTS* healthy devices, each of which gives a container every
+render node, read-write."
+  (when render-nodes
+    (make-device-plugin
+     :resource *gr8s-dri-resource* :endpoint "built-in"
+     :devices (loop for slot below *gr8s-dri-slots*
+                    collect (make-instance 'dp::device :id (format nil "dri-~D" slot) :health "Healthy"))
+     :local (lambda (method request)
+              (declare (ignore request))
+              (cond ((equal method "Allocate")
+                     (make-instance
+                      'dp::allocate-response
+                      :container-responses
+                      (list (make-instance 'dp::container-allocate-response
+                                           :devices (loop for node in render-nodes
+                                                          collect (make-instance 'dp::device-spec
+                                                                                 :host-path node :container-path node
+                                                                                 :permissions "rw"))))))
+                    ((equal method "PreStartContainer") (make-instance 'dp::pre-start-container-response))
+                    (t (device-plugin-error "Built-in device plugin has no ~A" method)))))))
+
+(defun install-builtin-device-plugins (manager &key (dri (make-dri-device-plugin)))
+  "Register the device plugins the agent itself provides: today the GPU render nodes."
+  (when dri
+    (bt:with-lock-held ((device-plugin-manager-lock manager))
+      (setf (gethash (device-plugin-resource dri) (device-plugin-manager-plugins manager)) dri))))
+
+(defparameter *device-plugin-call* #'device-plugin-call
   "Bounded unary transport, injectable for allocation failure and recovery tests.")
 
 (defun register-device-plugin (manager request)
@@ -210,6 +264,7 @@
            (device-plugin-manager-server manager) "/v1beta1.Registration/Register"
            (lambda (request context) (declare (ignore context)) (register-device-plugin manager request))
            :request-type 'dp::register-request :response-type 'dp::empty)
+          (install-builtin-device-plugins manager)
           (setf (ag-grpc::server-state (device-plugin-manager-server manager)) :running
                 (device-plugin-manager-thread manager)
                 (bt:make-thread (lambda () (device-plugin-accept-loop manager)) :name "device plugin registry")))

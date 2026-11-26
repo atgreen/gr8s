@@ -90,6 +90,8 @@ var systemPaths = []string{
 var scratchPaths = []string{
 	"/tmp", "/var/tmp", "/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom",
 	"/dev/tty", "/dev/ptmx", "/dev/pts", "/dev/shm",
+	// GPU render nodes, when the Pod has them (podster-wv1w.16).
+	"/dev/dri",
 }
 
 // PrivateHome reports whether the command gets its own tmpfs $HOME, holding
