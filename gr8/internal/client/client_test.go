@@ -226,3 +226,43 @@ func TestWriteClaudeHostTokensKeepsTheRestOfTheFile(t *testing.T) {
 		t.Errorf("mode %v", info.Mode().Perm())
 	}
 }
+
+func TestDesktopForBindsOnlyTheCallersDisplayAndAudio(t *testing.T) {
+	present := map[string]bool{"/run/user/1000/wayland-0": true, "/run/user/1000/pipewire-0": true,
+		"/run/user/1000/pulse/native": true}
+	exists := func(path string) bool { return present[path] }
+	env := func(values map[string]string) func(string) string {
+		return func(name string) string { return values[name] }
+	}
+	got := DesktopFor(env(map[string]string{"XDG_RUNTIME_DIR": "/run/user/1000", "WAYLAND_DISPLAY": "wayland-0"}),
+		1000, true, true, exists)
+	if !reflect.DeepEqual(got.Sockets, []string{"/run/user/1000/wayland-0", "/run/user/1000/pipewire-0", "/run/user/1000/pulse/native"}) {
+		t.Errorf("sockets %v", got.Sockets)
+	}
+	if !reflect.DeepEqual(got.Env, []string{"WAYLAND_DISPLAY=wayland-0", "PULSE_SERVER=unix:/run/user/1000/pulse/native",
+		"XDG_RUNTIME_DIR=/run/user/1000"}) {
+		t.Errorf("env %v", got.Env)
+	}
+	// Without XDG_RUNTIME_DIR, the uid's; opted out, nothing.
+	if got := DesktopFor(env(nil), 1000, true, false, exists); !reflect.DeepEqual(got.Sockets, []string{"/run/user/1000/wayland-0"}) {
+		t.Errorf("display only: %v", got.Sockets)
+	}
+	if got := DesktopFor(env(nil), 1000, false, false, exists); got.Sockets != nil || got.Env != nil {
+		t.Errorf("opted out: %+v", got)
+	}
+	// Nothing outside a runtime directory is bound, whatever WAYLAND_DISPLAY says.
+	present["/tmp/evil"] = true
+	if got := DesktopFor(env(map[string]string{"WAYLAND_DISPLAY": "/tmp/evil"}), 1000, true, false, exists); got.Sockets != nil || got.Env != nil {
+		t.Errorf("bound %+v", got)
+	}
+}
+
+func TestNewPodAsksForTheGPUOnlyWhenWanted(t *testing.T) {
+	with := NewPod(PodRequest{Namespace: "gr8", Command: "glxgears", GPU: true}, "x")
+	if quantity := with.Spec.Containers[0].Resources.Limits[GPUResource]; quantity.String() != "1" {
+		t.Errorf("limits %v", with.Spec.Containers[0].Resources.Limits)
+	}
+	if without := NewPod(PodRequest{Namespace: "gr8", Command: "ls"}, "x"); len(without.Spec.Containers[0].Resources.Limits) != 0 {
+		t.Errorf("limits %v", without.Spec.Containers[0].Resources.Limits)
+	}
+}

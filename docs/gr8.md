@@ -56,6 +56,9 @@ gr8 [flags] COMMAND [ARG...]
 | `--node NAME` | Node to run on (default: the one with this host's address). |
 | `--kubeconfig FILE` | Kubeconfig (default: `$KUBECONFIG`, then `~/.kube/config`). |
 | `--keep` | Keep the Pod, and any `--allow` policy, after the command exits. |
+| `--no-display` | Withhold the Wayland display. |
+| `--no-audio` | Withhold audio, and with it the microphone. |
+| `--no-gpu` | Withhold the GPU. |
 | `-v` | Report the Pod and policy gr8 creates. |
 
 gr8 exits with the command's own exit status. Status 126 means gr8 could not
@@ -78,9 +81,9 @@ the host:
   `/etc`, `/opt`, and the like) and whatever is granted; writing the working
   directory, `/tmp`, `/var/tmp` and what `--rw` names; and nothing else, so other
   users' homes, `/var` and `/srv` are out of reach. `/proc`, `/dev` and `/sys` are
-  the Pod's own, so it can't see your other processes. `/run` and `/tmp` are fresh
-  and empty, so it can't reach host sockets such as your SSH agent or Wayland
-  display.
+  the Pod's own, so it can't see your other processes. `/run` and `/tmp` are
+  fresh: your host's sockets, such as your SSH agent, are not there, only the
+  display and audio sockets the sandbox is given (see below).
 - **Home.** `$HOME` is private. It holds only what `--ro`, `--rw` and the
   command's SandboxProfile grant, and git's configuration (`~/.gitconfig`,
   `~/.config/git`). A granted file the command saves is copied back when it
@@ -90,6 +93,26 @@ the host:
   `HOME`, `USER`, `LOGNAME`, `SHELL`, `EDITOR`, `VISUAL`, `PAGER` and `NO_COLOR`
   pass through. Anything else, such as `SSH_AUTH_SOCK`, `*_TOKEN` or `AWS_*`,
   passes only when named with `--env`; the profile can add stand-ins.
+
+## The desktop
+
+gr8 is for desktop work, so a command gets your session's display, audio and GPU
+unless you say otherwise:
+
+- **Display.** Your Wayland socket, at the same path in the sandbox's own
+  `/run/user/UID` (`WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` set), so `gr8 firefox`
+  opens a window. Never X11.
+- **Audio.** PipeWire's `pipewire-0` and PulseAudio's `pulse/native` (`PULSE_SERVER`
+  set). An audio socket also lets the command record from the microphone;
+  `--no-audio` refuses both.
+- **GPU.** The node's render nodes (`/dev/dri/renderD*`), and the proprietary
+  NVIDIA driver's `/dev/nvidia*` when it is installed, through a device plugin
+  built into the gr8s agent that offers them as the shared resource `gr8s.io/dri`.
+  The display nodes (`card*`) are not handed out.
+
+The sandbox's runtime directory is its own and writable, so apps that keep state
+there (dconf, for one) work. A browser trusts the egress proxy too: gr8 adds its
+CA to the system bundles and, for NSS (Firefox, Chrome), to p11-kit's anchors.
 
 ## What the command can reach
 
@@ -245,7 +268,10 @@ Pod itself sets.
 ## Limits
 
 - **Linux only.** gr8 needs a gr8s node on the same host.
-- **No GUI programs.** The sandbox gets no display socket.
+- **No X11 or D-Bus.** An X11 client can read every other window and every key,
+  and a D-Bus session client can start processes outside the sandbox, so neither
+  is offered. Wayland apps work; an app that needs a portal or notifications runs
+  without them.
 - **HTTP/1.1 through termination.** A client that speaks only HTTP/2 or gRPC
   needs a passthrough host.
 - **Certificate pinning.** A client that pins certificates, or ignores both the

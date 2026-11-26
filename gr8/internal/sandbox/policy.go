@@ -20,12 +20,15 @@ type Config struct {
 	Placeholders []string
 	ReadOnly     []string
 	ReadWrite    []string
-	Env          []string
-	Command      []string
+	// Sockets are the host's Wayland and audio sockets, bound at the same paths in
+	// the sandbox's fresh /run (podster-wv1w.15).
+	Sockets []string
+	Env     []string
+	Command []string
 }
 
 // ParseArgs parses launch's arguments: --cwd DIR, then any of --home DIR,
-// --ro PATH, --rw PATH and --env NAME=VALUE, then -- and the command.
+// --ro PATH, --rw PATH, --socket PATH and --env NAME=VALUE, then -- and the command.
 func ParseArgs(args []string) (Config, error) {
 	var config Config
 	for len(args) > 0 {
@@ -53,6 +56,11 @@ func ParseArgs(args []string) (Config, error) {
 			config.ReadOnly = append(config.ReadOnly, value)
 		case "--rw":
 			config.ReadWrite = append(config.ReadWrite, value)
+		case "--socket":
+			if !strings.HasPrefix(value, "/run/user/") {
+				return Config{}, fmt.Errorf("--socket must be in a user's runtime directory, not %q", value)
+			}
+			config.Sockets = append(config.Sockets, value)
 		case "--env":
 			config.Env = append(config.Env, value)
 		default:
@@ -82,6 +90,8 @@ var systemPaths = []string{
 var scratchPaths = []string{
 	"/tmp", "/var/tmp", "/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom",
 	"/dev/tty", "/dev/ptmx", "/dev/pts", "/dev/shm",
+	// GPU render nodes, when the Pod has them (podster-wv1w.16).
+	"/dev/dri",
 }
 
 // PrivateHome reports whether the command gets its own tmpfs $HOME, holding
@@ -105,7 +115,28 @@ func (config Config) Rules(abi int) []Rule {
 	for _, path := range append(append(append([]string{}, scratchPaths...), config.ReadWrite...), config.Cwd) {
 		rules = append(rules, Rule{Path: path, Access: all})
 	}
+	// The proprietary NVIDIA driver's nodes, when the Pod has them (podster-wv1w.17).
+	nvidia, _ := filepath.Glob("/dev/nvidia*")
+	for _, path := range nvidia {
+		rules = append(rules, Rule{Path: path, Access: all})
+	}
+	// A desktop app keeps state in its runtime directory (dconf, for one), which is
+	// the sandbox's own tmpfs here, holding only the sockets it was given.
+	if runtime := config.RuntimeDir(); runtime != "" {
+		rules = append(rules, Rule{Path: runtime, Access: all})
+	}
 	return rules
+}
+
+// RuntimeDir is the /run/user/UID directory the sandbox's sockets are in, or "".
+func (config Config) RuntimeDir() string {
+	for _, socket := range config.Sockets {
+		parts := strings.SplitN(strings.TrimPrefix(socket, "/"), "/", 4)
+		if len(parts) >= 3 && parts[0] == "run" && parts[1] == "user" {
+			return "/" + strings.Join(parts[:3], "/")
+		}
+	}
+	return ""
 }
 
 func within(path, dir string) bool {

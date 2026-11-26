@@ -83,7 +83,9 @@
 (test registered-plugins-stream-health-and-return-real-allocation-rpcs
   (with-temporary-store (store path)
     (declare (ignore store))
-    (let* ((directory (merge-pathnames "registry/" path))
+    ;; No render nodes, so the agent's own GPU plugin stays out of the inventory.
+    (let* ((gr8s.kubelet::*dri-directory* (namestring (merge-pathnames "no-dri/" path)))
+           (directory (merge-pathnames "registry/" path))
            (manager (gr8s.kubelet::make-device-plugin-manager path :directory directory))
            (allocated-ids nil)
            (plugin-server (gr8s.kubelet::make-device-plugin-manager
@@ -128,3 +130,38 @@
              (is (equal '("gpu0") allocated-ids))))
         (gr8s.kubelet::stop-device-plugin-manager manager)
         (gr8s.kubelet::stop-device-plugin-manager plugin-server)))))
+
+(test the-agents-own-plugin-shares-the-gpu-render-nodes
+  ;; podster-wv1w.16: gr8 sandboxes ask for gr8s.io/dri; every holder gets every render
+  ;; node, read-write, and several Pods hold them at once.
+  (with-temporary-store (store path)
+    (declare (ignore store))
+    (let ((manager (gr8s.kubelet::make-device-plugin-manager path))
+          (container (gr8s.resources::core-object "name" "command" "resources"
+                       (gr8s.resources::core-object "limits" (gr8s.resources::core-object "gr8s.io/dri" "1")))))
+      (is (null (gr8s.kubelet::make-dri-device-plugin :render-nodes '())))
+      (gr8s.kubelet::install-builtin-device-plugins
+       manager :dri (gr8s.kubelet::make-dri-device-plugin
+                     :render-nodes '("/dev/dri/renderD128" "/dev/dri/renderD129")
+                     :nvidia-nodes '("/dev/nvidia-uvm" "/dev/nvidia0" "/dev/nvidiactl")))
+      (is (equal (list (cons "gr8s.io/dri" (princ-to-string gr8s.kubelet::*gr8s-dri-slots*)))
+                 (gr8s.kubelet::device-plugin-resource-entries manager)))
+      (dolist (uid '("one" "two" "three"))
+        (let ((devices (getf (gr8s.kubelet::device-plugin-container-config
+                              manager (gr8s.model::make-pod :uid uid :name uid) container)
+                             :devices)))
+          (is (equal '("/dev/dri/renderD128" "/dev/dri/renderD129" "/dev/nvidia-uvm" "/dev/nvidia0" "/dev/nvidiactl")
+                     (mapcar #'gr8s.cri.v1::host-path devices)))
+          (is (every (lambda (device) (equal "rw" (gr8s.cri.v1::permissions device))) devices)))))))
+
+(test the-nvidia-driver-nodes-are-found-beside-the-render-nodes
+  (with-temporary-store (store path)
+    (declare (ignore store))
+    (let ((dev (namestring (merge-pathnames "dev/" path))))
+      (ensure-directories-exist dev)
+      (dolist (name '("nvidiactl" "nvidia0" "nvidia1" "nvidia-uvm" "nvidia-modeset" "nvidia-caps" "null"))
+        (with-open-file (out (concatenate 'string dev name) :direction :output) (declare (ignore out))))
+      (is (equal (mapcar (lambda (name) (concatenate 'string dev name))
+                         '("nvidia-modeset" "nvidia-uvm" "nvidia0" "nvidia1" "nvidiactl"))
+                 (gr8s.kubelet::nvidia-device-nodes dev)))
+      (is (null (gr8s.kubelet::nvidia-device-nodes (namestring (merge-pathnames "none/" path))))))))

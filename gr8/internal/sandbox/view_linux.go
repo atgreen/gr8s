@@ -80,6 +80,11 @@ func buildView(hostRoot string, config Config) (*view, error) {
 			return nil, err
 		}
 	}
+	// The runtime directory the sockets were bound into is the caller's alone, as
+	// on the host.
+	for _, path := range config.Sockets {
+		_ = os.Chmod(filepath.Join(hostRoot, filepath.Dir(path)), 0o700)
+	}
 	for _, file := range result.saved {
 		if err := copyIn(filepath.Join(hostRoot, file.path), file); err != nil {
 			return nil, err
@@ -152,6 +157,10 @@ func holdBinds(hostRoot string, config Config) ([]heldBind, error) {
 				wants = append(wants, wanted{path, false, false})
 			}
 		}
+	}
+	// The display and audio sockets live in /run, which the sandbox gets fresh.
+	for _, path := range config.Sockets {
+		wants = append(wants, wanted{path, false, false})
 	}
 	sort.SliceStable(wants, func(i, j int) bool { return len(wants[i].path) < len(wants[j].path) })
 	var binds []heldBind
@@ -400,7 +409,43 @@ func trustEgressCA(hostRoot, trust string) error {
 			return err
 		}
 	}
+	if len(targets) > 0 {
+		return trustEgressAnchor(hostRoot)
+	}
 	return nil
+}
+
+// p11-kit's trust module, which on Fedora and its kin is NSS's built-in roots
+// (Firefox, Chrome, anything using NSS), reads anchor certificates from this
+// directory, not the bundles above.
+const p11KitAnchors = "/etc/pki/ca-trust/source/anchors"
+
+// trustEgressAnchor shows the sandbox p11KitAnchors with the egress CA among the
+// host's own anchors, so NSS clients trust the proxy too. A host without the
+// directory is left as it is.
+func trustEgressAnchor(hostRoot string) error {
+	anchors, err := ResolveIn(hostRoot, p11KitAnchors)
+	if err != nil || !isDir(anchors) {
+		return nil
+	}
+	directory := filepath.Join(hostRoot, trustDirectory, "anchors")
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		return err
+	}
+	entries, _ := os.ReadDir(anchors)
+	for _, entry := range entries {
+		if contents, err := os.ReadFile(filepath.Join(anchors, entry.Name())); err == nil {
+			_ = os.WriteFile(filepath.Join(directory, entry.Name()), contents, 0o644)
+		}
+	}
+	egress, err := os.ReadFile(filepath.Join(hostRoot, trustEgress))
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(directory, "gr8s-egress-ca.pem"), egress, 0o644); err != nil {
+		return err
+	}
+	return bindOver(directory, anchors, true)
 }
 
 // writeTrustBundle writes the sandbox's bundles under hostRoot's /run and returns the

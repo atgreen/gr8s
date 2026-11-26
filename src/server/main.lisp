@@ -4127,6 +4127,9 @@ upstream CRDs.
   `spec.egress.binaries` (`[{hosts, paths}]`) lets a host be reached only by the
   listed programs or their children; the node finds the program behind each
   connection from the Pod's /proc, and the flow event names it.
+  A gr8 sandbox gets the caller's Wayland display, audio and GPU (the agent's
+  built-in device plugin offers render nodes as `gr8s.io/dri`) unless gr8 is
+  run with --no-display, --no-audio or --no-gpu; never X11 or D-Bus.
   A gr8 sandbox is always on synthetic DNS, and anything no policy allows is
   denied; `gr8 --allow NAME` allows a name for one run. `gr8 login claude` stores
   Claude Code's subscription token as a Secret with a SecurityProfile injecting

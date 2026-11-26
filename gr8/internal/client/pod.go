@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -55,7 +56,12 @@ type PodRequest struct {
 	Launcher  string // the gr8 binary's path on the host
 	Command   string // the command's base name
 	Identity  Identity
+	GPU       bool // ask for the node's GPU render nodes (GPUResource)
 }
+
+// GPUResource is the extended resource a gr8s node offers its GPU render nodes as
+// (podster-wv1w.16): shared, so many sandboxes hold them at once.
+const GPUResource corev1.ResourceName = "gr8s.io/dri"
 
 // NewPod returns the Pod that holds a gr8 command. Its container only
 // waits ("gr8 hold"); the command itself is started by Pod exec, so no
@@ -97,9 +103,10 @@ func NewPod(request PodRequest, suffix string) *corev1.Pod {
 				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined},
 			},
 			Containers: []corev1.Container{{
-				Name:    ContainerName,
-				Image:   request.Image,
-				Command: []string{HostRoot + request.Launcher, "hold"},
+				Name:      ContainerName,
+				Image:     request.Image,
+				Command:   []string{HostRoot + request.Launcher, "hold"},
+				Resources: gpuResources(request.GPU),
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: "host", MountPath: HostRoot},
 					{Name: "egress-trust", MountPath: TrustMount, ReadOnly: true},
@@ -123,6 +130,14 @@ func NewPod(request PodRequest, suffix string) *corev1.Pod {
 			},
 		},
 	}
+}
+
+func gpuResources(gpu bool) corev1.ResourceRequirements {
+	if !gpu {
+		return corev1.ResourceRequirements{}
+	}
+	one := resource.MustParse("1")
+	return corev1.ResourceRequirements{Limits: corev1.ResourceList{GPUResource: one}}
 }
 
 // NewNamespace returns the namespace gr8 Pods live in. Mounting the host's
