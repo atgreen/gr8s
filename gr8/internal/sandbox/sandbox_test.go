@@ -286,7 +286,8 @@ func TestStandInCredentialsHideTheTokens(t *testing.T) {
 	}
 	must(t, json.Unmarshal(standIn, &parsed))
 	if parsed.OAuth["accessToken"] != StandInToken || parsed.OAuth["refreshToken"] != StandInToken ||
-		parsed.OAuth["expiresAt"].(float64) != standInExpiry || parsed.OAuth["subscriptionType"] != "max" {
+		parsed.OAuth["expiresAt"].(float64) != 1795000000000 || parsed.OAuth["subscriptionType"] != "max" {
+		// The real expiry stays, so the sandbox refreshes through the proxy on time.
 		t.Errorf("stand-in %v", parsed.OAuth)
 	}
 	if _, err := StandInCredentials([]byte("not json")); err == nil {

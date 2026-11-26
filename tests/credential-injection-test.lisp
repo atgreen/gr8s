@@ -172,7 +172,7 @@
         \"metadata\":{\"name\":\"claude\"},\"spec\":{\"commands\":[\"claude\"],\"home\":{\"placeholders\":[\"/etc/shadow\"]}}}")
      nil "claude" nil)))
 
-(defparameter +ci-login-security-profile+ "{\"apiVersion\":\"agents.kruise.io/v1alpha1\",\"kind\":\"SecurityProfile\",\"metadata\":{\"name\":\"claude-oauth\",\"namespace\":\"gr8\"},\"spec\":{\"rules\":[{\"actions\":{\"tokenTransformation\":{\"apiKey\":{\"targetHeaders\":{\"names\":[\"authorization\"]},\"value\":{\"template\":\"Bearer {{ .Token }}\"}},\"credentialRef\":{\"secret\":{\"key\":\"accessToken\",\"name\":\"claude-oauth\"}},\"failStrategy\":\"Block\",\"type\":\"ApiKey\"}},\"match\":[{\"domains\":[\"api.anthropic.com\"],\"schemes\":[\"https\"]}],\"name\":\"anthropic-oauth\"}],\"selector\":{\"matchLabels\":{\"gr8s.io/gr8-command\":\"claude\"}}}}")
+(defparameter +ci-login-security-profile+ "{\"apiVersion\":\"agents.kruise.io/v1alpha1\",\"kind\":\"SecurityProfile\",\"metadata\":{\"name\":\"claude-oauth\",\"namespace\":\"gr8\"},\"spec\":{\"rules\":[{\"actions\":{\"tokenTransformation\":{\"apiKey\":{\"targetHeaders\":{\"names\":[\"authorization\"]},\"value\":{\"template\":\"Bearer {{ .Token }}\"}},\"credentialRef\":{\"secret\":{\"key\":\"accessToken\",\"name\":\"claude-oauth\"}},\"failStrategy\":\"Block\",\"type\":\"ApiKey\"}},\"match\":[{\"domains\":[\"api.anthropic.com\"],\"schemes\":[\"https\"]}],\"name\":\"anthropic-oauth\"},{\"actions\":{\"tokenTransformation\":{\"credentialRef\":{\"secret\":{\"name\":\"claude-oauth\"}},\"failStrategy\":\"Block\",\"type\":\"OAuthRefresh\"}},\"match\":[{\"domains\":[\"platform.claude.com\",\"console.anthropic.com\"],\"methods\":[\"POST\"],\"paths\":[{\"type\":\"Prefix\",\"value\":\"/v1/oauth/token\"}],\"schemes\":[\"https\"]}],\"name\":\"anthropic-oauth-refresh\"}],\"selector\":{\"matchLabels\":{\"gr8s.io/gr8-command\":\"claude\"}}}}")
 (defparameter +ci-login-sandbox-profile+ "{\"apiVersion\":\"gr8.gr8s.io/v1alpha1\",\"kind\":\"SandboxProfile\",\"metadata\":{\"name\":\"claude\"},\"spec\":{\"commands\":[\"claude\"],\"home\":{\"placeholders\":[\".claude/.credentials.json\"],\"readWrite\":[\".claude\",\".claude.json\"]}}}")
 
 (test ci-the-objects-gr8-login-applies-are-valid
@@ -288,3 +288,120 @@
     (is (null (gr8s.network::pod-credential-hosts
                (gr8s.network::make-np-pod :name "web" :namespace "gr8" :labels (gr8s.network::np-labels "app" "web"))
                profiles)))))
+
+;;; podster-kn03: the proxy handles the OAuth refresh exchange, and the node writes the
+;;; tokens it returns back to the Secret.
+
+(defun ci-refresh-profile ()
+  (com.inuoe.jzon:parse +ci-login-security-profile+))
+
+(test ci-an-oauth-refresh-rule-is-validated-and-parsed
+  (is (gr8s.resources::normalize-core-resource "securityprofiles" (ci-refresh-profile) "gr8" nil nil))
+  (let ((rule (find :oauth-refresh
+                    (gr8s.network::security-profile-spec-rules
+                     (first (gr8s.network::security-profile-specs-from-objects (list (ci-refresh-profile)))))
+                    :key #'gr8s.network::injection-rule-kind)))
+    (is (equal "claude-oauth" (gr8s.network::injection-rule-secret-name rule)))
+    (is (equal "accessToken" (gr8s.network::injection-rule-access-token-key rule)))
+    (is (equal "refreshToken" (gr8s.network::injection-rule-refresh-token-key rule)))
+    (is (equal '("platform.claude.com" "console.anthropic.com") (gr8s.network::injection-rule-domains rule)))
+    (is (null (gr8s.network::injection-rule-headers rule))))
+  (flet ((with-transformation (json)
+           (gr8s.resources::normalize-core-resource
+            "securityprofiles"
+            (com.inuoe.jzon:parse
+             (format nil "{\"apiVersion\":\"agents.kruise.io/v1alpha1\",\"kind\":\"SecurityProfile\",\"metadata\":{\"name\":\"p\",\"namespace\":\"gr8\"},
+               \"spec\":{\"selector\":{},\"rules\":[{\"name\":\"r\",\"match\":[{\"domains\":[\"platform.claude.com\"]}],
+               \"actions\":{\"tokenTransformation\":~A}}]}}" json))
+            "gr8" nil nil)))
+    (is (with-transformation "{\"type\":\"OAuthRefresh\",\"credentialRef\":{\"secret\":{\"name\":\"s\"}},
+                                \"oauthRefresh\":{\"accessTokenKey\":\"at\",\"refreshTokenKey\":\"rt\"}}"))
+    (dolist (bad '("{\"type\":\"OAuthRefresh\",\"credentialRef\":{\"secret\":{\"name\":\"s\"}},\"apiKey\":{}}"
+                   "{\"type\":\"OAuthRefresh\",\"credentialRef\":{\"secret\":{\"name\":\"s\"}},\"oauthRefresh\":{\"accessTokenKey\":\"a b\"}}"
+                   "{\"type\":\"OAuthRefresh\",\"credentialRef\":{\"secret\":{\"name\":\"s\"}},\"oauthRefresh\":{\"other\":\"x\"}}"
+                   "{\"type\":\"OAuthRefresh\"}"))
+      (signals gr8s.resources::kubernetes-error (with-transformation bad)))))
+
+(test ci-the-proxy-swaps-the-refresh-tokens-in-and-out
+  (flet ((octets (string) (trivial-utf-8:string-to-utf-8-bytes string))
+         (text (octets) (trivial-utf-8:utf-8-bytes-to-string octets)))
+    ;; JSON: the stand-in becomes the real token; anything else is left alone.
+    (let ((swapped (gr8s.controllers::egress-refresh-request-body
+                    (octets "{\"grant_type\":\"refresh_token\",\"refresh_token\":\"gr8s-injected\",\"client_id\":\"c\"}")
+                    "application/json" "sk-ant-ort-real")))
+      (is (equal "sk-ant-ort-real" (gethash "refresh_token" (com.inuoe.jzon:parse (text swapped)))))
+      (is (equal "c" (gethash "client_id" (com.inuoe.jzon:parse (text swapped))))))
+    (is (null (gr8s.controllers::egress-refresh-request-body
+               (octets "{\"grant_type\":\"authorization_code\",\"code\":\"x\"}") "application/json" "real")))
+    (is (null (gr8s.controllers::egress-refresh-request-body
+               (octets "{\"grant_type\":\"refresh_token\",\"refresh_token\":\"someone-elses\"}") "application/json" "real")))
+    ;; A form.
+    (is (search "refresh_token=sk-ant-ort-real"
+                (text (gr8s.controllers::egress-refresh-request-body
+                       (octets "grant_type=refresh_token&refresh_token=gr8s-injected&client_id=c")
+                       "application/x-www-form-urlencoded" "sk-ant-ort-real"))))
+    ;; The response: stand-ins out, real tokens kept with their expiry.
+    (multiple-value-bind (body tokens)
+        (gr8s.controllers::egress-refresh-response-body
+         (octets "{\"access_token\":\"sk-ant-oat-new\",\"refresh_token\":\"sk-ant-ort-new\",\"expires_in\":28800,\"token_type\":\"Bearer\"}")
+         "accessToken" "refreshToken" :now-ms 1000)
+      (let ((object (com.inuoe.jzon:parse (text body))))
+        (is (equal "gr8s-injected" (gethash "access_token" object)))
+        (is (equal "gr8s-injected" (gethash "refresh_token" object)))
+        (is (equal "Bearer" (gethash "token_type" object))))
+      (is (equal '(("accessToken" . "sk-ant-oat-new") ("refreshToken" . "sk-ant-ort-new") ("expiresAt" . "28801000"))
+                 tokens)))
+    (is (null (gr8s.controllers::egress-refresh-response-body (octets "{\"error\":\"invalid_grant\"}") "a" "r")))))
+
+(test ci-the-server-writes-a-rotation-only-for-its-own-pod-and-rule
+  (with-temporary-store (store path)
+    (values path)
+    (gr8s.resources::create-core-resource store "namespaces"
+                                          (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "gr8")) nil)
+    (gr8s.resources::create-core-resource
+     store "secrets" (com.inuoe.jzon:parse "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"claude-oauth\",\"namespace\":\"gr8\"},
+                                             \"data\":{\"accessToken\":\"b2xk\",\"refreshToken\":\"b2xk\"}}")
+     "gr8")
+    (gr8s.resources::create-core-resource store "securityprofiles" (ci-refresh-profile) "gr8")
+    (let ((pod (create-pod store (parse-pod "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",
+                 \"metadata\":{\"name\":\"gr8-claude-x\",\"namespace\":\"gr8\",\"labels\":{\"gr8s.io/gr8-command\":\"claude\"}},
+                 \"spec\":{\"nodeName\":\"worker-a\",\"containers\":[{\"name\":\"c\",\"image\":\"busybox\"}]}}"))))
+      (flet ((rotation (&key (node "worker-a") (uid (pod-uid pod)) (secret "claude-oauth")
+                           (values '(("accessToken" . "new-access") ("refreshToken" . "new-refresh") ("expiresAt" . "9"))))
+               (let ((table (make-hash-table :test #'equal)))
+                 (loop for (key . value) in values do (setf (gethash key table) value))
+                 (gr8s.apiserver::apply-credential-rotation
+                  store node (make-instance 'gr8s.node.v1::credential-rotation
+                                            :namespace "gr8" :secret-name secret :pod-name "gr8-claude-x"
+                                            :pod-uid uid :tokens table))))
+             (stored (key)
+               (gr8s.network::secret-credential (gr8s.resources::get-core-resource store "secrets" "gr8" "claude-oauth") key)))
+        (signals error (rotation :node "worker-b"))
+        (signals error (rotation :uid "another"))
+        (signals error (rotation :secret "anthropic"))
+        (signals error (rotation :values '(("apiKey" . "x"))))
+        (is (equal "old" (stored "accessToken")))
+        (rotation)
+        (is (equal "new-access" (stored "accessToken")))
+        (is (equal "new-refresh" (stored "refreshToken")))
+        (is (equal "9" (stored "expiresAt")))
+        (is-true (gethash "gr8s.io/credential-rotated-at"
+                          (gethash "annotations" (gethash "metadata" (gr8s.resources::get-core-resource
+                                                                      store "secrets" "gr8" "claude-oauth")))))))))
+
+(test ci-the-node-uses-refreshed-tokens-until-the-secret-changes
+  (let ((directory (uiop:ensure-directory-pathname
+                    (sb-posix:mkdtemp (namestring (merge-pathnames "gr8s-test-XXXXXX" (uiop:temporary-directory)))))))
+    (unwind-protect
+         (let* ((runtime (gr8s.agent::make-node-runtime directory (gr8s.runtime::make-fake-runtime) nil))
+                (secret (com.inuoe.jzon:parse "{\"metadata\":{\"name\":\"claude-oauth\",\"namespace\":\"gr8\",\"resourceVersion\":\"5\"},
+                                                \"data\":{\"accessToken\":\"b2xk\"}}"))
+                (sent '()))
+           (let ((gr8s.agent::*credential-rotation-sender* (lambda (rotation) (push rotation sent))))
+             (gr8s.agent::note-refreshed-credentials runtime "gr8" "gone" secret '(("accessToken" . "new"))))
+           (is (equal "new" (gr8s.agent::node-runtime-credential runtime secret "accessToken")))
+           ;; The Pod isn't in this node's store, so nothing could be sent for it.
+           (is (null sent))
+           (setf (gethash "resourceVersion" (gethash "metadata" secret)) "6")
+           (is (equal "old" (gr8s.agent::node-runtime-credential runtime secret "accessToken"))))
+      (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))

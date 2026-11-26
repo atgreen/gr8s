@@ -9,6 +9,11 @@
 ;;;; proxy overwrite named headers with a value rendered from a Secret. Whatever gr8s
 ;;;; doesn't implement is refused here, so a manifest gr8s accepts means what it says:
 ;;;; one ApiKey token transformation per rule, failing closed.
+;;;;
+;;;; One extension of gr8s's own, type OAuthRefresh (podster-kn03): for an OAuth token
+;;;; endpoint, the proxy puts the Secret's real refresh token into a refresh request in
+;;;; place of the stand-in, keeps the new real tokens the response carries (the node
+;;;; writes them back to the Secret) and hands the client stand-ins.
 
 (in-package #:gr8s.resources)
 
@@ -67,9 +72,9 @@
 
 (defun %sp-token-transformation (transformation path)
   (%sp-object transformation path)
-  (%sp-fields transformation '("type" "failStrategy" "credentialRef" "apiKey") path)
-  (unless (equal (gethash "type" transformation) "ApiKey")
-    (%sp-invalid "~A.type must be ApiKey" path))
+  (%sp-fields transformation '("type" "failStrategy" "credentialRef" "apiKey" "oauthRefresh") path)
+  (unless (member (gethash "type" transformation) '("ApiKey" "OAuthRefresh") :test #'equal)
+    (%sp-invalid "~A.type must be ApiKey or OAuthRefresh" path))
   (unless (member (gethash "failStrategy" transformation "Block") '("Block") :test #'equal)
     (%sp-invalid "~A.failStrategy must be Block: gr8s never sends a request whose credential it couldn't add" path))
   (let* ((reference-path (format nil "~A.credentialRef" path))
@@ -83,6 +88,21 @@
       (multiple-value-bind (key present) (gethash "key" secret)
         (when (and present (not (and (stringp key) (plusp (length key)))))
           (%sp-invalid "~A.key must be a data key" secret-path)))))
+  (when (equal (gethash "type" transformation) "OAuthRefresh")
+    (when (nth-value 1 (gethash "apiKey" transformation))
+      (%sp-invalid "~A.apiKey is for type ApiKey" path))
+    (multiple-value-bind (refresh present) (gethash "oauthRefresh" transformation)
+      (when present
+        (let ((refresh-path (format nil "~A.oauthRefresh" path)))
+          (%sp-object refresh refresh-path)
+          (%sp-fields refresh '("accessTokenKey" "refreshTokenKey") refresh-path)
+          (maphash (lambda (key value)
+                     (unless (and (stringp value) (cl-ppcre:scan "^[-._a-zA-Z0-9]+$" value))
+                       (%sp-invalid "~A.~A must be a Secret data key" refresh-path key)))
+                   refresh))))
+    (return-from %sp-token-transformation))
+  (when (nth-value 1 (gethash "oauthRefresh" transformation))
+    (%sp-invalid "~A.oauthRefresh is for type OAuthRefresh" path))
   (let* ((api-path (format nil "~A.apiKey" path))
          (api-key (%sp-object (gethash "apiKey" transformation) api-path))
          (headers-path (format nil "~A.targetHeaders" api-path))

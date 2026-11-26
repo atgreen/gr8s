@@ -108,13 +108,54 @@
   ;; The node egress proxy for captured Pods (podster-wv1w.2), its sk_lookup
   ;; steering, and the policy it decides by: (ip-map specs cluster-policies), as
   ;; the last convergence resolved them.
-  egress-proxy egress-steering egress-dns-gate (egress-view nil))
+  egress-proxy egress-steering egress-dns-gate (egress-view nil)
+  ;; Tokens an OAuth refresh through the proxy returned (podster-kn03), by (namespace
+  ;; secret key) -> (value . the Secret's resourceVersion then): the node uses them
+  ;; until the Secret changes, which the server's write of them does.
+  (credential-overrides (make-hash-table :test #'equal))
+  (credential-overrides-lock (bt:make-lock "gr8s credential overrides")))
+
+(defun node-runtime-credential (node-runtime secret key)
+  "The credential SECRET (a Secret object) holds under KEY, unless a refresh through the
+proxy replaced it since: then the node's newer copy, until the Secret itself changes."
+  (let* ((metadata (gethash "metadata" secret))
+         (entry (bt:with-lock-held ((node-runtime-credential-overrides-lock node-runtime))
+                  (gethash (list (gethash "namespace" metadata) (gethash "name" metadata) key)
+                           (node-runtime-credential-overrides node-runtime)))))
+    (if (and entry (equal (cdr entry) (gethash "resourceVersion" metadata)))
+        (car entry)
+        (gr8s.network::secret-credential secret key))))
+
+(defun note-refreshed-credentials (node-runtime pod-namespace pod-name secret tokens)
+  "Keep TOKENS, an alist of Secret key -> value an OAuth refresh returned, for SECRET,
+and send them to the server to replace the Secret's, for the Pod POD-NAMESPACE/POD-NAME
+that refreshed. Best-effort: without a session the node's copy serves until the next
+refresh."
+  (let* ((metadata (gethash "metadata" secret))
+         (namespace (gethash "namespace" metadata)) (name (gethash "name" metadata))
+         (version (gethash "resourceVersion" metadata)))
+    (bt:with-lock-held ((node-runtime-credential-overrides-lock node-runtime))
+      (loop for (key . value) in tokens
+            do (setf (gethash (list namespace name key) (node-runtime-credential-overrides node-runtime))
+                     (cons value version))))
+    (let ((sender *credential-rotation-sender*)
+          (pod (ignore-errors (get-pod (node-runtime-store node-runtime) pod-namespace pod-name))))
+      (when (and sender pod)
+        (let ((values (make-hash-table :test #'equal)))
+          (loop for (key . value) in tokens do (setf (gethash key values) value))
+          (ignore-errors
+           (funcall sender (make-instance 'gr8s.node.v1::credential-rotation
+                                          :namespace namespace :secret-name name
+                                          :pod-name pod-name :pod-uid (pod-uid pod) :tokens values))))))))
 
 (defun node-runtime-egress-injector (node-runtime peer host scheme)
   "For the Pod at PEER, a request matcher injecting credentials into its requests to HOST
 over SCHEME, or NIL when no SecurityProfile selecting it names HOST (podster-wv1w.3). The
-matcher returns (values rule-name headers value), VALUE NIL when the Secret or its key is
-missing, which the proxy refuses rather than send the request without its credential."
+matcher returns (values rule-name headers value refresh), VALUE NIL when the Secret or
+its key is missing, which the proxy refuses rather than send the request without its
+credential. For an OAuthRefresh rule (podster-kn03), HEADERS is NIL, VALUE the real
+refresh token and REFRESH a plist (:rotate function): the proxy calls it with the
+alist of Secret keys -> new real tokens the refresh returned."
   (destructuring-bind (&optional ip-map specs cluster-policies profiles sandbox-profiles namespace-labels)
       (node-runtime-egress-view node-runtime)
     (declare (ignore specs cluster-policies sandbox-profiles namespace-labels))
@@ -125,16 +166,28 @@ missing, which the proxy refuses rather than send the request without its creden
         (lambda (method path)
           (let ((rule (gr8s.network::matching-injection-rule rules host scheme method path)))
             (when rule
-              (let* ((secret (ignore-errors
-                              (get-core-resource store "secrets" (gr8s.network::injection-rule-namespace rule)
-                                                 (gr8s.network::injection-rule-secret-name rule))))
-                     (credential (and secret (gr8s.network::secret-credential
-                                              secret (gr8s.network::injection-rule-secret-key rule)))))
-                (values (format nil "~A/~A" (gr8s.network::injection-rule-profile rule)
-                                (gr8s.network::injection-rule-name rule))
-                        (gr8s.network::injection-rule-headers rule)
-                        (and credential (gr8s.network::render-injection-value
-                                         (gr8s.network::injection-rule-template rule) credential)))))))))))
+              (let ((secret (ignore-errors
+                             (get-core-resource store "secrets" (gr8s.network::injection-rule-namespace rule)
+                                                (gr8s.network::injection-rule-secret-name rule))))
+                    (name (format nil "~A/~A" (gr8s.network::injection-rule-profile rule)
+                                  (gr8s.network::injection-rule-name rule))))
+                (if (eq :oauth-refresh (gr8s.network::injection-rule-kind rule))
+                    (values name nil
+                            (and secret (node-runtime-credential
+                                         node-runtime secret (gr8s.network::injection-rule-refresh-token-key rule)))
+                            (list :rotate
+                                  (lambda (tokens)
+                                    (note-refreshed-credentials
+                                     node-runtime (gr8s.network::np-pod-namespace pod) (gr8s.network::np-pod-name pod)
+                                     secret tokens))
+                                  :access-token-key (gr8s.network::injection-rule-access-token-key rule)
+                                  :refresh-token-key (gr8s.network::injection-rule-refresh-token-key rule)))
+                    (let ((credential (and secret (node-runtime-credential
+                                                   node-runtime secret (gr8s.network::injection-rule-secret-key rule)))))
+                      (values name
+                              (gr8s.network::injection-rule-headers rule)
+                              (and credential (gr8s.network::render-injection-value
+                                               (gr8s.network::injection-rule-template rule) credential)))))))))))))
 
 (defun node-runtime-local-risk-ready-p (node-runtime)
   "True only while the latest received snapshot has a read-back-complete local

@@ -591,3 +591,89 @@ are the proxy's (podster-wv1w.11)."
                       (ignore-errors (sb-bsd-sockets:socket-close socket))))
                (gr8s.controllers::stop-egress-proxy proxy)))
         (funcall stop)))))
+
+(defun egress-token-endpoint ()
+  "A cleartext OAuth token endpoint that answers a refresh with new tokens, and the
+request bodies it got. Returns (values stop port bodies)."
+  (let* ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp))
+         (stop (list nil)) (bodies (list nil)) (port nil))
+    (setf (sb-bsd-sockets:sockopt-reuse-address socket) t)
+    (sb-bsd-sockets:socket-bind socket #(127 0 0 1) 0)
+    (setf port (nth-value 1 (sb-bsd-sockets:socket-name socket)))
+    (sb-bsd-sockets:socket-listen socket 8)
+    (let ((thread
+            (bt:make-thread
+             (lambda ()
+               (loop until (car stop)
+                     do (ignore-errors
+                         (let* ((client (sb-bsd-sockets:socket-accept socket))
+                                (stream (gr8s.controllers::egress-socket-stream client)))
+                           (unwind-protect
+                                (multiple-value-bind (start headers)
+                                    (gr8s.controllers::egress-parse-http-head (gr8s.controllers::egress-read-http-head stream))
+                                  (declare (ignore start))
+                                  (push (trivial-utf-8:utf-8-bytes-to-string
+                                         (gr8s.controllers::egress-read-body
+                                          stream (gr8s.controllers::egress-body-framing headers :request t)))
+                                        (car bodies))
+                                  (let ((body (trivial-utf-8:string-to-utf-8-bytes
+                                               "{\"access_token\":\"sk-ant-oat-new\",\"refresh_token\":\"sk-ant-ort-new\",\"expires_in\":3600}")))
+                                    (write-sequence (gr8s.controllers::egress-http-head-octets
+                                                     "HTTP/1.1 200 OK"
+                                                     `(("Content-Type" . "application/json")
+                                                       ("Content-Length" . ,(princ-to-string (length body)))))
+                                                    stream)
+                                    (write-sequence body stream)
+                                    (force-output stream)))
+                             (ignore-errors (close stream))
+                             (ignore-errors (sb-bsd-sockets:socket-close client)))))))
+             :name "egress token endpoint")))
+      (values (lambda ()
+                (setf (car stop) t)
+                (ignore-errors
+                 (let ((waker (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+                   (unwind-protect (sb-bsd-sockets:socket-connect waker #(127 0 0 1) port)
+                     (ignore-errors (sb-bsd-sockets:socket-close waker)))))
+                (ignore-errors (bt:join-thread thread))
+                (ignore-errors (sb-bsd-sockets:socket-close socket)))
+              port bodies))))
+
+(test egress-proxy-exchanges-a-refresh-and-hands-the-client-stand-ins
+  ;; podster-kn03: the sandbox sends its stand-in refresh token; the endpoint gets the
+  ;; real one; the client gets stand-ins; the node keeps the real new tokens.
+  (multiple-value-bind (stop upstream bodies) (egress-token-endpoint)
+    (let ((rotated nil))
+      (unwind-protect
+           (with-injecting-proxy (port :upstream-port upstream
+                                       :matcher (lambda (method path)
+                                                  (declare (ignore method path))
+                                                  (values "gr8/claude-oauth/refresh" nil "sk-ant-ort-real"
+                                                          (list :rotate (lambda (tokens) (setf rotated tokens))
+                                                                :access-token-key "accessToken"
+                                                                :refresh-token-key "refreshToken"))))
+             (multiple-value-bind (stream socket) (egress-test-client port)
+               (unwind-protect
+                    (let ((body (trivial-utf-8:string-to-utf-8-bytes
+                                 "{\"grant_type\":\"refresh_token\",\"refresh_token\":\"gr8s-injected\"}")))
+                      (write-sequence (gr8s.controllers::egress-http-head-octets
+                                       "POST /v1/oauth/token HTTP/1.1"
+                                       `(("Host" . "api.example.test") ("Content-Type" . "application/json")
+                                         ("Accept-Encoding" . "gzip") ("Content-Length" . ,(princ-to-string (length body)))))
+                                      stream)
+                      (write-sequence body stream)
+                      (force-output stream)
+                      (multiple-value-bind (status-line headers)
+                          (gr8s.controllers::egress-parse-http-head (gr8s.controllers::egress-read-http-head stream))
+                        (is (search "200" status-line))
+                        (let ((answer (com.inuoe.jzon:parse
+                                       (trivial-utf-8:utf-8-bytes-to-string
+                                        (gr8s.controllers::egress-read-body
+                                         stream (gr8s.controllers::egress-body-framing headers :status 200 :method "POST"))))))
+                          (is (equal "gr8s-injected" (gethash "access_token" answer)))
+                          (is (equal "gr8s-injected" (gethash "refresh_token" answer))))))
+                 (ignore-errors (sb-bsd-sockets:socket-close socket)))))
+        (funcall stop))
+      (is (search "\"refresh_token\":\"sk-ant-ort-real\"" (first (car bodies))))
+      (is (equal "sk-ant-oat-new" (cdr (assoc "accessToken" rotated :test #'equal))))
+      (is (equal "sk-ant-ort-new" (cdr (assoc "refreshToken" rotated :test #'equal))))
+      (is (assoc "expiresAt" rotated :test #'equal)))))

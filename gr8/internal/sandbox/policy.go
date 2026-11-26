@@ -146,12 +146,10 @@ func ResolveIn(root, path string) (string, error) {
 	return filepath.Join(root, resolved), nil
 }
 
-// Stand-ins for the tokens a placeholder credential file holds: the proxy injects the
-// real access token, and an expiry far off means the sandbox never tries to refresh.
-const (
-	StandInToken  = "gr8s-injected"
-	standInExpiry = 4102444800000 // 2100-01-01, in milliseconds
-)
+// StandInToken stands for each token a placeholder credential file holds: the proxy
+// injects the real access token, and exchanges the real refresh token when the
+// sandbox refreshes on the real expiry, which the file keeps (podster-kn03).
+const StandInToken = "gr8s-injected"
 
 // StandInCredentials returns the JSON credentials file contents with every
 // accessToken and refreshToken replaced by StandInToken and every expiresAt and
@@ -169,8 +167,6 @@ func StandInCredentials(contents []byte) ([]byte, error) {
 				switch key {
 				case "accessToken", "refreshToken":
 					typed[key] = StandInToken
-				case "expiresAt", "refreshTokenExpiresAt":
-					typed[key] = standInExpiry
 				default:
 					typed[key] = walk(child)
 				}

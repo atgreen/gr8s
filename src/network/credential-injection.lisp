@@ -18,10 +18,14 @@
 
 (defstruct (injection-rule (:constructor make-injection-rule
                                (&key name profile namespace priority domains schemes paths methods
-                                     headers template secret-name secret-key)))
+                                     headers template secret-name secret-key
+                                     (kind :api-key) access-token-key refresh-token-key)))
   "One SecurityProfile rule as the proxy applies it. PATHS is a list of (:prefix or
-:exact . path); SCHEMES, METHODS and PATHS are NIL for any."
-  name profile namespace priority domains schemes paths methods headers template secret-name secret-key)
+:exact . path); SCHEMES, METHODS and PATHS are NIL for any. KIND :api-key overwrites
+HEADERS with TEMPLATE rendered from SECRET-KEY; :oauth-refresh exchanges the Secret's
+REFRESH-TOKEN-KEY in a refresh request and keeps the tokens it returns (podster-kn03)."
+  name profile namespace priority domains schemes paths methods headers template secret-name secret-key
+  kind access-token-key refresh-token-key)
 
 (defstruct (security-profile-spec (:constructor make-security-profile-spec (&key name namespace selector rules)))
   name namespace selector rules)
@@ -45,7 +49,9 @@ injection-rule per (rule, match) pair."
                            for secret = (and transformation
                                              (gethash "secret" (gethash "credentialRef" transformation (core-object))))
                            for api-key = (and transformation (gethash "apiKey" transformation))
-                           when (and secret api-key)
+                           for refresh = (and transformation (equal "OAuthRefresh" (gethash "type" transformation))
+                                              (gethash "oauthRefresh" transformation (core-object)))
+                           when (and secret (or api-key refresh))
                              append (loop for match across (gethash "match" rule #())
                                           collect (make-injection-rule
                                                    :name (gethash "name" rule) :profile name :namespace namespace
@@ -57,10 +63,13 @@ injection-rule per (rule, match) pair."
                                                                 collect (cons (if (equal (gethash "type" path "Prefix") "Exact")
                                                                                   :exact :prefix)
                                                                               (gethash "value" path)))
-                                                   :headers (%sp-strings (gethash "names" (gethash "targetHeaders" api-key)))
-                                                   :template (gethash "template" (gethash "value" api-key))
+                                                   :kind (if refresh :oauth-refresh :api-key)
+                                                   :headers (and api-key (%sp-strings (gethash "names" (gethash "targetHeaders" api-key))))
+                                                   :template (and api-key (gethash "template" (gethash "value" api-key)))
                                                    :secret-name (gethash "name" secret)
-                                                   :secret-key (gethash "key" secret))))))))
+                                                   :secret-key (gethash "key" secret)
+                                                   :access-token-key (and refresh (gethash "accessTokenKey" refresh "accessToken"))
+                                                   :refresh-token-key (and refresh (gethash "refreshTokenKey" refresh "refreshToken")))))))))
 
 (defun security-profile-selects-pod-p (profile pod)
   (and (equal (security-profile-spec-namespace profile) (np-pod-namespace pod))

@@ -173,11 +173,18 @@ gr8: claude's login is in the cluster; gr8 claude now runs with stand-in tokens
 $ gr8 claude
 ```
 
-`gr8 login claude` copies the access token from `~/.claude/.credentials.json`
-into the Secret `gr8/claude-oauth`. It also applies a SecurityProfile that
-injects the token as `Authorization: Bearer` on api.anthropic.com, and a
-SandboxProfile that shows the sandbox the credentials file with stand-in tokens.
-While `gr8 claude` runs, gr8 keeps the Secret in step with the host's file.
+`gr8 login claude` copies the tokens from `~/.claude/.credentials.json` into the
+Secret `gr8/claude-oauth`. It also applies a SecurityProfile that injects the
+access token as `Authorization: Bearer` on api.anthropic.com and handles the
+refresh exchange on the token endpoint, and a SandboxProfile that shows the
+sandbox the credentials file with stand-in tokens and the real expiry.
+
+When the sandboxed claude refreshes, the proxy sends the real refresh token, keeps
+the new tokens the response carries, and gives claude stand-ins. The node writes
+the new tokens back to the Secret. While `gr8 claude` runs, gr8 keeps the Secret
+and the host's file in step, whichever expires later winning, so your host's own
+`claude` keeps working after the sandbox refreshes. Allow the token endpoint's
+hosts (`platform.claude.com`, `console.anthropic.com`) in claude's policy.
 
 An API key works the same way, with a SecurityProfile rule that targets
 `x-api-key` and a stand-in in the command's environment. See
