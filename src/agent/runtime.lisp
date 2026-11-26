@@ -894,7 +894,16 @@ conflicting network."
                   :service-risk-ready-p
                   (lambda () (node-runtime-local-risk-ready-p node-runtime))
                   :mtu (gethash "mtu" network)
-                  :dns-address (gethash "dnsAddress" network)))))
+                  :dns-address (gethash "dnsAddress" network)
+                  ;; Where the socket LB pins its maps: egress capture names Pods
+                  ;; by the namespace cookies recorded there (podster-uevw).
+                  :egress-pin-directory
+                  (let ((manager (node-runtime-manager node-runtime)))
+                    (and manager
+                         (namestring (merge-pathnames
+                                      "service-lb/"
+                                      (uiop:ensure-directory-pathname
+                                       (managed-containerd-bpf-directory manager))))))))))
   node-runtime)
 
 (defun node-network-overlay-firewall-identity (network)
@@ -1341,7 +1350,11 @@ the node from starting."
           (multiple-value-bind (proxy steering gate)
               (gr8s.controllers::start-node-egress-proxy
                (lambda (peer host address port)
-                 (destructuring-bind (&optional ip-map specs cluster-policies) (node-runtime-egress-view node-runtime)
+                 ;; The view's four parts, profiles too: with three, every decision
+                 ;; signalled and every captured connection was reset (podster-uevw).
+                 (destructuring-bind (&optional ip-map specs cluster-policies profiles)
+                     (node-runtime-egress-view node-runtime)
+                   (declare (ignore profiles))
                    (let ((pod (and ip-map (gethash peer ip-map))))
                      (if pod
                          (gr8s.network::egress-connection-verdict pod specs cluster-policies host address port)
@@ -1358,6 +1371,12 @@ the node from starting."
                      (if (and pod (gr8s.network::pod-egress-synthetic-p pod cluster-policies))
                          (values (gr8s.network::pod-egress-allowed-domains pod cluster-policies) t)
                          :all))))
+               :report (lambda (peer host address port allowed rule)
+                         ;; A refusal is otherwise silent: the client just sees a reset.
+                         (unless allowed
+                           (format *error-output* "gr8s egress proxy refused ~A -> ~A (~A) port ~A~@[ by rule ~A~]~%"
+                                   peer (or host "an unnamed host") (or address "no address") port
+                                   (and rule (or (gr8s.network::cnp-rule-name rule) "unnamed")))))
                :inject (lambda (peer host scheme)
                          (node-runtime-egress-injector node-runtime peer host scheme))
                :mint (let ((minter nil) (ca nil))
