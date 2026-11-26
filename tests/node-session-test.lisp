@@ -1979,6 +1979,19 @@ them. A node can't claim another's address or name."
         (setf (aref arp 12) #x08 (aref arp 13) #x06)
         (is-true (gr8s.server::browser-policy-admit-p policy network arp :egress))))))
 
+(test daemonsets-skip-browser-nodes-they-could-not-run-on
+  ;; A node-exporter tolerating every taint but using the host must not be made for each
+  ;; browser, only to be refused; a plain daemon tolerating browsers is.
+  (let ((node (gr8s.model::make-node-record
+               :id "b" :name "browser-abcdef" :pod-cidr "10.88.2.0/24"
+               :labels (gr8s.resources::core-object "gr8s.io/browser" "true")
+               :taints (vector (gr8s.resources::core-object "key" "gr8s.io/browser" "value" "true"
+                                                            "effect" "NoSchedule"))))
+        (exporter (com.inuoe.jzon:parse "{\"spec\":{\"template\":{\"spec\":{\"hostNetwork\":true,\"tolerations\":[{\"operator\":\"Exists\",\"effect\":\"NoSchedule\"}],\"containers\":[{\"name\":\"e\",\"image\":\"prom/node-exporter\"}],\"volumes\":[{\"name\":\"proc\",\"hostPath\":{\"path\":\"/proc\"}}]}}}}"))
+        (plain (com.inuoe.jzon:parse "{\"spec\":{\"template\":{\"spec\":{\"tolerations\":[{\"key\":\"gr8s.io/browser\",\"operator\":\"Exists\"}],\"containers\":[{\"name\":\"e\",\"image\":\"prom/node-exporter\"}]}}}}")))
+    (is-false (gr8s.controllers::daemonset-node-eligible-p exporter node))
+    (is-true (gr8s.controllers::daemonset-node-eligible-p plain node))))
+
 (test control-plane-logs-come-from-the-assigned-remote-agent
   (with-temporary-store (store path)
     (gr8s.controllers::register-node
