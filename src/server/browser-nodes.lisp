@@ -134,6 +134,8 @@ join listener, which also serves this runtime's exec streams."
   ;; The server's image cache (browser-images.lisp), or NIL: containers then run in the
   ;; tab's own root file system.
   (images nil)
+  ;; The cluster store, for Pods' pull Secrets.
+  (store nil)
   (execs (make-hash-table :test #'equal :synchronized t))
   ;; "namespace/name" -> uid, for the Pod proxy.
   (names (make-hash-table :test #'equal :synchronized t)))
@@ -162,16 +164,31 @@ the runtime doesn't hold is ignored: the browser can't add Pods of its own."
           (setf (gr8s.runtime::runtime-pod-phase pod) phase)))
       (setf (gr8s.runtime::runtime-pod-status pod) status))))
 
-(defun browser-pod-request (pod &optional images)
+(defun browser-pod-pull-credential (store pod image)
+  "The first credential POD's imagePullSecrets hold for IMAGE, as (username . password), or
+NIL. It is the server's to use and never goes to the browser."
+  (let ((entries
+          (loop for reference across (gethash "imagePullSecrets" (gethash "spec" (gr8s.model::pod-to-object pod)) #())
+                for name = (gethash "name" reference "")
+                for secret = (and store (plusp (length name))
+                                  (ignore-errors (gr8s.resources::get-core-resource
+                                                  store "secrets" (gr8s.model::pod-namespace pod) name)))
+                when secret
+                  append (ignore-errors (gr8s.kubelet::pull-secret-entries secret)))))
+    (first (gr8s.kubelet::matching-registry-credentials entries (gr8s.kubelet::image-repository image)))))
+
+(defun browser-pod-request (pod &optional images store)
   "What the browser needs to run POD: its identity and its spec, a copy, with each
-container's image resolved through IMAGES when there are any."
+container's image resolved through IMAGES, with POD's pull credentials from STORE, when
+there are any."
   (let* ((object (gr8s.model::pod-to-object pod))
          (spec (gr8s.resources::copy-core-object (gethash "spec" object))))
     (when images
       (loop for container across (concatenate 'vector (gethash "initContainers" spec #())
                                               (gethash "containers" spec #()))
             do (setf (gethash "imageInfo" container)
-                     (resolve-browser-image images (gethash "image" container)))))
+                     (resolve-browser-image images (gethash "image" container)
+                                            (browser-pod-pull-credential store pod (gethash "image" container))))))
     (core-object "uid" (gr8s.model::pod-uid pod)
                  "name" (gethash "name" (gethash "metadata" object))
                  "namespace" (gethash "namespace" (gethash "metadata" object))
@@ -180,7 +197,7 @@ container's image resolved through IMAGES when there are any."
 (defmethod gr8s.runtime::runtime-ensure ((runtime browser-runtime) pod)
   (let* ((network (browser-runtime-network runtime))
          (address (and network (browser-network-address network (gr8s.model::pod-uid pod))))
-         (request (browser-pod-request pod (browser-runtime-images runtime)))
+         (request (browser-pod-request pod (browser-runtime-images runtime) (browser-runtime-store runtime)))
          (result (progn
                    (when address
                      (setf (gethash "network" request)
@@ -599,7 +616,8 @@ stops with the session."
                                                              :architecture architecture
                                                              :capacity (browser-node-capacity hello)))
                    (setf (gethash name (browser-join-runtimes acceptor)) runtime
-                         (browser-runtime-images runtime) (browser-join-images acceptor))
+                         (browser-runtime-images runtime) (browser-join-images acceptor)
+                         (browser-runtime-store runtime) (virtual-node-host-store host))
                    ;; Its Pods' network: the node's Pod CIDR, routed to a device here.
                    (let* ((node (gr8s.controllers::get-node (virtual-node-host-store host) name))
                           (cidr (find-if (lambda (cidr) (not (find #\: cidr)))

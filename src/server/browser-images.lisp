@@ -9,7 +9,9 @@
 ;;;; the browser unpacks them, in order and with their whiteouts, into the container's
 ;;;; root, and the guest runs the container chrooted there. Only layers of images the
 ;;;; server resolved are served, so the join listener is no open proxy. Each layer is
-;;;; checked against its digest before it is cached.
+;;;; checked against its digest before it is cached; a zstd layer is then decompressed
+;;;; here, since a browser can't. A Pod's imagePullSecrets authenticate the server's
+;;;; requests and never reach the browser.
 
 (in-package #:gr8s.server)
 
@@ -43,9 +45,15 @@ tag-or-digest), with Docker Hub's defaults."
       (setf repository (concatenate 'string "library/" repository)))
     (values registry repository tag)))
 
-(defun registry-bearer-token (challenge repository)
+(defun basic-authorization (credential)
+  "The Basic Authorization value for CREDENTIAL, (username . password)."
+  (format nil "Basic ~A" (cl-base64:string-to-base64-string
+                          (format nil "~A:~A" (car credential) (cdr credential)))))
+
+(defun registry-bearer-token (challenge repository &optional credential)
   "A token for pulling REPOSITORY, from the realm a WWW-Authenticate Bearer CHALLENGE names,
-asked for anonymously. NIL when the challenge is not Bearer."
+asked for with CREDENTIAL, (username . password), or anonymously. NIL when the challenge
+is not Bearer."
   (when (and challenge (uiop:string-prefix-p "Bearer " challenge))
     (let ((fields (make-hash-table :test #'equal)))
       (cl-ppcre:do-register-groups (key value) ("([a-zA-Z]+)=\"([^\"]*)\"" challenge)
@@ -55,24 +63,32 @@ asked for anonymously. NIL when the challenge is not Bearer."
           (let* ((url (format nil "~A?~@[service=~A&~]scope=repository:~A:pull" realm
                               (and (gethash "service" fields) (hunchentoot:url-encode (gethash "service" fields)))
                               repository))
-                 (body (gr8s.image-distribution::registry-http-request url nil :method :get :force-binary t))
+                 (body (gr8s.image-distribution::registry-http-request
+                        url (and credential (list (cons "Authorization" (basic-authorization credential))))
+                        :method :get :force-binary t))
                  (object (com.inuoe.jzon:parse body)))
             (or (gethash "token" object) (gethash "access_token" object))))))))
 
 (defun registry-fetch (registry repository path accept token-cell &key want-stream)
-  "GET PATH from REPOSITORY's REGISTRY, authenticating with the token in TOKEN-CELL (a
-cons), which a Bearer challenge fills. Returns (values body headers). Signals on failure."
+  "GET PATH from REPOSITORY's REGISTRY, authenticating with the Authorization in TOKEN-CELL,
+a list (authorization credential): a challenge fills its first element, from its credential
+when it has one. Returns (values body headers). Signals on failure."
   (flet ((request ()
            (gr8s.image-distribution::registry-http-request
             (gr8s.image-distribution::upstream-registry-url (gr8s.image-distribution::registry-origin-host registry) path)
             (append (and accept (list (cons "Accept" accept)))
-                    (and (car token-cell) (list (cons "Authorization" (format nil "Bearer ~A" (car token-cell))))))
+                    (and (car token-cell) (list (cons "Authorization" (car token-cell)))))
             :method :get :force-binary t :want-stream want-stream)))
     (multiple-value-bind (body status headers) (request)
       (when (and (= status 401) (null (car token-cell)))
         (when (streamp body) (close body))
-        (setf (car token-cell)
-              (registry-bearer-token (drakma:header-value :www-authenticate headers) repository))
+        (let ((challenge (drakma:header-value :www-authenticate headers))
+              (credential (second token-cell)))
+          (setf (car token-cell)
+                (if (and credential challenge (uiop:string-prefix-p "Basic" challenge))
+                    (basic-authorization credential)
+                    (let ((token (registry-bearer-token challenge repository credential)))
+                      (and token (format nil "Bearer ~A" token))))))
         (multiple-value-setq (body status headers) (request)))
       (unless (= status 200)
         (when (streamp body) (close body))
@@ -91,14 +107,16 @@ which registry and repository each layer it may serve comes from."
   "An image cache for browser nodes under DIRECTORY."
   (%make-browser-images (uiop:ensure-directory-pathname directory)))
 
-(defun resolve-browser-image (images reference)
+(defun resolve-browser-image (images reference &optional credential)
   "REFERENCE's linux/arm64 image: an object with its layers (digest and media type, base
-first) and the configuration it runs with (Entrypoint, Cmd, Env, WorkingDir). Resolved
-once and remembered. Signals a RUNTIME-ERROR when there is no arm64 image."
+first) and the configuration it runs with (Entrypoint, Cmd, Env, WorkingDir), fetched
+with CREDENTIAL, (username . password), when given. Resolved once and remembered. A zstd
+layer is listed as the plain tar the server serves for it. Signals a RUNTIME-ERROR when
+there is no arm64 image."
   (or (bt:with-lock-held ((browser-images-lock images))
         (gethash reference (browser-images-resolved images)))
       (multiple-value-bind (registry repository tag) (parse-image-reference reference)
-        (let* ((token (list nil))
+        (let* ((token (list nil credential))
                (accept (format nil "~{~A~^, ~}" +browser-image-manifest-types+))
                (manifest (com.inuoe.jzon:parse
                           (registry-fetch registry repository (format nil "/v2/~A/manifests/~A" repository tag)
@@ -124,8 +142,11 @@ once and remembered. Signals a RUNTIME-ERROR when there is no arm64 image."
                  (run (gethash "config" config (core-object)))
                  (image (core-object
                          "layers" (map 'vector (lambda (layer)
-                                                 (core-object "digest" (gethash "digest" layer)
-                                                              "mediaType" (gethash "mediaType" layer)))
+                                                 (let ((type (gethash "mediaType" layer "")))
+                                                   (core-object "digest" (gethash "digest" layer)
+                                                                "mediaType" (if (search "zstd" type)
+                                                                                "application/vnd.oci.image.layer.v1.tar"
+                                                                                type))))
                                        (gethash "layers" manifest #()))
                          "config" (core-object "Entrypoint" (gethash "Entrypoint" run 'null)
                                                "Cmd" (gethash "Cmd" run 'null)
@@ -134,9 +155,9 @@ once and remembered. Signals a RUNTIME-ERROR when there is no arm64 image."
             (unless (equal "arm64" (gethash "architecture" config "arm64"))
               (error 'runtime-error :message (format nil "~A is ~A, not arm64" reference (gethash "architecture" config))))
             (bt:with-lock-held ((browser-images-lock images))
-              (loop for layer across (gethash "layers" image)
+              (loop for layer across (gethash "layers" manifest #())
                     do (setf (gethash (gethash "digest" layer) (browser-images-layers images))
-                             (list registry repository token)))
+                             (list registry repository token (gethash "mediaType" layer ""))))
               (setf (gethash reference (browser-images-resolved images)) image)))))))
 
 (defun browser-image-layer-file (images digest)
@@ -148,7 +169,7 @@ NIL when DIGEST belongs to no image this server resolved."
       (let ((path (merge-pathnames (make-pathname :name (subseq digest 7) :type "layer")
                                    (browser-images-directory images))))
         (unless (probe-file path)
-          (destructuring-bind (registry repository token) source
+          (destructuring-bind (registry repository token &optional (media-type "")) source
             (let ((temporary (make-pathname :type "part" :defaults path))
                   (digester (ironclad:make-digest :sha256))
                   (buffer (make-array 65536 :element-type '(unsigned-byte 8))))
@@ -167,5 +188,9 @@ NIL when DIGEST belongs to no image this server resolved."
                                             (ironclad:byte-array-to-hex-string (ironclad:produce-digest digester))))
                 (delete-file temporary)
                 (error 'runtime-error :message (format nil "layer ~A did not match its digest" digest)))
-              (rename-file temporary path))))
+              (if (search "zstd" media-type)
+                  ;; A browser can't decompress zstd: serve the tar.
+                  (progn (gr8s.runtime::zstd-decompress-file temporary path)
+                         (delete-file temporary))
+                  (rename-file temporary path)))))
         path))))
