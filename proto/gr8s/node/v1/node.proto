@@ -95,6 +95,7 @@ message AgentEnvelope {
     OperationStream operation_stream = 15;
     CredentialTokenRequest credential_token_request = 16;
     GatewayConfigAck gateway_config_ack = 17;
+    CredentialRotation credential_rotation = 18;
   }
 }
 
@@ -149,6 +150,18 @@ message CredentialTokenRequest {
   string audience = 6;
   repeated string required_annotation_keys = 7;
   repeated string optional_annotation_keys = 8;
+}
+
+// New real tokens an OAuth refresh through the node egress proxy returned for a
+// Pod (podster-kn03), to replace the Secret's. The server accepts them only for a
+// Pod bound to this node that a SecurityProfile's OAuthRefresh rule selects with
+// this Secret, and only under that rule's keys.
+message CredentialRotation {
+  string namespace = 1;
+  string secret_name = 2;
+  string pod_uid = 3;
+  map<string, string> tokens = 4;
+  string pod_name = 5;
 }
 
 message CredentialTokenResponse {

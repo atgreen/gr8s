@@ -4105,7 +4105,11 @@ upstream CRDs.
   subset.** Credential injection: the node egress proxy overwrites the named
   headers of matching requests with a value rendered from a Secret
   (`tokenTransformation` `ApiKey`, `{{ .Token }}`, `failStrategy: Block` only;
-  anything else is rejected at admission). The Pod keeps only a placeholder. A
+  anything else is rejected at admission), plus gr8s's own type `OAuthRefresh`
+  for a token endpoint: the proxy swaps the real refresh token in, keeps the
+  new tokens the response carries (the node writes them back to the Secret)
+  and hands the client stand-ins. A stand-in (`gr8s-injected`) sent anywhere
+  its rules don't inject for gets 403 saying where it is bound. The Pod keeps only a placeholder. A
   selected Pod's Secret travels only with that Pod's assignment. For HTTPS the
   proxy terminates TLS with a leaf from the egress CA, which Pods trust through
   the `gr8s-egress` ClusterTrustBundle (a projected `clusterTrustBundle` volume);

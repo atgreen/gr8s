@@ -9,6 +9,15 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- The node egress proxy handles an OAuth refresh for a sandbox (podster-kn03): a
+  SecurityProfile rule of the gr8s type `OAuthRefresh` swaps the real refresh token
+  into a refresh request, keeps the new tokens the response carries and hands the
+  client stand-ins. The node writes the tokens back to the Secret through a new
+  `CredentialRotation` node-protocol message, which the server accepts only for that
+  node's Pod and rule. `gr8 login claude` stores the refresh token and adds the rule,
+  the sandbox refreshes on the login's real expiry, and gr8 keeps the Secret and the
+  host's credentials file in step, the later expiry winning.
+
 - A stand-in credential is bound to the hosts its rules inject for (podster-wv1w.12):
   a relayed request that would carry one anywhere else, or on a path no rule covers,
   gets 403 with a body saying which header, for what request, and where the Pod's

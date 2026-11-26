@@ -126,6 +126,11 @@
   ;; The last complete snapshot received, which the server's next delta changes.
   received)
 
+(defvar *credential-rotation-sender* nil
+  "While the node session is up, a function sending a CREDENTIAL-ROTATION to the server,
+which writes the tokens an OAuth refresh returned into their Secret (podster-kn03);
+NIL between sessions, when the node keeps them until a refresh comes again.")
+
 (defstruct pending-credential-token
   response
   (changed (bt:make-condition-variable :name "gr8s credential token response")))
@@ -887,6 +892,8 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
                (funcall credential-token-function-setter
                         (lambda (pod audience required optional)
                           (request-agent-credential-token session pod audience required optional))))
+             (setf *credential-rotation-sender*
+                   (lambda (rotation) (send-agent-session-envelope session :credential-rotation rotation)))
              (send-agent-session-envelope
               session :hello
                (make-instance 'gr8s.node.v1::node-hello
@@ -1004,6 +1011,7 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
                                  session envelope identity identity-path
                                  apply-snapshot operation-handler snapshot-worker)))))))))
       (finish-session)
+      (setf *credential-rotation-sender* nil)
       (when credential-token-function-setter
         (funcall credential-token-function-setter nil))
       (stop-agent-snapshot-worker snapshot-worker)

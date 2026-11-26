@@ -2,6 +2,8 @@ package client
 
 import (
 	"net"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -182,5 +184,45 @@ func TestProfilesForPrefersANamespacesOwnProfile(t *testing.T) {
 	}
 	if got := Profile("claude", "/home/u", ProfilesFor(items, "other", nil)); got.Env["FROM"] != "a-default" {
 		t.Errorf("elsewhere the first unscoped profile applies, got %v", got.Env)
+	}
+}
+
+func TestNewerTokensWinsByExpiry(t *testing.T) {
+	old := claudeTokens{AccessToken: "a1", RefreshToken: "r1", ExpiresAt: 100}
+	fresh := claudeTokens{AccessToken: "a2", RefreshToken: "r2", ExpiresAt: 200}
+	if got := NewerTokens(old, true, fresh, true); got == nil || *got != fresh {
+		t.Errorf("a refresh in the sandbox must reach the host file, got %v", got)
+	}
+	if got := NewerTokens(fresh, true, old, true); got == nil || *got != fresh {
+		t.Errorf("a refresh on the host must reach the Secret, got %v", got)
+	}
+	if NewerTokens(old, true, old, true) != nil || NewerTokens(old, false, fresh, true) != nil ||
+		NewerTokens(old, true, fresh, false) != nil {
+		t.Error("equal or unknown copies need no sync")
+	}
+}
+
+func TestWriteClaudeHostTokensKeepsTheRestOfTheFile(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, claudeCredentials)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"claudeAiOauth":{"accessToken":"a1","refreshToken":"r1","expiresAt":1,"scopes":["x"]},"other":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeClaudeHostTokens(home, claudeTokens{AccessToken: "a2", RefreshToken: "r2", ExpiresAt: 2}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := claudeHostTokens(home)
+	if err != nil || got != (claudeTokens{AccessToken: "a2", RefreshToken: "r2", ExpiresAt: 2}) {
+		t.Fatalf("tokens %v %v", got, err)
+	}
+	raw, _ := os.ReadFile(path)
+	if !strings.Contains(string(raw), `"other": true`) || !strings.Contains(string(raw), `"scopes"`) {
+		t.Errorf("lost the rest of the file: %s", raw)
+	}
+	if info, _ := os.Stat(path); info.Mode().Perm() != 0o600 {
+		t.Errorf("mode %v", info.Mode().Perm())
 	}
 }

@@ -249,12 +249,46 @@ the Pod's edge to the site it named, refusals in red:
 That is the per-run audit trail: what this agent asked for, and what it was
 refused.
 
-## Not in the first version
+## OAuth refresh at the proxy
 
-- **OAuth subscription logins** (Claude Code's `~/.claude/.credentials.json`):
-  the refresh exchange returns new real tokens in a response body, which the
-  proxy would have to replace with placeholders while keeping the real ones.
-  API keys and bearer tokens first.
+An OAuth login's access token expires, and the client refreshes it with its refresh
+token, which a sandbox holds only as a stand-in. A SecurityProfile rule of the
+gr8s-specific type `OAuthRefresh` (podster-kn03) handles the exchange for the token
+endpoint it matches:
+
+```yaml
+- name: anthropic-oauth-refresh
+  match:
+  - domains: [platform.claude.com, console.anthropic.com]
+    schemes: [https]
+    methods: [POST]
+    paths: [{type: Prefix, value: /v1/oauth/token}]
+  actions:
+    tokenTransformation:
+      type: OAuthRefresh
+      failStrategy: Block
+      credentialRef: {secret: {name: claude-oauth}}
+      oauthRefresh: {accessTokenKey: accessToken, refreshTokenKey: refreshToken}  # the defaults
+```
+
+1. The proxy reads the request body (JSON or a form). For a `refresh_token` grant
+   carrying a stand-in, it puts the Secret's real refresh token in its place and drops
+   `Accept-Encoding`, so the response comes back readable.
+2. From a successful response it takes `access_token`, `refresh_token` and
+   `expires_in`, and hands the client the body with stand-ins in their place. A
+   response still encoded is refused with 502 rather than passed on unread.
+3. The node keeps the new tokens and injects the new access token at once. It sends
+   them to the server in a `CredentialRotation` message; the server writes them, and
+   `expiresAt`, into the Secret only for a Pod bound to that node that an `OAuthRefresh`
+   rule of a selecting SecurityProfile names with that Secret. The node's copy serves
+   until the Secret changes.
+4. `gr8`, while `gr8 claude` runs, keeps the Secret and the host's credentials file in
+   step, the later `expiresAt` winning both ways: the refresh retired the file's old
+   refresh token, so the host's own `claude` needs the new one.
+
+The sandbox's stand-in file keeps the real expiry, so the client refreshes on time.
+
+## Not in the first version
 - Credentials used locally to sign (AWS SigV4, minted JWTs).
 - Client certificates and SSH keys (KeyFence handles both; later).
 - Namespaced hostname rules: `ClusterNetworkPolicy` is cluster-scoped, so a

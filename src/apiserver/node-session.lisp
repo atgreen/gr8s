@@ -1429,6 +1429,50 @@ An explicit unready or malformed current report withdraws its prior proof."
                              (node-grpc-server-service-receiver-reports server)))))))
         (values proofs valid-p)))))
 
+(defun apply-credential-rotation (store node-name rotation)
+  "Write the tokens ROTATION carries into its Secret (podster-kn03), after binding it to
+NODE-NAME's exact Pod and to an OAuthRefresh rule of a SecurityProfile that selects the
+Pod with that Secret: only that rule's two keys, and expiresAt, may change. Signals
+otherwise. Returns the updated Secret."
+  (let* ((namespace (slot-value rotation 'gr8s.node.v1::namespace))
+         (secret-name (slot-value rotation 'gr8s.node.v1::secret-name))
+         (pod (get-pod store namespace (slot-value rotation 'gr8s.node.v1::pod-name)))
+         (labels (gethash "labels" (gethash "metadata" (pod-to-object pod)) (core-object)))
+         (policy-pod (gr8s.network::make-np-pod :name (pod-name pod) :namespace namespace :labels labels))
+         (values (slot-value rotation 'gr8s.node.v1::tokens)))
+    (unless (and (equal node-name (pod-node-name pod))
+                 (equal (pod-uid pod) (slot-value rotation 'gr8s.node.v1::pod-uid)))
+      (error "Credential rotation does not name this node's exact Pod"))
+    (let ((rule (find-if (lambda (rule)
+                           (and (eq :oauth-refresh (gr8s.network::injection-rule-kind rule))
+                                (equal secret-name (gr8s.network::injection-rule-secret-name rule))))
+                         (gr8s.network::pod-injection-rules
+                          policy-pod (gr8s.network::security-profile-specs-from-objects
+                                      (gr8s.resources::list-core-resources store "securityprofiles" namespace))))))
+      (unless rule (error "No OAuthRefresh rule selecting the Pod refreshes Secret ~A/~A" namespace secret-name))
+      (let ((allowed (list (gr8s.network::injection-rule-access-token-key rule)
+                           (gr8s.network::injection-rule-refresh-token-key rule) "expiresAt")))
+        (unless (and (hash-table-p values) (plusp (hash-table-count values)))
+          (error "Credential rotation carries no tokens"))
+        (maphash (lambda (key value)
+                   (unless (and (member key allowed :test #'equal) (stringp value) (plusp (length value)))
+                     (error "Credential rotation may not set ~A" key)))
+                 values)
+        (gr8s.resources::update-core-resource
+         store "secrets" namespace secret-name
+         (lambda (secret)
+           (let ((data (or (gethash "data" secret) (setf (gethash "data" secret) (core-object))))
+                 (metadata (gethash "metadata" secret)))
+             (maphash (lambda (key value)
+                        (setf (gethash key data)
+                              (ag-grpc:base64-encode (trivial-utf-8:string-to-utf-8-bytes value))))
+                      values)
+             (remhash "stringData" secret)
+             (setf (gethash "gr8s.io/credential-rotated-at"
+                            (or (gethash "annotations" metadata) (setf (gethash "annotations" metadata) (core-object))))
+                   (current-timestamp))
+             secret)))))))
+
 (defun credential-token-response (store node-name request)
   "Mint the credential-provider token REQUEST after binding it to NODE-NAME's exact Pod."
   (let* ((namespace (slot-value request 'gr8s.node.v1::namespace))
@@ -1618,6 +1662,13 @@ An explicit unready or malformed current report withdraws its prior proof."
     (:operation-stream
      (note-node-operation-stream
       server node-name (slot-value envelope 'gr8s.node.v1::operation-stream)))
+    (:credential-rotation
+     ;; Fire and forget: a refused rotation leaves the node's own copy in use, and the
+     ;; next refresh tries again.
+     (handler-case (apply-credential-rotation (node-grpc-server-store server) node-name
+                                              (slot-value envelope 'gr8s.node.v1::credential-rotation))
+       (error (condition)
+         (format *error-output* "gr8s: credential rotation from node ~A refused: ~A~%" node-name condition))))
     (:credential-token-request
      (let* ((request (slot-value envelope 'gr8s.node.v1::credential-token-request))
             (response

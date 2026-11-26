@@ -737,6 +737,108 @@ an upgraded connection (a WebSocket) carries after its 101."
   "What every stand-in credential a gr8 sandbox holds contains: gr8's placeholder files'
 tokens and a SandboxProfile's placeholder values.")
 
+(defun egress-read-body (in framing)
+  "Read one message body from IN as FRAMING says it ends, whole. Returns the octets."
+  (let ((out (flexi-streams:make-in-memory-output-stream)))
+    (egress-copy-body in out framing)
+    (flexi-streams:get-output-stream-sequence out)))
+
+(defun egress-refresh-request-body (body content-type refresh-token)
+  "BODY, an OAuth token request, with its stand-in refresh token replaced by
+REFRESH-TOKEN, as (values octets content-type); NIL when it is no refresh_token grant
+carrying a stand-in, to relay as it came. JSON and form bodies are understood."
+  (let ((text (ignore-errors (trivial-utf-8:utf-8-bytes-to-string body))))
+    (when text
+      (if (search "json" (string-downcase (or content-type "")))
+          (let ((object (ignore-errors (com.inuoe.jzon:parse text))))
+            (when (and (hash-table-p object)
+                       (equal "refresh_token" (gethash "grant_type" object))
+                       (stringp (gethash "refresh_token" object))
+                       (search +egress-stand-in+ (gethash "refresh_token" object)))
+              (setf (gethash "refresh_token" object) refresh-token)
+              (values (gr8s.resources:stringify-to-utf-8-bytes object) content-type)))
+          (let ((fields (mapcar (lambda (pair)
+                                  (let ((equals (position #\= pair)))
+                                    (cons (hunchentoot:url-decode (subseq pair 0 (or equals (length pair))))
+                                          (if equals (hunchentoot:url-decode (subseq pair (1+ equals))) ""))))
+                                (cl-ppcre:split "&" text))))
+            (when (and (equal "refresh_token" (cdr (assoc "grant_type" fields :test #'equal)))
+                       (search +egress-stand-in+ (or (cdr (assoc "refresh_token" fields :test #'equal)) "")))
+              (setf (cdr (assoc "refresh_token" fields :test #'equal)) refresh-token)
+              (values (trivial-utf-8:string-to-utf-8-bytes
+                       (format nil "~{~A~^&~}"
+                               (mapcar (lambda (field) (format nil "~A=~A" (hunchentoot:url-encode (car field))
+                                                               (hunchentoot:url-encode (cdr field))))
+                                       fields)))
+                      content-type)))))))
+
+(defun egress-refresh-response-body (body access-key refresh-key &key (now-ms (* 1000 (- (get-universal-time) 2208988800))))
+  "The tokens BODY, an OAuth token response, carries as (values stand-in-body tokens):
+the body with its access and refresh tokens replaced by stand-ins, and an alist of
+ACCESS-KEY, REFRESH-KEY and expiresAt (milliseconds) to their real values. NIL when it
+carries no token."
+  (let ((object (ignore-errors (com.inuoe.jzon:parse body))))
+    (when (and (hash-table-p object) (stringp (gethash "access_token" object)))
+      (let ((tokens (list (cons access-key (gethash "access_token" object)))))
+        (setf (gethash "access_token" object) +egress-stand-in+)
+        (when (stringp (gethash "refresh_token" object))
+          (push (cons refresh-key (gethash "refresh_token" object)) tokens)
+          (setf (gethash "refresh_token" object) +egress-stand-in+))
+        (when (realp (gethash "expires_in" object))
+          (push (cons "expiresAt" (princ-to-string (+ now-ms (round (* 1000 (gethash "expires_in" object))))))
+                tokens))
+        (values (gr8s.resources:stringify-to-utf-8-bytes object) (nreverse tokens))))))
+
+(defun egress-relay-refresh (client upstream start-line headers method refresh-token refresh)
+  "Relay one OAuth token request from CLIENT to UPSTREAM (podster-kn03): its stand-in
+refresh token becomes REFRESH-TOKEN, and the real tokens the response carries go to
+REFRESH's :rotate and are replaced by stand-ins. A response the proxy can't read (one
+still encoded) is refused with 502 rather than handed to the client. Returns the status
+the client got."
+  (let* ((body (egress-read-body client (egress-body-framing headers :request t)))
+         (content-type (egress-header headers "Content-Type")))
+    (multiple-value-bind (swapped) (egress-refresh-request-body body content-type refresh-token)
+      (let ((body (or swapped body))
+            (headers (remove-if (lambda (header)
+                                  (member (car header) '("Content-Length" "Transfer-Encoding" "Accept-Encoding")
+                                          :test #'string-equal))
+                                headers)))
+        (write-sequence (egress-http-head-octets
+                         start-line (append headers `(("Content-Length" . ,(princ-to-string (length body))))))
+                        upstream)
+        (write-sequence body upstream)
+        (force-output upstream)
+        (let (status response-headers)
+          (loop
+            (multiple-value-bind (status-line parsed)
+                (egress-parse-http-head (or (egress-read-http-head upstream) (error "upstream closed")))
+              (setf status (parse-integer (second (cl-ppcre:split " " status-line)) :junk-allowed t)
+                    response-headers parsed)
+              (unless (<= 100 status 199)
+                (let* ((response (egress-read-body upstream (egress-body-framing parsed :status status :method method)))
+                       (encoding (egress-header parsed "Content-Encoding")))
+                  (when (and encoding (not (string-equal encoding "identity")))
+                    (egress-write-response client 502 "Bad Gateway"
+                                           "the token endpoint answered encoded, so its tokens can't be kept from the client")
+                    (return-from egress-relay-refresh 502))
+                  (multiple-value-bind (stand-in tokens)
+                      (and swapped (<= 200 status 299)
+                           (egress-refresh-response-body response (getf refresh :access-token-key)
+                                                         (getf refresh :refresh-token-key)))
+                    (when tokens (funcall (getf refresh :rotate) tokens))
+                    (let ((out (or stand-in response)))
+                      (write-sequence (egress-http-head-octets
+                                       status-line
+                                       (append (remove-if (lambda (header)
+                                                            (member (car header) '("Content-Length" "Transfer-Encoding")
+                                                                    :test #'string-equal))
+                                                          response-headers)
+                                               `(("Content-Length" . ,(princ-to-string (length out))))))
+                                      client)
+                      (write-sequence out client)
+                      (force-output client)
+                      (return-from egress-relay-refresh status))))))))))))
+
 (defun egress-stand-in-header (headers)
   "The first of HEADERS whose value still carries a stand-in credential, or NIL."
   (find-if (lambda (header) (search +egress-stand-in+ (cdr header))) headers))
@@ -775,10 +877,18 @@ from then on."
                            (egress-write-response client 421 "Misdirected Request")
                            (funcall report method target 421 nil)
                            (return))))
-                   (multiple-value-bind (rule-name names value) (and (not fronted) (funcall inject method target))
+                   (multiple-value-bind (rule-name names value refresh) (and (not fronted) (funcall inject method target))
                      (when (and rule-name (null value))
                        (egress-write-response client 403 "Forbidden: the credential for this request is unavailable")
                        (funcall report method target 403 rule-name)
+                       (return))
+                     ;; An OAuth refresh (podster-kn03): its body, not its headers, carries
+                     ;; the credential, and its response the tokens the client mustn't see.
+                     (when refresh
+                       (unless upstream (setf upstream (funcall open-upstream)))
+                       (funcall report method target
+                                (egress-relay-refresh client upstream start-line headers method value refresh)
+                                rule-name audit)
                        (return))
                      (when rule-name
                        (setf headers (append (remove-if (lambda (header) (member (car header) names :test #'string-equal))
