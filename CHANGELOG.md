@@ -170,6 +170,9 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- The egress DNS gate reports a Pod's lookup of a name once per decision: a
+  resolver's A and AAAA queries and retries made one refused lookup four events.
+
 - Every Burstable container got `oom_score_adj` 999, as if it requested no memory:
   the node's memory capacity was read as NIL (`/proc/meminfo`'s value was parsed
   twice), so the kubelet's scaling by memory request never applied.

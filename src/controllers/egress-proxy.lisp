@@ -552,6 +552,25 @@ allowed PATTERNS, to report."
           unless (egress-dns-cluster-name-p name)
             collect (cons name (egress-dns-name-allowed-p name patterns)))))
 
+(defparameter +egress-dns-report-window+ 5
+  "Seconds within which the DNS gate reports a Pod's lookup of a name, with the same
+verdict, once: a resolver asks for A and AAAA and retries, which is one decision.")
+
+(defun make-egress-dns-reporter (report &key (clock #'get-universal-time) (window +egress-dns-report-window+))
+  "REPORT, (client name allowed-p), called once per decision: a repeat of the same
+client, name and verdict within WINDOW seconds of the last report is folded into it."
+  (let ((seen (make-hash-table :test #'equal)) (lock (bt:make-lock "gr8s egress DNS reports")))
+    (lambda (client name allowed)
+      (let ((now (funcall clock)) (key (list client name allowed)))
+        (when (bt:with-lock-held (lock)
+                (let ((last (gethash key seen)))
+                  (when (> (hash-table-count seen) 4096)
+                    ;; Forget what is past the window, so the table stays small.
+                    (maphash (lambda (k time) (when (> (- now time) window) (remhash k seen))) seen))
+                  (when (or (null last) (> (- now last) window))
+                    (setf (gethash key seen) now))))
+          (funcall report client name allowed))))))
+
 (defun egress-dns-flow-object (peer name allowed)
   "The flow event for the Pod at PEER's DNS query for NAME, answered or refused by policy."
   (let ((flow (core-object "verdict" (if allowed "FORWARDED" "DROPPED")
@@ -569,10 +588,12 @@ allowed PATTERNS, to report."
 (values patterns synthetic-p): the domain patterns it may resolve, or :all, and whether
 it is answered with synthetic addresses from the egress-name-table NAMES. REPORT, when
 given, is called with (client name allowed-p) for each question outside the cluster zone
-of a client whose names policy decides. Returns the EGRESS-DNS-GATE."
+of a client whose names policy decides, once per decision (MAKE-EGRESS-DNS-REPORTER).
+Returns the EGRESS-DNS-GATE."
   (let* ((udp (make-instance 'sb-bsd-sockets:inet-socket :type :datagram :protocol :udp))
          (tcp (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp))
-         (gate (make-egress-dns-gate :udp udp :tcp tcp)))
+         (gate (make-egress-dns-gate :udp udp :tcp tcp))
+         (report (and report (make-egress-dns-reporter report))))
     (flet ((address-string (octets) (format nil "~{~D~^.~}" (coerce octets 'list)))
            (forward (packet) (cl-dns-proxy:forward-dns-udp packet upstreams timeout)))
       (labels ((answer (packet client forward)
