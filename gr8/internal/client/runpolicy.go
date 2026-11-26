@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -38,9 +39,28 @@ func RunSecurityProfile(namespace, pod string, credentials []PolicyCredential, e
 		for j, host := range credential.Hosts {
 			hosts[j] = host
 		}
+		match := map[string]any{"domains": hosts, "schemes": []any{"https"}}
+		if len(credential.Paths) > 0 {
+			var paths []any
+			for _, path := range credential.Paths {
+				if exact, ok := strings.CutPrefix(path, "="); ok {
+					paths = append(paths, map[string]any{"type": "Exact", "value": exact})
+				} else {
+					paths = append(paths, map[string]any{"type": "Prefix", "value": path})
+				}
+			}
+			match["paths"] = paths
+		}
+		if len(credential.Methods) > 0 {
+			methods := make([]any, len(credential.Methods))
+			for j, method := range credential.Methods {
+				methods[j] = method
+			}
+			match["methods"] = methods
+		}
 		rules = append(rules, map[string]any{
 			"name":  fmt.Sprintf("credential-%d", i),
-			"match": []any{map[string]any{"domains": hosts, "schemes": []any{"https"}}},
+			"match": []any{match},
 			"actions": map[string]any{"tokenTransformation": map[string]any{
 				"type": "ApiKey", "failStrategy": "Block",
 				"credentialRef": map[string]any{"secret": map[string]any{"name": CredentialSecretName(pod, i), "key": "token"}},

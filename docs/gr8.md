@@ -210,6 +210,10 @@ inside `Authorization: Basic`, so `token X`, `Bearer X` and git's
 `user:token` all work, in the form the client wrote. A request without the stand-in
 gets nothing, so one Pod can hold several credentials for the same host. `prefix`
 starts the stand-in for a client that checks a token's shape (`prefix: gho_`).
+`paths` (prefixes, or `=PATH` for one exact path) and `methods` narrow where the
+credential goes beyond its `hosts`; a stand-in sent anywhere else is refused with
+why. git over HTTPS reaches `github.com/OWNER/REPO.git/...`, so a credential for
+git and the API lists both kinds of path.
 
 A Secret without a recorded stand-in, such as a login's or one a SecurityProfile you
 wrote names, works by rule instead: the proxy overwrites the named header on every
@@ -294,6 +298,8 @@ spec:
     template: "Bearer {{ .Token }}"        # the default
     env: GH_TOKEN                          # the sandbox gets its stand-in in $GH_TOKEN
     prefix: gho_                           # optional: the stand-in starts gho_
+    paths: [/repos/atgreen/, =/user]       # optional: path prefixes, =PATH exact
+    methods: [GET, POST]                   # optional: only these methods
   home:
     readWrite: [.claude, .claude.json]
     readOnly: [.config/git]

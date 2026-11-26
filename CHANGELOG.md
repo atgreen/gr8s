@@ -9,6 +9,9 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- gr8 policy credentials take `paths` (prefixes, or `=PATH` exact) and `methods`,
+  binding a credential to those requests on its hosts alone (podster-wv1w.29).
+
 - Per-credential stand-ins (podster-wv1w.27): each gr8 policy credential gets its own
   stand-in, recorded on its Secret as `gr8s.io/stand-in`, and the node egress proxy
   swaps the real value in only where a request carries it, in any header or inside

@@ -80,6 +80,10 @@ type PolicyCredential struct {
 	Env string `json:"env,omitempty"`
 	// Prefix starts the stand-in, for a client that checks a token's shape (gho_).
 	Prefix string `json:"prefix,omitempty"`
+	// Paths and Methods narrow where the credential goes beyond Hosts: path
+	// prefixes, or =PATH for one exact path, and HTTP methods; empty for any.
+	Paths   []string `json:"paths,omitempty"`
+	Methods []string `json:"methods,omitempty"`
 }
 
 // PolicyDesktop withholds what a command gets of the desktop by default.
@@ -94,6 +98,7 @@ var (
 	policyHeader = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 	policyEnv    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	policyPrefix = regexp.MustCompile(`^[A-Za-z0-9_]{0,16}$`)
+	policyMethod = regexp.MustCompile(`^[A-Z]{1,16}$`)
 	policyToken  = regexp.MustCompile(`\{\{\s*\.Token\s*\}\}`)
 )
 
@@ -146,6 +151,17 @@ func ParsePolicy(raw []byte) (Policy, error) {
 		}
 		if credential.Env != "" && !policyEnv.MatchString(credential.Env) {
 			return Policy{}, fmt.Errorf("credentials[%d].env: %q is not a variable name", i, credential.Env)
+		}
+		for _, path := range credential.Paths {
+			if !strings.HasPrefix(strings.TrimPrefix(path, "="), "/") {
+				return Policy{}, fmt.Errorf("credentials[%d].paths: %q is not a path beginning with / (or =/ for an exact one)", i, path)
+			}
+		}
+		for j, method := range credential.Methods {
+			if !policyMethod.MatchString(strings.ToUpper(method)) {
+				return Policy{}, fmt.Errorf("credentials[%d].methods: %q is not an HTTP method", i, method)
+			}
+			credential.Methods[j] = strings.ToUpper(method)
 		}
 		if !policyPrefix.MatchString(credential.Prefix) {
 			return Policy{}, fmt.Errorf("credentials[%d].prefix: %q is not up to 16 letters, digits and _", i, credential.Prefix)
