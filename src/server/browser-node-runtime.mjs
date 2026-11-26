@@ -181,6 +181,10 @@ const layerCache = {
     await writable.write(JSON.stringify(index));
     await writable.close();
   },
+  async digests() {
+    const dir = await this.directory();
+    return dir ? Object.keys(await this.index(dir)) : [];
+  },
   async get(digest) {
     const dir = await this.directory();
     if (!dir) return null;
@@ -225,13 +229,24 @@ async function sha256Matches(digest, bytes) {
   return digest.slice(7) === [...hash].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-// A layer's bytes: from the cache when held and intact, else from the server, then kept.
-async function layerBytes(layer, base, log) {
+// A layer's bytes: from the cache when held and intact, else from a peer tab that
+// holds it (podster-57fv.12) or the server, checked against its digest, then kept.
+async function layerBytes(layer, base, log, fromPeer) {
   const verify = !layer.decompressed;
   const cached = await layerCache.get(layer.digest);
   if (cached && (!verify || (await sha256Matches(layer.digest, cached)))) {
     log(`layer ${layer.digest.slice(7, 19)} from the tab's cache`);
     return cached;
+  }
+  if (verify && fromPeer) {
+    for (const peer of layer.peers ?? []) {
+      const bytes = await fromPeer(peer, layer.digest).catch(() => null);
+      if (bytes && (await sha256Matches(layer.digest, bytes))) {
+        log(`layer ${layer.digest.slice(7, 19)} from ${peer}`);
+        await layerCache.put(layer.digest, bytes);
+        return bytes;
+      }
+    }
   }
   const response = await fetch(new URL(`blobs/${layer.digest}`, base));
   if (!response.ok) throw new Error(`layer ${layer.digest}: HTTP ${response.status}`);
@@ -296,6 +311,211 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
     return frame;
   }
 
+  // East-west between tabs (podster-57fv.13). Each other browser node is reached over a
+  // WebRTC data channel when one opens: a Pod's packet for an address in that node's
+  // CIDR goes straight to it, and anything else, or anything before the channel opens,
+  // through the server as before. The server introduces the peers and relays their
+  // signals; what arrives is taken only from the peer's own CIDR, and only as this
+  // tab's Pods' ingress policy admits it, or as a reply to what they sent.
+  const peering = (() => {
+    const available = typeof RTCPeerConnection !== "undefined";
+    let self = null, peers = [], iceServers = [], policy = {};
+    const links = new Map(); // node -> { pc, pods, layers, ready, waiters }
+    const flows = new Map(); // "proto src sport dst dport" -> time
+    const asked = new Map(); // node -> when this tab last asked it to connect
+    const FLOW_IDLE = 300000;
+    const toNumber = (address) => address.split(".").reduce((n, part) => n * 256 + Number(part), 0);
+    const inCidr = (cidr, address) => {
+      const [base, bits] = cidr.split("/");
+      const mask = Number(bits) === 0 ? 0 : (0xffffffff << (32 - Number(bits))) >>> 0;
+      return ((toNumber(base) & mask) >>> 0) === ((toNumber(address) & mask) >>> 0);
+    };
+    const ip = (bytes, at) => `${bytes[at]}.${bytes[at + 1]}.${bytes[at + 2]}.${bytes[at + 3]}`;
+    const flowOf = (packet) => {
+      const protocol = packet[9];
+      const l4 = (packet[0] & 0x0f) * 4;
+      const ports = (protocol === 6 || protocol === 17) && packet.length >= l4 + 4;
+      return {
+        protocol, source: ip(packet, 12), destination: ip(packet, 16),
+        sourcePort: ports ? (packet[l4] << 8) | packet[l4 + 1] : null,
+        destinationPort: ports ? (packet[l4 + 2] << 8) | packet[l4 + 3] : null,
+      };
+    };
+    const key = (f, reverse) => reverse
+      ? `${f.protocol} ${f.destination} ${f.destinationPort} ${f.source} ${f.sourcePort}`
+      : `${f.protocol} ${f.source} ${f.sourcePort} ${f.destination} ${f.destinationPort}`;
+    const admits = (f) => {
+      const now = Date.now();
+      const seen = flows.get(key(f, true)) ?? flows.get(key(f, false));
+      if (seen && now - seen < FLOW_IDLE) return true;
+      const pod = policy[f.destination];
+      if (pod?.isolated) {
+        const ok = (pod.entries ?? []).some((entry) =>
+          inCidr(entry.cidr, f.source) &&
+          !(entry.excepts ?? []).some((except) => inCidr(except, f.source)) &&
+          (entry.ports === "all" || entry.ports.some(([protocol, first, last]) =>
+            protocol === f.protocol && (first === null || (f.destinationPort !== null && first <= f.destinationPort && f.destinationPort <= (last ?? first))))));
+        if (!ok) return false;
+      }
+      return true;
+    };
+    const peerFor = (address) => peers.find((peer) => inCidr(peer.cidr, address));
+    const gatewayMac = Uint8Array.from([2, 0, 0, 0, 0, 1]);
+
+    function receivePacket(node, data) {
+      const packet = new Uint8Array(data);
+      if (packet.length < 20 || packet[0] >> 4 !== 4) return;
+      const peer = peers.find((p) => p.node === node);
+      const f = flowOf(packet);
+      if (!peer || !inCidr(peer.cidr, f.source) || !admits(f)) return;
+      flows.set(key(f, false), Date.now());
+      const nic = [...pods.values()].find((pod) => pod.request.network?.address === f.destination)?.nic;
+      if (!nic?.kernel) return;
+      const frame = new Uint8Array(14 + packet.length);
+      frame.set(nic.mac, 0);
+      frame.set(gatewayMac, 6);
+      frame[12] = 0x08;
+      frame[13] = 0x00;
+      frame.set(packet, 14);
+      nic.kernel.receiveFrame(frame);
+    }
+
+    // Layers a peer asks for: from the cache, in chunks, then an end marker.
+    function serveLayers(channel) {
+      channel.onmessage = async (event) => {
+        if (typeof event.data !== "string") return;
+        const { want } = JSON.parse(event.data);
+        const bytes = await layerCache.get(want);
+        if (!bytes) { channel.send(JSON.stringify({ missing: want })); return; }
+        for (let at = 0; at < bytes.length; at += 16384) {
+          while (channel.bufferedAmount > 1 << 22) await new Promise((r) => setTimeout(r, 20));
+          channel.send(bytes.subarray(at, at + 16384));
+        }
+        channel.send(JSON.stringify({ done: want, size: bytes.length }));
+      };
+    }
+
+    function link(node) {
+      let l = links.get(node);
+      if (l) return l;
+      l = { pc: new RTCPeerConnection({ iceServers }), pods: null, layers: null, ready: false, waiters: [], queue: Promise.resolve() };
+      links.set(node, l);
+      l.pc.onicecandidate = (event) => {
+        if (event.candidate) send({ op: "signal", to: node, data: { candidate: event.candidate.toJSON() } });
+      };
+      l.pc.onconnectionstatechange = () => {
+        if (["failed", "closed"].includes(l.pc.connectionState)) { links.delete(node); l.ready = false; }
+      };
+      const adopt = (channel) => {
+        channel.binaryType = "arraybuffer";
+        if (channel.label === "pods") {
+          l.pods = channel;
+          channel.onopen = () => { l.ready = true; log(`direct link to ${node}`); l.waiters.splice(0).forEach((w) => w()); };
+          channel.onmessage = (event) => receivePacket(node, event.data);
+          if (channel.readyState === "open") channel.onopen();
+        } else if (channel.label === "serve-layers") {
+          serveLayers(channel);
+        }
+      };
+      l.pc.ondatachannel = (event) => adopt(event.channel);
+      l.adopt = adopt;
+      return l;
+    }
+
+    async function offer(node) {
+      const l = link(node);
+      l.adopt(l.pc.createDataChannel("pods", { ordered: false, maxRetransmits: 0 }));
+      await l.pc.setLocalDescription(await l.pc.createOffer());
+      send({ op: "signal", to: node, data: { sdp: l.pc.localDescription.toJSON() } });
+    }
+
+    function connect(node) {
+      if (!available || links.has(node) || !self) return;
+      // The lower name offers, so two tabs never offer to each other at once.
+      if (self < node) offer(node).catch(() => links.delete(node));
+      else if (!(Date.now() - (asked.get(node) ?? 0) < 10000)) {
+        asked.set(node, Date.now());
+        send({ op: "signal", to: node, data: { want: true } });
+      }
+    }
+
+    return {
+      update(info) {
+        self = info.node?.name ?? self;
+        peers = info.peers ?? [];
+        iceServers = info.iceServers ?? [];
+        policy = info.ingressPolicy ?? {};
+        // Link up with peers as soon as they are known, so a Pod's first packets
+        // needn't detour through the server.
+        for (const peer of peers.slice(0, 32)) connect(peer.node);
+        // Which layers this tab can give its peers, whenever that changes.
+        layerCache.digests().then((digests) => {
+          const listed = digests.sort().join(",");
+          if (listed !== this.reported) {
+            this.reported = listed;
+            send({ op: "have", digests });
+          }
+        });
+      },
+      async signal(from, data) {
+        if (!available || !data) return;
+        if (data.want) { if (self < from && !links.has(from)) offer(from).catch(() => links.delete(from)); return; }
+        const l = link(from);
+        if (data.sdp) {
+          await l.pc.setRemoteDescription(data.sdp);
+          if (data.sdp.type === "offer") {
+            await l.pc.setLocalDescription(await l.pc.createAnswer());
+            send({ op: "signal", to: from, data: { sdp: l.pc.localDescription.toJSON() } });
+          }
+        } else if (data.candidate) {
+          await l.pc.addIceCandidate(data.candidate).catch(() => {});
+        }
+      },
+      // Send a Pod's frame straight to the peer whose CIDR holds its destination, if
+      // a channel to it is open; start one otherwise. True when it went.
+      send(frame) {
+        if (!available || frame.length < 34 || frame[12] !== 0x08 || frame[13] !== 0x00) return false;
+        const packet = frame.subarray(14);
+        const destination = ip(packet, 16);
+        const peer = peerFor(destination);
+        if (!peer) return false;
+        const l = links.get(peer.node);
+        if (!l?.ready || l.pods.readyState !== "open") { connect(peer.node); return false; }
+        flows.set(key(flowOf(packet), false), Date.now());
+        l.pods.send(packet.slice());
+        return true;
+      },
+      // A layer from the peer NODE, which said it holds it; NIL-ish on any failure.
+      async fetchLayer(node, digest) {
+        if (!available) return null;
+        connect(node);
+        const l = links.get(node);
+        if (!l) return null;
+        if (!l.ready) await Promise.race([new Promise((r) => l.waiters.push(r)), new Promise((r) => setTimeout(r, 5000))]);
+        if (!l.ready) return null;
+        const run = l.queue.then(() => new Promise((resolve) => {
+          const channel = l.pc.createDataChannel("serve-layers");
+          const parts = [];
+          channel.binaryType = "arraybuffer";
+          channel.onopen = () => channel.send(JSON.stringify({ want: digest }));
+          channel.onmessage = (event) => {
+            if (typeof event.data !== "string") { parts.push(new Uint8Array(event.data)); return; }
+            const message = JSON.parse(event.data);
+            channel.close();
+            if (!message.done) return resolve(null);
+            const bytes = new Uint8Array(message.size);
+            let at = 0;
+            for (const part of parts) { bytes.set(part, at); at += part.length; }
+            resolve(at === message.size ? bytes : null);
+          };
+          setTimeout(() => { channel.close(); resolve(null); }, 60000);
+        }));
+        l.queue = run.catch(() => {});
+        return run;
+      },
+    };
+  })();
+
   function makeNic() {
     const mac = new Uint8Array(6);
     crypto.getRandomValues(mac);
@@ -307,6 +527,7 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
       attach: (kernel) => { nic.kernel = kernel; },
       send: (frame) => {
         frame = finishChecksum(new Uint8Array(frame));
+        if (peering.send(frame)) return;
         if (socket.readyState === 1) socket.send(frame);
         deliver(frame, nic);
       },
@@ -349,7 +570,12 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
     }
     const message = JSON.parse(event.data);
     if (message.op === "info") {
+      peering.update(message);
       onInfo(message);
+      return;
+    }
+    if (message.op === "signal") {
+      peering.signal(message.from, message.data);
       return;
     }
     if (message.op === "exec-input" || message.op === "exec-resize" || message.op === "exec-kill") {
@@ -453,7 +679,7 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
     const fs = new MemoryFs();
     const base = url.replace(/^ws/, "http");
     for (const layer of info.layers) {
-      const bytes = await layerBytes(layer, base, log);
+      const bytes = await layerBytes(layer, base, log, peering.fetchLayer);
       await unpackLayer(fs, new Response(bytes), layer.mediaType ?? "");
     }
     for (const dir of ["/proc", "/dev", "/tmp", "/etc"]) fs.mkdirp(dir);

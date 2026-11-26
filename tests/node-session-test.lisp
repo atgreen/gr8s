@@ -1996,6 +1996,38 @@ them. A node can't claim another's address or name."
     (is-false (gr8s.controllers::daemonset-node-eligible-p exporter node))
     (is-true (gr8s.controllers::daemonset-node-eligible-p plain node))))
 
+(test browser-nodes-introduce-their-peers-and-only-relay-between-them
+  ;; podster-57fv.12/.13: the server relays WebRTC signals between connected browser
+  ;; nodes, saying who sent them, and remembers which layers each holds.
+  (let ((listener (make-instance 'gr8s.server::browser-join-acceptor :port 0 :nodes nil))
+        (streams (make-hash-table :test #'equal))
+        (digest "sha256:55d2dadd4bbc7132e31b89f47d8f7cc517cac013563328b707c933d42c4a2c07"))
+    (dolist (name '("browser-a" "browser-b"))
+      (let ((stream (flexi-streams:make-in-memory-output-stream)))
+        (setf (gethash name streams) stream
+              (gethash name (gr8s.server::browser-join-sessions listener))
+              (gr8s.server::%make-browser-session stream))))
+    (flet ((received (name)
+             (let ((input (flexi-streams:make-in-memory-input-stream
+                           (flexi-streams:get-output-stream-sequence (gethash name streams)))))
+               (loop for message = (ignore-errors
+                                    (multiple-value-bind (opcode payload) (gr8s.protocol::read-websocket-frame input)
+                                      (and (= opcode 1) (com.inuoe.jzon:parse payload))))
+                     while message collect message))))
+      (gr8s.server::browser-peer-message
+       listener "browser-a" (gr8s.resources::core-object "op" "signal" "to" "browser-b"
+                                                        "data" (gr8s.resources::core-object "want" t)))
+      (gr8s.server::browser-peer-message
+       listener "browser-a" (gr8s.resources::core-object "op" "signal" "to" "browser-z" "data" 1))
+      (gr8s.server::browser-peer-message
+       listener "browser-a" (gr8s.resources::core-object "op" "have" "digests" (vector digest "not-a-digest")))
+      (let ((to-b (received "browser-b")))
+        (is (= 1 (length to-b)))
+        (is (equal "browser-a" (gethash "from" (first to-b))))
+        (is (eq t (gethash "want" (gethash "data" (first to-b))))))
+      (is (null (received "browser-a")))
+      (is (equal (list digest) (gethash "browser-a" (gr8s.server::browser-join-holdings listener)))))))
+
 (test control-plane-logs-come-from-the-assigned-remote-agent
   (with-temporary-store (store path)
     (gr8s.controllers::register-node
