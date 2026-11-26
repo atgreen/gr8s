@@ -9,6 +9,12 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- The Network view draws more than 8 World sites in a view as one Internet node, with
+  one edge per workload and direction carrying their sum, and a scrollable list of
+  the sites on its card (most dropped first, then busiest) that opens each one's
+  connection. A browser in a gr8 sandbox reaches dozens of sites, which buried the
+  view.
+
 - Binary-scoped egress (podster-wv1w.13): SandboxProfile `spec.egress.binaries` lets a
   host be reached only by listed programs (`hosts`, `paths` with `*` and `**`), or
   their children. The node finds the program behind each proxied connection from the
