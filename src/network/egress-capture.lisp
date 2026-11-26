@@ -46,9 +46,23 @@
 (defun %egress-u64-from-le (octets)
   (loop for i below 8 sum (ash (aref octets i) (* 8 i))))
 
+(defparameter +egress-pinned-map-specs+
+  '((:name "gr8s_egress_capture" :type :hash :key-size 8 :value-size 1 :max-entries 4096 :flags 1)
+    (:name "gr8s_egress_exempt_v4" :type :lpm-trie :key-size 8 :value-size 1 :max-entries 256 :flags 1)
+    (:name "gr8s_pod_netns_v4" :type :hash :key-size 4 :value-size 8 :max-entries 4096 :flags 1))
+  "The service load balancer's maps egress capture writes, as its DEFMAPs declare them.")
+
+(defun egress-pinned-map-info (fd name &key (object-info #'bpf-object-kernel-info))
+  "The map-info for the pinned service-LB map FD named NAME, its schema checked. They are
+the load balancer's maps, not the CNI policy maps CNI-POLICY-MAP-INFO knows: checked by
+that, every write failed as an incompatible schema (podster-uevw)."
+  (let ((spec (find name +egress-pinned-map-specs+ :key (lambda (spec) (getf spec :name)) :test #'string=)))
+    (unless spec (error "~A is not a map egress capture writes" name))
+    (service-lb-pinned-map-info fd spec :object-info object-info)))
+
 (defun %call-with-pinned-map (pin-directory name function
                               &key (open #'whistler/loader:open-pinned-object)
-                                   (map-info #'cni-policy-map-info) (close #'sb-posix:close))
+                                   (map-info #'egress-pinned-map-info) (close #'sb-posix:close))
   (let ((fd (funcall open (concatenate 'string (namestring (uiop:ensure-directory-pathname pin-directory)) name))))
     (unwind-protect (funcall function (funcall map-info fd name))
       (ignore-errors (funcall close fd)))))

@@ -141,3 +141,36 @@
          (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "fine")
                                       "spec" (gr8s.resources::core-object "cidrs" (vector "198.20.0.0/24")))
          nil))))
+
+;;; podster-uevw: egress capture's maps are the service load balancer's, and are
+;;; checked by its specs, which must be the program's own.
+
+(defun egress-map-kernel-info (type key-size value-size max-entries flags)
+  "bpf_map_info's first 24 bytes as the kernel reports them."
+  (let ((info (make-array 24 :element-type '(unsigned-byte 8) :initial-element 0)))
+    (loop for (offset value) in `((0 ,type) (8 ,key-size) (12 ,value-size) (16 ,max-entries) (20 ,flags))
+          do (dotimes (i 4) (setf (aref info (+ offset i)) (ldb (byte 8 (* 8 i)) value))))
+    info))
+
+(test egress-capture-map-specs-are-the-load-balancers-own
+  (let ((compiled (gr8s.network::compile-service-lb)))
+    (flet ((type-number (type) (if (integerp type) type (whistler/compiler:resolve-map-type type))))
+      (dolist (spec gr8s.network::+egress-pinned-map-specs+)
+        (let ((program (find (getf spec :name) compiled :key (lambda (s) (getf s :name)) :test #'string=)))
+          (is (not (null program)) "~A is one of the program's maps" (getf spec :name))
+          (when program
+            (is (= (type-number (getf spec :type)) (type-number (getf program :type))) "~A type" (getf spec :name))
+            (dolist (field '(:key-size :value-size :max-entries :flags))
+              (is (eql (getf spec field) (getf program field)) "~A ~A" (getf spec :name) field))))))))
+
+(test egress-capture-opens-a-pinned-map-of-the-right-schema-and-refuses-another
+  (let ((map (gr8s.network::egress-pinned-map-info
+              7 "gr8s_egress_exempt_v4"
+              :object-info (lambda (fd) (declare (ignore fd)) (egress-map-kernel-info 11 8 1 256 1)))))
+    (is (equal "gr8s_egress_exempt_v4" (whistler/loader:map-info-name map)))
+    (is (= 7 (whistler/loader:map-info-fd map))))
+  (signals error
+    (gr8s.network::egress-pinned-map-info
+     7 "gr8s_egress_exempt_v4"
+     :object-info (lambda (fd) (declare (ignore fd)) (egress-map-kernel-info 11 8 1 128 1))))
+  (signals error (gr8s.network::egress-pinned-map-info 7 "netpol_egress_cidr")))
