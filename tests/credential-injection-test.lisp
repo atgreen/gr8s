@@ -458,6 +458,26 @@
                (is (equal "claude-anthropic/anthropic-api-key" rule))
                (is (equal '("x-api-key") headers))
                (is (equal "sk-ant-real" value))))
+           ;; A Secret recording its stand-in is swapped in by value instead
+           ;; (podster-wv1w.27); one too short to be gr8's is not taken for one.
+           (flet ((annotate (stand-in)
+                    (gr8s.resources::update-core-resource
+                     store "secrets" "gr8" "anthropic"
+                     (lambda (secret)
+                       (setf (gethash "annotations" (gethash "metadata" secret))
+                             (gr8s.resources::core-object "gr8s.io/stand-in" stand-in))
+                       secret))))
+             (annotate "gr8s-injected-0123456789abcdef")
+             (multiple-value-bind (rule headers value refresh swaps)
+                 (funcall (gr8s.agent::node-runtime-egress-injector runtime "10.80.32.7" "api.anthropic.com" "https")
+                          "POST" "/v1/messages")
+               (is (equal '(nil nil nil nil) (list rule headers value refresh)))
+               (is (equal '(("gr8s-injected-0123456789abcdef" "sk-ant-real" "claude-anthropic/anthropic-api-key"))
+                          swaps)))
+             (annotate "gr8s-injected-short")
+             (is (equal "claude-anthropic/anthropic-api-key"
+                        (funcall (gr8s.agent::node-runtime-egress-injector runtime "10.80.32.7" "api.anthropic.com" "https")
+                                 "POST" "/v1/messages"))))
            ;; Another Pod's address gets nothing.
            (is (null (gr8s.agent::node-runtime-egress-injector runtime "10.80.32.9" "api.anthropic.com" "https"))))
       (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))

@@ -153,7 +153,7 @@ func Run(options Options) (int, error) {
 		for _, name := range named {
 			loginRules = append(loginRules, LoginRules(name, logins[name])...)
 		}
-		if err := createPolicyCredentials(ctx, clientset, pod, policy.Spec.valueCredentials(), values, loginRules); err != nil {
+		if err := createPolicyCredentials(ctx, clientset, pod, policy.Spec.valueCredentials(), values, policy.standIns, loginRules); err != nil {
 			deletePolicyCredentials(clientset, pod, credentials, true)
 			return 0, err
 		}
@@ -247,6 +247,7 @@ func loadPolicy(options *Options, home, cwd string) (*Policy, []string, error) {
 		values = append(values, value)
 		options.Allow = append(options.Allow, credential.Hosts...)
 	}
+	policy.mintStandIns()
 	options.Allow = append(options.Allow, policy.Spec.Hosts...)
 	if desktop := policy.Spec.Desktop; desktop != nil {
 		options.NoDisplay = options.NoDisplay || (desktop.Display != nil && !*desktop.Display)
@@ -283,9 +284,9 @@ func (policy *Policy) withGrant(grant Grant, home string) Grant {
 	for name, value := range spec.Env {
 		env[name] = value
 	}
-	for _, credential := range spec.valueCredentials() {
+	for i, credential := range spec.valueCredentials() {
 		if credential.Env != "" {
-			env[credential.Env] = StandIn
+			env[credential.Env] = policy.standIn(i)
 		}
 	}
 	grant.Env = env

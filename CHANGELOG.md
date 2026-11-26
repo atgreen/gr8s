@@ -9,6 +9,14 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- Per-credential stand-ins (podster-wv1w.27): each gr8 policy credential gets its own
+  stand-in, recorded on its Secret as `gr8s.io/stand-in`, and the node egress proxy
+  swaps the real value in only where a request carries it, in any header or inside
+  `Authorization: Basic`, keeping the client's own form. A Pod can hold several
+  credentials for one host, a request without the stand-in gets none, and git over
+  HTTPS works. `prefix` shapes a stand-in for clients that check (`gho_`). Secrets
+  without a stand-in keep the rule's header overwrite.
+
 - Logins for any tool (podster-wv1w.20): `gr8 --login NAME` moves a tool's OAuth
   login into the cluster, described by its file, token key paths, expiry, inject
   hosts and token endpoint; claude is built in and `~/.config/gr8/logins.yaml`

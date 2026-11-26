@@ -72,12 +72,15 @@ func RunSandboxProfile(pod, command string, egress map[string]any) map[string]an
 	}
 }
 
-// createPolicyCredentials creates a Secret holding each of values and the
-// SecurityProfile injecting them for the Pod pod will be. They come before the Pod:
-// a node receives a Secret with the assignment of the Pod that uses it, so one made
-// after would not reach it.
+// AnnotationStandIn records on a credential's Secret the stand-in its sandbox holds.
+const AnnotationStandIn = "gr8s.io/stand-in"
+
+// createPolicyCredentials creates a Secret holding each of values, annotated with
+// its stand-in, and the SecurityProfile injecting them for the Pod pod will be. They
+// come before the Pod: a node receives a Secret with the assignment of the Pod that
+// uses it, so one made after would not reach it.
 func createPolicyCredentials(ctx context.Context, clientset kubernetes.Interface, pod *corev1.Pod,
-	credentials []PolicyCredential, values []string, loginRules []any) error {
+	credentials []PolicyCredential, values, standIns []string, loginRules []any) error {
 	if len(credentials) == 0 && len(loginRules) == 0 {
 		return nil
 	}
@@ -87,6 +90,11 @@ func createPolicyCredentials(ctx context.Context, clientset kubernetes.Interface
 				Labels: map[string]string{LabelManagedBy: "gr8", LabelRun: pod.Name}},
 			Type:       corev1.SecretTypeOpaque,
 			StringData: map[string]string{"token": value},
+		}
+		if i < len(standIns) {
+			// The proxy swaps this credential in where a request carries its stand-in
+			// (podster-wv1w.27).
+			secret.Annotations = map[string]string{AnnotationStandIn: standIns[i]}
 		}
 		if _, err := clientset.CoreV1().Secrets(pod.Namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
 			return fmt.Errorf("storing credential %d: %w", i, err)

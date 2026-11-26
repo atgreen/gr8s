@@ -197,11 +197,14 @@ for a gr8 sandbox, its programs nearest first; T for any other Pod."
 (defun node-runtime-egress-injector (node-runtime peer host scheme)
   "For the Pod at PEER, a request matcher injecting credentials into its requests to HOST
 over SCHEME, or NIL when no SecurityProfile selecting it names HOST (podster-wv1w.3). The
-matcher returns (values rule-name headers value refresh), VALUE NIL when the Secret or
-its key is missing, which the proxy refuses rather than send the request without its
+matcher returns (values rule-name headers value refresh swaps), VALUE NIL when the Secret
+or its key is missing, which the proxy refuses rather than send the request without its
 credential. For an OAuthRefresh rule (podster-kn03), HEADERS is NIL, VALUE the real
 refresh token and REFRESH a plist (:rotate function): the proxy calls it with the
-alist of Secret keys -> new real tokens the refresh returned."
+alist of Secret keys -> new real tokens the refresh returned. RULE-NAME is the first
+matching rule whose Secret records no stand-in; SWAPS are (stand-in credential rule-name)
+for each matching rule whose Secret does, swapped in only where the request carries the
+stand-in (podster-wv1w.27)."
   (destructuring-bind (&optional ip-map specs cluster-policies profiles sandbox-profiles namespace-labels)
       (node-runtime-egress-view node-runtime)
     (declare (ignore specs cluster-policies sandbox-profiles namespace-labels))
@@ -210,34 +213,52 @@ alist of Secret keys -> new real tokens the refresh returned."
            (store (node-runtime-store node-runtime)))
       (when (and rules (gr8s.network::injection-host-p rules host))
         (lambda (method path)
-          (let ((rule (gr8s.network::matching-injection-rule rules host scheme method path)))
-            (when rule
+          (let ((rule nil) (secret nil) (swaps nil))
+            (dolist (candidate (gr8s.network::matching-injection-rules rules host scheme method path))
               ;; Qualified: gr8s.agent has no GET-CORE-RESOURCE of its own, and unqualified
               ;; the call signalled UNDEFINED-FUNCTION, which IGNORE-ERRORS made "no
               ;; credential", so no node ever injected one (podster-sxfe).
-              (let ((secret (ignore-errors
-                             (gr8s.resources::get-core-resource
-                              store "secrets" (gr8s.network::injection-rule-namespace rule)
-                              (gr8s.network::injection-rule-secret-name rule))))
-                    (name (format nil "~A/~A" (gr8s.network::injection-rule-profile rule)
-                                  (gr8s.network::injection-rule-name rule))))
-                (if (eq :oauth-refresh (gr8s.network::injection-rule-kind rule))
-                    (values name nil
-                            (and secret (node-runtime-credential
-                                         node-runtime secret (gr8s.network::injection-rule-refresh-token-key rule)))
-                            (list :rotate
-                                  (lambda (tokens)
-                                    (note-refreshed-credentials
-                                     node-runtime (gr8s.network::np-pod-namespace pod) (gr8s.network::np-pod-name pod)
-                                     secret tokens))
-                                  :access-token-key (gr8s.network::injection-rule-access-token-key rule)
-                                  :refresh-token-key (gr8s.network::injection-rule-refresh-token-key rule)))
-                    (let ((credential (and secret (node-runtime-credential
-                                                   node-runtime secret (gr8s.network::injection-rule-secret-key rule)))))
-                      (values name
-                              (gr8s.network::injection-rule-headers rule)
-                              (and credential (gr8s.network::render-injection-value
-                                               (gr8s.network::injection-rule-template rule) credential)))))))))))))
+              (let* ((candidate-secret (ignore-errors
+                                        (gr8s.resources::get-core-resource
+                                         store "secrets" (gr8s.network::injection-rule-namespace candidate)
+                                         (gr8s.network::injection-rule-secret-name candidate))))
+                     (stand-in (and candidate-secret
+                                    (eq :api-key (gr8s.network::injection-rule-kind candidate))
+                                    (gr8s.network::secret-stand-in candidate-secret))))
+                (cond (stand-in
+                       (push (list stand-in
+                                   (node-runtime-credential node-runtime candidate-secret
+                                                            (gr8s.network::injection-rule-secret-key candidate))
+                                   (node-runtime-rule-name candidate))
+                             swaps))
+                      ((null rule) (setf rule candidate secret candidate-secret)))))
+            (setf swaps (nreverse swaps))
+            (cond ((null rule) (and swaps (values nil nil nil nil swaps)))
+                  ((eq :oauth-refresh (gr8s.network::injection-rule-kind rule))
+                   (values (node-runtime-rule-name rule) nil
+                           (and secret (node-runtime-credential
+                                        node-runtime secret (gr8s.network::injection-rule-refresh-token-key rule)))
+                           (list :rotate
+                                 (lambda (tokens)
+                                   (note-refreshed-credentials
+                                    node-runtime (gr8s.network::np-pod-namespace pod) (gr8s.network::np-pod-name pod)
+                                    secret tokens))
+                                 :access-token-key (gr8s.network::injection-rule-access-token-key rule)
+                                 :refresh-token-key (gr8s.network::injection-rule-refresh-token-key rule))
+                           swaps))
+                  (t
+                   (let ((credential (and secret (node-runtime-credential
+                                                  node-runtime secret (gr8s.network::injection-rule-secret-key rule)))))
+                     (values (node-runtime-rule-name rule)
+                             (gr8s.network::injection-rule-headers rule)
+                             (and credential (gr8s.network::render-injection-value
+                                              (gr8s.network::injection-rule-template rule) credential))
+                             nil
+                             swaps))))))))))
+
+(defun node-runtime-rule-name (rule)
+  "How flow events name RULE: its SecurityProfile, then its own name."
+  (format nil "~A/~A" (gr8s.network::injection-rule-profile rule) (gr8s.network::injection-rule-name rule)))
 
 (defun node-runtime-local-risk-ready-p (node-runtime)
   "True only while the latest received snapshot has a read-back-complete local
