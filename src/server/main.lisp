@@ -2834,6 +2834,25 @@ handler and never gets here. A busy host makes this race likely."
                     (invoke-restart restart))))
               (when previous (funcall previous condition hook)))))))
 
+(defvar *prompt-fatal-exit-installed* nil)
+
+(defconstant +fatal-exit-timeout-seconds+ 10
+  "How long a process ending on an unhandled error waits for its threads to unwind.")
+
+(defun install-prompt-fatal-exit ()
+  "End promptly on an error nothing handles. SBCL's quit waits SB-EXT:*EXIT-TIMEOUT*, 60
+seconds, for every thread to unwind, and a control-plane member sat that long with its
+listeners closed before systemd could restart it (podster-2aum). Installed before the hooks
+that recover from some conditions, it runs only once the process is ending."
+  (unless *prompt-fatal-exit-installed*
+    (let ((previous sb-ext:*invoke-debugger-hook*))
+      (setf *prompt-fatal-exit-installed* t
+            sb-ext:*invoke-debugger-hook*
+            (lambda (condition hook)
+              (when previous
+                (setf sb-ext:*exit-timeout* (min sb-ext:*exit-timeout* +fatal-exit-timeout-seconds+))
+                (funcall previous condition hook)))))))
+
 (defun install-shutdown-handlers ()
   "On SBCL, install signal handlers: SIGINT and SIGTERM request cooperative
    shutdown, and SIGUSR1 dumps thread backtraces."
@@ -4622,6 +4641,7 @@ and refuses every public registry (podster-8ak). Returns the bundle named, or NI
                                    (:serve "control plane")
                                    (:agent "node agent")
                                    (:witness "witness arbiter")))
+              (install-prompt-fatal-exit)
               (install-stale-timeout-guard)
               (install-memory-hooks))
             (when (member (getf options :command) '(:serve :agent :net-agent))

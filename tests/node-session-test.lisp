@@ -1842,6 +1842,29 @@ them. A node can't claim another's address or name."
           (gr8s.raft.transport::stop-raft-member owner-member)
           (gr8s.raft.transport::stop-raft-member origin-member))))))
 
+(test a-relay-to-an-unreachable-member-fails-the-route-not-the-process
+  ;; Connecting to a member that was restarting timed out in TLS, outside the relay's
+  ;; handler; the error ended the leader's whole process (podster-2aum).
+  (let* ((origin-member (gr8s.raft.transport::start-raft-member "origin" :port 0))
+         (closed-port (let ((socket (usocket:socket-listen "127.0.0.1" 0)))
+                        (prog1 (usocket:get-local-port socket) (usocket:socket-close socket))))
+         (request (make-instance 'gr8s.node.v1::operation-request
+                                 :operation-id "to-the-unreachable"
+                                 :kind gr8s.node.v1::+operationkind-operation_kind_slynk+)))
+    (unwind-protect
+         (progn
+           (gr8s.raft.transport::raft-member-set-peers
+            origin-member (list (list "away" "127.0.0.1" closed-port)))
+           (multiple-value-bind (owner reason)
+               (gr8s.raft.transport::raft-member-route-node-operation
+                origin-member :operation-request "away" "@control-plane/away" request)
+             (is (null owner))
+             (is (stringp reason) "the targeted route says why"))
+           (is (null (gr8s.raft.transport::raft-member-route-node-operation
+                      origin-member :operation-request nil "worker-somewhere" request))
+               "offering it to every peer finds no owner"))
+      (gr8s.raft.transport::stop-raft-member origin-member))))
+
 (test a-request-to-a-node-that-is-not-connected-says-so
   ;; "Node operation timed out" named neither the node nor why (podster-xbf).
   (with-temporary-store (store path)

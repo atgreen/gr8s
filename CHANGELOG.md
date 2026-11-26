@@ -100,6 +100,15 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- A control-plane member no longer goes down when the member it relays a node
+  operation to is restarting (podster-2aum). Connecting to that peer, a refusal or
+  a TLS handshake that timed out, escaped the relay's error handling and ended the
+  whole process, so a rolling upgrade could take out the leader while the other
+  member restarted. The route now fails over or reports the peer unreachable. An
+  error in a routing thread fails its operation, not the server. A process that
+  does end on an unhandled error now exits within 10 seconds, not after SBCL's
+  60-second wait for its threads, so systemd restarts it promptly.
+
 - The `kubernetes` Service carries the labels kube-apiserver gives it,
   `component: apiserver` and `provider: kubernetes` (podster-c6e), and a cluster
   whose Service lacks them gains them. Monitoring finds the API server by them:
