@@ -9,6 +9,14 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- The node egress proxy terminates a gr8 sandbox's TLS for every allowed host and
+  reports each request it makes (podster-wv1w.11). SandboxProfile `spec.egress` sets
+  `tls: Terminate|Passthrough`, `passthroughHosts` for clients that pin certificates,
+  and `enforcement: Enforce|Audit` (Audit reports a broken rule, such as domain
+  fronting, and forwards). `spec.namespaceSelector` scopes a profile to namespaces;
+  the node chooses the profile from the Pod's command label and namespace, never from
+  anything the Pod sets.
+
 - `gr8 --allow NAME` lets one run reach a hostname (repeatable; `*.example.com` for
   subdomains) through a ClusterNetworkPolicy that selects only that run's Pod and is
   deleted with it (podster-xazj). It needs permission to create ClusterNetworkPolicies.
@@ -114,6 +122,11 @@ the Kubernetes API version with a gr8s release suffix (see
   still serves Hubble's Observer API for the `hubble` CLI.
 
 ### Fixed
+
+- A proxied connection whose client closed first could leave the Gateway's L4 proxy or
+  the node egress proxy waiting on the upstream forever: closing a socket another
+  thread is receiving on neither wakes it nor tells the peer. Both sockets are now
+  shut down first.
 
 - The node egress proxy's verdicts reach the flow stream, the Network view, OTLP flow
   logs and `observe_flows` (podster-5hv.11): a second `:report` argument had silently

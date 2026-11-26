@@ -7,6 +7,13 @@
 ;;;; home, read-write or read-only, and environment placeholders (a stand-in API key
 ;;;; the node egress proxy overwrites). Paths are relative to $HOME and may not climb
 ;;;; out of it, so a profile can't grant /etc or another user's files.
+;;;;
+;;;; spec.egress is read by the node, not by gr8 (podster-wv1w.11): whether the node
+;;;; egress proxy terminates the command's TLS to see each request (Terminate, the
+;;;; default) or relays it undecrypted (Passthrough, or for passthroughHosts), and
+;;;; whether a request breaking a rule is refused (Enforce, the default) or only
+;;;; reported (Audit). spec.namespaceSelector limits a profile to the gr8 Pods of the
+;;;; namespaces it selects; one that names a namespace wins over one that doesn't.
 
 (in-package #:gr8s.resources)
 
@@ -23,7 +30,7 @@
   (let ((spec (gethash "spec" object)))
     (unless (hash-table-p spec) (%sbp-invalid "spec must be an object"))
     (dolist (key (loop for key being the hash-keys of spec collect key))
-      (unless (member key '("commands" "home" "env") :test #'equal)
+      (unless (member key '("commands" "namespaceSelector" "home" "env" "egress") :test #'equal)
         (%sbp-invalid "spec.~A is not supported" key)))
     (let ((commands (gethash "commands" spec)))
       (unless (and (vectorp commands) (not (stringp commands)) (plusp (length commands))
@@ -40,6 +47,30 @@
           (let ((paths (gethash key home)))
             (unless (and (vectorp paths) (not (stringp paths)) (every #'%sbp-home-path-p paths))
               (%sbp-invalid "spec.home.~A must list paths relative to $HOME, without .." key))))))
+    ;; Which namespaces' gr8 Pods it is for: all, without one.
+    (multiple-value-bind (selector present) (gethash "namespaceSelector" spec)
+      (when present
+        (unless (hash-table-p selector) (%sbp-invalid "spec.namespaceSelector must be a label selector"))
+        (validate-workload-selector selector :allow-empty t)))
+    (multiple-value-bind (egress present) (gethash "egress" spec)
+      (when present
+        (unless (hash-table-p egress) (%sbp-invalid "spec.egress must be an object"))
+        (maphash (lambda (key value)
+                   (cond ((equal key "tls")
+                          (unless (member value '("Terminate" "Passthrough") :test #'equal)
+                            (%sbp-invalid "spec.egress.tls must be Terminate or Passthrough")))
+                         ((equal key "enforcement")
+                          (unless (member value '("Enforce" "Audit") :test #'equal)
+                            (%sbp-invalid "spec.egress.enforcement must be Enforce or Audit")))
+                         ((equal key "passthroughHosts")
+                          (unless (and (vectorp value) (not (stringp value))
+                                       (every (lambda (host)
+                                                (and (stringp host)
+                                                     (cl-ppcre:scan "^(\\*\\.)?[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$" host)))
+                                              value))
+                            (%sbp-invalid "spec.egress.passthroughHosts must list hostnames, *.example.com for subdomains")))
+                         (t (%sbp-invalid "spec.egress.~A is not supported" key))))
+                 egress)))
     (multiple-value-bind (env present) (gethash "env" spec)
       (when present
         (unless (hash-table-p env) (%sbp-invalid "spec.env must map names to values"))

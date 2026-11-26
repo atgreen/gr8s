@@ -137,8 +137,9 @@ spec:
 
 ### 4. Trusting the proxy's CA
 
-Injection needs TLS termination for the hosts that carry a credential, and only
-those; every other allowed host passes through undecrypted, by SNI. The node
+Injection needs TLS termination for the hosts that carry a credential. Any other
+Pod's other allowed hosts pass through undecrypted, by SNI; a gr8 sandbox's are
+terminated too, so every request it makes is seen (section 5). The node
 agent signs per-host certificates from a gr8s CA published as a
 `ClusterTrustBundle` (for example `gr8s.io:egress`). A Pod trusts it through a
 projected `clusterTrustBundle` volume combined with the system roots, plus
@@ -169,6 +170,31 @@ spec:
 built-in table. The Pod's labels then select the egress and credential policies
 above; `gr8` needs no policy logic of its own.
 
+`spec.egress` is read by the node, not by `gr8` (podster-wv1w.11). It says how the
+node egress proxy treats the command's connections:
+
+```yaml
+spec:
+  commands: [claude]
+  namespaceSelector: {matchLabels: {team: a}}   # optional: only these namespaces' gr8 Pods
+  egress:
+    tls: Terminate              # the default; Passthrough relays TLS undecrypted
+    passthroughHosts: ["*.pinned.example"]       # for clients that pin certificates
+    enforcement: Enforce        # the default; Audit reports a broken rule and forwards
+```
+
+With `Terminate` the proxy presents a leaf from the egress CA for every allowed host,
+relays HTTP/1.1 request by request, and reports each request (method, host, path,
+status, injected rule) to the flow stream. A WebSocket is relayed after its upgrade.
+A rule a request breaks (today a `Host` other than the name the connection was
+admitted by) is refused under `Enforce` and reported, with the reason, under `Audit`.
+A node without the egress CA relays the TLS undecrypted. The node chooses the profile
+by the Pod's `gr8s.io/gr8-command` label and its namespace's labels: among profiles
+naming the command, one whose `namespaceSelector` matches wins over one without, then
+the first by name. `gr8` chooses the same profile for the home grants, so one profile
+governs both. HTTP/2 is not offered to the client (it falls back to HTTP/1.1); a
+client that only speaks h2, or pins certificates, needs a passthrough host.
+
 ## Enforcement in the node agent
 
 **Why the node agent, not a sidecar.** The node agent is already authorized to
@@ -190,7 +216,10 @@ none of these apply.
 - **Injection.** For hosts with a matching injection rule, the proxy terminates
   TLS with a certificate for that host, applies the rule's header rewrite with
   the Secret's current value, and opens a fresh TLS connection to the origin.
-  A missing or unreadable Secret fails closed (`failStrategy: Block`).
+  A missing or unreadable Secret fails closed (`failStrategy: Block`). A gr8
+  sandbox's connections are terminated the same way for every allowed host, so
+  each request is seen, unless its SandboxProfile asks for passthrough
+  (section 5).
 - **Pod identity** comes from the socket's cgroup, which the kernel binds at
   socket creation, not from the source address.
 - **DNS.** For a selected Pod, the node DNS server forwards only names its
@@ -206,11 +235,19 @@ none of these apply.
 
 ## Observability
 
-The proxy reports one flow event per request: Pod, host, method, path, the rule
-that injected a credential (never the credential), and the verdict. These join
-the existing flow stream and its OTLP export, so the dashboard's Network view
-shows requests on a Pod's edges and refusals in red. That is the per-run audit
-trail: what this agent asked for, and what it was refused.
+Every decision is a flow event in the existing flow stream, its OTLP export and
+`observe_flows` (podster-5hv.11), and the dashboard's Network view draws each on
+the Pod's edge to the site it named, refusals in red:
+
+- a **connection**: the host it was admitted or refused by, the deciding rule;
+- a **request** the proxy relayed (terminated or injected): method, host, path
+  without its query, status, the rule that injected a credential (never the
+  credential), and under Audit the rule it broke (`l7.audit`);
+- a **DNS answer or refusal** for a name outside the cluster zone, so a lookup
+  refused before any connection still shows.
+
+That is the per-run audit trail: what this agent asked for, and what it was
+refused.
 
 ## Not in the first version
 
@@ -285,7 +322,8 @@ trail: what this agent asked for, and what it was refused.
   alone: the redirect keeps the port, not the address.
 - **Domain fronting.** A TLS connection the proxy doesn't terminate is admitted by its
   SNI; a different Host inside it reaches whatever that server routes it to. Hosts
-  with an injected credential are terminated, and their Host is checked.
+  with an injected credential, and a gr8 sandbox's hosts, are terminated, and their
+  Host is checked (refused under Enforce, reported under Audit).
 - **The DNS gate** is a small server on the proxy address: cl-dns-proxy's hooks don't
   see the client, so captured Pods' DNS is redirected to the gate, which relays allowed
   names to the node DNS server.

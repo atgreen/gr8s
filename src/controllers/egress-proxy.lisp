@@ -12,8 +12,13 @@
 ;;;; HTTP Host header. Hosts behind shared CDN addresses can't be told apart by IP,
 ;;;; so a name is the only sound thing to admit. It resolves the name itself, asks
 ;;;; the Pod's tiers about the name, the address it will connect to and the port
-;;;; (EGRESS-CONNECTION-VERDICT), and then splices bytes or closes. It never
-;;;; terminates TLS here; a connection that names nothing can't be admitted by name.
+;;;; (EGRESS-CONNECTION-VERDICT), and then splices bytes or closes. A connection that
+;;;; names nothing can't be admitted by name.
+;;;;
+;;;; A gr8 sandbox's connections are inspected (podster-wv1w.11): its TLS is terminated
+;;;; with a leaf the egress CA signs and its HTTP relayed request by request, each one
+;;;; reported, unless its SandboxProfile asks for passthrough. Rules a request breaks
+;;;; refuse it under Enforce, and are only reported under Audit.
 ;;;;
 ;;;; Not defended here: a client that sends an allowed SNI and then a different Host
 ;;;; inside TLS (domain fronting) reaches whatever the allowed server routes that
@@ -35,8 +40,9 @@
   connect   ; (address port) -> a connected socket, or NIL
   report    ; (peer-address host address port allowed-p rule-name), or NIL
   inject    ; (peer-address host scheme) -> NIL, or a request matcher for EGRESS-RELAY-HTTP
+  inspect   ; (peer-address host) -> NIL, or (:enforcement :enforce|:audit) to terminate and relay
   mint      ; (host) -> (values certificate-chain key) for the egress CA's leaf, or NIL
-  request-report  ; (peer-address host address port method path code rule-name), or NIL
+  request-report  ; (peer-address host address port method path code rule-name &optional audit), or NIL
   (upstream-verify pure-tls:+verify-required+) ; how an injected connection checks its upstream
   names     ; the egress-name-table synthetic addresses are looked up in, or NIL
   dialed)   ; (client-socket) -> (values address port) the client dialled
@@ -197,40 +203,59 @@ again. A client that speaks first and names another host in its TLS SNI is refus
                  (ignore-errors (funcall (egress-proxy-report proxy) peer host address port allowed rule)))
                allowed))
         (unless allowed (return-from egress-proxy-handle-synthetic (report nil)))
-        (let ((inject (egress-proxy-inject proxy)) (upstream nil))
-          (unwind-protect
-               (if (and inject (or (funcall inject peer host "https") (funcall inject peer host "http")))
-                   ;; A host that may carry a credential speaks HTTP, so its client speaks first.
-                   (multiple-value-bind (named prefix) (egress-client-destination client)
-                     (let* ((tls (and prefix (plusp (length prefix)) (= (aref prefix 0) 22)))
-                            (matcher (funcall inject peer host (if tls "https" "http"))))
-                       (cond ((and tls named (string/= named host)) (report nil))
-                             (matcher (report t)
-                                      (egress-proxy-relay proxy client peer host address port prefix tls matcher))
-                             ((setf upstream (funcall (egress-proxy-connect proxy) address port))
-                              (report t)
-                              (egress-splice client upstream prefix))
-                             (t (report nil)))))
-                   (progn
-                     (setf upstream (funcall (egress-proxy-connect proxy) address port))
-                     (cond ((null upstream) (report nil))
-                           ;; Whoever speaks first: a server's greeting is relayed as it
-                           ;; comes; a client's first bytes are read, for their SNI.
-                           ((eq (egress-first-readable client upstream) :first)
-                            (multiple-value-bind (named prefix) (egress-client-destination client)
-                              (if (and prefix (plusp (length prefix)) (= (aref prefix 0) 22)
-                                       named (string/= named host))
-                                  (report nil)
-                                  (progn (report t) (egress-splice client upstream (or prefix #()))))))
-                           (t (report t) (egress-splice client upstream #())))))
-            (when upstream (ignore-errors (sb-bsd-sockets:socket-close upstream)))))))))
+        (let ((inject (egress-proxy-inject proxy))
+              (inspection (and (egress-proxy-inspect proxy) (funcall (egress-proxy-inspect proxy) peer host)))
+              (upstream nil))
+          (flet ((relay (prefix tls matcher)
+                   (report t)
+                   (egress-proxy-relay proxy client peer host address port prefix tls matcher
+                                       :upstream-socket (shiftf upstream nil)
+                                       :enforcement (getf inspection :enforcement :enforce))))
+            (unwind-protect
+                 (if (and inject (or (funcall inject peer host "https") (funcall inject peer host "http")))
+                     ;; A host that may carry a credential speaks HTTP, so its client speaks first.
+                     (multiple-value-bind (named prefix) (egress-client-destination client)
+                       (let* ((tls (egress-tls-prefix-p prefix))
+                              (matcher (funcall inject peer host (if tls "https" "http"))))
+                         (cond ((and tls named (string/= named host)) (report nil))
+                               ((or matcher (and inspection (or tls (egress-http-request-p prefix))))
+                                (relay prefix tls matcher))
+                               ((setf upstream (funcall (egress-proxy-connect proxy) address port))
+                                (report t)
+                                (egress-splice client upstream prefix))
+                               (t (report nil)))))
+                     (progn
+                       (setf upstream (funcall (egress-proxy-connect proxy) address port))
+                       (cond ((null upstream) (report nil))
+                             ;; Whoever speaks first: a server's greeting is relayed as it
+                             ;; comes; a client's first bytes are read, for their SNI.
+                             ((eq (egress-first-readable client upstream) :first)
+                              (multiple-value-bind (named prefix) (egress-client-destination client)
+                                (let ((tls (egress-tls-prefix-p prefix)))
+                                  (cond ((and tls named (string/= named host)) (report nil))
+                                        ((and inspection (or tls (egress-http-request-p prefix)))
+                                         (relay prefix tls nil))
+                                        (t (report t) (egress-splice client upstream (or prefix #())))))))
+                             (t (report t) (egress-splice client upstream #())))))
+              (when upstream (ignore-errors (sb-bsd-sockets:socket-close upstream))))))))))
+
+(defun egress-tls-prefix-p (prefix)
+  "True when PREFIX, a client's first bytes, begins a TLS record."
+  (and prefix (plusp (length prefix)) (= (aref prefix 0) 22)))
+
+(defun egress-http-request-p (prefix)
+  "True when PREFIX, a client's first bytes, begins an HTTP/1.x request line."
+  (and prefix (plusp (length prefix))
+       (let ((space (position 32 prefix :end (min (length prefix) 16))))
+         (and space (plusp space)
+              (every (lambda (byte) (<= 65 byte 90)) (subseq prefix 0 space))))))
 
 (defun start-egress-proxy (&key (address "127.0.0.1") (port 0) decide
                                 (resolve #'egress-default-resolve) (connect #'egress-default-connect) report
-                                inject mint request-report (upstream-verify pure-tls:+verify-required+)
+                                inject inspect mint request-report (upstream-verify pure-tls:+verify-required+)
                                 names dialed)
   "Listen on ADDRESS:PORT and serve captured connections, one thread each. DECIDE, RESOLVE,
-CONNECT, REPORT, NAMES and DIALED are as EGRESS-PROXY documents. Returns the EGRESS-PROXY;
+CONNECT, REPORT, INSPECT, NAMES and DIALED are as EGRESS-PROXY documents. Returns the EGRESS-PROXY;
 its PORT is the bound port (the kernel's choice when PORT is 0)."
   (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
     (setf (sb-bsd-sockets:sockopt-reuse-address socket) t)
@@ -239,7 +264,7 @@ its PORT is the bound port (the kernel's choice when PORT is 0)."
     (let ((proxy (make-egress-proxy :socket socket :address address
                                     :port (nth-value 1 (sb-bsd-sockets:socket-name socket))
                                     :decide decide :resolve resolve :connect connect :report report
-                                    :inject inject :mint mint :request-report request-report
+                                    :inject inject :inspect inspect :mint mint :request-report request-report
                                     :upstream-verify upstream-verify
                                     :names names :dialed (or dialed #'egress-default-dialed))))
       (setf (egress-proxy-thread proxy)
@@ -341,9 +366,10 @@ PORT: forwarded, or dropped by policy with the deciding RULE's name."
     (when rule (setf (gethash "rule" (gethash "l7" flow)) rule))
     flow))
 
-(defun egress-request-flow-object (peer host address port method path code rule)
+(defun egress-request-flow-object (peer host address port method path code rule &optional audit)
   "The flow event for one request the proxy relayed from the Pod at PEER to HOST, naming
-the SecurityProfile rule that injected a credential into it -- never the credential."
+the SecurityProfile rule that injected a credential into it -- never the credential --
+and, AUDIT, the rule it broke that Audit enforcement let through."
   (let ((flow (core-object "verdict" (if (and (integerp code) (< code 400)) "FORWARDED" "DROPPED")
                            "direction" "egress" "protocol" "TCP"
                            "podAddress" peer "peerAddress" (or address "") "peerPort" port
@@ -353,6 +379,7 @@ the SecurityProfile rule that injected a credential into it -- never the credent
                                              "code" (or code 0))
                            "peerName" host)))
     (when rule (setf (gethash "injected" (gethash "l7" flow)) rule))
+    (when audit (setf (gethash "audit" (gethash "l7" flow)) audit))
     flow))
 
 (defun egress-verdict-reporter (report)
@@ -367,7 +394,7 @@ and REPORT, when given, sees it too."
                                           (and rule (gr8s.network::cnp-rule-name rule))))))))
 
 (defun start-node-egress-proxy (decide patterns-for &key (address gr8s.network::+egress-proxy-address+) (port 15443)
-                                                       inject mint report
+                                                       inject inspect mint report
                                                        (upstreams (list (cons gr8s.network::+node-gateway-address+ 53))))
   "Start the node egress proxy on ADDRESS (put on the node gateway interface), steer every
 port there and on the synthetic range to it, and serve the egress DNS gate on its port 53.
@@ -383,12 +410,12 @@ node DNS server, UPSTREAMS. Returns (values proxy steering gate)."
                             (egress-upstream-a-records
                              name (lambda (packet) (cl-dns-proxy:forward-dns-udp packet upstreams 2.0))))))
          (proxy (start-egress-proxy
-                :address address :port port :decide decide :inject inject :mint mint :names names
-                :request-report (lambda (peer host resolved port method path code rule)
+                :address address :port port :decide decide :inject inject :inspect inspect :mint mint :names names
+                :request-report (lambda (peer host resolved port method path code rule &optional audit)
                                   (let ((sink *gateway-flow-sink*))
                                     (when sink
                                       (funcall sink (egress-request-flow-object peer host resolved port method
-                                                                                path code rule)))))
+                                                                                path code rule audit)))))
                 :report (egress-verdict-reporter report))))
     (let ((steering nil))
       (handler-case
@@ -693,26 +720,47 @@ stream of events (SSE) arrives as it is sent."
     (write-sequence body stream)
     (force-output stream)))
 
-(defun egress-relay-http (client host open-upstream inject report)
+(defun egress-stream-splice (client upstream)
+  "Copy CLIENT and UPSTREAM, two octet streams, to each other until either ends: what
+an upgraded connection (a WebSocket) carries after its 101."
+  (let ((other (bt:make-thread (lambda () (ignore-errors (egress-copy-body upstream client :close)))
+                               :name "gr8s egress upgraded")))
+    (ignore-errors (egress-copy-body client upstream :close))
+    (ignore-errors (close upstream))
+    (ignore-errors (bt:join-thread other))))
+
+(defun egress-relay-http (client host open-upstream inject report &key (enforcement :enforce))
   "Relay HTTP/1.1 requests from the CLIENT stream for HOST to the stream
 OPEN-UPSTREAM opens on first use. INJECT maps (method path) to NIL or (values rule-name
 headers value), VALUE NIL when the credential can't be found. REPORT is called with
-(method path code rule-name) for each request."
+(method path code rule-name &optional audit) for each request, AUDIT naming the rule a
+request broke that ENFORCEMENT :audit let through. An upgraded connection (101) is
+spliced from then on."
   (let ((upstream nil))
     (unwind-protect
          (loop
-           (let ((head (egress-read-http-head client)))
+           (let ((head (egress-read-http-head client)) (audit nil))
              (unless head (return))
              (multiple-value-bind (start-line headers) (egress-parse-http-head head)
                (destructuring-bind (&optional method target &rest rest) (cl-ppcre:split " " start-line)
                  (declare (ignore rest))
                  (let* ((host-header (string-downcase (or (egress-header headers "Host") "")))
-                        (header-host (subseq host-header 0 (or (position #\: host-header) (length host-header)))))
-                   (unless (and method target (string= header-host host))
-                     (egress-write-response client 421 "Misdirected Request")
-                     (funcall report method target 421 nil)
+                        (header-host (subseq host-header 0 (or (position #\: host-header) (length host-header))))
+                        (fronted (not (string= header-host host))))
+                   (unless (and method target)
+                     (egress-write-response client 400 "Bad Request")
+                     (funcall report method target 400 nil)
                      (return))
-                   (multiple-value-bind (rule-name names value) (funcall inject method target)
+                   ;; A Host other than the name the connection was admitted by (domain
+                   ;; fronting) is refused, or under Audit reported and never injected.
+                   (when fronted
+                     (if (eq enforcement :audit)
+                         (setf audit (format nil "Host ~A is not ~A" header-host host))
+                         (progn
+                           (egress-write-response client 421 "Misdirected Request")
+                           (funcall report method target 421 nil)
+                           (return))))
+                   (multiple-value-bind (rule-name names value) (and (not fronted) (funcall inject method target))
                      (when (and rule-name (null value))
                        (egress-write-response client 403 "Forbidden: the credential for this request is unavailable")
                        (funcall report method target 403 rule-name)
@@ -735,10 +783,14 @@ headers value), VALUE NIL when the credential can't be found. REPORT is called w
                                    response-headers parsed)
                              (write-sequence response client)
                              (force-output client)
-                             (unless (<= 100 status 199) (return)))))
+                             (unless (and (<= 100 status 199) (/= status 101)) (return)))))
+                       (when (= status 101)
+                         (funcall report method target status rule-name audit)
+                         (egress-stream-splice client upstream)
+                         (return))
                        (setf framing (egress-body-framing response-headers :status status :method method))
                        (egress-copy-body upstream client framing)
-                       (funcall report method target status rule-name)
+                       (funcall report method target status rule-name audit)
                        (when (or (eq framing :close)
                                  (string-equal (or (egress-header headers "Connection") "") "close")
                                  (string-equal (or (egress-header response-headers "Connection") "") "close"))
@@ -758,35 +810,44 @@ already read from it."
              stream)
             stream)))
 
-(defun egress-proxy-relay (proxy client peer host address port prefix tls matcher)
-  "Serve an admitted connection to HOST whose requests MATCHER may inject credentials
-into: terminate the client's TLS (when TLS) with a leaf for HOST, and relay to ADDRESS:PORT,
-over verified TLS when TLS."
+(defun egress-proxy-relay (proxy client peer host address port prefix tls matcher
+                           &key upstream-socket (enforcement :enforce))
+  "Serve an admitted connection to HOST request by request, injecting what MATCHER (or
+NIL) says: terminate the client's TLS (when TLS) with a leaf for HOST, and relay to
+UPSTREAM-SOCKET, or ADDRESS:PORT, over verified TLS when TLS. Without a leaf to present,
+a connection nothing is injected into is relayed undecrypted instead."
   (let ((client-stream nil) (raw nil))
     (unwind-protect
-         (multiple-value-bind (two-way socket-stream) (egress-prefixed-stream prefix client)
-           (setf raw socket-stream)
-           (setf client-stream
-                 (if tls
-                     (multiple-value-bind (chain key) (and (egress-proxy-mint proxy) (funcall (egress-proxy-mint proxy) host))
-                       (unless chain (error "no egress CA on this node to terminate ~A" host))
+         (multiple-value-bind (chain key) (and tls (egress-proxy-mint proxy) (funcall (egress-proxy-mint proxy) host))
+           (when (and tls (null chain))
+             (unless (or matcher (null upstream-socket))
+               (egress-splice client (shiftf upstream-socket nil) prefix)
+               (return-from egress-proxy-relay))
+             (error "no egress CA on this node to terminate ~A" host))
+           (multiple-value-bind (two-way socket-stream) (egress-prefixed-stream prefix client)
+             (setf raw socket-stream)
+             (setf client-stream
+                   (if tls
                        (pure-tls:make-tls-server-stream two-way :certificate chain :key key
-                                                                :alpn-protocols '("http/1.1")))
-                     two-way))
-           (egress-relay-http
-            client-stream host
-            (lambda ()
-              (let ((socket (or (funcall (egress-proxy-connect proxy) address port)
-                                (error "could not connect to ~A:~D" address port))))
-                (if tls
-                    (pure-tls:make-tls-client-stream (egress-socket-stream socket)
-                                                     :hostname host :verify (egress-proxy-upstream-verify proxy)
-                                                     :alpn-protocols '("http/1.1"))
-                    (egress-socket-stream socket))))
-            matcher
-            (lambda (method path code rule)
-              (when (egress-proxy-request-report proxy)
-                (ignore-errors (funcall (egress-proxy-request-report proxy)
-                                        peer host address port method path code rule))))))
+                                                                :alpn-protocols '("http/1.1"))
+                       two-way))
+             (egress-relay-http
+              client-stream host
+              (lambda ()
+                (let ((socket (or (shiftf upstream-socket nil)
+                                  (funcall (egress-proxy-connect proxy) address port)
+                                  (error "could not connect to ~A:~D" address port))))
+                  (if tls
+                      (pure-tls:make-tls-client-stream (egress-socket-stream socket)
+                                                       :hostname host :verify (egress-proxy-upstream-verify proxy)
+                                                       :alpn-protocols '("http/1.1"))
+                      (egress-socket-stream socket))))
+              (or matcher (lambda (method path) (declare (ignore method path)) nil))
+              (lambda (method path code rule &optional audit)
+                (when (egress-proxy-request-report proxy)
+                  (ignore-errors (funcall (egress-proxy-request-report proxy)
+                                          peer host address port method path code rule audit))))
+              :enforcement enforcement)))
+      (when upstream-socket (ignore-errors (sb-bsd-sockets:socket-close upstream-socket)))
       (when client-stream (ignore-errors (close client-stream)))
       (when raw (ignore-errors (close raw))))))

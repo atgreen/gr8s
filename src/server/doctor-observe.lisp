@@ -74,6 +74,22 @@
              (ingress (equal "ingress" (gethash "direction" flow)))
              (policies (coerce (gethash "policies" flow #()) 'list))
              (l7 (gethash "l7" flow)))
+        (when (and l7 (equal "egress" (gethash "direction" flow)))
+          ;; The node egress proxy's: a DNS answer, a connection, or a relayed request,
+          ;; from the Pod to the name it asked for.
+          (return-from format-flow-line
+            (let ((head (format nil "~A ~A: ~A ->" clock (gethash "node" flow "?") pod))
+                  (dropped (equal "DROPPED" (gethash "verdict" flow))))
+              (cond ((equal "dns" (gethash "type" l7))
+                     (format nil "~A DNS ~A ~:[answered~;REFUSED by policy~]" head (gethash "query" l7) dropped))
+                    ((equal "egress" (gethash "type" l7))
+                     (format nil "~A ~A (~A:~A) ~A~@[ by rule ~A~]" head (gethash "host" l7 "?")
+                             (gethash "peerAddress" flow "?") (gethash "peerPort" flow "?")
+                             (gethash "verdict" flow) (gethash "rule" l7)))
+                    (t
+                     (format nil "~A ~A ~A~A ~D~@[ injected ~A~]~@[ AUDIT: ~A~]" head
+                             (gethash "method" l7) (gethash "host" l7) (gethash "path" l7) (gethash "code" l7)
+                             (gethash "injected" l7) (gethash "audit" l7)))))))
         (when l7
           ;; A Gateway request: what was asked, of which backend, and how it went.
           (return-from format-flow-line

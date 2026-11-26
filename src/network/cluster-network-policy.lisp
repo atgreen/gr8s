@@ -325,6 +325,47 @@ policies don't allow is denied (podster-1mzb)."
   (let ((labels (np-pod-labels pod)))
     (and (hash-table-p labels) (nth-value 1 (gethash +gr8-sandbox-label+ labels)) t)))
 
+(defun gr8-sandbox-profile (pod sandbox-profiles namespace-labels)
+  "The SandboxProfile (an object) for gr8 sandbox POD's command: among SANDBOX-PROFILES
+whose spec.commands names it and whose spec.namespaceSelector, if any, matches its
+namespace's labels in NAMESPACE-LABELS, one with a selector before one without, then
+the first by name; else NIL. Chosen by what the node sees, so a Pod can't pick its own."
+  (let ((command (and (gr8-sandbox-pod-p pod) (gethash +gr8-sandbox-label+ (np-pod-labels pod))))
+        (labels (gethash (np-pod-namespace pod) namespace-labels)))
+    (when command
+      (flet ((spec (profile) (gethash "spec" profile (core-object))))
+        (let ((candidates
+                (remove-if-not
+                 (lambda (profile)
+                   (let ((commands (gethash "commands" (spec profile) #()))
+                         (selector (gethash "namespaceSelector" (spec profile))))
+                     (and (vectorp commands) (find command commands :test #'equal)
+                          (or (null selector) (np-selector-matches-p selector labels)))))
+                 sandbox-profiles)))
+          (first (sort candidates
+                       (lambda (a b)
+                         (let ((a-scoped (and (gethash "namespaceSelector" (spec a)) t))
+                               (b-scoped (and (gethash "namespaceSelector" (spec b)) t)))
+                           (if (eq a-scoped b-scoped)
+                               (string< (gethash "name" (gethash "metadata" a)) (gethash "name" (gethash "metadata" b)))
+                               a-scoped))))))))))
+
+(defun gr8-sandbox-inspection (pod sandbox-profiles host &optional (namespace-labels (make-hash-table :test #'equal)))
+  "How the node egress proxy treats gr8 sandbox POD's connection to HOST (podster-wv1w.11):
+NIL to relay it undecrypted, else a plist (:enforcement :enforce|:audit) to terminate its
+TLS and relay each request. A gr8 sandbox is terminated unless its SandboxProfile's
+spec.egress says Passthrough or lists HOST in passthroughHosts; any other Pod is NIL.
+NAMESPACE-LABELS maps a namespace to its labels, for a profile's namespaceSelector."
+  (when (gr8-sandbox-pod-p pod)
+    (let* ((profile (gr8-sandbox-profile pod sandbox-profiles namespace-labels))
+           (egress (and profile (gethash "egress" (gethash "spec" profile (core-object)))))
+           (egress (if (hash-table-p egress) egress (core-object))))
+      (unless (or (equal "Passthrough" (gethash "tls" egress))
+                  (and host
+                       (some (lambda (pattern) (egress-domain-matches-p pattern host))
+                             (coerce (gethash "passthroughHosts" egress #()) 'list))))
+        (list :enforcement (if (equal "Audit" (gethash "enforcement" egress)) :audit :enforce))))))
+
 (defun gr8-sandbox-egress-rule ()
   "The rule after every policy's for a gr8 sandbox: deny what nothing above allowed."
   (make-cnp-rule :name "gr8-sandbox" :action :deny :networks '("0.0.0.0/0" "::/0")

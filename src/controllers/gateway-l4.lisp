@@ -139,8 +139,10 @@
 (defun l4-splice (client-socket backend-socket close-both &optional prefix prefix-end)
   "Splice CLIENT-SOCKET and BACKEND-SOCKET bidirectionally until EOF. PREFIX, if
    given, is bytes already read from the client (the peeked ClientHello) sent to
-   the backend first. When either direction ends, CLOSE-BOTH (idempotent) shuts
-   both sockets so the other copy thread's blocked receive errors out."
+   the backend first. When either direction ends, both sockets are shut down, so
+   the other copy thread's blocked receive returns and each peer sees the end, and
+   CLOSE-BOTH (idempotent) closes them. Closing alone does neither: a socket another
+   thread is receiving on stays open, and its peer waits on it forever."
   ;; Best effort: a backend that closes without reading the replayed ClientHello
   ;; must not abort the splice before its reply is copied back.
   (when (and prefix (plusp (or prefix-end 0)))
@@ -150,13 +152,17 @@
                 do (incf sent (sb-bsd-sockets:socket-send
                                backend-socket (subseq prefix sent prefix-end) (- prefix-end sent)))))
       (error () nil)))
-  (let ((up (bt:make-thread (lambda ()
-                              (l4-copy client-socket backend-socket)
-                              (funcall close-both))
-                            :name "gr8s l4 c->b")))
-    (l4-copy backend-socket client-socket)            ; backend -> client on this thread
-    (funcall close-both)
-    (ignore-errors (bt:join-thread up))))
+  (flet ((end ()
+           (dolist (socket (list client-socket backend-socket))
+             (ignore-errors (sb-bsd-sockets:socket-shutdown socket :direction :io)))
+           (funcall close-both)))
+    (let ((up (bt:make-thread (lambda ()
+                                (l4-copy client-socket backend-socket)
+                                (end))
+                              :name "gr8s l4 c->b")))
+      (l4-copy backend-socket client-socket)            ; backend -> client on this thread
+      (end)
+      (ignore-errors (bt:join-thread up)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Listener.

@@ -115,8 +115,9 @@
 over SCHEME, or NIL when no SecurityProfile selecting it names HOST (podster-wv1w.3). The
 matcher returns (values rule-name headers value), VALUE NIL when the Secret or its key is
 missing, which the proxy refuses rather than send the request without its credential."
-  (destructuring-bind (&optional ip-map specs cluster-policies profiles) (node-runtime-egress-view node-runtime)
-    (declare (ignore specs cluster-policies))
+  (destructuring-bind (&optional ip-map specs cluster-policies profiles sandbox-profiles namespace-labels)
+      (node-runtime-egress-view node-runtime)
+    (declare (ignore specs cluster-policies sandbox-profiles namespace-labels))
     (let* ((pod (and ip-map (gethash peer ip-map)))
            (rules (and pod (gr8s.network::pod-injection-rules pod profiles)))
            (store (node-runtime-store node-runtime)))
@@ -1352,9 +1353,9 @@ the node from starting."
                (lambda (peer host address port)
                  ;; The view's four parts, profiles too: with three, every decision
                  ;; signalled and every captured connection was reset (podster-uevw).
-                 (destructuring-bind (&optional ip-map specs cluster-policies profiles)
+                 (destructuring-bind (&optional ip-map specs cluster-policies profiles sandbox-profiles namespace-labels)
                      (node-runtime-egress-view node-runtime)
-                   (declare (ignore profiles))
+                   (declare (ignore profiles sandbox-profiles namespace-labels))
                    (let ((pod (and ip-map (gethash peer ip-map))))
                      (if pod
                          (gr8s.network::egress-connection-verdict pod specs cluster-policies host address port)
@@ -1364,9 +1365,9 @@ the node from starting."
                  ;; SecurityProfile captures without domain rules resolves as before.
                  ;; One with a hostname allowlist resolves only its names, and to
                  ;; synthetic addresses (podster-wv1w.8).
-                 (destructuring-bind (&optional ip-map specs cluster-policies profiles)
+                 (destructuring-bind (&optional ip-map specs cluster-policies profiles sandbox-profiles namespace-labels)
                      (node-runtime-egress-view node-runtime)
-                   (declare (ignore specs profiles))
+                   (declare (ignore specs profiles sandbox-profiles namespace-labels))
                    (let ((pod (and ip-map (gethash client ip-map))))
                      (if (and pod (gr8s.network::pod-egress-synthetic-p pod cluster-policies))
                          (values (gr8s.network::pod-egress-allowed-domains pod cluster-policies) t)
@@ -1379,6 +1380,15 @@ the node from starting."
                                    (and rule (or (gr8s.network::cnp-rule-name rule) "unnamed")))))
                :inject (lambda (peer host scheme)
                          (node-runtime-egress-injector node-runtime peer host scheme))
+               ;; A gr8 sandbox's TLS is terminated and each request seen, as its
+               ;; SandboxProfile says (podster-wv1w.11).
+               :inspect (lambda (peer host)
+                          (destructuring-bind (&optional ip-map specs cluster-policies profiles sandbox-profiles namespace-labels)
+                              (node-runtime-egress-view node-runtime)
+                            (declare (ignore specs cluster-policies profiles))
+                            (let ((pod (and ip-map (gethash peer ip-map))))
+                              (and pod (gr8s.network::gr8-sandbox-inspection
+                                        pod sandbox-profiles host namespace-labels)))))
                :mint (let ((minter nil) (ca nil))
                        (lambda (host)
                          (multiple-value-bind (key certificate)
@@ -2083,7 +2093,9 @@ A no-op unless the agent is managed with a store and known endpoints."
           ;; Egress capture (podster-wv1w.2): send Pods whose policy names domains
           ;; through the node egress proxy, which decides by this view. Best-effort,
           ;; like the tables above.
-          (setf (node-runtime-egress-view node-runtime) (list ip-map specs cluster-policies profiles))
+          (setf (node-runtime-egress-view node-runtime)
+                (list ip-map specs cluster-policies profiles (list-core-resources store "sandboxprofiles")
+                      (gr8s.network::network-policy-namespace-labels store)))
           (when service-lb
             (gr8s.network::converge-egress-capture
              (gr8s.network::service-lb-dataplane-pin-directory service-lb) endpoints cluster-policies
