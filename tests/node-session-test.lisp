@@ -1841,6 +1841,10 @@ them. A node can't claim another's address or name."
                               (when done (return))))
                    (is (equal (format nil "hi from the tab~%") (trivial-utf-8:utf-8-bytes-to-string output)))
                    (is (eql 3 (gr8s.kubelet::reconciler-exec-session-exit-code reconciler session))))
+                 ;; /metrics reports the node and its Pods.
+                 (let ((metrics (gr8s.server::browser-node-metrics-text)))
+                   (is (search (format nil "gr8s_browser_node_pods{node=\"~A\"} 1" name) metrics))
+                   (is (cl-ppcre:scan "(?m)^gr8s_browser_node_joins_total [1-9]" metrics)))
                  ;; As CRI log lines, which the logs API reads.
                  (is (search " stdout F hello from the tab"
                              (gr8s.runtime:runtime-logs runtime (gr8s.model::pod-uid pod) "web"))))

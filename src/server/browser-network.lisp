@@ -75,7 +75,9 @@ and which addresses its Pods have, by Pod uid."
   (addresses (make-hash-table :test #'equal))
   device fd thread
   ;; The Pods' NetworkPolicy, enforced on every frame (below), or NIL to pass all.
-  (policy nil))
+  (policy nil)
+  ;; Frames relayed to and from the Pods, and those the policy dropped.
+  (frames-in 0) (frames-out 0) (dropped-in 0) (dropped-out 0))
 
 (defun make-browser-network (cidr)
   "The network for Pod CIDR, an IPv4 CIDR: its first host address is the gateway."
@@ -126,8 +128,10 @@ or NIL when this process may not create devices (no CAP_NET_ADMIN), after saying
                            while (and count (browser-network-fd network))
                            do (let ((frame (subseq buffer 0 count))
                                     (policy (browser-network-policy network)))
-                                (when (or (null policy) (browser-policy-admit-p policy network frame :ingress))
-                                  (ignore-errors (funcall send-frame frame)))))))
+                                (if (or (null policy) (browser-policy-admit-p policy network frame :ingress))
+                                    (progn (incf (browser-network-frames-in network))
+                                           (ignore-errors (funcall send-frame frame)))
+                                    (incf (browser-network-dropped-in network)))))))
                  :name (format nil "gr8s browser network ~A" name)))
           network)
       (error (condition)
@@ -141,8 +145,11 @@ or NIL when this process may not create devices (no CAP_NET_ADMIN), after saying
   "Give FRAME, from the browser's Pods, to this host's kernel."
   (let ((fd (browser-network-fd network))
         (policy (browser-network-policy network)))
-    (when (and fd (or (null policy) (browser-policy-admit-p policy network frame :egress)))
-      (write-tap-frame fd frame))))
+    (when fd
+      (if (or (null policy) (browser-policy-admit-p policy network frame :egress))
+          (progn (incf (browser-network-frames-out network))
+                 (write-tap-frame fd frame))
+          (incf (browser-network-dropped-out network))))))
 
 (defun stop-browser-network-device (network)
   "Close NETWORK's device, which removes it and its route."

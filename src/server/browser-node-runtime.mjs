@@ -316,6 +316,8 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
         const result = await pod.vm.exec(file, args, { user: "root" });
         return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode ?? 1 };
       }
+      case "stats":
+        return await nodeStats();
       case "http":
         return await proxyHttp(message);
       case "exec-start":
@@ -475,6 +477,34 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
     }
+  }
+
+  // What the server reports as this node's metrics: each Pod's VM and the tab.
+  // Memory in use is the guest's own MemTotal - MemAvailable, sampled every 15s.
+  async function nodeStats() {
+    const result = { tab: { cores: globalThis.navigator?.hardwareConcurrency ?? null }, pods: {} };
+    const heap = globalThis.performance?.memory?.usedJSHeapSize;
+    if (typeof heap === "number") result.tab.jsHeapBytes = heap;
+    for (const [uid, pod] of pods) {
+      if (!pod.vm) continue;
+      const stats = pod.vm.stats();
+      if (!pod.memorySampledAt || Date.now() - pod.memorySampledAt > 15000) {
+        pod.memorySampledAt = Date.now();
+        try {
+          const meminfo = (await pod.vm.exec("cat", ["/proc/meminfo"], { user: "root" })).stdout;
+          const field = (name) => Number(new RegExp(`^${name}:\\s+(\\d+) kB`, "m").exec(meminfo)?.[1] ?? NaN) * 1024;
+          pod.memoryUsed = field("MemTotal") - field("MemAvailable");
+        } catch {
+          pod.memoryUsed = undefined;
+        }
+      }
+      result.pods[uid] = {
+        uptimeSeconds: stats.uptimeMs / 1000,
+        memoryLimitBytes: memoryMiB * 1048576,
+        ...(Number.isFinite(pod.memoryUsed) ? { memoryUsedBytes: pod.memoryUsed } : {}),
+      };
+    }
+    return result;
   }
 
   // An interactive exec (kubectl exec): the server relays its streams.

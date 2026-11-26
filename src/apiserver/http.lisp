@@ -1558,6 +1558,7 @@ the request for drain diagnostics. Debug tunnels route without a lease."
                         (gr8s.server::datastore-filesystem-metrics-text store)
                         (gr8s.server::datastore-file-metrics-text store)
                         (gr8s.server::workload-generation-metrics-text store)
+                        (gr8s.server::browser-node-metrics-text)
                         (let ((acceptor hunchentoot:*acceptor*))
                           (if (and (typep acceptor 'gr8s-acceptor)
                                    (acceptor-control-plane-metrics-fn acceptor))
