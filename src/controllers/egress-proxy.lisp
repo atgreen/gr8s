@@ -899,7 +899,8 @@ the client got."
 (defun egress-relay-http (client host open-upstream inject report &key (enforcement :enforce) bound-hosts)
   "Relay HTTP/1.1 requests from the CLIENT stream for HOST to the stream
 OPEN-UPSTREAM opens on first use. INJECT maps (method path) to NIL or (values rule-name
-headers value), VALUE NIL when the credential can't be found. REPORT is called with
+headers value refresh swaps), VALUE NIL when the credential can't be found, SWAPS the
+stand-ins to replace wherever the request carries them (swap-stand-ins). REPORT is called with
 (method path code rule-name &optional audit) for each request, AUDIT naming the rule a
 request broke that ENFORCEMENT :audit let through. A request still carrying a stand-in
 credential once its rule (if any) has injected is refused with why, naming the
@@ -930,7 +931,7 @@ from then on."
                            (egress-write-response client 421 "Misdirected Request")
                            (funcall report method target 421 nil)
                            (return))))
-                   (multiple-value-bind (rule-name names value refresh) (and (not fronted) (funcall inject method target))
+                   (multiple-value-bind (rule-name names value refresh swaps) (and (not fronted) (funcall inject method target))
                      (when (and rule-name (null value))
                        (egress-write-response client 403 "Forbidden: the credential for this request is unavailable")
                        (funcall report method target 403 rule-name)
@@ -947,6 +948,16 @@ from then on."
                        (setf headers (append (remove-if (lambda (header) (member (car header) names :test #'string-equal))
                                                         headers)
                                              (mapcar (lambda (name) (cons name value)) names))))
+                     ;; Each credential whose stand-in the request carries, in its place
+                     ;; (podster-wv1w.27); one it carries without a credential is refused.
+                     (when swaps
+                       (multiple-value-bind (swapped applied missing) (gr8s.network::swap-stand-ins headers swaps)
+                         (when missing
+                           (egress-write-response client 403 "Forbidden: the credential for this request is unavailable")
+                           (funcall report method target 403 (first missing))
+                           (return))
+                         (setf headers swapped)
+                         (unless rule-name (setf rule-name (first applied)))))
                      (let ((stand-in (egress-stand-in-header headers)))
                        (when stand-in
                          (let ((reason (format nil "~A carries a gr8 stand-in credential, which no rule injects for ~A ~A~A~:[~;; this Pod's credentials are bound to ~:*~{~A~^, ~}~]"

@@ -102,8 +102,13 @@ profile name), each profile's in written order."
 (defun matching-injection-rule (rules host scheme method path)
   "The first of RULES matching a request for PATH (without its query) by METHOD to HOST
 over SCHEME, or NIL."
+  (first (matching-injection-rules rules host scheme method path)))
+
+(defun matching-injection-rules (rules host scheme method path)
+  "Those of RULES matching a request for PATH (without its query) by METHOD to HOST over
+SCHEME, in order."
   (let ((path (subseq path 0 (or (position #\? path) (length path)))))
-    (find-if (lambda (rule)
+    (remove-if-not (lambda (rule)
                (and (some (lambda (domain) (egress-domain-matches-p domain host)) (injection-rule-domains rule))
                     (or (null (injection-rule-schemes rule)) (member scheme (injection-rule-schemes rule) :test #'equal))
                     (or (null (injection-rule-methods rule))
@@ -116,6 +121,69 @@ over SCHEME, or NIL."
                                       (and (>= (length path) (length value)) (string= value path :end2 (length value))))))
                               (injection-rule-paths rule)))))
              rules)))
+
+;;; Stand-ins (podster-wv1w.27). A credential whose Secret records its stand-in is
+;;; swapped in only where a request carries that stand-in -- in any header, or inside
+;;; Basic auth -- in place of it, as the client wrote it: the stand-in names the
+;;; credential, so a Pod may hold several for one host, and a request without it gets
+;;; none. Its rule's binding still holds. A Secret without one keeps the rule's header
+;;; overwrite, as a SecurityProfile says.
+
+(defparameter +stand-in-annotation+ "gr8s.io/stand-in"
+  "The annotation on a credential's Secret recording the stand-in its Pod holds.")
+
+(defparameter +stand-in-marker+ "gr8s-injected-"
+  "What every recorded stand-in contains, before at least 16 random characters.")
+
+(defun secret-stand-in (secret)
+  "The stand-in SECRET's annotation records, or NIL. Only one holding +STAND-IN-MARKER+
+and 16 characters after it counts: a short one could match text by chance."
+  (let* ((metadata (gethash "metadata" secret))
+         (annotations (and (hash-table-p metadata) (gethash "annotations" metadata)))
+         (stand-in (and (hash-table-p annotations) (gethash +stand-in-annotation+ annotations)))
+         (at (and (stringp stand-in) (search +stand-in-marker+ stand-in))))
+    (and at (>= (- (length stand-in) at (length +stand-in-marker+)) 16) stand-in)))
+
+(defun replace-all (text old new)
+  "TEXT with every OLD replaced by NEW."
+  (with-output-to-string (out)
+    (loop with start = 0
+          for at = (search old text :start2 start)
+          do (write-string text out :start start :end (or at (length text)))
+          while at
+          do (write-string new out)
+             (setf start (+ at (length old))))))
+
+(defun swap-stand-ins (headers swaps)
+  "HEADERS, an alist, with each stand-in of SWAPS -- (stand-in credential rule-name)
+entries -- replaced by its credential wherever it appears, including inside a Basic
+Authorization's decoded user:password. Returns (values headers applied missing): the
+names of the rules swapped in, and of those whose stand-in appeared without a credential."
+  (let ((applied nil) (missing nil))
+    (flet ((swap (text)
+             (dolist (swap swaps text)
+               (destructuring-bind (stand-in credential name) swap
+                 (when (search stand-in text)
+                   (if credential
+                       (progn (setf text (replace-all text stand-in credential))
+                              (pushnew name applied :test #'equal))
+                       (pushnew name missing :test #'equal)))))))
+      (values (mapcar (lambda (header)
+                        (let ((value (cdr header)))
+                          (cons (car header)
+                                (if (and (> (length value) 6) (string-equal "Basic " value :end2 6))
+                                    (let ((decoded (ignore-errors
+                                                    (trivial-utf-8:utf-8-bytes-to-string
+                                                     (cl-base64:base64-string-to-usb8-array
+                                                      (string-trim " " (subseq value 6)))))))
+                                      (if (and decoded (some (lambda (swap) (search (first swap) decoded)) swaps))
+                                          (concatenate 'string "Basic "
+                                                       (cl-base64:usb8-array-to-base64-string
+                                                        (trivial-utf-8:string-to-utf-8-bytes (swap decoded))))
+                                          (swap value)))
+                                    (swap value)))))
+                      headers)
+              (nreverse applied) (nreverse missing)))))
 
 (defun secret-credential (secret key)
   "The credential SECRET (a Secret object) holds: under KEY, or its only data key. Returns

@@ -196,3 +196,26 @@ func TestLoadPolicyFoldsHostsDesktopAndResourcesIntoOptions(t *testing.T) {
 		t.Errorf("options %+v", options)
 	}
 }
+
+func TestEachCredentialGetsItsOwnStandIn(t *testing.T) {
+	policy, err := ParsePolicy([]byte("apiVersion: gr8.gr8s.io/v1alpha1\nkind: Policy\nspec:\n  credentials:\n" +
+		"  - {from: env:A, hosts: [a.example], env: A_TOKEN, prefix: gho_}\n" +
+		"  - {from: env:B, hosts: [a.example], env: B_TOKEN}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.mintStandIns()
+	grant := policy.withGrant(Grant{}, "/h")
+	a, b := grant.Env["A_TOKEN"], grant.Env["B_TOKEN"]
+	if !strings.HasPrefix(a, "gho_"+StandIn+"-") || !strings.HasPrefix(b, StandIn+"-") || a == b ||
+		len(b) != len(StandIn)+1+24 {
+		t.Errorf("stand-ins %q %q", a, b)
+	}
+	if !reflect.DeepEqual(policy.standIns, []string{a, b}) {
+		t.Errorf("recorded %v", policy.standIns)
+	}
+	if _, err := ParsePolicy([]byte("apiVersion: gr8.gr8s.io/v1alpha1\nkind: Policy\nspec:\n  credentials:\n" +
+		"  - {from: env:A, hosts: [a.example], prefix: \"x y\"}\n")); err == nil {
+		t.Error("a bad prefix was accepted")
+	}
+}

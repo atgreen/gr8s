@@ -2,6 +2,7 @@ package client
 
 import (
 	"bufio"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -40,6 +41,9 @@ type Policy struct {
 		Name string `json:"name"`
 	} `json:"metadata"`
 	Spec PolicySpec `json:"spec"`
+	// standIns are the stand-ins this run's value credentials hold, in order
+	// (podster-wv1w.27), minted when the run reads the credentials.
+	standIns []string
 }
 
 // PolicySpec is what a command gets.
@@ -70,9 +74,12 @@ type PolicyCredential struct {
 	Hosts    []string `json:"hosts"`
 	Header   string   `json:"header,omitempty"`   // default authorization
 	Template string   `json:"template,omitempty"` // default "Bearer {{ .Token }}"
-	// Env names a variable the sandbox gets holding a stand-in, for a client that
-	// only sends the header when it has some token.
+	// Env names a variable the sandbox gets holding the credential's stand-in. The
+	// proxy swaps the credential in only where a request carries that stand-in, in
+	// any header or inside Basic auth, as the client wrote it.
 	Env string `json:"env,omitempty"`
+	// Prefix starts the stand-in, for a client that checks a token's shape (gho_).
+	Prefix string `json:"prefix,omitempty"`
 }
 
 // PolicyDesktop withholds what a command gets of the desktop by default.
@@ -86,6 +93,7 @@ var (
 	policyHost   = regexp.MustCompile(`^(\*\.)?[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$`)
 	policyHeader = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 	policyEnv    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	policyPrefix = regexp.MustCompile(`^[A-Za-z0-9_]{0,16}$`)
 	policyToken  = regexp.MustCompile(`\{\{\s*\.Token\s*\}\}`)
 )
 
@@ -139,6 +147,9 @@ func ParsePolicy(raw []byte) (Policy, error) {
 		if credential.Env != "" && !policyEnv.MatchString(credential.Env) {
 			return Policy{}, fmt.Errorf("credentials[%d].env: %q is not a variable name", i, credential.Env)
 		}
+		if !policyPrefix.MatchString(credential.Prefix) {
+			return Policy{}, fmt.Errorf("credentials[%d].prefix: %q is not up to 16 letters, digits and _", i, credential.Prefix)
+		}
 	}
 	for _, list := range [][]string{spec.Home.ReadWrite, spec.Home.ReadOnly, spec.Home.Placeholders} {
 		for _, path := range list {
@@ -176,6 +187,32 @@ func (spec PolicySpec) loginNames() []string {
 		}
 	}
 	return out
+}
+
+// NewStandIn returns a fresh stand-in for one credential: prefix, StandIn, and 24
+// random hex digits, which the proxy matches to the credential's Secret.
+func NewStandIn(prefix string) string {
+	random := make([]byte, 12)
+	if _, err := rand.Read(random); err != nil {
+		panic(err)
+	}
+	return prefix + StandIn + "-" + hex.EncodeToString(random)
+}
+
+// mintStandIns gives each of the policy's value credentials its stand-in.
+func (policy *Policy) mintStandIns() {
+	policy.standIns = nil
+	for _, credential := range policy.Spec.valueCredentials() {
+		policy.standIns = append(policy.standIns, NewStandIn(credential.Prefix))
+	}
+}
+
+// standIn is the stand-in of the policy's i-th value credential.
+func (policy *Policy) standIn(i int) string {
+	if i < len(policy.standIns) {
+		return policy.standIns[i]
+	}
+	return StandIn
 }
 
 // CredentialValue reads a credential's real value on the host from its source.

@@ -200,8 +200,20 @@ the client HTTP/1.1, and most clients fall back to it.
 ## Credentials
 
 The command never holds a real credential. Each real credential lives in a
-Secret. A SecurityProfile binds it to hosts and Pods. The proxy overwrites the
-named header on matching requests with the real value.
+Secret. A SecurityProfile binds it to hosts and Pods.
+
+A policy file's credential gets its own stand-in, such as
+`gr8s-injected-3f9c…`, which gr8 records on its Secret (annotation
+`gr8s.io/stand-in`) and puts in the variable `env` names. The proxy swaps the real
+value in only where a request carries that stand-in. It looks in any header and
+inside `Authorization: Basic`, so `token X`, `Bearer X` and git's
+`user:token` all work, in the form the client wrote. A request without the stand-in
+gets nothing, so one Pod can hold several credentials for the same host. `prefix`
+starts the stand-in for a client that checks a token's shape (`prefix: gho_`).
+
+A Secret without a recorded stand-in, such as a login's or one a SecurityProfile you
+wrote names, works by rule instead: the proxy overwrites the named header on every
+matching request with the real value.
 
 ### Logins
 
@@ -255,8 +267,8 @@ An API key works the same way, with a SecurityProfile rule that targets
 `x-api-key` and a stand-in in the command's environment. See
 [credential injection](design-agent-egress.md#3-credential-injection).
 
-Every stand-in contains `gr8s-injected`, and each one is bound to the hosts its
-rules inject for. A request that would carry a stand-in anywhere else, or on a
+Every stand-in contains `gr8s-injected`, and each credential is bound to the hosts
+its rules inject for. A request that would carry a stand-in anywhere else, or on a
 path no rule covers, gets `403` with a body that says which header, for what
 request, and where the Pod's credentials are bound. Nothing real can leak this
 way, and the client learns why instead of seeing the server's `401`.
@@ -280,7 +292,8 @@ spec:
     hosts: [api.github.com, github.com]
     header: authorization                  # the default
     template: "Bearer {{ .Token }}"        # the default
-    env: GH_TOKEN                          # the sandbox gets a stand-in in $GH_TOKEN
+    env: GH_TOKEN                          # the sandbox gets its stand-in in $GH_TOKEN
+    prefix: gho_                           # optional: the stand-in starts gho_
   home:
     readWrite: [.claude, .claude.json]
     readOnly: [.config/git]

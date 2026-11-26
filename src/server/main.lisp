@@ -4141,9 +4141,10 @@ upstream CRDs.
   injecting the access token and handling the refresh; sandboxed runs see the
   tool's file with stand-ins at the token keys. `--logout NAME`, `--logins`.
   A gr8 policy file (`gr8.gr8s.io/v1alpha1` Policy, client-side) says all a
-  command gets: `hosts`, `credentials` (`from: env:NAME`, `file:PATH#key/path` or `login:NAME`,
-  `hosts`, `header`, `template`, `env` for a stand-in), `home`, `env`, `egress`
-  (as `spec.egress`), `desktop` and `resources`. `gr8 CMD` reads
+  command gets: `hosts`, `credentials` (`from: env:NAME`, `file:PATH#key/path` or
+  `login:NAME`, `hosts`, `header`, `template`, `env` for its own stand-in, which
+  the proxy swaps by value in any header or Basic auth, `prefix`), `home`, `env`,
+  `egress` (as `spec.egress`), `desktop` and `resources`. `gr8 CMD` reads
   `~/.config/gr8/policies/CMD.yaml`, else `.gr8/CMD.yaml` in the working
   directory, or `--policy NAME|FILE`, and creates resources for that run alone
   (a ClusterNetworkPolicy, Secrets and a SecurityProfile owned by the Pod, a

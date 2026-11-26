@@ -695,3 +695,73 @@ request bodies it got. Returns (values stop port bodies)."
       (is (equal "sk-ant-oat-new" (cdr (assoc "accessToken" rotated :test #'equal))))
       (is (equal "sk-ant-ort-new" (cdr (assoc "refreshToken" rotated :test #'equal))))
       (is (assoc "expiresAt" rotated :test #'equal)))))
+
+;;; podster-wv1w.27: per-credential stand-ins, swapped in by value.
+
+(defun egress-test-request-with (stream host path headers)
+  "Send one GET for PATH with HEADERS through STREAM; (values status body)."
+  (write-sequence (gr8s.controllers::egress-http-head-octets
+                   (format nil "GET ~A HTTP/1.1" path) `(("Host" . ,host) ,@headers ("Accept" . "*/*")))
+                  stream)
+  (force-output stream)
+  (multiple-value-bind (status-line headers)
+      (gr8s.controllers::egress-parse-http-head (gr8s.controllers::egress-read-http-head stream))
+    (let* ((length (parse-integer (or (gr8s.controllers::egress-header headers "Content-Length") "0")))
+           (body (make-array length :element-type '(unsigned-byte 8))))
+      (read-sequence body stream)
+      (values (parse-integer (second (cl-ppcre:split " " status-line)))
+              (babel:octets-to-string body :encoding :latin-1)))))
+
+(defparameter +test-stand-in-a+ "gho_gr8s-injected-0123456789abcdef01234567")
+(defparameter +test-stand-in-b+ "gr8s-injected-fedcba9876543210fedcba98")
+
+(defun egress-test-basic (user password)
+  (concatenate 'string "Basic " (cl-base64:usb8-array-to-base64-string
+                                 (trivial-utf-8:string-to-utf-8-bytes (format nil "~A:~A" user password)))))
+
+(test egress-proxy-swaps-each-stand-in-for-its-own-credential
+  (multiple-value-bind (stop upstream) (egress-echo-upstream)
+    (unwind-protect
+         (with-injecting-proxy (port :upstream-port upstream
+                                     :matcher (lambda (method path) (declare (ignore method path))
+                                                (values nil nil nil nil
+                                                        (list (list +test-stand-in-a+ "real-a" "p/a")
+                                                              (list +test-stand-in-b+ "real-b" "p/b")))))
+           (flet ((ask (headers)
+                    (multiple-value-bind (stream socket) (egress-test-client port)
+                      (unwind-protect (egress-test-request-with stream "api.example.test" "/x" headers)
+                        (ignore-errors (sb-bsd-sockets:socket-close socket))))))
+             ;; In place, as the client wrote the header; two credentials for one host.
+             (multiple-value-bind (status body) (ask `(("Authorization" . ,(format nil "token ~A" +test-stand-in-a+))
+                                                       ("X-Other" . ,+test-stand-in-b+)))
+               (is (= 200 status))
+               (is (search "token real-a" body))
+               (is (search "real-b" body))
+               (is (not (search "gr8s-injected" body))))
+             ;; Inside Basic auth, as git sends it.
+             (multiple-value-bind (status body) (ask `(("Authorization" . ,(egress-test-basic "x-access-token" +test-stand-in-b+))))
+               (is (= 200 status))
+               (is (search (egress-test-basic "x-access-token" "real-b") body)))
+             ;; No stand-in, no credential: nothing is injected by host alone.
+             (multiple-value-bind (status body) (ask '(("Authorization" . "token mine")))
+               (is (= 200 status))
+               (is (search "token mine" body))
+               (is (not (search "real-" body))))
+             ;; A stand-in no credential here owns is refused, saying why.
+             (multiple-value-bind (status body) (ask '(("Authorization" . "Bearer gr8s-injected-99999999999999999999")))
+               (is (= 403 status))
+               (is (search "carries a gr8 stand-in credential" body)))))
+      (funcall stop))))
+
+(test egress-proxy-refuses-a-stand-in-whose-credential-is-missing
+  (multiple-value-bind (stop upstream) (egress-echo-upstream)
+    (unwind-protect
+         (with-injecting-proxy (port :upstream-port upstream
+                                     :matcher (lambda (method path) (declare (ignore method path))
+                                                (values nil nil nil nil (list (list +test-stand-in-a+ nil "p/a")))))
+           (multiple-value-bind (stream socket) (egress-test-client port)
+             (unwind-protect
+                  (is (= 403 (egress-test-request-with stream "api.example.test" "/x"
+                                                       `(("Authorization" . ,(format nil "Bearer ~A" +test-stand-in-a+))))))
+               (ignore-errors (sb-bsd-sockets:socket-close socket)))))
+      (funcall stop))))
