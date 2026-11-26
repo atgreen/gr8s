@@ -137,10 +137,26 @@ renderer needs none, and they also drive the display."
               collect (namestring entry))
         #'string<))
 
-(defun make-dri-device-plugin (&key (render-nodes (dri-render-nodes)))
+(defvar *nvidia-device-directory* "/dev/"
+  "Where the proprietary NVIDIA driver's device nodes are; tests point it elsewhere.")
+
+(defun nvidia-device-nodes (&optional (directory *nvidia-device-directory*))
+  "The proprietary NVIDIA driver's device nodes on this node: its control and per-GPU
+nodes, modesetting and unified memory, which its GL, Vulkan and CUDA libraries open
+beside the render node (podster-wv1w.17). NIL without the driver."
+  (let ((shared (loop for name in '("nvidiactl" "nvidia-modeset" "nvidia-uvm" "nvidia-uvm-tools")
+                      for path = (concatenate 'string directory name)
+                      when (probe-file path) collect path))
+        (gpus (loop for entry in (ignore-errors (directory (concatenate 'string directory "nvidia*")))
+                    for name = (file-namestring entry)
+                    when (and (> (length name) 6) (every #'digit-char-p (subseq name 6)))
+                      collect (namestring entry))))
+    (sort (append shared gpus) #'string<)))
+
+(defun make-dri-device-plugin (&key (render-nodes (dri-render-nodes)) (nvidia-nodes (nvidia-device-nodes)))
   "The device plugin built into the agent for RENDER-NODES (podster-wv1w.16), or NIL
 without any: *GR8S-DRI-SLOTS* healthy devices, each of which gives a container every
-render node, read-write."
+render node and NVIDIA-NODES, read-write."
   (when render-nodes
     (make-device-plugin
      :resource *gr8s-dri-resource* :endpoint "built-in"
@@ -153,7 +169,7 @@ render node, read-write."
                       'dp::allocate-response
                       :container-responses
                       (list (make-instance 'dp::container-allocate-response
-                                           :devices (loop for node in render-nodes
+                                           :devices (loop for node in (append render-nodes nvidia-nodes)
                                                           collect (make-instance 'dp::device-spec
                                                                                  :host-path node :container-path node
                                                                                  :permissions "rw"))))))

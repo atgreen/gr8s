@@ -115,6 +115,11 @@ func (config Config) Rules(abi int) []Rule {
 	for _, path := range append(append(append([]string{}, scratchPaths...), config.ReadWrite...), config.Cwd) {
 		rules = append(rules, Rule{Path: path, Access: all})
 	}
+	// The proprietary NVIDIA driver's nodes, when the Pod has them (podster-wv1w.17).
+	nvidia, _ := filepath.Glob("/dev/nvidia*")
+	for _, path := range nvidia {
+		rules = append(rules, Rule{Path: path, Access: all})
+	}
 	// A desktop app keeps state in its runtime directory (dconf, for one), which is
 	// the sandbox's own tmpfs here, holding only the sockets it was given.
 	if runtime := config.RuntimeDir(); runtime != "" {
