@@ -219,3 +219,23 @@ func TestEachCredentialGetsItsOwnStandIn(t *testing.T) {
 		t.Error("a bad prefix was accepted")
 	}
 }
+
+func TestACredentialMayBeBoundToPathsAndMethods(t *testing.T) {
+	policy, err := ParsePolicy([]byte("apiVersion: gr8.gr8s.io/v1alpha1\nkind: Policy\nspec:\n  credentials:\n" +
+		"  - {from: env:A, hosts: [api.github.com], paths: [/repos/atgreen/, =/user], methods: [get, POST]}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule := RunSecurityProfile("gr8", "p", policy.Spec.valueCredentials())["spec"].(map[string]any)["rules"].([]any)[0]
+	match := rule.(map[string]any)["match"].([]any)[0].(map[string]any)
+	if !reflect.DeepEqual(match["paths"], []any{map[string]any{"type": "Prefix", "value": "/repos/atgreen/"},
+		map[string]any{"type": "Exact", "value": "/user"}}) || !reflect.DeepEqual(match["methods"], []any{"GET", "POST"}) {
+		t.Errorf("match %v", match)
+	}
+	for _, bad := range []string{"paths: [repos]", "paths: [\"=user\"]", "methods: [\"GE T\"]"} {
+		if _, err := ParsePolicy([]byte("apiVersion: gr8.gr8s.io/v1alpha1\nkind: Policy\nspec:\n  credentials:\n" +
+			"  - {from: env:A, hosts: [h.example], " + bad + "}\n")); err == nil {
+			t.Errorf("%s was accepted", bad)
+		}
+	}
+}

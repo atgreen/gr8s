@@ -410,11 +410,22 @@
 ;;; podster-wv1w.14: what a gr8 policy creates for one run.
 
 ;; Emitted by gr8's TestEmitLoginProfiles (gr8/internal/client/runpolicy.go).
-(defparameter +ci-run-security-profile+ "{\"apiVersion\":\"agents.kruise.io/v1alpha1\",\"kind\":\"SecurityProfile\",\"metadata\":{\"labels\":{\"app.kubernetes.io/managed-by\":\"gr8\"},\"name\":\"gr8-claude-abcde\",\"namespace\":\"gr8\"},\"spec\":{\"rules\":[{\"actions\":{\"tokenTransformation\":{\"apiKey\":{\"targetHeaders\":{\"names\":[\"authorization\"]},\"value\":{\"template\":\"Bearer {{ .Token }}\"}},\"credentialRef\":{\"secret\":{\"key\":\"token\",\"name\":\"gr8-claude-abcde-credential-0\"}},\"failStrategy\":\"Block\",\"type\":\"ApiKey\"}},\"match\":[{\"domains\":[\"api.github.com\"],\"schemes\":[\"https\"]}],\"name\":\"credential-0\"}],\"selector\":{\"matchLabels\":{\"gr8s.io/gr8-run\":\"gr8-claude-abcde\"}}}}")
+(defparameter +ci-run-security-profile+ "{\"apiVersion\":\"agents.kruise.io/v1alpha1\",\"kind\":\"SecurityProfile\",\"metadata\":{\"labels\":{\"app.kubernetes.io/managed-by\":\"gr8\"},\"name\":\"gr8-claude-abcde\",\"namespace\":\"gr8\"},\"spec\":{\"rules\":[{\"actions\":{\"tokenTransformation\":{\"apiKey\":{\"targetHeaders\":{\"names\":[\"authorization\"]},\"value\":{\"template\":\"Bearer {{ .Token }}\"}},\"credentialRef\":{\"secret\":{\"key\":\"token\",\"name\":\"gr8-claude-abcde-credential-0\"}},\"failStrategy\":\"Block\",\"type\":\"ApiKey\"}},\"match\":[{\"domains\":[\"api.github.com\"],\"methods\":[\"GET\",\"POST\"],\"paths\":[{\"type\":\"Prefix\",\"value\":\"/repos/atgreen/\"},{\"type\":\"Exact\",\"value\":\"/user\"}],\"schemes\":[\"https\"]}],\"name\":\"credential-0\"}],\"selector\":{\"matchLabels\":{\"gr8s.io/gr8-run\":\"gr8-claude-abcde\"}}}}")
 (defparameter +ci-run-sandbox-profile+ "{\"apiVersion\":\"gr8.gr8s.io/v1alpha1\",\"kind\":\"SandboxProfile\",\"metadata\":{\"labels\":{\"app.kubernetes.io/managed-by\":\"gr8\",\"gr8s.io/gr8-run\":\"gr8-claude-abcde\"},\"name\":\"gr8-claude-abcde\"},\"spec\":{\"commands\":[\"claude\"],\"egress\":{\"binaries\":[{\"hosts\":[\"api.github.com\"],\"paths\":[\"/usr/bin/gh\"]}],\"enforcement\":\"Audit\"},\"run\":\"gr8-claude-abcde\"}}")
 
 (test ci-a-policys-run-profiles-are-valid-and-its-own-run-comes-first
   (is (gr8s.resources::normalize-core-resource "securityprofiles" (com.inuoe.jzon:parse +ci-run-security-profile+) "gr8" nil nil))
+  ;; A credential bound to paths and methods (podster-wv1w.29) goes nowhere else.
+  (let ((rules (gr8s.network::security-profile-spec-rules
+                (first (gr8s.network::security-profile-specs-from-objects
+                        (list (com.inuoe.jzon:parse +ci-run-security-profile+)))))))
+    (flet ((matches (method path)
+             (and (gr8s.network::matching-injection-rule rules "api.github.com" "https" method path) t)))
+      (is-true (matches "GET" "/repos/atgreen/gr8s/pulls?state=open"))
+      (is-true (matches "POST" "/user"))
+      (is-false (matches "GET" "/user/repos"))
+      (is-false (matches "GET" "/repos/someone-else/x"))
+      (is-false (matches "DELETE" "/repos/atgreen/gr8s"))))
   (let ((run-profile (gr8s.resources::normalize-core-resource "sandboxprofiles" (com.inuoe.jzon:parse +ci-run-sandbox-profile+)
                                                               nil "gr8-claude-abcde" nil)))
     (flet ((enforcement (run)

@@ -14,7 +14,8 @@ func TestEmitLoginProfiles(t *testing.T) {
 		// What a policy creates for one run (podster-wv1w.14).
 		"run-security-profile.json": RunSecurityProfile("gr8", "gr8-claude-abcde",
 			[]PolicyCredential{{From: "env:GITHUB_TOKEN", Hosts: []string{"api.github.com"}, Header: "authorization",
-				Template: "Bearer {{ .Token }}"}}),
+				Template: "Bearer {{ .Token }}", Paths: []string{"/repos/atgreen/", "=/user"},
+				Methods: []string{"GET", "POST"}}}),
 		"run-sandbox-profile.json": RunSandboxProfile("gr8-claude-abcde", "claude",
 			map[string]any{"enforcement": "Audit", "binaries": []any{map[string]any{"hosts": []any{"api.github.com"},
 				"paths": []any{"/usr/bin/gh"}}}}),
