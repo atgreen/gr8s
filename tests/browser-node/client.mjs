@@ -7,7 +7,7 @@
 //
 //   cd tests/browser-node && npm install && node client.mjs ws://127.0.0.1:8099/socket
 
-import { createKernel, fetchDistro } from "unkernel";
+import { createKernel, fetchDistro, MemoryFs } from "unkernel";
 import { joinCluster } from "../../src/server/browser-node-runtime.mjs";
 
 const url = process.argv[2] ?? "ws://127.0.0.1:8099/socket";
@@ -16,6 +16,7 @@ let last = null;
 const node = joinCluster({
   url,
   createKernel,
+  MemoryFs,
   distro,
   log: (line) => console.log(`${new Date().toISOString()} ${line}`),
   onInfo: (info) => {

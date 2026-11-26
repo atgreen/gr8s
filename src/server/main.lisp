@@ -3416,7 +3416,8 @@ between later ones. An ordinary restart recovers within the first.")
                (destructuring-bind (address port) (getf options :browser-listen)
                  (setf browser-join (start-browser-join-listener virtual-nodes address port
                                                                  :distro (getf options :browser-distro)
-                                                                 :pod-network (not (getf options :disable-agent))))
+                                                                 :pod-network (not (getf options :disable-agent))
+                                                                 :images (merge-pathnames "browser-images/" state-directory)))
                  (format t "gr8s browser nodes join at http://~A:~D/~%" address port)))
              (when (getf options :debug-slynk-port)
                (setf debug-port (start-debug-server (getf options :debug-slynk-port) state-directory

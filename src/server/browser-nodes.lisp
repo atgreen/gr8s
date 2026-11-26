@@ -131,6 +131,9 @@ join listener, which also serves this runtime's exec streams."
   session endpoint
   ;; The node's Pod network (browser-network.lisp), or NIL when it has none.
   (network nil)
+  ;; The server's image cache (browser-images.lisp), or NIL: containers then run in the
+  ;; tab's own root file system.
+  (images nil)
   (execs (make-hash-table :test #'equal :synchronized t))
   ;; "namespace/name" -> uid, for the Pod proxy.
   (names (make-hash-table :test #'equal :synchronized t)))
@@ -159,18 +162,25 @@ the runtime doesn't hold is ignored: the browser can't add Pods of its own."
           (setf (gr8s.runtime::runtime-pod-phase pod) phase)))
       (setf (gr8s.runtime::runtime-pod-status pod) status))))
 
-(defun browser-pod-request (pod)
-  "What the browser needs to run POD: its identity and its spec."
-  (let ((object (gr8s.model::pod-to-object pod)))
+(defun browser-pod-request (pod &optional images)
+  "What the browser needs to run POD: its identity and its spec, a copy, with each
+container's image resolved through IMAGES when there are any."
+  (let* ((object (gr8s.model::pod-to-object pod))
+         (spec (gr8s.resources::copy-core-object (gethash "spec" object))))
+    (when images
+      (loop for container across (concatenate 'vector (gethash "initContainers" spec #())
+                                              (gethash "containers" spec #()))
+            do (setf (gethash "imageInfo" container)
+                     (resolve-browser-image images (gethash "image" container)))))
     (core-object "uid" (gr8s.model::pod-uid pod)
                  "name" (gethash "name" (gethash "metadata" object))
                  "namespace" (gethash "namespace" (gethash "metadata" object))
-                 "spec" (gethash "spec" object))))
+                 "spec" spec)))
 
 (defmethod gr8s.runtime::runtime-ensure ((runtime browser-runtime) pod)
   (let* ((network (browser-runtime-network runtime))
          (address (and network (browser-network-address network (gr8s.model::pod-uid pod))))
-         (request (browser-pod-request pod))
+         (request (browser-pod-request pod (browser-runtime-images runtime)))
          (result (progn
                    (when address
                      (setf (gethash "network" request)
@@ -471,6 +481,8 @@ who can reach the listener reaches those ports, so it is off unless asked for.")
    (pod-network :initarg :pod-network :initform nil :reader browser-join-pod-network
                 :documentation "Whether browser Pods get addresses in their node's Pod CIDR, routed
 to a TAP device on this host (browser-network.lisp). It needs CAP_NET_ADMIN.")
+   (images :initarg :images :initform nil :reader browser-join-images
+           :documentation "The image cache browser Pods' layers come from, or NIL.")
    (sessions :initform (make-hash-table :test #'equal :synchronized t) :reader browser-join-sessions
              :documentation "Each connected browser node's session, by node name.")
    (epochs :initform (make-hash-table :test #'equal :synchronized t) :reader browser-join-epochs
@@ -578,7 +590,8 @@ stops with the session."
                                        :runtime-options (list :runtime "browser" :runtime-object runtime
                                                              :architecture architecture
                                                              :capacity (browser-node-capacity hello)))
-                   (setf (gethash name (browser-join-runtimes acceptor)) runtime)
+                   (setf (gethash name (browser-join-runtimes acceptor)) runtime
+                         (browser-runtime-images runtime) (browser-join-images acceptor))
                    ;; Its Pods' network: the node's Pod CIDR, routed to a device here.
                    (let* ((node (gr8s.controllers::get-node (virtual-node-host-store host) name))
                           (cidr (find-if (lambda (cidr) (not (find #\: cidr)))
@@ -625,6 +638,17 @@ stops with the session."
           ((equal path "/")
            (setf (hunchentoot:content-type*) "text/html; charset=utf-8")
            +browser-node-html+)
+          ((and (uiop:string-prefix-p "/blobs/" path) (browser-join-images acceptor))
+           (let ((file (handler-case (browser-image-layer-file (browser-join-images acceptor) (subseq path 7))
+                         (error (condition)
+                           (format *error-output* "gr8s browser image layer ~A: ~A~%" (subseq path 7) condition)
+                           nil))))
+             (if file
+                 (progn (setf (hunchentoot:header-out :cache-control) "max-age=31536000, immutable")
+                        (hunchentoot:handle-static-file file "application/octet-stream"))
+                 (progn (setf (hunchentoot:return-code*) hunchentoot:+http-not-found+
+                              (hunchentoot:content-type*) "text/plain")
+                        "no such layer"))))
           ((equal path "/browser-node-runtime.mjs")
            (setf (hunchentoot:content-type*) "text/javascript; charset=utf-8")
            +browser-node-runtime-js+)
@@ -676,13 +700,14 @@ to the Pod's PORT, and relay the response."
                   do (setf (hunchentoot:header-out header) (aref pair 1)))
           (cl-base64:base64-string-to-usb8-array (gethash "body" result "")))))))
 
-(defun start-browser-join-listener (nodes address port &key distro pod-proxy pod-network)
+(defun start-browser-join-listener (nodes address port &key distro pod-proxy pod-network images)
   "Listen on ADDRESS:PORT for browsers joining as nodes on NODES, serving the join page and
 DISTRO, the root image file Pods boot from, and with POD-PROXY, HTTP to their Pods. With
 POD-NETWORK, their Pods join the cluster network through this host. Returns the acceptor."
   (hunchentoot:start (make-instance 'browser-join-acceptor
                                     :address address :port port :nodes nodes :pod-proxy pod-proxy
                                     :pod-network pod-network
+                                    :images (and images (make-browser-images images))
                                     :distro (and distro (pathname distro))
                                     :access-log-destination nil
                                     :message-log-destination *error-output*)))

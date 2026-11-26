@@ -527,6 +527,7 @@
                                            (:static-file "browser-node.html")
                                            (:static-file "browser-node-runtime.mjs")
                                            (:file "browser-network")
+                                           (:file "browser-images")
                                            (:file "browser-nodes" :depends-on ("dashboard-agent" "browser-network" "browser-node.html" "browser-node-runtime.mjs"))
                                            (:static-file "dashboard-lisp.html")
                                            (:file "dashboard-lisp" :depends-on ("dashboard-lisp.html" "dashboard-agent"))

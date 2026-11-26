@@ -207,12 +207,13 @@
   async function join() {
     setState("joining", "Joining the cluster…");
     log("loading the Linux kernel for this tab");
-    const { createKernel } = await import(SDK);
+    const { createKernel, MemoryFs } = await import(SDK);
     const socket = new URL("socket", location.href);
     socket.protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const node = joinCluster({
       url: socket.href,
       createKernel,
+      MemoryFs,
       distro: new URL("distro.erofs", location.href).href,
       memoryMiB: 256,
       log,

@@ -60,6 +60,102 @@ function tabId() {
   return id;
 }
 
+// Images (podster-57fv.4): the server resolves each container's image and serves its
+// layers; here they are unpacked, base first, into an in-memory root the guest
+// mounts over 9p, honouring the layers' whiteouts, and the container runs chrooted
+// there. A tar stream is read as it arrives.
+async function* tarEntries(readable) {
+  const reader = readable.getReader();
+  let buffer = new Uint8Array(0);
+  let done = false;
+  const need = async (count) => {
+    while (buffer.length < count && !done) {
+      const chunk = await reader.read();
+      if (chunk.done) done = true;
+      else {
+        const joined = new Uint8Array(buffer.length + chunk.value.length);
+        joined.set(buffer);
+        joined.set(chunk.value, buffer.length);
+        buffer = joined;
+      }
+    }
+    return buffer.length >= count;
+  };
+  const take = (count) => {
+    const out = buffer.subarray(0, count);
+    buffer = buffer.subarray(count);
+    return out;
+  };
+  const text = (bytes) => decoder.decode(bytes.subarray(0, bytes.indexOf(0) < 0 ? bytes.length : bytes.indexOf(0)));
+  const octal = (bytes) => parseInt(text(bytes).trim() || "0", 8);
+  let pax = {};
+  let longName = null;
+  let longLink = null;
+  while (await need(512)) {
+    const header = take(512).slice();
+    if (header.every((b) => b === 0)) break;
+    const size = octal(header.subarray(124, 136));
+    const type = String.fromCharCode(header[156] || 48);
+    const padding = (512 - (size % 512)) % 512;
+    if (!(await need(size))) throw new Error("a layer ended inside a file");
+    await need(size + padding);
+    const data = take(size).slice();
+    take(Math.min(padding, buffer.length));
+    if (type === "x") {
+      for (const line of decoder.decode(data).split("\n")) {
+        const match = /^\d+ ([^=]+)=(.*)$/.exec(line);
+        if (match) pax[match[1]] = match[2];
+      }
+      continue;
+    }
+    if (type === "g") continue;
+    if (type === "L") { longName = text(data); continue; }
+    if (type === "K") { longLink = text(data); continue; }
+    const prefix = text(header.subarray(345, 500));
+    const name = pax.path ?? longName ?? (prefix ? `${prefix}/${text(header.subarray(0, 100))}` : text(header.subarray(0, 100)));
+    const link = pax.linkpath ?? longLink ?? text(header.subarray(157, 257));
+    yield { name, type, mode: octal(header.subarray(100, 108)) & 0o7777, link, data };
+    pax = {};
+    longName = longLink = null;
+  }
+}
+
+async function unpackLayer(fs, response, mediaType) {
+  let body = response.body;
+  if (/gzip/.test(mediaType)) body = body.pipeThrough(new DecompressionStream("gzip"));
+  else if (/zstd/.test(mediaType)) throw new Error("zstd layers aren't supported in a browser node yet");
+  for await (const entry of tarEntries(body)) {
+    const path = "/" + entry.name.replace(/^(\.\/|\/)+/, "").replace(/\/+$/, "");
+    if (path === "/") continue;
+    const slash = path.lastIndexOf("/");
+    const directory = path.slice(0, slash) || "/";
+    const base = path.slice(slash + 1);
+    if (base === ".wh..wh..opq") {
+      if (fs.exists(directory)) for (const name of fs.list(directory)) fs.rm(`${directory === "/" ? "" : directory}/${name}`, { recursive: true, force: true });
+      continue;
+    }
+    if (base.startsWith(".wh.")) {
+      fs.rm(`${directory === "/" ? "" : directory}/${base.slice(4)}`, { recursive: true, force: true });
+      continue;
+    }
+    if (entry.type === "5") {
+      fs.mkdirp(path, { mode: entry.mode || 0o755 });
+      continue;
+    }
+    if (directory !== "/") fs.mkdirp(directory);
+    if (entry.type === "2") {
+      fs.rm(path, { force: true });
+      fs.writeLink(path, entry.link);
+    } else if (entry.type === "1") {
+      const target = "/" + entry.link.replace(/^(\.\/|\/)+/, "");
+      if (fs.exists(target)) fs.writeFile(path, fs.readFile(target), { mode: fs.stat(target)?.mode & 0o7777 });
+    } else if (entry.type === "0" || entry.type === "7") {
+      if (fs.stat(path)?.type === "dir") fs.rm(path, { recursive: true, force: true });
+      fs.writeFile(path, entry.data, { mode: entry.mode || 0o644 });
+    }
+  }
+}
+
 // How much of each container's output is kept for `kubectl logs`.
 const LOG_LIMIT = 1 << 20;
 
@@ -72,7 +168,7 @@ function now() {
  * onInfo receives the server's periodic summary of this node, its Pods and the
  * cluster. Returns { close(), node: Promise<name>, closed: Promise }.
  */
-export function joinCluster({ url, createKernel, distro, memoryMiB = 256, capacity, log = () => {}, onInfo = () => {} }) {
+export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 256, capacity, log = () => {}, onInfo = () => {} }) {
   const pods = new Map(); // uid -> Pod
   const execs = new Map(); // exec id -> { process, pty }
   const socket = new WebSocket(url);
@@ -215,7 +311,8 @@ export function joinCluster({ url, createKernel, distro, memoryMiB = 256, capaci
       case "exec": {
         const pod = pods.get(message.uid);
         if (!pod) throw new Error(`no Pod ${message.uid} here`);
-        const [file, ...args] = message.command;
+        const root = pod.roots?.get(message.container);
+        const [file, ...args] = root ? ["sh", "-c", CHROOT, "chroot", root, "/", ...message.command] : message.command;
         const result = await pod.vm.exec(file, args, { user: "root" });
         return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode ?? 1 };
       }
@@ -261,9 +358,51 @@ export function joinCluster({ url, createKernel, distro, memoryMiB = 256, capaci
     return pod;
   }
 
+  // A container's root: its image, unpacked once and mounted in the Pod's guest.
+  async function containerRoot(pod, spec) {
+    const info = spec.imageInfo;
+    if (!info || !MemoryFs) return null;
+    const root = `/run/gr8s/${spec.name}`;
+    const fs = new MemoryFs();
+    const base = url.replace(/^ws/, "http");
+    for (const layer of info.layers) {
+      const response = await fetch(new URL(`blobs/${layer.digest}`, base));
+      if (!response.ok) throw new Error(`layer ${layer.digest}: HTTP ${response.status}`);
+      await unpackLayer(fs, response, layer.mediaType ?? "");
+    }
+    for (const dir of ["/proc", "/dev", "/tmp", "/etc"]) fs.mkdirp(dir);
+    await pod.vm.exec("mkdir", ["-p", root], { user: "root" });
+    await pod.vm.mount(root, fs);
+    log(`${pod.request.name}/${spec.name}: ${spec.image} unpacked (${info.layers.length} layers)`);
+    return root;
+  }
+
+  // The program and environment Kubernetes runs: command and args over the image's
+  // Entrypoint and Cmd, the spec's environment over the image's.
+  function containerProgram(spec) {
+    const config = spec.imageInfo?.config ?? {};
+    const entrypoint = spec.command ?? config.Entrypoint ?? [];
+    const args = spec.args ?? (spec.command ? [] : config.Cmd ?? []);
+    const env = {};
+    for (const pair of config.Env ?? []) {
+      const at = pair.indexOf("=");
+      if (at > 0) env[pair.slice(0, at)] = pair.slice(at + 1);
+    }
+    for (const e of spec.env ?? []) if (typeof e.value === "string") env[e.name] = e.value;
+    return { argv: [...entrypoint, ...args], env, workingDir: spec.workingDir || config.WorkingDir || "/" };
+  }
+
+  // Run argv in ROOT, chrooted, with /proc and /dev there.
+  const CHROOT = 'R=$1; W=$2; shift 2; mount -t proc proc "$R/proc" 2>/dev/null; mount --bind /dev "$R/dev" 2>/dev/null; ' +
+    'cd "$R$W" 2>/dev/null || cd "$R"; exec chroot "$R" "$@"';
+
   async function startContainer(pod, spec) {
-    const argv = [...(spec.command ?? []), ...(spec.args ?? [])];
-    const env = Object.fromEntries((spec.env ?? []).filter((e) => typeof e.value === "string").map((e) => [e.name, e.value]));
+    if (!pod.roots) pod.roots = new Map();
+    if (!pod.roots.has(spec.name)) pod.roots.set(spec.name, await containerRoot(pod, spec));
+    const root = pod.roots.get(spec.name);
+    const program = containerProgram(spec);
+    const argv = program.argv;
+    const env = program.env;
     const container = pods.get(pod.request.uid)?.containers.get(spec.name) ?? {
       spec,
       log: "",
@@ -274,7 +413,9 @@ export function joinCluster({ url, createKernel, distro, memoryMiB = 256, capaci
     pod.containers.set(spec.name, container);
     container.restartCount += 1;
     const [file, ...args] = argv.length ? argv : ["sh"];
-    const process = await pod.vm.spawn(file, args, { pty: false, user: "root", env, cwd: spec.workingDir || "/" });
+    const process = root
+      ? await pod.vm.spawn("sh", ["-c", CHROOT, "chroot", root, program.workingDir, file, ...args], { pty: false, user: "root", env, cwd: "/" })
+      : await pod.vm.spawn(file, args, { pty: false, user: "root", env, cwd: spec.workingDir || "/" });
     container.process = process;
     container.state = { running: { startedAt: now() } };
     log(`${pod.request.name}/${spec.name} running (pid ${process.pid})`);
@@ -331,7 +472,8 @@ export function joinCluster({ url, createKernel, distro, memoryMiB = 256, capaci
     const pod = pods.get(message.uid);
     if (!pod) throw new Error(`no Pod ${message.uid} here`);
     await pod.starting;
-    const [file, ...args] = message.command;
+    const root = pod.roots?.get(message.container);
+    const [file, ...args] = root ? ["sh", "-c", CHROOT, "chroot", root, "/", ...message.command] : message.command;
     const id = message.exec;
     const output = (channel) => new WritableStream({
       write: (chunk) => send({ op: "exec-output", exec: id, channel, data: toBase64(chunk) }),
