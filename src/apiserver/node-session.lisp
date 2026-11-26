@@ -1091,28 +1091,45 @@ strings, are the members it says can admit the session instead."))
                  :wireguard-endpoints
                  (wireguard-projected-endpoints server source-name node)))
 
+(defun virtual-node-record-p (node)
+  "Whether NODE's agent runs inside a server for containers elsewhere, as a browser node's
+does (podster-57fv): it is no overlay peer of its own."
+  (let ((labels (node-record-labels node)))
+    (and labels (equal "true" (gethash "gr8s.io/virtual" labels)))))
+
+(defun hosted-virtual-pod-cidrs (nodes host-name)
+  "The Pod CIDRs of the virtual nodes among NODES that HOST-NAME carries: their Pods are
+reached through it, so its route holds them too."
+  (loop for node in nodes
+        when (and (virtual-node-record-p node)
+                  (equal host-name (gethash "gr8s.io/virtual-host" (node-record-labels node))))
+          append (coerce (node-record-all-pod-cidrs node) 'list)))
+
 (defun assigned-node-routes (server node-name)
-  "Project every destination Pod CIDR and its authenticated direct or sparse next hop."
+  "Project every destination Pod CIDR and its authenticated direct or sparse next hop. A
+virtual node is no destination itself; its Pod CIDRs ride on the node hosting it."
   (let* ((store (node-grpc-server-store server))
          (wireguard-p (string= "wireguard" (node-grpc-server-overlay-backend server)))
          (source (get-node store node-name))
          (now (funcall (node-grpc-server-clock server))))
-    (when (string= "" (node-record-underlay-address source))
+    (when (or (string= "" (node-record-underlay-address source)) (virtual-node-record-p source))
       (return-from assigned-node-routes nil))
-    (let* ((eligible
+    (let* ((all-nodes (list-nodes store))
+           (eligible
              (remove-if
               (lambda (node)
                 ;; VXLAN peers are direct Pod routes, independent of the
                 ;; agent lease. Existing Pods and sockets survive a restart.
                 ;; WireGuard transit selection retains its readiness fencing.
-                (or (and wireguard-p
+                (or (virtual-node-record-p node)
+                    (and wireguard-p
                          (node-grpc-server-gateway-stability-seconds server)
                          (not (node-record-ready-p node)))
                     (string= "" (node-record-underlay-address node))
                     (string= "" (node-record-pod-cidr node))
                     (and wireguard-p
                          (/= 32 (length (node-record-wireguard-public-key node))))))
-              (copy-list (list-nodes store))))
+              (copy-list all-nodes)))
            (stable-transit
              (if (null (node-grpc-server-gateway-stability-seconds server))
                  (mapcar #'node-record-name eligible)
@@ -1141,7 +1158,8 @@ strings, are the members it says can admit the session instead."))
                    :node-id (node-record-id node)
                    :node-name destination-name
                    :pod-cidr (node-record-pod-cidr node)
-                   :pod-cidrs (coerce (node-record-all-pod-cidrs node) 'list)
+                   :pod-cidrs (append (coerce (node-record-all-pod-cidrs node) 'list)
+                                      (hosted-virtual-pod-cidrs all-nodes destination-name))
                    :underlay-address (node-record-underlay-address node)
                    :region region :zone zone
                    :capacity-score

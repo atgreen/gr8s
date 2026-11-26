@@ -760,7 +760,8 @@ Anything but Disabled needs a read-only mount whose propagation is None."
 (defun node-builtin-labels (node)
   "Return the labels gr8s derives from what NODE actually is."
   (core-object "kubernetes.io/os" "linux"
-               "kubernetes.io/arch" (native-node-architecture)
+               ;; What the node's agent reported: a browser node's is arm64 (podster-57fv).
+               "kubernetes.io/arch" (or (gr8s.model::node-record-agent-architecture node) (native-node-architecture))
                "kubernetes.io/hostname" (node-record-name node)))
 
 (defun node-labels (node)

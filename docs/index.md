@@ -36,7 +36,8 @@ Design notes record the decisions behind the implementation:
 [foreign-cluster networking](design-foreign-cluster-networking.md) (gr8s as a
 standalone CNI and Gateway, validated by the
 [Gateway conformance harness](../deploy/conformance/README.md)),
-[ListenerSets](design-listenersets.md), and
-[selector-scoped kernel tracing](design-gr8s-trace.md).
+[ListenerSets](design-listenersets.md),
+[selector-scoped kernel tracing](design-gr8s-trace.md), and
+[browser nodes](design-browser-nodes.md) (proposed).
 The [Service identity envelope](service-wire-protocol.md) is an archived
 experiment, kept for the record.

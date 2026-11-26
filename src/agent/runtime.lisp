@@ -138,7 +138,7 @@ refresh."
       (loop for (key . value) in tokens
             do (setf (gethash (list namespace name key) (node-runtime-credential-overrides node-runtime))
                      (cons value version))))
-    (let ((sender *credential-rotation-sender*)
+    (let ((sender (credential-rotation-sender (node-runtime-node-name node-runtime)))
           (pod (ignore-errors (get-pod (node-runtime-store node-runtime) pod-namespace pod-name))))
       (when (and sender pod)
         ;; A protobuf map is an alist here, as TOKENS already is.

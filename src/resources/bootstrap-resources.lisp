@@ -686,6 +686,33 @@ lastHeartbeatTime: renewing the lease must not change the object clients see."
              copy))
          requested)))
 
+;;; A Node the server itself operates, such as a browser node (podster-57fv), gets
+;;; its labels and taints from the server rather than through the API.
+(defun set-node-labels-and-taints (store name labels taints)
+  "Merge LABELS (a hash of key -> value; derived labels are left alone) into NAME's
+labels and replace its taints with TAINTS (a vector of taint objects), as an API write
+would: persisted, published, and replicated. Signals NotFound when NAME isn't
+registered. Returns the node record."
+  (with-store-lock (store)
+    (let ((current (get-node-unlocked store name)))
+      (unless current (core-resource-error 404 "NotFound" "nodes \"~A\" not found" name))
+      (let ((updated (copy-node-record current))
+            (merged (copy-core-object (or (node-record-labels current) (core-object))))
+            (builtin (node-builtin-labels current)))
+        (when labels
+          (maphash (lambda (key value)
+                     (unless (nth-value 1 (gethash key builtin)) (setf (gethash key merged) value)))
+                   labels))
+        (setf (node-record-labels updated) merged
+              (node-record-taints updated) (copy-core-object (or taints #())))
+        (let ((old (node-api-object current)))
+          (persist-node store updated)
+          (setf (node-record-labels current) (node-record-labels updated)
+                (node-record-taints current) (node-record-taints updated))
+          (publish-node-change-unlocked store old current)
+          (note-node-desired-change store current)
+          current)))))
+
 (defun write-node-response (store name method)
   "Apply a Node update or patch to its durable labels and annotations."
   (let* ((node (get-node store name)) (input (require-object (node-write-input node method) "Node"))
