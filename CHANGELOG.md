@@ -103,7 +103,10 @@ the Kubernetes API version with a gr8s release suffix (see
 - Egress capture works on a real node (podster-uevw). It validated the service
   load balancer's pinned maps against the CNI policy maps' layouts, so every write
   failed ("incompatible schema"), and native agents never recorded a Pod's network
-  namespace cookie, by which capture names it.
+  namespace cookie, by which capture names it. The proxy's decision read three of
+  the agent's four egress-view parts, so every captured connection signalled and
+  was reset. The proxy now logs its refusals and its connection errors, which it
+  used to swallow.
   Hostname allowlists, credential injection and synthetic DNS did nothing outside
   the unit tests.
 
