@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gr8s browser node</title>
+<style>
+  :root {
+    --bg: #f4f6fa; --panel: #ffffff; --panel-2: #f8f9fc; --fg: #172033; --muted: #5d6779;
+    --faint: #8a93a6; --line: #e2e6ee; --accent: #3b6ef5; --accent-soft: #e8eefe;
+    --ok: #13915f; --ok-soft: #e3f6ee; --warn: #b7791f; --warn-soft: #fdf3e1;
+    --bad: #c4362f; --bad-soft: #fbe9e8; --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --shadow: 0 1px 2px rgba(23, 32, 51, .06), 0 8px 24px rgba(23, 32, 51, .06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1118; --panel: #161a23; --panel-2: #1b202b; --fg: #e7eaf1; --muted: #a0a9ba;
+      --faint: #6f788b; --line: #262c39; --accent: #7aa2ff; --accent-soft: #1d2640;
+      --ok: #3ccf91; --ok-soft: #133024; --warn: #f0b35a; --warn-soft: #33281a;
+      --bad: #ff7a70; --bad-soft: #3a1d1c; --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px rgba(0, 0, 0, .25);
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 24px 16px 48px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; letter-spacing: -.01em; }
+  .logo { width: 28px; height: 28px; border-radius: 8px; background: linear-gradient(135deg, var(--accent), #8b5cf6);
+          display: grid; place-items: center; color: #fff; font-size: 14px; font-weight: 700; }
+  .pill { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; font-size: 13px;
+          font-weight: 600; background: var(--panel); border: 1px solid var(--line); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+  .pill.ready .dot { background: var(--ok); box-shadow: 0 0 0 4px var(--ok-soft); animation: pulse 2s infinite; }
+  .pill.joining .dot { background: var(--warn); }
+  .pill.gone .dot { background: var(--bad); }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 7px transparent; } }
+  .hero { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 24px; box-shadow: var(--shadow);
+          display: grid; grid-template-columns: 1fr auto; gap: 16px; align-items: center; }
+  .eyebrow { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .08em; font-weight: 600; }
+  .node-name { font: 600 clamp(24px, 4vw, 34px)/1.2 var(--mono); margin: 6px 0 10px; word-break: break-all; }
+  .facts { display: flex; flex-wrap: wrap; gap: 8px; }
+  .fact { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 4px 10px; font-size: 13px; color: var(--muted); }
+  .fact b { color: var(--fg); font-weight: 600; }
+  button { font: inherit; font-weight: 600; padding: 10px 16px; border-radius: 10px; border: 1px solid var(--line);
+           background: var(--panel-2); color: var(--fg); cursor: pointer; }
+  button:hover { border-color: var(--bad); color: var(--bad); }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 16px 0; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px; box-shadow: var(--shadow); }
+  .stat .label { color: var(--muted); font-size: 13px; }
+  .stat .value { font-size: 28px; font-weight: 650; letter-spacing: -.02em; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .stat .sub { color: var(--faint); font-size: 12px; }
+  .bar { height: 6px; border-radius: 3px; background: var(--panel-2); margin-top: 10px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--accent); border-radius: 3px; transition: width .4s; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 20px; box-shadow: var(--shadow); margin-top: 16px; }
+  h2 { font-size: 15px; margin: 0 0 14px; display: flex; align-items: center; justify-content: space-between; }
+  h2 small { color: var(--faint); font-weight: 500; font-size: 13px; }
+  .pods { display: grid; gap: 10px; }
+  .pod { border: 1px solid var(--line); border-radius: 12px; padding: 14px; background: var(--panel-2); }
+  .pod-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  .pod-name { font: 600 14px var(--mono); }
+  .pod-name span { color: var(--faint); font-weight: 400; }
+  .badge { font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); }
+  .badge.Running { background: var(--ok-soft); color: var(--ok); }
+  .badge.Pending { background: var(--warn-soft); color: var(--warn); }
+  .badge.Failed { background: var(--bad-soft); color: var(--bad); }
+  .container { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 10px; font-size: 13px; color: var(--muted); }
+  .container code { font-family: var(--mono); color: var(--fg); }
+  .empty { color: var(--muted); text-align: center; padding: 28px 12px; border: 1px dashed var(--line); border-radius: 12px; }
+  .empty code { font-family: var(--mono); font-size: 13px; color: var(--fg); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { font: 12px var(--mono); padding: 3px 8px; border-radius: 6px; background: var(--panel-2); border: 1px solid var(--line); word-break: break-all; }
+  .chip.taint { border-color: var(--warn); color: var(--warn); }
+  pre { margin: 0; max-height: 220px; overflow: auto; font: 12px/1.6 var(--mono); color: var(--muted); white-space: pre-wrap; }
+  footer { color: var(--faint); font-size: 12px; text-align: center; margin-top: 24px; }
+  @media (max-width: 760px) {
+    .stats { grid-template-columns: repeat(2, 1fr); }
+    .grid2, .hero { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand"><div class="logo">g8</div>gr8s</div>
+    <div class="pill joining" id="pill"><span class="dot"></span><span id="state">Joining the cluster…</span></div>
+  </header>
+
+  <div class="hero">
+    <div>
+      <div class="eyebrow">This tab is a Kubernetes node</div>
+      <div class="node-name" id="node">…</div>
+      <div class="facts">
+        <span class="fact">arch <b id="arch">arm64</b></span>
+        <span class="fact">runtime <b>unkernel</b></span>
+        <span class="fact">Pod CIDR <b id="cidr">—</b></span>
+        <span class="fact">up <b id="uptime">0s</b></span>
+      </div>
+    </div>
+    <button id="leave">Leave the cluster</button>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="label">Pods in this tab</div><div class="value" id="here">0</div><div class="sub">each in its own Linux</div></div>
+    <div class="stat"><div class="label">Cluster nodes</div><div class="value" id="nodes">—</div><div class="sub" id="nodes-sub">ready of total</div>
+      <div class="bar"><i id="nodes-bar" style="width:0"></i></div></div>
+    <div class="stat"><div class="label">Browser nodes</div><div class="value" id="browsers">—</div><div class="sub">tabs like this one</div></div>
+    <div class="stat"><div class="label">Pods running</div><div class="value" id="running">—</div><div class="sub" id="running-sub">across the cluster</div>
+      <div class="bar"><i id="running-bar" style="width:0"></i></div></div>
+  </div>
+
+  <section>
+    <h2>Running here <small id="pods-sub"></small></h2>
+    <div class="pods" id="pods">
+      <div class="empty">Nothing scheduled here yet. Pods that tolerate
+        <code>gr8s.io/browser</code> can land on this node:<br><br>
+        <code id="hint">kubectl run hello --image=busybox --overrides=…</code></div>
+    </div>
+  </section>
+
+  <div class="grid2">
+    <section>
+      <h2>Labels &amp; taints</h2>
+      <div class="chips" id="labels"></div>
+    </section>
+    <section>
+      <h2>Activity</h2>
+      <pre id="log"></pre>
+    </section>
+  </div>
+
+  <footer>Closing this tab removes the node; its Pods are rescheduled elsewhere. Workloads here never receive the
+    cluster's secrets. <span id="version"></span></footer>
+</div>
+
+<script type="module">
+  import { joinCluster } from "./browser-node-runtime.mjs";
+  const SDK = "https://cdn.jsdelivr.net/npm/unkernel@0.2.0-261126-fd204d3/dist/web.mjs";
+  const $ = (id) => document.getElementById(id);
+  const esc = (text) => String(text ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  const log = (line) => {
+    const box = $("log");
+    box.textContent += `${new Date().toLocaleTimeString()}  ${line}\n`;
+    box.scrollTop = box.scrollHeight;
+  };
+  const ago = (iso) => {
+    if (!iso) return "";
+    const s = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
+    return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+  };
+  const setState = (kind, text) => { $("pill").className = `pill ${kind}`; $("state").textContent = text; };
+  let created = null;
+  setInterval(() => { if (created) $("uptime").textContent = ago(created); }, 1000);
+
+  function containerState(state) {
+    if (state?.running) return `running ${ago(state.running.startedAt)}`;
+    if (state?.terminated) return `exited ${state.terminated.exitCode} (${state.terminated.reason ?? ""})`;
+    if (state?.waiting) return state.waiting.reason ?? "waiting";
+    return "starting";
+  }
+
+  function render(info) {
+    const { node, cluster, pods } = info;
+    created = node.created || created;
+    $("node").textContent = node.name;
+    $("arch").textContent = node.labels?.["kubernetes.io/arch"] ?? "arm64";
+    $("cidr").textContent = node.podCIDR || "—";
+    if (node.ready) setState("ready", "Ready for Pods"); else setState("joining", "Starting…");
+    $("here").textContent = pods.length;
+    $("nodes").textContent = `${cluster.readyNodes}/${cluster.nodes}`;
+    $("nodes-bar").style.width = `${cluster.nodes ? (100 * cluster.readyNodes) / cluster.nodes : 0}%`;
+    $("browsers").textContent = cluster.browserNodes;
+    $("running").textContent = cluster.runningPods;
+    $("running-sub").textContent = `of ${cluster.pods} Pods in the cluster`;
+    $("running-bar").style.width = `${cluster.pods ? (100 * cluster.runningPods) / cluster.pods : 0}%`;
+    $("version").textContent = cluster.version ? `gr8s ${cluster.version}` : "";
+    $("pods-sub").textContent = pods.length ? `${pods.length} Pod${pods.length === 1 ? "" : "s"}` : "";
+    const hint = `kubectl run hello --image=busybox --overrides='{"spec":{"nodeName":"${node.name}","tolerations":[{"key":"gr8s.io/browser","operator":"Exists"}]}}' -- sh -c 'echo hi; sleep 3600'`;
+    if (!pods.length) {
+      $("pods").innerHTML = `<div class="empty">Nothing scheduled here yet. Pods that tolerate
+        <code>gr8s.io/browser</code> can land on this node:<br><br><code>${esc(hint)}</code></div>`;
+    } else {
+      $("pods").innerHTML = pods.map((pod) => `
+        <div class="pod">
+          <div class="pod-head">
+            <div class="pod-name"><span>${esc(pod.namespace)}/</span>${esc(pod.name)}</div>
+            <span class="badge ${esc(pod.phase)}">${esc(pod.phase)}</span>
+          </div>
+          ${pod.containers.map((c) => `
+            <div class="container"><span>container <code>${esc(c.name)}</code></span>
+              <span>image <code>${esc(c.image)}</code></span>
+              <span>${esc(containerState(c.state))}</span>
+              <span>restarts <code>${esc(c.restartCount)}</code></span></div>`).join("")}
+        </div>`).join("");
+    }
+    const labels = Object.entries(node.labels ?? {}).map(([k, v]) => `<span class="chip">${esc(k)}=${esc(v)}</span>`);
+    const taints = (node.taints ?? []).map((t) => `<span class="chip taint">${esc(t.key)}=${esc(t.value ?? "")}:${esc(t.effect)}</span>`);
+    $("labels").innerHTML = [...taints, ...labels].join("");
+  }
+
+  async function join() {
+    setState("joining", "Joining the cluster…");
+    log("loading the Linux kernel for this tab");
+    const { createKernel } = await import(SDK);
+    const socket = new URL("socket", location.href);
+    socket.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    const node = joinCluster({
+      url: socket.href,
+      createKernel,
+      distro: new URL("distro.erofs", location.href).href,
+      memoryMiB: 256,
+      log,
+      onInfo: render,
+    });
+    $("leave").onclick = () => node.close();
+    const name = await node.node;
+    $("node").textContent = name;
+    log(`this tab is node ${name}`);
+    await node.closed;
+    setState("gone", "Disconnected");
+    log("left the cluster; reload to join again");
+    $("leave").textContent = "Join again";
+    $("leave").onclick = () => location.reload();
+  }
+  join().catch((error) => { setState("gone", "Couldn't join"); log(String(error?.message ?? error)); });
+</script>
+</body>
+</html>

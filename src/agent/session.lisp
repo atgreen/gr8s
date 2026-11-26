@@ -126,10 +126,21 @@
   ;; The last complete snapshot received, which the server's next delta changes.
   received)
 
-(defvar *credential-rotation-sender* nil
-  "While the node session is up, a function sending a CREDENTIAL-ROTATION to the server,
-which writes the tokens an OAuth refresh returned into their Secret (podster-kn03);
-NIL between sessions, when the node keeps them until a refresh comes again.")
+(defvar *credential-rotation-senders* (make-hash-table :test #'equal :synchronized t)
+  "By node name, while that node's session is up, a function sending a
+CREDENTIAL-ROTATION to the server, which writes the tokens an OAuth refresh returned into
+their Secret (podster-kn03); absent between sessions, when the node keeps them until a
+refresh comes again. One process can run several nodes' agents (podster-57fv), so each
+has its own.")
+
+(defun credential-rotation-sender (node-name)
+  "The function sending NODE-NAME's credential rotations, or NIL between its sessions."
+  (gethash node-name *credential-rotation-senders*))
+
+(defvar *agent-architectures* (make-hash-table :test #'equal :synchronized t)
+  "By node name, the architecture an agent in this process reports for its node when not
+this executable's: a browser node's agent runs here but its containers are arm64
+(podster-57fv).")
 
 (defstruct pending-credential-token
   response
@@ -892,7 +903,7 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
                (funcall credential-token-function-setter
                         (lambda (pod audience required optional)
                           (request-agent-credential-token session pod audience required optional))))
-             (setf *credential-rotation-sender*
+             (setf (gethash node-name *credential-rotation-senders*)
                    (lambda (rotation) (send-agent-session-envelope session :credential-rotation rotation)))
              (send-agent-session-envelope
               session :hello
@@ -904,7 +915,8 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
                                   #())
                               :boot-id (generate-uid)
                               :agent-version (gr8s.foundation::kubernetes-git-version)
-                              :agent-architecture (gr8s.resources::native-node-architecture)
+                              :agent-architecture (or (gethash node-name *agent-architectures*)
+                                                      (gr8s.resources::native-node-architecture))
                               :underlay-address
                               (or underlay-address (node-channel-underlay-address channel))
                               :capabilities (node-session-capabilities capabilities gateway-config-handler one-shot-p)
@@ -1011,7 +1023,7 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
                                  session envelope identity identity-path
                                  apply-snapshot operation-handler snapshot-worker)))))))))
       (finish-session)
-      (setf *credential-rotation-sender* nil)
+      (remhash node-name *credential-rotation-senders*)
       (when credential-token-function-setter
         (funcall credential-token-function-setter nil))
       (stop-agent-snapshot-worker snapshot-worker)

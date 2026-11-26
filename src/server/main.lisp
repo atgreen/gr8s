@@ -374,6 +374,15 @@ registry serving a cert-manager certificate from the cluster's ca issuer."
                      ((string= option "--node-name")
                       (setf (getf options :node-name)
                             (ensure-valid-node-name value)))
+                     ((string= option "--browser-listen")
+                      (multiple-value-bind (host port) (parse-agent-server value)
+                        (setf (getf options :browser-listen) (list host port))))
+                     ((string= option "--browser-distro")
+                      (unless (probe-file value) (error "--browser-distro ~A does not exist" value))
+                      (setf (getf options :browser-distro) value))
+                     ((string= option "--virtual-node")
+                      (setf (getf options :virtual-nodes)
+                            (append (getf options :virtual-nodes) (list (ensure-valid-node-name value)))))
                      ((string= option "--runtime")
                       (unless (member value '("containerd" "fake")
                                       :test #'string=)
@@ -2392,6 +2401,9 @@ needs no shell/coreutils/util-linux. Returns 0."
    configured socket and MANAGER is NIL; any other runtime is the fake runtime
    with MANAGER NIL."
   (cond
+    ;; A runtime made for the agent, such as a browser node's (podster-57fv).
+    ((getf options :runtime-object)
+     (values (getf options :runtime-object) nil))
     ((string= (getf options :runtime) "containerd")
      (if (string= (getf options :containerd-mode) "managed")
          (let* ((state-directory
@@ -2780,6 +2792,9 @@ alongside the LAN primary and 127.0.0.1 (podster-6ls)."
       ;; Run synchronously so serve's top-level error handler prints one concise
       ;; diagnostic instead of an unhandled backtrace from the local-agent thread.
       (ensure-kubelet-endpoints-available :command "serve"))
+    (if (getf options :architecture)
+        (setf (gethash node-name gr8s.agent::*agent-architectures*) (getf options :architecture))
+        (remhash node-name gr8s.agent::*agent-architectures*))
     (setf (local-node-agent-thread worker)
           (bt:make-thread
            (lambda ()
@@ -3230,6 +3245,8 @@ between later ones. An ordinary restart recovers within the first.")
          (ha nil)
          (memory-monitor nil)
          (local-agent nil)
+         (virtual-nodes nil)
+         (browser-join nil)
          (pki-authority-observer nil)
          (kubeconfig-path nil))
     (setf *shutdown-requested* nil)
@@ -3383,6 +3400,18 @@ between later ones. An ordinary restart recovers within the first.")
                       :session-endpoints (when ha
                                            (ha-control-plane-node-session-endpoints
                                             ha (getf options :node-port))))))
+             ;; Virtual nodes: agents this process runs for nodes whose containers
+             ;; live elsewhere (docs/design-browser-nodes.md).
+             (when (or (getf options :virtual-nodes) (getf options :browser-listen))
+               (setf virtual-nodes
+                     (make-virtual-node-host store node-server pki (merge-pathnames "virtual-nodes/" state-directory)))
+               (dolist (name (getf options :virtual-nodes))
+                 (start-virtual-node virtual-nodes name)))
+             (when (getf options :browser-listen)
+               (destructuring-bind (address port) (getf options :browser-listen)
+                 (setf browser-join (start-browser-join-listener virtual-nodes address port
+                                                                 :distro (getf options :browser-distro)))
+                 (format t "gr8s browser nodes join at http://~A:~D/~%" address port)))
              (when (getf options :debug-slynk-port)
                (setf debug-port (start-debug-server (getf options :debug-slynk-port) state-directory
                                                     :store store :reconciler reconciler)))
@@ -3557,6 +3586,8 @@ between later ones. An ordinary restart recovers within the first.")
       (when pki-authority-observer
         (gr8s.resources::remove-pki-authority-observer
          store pki-authority-observer))
+      (when browser-join (ignore-errors (hunchentoot:stop browser-join :soft nil)))
+      (when virtual-nodes (stop-virtual-nodes virtual-nodes))
       (when local-agent (stop-local-node-agent local-agent))
       (when ha (stop-ha-control-plane ha))
       (when node-server
@@ -4388,6 +4419,9 @@ No HA API may start from member-local certificate state before this converges."
                         ("--listen IPV4" "API listen address") ("--port PORT" "API port")
                         ("--node-port PORT" "Agent supervisor port") ("--node-name NAME" "Node name")
                         ("--disable-agent" "Run only the control plane")
+                        ("--browser-listen HOST:PORT" "Serve the browser-node join page and sessions there (podster-57fv)")
+                        ("--browser-distro FILE" "The root image (erofs) browser nodes boot Pods from")
+                        ("--virtual-node NAME" "Also run a virtual node NAME in this process on the fake runtime (repeatable; podster-57fv)")
                         ("--raft-init" "Found an HA control-plane cluster")
                         ("--cluster-reset" "Rewrite HA membership to this member alone (quorum lost forever)")
                         ("--join HOST:PORT" "Join an HA control-plane cluster through a member's Raft address")

@@ -1614,6 +1614,149 @@ them. A node can't claim another's address or name."
         (when worker (gr8s.server::stop-local-node-agent worker))
         (gr8s.apiserver::stop-node-grpc-server server)))))
 
+(test virtual-nodes-run-in-the-server-tainted-from-the-start
+  ;; podster-57fv.1: a browser node's kubelet half is an in-process agent. Two run in
+  ;; one server, each with its own lease and Pods, labelled and tainted before they
+  ;; can be Ready.
+  (with-temporary-store (store path)
+    (let* ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" path)))
+           (server (gr8s.apiserver::start-node-grpc-server store :host "127.0.0.1" :port 0 :pki pki))
+           (host (gr8s.server::make-virtual-node-host store server pki (merge-pathnames "virtual/" path)))
+           (taints (vector (gr8s.resources::core-object "key" "gr8s.io/browser" "value" "true"
+                                                        "effect" "NoSchedule")))
+           (runtime (gr8s.controllers::make-control-plane-runtime store server))
+           (reconciler (make-reconciler store runtime)))
+      (flet ((ready-p (name)
+               (handler-case (gr8s.model::node-record-ready-p (gr8s.controllers::get-node store name))
+                 (gr8s.model::kubernetes-error () nil))))
+        (unwind-protect
+             (progn
+               (dolist (name '("vn-a" "vn-b"))
+                 (gr8s.server::start-virtual-node
+                  host name :labels (gr8s.resources::core-object "gr8s.io/browser" "true") :taints taints))
+               (is (equal '("vn-a" "vn-b") (gr8s.server::virtual-node-names host)))
+               (is-true (wait-until (lambda () (and (ready-p "vn-a") (ready-p "vn-b"))) :timeout 20))
+               (let ((node (gr8s.controllers::get-node store "vn-b")))
+                 (is (equal "true" (gethash "gr8s.io/virtual" (gr8s.model::node-record-labels node))))
+                 (is (equal "true" (gethash "gr8s.io/browser" (gr8s.model::node-record-labels node))))
+                 (is (equal "gr8s.io/browser" (gethash "key" (aref (gr8s.model::node-record-taints node) 0)))))
+               (signals error (gr8s.server::start-virtual-node host "vn-a"))
+               ;; The taint keeps an ordinary Pod off them; one tolerating it runs.
+               (let ((plain (create-pod store (parse-pod *valid-pod-json*)))
+                     (tolerant (create-pod
+                                store
+                                (parse-pod
+                                 (cl-ppcre:regex-replace
+                                  "\\{\"containers\""
+                                  (cl-ppcre:regex-replace "\"name\":\"hello\"" *valid-pod-json* "\"name\":\"tolerant\"")
+                                  "{\"nodeSelector\":{\"kubernetes.io/hostname\":\"vn-b\"},\"tolerations\":[{\"key\":\"gr8s.io/browser\",\"operator\":\"Exists\",\"effect\":\"NoSchedule\"}],\"containers\"")))))
+                 (reconcile-pod reconciler "default" "hello")
+                 (reconcile-pod reconciler "default" "tolerant")
+                 (is-true (wait-until (lambda () (string= "Running" (gr8s.controllers::pod-scheduling-phase store tolerant)))
+                                      :timeout 20))
+                 (is (equal "vn-b" (gr8s.model::pod-node-name (get-pod store "default" "tolerant"))))
+                 (is (not (equal "Running" (gr8s.controllers::pod-scheduling-phase store plain)))))
+               (is-true (gr8s.server::stop-virtual-node host "vn-a"))
+               (is (equal '("vn-b") (gr8s.server::virtual-node-names host)))
+               (is-false (gr8s.server::stop-virtual-node host "vn-a")))
+          (gr8s.server::stop-virtual-nodes host)
+          (gr8s.apiserver::stop-node-grpc-server server))))))
+
+(defun browser-node-test-connect (port)
+  "Open a WebSocket to the browser-join listener on PORT, as a browser would."
+  (let* ((socket (usocket:socket-connect "127.0.0.1" port :element-type '(unsigned-byte 8)))
+         (stream (usocket:socket-stream socket)))
+    (write-sequence (trivial-utf-8:string-to-utf-8-bytes
+                     (format nil "GET /socket HTTP/1.1~C~CHost: 127.0.0.1~C~CUpgrade: websocket~C~CConnection: Upgrade~C~CSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==~C~CSec-WebSocket-Version: 13~C~C~C~C"
+                             #\Return #\Newline #\Return #\Newline #\Return #\Newline #\Return #\Newline
+                             #\Return #\Newline #\Return #\Newline #\Return #\Newline))
+                    stream)
+    (finish-output stream)
+    (values stream socket
+            (gr8s.protocol::parse-http-response-head (gr8s.protocol::read-http-response-head stream)))))
+
+(defun browser-node-test-send (stream object)
+  (gr8s.protocol::write-websocket-frame stream 1 (gr8s.resources:stringify-to-utf-8-bytes object) :masked-p t)
+  (finish-output stream))
+
+(defun browser-node-test-read (stream)
+  (multiple-value-bind (opcode payload) (gr8s.protocol::read-websocket-frame stream)
+    (and (= opcode 1) (com.inuoe.jzon:parse payload))))
+
+(test a-browser-joins-as-a-tainted-node-and-runs-a-pod
+  ;; podster-57fv.2: a browser's session becomes a node whose agent runs here; the
+  ;; browser (a stand-in speaking its protocol) only runs the containers.
+  (with-temporary-store (store path)
+    (let* ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" path)))
+           (server (gr8s.apiserver::start-node-grpc-server store :host "127.0.0.1" :port 0 :pki pki))
+           (host (gr8s.server::make-virtual-node-host store server pki (merge-pathnames "virtual/" path)))
+           (listener (gr8s.server::start-browser-join-listener host "127.0.0.1" 0))
+           (runtime (gr8s.controllers::make-control-plane-runtime store server))
+           (reconciler (make-reconciler store runtime))
+           (socket nil) (browser nil) (asked '()))
+      (unwind-protect
+           (multiple-value-bind (stream connection status)
+               (browser-node-test-connect (hunchentoot:acceptor-port listener))
+             (setf socket connection)
+             (is (= 101 status))
+             (browser-node-test-send stream (gr8s.resources::core-object "op" "hello" "arch" "arm64"))
+             (let* ((welcome (browser-node-test-read stream))
+                    (name (gethash "node" welcome)))
+               (is (equal "welcome" (gethash "op" welcome)))
+               (is-true (wait-until (lambda () (handler-case (gr8s.model::node-record-ready-p (gr8s.controllers::get-node store name))
+                                                 (gr8s.model::kubernetes-error () nil)))
+                                    :timeout 20))
+               (let ((labels (gr8s.kubelet::node-labels (gr8s.controllers::get-node store name))))
+                 (is (equal "arm64" (gethash "kubernetes.io/arch" labels)))
+                 (is (equal "true" (gethash "gr8s.io/browser" labels))))
+               ;; The browser answers what the node's agent asks of it.
+               (setf browser
+                     (bt:make-thread
+                      (lambda ()
+                        (handler-case
+                            (loop for request = (browser-node-test-read stream)
+                                  while request
+                                  do (push (gethash "op" request) asked)
+                                     (let ((op (gethash "op" request)) (id (gethash "id" request)))
+                                       (browser-node-test-send
+                                        stream
+                                        (cond ((equal op "ensure")
+                                               (let ((uid (gethash "uid" (gethash "pod" request))))
+                                                 (gr8s.resources::core-object
+                                                  "id" id "result"
+                                                  (gr8s.resources::core-object
+                                                   "status" (com.inuoe.jzon:parse
+                                                             (format nil "{\"phase\":\"Running\",\"containerStatuses\":[{\"name\":\"web\",\"ready\":true,\"restartCount\":0,\"image\":\"busybox\",\"imageID\":\"\",\"containerID\":\"browser://~A/web\",\"started\":true,\"state\":{\"running\":{\"startedAt\":\"2026-11-26T00:00:00Z\"}}}]}" uid))))))
+                                              ((equal op "logs")
+                                               (gr8s.resources::core-object "id" id "result" (gr8s.resources::core-object "text" (format nil "hello from the tab~%"))))
+                                              (t (gr8s.resources::core-object "id" id "result" (gr8s.resources::core-object)))))))
+                          (error () nil)))
+                      :name "test browser"))
+               (let ((pod (create-pod
+                           store
+                           (parse-pod
+                            (cl-ppcre:regex-replace
+                             "\\{\"containers\""
+                             *valid-pod-json*
+                             (format nil "{\"nodeSelector\":{\"kubernetes.io/hostname\":\"~A\"},\"tolerations\":[{\"key\":\"gr8s.io/browser\",\"operator\":\"Exists\"}],\"containers\"" name))))))
+                 (reconcile-pod reconciler "default" "hello")
+                 (is-true (wait-until (lambda () (string= "Running" (gr8s.controllers::pod-scheduling-phase store pod)))
+                                      :timeout 20))
+                 (is (equal name (gr8s.model::pod-node-name (get-pod store "default" "hello"))))
+                 (is (member "ensure" asked :test #'equal))
+                 ;; As CRI log lines, which the logs API reads.
+                 (is (search " stdout F hello from the tab"
+                             (gr8s.runtime:runtime-logs runtime (gr8s.model::pod-uid pod) "web"))))
+               ;; The browser goes: so does its node.
+               (usocket:socket-close socket)
+               (setf socket nil)
+               (is-true (wait-until (lambda () (null (gr8s.server::virtual-node-names host))) :timeout 30))))
+        (when socket (ignore-errors (usocket:socket-close socket)))
+        (when browser (ignore-errors (bt:join-thread browser)))
+        (hunchentoot:stop listener)
+        (gr8s.server::stop-virtual-nodes host)
+        (gr8s.apiserver::stop-node-grpc-server server)))))
+
 (test control-plane-logs-come-from-the-assigned-remote-agent
   (with-temporary-store (store path)
     (gr8s.controllers::register-node

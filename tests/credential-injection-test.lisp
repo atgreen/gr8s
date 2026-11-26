@@ -398,8 +398,11 @@
                 (secret (com.inuoe.jzon:parse "{\"metadata\":{\"name\":\"login-claude\",\"namespace\":\"gr8\",\"resourceVersion\":\"5\"},
                                                 \"data\":{\"accessToken\":\"b2xk\"}}"))
                 (sent '()))
-           (let ((gr8s.agent::*credential-rotation-sender* (lambda (rotation) (push rotation sent))))
-             (gr8s.agent::note-refreshed-credentials runtime "gr8" "gone" secret '(("accessToken" . "new"))))
+           (let ((node (gr8s.agent::node-runtime-node-name runtime)))
+             (setf (gethash node gr8s.agent::*credential-rotation-senders*) (lambda (rotation) (push rotation sent)))
+             (unwind-protect
+                  (gr8s.agent::note-refreshed-credentials runtime "gr8" "gone" secret '(("accessToken" . "new")))
+               (remhash node gr8s.agent::*credential-rotation-senders*)))
            (is (equal "new" (gr8s.agent::node-runtime-credential runtime secret "accessToken")))
            ;; The Pod isn't in this node's store, so nothing could be sent for it.
            (is (null sent))

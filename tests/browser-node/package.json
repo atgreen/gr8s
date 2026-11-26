@@ -1,0 +1,6 @@
+{
+  "name": "gr8s-browser-node-test",
+  "private": true,
+  "type": "module",
+  "dependencies": { "unkernel": "0.2.0-261126-fd204d3" }
+}
