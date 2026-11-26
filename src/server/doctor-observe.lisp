@@ -83,9 +83,9 @@
               (cond ((equal "dns" (gethash "type" l7))
                      (format nil "~A DNS ~A ~:[answered~;REFUSED by policy~]" head (gethash "query" l7) dropped))
                     ((equal "egress" (gethash "type" l7))
-                     (format nil "~A ~A (~A:~A) ~A~@[ by rule ~A~]" head (gethash "host" l7 "?")
+                     (format nil "~A ~A (~A:~A) ~A~@[ by rule ~A~]~@[ from ~A~]~@[ AUDIT: ~A~]" head (gethash "host" l7 "?")
                              (gethash "peerAddress" flow "?") (gethash "peerPort" flow "?")
-                             (gethash "verdict" flow) (gethash "rule" l7)))
+                             (gethash "verdict" flow) (gethash "rule" l7) (gethash "process" l7) (gethash "audit" l7)))
                     (t
                      (format nil "~A ~A ~A~A ~D~@[ injected ~A~]~@[ AUDIT: ~A~]" head
                              (gethash "method" l7) (gethash "host" l7) (gethash "path" l7) (gethash "code" l7)

@@ -148,6 +148,50 @@ refresh."
                                           :namespace namespace :secret-name name
                                           :pod-name pod-name :pod-uid (pod-uid pod) :tokens values))))))))
 
+(defun node-runtime-pod-pids (node-runtime namespace name)
+  "The processes of the Pod NAMESPACE/NAME on this node: those in its containers'
+cgroups, which an exec into a container joins. NIL when none can be read."
+  (let* ((store (node-runtime-store node-runtime))
+         (pod (ignore-errors (get-pod store namespace name)))
+         (status (and pod (gr8s.controllers::pod-observed-status store pod))))
+    (loop for container across (if (hash-table-p status) (gethash "containerStatuses" status #()) #())
+          for id = (let ((full (gethash "containerID" container "")))
+                     (subseq full (let ((at (search "://" full))) (if at (+ at 3) 0))))
+          for directory = (and (plusp (length id)) (ignore-errors (gr8s.kubelet::find-container-cgroup id)))
+          for procs = (and directory
+                           (ignore-errors
+                            (uiop:read-file-string
+                             (format nil "~A~A/cgroup.procs" gr8s.kubelet::*cgroup-root* (string-left-trim "/" directory)))))
+          append (loop for line in (and procs (uiop:split-string procs :separator '(#\Newline)))
+                       for pid = (parse-integer line :junk-allowed t)
+                       when pid collect pid))))
+
+(defun gr8-sandbox-program-path (path)
+  "PATH, a gr8 sandbox's program as the node reads it, as the sandbox sees it: the
+sandbox runs in the host's / mounted at /host in its Pod, which the node's view of
+/proc/PID/exe shows."
+  (if (and (> (length path) 6) (string= "/host/" path :end2 6)) (subseq path 5) path))
+
+(defun node-runtime-binary-verdict (node-runtime peer peer-port host)
+  "Whether the program in the Pod at PEER that opened the connection from PEER-PORT may
+reach HOST (podster-wv1w.13). Returns (values allowed-p reason executables enforcement)
+for a gr8 sandbox, its programs nearest first; T for any other Pod."
+  (destructuring-bind (&optional ip-map specs cluster-policies profiles sandbox-profiles namespace-labels)
+      (node-runtime-egress-view node-runtime)
+    (declare (ignore specs cluster-policies profiles))
+    (let ((pod (and ip-map (gethash peer ip-map))))
+      (if (not (and pod peer-port (gr8s.network::gr8-sandbox-pod-p pod)))
+          t
+          (let ((executables (mapcar #'gr8-sandbox-program-path
+                                     (gr8s.network::connection-executables
+                                      (node-runtime-pod-pids node-runtime (gr8s.network::np-pod-namespace pod)
+                                                             (gr8s.network::np-pod-name pod))
+                                      peer peer-port))))
+            (multiple-value-bind (allowed reason)
+                (gr8s.network::gr8-sandbox-binary-verdict pod sandbox-profiles host executables namespace-labels)
+              (values allowed reason executables
+                      (gr8s.network::gr8-sandbox-enforcement pod sandbox-profiles namespace-labels))))))))
+
 (defun node-runtime-egress-injector (node-runtime peer host scheme)
   "For the Pod at PEER, a request matcher injecting credentials into its requests to HOST
 over SCHEME, or NIL when no SecurityProfile selecting it names HOST (podster-wv1w.3). The
@@ -1433,6 +1477,9 @@ the node from starting."
                                    (and rule (or (gr8s.network::cnp-rule-name rule) "unnamed")))))
                :inject (lambda (peer host scheme)
                          (node-runtime-egress-injector node-runtime peer host scheme))
+               ;; Which program in a gr8 sandbox may reach a host (podster-wv1w.13).
+               :binaries (lambda (peer peer-port host)
+                           (node-runtime-binary-verdict node-runtime peer peer-port host))
                ;; The hosts a refused stand-in's credentials are for (podster-wv1w.12).
                :bindings (lambda (peer)
                            (destructuring-bind (&optional ip-map specs cluster-policies profiles &rest more)

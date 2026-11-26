@@ -38,10 +38,11 @@
   decide    ; (peer-address host address port) -> (values allowed-p rule-name)
   resolve   ; (host) -> an address string, or NIL
   connect   ; (address port) -> a connected socket, or NIL
-  report    ; (peer-address host address port allowed-p rule-name), or NIL
+  report    ; (peer-address host address port allowed-p rule &optional program audit), or NIL
   inject    ; (peer-address host scheme) -> NIL, or a request matcher for EGRESS-RELAY-HTTP
   inspect   ; (peer-address host) -> NIL, or (:enforcement :enforce|:audit) to terminate and relay
   bindings  ; (peer-address) -> the hosts the Pod's credentials are bound to, for explaining a refusal
+  binaries  ; (peer-address peer-port host) -> (values allowed-p reason executables enforcement), or NIL
   mint      ; (host) -> (values certificate-chain key) for the egress CA's leaf, or NIL
   request-report  ; (peer-address host address port method path code rule-name &optional audit), or NIL
   (upstream-verify pure-tls:+verify-required+) ; how an injected connection checks its upstream
@@ -142,8 +143,12 @@ leaves as the client asked."
                  (let ((address (and host (funcall (egress-proxy-resolve proxy) host))))
                    (multiple-value-bind (allowed rule) (funcall (egress-proxy-decide proxy) peer host address port)
                      (setf allowed (and allowed address t))
-                     (when (egress-proxy-report proxy)
-                       (ignore-errors (funcall (egress-proxy-report proxy) peer host address port allowed rule)))
+                     (multiple-value-bind (permitted reason program audit)
+                         (if allowed (egress-binary-check proxy client peer host) t)
+                       (unless permitted (setf allowed nil rule reason))
+                       (when (egress-proxy-report proxy)
+                         (ignore-errors (funcall (egress-proxy-report proxy) peer host address port allowed rule
+                                                 program audit))))
                      (when allowed
                        (let* ((tls (and prefix (plusp (length prefix)) (= (aref prefix 0) 22)))
                               (matcher (and (egress-proxy-inject proxy)
@@ -192,6 +197,19 @@ admits, or the first address and its refusing rule."
         (when allowed (return (values address rule t)))
         (unless first-rule (setf first-rule rule))))))
 
+(defun egress-binary-check (proxy client peer host)
+  "Ask PROXY's binaries hook (podster-wv1w.13) whether the program behind CLIENT, from
+PEER, may reach HOST, which policy allows. Returns (values permitted reason program
+audit): PROGRAM the one that opened it, and under Audit a refusal is AUDIT instead."
+  (let ((hook (egress-proxy-binaries proxy)))
+    (if (null hook)
+        t
+        (multiple-value-bind (allowed reason executables enforcement)
+            (funcall hook peer (nth-value 1 (ignore-errors (sb-bsd-sockets:socket-peername client))) host)
+          (cond (allowed (values t nil (first executables)))
+                ((eq enforcement :audit) (values t nil (first executables) reason))
+                (t (values nil reason (first executables))))))))
+
 (defun egress-proxy-handle-synthetic (proxy client peer dialed port)
   "Serve CLIENT, which dialled the synthetic address DIALED on PORT: decide it by the name
 DIALED stands for, and dial one of that name's pinned addresses, never resolving the name
@@ -199,11 +217,19 @@ again. A client that speaks first and names another host in its TLS SNI is refus
   (multiple-value-bind (host addresses)
       (gr8s.network::egress-name-for-connect (egress-proxy-names proxy) dialed)
     (multiple-value-bind (address rule allowed) (and host (egress-synthetic-verdict proxy peer host addresses port))
-      (flet ((report (allowed)
+      (let ((program nil) (audit nil))
+       (flet ((report (allowed)
                (when (egress-proxy-report proxy)
-                 (ignore-errors (funcall (egress-proxy-report proxy) peer host address port allowed rule)))
+                 (ignore-errors (funcall (egress-proxy-report proxy) peer host address port allowed rule program audit)))
                allowed))
         (unless allowed (return-from egress-proxy-handle-synthetic (report nil)))
+        ;; Policy allows the name; the program that dialled it may still not be one
+        ;; that may (podster-wv1w.13).
+        (multiple-value-bind (permitted reason exe audited) (egress-binary-check proxy client peer host)
+          (setf program exe audit audited)
+          (unless permitted
+            (setf rule reason)
+            (return-from egress-proxy-handle-synthetic (report nil))))
         (let ((inject (egress-proxy-inject proxy))
               (inspection (and (egress-proxy-inspect proxy) (funcall (egress-proxy-inspect proxy) peer host)))
               (upstream nil))
@@ -238,7 +264,7 @@ again. A client that speaks first and names another host in its TLS SNI is refus
                                          (relay prefix tls nil))
                                         (t (report t) (egress-splice client upstream (or prefix #())))))))
                              (t (report t) (egress-splice client upstream #())))))
-              (when upstream (ignore-errors (sb-bsd-sockets:socket-close upstream))))))))))
+              (when upstream (ignore-errors (sb-bsd-sockets:socket-close upstream)))))))))))
 
 (defun egress-tls-prefix-p (prefix)
   "True when PREFIX, a client's first bytes, begins a TLS record."
@@ -253,7 +279,7 @@ again. A client that speaks first and names another host in its TLS SNI is refus
 
 (defun start-egress-proxy (&key (address "127.0.0.1") (port 0) decide
                                 (resolve #'egress-default-resolve) (connect #'egress-default-connect) report
-                                inject inspect bindings mint request-report (upstream-verify pure-tls:+verify-required+)
+                                inject inspect bindings binaries mint request-report (upstream-verify pure-tls:+verify-required+)
                                 names dialed)
   "Listen on ADDRESS:PORT and serve captured connections, one thread each. DECIDE, RESOLVE,
 CONNECT, REPORT, INSPECT, NAMES and DIALED are as EGRESS-PROXY documents. Returns the EGRESS-PROXY;
@@ -265,7 +291,7 @@ its PORT is the bound port (the kernel's choice when PORT is 0)."
     (let ((proxy (make-egress-proxy :socket socket :address address
                                     :port (nth-value 1 (sb-bsd-sockets:socket-name socket))
                                     :decide decide :resolve resolve :connect connect :report report
-                                    :inject inject :inspect inspect :bindings bindings :mint mint
+                                    :inject inject :inspect inspect :bindings bindings :binaries binaries :mint mint
                                     :request-report request-report
                                     :upstream-verify upstream-verify
                                     :names names :dialed (or dialed #'egress-default-dialed))))
@@ -353,9 +379,11 @@ LISTENER-FD. Signals on failure."
     (ignore-errors (sb-posix:close (egress-steering-prog-fd steering)))
     (ignore-errors (sb-posix:close (whistler/loader:map-info-fd (egress-steering-sockmap steering))))))
 
-(defun egress-flow-object (peer host address port allowed rule)
+(defun egress-flow-object (peer host address port allowed rule &optional program audit)
   "The flow event for one proxied connection from the Pod at PEER to HOST (ADDRESS) on
-PORT: forwarded, or dropped by policy with the deciding RULE's name."
+PORT: forwarded, or dropped by policy with the deciding RULE's name (or why, for a
+program a binaries rule refused), naming the PROGRAM that opened it and, under Audit,
+the rule it broke."
   (let ((flow (core-object "verdict" (if allowed "FORWARDED" "DROPPED")
                            "direction" "egress" "protocol" "TCP"
                            "podAddress" peer
@@ -366,6 +394,8 @@ PORT: forwarded, or dropped by policy with the deciding RULE's name."
     (when host (setf (gethash "peerName" flow) host))
     (unless allowed (setf (gethash "reason" flow) "POLICY"))
     (when rule (setf (gethash "rule" (gethash "l7" flow)) rule))
+    (when program (setf (gethash "process" (gethash "l7" flow)) program))
+    (when audit (setf (gethash "audit" (gethash "l7" flow)) audit))
     flow))
 
 (defun egress-request-flow-object (peer host address port method path code rule &optional audit)
@@ -387,16 +417,17 @@ and, AUDIT, the rule it broke that Audit enforcement let through."
 (defun egress-verdict-reporter (report)
   "The proxy's REPORT: each connection verdict joins the flow stream (podster-5hv.11),
 and REPORT, when given, sees it too."
-  (lambda (peer host resolved port allowed rule)
+  (lambda (peer host resolved port allowed rule &optional program audit)
     (when report
       (ignore-errors (funcall report peer host resolved port allowed rule)))
     (let ((sink *gateway-flow-sink*))
       (when sink
         (funcall sink (egress-flow-object peer host resolved port allowed
-                                          (and rule (gr8s.network::cnp-rule-name rule))))))))
+                                          (if (stringp rule) rule (and rule (gr8s.network::cnp-rule-name rule)))
+                                          program audit))))))
 
 (defun start-node-egress-proxy (decide patterns-for &key (address gr8s.network::+egress-proxy-address+) (port 15443)
-                                                       inject inspect bindings mint report
+                                                       inject inspect bindings binaries mint report
                                                        (upstreams (list (cons gr8s.network::+node-gateway-address+ 53))))
   "Start the node egress proxy on ADDRESS (put on the node gateway interface), steer every
 port there and on the synthetic range to it, and serve the egress DNS gate on its port 53.
@@ -413,6 +444,7 @@ node DNS server, UPSTREAMS. Returns (values proxy steering gate)."
                              name (lambda (packet) (cl-dns-proxy:forward-dns-udp packet upstreams 2.0))))))
          (proxy (start-egress-proxy
                 :address address :port port :decide decide :inject inject :inspect inspect :bindings bindings
+                :binaries binaries
                 :mint mint :names names
                 :request-report (lambda (peer host resolved port method path code rule &optional audit)
                                   (let ((sink *gateway-flow-sink*))

@@ -9,6 +9,12 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- Binary-scoped egress (podster-wv1w.13): SandboxProfile `spec.egress.binaries` lets a
+  host be reached only by listed programs (`hosts`, `paths` with `*` and `**`), or
+  their children. The node finds the program behind each proxied connection from the
+  Pod's `/proc` (the socket by the client's address, the process holding it, its
+  executable and parents), and every connection event names it (`l7.process`).
+
 - The node egress proxy handles an OAuth refresh for a sandbox (podster-kn03): a
   SecurityProfile rule of the gr8s type `OAuthRefresh` swaps the real refresh token
   into a refresh request, keeps the new tokens the response carries and hands the
