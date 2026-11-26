@@ -213,12 +213,12 @@ dashboard-assets-compress:
 	  xargs -0 -r gzip -9 -n
 	@echo "embedded $$(find assets/dashboard -type f | wc -l) dashboard asset files ($$(du -sh assets/dashboard | cut -f1))"
 
-.PHONY: gr8ify test-gr8ify
-gr8ify:
-	cd gr8ify && CGO_ENABLED=0 go build -o ../build/gr8ify ./cmd/gr8ify
+.PHONY: gr8 test-gr8
+gr8:
+	cd gr8 && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ../build/gr8 ./cmd/gr8
 
-test-gr8ify:
-	cd gr8ify && go vet ./... && go test ./...
+test-gr8:
+	cd gr8 && go vet ./... && go test ./...
 
 help:
 	@echo "gr8s targets:"
@@ -254,8 +254,8 @@ help:
 	@echo "  run           Start gr8s (override STATE_DIR, PORT, RUNTIME, KUBECONFIG)"
 	@echo "  kubeconfig    Write KUBECONFIG for the configured PORT"
 	@echo "  native        Build the dumped native executable at build/gr8s"
-	@echo "  gr8ify        Build build/gr8ify, which runs a command in a sandboxed local Pod"
-	@echo "  test-gr8ify   Run the gr8ify Go tests"
+	@echo "  gr8           Build build/gr8, which runs a command in a sandboxed local Pod"
+	@echo "  test-gr8      Run the gr8 Go tests"
 	@echo "  deps          Restore pinned dependencies from ocicl.csv into ocicl/"
 	@echo "  clean         Remove build outputs"
 

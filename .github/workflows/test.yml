@@ -117,6 +117,8 @@ jobs:
           mkdir -p build/release
           printf '#!/bin/sh\necho v0.0.0-gr8s.0\n' > build/release/gr8s-linux-amd64
           cp build/release/gr8s-linux-amd64 build/release/gr8s-linux-arm64
+          printf '#!/bin/sh\necho gr8\n' > build/release/gr8-linux-amd64
+          cp build/release/gr8-linux-amd64 build/release/gr8-linux-arm64
           PKG_OUTPUT_DIRECTORY=build/packages releng/build-packages.sh
           for package in gr8s-0.0.0+gr8s.0-1.x86_64.rpm \
                          gr8s-0.0.0+gr8s.0-1.aarch64.rpm \
@@ -141,6 +143,7 @@ jobs:
         run: |
           sudo dpkg -i build/packages/gr8s_0.0.0+gr8s.0-1_amd64.deb
           test "$(gr8s version)" = v0.0.0-gr8s.0
+          test "$(gr8)" = gr8
           test -x /usr/bin/gr8s-killall.sh
           test -f /usr/lib/systemd/system/gr8s-server.service
           test -f /usr/lib/systemd/system/gr8s-agent.service
@@ -155,6 +158,7 @@ jobs:
           grep -q '^KillMode=process' /usr/lib/systemd/system/gr8s-agent.service
           sudo dpkg -P gr8s
           test ! -e /usr/bin/gr8s
+          test ! -e /usr/bin/gr8
           test ! -e /usr/bin/gr8s-killall.sh
           test ! -e /etc/gr8s/server.env
           test ! -e /usr/lib/systemd/system/gr8s-server.service

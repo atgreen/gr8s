@@ -1,4 +1,4 @@
-// Package client creates the Pod a gr8ify command runs in, on the local
+// Package client creates the Pod a gr8 command runs in, on the local
 // gr8s node, and streams the command's terminal through Pod exec.
 package client
 
@@ -14,22 +14,22 @@ import (
 // HostRoot is where the Pod mounts the host's /; the launcher chroots into it.
 const HostRoot = "/host"
 
-// ContainerName names the one container of a gr8ify Pod.
+// ContainerName names the one container of a gr8 Pod.
 const ContainerName = "command"
 
 // The egress CA's ClusterTrustBundle, mounted so the launcher can make the sandbox
 // trust the node egress proxy where it injects credentials (podster-wv1w.5).
 const (
 	TrustBundle = "gr8s-egress"
-	TrustMount  = "/gr8ify-trust"
+	TrustMount  = "/gr8-trust"
 	TrustFile   = "egress-ca.pem"
 )
 
-// Labels a NetworkPolicy can select gr8ify Pods by.
+// Labels a NetworkPolicy can select gr8 Pods by.
 const (
 	LabelManagedBy = "app.kubernetes.io/managed-by"
-	LabelCommand   = "gr8s.io/gr8ify-command"
-	LabelUser      = "gr8s.io/gr8ify-user"
+	LabelCommand   = "gr8s.io/gr8-command"
+	LabelUser      = "gr8s.io/gr8-user"
 )
 
 // Identity is the caller the command runs as.
@@ -45,13 +45,13 @@ type PodRequest struct {
 	Namespace string
 	Node      string
 	Image     string
-	Launcher  string // the gr8ify binary's path on the host
+	Launcher  string // the gr8 binary's path on the host
 	Command   string // the command's base name
 	Identity  Identity
 }
 
-// NewPod returns the Pod that holds a gr8ify command. Its container only
-// waits ("gr8ify hold"); the command itself is started by Pod exec, so no
+// NewPod returns the Pod that holds a gr8 command. Its container only
+// waits ("gr8 hold"); the command itself is started by Pod exec, so no
 // output is lost before the terminal is attached.
 func NewPod(request PodRequest, suffix string) *corev1.Pod {
 	hostPathDirectory := corev1.HostPathDirectory
@@ -66,7 +66,7 @@ func NewPod(request PodRequest, suffix string) *corev1.Pod {
 			Name:      PodName(request.Command, suffix),
 			Namespace: request.Namespace,
 			Labels: map[string]string{
-				LabelManagedBy: "gr8ify",
+				LabelManagedBy: "gr8",
 				LabelCommand:   LabelValue(request.Command),
 				LabelUser:      LabelValue(request.Identity.User),
 			},
@@ -115,19 +115,19 @@ func NewPod(request PodRequest, suffix string) *corev1.Pod {
 	}
 }
 
-// NewNamespace returns the namespace gr8ify Pods live in. Mounting the host's
+// NewNamespace returns the namespace gr8 Pods live in. Mounting the host's
 // / is a hostPath volume, which only the privileged Pod Security level admits.
 func NewNamespace(name string) *corev1.Namespace {
 	return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
 		Name: name,
 		Labels: map[string]string{
-			LabelManagedBy:                       "gr8ify",
+			LabelManagedBy:                       "gr8",
 			"pod-security.kubernetes.io/enforce": "privileged",
 		},
 	}}
 }
 
-// PodName returns "gr8ify-COMMAND-SUFFIX" as a valid DNS subdomain.
+// PodName returns "gr8-COMMAND-SUFFIX" as a valid DNS subdomain.
 func PodName(command, suffix string) string {
 	base := strings.Trim(mapInvalid(strings.ToLower(command), func(r rune) bool {
 		return r >= 'a' && r <= 'z' || r >= '0' && r <= '9'
@@ -138,7 +138,7 @@ func PodName(command, suffix string) string {
 	if base == "" {
 		base = "command"
 	}
-	return "gr8ify-" + base + "-" + suffix
+	return "gr8-" + base + "-" + suffix
 }
 
 // LabelValue turns s into a valid label value: at most 63 characters of

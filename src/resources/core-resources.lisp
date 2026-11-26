@@ -120,8 +120,8 @@
     ;; The subset of OpenKruise Agents' SecurityProfile gr8s implements: credential
     ;; injection by the node egress proxy (podster-wv1w.3).
     ("securityprofiles" "SecurityProfile" "agents.kruise.io/v1alpha1" t)
-    ;; What a command gr8ify runs gets: home paths and environment (podster-wv1w.5).
-    ("sandboxprofiles" "SandboxProfile" "gr8ify.gr8s.io/v1alpha1" nil)
+    ;; What a command gr8 runs gets: home paths and environment (podster-wv1w.5).
+    ("sandboxprofiles" "SandboxProfile" "gr8.gr8s.io/v1alpha1" nil)
     ("gatewayclasses" "GatewayClass" "gateway.networking.k8s.io/v1" nil)
     ("gateways" "Gateway" "gateway.networking.k8s.io/v1" t)
     ("httproutes" "HTTPRoute" "gateway.networking.k8s.io/v1" t)

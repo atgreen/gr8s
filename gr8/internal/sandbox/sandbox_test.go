@@ -84,7 +84,7 @@ func TestRulesAllowTheWorkingDirectoryAndNotHome(t *testing.T) {
 
 // The Landlock test restricts a child copy of the test binary, since a
 // restriction can't be lifted from the test process itself.
-const landlockChild = "GR8IFY_LANDLOCK_CHILD"
+const landlockChild = "GR8_LANDLOCK_CHILD"
 
 func TestLandlockConfinesWritesAndReads(t *testing.T) {
 	if LandlockABI() < 1 {

@@ -1,8 +1,8 @@
-// gr8ify runs a command as though directly, but in a sandboxed Pod on the
+// gr8 runs a command as though directly, but in a sandboxed Pod on the
 // local gr8s node: subject to NetworkPolicy, visible in the dashboard, and
 // confined by Landlock to the working directory.
 //
-//	gr8ify [flags] COMMAND [ARG...]
+//	gr8 [flags] COMMAND [ARG...]
 package main
 
 import (
@@ -10,8 +10,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/atgreen/gr8s/gr8ify/internal/client"
-	"github.com/atgreen/gr8s/gr8ify/internal/sandbox"
+	"github.com/atgreen/gr8s/gr8/internal/client"
+	"github.com/atgreen/gr8s/gr8/internal/sandbox"
 )
 
 type stringList []string
@@ -42,11 +42,11 @@ func main() {
 
 // login stores a command's host login for the node egress proxy to inject.
 func login(args []string) int {
-	flags := flag.NewFlagSet("gr8ify login", flag.ExitOnError)
+	flags := flag.NewFlagSet("gr8 login", flag.ExitOnError)
 	kubeconfig := flags.String("kubeconfig", "", "kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)")
-	namespace := flags.String("namespace", "gr8ify", "namespace for the Secret and SecurityProfile")
+	namespace := flags.String("namespace", "gr8", "namespace for the Secret and SecurityProfile")
 	flags.Usage = func() {
-		fmt.Fprintf(flags.Output(), "usage: gr8ify login [flags] claude\n\n"+
+		fmt.Fprintf(flags.Output(), "usage: gr8 login [flags] claude\n\n"+
 			"Move claude's subscription login into the cluster: the node egress proxy adds it\n"+
 			"to claude's API requests, and claude in the sandbox sees only stand-in tokens.\n\n")
 		flags.PrintDefaults()
@@ -57,29 +57,29 @@ func login(args []string) int {
 		return 2
 	}
 	if err := client.LoginClaude(*kubeconfig, *namespace); err != nil {
-		fmt.Fprintf(os.Stderr, "gr8ify login: %v\n", err)
+		fmt.Fprintf(os.Stderr, "gr8 login: %v\n", err)
 		return 1
 	}
-	fmt.Println("gr8ify: claude's login is in the cluster; gr8ify claude now runs with stand-in tokens")
+	fmt.Println("gr8: claude's login is in the cluster; gr8 claude now runs with stand-in tokens")
 	return 0
 }
 
 func run() int {
 	var options client.Options
 	var readOnly, readWrite, env stringList
-	flags := flag.NewFlagSet("gr8ify", flag.ExitOnError)
+	flags := flag.NewFlagSet("gr8", flag.ExitOnError)
 	flags.Usage = func() {
-		fmt.Fprintf(flags.Output(), "usage: gr8ify [flags] COMMAND [ARG...]\n\n"+
+		fmt.Fprintf(flags.Output(), "usage: gr8 [flags] COMMAND [ARG...]\n\n"+
 			"Run COMMAND in a sandboxed Pod on this host's gr8s node. It sees the host's\n"+
 			"files, may write only the working directory, and is subject to NetworkPolicy.\n\n")
 		flags.PrintDefaults()
 	}
 	flags.StringVar(&options.Kubeconfig, "kubeconfig", "", "kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)")
 	flags.StringVar(&options.Node, "node", "", "node to run on (default: the node with this host's address)")
-	flags.StringVar(&options.Namespace, "namespace", "gr8ify", "namespace for the Pod")
+	flags.StringVar(&options.Namespace, "namespace", "gr8", "namespace for the Pod")
 	flags.StringVar(&options.Image, "image", "registry.k8s.io/pause:3.10", "container image (its files are not used)")
 	flags.BoolVar(&options.Keep, "keep", false, "keep the Pod after the command exits")
-	flags.BoolVar(&options.Verbose, "v", false, "report the Pod gr8ify creates")
+	flags.BoolVar(&options.Verbose, "v", false, "report the Pod gr8 creates")
 	flags.Var(&readOnly, "ro", "also allow reading `PATH` (repeatable)")
 	flags.Var(&readWrite, "rw", "also allow writing `PATH` (repeatable)")
 	flags.Var(&env, "env", "also pass environment variable `NAME` (repeatable)")
@@ -93,7 +93,7 @@ func run() int {
 
 	status, err := client.Run(options)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "gr8ify: %v\n", err)
+		fmt.Fprintf(os.Stderr, "gr8: %v\n", err)
 		return sandbox.ExitCannotRun
 	}
 	return status

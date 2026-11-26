@@ -44,7 +44,7 @@ type Options struct {
 	PlaceholderFiles []string
 }
 
-// Run runs options.Command in a gr8ify Pod and returns its exit status.
+// Run runs options.Command in a gr8 Pod and returns its exit status.
 func Run(options Options) (int, error) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
@@ -119,7 +119,7 @@ func Run(options Options) (int, error) {
 
 func (options Options) logf(format string, arguments ...any) {
 	if options.Verbose {
-		fmt.Fprintf(os.Stderr, "gr8ify: "+format+"\n", arguments...)
+		fmt.Fprintf(os.Stderr, "gr8: "+format+"\n", arguments...)
 	}
 }
 
@@ -294,7 +294,7 @@ func execInPod(ctx context.Context, config *rest.Config, clientset kubernetes.In
 		streams.TerminalSizeQueue = sizes
 	} else {
 		streams.Stderr = os.Stderr
-		// Without a terminal, ^C reaches gr8ify, not the command: end the
+		// Without a terminal, ^C reaches gr8, not the command: end the
 		// stream, and the Pod's deletion stops the command.
 		var stop context.CancelFunc
 		ctx, stop = signal.NotifyContext(ctx, os.Interrupt)

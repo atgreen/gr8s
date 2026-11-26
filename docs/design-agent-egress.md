@@ -16,7 +16,7 @@ Kubernetes resources and enforced by the gr8s node agent:
    node agent adds the credential, from a Secret, to requests bound for the
    destinations a policy names, and only those.
 
-`gr8ify` (see the podster-0ii epic) is the first consumer, but nothing here is
+`gr8` (see the podster-0ii epic) is the first consumer, but nothing here is
 specific to it: an agent Deployment elsewhere in the cluster gets the same
 protection from the same resources, selected by label.
 
@@ -68,8 +68,8 @@ spec:
   priority: 10
   subject:
     pods:
-      namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: gr8ify}}
-      podSelector: {matchLabels: {gr8s.io/gr8ify-command: claude}}
+      namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: gr8}}
+      podSelector: {matchLabels: {gr8s.io/gr8-command: claude}}
   egress:
   - action: Accept
     to:
@@ -96,15 +96,15 @@ agent sent; the agent only needs *some* value so its client sends the header.
 ```yaml
 apiVersion: v1
 kind: Secret
-metadata: {name: anthropic, namespace: gr8ify}
+metadata: {name: anthropic, namespace: gr8}
 stringData: {apiKey: sk-ant-...}
 ---
 apiVersion: agents.kruise.io/v1alpha1     # see the decision below
 kind: SecurityProfile
-metadata: {name: claude-anthropic, namespace: gr8ify}
+metadata: {name: claude-anthropic, namespace: gr8}
 spec:
   selector:
-    matchLabels: {gr8s.io/gr8ify-command: claude}
+    matchLabels: {gr8s.io/gr8-command: claude}
   rules:
   - name: anthropic-api-key
     match:
@@ -143,17 +143,17 @@ agent signs per-host certificates from a gr8s CA published as a
 `ClusterTrustBundle` (for example `gr8s.io:egress`). A Pod trusts it through a
 projected `clusterTrustBundle` volume combined with the system roots, plus
 `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE` and `GIT_SSL_CAINFO`.
-gr8s already serves both pieces. `gr8ify` does this automatically for its
+gr8s already serves both pieces. `gr8` does this automatically for its
 sandbox; other Pods declare the volume themselves.
 
-### 5. gr8ify sandbox profiles
+### 5. gr8 sandbox profiles
 
-Which host paths a command gets is `gr8ify`-specific and has no upstream analog
+Which host paths a command gets is `gr8`-specific and has no upstream analog
 (agent-sandbox's `SandboxTemplate` describes a Pod, not grants into a user's
 home), so it is a gr8s resource:
 
 ```yaml
-apiVersion: gr8ify.gr8s.io/v1alpha1
+apiVersion: gr8.gr8s.io/v1alpha1
 kind: SandboxProfile
 metadata: {name: claude}
 spec:
@@ -165,9 +165,9 @@ spec:
     ANTHROPIC_API_KEY: gr8s-injected   # a placeholder the proxy overwrites
 ```
 
-`gr8ify` reads the profile for its command from the cluster in place of its
+`gr8` reads the profile for its command from the cluster in place of its
 built-in table. The Pod's labels then select the egress and credential policies
-above; `gr8ify` needs no policy logic of its own.
+above; `gr8` needs no policy logic of its own.
 
 ## Enforcement in the node agent
 
@@ -230,7 +230,7 @@ trail: what this agent asked for, and what it was refused.
 3. Node egress proxy: capture, SNI/Host admission, QUIC refusal, DNS gating.
 4. Credential injection: the injection resource, node-authorizer grant, TLS
    termination, the egress `ClusterTrustBundle`.
-5. gr8ify: `SandboxProfile`, trust bundle and placeholder env in the sandbox,
+5. gr8: `SandboxProfile`, trust bundle and placeholder env in the sandbox,
    policies selected by the Pod's labels.
 6. Request-level flows in the dashboard.
 7. OAuth subscription tokens.
@@ -268,9 +268,9 @@ trail: what this agent asked for, and what it was refused.
   see the client, so captured Pods' DNS is redirected to the gate, which relays allowed
   names to the node DNS server.
 - **OAuth subscription logins** (podster-wv1w.7) work without the refresh exchange:
-  `gr8ify login claude` stores the access token for injection, the sandbox sees the
+  `gr8 login claude` stores the access token for injection, the sandbox sees the
   credentials file with stand-in tokens and a far-off expiry so it never refreshes,
-  and gr8ify keeps the Secret in step with the host's credentials file, which the
+  and gr8 keeps the Secret in step with the host's credentials file, which the
   host's own claude refreshes. Rewriting the refresh exchange itself is follow-up work.
 - **Verification.** Unit and in-process tests cover policy compilation, the proxy
   (pass-through, refusal, cleartext and TLS injection), the DNS gate, the CA and the

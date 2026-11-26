@@ -14,7 +14,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-// Claude Code's subscription login, for `gr8ify login claude` (podster-wv1w.7): its
+// Claude Code's subscription login, for `gr8 login claude` (podster-wv1w.7): its
 // access token moves into a Secret the node egress proxy injects as a bearer token,
 // and the sandbox sees the credentials file with stand-in tokens.
 const (
@@ -71,7 +71,7 @@ func ClaudeSecurityProfile(namespace string) map[string]any {
 // credentials file as stand-ins.
 func ClaudeSandboxProfile() map[string]any {
 	return map[string]any{
-		"apiVersion": "gr8ify.gr8s.io/v1alpha1", "kind": "SandboxProfile",
+		"apiVersion": "gr8.gr8s.io/v1alpha1", "kind": "SandboxProfile",
 		"metadata": map[string]any{"name": "claude"},
 		"spec": map[string]any{
 			"commands": []any{"claude"},
@@ -87,7 +87,7 @@ func upsertSecret(ctx context.Context, clientset kubernetes.Interface, namespace
 	secrets := clientset.CoreV1().Secrets(namespace)
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: claudeSecret, Namespace: namespace,
-			Labels: map[string]string{LabelManagedBy: "gr8ify"}},
+			Labels: map[string]string{LabelManagedBy: "gr8"}},
 		Type:       corev1.SecretTypeOpaque,
 		StringData: map[string]string{"accessToken": token},
 	}
@@ -160,7 +160,7 @@ func LoginClaude(kubeconfig, namespace string) error {
 		claudeProfile, ClaudeSecurityProfile(namespace)); err != nil {
 		return fmt.Errorf("the SecurityProfile: %w", err)
 	}
-	if err := applyObject(ctx, clientset, "/apis/gr8ify.gr8s.io/v1alpha1/sandboxprofiles", "claude",
+	if err := applyObject(ctx, clientset, "/apis/gr8.gr8s.io/v1alpha1/sandboxprofiles", "claude",
 		ClaudeSandboxProfile()); err != nil {
 		return fmt.Errorf("the SandboxProfile: %w", err)
 	}

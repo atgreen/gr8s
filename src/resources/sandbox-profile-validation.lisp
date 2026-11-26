@@ -2,8 +2,8 @@
 ;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Purpose:
-;;;; Validate gr8ify.gr8s.io/v1alpha1 SandboxProfile (podster-wv1w.5): what a
-;;;; command gr8ify runs gets beyond its working directory -- paths in the caller's
+;;;; Validate gr8.gr8s.io/v1alpha1 SandboxProfile (podster-wv1w.5): what a
+;;;; command gr8 runs gets beyond its working directory -- paths in the caller's
 ;;;; home, read-write or read-only, and environment placeholders (a stand-in API key
 ;;;; the node egress proxy overwrites). Paths are relative to $HOME and may not climb
 ;;;; out of it, so a profile can't grant /etc or another user's files.

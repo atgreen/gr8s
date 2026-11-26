@@ -6,7 +6,7 @@
 ;;;; node egress proxy must terminate the Pod's TLS, so it presents a certificate for
 ;;;; the destination host minted from this CA, and a Pod that wants credentials
 ;;;; injected trusts it through the gr8s-egress ClusterTrustBundle (a projected
-;;;; clusterTrustBundle volume; gr8ify mounts it for its sandbox).
+;;;; clusterTrustBundle volume; gr8 mounts it for its sandbox).
 ;;;;
 ;;;; The control plane creates the CA once, as a kubernetes.io/tls Secret in
 ;;;; kube-system, and every node's snapshot carries it so any node can mint leaves for
