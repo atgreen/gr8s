@@ -107,6 +107,14 @@ main { flex: 1; display: flex; min-height: 0; margin: 12px 16px; gap: 12px; }
   padding: 1px 6px; white-space: nowrap; }
 .chip .proto { opacity: .65; margin-left: 2px; }
 .chip.more { color: var(--muted); background: var(--tile); }
+/* Many World sites are one card listing them, scrollable without zooming the graph. */
+.sites { margin-top: 8px; max-height: 176px; overflow-y: auto; pointer-events: auto; border-top: 1px solid var(--line);
+  padding-top: 4px; overscroll-behavior: contain; }
+.site { display: flex; align-items: center; gap: 6px; padding: 3px 4px; border-radius: 6px; font-size: 11.5px; cursor: pointer; }
+.site:hover { background: var(--tile); }
+.site .host { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.site .rate { flex: none; color: var(--muted); }
+.site .drop { flex: none; color: var(--bad); font-weight: 600; }
 aside { width: 380px; flex: none; background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
   box-shadow: var(--shadow); overflow: auto; padding: 16px; }
 aside h2 { font-size: 15px; font-weight: 600; margin: 0 0 2px; word-break: break-all; }
@@ -170,6 +178,9 @@ const css = (name) => getComputedStyle(document.documentElement).getPropertyValu
 const CARD_WIDTH = 220, CARD_HEIGHT = 58, CARD_PORTS_HEIGHT = 26;
 const KIND_TINT = { Node: '--kind-node', Service: '--kind-service', Gateway: '--kind-service', Clients: '--kind-outside', LAN: '--kind-outside', External: '--kind-outside', World: '--kind-outside' };
 let graph = { nodes: [], edges: [] };
+// Past this many World sites in a view, they are drawn as one Internet node listing them.
+const WORLD_LIMIT = 8, SITE_ROW_HEIGHT = 22, SITES_MAX_HEIGHT = 176;
+let internet = null; // the view's Internet node, when its World sites were merged
 let mode = 'live', laidOut = false, selected = null, cy = null, policyView = null;
 // The doctor's latest survey, read every 15 s.
 let health = { at: null, problems: [], warnings: [] }, healthRead = 0;
@@ -270,6 +281,7 @@ function shield() {
 }
 
 function renderCard(node, window) {
+  if (node.sites) return renderInternetCard(node, window);
   let card = cards.get(node.id);
   if (!card) { card = el('div', 'card'); $('cards').append(card); cards.set(node.id, card); }
   const ports = inboundPorts(node.id, window);
@@ -311,6 +323,75 @@ function renderCard(node, window) {
   return height;
 }
 
+// The sites behind the Internet node, most dropped first, then busiest.
+function siteRows(node, window) {
+  return node.sites.map((s) => ({ ...s, flows: s.edges.reduce((n, e) => n + e[window].flows, 0),
+                                  dropped: s.edges.reduce((n, e) => n + e[window].dropped, 0) }))
+    .sort((a, b) => b.dropped - a.dropped || b.flows - a.flows || a.name.localeCompare(b.name));
+}
+
+function renderInternetCard(node, window) {
+  let card = cards.get(node.id);
+  if (!card) { card = el('div', 'card'); $('cards').append(card); cards.set(node.id, card); }
+  const rows = siteRows(node, window);
+  const dropped = rows.reduce((n, r) => n + r.dropped, 0);
+  const height = CARD_HEIGHT + 8 + Math.min(SITES_MAX_HEIGHT, rows.length * SITE_ROW_HEIGHT + 6);
+  const key = JSON.stringify(['internet', rows.map((r) => [r.name, r.flows, r.dropped])]);
+  if (card.dataset.key === key) return height;
+  card.dataset.key = key;
+  const list = card.querySelector('.sites') || el('div', 'sites');
+  const scroll = list.scrollTop;
+  const names = el('div', 'names');
+  names.append(el('div', 'name', node.name), el('div', 'kind', rows.length + ' sites'));
+  const top = el('div', 'top');
+  top.append(iconTile(node), names);
+  if (dropped) top.append(el('span', 'badge', dropped + ' dropped'));
+  list.replaceChildren(...rows.map((r) => {
+    const line = el('div', 'site');
+    line.title = r.name + ' · ' + rate(r.flows, window) + (r.dropped ? ' · ' + r.dropped + ' dropped' : '');
+    line.append(el('span', 'host', r.name), r.dropped ? el('span', 'drop', r.dropped + ' dropped') : el('span', 'rate', rate(r.flows, window)));
+    // Its busiest connection, in the panel as if its edge were drawn.
+    const edge = r.edges.slice().sort((a, b) => b[window].flows - a[window].flows)[0];
+    line.onclick = () => select({ type: 'edge', id: edge.id });
+    return line;
+  }));
+  // A wheel over the list scrolls it, not the graph's zoom underneath.
+  list.onwheel = (event) => event.stopPropagation();
+  card.replaceChildren(top, list);
+  list.scrollTop = scroll;
+  card.title = rows.length + ' sites reached from this view';
+  card.style.height = height + 'px';
+  return height;
+}
+
+// Many World sites drawn one by one bury the view (a browser reaches dozens): past
+// WORLD_LIMIT they become one Internet node listing them, with one edge per workload
+// and direction carrying their sum.
+function mergeWorld(view) {
+  const sites = view.nodes.filter((n) => n.kind === 'World');
+  if (sites.length <= WORLD_LIMIT) return { ...view, internet: null };
+  const ids = new Set(sites.map((n) => n.id));
+  const node = { id: 'world:internet', kind: 'World', name: 'Internet', icon: sites[0].icon,
+                 sites: sites.map((n) => ({ id: n.id, name: n.name, edges: [] })) };
+  const byId = new Map(node.sites.map((s) => [s.id, s]));
+  const merged = new Map(), edges = [];
+  for (const e of view.edges) {
+    const out = ids.has(e.target);
+    if (!out && !ids.has(e.source)) { edges.push(e); continue; }
+    byId.get(out ? e.target : e.source).edges.push(e);
+    const key = out ? e.source + '>' : '<' + e.target;
+    let m = merged.get(key);
+    if (!m) {
+      m = { id: 'world-edge:' + key, source: out ? e.source : node.id, target: out ? node.id : e.target, ports: [] };
+      for (const w of ['m1', 'm5', 'm15']) m[w] = { flows: 0, dropped: 0, errors: 0 };
+      merged.set(key, m); edges.push(m);
+    }
+    for (const w of ['m1', 'm5', 'm15']) for (const k of ['flows', 'dropped', 'errors']) m[w][k] += (e[w] && e[w][k]) || 0;
+    for (const port of e.ports) if (!m.ports.includes(port)) m.ports.push(port);
+  }
+  return { nodes: view.nodes.filter((n) => !ids.has(n.id)).concat(node), edges, window: view.window, internet: node };
+}
+
 function visibleGraph() {
   const window = $('window').value, namespace = $('namespace').value, verdict = $('verdict').value;
   const search = $('search').value.trim().toLowerCase();
@@ -324,7 +405,7 @@ function visibleGraph() {
   }
   if (search) edges = edges.filter((e) => [e.source, e.target].some((id) => (byId.get(id) || { name: '' }).name.toLowerCase().includes(search)));
   const ids = new Set(edges.flatMap((e) => [e.source, e.target]));
-  return { nodes: graph.nodes.filter((n) => ids.has(n.id)), edges, window };
+  return mergeWorld({ nodes: graph.nodes.filter((n) => ids.has(n.id)), edges, window });
 }
 
 function elements(view) {
@@ -336,7 +417,8 @@ function elements(view) {
   }
   for (const e of view.edges) {
     const w = e[view.window];
-    const parts = [e.ports.join(' '), rate(w.flows, view.window)];
+    const ports = e.ports.length > 3 ? e.ports.slice(0, 3).join(' ') + ' +' + (e.ports.length - 3) : e.ports.join(' ');
+    const parts = [ports, rate(w.flows, view.window)];
     if (w.dropped) parts.push(w.dropped + ' dropped');
     if (w.errors) parts.push(w.errors + ' errors');
     els.push({ group: 'edges', data: { id: e.id, source: e.source, target: e.target, label: parts.filter(Boolean).join(' · '),
@@ -355,6 +437,7 @@ function layout(pinned) {
 
 function draw() {
   const view = visibleGraph();
+  internet = view.internet;
   const empty = view.edges.length === 0;
   $('empty').hidden = !empty;
   $('graph').hidden = empty;
@@ -477,6 +560,21 @@ async function showDetails() {
   const window = $('window').value;
   const nodeName = (id) => (graph.nodes.find((n) => n.id === id) || { name: id }).name;
   if (selected.type === 'health') { showHealthList(); return; }
+  if (selected.type === 'node' && internet && selected.id === internet.id) {
+    const table = el('table');
+    table.append(head('Site', 'Ports', 'Rate', 'Dropped'));
+    for (const r of siteRows(internet, window)) {
+      const edge = r.edges.slice().sort((a, b) => b[window].flows - a[window].flows)[0];
+      const site = cell(r.name, 'link');
+      site.onclick = () => select({ type: 'edge', id: edge.id });
+      table.append(row(site, cell([...new Set(r.edges.flatMap((e) => e.ports))].join(' ')), cell(rate(r.flows, window), 'num'),
+        cell(r.dropped || '', r.dropped ? 'num dropped' : 'num')));
+    }
+    setPanel('internet', [window, siteRows(internet, window).map((r) => [r.name, r.flows, r.dropped])],
+      [el('h2', null, 'Internet'), el('div', 'sub', internet.sites.length + ' sites, merged past ' + WORLD_LIMIT),
+       el('h3', null, 'Sites'), table]);
+    return;
+  }
   if (selected.type === 'node') {
     const node = graph.nodes.find((n) => n.id === selected.id);
     if (!node) { select(null); return; }
