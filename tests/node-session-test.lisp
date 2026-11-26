@@ -1849,7 +1849,10 @@ them. A node can't claim another's address or name."
                (setf socket nil)
                (is-true (wait-until (lambda () (null (gr8s.server::virtual-node-names host))) :timeout 30))))
         (when socket (ignore-errors (usocket:socket-close socket)))
-        (when browser (ignore-errors (bt:join-thread browser)))
+        ;; Its read may not wake when the socket closes: give it a moment, then end it.
+        (when browser
+          (loop repeat 20 while (bt:thread-alive-p browser) do (sleep 0.1))
+          (when (bt:thread-alive-p browser) (ignore-errors (bt:destroy-thread browser))))
         (hunchentoot:stop listener)
         (gr8s.server::stop-virtual-nodes host)
         (gr8s.apiserver::stop-node-grpc-server server)))))
