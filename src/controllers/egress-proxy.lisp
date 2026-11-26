@@ -355,6 +355,17 @@ the SecurityProfile rule that injected a credential into it -- never the credent
     (when rule (setf (gethash "injected" (gethash "l7" flow)) rule))
     flow))
 
+(defun egress-verdict-reporter (report)
+  "The proxy's REPORT: each connection verdict joins the flow stream (podster-5hv.11),
+and REPORT, when given, sees it too."
+  (lambda (peer host resolved port allowed rule)
+    (when report
+      (ignore-errors (funcall report peer host resolved port allowed rule)))
+    (let ((sink *gateway-flow-sink*))
+      (when sink
+        (funcall sink (egress-flow-object peer host resolved port allowed
+                                          (and rule (gr8s.network::cnp-rule-name rule))))))))
+
 (defun start-node-egress-proxy (decide patterns-for &key (address gr8s.network::+egress-proxy-address+) (port 15443)
                                                        inject mint report
                                                        (upstreams (list (cons gr8s.network::+node-gateway-address+ 53))))
@@ -373,17 +384,12 @@ node DNS server, UPSTREAMS. Returns (values proxy steering gate)."
                              name (lambda (packet) (cl-dns-proxy:forward-dns-udp packet upstreams 2.0))))))
          (proxy (start-egress-proxy
                 :address address :port port :decide decide :inject inject :mint mint :names names
-                :report report
                 :request-report (lambda (peer host resolved port method path code rule)
                                   (let ((sink *gateway-flow-sink*))
                                     (when sink
                                       (funcall sink (egress-request-flow-object peer host resolved port method
                                                                                 path code rule)))))
-                :report (lambda (peer host resolved port allowed rule)
-                          (let ((sink *gateway-flow-sink*))
-                            (when sink
-                              (funcall sink (egress-flow-object peer host resolved port allowed
-                                                                (and rule (gr8s.network::cnp-rule-name rule))))))))))
+                :report (egress-verdict-reporter report))))
     (let ((steering nil))
       (handler-case
           (progn
@@ -391,7 +397,11 @@ node DNS server, UPSTREAMS. Returns (values proxy steering gate)."
                             (sb-bsd-sockets:socket-file-descriptor (egress-proxy-socket proxy))))
             (values proxy steering
                     (start-egress-dns-gate :address address :port 53 :patterns-for patterns-for
-                                           :names names :upstreams upstreams)))
+                                           :names names :upstreams upstreams
+                                           :report (lambda (client name allowed)
+                                                     (let ((sink *gateway-flow-sink*))
+                                                       (when sink
+                                                         (funcall sink (egress-dns-flow-object client name allowed))))))))
         (error (condition)
           (stop-egress-steering steering)
           (stop-egress-proxy proxy)
@@ -471,13 +481,33 @@ rcode), TTL the least the answers carry."
 
 (defstruct egress-dns-gate udp tcp threads (stop nil))
 
-(defun start-egress-dns-gate (&key (address "127.0.0.1") (port 53) patterns-for names
+(defun egress-dns-decisions (packet patterns)
+  "Each question of DNS PACKET outside the cluster zone as (name . allowed-p) for a client
+allowed PATTERNS, to report."
+  (let ((query (ignore-errors (0conf:decode-message packet))))
+    (loop for question in (and query (0conf:dns-message-questions query))
+          for name = (string-downcase (string-right-trim "." (0conf:question-name question)))
+          unless (egress-dns-cluster-name-p name)
+            collect (cons name (egress-dns-name-allowed-p name patterns)))))
+
+(defun egress-dns-flow-object (peer name allowed)
+  "The flow event for the Pod at PEER's DNS query for NAME, answered or refused by policy."
+  (let ((flow (core-object "verdict" (if allowed "FORWARDED" "DROPPED")
+                           "direction" "egress" "protocol" "UDP"
+                           "podAddress" peer "peerAddress" gr8s.network::+egress-proxy-address+ "peerPort" 53
+                           "l7" (core-object "type" "dns" "query" name)
+                           "peerName" name)))
+    (unless allowed (setf (gethash "reason" flow) "POLICY"))
+    flow))
+
+(defun start-egress-dns-gate (&key (address "127.0.0.1") (port 53) patterns-for names report
                                    (upstreams (list (cons gr8s.network::+node-gateway-address+ 53)))
                                    (timeout 2.0))
   "Serve DNS on ADDRESS:PORT over UDP and TCP. PATTERNS-FOR maps a client address to
 (values patterns synthetic-p): the domain patterns it may resolve, or :all, and whether
-it is answered with synthetic addresses from the egress-name-table NAMES. Returns the
-EGRESS-DNS-GATE."
+it is answered with synthetic addresses from the egress-name-table NAMES. REPORT, when
+given, is called with (client name allowed-p) for each question outside the cluster zone
+of a client whose names policy decides. Returns the EGRESS-DNS-GATE."
   (let* ((udp (make-instance 'sb-bsd-sockets:inet-socket :type :datagram :protocol :udp))
          (tcp (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp))
          (gate (make-egress-dns-gate :udp udp :tcp tcp)))
@@ -485,6 +515,9 @@ EGRESS-DNS-GATE."
            (forward (packet) (cl-dns-proxy:forward-dns-udp packet upstreams timeout)))
       (labels ((answer (packet client forward)
                  (multiple-value-bind (patterns synthetic) (funcall patterns-for client)
+                   (when (and report (not (eq patterns :all)))
+                     (loop for (name . allowed) in (egress-dns-decisions packet patterns)
+                           do (ignore-errors (funcall report client name allowed))))
                    (egress-dns-gate-answer
                     packet patterns forward
                     :synthesize (and synthetic names

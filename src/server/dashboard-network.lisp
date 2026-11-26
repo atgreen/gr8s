@@ -381,6 +381,10 @@ flow carries one (podster-5hv.8), so each site the cluster talks to is a node of
     (or (and pod namespace
              (or (gethash (cons namespace pod) (network-topology-pods topology))
                  (list namespace "Pod" pod)))
+        ;; The egress DNS gate's verdict on a name is drawn to the site it names, so a
+        ;; refused lookup shows though no connection follows it.
+        (let ((l7 (gethash "l7" flow)))
+          (and name (hash-table-p l7) (equal "dns" (gethash "type" l7)) (list nil "World" name)))
         (gethash address (network-topology-addresses topology))
         (gethash address (network-topology-services topology))
         (let ((node (gethash address (network-topology-nodes topology))))
