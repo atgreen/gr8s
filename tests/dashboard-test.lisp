@@ -742,4 +742,10 @@
         (is (equal "/v1/messages" (gethash "path" (gethash "l7" request))) "no query string")
         (is (equal "gr8/claude-anthropic/anthropic-api-key" (gethash "injected" (gethash "l7" request))))
         (is (= 1 (gethash "flows" (gethash "m1" (edge "cave/Deployment/cave-runner" "World/api.anthropic.com")))))
-        (is (= 1 (gethash "dropped" (gethash "m1" (edge "cave/Deployment/cave-runner" "World/evil.example.com")))))))))
+        (is (= 1 (gethash "dropped" (gethash "m1" (edge "cave/Deployment/cave-runner" "World/evil.example.com"))))))
+      ;; A refused lookup is drawn to the site it names, though no connection follows.
+      (let ((lookup (gr8s.controllers::egress-dns-flow-object "10.80.16.4" "exfil.example" nil)))
+        (setf (gethash "time" lookup) "2026-11-25T12:00:00Z" (gethash "namespace" lookup) "cave"
+              (gethash "pod" lookup) "cave-runner-b4-x")
+        (note lookup)
+        (is (= 1 (gethash "dropped" (gethash "m1" (edge "cave/Deployment/cave-runner" "World/exfil.example")))))))))

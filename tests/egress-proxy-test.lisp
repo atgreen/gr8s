@@ -88,6 +88,39 @@ upstream is a tag backend answering \"UP\". DECISIONS collects each report as
         (is (= 5 (cl-dns-proxy:dns-response-code refused))))
       (is (equal '("api.anthropic.com") forwarded)))))
 
+(test egress-every-verdict-joins-the-flow-stream
+  ;; podster-5hv.11: the agent's own report replaced the flow sink's, so no verdict
+  ;; reached the stream. Both must see each one.
+  (let ((reported '()) (flows '()))
+    (let ((gr8s.controllers::*gateway-flow-sink* (lambda (flow) (push flow flows))))
+      (funcall (gr8s.controllers::egress-verdict-reporter
+                (lambda (peer host address port allowed rule)
+                  (declare (ignore address port rule))
+                  (push (list peer host allowed) reported)))
+               "10.80.32.7" "evil.example.com" "203.0.113.5" 443 nil
+               (gr8s.network::make-cnp-rule :action :deny :name "gr8-sandbox")))
+    (is (equal '(("10.80.32.7" "evil.example.com" nil)) reported))
+    (is (= 1 (length flows)))
+    (let ((flow (first flows)))
+      (is (equal "DROPPED" (gethash "verdict" flow)))
+      (is (equal "evil.example.com" (gethash "peerName" flow)))
+      (is (equal "gr8-sandbox" (gethash "rule" (gethash "l7" flow)))))))
+
+(test egress-dns-gate-reports-each-decided-name
+  ;; A name outside the cluster zone is a decision: reported allowed or refused. The
+  ;; cluster's own names aren't, being always relayed.
+  (let ((query (0conf:encode-message
+                (0conf:make-dns-message :id 1 :flags #x0100
+                                        :questions (list (0conf:make-question :name "Example.COM." :qtype 0conf:+type-a+))))))
+    (is (equal '(("example.com" . t)) (gr8s.controllers::egress-dns-decisions query '("example.com"))))
+    (is (equal '(("example.com")) (gr8s.controllers::egress-dns-decisions query '("api.anthropic.com")))))
+  (is (null (gr8s.controllers::egress-dns-decisions (egress-dns-query "web.prod.svc.cluster.local") '())))
+  (let ((flow (gr8s.controllers::egress-dns-flow-object "10.80.32.7" "exfil.example" nil)))
+    (is (equal "DROPPED" (gethash "verdict" flow)))
+    (is (equal "POLICY" (gethash "reason" flow)))
+    (is (equal "dns" (gethash "type" (gethash "l7" flow))))
+    (is (equal "exfil.example" (gethash "query" (gethash "l7" flow))))))
+
 (defun egress-test-name-table (answers &key (clock (let ((now 1000)) (lambda () now))))
   "A name table whose resolver answers from ANSWERS, an alist of name -> (addresses ttl
 rcode), counting calls per name in the returned hash table."

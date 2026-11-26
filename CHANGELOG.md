@@ -115,6 +115,12 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- The node egress proxy's verdicts reach the flow stream, the Network view, OTLP flow
+  logs and `observe_flows` (podster-5hv.11): a second `:report` argument had silently
+  replaced the one that sent them. The egress DNS gate reports each name it answers
+  or refuses for a captured Pod, and the Network view draws a refused lookup in red to
+  the site it names.
+
 - A new Pod is in a ClusterNetworkPolicy's subject from the snapshot that assigns it,
   not one after its address reaches the control plane, so its first connections are
   not decided without the policy (podster-ae08).
