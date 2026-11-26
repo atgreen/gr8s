@@ -1722,6 +1722,29 @@ them. A node can't claim another's address or name."
   (multiple-value-bind (opcode payload) (gr8s.protocol::read-websocket-frame stream)
     (and (= opcode 1) (com.inuoe.jzon:parse payload))))
 
+(defun browser-node-test-join (stream &key (key (ironclad:generate-key-pair :secp256r1)) (tab "0a0b") wrong-key)
+  "Join as a browser would: hello with KEY's public half and TAB, then sign the challenge
+(with WRONG-KEY instead, to fail). Returns the server's next message."
+  (multiple-value-bind (private public) (if (consp key) (values (car key) (cdr key)) (ironclad:generate-key-pair :secp256r1))
+    (declare (ignorable public))
+    (let ((public (if (consp key) (cdr key) public)))
+      (browser-node-test-send
+       stream (gr8s.resources::core-object
+               "op" "hello" "arch" "arm64"
+               "capacity" (gr8s.resources::core-object "cpu" "3" "memory" "2048Mi" "pods" "40")
+               "identity" (gr8s.resources::core-object
+                           "publicKey" (cl-base64:usb8-array-to-base64-string (getf (ironclad:destructure-public-key public) :y))
+                           "tab" tab)))
+      (let* ((challenge (browser-node-test-read stream))
+             (nonce (cl-base64:base64-string-to-usb8-array (gethash "nonce" challenge)))
+             (signer (or wrong-key private)))
+        (browser-node-test-send
+         stream (gr8s.resources::core-object
+                 "op" "proof"
+                 "signature" (cl-base64:usb8-array-to-base64-string
+                              (ironclad:sign-message signer (ironclad:digest-sequence :sha256 nonce)))))
+        (browser-node-test-read stream)))))
+
 (test a-browser-joins-as-a-tainted-node-and-runs-a-pod
   ;; podster-57fv.2: a browser's session becomes a node whose agent runs here; the
   ;; browser (a stand-in speaking its protocol) only runs the containers.
@@ -1738,10 +1761,10 @@ them. A node can't claim another's address or name."
                (browser-node-test-connect (hunchentoot:acceptor-port listener))
              (setf socket connection)
              (is (= 101 status))
-             (browser-node-test-send stream (gr8s.resources::core-object "op" "hello" "arch" "arm64"))
-             (let* ((welcome (browser-node-test-read stream))
+             (let* ((welcome (browser-node-test-join stream))
                     (name (gethash "node" welcome)))
                (is (equal "welcome" (gethash "op" welcome)))
+               (is (eql 1 (gethash "epoch" welcome)))
                (is-true (wait-until (lambda () (handler-case (gr8s.model::node-record-ready-p (gr8s.controllers::get-node store name))
                                                  (gr8s.model::kubernetes-error () nil)))
                                     :timeout 20))
@@ -1750,7 +1773,12 @@ them. A node can't claim another's address or name."
                                                                        (gr8s.kubelet::node-labels (gr8s.controllers::get-node store name)))))
                                     :timeout 10))
                (let ((labels (gr8s.kubelet::node-labels (gr8s.controllers::get-node store name))))
-                 (is (equal "true" (gethash "gr8s.io/browser" labels))))
+                 (is (equal "true" (gethash "gr8s.io/browser" labels)))
+                 (is (cl-ppcre:scan "^browser-[0-9a-f]{8}$" (gethash "topology.kubernetes.io/zone" labels))))
+               ;; What the browser offered, clamped: 40 Pods is more than a tab may take.
+               (is-true (wait-until (lambda () (equal "16" (gethash "pods" (gr8s.model::node-record-capacity
+                                                                          (gr8s.controllers::get-node store name)))))
+                                    :timeout 10))
                ;; The browser answers what the node's agent asks of it.
                (setf browser
                      (bt:make-thread
@@ -1825,6 +1853,57 @@ them. A node can't claim another's address or name."
         (hunchentoot:stop listener)
         (gr8s.server::stop-virtual-nodes host)
         (gr8s.apiserver::stop-node-grpc-server server)))))
+
+(test a-browser-node-is-who-its-key-says-and-a-reconnect-replaces-it
+  ;; podster-57fv.5: the node's name comes from the browser's key and tab; a browser that
+  ;; can't sign the challenge is refused; the same tab reconnecting fences its old session.
+  (with-temporary-store (store path)
+    (let* ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" path)))
+           (server (gr8s.apiserver::start-node-grpc-server store :host "127.0.0.1" :port 0 :pki pki))
+           (host (gr8s.server::make-virtual-node-host store server pki (merge-pathnames "virtual/" path)))
+           (listener (gr8s.server::start-browser-join-listener host "127.0.0.1" 0))
+           (port (hunchentoot:acceptor-port listener))
+           (key (multiple-value-call #'cons (ironclad:generate-key-pair :secp256r1)))
+           (sockets '()))
+      (flet ((connect ()
+               (multiple-value-bind (stream socket) (browser-node-test-connect port)
+                 (push socket sockets)
+                 stream)))
+        (unwind-protect
+             (let* ((first (connect))
+                    (welcome (browser-node-test-join first :key key :tab "aa"))
+                    (name (gethash "node" welcome)))
+               (is (cl-ppcre:scan "^browser-[0-9a-f]{6}$" name))
+               ;; Another tab of the same browser is another node in the same zone.
+               (let ((other (browser-node-test-join (connect) :key key :tab "bb")))
+                 (is (not (equal name (gethash "node" other)))))
+               ;; A key it can't sign for is refused.
+               (let ((stranger (connect)))
+                 (is (null (ignore-errors
+                            (browser-node-test-join stranger :key key :tab "aa"
+                                                             :wrong-key (ironclad:generate-key-pair :secp256r1))))))
+               ;; The same tab again is the same node, in a new session that replaces the first.
+               (let ((again (browser-node-test-join (connect) :key key :tab "aa")))
+                 (is (equal name (gethash "node" again)))
+                 (is (eql 2 (gethash "epoch" again)))
+                 ;; The first session is over: past what it had already been sent, it ends.
+                 (is-true (loop repeat 50
+                                for opcode = (ignore-errors (gr8s.protocol::read-websocket-frame first))
+                                when (member opcode '(nil 8)) return t))))
+          (dolist (socket sockets) (ignore-errors (usocket:socket-close socket)))
+          (hunchentoot:stop listener)
+          (gr8s.server::stop-virtual-nodes host)
+          (gr8s.apiserver::stop-node-grpc-server server))))))
+
+(test browser-nodes-take-no-pod-that-brings-secrets-or-privileges
+  (flet ((suits (json) (gr8s.resources::spec-suits-browser-node-p (com.inuoe.jzon:parse json))))
+    (is-true (suits "{\"containers\":[{\"name\":\"a\",\"image\":\"busybox\"}],\"volumes\":[{\"name\":\"t\",\"projected\":{\"sources\":[{\"serviceAccountToken\":{\"path\":\"token\"}}]}}]}"))
+    (is-false (suits "{\"containers\":[{\"name\":\"a\"}],\"volumes\":[{\"name\":\"s\",\"secret\":{\"secretName\":\"x\"}}]}"))
+    (is-false (suits "{\"containers\":[{\"name\":\"a\"}],\"volumes\":[{\"name\":\"h\",\"hostPath\":{\"path\":\"/\"}}]}"))
+    (is-false (suits "{\"containers\":[{\"name\":\"a\",\"env\":[{\"name\":\"T\",\"valueFrom\":{\"secretKeyRef\":{\"name\":\"x\",\"key\":\"k\"}}}]}]}"))
+    (is-false (suits "{\"containers\":[{\"name\":\"a\",\"envFrom\":[{\"secretRef\":{\"name\":\"x\"}}]}]}"))
+    (is-false (suits "{\"containers\":[{\"name\":\"a\",\"securityContext\":{\"privileged\":true}}]}"))
+    (is-false (suits "{\"hostNetwork\":true,\"containers\":[{\"name\":\"a\"}]}"))))
 
 (test control-plane-logs-come-from-the-assigned-remote-agent
   (with-temporary-store (store path)

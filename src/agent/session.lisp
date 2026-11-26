@@ -137,6 +137,10 @@ has its own.")
   "The function sending NODE-NAME's credential rotations, or NIL between its sessions."
   (gethash node-name *credential-rotation-senders*))
 
+(defvar *agent-capacities* (make-hash-table :test #'equal :synchronized t)
+  "By node name, the capacity an agent in this process advertises for its node, as protocol
+map entries, when not this host's: a browser node offers what its browser does.")
+
 (defvar *agent-architectures* (make-hash-table :test #'equal :synchronized t)
   "By node name, the architecture an agent in this process reports for its node when not
 this executable's: a browser node's agent runs here but its containers are arm64
@@ -920,7 +924,8 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
                               :underlay-address
                               (or underlay-address (node-channel-underlay-address channel))
                               :capabilities (node-session-capabilities capabilities gateway-config-handler one-shot-p)
-                              :capacity (node-reported-capacity-entries)
+                              :capacity (or (gethash node-name *agent-capacities*)
+                                            (node-reported-capacity-entries))
                               :kubelet-port kubelet-port
                               :wireguard-public-key (or wireguard-public-key #())
                               :wireguard-endpoints

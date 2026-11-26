@@ -53,11 +53,46 @@
                  (some (lambda (toleration) (toleration-matches-taint-p toleration taint)) tolerations)))
            (node-record-taints node))))
 
+;;; A browser node (podster-57fv) runs its Pods where their operator can read everything
+;;; they hold, so it takes no Pod that would bring a Secret, the host or privileges with
+;;; it. A ServiceAccount token volume is let through: the browser runtime mounts no
+;;; volumes, so the token never reaches the browser.
+
+(defun browser-node-p (node)
+  "Whether NODE is a browser node."
+  (let ((labels (node-record-labels node)))
+    (and labels (equal "true" (gethash "gr8s.io/browser" labels)))))
+
+(defun spec-suits-browser-node-p (spec)
+  "Whether a Pod with SPEC may run on a browser node: no Secret by volume or environment,
+no host path, and no privileges or host namespaces."
+  (flet ((secret-env-p (container)
+           (or (some (lambda (env) (let ((from (gethash "valueFrom" env)))
+                                     (and (hash-table-p from) (gethash "secretKeyRef" from))))
+                     (gethash "env" container #()))
+               (some (lambda (from) (gethash "secretRef" from)) (gethash "envFrom" container #()))))
+         (privileged-p (container)
+           (let ((context (gethash "securityContext" container)))
+             (and (hash-table-p context) (eq t (gethash "privileged" context))))))
+    (let ((containers (concatenate 'list (gethash "initContainers" spec #()) (gethash "containers" spec #()))))
+      (not (or (some (lambda (volume)
+                       (or (gethash "secret" volume) (gethash "hostPath" volume)
+                           (let ((projected (gethash "projected" volume)))
+                             (and (hash-table-p projected)
+                                  (some (lambda (source) (gethash "secret" source))
+                                        (gethash "sources" projected #()))))))
+                     (gethash "volumes" spec #()))
+               (some #'secret-env-p containers)
+               (some #'privileged-p containers)
+               (some (lambda (key) (eq t (gethash key spec))) '("hostNetwork" "hostPID" "hostIPC")))))))
+
 (defun pod-node-taints-allow-p (pod node)
-  "Return whether NODE's unschedulable flag and taints admit POD to the scheduler."
+  "Return whether NODE's unschedulable flag and taints admit POD to the scheduler, and, for
+a browser node, whether POD suits one."
   (let ((spec (gethash "spec" (pod-to-object pod))))
     (and (not (node-record-unschedulable node))
-         (spec-tolerates-node-scheduling-p spec node))))
+         (spec-tolerates-node-scheduling-p spec node)
+         (or (not (browser-node-p node)) (spec-suits-browser-node-p spec)))))
 
 (defun pod-no-execute-toleration-seconds (spec node)
   "Return how long a Pod with SPEC may stay on NODE: NIL forever, otherwise seconds, 0 for at once."

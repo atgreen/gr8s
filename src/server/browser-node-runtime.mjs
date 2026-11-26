@@ -26,6 +26,40 @@ function fromBase64(text) {
 }
 const decoder = new TextDecoder();
 
+// The node's identity (podster-57fv.5): an ECDSA P-256 key whose private half
+// never leaves the browser (non-extractable, kept in IndexedDB), and a tab id kept
+// for the tab's life. A reload of the tab is the same node; another tab or browser
+// profile is another. The server proves possession with a challenge.
+async function loadIdentityKey() {
+  const fresh = () => crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"]);
+  if (typeof indexedDB === "undefined") return fresh();
+  const db = await new Promise((resolve, reject) => {
+    const open = indexedDB.open("gr8s-browser-node", 1);
+    open.onupgradeneeded = () => open.result.createObjectStore("keys");
+    open.onsuccess = () => resolve(open.result);
+    open.onerror = () => reject(open.error);
+  });
+  const request = (mode, run) => new Promise((resolve, reject) => {
+    const r = run(db.transaction("keys", mode).objectStore("keys"));
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  });
+  let pair = await request("readonly", (store) => store.get("identity"));
+  if (!pair) {
+    pair = await fresh();
+    await request("readwrite", (store) => store.put(pair, "identity"));
+  }
+  return pair;
+}
+
+function tabId() {
+  const make = () => [...crypto.getRandomValues(new Uint8Array(4))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  if (typeof sessionStorage === "undefined") return make();
+  let id = sessionStorage.getItem("gr8s-tab");
+  if (!id) sessionStorage.setItem("gr8s-tab", (id = make()));
+  return id;
+}
+
 // How much of each container's output is kept for `kubectl logs`.
 const LOG_LIMIT = 1 << 20;
 
@@ -107,12 +141,22 @@ export function joinCluster({ url, createKernel, distro, memoryMiB = 256, capaci
     if (socket.readyState === 1) socket.send(JSON.stringify(message));
   };
 
-  socket.onopen = () =>
+  const identity = loadIdentityKey();
+  let epoch = null;
+  socket.onopen = async () => {
+    const pair = await identity;
+    const publicKey = new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey));
     send({
       op: "hello",
-      capacity: capacity ?? { cpu: "1", memory: `${memoryMiB}Mi`, pods: "4" },
+      identity: { publicKey: toBase64(publicKey), tab: tabId() },
+      capacity: capacity ?? {
+        cpu: String(Math.max(1, Math.min(8, (globalThis.navigator?.hardwareConcurrency ?? 2) - 1))),
+        memory: `${memoryMiB * 4}Mi`,
+        pods: "4",
+      },
       arch: "arm64",
     });
+  };
   socket.onclose = async () => {
     for (const uid of [...pods.keys()]) await deletePod(uid);
     resolveClosed();
@@ -131,12 +175,22 @@ export function joinCluster({ url, createKernel, distro, memoryMiB = 256, capaci
       execControl(message);
       return;
     }
+    if (message.op === "challenge") {
+      const pair = await identity;
+      const signature = new Uint8Array(await crypto.subtle.sign(
+        { name: "ECDSA", hash: "SHA-256" }, pair.privateKey, fromBase64(message.nonce)));
+      send({ op: "proof", signature: toBase64(signature) });
+      return;
+    }
     if (message.op === "welcome") {
+      epoch = message.epoch ?? null;
       log(`joined as ${message.node}`);
       resolveNode(message.node);
       return;
     }
     if (typeof message.id !== "number") return;
+    // A request from an earlier session of this node is stale: never act on it.
+    if (message.epoch !== undefined && message.epoch !== epoch) return;
     try {
       send({ id: message.id, result: await handle(message) });
     } catch (error) {

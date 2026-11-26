@@ -27,6 +27,8 @@ the handler for the messages it sends unasked."
   (next-id 0)
   (replies (make-hash-table))
   (closed nil)
+  ;; This session's epoch: every request carries it, and the browser acts only on its own.
+  (epoch 0)
   (on-message nil)
   ;; Called with each binary message: an Ethernet frame from the browser's Pods.
   (on-frame nil))
@@ -56,7 +58,8 @@ the browser doesn't answer in time or goes away."
                 (setf (gethash id (browser-session-replies session)) :waiting)
                 id)))
         (message (apply #'core-object "id" nil "op" op fields)))
-    (setf (gethash "id" message) id)
+    (setf (gethash "id" message) id
+          (gethash "epoch" message) (browser-session-epoch session))
     (handler-case (browser-session-send session message)
       (error (condition)
         (bt:with-lock-held ((browser-session-lock session))
@@ -468,13 +471,76 @@ who can reach the listener reaches those ports, so it is off unless asked for.")
    (pod-network :initarg :pod-network :initform nil :reader browser-join-pod-network
                 :documentation "Whether browser Pods get addresses in their node's Pod CIDR, routed
 to a TAP device on this host (browser-network.lisp). It needs CAP_NET_ADMIN.")
+   (sessions :initform (make-hash-table :test #'equal :synchronized t) :reader browser-join-sessions
+             :documentation "Each connected browser node's session, by node name.")
+   (epochs :initform (make-hash-table :test #'equal :synchronized t) :reader browser-join-epochs
+           :documentation "The last epoch each node's session had.")
    (runtimes :initform (make-hash-table :test #'equal :synchronized t) :reader browser-join-runtimes
              :documentation "Each connected browser node's runtime, by node name."))
   (:documentation "Serves the join page and accepts browser nodes' sessions."))
 
-(defun browser-node-name ()
-  "A fresh name for a browser node."
-  (format nil "browser-~(~{~2,'0x~}~)" (coerce (secure-random-octets 3) 'list)))
+(defun hex-prefix (octets count)
+  (format nil "~(~{~2,'0x~}~)" (coerce (subseq octets 0 count) 'list)))
+
+(defun browser-node-identity (session stream hello)
+  "Prove the identity HELLO presents and return (values node-name zone): the browser must
+sign a fresh challenge with the private half of its public key. The name comes from the
+key and the tab, so a reload of the tab is the same node; the zone from the key alone,
+so a browser's tabs share one failure domain. Signals when the proof fails."
+  (let* ((identity (gethash "identity" hello))
+         (encoded (and (hash-table-p identity) (gethash "publicKey" identity)))
+         (tab (and (hash-table-p identity) (gethash "tab" identity)))
+         (public-key (and (stringp encoded) (ignore-errors (cl-base64:base64-string-to-usb8-array encoded)))))
+    (unless (and public-key (= 65 (length public-key)) (= 4 (aref public-key 0))
+                 (stringp tab) (cl-ppcre:scan "^[0-9a-f]{1,16}$" tab))
+      (error "a browser node presents a P-256 public key and a tab id"))
+    (let ((nonce (secure-random-octets 32)))
+      (browser-session-send session (core-object "op" "challenge" "nonce" (octets-base64 nonce)))
+      (multiple-value-bind (opcode payload) (gr8s.protocol::read-websocket-frame stream)
+        (let* ((proof (and (= opcode 1) (ignore-errors (com.inuoe.jzon:parse payload))))
+               (signature (and (hash-table-p proof) (equal "proof" (gethash "op" proof))
+                               (stringp (gethash "signature" proof))
+                               (ignore-errors (cl-base64:base64-string-to-usb8-array (gethash "signature" proof))))))
+          (unless (and signature
+                       (ignore-errors
+                        (ironclad:verify-signature (ironclad:make-public-key :secp256r1 :y public-key)
+                                                   (ironclad:digest-sequence :sha256 nonce) signature)))
+            (error "the browser could not prove its identity")))))
+    (values (format nil "browser-~A"
+                    (hex-prefix (ironclad:digest-sequence
+                                 :sha256 (concatenate '(vector (unsigned-byte 8)) public-key
+                                                      (trivial-utf-8:string-to-utf-8-bytes tab)))
+                                3))
+            (format nil "browser-~A" (hex-prefix (ironclad:digest-sequence :sha256 public-key) 4)))))
+
+(defun browser-node-capacity (hello)
+  "The capacity HELLO offers, as protocol map entries, within what a tab can give: at most
+8 CPUs, 8Gi of memory and 16 Pods. It is what the browser said, not what it has."
+  (let* ((offered (gethash "capacity" hello))
+         (offered (if (hash-table-p offered) offered (core-object))))
+    (flet ((bounded (key default limit)
+             (let ((value (gethash key offered)))
+               (if (and (stringp value) (cl-ppcre:scan "^[0-9]+$" value))
+                   (princ-to-string (min (max 1 (parse-integer value)) limit))
+                   default))))
+      (list (cons "cpu" (bounded "cpu" "1" 8))
+            (cons "memory" (let ((value (gethash "memory" offered)))
+                             (if (and (stringp value) (cl-ppcre:scan "^[0-9]{1,5}Mi$" value)
+                                      (<= 64 (parse-integer value :junk-allowed t) 8192))
+                                 value
+                                 "1024Mi")))
+            (cons "pods" (bounded "pods" "4" 16))))))
+
+(defun fence-browser-node (acceptor name)
+  "End NAME's earlier session, if one is still open, and wait for its node to stop, so a
+reconnecting browser never shares its node with the session it replaces."
+  (let ((old (gethash name (browser-join-sessions acceptor))))
+    (when old
+      ;; Closing it wouldn't wake the session's blocked read; this does.
+      (ignore-errors (stop-reading-websocket (browser-session-stream old)))
+      (loop repeat 100
+            while (member name (virtual-node-names (browser-join-nodes acceptor)) :test #'equal)
+            do (sleep 0.1)))))
 
 (defun accept-browser-node (acceptor request)
   "Run one browser's session on REQUEST's upgraded connection: read its hello, make it a
@@ -490,19 +556,28 @@ stops with the session."
                (let ((hello (and (= opcode 1) (ignore-errors (com.inuoe.jzon:parse payload)))))
                  (unless (and (hash-table-p hello) (equal "hello" (gethash "op" hello)))
                    (error "a browser node must say hello first"))
+                 (multiple-value-bind (identity zone) (browser-node-identity session stream hello)
+                   (fence-browser-node acceptor identity)
+                   (setf name identity
+                         (browser-session-epoch session)
+                         (setf (gethash name (browser-join-epochs acceptor))
+                               (1+ (gethash name (browser-join-epochs acceptor) 0)))
+                         (gethash name (browser-join-sessions acceptor)) session)
+                   (setf (gethash "zone" hello) zone))
                  (let ((runtime (make-browser-runtime
                                  session (list (let ((address (hunchentoot:acceptor-address acceptor)))
                                                  (if (member address '(nil "0.0.0.0") :test #'equal)
                                                      "127.0.0.1" address))
                                                (hunchentoot:acceptor-port acceptor))))
                        (architecture (if (equal "amd64" (gethash "arch" hello)) "amd64" "arm64")))
-                   (setf name (browser-node-name))
                    (start-virtual-node host name
                                        :labels (core-object "gr8s.io/browser" "true"
-                                                            "gr8s.io/runtime" "unkernel")
+                                                            "gr8s.io/runtime" "unkernel"
+                                                            "topology.kubernetes.io/zone" (gethash "zone" hello))
                                        :taints (vector (apply #'core-object +browser-node-taint+))
                                        :runtime-options (list :runtime "browser" :runtime-object runtime
-                                                             :architecture architecture))
+                                                             :architecture architecture
+                                                             :capacity (browser-node-capacity hello)))
                    (setf (gethash name (browser-join-runtimes acceptor)) runtime)
                    ;; Its Pods' network: the node's Pod CIDR, routed to a device here.
                    (let* ((node (gr8s.controllers::get-node (virtual-node-host-store host) name))
@@ -517,6 +592,7 @@ stops with the session."
                                  (browser-session-on-frame session)
                                  (lambda (frame) (browser-network-receive network frame)))))))
                    (browser-session-send session (core-object "op" "welcome" "node" name
+                                                              "epoch" (browser-session-epoch session)
                                                               "podProxy" (and (browser-join-pod-proxy acceptor) t)))
                    (format t "gr8s browser node ~A joined~%" name)
                    (start-browser-node-reporter session (virtual-node-host-store host) name
@@ -524,6 +600,8 @@ stops with the session."
                    (run-browser-session session))))
            (error (condition)
              (format *error-output* "gr8s browser node~@[ ~A~]: ~A~%" name condition)))
+      (when (and name (eq session (gethash name (browser-join-sessions acceptor))))
+        (remhash name (browser-join-sessions acceptor)))
       (when name
         (let ((runtime (gethash name (browser-join-runtimes acceptor))))
           (when (and runtime (browser-runtime-network runtime))

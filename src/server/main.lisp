@@ -2795,6 +2795,9 @@ alongside the LAN primary and 127.0.0.1 (podster-6ls)."
     (if (getf options :architecture)
         (setf (gethash node-name gr8s.agent::*agent-architectures*) (getf options :architecture))
         (remhash node-name gr8s.agent::*agent-architectures*))
+    (if (getf options :capacity)
+        (setf (gethash node-name gr8s.agent::*agent-capacities*) (getf options :capacity))
+        (remhash node-name gr8s.agent::*agent-capacities*))
     (setf (local-node-agent-thread worker)
           (bt:make-thread
            (lambda ()
