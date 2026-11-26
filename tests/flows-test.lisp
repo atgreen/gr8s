@@ -162,6 +162,20 @@
         (is-true (wait-until (lambda () (bt:with-lock-held (seen-lock)
                                           (find 1003 seen :key (lambda (flow) (gethash "podPort" flow)))))
                              :timeout 10))
+        ;; The node's stream ends, as when its agent restarts: the observer asks again,
+        ;; and what it already delivered doesn't come twice (podster-v7sj).
+        (dolist (operation (bt:with-lock-held ((gr8s.agent::node-runtime-operations-lock node-runtime))
+                             (alexandria:hash-table-values (gr8s.agent::node-runtime-operations node-runtime))))
+          (gr8s.agent::finish-node-exec-operation operation))
+        (sleep 1)
+        (gr8s.agent::note-flow-record collector (test-flow-record :pod-port 1004))
+        (is-true (wait-until (lambda () (bt:with-lock-held (seen-lock)
+                                          (find 1004 seen :key (lambda (flow) (gethash "podPort" flow)))))
+                             :timeout 15))
+        (is (equal '(1001 1002 1003 1004)
+                   (bt:with-lock-held (seen-lock)
+                     (reverse (mapcar (lambda (flow) (gethash "podPort" flow))
+                                      (remove-if-not (lambda (flow) (gethash "podPort" flow)) seen))))))
         (setf stop t)
         (is-true (wait-until (lambda () (not (bt:thread-alive-p observer))) :timeout 10)))
       ;; A node without a collector says so once.
