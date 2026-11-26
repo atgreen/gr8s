@@ -9,6 +9,11 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- A stand-in credential is bound to the hosts its rules inject for (podster-wv1w.12):
+  a relayed request that would carry one anywhere else, or on a path no rule covers,
+  gets 403 with a body saying which header, for what request, and where the Pod's
+  credentials are bound; Audit enforcement reports it and forwards.
+
 - The node egress proxy terminates a gr8 sandbox's TLS for every allowed host and
   reports each request it makes (podster-wv1w.11). SandboxProfile `spec.egress` sets
   `tls: Terminate|Passthrough`, `passthroughHosts` for clients that pin certificates,

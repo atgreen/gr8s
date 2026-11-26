@@ -41,6 +41,7 @@
   report    ; (peer-address host address port allowed-p rule-name), or NIL
   inject    ; (peer-address host scheme) -> NIL, or a request matcher for EGRESS-RELAY-HTTP
   inspect   ; (peer-address host) -> NIL, or (:enforcement :enforce|:audit) to terminate and relay
+  bindings  ; (peer-address) -> the hosts the Pod's credentials are bound to, for explaining a refusal
   mint      ; (host) -> (values certificate-chain key) for the egress CA's leaf, or NIL
   request-report  ; (peer-address host address port method path code rule-name &optional audit), or NIL
   (upstream-verify pure-tls:+verify-required+) ; how an injected connection checks its upstream
@@ -252,7 +253,7 @@ again. A client that speaks first and names another host in its TLS SNI is refus
 
 (defun start-egress-proxy (&key (address "127.0.0.1") (port 0) decide
                                 (resolve #'egress-default-resolve) (connect #'egress-default-connect) report
-                                inject inspect mint request-report (upstream-verify pure-tls:+verify-required+)
+                                inject inspect bindings mint request-report (upstream-verify pure-tls:+verify-required+)
                                 names dialed)
   "Listen on ADDRESS:PORT and serve captured connections, one thread each. DECIDE, RESOLVE,
 CONNECT, REPORT, INSPECT, NAMES and DIALED are as EGRESS-PROXY documents. Returns the EGRESS-PROXY;
@@ -264,7 +265,8 @@ its PORT is the bound port (the kernel's choice when PORT is 0)."
     (let ((proxy (make-egress-proxy :socket socket :address address
                                     :port (nth-value 1 (sb-bsd-sockets:socket-name socket))
                                     :decide decide :resolve resolve :connect connect :report report
-                                    :inject inject :inspect inspect :mint mint :request-report request-report
+                                    :inject inject :inspect inspect :bindings bindings :mint mint
+                                    :request-report request-report
                                     :upstream-verify upstream-verify
                                     :names names :dialed (or dialed #'egress-default-dialed))))
       (setf (egress-proxy-thread proxy)
@@ -394,7 +396,7 @@ and REPORT, when given, sees it too."
                                           (and rule (gr8s.network::cnp-rule-name rule))))))))
 
 (defun start-node-egress-proxy (decide patterns-for &key (address gr8s.network::+egress-proxy-address+) (port 15443)
-                                                       inject inspect mint report
+                                                       inject inspect bindings mint report
                                                        (upstreams (list (cons gr8s.network::+node-gateway-address+ 53))))
   "Start the node egress proxy on ADDRESS (put on the node gateway interface), steer every
 port there and on the synthetic range to it, and serve the egress DNS gate on its port 53.
@@ -410,7 +412,8 @@ node DNS server, UPSTREAMS. Returns (values proxy steering gate)."
                             (egress-upstream-a-records
                              name (lambda (packet) (cl-dns-proxy:forward-dns-udp packet upstreams 2.0))))))
          (proxy (start-egress-proxy
-                :address address :port port :decide decide :inject inject :inspect inspect :mint mint :names names
+                :address address :port port :decide decide :inject inject :inspect inspect :bindings bindings
+                :mint mint :names names
                 :request-report (lambda (peer host resolved port method path code rule &optional audit)
                                   (let ((sink *gateway-flow-sink*))
                                     (when sink
@@ -711,8 +714,9 @@ stream of events (SSE) arrives as it is sent."
                        finally (force-output out) (return-from egress-copy-body))))))
         (t (egress-copy-bytes in out (second framing)))))
 
-(defun egress-write-response (stream code reason)
-  (let ((body (babel:string-to-octets (format nil "gr8s egress: ~A~%" reason))))
+(defun egress-write-response (stream code reason &optional detail)
+  "Answer on STREAM with CODE and REASON, the body DETAIL (else REASON), and close."
+  (let ((body (babel:string-to-octets (format nil "gr8s egress: ~A~%" (or detail reason)))))
     (write-sequence (egress-http-head-octets (format nil "HTTP/1.1 ~D ~A" code reason)
                                              `(("Content-Type" . "text/plain") ("Content-Length" . ,(princ-to-string (length body)))
                                                ("Connection" . "close")))
@@ -729,13 +733,24 @@ an upgraded connection (a WebSocket) carries after its 101."
     (ignore-errors (close upstream))
     (ignore-errors (bt:join-thread other))))
 
-(defun egress-relay-http (client host open-upstream inject report &key (enforcement :enforce))
+(defparameter +egress-stand-in+ "gr8s-injected"
+  "What every stand-in credential a gr8 sandbox holds contains: gr8's placeholder files'
+tokens and a SandboxProfile's placeholder values.")
+
+(defun egress-stand-in-header (headers)
+  "The first of HEADERS whose value still carries a stand-in credential, or NIL."
+  (find-if (lambda (header) (search +egress-stand-in+ (cdr header))) headers))
+
+(defun egress-relay-http (client host open-upstream inject report &key (enforcement :enforce) bound-hosts)
   "Relay HTTP/1.1 requests from the CLIENT stream for HOST to the stream
 OPEN-UPSTREAM opens on first use. INJECT maps (method path) to NIL or (values rule-name
 headers value), VALUE NIL when the credential can't be found. REPORT is called with
 (method path code rule-name &optional audit) for each request, AUDIT naming the rule a
-request broke that ENFORCEMENT :audit let through. An upgraded connection (101) is
-spliced from then on."
+request broke that ENFORCEMENT :audit let through. A request still carrying a stand-in
+credential once its rule (if any) has injected is refused with why, naming the
+BOUND-HOSTS its credentials are for (podster-wv1w.12): the stand-in would otherwise
+reach the server and fail there unexplained. An upgraded connection (101) is spliced
+from then on."
   (let ((upstream nil))
     (unwind-protect
          (loop
@@ -769,6 +784,18 @@ spliced from then on."
                        (setf headers (append (remove-if (lambda (header) (member (car header) names :test #'string-equal))
                                                         headers)
                                              (mapcar (lambda (name) (cons name value)) names))))
+                     (let ((stand-in (egress-stand-in-header headers)))
+                       (when stand-in
+                         (let ((reason (format nil "~A carries a gr8 stand-in credential, which no rule injects for ~A ~A~A~:[~;; this Pod's credentials are bound to ~:*~{~A~^, ~}~]"
+                                               (car stand-in) method host
+                                               (subseq target 0 (or (position #\? target) (length target)))
+                                               bound-hosts)))
+                           (if (eq enforcement :audit)
+                               (setf audit (if audit (format nil "~A; ~A" audit reason) reason))
+                               (progn
+                                 (egress-write-response client 403 "Forbidden" reason)
+                                 (funcall report method target 403 rule-name reason)
+                                 (return))))))
                      ;; A client waiting for 100 Continue would wait on us: it sends anyway after a pause.
                      (setf headers (remove "Expect" headers :key #'car :test #'string-equal))
                      (unless upstream (setf upstream (funcall open-upstream)))
@@ -847,7 +874,9 @@ a connection nothing is injected into is relayed undecrypted instead."
                 (when (egress-proxy-request-report proxy)
                   (ignore-errors (funcall (egress-proxy-request-report proxy)
                                           peer host address port method path code rule audit))))
-              :enforcement enforcement)))
+              :enforcement enforcement
+              :bound-hosts (and (egress-proxy-bindings proxy)
+                                (ignore-errors (funcall (egress-proxy-bindings proxy) peer))))))
       (when upstream-socket (ignore-errors (sb-bsd-sockets:socket-close upstream-socket)))
       (when client-stream (ignore-errors (close client-stream)))
       (when raw (ignore-errors (close raw))))))

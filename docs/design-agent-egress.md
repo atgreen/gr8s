@@ -320,6 +320,13 @@ refused.
   Private, shared and link-local destinations are exempt from capture (address policy
   applies to them as before), and a captured Pod can't reach a public address by IP
   alone: the redirect keeps the port, not the address.
+- **Stand-ins are bound to their hosts** (podster-wv1w.12). Every stand-in a gr8
+  sandbox holds contains `gr8s-injected`. In a request the proxy relays (terminated or
+  injected), a header still carrying one after its rule, if any, has injected is
+  refused with 403 and a body naming the header, the request and the hosts the Pod's
+  credentials are bound to; under Audit it is reported (`l7.audit`) and forwarded,
+  since a stand-in is worthless where it isn't swapped. The client learns why instead
+  of the server answering 401.
 - **Domain fronting.** A TLS connection the proxy doesn't terminate is admitted by its
   SNI; a different Host inside it reaches whatever that server routes it to. Hosts
   with an injected credential, and a gr8 sandbox's hosts, are terminated, and their
