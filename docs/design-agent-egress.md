@@ -257,6 +257,14 @@ trail: what this agent asked for, and what it was refused.
   real answers and SNI/Host admission. Only A answers are synthesized; AAAA and other
   types get no data. UDP other than DNS and QUIC's 443 is still left to address policy.
   A node whose own address is in `198.18.0.0/15` is not detected.
+- **A gr8 sandbox is always confined** (podster-1mzb). A Pod labelled
+  `gr8s.io/gr8-command` is captured and synthetic whether or not a policy names hosts,
+  and its egress ends with a built-in Deny of `0.0.0.0/0` and `::/0` (`gr8-sandbox`)
+  below every policy's rules, so it reaches what Admin rules, its NetworkPolicy and
+  Baseline rules allow and nothing else. With no policy, its DNS answers nothing outside
+  the cluster zone and it reaches only the egress proxy. Its host-redirect table holds
+  the proxy alone: the API server and the node's own addresses, which other Pods reach
+  past policy (podster-5hv.10), are decided by policy for it.
 - **Capture is IPv4.** A captured Pod's IPv6 TCP is left to address policy.
   Private, shared and link-local destinations are exempt from capture (address policy
   applies to them as before), and a captured Pod can't reach a public address by IP

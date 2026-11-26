@@ -9,6 +9,13 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- A gr8 sandbox, any Pod labelled `gr8s.io/gr8-command`, is always on synthetic
+  DNS, and anything its policies don't allow is denied (podster-1mzb). Its DNS
+  answers only the names a ClusterNetworkPolicy accepts for it (none: `REFUSED`).
+  It reaches those names through the node egress proxy. Every other connection is
+  denied by a built-in last rule, `gr8-sandbox`: by address, over IPv6, over UDP,
+  and to the API server and its own node, which other Pods reach past policy.
+
 - Egress control and credential injection for AI agents, declared as Kubernetes
   resources and enforced by the node (podster-wv1w, docs/design-agent-egress.md):
   - `policy.networking.k8s.io/v1alpha2` ClusterNetworkPolicy is served natively:

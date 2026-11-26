@@ -310,9 +310,24 @@ as \"namespace/name\" strings, and its rules in order per direction."
   (member (format nil "~A/~A" (np-pod-namespace pod) (np-pod-name pod)) (cnp-spec-subject-pods spec)
           :test #'equal))
 
+(defparameter +gr8-sandbox-label+ "gr8s.io/gr8-command"
+  "The label gr8 gives the Pod it runs a command in.")
+
+(defun gr8-sandbox-pod-p (pod)
+  "True when POD is a gr8 sandbox: its egress is captured and named, and anything its
+policies don't allow is denied (podster-1mzb)."
+  (let ((labels (np-pod-labels pod)))
+    (and (hash-table-p labels) (nth-value 1 (gethash +gr8-sandbox-label+ labels)) t)))
+
+(defun gr8-sandbox-egress-rule ()
+  "The rule after every policy's for a gr8 sandbox: deny what nothing above allowed."
+  (make-cnp-rule :name "gr8-sandbox" :action :deny :networks '("0.0.0.0/0" "::/0")
+                 :ports (pset-full)))
+
 (defun pod-cluster-network-policy-tiers (pod cnps direction)
   "POD's DIRECTION rules, in evaluation order: (values admin-rules baseline-rules), each
-the selecting policies' rules by priority (then name), in their written order."
+the selecting policies' rules by priority (then name), in their written order. A gr8
+sandbox's egress ends with the gr8-sandbox Deny."
   (flet ((tier (which)
            (loop for spec in (sort (remove-if-not (lambda (spec) (and (eq (cnp-spec-tier spec) which)
                                                                       (cnp-selects-pod-p spec pod)))
@@ -321,7 +336,10 @@ the selecting policies' rules by priority (then name), in their written order."
                                                      (string< (cnp-spec-name a) (cnp-spec-name b))
                                                      (< (cnp-spec-priority a) (cnp-spec-priority b)))))
                  append (if (eq direction :egress) (cnp-spec-egress spec) (cnp-spec-ingress spec)))))
-    (values (tier :admin) (tier :baseline))))
+    (values (tier :admin)
+            (append (tier :baseline)
+                    (when (and (eq direction :egress) (gr8-sandbox-pod-p pod))
+                      (list (gr8-sandbox-egress-rule)))))))
 
 (defun %family-prefix-functions (family)
   (if (eq family :ipv4)
@@ -400,7 +418,8 @@ rules, then everything undecided."
                                     (ordered-policy-entries np-isolated np-entries admin baseline :ipv6))))
                ;; A captured Pod's connections leave through the node egress proxy,
                ;; which decides them itself; the guard must let them reach it.
-               (when (and (eq direction :egress) (some #'cnp-rule-domain-names (append admin baseline)))
+               (when (and (eq direction :egress)
+                          (or (gr8-sandbox-pod-p pod) (some #'cnp-rule-domain-names (append admin baseline))))
                  (push (list (format nil "~A/32" +egress-proxy-address+) '() '((6 nil nil) (17 53 53))) entries)
                  ;; And the synthetic addresses its DNS answers with, which reach the
                  ;; proxy too (podster-wv1w.8).
@@ -434,9 +453,10 @@ for \"*.example.com\" any name with one or more whole labels in front of example
           (string= pattern host)))))
 
 (defun pod-egress-captured-p (pod cnps &optional profiles)
-  "True when one of POD's egress ClusterNetworkPolicy rules names domains, or a
-SecurityProfile among PROFILES selects POD for credential injection."
-  (or (some #'cnp-rule-domain-names (pod-egress-domain-rules pod cnps))
+  "True when POD is a gr8 sandbox, one of its egress ClusterNetworkPolicy rules names
+domains, or a SecurityProfile among PROFILES selects it for credential injection."
+  (or (gr8-sandbox-pod-p pod)
+      (some #'cnp-rule-domain-names (pod-egress-domain-rules pod cnps))
       (some (lambda (profile) (funcall 'security-profile-selects-pod-p profile pod)) profiles)))
 
 (defun pod-egress-allowed-domains (pod cnps)

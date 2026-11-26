@@ -150,10 +150,11 @@ or its name has no current address. Expired addresses are never returned."
           (values (egress-name-name entry) (egress-name-addresses entry)))))))
 
 (defun pod-egress-synthetic-p (pod cnps)
-  "True when POD has a hostname allowlist, an egress Accept rule naming domains among
-CNPS: its DNS is answered with synthetic addresses. Pods without one, including those
-a SecurityProfile alone captures, see real answers."
-  (and (pod-egress-allowed-domains pod cnps) t))
+  "True when POD is a gr8 sandbox or has a hostname allowlist, an egress Accept rule
+naming domains among CNPS: its DNS is answered with synthetic addresses, for the names
+allowed and no others. Other Pods, including those a SecurityProfile alone captures,
+see real answers."
+  (or (gr8-sandbox-pod-p pod) (and (pod-egress-allowed-domains pod cnps) t)))
 
 (defun %egress-synthetic-route-message ()
   "The rtmsg for local 198.18.0.0/15 dev lo in the local table."

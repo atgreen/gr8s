@@ -2025,12 +2025,19 @@ A no-op unless the agent is managed with a store and known endpoints."
         ;; host-local destinations (the API server 10.96.0.1, this node's own IP)
         ;; so the egress guard redirects that traffic to lo, past the host
         ;; firewall's INPUT reject. Independent and fail-soft, like the table above.
+        ;; A gr8 sandbox's table holds the egress proxy alone (podster-1mzb).
         (when native-p
-          (converge-node-host-redirect
-           (mapcar #'first endpoints)
-           (ignore-errors (containerd-node-address (node-runtime-runtime node-runtime)))
-           :directory-fn (lambda (sandbox)
-                           (nth-value 2 (cni-pin-paths root sandbox)))))
+          (let ((pods (or (ignore-errors (gr8s.network::pod-ip-identity-map store))
+                          (make-hash-table :test #'equal))))
+            (converge-node-host-redirect
+             (mapcar #'first endpoints)
+             (ignore-errors (containerd-node-address (node-runtime-runtime node-runtime)))
+             :directory-fn (lambda (sandbox)
+                             (nth-value 2 (cni-pin-paths root sandbox)))
+             :confined-p (lambda (sandbox)
+                           (let* ((address (third (find sandbox endpoints :key #'first :test #'equal)))
+                                  (pod (and address (gethash address pods))))
+                             (and pod (gr8s.network::gr8-sandbox-pod-p pod)))))))
         ;; NetworkPolicy, both directions (origin/main). Spec resolution can throw
         ;; on an unsupported policy, so it stays after the delivery tables above,
         ;; which must populate regardless.
