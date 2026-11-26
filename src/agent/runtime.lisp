@@ -1367,6 +1367,12 @@ the node from starting."
                      (if (and pod (gr8s.network::pod-egress-synthetic-p pod cluster-policies))
                          (values (gr8s.network::pod-egress-allowed-domains pod cluster-policies) t)
                          :all))))
+               :report (lambda (peer host address port allowed rule)
+                         ;; A refusal is otherwise silent: the client just sees a reset.
+                         (unless allowed
+                           (format *error-output* "gr8s egress proxy refused ~A -> ~A (~A) port ~A~@[ by rule ~A~]~%"
+                                   peer (or host "an unnamed host") (or address "no address") port
+                                   (and rule (or (gr8s.network::cnp-rule-name rule) "unnamed")))))
                :inject (lambda (peer host scheme)
                          (node-runtime-egress-injector node-runtime peer host scheme))
                :mint (let ((minter nil) (ca nil))

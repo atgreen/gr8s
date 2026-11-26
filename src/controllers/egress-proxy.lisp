@@ -256,7 +256,10 @@ its PORT is the bound port (the kernel's choice when PORT is 0)."
                              ;; ends that connection, not the agent.
                              (bt:make-thread (lambda ()
                                                (handler-case (egress-proxy-handle proxy client)
-                                                 (error () (ignore-errors (sb-bsd-sockets:socket-close client)))))
+                                                 (error (condition)
+                                                   (format *error-output* "gr8s egress proxy connection failed: ~A~%"
+                                                           condition)
+                                                   (ignore-errors (sb-bsd-sockets:socket-close client)))))
                                              :name "gr8s egress proxy conn"))))
                    (error () (when (egress-proxy-stop proxy) (return))))))
              :name "gr8s egress proxy accept"))
@@ -353,7 +356,7 @@ the SecurityProfile rule that injected a credential into it -- never the credent
     flow))
 
 (defun start-node-egress-proxy (decide patterns-for &key (address gr8s.network::+egress-proxy-address+) (port 15443)
-                                                       inject mint
+                                                       inject mint report
                                                        (upstreams (list (cons gr8s.network::+node-gateway-address+ 53))))
   "Start the node egress proxy on ADDRESS (put on the node gateway interface), steer every
 port there and on the synthetic range to it, and serve the egress DNS gate on its port 53.
@@ -370,6 +373,7 @@ node DNS server, UPSTREAMS. Returns (values proxy steering gate)."
                              name (lambda (packet) (cl-dns-proxy:forward-dns-udp packet upstreams 2.0))))))
          (proxy (start-egress-proxy
                 :address address :port port :decide decide :inject inject :mint mint :names names
+                :report report
                 :request-report (lambda (peer host resolved port method path code rule)
                                   (let ((sink *gateway-flow-sink*))
                                     (when sink
