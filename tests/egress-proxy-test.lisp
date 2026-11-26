@@ -343,9 +343,12 @@ the body, over TLS when TLS-CHAIN is given. Returns (values stop port)."
       (values (parse-integer (second (cl-ppcre:split " " status-line)))
               (babel:octets-to-string body :encoding :latin-1)))))
 
-(defmacro with-injecting-proxy ((port &key matcher mint (upstream-port '(error "upstream")) names dialed) &body body)
+(defmacro with-injecting-proxy ((port &key matcher mint (upstream-port '(error "upstream")) names dialed
+                                         inspect request-report)
+                                &body body)
   "NAMES and DIALED, when given, are the proxy's name table and the address every
-connection is taken to have been dialled to (podster-wv1w.8)."
+connection is taken to have been dialled to (podster-wv1w.8). INSPECT and REQUEST-REPORT
+are the proxy's (podster-wv1w.11)."
   (let ((proxy (gensym)))
     `(let* ((,proxy (gr8s.controllers::start-egress-proxy
                      :decide (lambda (peer host address port) (declare (ignore peer host address port)) (values t nil))
@@ -356,6 +359,8 @@ connection is taken to have been dialled to (podster-wv1w.8)."
                      :inject (lambda (peer host scheme) (declare (ignore peer scheme))
                                (and (equal host "api.example.test") ,matcher))
                      :mint ,mint
+                     :inspect ,inspect
+                     :request-report ,request-report
                      :upstream-verify pure-tls:+verify-none+
                      :names ,names
                      :dialed ,(and dialed `(lambda (socket) (declare (ignore socket)) (values ,dialed 80)))))
@@ -447,3 +452,96 @@ connection is taken to have been dialled to (podster-wv1w.8)."
                             (is (search "x-api-key: sk-real" body))))
                      (ignore-errors (sb-bsd-sockets:socket-close socket)))))
             (funcall stop)))))))
+
+;;; A gr8 sandbox's egress is inspected (podster-wv1w.11): TLS terminated, every request
+;;; reported, and a rule a request breaks refused under Enforce, reported under Audit.
+
+(defun egress-test-ca-minter ()
+  (multiple-value-bind (ca-key ca-public) (ironclad:generate-key-pair :secp256r1)
+    (gr8s.controllers::make-egress-leaf-minter
+     ca-key (pure-tls:parse-certificate (gr8s.security::ca-certificate-der ca-key ca-public :common-name "gr8s egress")))))
+
+(defun egress-test-tls-upstream (host)
+  "An echo upstream presenting its own leaf for HOST. Returns (values stop port)."
+  (multiple-value-bind (chain key)
+      (multiple-value-bind (certificate-pem key-pem) (gr8s.controllers::cm-issue-leaf :dns-names (list host))
+        (egress-test-pem-material certificate-pem key-pem))
+    (egress-echo-upstream :tls-chain chain :tls-key key)))
+
+(defun egress-test-synthetic-address (host)
+  (let ((table (gr8s.network::make-egress-name-table
+                :resolve (lambda (name) (declare (ignore name)) (values '("203.0.113.5") 30 0)))))
+    (values table (gr8s.network::egress-name-answer table host))))
+
+(test egress-proxy-terminates-an-inspected-sandboxs-tls-and-reports-each-request
+  ;; No credential for this host: termination is for seeing the requests.
+  (multiple-value-bind (stop upstream) (egress-test-tls-upstream "web.example.test")
+    (multiple-value-bind (table address) (egress-test-synthetic-address "web.example.test")
+      (let ((requests '()))
+        (unwind-protect
+             (with-injecting-proxy (port :mint (egress-test-ca-minter) :upstream-port upstream
+                                         :names table :dialed address
+                                         :inspect (lambda (peer host) (declare (ignore peer host))
+                                                    (list :enforcement :enforce))
+                                         :request-report (lambda (peer host address port method path code rule &optional audit)
+                                                           (declare (ignore peer address port))
+                                                           (push (list host method path code rule audit) requests)))
+               (multiple-value-bind (raw socket) (egress-test-client port)
+                 (unwind-protect
+                      (let ((tls (pure-tls:make-tls-client-stream raw :hostname "web.example.test"
+                                                                      :verify pure-tls:+verify-none+)))
+                        ;; The leaf is the egress CA's, not the server's own.
+                        (let ((leaf (first (pure-tls:tls-peer-certificate-chain tls))))
+                          (is (member "gr8s egress" (pure-tls::certificate-issuer-common-names leaf) :test #'equal)))
+                        (multiple-value-bind (status body) (egress-test-request tls "web.example.test" "/index.html")
+                          (is (= 200 status))
+                          ;; Nothing is injected; the stand-in passes as it came.
+                          (is (search "x-api-key: gr8s-injected" body)))
+                        ;; Fronting is refused under Enforce.
+                        (is (= 421 (egress-test-request tls "evil.example.test" "/"))))
+                   (ignore-errors (sb-bsd-sockets:socket-close socket)))))
+          (funcall stop))
+        (is (equal '(("web.example.test" "GET" "/" 421 nil nil)
+                     ("web.example.test" "GET" "/index.html" 200 nil nil))
+                   requests))))))
+
+(test egress-proxy-under-audit-reports-a-broken-rule-and-forwards
+  (multiple-value-bind (stop upstream) (egress-echo-upstream)
+    (multiple-value-bind (table address) (egress-test-synthetic-address "web.example.test")
+      (let ((requests '()))
+        (unwind-protect
+             (with-injecting-proxy (port :upstream-port upstream :names table :dialed address
+                                         :inspect (lambda (peer host) (declare (ignore peer host))
+                                                    (list :enforcement :audit))
+                                         :request-report (lambda (peer host address port method path code rule &optional audit)
+                                                           (declare (ignore peer host address port method rule))
+                                                           (push (list path code audit) requests)))
+               (multiple-value-bind (stream socket) (egress-test-client port)
+                 (unwind-protect
+                      (multiple-value-bind (status body) (egress-test-request stream "evil.example.test" "/x")
+                        (is (= 200 status))
+                        (is (search "Host: evil.example.test" body)))
+                   (ignore-errors (sb-bsd-sockets:socket-close socket)))))
+          (funcall stop))
+        (is (equal '(("/x" 200 "Host evil.example.test is not web.example.test")) requests))))))
+
+(test egress-proxy-relays-an-inspected-sandbox-undecrypted-without-a-ca
+  ;; No egress CA on the node: nothing to present, so the TLS goes through as it came
+  ;; (terminating would have failed the connection), and the client completes its
+  ;; handshake with the server itself.
+  (multiple-value-bind (stop upstream) (egress-test-tls-upstream "web.example.test")
+    (multiple-value-bind (table address) (egress-test-synthetic-address "web.example.test")
+      (let ((asked '()))
+        (unwind-protect
+             (with-injecting-proxy (port :mint (lambda (host) (push host asked) nil) :upstream-port upstream
+                                         :names table :dialed address
+                                         :inspect (lambda (peer host) (declare (ignore peer host))
+                                                    (list :enforcement :enforce)))
+               (multiple-value-bind (raw socket) (egress-test-client port)
+                 (unwind-protect
+                      (let ((tls (pure-tls:make-tls-client-stream raw :hostname "web.example.test"
+                                                                      :verify pure-tls:+verify-none+)))
+                        (is (= 200 (egress-test-request tls "web.example.test" "/"))))
+                   (ignore-errors (sb-bsd-sockets:socket-close socket)))))
+          (funcall stop))
+        (is (equal '("web.example.test") asked))))))

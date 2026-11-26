@@ -222,6 +222,22 @@
     (is-false (gr8s.apiserver::flow-in-namespace-p (flow "namespace" "data") "shop"))
     (is-true (gr8s.apiserver::flow-in-namespace-p (flow "namespace" "data") nil))))
 
+(test doctor-observe-prints-the-egress-proxys-decisions
+  (flet ((line (flow)
+           (setf (gethash "time" flow) "2026-11-22T01:02:03.456Z" (gethash "node" flow) "worker-a"
+                 (gethash "namespace" flow) "gr8" (gethash "pod" flow) "gr8-curl-x")
+           (gr8s.server::format-flow-line flow)))
+    (is (equal "01:02:03.456 worker-a: gr8/gr8-curl-x -> DNS exfil.example REFUSED by policy"
+               (line (gr8s.controllers::egress-dns-flow-object "10.80.32.7" "exfil.example" nil))))
+    (is (equal "01:02:03.456 worker-a: gr8/gr8-curl-x -> DNS example.com answered"
+               (line (gr8s.controllers::egress-dns-flow-object "10.80.32.7" "example.com" t))))
+    (is (equal "01:02:03.456 worker-a: gr8/gr8-curl-x -> evil.example (203.0.113.5:443) DROPPED by rule gr8-sandbox"
+               (line (gr8s.controllers::egress-flow-object "10.80.32.7" "evil.example" "203.0.113.5" 443 nil "gr8-sandbox"))))
+    (is (equal "01:02:03.456 worker-a: gr8/gr8-curl-x -> GET example.com/a 200 injected gr8/p/r AUDIT: Host x is not example.com"
+               (line (gr8s.controllers::egress-request-flow-object
+                      "10.80.32.7" "example.com" "104.20.23.154" 443 "GET" "/a?q=1" 200 "gr8/p/r"
+                      "Host x is not example.com"))))))
+
 (test doctor-observe-reads-a-chunked-body-line-by-line
   (let* ((body (format nil "{\"a\":1}~%{\"b\":2}~%"))
          (octets (trivial-utf-8:string-to-utf-8-bytes

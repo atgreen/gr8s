@@ -189,3 +189,90 @@
                               (list (com.inuoe.jzon:parse +ci-login-security-profile+))))))))
     (is (equal "accessToken" (gr8s.network::injection-rule-secret-key rule)))
     (is (equal "Bearer t" (gr8s.network::render-injection-value (gr8s.network::injection-rule-template rule) "t")))))
+
+;;; podster-wv1w.11: how the node egress proxy inspects a gr8 command's egress.
+
+(defun ci-sandbox-profile (name commands &optional egress)
+  (com.inuoe.jzon:parse
+   (format nil "{\"apiVersion\":\"gr8.gr8s.io/v1alpha1\",\"kind\":\"SandboxProfile\",\"metadata\":{\"name\":~S},
+                 \"spec\":{\"commands\":[~{~S~^,~}]~@[,\"egress\":~A~]}}" name commands egress)))
+
+(test ci-sandbox-profiles-say-how-egress-is-inspected
+  (flet ((normalize (egress)
+           (gr8s.resources::normalize-core-resource "sandboxprofiles" (ci-sandbox-profile "x" '("x") egress)
+                                                    nil "x" nil)))
+    (is (normalize "{\"tls\":\"Passthrough\",\"enforcement\":\"Audit\",\"passthroughHosts\":[\"pinned.example.com\",\"*.corp.example\"]}"))
+    (dolist (bad '("{\"tls\":\"Sometimes\"}" "{\"enforcement\":\"enforce\"}" "{\"passthroughHosts\":[\"https://x\"]}"
+                   "{\"passthroughHosts\":\"x.example\"}" "{\"inspect\":true}" "[]"))
+      (signals gr8s.resources::kubernetes-error (normalize bad)))))
+
+(test ci-a-gr8-sandbox-is-terminated-unless-its-profile-says-otherwise
+  (let ((claude (gr8s.network::make-np-pod :name "gr8-claude-x" :namespace "gr8"
+                                           :labels (gr8s.network::np-labels "gr8s.io/gr8-command" "claude")))
+        (web (gr8s.network::make-np-pod :name "web" :namespace "prod" :labels (gr8s.network::np-labels "app" "web"))))
+    (flet ((inspection (profiles &optional (host "api.anthropic.com"))
+             (gr8s.network::gr8-sandbox-inspection claude profiles host)))
+      ;; No profile: terminated and enforced.
+      (is (equal '(:enforcement :enforce) (inspection '())))
+      (is (equal '(:enforcement :audit)
+                 (inspection (list (ci-sandbox-profile "claude" '("claude") "{\"enforcement\":\"Audit\"}")))))
+      (is (null (inspection (list (ci-sandbox-profile "claude" '("claude") "{\"tls\":\"Passthrough\"}")))))
+      (let ((pinned (list (ci-sandbox-profile "claude" '("claude") "{\"passthroughHosts\":[\"*.pinned.example\"]}"))))
+        (is (null (inspection pinned "api.pinned.example")))
+        (is (equal '(:enforcement :enforce) (inspection pinned))))
+      ;; Another command's profile, or the later of two by name, doesn't apply.
+      (is (equal '(:enforcement :enforce)
+                 (inspection (list (ci-sandbox-profile "ping" '("ping") "{\"tls\":\"Passthrough\"}")))))
+      (is (null (inspection (list (ci-sandbox-profile "b" '("claude") "{\"tls\":\"Terminate\"}")
+                                  (ci-sandbox-profile "a" '("claude") "{\"tls\":\"Passthrough\"}"))))))
+    ;; Only gr8 sandboxes are inspected.
+    (is (null (gr8s.network::gr8-sandbox-inspection web '() "api.anthropic.com")))))
+
+(test ci-a-node-sees-only-a-sandbox-profiles-commands-and-egress
+  (let* ((profile (ci-sandbox-profile "claude" '("claude") "{\"enforcement\":\"Audit\"}"))
+         (public (progn
+                   (setf (gethash "home" (gethash "spec" profile)) (gr8s.resources::core-object "readWrite" #(".claude"))
+                         (gethash "env" (gethash "spec" profile)) (gr8s.resources::core-object "KEY" "gr8s-injected"))
+                   (gr8s.kubelet::service-discovery-public-object profile)))
+         (spec (gethash "spec" public)))
+    (is (equal "gr8.gr8s.io/v1alpha1" (gethash "apiVersion" public)))
+    (is (equal '("claude") (coerce (gethash "commands" spec) 'list)))
+    (is (equal "Audit" (gethash "enforcement" (gethash "egress" spec))))
+    (is (null (gethash "home" spec)))
+    (is (null (gethash "env" spec)))
+    ;; And decodes back as the cluster-scoped resource it is.
+    (destructuring-bind (key . object)
+        (gr8s.kubelet::decode-service-discovery-entry (gr8s.resources:stringify-to-utf-8-bytes public))
+      (is (equal "sandboxprofiles" (first key)))
+      (is (equal "SandboxProfile" (gethash "kind" object))))))
+
+(test ci-a-namespaces-own-sandbox-profile-wins
+  (let ((labels (make-hash-table :test #'equal))
+        (profiles (list (ci-sandbox-profile "all" '("claude") "{\"enforcement\":\"Enforce\"}")
+                        (let ((profile (ci-sandbox-profile "team-a" '("claude") "{\"enforcement\":\"Audit\"}")))
+                          (setf (gethash "namespaceSelector" (gethash "spec" profile))
+                                (com.inuoe.jzon:parse "{\"matchLabels\":{\"team\":\"a\"}}"))
+                          profile))))
+    (setf (gethash "team-a" labels) (gr8s.network::np-labels "team" "a" "kubernetes.io/metadata.name" "team-a")
+          (gethash "prod" labels) (gr8s.network::np-labels "kubernetes.io/metadata.name" "prod"))
+    (flet ((enforcement (namespace)
+             (getf (gr8s.network::gr8-sandbox-inspection
+                    (gr8s.network::make-np-pod :name "gr8-claude-x" :namespace namespace
+                                               :labels (gr8s.network::np-labels "gr8s.io/gr8-command" "claude"))
+                    profiles "api.anthropic.com" labels)
+                   :enforcement)))
+      (is (eq :audit (enforcement "team-a")))
+      (is (eq :enforce (enforcement "prod")))
+      ;; A namespace the node knows nothing of matches no selector.
+      (is (eq :enforce (enforcement "elsewhere")))))
+  (is (gr8s.resources::normalize-core-resource
+       "sandboxprofiles"
+       (com.inuoe.jzon:parse "{\"apiVersion\":\"gr8.gr8s.io/v1alpha1\",\"kind\":\"SandboxProfile\",\"metadata\":{\"name\":\"x\"},
+          \"spec\":{\"commands\":[\"x\"],\"namespaceSelector\":{\"matchExpressions\":[{\"key\":\"team\",\"operator\":\"In\",\"values\":[\"a\"]}]}}}")
+       nil "x" nil))
+  (signals gr8s.resources::kubernetes-error
+    (gr8s.resources::normalize-core-resource
+     "sandboxprofiles"
+     (com.inuoe.jzon:parse "{\"apiVersion\":\"gr8.gr8s.io/v1alpha1\",\"kind\":\"SandboxProfile\",\"metadata\":{\"name\":\"x\"},
+        \"spec\":{\"commands\":[\"x\"],\"namespaceSelector\":{\"matchLabels\":{\"team\":\"a\"},\"bogus\":1}}}")
+     nil "x" nil)))

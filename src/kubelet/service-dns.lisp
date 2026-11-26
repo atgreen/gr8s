@@ -12,7 +12,7 @@
   (let* ((kind (gethash "kind" object)) (source (gethash "metadata" object))
          (metadata (core-object)) (result (core-object)))
     (unless (member kind '("Namespace" "Service" "EndpointSlice" "NetworkPolicy" "ClusterNetworkPolicy" "SecurityProfile"
-                           "Ingress" "IngressClass"
+                           "SandboxProfile" "Ingress" "IngressClass"
                            "GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute" "ReferenceGrant"
                            "Secret" "ClusterTrustBundle" "PodCertificateRequest") :test #'equal)
       (invalid-pod "unsupported public Service discovery kind"))
@@ -38,6 +38,7 @@
                                               ((equal kind "PodCertificateRequest") "certificates.k8s.io/v1")
                                               ((equal kind "ClusterNetworkPolicy") "policy.networking.k8s.io/v1alpha2")
                                               ((equal kind "SecurityProfile") "agents.kruise.io/v1alpha1")
+                                              ((equal kind "SandboxProfile") "gr8.gr8s.io/v1alpha1")
                                               ((member kind '("NetworkPolicy" "Ingress" "IngressClass") :test #'equal)
                                                "networking.k8s.io/v1")
                                               ((member kind '("GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute" "ReferenceGrant") :test #'equal)
@@ -78,6 +79,14 @@
                                                                     (setf (gethash key kept) (gethash key entry)))))
                                                               kept))
                                                   ingress))))))))
+      ((equal kind "SandboxProfile")
+       ;; Which commands it is for and how their egress is inspected; what gr8 grants in
+       ;; the caller's home is none of the node's business.
+       (let ((spec (core-object)))
+         (dolist (key '("commands" "namespaceSelector" "egress"))
+           (multiple-value-bind (value present) (gethash key (gethash "spec" object (core-object)))
+             (when present (setf (gethash key spec) (copy-core-object value)))))
+         (setf (gethash "spec" result) spec)))
       ((member kind '("NetworkPolicy" "ClusterNetworkPolicy" "SecurityProfile") :test #'equal)
        ;; The spec as network-policy-projection (or cluster-network-policy-projection)
        ;; resolved it: selected Pods and rules whose peers are addresses. The node
@@ -209,6 +218,8 @@
                           ;; Which Pods the node egress proxy injects credentials for; the
                           ;; Secrets themselves travel only with the Pods they serve.
                           (objects "securityprofiles")
+                          ;; How the proxy inspects a gr8 command's egress (podster-wv1w.11).
+                          (objects "sandboxprofiles")
                           (gr8s.controllers::egress-ca-secrets store)
                           (objects "ingressclasses")
                           (objects "ingresses")
@@ -325,6 +336,7 @@
                            ((equal "NetworkPolicy" (gethash "kind" public)) "networkpolicies")
                            ((equal "ClusterNetworkPolicy" (gethash "kind" public)) "clusternetworkpolicies")
                            ((equal "SecurityProfile" (gethash "kind" public)) "securityprofiles")
+                           ((equal "SandboxProfile" (gethash "kind" public)) "sandboxprofiles")
                            ((equal "IngressClass" (gethash "kind" public)) "ingressclasses")
                            ((equal "Ingress" (gethash "kind" public)) "ingresses")
                            ((equal "ReferenceGrant" (gethash "kind" public)) "referencegrants")
@@ -342,7 +354,7 @@
                    ;; GatewayClass, IngressClass and ClusterTrustBundle are cluster-scoped (no
                    ;; namespace); all others are namespaced.
                    (if (member resource '("namespaces" "gatewayclasses" "ingressclasses" "clustertrustbundles"
-                                          "clusternetworkpolicies") :test #'equal)
+                                          "clusternetworkpolicies" "sandboxprofiles") :test #'equal)
                        (null namespace) (dns-label-p namespace)))
         (invalid-pod "public Service discovery metadata is invalid"))
       (cons (core-resource-key resource namespace name) public)))

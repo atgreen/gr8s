@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"sort"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8slabels "k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -18,6 +21,8 @@ type SandboxProfile struct {
 		Placeholders []string `json:"placeholders"`
 	} `json:"home"`
 	Env map[string]string `json:"env"`
+	// NamespaceSelector limits the profile to the gr8 Pods of the namespaces it selects.
+	NamespaceSelector *metav1.LabelSelector `json:"namespaceSelector,omitempty"`
 }
 
 // builtinProfiles apply when the cluster has no SandboxProfile for a command.
@@ -67,25 +72,61 @@ func Profile(command, home string, profiles []SandboxProfile) Grant {
 	return grant
 }
 
-// clusterProfiles lists the cluster's SandboxProfiles; a cluster without the API, or
-// a caller who may not list them, has none.
-func clusterProfiles(ctx context.Context, clientset kubernetes.Interface) []SandboxProfile {
+// clusterProfiles lists the cluster's SandboxProfiles for namespace's gr8 Pods, in the
+// order the node picks them (see ProfilesFor); a cluster without the API, or a caller
+// who may not list them, has none.
+func clusterProfiles(ctx context.Context, clientset kubernetes.Interface, namespace string) []SandboxProfile {
 	raw, err := clientset.Discovery().RESTClient().Get().
 		AbsPath("/apis/gr8.gr8s.io/v1alpha1/sandboxprofiles").DoRaw(ctx)
 	if err != nil {
 		return nil
 	}
 	var list struct {
-		Items []struct {
-			Spec SandboxProfile `json:"spec"`
-		} `json:"items"`
+		Items []NamedProfile `json:"items"`
 	}
 	if json.Unmarshal(raw, &list) != nil {
 		return nil
 	}
+	var labels map[string]string
+	if object, err := clientset.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{}); err == nil {
+		labels = object.Labels
+	}
+	return ProfilesFor(list.Items, namespace, labels)
+}
+
+// NamedProfile is a SandboxProfile as listed: its name and spec.
+type NamedProfile struct {
+	Metadata struct {
+		Name string `json:"name"`
+	} `json:"metadata"`
+	Spec SandboxProfile `json:"spec"`
+}
+
+// ProfilesFor returns the profiles that apply in namespace, whose labels are labels:
+// those without a namespaceSelector and those whose selector matches, the matching
+// ones first, each group by name. The node chooses among them the same way.
+func ProfilesFor(items []NamedProfile, namespace string, labels map[string]string) []SandboxProfile {
+	all := map[string]string{"kubernetes.io/metadata.name": namespace}
+	for key, value := range labels {
+		all[key] = value
+	}
+	var scoped, unscoped []NamedProfile
+	for _, item := range items {
+		if item.Spec.NamespaceSelector == nil {
+			unscoped = append(unscoped, item)
+			continue
+		}
+		selector, err := metav1.LabelSelectorAsSelector(item.Spec.NamespaceSelector)
+		if err == nil && selector.Matches(k8slabels.Set(all)) {
+			scoped = append(scoped, item)
+		}
+	}
 	var profiles []SandboxProfile
-	for _, item := range list.Items {
-		profiles = append(profiles, item.Spec)
+	for _, group := range [][]NamedProfile{scoped, unscoped} {
+		sort.SliceStable(group, func(i, j int) bool { return group[i].Metadata.Name < group[j].Metadata.Name })
+		for _, item := range group {
+			profiles = append(profiles, item.Spec)
+		}
 	}
 	return profiles
 }

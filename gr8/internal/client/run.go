@@ -110,7 +110,7 @@ func Run(options Options) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	grant := Profile(options.Command[0], home, clusterProfiles(ctx, clientset))
+	grant := Profile(options.Command[0], home, clusterProfiles(ctx, clientset, options.Namespace))
 	options.ReadOnly = append(grant.ReadOnly, options.ReadOnly...)
 	options.ReadWrite = append(grant.ReadWrite, options.ReadWrite...)
 	options.PlaceholderFiles = grant.Placeholders

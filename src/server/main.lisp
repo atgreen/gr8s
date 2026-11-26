@@ -4098,8 +4098,9 @@ upstream CRDs.
   proxy (169.254.1.2), which admits a connection by its TLS SNI or HTTP Host, and
   their DNS answered only for allowed names (REFUSED otherwise). UDP 443 is
   refused so QUIC falls back to TCP. A captured Pod can't reach a public address
-  by IP alone. Proxied connections appear in the flows and the Network view under
-  the name they went to.
+  by IP alone. Every proxied connection, request and DNS answer or refusal is a
+  flow event: it appears in the flows and the Network view under the name it went
+  to, refusals in red.
 - **OpenKruise Agents SecurityProfile (`agents.kruise.io/v1alpha1`): a built-in
   subset.** Credential injection: the node egress proxy overwrites the named
   headers of matching requests with a value rendered from a Secret
@@ -4112,10 +4113,17 @@ upstream CRDs.
   credential is missing gets 403. Do NOT install Kruise Agents' CRDs.
 - **gr8 (`gr8.gr8s.io/v1alpha1` SandboxProfile): gr8s's own.** What a
   command run by `gr8` gets in the caller's home (`readWrite`, `readOnly`,
-  `placeholders` credential files) and placeholder environment.
-  `gr8 login claude` stores Claude Code's subscription token as a Secret with
-  a SecurityProfile injecting it; the sandbox then sees stand-in tokens.
-  See docs/design-agent-egress.md.
+  `placeholders` credential files) and placeholder environment, and how the node
+  egress proxy treats its egress (`spec.egress`): `tls: Terminate` (the default:
+  every allowed host's TLS is terminated with a leaf from the egress CA and each
+  request reported) or `Passthrough`, `passthroughHosts` for clients that pin
+  certificates, and `enforcement: Enforce` (the default) or `Audit`, which reports
+  a broken rule such as domain fronting and forwards. `spec.namespaceSelector`
+  scopes a profile to namespaces; one that selects wins over one that doesn't.
+  A gr8 sandbox is always on synthetic DNS, and anything no policy allows is
+  denied; `gr8 --allow NAME` allows a name for one run. `gr8 login claude` stores
+  Claude Code's subscription token as a Secret with a SecurityProfile injecting
+  it; the sandbox then sees stand-in tokens. See docs/design-agent-egress.md.
 
 If you have already installed an upstream duplicate and wedged a group, recover
 by removing it and its CRDs (`helm uninstall ...`; `kubectl delete crd ...`);

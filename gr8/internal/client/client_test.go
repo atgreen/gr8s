@@ -151,3 +151,36 @@ func TestNewPodMountsTheEgressTrustBundle(t *testing.T) {
 		t.Errorf("no optional %s trust bundle volume in %+v", TrustBundle, pod.Spec.Volumes)
 	}
 }
+
+func TestProfilesForPrefersANamespacesOwnProfile(t *testing.T) {
+	named := func(name, command string, selector *metav1.LabelSelector) NamedProfile {
+		var item NamedProfile
+		item.Metadata.Name = name
+		item.Spec.Commands = []string{command}
+		item.Spec.Env = map[string]string{"FROM": name}
+		item.Spec.NamespaceSelector = selector
+		return item
+	}
+	items := []NamedProfile{
+		named("z-default", "claude", nil),
+		named("a-default", "claude", nil),
+		named("team", "claude", &metav1.LabelSelector{MatchLabels: map[string]string{"team": "a"}}),
+		named("prod", "claude", &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": "prod"}}),
+	}
+	from := func(profiles []SandboxProfile) []string {
+		var names []string
+		for _, profile := range profiles {
+			names = append(names, profile.Env["FROM"])
+		}
+		return names
+	}
+	if got := from(ProfilesFor(items, "gr8", map[string]string{"team": "a"})); !reflect.DeepEqual(got, []string{"team", "a-default", "z-default"}) {
+		t.Errorf("team a: %v", got)
+	}
+	if got := from(ProfilesFor(items, "prod", nil)); !reflect.DeepEqual(got, []string{"prod", "a-default", "z-default"}) {
+		t.Errorf("prod, by its name label: %v", got)
+	}
+	if got := Profile("claude", "/home/u", ProfilesFor(items, "other", nil)); got.Env["FROM"] != "a-default" {
+		t.Errorf("elsewhere the first unscoped profile applies, got %v", got.Env)
+	}
+}
