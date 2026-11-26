@@ -65,6 +65,8 @@
   .badge.Failed { background: var(--bad-soft); color: var(--bad); }
   .container { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 10px; font-size: 13px; color: var(--muted); }
   .container code { font-family: var(--mono); color: var(--fg); }
+  .port { font-weight: 600; color: var(--accent); text-decoration: none; border: 1px solid var(--accent); border-radius: 999px; padding: 0 10px; }
+  .port:hover { background: var(--accent-soft); }
   .empty { color: var(--muted); text-align: center; padding: 28px 12px; border: 1px dashed var(--line); border-radius: 12px; }
   .empty code { font-family: var(--mono); font-size: 13px; color: var(--fg); }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
@@ -190,7 +192,10 @@
             <div class="container"><span>container <code>${esc(c.name)}</code></span>
               <span>image <code>${esc(c.image)}</code></span>
               <span>${esc(containerState(c.state))}</span>
-              <span>restarts <code>${esc(c.restartCount)}</code></span></div>`).join("")}
+              <span>restarts <code>${esc(c.restartCount)}</code></span>
+              ${(c.ports ?? []).map((port) => info.podProxy
+                ? `<a class="port" target="_blank" href="pods/${encodeURIComponent(pod.namespace)}/${encodeURIComponent(pod.name)}/${port}/">open port ${port} ↗</a>`
+                : `<span>port <code>${port}</code></span>`).join("")}</div>`).join("")}
         </div>`).join("");
     }
     const labels = Object.entries(node.labels ?? {}).map(([k, v]) => `<span class="chip">${esc(k)}=${esc(v)}</span>`);

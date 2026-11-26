@@ -104,6 +104,8 @@ export function joinCluster({ url, createKernel, distro, memoryMiB = 256, capaci
         const result = await pod.vm.exec(file, args, { user: "root" });
         return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode ?? 1 };
       }
+      case "http":
+        return await proxyHttp(message);
       case "exec-start":
         await startExec(message);
         return {};
@@ -176,6 +178,26 @@ export function joinCluster({ url, createKernel, distro, memoryMiB = 256, capaci
         if (pods.get(pod.request.uid) === pod) await startContainer(pod, spec).catch(() => {});
       }
     });
+  }
+
+  // One HTTP request to a server in a Pod, for the server's Pod proxy. A refused
+  // connection is retried briefly: a simple server may be between connections.
+  async function proxyHttp(message) {
+    const pod = pods.get(message.uid);
+    if (!pod) throw new Error(`no Pod ${message.uid} here`);
+    await pod.starting;
+    const init = { method: message.method, headers: message.headers ?? {} };
+    if (message.body) init.body = fromBase64(message.body);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const response = await pod.vm.fetch(`http://localhost:${message.port}${message.path}`, init);
+        const body = new Uint8Array(await response.arrayBuffer());
+        return { status: response.status, headers: [...response.headers], body: toBase64(body) };
+      } catch (error) {
+        if (attempt >= 20 || !/ECONNREFUSED|closed before/.test(String(error?.message))) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
   }
 
   // An interactive exec (kubectl exec): the server relays its streams.

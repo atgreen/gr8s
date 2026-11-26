@@ -113,7 +113,9 @@ and wake every waiting request. Returns when the connection has ended."
 the Pods it holds are what the browser last reported. ENDPOINT, (address port), is the
 join listener, which also serves this runtime's exec streams."
   session endpoint
-  (execs (make-hash-table :test #'equal :synchronized t)))
+  (execs (make-hash-table :test #'equal :synchronized t))
+  ;; "namespace/name" -> uid, for the Pod proxy.
+  (names (make-hash-table :test #'equal :synchronized t)))
 
 (defun make-browser-runtime (session &optional endpoint)
   "A runtime for SESSION's browser, keeping the status the browser reports for each Pod and
@@ -153,6 +155,10 @@ the runtime doesn't hold is ignored: the browser can't add Pods of its own."
          (status (gethash "status" result))
          (runtime-pod (or (gethash (gr8s.model::pod-uid pod) (gr8s.runtime::fake-runtime-pods runtime))
                           (gr8s.runtime::make-runtime-pod :uid (gr8s.model::pod-uid pod)))))
+    (let ((request (browser-pod-request pod)))
+      (setf (gethash (format nil "~A/~A" (gethash "namespace" request) (gethash "name" request))
+                     (browser-runtime-names runtime))
+            (gr8s.model::pod-uid pod)))
     (setf (gr8s.runtime::runtime-pod-resource-version runtime-pod) (gr8s.model::pod-resource-version pod)
           (gr8s.runtime::runtime-pod-spec-fingerprint runtime-pod) (gr8s.runtime::pod-runtime-spec-fingerprint pod)
           (gethash (gr8s.model::pod-uid pod) (gr8s.runtime::fake-runtime-pods runtime)) runtime-pod)
@@ -368,6 +374,8 @@ A browser node is untrusted, so of other nodes and workloads it learns only tota
                                            :key (lambda (s) (gethash "name" s)) :test #'equal)))
                           (core-object "name" (gethash "name" container)
                                        "image" (gethash "image" container "")
+                                       "ports" (map 'vector (lambda (port) (gethash "containerPort" port))
+                                                    (gethash "ports" container #()))
                                        "restartCount" (if state (gethash "restartCount" state 0) 0)
                                        "state" (if state (gethash "state" state (core-object)) (core-object)))))
                       (gethash "containers" (gethash "spec" object) #())))
@@ -395,12 +403,15 @@ A browser node is untrusted, so of other nodes and workloads it learns only tota
                 "pods" (length pods)
                 "runningPods" running))))
 
-(defun start-browser-node-reporter (session store name)
-  "Tell SESSION's browser how its node NAME and the cluster are doing until it goes."
+(defun start-browser-node-reporter (session store name &key pod-proxy)
+  "Tell SESSION's browser how its node NAME and the cluster are doing until it goes, and
+whether its Pods' ports are reachable through POD-PROXY."
   (bt:make-thread
    (lambda ()
      (loop until (browser-session-closed session)
-           do (handler-case (browser-session-send session (browser-node-info store name))
+           do (handler-case (let ((info (browser-node-info store name)))
+                              (setf (gethash "podProxy" info) (and pod-proxy t))
+                              (browser-session-send session info))
                 (error () (return)))
               (loop repeat (* 10 +browser-node-info-seconds+)
                     until (browser-session-closed session) do (sleep 0.1))))
@@ -422,7 +433,12 @@ A browser node is untrusted, so of other nodes and workloads it learns only tota
   ((nodes :initarg :nodes :reader browser-join-nodes
           :documentation "The virtual-node-host browser nodes run on.")
    (distro :initarg :distro :initform nil :reader browser-join-distro
-           :documentation "The root image file the page boots Pods from, or NIL."))
+           :documentation "The root image file the page boots Pods from, or NIL.")
+   (pod-proxy :initarg :pod-proxy :initform nil :reader browser-join-pod-proxy
+              :documentation "Whether /pods/NS/NAME/PORT/ proxies HTTP to browser Pods. Anyone
+who can reach the listener reaches those ports, so it is off unless asked for.")
+   (runtimes :initform (make-hash-table :test #'equal :synchronized t) :reader browser-join-runtimes
+             :documentation "Each connected browser node's runtime, by node name."))
   (:documentation "Serves the join page and accepts browser nodes' sessions."))
 
 (defun browser-node-name ()
@@ -456,20 +472,26 @@ stops with the session."
                                        :taints (vector (apply #'core-object +browser-node-taint+))
                                        :runtime-options (list :runtime "browser" :runtime-object runtime
                                                              :architecture architecture))
-                   (browser-session-send session (core-object "op" "welcome" "node" name))
+                   (setf (gethash name (browser-join-runtimes acceptor)) runtime)
+                   (browser-session-send session (core-object "op" "welcome" "node" name
+                                                              "podProxy" (and (browser-join-pod-proxy acceptor) t)))
                    (format t "gr8s browser node ~A joined~%" name)
-                   (start-browser-node-reporter session (virtual-node-host-store host) name)
+                   (start-browser-node-reporter session (virtual-node-host-store host) name
+                                                :pod-proxy (browser-join-pod-proxy acceptor))
                    (run-browser-session session))))
            (error (condition)
              (format *error-output* "gr8s browser node~@[ ~A~]: ~A~%" name condition)))
       (when name
+        (remhash name (browser-join-runtimes acceptor))
         (stop-virtual-node host name)
         (format t "gr8s browser node ~A left~%" name))
       (ignore-errors (close stream)))))
 
 (defmethod hunchentoot:acceptor-dispatch-request ((acceptor browser-join-acceptor) request)
   (let ((path (hunchentoot:script-name request)))
-    (cond ((and (uiop:string-prefix-p "/exec/" path)
+    (cond ((and (uiop:string-prefix-p "/pods/" path) (browser-join-pod-proxy acceptor))
+           (proxy-browser-pod acceptor request path))
+          ((and (uiop:string-prefix-p "/exec/" path)
                 (string-equal (hunchentoot:header-in :upgrade request) "SPDY/3.1"))
            (serve-browser-exec (subseq path 6)))
           ((and (equal path "/socket")
@@ -489,11 +511,53 @@ stops with the session."
                    (hunchentoot:content-type*) "text/plain")
              "not found"))))
 
-(defun start-browser-join-listener (nodes address port &key distro)
+(defun proxy-browser-pod (acceptor request path)
+  "Answer REQUEST for /pods/NAMESPACE/NAME/PORT/REST by asking the Pod's browser to make it
+to the Pod's PORT, and relay the response."
+  (destructuring-bind (&optional namespace name port-text &rest rest)
+      (uiop:split-string (subseq path (length "/pods/")) :separator '(#\/))
+    (let* ((port (ignore-errors (parse-integer (or port-text ""))))
+           (key (format nil "~A/~A" namespace name))
+           (runtime (loop for runtime being the hash-values of (browser-join-runtimes acceptor)
+                          when (gethash key (browser-runtime-names runtime)) return runtime)))
+      (flet ((fail (code text)
+               (setf (hunchentoot:return-code*) code (hunchentoot:content-type*) "text/plain")
+               (return-from proxy-browser-pod text)))
+        (unless (and port (< 0 port 65536)) (fail 400 "expected /pods/NAMESPACE/NAME/PORT/"))
+        (unless runtime (fail 404 (format nil "no Pod ~A runs in a browser here" key)))
+        (when (null rest)
+          ;; Relative links in the page resolve under the Pod's path.
+          (hunchentoot:redirect (format nil "~A/" path)))
+        (let* ((query (hunchentoot:query-string request))
+               (headers (let ((object (core-object)))
+                          (loop for (header . value) in (hunchentoot:headers-in request)
+                                unless (member header '(:host :connection :upgrade :content-length :accept-encoding))
+                                  do (setf (gethash (string-downcase (symbol-name header)) object) value))
+                          object))
+               (body (hunchentoot:raw-post-data :request request :force-binary t))
+               (result
+                 (handler-case
+                     (apply #'browser-session-call (browser-runtime-session runtime) "http"
+                            "uid" (gethash key (browser-runtime-names runtime)) "port" port
+                            "method" (string-upcase (symbol-name (hunchentoot:request-method request)))
+                            "path" (format nil "/~{~A~^/~}~@[?~A~]" rest (and (plusp (length (or query ""))) query))
+                            "headers" headers
+                            (and body (plusp (length body)) (list "body" (octets-base64 body))))
+                   (runtime-error (condition) (fail 502 (princ-to-string condition))))))
+          (setf (hunchentoot:return-code*) (or (gethash "status" result) 502))
+          (loop for pair across (gethash "headers" result #())
+                for header = (string-downcase (aref pair 0))
+                unless (member header '("connection" "transfer-encoding" "content-length" "keep-alive")
+                               :test #'equal)
+                  do (setf (hunchentoot:header-out header) (aref pair 1)))
+          (cl-base64:base64-string-to-usb8-array (gethash "body" result "")))))))
+
+(defun start-browser-join-listener (nodes address port &key distro pod-proxy)
   "Listen on ADDRESS:PORT for browsers joining as nodes on NODES, serving the join page and
-DISTRO, the root image file Pods boot from. Returns the acceptor."
+DISTRO, the root image file Pods boot from, and with POD-PROXY, HTTP to their Pods.
+Returns the acceptor."
   (hunchentoot:start (make-instance 'browser-join-acceptor
-                                    :address address :port port :nodes nodes
+                                    :address address :port port :nodes nodes :pod-proxy pod-proxy
                                     :distro (and distro (pathname distro))
                                     :access-log-destination nil
                                     :message-log-destination *error-output*)))
