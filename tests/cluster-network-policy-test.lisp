@@ -305,3 +305,24 @@
     (multiple-value-bind (isolated entries) (gr8s.network::pod-policy-entries sandbox '() cnps :egress)
       (is-true isolated)
       (is (null (cnp-ports-for entries "0.0.0.0/0"))))))
+
+(test cnp-a-pod-is-in-a-subject-before-it-has-an-address
+  ;; The snapshot that assigns a Pod already names the policies that select it; its
+  ;; address isn't needed to be a subject, only to be a peer (podster-ae08).
+  (with-temporary-store (store path)
+    (values path)
+    (gr8s.resources::create-core-resource
+     store "clusternetworkpolicies"
+     (com.inuoe.jzon:parse "{\"apiVersion\":\"policy.networking.k8s.io/v1alpha2\",\"kind\":\"ClusterNetworkPolicy\",
+        \"metadata\":{\"name\":\"web\"},
+        \"spec\":{\"tier\":\"Admin\",\"priority\":10,
+          \"subject\":{\"pods\":{\"podSelector\":{\"matchLabels\":{\"app\":\"web\"}}}},
+          \"egress\":[{\"action\":\"Accept\",\"to\":[{\"domainNames\":[\"example.com\"]}]},
+                      {\"action\":\"Accept\",\"to\":[{\"pods\":{\"namespaceSelector\":{},\"podSelector\":{\"matchLabels\":{\"app\":\"web\"}}}}]}]}}")
+     nil)
+    (create-pod store (parse-pod "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"web\",\"namespace\":\"default\",\"labels\":{\"app\":\"web\"}},\"spec\":{\"containers\":[{\"name\":\"web\",\"image\":\"busybox\"}]}}"))
+    (let* ((spec (gethash "spec" (first (gr8s.network::cluster-network-policy-projection store))))
+           (pods (second (coerce (gethash "egress" spec) 'list))))
+      (is (equal '("default/web") (coerce (gethash "subjectPods" spec) 'list)))
+      ;; As a peer it has no address to give.
+      (is (or (null pods) (zerop (length (gethash "networks" pods))))))))

@@ -30,7 +30,14 @@ const (
 	LabelManagedBy = "app.kubernetes.io/managed-by"
 	LabelCommand   = "gr8s.io/gr8-command"
 	LabelUser      = "gr8s.io/gr8-user"
+	// LabelRun is the Pod's name, so a policy can select this one run.
+	LabelRun = "gr8s.io/gr8-run"
 )
+
+// NetworkReady is the readiness gate a gr8 Pod waits on: the node reports it once it
+// enforces the Pod's network policy, so the command never runs before its allowlist
+// does (podster-ae08).
+const NetworkReady corev1.PodConditionType = "gr8s.io/NetworkReady"
 
 // Identity is the caller the command runs as.
 type Identity struct {
@@ -61,14 +68,16 @@ func NewPod(request PodRequest, suffix string) *corev1.Pod {
 			supplemental = append(supplemental, group)
 		}
 	}
+	name := PodName(request.Command, suffix)
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      PodName(request.Command, suffix),
+			Name:      name,
 			Namespace: request.Namespace,
 			Labels: map[string]string{
 				LabelManagedBy: "gr8",
 				LabelCommand:   LabelValue(request.Command),
 				LabelUser:      LabelValue(request.Identity.User),
+				LabelRun:       name,
 			},
 		},
 		Spec: corev1.PodSpec{
@@ -77,6 +86,7 @@ func NewPod(request PodRequest, suffix string) *corev1.Pod {
 			AutomountServiceAccountToken:  ptr(false),
 			EnableServiceLinks:            ptr(false),
 			TerminationGracePeriodSeconds: ptr(int64(1)),
+			ReadinessGates:                []corev1.PodReadinessGate{{ConditionType: NetworkReady}},
 			SecurityContext: &corev1.PodSecurityContext{
 				RunAsUser:          ptr(request.Identity.UID),
 				RunAsGroup:         ptr(request.Identity.GID),

@@ -66,12 +66,13 @@ func login(args []string) int {
 
 func run() int {
 	var options client.Options
-	var readOnly, readWrite, env stringList
+	var readOnly, readWrite, env, allow stringList
 	flags := flag.NewFlagSet("gr8", flag.ExitOnError)
 	flags.Usage = func() {
 		fmt.Fprintf(flags.Output(), "usage: gr8 [flags] COMMAND [ARG...]\n\n"+
 			"Run COMMAND in a sandboxed Pod on this host's gr8s node. It sees the host's\n"+
-			"files, may write only the working directory, and is subject to NetworkPolicy.\n\n")
+			"files, may write only the working directory, and may reach only the hostnames\n"+
+			"a ClusterNetworkPolicy or --allow permits.\n\n")
 		flags.PrintDefaults()
 	}
 	flags.StringVar(&options.Kubeconfig, "kubeconfig", "", "kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)")
@@ -82,13 +83,14 @@ func run() int {
 	flags.BoolVar(&options.Verbose, "v", false, "report the Pod gr8 creates")
 	flags.Var(&readOnly, "ro", "also allow reading `PATH` (repeatable)")
 	flags.Var(&readWrite, "rw", "also allow writing `PATH` (repeatable)")
+	flags.Var(&allow, "allow", "also allow reaching `HOSTNAME` (repeatable; *.example.com for subdomains)")
 	flags.Var(&env, "env", "also pass environment variable `NAME` (repeatable)")
 	_ = flags.Parse(os.Args[1:])
 	if flags.NArg() == 0 {
 		flags.Usage()
 		return 2
 	}
-	options.ReadOnly, options.ReadWrite, options.Env = readOnly, readWrite, env
+	options.ReadOnly, options.ReadWrite, options.Env, options.Allow = readOnly, readWrite, env, allow
 	options.Command = flags.Args()
 
 	status, err := client.Run(options)

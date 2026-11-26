@@ -1674,6 +1674,32 @@ deletion deadline cannot postpone an earlier one. Holds the store lock."
                            (setf (gethash "incarnationGeneration" record) generation))
                          record))))))
 
+(defparameter +network-ready-condition+ "gr8s.io/NetworkReady"
+  "The readiness gate a Pod names to wait until this node enforces its network policy.")
+
+(defun set-network-ready-condition (node-runtime pod status)
+  "Report +NETWORK-READY-CONDITION+ in STATUS when POD's readiness gates name it: True
+once the view the node's policy, egress capture and DNS gate were written from maps
+POD's address to POD (podster-ae08). Returns whether it is True."
+  (when (member +network-ready-condition+ (gr8s.kubelet::pod-readiness-gate-types pod) :test #'equal)
+    (let* ((address (gethash "podIP" status))
+           (ip-map (first (node-runtime-egress-view node-runtime)))
+           (owner (and (stringp address) ip-map (gethash address ip-map)))
+           ;; The address is this Pod's in the view, not still a deleted Pod's.
+           (ready (and owner
+                       (equal (gr8s.network::np-pod-name owner) (pod-name pod))
+                       (equal (gr8s.network::np-pod-namespace owner) (pod-namespace pod))))
+           (others (remove +network-ready-condition+ (gethash "conditions" status #())
+                           :test #'equal :key (lambda (condition) (gethash "type" condition)))))
+      (setf (gethash "conditions" status)
+            (concatenate 'vector others
+                         (vector (if ready
+                                     (json-object "type" +network-ready-condition+ "status" "True")
+                                     (json-object "type" +network-ready-condition+ "status" "False"
+                                                  "reason" "NetworkPolicyPending"
+                                                  "message" "the node has not yet written this Pod's network policy")))))
+      ready)))
+
 (defun cache-node-observation (node-runtime pod status)
   "Persist actual status and transport Events without confusing runtime deletion with public phase."
   (setf status (copy-core-object status))
@@ -1682,7 +1708,8 @@ deletion deadline cannot postpone an earlier one. Holds the store lock."
     (when translation (setf (gethash "gr8sServiceTranslation" status) translation)))
   (let* ((store (node-runtime-store node-runtime))
          (before (pod-observed-status store pod))
-         (address (gethash "podIP" status)))
+         (address (gethash "podIP" status))
+         (network-ready (set-network-ready-condition node-runtime pod status)))
     (save-pod-observation store pod status)
     ;; A Pod's policy can only be written once it has an address. Policies that
     ;; select it may not change when it gets one, so no snapshot would follow.
@@ -1693,7 +1720,11 @@ deletion deadline cannot postpone an earlier one. Holds the store lock."
       (request-status-report)
       (handler-case (converge-node-network-policies node-runtime)
         (error (condition)
-          (format *error-output* "gr8s: NetworkPolicy convergence failed: ~A~%" condition)))))
+          (format *error-output* "gr8s: NetworkPolicy convergence failed: ~A~%" condition)))
+      ;; Now written, the Pod may be Ready.
+      (when (and (not network-ready) (set-network-ready-condition node-runtime pod status))
+        (save-pod-observation store pod status)
+        (request-status-report))))
   (let* ((finalization (pod-finalization-state (node-runtime-store node-runtime) pod))
          (message (pod-observed-status-message
                    pod status (runtime-events (node-runtime-runtime node-runtime) (pod-uid pod))

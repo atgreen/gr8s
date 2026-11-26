@@ -420,6 +420,71 @@ Return (values result final-contents events)."
       (sb-int:unencapsulate 'gr8s.agent::converge-node-network-policies-unlocked 'npr-count)
       (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))
 
+(test npr-a-gated-pod-is-network-ready-once-its-policy-is-written
+  ;; podster-ae08: gr8 waits for gr8s.io/NetworkReady, which the node reports True
+  ;; only once the view its policy, capture and DNS gate use has the Pod's address.
+  (let ((directory (uiop:ensure-directory-pathname
+                    (sb-posix:mkdtemp (namestring (merge-pathnames "gr8s-test-XXXXXX" (uiop:temporary-directory))))))
+        (observed-runtime nil))
+    (sb-int:encapsulate 'gr8s.agent::converge-node-network-policies-unlocked 'npr-ready
+                        (lambda (function runtime &rest arguments)
+                          (if (eq runtime observed-runtime)
+                              (let ((map (make-hash-table :test #'equal)))
+                                (setf (gethash "10.88.0.7" map) (gr8s.network::make-np-pod :name "gated" :namespace "default")
+                                      (gr8s.agent::node-runtime-egress-view runtime) (list map)))
+                              (apply function runtime arguments))))
+    (unwind-protect
+         (let* ((runtime (gr8s.agent::make-node-runtime directory (gr8s.runtime::make-fake-runtime) nil))
+                (store (gr8s.agent::node-runtime-store runtime))
+                (pod (create-pod store (parse-pod (gated-pod-json "gated" :gates '("gr8s.io/NetworkReady"))))))
+           (setf observed-runtime runtime)
+           (flet ((network-ready ()
+                    (let ((condition (gr8s.kubelet::find-pod-condition
+                                      (gethash "conditions" (gr8s.controllers::pod-observed-status store pod))
+                                      "gr8s.io/NetworkReady")))
+                      (and condition (gethash "status" condition)))))
+             (gr8s.agent::cache-node-observation runtime pod (gr8s.resources::core-object "phase" "Pending"))
+             (is (equal "False" (network-ready)))
+             (gr8s.agent::cache-node-observation runtime pod (gr8s.resources::core-object "phase" "Running" "podIP" "10.88.0.7"))
+             (is (equal "True" (network-ready)))
+             ;; Not while the view still gives its address to another Pod.
+             (setf (gethash "10.88.0.7" (first (gr8s.agent::node-runtime-egress-view runtime)))
+                   (gr8s.network::make-np-pod :name "gone" :namespace "default"))
+             (gr8s.agent::cache-node-observation runtime pod (gr8s.resources::core-object "phase" "Running" "podIP" "10.88.0.7"
+                                                                        "message" "again"))
+             (is (equal "False" (network-ready)))
+             ;; A Pod without the gate is left as it was.
+             (let ((plain (create-pod store (parse-pod *valid-pod-json*))))
+               (gr8s.agent::cache-node-observation runtime plain (gr8s.resources::core-object "phase" "Running" "podIP" "10.88.0.7"))
+               (is (null (gethash "conditions" (gr8s.controllers::pod-observed-status store plain)))))))
+      (sb-int:unencapsulate 'gr8s.agent::converge-node-network-policies-unlocked 'npr-ready)
+      (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))
+
+(test npr-an-address-belongs-to-the-live-pod-not-a-leaving-one
+  ;; A deleted Pod's address can go to a new Pod before the old record is gone; the new
+  ;; Pod must not be resolved with the old one's labels (podster-ae08).
+  (with-temporary-store (store path)
+    (values path)
+    (flet ((pod-at (name address &key deleting phase)
+             (let ((pod (create-pod store (parse-pod (format nil "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":~S,\"namespace\":\"default\"},\"spec\":{\"nodeName\":\"worker-a\",\"containers\":[{\"name\":\"web\",\"image\":\"busybox\"}]}}" name)))))
+               (gr8s.kubelet::save-pod-observation store pod (gr8s.resources::core-object "phase" (or phase "Running") "podIP" address))
+               (when deleting
+                 (let ((object (gr8s.resources::copy-core-object (pod-to-object pod))))
+                   (setf (gethash "deletionTimestamp" (gethash "metadata" object)) "2026-11-26T00:00:00Z")
+                   (gr8s.agent::put-assigned-pod store (parse-pod object))))
+               pod)))
+      ;; Whichever order the store lists them in.
+      (pod-at "old" "10.88.0.7" :deleting t)
+      (pod-at "new" "10.88.0.7")
+      (pod-at "newer" "10.88.0.8")
+      (pod-at "done" "10.88.0.8" :phase "Succeeded")
+      (pod-at "alone" "10.88.0.9" :deleting t)
+      (let ((map (gr8s.network::pod-ip-identity-map store)))
+        (is (equal "new" (gr8s.network::np-pod-name (gethash "10.88.0.7" map))))
+        (is (equal "newer" (gr8s.network::np-pod-name (gethash "10.88.0.8" map))))
+        ;; A leaving Pod nobody replaced keeps its address and its policy.
+        (is (equal "alone" (gr8s.network::np-pod-name (gethash "10.88.0.9" map))))))))
+
 ;;; Explaining a connection (podster-5hv.3)
 
 (defun npr-spec (namespace name spec)

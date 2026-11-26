@@ -36,6 +36,7 @@ type Options struct {
 	ReadOnly   []string
 	ReadWrite  []string
 	Env        []string
+	Allow      []string // hostnames this run alone may reach
 	Command    []string
 	// Placeholders are NAME=VALUE stand-ins the profile sets, such as an API key the
 	// node egress proxy overwrites with the real one.
@@ -83,6 +84,16 @@ func Run(options Options) (int, error) {
 		Command:   filepath.Base(options.Command[0]),
 		Identity:  identity,
 	}, randomSuffix())
+	// The policy goes first, so the command never starts without it.
+	if len(options.Allow) > 0 {
+		if err := createAllowPolicy(ctx, clientset, options.Namespace, pod.Name, options.Allow); err != nil {
+			return 0, err
+		}
+		options.logf("ClusterNetworkPolicy %s allows %v", pod.Name, options.Allow)
+		if !options.Keep {
+			defer deleteAllowPolicy(clientset, pod.Name)
+		}
+	}
 	pod, err = clientset.CoreV1().Pods(options.Namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
 		return 0, fmt.Errorf("creating the Pod: %w", err)
@@ -223,13 +234,21 @@ func waitRunning(ctx context.Context, clientset kubernetes.Interface, pod *corev
 	defer cancel()
 	pods := clientset.CoreV1().Pods(pod.Namespace)
 	var last *corev1.Pod
+	var runningSince time.Time
 	for {
 		current, err := pods.Get(ctx, pod.Name, metav1.GetOptions{})
 		if err == nil {
 			last = current
 			switch current.Status.Phase {
 			case corev1.PodRunning:
-				return nil
+				if runningSince.IsZero() {
+					runningSince = time.Now()
+				}
+				// A node that predates the gate never reports it.
+				ready, reported := networkReady(current)
+				if ready || !reported && time.Since(runningSince) > legacyNetworkGrace {
+					return nil
+				}
 			case corev1.PodFailed, corev1.PodSucceeded:
 				return fmt.Errorf("Pod %s stopped before the command started: %s", pod.Name, podProblem(current))
 			}
@@ -242,9 +261,32 @@ func waitRunning(ctx context.Context, clientset kubernetes.Interface, pod *corev
 	}
 }
 
+// legacyNetworkGrace is how long a running Pod whose node never reports NetworkReady
+// is given before the command starts anyway.
+const legacyNetworkGrace = 2 * time.Second
+
+// networkReady says whether pod is Ready, which waits for its NetworkReady gate, and
+// whether its node reports that gate at all.
+func networkReady(pod *corev1.Pod) (ready, reported bool) {
+	for _, condition := range pod.Status.Conditions {
+		switch condition.Type {
+		case corev1.PodReady:
+			ready = condition.Status == corev1.ConditionTrue
+		case NetworkReady:
+			reported = true
+		}
+	}
+	return ready, ready || reported
+}
+
 func podProblem(pod *corev1.Pod) string {
 	if pod == nil {
 		return "no status"
+	}
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == NetworkReady && condition.Status != corev1.ConditionTrue {
+			return "its network policy is not in place: " + condition.Message
+		}
 	}
 	for _, status := range pod.Status.ContainerStatuses {
 		if waiting := status.State.Waiting; waiting != nil && waiting.Reason != "" {

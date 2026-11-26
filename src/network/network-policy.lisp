@@ -352,14 +352,15 @@ no address or has finished."
                    :ip (first addresses) :ips addresses
                    :ports (np-container-ports object)))))
 
-(defun network-policy-cluster-pods (store)
-  "Every nonterminal Pod with at least one address that policy can select."
+(defun network-policy-cluster-pods (store &key (addressed t))
+  "Every nonterminal Pod with at least one address that policy can select. With
+ADDRESSED NIL, those without one too: a policy's subject is chosen by labels alone."
   (loop for pod in (list-pods store)
         for status = (gr8s.store:pod-reported-status store pod)
         for addresses = (pod-status-addresses status)
         for object = (pod-to-object pod)
-        when (and addresses
-                  (not (member (gethash "phase" status) '("Succeeded" "Failed") :test #'equal)))
+        when (and (or addresses (not addressed))
+                  (not (member (and status (gethash "phase" status)) '("Succeeded" "Failed") :test #'equal)))
           collect (make-np-pod :name (pod-name pod) :namespace (pod-namespace pod)
                                :labels (gethash "labels" (gethash "metadata" object) (core-object))
                                :ip (first addresses) :ips addresses
@@ -694,8 +695,12 @@ policy is not rewritten on every snapshot.")
 
 (defun pod-ip-identity-map (store)
   "Map each Pod's IP to the np-pod its NetworkPolicy is resolved for.
-Reads through the desired-state seam, so STORE may be a foreign cluster's view."
-  (let ((map (make-hash-table :test #'equal)))
+Reads through the desired-state seam, so STORE may be a foreign cluster's view.
+A Pod being deleted or finished can still hold an address its node has already given
+to a new Pod; the new Pod owns it then (podster-ae08), else it would get the old Pod's
+policy."
+  (let ((map (make-hash-table :test #'equal))
+        (live (make-hash-table :test #'equal)))
     (dolist (pod (list-pods store) map)
       (let* ((status (gr8s.store:pod-reported-status store pod))
              (plural (and status (gethash "podIPs" status)))
@@ -706,7 +711,9 @@ Reads through the desired-state seam, so STORE may be a foreign cluster's view."
                             (let ((single (and status (gethash "podIP" status))))
                               (and (stringp single) (list single)))))
              (object (pod-to-object pod))
-             (metadata (gethash "metadata" object (make-hash-table :test #'equal))))
+             (metadata (gethash "metadata" object (make-hash-table :test #'equal)))
+             (leaving (or (gethash "deletionTimestamp" metadata)
+                          (member (and status (gethash "phase" status)) '("Succeeded" "Failed") :test #'equal))))
         (when addresses
           (let ((policy-pod
                   (make-np-pod :name (pod-name pod) :namespace (pod-namespace pod)
@@ -714,7 +721,9 @@ Reads through the desired-state seam, so STORE may be a foreign cluster's view."
                                :ip (first addresses) :ips addresses
                                :ports (np-container-ports object))))
             (dolist (address addresses)
-              (setf (gethash address map) policy-pod))))))))
+              (unless (and leaving (gethash address live))
+                (setf (gethash address map) policy-pod
+                      (gethash address live) (not leaving))))))))))
 
 (defun converge-pod-network-policies
     (specs endpoints &key pod-finder directory-fn (writer #'write-pod-network-policy) cluster-policies)
