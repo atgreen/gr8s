@@ -121,6 +121,24 @@ upstream is a tag backend answering \"UP\". DECISIONS collects each report as
     (is (equal "dns" (gethash "type" (gethash "l7" flow))))
     (is (equal "exfil.example" (gethash "query" (gethash "l7" flow))))))
 
+(test egress-dns-gate-reports-one-event-per-decision
+  ;; A resolver asks for A and AAAA and retries: one lookup, one event.
+  (let* ((now 1000) (events '())
+         (report (gr8s.controllers::make-egress-dns-reporter
+                  (lambda (client name allowed) (push (list client name allowed) events))
+                  :clock (lambda () now))))
+    (dotimes (i 4) (funcall report "10.80.32.7" "example.com" nil))
+    (is (equal '(("10.80.32.7" "example.com" nil)) events))
+    ;; Another Pod, another name, or the other verdict is another decision.
+    (funcall report "10.80.32.8" "example.com" nil)
+    (funcall report "10.80.32.7" "example.org" nil)
+    (funcall report "10.80.32.7" "example.com" t)
+    (is (= 4 (length events)))
+    ;; Asked again after the window: a new decision.
+    (incf now 6)
+    (funcall report "10.80.32.7" "example.com" nil)
+    (is (= 5 (length events)))))
+
 (defun egress-test-name-table (answers &key (clock (let ((now 1000)) (lambda () now))))
   "A name table whose resolver answers from ANSWERS, an alist of name -> (addresses ttl
 rcode), counting calls per name in the returned hash table."
