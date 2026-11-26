@@ -315,6 +315,23 @@ its own entry, with that \"dropReason\" and no policy verdict: policy played no 
   (let ((seen (make-hash-table :test #'equal))
         (explained '()))
     (dolist (flow flows)
+      ;; The node egress proxy and its DNS gate decide by name, which NetworkPolicy's
+      ;; explanation knows nothing of: say what decided, and why.
+      (let ((proxy (network-egress-proxy-explanation flow)))
+        (when proxy
+          (let* ((dropped (equal (gethash "verdict" flow) "DROPPED"))
+                 (key (list :proxy (gethash "pod" flow) (gethash "text" proxy)))
+                 (entry (gethash key seen)))
+            (cond (entry (when dropped (incf (gethash "dropped" entry))))
+                  ((< (hash-table-count seen) +network-explained-connections+)
+                   (let ((entry (gr8s-diagnose::object
+                                 "source" (format nil "~A/~A" (gethash "namespace" flow) (gethash "pod" flow))
+                                 "destination" (gethash "peerName" flow) "port" 'null
+                                 "protocol" (gethash "label" proxy) "dropped" (if dropped 1 0)
+                                 "dropReason" 'null "explanation" 'null "proxy" proxy)))
+                     (setf (gethash key seen) entry)
+                     (push entry explained)))))
+          (go next)))
       (multiple-value-bind (source destination port) (network-flow-policy-ends topology flow)
         (when source
           (flet ((key (end)
@@ -342,8 +359,29 @@ its own entry, with that \"dropReason\" and no policy verdict: policy played no 
                                                   (network-topology-policies topology) source destination port protocol
                                                   (network-topology-namespace-labels topology))))))
                    (setf (gethash key seen) entry)
-                   (push entry explained)))))))))
+                   (push entry explained))))))))
+      next)
     (nreverse explained)))
+
+(defun network-egress-proxy-explanation (flow)
+  "For a flow event of the node egress proxy or its DNS gate, an object with \"label\"
+(DNS, or the connection's protocol), \"verdict\" and \"text\" saying what decided it and
+why; NIL for any other flow."
+  (let* ((l7 (gethash "l7" flow))
+         (type (and (hash-table-p l7) (gethash "type" l7)))
+         (dropped (equal (gethash "verdict" flow) "DROPPED"))
+         (name (gethash "peerName" flow)))
+    (flet ((explanation (label text)
+             (gr8s-diagnose::object "label" label "verdict" (if dropped "denied" "allowed") "text" text)))
+      (cond ((equal type "dns")
+             (explanation "DNS"
+                          (if dropped
+                              (format nil "The egress DNS gate refused the lookup of ~A: no ClusterNetworkPolicy allows that name for this Pod. Nothing was sent to the site." name)
+                              (format nil "The egress DNS gate answered the lookup of ~A: a ClusterNetworkPolicy allows it." name))))
+            ((equal type "egress")
+             (explanation (format nil "~@[~A/~]~A" (gethash "peerPort" flow) (gethash "protocol" flow "TCP"))
+                          (format nil "The node egress proxy ~:[admitted~;refused~] the connection to ~A by name~@[ (rule ~A)~]~@[, opened by ~A~]~@[; under Audit: ~A~]."
+                                  dropped name (gethash "rule" l7) (gethash "process" l7) (gethash "audit" l7))))))))
 
 (defun network-workload-isolation (topology workload)
   "An object naming the policies that isolate WORKLOAD's Pods, \"ingress\" and \"egress\",
@@ -528,7 +566,11 @@ proxy are left out: the proxy reports each of those connections by the name it w
               (incf (aref bucket 3) (gethash "length" flow 0))
               (when (and (hash-table-p l7) (plusp (gethash "latencyNs" l7 0)))
                 (push (cons time (gethash "latencyNs" l7)) (network-edge-latencies edge)))
-              (let ((key (format nil "~@[~A/~]~A" port (gethash "protocol" flow ""))))
+              ;; The egress DNS gate's verdict on a name is a lookup, not a connection to
+              ;; the site's port 53.
+              (let ((key (if (and (hash-table-p l7) (equal "dns" (gethash "type" l7)))
+                             "DNS"
+                             (format nil "~@[~A/~]~A" port (gethash "protocol" flow "")))))
                 (when (plusp (length key)) (incf (gethash key (network-edge-ports edge) 0))))
               (setf (network-edge-last-seen edge) (max time (network-edge-last-seen edge)))
               (push flow (network-edge-recent edge))

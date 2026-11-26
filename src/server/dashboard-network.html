@@ -522,9 +522,10 @@ async function showDetails() {
     showTraces(latest, traces);
     for (const f of latest) {
       const [from, to, port] = flowSides(f);
+      const dns = f.l7 && f.l7.type === 'dns';
       const http = f.l7 ? ' ' + l7Detail(f.l7) : '';
-      flows.append(row(cell((f.time || '').slice(11, 19)), cell(from + ' → ' + to + http),
-        cell((port == null ? '' : port + '/') + (f.protocol || '')),
+      flows.append(row(cell((f.time || '').slice(11, 19)), cell(dns ? from + ' · ' + l7Detail(f.l7) : from + ' → ' + to + http),
+        cell(dns ? 'DNS' : (port == null ? '' : port + '/') + (f.protocol || '')),
         cell(f.verdict.toLowerCase() + dropReason(f), f.verdict === 'DROPPED' ? 'dropped' : '')));
     }
   } else flows.append(row(cell('Cannot read the flows: ' + latest.error)));
@@ -733,6 +734,14 @@ async function explainEdge(edge, into) {
   const refused = (c) => c.dropReason || c.explanation.verdict === 'denied';
   explained.sort((a, b) => refused(b) - refused(a) || b.dropped - a.dropped);
   const boxes = explained.map((c) => {
+    if (c.proxy) {
+      // The node egress proxy or its DNS gate decided by name, not NetworkPolicy.
+      const box = el('div', 'policy' + (c.proxy.verdict === 'denied' ? ' denied' : ''));
+      const conn = el('div', 'conn', c.source + ' → ' + c.destination + ' ' + c.protocol);
+      conn.append(el('span', 'verdict', c.proxy.verdict + (c.dropped ? ' · ' + c.dropped : '')));
+      box.append(conn, el('div', 'side', c.proxy.text));
+      return box;
+    }
     if (c.dropReason) {
       const box = el('div', 'policy denied');
       const conn = el('div', 'conn', c.source + ' → ' + (c.destination || 'an unknown address')
@@ -754,13 +763,16 @@ async function explainEdge(edge, into) {
 // A flow's L7 detail: an HTTP request, or a connection the node egress proxy admitted
 // by name, and whether the proxy injected a credential into the request (podster-wv1w.6).
 function l7Detail(l7) {
-  if (l7.type === 'egress') return l7.host || '';
+  if (l7.type === 'dns') return 'DNS lookup of ' + l7.query;
+  if (l7.type === 'egress') return (l7.host || '') + (l7.process ? ' from ' + l7.process : '') + (l7.audit ? ' (audit: ' + l7.audit + ')' : '');
   const request = l7.method + ' ' + l7.path + ' → ' + l7.code;
   return l7.injected ? request + ' (credential: ' + l7.injected + ')' : request;
 }
 
 function dropReason(f) {
   if (f.verdict !== 'DROPPED') return '';
+  if (f.l7 && f.l7.type === 'dns') return ' (no policy allows the name)';
+  if (f.l7 && f.l7.type === 'egress' && f.l7.rule) return ' by rule ' + f.l7.rule;
   return f.policies && f.policies.length ? ' by ' + f.policies.join(', ') : f.reason ? ' (' + f.reason + ')' : '';
 }
 
@@ -785,8 +797,10 @@ async function showFlows() {
     if (namespace && f.namespace !== namespace && f.peerNamespace !== namespace) continue;
     const [from, to, port] = flowSides(f);
     if (search && !(from + ' ' + to).toLowerCase().includes(search)) continue;
-    const detail = f.verdict === 'DROPPED' ? dropReason(f).trim() : f.l7 ? l7Detail(f.l7) : '';
-    const tr = row(cell((f.time || '').slice(11, 19)), cell(from), cell(to), cell((port == null ? '' : port + '/') + (f.protocol || '')),
+    const dns = f.l7 && f.l7.type === 'dns';
+    const detail = f.verdict === 'DROPPED' ? (dns ? l7Detail(f.l7) + ' ' : '') + dropReason(f).trim() : f.l7 ? l7Detail(f.l7) : '';
+    const tr = row(cell((f.time || '').slice(11, 19)), cell(from), cell(dns ? f.l7.query : to),
+      cell(dns ? 'DNS' : (port == null ? '' : port + '/') + (f.protocol || '')),
       cell(f.verdict.toLowerCase(), f.verdict === 'DROPPED' ? 'dropped' : ''), cell(detail));
     tr.onclick = () => select({ type: 'edge', id: f.edge });
     rows.push(tr);
