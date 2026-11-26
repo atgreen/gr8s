@@ -14,6 +14,16 @@
 // createKernel and the distro (a URL in a browser, a path under Node).
 
 const encoder = new TextEncoder();
+
+function toBase64(bytes) {
+  let text = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(text);
+}
+
+function fromBase64(text) {
+  return Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
+}
 const decoder = new TextDecoder();
 
 // How much of each container's output is kept for `kubectl logs`.
@@ -30,6 +40,7 @@ function now() {
  */
 export function joinCluster({ url, createKernel, distro, memoryMiB = 256, capacity, log = () => {}, onInfo = () => {} }) {
   const pods = new Map(); // uid -> Pod
+  const execs = new Map(); // exec id -> { process, pty }
   const socket = new WebSocket(url);
   let resolveNode, resolveClosed;
   const node = new Promise((resolve) => (resolveNode = resolve));
@@ -53,6 +64,10 @@ export function joinCluster({ url, createKernel, distro, memoryMiB = 256, capaci
     const message = JSON.parse(typeof event.data === "string" ? event.data : decoder.decode(event.data));
     if (message.op === "info") {
       onInfo(message);
+      return;
+    }
+    if (message.op === "exec-input" || message.op === "exec-resize" || message.op === "exec-kill") {
+      execControl(message);
       return;
     }
     if (message.op === "welcome") {
@@ -89,6 +104,9 @@ export function joinCluster({ url, createKernel, distro, memoryMiB = 256, capaci
         const result = await pod.vm.exec(file, args, { user: "root" });
         return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode ?? 1 };
       }
+      case "exec-start":
+        await startExec(message);
+        return {};
       default:
         throw new Error(`unknown request ${message.op}`);
     }
@@ -158,6 +176,50 @@ export function joinCluster({ url, createKernel, distro, memoryMiB = 256, capaci
         if (pods.get(pod.request.uid) === pod) await startContainer(pod, spec).catch(() => {});
       }
     });
+  }
+
+  // An interactive exec (kubectl exec): the server relays its streams.
+  async function startExec(message) {
+    const pod = pods.get(message.uid);
+    if (!pod) throw new Error(`no Pod ${message.uid} here`);
+    await pod.starting;
+    const [file, ...args] = message.command;
+    const id = message.exec;
+    const output = (channel) => new WritableStream({
+      write: (chunk) => send({ op: "exec-output", exec: id, channel, data: toBase64(chunk) }),
+    });
+    let process;
+    if (message.tty) {
+      process = await pod.vm.spawn(file, args, { user: "root", cols: 80, rows: 24 });
+      process.output.pipeTo(output(1)).catch(() => {});
+    } else {
+      process = await pod.vm.spawn(file, args, { pty: false, user: "root" });
+      process.stdout.pipeTo(output(1)).catch(() => {});
+      process.stderr.pipeTo(output(2)).catch(() => {});
+      if (!message.stdin) process.stdin.close().catch(() => {});
+    }
+    const writer = message.tty ? null : process.stdin.getWriter();
+    execs.set(id, { process, writer, tty: message.tty });
+    process.ended.then((end) => {
+      execs.delete(id);
+      send({ op: "exec-exit", exec: id, exitCode: end.type === "exit" ? end.code : 128 + (end.signal ?? 9) });
+    });
+  }
+
+  function execControl(message) {
+    const exec = execs.get(message.exec);
+    if (!exec) return;
+    if (message.op === "exec-kill") {
+      exec.process.kill("SIGKILL");
+    } else if (message.op === "exec-resize") {
+      if (exec.tty) exec.process.resize(message.cols, message.rows);
+    } else if (message.data) {
+      const bytes = fromBase64(message.data);
+      if (exec.tty) exec.process.write(bytes);
+      else exec.writer.write(bytes).catch(() => {});
+    } else if (message.eof && exec.writer) {
+      exec.writer.close().catch(() => {});
+    }
   }
 
   async function deletePod(uid) {

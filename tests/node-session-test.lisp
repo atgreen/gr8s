@@ -1706,8 +1706,11 @@ them. A node can't claim another's address or name."
                (is-true (wait-until (lambda () (handler-case (gr8s.model::node-record-ready-p (gr8s.controllers::get-node store name))
                                                  (gr8s.model::kubernetes-error () nil)))
                                     :timeout 20))
+               ;; Its agent reports the browser's architecture with its hello.
+               (is-true (wait-until (lambda () (equal "arm64" (gethash "kubernetes.io/arch"
+                                                                       (gr8s.kubelet::node-labels (gr8s.controllers::get-node store name)))))
+                                    :timeout 10))
                (let ((labels (gr8s.kubelet::node-labels (gr8s.controllers::get-node store name))))
-                 (is (equal "arm64" (gethash "kubernetes.io/arch" labels)))
                  (is (equal "true" (gethash "gr8s.io/browser" labels))))
                ;; The browser answers what the node's agent asks of it.
                (setf browser
@@ -1727,6 +1730,18 @@ them. A node can't claim another's address or name."
                                                   (gr8s.resources::core-object
                                                    "status" (com.inuoe.jzon:parse
                                                              (format nil "{\"phase\":\"Running\",\"containerStatuses\":[{\"name\":\"web\",\"ready\":true,\"restartCount\":0,\"image\":\"busybox\",\"imageID\":\"\",\"containerID\":\"browser://~A/web\",\"started\":true,\"state\":{\"running\":{\"startedAt\":\"2026-11-26T00:00:00Z\"}}}]}" uid))))))
+                                              ((equal op "exec-start")
+                                               (let ((exec (gethash "exec" request)))
+                                                 (bt:make-thread
+                                                  (lambda ()
+                                                    (sleep 0.2)
+                                                    (browser-node-test-send
+                                                     stream (gr8s.resources::core-object
+                                                             "op" "exec-output" "exec" exec "channel" 1
+                                                             "data" (cl-base64:string-to-base64-string (format nil "hi from the tab~%"))))
+                                                    (browser-node-test-send
+                                                     stream (gr8s.resources::core-object "op" "exec-exit" "exec" exec "exitCode" 3))))
+                                                 (gr8s.resources::core-object "id" id "result" (gr8s.resources::core-object))))
                                               ((equal op "logs")
                                                (gr8s.resources::core-object "id" id "result" (gr8s.resources::core-object "text" (format nil "hello from the tab~%"))))
                                               (t (gr8s.resources::core-object "id" id "result" (gr8s.resources::core-object)))))))
@@ -1744,6 +1759,21 @@ them. A node can't claim another's address or name."
                                       :timeout 20))
                  (is (equal name (gr8s.model::pod-node-name (get-pod store "default" "hello"))))
                  (is (member "ensure" asked :test #'equal))
+                 ;; kubectl exec: the agent dials the runtime's stream URL, which the tab answers.
+                 (let ((session (gr8s.kubelet::reconciler-start-exec-session
+                                 reconciler (gr8s.model::pod-uid pod) "web" (list "echo" "hi") :stdout t :stderr t))
+                       (output (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+                   (loop with cursor = 0
+                         repeat 200
+                         do (multiple-value-bind (message next done)
+                                (gr8s.kubelet::reconciler-next-exec-session-output reconciler session cursor :timeout 5)
+                              (setf cursor next)
+                              (when message
+                                (loop for octet across (slot-value message 'gr8s.node.v1::data)
+                                      do (vector-push-extend octet output)))
+                              (when done (return))))
+                   (is (equal (format nil "hi from the tab~%") (trivial-utf-8:utf-8-bytes-to-string output)))
+                   (is (eql 3 (gr8s.kubelet::reconciler-exec-session-exit-code reconciler session))))
                  ;; As CRI log lines, which the logs API reads.
                  (is (search " stdout F hello from the tab"
                              (gr8s.runtime:runtime-logs runtime (gr8s.model::pod-uid pod) "web"))))

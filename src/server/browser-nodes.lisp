@@ -108,18 +108,25 @@ and wake every waiting request. Returns when the connection has ended."
 ;;; The runtime
 
 (defstruct (browser-runtime (:include gr8s.runtime::fake-runtime)
-                            (:constructor %make-browser-runtime (session)))
+                            (:constructor %make-browser-runtime (session endpoint)))
   "A runtime whose containers run in a browser: each call is a request over SESSION, and
-the Pods it holds are what the browser last reported."
-  session)
+the Pods it holds are what the browser last reported. ENDPOINT, (address port), is the
+join listener, which also serves this runtime's exec streams."
+  session endpoint
+  (execs (make-hash-table :test #'equal :synchronized t)))
 
-(defun make-browser-runtime (session)
-  "A runtime for SESSION's browser, keeping the status the browser reports for each Pod."
-  (let ((runtime (%make-browser-runtime session)))
+(defun make-browser-runtime (session &optional endpoint)
+  "A runtime for SESSION's browser, keeping the status the browser reports for each Pod and
+passing each running exec its output."
+  (let ((runtime (%make-browser-runtime session endpoint)))
     (setf (browser-session-on-message session)
           (lambda (message)
-            (when (and (equal "status" (gethash "op" message)) (stringp (gethash "uid" message)))
-              (browser-runtime-note-status runtime (gethash "uid" message) (gethash "status" message)))))
+            (let ((op (gethash "op" message)))
+              (cond ((and (equal "status" op) (stringp (gethash "uid" message)))
+                     (browser-runtime-note-status runtime (gethash "uid" message) (gethash "status" message)))
+                    ((member op '("exec-output" "exec-exit") :test #'equal)
+                     (let ((exec (gethash (gethash "exec" message) (browser-runtime-execs runtime))))
+                       (when exec (browser-exec-deliver exec message))))))))
     runtime))
 
 (defun browser-runtime-note-status (runtime uid status)
@@ -188,6 +195,142 @@ browser keeps no timestamps, so every line is stamped now."
      :stdout (trivial-utf-8:string-to-utf-8-bytes (or (gethash "stdout" result) ""))
      :stderr (trivial-utf-8:string-to-utf-8-bytes (or (gethash "stderr" result) ""))
      :exit-code (or (gethash "exitCode" result) 0))))
+
+;;; Exec: kubectl's streams, bridged to a program in the browser
+;;;
+;;; The agent streams an exec from a URL the runtime hands it, as from a CRI streaming
+;;; server: it dials the URL and speaks SPDY remotecommand. A browser runtime's URL is a
+;;; one-time path on the join listener, where the streams are bridged to the session:
+;;; the browser runs the command and sends its output and exit status back.
+
+(defvar *browser-exec-tokens* (make-hash-table :test #'equal :synchronized t)
+  "One-time exec tokens to (runtime . request), until their stream is opened.")
+
+(defstruct (browser-exec (:constructor make-browser-exec (id)))
+  id
+  (lock (bt:make-lock "gr8s browser exec"))
+  (arrived (bt:make-condition-variable))
+  (messages '()))
+
+(defun browser-exec-deliver (exec message)
+  "Queue MESSAGE, the browser's output or exit for EXEC."
+  (bt:with-lock-held ((browser-exec-lock exec))
+    (setf (browser-exec-messages exec) (append (browser-exec-messages exec) (list message)))
+    (bt:condition-notify (browser-exec-arrived exec))))
+
+(defun browser-exec-next (exec session)
+  "The next message for EXEC, waiting for it; NIL once the browser has gone."
+  (bt:with-lock-held ((browser-exec-lock exec))
+    (loop until (or (browser-exec-messages exec) (browser-session-closed session))
+          do (bt:condition-wait (browser-exec-arrived exec) (browser-exec-lock exec) :timeout 1))
+    (pop (browser-exec-messages exec))))
+
+(defmethod gr8s.runtime::runtime-exec-url ((runtime browser-runtime) uid container command
+                                           &key stdin stdout stderr tty)
+  (unless (browser-runtime-endpoint runtime)
+    (error 'runtime-error :message "This browser node has no exec endpoint"))
+  (let ((token (format nil "~(~{~2,'0x~}~)" (coerce (secure-random-octets 16) 'list))))
+    (setf (gethash token *browser-exec-tokens*)
+          (cons runtime (list :uid uid :container container :command command
+                              :stdin stdin :stdout stdout :stderr stderr :tty tty)))
+    (destructuring-bind (address port) (browser-runtime-endpoint runtime)
+      (format nil "http://~A:~D/exec/~A" address port token))))
+
+(defun octets-base64 (octets)
+  (cl-base64:usb8-array-to-base64-string (coerce octets '(simple-array (unsigned-byte 8) (*)))))
+
+(defun serve-browser-exec (token)
+  "Serve the exec TOKEN names to the SPDY client on this request: open its streams, start
+the command in the browser, and pass input one way and output and the exit status the
+other until the command ends or the client goes."
+  (let ((entry (gethash token *browser-exec-tokens*)))
+    (remhash token *browser-exec-tokens*)
+    (unless entry
+      (setf (hunchentoot:return-code*) hunchentoot:+http-not-found+)
+      (return-from serve-browser-exec "no such exec"))
+    (destructuring-bind (runtime . request) entry
+      (let* ((session (browser-runtime-session runtime))
+             (tty (getf request :tty))
+             (options (gr8s.apiserver::make-exec-options
+                       :stdin (getf request :stdin) :stdout (getf request :stdout)
+                       :stderr (and (getf request :stderr) (not tty)) :tty tty))
+             (exec (make-browser-exec token))
+             (input-thread nil))
+        (multiple-value-bind (protocol named) (gr8s.apiserver::negotiate-spdy-remotecommand-protocol)
+          (let ((server (gr8s.protocol:make-spdy-server
+                         (gr8s.apiserver::begin-spdy-remotecommand protocol named))))
+            (multiple-value-bind (streams early)
+                (gr8s.apiserver::accept-remotecommand-streams
+                 server (gr8s.apiserver::remotecommand-expected-streams options protocol))
+              (flet ((stream-id (type) (cdr (assoc type streams :test #'equal)))
+                     (send (&rest fields)
+                       (ignore-errors (browser-session-send session (apply #'core-object "exec" token fields)))))
+                (setf (gethash token (browser-runtime-execs runtime)) exec)
+                (unwind-protect
+                     (handler-case
+                         (progn
+                           (browser-session-call session "exec-start" "exec" token
+                                                 "uid" (getf request :uid) "container" (getf request :container)
+                                                 "command" (coerce (getf request :command) 'vector)
+                                                 "tty" (and tty t) "stdin" (and (getf request :stdin) t))
+                           (setf input-thread
+                                 (bt:make-thread
+                                  (lambda ()
+                                    (let ((stdin (stream-id "stdin")) (resize (stream-id "resize"))
+                                          (pending (make-array 0 :element-type '(unsigned-byte 8))))
+                                      (flet ((take (id fin data)
+                                               (cond ((eql id stdin)
+                                                      (when (plusp (length data))
+                                                        (send "op" "exec-input" "data" (octets-base64 data)))
+                                                      (when fin (send "op" "exec-input" "eof" t)))
+                                                     ((eql id resize)
+                                                      (multiple-value-bind (sizes rest)
+                                                          (gr8s.apiserver::remotecommand-terminal-sizes pending data)
+                                                        (setf pending rest)
+                                                        (loop for (rows . columns) in sizes
+                                                              do (send "op" "exec-resize" "rows" rows "cols" columns)))))))
+                                        (handler-case
+                                            (progn
+                                              (dolist (frame early) (apply #'take frame))
+                                              (loop for frame = (gr8s.protocol::spdy-server-read-frame server)
+                                                    do (case (first frame)
+                                                         ((nil) (send "op" "exec-kill") (return))
+                                                         (:data (apply #'take (rest frame)))
+                                                         (:reset (when (eql (second frame) stdin)
+                                                                   (send "op" "exec-input" "eof" t))))))
+                                          (error () nil)))))
+                                  :name "gr8s browser exec input"))
+                           (loop for message = (browser-exec-next exec session)
+                                 do (cond
+                                      ((null message)
+                                       (error 'runtime-error :message "The browser node disconnected"))
+                                      ((equal "exec-output" (gethash "op" message))
+                                       (let ((id (if (eql 2 (gethash "channel" message))
+                                                     (or (stream-id "stderr") (stream-id "stdout"))
+                                                     (stream-id "stdout"))))
+                                         (when id
+                                           (gr8s.protocol::spdy-server-write-data
+                                            server id (cl-base64:base64-string-to-usb8-array (gethash "data" message ""))))))
+                                      (t
+                                       (let ((status (gr8s.apiserver::spdy-remotecommand-status-bytes
+                                                      protocol (or (gethash "exitCode" message) 1))))
+                                         (when status
+                                           (gr8s.protocol::spdy-server-write-data server (stream-id "error") status)))
+                                       (return))))
+                           (dolist (type '("stdout" "stderr" "error"))
+                             (when (stream-id type)
+                               (gr8s.protocol::spdy-server-write-data
+                                server (stream-id type) (make-array 0 :element-type '(unsigned-byte 8)) :fin t))))
+                       (error (condition)
+                         (ignore-errors
+                          (gr8s.protocol::spdy-server-write-data
+                           server (stream-id "error")
+                           (gr8s.apiserver::spdy-remotecommand-failure-bytes protocol (princ-to-string condition))
+                           :fin t))))
+                  (remhash token (browser-runtime-execs runtime))
+                  (send "op" "exec-kill")
+                  (when input-thread (ignore-errors (bt:destroy-thread input-thread)))))))))))
+  "")
 
 ;;; What the join page shows
 
@@ -300,7 +443,11 @@ stops with the session."
                (let ((hello (and (= opcode 1) (ignore-errors (com.inuoe.jzon:parse payload)))))
                  (unless (and (hash-table-p hello) (equal "hello" (gethash "op" hello)))
                    (error "a browser node must say hello first"))
-                 (let ((runtime (make-browser-runtime session))
+                 (let ((runtime (make-browser-runtime
+                                 session (list (let ((address (hunchentoot:acceptor-address acceptor)))
+                                                 (if (member address '(nil "0.0.0.0") :test #'equal)
+                                                     "127.0.0.1" address))
+                                               (hunchentoot:acceptor-port acceptor))))
                        (architecture (if (equal "amd64" (gethash "arch" hello)) "amd64" "arm64")))
                    (setf name (browser-node-name))
                    (start-virtual-node host name
@@ -322,7 +469,10 @@ stops with the session."
 
 (defmethod hunchentoot:acceptor-dispatch-request ((acceptor browser-join-acceptor) request)
   (let ((path (hunchentoot:script-name request)))
-    (cond ((and (equal path "/socket")
+    (cond ((and (uiop:string-prefix-p "/exec/" path)
+                (string-equal (hunchentoot:header-in :upgrade request) "SPDY/3.1"))
+           (serve-browser-exec (subseq path 6)))
+          ((and (equal path "/socket")
                 (string-equal (hunchentoot:header-in :upgrade request) "websocket"))
            (accept-browser-node acceptor request)
            "")
