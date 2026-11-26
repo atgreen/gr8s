@@ -88,6 +88,16 @@ IPv6 neighbor discovery and MLD (ICMPv6, or MLD behind a hop-by-hop header) to o
 from a link-scope peer -- `fe80::/10`, `ff02::/16` or the unspecified `::` -- are
 not subject to NetworkPolicy: they keep the Pod's interface working, and Cilium
 likewise always admits NDP. Other link-local traffic, such as mDNS, is.
+Egress policy also governs the destinations a node serves itself: the node DNS
+gateway (`169.254.1.1:53`), the API server's Service address and the Pod's own
+node. The guard delivers them to the host only after policy allows them, so a
+Pod isolated for egress reaches none of them until a rule does. The rules charts
+already write keep working: a peer selecting `k8s-app: kube-dns` Pods in
+`kube-system` (with the `dns` and `dns-tcp` named ports) selects the node DNS
+gateway, since gr8s runs no kube-dns Pods, and a rule admitting the API server's
+endpoints on their port (the members' addresses, 6443), as upstream matches egress
+after Service translation, admits its Service address and port as well. Ingress
+from the Pod's own node is always allowed, as upstream specifies.
 Connection state permits reply traffic for allowed flows: for 5 days after a TCP
 connection's last packet, as conntrack keeps an established connection (well past
 the 2-hour `tcp_keepalive_time`, so an idle connection's keepalives get through),
@@ -105,6 +115,34 @@ Current source implements both directions and dual-family policy paths; the
 [compatibility inventory](k3s-gap-inventory.md) distinguishes focused support from
 the remaining combined IPv6/dual-stack acceptance work. An old egress-only smoke
 result is not evidence for all newer policy behavior.
+
+### Egress by hostname
+
+A ClusterNetworkPolicy egress rule with `domainNames` names hosts, not addresses
+([design](design-agent-egress.md)). The node enforces it with an egress proxy at
+`169.254.1.2` and a DNS gate on its port 53. A Pod with a hostname allowlist is in
+*synthetic mode* (podster-wv1w.8): the gate answers each name the Pod may resolve
+with an address from `198.18.0.0/15` that stands for the name, not with the name's
+real addresses, and answers other record types for it (AAAA, HTTPS) with no data.
+The Pod's TCP may reach only that range; a real public address is refused at
+`connect(2)` with `EPERM`. The node delivers the range locally (a `local` route on
+`lo`), and sk_lookup hands every port in it to the proxy, which reads the dialled
+address, looks up the name it stands for, decides the connection by the Pod's
+policy for that name, and dials one of the real addresses the gate pinned when it
+answered. So any protocol is admitted by name, a server that speaks first included,
+and nothing resolves the name again between the answer and the connect. A TLS
+client whose SNI names another host is refused. Answers live for at most 30 seconds;
+an expired mapping is looked up again when a connection uses it, and is never used
+stale. A synthetic address is reused for another name only after an hour unused.
+
+Real addresses behind a synthetic one are public unicast IPv4 only: a name that
+resolves to the cluster's own ranges is refused, since those stay under address
+policy. A Pod captured only by a SecurityProfile, to have credentials injected
+without a hostname allowlist, keeps real DNS answers: its public TCP is redirected
+to the proxy, which admits it by the TLS SNI or HTTP Host. Every other Pod is
+untouched. `198.18.0.0/15` is reserved: Pod pools and ServiceCIDRs may not overlap it.
+See [`egress-names.lisp`](../src/network/egress-names.lisp) and
+[`egress-proxy.lisp`](../src/controllers/egress-proxy.lisp).
 
 ## Services & load balancing
 

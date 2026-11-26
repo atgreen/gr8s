@@ -717,3 +717,29 @@
            (is (null (probe-file (gr8s.server::dashboard-session-file 18555)))))
       (if saved (sb-posix:setenv "XDG_RUNTIME_DIR" saved 1) (sb-posix:unsetenv "XDG_RUNTIME_DIR"))
       (uiop:delete-directory-tree directory :validate t))))
+
+(test network-graph-draws-proxied-egress-by-name
+  ;; A captured Pod's connections are reported by the egress proxy under the name
+  ;; they went to; its packets to the proxy address draw nothing (podster-wv1w.6).
+  (let ((graph (gr8s.server::make-network-graph))
+        (now (encode-universal-time 30 0 12 25 11 2026 0)))
+    (setf (gr8s.server::network-graph-topology graph) (network-test-topology))
+    (flet ((note (flow) (gr8s.server::network-graph-note-flow graph flow))
+           (edge (source target)
+             (find-if (lambda (e) (and (equal source (gethash "source" e)) (equal target (gethash "target" e))))
+                      (coerce (gethash "edges" (gr8s.server::network-graph-object graph now)) 'list))))
+      (note (network-test-flow "peerAddress" "169.254.1.2" "peerPort" 443))
+      (is (zerop (length (gethash "edges" (gr8s.server::network-graph-object graph now)))))
+      (let ((request (gr8s.controllers::egress-request-flow-object
+                      "10.80.16.4" "api.anthropic.com" "160.79.104.10" 443 "POST" "/v1/messages?beta=true" 200
+                      "gr8ify/claude-anthropic/anthropic-api-key"))
+            (refused (gr8s.controllers::egress-flow-object
+                      "10.80.16.4" "evil.example.com" "203.0.113.5" 443 nil nil)))
+        (dolist (flow (list request refused))
+          (setf (gethash "time" flow) "2026-11-25T12:00:00Z" (gethash "namespace" flow) "cave"
+                (gethash "pod" flow) "cave-runner-b4-x")
+          (note flow))
+        (is (equal "/v1/messages" (gethash "path" (gethash "l7" request))) "no query string")
+        (is (equal "gr8ify/claude-anthropic/anthropic-api-key" (gethash "injected" (gethash "l7" request))))
+        (is (= 1 (gethash "flows" (gethash "m1" (edge "cave/Deployment/cave-runner" "World/api.anthropic.com")))))
+        (is (= 1 (gethash "dropped" (gethash "m1" (edge "cave/Deployment/cave-runner" "World/evil.example.com")))))))))

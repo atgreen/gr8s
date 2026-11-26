@@ -9,22 +9,6 @@ These were identified in the k1/k2 security spot-checks, whose findings are
 summarized in the
 [2026-11-13 compatibility review](history/compatibility-review-2026-11-13.md).
 
-## Egress NetworkPolicy does not gate the API server, node IP, or node-local DNS (F5)
-
-The agent's eBPF egress datapath redirects DNS (to the node-local DNS gateway)
-and host-destined traffic (the API server ClusterIP `10.96.0.1` and the node's
-own IP) **before** the NetworkPolicy gate. A Pod under a default-deny egress
-policy can therefore still reach the API server, node-hosted services, and DNS.
-
-- **Why acceptable:** this mirrors NodeLocalDNS-style designs and keeps core
-  cluster function working without every workload needing an explicit allow rule
-  (upstream's default-deny famously breaks CoreDNS until a policy allows it).
-- **Deviation from k8s:** upstream's default-deny egress blocks these until
-  explicitly allowed. gr8s's guarantee is weaker: a compromised Pod retains an
-  exfiltration channel (DNS) and reach to the API server and node services.
-- **Revisit if:** gr8s is used for multi-tenant or strong-egress-isolation
-  workloads; then the redirects should themselves be policy-gated.
-
 ## Certificate leaves live up to ~1 year with no revocation (F11)
 
 CSR-API leaves honor the requested lifetime up to `*csr-certificate-duration*`

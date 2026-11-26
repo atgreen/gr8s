@@ -149,7 +149,7 @@
 (test service-lb-program-compiles-in-process
   (multiple-value-bind (map-specs prog-specs) (gr8s.network::compile-service-lb)
     ;; Five maps per family, with the key/value sizes the encoders target.
-    (is (= 10 (length map-specs)))
+    (is (= 13 (length map-specs)))
     (let ((service (find "gr8s_service_v4" map-specs
                          :key (lambda (s) (getf s :name)) :test #'string=))
           (backend (find "gr8s_backend_v4" map-specs
@@ -181,7 +181,7 @@
 
 (test service-lb-program-compiles-every-ipv4-and-ipv6-socket-hook
   (multiple-value-bind (maps programs) (gr8s.network::compile-service-lb)
-    (is (= 10 (length maps)))
+    (is (= 13 (length maps)))
     (dolist (name '("gr8s_service_v6" "gr8s_backend_v6"
                     "gr8s_backend_index_v6" "gr8s_affinity_v6"
                     "gr8s_reverse_v6"))
@@ -1694,7 +1694,8 @@
   ;; Both families steer connect/sendmsg and restore the Service address on UDP replies.
   (multiple-value-bind (maps programs) (gr8s.network::compile-service-lb)
     (is (equal '("gr8s_service_v4" "gr8s_backend_v4" "gr8s_backend_index_v4" "gr8s_affinity_v4" "gr8s_reverse_v4"
-                 "gr8s_service_v6" "gr8s_backend_v6" "gr8s_backend_index_v6" "gr8s_affinity_v6" "gr8s_reverse_v6")
+                 "gr8s_service_v6" "gr8s_backend_v6" "gr8s_backend_index_v6" "gr8s_affinity_v6" "gr8s_reverse_v6"
+                     "gr8s_egress_capture" "gr8s_egress_exempt_v4" "gr8s_pod_netns_v4")
                (mapcar (lambda (spec) (getf spec :name)) maps)))
     (is (equal '("cgroup/connect4" "cgroup/sendmsg4" "cgroup/recvmsg4"
                  "cgroup/connect6" "cgroup/sendmsg6" "cgroup/recvmsg6")

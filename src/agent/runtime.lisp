@@ -104,7 +104,36 @@
   gateway-controller
   ;; sk_lookup attachment that exposes loopback Gateway/Ingress listeners on
   ;; their destination ports without opening host-wide listening sockets.
-  gateway-steering)
+  gateway-steering
+  ;; The node egress proxy for captured Pods (podster-wv1w.2), its sk_lookup
+  ;; steering, and the policy it decides by: (ip-map specs cluster-policies), as
+  ;; the last convergence resolved them.
+  egress-proxy egress-steering egress-dns-gate (egress-view nil))
+
+(defun node-runtime-egress-injector (node-runtime peer host scheme)
+  "For the Pod at PEER, a request matcher injecting credentials into its requests to HOST
+over SCHEME, or NIL when no SecurityProfile selecting it names HOST (podster-wv1w.3). The
+matcher returns (values rule-name headers value), VALUE NIL when the Secret or its key is
+missing, which the proxy refuses rather than send the request without its credential."
+  (destructuring-bind (&optional ip-map specs cluster-policies profiles) (node-runtime-egress-view node-runtime)
+    (declare (ignore specs cluster-policies))
+    (let* ((pod (and ip-map (gethash peer ip-map)))
+           (rules (and pod (gr8s.network::pod-injection-rules pod profiles)))
+           (store (node-runtime-store node-runtime)))
+      (when (and rules (gr8s.network::injection-host-p rules host))
+        (lambda (method path)
+          (let ((rule (gr8s.network::matching-injection-rule rules host scheme method path)))
+            (when rule
+              (let* ((secret (ignore-errors
+                              (get-core-resource store "secrets" (gr8s.network::injection-rule-namespace rule)
+                                                 (gr8s.network::injection-rule-secret-name rule))))
+                     (credential (and secret (gr8s.network::secret-credential
+                                              secret (gr8s.network::injection-rule-secret-key rule)))))
+                (values (format nil "~A/~A" (gr8s.network::injection-rule-profile rule)
+                                (gr8s.network::injection-rule-name rule))
+                        (gr8s.network::injection-rule-headers rule)
+                        (and credential (gr8s.network::render-injection-value
+                                         (gr8s.network::injection-rule-template rule) credential)))))))))))
 
 (defun node-runtime-local-risk-ready-p (node-runtime)
   "True only while the latest received snapshot has a read-back-complete local
@@ -1307,6 +1336,45 @@ the node from starting."
         (setf (node-runtime-gateway-steering node-runtime) (start-gateway-steering))
       (error (condition)
         (format *error-output* "gr8s: Gateway listener steering unavailable: ~A~%" condition)))
+    (when (node-runtime-service-lb node-runtime)
+      (handler-case
+          (multiple-value-bind (proxy steering gate)
+              (gr8s.controllers::start-node-egress-proxy
+               (lambda (peer host address port)
+                 (destructuring-bind (&optional ip-map specs cluster-policies) (node-runtime-egress-view node-runtime)
+                   (let ((pod (and ip-map (gethash peer ip-map))))
+                     (if pod
+                         (gr8s.network::egress-connection-verdict pod specs cluster-policies host address port)
+                         (values nil nil)))))
+               (lambda (client)
+                 ;; A Pod the policy doesn't capture may resolve anything; one a
+                 ;; SecurityProfile captures without domain rules resolves as before.
+                 ;; One with a hostname allowlist resolves only its names, and to
+                 ;; synthetic addresses (podster-wv1w.8).
+                 (destructuring-bind (&optional ip-map specs cluster-policies profiles)
+                     (node-runtime-egress-view node-runtime)
+                   (declare (ignore specs profiles))
+                   (let ((pod (and ip-map (gethash client ip-map))))
+                     (if (and pod (gr8s.network::pod-egress-synthetic-p pod cluster-policies))
+                         (values (gr8s.network::pod-egress-allowed-domains pod cluster-policies) t)
+                         :all))))
+               :inject (lambda (peer host scheme)
+                         (node-runtime-egress-injector node-runtime peer host scheme))
+               :mint (let ((minter nil) (ca nil))
+                       (lambda (host)
+                         (multiple-value-bind (key certificate)
+                             (gr8s.controllers::egress-ca-material (node-runtime-store node-runtime))
+                           (when key
+                             (unless (and minter (equalp ca (pure-tls::x509-certificate-raw-der certificate)))
+                               (setf minter (gr8s.controllers::make-egress-leaf-minter key certificate)
+                                     ca (pure-tls::x509-certificate-raw-der certificate)))
+                             (funcall minter host))))))
+            (setf (node-runtime-egress-proxy node-runtime) proxy
+                  (node-runtime-egress-steering node-runtime) steering
+                  (node-runtime-egress-dns-gate node-runtime) gate))
+        (error (condition)
+          (format *error-output* "gr8s: egress proxy unavailable; captured Pods reach nothing by name: ~A~%"
+                  condition))))
     (unwind-protect
          (funcall function)
       (when (node-runtime-gateway-controller node-runtime)
@@ -1315,6 +1383,11 @@ the node from starting."
       (when (node-runtime-gateway-steering node-runtime)
         (ignore-errors (stop-gateway-steering (node-runtime-gateway-steering node-runtime)))
         (setf (node-runtime-gateway-steering node-runtime) nil))
+      (ignore-errors (gr8s.controllers::stop-egress-dns-gate (node-runtime-egress-dns-gate node-runtime)))
+      (ignore-errors (gr8s.controllers::stop-egress-steering (node-runtime-egress-steering node-runtime)))
+      (ignore-errors (gr8s.controllers::stop-egress-proxy (node-runtime-egress-proxy node-runtime)))
+      (when (node-runtime-egress-proxy node-runtime) (gr8s.network::remove-egress-synthetic-route))
+      (setf (node-runtime-egress-steering node-runtime) nil (node-runtime-egress-proxy node-runtime) nil)
       (when (node-runtime-service-lb node-runtime)
         (bt:with-lock-held ((node-runtime-arrival-lock node-runtime))
           (setf (node-runtime-service-risk-ready-revision node-runtime) nil
@@ -1942,11 +2015,25 @@ A no-op unless the agent is managed with a store and known endpoints."
         ;; NetworkPolicy, both directions (origin/main). Spec resolution can throw
         ;; on an unsupported policy, so it stays after the delivery tables above,
         ;; which must populate regardless.
-        (let ((specs (network-policy-specs-from-objects
-                      (list-core-resources store "networkpolicies")))
-              (ip-map (gr8s.network::pod-ip-identity-map store)))
+        (let* ((specs (network-policy-specs-from-objects
+                       (list-core-resources store "networkpolicies")))
+               (cluster-policies (gr8s.network::cluster-network-policy-specs-from-objects
+                                  (list-core-resources store "clusternetworkpolicies")))
+               (profiles (gr8s.network::security-profile-specs-from-objects
+                          (list-core-resources store "securityprofiles")))
+               (ip-map (gr8s.network::pod-ip-identity-map store))
+               (service-lb (node-runtime-service-lb node-runtime)))
+          ;; Egress capture (podster-wv1w.2): send Pods whose policy names domains
+          ;; through the node egress proxy, which decides by this view. Best-effort,
+          ;; like the tables above.
+          (setf (node-runtime-egress-view node-runtime) (list ip-map specs cluster-policies profiles))
+          (when service-lb
+            (gr8s.network::converge-egress-capture
+             (gr8s.network::service-lb-dataplane-pin-directory service-lb) endpoints cluster-policies
+             :pod-finder (lambda (address) (gethash address ip-map)) :profiles profiles))
           (funcall policy-converger
                    specs endpoints
+                   :cluster-policies cluster-policies
                    :pod-finder (lambda (address) (gethash address ip-map))
                    :directory-fn (lambda (sandbox)
                                    (nth-value 2 (cni-pin-paths root sandbox)))))))))

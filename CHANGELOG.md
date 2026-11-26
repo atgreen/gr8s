@@ -9,6 +9,34 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- Egress control and credential injection for AI agents, declared as Kubernetes
+  resources and enforced by the node (podster-wv1w, docs/design-agent-egress.md):
+  - `policy.networking.k8s.io/v1alpha2` ClusterNetworkPolicy is served natively:
+    Admin and Baseline tiers around NetworkPolicy, Accept, Deny and Pass, Pod,
+    namespace, node and CIDR peers, named ports, and `domainNames`.
+  - A Pod whose egress policy names domains is captured: its outbound TCP to public
+    addresses goes to a node egress proxy, which admits a connection by the TLS SNI
+    or HTTP Host it names, never by address; its DNS is answered only for allowed
+    names; UDP 443 is refused, so QUIC falls back to TCP.
+  - A subset of OpenKruise Agents' `agents.kruise.io/v1alpha1` SecurityProfile
+    injects credentials: the proxy overwrites the named headers of matching
+    requests with a value from a Secret, terminating TLS with a leaf from a new
+    egress CA that Pods trust through the `gr8s-egress` ClusterTrustBundle. The
+    Pod holds only a placeholder; a Host that differs from the TLS name gets 421,
+    and a missing credential 403. A profile's Secret reaches only the nodes
+    running the Pods it selects, with their assignments.
+  - Proxied connections and requests appear in the flows and the Network view
+    under the name they went to, with the rule that injected a credential.
+  - A Pod with a hostname allowlist resolves its allowed names to synthetic
+    addresses in `198.18.0.0/15` and reaches only those, so the proxy admits a
+    connection by the name the Pod looked up, whatever protocol it speaks, and dials
+    only the addresses resolved with the answer (podster-wv1w.8). The range is
+    reserved: Pod pools and ServiceCIDRs may not overlap it.
+- gr8ify: `gr8ify.gr8s.io/v1alpha1` SandboxProfile says what a command gets in the
+  caller's home and environment; the sandbox trusts the egress CA when the cluster
+  has one; `gr8ify login claude` moves Claude Code's subscription token into the
+  cluster, so the sandboxed claude sees only stand-in tokens.
+
 - `gr8s dashboard` has a Network tab: a live map of the cluster's traffic,
   drawn from its flow events (podster-5hv). A node is a workload (a Pod
   resolved through its owners to its Deployment, StatefulSet, DaemonSet or
@@ -83,6 +111,17 @@ the Kubernetes API version with a gr8s release suffix (see
   as a loopback copy received on that veth, which the egress guard took for the
   Pod's traffic from the wrong address. The guard now passes the host's own
   loopback copies; a Pod can't make one.
+
+- Egress NetworkPolicy now governs node DNS, the API server and the Pod's own
+  node (podster-5hv.10, closing security deviation F5). The egress guard used
+  to deliver those to the host before checking policy, so a Pod under
+  default-deny egress could still resolve names, reach the API server and the
+  node's services, and its connections to them never appeared in the flows or
+  on the Network map. **Behaviour change:** a Pod isolated for egress now needs
+  a rule for each. The usual rules work: a peer selecting `k8s-app: kube-dns`
+  Pods in `kube-system` selects the node DNS gateway, and a rule admitting the
+  API server's endpoints (the members' addresses on 6443) admits its Service
+  address too.
 
 - `make native` in a fresh checkout embeds the Network tab's graph assets. The
   binary's build didn't depend on them, so it built without them and the tab

@@ -522,7 +522,7 @@ async function showDetails() {
     showTraces(latest, traces);
     for (const f of latest) {
       const [from, to, port] = flowSides(f);
-      const http = f.l7 ? ' ' + f.l7.method + ' ' + f.l7.path + ' → ' + f.l7.code : '';
+      const http = f.l7 ? ' ' + l7Detail(f.l7) : '';
       flows.append(row(cell((f.time || '').slice(11, 19)), cell(from + ' → ' + to + http),
         cell((port == null ? '' : port + '/') + (f.protocol || '')),
         cell(f.verdict.toLowerCase() + dropReason(f), f.verdict === 'DROPPED' ? 'dropped' : '')));
@@ -751,6 +751,14 @@ async function explainEdge(edge, into) {
   into.replaceChildren(...boxes, el('div', 'note', 'As the policies are now; a suggested rule is a starting point to review, never applied for you.'));
 }
 
+// A flow's L7 detail: an HTTP request, or a connection the node egress proxy admitted
+// by name, and whether the proxy injected a credential into the request (podster-wv1w.6).
+function l7Detail(l7) {
+  if (l7.type === 'egress') return l7.host || '';
+  const request = l7.method + ' ' + l7.path + ' → ' + l7.code;
+  return l7.injected ? request + ' (credential: ' + l7.injected + ')' : request;
+}
+
 function dropReason(f) {
   if (f.verdict !== 'DROPPED') return '';
   return f.policies && f.policies.length ? ' by ' + f.policies.join(', ') : f.reason ? ' (' + f.reason + ')' : '';
@@ -777,7 +785,7 @@ async function showFlows() {
     if (namespace && f.namespace !== namespace && f.peerNamespace !== namespace) continue;
     const [from, to, port] = flowSides(f);
     if (search && !(from + ' ' + to).toLowerCase().includes(search)) continue;
-    const detail = f.verdict === 'DROPPED' ? dropReason(f).trim() : f.l7 ? f.l7.method + ' ' + f.l7.path + ' → ' + f.l7.code : '';
+    const detail = f.verdict === 'DROPPED' ? dropReason(f).trim() : f.l7 ? l7Detail(f.l7) : '';
     const tr = row(cell((f.time || '').slice(11, 19)), cell(from), cell(to), cell((port == null ? '' : port + '/') + (f.protocol || '')),
       cell(f.verdict.toLowerCase(), f.verdict === 'DROPPED' ? 'dropped' : ''), cell(detail));
     tr.onclick = () => select({ type: 'edge', id: f.edge });

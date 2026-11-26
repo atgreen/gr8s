@@ -24,10 +24,13 @@
 
 (defun node-host-redirect-table (node-address)
   "The node-wide host-local destination table (alist of 4-byte key -> 1-byte
-   presence value): the API server ClusterIP, and this node's own IP when known.
+   presence value): the API server ClusterIP, the egress proxy address, and this
+   node's own IP when known.
    A hit means the destination is served by this host and must reach it via lo."
   (let ((value (make-array 1 :element-type '(unsigned-byte 8) :initial-element 1))
-        (addresses (list (format nil "~{~A~^.~}" (coerce +dns-kubernetes-service-address+ 'list)))))
+        (addresses (list (format nil "~{~A~^.~}" (coerce +dns-kubernetes-service-address+ 'list))
+                         ;; The egress proxy and DNS gate (podster-wv1w.2).
+                         +egress-proxy-address+)))
     (when (and node-address (plusp (length node-address)))
       (pushnew node-address addresses :test #'string=))
     (loop for address in addresses

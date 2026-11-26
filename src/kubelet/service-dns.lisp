@@ -11,7 +11,8 @@
   "Copy only public DNS fields; exclude arbitrary annotations and unrelated resources."
   (let* ((kind (gethash "kind" object)) (source (gethash "metadata" object))
          (metadata (core-object)) (result (core-object)))
-    (unless (member kind '("Namespace" "Service" "EndpointSlice" "NetworkPolicy" "Ingress" "IngressClass"
+    (unless (member kind '("Namespace" "Service" "EndpointSlice" "NetworkPolicy" "ClusterNetworkPolicy" "SecurityProfile"
+                           "Ingress" "IngressClass"
                            "GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute" "ReferenceGrant"
                            "Secret" "ClusterTrustBundle" "PodCertificateRequest") :test #'equal)
       (invalid-pod "unsupported public Service discovery kind"))
@@ -35,6 +36,8 @@
                                               ((equal kind "Secret") "v1")
                                               ((equal kind "ClusterTrustBundle") "certificates.k8s.io/v1")
                                               ((equal kind "PodCertificateRequest") "certificates.k8s.io/v1")
+                                              ((equal kind "ClusterNetworkPolicy") "policy.networking.k8s.io/v1alpha2")
+                                              ((equal kind "SecurityProfile") "agents.kruise.io/v1alpha1")
                                               ((member kind '("NetworkPolicy" "Ingress" "IngressClass") :test #'equal)
                                                "networking.k8s.io/v1")
                                               ((member kind '("GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute" "ReferenceGrant") :test #'equal)
@@ -75,9 +78,10 @@
                                                                     (setf (gethash key kept) (gethash key entry)))))
                                                               kept))
                                                   ingress))))))))
-      ((equal kind "NetworkPolicy")
-       ;; The spec as network-policy-projection resolved it: podSelector, defaulted
-       ;; policyTypes, and rules whose peers are addresses. The node needs nothing else.
+      ((member kind '("NetworkPolicy" "ClusterNetworkPolicy" "SecurityProfile") :test #'equal)
+       ;; The spec as network-policy-projection (or cluster-network-policy-projection)
+       ;; resolved it: selected Pods and rules whose peers are addresses. The node
+       ;; needs nothing else.
        (setf (gethash "spec" result) (copy-core-object (gethash "spec" object))))
       ((member kind '("Ingress" "IngressClass"
                       "GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute" "ReferenceGrant") :test #'equal)
@@ -201,6 +205,11 @@
                           (objects "endpointslices")
                           ;; NetworkPolicy selectors are resolved against cluster Pods and Namespaces.
                           (network-policy-projection store)
+                          (gr8s.network::cluster-network-policy-projection store)
+                          ;; Which Pods the node egress proxy injects credentials for; the
+                          ;; Secrets themselves travel only with the Pods they serve.
+                          (objects "securityprofiles")
+                          (gr8s.controllers::egress-ca-secrets store)
                           (objects "ingressclasses")
                           (objects "ingresses")
                           (objects "referencegrants")
@@ -314,6 +323,8 @@
            (resource (cond ((equal "Namespace" (gethash "kind" public)) "namespaces")
                            ((equal "Service" (gethash "kind" public)) "services")
                            ((equal "NetworkPolicy" (gethash "kind" public)) "networkpolicies")
+                           ((equal "ClusterNetworkPolicy" (gethash "kind" public)) "clusternetworkpolicies")
+                           ((equal "SecurityProfile" (gethash "kind" public)) "securityprofiles")
                            ((equal "IngressClass" (gethash "kind" public)) "ingressclasses")
                            ((equal "Ingress" (gethash "kind" public)) "ingresses")
                            ((equal "ReferenceGrant" (gethash "kind" public)) "referencegrants")
@@ -330,7 +341,8 @@
       (unless (and (stringp name) (plusp (length name))
                    ;; GatewayClass, IngressClass and ClusterTrustBundle are cluster-scoped (no
                    ;; namespace); all others are namespaced.
-                   (if (member resource '("namespaces" "gatewayclasses" "ingressclasses" "clustertrustbundles") :test #'equal)
+                   (if (member resource '("namespaces" "gatewayclasses" "ingressclasses" "clustertrustbundles"
+                                          "clusternetworkpolicies") :test #'equal)
                        (null namespace) (dns-label-p namespace)))
         (invalid-pod "public Service discovery metadata is invalid"))
       (cons (core-resource-key resource namespace name) public)))

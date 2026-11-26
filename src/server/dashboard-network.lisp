@@ -491,8 +491,12 @@ arriving at a Pod from another known Pod isn't counted: its source counted it le
         (values there here port counted))))
 
 (defun network-graph-note-flow (graph flow)
-  "Fold FLOW, a flow event object, into GRAPH."
-  (when (or (gethash "pod" flow) (hash-table-p (gethash "l7" flow)))
+  "Fold FLOW, a flow event object, into GRAPH. A captured Pod's packets to the node egress
+proxy are left out: the proxy reports each of those connections by the name it went to
+(podster-wv1w.6)."
+  (when (and (or (gethash "pod" flow) (hash-table-p (gethash "l7" flow)))
+             (not (and (equal (gethash "peerAddress" flow) gr8s.network::+egress-proxy-address+)
+                       (not (hash-table-p (gethash "l7" flow))))))
     (bt:with-lock-held ((network-graph-lock graph))
       (let ((topology (network-graph-topology graph)))
         (multiple-value-bind (source target port counted) (network-flow-endpoints topology flow)

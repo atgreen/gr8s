@@ -170,7 +170,23 @@
           ((equal resource "certificaterequests")
            (setf (gethash "spec" object)
                  (gr8s.resources::core-object "issuerRef" (gr8s.resources::core-object "name" "watched")
-                                    "request" "Zm9v"))))
+                                    "request" "Zm9v")))
+          ((equal resource "clusternetworkpolicies")
+           (setf (gethash "spec" object)
+                 (gr8s.resources::core-object "tier" "Baseline" "priority" 10
+                                              "subject" (gr8s.resources::core-object
+                                                         "namespaces" (gr8s.resources::core-object)))))
+          ((equal resource "sandboxprofiles")
+           (setf (gethash "spec" object)
+                 (gr8s.resources::core-object "commands" (vector "claude"))))
+          ((equal resource "securityprofiles")
+           (setf (gethash "spec" object)
+                 (com.inuoe.jzon:parse
+                  "{\"selector\":{},\"rules\":[{\"name\":\"r\",\"match\":[{\"domains\":[\"api.example.com\"]}],
+                    \"actions\":{\"tokenTransformation\":{\"type\":\"ApiKey\",
+                      \"credentialRef\":{\"secret\":{\"name\":\"s\"}},
+                      \"apiKey\":{\"targetHeaders\":{\"names\":[\"x-api-key\"]},
+                                  \"value\":{\"template\":\"{{ .Token }}\"}}}}}]}"))))
     object))
 
 (test durable-resources-stream-real-http-selector-transitions

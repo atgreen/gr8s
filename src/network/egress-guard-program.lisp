@@ -283,54 +283,6 @@
                      (drop-pod-packet :malformed))
                    (when (/= (ntohl (ipv4-src-addr ip)) (load u32 identity 0))
                      (drop-pod-packet :spoof))
-                   ;; DNS to the node gateway (169.254.1.1:53, UDP or TCP):
-                   ;; redirect the query to the loopback ingress so it is
-                   ;; delivered with iif=lo, which the host firewall trusts,
-                   ;; instead of crossing the (possibly default-deny) INPUT path
-                   ;; on port 53. Zeroing the destination MAC first makes lo's
-                   ;; eth_type_trans classify the reinjected frame as PACKET_HOST,
-                   ;; not PACKET_OTHERHOST (which drops it before INPUT). The node
-                   ;; DNS server answers on 169.254.1.1:53; its reply is host-
-                   ;; originated (OUTPUT) and routes back to the Pod normally.
-                   ;; TCP and UDP carry the destination port at the same L4 offset
-                   ;; (bytes 2-3), so one dport test covers both; for TCP every
-                   ;; inbound segment of the flow is redirected the same way.
-                   (let ((l4-proto u8 (load u8 ip 9)))
-                     (when (and (= (load u32 identity 12) 1)        ; native host veth
-                                (or (= l4-proto 17) (= l4-proto 6)) ; UDP or TCP
-                                (= (logand (load u8 ip 0) 15) 5)   ; no IP options (ihl = 5)
-                                (= (ntohl (load u32 ip 16)) #xa9fe0101) ; dst = 169.254.1.1
-                                (<= (+ data 42) data-end)          ; L4 ports in bounds
-                                (= (ntohs (load u16 ip 22)) 53))   ; dport = 53
-                       (add-pod-counter allowed-packets 1)
-                       (add-pod-counter allowed-bytes (ctx u32 0))
-                       (store u32 data 0 0)                        ; zero dst MAC bytes 0-3
-                       (store u16 data 4 0)                        ; zero dst MAC bytes 4-5
-                       (return (redirect 1 1))))                   ; lo = ifindex 1, BPF_F_INGRESS
-                   ;; Pod->host fast path (podster-9b1): a packet to a host-local
-                   ;; address -- the API server at 10.96.0.1:443, or this node's
-                   ;; own IP after the socket LB rewrote a ClusterIP to a host
-                   ;; backend -- would otherwise cross the host firewall's INPUT
-                   ;; path. Redirect it to the loopback ingress (iif=lo, which
-                   ;; firewalld trusts), exactly like the DNS gateway trick above:
-                   ;; zeroing the dst MAC makes lo classify it PACKET_HOST, and the
-                   ;; host service's reply is OUTPUT-routed back to the Pod. The
-                   ;; agent populates host-redirect-v4 with the node's host-local
-                   ;; destinations. The scalar u32 key is the dst in network order,
-                   ;; the same bytes the agent writes (see host-redirect-key).
-                   (when (and (= (load u32 identity 12) 1)
-                              (/= (map-lookup host-redirect-v4 (load u32 ip 16)) 0))
-                     ;; The lookup reset the verifier's proven packet range; re-prove
-                     ;; the L2 bounds before rewriting the MAC header.
-                     (when (> (+ data 14) data-end) (drop-pod-packet :malformed))
-                     (add-pod-counter allowed-packets 1)
-                     (add-pod-counter allowed-bytes (ctx u32 0))
-                     (store u32 data 0 0)
-                     (store u16 data 4 0)
-                     (return (redirect 1 1)))
-                   ;; The host-redirect lookup above reset the proven packet range;
-                   ;; re-prove the IPv4 header bounds before the reads below.
-                   (when (> (+ data 34) data-end) (drop-pod-packet :malformed))
                    ;; NetworkPolicy (map-driven; the agent rewrites the maps on policy
                    ;; change). Egress isolation allows a packet that its rules allow, or
                    ;; that answers a connection the ingress guard admitted. Either
@@ -371,6 +323,61 @@
                            (let ((stamp (make-netpol-flow-stamp)))
                              (setf (netpol-flow-stamp-ns stamp) now)
                              (record-netpol-flow netpol-flows fkey stamp opens :family 4 :endpoint (if (/= identity 0) (load u32 identity 0) 0)))))))
+                   ;; The host-local deliveries below run only after NetworkPolicy has
+                   ;; allowed the packet and recorded its connection: an egress-isolated
+                   ;; Pod reaches node DNS, the API server and its node only as its policy
+                   ;; allows, and those connections are reported like any other
+                   ;; (podster-5hv.10; this closed security deviation F5). The policy
+                   ;; block's helper calls reset the proven packet range.
+                   (when (> (+ data 34) data-end) (drop-pod-packet :malformed))
+                   ;; DNS to the node gateway (169.254.1.1:53, UDP or TCP):
+                   ;; redirect the query to the loopback ingress so it is
+                   ;; delivered with iif=lo, which the host firewall trusts,
+                   ;; instead of crossing the (possibly default-deny) INPUT path
+                   ;; on port 53. Zeroing the destination MAC first makes lo's
+                   ;; eth_type_trans classify the reinjected frame as PACKET_HOST,
+                   ;; not PACKET_OTHERHOST (which drops it before INPUT). The node
+                   ;; DNS server answers on 169.254.1.1:53; its reply is host-
+                   ;; originated (OUTPUT) and routes back to the Pod normally.
+                   ;; TCP and UDP carry the destination port at the same L4 offset
+                   ;; (bytes 2-3), so one dport test covers both; for TCP every
+                   ;; inbound segment of the flow is redirected the same way.
+                   (let ((l4-proto u8 (load u8 ip 9)))
+                     (when (and (= (load u32 identity 12) 1)        ; native host veth
+                                (or (= l4-proto 17) (= l4-proto 6)) ; UDP or TCP
+                                (= (logand (load u8 ip 0) 15) 5)   ; no IP options (ihl = 5)
+                                (= (ntohl (load u32 ip 16)) #xa9fe0101) ; dst = 169.254.1.1
+                                (<= (+ data 42) data-end)          ; L4 ports in bounds
+                                (= (ntohs (load u16 ip 22)) 53))   ; dport = 53
+                       (add-pod-counter allowed-packets 1)
+                       (add-pod-counter allowed-bytes (ctx u32 0))
+                       (store u32 data 0 0)                        ; zero dst MAC bytes 0-3
+                       (store u16 data 4 0)                        ; zero dst MAC bytes 4-5
+                       (return (redirect 1 1))))                   ; lo = ifindex 1, BPF_F_INGRESS
+                   ;; Pod->host fast path (podster-9b1): a packet to a host-local
+                   ;; address -- the API server at 10.96.0.1:443, or this node's
+                   ;; own IP after the socket LB rewrote a ClusterIP to a host
+                   ;; backend -- would otherwise cross the host firewall's INPUT
+                   ;; path. Redirect it to the loopback ingress (iif=lo, which
+                   ;; firewalld trusts), exactly like the DNS gateway trick above:
+                   ;; zeroing the dst MAC makes lo classify it PACKET_HOST, and the
+                   ;; host service's reply is OUTPUT-routed back to the Pod. The
+                   ;; agent populates host-redirect-v4 with the node's host-local
+                   ;; destinations. The scalar u32 key is the dst in network order,
+                   ;; the same bytes the agent writes (see host-redirect-key).
+                   ;; The synthetic range 198.18.0.0/15 (podster-wv1w.8) is host-local
+                   ;; too: the node delivers it to the egress proxy.
+                   (when (and (= (load u32 identity 12) 1)
+                              (or (= (logand (load u32 ip 16) #xfeff) #x12c6)
+                                  (/= (map-lookup host-redirect-v4 (load u32 ip 16)) 0)))
+                     ;; The lookup reset the verifier's proven packet range; re-prove
+                     ;; the L2 bounds before rewriting the MAC header.
+                     (when (> (+ data 14) data-end) (drop-pod-packet :malformed))
+                     (add-pod-counter allowed-packets 1)
+                     (add-pod-counter allowed-bytes (ctx u32 0))
+                     (store u32 data 0 0)
+                     (store u16 data 4 0)
+                     (return (redirect 1 1)))
                    ;; Same-node Pod->Pod fast path. Policy has allowed the packet
                    ;; above; if the destination is a Pod on this node, deliver it
                    ;; straight to that Pod's veth via bpf_redirect, bypassing the

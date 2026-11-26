@@ -176,6 +176,24 @@ no class, by field or by the legacy kubernetes.io/ingress.class annotation, the 
                                     "message" "Kubernetes Service CIDR is ready"
                                     "lastTransitionTime" (current-timestamp)))))
 
+(defparameter +egress-synthetic-cidr+ "198.18.0.0/15"
+  "The node egress proxy's synthetic address range (gr8s.network, podster-wv1w.8), which
+no ServiceCIDR may overlap.")
+
+(defun networking-ipv4-cidrs-overlap-p (left right)
+  "True when the IPv4 prefixes LEFT and RIGHT share an address; NIL for IPv6."
+  (flet ((parse (cidr)
+           (let ((slash (position #\/ cidr)))
+             (values (reduce (lambda (acc octet) (+ (* acc 256) (parse-integer octet)))
+                             (uiop:split-string (subseq cidr 0 slash) :separator ".")
+                             :initial-value 0)
+                     (parse-integer cidr :start (1+ slash))))))
+    (unless (or (find #\: left) (find #\: right))
+      (multiple-value-bind (a a-prefix) (parse left)
+        (multiple-value-bind (b b-prefix) (parse right)
+          (let ((shift (- 32 (min a-prefix b-prefix))))
+            (= (ash a (- shift)) (ash b (- shift)))))))))
+
 (defun normalize-service-cidr (object existing)
   "Validate one or two distinct-family prefixes that never change once set."
   (let* ((spec (require-object (gethash "spec" object) "ServiceCIDR.spec"))
@@ -188,6 +206,9 @@ no class, by field or by the legacy kubernetes.io/ingress.class annotation, the 
       (core-resource-error 422 "Invalid" "ServiceCIDR.spec.cidrs must have one prefix per address family"))
     (when (and existing (not (equalp cidrs (gethash "cidrs" (gethash "spec" existing)))))
       (core-resource-error 422 "Invalid" "ServiceCIDR.spec.cidrs is immutable"))
+    (when (some (lambda (cidr) (networking-ipv4-cidrs-overlap-p cidr +egress-synthetic-cidr+)) cidrs)
+      (core-resource-error 422 "Invalid" "ServiceCIDR.spec.cidrs may not overlap ~A, where synthetic egress addresses come from"
+                           +egress-synthetic-cidr+))
     (networking-keep-status object existing (service-cidr-ready-status cidrs))))
 
 (defun normalize-ip-address (object existing)

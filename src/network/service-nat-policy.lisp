@@ -544,9 +544,13 @@ The eventual NAT pipeline must commit translation before a delivery stage."
                     ;; Kubernetes self/host-node exceptions must also survive
                     ;; hairpin source translation. The peer resolver has checked
                     ;; a self peer's epoch against this endpoint's local identity.
+                    ;; Only ingress exempts the host: Kubernetes admits a Pod's own
+                    ;; node to it, but egress to the node, the API server or node
+                    ;; DNS answers to the Pod's egress policy (podster-5hv.10).
                     `(if (or (= whistler::canonical-peer
                                 (whistler::ntohl (whistler::load whistler::u32 whistler::local-identity 0)))
-                             (/= (whistler::map-lookup whistler::host-redirect-v4 whistler::canonical-peer) 0))
+                             ,@(when (eq (second form) 'whistler::netpol-ingress-cidr)
+                                 '((/= (whistler::map-lookup whistler::host-redirect-v4 whistler::canonical-peer) 0))))
                          1 ,result)))
                  ((and (eq (car form) 'return) (consp (second form))
                        (eq (car (second form)) 'whistler::redirect))

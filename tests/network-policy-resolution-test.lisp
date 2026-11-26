@@ -501,3 +501,73 @@ Return (values result final-contents events)."
     (multiple-value-bind (ingress egress) (gr8s.network::np-pod-isolation specs (second api))
       (is (equal '("shop/api") ingress))
       (is (equal '("shop/api") egress)))))
+
+(defun npr-namespaces-with-kube-system ()
+  (let ((labels (npr-namespaces)))
+    (setf (gethash "kube-system" labels) (gr8s.network::np-labels "kubernetes.io/metadata.name" "kube-system"))
+    labels))
+
+(test npr-the-usual-dns-rule-selects-the-node-dns-gateway
+  ;; gr8s has no kube-dns Pods: Pods resolve through the node gateway. The rule
+  ;; charts write to allow DNS must still allow it (podster-5hv.10).
+  (let* ((pods (cons (gr8s.network::node-dns-policy-peer) *npr-pods*))
+         (spec (gethash "spec" (gr8s.network::resolve-network-policy-object
+                                (npr-policy "prod" "{\"podSelector\":{},\"policyTypes\":[\"Egress\"],
+                                   \"egress\":[{\"to\":[{\"namespaceSelector\":{\"matchLabels\":{\"kubernetes.io/metadata.name\":\"kube-system\"}},
+                                                        \"podSelector\":{\"matchLabels\":{\"k8s-app\":\"kube-dns\"}}}],
+                                                \"ports\":[{\"port\":53,\"protocol\":\"UDP\"},{\"port\":\"dns-tcp\",\"protocol\":\"TCP\"}]}]}")
+                                pods (npr-namespaces-with-kube-system))))
+         (rules (coerce (gethash "egress" spec) 'list)))
+    (is (equal '("169.254.1.1/32") (npr-peers (first rules) "to")))
+    (is (equal '(53) (map 'list (lambda (port) (gethash "port" port)) (gethash "ports" (first rules)))))
+    ;; The named port resolves against the gateway's own: dns-tcp is TCP 53.
+    (is (equal '("169.254.1.1/32") (npr-peers (second rules) "to")))
+    (is (equal '(53) (map 'list (lambda (port) (gethash "port" port)) (gethash "ports" (second rules)))))))
+
+(defparameter *npr-api-server*
+  (list :address "10.96.0.1" :port 443 :endpoints '("10.77.77.20" "10.77.77.21") :endpoint-port 6443))
+
+(defun npr-resolve-with-api (spec)
+  (coerce (gethash "egress" (gethash "spec" (gr8s.network::resolve-network-policy-object
+                                              (npr-policy "prod" spec) *npr-pods* (npr-namespaces)
+                                              :api-server *npr-api-server*)))
+          'list))
+
+(defun npr-admits-api-service-p (rules)
+  "True when one of RULES is exactly the API Service: 10.96.0.1/32 on TCP 443."
+  (some (lambda (rule)
+          (and (equal '("10.96.0.1/32") (npr-peers rule "to"))
+               (equal '(("TCP" 443))
+                      (map 'list (lambda (port) (list (gethash "protocol" port) (gethash "port" port)))
+                           (gethash "ports" rule)))))
+        rules))
+
+(test npr-a-rule-admitting-the-api-servers-endpoints-admits-its-service
+  ;; Upstream matches egress after DNAT, at the API server's endpoints; gr8s Pods
+  ;; reach it at the Service address, so a rule admitting an endpoint on its port
+  ;; admits the Service address and port too (podster-5hv.10).
+  (is (npr-admits-api-service-p
+       (npr-resolve-with-api "{\"podSelector\":{},\"policyTypes\":[\"Egress\"],
+          \"egress\":[{\"to\":[{\"ipBlock\":{\"cidr\":\"10.77.77.20/32\"}}],\"ports\":[{\"port\":6443}]}]}")))
+  (is (npr-admits-api-service-p
+       (npr-resolve-with-api "{\"podSelector\":{},\"policyTypes\":[\"Egress\"],
+          \"egress\":[{\"to\":[{\"ipBlock\":{\"cidr\":\"10.77.0.0/16\"}}]}]}")))
+  (is (npr-admits-api-service-p
+       (npr-resolve-with-api "{\"podSelector\":{},\"policyTypes\":[\"Egress\"],
+          \"egress\":[{\"ports\":[{\"port\":6000,\"endPort\":7000,\"protocol\":\"TCP\"}]}]}")))
+  ;; Not on the endpoint's port, not covering an endpoint, or excepting it: no.
+  (is (not (npr-admits-api-service-p
+            (npr-resolve-with-api "{\"podSelector\":{},\"policyTypes\":[\"Egress\"],
+               \"egress\":[{\"to\":[{\"ipBlock\":{\"cidr\":\"10.77.77.20/32\"}}],\"ports\":[{\"port\":80}]}]}"))))
+  (is (not (npr-admits-api-service-p
+            (npr-resolve-with-api "{\"podSelector\":{},\"policyTypes\":[\"Egress\"],
+               \"egress\":[{\"to\":[{\"ipBlock\":{\"cidr\":\"10.88.0.0/16\"}}]}]}"))))
+  (is (not (npr-admits-api-service-p
+            (npr-resolve-with-api "{\"podSelector\":{},\"policyTypes\":[\"Egress\"],
+               \"egress\":[{\"to\":[{\"ipBlock\":{\"cidr\":\"10.77.77.0/24\",\"except\":[\"10.77.77.16/28\"]}}]}]}"))))
+  (is (not (npr-admits-api-service-p
+            (npr-resolve-with-api "{\"podSelector\":{},\"policyTypes\":[\"Egress\"],
+               \"egress\":[{\"to\":[{\"ipBlock\":{\"cidr\":\"10.77.77.20/32\"}}],\"ports\":[{\"port\":6443,\"protocol\":\"UDP\"}]}]}"))))
+  ;; Without the API server's address, resolution is as before.
+  (is (= 1 (length (coerce (gethash "egress" (npr-resolve "prod" "{\"podSelector\":{},\"policyTypes\":[\"Egress\"],
+          \"egress\":[{\"to\":[{\"ipBlock\":{\"cidr\":\"10.77.77.20/32\"}}]}]}")) 'list)))))
