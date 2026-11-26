@@ -528,7 +528,7 @@ A fixed or random port in the ephemeral range can already be taken on a shared h
   ;; Service, backend, membership/affinity index, affinity and UDP reverse maps
   ;; and connect/sendmsg/recvmsg hooks for both address families.
   (multiple-value-bind (maps programs) (gr8s.network::compile-service-lb)
-    (is (= 10 (length maps)))
+    (is (= 13 (length maps)))
     (is (= 6 (length programs)))))
 
 ;;; Traffic policies, external IPs and health check node ports

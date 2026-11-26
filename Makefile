@@ -213,6 +213,13 @@ dashboard-assets-compress:
 	  xargs -0 -r gzip -9 -n
 	@echo "embedded $$(find assets/dashboard -type f | wc -l) dashboard asset files ($$(du -sh assets/dashboard | cut -f1))"
 
+.PHONY: gr8ify test-gr8ify
+gr8ify:
+	cd gr8ify && CGO_ENABLED=0 go build -o ../build/gr8ify ./cmd/gr8ify
+
+test-gr8ify:
+	cd gr8ify && go vet ./... && go test ./...
+
 help:
 	@echo "gr8s targets:"
 	@echo "  containerd-bundle Build and verify pinned containerd, runc, and CNI binaries"
@@ -247,6 +254,8 @@ help:
 	@echo "  run           Start gr8s (override STATE_DIR, PORT, RUNTIME, KUBECONFIG)"
 	@echo "  kubeconfig    Write KUBECONFIG for the configured PORT"
 	@echo "  native        Build the dumped native executable at build/gr8s"
+	@echo "  gr8ify        Build build/gr8ify, which runs a command in a sandboxed local Pod"
+	@echo "  test-gr8ify   Run the gr8ify Go tests"
 	@echo "  deps          Restore pinned dependencies from ocicl.csv into ocicl/"
 	@echo "  clean         Remove build outputs"
 
@@ -318,6 +327,14 @@ build/gr8s-service-test.json: src/network/service-lb-program.lisp src/network/se
 	$(SBCL) --noinform $(LISP_BOOTSTRAP) --script scripts/compile-endpoint-policy-fixture.lisp $@ service-lb
 
 .PHONY: test-service-lb-program
+build/gr8s-egress-steering.json build/gr8s-gateway-steering.json: src/controllers/egress-proxy.lisp src/controllers/gateway-sklookup.lisp scripts/compile-endpoint-policy-fixture.lisp | $(OCICL_STAMP)
+	$(SBCL) --noinform $(LISP_BOOTSTRAP) --script scripts/compile-endpoint-policy-fixture.lisp $@ $(patsubst build/gr8s-%.json,%,$@)
+
+.PHONY: test-egress-steering-kernel
+# Root in a disposable VM: sk_lookup steering of the egress proxy address (podster-wv1w.2).
+test-egress-steering-kernel: build/gr8s-egress-steering.json build/gr8s-gateway-steering.json
+	python3 scripts/test-egress-steering.py $^
+
 test-service-lb-program: build/gr8s-service-test.json
 	python3 scripts/test-service-lb-program.py $<
 

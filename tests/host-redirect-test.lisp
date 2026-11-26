@@ -19,17 +19,19 @@
   ;; known. Each entry is a 4-byte key -> a 1-byte presence value.
   (let ((without (gr8s.network::node-host-redirect-table nil))
         (with (gr8s.network::node-host-redirect-table "192.168.1.20")))
-    (is (= 1 (length without)))
+    ;; The egress proxy address is always present too (podster-wv1w.2).
+    (is (= 2 (length without)))
     (is (member #(10 96 0 1) (mapcar #'car without) :test #'equalp))
+    (is (member #(169 254 1 2) (mapcar #'car without) :test #'equalp))
     (is (equalp #(1) (cdr (first without))))
-    (is (= 2 (length with)))
+    (is (= 3 (length with)))
     (is (member #(10 96 0 1) (mapcar #'car with) :test #'equalp))
     (is (member #(192 168 1 20) (mapcar #'car with) :test #'equalp))))
 
 (test host-redirect-table-does-not-duplicate-a-node-ip-equal-to-the-api-server
   ;; Defensive: a node address that equals the API server VIP must not appear twice.
   (let ((table (gr8s.network::node-host-redirect-table "10.96.0.1")))
-    (is (= 1 (length table)))))
+    (is (= 2 (length table)))))
 
 (test converge-writes-the-host-redirect-table-into-every-local-pod
   (let ((writes '()))

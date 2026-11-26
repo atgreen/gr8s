@@ -18,6 +18,7 @@ import os
 import platform
 import struct
 import sys
+import time
 
 MASK = (1 << 64) - 1
 ARRAY, HASH, LRU_HASH, LPM_TRIE, RINGBUF = 2, 1, 9, 11, 27
@@ -41,7 +42,7 @@ EXPECTED_MAPS = {'rejected_spoofs': (ARRAY, 4, 8, 1, 0),
                  'host_redirect_v4': (HASH, 4, 1, 64, 1),
                  'flow_events': (RINGBUF, 0, 0, 262144, 0),
                  'flow_config': (ARRAY, 4, 4, 1, 0)}
-TC_ACT_OK, TC_ACT_SHOT = 0, 2
+TC_ACT_OK, TC_ACT_SHOT, TC_ACT_REDIRECT = 0, 2, 7
 
 
 def signed(value, bits):
@@ -294,6 +295,7 @@ class Interpreter:
 
     def advance(self, seconds):
         self.clock[0] += int(seconds * 1e9)
+        return True
 
     def events(self):
         """Take the flow events written since the last call."""
@@ -341,12 +343,14 @@ class Kernel:
                     raise RuntimeError(f'kernel rejected {program}: {error}\n{log.value.decode()}') from error
                 self.fds.append(fd)
                 self.program_fds[program] = fd
-            ring = self.map_fds['flow_events']
-            page = mmap.PAGESIZE
-            self.ring_size = descriptors['flow_events'][3]
-            self.consumer = mmap.mmap(ring, page, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
-            self.producer = mmap.mmap(ring, page + 2 * self.ring_size, mmap.MAP_SHARED,
-                                      mmap.PROT_READ, offset=page)
+            # Programs without a flow-event ring (the socket load balancer) have none to read.
+            if 'flow_events' in self.map_fds:
+                ring = self.map_fds['flow_events']
+                page = mmap.PAGESIZE
+                self.ring_size = descriptors['flow_events'][3]
+                self.consumer = mmap.mmap(ring, page, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
+                self.producer = mmap.mmap(ring, page + 2 * self.ring_size, mmap.MAP_SHARED,
+                                          mmap.PROT_READ, offset=page)
         except BaseException:
             self.close()
             raise
@@ -406,7 +410,12 @@ class Kernel:
         return struct.unpack_from('<I', attr.raw, 4)[0]
 
     def advance(self, seconds):
+        """Age the connection table by SECONDS; False when the kernel's monotonic clock,
+        which BPF reads, hasn't yet run that long since boot, so no stamp can be aged
+        that far and the expiry it would prove can't be shown on this machine."""
         # The kernel's clock cannot be moved; age the connection table instead.
+        if time.clock_gettime_ns(time.CLOCK_MONOTONIC) < seconds * 1e9:
+            return False
         for name in ('netpol_flows', 'netpol_flows_v6'):
             flows = self.map_fds[name]
             size = self.descriptors[name][1]
@@ -428,6 +437,7 @@ class Kernel:
                 stamp = struct.unpack('<Q', self.lookup(name, entry))[0]
                 self.update(name, entry,
                             struct.pack('<Q', max(0, stamp - int(seconds * 1e9))))
+        return True
 
     def close(self):
         for view in ('producer', 'consumer'):
@@ -536,7 +546,9 @@ def main(path, kernel=False):
         backend.update('netpol_mode', struct.pack('<I', 1), struct.pack('<I', ingress))
 
     def check(packet, allowed, reason=None, configured=True, logical_length=None):
-        """The egress guard's verdict and counters for one Pod packet."""
+        """The egress guard's verdict and counters for one Pod packet. ALLOWED is
+        'redirect' for a packet allowed and redirected to the host (node DNS, host-local
+        destinations), as bpf_redirect returns."""
         nonlocal count
         # Linux's test-run skb constructor requires an Ethernet header and
         # cannot represent a separately specified non-linear packet length.
@@ -546,7 +558,9 @@ def main(path, kernel=False):
         configure(configured)
         backend.events()
         result = backend.run('gr8s_egress_guard', packet, logical_length)
-        assert result == (TC_ACT_OK if allowed else TC_ACT_SHOT), (count, packet.hex(), result)
+        expected = TC_ACT_REDIRECT if allowed == 'redirect' else TC_ACT_OK if allowed else TC_ACT_SHOT
+        assert result == expected, (count, packet.hex(), result)
+        allowed = bool(allowed)
         size = len(packet) if logical_length is None else logical_length
         # Every drop is reported once, with its reason; nothing allowed is reported as a drop.
         events = [flow_event(raw) for raw in backend.events()]
@@ -779,19 +793,72 @@ def main(path, kernel=False):
     check(datagram(IP, other, UDP, 7000, 6000), True)
     check(datagram(IP, other, UDP, 7001, 6000), False, 'policy')
     # A connection's replies stop passing once it has been idle past its lifetime.
-    backend.advance(181)
-    check(datagram(IP, other, UDP, 7000, 6000), False, 'policy')
+    if backend.advance(181):
+        check(datagram(IP, other, UDP, 7000, 6000), False, 'policy')
     # A TCP connection idle past tcp_keepalive_time (2h) still gets its peer's keepalives
     # in: TCP replies stay admitted for days, as conntrack keeps ESTABLISHED (podster-af3).
     mode(0, 1)
     check(datagram(IP, outside, TCP, 42000, 443), True)
     check(datagram6(IP6, outside6, TCP, 42000, 443), True)
-    backend.advance(7200 + 75)
-    inbound(datagram(outside, IP, TCP, 443, 42000), True)
-    inbound(datagram6(outside6, IP6, TCP, 443, 42000), True)
-    backend.advance(5 * 86400 + 1)
-    inbound(datagram(outside, IP, TCP, 443, 42000), False)
-    inbound(datagram6(outside6, IP6, TCP, 443, 42000), False)
+    if backend.advance(7200 + 75):
+        inbound(datagram(outside, IP, TCP, 443, 42000), True)
+        inbound(datagram6(outside6, IP6, TCP, 443, 42000), True)
+        if backend.advance(5 * 86400 + 1):
+            inbound(datagram(outside, IP, TCP, 443, 42000), False)
+            inbound(datagram6(outside6, IP6, TCP, 443, 42000), False)
+    # The node DNS gateway, the API Service and this node's own address are delivered
+    # to the host by redirect, but only after egress policy has allowed them, and they
+    # are reported like any connection (podster-5hv.10, security deviation F5).
+    api, node = bytes([10, 96, 0, 1]), bytes([10, 77, 0, 5])
+    for address in (api, node):
+        backend.update('host_redirect_v4', address, b'\x01')
+    mode(0, 0)
+    check(datagram(IP, GATEWAY, UDP, 43000, 53), 'redirect')
+    check(datagram(IP, api, TCP, 43000, 443), 'redirect')
+    backend.update('flow_config', struct.pack('<I', 0), struct.pack('<I', 1))
+    new = single(check(datagram(IP, api, TCP, 43001, 443), 'redirect'), 2)
+    assert (new['peer'], new['peer_port']) == (api, 443), new
+    new = single(check(datagram(IP, GATEWAY, UDP, 43002, 53), 'redirect'), 2)
+    assert (new['peer'], new['peer_port'], new['protocol']) == (GATEWAY, 53, UDP), new
+    single(check(datagram(IP, node, TCP, 43003, 10250), 'redirect'), 2)
+    backend.update('flow_config', struct.pack('<I', 0), struct.pack('<I', 0))
+    # Isolated for egress with nothing allowed: none of them get out.
+    mode(1, 0)
+    drop = single(check(datagram(IP, GATEWAY, UDP, 43010, 53), False, 'policy'), 1)
+    assert (drop['peer'], drop['peer_port']) == (GATEWAY, 53), drop
+    check(datagram(IP, GATEWAY, TCP, 43011, 53), False, 'policy')
+    check(datagram(IP, api, TCP, 43012, 443), False, 'policy')
+    check(datagram(IP, node, TCP, 43013, 10250), False, 'policy')
+    # Allowed by policy, they are redirected as before; other ports stay refused.
+    backend.update('netpol_egress_cidr', cidr_key('169.254.1.1/32'), struct.pack('<I', 4))
+    backend.update('netpol_egress_cidr', cidr_key('10.96.0.1/32'), struct.pack('<I', 5))
+    for key in (port_key(4, UDP, 53), port_key(4, TCP, 53), port_key(5, TCP, 443)):
+        backend.update('netpol_egress_ports', key, b'\x01')
+    check(datagram(IP, GATEWAY, UDP, 43020, 53), 'redirect')
+    check(datagram(IP, GATEWAY, TCP, 43021, 53), 'redirect')
+    check(datagram(IP, GATEWAY, UDP, 43022, 54), False, 'policy')
+    check(datagram(IP, api, TCP, 43023, 443), 'redirect')
+    check(datagram(IP, api, TCP, 43024, 80), False, 'policy')
+    check(datagram(IP, node, TCP, 43025, 10250), False, 'policy')
+    # Ingress isolation alone leaves them alone.
+    mode(0, 1)
+    check(datagram(IP, node, TCP, 43030, 10250), 'redirect')
+    check(datagram(IP, GATEWAY, UDP, 43031, 53), 'redirect')
+    # The synthetic range 198.18.0.0/15 is host-local as well (podster-wv1w.8): the
+    # node delivers it to the egress proxy, by the same redirect, once policy allows it.
+    # Its neighbours are not.
+    synthetic = bytes([198, 18, 0, 7])
+    mode(0, 0)
+    check(datagram(IP, synthetic, TCP, 43040, 6379), 'redirect')
+    check(datagram(IP, bytes([198, 19, 255, 254]), TCP, 43041, 443), 'redirect')
+    check(datagram(IP, bytes([198, 20, 0, 7]), TCP, 43042, 443), True)
+    check(datagram(IP, bytes([198, 17, 255, 255]), TCP, 43043, 443), True)
+    mode(1, 0)
+    check(datagram(IP, synthetic, TCP, 43044, 6379), False, 'policy')
+    backend.update('netpol_egress_cidr', cidr_key('198.18.0.0/15'), struct.pack('<I', 6))
+    backend.update('netpol_egress_ports', port_key(6, TCP), b'\x01')
+    check(datagram(IP, synthetic, TCP, 43045, 6379), 'redirect')
+    check(datagram(IP, synthetic, UDP, 43046, 6379), False, 'policy')
     backend.close()
     name = 'Linux kernel' if kernel else 'emitted bytecode'
     sizes = ', '.join(f'{len(code) // 8} {program}' for program, code in sorted(programs.items()))

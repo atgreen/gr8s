@@ -19,6 +19,7 @@ from pathlib import Path
 import select
 import socket
 import struct
+import subprocess
 import sys
 
 
@@ -146,6 +147,52 @@ def test_repacking(programs, maps, family, protocol, affinity):
         check(programs, maps, address, original, protocol, section, True)
 
 
+def test_egress_capture(programs, maps):
+    """A captured Pod's TCP outside the cluster goes to the egress proxy with its port
+    kept; QUIC's UDP 443 is refused; cluster addresses and Services are untouched
+    (podster-wv1w.2). The interpreter's netns cookie is 456."""
+    def run(section, address, port, protocol):
+        machine = SocketMachine(programs[section], maps, address, port, protocol)
+        return machine.run(), machine.destination(), machine.retval
+
+    cookie = struct.pack("<Q", 456)
+    assert run("cgroup/connect4", "203.0.113.5", 443, 6) == (1, ("203.0.113.5", 443), None)
+    maps.update("gr8s_egress_capture", cookie, b"\x01")
+    maps.update("gr8s_egress_exempt_v4", endpoint.cidr_key("10.0.0.0/8"), b"\x01")
+    assert run("cgroup/connect4", "203.0.113.5", 443, 6) == (1, ("169.254.1.2", 443), None)
+    assert run("cgroup/connect4", "198.51.100.9", 8443, 6) == (1, ("169.254.1.2", 8443), None)
+    assert run("cgroup/connect4", "10.1.2.3", 5432, 6) == (1, ("10.1.2.3", 5432), None)
+    for section in ("cgroup/connect4", "cgroup/sendmsg4"):
+        assert run(section, "203.0.113.5", 443, 17) == (0, ("203.0.113.5", 443), 0xffffffff)
+        assert run(section, "1.1.1.1", 53, 17) == (1, ("1.1.1.1", 53), None)
+    # DNS to the node gateway goes to the egress DNS gate, and a UDP reply from the
+    # gate is shown as the gateway's.
+    for section, protocol in (("cgroup/sendmsg4", 17), ("cgroup/connect4", 17), ("cgroup/connect4", 6)):
+        assert run(section, "169.254.1.1", 53, protocol) == (1, ("169.254.1.2", 53), None), (section, protocol)
+    reverse = struct.pack("<QQ", 123, 0x35000201fea9)
+    assert maps.lookup("gr8s_reverse_v4", reverse) != 0
+    reply = SocketMachine(programs["cgroup/recvmsg4"], maps, "169.254.1.2", 53, 17)
+    assert reply.run() == 1 and reply.destination() == ("169.254.1.1", 53), reply.destination()
+    # A Service is still load-balanced for a captured Pod.
+    key = service_key("10.96.0.10", 80, 6)
+    backend = backend_value("10.88.1.5", 8080)
+    maps.update("gr8s_backend_v4", struct.pack("<I", 0), backend)
+    maps.update("gr8s_backend_index_v4", key + backend, struct.pack("<I", 0))
+    maps.update("gr8s_service_v4", key, struct.pack("<HHIII", 1, 0, 0, 60, 0))
+    assert run("cgroup/connect4", "10.96.0.10", 80, 6) == (1, ("10.88.1.5", 8080), None)
+    # Mode 2, a hostname allowlist (podster-wv1w.8): a synthetic address passes as dialled,
+    # for the proxy to read; a real public address is refused; the rest is as in mode 1.
+    maps.update("gr8s_egress_capture", cookie, b"\x02")
+    for address in ("198.18.0.7", "198.19.255.254"):
+        assert run("cgroup/connect4", address, 6379, 6) == (1, (address, 6379), None), address
+    for address in ("203.0.113.5", "198.20.0.7", "198.17.255.255"):
+        assert run("cgroup/connect4", address, 443, 6) == (0, (address, 443), 0xffffffff), address
+    assert run("cgroup/connect4", "10.1.2.3", 5432, 6) == (1, ("10.1.2.3", 5432), None)
+    assert run("cgroup/connect4", "169.254.1.1", 53, 17) == (1, ("169.254.1.2", 53), None)
+    assert run("cgroup/sendmsg4", "203.0.113.5", 443, 17) == (0, ("203.0.113.5", 443), 0xffffffff)
+    assert run("cgroup/connect4", "10.96.0.10", 80, 6) == (1, ("10.88.1.5", 8080), None)
+
+
 def main():
     if "--kernel" in sys.argv[2:]:
         test_kernel(sys.argv[1])
@@ -155,8 +202,88 @@ def main():
             for affinity in (0, 1):
                 programs, maps = fixture(sys.argv[1])
                 test_repacking(programs, maps, family, protocol, affinity)
+    programs, maps = fixture(sys.argv[1])
+    test_egress_capture(programs, maps)
     print("Service socket bytecode: slot-repacking isolation passed "
-          "for IPv4/IPv6, TCP/UDP, with/without affinity")
+          "for IPv4/IPv6, TCP/UDP, with/without affinity; egress capture passed")
+
+
+def test_kernel_egress_capture(kernel):
+    """A captured netns's TCP outside the exempt prefixes reaches the egress proxy address
+    with its port kept, UDP 443 is refused, and DNS to the node gateway reaches the DNS
+    gate while its reply shows the gateway's address (podster-wv1w.2)."""
+    addresses = ("169.254.1.1/32", "169.254.1.2/32", "10.99.0.1/32")
+    for address in addresses:
+        subprocess.run(["ip", "addr", "add", address, "dev", "lo"], check=False, capture_output=True)
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            cookie = probe.getsockopt(socket.SOL_SOCKET, 71, 8)  # SO_NETNS_COOKIE
+        kernel.update("gr8s_egress_capture", cookie, b"\x01")
+        kernel.update("gr8s_egress_exempt_v4", endpoint.cidr_key("10.0.0.0/8"), b"\x01")
+        with socket.socket() as proxy, socket.socket() as internal:
+            proxy.bind(("169.254.1.2", 0))
+            proxy.listen()
+            port = proxy.getsockname()[1]
+            internal.bind(("10.99.0.1", port))
+            internal.listen()
+            with socket.socket() as client:
+                client.settimeout(2)
+                client.connect(("203.0.113.5", port))
+                accepted, _ = proxy.accept()
+                assert accepted.getsockname() == ("169.254.1.2", port), accepted.getsockname()
+                accepted.close()
+            with socket.socket() as client:
+                client.settimeout(2)
+                client.connect(("10.99.0.1", port))
+                accepted, _ = internal.accept()
+                accepted.close()
+            assert not select.select([proxy], [], [], 0)[0], "an exempt address went to the proxy"
+            # Mode 2 (podster-wv1w.8): a synthetic address is dialled as it is, and a
+            # real public one is refused.
+            kernel.update("gr8s_egress_capture", cookie, b"\x02")
+            synthetic = socket.socket()
+            synthetic.setblocking(False)
+            try:
+                try:
+                    synthetic.connect(("198.18.0.7", port))
+                except (BlockingIOError, ConnectionRefusedError, OSError) as error:
+                    assert not isinstance(error, PermissionError), "a synthetic address was refused"
+            finally:
+                synthetic.close()
+            with socket.socket() as client:
+                try:
+                    client.connect(("203.0.113.5", port))
+                except PermissionError:
+                    pass
+                else:
+                    raise AssertionError("mode 2 reached a real public address")
+            assert not select.select([proxy], [], [], 0)[0], "mode 2 went to the proxy address"
+            kernel.update("gr8s_egress_capture", cookie, b"\x01")
+        for send in ("connect", "sendto"):
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+                try:
+                    if send == "connect":
+                        client.connect(("203.0.113.5", 443))
+                    else:
+                        client.sendto(b"quic", ("203.0.113.5", 443))
+                except PermissionError:
+                    pass
+                else:
+                    raise AssertionError(f"UDP 443 by {send} was not refused")
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as gate, \
+             socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+            gate.bind(("169.254.1.2", 53))
+            client.settimeout(2)
+            client.sendto(b"query", ("169.254.1.1", 53))
+            assert select.select([gate], [], [], 2)[0], "the DNS gate got no query"
+            payload, peer = gate.recvfrom(256)
+            assert payload == b"query"
+            gate.sendto(b"answer", peer)
+            payload, peer = client.recvfrom(256)
+            assert payload == b"answer" and peer == ("169.254.1.1", 53), peer
+    finally:
+        for address in addresses:
+            subprocess.run(["ip", "addr", "del", address, "dev", "lo"], check=False, capture_output=True)
 
 
 def test_kernel(path):
@@ -235,8 +362,9 @@ def test_kernel(path):
                     kernel.update(f"gr8s_backend_index_{suffix}", key + value, slot1)
                     kernel.update(f"gr8s_service_{suffix}", key, struct.pack("<HHIII", 1, 0, 1, 60, 0))
                     successful_request()
+        test_kernel_egress_capture(kernel)
         print("Service socket kernel hooks: IPv4/IPv6 TCP/UDP translation, UDP replies, "
-              "slot-repacking isolation and recovery passed")
+              "slot-repacking isolation and recovery, egress capture passed")
     finally:
         if group.exists():
             (root / original_cgroup.lstrip("/") / "cgroup.procs").write_text(str(os.getpid()))

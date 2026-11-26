@@ -333,6 +333,9 @@
                        ((equal resource "roles") '("rules"))
                        ((equal resource "clusterroles") '("rules" "aggregationRule"))
                        ((equal resource "networkpolicies") '("spec"))
+                       ((member resource '("clusternetworkpolicies" "securityprofiles") :test #'equal)
+                        '("spec" "status"))
+                       ((equal resource "sandboxprofiles") '("spec"))
                        ((equal resource "gatewayclasses") '("spec" "status"))
                        ((member resource '("gateways" "httproutes"
                                            "tcproutes" "tlsroutes" "grpcroutes") :test #'equal)
@@ -396,6 +399,12 @@
          (when spec
            (default-network-policy-spec spec)
            (validate-network-policy-spec spec))))
+      ((equal resource "clusternetworkpolicies")
+       (validate-cluster-network-policy object))
+      ((equal resource "securityprofiles")
+       (validate-security-profile object))
+      ((equal resource "sandboxprofiles")
+       (validate-sandbox-profile object))
       ((member resource '("gatewayclasses" "gateways" "httproutes"
                           "tcproutes" "tlsroutes" "grpcroutes") :test #'equal)
        (validate-gateway-resource resource object)
@@ -490,7 +499,8 @@ api/discovery. Clients resolve `kubectl get ns` and `kubectl get all` through th
       (member resource '("configmaps" "secrets" "serviceaccounts" "roles" "rolebindings" "clusterroles" "clusterrolebindings"
                          "networkpolicies" "services" "podtemplates" "events" "horizontalpodautoscalers" "deployments"
                          "replicasets" "replicationcontrollers" "daemonsets" "statefulsets" "controllerrevisions"
-                         "customresourcedefinitions" "clustertrustbundles" "podcertificaterequests")
+                         "customresourcedefinitions" "clustertrustbundles" "podcertificaterequests"
+                         "clusternetworkpolicies" "securityprofiles" "sandboxprofiles")
               :test #'equal)))
 
 (defun stored-resource-discovery (version)

@@ -51,8 +51,9 @@
                      (invalid-cni "node Pod prefix /~A does not fit pool ~A" node-prefix cidr)))
                (cni-error (condition) (error condition))
                (error (condition) (invalid-cni "invalid Pod pool ~A: ~A" cidr condition))))
+    ;; 198.18.0.0/15 is where synthetic egress addresses come from (podster-wv1w.8).
     (dolist (reserved '("0.0.0.0/8" "127.0.0.0/8" "169.254.0.0/16" "224.0.0.0/4"
-                        "240.0.0.0/4" "10.96.0.1/32" "::/128" "::1/128"
+                        "240.0.0.0/4" "10.96.0.1/32" "198.18.0.0/15" "::/128" "::1/128"
                         "fe80::/10" "ff00::/8"))
       (loop for cidr across cidrs
             when (pod-cidrs-overlap-p cidr reserved)

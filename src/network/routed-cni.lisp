@@ -257,7 +257,11 @@ SCTP). It is best-effort: a missing or empty dataplane never fails Pod setup."
                ;; absent or its Service maps are not pinned yet.
                (handler-case (install-cni-sctp-nat configuration context
                                                    sctp-nat-pin-directory link-path)
-                 (error () nil)))
+                 (error () nil))
+               ;; The connect hook knows a Pod by its namespace cookie: record it,
+               ;; so egress capture can name this Pod (podster-wv1w.2).
+               (dolist (address addresses)
+                 (record-pod-netns-cookie sctp-nat-pin-directory address (cni-context-netns context))))
              (when return-address (funcall install-service-return context return-address))))
        (setf (cni-configuration-previous-result configuration)
              (routed-cni-result configuration context host addresses dns-address))))
@@ -313,7 +317,12 @@ SCTP). It is best-effort: a missing or empty dataplane never fails Pod setup."
               (funcall (cni-operations-delete policy)
                        configuration context map-path link-path directory)
               (when sctp-nat-pin-directory
-                (handler-case (remove-cni-sctp-nat link-path) (error () nil)))
+                (handler-case (remove-cni-sctp-nat link-path) (error () nil))
+                (dolist (address (handler-case
+                                     (check-pod-addresses ipam (cni-context-container-id context)
+                                                          (cni-context-interface-name context))
+                                   (error () nil)))
+                  (forget-pod-netns-cookie sctp-nat-pin-directory address)))
               (funcall remove-link context)
               (release-pod-address ipam (cni-context-container-id context)
                                    (cni-context-interface-name context))))

@@ -3484,6 +3484,7 @@ between later ones. An ordinary restart recovers within the first.")
                                       (run (reconcile-certificate-signing-requests store pki))
                                       (run (reconcile-pod-certificate-requests store pki))
                                       (run (reconcile-certificates store pki))
+                                      (run (gr8s.controllers::ensure-egress-ca store))
                                       (run (reconcile-storage-bindings store))
                                       (run (reconcile-volume-attachments store))
                                       (run (reconcile-resource-quotas store))
@@ -4070,6 +4071,32 @@ upstream CRDs.
   so a Gateway/Ingress TLS listener can reference it directly. To give services
   one trusted CA, point a `ca` ClusterIssuer at the cluster CA and trust that CA
   on clients.
+- **network-policy-api (`policy.networking.k8s.io/v1alpha2`): built in.**
+  ClusterNetworkPolicy, tiered Admin -> NetworkPolicy -> Baseline, with Accept,
+  Deny and Pass. Do NOT install the upstream CRDs. An egress `domainNames` peer
+  (Accept only) is enforced by name, not by resolved address: the Pods it
+  selects have their outbound TCP to public addresses sent to the node egress
+  proxy (169.254.1.2), which admits a connection by its TLS SNI or HTTP Host, and
+  their DNS answered only for allowed names (REFUSED otherwise). UDP 443 is
+  refused so QUIC falls back to TCP. A captured Pod can't reach a public address
+  by IP alone. Proxied connections appear in the flows and the Network view under
+  the name they went to.
+- **OpenKruise Agents SecurityProfile (`agents.kruise.io/v1alpha1`): a built-in
+  subset.** Credential injection: the node egress proxy overwrites the named
+  headers of matching requests with a value rendered from a Secret
+  (`tokenTransformation` `ApiKey`, `{{ .Token }}`, `failStrategy: Block` only;
+  anything else is rejected at admission). The Pod keeps only a placeholder. A
+  selected Pod's Secret travels only with that Pod's assignment. For HTTPS the
+  proxy terminates TLS with a leaf from the egress CA, which Pods trust through
+  the `gr8s-egress` ClusterTrustBundle (a projected `clusterTrustBundle` volume);
+  a request whose Host differs from its TLS name gets 421, and one whose
+  credential is missing gets 403. Do NOT install Kruise Agents' CRDs.
+- **gr8ify (`gr8ify.gr8s.io/v1alpha1` SandboxProfile): gr8s's own.** What a
+  command run by `gr8ify` gets in the caller's home (`readWrite`, `readOnly`,
+  `placeholders` credential files) and placeholder environment.
+  `gr8ify login claude` stores Claude Code's subscription token as a Secret with
+  a SecurityProfile injecting it; the sandbox then sees stand-in tokens.
+  See docs/design-agent-egress.md.
 
 If you have already installed an upstream duplicate and wedged a group, recover
 by removing it and its CRDs (`helm uninstall ...`; `kubectl delete crd ...`);

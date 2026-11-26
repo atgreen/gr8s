@@ -28,8 +28,12 @@
 (defparameter *gateway-steering-prog-forms*
   '((whistler:defprog gw-sk-lookup
         (:type :sk-lookup :section "sk_lookup" :license "GPL")
-      ;; TCP only; steer to the listener registered for this destination port.
-      (when (= (ctx protocol) 6)
+      ;; TCP only; steer to the listener registered for this destination port --
+      ;; except on the egress proxy's address and the synthetic range, whose every
+      ;; port is the proxy's (169.254.1.2 and 198.18.0.0/15 in network order;
+      ;; podster-wv1w.2, podster-wv1w.8).
+      (when (and (= (ctx protocol) 6) (/= (ctx local-ip4) #x0201fea9)
+                 (/= (logand (ctx local-ip4) #xfeff) #x12c6))
         (let ((sk (map-lookup gw-listener-sock (ctx local-port))))
           (when (/= sk 0)
             (sk-assign (ctx-ptr) sk 0)

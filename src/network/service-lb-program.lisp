@@ -70,7 +70,20 @@
     (defmap gr8s-affinity-v6 :type :lru-hash
       :key-size 32 :value-size 32 :max-entries 65536)
     (defmap gr8s-reverse-v6 :type :lru-hash
-      :key-size 32 :value-size 20 :max-entries 65536)))
+      :key-size 32 :value-size 20 :max-entries 65536)
+    ;; Egress capture (podster-wv1w.2): network namespace cookie -> 1 for each Pod
+    ;; whose egress policy names domains, and the IPv4 prefixes that stay outside the
+    ;; capture because they are the cluster's own (Pod and Service ranges, nodes,
+    ;; link-local), where address policy applies as before.
+    (defmap gr8s-egress-capture :type :hash
+      :key-size 8 :value-size 1 :max-entries 4096 :map-flags 1)
+    (defmap gr8s-egress-exempt-v4 :type :lpm-trie
+      :key-size 8 :value-size 1 :max-entries 256 :map-flags 1)
+    ;; Pod IPv4 (network order) -> its network namespace cookie, written at CNI ADD,
+    ;; from which the agent fills gr8s-egress-capture. Pinned here only to outlive
+    ;; an agent restart; no program reads it.
+    (defmap gr8s-pod-netns-v4 :type :hash
+      :key-size 4 :value-size 8 :max-entries 4096 :map-flags 1)))
 
 (defun gr8s.network::service-lb-steer-program (name section)
   "Return the (defprog NAME ...) form steering a socket address hook at SECTION.
@@ -84,12 +97,49 @@ with ECONNREFUSED, as kube-proxy rejects it; one whose endpoints are all elsewhe
 (internalTrafficPolicy Local) keeps a zero count and is left untouched, as kube-proxy
 drops it.  No DNAT, no conntrack: the socket talks to the real backend.
 For UDP the socket's (cookie, backend) is remembered, so the recvmsg4 hook can show
-replies as coming from the address the client sent to."
+replies as coming from the address the client sent to.
+A Pod whose netns is in gr8s-egress-capture (podster-wv1w.2) instead has TCP to any
+address outside gr8s-egress-exempt-v4 sent to the node egress proxy at 169.254.1.2,
+keeping the port; its DNS to the node gateway sent to the egress DNS gate there; and UDP
+to port 443 refused with EPERM so QUIC clients fall back to TCP, where the proxy can see
+the name they ask for. In mode 2 (the map's value; podster-wv1w.8) its TCP may reach only
+the synthetic range 198.18.0.0/15, which the node delivers to the proxy unchanged; any
+other address outside gr8s-egress-exempt-v4 is refused with EPERM."
   `(defprog ,name (:type :cgroup-sock-addr :section ,section :license "GPL")
      (let* ((vip u64 (cast u64 (ctx user-ip4)))
             (vport u64 (logand (cast u64 (ctx user-port)) #xffff))
             (proto u64 (logand (cast u64 (ctx protocol)) #xff))
             (key u64 (logior (<< proto 48) (logior (<< vip 16) vport))))
+       (when (= (map-lookup gr8s-service-v4 key) 0)
+         (when-let ((capture u64 (map-lookup gr8s-egress-capture (get-netns-cookie (ctx-ptr)))))
+           (when (and (= proto 17) (= vport #xbb01)) ; port 443, network order
+             (set-retval #xffffffff)                 ; -EPERM
+             (return 0))
+           ;; DNS to the node gateway goes to the egress DNS gate on the proxy
+           ;; address, which answers only the names the Pod's policy allows. A UDP
+           ;; reply is shown as the gateway's, as for a Service.
+           (when (and (= vport #x3500) (= vip #x0101fea9)) ; 169.254.1.1:53
+             (when (= proto 17)
+               (let ((socket (make-gr8s-lb-pair)))
+                 (setf (gr8s-lb-pair-first socket) (get-socket-cookie (ctx-ptr))
+                       (gr8s-lb-pair-second socket) #x35000201fea9) ; 169.254.1.2:53
+                 (setf (getmap gr8s-reverse-v4 socket) (logior vip (<< vport 32)))))
+             (setf (ctx user-ip4) #x0201fea9)
+             (return 1))
+           (when (= proto 6)
+             (let ((exempt (make-gr8s-egress-lpm-key)))
+               (setf (gr8s-egress-lpm-key-prefixlen exempt) 32
+                     (gr8s-egress-lpm-key-address exempt) (cast u32 vip))
+               (when (= (map-lookup-ptr gr8s-egress-exempt-v4 exempt) 0)
+                 ;; Mode 2: synthetic addresses pass as dialled, so the proxy sees
+                 ;; which one; a real public address is refused.
+                 (when (= (load u8 capture 0) 2)
+                   (when (= (logand vip #xfeff) #x12c6) ; 198.18.0.0/15, network order
+                     (return 1))
+                   (set-retval #xffffffff)              ; -EPERM
+                   (return 0))
+                 (setf (ctx user-ip4) #x0201fea9)     ; 169.254.1.2, network order
+                 (return 1))))))
        (when-let ((service u64 (map-lookup gr8s-service-v4 key)))
          (let ((count u32 (cast u32 (load u16 service 0))))
            (when (and (= count 0) (> (logand (load u32 service 12) 1) 0))
@@ -243,6 +293,7 @@ replies as coming from the address the client sent to."
 ;; UDP reply from a backend as coming from the Service address the client used.
 (defparameter gr8s.network::*service-lb-program-forms*
   (list '(defstruct gr8s-lb-pair (first u64) (second u64))
+        '(defstruct gr8s-egress-lpm-key (prefixlen u32) (address u32))
         '(defstruct gr8s-lb-v6-service-key
            (address (array u32 4)) (port u16) (protocol u8) (pad u8))
         '(defstruct gr8s-lb-v6-address

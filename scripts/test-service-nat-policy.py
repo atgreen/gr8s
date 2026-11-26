@@ -198,14 +198,21 @@ def local_fence_and_legacy(runner):
     check(runner, 1, v4(PEER, LOCAL), p.SHOT)
     n.owner(runner, LOCAL, LOCAL_ALIAS, 1)
     isolated(runner)
-    # Node gateway behavior remains an authorization exception, but no redirect
-    # or L2 mutation may happen before the eventual NAT commit/delivery stage.
-    check(runner, 0, v4(destination="169.254.1.1", dport=53, protocol=17), p.OK)
+    # Egress to node DNS and host-local destinations answers to egress policy
+    # (podster-5hv.10): refused under isolation until a rule allows it, and then
+    # authorized without any redirect or L2 mutation before the eventual NAT
+    # commit/delivery stage. Ingress from the Pod's node stays exempt.
     runner.update("host_redirect_v4", address("192.0.2.1"), b"\x01")
-    check(runner, 0, v4(destination="192.0.2.1", dport=443), p.OK)
+    check(runner, 0, v4(destination="169.254.1.1", dport=53, protocol=17), p.SHOT)
+    check(runner, 0, v4(destination="192.0.2.1", dport=443), p.SHOT)
     check(runner, 1, v4("192.0.2.1", LOCAL, 53000, 443), p.OK)
     check(runner, 1, v4("192.0.2.2", LOCAL, 53000, 443), p.SHOT)
-    cases.append("nodeExceptionsAuthorizeWithoutEarlyRedirect")
+    cases.append("nodeDestinationsAnswerToEgressPolicy")
+    allow(runner, "egress", "169.254.1.1/32")
+    allow(runner, "egress", "192.0.2.1/32")
+    check(runner, 0, v4(destination="169.254.1.1", dport=53, protocol=17), p.OK)
+    check(runner, 0, v4(destination="192.0.2.1", dport=443), p.OK)
+    cases.append("allowedNodeDestinationsAuthorizeWithoutEarlyRedirect")
     allow(runner, "egress", PEER + "/32")
     runner.update("local_pod_v4", e.cidr_key(PEER + "/32"),
                   struct.pack("<I", 12345) + bytes.fromhex("020000000001020000000002"))

@@ -115,6 +115,13 @@
     ("clusterroles" "ClusterRole" "rbac.authorization.k8s.io/v1" nil)
     ("clusterrolebindings" "ClusterRoleBinding" "rbac.authorization.k8s.io/v1" nil)
     ("networkpolicies" "NetworkPolicy" "networking.k8s.io/v1" t)
+    ;; network-policy-api's cluster-scoped, tiered policy (podster-wv1w.1).
+    ("clusternetworkpolicies" "ClusterNetworkPolicy" "policy.networking.k8s.io/v1alpha2" nil)
+    ;; The subset of OpenKruise Agents' SecurityProfile gr8s implements: credential
+    ;; injection by the node egress proxy (podster-wv1w.3).
+    ("securityprofiles" "SecurityProfile" "agents.kruise.io/v1alpha1" t)
+    ;; What a command gr8ify runs gets: home paths and environment (podster-wv1w.5).
+    ("sandboxprofiles" "SandboxProfile" "gr8ify.gr8s.io/v1alpha1" nil)
     ("gatewayclasses" "GatewayClass" "gateway.networking.k8s.io/v1" nil)
     ("gateways" "Gateway" "gateway.networking.k8s.io/v1" t)
     ("httproutes" "HTTPRoute" "gateway.networking.k8s.io/v1" t)

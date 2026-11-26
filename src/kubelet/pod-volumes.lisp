@@ -51,9 +51,27 @@
                                                (eq t (gethash "optional" ref))) references))))))
     references))
 
+(defvar *assignment-security-profiles* '()
+  "The SecurityProfiles of the snapshot being installed (security-profile-specs): a Secret
+one of them takes a credential from may reach the Pods it selects (podster-wv1w.3).")
+
+(defun pod-security-profile-secret-names (profiles pod)
+  "The Secrets PROFILES inject into POD's requests from."
+  (gr8s.network::security-profile-secret-names
+   profiles (pod-namespace pod)
+   (gethash "labels" (gethash "metadata" (pod-to-object pod)) (core-object))))
+
 (defun pod-referenced-resource-objects (store pod)
-  "Copy only POD's referenced configuration, storage and DRA resources."
+  "Copy only POD's referenced configuration, storage and DRA resources, and the Secrets
+the SecurityProfiles selecting it inject credentials from."
   (let ((result nil))
+    (dolist (name (ignore-errors
+                   (pod-security-profile-secret-names
+                    (gr8s.network::security-profile-specs-from-objects
+                     (list-core-resources store "securityprofiles" (pod-namespace pod)))
+                    pod)))
+      (let ((secret (ignore-errors (get-core-resource store "secrets" (pod-namespace pod) name))))
+        (when secret (push secret result))))
     (dolist (reference (pod-resource-reference-declarations pod))
       (destructuring-bind (resource name optional) reference
         (declare (ignore optional))
@@ -142,7 +160,10 @@
                                     (or (and (equal resource "secrets") (equal name (projected-token-secret-name pod))
                                              (pod-projected-token-sources pod))
                                         (some (lambda (reference) (and (equal resource (first reference)) (equal name (second reference))))
-                                              (pod-resource-reference-declarations pod))))
+                                              (pod-resource-reference-declarations pod))
+                                        (and (equal resource "secrets")
+                                             (member name (pod-security-profile-secret-names *assignment-security-profiles* pod)
+                                                     :test #'equal))))
                                (and (equal resource "secrets") (csi-volume-secret-reference-p object projected)))))
               (invalid-pod "assignment contains an unreferenced, cross-namespace or incorrectly bound resource"))
             ;; This status came from the authenticated control plane, rather than
@@ -154,7 +175,14 @@
 
 (defun install-assigned-resource-objects (store assignments &optional service-discovery &key public-resources)
   "Atomically install Pod-scoped references, exact PVC/PV bindings and public Service discovery."
-  (let ((resources (make-hash-table :test #'equal)))
+  (let ((resources (make-hash-table :test #'equal))
+        (*assignment-security-profiles*
+          (let ((public (or public-resources
+                            (ignore-errors (decode-service-discovery-projection service-discovery)))))
+            (gr8s.network::security-profile-specs-from-objects
+             (when public
+               (loop for key being the hash-keys of public using (hash-value object)
+                     when (equal (first key) "securityprofiles") collect object))))))
     (dolist (assignment assignments)
       ;; Every snapshot carries every Pod, so failing the whole of it would stop
       ;; all Pods on this node. One Pod's bad object delays only that Pod, whose

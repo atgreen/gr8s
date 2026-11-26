@@ -1,0 +1,755 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; Purpose:
+;;;; The node egress proxy (podster-wv1w.2, docs/design-agent-egress.md). A Pod whose
+;;;; egress ClusterNetworkPolicy names domains has its outbound TCP redirected here
+;;;; by the socket load balancer's connect hook, which keeps the original port, and
+;;;; an sk_lookup program hands every port on the proxy address to this one listener.
+;;;;
+;;;; The proxy learns where the connection was going from what the client says, not
+;;;; from the address it dialled: the TLS ClientHello's SNI, or for cleartext the
+;;;; HTTP Host header. Hosts behind shared CDN addresses can't be told apart by IP,
+;;;; so a name is the only sound thing to admit. It resolves the name itself, asks
+;;;; the Pod's tiers about the name, the address it will connect to and the port
+;;;; (EGRESS-CONNECTION-VERDICT), and then splices bytes or closes. It never
+;;;; terminates TLS here; a connection that names nothing can't be admitted by name.
+;;;;
+;;;; Not defended here: a client that sends an allowed SNI and then a different Host
+;;;; inside TLS (domain fronting) reaches whatever the allowed server routes that
+;;;; Host to. Hosts that carry an injected credential are terminated instead
+;;;; (podster-wv1w.3), which checks the Host too.
+;;;;
+;;;; A Pod with a hostname allowlist dials synthetic addresses instead (podster-wv1w.8,
+;;;; egress-names.lisp), and for those the address names the destination: the proxy
+;;;; admits the connection by the name it stands for, whatever protocol follows, dials
+;;;; only the addresses pinned when the name was answered, and checks a TLS client's
+;;;; SNI against the name rather than trusting it.
+
+(in-package #:gr8s.controllers)
+
+(defstruct egress-proxy
+  socket thread (stop nil) address port
+  decide    ; (peer-address host address port) -> (values allowed-p rule-name)
+  resolve   ; (host) -> an address string, or NIL
+  connect   ; (address port) -> a connected socket, or NIL
+  report    ; (peer-address host address port allowed-p rule-name), or NIL
+  inject    ; (peer-address host scheme) -> NIL, or a request matcher for EGRESS-RELAY-HTTP
+  mint      ; (host) -> (values certificate-chain key) for the egress CA's leaf, or NIL
+  request-report  ; (peer-address host address port method path code rule-name), or NIL
+  (upstream-verify pure-tls:+verify-required+) ; how an injected connection checks its upstream
+  names     ; the egress-name-table synthetic addresses are looked up in, or NIL
+  dialed)   ; (client-socket) -> (values address port) the client dialled
+
+(defparameter +egress-proxy-head-limit+ 16384
+  "The most of a cleartext request head the proxy reads looking for its Host.")
+
+(defun egress-http-host (head)
+  "The host an HTTP/1.x request HEAD (octets) names in its Host header, lowercased and
+without a port, or NIL when it has none."
+  (let* ((text (ignore-errors (trivial-utf-8:utf-8-bytes-to-string head)))
+         (lines (and text (cl-ppcre:split "\\r?\\n" text))))
+    (loop for line in (rest lines)
+          for colon = (position #\: line)
+          when (and colon (string-equal "host" (string-trim " " (subseq line 0 colon))))
+            do (let ((value (string-trim " " (subseq line (1+ colon)))))
+                 (return (string-downcase
+                          (if (and (plusp (length value)) (char= (char value 0) #\[))
+                              (subseq value 0 (1+ (or (position #\] value) (1- (length value)))))
+                              (subseq value 0 (or (position #\: value) (length value))))))))))
+
+(defun %egress-read-http-head (socket first)
+  "Read from SOCKET, after the already-read octet FIRST, through the end of the request
+head (a blank line) or the limit. Returns the octets read."
+  (let ((head (make-array 1 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 1
+                            :initial-element first))
+        (buffer (make-array 1024 :element-type '(unsigned-byte 8))))
+    (loop
+      (when (or (>= (length head) +egress-proxy-head-limit+)
+                (search #(13 10 13 10) head) (search #(10 10) head))
+        (return))
+      (multiple-value-bind (b n) (sb-bsd-sockets:socket-receive socket buffer nil)
+        (declare (ignore b))
+        (when (or (null n) (zerop n)) (return))
+        (loop for i below n do (vector-push-extend (aref buffer i) head))))
+    (coerce head '(simple-array (unsigned-byte 8) (*)))))
+
+(defun egress-client-destination (socket)
+  "Read enough of SOCKET's first bytes to name its destination. Returns (values host
+prefix): HOST from the TLS SNI or HTTP Host, or NIL; PREFIX the octets read, to replay
+upstream."
+  (let ((first (make-array 1 :element-type '(unsigned-byte 8))))
+    (multiple-value-bind (b n) (sb-bsd-sockets:socket-receive socket first 1 :waitall t)
+      (declare (ignore b))
+      (cond ((not (eql n 1)) (values nil nil))
+            ((= (aref first 0) 22)
+             ;; A TLS record: read the rest of the ClientHello record.
+             (let ((header (make-array 4 :element-type '(unsigned-byte 8))))
+               (multiple-value-bind (b2 n2) (sb-bsd-sockets:socket-receive socket header 4 :waitall t)
+                 (declare (ignore b2))
+                 (if (not (eql n2 4))
+                     (values nil first)
+                     (let* ((length (logior (ash (aref header 2) 8) (aref header 3)))
+                            (body (make-array length :element-type '(unsigned-byte 8))))
+                       (multiple-value-bind (b3 n3) (sb-bsd-sockets:socket-receive socket body length :waitall t)
+                         (declare (ignore b3))
+                         (let ((record (concatenate '(simple-array (unsigned-byte 8) (*))
+                                                    first header (subseq body 0 (or n3 0)))))
+                           (values (let ((sni (ignore-errors (parse-tls-client-hello-sni record))))
+                                     (and sni (string-downcase sni)))
+                                   record))))))))
+            (t (let ((head (%egress-read-http-head socket (aref first 0))))
+                 (values (egress-http-host head) head)))))))
+
+(defun egress-default-resolve (host)
+  "Resolve HOST to its first IPv4 address with the node's resolver, or NIL."
+  (ignore-errors
+   (let ((address (sb-bsd-sockets:host-ent-address (sb-bsd-sockets:get-host-by-name host))))
+     (format nil "~{~D~^.~}" (coerce address 'list)))))
+
+(defun egress-default-connect (address port)
+  "Open a TCP connection to ADDRESS:PORT, or NIL."
+  (ignore-errors
+   (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+     (handler-case (progn (sb-bsd-sockets:socket-connect socket (sb-bsd-sockets:make-inet-address address) port)
+                          socket)
+       (error () (ignore-errors (sb-bsd-sockets:socket-close socket)) nil)))))
+
+(defun egress-default-dialed (client)
+  "The address and port CLIENT dialled: its accepted socket's own, which the steering
+leaves as the client asked."
+  (multiple-value-bind (octets port) (sb-bsd-sockets:socket-name client)
+    (values (format nil "~{~D~^.~}" (coerce octets 'list)) port)))
+
+(defun egress-proxy-handle (proxy client)
+  "Decide and serve one captured connection CLIENT."
+  (let ((upstream nil))
+    (unwind-protect
+         (multiple-value-bind (peer-octets) (sb-bsd-sockets:socket-peername client)
+           (multiple-value-bind (dialed port) (funcall (egress-proxy-dialed proxy) client)
+             (let ((peer (format nil "~{~D~^.~}" (coerce peer-octets 'list))))
+               (when (and (egress-proxy-names proxy) (gr8s.network::egress-synthetic-address-p dialed))
+                 (egress-proxy-handle-synthetic proxy client peer dialed port)
+                 (return-from egress-proxy-handle))
+               (multiple-value-bind (host prefix) (egress-client-destination client)
+                 (let ((address (and host (funcall (egress-proxy-resolve proxy) host))))
+                   (multiple-value-bind (allowed rule) (funcall (egress-proxy-decide proxy) peer host address port)
+                     (setf allowed (and allowed address t))
+                     (when (egress-proxy-report proxy)
+                       (ignore-errors (funcall (egress-proxy-report proxy) peer host address port allowed rule)))
+                     (when allowed
+                       (let* ((tls (and prefix (plusp (length prefix)) (= (aref prefix 0) 22)))
+                              (matcher (and (egress-proxy-inject proxy)
+                                            (funcall (egress-proxy-inject proxy) peer host (if tls "https" "http")))))
+                         (when matcher
+                           (egress-proxy-relay proxy client peer host address port prefix tls matcher)
+                           (return-from egress-proxy-handle))
+                         (setf upstream (funcall (egress-proxy-connect proxy) address port))
+                         (when upstream
+                           (egress-splice client upstream prefix))))))))))
+      (ignore-errors (sb-bsd-sockets:socket-close client))
+      (when upstream (ignore-errors (sb-bsd-sockets:socket-close upstream))))))
+
+(defun egress-splice (client upstream prefix)
+  "Splice CLIENT and UPSTREAM until either ends, sending PREFIX, read from CLIENT, first."
+  (let ((closed nil))
+    (flet ((close-both ()
+             (unless closed
+               (setf closed t)
+               (ignore-errors (sb-bsd-sockets:socket-close client))
+               (ignore-errors (sb-bsd-sockets:socket-close upstream)))))
+      (l4-splice client upstream #'close-both prefix (length prefix)))))
+
+(sb-alien:define-alien-routine ("poll" %egress-poll) sb-alien:int
+  (fds (* (sb-alien:unsigned 32))) (count sb-alien:unsigned-long) (timeout sb-alien:int))
+
+(defun egress-first-readable (first second)
+  "Wait until socket FIRST or SECOND has input or has closed. Returns :first or :second,
+or NIL when the wait fails."
+  ;; Two struct pollfd {int fd; short events; short revents}, events POLLIN.
+  (sb-alien:with-alien ((fds (array (sb-alien:unsigned 32) 4)))
+    (setf (sb-alien:deref fds 0) (sb-bsd-sockets:socket-file-descriptor first) (sb-alien:deref fds 1) 1
+          (sb-alien:deref fds 2) (sb-bsd-sockets:socket-file-descriptor second) (sb-alien:deref fds 3) 1)
+    (loop
+      (let ((ready (%egress-poll (sb-alien:addr (sb-alien:deref fds 0)) 2 -1)))
+        (cond ((plusp ready) (return (if (plusp (ash (sb-alien:deref fds 1) -16)) :first :second)))
+              ((/= (sb-alien:get-errno) sb-unix:eintr) (return nil)))))))
+
+(defun egress-synthetic-verdict (proxy peer host addresses port)
+  "Decide the Pod at PEER's connection to HOST on PORT against each of HOST's pinned
+ADDRESSES in turn. Returns (values address rule allowed-p): the first address the policy
+admits, or the first address and its refusing rule."
+  (let ((first-rule nil))
+    (dolist (address addresses (values (first addresses) first-rule nil))
+      (multiple-value-bind (allowed rule) (funcall (egress-proxy-decide proxy) peer host address port)
+        (when allowed (return (values address rule t)))
+        (unless first-rule (setf first-rule rule))))))
+
+(defun egress-proxy-handle-synthetic (proxy client peer dialed port)
+  "Serve CLIENT, which dialled the synthetic address DIALED on PORT: decide it by the name
+DIALED stands for, and dial one of that name's pinned addresses, never resolving the name
+again. A client that speaks first and names another host in its TLS SNI is refused."
+  (multiple-value-bind (host addresses)
+      (gr8s.network::egress-name-for-connect (egress-proxy-names proxy) dialed)
+    (multiple-value-bind (address rule allowed) (and host (egress-synthetic-verdict proxy peer host addresses port))
+      (flet ((report (allowed)
+               (when (egress-proxy-report proxy)
+                 (ignore-errors (funcall (egress-proxy-report proxy) peer host address port allowed rule)))
+               allowed))
+        (unless allowed (return-from egress-proxy-handle-synthetic (report nil)))
+        (let ((inject (egress-proxy-inject proxy)) (upstream nil))
+          (unwind-protect
+               (if (and inject (or (funcall inject peer host "https") (funcall inject peer host "http")))
+                   ;; A host that may carry a credential speaks HTTP, so its client speaks first.
+                   (multiple-value-bind (named prefix) (egress-client-destination client)
+                     (let* ((tls (and prefix (plusp (length prefix)) (= (aref prefix 0) 22)))
+                            (matcher (funcall inject peer host (if tls "https" "http"))))
+                       (cond ((and tls named (string/= named host)) (report nil))
+                             (matcher (report t)
+                                      (egress-proxy-relay proxy client peer host address port prefix tls matcher))
+                             ((setf upstream (funcall (egress-proxy-connect proxy) address port))
+                              (report t)
+                              (egress-splice client upstream prefix))
+                             (t (report nil)))))
+                   (progn
+                     (setf upstream (funcall (egress-proxy-connect proxy) address port))
+                     (cond ((null upstream) (report nil))
+                           ;; Whoever speaks first: a server's greeting is relayed as it
+                           ;; comes; a client's first bytes are read, for their SNI.
+                           ((eq (egress-first-readable client upstream) :first)
+                            (multiple-value-bind (named prefix) (egress-client-destination client)
+                              (if (and prefix (plusp (length prefix)) (= (aref prefix 0) 22)
+                                       named (string/= named host))
+                                  (report nil)
+                                  (progn (report t) (egress-splice client upstream (or prefix #()))))))
+                           (t (report t) (egress-splice client upstream #())))))
+            (when upstream (ignore-errors (sb-bsd-sockets:socket-close upstream)))))))))
+
+(defun start-egress-proxy (&key (address "127.0.0.1") (port 0) decide
+                                (resolve #'egress-default-resolve) (connect #'egress-default-connect) report
+                                inject mint request-report (upstream-verify pure-tls:+verify-required+)
+                                names dialed)
+  "Listen on ADDRESS:PORT and serve captured connections, one thread each. DECIDE, RESOLVE,
+CONNECT, REPORT, NAMES and DIALED are as EGRESS-PROXY documents. Returns the EGRESS-PROXY;
+its PORT is the bound port (the kernel's choice when PORT is 0)."
+  (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+    (setf (sb-bsd-sockets:sockopt-reuse-address socket) t)
+    (sb-bsd-sockets:socket-bind socket (sb-bsd-sockets:make-inet-address address) port)
+    (sb-bsd-sockets:socket-listen socket 128)
+    (let ((proxy (make-egress-proxy :socket socket :address address
+                                    :port (nth-value 1 (sb-bsd-sockets:socket-name socket))
+                                    :decide decide :resolve resolve :connect connect :report report
+                                    :inject inject :mint mint :request-report request-report
+                                    :upstream-verify upstream-verify
+                                    :names names :dialed (or dialed #'egress-default-dialed))))
+      (setf (egress-proxy-thread proxy)
+            (bt:make-thread
+             (lambda ()
+               (loop
+                 (when (egress-proxy-stop proxy) (return))
+                 (handler-case
+                     (let ((client (sb-bsd-sockets:socket-accept socket)))
+                       (if (egress-proxy-stop proxy)
+                           (ignore-errors (sb-bsd-sockets:socket-close client))
+                           (when client
+                             ;; One connection's failure, an unreachable upstream say,
+                             ;; ends that connection, not the agent.
+                             (bt:make-thread (lambda ()
+                                               (handler-case (egress-proxy-handle proxy client)
+                                                 (error () (ignore-errors (sb-bsd-sockets:socket-close client)))))
+                                             :name "gr8s egress proxy conn"))))
+                   (error () (when (egress-proxy-stop proxy) (return))))))
+             :name "gr8s egress proxy accept"))
+      proxy)))
+
+(defun stop-egress-proxy (proxy)
+  "Stop PROXY's accept loop and close its listening socket. Best-effort; NIL is a no-op."
+  (when proxy
+    (setf (egress-proxy-stop proxy) t)
+    (ignore-errors
+     (let ((waker (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+       (unwind-protect
+            (sb-bsd-sockets:socket-connect waker (sb-bsd-sockets:make-inet-address (egress-proxy-address proxy))
+                                           (egress-proxy-port proxy))
+         (ignore-errors (sb-bsd-sockets:socket-close waker)))))
+    (ignore-errors
+     (when (and (egress-proxy-thread proxy) (bt:thread-alive-p (egress-proxy-thread proxy)))
+       (bt:join-thread (egress-proxy-thread proxy))))
+    (ignore-errors (sb-bsd-sockets:socket-close (egress-proxy-socket proxy)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Steering: every TCP connection to the proxy address, whatever its port, goes to
+;;; the one listener, which then knows the port the client asked for. So does every
+;;; connection to a synthetic address (podster-wv1w.8), which the node delivers locally:
+;;; the listener's accepted socket then also says which address was dialled.
+
+(defparameter *egress-steering-map-forms*
+  '((whistler:defmap egress-listener-sock
+      :type :sockhash :key-size 4 :value-size 4 :max-entries 1)))
+
+(defparameter *egress-steering-prog-forms*
+  '((whistler:defprog egress-sk-lookup
+        (:type :sk-lookup :section "sk_lookup" :license "GPL")
+      ;; 169.254.1.2 in network order, whose port 53 is the egress DNS gate's own; and
+      ;; 198.18.0.0/15, the synthetic range, on every port.
+      (when (and (= (ctx protocol) 6)
+                 (or (and (= (ctx local-ip4) #x0201fea9) (/= (ctx local-port) 53))
+                     (= (logand (ctx local-ip4) #xfeff) #x12c6)))
+        (let ((sk (map-lookup egress-listener-sock 0)))
+          (when (/= sk 0)
+            (sk-assign (ctx-ptr) sk 0)
+            (sk-release sk))))
+      SK_PASS)))
+
+(defstruct egress-steering sockmap prog-fd attachment)
+
+(defun start-egress-steering (listener-fd &key (netns-path "/proc/self/ns/net"))
+  "Load and attach the sk_lookup program handing every port on the proxy address to
+LISTENER-FD. Signals on failure."
+  (multiple-value-bind (map-specs prog-specs)
+      (whistler/loader::compile-bpf-forms *egress-steering-map-forms* *egress-steering-prog-forms*)
+    (let* ((maps (whistler/loader::session-create-maps map-specs))
+           (progs (whistler/loader::session-load-progs prog-specs maps))
+           (sockmap (cdr (first maps)))
+           (prog-fd (whistler/loader:prog-info-fd (cdr (first progs)))))
+      (whistler/loader:map-update-int sockmap 0 listener-fd)
+      (make-egress-steering :sockmap sockmap :prog-fd prog-fd
+                            :attachment (whistler/loader:attach-sk-lookup prog-fd :netns-path netns-path)))))
+
+(defun stop-egress-steering (steering)
+  "Detach and close STEERING. Best-effort; NIL is a no-op."
+  (when steering
+    (ignore-errors (whistler/loader:detach (egress-steering-attachment steering)))
+    (ignore-errors (sb-posix:close (egress-steering-prog-fd steering)))
+    (ignore-errors (sb-posix:close (whistler/loader:map-info-fd (egress-steering-sockmap steering))))))
+
+(defun egress-flow-object (peer host address port allowed rule)
+  "The flow event for one proxied connection from the Pod at PEER to HOST (ADDRESS) on
+PORT: forwarded, or dropped by policy with the deciding RULE's name."
+  (let ((flow (core-object "verdict" (if allowed "FORWARDED" "DROPPED")
+                           "direction" "egress" "protocol" "TCP"
+                           "podAddress" peer
+                           "peerAddress" (or address "")
+                           "peerPort" port
+                           "l7" (core-object "type" "egress" "host" (or host "")))))
+    ;; The Network view draws a site by the name the Pod asked for.
+    (when host (setf (gethash "peerName" flow) host))
+    (unless allowed (setf (gethash "reason" flow) "POLICY"))
+    (when rule (setf (gethash "rule" (gethash "l7" flow)) rule))
+    flow))
+
+(defun egress-request-flow-object (peer host address port method path code rule)
+  "The flow event for one request the proxy relayed from the Pod at PEER to HOST, naming
+the SecurityProfile rule that injected a credential into it -- never the credential."
+  (let ((flow (core-object "verdict" (if (and (integerp code) (< code 400)) "FORWARDED" "DROPPED")
+                           "direction" "egress" "protocol" "TCP"
+                           "podAddress" peer "peerAddress" (or address "") "peerPort" port
+                           "l7" (core-object "type" "http" "method" (or method "") "host" host
+                                             "path" (let ((path (or path "")))
+                                                      (subseq path 0 (or (position #\? path) (length path))))
+                                             "code" (or code 0))
+                           "peerName" host)))
+    (when rule (setf (gethash "injected" (gethash "l7" flow)) rule))
+    flow))
+
+(defun start-node-egress-proxy (decide patterns-for &key (address gr8s.network::+egress-proxy-address+) (port 15443)
+                                                       inject mint
+                                                       (upstreams (list (cons gr8s.network::+node-gateway-address+ 53))))
+  "Start the node egress proxy on ADDRESS (put on the node gateway interface), steer every
+port there and on the synthetic range to it, and serve the egress DNS gate on its port 53.
+DECIDE is as EGRESS-PROXY documents; PATTERNS-FOR as START-EGRESS-DNS-GATE does. The gate
+and the proxy share one table of synthetic addresses, whose names are looked up at the
+node DNS server, UPSTREAMS. Returns (values proxy steering gate)."
+  (gr8s.network::ensure-node-gateway (list gr8s.network::+node-gateway-address+ address))
+  (handler-case (gr8s.network::ensure-egress-synthetic-route)
+    (error (condition)
+      (format *error-output* "gr8s: synthetic egress addresses won't reach the proxy: ~A~%" condition)))
+  (let* ((names (gr8s.network::make-egress-name-table
+                 :resolve (lambda (name)
+                            (egress-upstream-a-records
+                             name (lambda (packet) (cl-dns-proxy:forward-dns-udp packet upstreams 2.0))))))
+         (proxy (start-egress-proxy
+                :address address :port port :decide decide :inject inject :mint mint :names names
+                :request-report (lambda (peer host resolved port method path code rule)
+                                  (let ((sink *gateway-flow-sink*))
+                                    (when sink
+                                      (funcall sink (egress-request-flow-object peer host resolved port method
+                                                                                path code rule)))))
+                :report (lambda (peer host resolved port allowed rule)
+                          (let ((sink *gateway-flow-sink*))
+                            (when sink
+                              (funcall sink (egress-flow-object peer host resolved port allowed
+                                                                (and rule (gr8s.network::cnp-rule-name rule))))))))))
+    (let ((steering nil))
+      (handler-case
+          (progn
+            (setf steering (start-egress-steering
+                            (sb-bsd-sockets:socket-file-descriptor (egress-proxy-socket proxy))))
+            (values proxy steering
+                    (start-egress-dns-gate :address address :port 53 :patterns-for patterns-for
+                                           :names names :upstreams upstreams)))
+        (error (condition)
+          (stop-egress-steering steering)
+          (stop-egress-proxy proxy)
+          (error condition))))))
+
+;;; ---------------------------------------------------------------------------
+;;; The egress DNS gate. A captured Pod's DNS to the node gateway is redirected
+;;; here (port 53 on the proxy address), where the querying Pod is known: the gate
+;;; answers REFUSED for any name outside the cluster's own zone that the Pod's policy
+;;; doesn't name, and relays the rest to the node DNS server. A query name is data
+;;; leaving the node, so forwarding every name would leave a channel open.
+;;;
+;;; A Pod with a hostname allowlist is answered with synthetic addresses instead
+;;; (podster-wv1w.8): an allowed name's A query gets the address that stands for it,
+;;; any other type of query for it gets no data (an AAAA or HTTPS record would hand
+;;; the client real addresses), and only the cluster's own names are relayed.
+
+(defun egress-dns-cluster-name-p (name)
+  "True when the DNS query NAME is in the cluster zone."
+  (let ((name (string-downcase (string-right-trim "." name)))
+        (zone gr8s.foundation::+dns-cluster-zone+))
+    (or (string= name zone)
+        (and (> (length name) (1+ (length zone)))
+             (string= (concatenate 'string "." zone) name :start2 (- (length name) (1+ (length zone))))))))
+
+(defun egress-dns-name-allowed-p (name patterns)
+  "True when the DNS query NAME is in the cluster zone or matches one of PATTERNS
+(domainNames patterns), or PATTERNS is :all."
+  (or (eq patterns :all)
+      (egress-dns-cluster-name-p name)
+      (let ((name (string-downcase (string-right-trim "." name))))
+        (some (lambda (pattern) (gr8s.network::egress-domain-matches-p pattern name)) patterns))))
+
+(defun egress-dns-gate-answer (packet patterns forward &key synthesize)
+  "Answer DNS PACKET for a client allowed PATTERNS: relay it with FORWARD (packet ->
+response) when every question is allowed, else REFUSED. With SYNTHESIZE, a function from
+a name to (values address ttl) or (values NIL rcode), names outside the cluster zone are
+answered with synthetic addresses rather than relayed."
+  (let* ((query (ignore-errors (0conf:decode-message packet)))
+         (questions (and query (0conf:dns-message-questions query))))
+    (cond ((null query) nil)
+          ((not (and questions (every (lambda (question)
+                                        (egress-dns-name-allowed-p (0conf:question-name question) patterns))
+                                      questions)))
+           (cl-dns-proxy::dns-authoritative-response query :rcode 5))
+          ((or (null synthesize)
+               (every (lambda (question) (egress-dns-cluster-name-p (0conf:question-name question))) questions))
+           (funcall forward packet))
+          ((rest questions) (cl-dns-proxy::dns-authoritative-response query :rcode 5))
+          ((/= (0conf:question-qtype (first questions)) 0conf:+type-a+)
+           (cl-dns-proxy::dns-authoritative-response query))
+          (t
+           (let ((question (first questions)))
+             (multiple-value-bind (address ttl-or-rcode) (funcall synthesize (0conf:question-name question))
+               (if address
+                   (cl-dns-proxy::dns-authoritative-response
+                    query :answers (list (make-instance '0conf:a-record
+                                                        :name (0conf:question-name question)
+                                                        :address (gr8s.network::ipv4-network-octets address)
+                                                        :ttl ttl-or-rcode)))
+                   (cl-dns-proxy::dns-authoritative-response query :rcode ttl-or-rcode))))))))
+
+(defun egress-upstream-a-records (name forward)
+  "Ask FORWARD (packet -> response) for NAME's A records. Returns (values addresses ttl
+rcode), TTL the least the answers carry."
+  (let* ((query (0conf:encode-message
+                 (0conf:make-dns-message :id (random #x10000) :flags #x0100
+                                         :questions (list (0conf:make-question :name name :qtype 0conf:+type-a+)))))
+         (message (ignore-errors (0conf:decode-message (funcall forward query)))))
+    (if (null message)
+        (values nil 0 2)
+        (let ((records (remove-if-not (lambda (record) (typep record '0conf:a-record))
+                                      (0conf:dns-message-answers message))))
+          (values (mapcar (lambda (record) (format nil "~{~D~^.~}" (coerce (0conf:a-address record) 'list))) records)
+                  (if records (reduce #'min records :key #'0conf:rr-ttl) 0)
+                  (logand #xf (0conf:dns-message-flags message)))))))
+
+(defstruct egress-dns-gate udp tcp threads (stop nil))
+
+(defun start-egress-dns-gate (&key (address "127.0.0.1") (port 53) patterns-for names
+                                   (upstreams (list (cons gr8s.network::+node-gateway-address+ 53)))
+                                   (timeout 2.0))
+  "Serve DNS on ADDRESS:PORT over UDP and TCP. PATTERNS-FOR maps a client address to
+(values patterns synthetic-p): the domain patterns it may resolve, or :all, and whether
+it is answered with synthetic addresses from the egress-name-table NAMES. Returns the
+EGRESS-DNS-GATE."
+  (let* ((udp (make-instance 'sb-bsd-sockets:inet-socket :type :datagram :protocol :udp))
+         (tcp (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp))
+         (gate (make-egress-dns-gate :udp udp :tcp tcp)))
+    (flet ((address-string (octets) (format nil "~{~D~^.~}" (coerce octets 'list)))
+           (forward (packet) (cl-dns-proxy:forward-dns-udp packet upstreams timeout)))
+      (labels ((answer (packet client forward)
+                 (multiple-value-bind (patterns synthetic) (funcall patterns-for client)
+                   (egress-dns-gate-answer
+                    packet patterns forward
+                    :synthesize (and synthetic names
+                                     (lambda (name) (gr8s.network::egress-name-answer names name)))))))
+      (setf (sb-bsd-sockets:sockopt-reuse-address udp) t
+            (sb-bsd-sockets:sockopt-reuse-address tcp) t)
+      (sb-bsd-sockets:socket-bind udp (sb-bsd-sockets:make-inet-address address) port)
+      (sb-bsd-sockets:socket-bind tcp (sb-bsd-sockets:make-inet-address address)
+                                  (nth-value 1 (sb-bsd-sockets:socket-name udp)))
+      (sb-bsd-sockets:socket-listen tcp 32)
+      (setf (egress-dns-gate-threads gate)
+            (list
+             (bt:make-thread
+              (lambda ()
+                (let ((buffer (make-array #xffff :element-type '(unsigned-byte 8))))
+                  (loop until (egress-dns-gate-stop gate)
+                        do (handler-case
+                               (when (sb-sys:wait-until-fd-usable (sb-bsd-sockets:socket-file-descriptor udp) :input 0.2)
+                                 (multiple-value-bind (b size host client-port) (sb-bsd-sockets:socket-receive udp buffer nil)
+                                   (declare (ignore b))
+                                   (let ((response (answer (subseq buffer 0 size) (address-string host) #'forward)))
+                                     (when response
+                                       (sb-bsd-sockets:socket-send udp response (length response)
+                                                                   :address (list host client-port))))))
+                             (error () nil)))))
+              :name "gr8s egress DNS gate udp")
+             (bt:make-thread
+              (lambda ()
+                (loop until (egress-dns-gate-stop gate)
+                      do (handler-case
+                             (let ((client (sb-bsd-sockets:socket-accept tcp)))
+                               (when client
+                                 (bt:make-thread
+                                  (lambda ()
+                                    (let ((stream (sb-bsd-sockets:socket-make-stream
+                                                   client :input t :output t :element-type '(unsigned-byte 8)
+                                                          :buffering :none)))
+                                      (unwind-protect
+                                           (let ((packet (cl-dns-proxy::read-dns-frame stream)))
+                                             (when packet
+                                               (let ((response (answer
+                                                                packet
+                                                                (address-string (sb-bsd-sockets:socket-peername client))
+                                                                (lambda (packet)
+                                                                  (cl-dns-proxy:forward-dns-tcp packet upstreams timeout)))))
+                                                 (when response (cl-dns-proxy::write-dns-frame stream response)))))
+                                        (ignore-errors (close stream))
+                                        (ignore-errors (sb-bsd-sockets:socket-close client)))))
+                                  :name "gr8s egress DNS gate tcp conn")))
+                           (error () nil))))
+              :name "gr8s egress DNS gate tcp"))))
+      gate)))
+
+(defun egress-dns-gate-port (gate)
+  (nth-value 1 (sb-bsd-sockets:socket-name (egress-dns-gate-udp gate))))
+
+(defun stop-egress-dns-gate (gate)
+  "Stop GATE's threads and close its sockets. Best-effort; NIL is a no-op."
+  (when gate
+    (setf (egress-dns-gate-stop gate) t)
+    (ignore-errors
+     (let ((waker (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+       (unwind-protect
+            (sb-bsd-sockets:socket-connect waker (sb-bsd-sockets:socket-name (egress-dns-gate-tcp gate))
+                                           (egress-dns-gate-port gate))
+         (ignore-errors (sb-bsd-sockets:socket-close waker)))))
+    (dolist (thread (egress-dns-gate-threads gate))
+      (ignore-errors (bt:join-thread thread)))
+    (ignore-errors (sb-bsd-sockets:socket-close (egress-dns-gate-udp gate)))
+    (ignore-errors (sb-bsd-sockets:socket-close (egress-dns-gate-tcp gate)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Credential injection (podster-wv1w.3). For a host a SecurityProfile selecting
+;;; the Pod names, the proxy terminates the Pod's TLS with a leaf the egress CA
+;;; signs, relays HTTP/1.1 request by request, and on each request a rule matches
+;;; overwrites the rule's headers with the credential. Upstream it is an ordinary
+;;; verifying TLS client. A request whose Host isn't the host its TLS named is
+;;; refused (421), so an allowed name can't front for another site; a request whose
+;;; credential can't be found is refused (403) rather than sent without it.
+
+(defparameter +egress-http-head-limit+ (* 64 1024))
+
+(defun egress-read-http-head (stream)
+  "Read one HTTP/1.x message head from STREAM through its blank line. Returns the octets,
+or NIL at end of stream. Signals past the head limit."
+  (let ((head (make-array 256 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+    (loop for byte = (read-byte stream nil nil)
+          do (cond ((null byte) (return (when (plusp (length head)) (coerce head '(simple-array (unsigned-byte 8) (*))))))
+                   (t (vector-push-extend byte head)
+                      (when (> (length head) +egress-http-head-limit+) (error "HTTP head too large"))
+                      (let ((n (length head)))
+                        (when (and (>= n 4) (= (aref head (- n 1)) 10) (= (aref head (- n 2)) 13)
+                                   (= (aref head (- n 3)) 10) (= (aref head (- n 4)) 13))
+                          (return (coerce head '(simple-array (unsigned-byte 8) (*)))))))))))
+
+(defun egress-parse-http-head (octets)
+  "(values start-line headers), HEADERS a list of (name . value) in order."
+  (let* ((lines (cl-ppcre:split "\\r\\n" (babel:octets-to-string octets :encoding :latin-1))))
+    (values (first lines)
+            (loop for line in (rest lines)
+                  for colon = (position #\: line)
+                  when (and colon (plusp colon))
+                    collect (cons (subseq line 0 colon) (string-trim " " (subseq line (1+ colon))))))))
+
+(defun egress-http-head-octets (start-line headers)
+  (babel:string-to-octets
+   (with-output-to-string (out)
+     (format out "~A~C~C" start-line #\Return #\Newline)
+     (loop for (name . value) in headers do (format out "~A: ~A~C~C" name value #\Return #\Newline))
+     (format out "~C~C" #\Return #\Newline))
+   :encoding :latin-1))
+
+(defun egress-header (headers name)
+  (cdr (assoc name headers :test #'string-equal)))
+
+(defun egress-body-framing (headers &key request status method)
+  "How the body after HEADERS ends: :none, (:length n), :chunked or :close."
+  (let ((encoding (egress-header headers "Transfer-Encoding"))
+        (length (egress-header headers "Content-Length")))
+    (cond ((and (not request) (or (string-equal method "HEAD") (<= 100 status 199) (member status '(204 304)))) :none)
+          ((and encoding (search "chunked" (string-downcase encoding))) :chunked)
+          (length (list :length (parse-integer length)))
+          (request :none)
+          (t :close))))
+
+(defun egress-copy-bytes (in out count)
+  (let ((buffer (make-array 16384 :element-type '(unsigned-byte 8))))
+    (loop while (plusp count)
+          do (let ((n (read-sequence buffer in :end (min count (length buffer)))))
+               (when (zerop n) (error "body ended early"))
+               (write-sequence buffer out :end n)
+               (decf count n)))
+    (force-output out)))
+
+(defun egress-copy-line (in out)
+  "Copy one CRLF-terminated line; returns it without the CRLF."
+  (let ((line (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+    (loop for byte = (read-byte in)
+          do (write-byte byte out) (vector-push-extend byte line)
+          until (and (= byte 10) (>= (length line) 2) (= (aref line (- (length line) 2)) 13)))
+    (babel:octets-to-string (subseq line 0 (- (length line) 2)) :encoding :latin-1)))
+
+(defun egress-copy-body (in out framing)
+  "Copy one message body from IN to OUT as FRAMING says it ends, flushing as it goes so a
+stream of events (SSE) arrives as it is sent."
+  (cond ((eq framing :none))
+        ((eq framing :close)
+         ;; Until the upstream closes: flush whenever nothing more is waiting.
+         (loop for byte = (handler-case (read-byte in nil nil) (error () nil))
+               while byte
+               do (write-byte byte out)
+                  (unless (ignore-errors (listen in)) (force-output out))
+               finally (force-output out)))
+        ((eq framing :chunked)
+         (loop
+           (let* ((line (egress-copy-line in out))
+                  (size (parse-integer line :radix 16 :junk-allowed t)))
+             (force-output out)
+             (if (and size (plusp size))
+                 (progn (egress-copy-bytes in out size) (egress-copy-line in out) (force-output out))
+                 ;; The last chunk, then trailers through a blank line.
+                 (loop for trailer = (egress-copy-line in out)
+                       until (zerop (length trailer))
+                       finally (force-output out) (return-from egress-copy-body))))))
+        (t (egress-copy-bytes in out (second framing)))))
+
+(defun egress-write-response (stream code reason)
+  (let ((body (babel:string-to-octets (format nil "gr8s egress: ~A~%" reason))))
+    (write-sequence (egress-http-head-octets (format nil "HTTP/1.1 ~D ~A" code reason)
+                                             `(("Content-Type" . "text/plain") ("Content-Length" . ,(princ-to-string (length body)))
+                                               ("Connection" . "close")))
+                    stream)
+    (write-sequence body stream)
+    (force-output stream)))
+
+(defun egress-relay-http (client host open-upstream inject report)
+  "Relay HTTP/1.1 requests from the CLIENT stream for HOST to the stream
+OPEN-UPSTREAM opens on first use. INJECT maps (method path) to NIL or (values rule-name
+headers value), VALUE NIL when the credential can't be found. REPORT is called with
+(method path code rule-name) for each request."
+  (let ((upstream nil))
+    (unwind-protect
+         (loop
+           (let ((head (egress-read-http-head client)))
+             (unless head (return))
+             (multiple-value-bind (start-line headers) (egress-parse-http-head head)
+               (destructuring-bind (&optional method target &rest rest) (cl-ppcre:split " " start-line)
+                 (declare (ignore rest))
+                 (let* ((host-header (string-downcase (or (egress-header headers "Host") "")))
+                        (header-host (subseq host-header 0 (or (position #\: host-header) (length host-header)))))
+                   (unless (and method target (string= header-host host))
+                     (egress-write-response client 421 "Misdirected Request")
+                     (funcall report method target 421 nil)
+                     (return))
+                   (multiple-value-bind (rule-name names value) (funcall inject method target)
+                     (when (and rule-name (null value))
+                       (egress-write-response client 403 "Forbidden: the credential for this request is unavailable")
+                       (funcall report method target 403 rule-name)
+                       (return))
+                     (when rule-name
+                       (setf headers (append (remove-if (lambda (header) (member (car header) names :test #'string-equal))
+                                                        headers)
+                                             (mapcar (lambda (name) (cons name value)) names))))
+                     ;; A client waiting for 100 Continue would wait on us: it sends anyway after a pause.
+                     (setf headers (remove "Expect" headers :key #'car :test #'string-equal))
+                     (unless upstream (setf upstream (funcall open-upstream)))
+                     (write-sequence (egress-http-head-octets start-line headers) upstream)
+                     (egress-copy-body client upstream (egress-body-framing headers :request t))
+                     (force-output upstream)
+                     (let (status response-headers framing)
+                       (loop
+                         (let ((response (or (egress-read-http-head upstream) (error "upstream closed"))))
+                           (multiple-value-bind (status-line parsed) (egress-parse-http-head response)
+                             (setf status (parse-integer (second (cl-ppcre:split " " status-line)) :junk-allowed t)
+                                   response-headers parsed)
+                             (write-sequence response client)
+                             (force-output client)
+                             (unless (<= 100 status 199) (return)))))
+                       (setf framing (egress-body-framing response-headers :status status :method method))
+                       (egress-copy-body upstream client framing)
+                       (funcall report method target status rule-name)
+                       (when (or (eq framing :close)
+                                 (string-equal (or (egress-header headers "Connection") "") "close")
+                                 (string-equal (or (egress-header response-headers "Connection") "") "close"))
+                         (return)))))))))
+      (when upstream (ignore-errors (close upstream))))))
+
+(defun egress-socket-stream (socket)
+  (sb-bsd-sockets:socket-make-stream socket :input t :output t :element-type '(unsigned-byte 8)
+                                            :buffering :full))
+
+(defun egress-prefixed-stream (prefix socket)
+  "A bidirectional octet stream over SOCKET whose input begins with PREFIX, the bytes
+already read from it."
+  (let ((stream (egress-socket-stream socket)))
+    (values (make-two-way-stream
+             (make-concatenated-stream (flexi-streams:make-in-memory-input-stream prefix) stream)
+             stream)
+            stream)))
+
+(defun egress-proxy-relay (proxy client peer host address port prefix tls matcher)
+  "Serve an admitted connection to HOST whose requests MATCHER may inject credentials
+into: terminate the client's TLS (when TLS) with a leaf for HOST, and relay to ADDRESS:PORT,
+over verified TLS when TLS."
+  (let ((client-stream nil) (raw nil))
+    (unwind-protect
+         (multiple-value-bind (two-way socket-stream) (egress-prefixed-stream prefix client)
+           (setf raw socket-stream)
+           (setf client-stream
+                 (if tls
+                     (multiple-value-bind (chain key) (and (egress-proxy-mint proxy) (funcall (egress-proxy-mint proxy) host))
+                       (unless chain (error "no egress CA on this node to terminate ~A" host))
+                       (pure-tls:make-tls-server-stream two-way :certificate chain :key key
+                                                                :alpn-protocols '("http/1.1")))
+                     two-way))
+           (egress-relay-http
+            client-stream host
+            (lambda ()
+              (let ((socket (or (funcall (egress-proxy-connect proxy) address port)
+                                (error "could not connect to ~A:~D" address port))))
+                (if tls
+                    (pure-tls:make-tls-client-stream (egress-socket-stream socket)
+                                                     :hostname host :verify (egress-proxy-upstream-verify proxy)
+                                                     :alpn-protocols '("http/1.1"))
+                    (egress-socket-stream socket))))
+            matcher
+            (lambda (method path code rule)
+              (when (egress-proxy-request-report proxy)
+                (ignore-errors (funcall (egress-proxy-request-report proxy)
+                                        peer host address port method path code rule))))))
+      (when client-stream (ignore-errors (close client-stream)))
+      (when raw (ignore-errors (close raw))))))

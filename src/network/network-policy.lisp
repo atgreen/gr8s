@@ -254,20 +254,68 @@ own ports, so they become one rule per Pod that defines them."
                  (push (rule-object (np-pod-peers (list pod)) ports) rules))))))))
     (nreverse rules)))
 
-(defun resolve-network-policy-object (object pods namespace-labels)
+(defun node-dns-policy-peer ()
+  "Cluster DNS as NetworkPolicy selectors see it: a kube-system peer labelled
+k8s-app=kube-dns at the node DNS gateway, with the usual dns and dns-tcp named
+ports. gr8s runs no kube-dns Pods -- each node answers DNS at the gateway -- so
+without this the rule charts write to allow DNS would select nothing, and an
+egress-isolated Pod could not resolve names (podster-5hv.10)."
+  (make-np-pod :name "node-dns" :namespace "kube-system"
+               :labels (np-labels "k8s-app" "kube-dns")
+               :ip +dns-pod-server-address+ :ips (list +dns-pod-server-address+)
+               :ports '(("dns" :udp 53) ("dns-tcp" :tcp 53))))
+
+(defun np-rule-object-admits-p (rule address protocol port)
+  "True when resolved egress RULE (ipBlock peers only) admits ADDRESS on PROTOCOL
+(a NetworkPolicy protocol string) and PORT."
+  (flet ((peer-admits-p (peer)
+           (let ((block (gethash "ipBlock" peer)))
+             (and (network-address-in-cidr-p (gethash "cidr" block) address)
+                  (notany (lambda (except) (network-address-in-cidr-p except address))
+                          (coerce (gethash "except" block #()) 'list)))))
+         (port-admits-p (object)
+           (let ((first (gethash "port" object)) (last (gethash "endPort" object)))
+             (and (equal (gethash "protocol" object "TCP") protocol)
+                  (or (null first)
+                      (and (integerp first) (<= first port (or last first))))))))
+    (multiple-value-bind (peers peers-p) (gethash "to" rule)
+      (multiple-value-bind (ports ports-p) (gethash "ports" rule)
+        (and (or (not peers-p) (some #'peer-admits-p (coerce peers 'list)))
+             (or (not ports-p) (zerop (length ports)) (some #'port-admits-p (coerce ports 'list))))))))
+
+(defun api-server-service-rules (rules api-server)
+  "Rule objects admitting the API Service for every one of resolved egress RULES that
+admits one of its endpoints. API-SERVER is a plist of :address and :port (the Service)
+and :endpoints and :endpoint-port (where it runs). Kubernetes matches egress policy
+after Service translation, at the endpoints; gr8s Pods reach the API server at the
+Service address, which the node delivers itself, so the Service is what the node must
+admit (podster-5hv.10)."
+  (destructuring-bind (&key address port endpoints endpoint-port) api-server
+    (when (and address port endpoint-port
+               (some (lambda (rule)
+                       (some (lambda (endpoint) (np-rule-object-admits-p rule endpoint "TCP" endpoint-port))
+                             endpoints))
+                     rules))
+      (list (core-object "to" (vector (np-ip-block (format nil "~A/32" address)))
+                         "ports" (vector (core-object "protocol" "TCP" "port" port)))))))
+
+(defun resolve-network-policy-object (object pods namespace-labels &key api-server)
   "Return a copy of NetworkPolicy OBJECT whose spec a node can enforce without seeing other
-Pods or Namespaces: defaulted policyTypes, and rules whose peers are only ipBlocks."
+Pods or Namespaces: defaulted policyTypes, and rules whose peers are only ipBlocks. With
+API-SERVER (see API-SERVER-SERVICE-RULES), egress that admits the API server's endpoints
+admits its Service address as well."
   (let* ((spec (parse-network-policy-json object))
          (source (gethash "spec" object))
          (resolved (core-object "podSelector" (copy-core-object (gethash "podSelector" source (core-object)))
                                 "policyTypes" (coerce (np-spec-policy-types spec) 'vector)))
          (result (copy-core-object object)))
     (loop for (direction key rules) in `((:ingress "ingress" ,(np-spec-ingress spec)) (:egress "egress" ,(np-spec-egress spec)))
-          do (setf (gethash key resolved)
-                   (coerce (loop for rule in rules
-                                 append (resolve-network-policy-rule rule direction (np-spec-namespace spec)
-                                                                     pods namespace-labels))
-                           'vector)))
+          do (let ((objects (loop for rule in rules
+                                  append (resolve-network-policy-rule rule direction (np-spec-namespace spec)
+                                                                      pods namespace-labels))))
+               (when (and (eq direction :egress) api-server)
+                 (setf objects (append objects (api-server-service-rules objects api-server))))
+               (setf (gethash key resolved) (coerce objects 'vector))))
     (setf (gethash "spec" result) resolved)
     result))
 
@@ -328,13 +376,41 @@ Kubernetes gives every Namespace."
         (setf (gethash "kubernetes.io/metadata.name" own) name
               (gethash name labels) own)))))
 
+(defun network-policy-api-server (store)
+  "The API server as egress policy needs it, from the default/kubernetes Service and
+its EndpointSlices: a plist for API-SERVER-SERVICE-RULES, or NIL without the Service."
+  (let ((service (find "kubernetes" (list-core-resources store "services" "default")
+                       :key (lambda (object) (gethash "name" (gethash "metadata" object)))
+                       :test #'equal)))
+    (when service
+      (let* ((spec (gethash "spec" service))
+             (port (find "TCP" (coerce (gethash "ports" spec #()) 'list)
+                         :key (lambda (port) (gethash "protocol" port "TCP")) :test #'equal))
+             (endpoints '()) (endpoint-port nil))
+        (dolist (slice (list-core-resources store "endpointslices" "default"))
+          (when (equal "kubernetes" (gethash "kubernetes.io/service-name"
+                                             (gethash "labels" (gethash "metadata" slice) (core-object))))
+            (loop for slice-port across (gethash "ports" slice #())
+                  do (setf endpoint-port (or endpoint-port (gethash "port" slice-port))))
+            (loop for endpoint across (gethash "endpoints" slice #())
+                  do (loop for address across (gethash "addresses" endpoint #())
+                           do (pushnew address endpoints :test #'equal)))))
+        (when (and port (stringp (gethash "clusterIP" spec)))
+          (list :address (gethash "clusterIP" spec) :port (gethash "port" port)
+                :endpoints (nreverse endpoints)
+                :endpoint-port (or endpoint-port (gethash "targetPort" port))))))))
+
 (defun network-policy-projection (store)
-  "The NetworkPolicies to project to nodes, each resolved against the current Pods and Namespaces."
+  "The NetworkPolicies to project to nodes, each resolved against the current Pods and
+Namespaces, the node DNS gateway as cluster DNS, and the API server's Service."
   (let ((policies (list-core-resources store "networkpolicies")))
     (when policies
-      (let ((pods (network-policy-cluster-pods store))
-            (namespace-labels (network-policy-namespace-labels store)))
-        (mapcar (lambda (object) (resolve-network-policy-object object pods namespace-labels)) policies)))))
+      (let ((pods (cons (node-dns-policy-peer) (network-policy-cluster-pods store)))
+            (namespace-labels (network-policy-namespace-labels store))
+            (api-server (network-policy-api-server store)))
+        (mapcar (lambda (object)
+                  (resolve-network-policy-object object pods namespace-labels :api-server api-server))
+                policies)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Node: a Pod's allowed peers and ports for one direction.
@@ -641,8 +717,9 @@ Reads through the desired-state seam, so STORE may be a foreign cluster's view."
               (setf (gethash address map) policy-pod))))))))
 
 (defun converge-pod-network-policies
-    (specs endpoints &key pod-finder directory-fn (writer #'write-pod-network-policy))
-  "Resolve and write the policy of each local Pod ENDPOINT (SANDBOX INTERFACE ADDRESS).
+    (specs endpoints &key pod-finder directory-fn (writer #'write-pod-network-policy) cluster-policies)
+  "Resolve and write the policy of each local Pod ENDPOINT (SANDBOX INTERFACE ADDRESS) from
+NetworkPolicy SPECS and resolved ClusterNetworkPolicy CLUSTER-POLICIES (cnp-specs).
 POD-FINDER maps an address to an np-pod, or NIL; DIRECTORY-FN maps a sandbox to its pin
 directory. Fail-soft per endpoint; returns the sandboxes written."
   (let ((written '()))
@@ -659,8 +736,10 @@ directory. Fail-soft per endpoint; returns the sandboxes written."
             (let ((pod (funcall pod-finder address)))
               (when pod
                 (let* ((directory (funcall directory-fn sandbox))
-                       (policy (list (multiple-value-call #'cons (pod-network-policy-entries pod specs :egress))
-                                     (multiple-value-call #'cons (pod-network-policy-entries pod specs :ingress)))))
+                       (policy (list (multiple-value-call #'cons
+                                       (pod-policy-entries pod specs cluster-policies :egress))
+                                     (multiple-value-call #'cons
+                                       (pod-policy-entries pod specs cluster-policies :ingress)))))
                   (unless (equal policy (bt:with-lock-held (*pod-network-policy-written-lock*)
                                           (gethash directory *pod-network-policy-written*)))
                     (when (funcall writer directory (first policy) (second policy))
