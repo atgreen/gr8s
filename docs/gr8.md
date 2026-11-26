@@ -56,6 +56,8 @@ gr8 [flags] COMMAND [ARG...]
 | `--node NAME` | Node to run on (default: the one with this host's address). |
 | `--kubeconfig FILE` | Kubeconfig (default: `$KUBECONFIG`, then `~/.kube/config`). |
 | `--keep` | Keep the Pod, and any `--allow` policy, after the command exits. |
+| `--cpu N` | The command's CPUs, request and limit (`4`, `500m`). |
+| `--memory N` | The command's memory, request and limit (`8Gi`). |
 | `--no-display` | Withhold the Wayland display. |
 | `--no-audio` | Withhold audio, and with it the microphone. |
 | `--no-gpu` | Withhold the GPU. |
@@ -93,6 +95,15 @@ the host:
   `HOME`, `USER`, `LOGNAME`, `SHELL`, `EDITOR`, `VISUAL`, `PAGER` and `NO_COLOR`
   pass through. Anything else, such as `SSH_AUTH_SOCK`, `*_TOKEN` or `AWS_*`,
   passes only when named with `--env`; the profile can add stand-ins.
+
+## CPU and memory
+
+The command runs in its Pod's cgroup, under the same enforcement as any Pod. By
+default it requests 1 CPU and 1Gi and may use up to half the node's CPU and memory:
+a runaway build or a hungry agent can't take the whole machine, and the Pod is
+Burstable, so the kernel and the kubelet weigh what it asked for before choosing it
+under memory pressure. `--cpu` and `--memory` give it exactly that much, as both
+request and limit.
 
 ## The desktop
 

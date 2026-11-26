@@ -9,6 +9,10 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- A gr8 sandbox requests 1 CPU and 1Gi and is limited to half the node's CPU and
+  memory by default, `--cpu` and `--memory` setting both; it was BestEffort, with
+  no ceiling and the first to be killed.
+
 - A gr8 sandbox is a desktop one (podster-wv1w.15, .16, .17): it gets the caller's
   Wayland display and audio (PipeWire, PulseAudio) at the same paths in its own
   runtime directory, and the GPU through a device plugin built into the agent,
@@ -156,6 +160,10 @@ the Kubernetes API version with a gr8s release suffix (see
   still serves Hubble's Observer API for the `hubble` CLI.
 
 ### Fixed
+
+- Every Burstable container got `oom_score_adj` 999, as if it requested no memory:
+  the node's memory capacity was read as NIL (`/proc/meminfo`'s value was parsed
+  twice), so the kubelet's scaling by memory request never applied.
 
 - A proxied connection whose client closed first could leave the Gateway's L4 proxy or
   the node egress proxy waiting on the upstream forever: closing a socket another

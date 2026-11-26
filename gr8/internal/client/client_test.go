@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -265,4 +266,37 @@ func TestNewPodAsksForTheGPUOnlyWhenWanted(t *testing.T) {
 	if without := NewPod(PodRequest{Namespace: "gr8", Command: "ls"}, "x"); len(without.Spec.Containers[0].Resources.Limits) != 0 {
 		t.Errorf("limits %v", without.Spec.Containers[0].Resources.Limits)
 	}
+}
+
+func TestSandboxResourcesAreCappedAndBurstable(t *testing.T) {
+	node := corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("16"), corev1.ResourceMemory: resource.MustParse("32Gi")}
+	got, err := SandboxResources(node, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func(list corev1.ResourceList, name corev1.ResourceName, want string) {
+		if quantity := list[name]; quantity.Cmp(resource.MustParse(want)) != 0 {
+			t.Errorf("%s %s, want %s", name, quantity.String(), want)
+		}
+	}
+	check(got.Requests, corev1.ResourceCPU, "1")
+	check(got.Requests, corev1.ResourceMemory, "1Gi")
+	check(got.Limits, corev1.ResourceCPU, "8")
+	check(got.Limits, corev1.ResourceMemory, "16Gi")
+	// A small node: the request never exceeds the limit.
+	small, _ := SandboxResources(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"),
+		corev1.ResourceMemory: resource.MustParse("1Gi")}, "", "")
+	check(small.Requests, corev1.ResourceCPU, "500m")
+	check(small.Requests, corev1.ResourceMemory, "512Mi")
+	// Given: request and limit alike.
+	given, _ := SandboxResources(node, "4", "8Gi")
+	check(given.Requests, corev1.ResourceCPU, "4")
+	check(given.Limits, corev1.ResourceMemory, "8Gi")
+	if _, err := SandboxResources(node, "lots", ""); err == nil {
+		t.Error("a bad quantity was accepted")
+	}
+	// The GPU slot joins the limits without losing them.
+	pod := NewPod(PodRequest{Namespace: "gr8", Command: "x", GPU: true, Resources: got}, "s")
+	check(pod.Spec.Containers[0].Resources.Limits, corev1.ResourceMemory, "16Gi")
+	check(pod.Spec.Containers[0].Resources.Limits, GPUResource, "1")
 }

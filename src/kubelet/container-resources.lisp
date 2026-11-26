@@ -294,11 +294,13 @@ A container without a CPU request gets the minimum share, as a kubelet gives it.
                                     :limit (container-quantity-integer (parse-container-quantity value))))))))
 
 
-(defun node-memory-capacity-bytes ()
-  "Total machine memory in bytes from /proc/meminfo, or NIL when unavailable."
+(defun node-memory-capacity-bytes (&optional (meminfo "/proc/meminfo"))
+  "Total machine memory in bytes from MEMINFO, or NIL when unavailable."
   (ignore-errors
-    (let ((total (cdr (assoc "MemTotal" (read-key-value-file "/proc/meminfo") :test #'equal))))
-      (when total (* 1024 (parse-integer total :junk-allowed t))))))
+    ;; READ-KEY-VALUE-FILE has already read the number: parsing it again signalled,
+    ;; and every Burstable container got 999, as if it requested nothing.
+    (let ((total (cdr (assoc "MemTotal" (read-key-value-file meminfo) :test #'equal))))
+      (when (integerp total) (* 1024 total)))))
 
 (defun container-oom-score-adj (qos-class container memory-capacity)
   "The kubelet's per-QoS OOM score adjustment: Guaranteed is protected, BestEffort

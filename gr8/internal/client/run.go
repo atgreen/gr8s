@@ -40,6 +40,8 @@ type Options struct {
 	NoDisplay  bool     // withhold the Wayland display
 	NoAudio    bool     // withhold the audio sockets
 	NoGPU      bool     // withhold the GPU render nodes
+	CPU        string   // the command's CPU, request and limit; default SandboxResources
+	Memory     string   // the command's memory, request and limit
 	Command    []string
 	// Placeholders are NAME=VALUE stand-ins the profile sets, such as an API key the
 	// node egress proxy overwrites with the real one.
@@ -79,6 +81,14 @@ func Run(options Options) (int, error) {
 		return 0, err
 	}
 
+	nodeObject, err := clientset.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
+	if err != nil {
+		return 0, fmt.Errorf("reading node %s: %w", node, err)
+	}
+	resources, err := SandboxResources(nodeObject.Status.Allocatable, options.CPU, options.Memory)
+	if err != nil {
+		return 0, err
+	}
 	pod := NewPod(PodRequest{
 		Namespace: options.Namespace,
 		Node:      node,
@@ -86,7 +96,8 @@ func Run(options Options) (int, error) {
 		Launcher:  launcher,
 		Command:   filepath.Base(options.Command[0]),
 		Identity:  identity,
-		GPU:       !options.NoGPU && nodeOffersGPU(ctx, clientset, node),
+		GPU:       !options.NoGPU && offersGPU(nodeObject),
+		Resources: resources,
 	}, randomSuffix())
 	// The policy goes first, so the command never starts without it.
 	if len(options.Allow) > 0 {
@@ -132,12 +143,8 @@ func Run(options Options) (int, error) {
 	return execInPod(ctx, config, clientset, pod, argv)
 }
 
-// nodeOffersGPU says whether node offers GPU render nodes to Pods.
-func nodeOffersGPU(ctx context.Context, clientset kubernetes.Interface, name string) bool {
-	node, err := clientset.CoreV1().Nodes().Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		return false
-	}
+// offersGPU says whether node offers GPU render nodes to Pods.
+func offersGPU(node *corev1.Node) bool {
 	quantity, ok := node.Status.Allocatable[GPUResource]
 	return ok && !quantity.IsZero()
 }

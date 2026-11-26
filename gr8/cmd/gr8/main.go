@@ -84,6 +84,8 @@ func run() int {
 	flags.BoolVar(&options.NoDisplay, "no-display", false, "withhold the Wayland display")
 	flags.BoolVar(&options.NoAudio, "no-audio", false, "withhold audio (and the microphone)")
 	flags.BoolVar(&options.NoGPU, "no-gpu", false, "withhold the GPU render nodes")
+	flags.StringVar(&options.CPU, "cpu", "", "the command's CPUs, e.g. 4 or 500m (default: 1, up to half the node's)")
+	flags.StringVar(&options.Memory, "memory", "", "the command's memory, e.g. 8Gi (default: 1Gi, up to half the node's)")
 	flags.BoolVar(&options.Verbose, "v", false, "report the Pod gr8 creates")
 	flags.Var(&readOnly, "ro", "also allow reading `PATH` (repeatable)")
 	flags.Var(&readWrite, "rw", "also allow writing `PATH` (repeatable)")
