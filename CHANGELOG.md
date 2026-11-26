@@ -9,6 +9,14 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- A gr8 sandbox is a desktop one (podster-wv1w.15, .16, .17): it gets the caller's
+  Wayland display and audio (PipeWire, PulseAudio) at the same paths in its own
+  runtime directory, and the GPU through a device plugin built into the agent,
+  `gr8s.io/dri`, which shares the render nodes and NVIDIA's device nodes.
+  `--no-display`, `--no-audio` and `--no-gpu` withhold them. Never X11 or D-Bus.
+  NSS clients (Firefox, Chrome) trust the egress CA through p11-kit's anchors, so
+  `gr8 firefox` works with TLS termination.
+
 - The Network view draws more than 8 World sites in a view as one Internet node, with
   one edge per workload and direction carrying their sum, and a scrollable list of
   the sites on its card (most dropped first, then busiest) that opens each one's
