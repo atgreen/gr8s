@@ -456,7 +456,13 @@ outside SERVER's lock because a peer RPC may take seconds."
 
 (defun start-node-operation-route-retry (server operation)
   (bt:make-thread
-   (lambda () (retry-node-operation-route server operation))
+   (lambda ()
+     ;; An error routing one operation fails that operation, not the server (podster-2aum).
+     (handler-case (retry-node-operation-route server operation)
+       (error (condition)
+         (format *error-output* "gr8s could not route node operation ~A: ~A~%"
+                 (operation-request-id (pending-node-operation-request operation)) condition)
+         (finish-node-operation operation :error (princ-to-string condition)))))
    :name (format nil "gr8s route node operation ~A"
                  (operation-request-id
                   (pending-node-operation-request operation)))))

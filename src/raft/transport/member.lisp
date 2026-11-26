@@ -693,13 +693,17 @@ whether it was connected just now."
 second value the reason it gave when it did not. A cached connection the peer has since
 dropped, as a restart does, fails as it is written to: the frame never reached the new
 process, so it goes again once on a new connection (podster-3ao). A timeout doesn't:
-the frame may have arrived, and an operation must not start twice."
+the frame may have arrived, and an operation must not start twice. A peer that can't be
+reached -- refused, or too slow to finish TLS while it restarts -- didn't accept it, and
+nothing is retried (podster-2aum)."
   (bt:with-lock-held ((raft-peer-link-relay-lock link))
     (loop
-      (multiple-value-bind (stub fresh) (raft-link-relay-stub member link)
+      ;; Connecting is inside the handler: its failure escaped once and ended the process.
+      (let ((fresh (null (raft-peer-link-relay-stub link))))
         (handler-case
-            (let ((result (funcall relay stub (make-routed-operation member variant node-name payload)
-                                   :timeout 3)))
+            (let* ((stub (raft-link-relay-stub member link))
+                   (result (funcall relay stub (make-routed-operation member variant node-name payload)
+                                    :timeout 3)))
               (return (values (slot-value result 'gr8s.node.v1::accepted)
                               (slot-value result 'gr8s.node.v1::error-message))))
           ((or error sb-ext:timeout) (condition)

@@ -1095,3 +1095,27 @@ does; --kubelet-port moves them, and 0 turns them off."
       (is (null (ensure nil nil)))
       (is (null set)))))
 
+
+(test an-unhandled-error-ends-the-process-promptly
+  ;; SBCL's quit waited 60 s for threads to unwind, and a member sat that long with its
+  ;; listeners closed before systemd restarted it (podster-2aum).
+  (let ((hook sb-ext:*invoke-debugger-hook*)
+        (installed gr8s.server::*prompt-fatal-exit-installed*)
+        (exit-timeout sb-ext:*exit-timeout*)
+        (quit-with nil))
+    (unwind-protect
+         (progn
+           (setf sb-ext:*invoke-debugger-hook* (lambda (condition hook)
+                                                 (declare (ignore hook))
+                                                 (setf quit-with (list condition sb-ext:*exit-timeout*)))
+                 gr8s.server::*prompt-fatal-exit-installed* nil
+                 sb-ext:*exit-timeout* 60)
+           (gr8s.server::install-prompt-fatal-exit)
+           (let ((condition (make-condition 'simple-error :format-control "fatal")))
+             (funcall sb-ext:*invoke-debugger-hook* condition nil)
+             (is (eq condition (first quit-with)) "the quit hook still runs")
+             (is (= gr8s.server::+fatal-exit-timeout-seconds+ (second quit-with))
+                 "with the shorter wait for threads")))
+      (setf sb-ext:*invoke-debugger-hook* hook
+            gr8s.server::*prompt-fatal-exit-installed* installed
+            sb-ext:*exit-timeout* exit-timeout))))
