@@ -4130,10 +4130,24 @@ upstream CRDs.
   A gr8 sandbox gets the caller's Wayland display, audio and GPU (the agent's
   built-in device plugin offers render nodes as `gr8s.io/dri`) unless gr8 is
   run with --no-display, --no-audio or --no-gpu; never X11 or D-Bus.
+  `spec.run` makes a profile one gr8 run's alone (a policy file's); the node
+  prefers it for that run's Pod and never applies it to another.
   A gr8 sandbox is always on synthetic DNS, and anything no policy allows is
-  denied; `gr8 --allow NAME` allows a name for one run. `gr8 login claude` stores
-  Claude Code's subscription token as a Secret with a SecurityProfile injecting
-  it; the sandbox then sees stand-in tokens. See docs/design-agent-egress.md.
+  denied; `gr8 --allow NAME` allows a name for one run. It requests 1 CPU and
+  1Gi and is limited to half the node's (`--cpu`, `--memory`). `gr8 login claude`
+  stores Claude Code's subscription tokens as a Secret with a SecurityProfile
+  injecting the access token and handling the refresh; the sandbox then sees
+  stand-in tokens.
+  A gr8 policy file (`gr8.gr8s.io/v1alpha1` Policy, client-side) says all a
+  command gets: `hosts`, `credentials` (`from: env:NAME` or `file:PATH#key/path`,
+  `hosts`, `header`, `template`, `env` for a stand-in), `home`, `env`, `egress`
+  (as `spec.egress`), `desktop` and `resources`. `gr8 CMD` reads
+  `~/.config/gr8/policies/CMD.yaml`, else `.gr8/CMD.yaml` in the working
+  directory, or `--policy NAME|FILE`, and creates resources for that run alone
+  (a ClusterNetworkPolicy, Secrets and a SecurityProfile owned by the Pod, a
+  `spec.run` SandboxProfile), removed when it ends. A working-directory policy is
+  shown and pinned by content, and asked about again when it changes. See
+  docs/gr8.md and docs/design-agent-egress.md.
 
 If you have already installed an upstream duplicate and wedged a group, recover
 by removing it and its CRDs (`helm uninstall ...`; `kubectl delete crd ...`);
