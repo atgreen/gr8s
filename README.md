@@ -178,6 +178,10 @@ For multi-member operation, recovery, automatic checkpoints and heap sizing, see
   control-plane or agent process; see
   [debugging a running cluster](docs/building-and-testing.md#debugging-a-running-cluster).
   `gr8s skill` prints built-in operator and AI agent guidance that works offline.
+- **A sandbox for AI agents and desktop apps.** [`gr8`](#gr8--run-anything-in-a-sandbox)
+  runs a command, `claude` or `firefox`, as if you had, but confined: it reaches only
+  the hosts a policy names, sees every request audited, and never holds a real
+  credential.
 - **An independent implementation to study.** The control plane and node agent
   are written from scratch rather than packaged from upstream Kubernetes. gr8s
   is an experiment in large systems programming in Common Lisp:
@@ -228,6 +232,40 @@ helm install gr8s-net deploy/chart/gr8s-net -n kube-system \
 See [deploy/](deploy/) for the chart and conformance harness, and the
 [foreign-cluster networking design](docs/design-foreign-cluster-networking.md)
 for how it works.
+
+## gr8 — run anything in a sandbox
+
+`gr8 COMMAND` runs a command on your machine as if you had typed it, with your
+terminal, your files and your desktop, but inside a sandboxed Pod on the local
+gr8s node, where the node, not the command, decides what it can do.
+
+```console
+$ gr8 --allow api.anthropic.com --allow '*.github.com' claude
+$ gr8 --allow '*.wikipedia.org' firefox
+```
+
+- **Files.** It reads the system and writes only the directory you started it
+  in, under Landlock, with a private `$HOME` holding just what it is granted.
+- **Network by name.** Its DNS answers only the hostnames a policy allows, and
+  every connection goes through the node's egress proxy, which admits it by the
+  name it asked for. Everything else is denied: addresses, IPv6, the LAN, the
+  API server. A rule can narrow a host to the programs that may reach it, so
+  `gh` may reach api.github.com and `curl` may not.
+- **Every request seen.** The proxy terminates its TLS with a certificate from
+  the cluster's egress CA, which the sandbox trusts, and records each DNS answer,
+  connection and request in the flow stream, so the dashboard's Network view
+  shows what an agent asked for and what it was refused.
+- **No real credentials.** The command holds stand-ins. The proxy writes the real
+  API key or bearer token into requests to the host it belongs to, refuses with
+  an explanation a stand-in sent anywhere else, and handles OAuth refreshes
+  itself. `gr8 login claude` moves Claude Code's subscription login into the
+  cluster.
+- **A desktop.** It gets your Wayland display, audio and GPU (never X11 or the
+  D-Bus session bus), and a share of CPU and memory with a ceiling.
+
+Policy is ordinary Kubernetes: ClusterNetworkPolicy for hostnames,
+SecurityProfile for credentials and a SandboxProfile for each command, with
+Enforce and Audit modes. See [docs/gr8.md](docs/gr8.md).
 
 ## Dashboard
 
