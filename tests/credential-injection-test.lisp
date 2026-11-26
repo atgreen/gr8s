@@ -405,3 +405,26 @@
            (setf (gethash "resourceVersion" (gethash "metadata" secret)) "6")
            (is (equal "old" (gr8s.agent::node-runtime-credential runtime secret "accessToken"))))
       (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))
+
+;;; podster-wv1w.14: what a gr8 policy creates for one run.
+
+;; Emitted by gr8's TestEmitLoginProfiles (gr8/internal/client/runpolicy.go).
+(defparameter +ci-run-security-profile+ "{\"apiVersion\":\"agents.kruise.io/v1alpha1\",\"kind\":\"SecurityProfile\",\"metadata\":{\"labels\":{\"app.kubernetes.io/managed-by\":\"gr8\"},\"name\":\"gr8-claude-abcde\",\"namespace\":\"gr8\"},\"spec\":{\"rules\":[{\"actions\":{\"tokenTransformation\":{\"apiKey\":{\"targetHeaders\":{\"names\":[\"authorization\"]},\"value\":{\"template\":\"Bearer {{ .Token }}\"}},\"credentialRef\":{\"secret\":{\"key\":\"token\",\"name\":\"gr8-claude-abcde-credential-0\"}},\"failStrategy\":\"Block\",\"type\":\"ApiKey\"}},\"match\":[{\"domains\":[\"api.github.com\"],\"schemes\":[\"https\"]}],\"name\":\"credential-0\"}],\"selector\":{\"matchLabels\":{\"gr8s.io/gr8-run\":\"gr8-claude-abcde\"}}}}")
+(defparameter +ci-run-sandbox-profile+ "{\"apiVersion\":\"gr8.gr8s.io/v1alpha1\",\"kind\":\"SandboxProfile\",\"metadata\":{\"labels\":{\"app.kubernetes.io/managed-by\":\"gr8\",\"gr8s.io/gr8-run\":\"gr8-claude-abcde\"},\"name\":\"gr8-claude-abcde\"},\"spec\":{\"commands\":[\"claude\"],\"egress\":{\"binaries\":[{\"hosts\":[\"api.github.com\"],\"paths\":[\"/usr/bin/gh\"]}],\"enforcement\":\"Audit\"},\"run\":\"gr8-claude-abcde\"}}")
+
+(test ci-a-policys-run-profiles-are-valid-and-its-own-run-comes-first
+  (is (gr8s.resources::normalize-core-resource "securityprofiles" (com.inuoe.jzon:parse +ci-run-security-profile+) "gr8" nil nil))
+  (let ((run-profile (gr8s.resources::normalize-core-resource "sandboxprofiles" (com.inuoe.jzon:parse +ci-run-sandbox-profile+)
+                                                              nil "gr8-claude-abcde" nil)))
+    (flet ((enforcement (run)
+             (gr8s.network::gr8-sandbox-enforcement
+              (gr8s.network::make-np-pod :name run :namespace "gr8"
+                                         :labels (gr8s.network::np-labels "gr8s.io/gr8-command" "claude" "gr8s.io/gr8-run" run))
+              (list run-profile (ci-sandbox-profile "claude" '("claude") "{\"enforcement\":\"Enforce\"}")))))
+      ;; Its own run gets the policy's Audit; any other run of claude, the standing profile.
+      (is (eq :audit (enforcement "gr8-claude-abcde")))
+      (is (eq :enforce (enforcement "gr8-claude-zzzzz")))))
+  (let ((bad (ci-sandbox-profile "x" '("x"))))
+    (setf (gethash "run" (gethash "spec" bad)) "Not A Pod!")
+    (signals gr8s.resources::kubernetes-error
+      (gr8s.resources::normalize-core-resource "sandboxprofiles" bad nil "x" nil))))

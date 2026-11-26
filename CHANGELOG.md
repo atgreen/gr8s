@@ -9,6 +9,15 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- gr8 policy files (podster-wv1w.14): one `gr8.gr8s.io/v1alpha1` Policy says a
+  command's hosts, credentials (read from `env:` or `file:` sources on the host when
+  the run starts), home grants, environment, egress inspection, desktop and
+  resources. gr8 makes them resources scoped to the run's Pod, owned by it where
+  namespaced, and removes them when the run ends. `~/.config/gr8/policies/CMD.yaml`
+  is trusted; a working directory's `.gr8/CMD.yaml`, which the sandbox could edit, is
+  pinned by content, and shown and asked about again whenever it changes.
+  SandboxProfile gains `spec.run`, a profile for one run, which the node prefers.
+
 - A gr8 sandbox requests 1 CPU and 1Gi and is limited to half the node's CPU and
   memory by default, `--cpu` and `--memory` setting both; it was BestEffort, with
   no ceiling and the first to be killed.

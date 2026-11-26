@@ -40,6 +40,7 @@ type Options struct {
 	NoDisplay  bool     // withhold the Wayland display
 	NoAudio    bool     // withhold the audio sockets
 	NoGPU      bool     // withhold the GPU render nodes
+	Policy     string   // --policy: a policy file, or a name in ~/.config/gr8/policies
 	CPU        string   // the command's CPU, request and limit; default SandboxResources
 	Memory     string   // the command's memory, request and limit
 	Command    []string
@@ -68,6 +69,14 @@ func Run(options Options) (int, error) {
 		return 0, err
 	}
 	cwd, err := os.Getwd()
+	if err != nil {
+		return 0, err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return 0, err
+	}
+	policy, values, err := loadPolicy(&options, home, cwd)
 	if err != nil {
 		return 0, err
 	}
@@ -109,6 +118,17 @@ func Run(options Options) (int, error) {
 			defer deleteAllowPolicy(clientset, pod.Name)
 		}
 	}
+	credentials := 0
+	if policy != nil {
+		credentials = len(policy.Spec.Credentials)
+		if err := createPolicyCredentials(ctx, clientset, pod, policy.Spec.Credentials, values); err != nil {
+			deletePolicyCredentials(clientset, pod, credentials)
+			return 0, err
+		}
+		if !options.Keep {
+			defer deletePolicyCredentials(clientset, pod, credentials)
+		}
+	}
 	pod, err = clientset.CoreV1().Pods(options.Namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
 		return 0, fmt.Errorf("creating the Pod: %w", err)
@@ -117,15 +137,26 @@ func Run(options Options) (int, error) {
 	if !options.Keep {
 		defer deletePod(clientset, pod)
 	}
+	if policy != nil {
+		adoptPolicyCredentials(ctx, clientset, pod, credentials)
+		if egress := policy.Spec.egressJSON(); egress != nil {
+			if err := postObject(ctx, clientset, sandboxProfiles,
+				RunSandboxProfile(pod.Name, filepath.Base(options.Command[0]), egress), "the SandboxProfile"); err != nil {
+				return 0, err
+			}
+			if !options.Keep {
+				defer deleteRunSandboxProfile(clientset, pod.Name)
+			}
+		}
+	}
 	if err := waitRunning(ctx, clientset, pod); err != nil {
 		return 0, err
 	}
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return 0, err
-	}
 	grant := Profile(options.Command[0], home, clusterProfiles(ctx, clientset, options.Namespace))
+	if policy != nil {
+		grant = policy.withGrant(grant, home)
+	}
 	options.ReadOnly = append(grant.ReadOnly, options.ReadOnly...)
 	options.ReadWrite = append(grant.ReadWrite, options.ReadWrite...)
 	options.PlaceholderFiles = grant.Placeholders
@@ -148,6 +179,89 @@ func offersGPU(node *corev1.Node) bool {
 	quantity, ok := node.Status.Allocatable[GPUResource]
 	return ok && !quantity.IsZero()
 }
+
+// loadPolicy finds, approves and reads the command's policy, if it has one, and
+// folds what it says into options: hosts into Allow (with its credentials' hosts),
+// and its desktop and resources where no flag already says. It reads each
+// credential's real value now, so a missing one stops the run before it starts.
+func loadPolicy(options *Options, home, cwd string) (*Policy, []string, error) {
+	file, found, err := FindPolicy(options.Policy, options.Command[0], home, cwd)
+	if err != nil || !found {
+		return nil, nil, err
+	}
+	raw, err := os.ReadFile(file.Path)
+	if err != nil {
+		return nil, nil, err
+	}
+	policy, err := ParsePolicy(raw)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s: %w", file.Path, err)
+	}
+	ask := func(string) bool { return false }
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		ask = TerminalAsk(os.Stdin, os.Stderr)
+	}
+	if err := ApprovePolicy(file, raw, home, ask); err != nil {
+		return nil, nil, err
+	}
+	options.logf("policy %s", file.Path)
+	var values []string
+	for _, credential := range policy.Spec.Credentials {
+		value, err := CredentialValue(credential.From, home, os.Getenv)
+		if err != nil {
+			return nil, nil, err
+		}
+		values = append(values, value)
+		options.Allow = append(options.Allow, credential.Hosts...)
+	}
+	options.Allow = append(options.Allow, policy.Spec.Hosts...)
+	if desktop := policy.Spec.Desktop; desktop != nil {
+		options.NoDisplay = options.NoDisplay || (desktop.Display != nil && !*desktop.Display)
+		options.NoAudio = options.NoAudio || (desktop.Audio != nil && !*desktop.Audio)
+		options.NoGPU = options.NoGPU || (desktop.GPU != nil && !*desktop.GPU)
+	}
+	if options.CPU == "" {
+		options.CPU = policy.Spec.Resources.CPU
+	}
+	if options.Memory == "" {
+		options.Memory = policy.Spec.Resources.Memory
+	}
+	return &policy, values, nil
+}
+
+// withGrant adds the policy's home paths, environment and credential stand-ins to
+// what the command's SandboxProfile grants.
+func (policy *Policy) withGrant(grant Grant, home string) Grant {
+	inHome := func(paths []string) []string {
+		var out []string
+		for _, path := range paths {
+			out = append(out, filepath.Join(home, path))
+		}
+		return out
+	}
+	spec := policy.Spec
+	grant.ReadOnly = append(grant.ReadOnly, inHome(spec.Home.ReadOnly)...)
+	grant.ReadWrite = append(grant.ReadWrite, inHome(spec.Home.ReadWrite)...)
+	grant.Placeholders = append(grant.Placeholders, inHome(spec.Home.Placeholders)...)
+	env := map[string]string{}
+	for name, value := range grant.Env {
+		env[name] = value
+	}
+	for name, value := range spec.Env {
+		env[name] = value
+	}
+	for _, credential := range spec.Credentials {
+		if credential.Env != "" {
+			env[credential.Env] = StandIn
+		}
+	}
+	grant.Env = env
+	return grant
+}
+
+// StandIn is what a sandbox holds in place of a credential, which the node egress
+// proxy recognizes (podster-wv1w.12).
+const StandIn = "gr8s-injected"
 
 func (options Options) logf(format string, arguments ...any) {
 	if options.Verbose {

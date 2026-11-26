@@ -328,27 +328,35 @@ policies don't allow is denied (podster-1mzb)."
 (defun gr8-sandbox-profile (pod sandbox-profiles namespace-labels)
   "The SandboxProfile (an object) for gr8 sandbox POD's command: among SANDBOX-PROFILES
 whose spec.commands names it and whose spec.namespaceSelector, if any, matches its
-namespace's labels in NAMESPACE-LABELS, one with a selector before one without, then
-the first by name; else NIL. Chosen by what the node sees, so a Pod can't pick its own."
+namespace's labels in NAMESPACE-LABELS, one for POD's own run (spec.run, a gr8
+policy's) first, then one with a selector before one without, then the first by name;
+else NIL. A profile for another run never applies. Chosen by what the node sees, so a
+Pod can't pick its own."
   (let ((command (and (gr8-sandbox-pod-p pod) (gethash +gr8-sandbox-label+ (np-pod-labels pod))))
+        (run (gethash "gr8s.io/gr8-run" (np-pod-labels pod)))
         (labels (gethash (np-pod-namespace pod) namespace-labels)))
     (when command
       (flet ((spec (profile) (gethash "spec" profile (core-object))))
-        (let ((candidates
-                (remove-if-not
-                 (lambda (profile)
-                   (let ((commands (gethash "commands" (spec profile) #()))
-                         (selector (gethash "namespaceSelector" (spec profile))))
-                     (and (vectorp commands) (find command commands :test #'equal)
-                          (or (null selector) (np-selector-matches-p selector labels)))))
-                 sandbox-profiles)))
-          (first (sort candidates
-                       (lambda (a b)
-                         (let ((a-scoped (and (gethash "namespaceSelector" (spec a)) t))
-                               (b-scoped (and (gethash "namespaceSelector" (spec b)) t)))
-                           (if (eq a-scoped b-scoped)
-                               (string< (gethash "name" (gethash "metadata" a)) (gethash "name" (gethash "metadata" b)))
-                               a-scoped))))))))))
+        (flet ((rank (profile)
+                 (cond ((gethash "run" (spec profile)) 0)
+                       ((gethash "namespaceSelector" (spec profile)) 1)
+                       (t 2))))
+          (let ((candidates
+                  (remove-if-not
+                   (lambda (profile)
+                     (let ((commands (gethash "commands" (spec profile) #()))
+                           (selector (gethash "namespaceSelector" (spec profile)))
+                           (for-run (gethash "run" (spec profile))))
+                       (and (vectorp commands) (find command commands :test #'equal)
+                            (or (null for-run) (equal for-run run))
+                            (or (null selector) (np-selector-matches-p selector labels)))))
+                   sandbox-profiles)))
+            (first (sort candidates
+                         (lambda (a b)
+                           (let ((ra (rank a)) (rb (rank b)))
+                             (if (= ra rb)
+                                 (string< (gethash "name" (gethash "metadata" a)) (gethash "name" (gethash "metadata" b)))
+                                 (< ra rb))))))))))))
 
 (defun gr8-sandbox-enforcement (pod sandbox-profiles &optional (namespace-labels (make-hash-table :test #'equal)))
   "Whether a rule gr8 sandbox POD's egress breaks is refused (:enforce, the default) or

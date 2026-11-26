@@ -83,7 +83,7 @@
        ;; Which commands it is for and how their egress is inspected; what gr8 grants in
        ;; the caller's home is none of the node's business.
        (let ((spec (core-object)))
-         (dolist (key '("commands" "namespaceSelector" "egress"))
+         (dolist (key '("commands" "namespaceSelector" "run" "egress"))
            (multiple-value-bind (value present) (gethash key (gethash "spec" object (core-object)))
              (when present (setf (gethash key spec) (copy-core-object value)))))
          (setf (gethash "spec" result) spec)))
