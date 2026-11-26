@@ -1380,6 +1380,13 @@ the node from starting."
                                    (and rule (or (gr8s.network::cnp-rule-name rule) "unnamed")))))
                :inject (lambda (peer host scheme)
                          (node-runtime-egress-injector node-runtime peer host scheme))
+               ;; The hosts a refused stand-in's credentials are for (podster-wv1w.12).
+               :bindings (lambda (peer)
+                           (destructuring-bind (&optional ip-map specs cluster-policies profiles &rest more)
+                               (node-runtime-egress-view node-runtime)
+                             (declare (ignore specs cluster-policies more))
+                             (let ((pod (and ip-map (gethash peer ip-map))))
+                               (and pod (gr8s.network::pod-credential-hosts pod profiles)))))
                ;; A gr8 sandbox's TLS is terminated and each request seen, as its
                ;; SandboxProfile says (podster-wv1w.11).
                :inspect (lambda (peer host)

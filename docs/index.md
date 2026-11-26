@@ -10,7 +10,8 @@ Choose a path through the current guides:
 | Develop gr8s | [Architecture](design.md) | [Source map and request walkthrough](development.md), [tests and debugging](building-and-testing.md#test-matrix), [documentation style](documentation-style.md) |
 | Evaluate the evidence | [Conformance results](CONFORMANCE.md) | [Gateway conformance harness](../deploy/conformance/README.md), linked validation records in each feature guide |
 
-Feature references cover [networking](networking.md), [container runtimes](runtime.md),
+Feature references cover [gr8, the sandbox for agents and other commands](gr8.md),
+[networking](networking.md), [container runtimes](runtime.md),
 [storage](persistent-storage.md), [custom resources](custom-resources.md),
 [Secrets](configmap-secret-api.md), [resource management](resource-management.md),
 and [KubeVirt](kubevirt.md).

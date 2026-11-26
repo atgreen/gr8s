@@ -276,3 +276,15 @@
      (com.inuoe.jzon:parse "{\"apiVersion\":\"gr8.gr8s.io/v1alpha1\",\"kind\":\"SandboxProfile\",\"metadata\":{\"name\":\"x\"},
         \"spec\":{\"commands\":[\"x\"],\"namespaceSelector\":{\"matchLabels\":{\"team\":\"a\"},\"bogus\":1}}}")
      nil "x" nil)))
+
+(test ci-a-pods-credentials-are-bound-to-its-rules-hosts
+  (multiple-value-bind (rules profiles) (ci-rules)
+    (declare (ignore rules))
+    (is (equal '("api.anthropic.com")
+               (gr8s.network::pod-credential-hosts
+                (gr8s.network::make-np-pod :name "agent" :namespace "gr8"
+                                           :labels (gr8s.network::np-labels "gr8s.io/gr8-command" "claude"))
+                profiles)))
+    (is (null (gr8s.network::pod-credential-hosts
+               (gr8s.network::make-np-pod :name "web" :namespace "gr8" :labels (gr8s.network::np-labels "app" "web"))
+               profiles)))))
