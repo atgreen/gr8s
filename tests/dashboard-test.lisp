@@ -748,4 +748,22 @@
         (setf (gethash "time" lookup) "2026-11-25T12:00:00Z" (gethash "namespace" lookup) "cave"
               (gethash "pod" lookup) "cave-runner-b4-x")
         (note lookup)
-        (is (= 1 (gethash "dropped" (gethash "m1" (edge "cave/Deployment/cave-runner" "World/exfil.example")))))))))
+        (is (= 1 (gethash "dropped" (gethash "m1" (edge "cave/Deployment/cave-runner" "World/exfil.example")))))
+        ;; A lookup, not a connection to the site's port 53.
+        (is (equalp #("DNS") (gethash "ports" (edge "cave/Deployment/cave-runner" "World/exfil.example"))))))))
+
+(test network-explains-egress-proxy-decisions-by-name
+  (let ((refused (gr8s.server::network-egress-proxy-explanation
+                  (gr8s.controllers::egress-dns-flow-object "10.80.16.4" "www.youtube.com" nil)))
+        (admitted (gr8s.server::network-egress-proxy-explanation
+                   (gr8s.controllers::egress-flow-object "10.80.16.4" "api.github.com" "140.82.112.5" 443 t
+                                                         "gr8-allow"))))
+    (is (equal "DNS" (gethash "label" refused)))
+    (is (equal "denied" (gethash "verdict" refused)))
+    (is (search "refused the lookup of www.youtube.com" (gethash "text" refused)))
+    (is (equal "443/TCP" (gethash "label" admitted)))
+    (is (equal "allowed" (gethash "verdict" admitted)))
+    (is (search "admitted the connection to api.github.com by name (rule gr8-allow)"
+                (gethash "text" admitted))))
+  (is (null (gr8s.server::network-egress-proxy-explanation
+             (gr8s.resources::core-object "verdict" "DROPPED" "protocol" "TCP")))))
