@@ -141,12 +141,14 @@ refresh."
     (let ((sender *credential-rotation-sender*)
           (pod (ignore-errors (get-pod (node-runtime-store node-runtime) pod-namespace pod-name))))
       (when (and sender pod)
-        (let ((values (make-hash-table :test #'equal)))
-          (loop for (key . value) in tokens do (setf (gethash key values) value))
-          (ignore-errors
-           (funcall sender (make-instance 'gr8s.node.v1::credential-rotation
-                                          :namespace namespace :secret-name name
-                                          :pod-name pod-name :pod-uid (pod-uid pod) :tokens values))))))))
+        ;; A protobuf map is an alist here, as TOKENS already is.
+        (handler-case
+            (funcall sender (make-instance 'gr8s.node.v1::credential-rotation
+                                           :namespace namespace :secret-name name
+                                           :pod-name pod-name :pod-uid (pod-uid pod) :tokens tokens))
+          (error (condition)
+            (format *error-output* "gr8s: sending the refreshed credentials of ~A/~A failed: ~A~%"
+                    namespace name condition)))))))
 
 (defun node-runtime-pod-pids (node-runtime namespace name)
   "The processes of the Pod NAMESPACE/NAME on this node: those in its containers'
@@ -210,9 +212,13 @@ alist of Secret keys -> new real tokens the refresh returned."
         (lambda (method path)
           (let ((rule (gr8s.network::matching-injection-rule rules host scheme method path)))
             (when rule
+              ;; Qualified: gr8s.agent has no GET-CORE-RESOURCE of its own, and unqualified
+              ;; the call signalled UNDEFINED-FUNCTION, which IGNORE-ERRORS made "no
+              ;; credential", so no node ever injected one (podster-sxfe).
               (let ((secret (ignore-errors
-                             (get-core-resource store "secrets" (gr8s.network::injection-rule-namespace rule)
-                                                (gr8s.network::injection-rule-secret-name rule))))
+                             (gr8s.resources::get-core-resource
+                              store "secrets" (gr8s.network::injection-rule-namespace rule)
+                              (gr8s.network::injection-rule-secret-name rule))))
                     (name (format nil "~A/~A" (gr8s.network::injection-rule-profile rule)
                                   (gr8s.network::injection-rule-name rule))))
                 (if (eq :oauth-refresh (gr8s.network::injection-rule-kind rule))
