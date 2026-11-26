@@ -156,6 +156,91 @@ async function unpackLayer(fs, response, mediaType) {
   }
 }
 
+// The tab's layer cache (podster-57fv.11): layers it has downloaded, kept in the
+// origin-private file system by digest, so a reload or another Pod of the same image
+// needn't download them again. A layer is checked against its digest whenever it is
+// read, from the server or the cache. Least recently used layers go past a budget.
+const layerCache = {
+  async directory() {
+    if (!globalThis.navigator?.storage?.getDirectory) return null;
+    try {
+      return await navigator.storage.getDirectory().then((root) => root.getDirectoryHandle("gr8s-layers", { create: true }));
+    } catch {
+      return null;
+    }
+  },
+  async index(dir) {
+    try {
+      return JSON.parse(await (await (await dir.getFileHandle("index.json")).getFile()).text());
+    } catch {
+      return {};
+    }
+  },
+  async saveIndex(dir, index) {
+    const writable = await (await dir.getFileHandle("index.json", { create: true })).createWritable();
+    await writable.write(JSON.stringify(index));
+    await writable.close();
+  },
+  async get(digest) {
+    const dir = await this.directory();
+    if (!dir) return null;
+    try {
+      const bytes = new Uint8Array(await (await (await dir.getFileHandle(digest.replace(":", "-"))).getFile()).arrayBuffer());
+      const index = await this.index(dir);
+      index[digest] = { size: bytes.length, used: Date.now() };
+      await this.saveIndex(dir, index);
+      return bytes;
+    } catch {
+      return null;
+    }
+  },
+  async put(digest, bytes) {
+    const dir = await this.directory();
+    if (!dir) return;
+    try {
+      const writable = await (await dir.getFileHandle(digest.replace(":", "-"), { create: true })).createWritable();
+      await writable.write(bytes);
+      await writable.close();
+      const index = await this.index(dir);
+      index[digest] = { size: bytes.length, used: Date.now() };
+      const quota = (await navigator.storage.estimate?.())?.quota ?? 0;
+      const budget = Math.min(2 ** 31, quota > 0 ? quota / 4 : 2 ** 30);
+      let total = Object.values(index).reduce((sum, entry) => sum + entry.size, 0);
+      for (const [old, entry] of Object.entries(index).sort((a, b) => a[1].used - b[1].used)) {
+        if (total <= budget || old === digest) continue;
+        await dir.removeEntry(old.replace(":", "-")).catch(() => {});
+        delete index[old];
+        total -= entry.size;
+      }
+      await this.saveIndex(dir, index);
+    } catch {
+      // A full or unavailable store only means downloading again next time.
+    }
+  },
+};
+
+async function sha256Matches(digest, bytes) {
+  if (!digest.startsWith("sha256:")) return false;
+  const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return digest.slice(7) === [...hash].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// A layer's bytes: from the cache when held and intact, else from the server, then kept.
+async function layerBytes(layer, base, log) {
+  const verify = !layer.decompressed;
+  const cached = await layerCache.get(layer.digest);
+  if (cached && (!verify || (await sha256Matches(layer.digest, cached)))) {
+    log(`layer ${layer.digest.slice(7, 19)} from the tab's cache`);
+    return cached;
+  }
+  const response = await fetch(new URL(`blobs/${layer.digest}`, base));
+  if (!response.ok) throw new Error(`layer ${layer.digest}: HTTP ${response.status}`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (verify && !(await sha256Matches(layer.digest, bytes))) throw new Error(`layer ${layer.digest} did not match its digest`);
+  await layerCache.put(layer.digest, bytes);
+  return bytes;
+}
+
 // How much of each container's output is kept for `kubectl logs`.
 const LOG_LIMIT = 1 << 20;
 
@@ -368,9 +453,8 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
     const fs = new MemoryFs();
     const base = url.replace(/^ws/, "http");
     for (const layer of info.layers) {
-      const response = await fetch(new URL(`blobs/${layer.digest}`, base));
-      if (!response.ok) throw new Error(`layer ${layer.digest}: HTTP ${response.status}`);
-      await unpackLayer(fs, response, layer.mediaType ?? "");
+      const bytes = await layerBytes(layer, base, log);
+      await unpackLayer(fs, new Response(bytes), layer.mediaType ?? "");
     }
     for (const dir of ["/proc", "/dev", "/tmp", "/etc"]) fs.mkdirp(dir);
     // Cluster DNS and the Pod's own name, as the kubelet writes them.

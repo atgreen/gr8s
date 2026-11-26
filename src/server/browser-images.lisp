@@ -143,10 +143,13 @@ there is no arm64 image."
                  (image (core-object
                          "layers" (map 'vector (lambda (layer)
                                                  (let ((type (gethash "mediaType" layer "")))
-                                                   (core-object "digest" (gethash "digest" layer)
-                                                                "mediaType" (if (search "zstd" type)
-                                                                                "application/vnd.oci.image.layer.v1.tar"
-                                                                                type))))
+                                                   (if (search "zstd" type)
+                                                       ;; Served decompressed: its bytes aren't the digest's.
+                                                       (core-object "digest" (gethash "digest" layer)
+                                                                    "mediaType" "application/vnd.oci.image.layer.v1.tar"
+                                                                    "decompressed" t)
+                                                       (core-object "digest" (gethash "digest" layer)
+                                                                    "mediaType" type))))
                                        (gethash "layers" manifest #()))
                          "config" (core-object "Entrypoint" (gethash "Entrypoint" run 'null)
                                                "Cmd" (gethash "Cmd" run 'null)
