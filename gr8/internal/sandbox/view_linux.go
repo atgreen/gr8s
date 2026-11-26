@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -39,6 +40,9 @@ func buildView(hostRoot string, config Config) (*view, error) {
 		return nil, fmt.Errorf("making mounts private: %w", err)
 	}
 	result := &view{}
+	// Read each placeholder's real file now: the private $HOME below hides it unless
+	// granted, and a login's file needn't be (podster-wv1w.20).
+	placeholders := readPlaceholders(hostRoot, config.Placeholders)
 	// Hold what the covering mounts below may hide, to bind it back.
 	binds, err := holdBinds(hostRoot, config)
 	if err != nil {
@@ -95,14 +99,11 @@ func buildView(hostRoot string, config Config) (*view, error) {
 	}
 	// After the binds above: a placeholder file usually lives inside a directory the
 	// command may write (~/.claude). It covers the real one in this view only.
-	for index, path := range config.Placeholders {
-		real, err := os.ReadFile(filepath.Join(hostRoot, path))
+	for index, placeholder := range placeholders {
+		path := placeholder.path
+		standIn, err := StandInFile(path, placeholder.real, placeholder.keys)
 		if err != nil {
-			continue
-		}
-		standIn, err := StandInCredentials(real)
-		if err != nil {
-			return nil, fmt.Errorf("%s is not a JSON credentials file: %w", path, err)
+			return nil, fmt.Errorf("%s is not a credentials file gr8 can read: %w", path, err)
 		}
 		standInPath := filepath.Join(hostRoot, trustDirectory, fmt.Sprintf("placeholder-%d", index))
 		if err := os.MkdirAll(filepath.Dir(standInPath), 0o700); err != nil {
@@ -139,6 +140,31 @@ type heldBind struct {
 // holdBinds opens what must be bound back after the covering mounts: the
 // working directory, and in a private $HOME the --ro paths and --rw
 // directories there. Parents come first, so a child binds over its parent.
+type placeholderFile struct {
+	path string
+	keys []string
+	real []byte
+}
+
+// readPlaceholders reads the real files config's placeholders (PATH or PATH#keys)
+// name; one that can't be read is left out, as there is nothing to stand in for.
+func readPlaceholders(hostRoot string, placeholders []string) []placeholderFile {
+	var files []placeholderFile
+	for _, placeholder := range placeholders {
+		path, keyList, _ := strings.Cut(placeholder, "#")
+		real, err := os.ReadFile(filepath.Join(hostRoot, path))
+		if err != nil {
+			continue
+		}
+		file := placeholderFile{path: path, real: real}
+		if keyList != "" {
+			file.keys = strings.Split(keyList, ",")
+		}
+		files = append(files, file)
+	}
+	return files
+}
+
 func holdBinds(hostRoot string, config Config) ([]heldBind, error) {
 	type wanted struct {
 		path     string

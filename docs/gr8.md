@@ -32,7 +32,7 @@ means "could not resolve host".
   cluster). gr8 runs the Pod on the node whose address belongs to this machine;
   `--node` names another.
 - A kubeconfig that can create Pods in the `gr8` namespace. `--allow` also needs
-  permission to create ClusterNetworkPolicies, and `gr8 login` needs permission
+  permission to create ClusterNetworkPolicies, and `gr8 --login` needs permission
   to create Secrets and SecurityProfiles.
 - Linux with Landlock (kernel 5.13 or later). gr8 refuses to run a command
   unconfined on a kernel without it.
@@ -57,6 +57,9 @@ gr8 [flags] COMMAND [ARG...]
 | `--kubeconfig FILE` | Kubeconfig (default: `$KUBECONFIG`, then `~/.kube/config`). |
 | `--keep` | Keep the Pod, and any `--allow` policy, after the command exits. |
 | `--policy NAME\|FILE` | Use this policy instead of the command's own. |
+| `--login NAME` | Move a tool's login into the cluster (see Logins). |
+| `--logout NAME` | Remove a stored login. |
+| `--logins` | List the logins gr8 knows, and which are stored. |
 | `--cpu N` | The command's CPUs, request and limit (`4`, `500m`). |
 | `--memory N` | The command's memory, request and limit (`8Gi`). |
 | `--no-display` | Withhold the Wayland display. |
@@ -200,26 +203,53 @@ The command never holds a real credential. Each real credential lives in a
 Secret. A SecurityProfile binds it to hosts and Pods. The proxy overwrites the
 named header on matching requests with the real value.
 
-For Claude Code's subscription login:
+### Logins
+
+A tool that keeps an OAuth login in a file, as Claude Code does, can hand it to the
+cluster:
 
 ```console
-$ gr8 login claude
-gr8: claude's login is in the cluster; gr8 claude now runs with stand-in tokens
+$ gr8 --login claude
+gr8: claude's login is in the cluster; sandboxed runs of it hold stand-in tokens
 $ gr8 claude
+$ gr8 --logins                  # which logins gr8 knows, and which are stored
+$ gr8 --logout claude           # remove it from the cluster
 ```
 
-`gr8 login claude` copies the tokens from `~/.claude/.credentials.json` into the
-Secret `gr8/claude-oauth`. It also applies a SecurityProfile that injects the
-access token as `Authorization: Bearer` on api.anthropic.com and handles the
-refresh exchange on the token endpoint, and a SandboxProfile that shows the
-sandbox the credentials file with stand-in tokens and the real expiry.
+`gr8 --login NAME` copies the tool's tokens from its own file into the Secret
+`gr8/login-NAME`, and applies a SecurityProfile that injects the access token into
+requests to the login's hosts and, when the tool refreshes, handles the refresh
+exchange at its token endpoint. A sandboxed run of one of the login's commands
+sees the tool's file with stand-ins at exactly the token keys, and may reach the
+login's hosts without listing them.
 
-When the sandboxed claude refreshes, the proxy sends the real refresh token, keeps
-the new tokens the response carries, and gives claude stand-ins. The node writes
-the new tokens back to the Secret. While `gr8 claude` runs, gr8 keeps the Secret
-and the host's file in step, whichever expires later winning, so your host's own
-`claude` keeps working after the sandbox refreshes. Allow the token endpoint's
-hosts (`platform.claude.com`, `console.anthropic.com`) in claude's policy.
+When the sandboxed tool refreshes, the proxy sends the real refresh token, keeps the
+new tokens the response carries, and gives the tool stand-ins. The node writes the
+new tokens back to the Secret. While the command runs, gr8 keeps the Secret and the
+host's file in step, whichever expires later winning, so the tool outside the
+sandbox keeps working after a refresh inside it retires its old refresh token.
+
+gr8 knows `claude`. Describe any other tool's login in `~/.config/gr8/logins.yaml`:
+
+```yaml
+acme:
+  commands: [acme]                      # the commands it is for
+  file: .config/acme/credentials.json   # relative to $HOME; YAML if .yaml or .yml
+  accessToken: oauth/access_token       # key paths, split on / (keys may hold dots)
+  refreshToken: oauth/refresh_token     # optional
+  expiresAt: oauth/expires_at           # optional
+  expiresUnit: seconds                  # milliseconds (default), seconds or rfc3339
+  inject:
+    hosts: [api.acme.example]
+    header: authorization               # the default
+    template: "Bearer {{ .Token }}"     # the default
+  refresh:                              # optional: the OAuth token endpoint
+    hosts: [auth.acme.example]
+    path: /oauth/token
+```
+
+A policy file can carry a stored login for one run: `credentials: [{from:
+login:acme}]`.
 
 An API key works the same way, with a SecurityProfile rule that targets
 `x-api-key` and a stand-in in the command's environment. See
@@ -245,7 +275,8 @@ metadata: {name: claude}
 spec:
   hosts: [api.anthropic.com, platform.claude.com, "*.githubusercontent.com"]
   credentials:
-  - from: env:GITHUB_TOKEN                 # or file:~/.config/gh/hosts.yml#github.com/oauth_token
+  - from: env:GITHUB_TOKEN                 # or file:~/.config/gh/hosts.yml#github.com/oauth_token,
+                                           # or login:NAME, a stored login
     hosts: [api.github.com, github.com]
     header: authorization                  # the default
     template: "Bearer {{ .Token }}"        # the default

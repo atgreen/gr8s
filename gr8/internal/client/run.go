@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"syscall"
 	"time"
 
@@ -23,6 +24,8 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
 	utilexec "k8s.io/client-go/util/exec"
+
+	"github.com/atgreen/gr8s/gr8/internal/sandbox"
 )
 
 // Options are the client's command-line settings.
@@ -80,6 +83,10 @@ func Run(options Options) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	logins, err := Logins(home)
+	if err != nil {
+		return 0, err
+	}
 	node := options.Node
 	if node == "" {
 		if node, err = localNode(ctx, clientset); err != nil {
@@ -88,6 +95,26 @@ func Run(options Options) (int, error) {
 	}
 	if err := ensureNamespace(ctx, clientset, options.Namespace); err != nil {
 		return 0, err
+	}
+
+	// The logins this run carries: those stored for its command, applied by their
+	// own SecurityProfiles, and those its policy names, applied for it alone. Their
+	// hosts are its to reach.
+	stored := storedLogins(ctx, clientset, options.Namespace, options.Command[0], logins)
+	var named []string
+	if policy != nil {
+		for _, name := range policy.Spec.loginNames() {
+			if _, ok := logins[name]; !ok {
+				return 0, fmt.Errorf("the policy names login %q, which gr8 doesn't know", name)
+			}
+			if !slices.Contains(stored, name) {
+				named = append(named, name)
+			}
+		}
+	}
+	carried := append(append([]string{}, stored...), named...)
+	for _, name := range carried {
+		options.Allow = append(options.Allow, logins[name].Hosts()...)
 	}
 
 	nodeObject, err := clientset.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
@@ -118,15 +145,20 @@ func Run(options Options) (int, error) {
 			defer deleteAllowPolicy(clientset, pod.Name)
 		}
 	}
-	credentials := 0
+	credentials, profile := 0, false
 	if policy != nil {
-		credentials = len(policy.Spec.Credentials)
-		if err := createPolicyCredentials(ctx, clientset, pod, policy.Spec.Credentials, values); err != nil {
-			deletePolicyCredentials(clientset, pod, credentials)
+		credentials = len(policy.Spec.valueCredentials())
+		profile = credentials > 0 || len(named) > 0
+		var loginRules []any
+		for _, name := range named {
+			loginRules = append(loginRules, LoginRules(name, logins[name])...)
+		}
+		if err := createPolicyCredentials(ctx, clientset, pod, policy.Spec.valueCredentials(), values, loginRules); err != nil {
+			deletePolicyCredentials(clientset, pod, credentials, true)
 			return 0, err
 		}
 		if !options.Keep {
-			defer deletePolicyCredentials(clientset, pod, credentials)
+			defer deletePolicyCredentials(clientset, pod, credentials, profile)
 		}
 	}
 	pod, err = clientset.CoreV1().Pods(options.Namespace).Create(ctx, pod, metav1.CreateOptions{})
@@ -138,7 +170,7 @@ func Run(options Options) (int, error) {
 		defer deletePod(clientset, pod)
 	}
 	if policy != nil {
-		adoptPolicyCredentials(ctx, clientset, pod, credentials)
+		adoptPolicyCredentials(ctx, clientset, pod, credentials, profile)
 		if egress := policy.Spec.egressJSON(); egress != nil {
 			if err := postObject(ctx, clientset, sandboxProfiles,
 				RunSandboxProfile(pod.Name, filepath.Base(options.Command[0]), egress), "the SandboxProfile"); err != nil {
@@ -163,12 +195,13 @@ func Run(options Options) (int, error) {
 	for name, value := range grant.Env {
 		options.Placeholders = append(options.Placeholders, name+"="+value)
 	}
-	// While the sandbox runs with stand-in tokens, keep the injected credential as
-	// fresh as the host's own login (podster-wv1w.7).
-	if len(grant.Placeholders) > 0 {
-		go syncCredentials(ctx, clientset, options.Namespace, options.Command[0], home)
+	// Each login's file, as the sandbox sees it, holds stand-ins at its token keys;
+	// while the command runs, the host's copy and the Secret are kept in step.
+	for _, name := range carried {
+		options.PlaceholderFiles = append(options.PlaceholderFiles, logins[name].PlaceholderArg(home))
+		go syncLogin(ctx, clientset, options.Namespace, name, logins[name], home)
 	}
-	argv := append([]string{HostRoot + launcher, "launch", "--cwd", cwd, "--home", home},
+	argv := append([]string{HostRoot + launcher, sandbox.Internal, "launch", "--cwd", cwd, "--home", home},
 		launchFlags(options)...)
 	argv = append(append(argv, "--"), options.Command...)
 	return execInPod(ctx, config, clientset, pod, argv)
@@ -206,7 +239,7 @@ func loadPolicy(options *Options, home, cwd string) (*Policy, []string, error) {
 	}
 	options.logf("policy %s", file.Path)
 	var values []string
-	for _, credential := range policy.Spec.Credentials {
+	for _, credential := range policy.Spec.valueCredentials() {
 		value, err := CredentialValue(credential.From, home, os.Getenv)
 		if err != nil {
 			return nil, nil, err
@@ -250,7 +283,7 @@ func (policy *Policy) withGrant(grant Grant, home string) Grant {
 	for name, value := range spec.Env {
 		env[name] = value
 	}
-	for _, credential := range spec.Credentials {
+	for _, credential := range spec.valueCredentials() {
 		if credential.Env != "" {
 			env[credential.Env] = StandIn
 		}

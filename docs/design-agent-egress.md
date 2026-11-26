@@ -293,7 +293,7 @@ endpoint it matches:
 ```yaml
 - name: anthropic-oauth-refresh
   match:
-  - domains: [platform.claude.com, console.anthropic.com]
+  - domains: [platform.claude.com]
     schemes: [https]
     methods: [POST]
     paths: [{type: Prefix, value: /v1/oauth/token}]
@@ -301,7 +301,7 @@ endpoint it matches:
     tokenTransformation:
       type: OAuthRefresh
       failStrategy: Block
-      credentialRef: {secret: {name: claude-oauth}}
+      credentialRef: {secret: {name: login-claude}}
       oauthRefresh: {accessTokenKey: accessToken, refreshTokenKey: refreshToken}  # the defaults
 ```
 
@@ -402,11 +402,13 @@ The sandbox's stand-in file keeps the real expiry, so the client refreshes on ti
 - **The DNS gate** is a small server on the proxy address: cl-dns-proxy's hooks don't
   see the client, so captured Pods' DNS is redirected to the gate, which relays allowed
   names to the node DNS server.
-- **OAuth subscription logins** (podster-wv1w.7) work without the refresh exchange:
-  `gr8 login claude` stores the access token for injection, the sandbox sees the
-  credentials file with stand-in tokens and a far-off expiry so it never refreshes,
-  and gr8 keeps the Secret in step with the host's credentials file, which the
-  host's own claude refreshes. Rewriting the refresh exchange itself is follow-up work.
+- **OAuth logins** (podster-wv1w.7, kn03, .20): `gr8 --login NAME` stores any tool's
+  login described by its file, token key paths, expiry, inject hosts and token
+  endpoint (claude is built in; others in `~/.config/gr8/logins.yaml`) as the Secret
+  `login-NAME` with a SecurityProfile that injects the access token and handles the
+  refresh exchange at the proxy. The sandbox sees the tool's file with stand-ins at
+  the token keys and the real expiry, so it refreshes on time; gr8 keeps the Secret
+  and the host's file in step, the later expiry winning.
 - **Verification.** Unit and in-process tests cover policy compilation, the proxy
   (pass-through, refusal, cleartext and TLS injection), the DNS gate, the CA and the
   APIs; the endpoint guard, socket hooks and sk_lookup steering ran on a real kernel

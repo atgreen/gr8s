@@ -122,8 +122,12 @@ func Confine(args []string) int {
 	return fail(ExitCannotRun, fmt.Errorf("exec %s: %w", path, err))
 }
 
+// Internal is the flag before the mode gr8 runs itself in inside the Pod (hold,
+// launch, enter, confine): a flag, so no command of those names is mistaken for one.
+const Internal = "--internal"
+
 func self(mode string, args []string) *exec.Cmd {
-	child := exec.Command("/proc/self/exe", append([]string{mode}, args...)...)
+	child := exec.Command("/proc/self/exe", append([]string{Internal, mode}, args...)...)
 	child.Stdin, child.Stdout, child.Stderr = os.Stdin, os.Stdout, os.Stderr
 	child.Env = []string{}
 	return child

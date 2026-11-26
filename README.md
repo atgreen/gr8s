@@ -258,8 +258,8 @@ $ gr8 --allow '*.wikipedia.org' firefox
 - **No real credentials.** The command holds stand-ins. The proxy writes the real
   API key or bearer token into requests to the host it belongs to, refuses with
   an explanation a stand-in sent anywhere else, and handles OAuth refreshes
-  itself. `gr8 login claude` moves Claude Code's subscription login into the
-  cluster.
+  itself. `gr8 --login NAME` moves a tool's OAuth login, Claude Code's or any
+  you describe, into the cluster.
 - **A desktop.** It gets your Wayland display, audio and GPU (never X11 or the
   D-Bus session bus), and a share of CPU and memory with a ceiling.
 

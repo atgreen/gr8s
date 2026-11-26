@@ -64,7 +64,8 @@ type PolicySpec struct {
 type PolicyCredential struct {
 	// From is where the real value is read on the host when the run starts:
 	// env:NAME, or file:PATH, or file:PATH#key/path into a YAML or JSON file (keys
-	// split on /, since they hold dots: github.com/oauth_token).
+	// split on /, since they hold dots: github.com/oauth_token); or login:NAME, a
+	// login stored with gr8 --login, with its own hosts and refresh.
 	From     string   `json:"from"`
 	Hosts    []string `json:"hosts"`
 	Header   string   `json:"header,omitempty"`   // default authorization
@@ -106,8 +107,14 @@ func ParsePolicy(raw []byte) (Policy, error) {
 	}
 	for i := range spec.Credentials {
 		credential := &spec.Credentials[i]
+		if name, ok := strings.CutPrefix(credential.From, "login:"); ok {
+			if !loginNameOK(name) {
+				return Policy{}, fmt.Errorf("credentials[%d].from: %q names no login", i, credential.From)
+			}
+			continue
+		}
 		if !strings.HasPrefix(credential.From, "env:") && !strings.HasPrefix(credential.From, "file:") {
-			return Policy{}, fmt.Errorf("credentials[%d].from: %q is neither env:NAME nor file:PATH", i, credential.From)
+			return Policy{}, fmt.Errorf("credentials[%d].from: %q is not env:NAME, file:PATH or login:NAME", i, credential.From)
 		}
 		if len(credential.Hosts) == 0 {
 			return Policy{}, fmt.Errorf("credentials[%d] names no hosts to send it to", i)
@@ -146,6 +153,29 @@ func ParsePolicy(raw []byte) (Policy, error) {
 		}
 	}
 	return policy, nil
+}
+
+// valueCredentials are the policy's credentials read from a source on the host, as
+// opposed to stored logins.
+func (spec PolicySpec) valueCredentials() []PolicyCredential {
+	var out []PolicyCredential
+	for _, credential := range spec.Credentials {
+		if !strings.HasPrefix(credential.From, "login:") {
+			out = append(out, credential)
+		}
+	}
+	return out
+}
+
+// loginNames are the stored logins the policy's credentials name.
+func (spec PolicySpec) loginNames() []string {
+	var out []string
+	for _, credential := range spec.Credentials {
+		if name, ok := strings.CutPrefix(credential.From, "login:"); ok {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // CredentialValue reads a credential's real value on the host from its source.

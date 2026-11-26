@@ -31,7 +31,7 @@ func CredentialSecretName(pod string, i int) string { return fmt.Sprintf("%s-cre
 
 // RunSecurityProfile is the SecurityProfile injecting credentials into the requests
 // of the Pod named pod alone, each from its CredentialSecretName.
-func RunSecurityProfile(namespace, pod string, credentials []PolicyCredential) map[string]any {
+func RunSecurityProfile(namespace, pod string, credentials []PolicyCredential, extra ...any) map[string]any {
 	var rules []any
 	for i, credential := range credentials {
 		hosts := make([]any, len(credential.Hosts))
@@ -51,6 +51,7 @@ func RunSecurityProfile(namespace, pod string, credentials []PolicyCredential) m
 			}},
 		})
 	}
+	rules = append(rules, extra...)
 	return map[string]any{
 		"apiVersion": "agents.kruise.io/v1alpha1", "kind": "SecurityProfile",
 		"metadata": map[string]any{"name": pod, "namespace": namespace, "labels": map[string]any{LabelManagedBy: "gr8"}},
@@ -76,8 +77,8 @@ func RunSandboxProfile(pod, command string, egress map[string]any) map[string]an
 // a node receives a Secret with the assignment of the Pod that uses it, so one made
 // after would not reach it.
 func createPolicyCredentials(ctx context.Context, clientset kubernetes.Interface, pod *corev1.Pod,
-	credentials []PolicyCredential, values []string) error {
-	if len(credentials) == 0 {
+	credentials []PolicyCredential, values []string, loginRules []any) error {
+	if len(credentials) == 0 && len(loginRules) == 0 {
 		return nil
 	}
 	for i, value := range values {
@@ -92,14 +93,14 @@ func createPolicyCredentials(ctx context.Context, clientset kubernetes.Interface
 		}
 	}
 	return postObject(ctx, clientset, fmt.Sprintf(securityProfiles, pod.Namespace),
-		RunSecurityProfile(pod.Namespace, pod.Name, credentials), "the SecurityProfile")
+		RunSecurityProfile(pod.Namespace, pod.Name, credentials, loginRules...), "the SecurityProfile")
 }
 
 // adoptPolicyCredentials makes the run's Pod own its credentials' Secrets and
 // SecurityProfile, so they go with it even if gr8 doesn't. Best-effort: gr8 deletes
 // them itself when the run ends.
-func adoptPolicyCredentials(ctx context.Context, clientset kubernetes.Interface, pod *corev1.Pod, count int) {
-	if count == 0 {
+func adoptPolicyCredentials(ctx context.Context, clientset kubernetes.Interface, pod *corev1.Pod, count int, profile bool) {
+	if !profile {
 		return
 	}
 	patch, _ := json.Marshal(map[string]any{"metadata": map[string]any{"ownerReferences": ownedBy(pod)}})
@@ -112,8 +113,8 @@ func adoptPolicyCredentials(ctx context.Context, clientset kubernetes.Interface,
 }
 
 // deletePolicyCredentials removes a run's credentials' Secrets and SecurityProfile.
-func deletePolicyCredentials(clientset kubernetes.Interface, pod *corev1.Pod, count int) {
-	if count == 0 {
+func deletePolicyCredentials(clientset kubernetes.Interface, pod *corev1.Pod, count int, profile bool) {
+	if !profile {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -10,6 +10,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/atgreen/gr8s/gr8/internal/sandbox"
 )
 
 // HostRoot is where the Pod mounts the host's /; the launcher chroots into it.
@@ -107,7 +109,7 @@ func NewPod(request PodRequest, suffix string) *corev1.Pod {
 			Containers: []corev1.Container{{
 				Name:      ContainerName,
 				Image:     request.Image,
-				Command:   []string{HostRoot + request.Launcher, "hold"},
+				Command:   []string{HostRoot + request.Launcher, sandbox.Internal, "hold"},
 				Resources: withGPU(request.Resources, request.GPU),
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: "host", MountPath: HostRoot},
