@@ -1940,6 +1940,45 @@ them. A node can't claim another's address or name."
              (is (null (gr8s.server::browser-image-layer-file images "sha256:../../etc/passwd")))))
       (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))
 
+(defun browser-test-frame (protocol source source-port destination destination-port)
+  "An Ethernet frame carrying an IPv4 PROTOCOL header and the first four bytes of its ports."
+  (let ((frame (make-array 54 :element-type '(unsigned-byte 8) :initial-element 0)))
+    (setf (aref frame 12) #x08 (aref frame 13) #x00 (aref frame 14) #x45 (aref frame 23) protocol)
+    (flet ((address (at text)
+             (loop for part in (uiop:split-string text :separator '(#\.)) for i from 0
+                   do (setf (aref frame (+ at i)) (parse-integer part))))
+           (port (at number) (setf (aref frame at) (ash number -8) (aref frame (1+ at)) (logand number 255))))
+      (address 26 source) (address 30 destination)
+      (port 34 source-port) (port 36 destination-port))
+    frame))
+
+(test browser-pods-keep-to-their-network-policy
+  ;; podster-57fv.7: the relay enforces a browser Pod's NetworkPolicy and its address.
+  (let* ((network (gr8s.server::make-browser-network "10.88.2.0/24"))
+         (policy (gr8s.server::make-browser-policy))
+         (pod (gr8s.server::browser-network-address network "pod-a")))
+    (flet ((admit (direction &rest flow)
+             (gr8s.server::browser-policy-admit-p policy network (apply #'browser-test-frame flow) direction)))
+      ;; Unisolated: anything, but only from the Pod's own address.
+      (is-true (admit :egress 6 pod 40000 "10.88.9.9" 443))
+      (is-false (admit :egress 6 "10.88.2.77" 40000 "10.88.9.9" 443))
+      (is-true (admit :ingress 6 "10.88.9.9" 5555 pod 8080))
+      ;; Ingress isolated, admitting 10.88.1.0/24 on TCP 8080.
+      (setf (gethash pod (gr8s.server::browser-policy-pods policy))
+            (list t (list (list "10.88.1.0/24" '() (list (list 6 8080 8080)))) nil '()))
+      (is-true (admit :ingress 6 "10.88.1.5" 5000 pod 8080))
+      (is-true (admit :egress 6 pod 8080 "10.88.1.5" 5000) "the reply passes")
+      (is-false (admit :ingress 6 "10.88.1.5" 5001 pod 22))
+      (is-false (admit :ingress 6 "10.88.3.5" 5002 pod 8080))
+      ;; Replies to the Pod's own connections pass, and the host reaches it always.
+      (is-true (admit :egress 6 pod 41000 "10.88.3.5" 443))
+      (is-true (admit :ingress 6 "10.88.3.5" 443 pod 41000))
+      (is-true (admit :ingress 6 (gr8s.server::browser-network-gateway network) 6000 pod 22))
+      ;; Not IPv4 (ARP): passes.
+      (let ((arp (make-array 42 :element-type '(unsigned-byte 8) :initial-element 0)))
+        (setf (aref arp 12) #x08 (aref arp 13) #x06)
+        (is-true (gr8s.server::browser-policy-admit-p policy network arp :egress))))))
+
 (test control-plane-logs-come-from-the-assigned-remote-agent
   (with-temporary-store (store path)
     (gr8s.controllers::register-node

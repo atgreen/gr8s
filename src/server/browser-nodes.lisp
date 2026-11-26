@@ -469,6 +469,27 @@ A browser node is untrusted, so of other nodes and workloads it learns only tota
                 "pods" (length pods)
                 "runningPods" running))))
 
+(defun start-browser-policy-refresher (session network runtime store)
+  "Keep NETWORK's policy for RUNTIME's Pods current with STORE's NetworkPolicies, Pods and
+Namespaces, until SESSION ends."
+  (bt:make-thread
+   (lambda ()
+     (loop until (browser-session-closed session)
+           do (handler-case
+                  (browser-policy-update
+                   (browser-network-policy network) store
+                   (loop for key being the hash-keys of (browser-runtime-names runtime) using (hash-value uid)
+                         for address = (bt:with-lock-held ((browser-network-lock network))
+                                         (gethash uid (browser-network-addresses network)))
+                         for slash = (position #\/ key)
+                         for pod = (and address (ignore-errors (gr8s.store:get-pod store (subseq key 0 slash)
+                                                                                    (subseq key (1+ slash)))))
+                         when pod collect (cons address (gr8s.model::pod-to-object pod))))
+                (error (condition)
+                  (format *error-output* "gr8s browser network policy: ~A~%" condition)))
+              (loop repeat 20 until (browser-session-closed session) do (sleep 0.1))))
+   :name "gr8s browser network policy"))
+
 (defun start-browser-node-reporter (session store name &key pod-proxy)
   "Tell SESSION's browser how its node NAME and the cluster are doing until it goes, and
 whether its Pods' ports are reachable through POD-PROXY."
@@ -628,8 +649,11 @@ stops with the session."
                                        (lambda (frame) (browser-session-send-frame session frame)))))
                          (when network
                            (setf (browser-runtime-network runtime) network
+                                 (browser-network-policy network) (make-browser-policy)
                                  (browser-session-on-frame session)
-                                 (lambda (frame) (browser-network-receive network frame)))))))
+                                 (lambda (frame) (browser-network-receive network frame)))
+                           (start-browser-policy-refresher session network runtime
+                                                           (virtual-node-host-store host))))))
                    (browser-session-send session (core-object "op" "welcome" "node" name
                                                               "epoch" (browser-session-epoch session)
                                                               "podProxy" (and (browser-join-pod-proxy acceptor) t)))
