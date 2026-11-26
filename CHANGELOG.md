@@ -180,6 +180,10 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- A followed flow stream (the dashboard's Network tab, `gr8s doctor observe -f`) no
+  longer loses a node for good when that node's stream ends, as when its agent
+  restarts in a rolling upgrade: the node is asked again every 2 seconds, resuming
+  after the last event delivered (podster-v7sj).
 - The egress DNS gate reports a Pod's lookup of a name once per decision: a
   resolver's A and AAAA queries and retries made one refused lookup four events.
 

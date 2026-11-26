@@ -120,11 +120,21 @@ may be on another node) gets it here."
                                 (setf (fill-pointer partial) 0))
                               (vector-push-extend octet partial))))))))
 
-(defun observe-cluster-flows (runtime function &key follow nodes (stop-p (constantly nil)))
+(defun flow-newer-p (flow since)
+  "Whether FLOW happened after SINCE, an RFC 3339 UTC time (NIL: any flow). Nodes write
+their times in one fixed form, so the strings order as the times do."
+  (let ((time (gethash "time" flow)))
+    (or (null since) (not (stringp time)) (string> time since))))
+
+(defun observe-cluster-flows (runtime function &key follow nodes (stop-p (constantly nil))
+                                                    (resume-seconds 2))
   "Call FUNCTION with each flow event, as a JSON object, from every node in NODES (by default
 every node that runs workloads): their recent events, then with FOLLOW new ones until STOP-P
 answers true. FUNCTION is never called from two threads at once. A node that can't stream
-is reported once to FUNCTION as an object with \"node\" and \"error\"."
+is reported to FUNCTION as an object with \"node\" and \"error\", once each time it stops.
+With FOLLOW, a node whose stream ends (its agent restarted, say) is asked again every
+RESUME-SECONDS, its events resuming after the last one delivered (podster-v7sj): the others
+keep the stream open, so its reader would otherwise never see that node again."
   (let* ((store (control-plane-runtime-store runtime))
          (names (or nodes (loop for node in (list-nodes store)
                                 unless (node-record-api-only node) collect (node-record-name node))))
@@ -142,23 +152,34 @@ is reported once to FUNCTION as an object with \"node\" and \"error\"."
                     collect (let ((name name))
                               (bt:make-thread
                                (lambda ()
-                                 (let ((session nil))
-                                   (handler-case
-                                       (progn
-                                         (setf session (start-control-plane-flows-session runtime name :follow follow))
-                                         (flow-session-lines
-                                          runtime session
-                                          (lambda (line)
-                                            (let ((object (ignore-errors (com.inuoe.jzon:parse line))))
-                                              (when (hash-table-p object) (deliver object))))
-                                          stop-p)
-                                         ;; A node that refused, or failed, reports why.
-                                         (runtime-exec-session-exit-code runtime session))
-                                     (error (condition)
-                                       (deliver (core-object "node" name "error" (princ-to-string condition)))))
-                                   (when session
-                                     (ignore-errors (runtime-cancel-exec-session runtime session "observer finished"))
-                                     (ignore-errors (runtime-release-exec-session runtime session)))))
+                                 (let ((since nil) (failing nil))
+                                   (loop
+                                     (let ((session nil))
+                                       (handler-case
+                                           (progn
+                                             (setf session (start-control-plane-flows-session runtime name :follow follow))
+                                             (flow-session-lines
+                                              runtime session
+                                              (lambda (line)
+                                                (let ((object (ignore-errors (com.inuoe.jzon:parse line))))
+                                                  (when (and (hash-table-p object) (flow-newer-p object since))
+                                                    (setf failing nil)
+                                                    (when (stringp (gethash "time" object))
+                                                      (setf since (gethash "time" object)))
+                                                    (deliver object))))
+                                              stop-p)
+                                             ;; A node that refused, or failed, reports why.
+                                             (runtime-exec-session-exit-code runtime session))
+                                         (error (condition)
+                                           (unless failing
+                                             (setf failing t)
+                                             (deliver (core-object "node" name "error" (princ-to-string condition))))))
+                                       (when session
+                                         (ignore-errors (runtime-cancel-exec-session runtime session "observer finished"))
+                                         (ignore-errors (runtime-release-exec-session runtime session))))
+                                     (when (or (not follow) (funcall stop-p)) (return))
+                                     (loop repeat (* 10 resume-seconds) until (funcall stop-p) do (sleep 0.1))
+                                     (when (funcall stop-p) (return)))))
                                :name "gr8s flow observer")))))
         (mapc #'bt:join-thread threads)
         (length names)))))
