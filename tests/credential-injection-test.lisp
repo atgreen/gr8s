@@ -368,12 +368,14 @@
                  \"spec\":{\"nodeName\":\"worker-a\",\"containers\":[{\"name\":\"c\",\"image\":\"busybox\"}]}}"))))
       (flet ((rotation (&key (node "worker-a") (uid (pod-uid pod)) (secret "claude-oauth")
                            (values '(("accessToken" . "new-access") ("refreshToken" . "new-refresh") ("expiresAt" . "9"))))
-               (let ((table (make-hash-table :test #'equal)))
-                 (loop for (key . value) in values do (setf (gethash key table) value))
-                 (gr8s.apiserver::apply-credential-rotation
-                  store node (make-instance 'gr8s.node.v1::credential-rotation
+               ;; Through the wire, as a node sends it: the map's encoding is the test.
+               (gr8s.apiserver::apply-credential-rotation
+                store node (ag-proto:deserialize-from-bytes
+                            'gr8s.node.v1::credential-rotation
+                            (ag-proto:serialize-to-bytes
+                             (make-instance 'gr8s.node.v1::credential-rotation
                                             :namespace "gr8" :secret-name secret :pod-name "gr8-claude-x"
-                                            :pod-uid uid :tokens table))))
+                                            :pod-uid uid :tokens values)))))
              (stored (key)
                (gr8s.network::secret-credential (gr8s.resources::get-core-resource store "secrets" "gr8" "claude-oauth") key)))
         (signals error (rotation :node "worker-b"))
@@ -428,3 +430,35 @@
     (setf (gethash "run" (gethash "spec" bad)) "Not A Pod!")
     (signals gr8s.resources::kubernetes-error
       (gr8s.resources::normalize-core-resource "sandboxprofiles" bad nil "x" nil))))
+
+(test ci-the-agents-injector-finds-the-credential-in-its-store
+  ;; podster-sxfe: the injector called an undefined GR8S.AGENT::GET-CORE-RESOURCE,
+  ;; which IGNORE-ERRORS turned into "credential unavailable" on every node. The
+  ;; proxy's tests hand it a matcher, so only the agent's own injector shows this.
+  (let ((directory (uiop:ensure-directory-pathname
+                    (sb-posix:mkdtemp (namestring (merge-pathnames "gr8s-test-XXXXXX" (uiop:temporary-directory)))))))
+    (unwind-protect
+         (let* ((runtime (gr8s.agent::make-node-runtime directory (gr8s.runtime::make-fake-runtime) nil))
+                (store (gr8s.agent::node-runtime-store runtime))
+                (ip-map (make-hash-table :test #'equal)))
+           (gr8s.resources::create-core-resource store "namespaces"
+                                                 (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "gr8")) nil)
+           (gr8s.resources::create-core-resource
+            store "secrets" (com.inuoe.jzon:parse "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"anthropic\",\"namespace\":\"gr8\"},
+                                                    \"data\":{\"apiKey\":\"c2stYW50LXJlYWw=\"}}")
+            "gr8")
+           (setf (gethash "10.80.32.7" ip-map)
+                 (gr8s.network::make-np-pod :name "gr8-claude-x" :namespace "gr8"
+                                            :labels (gr8s.network::np-labels "gr8s.io/gr8-command" "claude"))
+                 (gr8s.agent::node-runtime-egress-view runtime)
+                 (list ip-map nil nil (gr8s.network::security-profile-specs-from-objects
+                                       (list (com.inuoe.jzon:parse +ci-profile-json+)))))
+           (let ((matcher (gr8s.agent::node-runtime-egress-injector runtime "10.80.32.7" "api.anthropic.com" "https")))
+             (is (functionp matcher))
+             (multiple-value-bind (rule headers value) (funcall matcher "POST" "/v1/messages")
+               (is (equal "claude-anthropic/anthropic-api-key" rule))
+               (is (equal '("x-api-key") headers))
+               (is (equal "sk-ant-real" value))))
+           ;; Another Pod's address gets nothing.
+           (is (null (gr8s.agent::node-runtime-egress-injector runtime "10.80.32.9" "api.anthropic.com" "https"))))
+      (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))

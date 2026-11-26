@@ -1452,21 +1452,20 @@ otherwise. Returns the updated Secret."
       (unless rule (error "No OAuthRefresh rule selecting the Pod refreshes Secret ~A/~A" namespace secret-name))
       (let ((allowed (list (gr8s.network::injection-rule-access-token-key rule)
                            (gr8s.network::injection-rule-refresh-token-key rule) "expiresAt")))
-        (unless (and (hash-table-p values) (plusp (hash-table-count values)))
+        ;; A protobuf map arrives as an alist of (key . value).
+        (unless (and (listp values) values)
           (error "Credential rotation carries no tokens"))
-        (maphash (lambda (key value)
-                   (unless (and (member key allowed :test #'equal) (stringp value) (plusp (length value)))
-                     (error "Credential rotation may not set ~A" key)))
-                 values)
+        (loop for (key . value) in values
+              unless (and (member key allowed :test #'equal) (stringp value) (plusp (length value)))
+                do (error "Credential rotation may not set ~A" key))
         (gr8s.resources::update-core-resource
          store "secrets" namespace secret-name
          (lambda (secret)
            (let ((data (or (gethash "data" secret) (setf (gethash "data" secret) (core-object))))
                  (metadata (gethash "metadata" secret)))
-             (maphash (lambda (key value)
-                        (setf (gethash key data)
-                              (ag-grpc:base64-encode (trivial-utf-8:string-to-utf-8-bytes value))))
-                      values)
+             (loop for (key . value) in values
+                   do (setf (gethash key data)
+                            (ag-grpc:base64-encode (trivial-utf-8:string-to-utf-8-bytes value))))
              (remhash "stringData" secret)
              (setf (gethash "gr8s.io/credential-rotated-at"
                             (or (gethash "annotations" metadata) (setf (gethash "annotations" metadata) (core-object))))

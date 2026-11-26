@@ -52,7 +52,9 @@
                   (:status gr8s.node.v1::node-status)
                   (:operation-response gr8s.node.v1::operation-response)
                   (:operation-stream gr8s.node.v1::operation-stream)
-                  (:credential-token-request gr8s.node.v1::credential-token-request)))
+                  (:credential-token-request gr8s.node.v1::credential-token-request)
+                  (:gateway-config-ack gr8s.node.v1::gateway-config-ack)
+                  (:credential-rotation gr8s.node.v1::credential-rotation)))
     (destructuring-bind (variant payload-type) spec
       (let* ((payload (make-instance payload-type))
              (envelope
@@ -67,6 +69,26 @@
                                (find-symbol (symbol-name variant)
                                             :gr8s.node.v1))
                    payload-type))))))
+
+(test every-envelope-message-in-the-proto-can-be-sent
+  ;; A message added to an envelope's oneof but not to its variants can't be built:
+  ;; the agent's credential rotations were dropped that way, the error swallowed
+  ;; (podster-sxfe).
+  (let ((proto (uiop:read-file-string (asdf:system-relative-pathname "gr8s" "proto/gr8s/node/v1/node.proto"))))
+    (flet ((oneof-fields (message)
+             (let* ((start (search (format nil "message ~A {" message) proto))
+                    (oneof (search "oneof payload {" proto :start2 start))
+                    (end (search "}" proto :start2 oneof)))
+               (loop for line in (uiop:split-string (subseq proto oneof end) :separator '(#\Newline))
+                     for parts = (remove "" (uiop:split-string (string-trim " ;" line) :separator " ") :test #'equal)
+                     when (and (= 4 (length parts)) (equal "=" (third parts)))
+                       collect (intern (string-upcase (substitute #\- #\_ (second parts))) :keyword)))))
+      (dolist (pair (list (cons "AgentEnvelope" gr8s.protocol::+agent-envelope-variants+)
+                          (cons "ServerEnvelope" gr8s.protocol::+server-envelope-variants+)))
+        (let ((fields (oneof-fields (car pair))))
+          (is (plusp (length fields)))
+          (dolist (field fields)
+            (is (assoc field (cdr pair)) "~A's ~A has no variant to send it" (car pair) field)))))))
 
 (test service-receiver-status-roundtrips-complete-and-empty-reports
   (let* ((proof (make-instance 'gr8s.node.v1::service-receiver-proof

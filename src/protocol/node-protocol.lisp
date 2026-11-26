@@ -62,7 +62,8 @@ Framing keeps different object boundaries from sharing the same digest input."
     (:operation-response . gr8s.node.v1::operation-response)
     (:operation-stream . gr8s.node.v1::operation-stream)
     (:credential-token-request . gr8s.node.v1::credential-token-request)
-    (:gateway-config-ack . gr8s.node.v1::gateway-config-ack)))
+    (:gateway-config-ack . gr8s.node.v1::gateway-config-ack)
+    (:credential-rotation . gr8s.node.v1::credential-rotation)))
 
 (defparameter +server-envelope-variants+
   '((:hello . gr8s.node.v1::server-hello)
