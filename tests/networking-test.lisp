@@ -1009,8 +1009,16 @@ A fixed or random port in the ephemeral range can already be taken on a shared h
                                   "spec" (gr8s.resources::core-object "clusterIP" "10.96.0.1"
                                                                       "ports" (vector (gr8s.resources::core-object "name" "https" "port" 443 "targetPort" 6443))))
      "default")
-    (gr8s.controllers::ensure-native-api-service store "192.0.2.10" 6443)
+    ;; A member restarting into the cluster doesn't run ensure-native-api-service;
+    ;; the leader's endpoint reconcile adds the labels, and then writes nothing more.
+    (gr8s.controllers::reconcile-native-api-endpoints store '(("192.0.2.10" 6443)))
     (let ((labels (gethash "labels" (gethash "metadata" (gr8s.resources::get-core-resource store "services" "default" "kubernetes")))))
       (is (equal "apiserver" (gethash "component" labels)))
       (is (equal "kubernetes" (gethash "provider" labels)))
-      (is (equal "infra" (gethash "team" labels))))))
+      (is (equal "infra" (gethash "team" labels))))
+    (let ((revision (gr8s.store::pod-store-resource-revision store)))
+      (gr8s.controllers::reconcile-native-api-endpoints store '(("192.0.2.10" 6443)))
+      (is (= revision (gr8s.store::pod-store-resource-revision store))))
+    (gr8s.controllers::ensure-native-api-service store "192.0.2.10" 6443)
+    (is (gr8s.controllers::native-api-service-labelled-p
+         (gr8s.resources::get-core-resource store "services" "default" "kubernetes")))))
