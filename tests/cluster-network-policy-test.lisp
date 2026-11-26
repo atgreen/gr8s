@@ -264,3 +264,44 @@
     (is (equal '((6 nil nil) (17 53 53)) (cnp-ports-for entries "169.254.1.2/32")))
     (is (eq :all (cnp-ports-for entries "10.0.0.0/8")))
     (is (null (cnp-ports-for entries "0.0.0.0/0")))))
+
+;;; podster-1mzb: a gr8 sandbox is always on synthetic DNS, and what nothing allows is denied.
+
+(test a-gr8-sandbox-with-no-policy-reaches-only-the-egress-proxy
+  (let ((sandbox (first *cnp-pods*)) (web (second *cnp-pods*)))
+    (is-true (gr8s.network::gr8-sandbox-pod-p sandbox))
+    (is-false (gr8s.network::gr8-sandbox-pod-p web))
+    (is-true (gr8s.network::pod-egress-captured-p sandbox '()))
+    (is-true (gr8s.network::pod-egress-synthetic-p sandbox '()) "its DNS is the gate's, with no names allowed")
+    (is (null (gr8s.network::pod-egress-allowed-domains sandbox '())))
+    (multiple-value-bind (isolated entries) (gr8s.network::pod-policy-entries sandbox '() '() :egress)
+      (is-true isolated)
+      (is (equal '((6 nil nil) (17 53 53)) (cnp-ports-for entries "169.254.1.2/32")))
+      (is (equal '((6 nil nil)) (cnp-ports-for entries "198.18.0.0/15")))
+      (is (null (cnp-ports-for entries "0.0.0.0/0")))
+      (is (null (cnp-ports-for entries "::/0")) "nor IPv6")
+      (is (= 2 (length entries)) "and nothing else"))
+    (multiple-value-bind (allowed rule)
+        (gr8s.network::egress-connection-verdict sandbox '() '() "example.com" "93.184.215.14" 443)
+      (is-false allowed)
+      (is (equal "gr8-sandbox" (gr8s.network::cnp-rule-name rule)) "the refusal names the sandbox rule"))
+    ;; A Pod gr8 didn't make is untouched.
+    (is-false (gr8s.network::pod-policy-entries web '() '() :egress))
+    (is-true (gr8s.network::egress-connection-verdict web '() '() "example.com" "93.184.215.14" 443))))
+
+(test a-gr8-sandbox-reaches-what-its-policies-allow-and-nothing-more
+  (let* ((sandbox (first *cnp-pods*))
+         (cnps (gr8s.network::cluster-network-policy-specs-from-objects
+                (list (cnp-resolve "{\"metadata\":{\"name\":\"claude-names\"},
+                   \"spec\":{\"tier\":\"Admin\",\"priority\":10,
+                     \"subject\":{\"namespaces\":{\"matchLabels\":{\"kubernetes.io/metadata.name\":\"gr8\"}}},
+                     \"egress\":[{\"action\":\"Accept\",\"to\":[{\"domainNames\":[\"api.anthropic.com\"]}]}]}}")))))
+    (is (equal '("api.anthropic.com") (gr8s.network::pod-egress-allowed-domains sandbox cnps)))
+    (flet ((verdict (host address)
+             (gr8s.network::egress-connection-verdict sandbox '() cnps host address 443)))
+      (is-true (verdict "api.anthropic.com" "160.79.104.10"))
+      (is-false (verdict "evil.example.com" "203.0.113.5"))
+      (is-false (verdict nil "10.1.2.3") "a private address too: no policy allows it"))
+    (multiple-value-bind (isolated entries) (gr8s.network::pod-policy-entries sandbox '() cnps :egress)
+      (is-true isolated)
+      (is (null (cnp-ports-for entries "0.0.0.0/0"))))))

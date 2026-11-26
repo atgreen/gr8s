@@ -106,7 +106,10 @@
   (let ((agent (first *cnp-pods*)) (web (second *cnp-pods*)) (cnps (cnp-claude-policies)))
     (is-true (gr8s.network::pod-egress-synthetic-p agent cnps))
     (is-false (gr8s.network::pod-egress-synthetic-p web cnps))
-    (is-false (gr8s.network::pod-egress-synthetic-p agent '()))))
+    ;; Without an allowlist a Pod sees real answers -- unless gr8 made it: a gr8
+    ;; sandbox is always synthetic (podster-1mzb).
+    (is-false (gr8s.network::pod-egress-synthetic-p web '()))
+    (is-true (gr8s.network::pod-egress-synthetic-p agent '()))))
 
 (test egress-capture-records-each-pods-mode
   ;; 1: captured by a SecurityProfile alone, admitted by SNI/Host; 2: synthetic mode.

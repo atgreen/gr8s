@@ -45,3 +45,18 @@
       (let ((keys (mapcar #'car (cdr w))))
         (is (member #(10 96 0 1) keys :test #'equalp))
         (is (member #(192 168 1 20) keys :test #'equalp))))))
+
+(test a-gr8-sandbox-is-redirected-to-the-egress-proxy-alone
+  ;; The redirect passes before policy: a confined Pod's table must not hold the API
+  ;; server or the node's own IP, or it would reach them whatever it denied (podster-1mzb).
+  (let ((table (gr8s.network::node-host-redirect-table "192.168.1.20" :confined t)))
+    (is (equalp (list #(169 254 1 2)) (mapcar #'car table))
+        "~S" table))
+  (let ((writes '()))
+    (gr8s.network::converge-node-host-redirect
+     '("sandboxA" "gr8box") "192.168.1.20"
+     :directory-fn #'identity
+     :confined-p (lambda (sandbox) (equal sandbox "gr8box"))
+     :writer (lambda (directory table) (push (cons directory (mapcar #'car table)) writes)))
+    (is (member #(10 96 0 1) (cdr (assoc "sandboxA" writes :test #'equal)) :test #'equalp))
+    (is (equalp (list #(169 254 1 2)) (cdr (assoc "gr8box" writes :test #'equal))))))

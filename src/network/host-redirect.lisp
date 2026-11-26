@@ -22,16 +22,20 @@
    spills as the scalar key."
   (ipv4-network-octets address))
 
-(defun node-host-redirect-table (node-address)
+(defun node-host-redirect-table (node-address &key confined)
   "The node-wide host-local destination table (alist of 4-byte key -> 1-byte
    presence value): the API server ClusterIP, the egress proxy address, and this
-   node's own IP when known.
+   node's own IP when known. A CONFINED Pod's (a gr8 sandbox's) holds the egress
+   proxy alone: the redirect passes before policy, so the API server and the
+   node's own services would be reachable whatever it denied (podster-1mzb).
    A hit means the destination is served by this host and must reach it via lo."
   (let ((value (make-array 1 :element-type '(unsigned-byte 8) :initial-element 1))
-        (addresses (list (format nil "~{~A~^.~}" (coerce +dns-kubernetes-service-address+ 'list))
-                         ;; The egress proxy and DNS gate (podster-wv1w.2).
-                         +egress-proxy-address+)))
-    (when (and node-address (plusp (length node-address)))
+        (addresses (if confined
+                       (list +egress-proxy-address+)
+                       (list (format nil "~{~A~^.~}" (coerce +dns-kubernetes-service-address+ 'list))
+                             ;; The egress proxy and DNS gate (podster-wv1w.2).
+                             +egress-proxy-address+))))
+    (when (and (not confined) node-address (plusp (length node-address)))
       (pushnew node-address addresses :test #'string=))
     (loop for address in addresses
           collect (cons (host-redirect-key address) value))))
@@ -54,16 +58,20 @@
 
 (defun converge-node-host-redirect
     (sandboxes node-address &key directory-fn
+                                 (confined-p (constantly nil))
                                  (table-fn #'node-host-redirect-table)
                                  (writer #'write-host-redirect-table))
   "Rebuild the node's host-local destination table from NODE-ADDRESS and write
    it into every local Pod's pinned host_redirect_v4. SANDBOXES is the list of
-   local Pod sandbox ids; DIRECTORY-FN maps a sandbox to its bpffs pin directory.
+   local Pod sandbox ids; DIRECTORY-FN maps a sandbox to its bpffs pin directory;
+   CONFINED-P is true of a sandbox whose Pod gets the confined table.
    Fail-soft per Pod; returns the sandboxes written."
   (let ((table (funcall table-fn node-address))
+        (confined-table (funcall table-fn node-address :confined t))
         (written '()))
     (dolist (sandbox sandboxes (nreverse written))
       (handler-case
-          (progn (funcall writer (funcall directory-fn sandbox) table)
+          (progn (funcall writer (funcall directory-fn sandbox)
+                          (if (funcall confined-p sandbox) confined-table table))
                  (push sandbox written))
         (error () nil)))))
