@@ -92,8 +92,8 @@
       (is (member '(17 nil nil) ports :test #'equal)))))
 
 (defparameter *cnp-pods*
-  (list (gr8s.network::make-np-pod :name "agent" :namespace "gr8ify" :ip "10.88.1.2"
-                                   :labels (gr8s.network::np-labels "gr8s.io/gr8ify-command" "claude"))
+  (list (gr8s.network::make-np-pod :name "agent" :namespace "gr8" :ip "10.88.1.2"
+                                   :labels (gr8s.network::np-labels "gr8s.io/gr8-command" "claude"))
         (gr8s.network::make-np-pod :name "web" :namespace "prod" :ip "10.88.2.2"
                                    :labels (gr8s.network::np-labels "app" "web")
                                    :ports '(("http" :tcp 8080)))
@@ -102,7 +102,7 @@
 
 (defun cnp-namespace-labels ()
   (let ((labels (make-hash-table :test #'equal)))
-    (dolist (name '("gr8ify" "prod"))
+    (dolist (name '("gr8" "prod"))
       (setf (gethash name labels) (gr8s.network::np-labels "kubernetes.io/metadata.name" name)))
     labels))
 
@@ -115,8 +115,8 @@
   (let* ((policy (cnp-resolve "{\"apiVersion\":\"policy.networking.k8s.io/v1alpha2\",\"kind\":\"ClusterNetworkPolicy\",
              \"metadata\":{\"name\":\"claude-egress\"},
              \"spec\":{\"tier\":\"Admin\",\"priority\":10,
-               \"subject\":{\"pods\":{\"namespaceSelector\":{\"matchLabels\":{\"kubernetes.io/metadata.name\":\"gr8ify\"}},
-                                      \"podSelector\":{\"matchLabels\":{\"gr8s.io/gr8ify-command\":\"claude\"}}}},
+               \"subject\":{\"pods\":{\"namespaceSelector\":{\"matchLabels\":{\"kubernetes.io/metadata.name\":\"gr8\"}},
+                                      \"podSelector\":{\"matchLabels\":{\"gr8s.io/gr8-command\":\"claude\"}}}},
                \"egress\":[
                  {\"name\":\"anthropic\",\"action\":\"Accept\",\"to\":[{\"domainNames\":[\"api.anthropic.com\"]}],
                   \"protocols\":[{\"tcp\":{\"destinationPort\":{\"number\":443}}}]},
@@ -126,7 +126,7 @@
                  {\"action\":\"Deny\",\"to\":[{\"networks\":[\"0.0.0.0/0\"]}]}]}}"))
          (spec (gethash "spec" policy))
          (rules (coerce (gethash "egress" spec) 'list)))
-    (is (equal '("gr8ify/agent") (coerce (gethash "subjectPods" spec) 'list)))
+    (is (equal '("gr8/agent") (coerce (gethash "subjectPods" spec) 'list)))
     (is (= 4 (length rules)))
     (destructuring-bind (domain named node deny) rules
       (is (equal '("api.anthropic.com") (coerce (gethash "domainNames" domain) 'list)))
@@ -144,7 +144,7 @@
 (test cnp-a-resolved-policy-drives-the-selected-pods-entries
   (let* ((policy (cnp-resolve "{\"metadata\":{\"name\":\"lockdown\"},
              \"spec\":{\"tier\":\"Admin\",\"priority\":1,
-               \"subject\":{\"namespaces\":{\"matchLabels\":{\"kubernetes.io/metadata.name\":\"gr8ify\"}}},
+               \"subject\":{\"namespaces\":{\"matchLabels\":{\"kubernetes.io/metadata.name\":\"gr8\"}}},
                \"egress\":[{\"action\":\"Accept\",\"to\":[{\"networks\":[\"192.0.2.0/24\"]}],
                             \"protocols\":[{\"tcp\":{\"destinationPort\":{\"number\":443}}}]},
                            {\"action\":\"Deny\",\"to\":[{\"networks\":[\"0.0.0.0/0\"]}]}]}}"))
@@ -172,7 +172,7 @@
 
 (defparameter +cnp-valid-spec+
   "{\"tier\":\"Admin\",\"priority\":10,
-    \"subject\":{\"pods\":{\"namespaceSelector\":{\"matchLabels\":{\"kubernetes.io/metadata.name\":\"gr8ify\"}},
+    \"subject\":{\"pods\":{\"namespaceSelector\":{\"matchLabels\":{\"kubernetes.io/metadata.name\":\"gr8\"}},
                            \"podSelector\":{}}},
     \"egress\":[{\"name\":\"api\",\"action\":\"Accept\",\"to\":[{\"domainNames\":[\"api.anthropic.com\",\"*.githubusercontent.com\"]}],
                  \"protocols\":[{\"tcp\":{\"destinationPort\":{\"number\":443}}}]},
@@ -210,7 +210,7 @@
 (test cnp-projection-reaches-the-node-snapshot
   (let* ((policy (cnp-resolve "{\"metadata\":{\"name\":\"lockdown\",\"uid\":\"u1\",\"resourceVersion\":\"3\"},
              \"spec\":{\"tier\":\"Admin\",\"priority\":1,
-               \"subject\":{\"namespaces\":{\"matchLabels\":{\"kubernetes.io/metadata.name\":\"gr8ify\"}}},
+               \"subject\":{\"namespaces\":{\"matchLabels\":{\"kubernetes.io/metadata.name\":\"gr8\"}}},
                \"egress\":[{\"action\":\"Deny\",\"to\":[{\"networks\":[\"0.0.0.0/0\"]}]}]}}"))
          (public (progn (setf (gethash "kind" policy) "ClusterNetworkPolicy")
                         (gr8s.kubelet::service-discovery-public-object policy)))
@@ -219,7 +219,7 @@
     (is (equal "clusternetworkpolicies" (first (car decoded))))
     (let ((specs (gr8s.network::cluster-network-policy-specs-from-objects (list (cdr decoded)))))
       (is (= 1 (length specs)))
-      (is (equal '("gr8ify/agent") (gr8s.network::cnp-spec-subject-pods (first specs)))))))
+      (is (equal '("gr8/agent") (gr8s.network::cnp-spec-subject-pods (first specs)))))))
 
 (test cnp-domain-names-match-as-upstream-specifies
   (is-true (gr8s.network::egress-domain-matches-p "api.anthropic.com" "API.Anthropic.com."))
@@ -233,7 +233,7 @@
   (gr8s.network::cluster-network-policy-specs-from-objects
    (list (cnp-resolve "{\"metadata\":{\"name\":\"claude\"},
              \"spec\":{\"tier\":\"Admin\",\"priority\":10,
-               \"subject\":{\"namespaces\":{\"matchLabels\":{\"kubernetes.io/metadata.name\":\"gr8ify\"}}},
+               \"subject\":{\"namespaces\":{\"matchLabels\":{\"kubernetes.io/metadata.name\":\"gr8\"}}},
                \"egress\":[{\"action\":\"Accept\",\"to\":[{\"domainNames\":[\"api.anthropic.com\",\"*.claude.com\"]}],
                             \"protocols\":[{\"tcp\":{\"destinationPort\":{\"number\":443}}}]},
                            {\"action\":\"Accept\",\"to\":[{\"networks\":[\"10.0.0.0/8\"]}]},

@@ -1,4 +1,4 @@
-// Package sandbox is the in-Pod half of gr8ify: it builds the command's view
+// Package sandbox is the in-Pod half of gr8: it builds the command's view
 // of the host and confines it with Landlock before exec.
 package sandbox
 
@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-// Config is what "gr8ify launch" is asked to run.
+// Config is what "gr8 launch" is asked to run.
 type Config struct {
 	Cwd  string
 	Home string

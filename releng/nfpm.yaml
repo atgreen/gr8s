@@ -12,7 +12,8 @@ maintainer: Anthony Green <green@moxielogic.com>
 description: |
   Single-binary Kubernetes-compatible cluster in Common Lisp.
   Control plane, node agent, HA witness, Raft datastore, and embedded
-  container runtime in one executable. The gr8s-server and gr8s-agent
+  container runtime in one executable, and gr8, which runs a command in a
+  sandboxed Pod on the local node. The gr8s-server and gr8s-agent
   services install disabled; edit /etc/gr8s/server.env or
   /etc/gr8s/agent.env, then enable the one this host should run.
 vendor: Anthony Green
@@ -21,6 +22,10 @@ license: Apache-2.0
 contents:
   - src: build/package-stage/gr8s
     dst: /usr/bin/gr8s
+    file_info:
+      mode: 0755
+  - src: build/package-stage/gr8
+    dst: /usr/bin/gr8
     file_info:
       mode: 0755
   - src: gr8s-killall.sh

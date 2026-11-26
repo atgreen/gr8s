@@ -57,3 +57,7 @@ python3 scripts/package-release.py --root . --binary build/gr8s \
 ocicl create-sbom cyclonedx "$output/gr8s-linux-$architecture-lisp-sbom.cdx.json"
 ocicl create-sbom spdx "$output/gr8s-linux-$architecture-lisp-sbom.spdx.json"
 (cd "$output" && sha256sum -c "gr8s-linux-$architecture.sha256")
+# gr8, the sandboxed-command client, ships beside gr8s in the RPM and DEB.
+make gr8
+cp -f build/gr8 "$output/gr8-linux-$architecture"
+(cd "$output" && sha256sum "gr8-linux-$architecture" > "gr8-linux-$architecture.sha256")

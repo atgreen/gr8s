@@ -31,17 +31,17 @@ podster-wv1w.3). Installing OpenKruise Agents' CRDs as well registers it twice."
                               "groupVersion" "agents.kruise.io/v1alpha1"
                               "resources" (stored-resource-discovery "agents.kruise.io/v1alpha1"))))
 
-(defun gr8ify-api-group ()
-  "Describe the gr8ify.gr8s.io API group (SandboxProfile, podster-wv1w.5)."
-  (core-object "apiVersion" "v1" "kind" "APIGroup" "name" "gr8ify.gr8s.io"
-               "versions" (vector (core-object "groupVersion" "gr8ify.gr8s.io/v1alpha1" "version" "v1alpha1"))
-               "preferredVersion" (core-object "groupVersion" "gr8ify.gr8s.io/v1alpha1" "version" "v1alpha1")))
+(defun gr8-api-group ()
+  "Describe the gr8.gr8s.io API group (SandboxProfile, podster-wv1w.5)."
+  (core-object "apiVersion" "v1" "kind" "APIGroup" "name" "gr8.gr8s.io"
+               "versions" (vector (core-object "groupVersion" "gr8.gr8s.io/v1alpha1" "version" "v1alpha1"))
+               "preferredVersion" (core-object "groupVersion" "gr8.gr8s.io/v1alpha1" "version" "v1alpha1")))
 
-(defun gr8ify-discovery-response ()
+(defun gr8-discovery-response ()
   "Advertise SandboxProfile from the durable registry."
   (json-response (core-object "apiVersion" "v1" "kind" "APIResourceList"
-                              "groupVersion" "gr8ify.gr8s.io/v1alpha1"
-                              "resources" (stored-resource-discovery "gr8ify.gr8s.io/v1alpha1"))))
+                              "groupVersion" "gr8.gr8s.io/v1alpha1"
+                              "resources" (stored-resource-discovery "gr8.gr8s.io/v1alpha1"))))
 
 (defun policy-networking-discovery-response ()
   "Advertise ClusterNetworkPolicy from the durable registry."

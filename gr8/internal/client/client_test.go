@@ -12,12 +12,12 @@ import (
 
 func TestNewPodRunsAsTheCallerOnTheNodeWithTheHostMounted(t *testing.T) {
 	pod := NewPod(PodRequest{
-		Namespace: "gr8ify", Node: "gr8s-local", Image: "pause", Launcher: "/usr/bin/gr8ify",
+		Namespace: "gr8", Node: "gr8s-local", Image: "pause", Launcher: "/usr/bin/gr8",
 		Command:  "ping",
 		Identity: Identity{User: "green", UID: 1000, GID: 1000, Groups: []int64{1000, 10, 39}},
 	}, "abcde")
 
-	if pod.Name != "gr8ify-ping-abcde" || pod.Namespace != "gr8ify" || pod.Spec.NodeName != "gr8s-local" {
+	if pod.Name != "gr8-ping-abcde" || pod.Namespace != "gr8" || pod.Spec.NodeName != "gr8s-local" {
 		t.Fatalf("placed as %s/%s on %q", pod.Namespace, pod.Name, pod.Spec.NodeName)
 	}
 	if pod.Labels[LabelCommand] != "ping" || pod.Labels[LabelUser] != "green" {
@@ -34,7 +34,7 @@ func TestNewPodRunsAsTheCallerOnTheNodeWithTheHostMounted(t *testing.T) {
 		t.Errorf("sysctls %v", context.Sysctls)
 	}
 	container := pod.Spec.Containers[0]
-	if !reflect.DeepEqual(container.Command, []string{"/host/usr/bin/gr8ify", "hold"}) {
+	if !reflect.DeepEqual(container.Command, []string{"/host/usr/bin/gr8", "hold"}) {
 		t.Errorf("command %v", container.Command)
 	}
 	if container.VolumeMounts[0].MountPath != HostRoot || pod.Spec.Volumes[0].HostPath.Path != "/" {
@@ -46,17 +46,17 @@ func TestNewPodRunsAsTheCallerOnTheNodeWithTheHostMounted(t *testing.T) {
 }
 
 func TestNewNamespaceAdmitsHostPath(t *testing.T) {
-	if NewNamespace("gr8ify").Labels["pod-security.kubernetes.io/enforce"] != "privileged" {
+	if NewNamespace("gr8").Labels["pod-security.kubernetes.io/enforce"] != "privileged" {
 		t.Error("a hostPath volume needs the privileged Pod Security level")
 	}
 }
 
 func TestPodNameIsADNSSubdomain(t *testing.T) {
 	for command, want := range map[string]string{
-		"ping":                        "gr8ify-ping-xyz",
-		"Python3.12":                  "gr8ify-python3-12-xyz",
-		"__":                          "gr8ify-command-xyz",
-		strings.Repeat("a", 60) + "!": "gr8ify-" + strings.Repeat("a", 40) + "-xyz",
+		"ping":                        "gr8-ping-xyz",
+		"Python3.12":                  "gr8-python3-12-xyz",
+		"__":                          "gr8-command-xyz",
+		strings.Repeat("a", 60) + "!": "gr8-" + strings.Repeat("a", 40) + "-xyz",
 	} {
 		if got := PodName(command, "xyz"); got != want {
 			t.Errorf("PodName(%q) = %q, want %q", command, got, want)
@@ -138,7 +138,7 @@ func TestProfile(t *testing.T) {
 }
 
 func TestNewPodMountsTheEgressTrustBundle(t *testing.T) {
-	pod := NewPod(PodRequest{Namespace: "gr8ify", Node: "n", Image: "pause", Launcher: "/usr/bin/gr8ify",
+	pod := NewPod(PodRequest{Namespace: "gr8", Node: "n", Image: "pause", Launcher: "/usr/bin/gr8",
 		Command: "claude", Identity: Identity{User: "u", UID: 1000, GID: 1000}}, "x")
 	var found bool
 	for _, volume := range pod.Spec.Volumes {

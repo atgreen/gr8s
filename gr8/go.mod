@@ -1,4 +1,4 @@
-module github.com/atgreen/gr8s/gr8ify
+module github.com/atgreen/gr8s/gr8
 
 go 1.27
 

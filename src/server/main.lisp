@@ -4091,10 +4091,10 @@ upstream CRDs.
   the `gr8s-egress` ClusterTrustBundle (a projected `clusterTrustBundle` volume);
   a request whose Host differs from its TLS name gets 421, and one whose
   credential is missing gets 403. Do NOT install Kruise Agents' CRDs.
-- **gr8ify (`gr8ify.gr8s.io/v1alpha1` SandboxProfile): gr8s's own.** What a
-  command run by `gr8ify` gets in the caller's home (`readWrite`, `readOnly`,
+- **gr8 (`gr8.gr8s.io/v1alpha1` SandboxProfile): gr8s's own.** What a
+  command run by `gr8` gets in the caller's home (`readWrite`, `readOnly`,
   `placeholders` credential files) and placeholder environment.
-  `gr8ify login claude` stores Claude Code's subscription token as a Secret with
+  `gr8 login claude` stores Claude Code's subscription token as a Secret with
   a SecurityProfile injecting it; the sandbox then sees stand-in tokens.
   See docs/design-agent-egress.md.
 

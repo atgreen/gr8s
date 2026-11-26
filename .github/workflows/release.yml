@@ -97,6 +97,7 @@ jobs:
           name: release-linux-${{ matrix.arch }}
           path: |
             build/release/gr8s-linux-*
+            build/release/gr8-linux-*
             build/release/gr8s-*-linux-*.tar.gz
           if-no-files-found: error
           compression-level: 0
@@ -138,12 +139,14 @@ jobs:
         run: |
           sudo dpkg -i build/packages/gr8s_*_amd64.deb
           gr8s version
+          test -x /usr/bin/gr8
           test -f /usr/lib/systemd/system/gr8s-server.service
           test -f /usr/lib/systemd/system/gr8s-agent.service
           test "$(stat -c %a /etc/gr8s/server.env)" = 600
           test "$(systemctl is-enabled gr8s-server.service || true)" = disabled
           sudo dpkg -P gr8s
           test ! -e /usr/bin/gr8s
+          test ! -e /usr/bin/gr8
           test ! -e /etc/gr8s/server.env
 
       - name: Upload package assets
@@ -182,7 +185,8 @@ jobs:
         run: |
           cp -f LICENSE NOTICE release/
           cd release
-          sha256sum -c gr8s-linux-amd64.sha256 gr8s-linux-arm64.sha256
+          sha256sum -c gr8s-linux-amd64.sha256 gr8s-linux-arm64.sha256 \
+            gr8-linux-amd64.sha256 gr8-linux-arm64.sha256
           sha256sum -- * > ../SHA256SUMS
           mv -f ../SHA256SUMS .
 

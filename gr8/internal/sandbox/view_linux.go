@@ -256,7 +256,7 @@ func saveFile(dirFD int, name string, original, current []byte, mode os.FileMode
 	if !bytes.Equal(real, original) || (real == nil) != (original == nil) {
 		return errChangedMeanwhile
 	}
-	temporary := fmt.Sprintf(".%s.gr8ify-%d", name, os.Getpid())
+	temporary := fmt.Sprintf(".%s.gr8-%d", name, os.Getpid())
 	fd, err := unix.Openat(dirFD, temporary,
 		unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, uint32(mode.Perm()))
 	if err != nil {
@@ -372,7 +372,7 @@ func isDir(path string) bool {
 
 // The sandbox's CA bundles, in its private /run.
 const (
-	trustDirectory = "/run/gr8ify"
+	trustDirectory = "/run/gr8"
 	trustBundle    = trustDirectory + "/ca-bundle.pem"
 	trustEgress    = trustDirectory + "/egress-ca.pem"
 )

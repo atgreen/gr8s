@@ -13,8 +13,8 @@
 
 (defparameter +ci-profile-json+
   "{\"apiVersion\":\"agents.kruise.io/v1alpha1\",\"kind\":\"SecurityProfile\",
-    \"metadata\":{\"name\":\"claude-anthropic\",\"namespace\":\"gr8ify\"},
-    \"spec\":{\"selector\":{\"matchLabels\":{\"gr8s.io/gr8ify-command\":\"claude\"}},
+    \"metadata\":{\"name\":\"claude-anthropic\",\"namespace\":\"gr8\"},
+    \"spec\":{\"selector\":{\"matchLabels\":{\"gr8s.io/gr8-command\":\"claude\"}},
       \"rules\":[{\"name\":\"anthropic-api-key\",
         \"match\":[{\"domains\":[\"api.anthropic.com\"],\"schemes\":[\"https\"],
                     \"paths\":[{\"type\":\"Prefix\",\"value\":\"/v1/\"}],\"methods\":[\"POST\",\"GET\"]}],
@@ -23,7 +23,7 @@
           \"apiKey\":{\"targetHeaders\":{\"names\":[\"x-api-key\"]},\"value\":{\"template\":\"{{ .Token }}\"}}}}}]}}")
 
 (defun ci-normalize (json)
-  (gr8s.resources::normalize-core-resource "securityprofiles" (com.inuoe.jzon:parse json) "gr8ify" nil nil))
+  (gr8s.resources::normalize-core-resource "securityprofiles" (com.inuoe.jzon:parse json) "gr8" nil nil))
 
 (test ci-security-profile-accepts-the-subset-gr8s-implements
   (let ((object (ci-normalize +ci-profile-json+)))
@@ -50,8 +50,8 @@
   (let ((profiles (gr8s.network::security-profile-specs-from-objects
                    (list (com.inuoe.jzon:parse +ci-profile-json+)))))
     (values (gr8s.network::pod-injection-rules
-             (gr8s.network::make-np-pod :name "agent" :namespace "gr8ify"
-                                        :labels (gr8s.network::np-labels "gr8s.io/gr8ify-command" "claude"))
+             (gr8s.network::make-np-pod :name "agent" :namespace "gr8"
+                                        :labels (gr8s.network::np-labels "gr8s.io/gr8-command" "claude"))
              profiles)
             profiles)))
 
@@ -71,11 +71,11 @@
   (multiple-value-bind (rules profiles) (ci-rules)
     (declare (ignore rules))
     (is (equal '("anthropic") (gr8s.network::security-profile-secret-names
-                               profiles "gr8ify" (gr8s.network::np-labels "gr8s.io/gr8ify-command" "claude"))))
+                               profiles "gr8" (gr8s.network::np-labels "gr8s.io/gr8-command" "claude"))))
     (is (null (gr8s.network::security-profile-secret-names
-               profiles "prod" (gr8s.network::np-labels "gr8s.io/gr8ify-command" "claude"))))
+               profiles "prod" (gr8s.network::np-labels "gr8s.io/gr8-command" "claude"))))
     (is (null (gr8s.network::security-profile-secret-names
-               profiles "gr8ify" (gr8s.network::np-labels "gr8s.io/gr8ify-command" "ping"))))))
+               profiles "gr8" (gr8s.network::np-labels "gr8s.io/gr8-command" "ping"))))))
 
 (test ci-the-credential-comes-from-the-secret-and-renders-into-the-template
   (let ((one (com.inuoe.jzon:parse "{\"data\":{\"apiKey\":\"c2stYW50LXJlYWw=\"}}"))
@@ -111,15 +111,15 @@
   (with-temporary-store (store path)
     (values path)
     (gr8s.resources::create-core-resource store "namespaces"
-                                          (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "gr8ify")) nil)
+                                          (gr8s.resources::core-object "metadata" (gr8s.resources::core-object "name" "gr8")) nil)
     (gr8s.resources::create-core-resource
-     store "secrets" (com.inuoe.jzon:parse "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"anthropic\",\"namespace\":\"gr8ify\"},
+     store "secrets" (com.inuoe.jzon:parse "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"anthropic\",\"namespace\":\"gr8\"},
                                              \"data\":{\"apiKey\":\"c2stYW50LXJlYWw=\"}}")
-     "gr8ify")
-    (gr8s.resources::create-core-resource store "securityprofiles" (com.inuoe.jzon:parse +ci-profile-json+) "gr8ify")
+     "gr8")
+    (gr8s.resources::create-core-resource store "securityprofiles" (com.inuoe.jzon:parse +ci-profile-json+) "gr8")
     (flet ((pod (name command)
              (create-pod store (parse-pod (format nil "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",
-                 \"metadata\":{\"name\":\"~A\",\"namespace\":\"gr8ify\",\"labels\":{\"gr8s.io/gr8ify-command\":\"~A\"}},
+                 \"metadata\":{\"name\":\"~A\",\"namespace\":\"gr8\",\"labels\":{\"gr8s.io/gr8-command\":\"~A\"}},
                  \"spec\":{\"containers\":[{\"name\":\"c\",\"image\":\"busybox\"}]}}" name command)))))
       (let ((claude (pod "claude-1" "claude")) (ping (pod "ping-1" "ping")))
         (flet ((secret-names (pod)
@@ -141,7 +141,7 @@
   (flet ((normalize (spec)
            (gr8s.resources::normalize-core-resource
             "sandboxprofiles"
-            (com.inuoe.jzon:parse (format nil "{\"apiVersion\":\"gr8ify.gr8s.io/v1alpha1\",\"kind\":\"SandboxProfile\",
+            (com.inuoe.jzon:parse (format nil "{\"apiVersion\":\"gr8.gr8s.io/v1alpha1\",\"kind\":\"SandboxProfile\",
                                                 \"metadata\":{\"name\":\"claude\"},\"spec\":~A}" spec))
             nil "claude" nil)))
     (is (equal "SandboxProfile"
@@ -161,25 +161,25 @@
   (is (equal "SandboxProfile"
              (gethash "kind" (gr8s.resources::normalize-core-resource
                               "sandboxprofiles"
-                              (com.inuoe.jzon:parse "{\"apiVersion\":\"gr8ify.gr8s.io/v1alpha1\",\"kind\":\"SandboxProfile\",
+                              (com.inuoe.jzon:parse "{\"apiVersion\":\"gr8.gr8s.io/v1alpha1\",\"kind\":\"SandboxProfile\",
                                  \"metadata\":{\"name\":\"claude\"},
                                  \"spec\":{\"commands\":[\"claude\"],\"home\":{\"placeholders\":[\".claude/.credentials.json\"]}}}")
                               nil "claude" nil))))
   (signals gr8s.resources::kubernetes-error
     (gr8s.resources::normalize-core-resource
      "sandboxprofiles"
-     (com.inuoe.jzon:parse "{\"apiVersion\":\"gr8ify.gr8s.io/v1alpha1\",\"kind\":\"SandboxProfile\",
+     (com.inuoe.jzon:parse "{\"apiVersion\":\"gr8.gr8s.io/v1alpha1\",\"kind\":\"SandboxProfile\",
         \"metadata\":{\"name\":\"claude\"},\"spec\":{\"commands\":[\"claude\"],\"home\":{\"placeholders\":[\"/etc/shadow\"]}}}")
      nil "claude" nil)))
 
-(defparameter +ci-login-security-profile+ "{\"apiVersion\":\"agents.kruise.io/v1alpha1\",\"kind\":\"SecurityProfile\",\"metadata\":{\"name\":\"claude-oauth\",\"namespace\":\"gr8ify\"},\"spec\":{\"rules\":[{\"actions\":{\"tokenTransformation\":{\"apiKey\":{\"targetHeaders\":{\"names\":[\"authorization\"]},\"value\":{\"template\":\"Bearer {{ .Token }}\"}},\"credentialRef\":{\"secret\":{\"key\":\"accessToken\",\"name\":\"claude-oauth\"}},\"failStrategy\":\"Block\",\"type\":\"ApiKey\"}},\"match\":[{\"domains\":[\"api.anthropic.com\"],\"schemes\":[\"https\"]}],\"name\":\"anthropic-oauth\"}],\"selector\":{\"matchLabels\":{\"gr8s.io/gr8ify-command\":\"claude\"}}}}")
-(defparameter +ci-login-sandbox-profile+ "{\"apiVersion\":\"gr8ify.gr8s.io/v1alpha1\",\"kind\":\"SandboxProfile\",\"metadata\":{\"name\":\"claude\"},\"spec\":{\"commands\":[\"claude\"],\"home\":{\"placeholders\":[\".claude/.credentials.json\"],\"readWrite\":[\".claude\",\".claude.json\"]}}}")
+(defparameter +ci-login-security-profile+ "{\"apiVersion\":\"agents.kruise.io/v1alpha1\",\"kind\":\"SecurityProfile\",\"metadata\":{\"name\":\"claude-oauth\",\"namespace\":\"gr8\"},\"spec\":{\"rules\":[{\"actions\":{\"tokenTransformation\":{\"apiKey\":{\"targetHeaders\":{\"names\":[\"authorization\"]},\"value\":{\"template\":\"Bearer {{ .Token }}\"}},\"credentialRef\":{\"secret\":{\"key\":\"accessToken\",\"name\":\"claude-oauth\"}},\"failStrategy\":\"Block\",\"type\":\"ApiKey\"}},\"match\":[{\"domains\":[\"api.anthropic.com\"],\"schemes\":[\"https\"]}],\"name\":\"anthropic-oauth\"}],\"selector\":{\"matchLabels\":{\"gr8s.io/gr8-command\":\"claude\"}}}}")
+(defparameter +ci-login-sandbox-profile+ "{\"apiVersion\":\"gr8.gr8s.io/v1alpha1\",\"kind\":\"SandboxProfile\",\"metadata\":{\"name\":\"claude\"},\"spec\":{\"commands\":[\"claude\"],\"home\":{\"placeholders\":[\".claude/.credentials.json\"],\"readWrite\":[\".claude\",\".claude.json\"]}}}")
 
-(test ci-the-objects-gr8ify-login-applies-are-valid
-  ;; Emitted by gr8ify's TestEmitLoginProfiles (gr8ify/internal/client/login.go).
+(test ci-the-objects-gr8-login-applies-are-valid
+  ;; Emitted by gr8's TestEmitLoginProfiles (gr8/internal/client/login.go).
   (is (equal "SecurityProfile"
              (gethash "kind" (gr8s.resources::normalize-core-resource
-                              "securityprofiles" (com.inuoe.jzon:parse +ci-login-security-profile+) "gr8ify" nil nil))))
+                              "securityprofiles" (com.inuoe.jzon:parse +ci-login-security-profile+) "gr8" nil nil))))
   (is (equal "SandboxProfile"
              (gethash "kind" (gr8s.resources::normalize-core-resource
                               "sandboxprofiles" (com.inuoe.jzon:parse +ci-login-sandbox-profile+) nil "claude" nil))))

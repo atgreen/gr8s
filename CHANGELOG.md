@@ -32,10 +32,11 @@ the Kubernetes API version with a gr8s release suffix (see
     connection by the name the Pod looked up, whatever protocol it speaks, and dials
     only the addresses resolved with the answer (podster-wv1w.8). The range is
     reserved: Pod pools and ServiceCIDRs may not overlap it.
-- gr8ify: `gr8ify.gr8s.io/v1alpha1` SandboxProfile says what a command gets in the
+- gr8: `gr8.gr8s.io/v1alpha1` SandboxProfile says what a command gets in the
   caller's home and environment; the sandbox trusts the egress CA when the cluster
-  has one; `gr8ify login claude` moves Claude Code's subscription token into the
-  cluster, so the sandboxed claude sees only stand-in tokens.
+  has one; `gr8 login claude` moves Claude Code's subscription token into the
+  cluster, so the sandboxed claude sees only stand-in tokens. The RPM and DEB
+  packages install `/usr/bin/gr8` beside `gr8s`; `make gr8` builds it from source.
 
 - `gr8s dashboard` has a Network tab: a live map of the cluster's traffic,
   drawn from its flow events (podster-5hv). A node is a workload (a Pod

@@ -8,7 +8,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-// SandboxProfile is gr8ify.gr8s.io/v1alpha1 SandboxProfile's spec: what a command gets
+// SandboxProfile is gr8.gr8s.io/v1alpha1 SandboxProfile's spec: what a command gets
 // beyond its working directory.
 type SandboxProfile struct {
 	Commands []string `json:"commands"`
@@ -71,7 +71,7 @@ func Profile(command, home string, profiles []SandboxProfile) Grant {
 // a caller who may not list them, has none.
 func clusterProfiles(ctx context.Context, clientset kubernetes.Interface) []SandboxProfile {
 	raw, err := clientset.Discovery().RESTClient().Get().
-		AbsPath("/apis/gr8ify.gr8s.io/v1alpha1/sandboxprofiles").DoRaw(ctx)
+		AbsPath("/apis/gr8.gr8s.io/v1alpha1/sandboxprofiles").DoRaw(ctx)
 	if err != nil {
 		return nil
 	}

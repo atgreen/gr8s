@@ -93,7 +93,7 @@ func Enter(hostRoot string, args []string) int {
 		return fail(ExitCannotRun, err)
 	}
 	for _, problem := range view.saveBack() {
-		fmt.Fprintf(os.Stderr, "gr8ify: %v\n", problem)
+		fmt.Fprintf(os.Stderr, "gr8: %v\n", problem)
 	}
 	return status
 }
@@ -179,6 +179,6 @@ func lookPath(command string, env []string) (string, error) {
 }
 
 func fail(status int, err error) int {
-	fmt.Fprintf(os.Stderr, "gr8ify: %v\n", err)
+	fmt.Fprintf(os.Stderr, "gr8: %v\n", err)
 	return status
 }
