@@ -874,12 +874,18 @@ was written once, by the member that founded the cluster, and went on leading
 to that member alone whether or not it was running. A pass that finds nothing a
 Pod could reach leaves what is published, and so does a store with no such
 Service."
-  (let ((wanted (pod-reachable-api-endpoints endpoints)))
-    (when (and wanted
-               (handler-case (get-core-resource store "services" "default" "kubernetes")
-                 (kubernetes-error (condition)
-                   (unless (= 404 (kubernetes-error-status-code condition)) (error condition))
-                   nil)))
+  (let* ((wanted (pod-reachable-api-endpoints endpoints))
+         (service (and wanted
+                       (handler-case (get-core-resource store "services" "default" "kubernetes")
+                         (kubernetes-error (condition)
+                           (unless (= 404 (kubernetes-error-status-code condition)) (error condition))
+                           nil)))))
+    (when service
+      ;; ensure-native-api-service runs only when a cluster is founded, so a cluster
+      ;; made before the Service carried its labels gains them here.
+      (unless (native-api-service-labelled-p service)
+        (update-core-resource store "services" "default" "kubernetes"
+                              (lambda (service) (add-native-api-service-labels service) service)))
       (multiple-value-bind (endpoints slices) (published-native-api-endpoints store)
         (unless (and (equal wanted endpoints) (equal wanted slices))
           (publish-native-api-endpoints store wanted))))))
@@ -888,19 +894,30 @@ Service."
   "The labels kube-apiserver gives the kubernetes Service, which monitoring finds the API
 by (kube-prometheus-stack's apiserver ServiceMonitor selects on them).")
 
+(defun native-api-service-labelled-p (service)
+  (let ((labels (gethash "labels" (gethash "metadata" service))))
+    (and labels
+         (loop for (key . value) in +native-api-service-labels+
+               always (equal value (gethash key labels))))))
+
+(defun add-native-api-service-labels (service)
+  "Give SERVICE the standard labels, keeping labels of its own."
+  (let* ((metadata (gethash "metadata" service))
+         (labels (or (gethash "labels" metadata) (setf (gethash "labels" metadata) (core-object)))))
+    (loop for (key . value) in +native-api-service-labels+
+          do (setf (gethash key labels) value))))
+
 (defun ensure-native-api-service (store &optional (api-address "127.0.0.1") (api-port 6443))
   "Publish the real native HTTPS listener as the reserved Kubernetes Service, labelled as
 kube-apiserver labels it; a Service made before it carried the labels gains them."
   (prog1
       (handler-case
           (create-core-resource store "services"
-           (core-object "metadata" (core-object "name" "kubernetes"
-                                                "labels" (let ((labels (core-object)))
-                                                           (loop for (key . value) in +native-api-service-labels+
-                                                                 do (setf (gethash key labels) value))
-                                                           labels))
-                        "spec" (core-object "clusterIP" "10.96.0.1"
-                                             "ports" (vector (core-object "name" "https" "port" 443 "targetPort" api-port))))
+           (let ((service (core-object "metadata" (core-object "name" "kubernetes")
+                                       "spec" (core-object "clusterIP" "10.96.0.1"
+                                             "ports" (vector (core-object "name" "https" "port" 443 "targetPort" api-port))))))
+             (add-native-api-service-labels service)
+             service)
            "default")
         (kubernetes-error (condition)
           (unless (= 409 (kubernetes-error-status-code condition)) (error condition))
@@ -910,13 +927,9 @@ kube-apiserver labels it; a Service made before it carried the labels gains them
             (update-core-resource
              store "services" "default" "kubernetes"
              (lambda (service)
-               (let ((ports (gethash "ports" (gethash "spec" service)))
-                     (metadata (gethash "metadata" service)))
-                 (setf (gethash "targetPort" (aref ports 0)) api-port)
-                 ;; Labels of the Service's own are kept; the standard two are added.
-                 (let ((labels (or (gethash "labels" metadata) (setf (gethash "labels" metadata) (core-object)))))
-                   (loop for (key . value) in +native-api-service-labels+
-                         do (setf (gethash key labels) value))))
+               (let ((ports (gethash "ports" (gethash "spec" service))))
+                 (setf (gethash "targetPort" (aref ports 0)) api-port))
+               (add-native-api-service-labels service)
                service)))))
     (ensure-native-api-endpoints store api-address api-port)
     (ensure-default-service-cidr store)))
