@@ -3404,13 +3404,16 @@ between later ones. An ordinary restart recovers within the first.")
              ;; live elsewhere (docs/design-browser-nodes.md).
              (when (or (getf options :virtual-nodes) (getf options :browser-listen))
                (setf virtual-nodes
-                     (make-virtual-node-host store node-server pki (merge-pathnames "virtual-nodes/" state-directory)))
+                     (make-virtual-node-host store node-server pki (merge-pathnames "virtual-nodes/" state-directory)
+                                             :host-node (unless (getf options :disable-agent)
+                                                          (getf options :node-name))))
                (dolist (name (getf options :virtual-nodes))
                  (start-virtual-node virtual-nodes name)))
              (when (getf options :browser-listen)
                (destructuring-bind (address port) (getf options :browser-listen)
                  (setf browser-join (start-browser-join-listener virtual-nodes address port
-                                                                 :distro (getf options :browser-distro)))
+                                                                 :distro (getf options :browser-distro)
+                                                                 :pod-network (not (getf options :disable-agent))))
                  (format t "gr8s browser nodes join at http://~A:~D/~%" address port)))
              (when (getf options :debug-slynk-port)
                (setf debug-port (start-debug-server (getf options :debug-slynk-port) state-directory

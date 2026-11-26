@@ -27,7 +27,16 @@ the handler for the messages it sends unasked."
   (next-id 0)
   (replies (make-hash-table))
   (closed nil)
-  (on-message nil))
+  (on-message nil)
+  ;; Called with each binary message: an Ethernet frame from the browser's Pods.
+  (on-frame nil))
+
+(defun browser-session-send-frame (session frame)
+  "Send FRAME, an Ethernet frame for the browser's Pods, as one binary message."
+  (bt:with-lock-held ((browser-session-write-lock session))
+    (gr8s.protocol::write-websocket-frame (browser-session-stream session) 2
+                                          (coerce frame '(simple-array (unsigned-byte 8) (*))))
+    (force-output (browser-session-stream session))))
 
 (defun browser-session-send (session object)
   "Send OBJECT to SESSION's browser as one text frame. Signals when the connection is gone."
@@ -95,11 +104,15 @@ and wake every waiting request. Returns when the connection has ended."
                  (case opcode
                    (1 (let ((message (ignore-errors (com.inuoe.jzon:parse payload))))
                         (when (hash-table-p message) (browser-session-receive session message))))
+                   (2 (let ((handler (browser-session-on-frame session)))
+                        (when handler (ignore-errors (funcall handler payload)))))
                    (8 (return))
                    (9 (bt:with-lock-held ((browser-session-write-lock session))
                         (gr8s.protocol::write-websocket-frame stream 10 payload)
                         (force-output stream))))))
-           (error () nil))
+           (end-of-file () nil)
+           (error (condition)
+             (format *error-output* "gr8s browser session ended: ~A~%" condition)))
       (bt:with-lock-held ((browser-session-lock session))
         (setf (browser-session-closed session) t)
         (bt:condition-notify (browser-session-changed session)))
@@ -113,6 +126,8 @@ and wake every waiting request. Returns when the connection has ended."
 the Pods it holds are what the browser last reported. ENDPOINT, (address port), is the
 join listener, which also serves this runtime's exec streams."
   session endpoint
+  ;; The node's Pod network (browser-network.lisp), or NIL when it has none.
+  (network nil)
   (execs (make-hash-table :test #'equal :synchronized t))
   ;; "namespace/name" -> uid, for the Pod proxy.
   (names (make-hash-table :test #'equal :synchronized t)))
@@ -150,8 +165,15 @@ the runtime doesn't hold is ignored: the browser can't add Pods of its own."
                  "spec" (gethash "spec" object))))
 
 (defmethod gr8s.runtime::runtime-ensure ((runtime browser-runtime) pod)
-  (let* ((result (browser-session-call (browser-runtime-session runtime) "ensure"
-                                       "pod" (browser-pod-request pod)))
+  (let* ((network (browser-runtime-network runtime))
+         (address (and network (browser-network-address network (gr8s.model::pod-uid pod))))
+         (request (browser-pod-request pod))
+         (result (progn
+                   (when address
+                     (setf (gethash "network" request)
+                           (core-object "address" address "prefix" (browser-network-prefix network)
+                                        "gateway" (browser-network-gateway network))))
+                   (browser-session-call (browser-runtime-session runtime) "ensure" "pod" request)))
          (status (gethash "status" result))
          (runtime-pod (or (gethash (gr8s.model::pod-uid pod) (gr8s.runtime::fake-runtime-pods runtime))
                           (gr8s.runtime::make-runtime-pod :uid (gr8s.model::pod-uid pod)))))
@@ -159,6 +181,9 @@ the runtime doesn't hold is ignored: the browser can't add Pods of its own."
       (setf (gethash (format nil "~A/~A" (gethash "namespace" request) (gethash "name" request))
                      (browser-runtime-names runtime))
             (gr8s.model::pod-uid pod)))
+    (when address
+      (setf (gr8s.runtime::runtime-pod-pod-ip runtime-pod) address
+            (gr8s.runtime::runtime-pod-pod-ips runtime-pod) (vector address)))
     (setf (gr8s.runtime::runtime-pod-resource-version runtime-pod) (gr8s.model::pod-resource-version pod)
           (gr8s.runtime::runtime-pod-spec-fingerprint runtime-pod) (gr8s.runtime::pod-runtime-spec-fingerprint pod)
           (gethash (gr8s.model::pod-uid pod) (gr8s.runtime::fake-runtime-pods runtime)) runtime-pod)
@@ -168,6 +193,8 @@ the runtime doesn't hold is ignored: the browser can't add Pods of its own."
 (defmethod gr8s.runtime::runtime-delete ((runtime browser-runtime) uid)
   ;; A browser that has gone has nothing left to stop.
   (ignore-errors (browser-session-call (browser-runtime-session runtime) "delete" "uid" uid))
+  (when (browser-runtime-network runtime)
+    (release-browser-network-address (browser-runtime-network runtime) uid))
   (remhash uid (gr8s.runtime::fake-runtime-pods runtime)))
 
 (defmethod gr8s.runtime::runtime-logs ((runtime browser-runtime) uid container &key tail previous)
@@ -365,6 +392,7 @@ A browser node is untrusted, so of other nodes and workloads it learns only tota
                  "name" (gethash "name" (gethash "metadata" object))
                  "namespace" (gethash "namespace" (gethash "metadata" object))
                  "phase" phase
+                 "podIP" (gethash "podIP" status "")
                  "startTime" (gethash "startTime" status 'null)
                  "containers"
                  (map 'vector
@@ -437,6 +465,9 @@ whether its Pods' ports are reachable through POD-PROXY."
    (pod-proxy :initarg :pod-proxy :initform nil :reader browser-join-pod-proxy
               :documentation "Whether /pods/NS/NAME/PORT/ proxies HTTP to browser Pods. Anyone
 who can reach the listener reaches those ports, so it is off unless asked for.")
+   (pod-network :initarg :pod-network :initform nil :reader browser-join-pod-network
+                :documentation "Whether browser Pods get addresses in their node's Pod CIDR, routed
+to a TAP device on this host (browser-network.lisp). It needs CAP_NET_ADMIN.")
    (runtimes :initform (make-hash-table :test #'equal :synchronized t) :reader browser-join-runtimes
              :documentation "Each connected browser node's runtime, by node name."))
   (:documentation "Serves the join page and accepts browser nodes' sessions."))
@@ -473,6 +504,18 @@ stops with the session."
                                        :runtime-options (list :runtime "browser" :runtime-object runtime
                                                              :architecture architecture))
                    (setf (gethash name (browser-join-runtimes acceptor)) runtime)
+                   ;; Its Pods' network: the node's Pod CIDR, routed to a device here.
+                   (let* ((node (gr8s.controllers::get-node (virtual-node-host-store host) name))
+                          (cidr (find-if (lambda (cidr) (not (find #\: cidr)))
+                                         (gr8s.model::node-record-all-pod-cidrs node))))
+                     (when (and cidr (browser-join-pod-network acceptor))
+                       (let ((network (start-browser-network-device
+                                       (make-browser-network cidr) name
+                                       (lambda (frame) (browser-session-send-frame session frame)))))
+                         (when network
+                           (setf (browser-runtime-network runtime) network
+                                 (browser-session-on-frame session)
+                                 (lambda (frame) (browser-network-receive network frame)))))))
                    (browser-session-send session (core-object "op" "welcome" "node" name
                                                               "podProxy" (and (browser-join-pod-proxy acceptor) t)))
                    (format t "gr8s browser node ~A joined~%" name)
@@ -482,6 +525,9 @@ stops with the session."
            (error (condition)
              (format *error-output* "gr8s browser node~@[ ~A~]: ~A~%" name condition)))
       (when name
+        (let ((runtime (gethash name (browser-join-runtimes acceptor))))
+          (when (and runtime (browser-runtime-network runtime))
+            (stop-browser-network-device (browser-runtime-network runtime))))
         (remhash name (browser-join-runtimes acceptor))
         (stop-virtual-node host name)
         (format t "gr8s browser node ~A left~%" name))
@@ -552,12 +598,13 @@ to the Pod's PORT, and relay the response."
                   do (setf (hunchentoot:header-out header) (aref pair 1)))
           (cl-base64:base64-string-to-usb8-array (gethash "body" result "")))))))
 
-(defun start-browser-join-listener (nodes address port &key distro pod-proxy)
+(defun start-browser-join-listener (nodes address port &key distro pod-proxy pod-network)
   "Listen on ADDRESS:PORT for browsers joining as nodes on NODES, serving the join page and
-DISTRO, the root image file Pods boot from, and with POD-PROXY, HTTP to their Pods.
-Returns the acceptor."
+DISTRO, the root image file Pods boot from, and with POD-PROXY, HTTP to their Pods. With
+POD-NETWORK, their Pods join the cluster network through this host. Returns the acceptor."
   (hunchentoot:start (make-instance 'browser-join-acceptor
                                     :address address :port port :nodes nodes :pod-proxy pod-proxy
+                                    :pod-network pod-network
                                     :distro (and distro (pathname distro))
                                     :access-log-destination nil
                                     :message-log-destination *error-output*)))

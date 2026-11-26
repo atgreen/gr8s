@@ -65,6 +65,7 @@
   .badge.Failed { background: var(--bad-soft); color: var(--bad); }
   .container { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 10px; font-size: 13px; color: var(--muted); }
   .container code { font-family: var(--mono); color: var(--fg); }
+  .ip { font: 13px var(--mono); color: var(--muted); margin-right: 8px; }
   .port { font-weight: 600; color: var(--accent); text-decoration: none; border: 1px solid var(--accent); border-radius: 999px; padding: 0 10px; }
   .port:hover { background: var(--accent-soft); }
   .empty { color: var(--muted); text-align: center; padding: 28px 12px; border: 1px dashed var(--line); border-radius: 12px; }
@@ -186,7 +187,7 @@
         <div class="pod">
           <div class="pod-head">
             <div class="pod-name"><span>${esc(pod.namespace)}/</span>${esc(pod.name)}</div>
-            <span class="badge ${esc(pod.phase)}">${esc(pod.phase)}</span>
+            <span>${pod.podIP ? `<code class="ip">${esc(pod.podIP)}</code> ` : ""}<span class="badge ${esc(pod.phase)}">${esc(pod.phase)}</span></span>
           </div>
           ${pod.containers.map((c) => `
             <div class="container"><span>container <code>${esc(c.name)}</code></span>

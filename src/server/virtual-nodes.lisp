@@ -23,16 +23,18 @@
   name directory worker)
 
 (defstruct (virtual-node-host (:constructor %make-virtual-node-host
-                                  (store server pki state-root)))
-  "The virtual nodes one server hosts, each with its state under STATE-ROOT/NAME/."
-  store server pki state-root
+                                  (store server pki state-root host-node)))
+  "The virtual nodes one server hosts, each with its state under STATE-ROOT/NAME/.
+HOST-NODE names the node of this process, through which their Pods are routed."
+  store server pki state-root host-node
   (nodes (make-hash-table :test #'equal))
   (lock (bt:make-lock "gr8s virtual nodes")))
 
-(defun make-virtual-node-host (store server pki state-root)
+(defun make-virtual-node-host (store server pki state-root &key host-node)
   "A host for virtual nodes enrolled through the node SERVER with PKI, storing each
-one's agent state under STATE-ROOT."
-  (%make-virtual-node-host store server pki (uiop:ensure-directory-pathname state-root)))
+one's agent state under STATE-ROOT. HOST-NODE, the node this process runs as, carries
+their Pods' traffic: the cluster routes their Pod CIDRs to it."
+  (%make-virtual-node-host store server pki (uiop:ensure-directory-pathname state-root) host-node))
 
 (defun virtual-node-host-endpoint (host)
   "The loopback endpoint (HOST PORT) of the node server its virtual nodes dial."
@@ -60,6 +62,8 @@ enrollment fails. Returns the virtual-node."
     (gr8s.resources::set-node-labels-and-taints
      (virtual-node-host-store host) name
      (let ((all (core-object "gr8s.io/virtual" "true")))
+       (when (virtual-node-host-host-node host)
+         (setf (gethash "gr8s.io/virtual-host" all) (virtual-node-host-host-node host)))
        (when labels (maphash (lambda (k v) (setf (gethash k all) v)) labels))
        all)
      taints)

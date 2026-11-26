@@ -198,6 +198,45 @@
             (is (member :lease-expired reasons))
             (is (member :stability-window-satisfied reasons))))))))
 
+(test a-virtual-nodes-pod-cidr-rides-on-the-node-hosting-it
+  ;; podster-57fv.3: a browser node is no overlay peer of its own; its Pod CIDR is
+  ;; routed to the node whose server carries its Pods.
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let ((now 1700000200))
+      (flet ((node (name cidr underlay &optional labels)
+               (let ((node (topology-node name "r" "z")))
+                 (setf (gr8s.model::node-record-pod-cidr node) cidr
+                       (gr8s.model::node-record-underlay-address node) underlay)
+                 (gr8s.controllers::register-node store node)
+                 (when labels
+                   (gr8s.resources::set-node-labels-and-taints store name labels #()))
+                 (gr8s.controllers::mark-node-ready store name (+ now 2208988800) :lease-duration 1000))))
+        (node "host" "10.88.0.0/24" "192.0.2.10")
+        (node "other" "10.88.1.0/24" "192.0.2.11")
+        (node "browser-a" "10.88.2.0/24" "127.0.0.1"
+              (gr8s.resources::core-object "gr8s.io/virtual" "true" "gr8s.io/virtual-host" "host")))
+      (let* ((server (gr8s.apiserver::%make-node-grpc-server :store store :overlay-backend "vxlan"
+                                                             :clock (lambda () now)))
+             (routes (gr8s.apiserver::assigned-node-routes server "other")))
+        (is (equal '("host") (mapcar (lambda (route) (slot-value route 'gr8s.node.v1::node-name)) routes)))
+        (is (equal '("10.88.0.0/24" "10.88.2.0/24")
+                   (slot-value (first routes) 'gr8s.node.v1::pod-cidrs)))
+        ;; The browser node's own agent gets no routes to program.
+        (is (null (gr8s.apiserver::assigned-node-routes server "browser-a")))))))
+
+(test a-browser-nodes-pods-get-addresses-in-its-cidr
+  (let ((network (gr8s.server::make-browser-network "10.88.2.0/30")))
+    (is (equal "10.88.2.1" (gr8s.server::browser-network-gateway network)))
+    (is (= 30 (gr8s.server::browser-network-prefix network)))
+    (is (equal "10.88.2.2" (gr8s.server::browser-network-address network "pod-a")))
+    (is (equal "10.88.2.2" (gr8s.server::browser-network-address network "pod-a")))
+    ;; A /30 holds one Pod beside its gateway.
+    (signals runtime-error (gr8s.server::browser-network-address network "pod-b"))
+    (gr8s.server::release-browser-network-address network "pod-a")
+    (is (equal "10.88.2.2" (gr8s.server::browser-network-address network "pod-b")))
+    (is (equal "gb-wser-a" (gr8s.server::browser-tap-name "browser-a")))))
+
 (test sparse-steering-evidence-is-next-hop-bound-fresh-deduplicated-and-clamped
   (with-temporary-store (store path)
     (declare (ignore path))

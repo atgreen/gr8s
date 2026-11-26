@@ -42,6 +42,63 @@ export function joinCluster({ url, createKernel, distro, memoryMiB = 256, capaci
   const pods = new Map(); // uid -> Pod
   const execs = new Map(); // exec id -> { process, pty }
   const socket = new WebSocket(url);
+  socket.binaryType = "arraybuffer";
+
+  // The Pods' network: a learning switch between each Pod's virtual NIC and the
+  // server, which routes the node's Pod CIDR to this tab. Frames are Ethernet.
+  const nics = new Map(); // MAC (hex) -> { kernel }
+  const macOf = (frame, offset) => [...frame.subarray(offset, offset + 6)].map((b) => b.toString(16).padStart(2, "0")).join(":");
+  const deliver = (frame, from) => {
+    const destination = macOf(frame, 0);
+    const local = nics.get(destination);
+    if (local && local !== from) local.kernel?.receiveFrame(frame);
+    else if (frame[0] & 1) for (const nic of nics.values()) if (nic !== from) nic.kernel?.receiveFrame(frame);
+  };
+  // The guest's NIC offloads TCP and UDP checksums, leaving only the pseudo-header
+  // sum: as the "hardware" here, finish them before a frame leaves the Pod.
+  function finishChecksum(frame) {
+    if (frame.length < 34 || frame[12] !== 0x08 || frame[13] !== 0x00) return frame; // IPv4 only
+    const ip = 14;
+    const headerLength = (frame[ip] & 0x0f) * 4;
+    const protocol = frame[ip + 9];
+    if (protocol !== 6 && protocol !== 17) return frame;
+    const totalLength = (frame[ip + 2] << 8) | frame[ip + 3];
+    const l4 = ip + headerLength;
+    const length = totalLength - headerLength;
+    if (l4 + length > frame.length || (frame[ip + 6] & 0x3f) || frame[ip + 7]) return frame; // fragments as they are
+    const field = l4 + (protocol === 6 ? 16 : 6);
+    if (protocol === 17 && frame[field] === 0 && frame[field + 1] === 0) return frame; // UDP without one
+    frame[field] = 0;
+    frame[field + 1] = 0;
+    let sum = protocol + length;
+    for (let i = ip + 12; i < ip + 20; i += 2) sum += (frame[i] << 8) | frame[i + 1];
+    for (let i = 0; i < length; i += 2) sum += (frame[l4 + i] << 8) | (i + 1 < length ? frame[l4 + i + 1] : 0);
+    while (sum > 0xffff) sum = (sum & 0xffff) + (sum >>> 16);
+    let checksum = ~sum & 0xffff;
+    if (checksum === 0 && protocol === 17) checksum = 0xffff;
+    frame[field] = checksum >> 8;
+    frame[field + 1] = checksum & 0xff;
+    return frame;
+  }
+
+  function makeNic() {
+    const mac = new Uint8Array(6);
+    crypto.getRandomValues(mac);
+    mac[0] = (mac[0] & 0xfe) | 0x02; // unicast, locally administered
+    const nic = { mac, kernel: null };
+    nics.set(macOf(mac, 0), nic);
+    nic.device = {
+      mac,
+      attach: (kernel) => { nic.kernel = kernel; },
+      send: (frame) => {
+        frame = finishChecksum(new Uint8Array(frame));
+        if (socket.readyState === 1) socket.send(frame);
+        deliver(frame, nic);
+      },
+      close: () => nics.delete(macOf(mac, 0)),
+    };
+    return nic;
+  }
   let resolveNode, resolveClosed;
   const node = new Promise((resolve) => (resolveNode = resolve));
   const closed = new Promise((resolve) => (resolveClosed = resolve));
@@ -61,7 +118,11 @@ export function joinCluster({ url, createKernel, distro, memoryMiB = 256, capaci
     resolveClosed();
   };
   socket.onmessage = async (event) => {
-    const message = JSON.parse(typeof event.data === "string" ? event.data : decoder.decode(event.data));
+    if (typeof event.data !== "string") {
+      deliver(new Uint8Array(event.data), null);
+      return;
+    }
+    const message = JSON.parse(event.data);
     if (message.op === "info") {
       onInfo(message);
       return;
@@ -122,7 +183,18 @@ export function joinCluster({ url, createKernel, distro, memoryMiB = 256, capaci
     pods.set(request.uid, pod);
     pod.starting = (async () => {
       log(`starting ${request.namespace}/${request.name}`);
-      pod.vm = await createKernel({ distro, memoryMiB });
+      const network = request.network;
+      if (network) pod.nic = makeNic();
+      pod.vm = await createKernel({ distro, memoryMiB, ...(network ? { net: pod.nic.device } : {}) });
+      if (network) {
+        // The Pod's own address in the node's Pod CIDR, as the server assigned it.
+        const setup = await pod.vm.exec("sh", ["-c",
+          `pkill udhcpc; ip link set eth0 up && ip addr flush dev eth0 && ` +
+          `ip addr add ${network.address}/${network.prefix} dev eth0 && ip route add default via ${network.gateway}`],
+          { user: "root" });
+        if (setup.exitCode !== 0) throw new Error(`network setup failed: ${setup.stderr}`);
+        log(`${request.name} is ${network.address}`);
+      }
       for (const spec of request.spec.containers ?? []) await startContainer(pod, spec);
     })();
     try {
@@ -251,6 +323,7 @@ export function joinCluster({ url, createKernel, distro, memoryMiB = 256, capaci
     await pod.starting?.catch(() => {});
     for (const container of pod.containers.values()) container.process?.kill("SIGKILL");
     await pod.vm?.stop?.();
+    pod.nic?.device.close();
     log(`stopped ${pod.request.namespace}/${pod.request.name}`);
   }
 
