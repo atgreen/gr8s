@@ -1350,7 +1350,11 @@ the node from starting."
           (multiple-value-bind (proxy steering gate)
               (gr8s.controllers::start-node-egress-proxy
                (lambda (peer host address port)
-                 (destructuring-bind (&optional ip-map specs cluster-policies) (node-runtime-egress-view node-runtime)
+                 ;; The view's four parts, profiles too: with three, every decision
+                 ;; signalled and every captured connection was reset (podster-uevw).
+                 (destructuring-bind (&optional ip-map specs cluster-policies profiles)
+                     (node-runtime-egress-view node-runtime)
+                   (declare (ignore profiles))
                    (let ((pod (and ip-map (gethash peer ip-map))))
                      (if pod
                          (gr8s.network::egress-connection-verdict pod specs cluster-policies host address port)
