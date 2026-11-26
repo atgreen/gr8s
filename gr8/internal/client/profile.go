@@ -23,6 +23,9 @@ type SandboxProfile struct {
 	Env map[string]string `json:"env"`
 	// NamespaceSelector limits the profile to the gr8 Pods of the namespaces it selects.
 	NamespaceSelector *metav1.LabelSelector `json:"namespaceSelector,omitempty"`
+	// Run names the one gr8 run a policy's profile is for; such a profile carries
+	// only its egress block, for the node (podster-wv1w.14).
+	Run string `json:"run,omitempty"`
 }
 
 // builtinProfiles apply when the cluster has no SandboxProfile for a command.
@@ -112,6 +115,9 @@ func ProfilesFor(items []NamedProfile, namespace string, labels map[string]strin
 	}
 	var scoped, unscoped []NamedProfile
 	for _, item := range items {
+		if item.Spec.Run != "" {
+			continue
+		}
 		if item.Spec.NamespaceSelector == nil {
 			unscoped = append(unscoped, item)
 			continue

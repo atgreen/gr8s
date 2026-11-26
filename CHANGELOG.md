@@ -9,6 +9,19 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- gr8 policy files (podster-wv1w.14): one `gr8.gr8s.io/v1alpha1` Policy says a
+  command's hosts, credentials (read from `env:` or `file:` sources on the host when
+  the run starts), home grants, environment, egress inspection, desktop and
+  resources. gr8 makes them resources scoped to the run's Pod, owned by it where
+  namespaced, and removes them when the run ends. `~/.config/gr8/policies/CMD.yaml`
+  is trusted; a working directory's `.gr8/CMD.yaml`, which the sandbox could edit, is
+  pinned by content, and shown and asked about again whenever it changes.
+  SandboxProfile gains `spec.run`, a profile for one run, which the node prefers.
+
+- A gr8 sandbox requests 1 CPU and 1Gi and is limited to half the node's CPU and
+  memory by default, `--cpu` and `--memory` setting both; it was BestEffort, with
+  no ceiling and the first to be killed.
+
 - A gr8 sandbox is a desktop one (podster-wv1w.15, .16, .17): it gets the caller's
   Wayland display and audio (PipeWire, PulseAudio) at the same paths in its own
   runtime directory, and the GPU through a device plugin built into the agent,
@@ -156,6 +169,10 @@ the Kubernetes API version with a gr8s release suffix (see
   still serves Hubble's Observer API for the `hubble` CLI.
 
 ### Fixed
+
+- Every Burstable container got `oom_score_adj` 999, as if it requested no memory:
+  the node's memory capacity was read as NIL (`/proc/meminfo`'s value was parsed
+  twice), so the kubelet's scaling by memory request never applied.
 
 - A proxied connection whose client closed first could leave the Gateway's L4 proxy or
   the node egress proxy waiting on the upstream forever: closing a socket another

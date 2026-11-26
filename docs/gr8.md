@@ -56,6 +56,9 @@ gr8 [flags] COMMAND [ARG...]
 | `--node NAME` | Node to run on (default: the one with this host's address). |
 | `--kubeconfig FILE` | Kubeconfig (default: `$KUBECONFIG`, then `~/.kube/config`). |
 | `--keep` | Keep the Pod, and any `--allow` policy, after the command exits. |
+| `--policy NAME\|FILE` | Use this policy instead of the command's own. |
+| `--cpu N` | The command's CPUs, request and limit (`4`, `500m`). |
+| `--memory N` | The command's memory, request and limit (`8Gi`). |
 | `--no-display` | Withhold the Wayland display. |
 | `--no-audio` | Withhold audio, and with it the microphone. |
 | `--no-gpu` | Withhold the GPU. |
@@ -93,6 +96,15 @@ the host:
   `HOME`, `USER`, `LOGNAME`, `SHELL`, `EDITOR`, `VISUAL`, `PAGER` and `NO_COLOR`
   pass through. Anything else, such as `SSH_AUTH_SOCK`, `*_TOKEN` or `AWS_*`,
   passes only when named with `--env`; the profile can add stand-ins.
+
+## CPU and memory
+
+The command runs in its Pod's cgroup, under the same enforcement as any Pod. By
+default it requests 1 CPU and 1Gi and may use up to half the node's CPU and memory:
+a runaway build or a hungry agent can't take the whole machine, and the Pod is
+Burstable, so the kernel and the kubelet weigh what it asked for before choosing it
+under memory pressure. `--cpu` and `--memory` give it exactly that much, as both
+request and limit.
 
 ## The desktop
 
@@ -218,6 +230,54 @@ rules inject for. A request that would carry a stand-in anywhere else, or on a
 path no rule covers, gets `403` with a body that says which header, for what
 request, and where the Pod's credentials are bound. Nothing real can leak this
 way, and the client learns why instead of seeing the server's `401`.
+
+## Policy files
+
+One file can say everything a command gets. `gr8 claude` reads
+`~/.config/gr8/policies/claude.yaml`, else the working directory's
+`.gr8/claude.yaml`; `--policy NAME` picks `~/.config/gr8/policies/NAME.yaml`, and
+`--policy FILE` a file.
+
+```yaml
+apiVersion: gr8.gr8s.io/v1alpha1
+kind: Policy
+metadata: {name: claude}
+spec:
+  hosts: [api.anthropic.com, platform.claude.com, "*.githubusercontent.com"]
+  credentials:
+  - from: env:GITHUB_TOKEN                 # or file:~/.config/gh/hosts.yml#github.com/oauth_token
+    hosts: [api.github.com, github.com]
+    header: authorization                  # the default
+    template: "Bearer {{ .Token }}"        # the default
+    env: GH_TOKEN                          # the sandbox gets a stand-in in $GH_TOKEN
+  home:
+    readWrite: [.claude, .claude.json]
+    readOnly: [.config/git]
+  env: {EDITOR: vi}
+  egress:                                  # as a SandboxProfile's spec.egress
+    enforcement: Audit
+    binaries:
+    - hosts: [api.github.com]
+      paths: [/usr/bin/gh, /usr/bin/git]
+  desktop: {audio: false}                  # display, audio and gpu default to on
+  resources: {cpu: "4", memory: 8Gi}
+```
+
+gr8 turns it into resources for the one run, scoped to its Pod by the
+`gr8s.io/gr8-run` label: a ClusterNetworkPolicy allowing `hosts` and the
+credentials' hosts; a Secret per credential, read from its source on your
+machine when the run starts, and a SecurityProfile injecting them; and, for
+`egress`, a SandboxProfile for this run alone (`spec.run`), which the node prefers
+to any other for it. The Secrets and SecurityProfile are owned by the Pod, so they
+go with it even if gr8 doesn't; gr8 deletes everything when the run ends. Flags
+win over the file. A missing credential stops the run before it starts.
+
+**A policy the sandbox could edit isn't trusted as it stands.** The command may
+write its working directory, so a `.gr8/` policy there could be widened by the very
+agent it confines. gr8 shows such a policy and asks before using it, records your
+approval by its content, and asks again, showing what changed, whenever it differs.
+Without a terminal to ask on, gr8 refuses it. Policies in `~/.config/gr8/policies`,
+which the sandbox can't write, are used as they are.
 
 ## SandboxProfiles
 

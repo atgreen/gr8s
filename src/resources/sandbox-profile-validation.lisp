@@ -30,7 +30,7 @@
   (let ((spec (gethash "spec" object)))
     (unless (hash-table-p spec) (%sbp-invalid "spec must be an object"))
     (dolist (key (loop for key being the hash-keys of spec collect key))
-      (unless (member key '("commands" "namespaceSelector" "home" "env" "egress") :test #'equal)
+      (unless (member key '("commands" "namespaceSelector" "run" "home" "env" "egress") :test #'equal)
         (%sbp-invalid "spec.~A is not supported" key)))
     (let ((commands (gethash "commands" spec)))
       (unless (and (vectorp commands) (not (stringp commands)) (plusp (length commands))
@@ -47,6 +47,10 @@
           (let ((paths (gethash key home)))
             (unless (and (vectorp paths) (not (stringp paths)) (every #'%sbp-home-path-p paths))
               (%sbp-invalid "spec.home.~A must list paths relative to $HOME, without .." key))))))
+    ;; One run's alone, by its Pod's gr8s.io/gr8-run label: a gr8 policy's (podster-wv1w.14).
+    (multiple-value-bind (run present) (gethash "run" spec)
+      (when (and present (not (and (stringp run) (dns-subdomain-p run))))
+        (%sbp-invalid "spec.run must name a gr8 run's Pod")))
     ;; Which namespaces' gr8 Pods it is for: all, without one.
     (multiple-value-bind (selector present) (gethash "namespaceSelector" spec)
       (when present

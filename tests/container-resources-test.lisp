@@ -38,6 +38,17 @@
     ;; With no known capacity it stays within range rather than erroring.
     (is (<= -996 (gr8s.kubelet::container-oom-score-adj "Burstable" container nil) 999))))
 
+(test the-nodes-memory-capacity-is-read-from-meminfo
+  ;; It was always NIL, so every Burstable container scored 999 whatever it requested.
+  (let ((path (uiop:tmpize-pathname (merge-pathnames "meminfo" (uiop:temporary-directory)))))
+    (unwind-protect
+         (progn
+           (with-open-file (out path :direction :output :if-exists :supersede)
+             (format out "MemTotal:       32314980 kB~%MemFree:         1000000 kB~%"))
+           (is (= (* 1024 32314980) (gr8s.kubelet::node-memory-capacity-bytes path))))
+      (ignore-errors (delete-file path))))
+  (is (integerp (gr8s.kubelet::node-memory-capacity-bytes))))
+
 (test quantities-round-trip-exactly-without-floating-point
   (loop for (input expected) in '(("100m" 100) ("1" 1000) ("0.5" 500) ("1.5" 1500) ("2k" 2000000)
                                   ("1e3" 1000000) ("0.0001" 1) ("1001u" 2))

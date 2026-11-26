@@ -57,6 +57,8 @@ type PodRequest struct {
 	Command   string // the command's base name
 	Identity  Identity
 	GPU       bool // ask for the node's GPU render nodes (GPUResource)
+	// Resources are the command's CPU and memory requests and limits.
+	Resources corev1.ResourceRequirements
 }
 
 // GPUResource is the extended resource a gr8s node offers its GPU render nodes as
@@ -106,7 +108,7 @@ func NewPod(request PodRequest, suffix string) *corev1.Pod {
 				Name:      ContainerName,
 				Image:     request.Image,
 				Command:   []string{HostRoot + request.Launcher, "hold"},
-				Resources: gpuResources(request.GPU),
+				Resources: withGPU(request.Resources, request.GPU),
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: "host", MountPath: HostRoot},
 					{Name: "egress-trust", MountPath: TrustMount, ReadOnly: true},
@@ -132,12 +134,63 @@ func NewPod(request PodRequest, suffix string) *corev1.Pod {
 	}
 }
 
-func gpuResources(gpu bool) corev1.ResourceRequirements {
+// withGPU adds a GPU slot to resources when gpu.
+func withGPU(resources corev1.ResourceRequirements, gpu bool) corev1.ResourceRequirements {
 	if !gpu {
-		return corev1.ResourceRequirements{}
+		return resources
 	}
-	one := resource.MustParse("1")
-	return corev1.ResourceRequirements{Limits: corev1.ResourceList{GPUResource: one}}
+	limits := corev1.ResourceList{GPUResource: resource.MustParse("1")}
+	for name, quantity := range resources.Limits {
+		limits[name] = quantity
+	}
+	resources.Limits = limits
+	return resources
+}
+
+// SandboxResources returns the command's CPU and memory requests and limits on a node
+// whose allocatable is given. Without cpu or memory (Kubernetes quantities), a command
+// requests 1 CPU and 1Gi and may use up to half the node's: capped, so a runaway build
+// can't take the desktop, and Burstable, so it isn't the first thing the kernel kills
+// under memory pressure, as a BestEffort Pod is. A given cpu or memory is both the
+// request and the limit.
+func SandboxResources(allocatable corev1.ResourceList, cpu, memory string) (corev1.ResourceRequirements, error) {
+	requests, limits := corev1.ResourceList{}, corev1.ResourceList{}
+	for _, item := range []struct {
+		name    corev1.ResourceName
+		given   string
+		request string
+	}{{corev1.ResourceCPU, cpu, "1"}, {corev1.ResourceMemory, memory, "1Gi"}} {
+		if item.given != "" {
+			quantity, err := resource.ParseQuantity(item.given)
+			if err != nil || quantity.Sign() <= 0 {
+				return corev1.ResourceRequirements{}, fmt.Errorf("--%s %q is not a positive quantity", item.name, item.given)
+			}
+			requests[item.name], limits[item.name] = quantity, quantity
+			continue
+		}
+		request := resource.MustParse(item.request)
+		available, ok := allocatable[item.name]
+		if !ok || available.IsZero() {
+			requests[item.name] = request
+			continue
+		}
+		half := halfOf(item.name, available)
+		if half.Cmp(request) < 0 {
+			request = half
+		}
+		requests[item.name], limits[item.name] = request, half
+	}
+	if len(limits) == 0 {
+		limits = nil
+	}
+	return corev1.ResourceRequirements{Requests: requests, Limits: limits}, nil
+}
+
+func halfOf(name corev1.ResourceName, quantity resource.Quantity) resource.Quantity {
+	if name == corev1.ResourceCPU {
+		return *resource.NewMilliQuantity(quantity.MilliValue()/2, resource.DecimalSI)
+	}
+	return *resource.NewQuantity(quantity.Value()/2, resource.BinarySI)
 }
 
 // NewNamespace returns the namespace gr8 Pods live in. Mounting the host's
