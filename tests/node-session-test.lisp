@@ -1908,6 +1908,38 @@ them. A node can't claim another's address or name."
     (is-false (suits "{\"containers\":[{\"name\":\"a\",\"securityContext\":{\"privileged\":true}}]}"))
     (is-false (suits "{\"hostNetwork\":true,\"containers\":[{\"name\":\"a\"}]}"))))
 
+(test browser-images-resolve-references-as-docker-does
+  ;; podster-57fv.4: references as Pods write them, with Docker Hub's defaults.
+  (flet ((parsed (reference) (multiple-value-list (gr8s.server::parse-image-reference reference))))
+    (is (equal '("docker.io" "library/busybox" "latest") (parsed "busybox")))
+    (is (equal '("docker.io" "library/nginx" "1.27-alpine") (parsed "nginx:1.27-alpine")))
+    (is (equal '("docker.io" "library/busybox" "latest") (parsed "docker.io/library/busybox:latest")))
+    (is (equal '("docker.io" "grafana/grafana" "11.0.0") (parsed "grafana/grafana:11.0.0")))
+    (is (equal '("ghcr.io" "o/r" "v1") (parsed "ghcr.io/o/r:v1")))
+    (is (equal '("registry.lab:30500" "team/app" "latest") (parsed "registry.lab:30500/team/app")))
+    (is (equal '("docker.io" "library/busybox" "sha256:abc") (parsed "busybox@sha256:abc")))
+    (is (equal '("localhost" "app" "dev") (parsed "localhost/app:dev")))))
+
+(test browser-images-serve-only-layers-they-resolved
+  (let* ((directory (uiop:ensure-directory-pathname
+                     (sb-posix:mkdtemp (namestring (merge-pathnames "gr8s-test-XXXXXX" (uiop:temporary-directory))))))
+         (images (gr8s.server::make-browser-images directory)))
+    (unwind-protect
+         (progn
+           (is (null (gr8s.server::browser-image-layer-file
+                      images "sha256:55d2dadd4bbc7132e31b89f47d8f7cc517cac013563328b707c933d42c4a2c07")))
+           ;; A cached layer of a resolved image is served from its file.
+           (let ((digest (format nil "sha256:~(~A~)" (ironclad:byte-array-to-hex-string
+                                                      (ironclad:digest-sequence :sha256 (make-array 3 :element-type '(unsigned-byte 8)
+                                                                                                         :initial-contents '(1 2 3)))))))
+             (setf (gethash digest (gr8s.server::browser-images-layers images)) (list "docker.io" "library/x" (list nil)))
+             (with-open-file (out (merge-pathnames (make-pathname :name (subseq digest 7) :type "layer") directory)
+                                  :direction :output :element-type '(unsigned-byte 8))
+               (write-sequence #(1 2 3) out))
+             (is (probe-file (gr8s.server::browser-image-layer-file images digest)))
+             (is (null (gr8s.server::browser-image-layer-file images "sha256:../../etc/passwd")))))
+      (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))
+
 (test control-plane-logs-come-from-the-assigned-remote-agent
   (with-temporary-store (store path)
     (gr8s.controllers::register-node

@@ -16,9 +16,15 @@ the Kubernetes API version with a gr8s release suffix (see
   browser that connects becomes a node (`browser-XXXXXX`, `kubernetes.io/arch: arm64`,
   taint `gr8s.io/browser=true:NoSchedule`) whose agent runs in the server and whose
   containers run in the tab, one unkernel instance per Pod
-  (`--browser-distro FILE` is the root image they boot). Pods' logs come from the
-  tab. A Node's `kubernetes.io/arch` is now the architecture its agent reports, so
-  an arm64 node joined to an amd64 server is labelled arm64.
+  (`--browser-distro FILE` is the root image they boot). Pods run their own
+  linux/arm64 images, which the server resolves and caches and the tab unpacks; they
+  get addresses in the node's Pod CIDR, routed through the hosting node to the tab,
+  so Services and Gateways reach them; `kubectl logs` and `kubectl exec` work. A
+  browser proves a non-extractable key, so a reload is the same node, and browser
+  nodes refuse Pods that bring Secrets, host paths or privileges. A Node's
+  `kubernetes.io/arch` is now the architecture its agent reports, so an arm64 node
+  joined to an amd64 server is labelled arm64, and virtual nodes are no longer
+  offered to the overlay as peers.
 
 - gr8 policy credentials take `paths` (prefixes, or `=PATH` exact) and `methods`,
   binding a credential to those requests on its hosts alone (podster-wv1w.29).

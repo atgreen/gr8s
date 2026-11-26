@@ -4,7 +4,8 @@ SPDX-License-Identifier: Apache-2.0
 -->
 # Browser nodes
 
-> **Status:** proposed (podster-57fv, 2026-11-26). Nothing here is built yet.
+> **Status:** built (podster-57fv, 2026-11-26), with the differences listed under
+> *As built* at the end. The design below is as proposed.
 
 ## Goal
 
@@ -196,3 +197,44 @@ pre-warming, more than 300 MB of heap, and minutes to Ready. Running the node's
 Kubernetes half in the server removes every one of those costs from the tab. The
 spike's fixes for slow hosts (pre-warming, and the deadline bugs podster-ewxh,
 podster-135e and podster-i8my) still help native nodes.
+
+## As built
+
+- **Virtual nodes** (`src/server/virtual-nodes.lisp`). A browser node's agent is the
+  same in-process agent `serve` runs for its own node, one per browser, each in its
+  own state directory. The server enrolls the node and writes its labels and taints
+  before starting the agent, so it is never schedulable untainted. `serve
+  --virtual-node NAME` runs one on the fake runtime.
+- **Joining** (`src/server/browser-nodes.lisp`). `serve --browser-listen HOST:PORT`
+  serves the page and the session; `--browser-distro FILE` is the root image (erofs)
+  the guests boot. Opening the page joins: there is no separate consent step, and the
+  page says what the tab is for and offers to leave.
+- **Identity.** An ECDSA P-256 key, non-extractable, kept in IndexedDB, and a tab id
+  kept in sessionStorage. The node is `browser-` and six hex digits of the key and
+  tab; `topology.kubernetes.io/zone` comes from the key alone. A tab reconnecting
+  stops its earlier session's node before its new one starts, and every request
+  carries its session's epoch.
+- **The runtime.** `browser-runtime` forwards ensure, delete, logs (as CRI lines)
+  and exec to the tab. `kubectl exec` arrives as SPDY remotecommand on a one-time
+  path of the join listener and is bridged to the session. Status comes back as
+  PodStatus objects.
+- **Pod network** (`src/server/browser-network.lisp`). Not a network namespace per
+  Pod: one TAP device per browser node on the hosting node, holding the first address
+  of the node's Pod CIDR. The tab runs a learning switch between the session and its
+  Pods' virtual NICs. The guest NIC offloads TCP and UDP checksums, so the tab
+  finishes them. The node's CIDR rides on the hosting node's route
+  (`gr8s.io/virtual-host`), and virtual nodes are no overlay peers. The packets cross
+  the hosting node's kernel, but the eBPF programs gr8s attaches to Pod veths are not
+  attached to the TAP device, so NetworkPolicy does not yet apply to browser Pods.
+- **Images** (`src/server/browser-images.lisp`). Not erofs: the server resolves the
+  linux/arm64 manifest and serves layers from a digest-checked cache, and the tab
+  unpacks them into an in-memory file system mounted in the guest over 9p, where the
+  container runs chrooted. zstd layers and private registries are not supported yet.
+- **Trust.** Browser nodes refuse Pods that bring a Secret (volume, projection or
+  environment), a host path, privileges or host namespaces, in the scheduler and in
+  node admission. ServiceAccount token volumes pass, because the browser runtime
+  mounts no volumes.
+- **Capacity.** What the tab offered, clamped to 8 CPUs, 8Gi and 16 Pods.
+- **For trying it.** The join listener can proxy HTTP to browser Pods
+  (`:pod-proxy`), off by default. `tests/browser-node/client.mjs` runs the page's
+  module under Node.
