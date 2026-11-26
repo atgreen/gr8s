@@ -193,11 +193,14 @@ partial failure retains the IPAM lease until DEL removes the endpoint."
             (check-service-owner #'check-cni-service-nat-owner)
             (withdraw-service-owner #'withdraw-cni-service-nat-owner)
             sctp-nat-pin-directory
+            (egress-pin-directory sctp-nat-pin-directory)
             (policy (make-cni-operations)))
   "Bind a CNI lifecycle to agent-owned IPAM; never trust client IPAM settings.
 When SCTP-NAT-PIN-DIRECTORY names the socket LB's pinned Service maps, each Pod
 also gets the SCTP ClusterIP DNAT/SNAT classifiers (the socket LB cannot steer
-SCTP). It is best-effort: a missing or empty dataplane never fails Pod setup."
+SCTP). EGRESS-PIN-DIRECTORY, the same directory, is where each Pod's network
+namespace cookie is recorded for egress capture, whatever the Service profile.
+Both are best-effort: a missing or empty dataplane never fails Pod setup."
   (make-cni-operations
    :prepare
    (lambda (configuration context)
@@ -257,12 +260,14 @@ SCTP). It is best-effort: a missing or empty dataplane never fails Pod setup."
                ;; absent or its Service maps are not pinned yet.
                (handler-case (install-cni-sctp-nat configuration context
                                                    sctp-nat-pin-directory link-path)
-                 (error () nil))
-               ;; The connect hook knows a Pod by its namespace cookie: record it,
-               ;; so egress capture can name this Pod (podster-wv1w.2).
-               (dolist (address addresses)
-                 (record-pod-netns-cookie sctp-nat-pin-directory address (cni-context-netns context))))
+                 (error () nil)))
              (when return-address (funcall install-service-return context return-address))))
+       ;; The connect hook knows a Pod by its namespace cookie: record it, so egress
+       ;; capture can name this Pod (podster-wv1w.2). Native agents passed no
+       ;; directory, so no Pod was ever captured there (podster-uevw).
+       (when egress-pin-directory
+         (dolist (address addresses)
+           (record-pod-netns-cookie egress-pin-directory address (cni-context-netns context))))
        (setf (cni-configuration-previous-result configuration)
              (routed-cni-result configuration context host addresses dns-address))))
    :check
@@ -317,12 +322,13 @@ SCTP). It is best-effort: a missing or empty dataplane never fails Pod setup."
               (funcall (cni-operations-delete policy)
                        configuration context map-path link-path directory)
               (when sctp-nat-pin-directory
-                (handler-case (remove-cni-sctp-nat link-path) (error () nil))
+                (handler-case (remove-cni-sctp-nat link-path) (error () nil)))
+              (when egress-pin-directory
                 (dolist (address (handler-case
                                      (check-pod-addresses ipam (cni-context-container-id context)
                                                           (cni-context-interface-name context))
                                    (error () nil)))
-                  (forget-pod-netns-cookie sctp-nat-pin-directory address)))
+                  (forget-pod-netns-cookie egress-pin-directory address)))
               (funcall remove-link context)
               (release-pod-address ipam (cni-context-container-id context)
                                    (cni-context-interface-name context))))

@@ -894,7 +894,16 @@ conflicting network."
                   :service-risk-ready-p
                   (lambda () (node-runtime-local-risk-ready-p node-runtime))
                   :mtu (gethash "mtu" network)
-                  :dns-address (gethash "dnsAddress" network)))))
+                  :dns-address (gethash "dnsAddress" network)
+                  ;; Where the socket LB pins its maps: egress capture names Pods
+                  ;; by the namespace cookies recorded there (podster-uevw).
+                  :egress-pin-directory
+                  (let ((manager (node-runtime-manager node-runtime)))
+                    (and manager
+                         (namestring (merge-pathnames
+                                      "service-lb/"
+                                      (uiop:ensure-directory-pathname
+                                       (managed-containerd-bpf-directory manager))))))))))
   node-runtime)
 
 (defun node-network-overlay-firewall-identity (network)
