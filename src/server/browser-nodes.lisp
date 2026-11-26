@@ -185,7 +185,15 @@ container's image resolved through IMAGES when there are any."
                    (when address
                      (setf (gethash "network" request)
                            (core-object "address" address "prefix" (browser-network-prefix network)
-                                        "gateway" (browser-network-gateway network))))
+                                        "gateway" (browser-network-gateway network)
+                                        ;; The hosting node answers cluster DNS, as for its own Pods.
+                                        "dns" (core-object
+                                               "nameservers" (vector gr8s.foundation::+dns-pod-server-address+)
+                                               "searches" (coerce (cons (format nil "~A.svc.cluster.local"
+                                                                                (gethash "namespace" request))
+                                                                        (rest gr8s.foundation::+dns-pod-searches+))
+                                                                  'vector)
+                                               "options" (coerce gr8s.foundation::+dns-pod-options+ 'vector)))))
                    (browser-session-call (browser-runtime-session runtime) "ensure" "pod" request)))
          (status (gethash "status" result))
          (runtime-pod (or (gethash (gr8s.model::pod-uid pod) (gr8s.runtime::fake-runtime-pods runtime))

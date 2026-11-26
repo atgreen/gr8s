@@ -371,6 +371,16 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
       await unpackLayer(fs, response, layer.mediaType ?? "");
     }
     for (const dir of ["/proc", "/dev", "/tmp", "/etc"]) fs.mkdirp(dir);
+    // Cluster DNS and the Pod's own name, as the kubelet writes them.
+    const network = pod.request.network;
+    if (network?.dns) {
+      fs.rm("/etc/resolv.conf", { force: true });
+      fs.writeFile("/etc/resolv.conf",
+        network.dns.nameservers.map((server) => `nameserver ${server}\n`).join("") +
+        `search ${network.dns.searches.join(" ")}\noptions ${network.dns.options.join(" ")}\n`);
+      fs.rm("/etc/hosts", { force: true });
+      fs.writeFile("/etc/hosts", `127.0.0.1\tlocalhost\n${network.address}\t${pod.request.name}\n`);
+    }
     await pod.vm.exec("mkdir", ["-p", root], { user: "root" });
     await pod.vm.mount(root, fs);
     log(`${pod.request.name}/${spec.name}: ${spec.image} unpacked (${info.layers.length} layers)`);
