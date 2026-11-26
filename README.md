@@ -29,6 +29,11 @@ See the [results and evidence](docs/CONFORMANCE.md), and the
 [API coverage](docs/kubernetes-surface.md) and
 [known gaps](docs/k3s-gap-inventory.md) for the current scope.
 
+**A web browser can be a worker node.** Open a cluster's join page and the tab
+becomes a Kubernetes node: Pods run inside it, in Linux compiled to WebAssembly,
+with their own cluster IPs, reachable through Services and the cluster's Gateway.
+Nothing to install on the visitor's machine. See [Browser nodes](#browser-nodes--a-tab-is-a-worker-node).
+
 Start with the [documentation guide](docs/index.md). If you already know Kubernetes,
 the [component map](docs/kubernetes-users.md) explains where familiar components live.
 
@@ -266,6 +271,40 @@ $ gr8 --allow '*.wikipedia.org' firefox
 Policy is ordinary Kubernetes: ClusterNetworkPolicy for hostnames,
 SecurityProfile for credentials and a SandboxProfile for each command, with
 Enforce and Audit modes. See [docs/gr8.md](docs/gr8.md).
+
+## Browser nodes — a tab is a worker node
+
+`gr8s serve --browser-listen HOST:PORT` publishes a join page. Anyone who opens it
+turns that browser tab into a node of the cluster: no install, no root, no VPN,
+no container runtime, and no inbound firewall rule on their machine.
+
+```console
+$ kubectl get nodes
+NAME             STATUS   ROLES    AGE   VERSION
+gr8s2            Ready    <none>   7d    v1.37.2-…
+browser-b93021   Ready    <none>   2m    v1.37.2-…
+```
+
+- **The kubelet half stays home.** The node's agent, lease, Pod sync, probes and
+  status run in the gr8s server; the tab only runs containers. Each Pod is its own
+  [unkernel](https://github.com/pithings/unkernel) instance — Linux built as
+  WebAssembly — so the node is `arm64` whatever the visitor's CPU.
+- **Real images.** The server resolves a container's linux/arm64 image (private
+  ones with the Pod's pull Secrets, which never reach the browser) and serves its
+  layers; the tab unpacks them, keeps them in its private storage by digest, and
+  runs the container in that root. `kubectl logs` and `kubectl exec` work.
+- **Real networking.** Each browser Pod gets an address in its node's Pod CIDR.
+  Its packets ride the tab's WebSocket to the node hosting it, so Services, DNS,
+  the Gateway and NetworkPolicy treat it like any other Pod.
+- **Safe by construction.** Browser nodes are tainted, so only Pods that tolerate
+  them land there, and they refuse Pods that would bring Secrets, host paths or
+  privileges. A tab proves a non-extractable key, so a reload is the same node;
+  every frame it sends must come from an address the server gave it.
+- **Visible.** The join page shows the node, its Pods and the cluster; `/metrics`
+  reports every browser node's Pods, latency, traffic and memory.
+
+Closing the tab removes the node, and its Pods are rescheduled. See
+[docs/design-browser-nodes.md](docs/design-browser-nodes.md).
 
 ## Dashboard
 
