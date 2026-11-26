@@ -4134,12 +4134,14 @@ upstream CRDs.
   prefers it for that run's Pod and never applies it to another.
   A gr8 sandbox is always on synthetic DNS, and anything no policy allows is
   denied; `gr8 --allow NAME` allows a name for one run. It requests 1 CPU and
-  1Gi and is limited to half the node's (`--cpu`, `--memory`). `gr8 login claude`
-  stores Claude Code's subscription tokens as a Secret with a SecurityProfile
-  injecting the access token and handling the refresh; the sandbox then sees
-  stand-in tokens.
+  1Gi and is limited to half the node's (`--cpu`, `--memory`). `gr8 --login NAME`
+  stores a tool's OAuth login (claude, or one described in
+  ~/.config/gr8/logins.yaml: commands, file, token key paths, expiry, inject
+  hosts, refresh endpoint) as the Secret login-NAME with a SecurityProfile
+  injecting the access token and handling the refresh; sandboxed runs see the
+  tool's file with stand-ins at the token keys. `--logout NAME`, `--logins`.
   A gr8 policy file (`gr8.gr8s.io/v1alpha1` Policy, client-side) says all a
-  command gets: `hosts`, `credentials` (`from: env:NAME` or `file:PATH#key/path`,
+  command gets: `hosts`, `credentials` (`from: env:NAME`, `file:PATH#key/path` or `login:NAME`,
   `hosts`, `header`, `template`, `env` for a stand-in), `home`, `env`, `egress`
   (as `spec.egress`), `desktop` and `resources`. `gr8 CMD` reads
   `~/.config/gr8/policies/CMD.yaml`, else `.gr8/CMD.yaml` in the working

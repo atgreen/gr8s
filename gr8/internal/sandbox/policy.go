@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"sigs.k8s.io/yaml"
 )
 
 // Config is what "gr8 launch" is asked to run.
@@ -16,7 +18,8 @@ type Config struct {
 	Home string
 	// Trust is the egress CA's PEM in the Pod (outside the sandbox's root), or "".
 	Trust string
-	// Placeholders are credential files the sandbox sees with stand-in tokens.
+	// Placeholders are credential files the sandbox sees with stand-in tokens: a path,
+	// or PATH#key/path,key/path naming exactly the tokens (a login's, podster-wv1w.20).
 	Placeholders []string
 	ReadOnly     []string
 	ReadWrite    []string
@@ -181,6 +184,49 @@ func ResolveIn(root, path string) (string, error) {
 // injects the real access token, and exchanges the real refresh token when the
 // sandbox refreshes on the real expiry, which the file keeps (podster-kn03).
 const StandInToken = "gr8s-injected"
+
+// StandInFile returns the credentials file at path, whose contents are given, as the
+// sandbox sees it: with StandInToken at each of keys (paths split on /), keeping
+// everything else, in the file's own format (YAML for .yaml and .yml, else JSON).
+// Without keys, every accessToken and refreshToken (StandInCredentials).
+func StandInFile(path string, contents []byte, keys []string) ([]byte, error) {
+	if len(keys) == 0 {
+		return StandInCredentials(contents)
+	}
+	extension := strings.ToLower(filepath.Ext(path))
+	isYAML := extension == ".yaml" || extension == ".yml"
+	var document map[string]any
+	var err error
+	if isYAML {
+		err = yaml.Unmarshal(contents, &document)
+	} else {
+		err = json.Unmarshal(contents, &document)
+	}
+	if err != nil {
+		return nil, err
+	}
+	for _, key := range keys {
+		parts := strings.Split(key, "/")
+		object := document
+		for _, part := range parts[:len(parts)-1] {
+			next, ok := object[part].(map[string]any)
+			if !ok {
+				object = nil
+				break
+			}
+			object = next
+		}
+		if object != nil {
+			if _, ok := object[parts[len(parts)-1]]; ok {
+				object[parts[len(parts)-1]] = StandInToken
+			}
+		}
+	}
+	if isYAML {
+		return yaml.Marshal(document)
+	}
+	return json.MarshalIndent(document, "", "  ")
+}
 
 // StandInCredentials returns the JSON credentials file contents with every
 // accessToken and refreshToken replaced by StandInToken and every expiresAt and

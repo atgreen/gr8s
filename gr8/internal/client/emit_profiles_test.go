@@ -6,12 +6,11 @@ import (
 	"testing"
 )
 
-// TestEmitLoginProfiles writes the objects `gr8 login claude` applies, for the gr8s
+// TestEmitLoginProfiles writes the objects `gr8 --login claude` applies, for the gr8s
 // suite to validate (GR8_EMIT names the directory); otherwise it checks they marshal.
 func TestEmitLoginProfiles(t *testing.T) {
 	for name, object := range map[string]map[string]any{
-		"security-profile.json": ClaudeSecurityProfile("gr8"),
-		"sandbox-profile.json":  ClaudeSandboxProfile(),
+		"security-profile.json": LoginSecurityProfile("gr8", "claude", presetLogins["claude"]),
 		// What a policy creates for one run (podster-wv1w.14).
 		"run-security-profile.json": RunSecurityProfile("gr8", "gr8-claude-abcde",
 			[]PolicyCredential{{From: "env:GITHUB_TOKEN", Hosts: []string{"api.github.com"}, Header: "authorization",

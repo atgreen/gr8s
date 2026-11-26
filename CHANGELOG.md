@@ -9,6 +9,16 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- Logins for any tool (podster-wv1w.20): `gr8 --login NAME` moves a tool's OAuth
+  login into the cluster, described by its file, token key paths, expiry, inject
+  hosts and token endpoint; claude is built in and `~/.config/gr8/logins.yaml`
+  adds others. A sandboxed run of its commands sees the tool's file with stand-ins
+  at the token keys and may reach the login's hosts. `--logout NAME` and `--logins`;
+  policy files take `from: login:NAME`. This replaces `gr8 login claude`, whose
+  Secret and profiles it removes. gr8's own modes inside the Pod (hold, launch,
+  enter, confine) now follow `--internal`, so no command of those names is mistaken
+  for one.
+
 - gr8 policy files (podster-wv1w.14): one `gr8.gr8s.io/v1alpha1` Policy says a
   command's hosts, credentials (read from `env:` or `file:` sources on the host when
   the run starts), home grants, environment, egress inspection, desktop and
