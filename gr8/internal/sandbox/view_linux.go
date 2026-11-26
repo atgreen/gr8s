@@ -409,7 +409,43 @@ func trustEgressCA(hostRoot, trust string) error {
 			return err
 		}
 	}
+	if len(targets) > 0 {
+		return trustEgressAnchor(hostRoot)
+	}
 	return nil
+}
+
+// p11-kit's trust module, which on Fedora and its kin is NSS's built-in roots
+// (Firefox, Chrome, anything using NSS), reads anchor certificates from this
+// directory, not the bundles above.
+const p11KitAnchors = "/etc/pki/ca-trust/source/anchors"
+
+// trustEgressAnchor shows the sandbox p11KitAnchors with the egress CA among the
+// host's own anchors, so NSS clients trust the proxy too. A host without the
+// directory is left as it is.
+func trustEgressAnchor(hostRoot string) error {
+	anchors, err := ResolveIn(hostRoot, p11KitAnchors)
+	if err != nil || !isDir(anchors) {
+		return nil
+	}
+	directory := filepath.Join(hostRoot, trustDirectory, "anchors")
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		return err
+	}
+	entries, _ := os.ReadDir(anchors)
+	for _, entry := range entries {
+		if contents, err := os.ReadFile(filepath.Join(anchors, entry.Name())); err == nil {
+			_ = os.WriteFile(filepath.Join(directory, entry.Name()), contents, 0o644)
+		}
+	}
+	egress, err := os.ReadFile(filepath.Join(hostRoot, trustEgress))
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(directory, "gr8s-egress-ca.pem"), egress, 0o644); err != nil {
+		return err
+	}
+	return bindOver(directory, anchors, true)
 }
 
 // writeTrustBundle writes the sandbox's bundles under hostRoot's /run and returns the

@@ -115,7 +115,23 @@ func (config Config) Rules(abi int) []Rule {
 	for _, path := range append(append(append([]string{}, scratchPaths...), config.ReadWrite...), config.Cwd) {
 		rules = append(rules, Rule{Path: path, Access: all})
 	}
+	// A desktop app keeps state in its runtime directory (dconf, for one), which is
+	// the sandbox's own tmpfs here, holding only the sockets it was given.
+	if runtime := config.RuntimeDir(); runtime != "" {
+		rules = append(rules, Rule{Path: runtime, Access: all})
+	}
 	return rules
+}
+
+// RuntimeDir is the /run/user/UID directory the sandbox's sockets are in, or "".
+func (config Config) RuntimeDir() string {
+	for _, socket := range config.Sockets {
+		parts := strings.SplitN(strings.TrimPrefix(socket, "/"), "/", 4)
+		if len(parts) >= 3 && parts[0] == "run" && parts[1] == "user" {
+			return "/" + strings.Join(parts[:3], "/")
+		}
+	}
+	return ""
 }
 
 func within(path, dir string) bool {

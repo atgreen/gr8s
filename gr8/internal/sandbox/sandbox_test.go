@@ -294,3 +294,21 @@ func TestStandInCredentialsHideTheTokens(t *testing.T) {
 		t.Error("a non-JSON file was accepted")
 	}
 }
+
+func TestTheRuntimeDirectoryIsWritableOnlyWithItsSockets(t *testing.T) {
+	writable := func(config Config, path string) bool {
+		for _, rule := range config.Rules(6) {
+			if rule.Path == path && rule.Access&accessWriteFile != 0 {
+				return true
+			}
+		}
+		return false
+	}
+	with := Config{Cwd: "/w", Sockets: []string{"/run/user/1000/wayland-0", "/run/user/1000/pulse/native"}}
+	if with.RuntimeDir() != "/run/user/1000" || !writable(with, "/run/user/1000") {
+		t.Errorf("runtime dir %q not writable", with.RuntimeDir())
+	}
+	if without := (Config{Cwd: "/w"}); without.RuntimeDir() != "" {
+		t.Errorf("runtime dir %q without sockets", without.RuntimeDir())
+	}
+}
