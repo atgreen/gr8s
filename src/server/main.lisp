@@ -4124,6 +4124,9 @@ upstream CRDs.
   certificates, and `enforcement: Enforce` (the default) or `Audit`, which reports
   a broken rule such as domain fronting and forwards. `spec.namespaceSelector`
   scopes a profile to namespaces; one that selects wins over one that doesn't.
+  `spec.egress.binaries` (`[{hosts, paths}]`) lets a host be reached only by the
+  listed programs or their children; the node finds the program behind each
+  connection from the Pod's /proc, and the flow event names it.
   A gr8 sandbox is always on synthetic DNS, and anything no policy allows is
   denied; `gr8 --allow NAME` allows a name for one run. `gr8 login claude` stores
   Claude Code's subscription token as a Secret with a SecurityProfile injecting

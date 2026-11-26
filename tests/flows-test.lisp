@@ -233,6 +233,10 @@
                (line (gr8s.controllers::egress-dns-flow-object "10.80.32.7" "example.com" t))))
     (is (equal "01:02:03.456 worker-a: gr8/gr8-curl-x -> evil.example (203.0.113.5:443) DROPPED by rule gr8-sandbox"
                (line (gr8s.controllers::egress-flow-object "10.80.32.7" "evil.example" "203.0.113.5" 443 nil "gr8-sandbox"))))
+    (is (equal "01:02:03.456 worker-a: gr8/gr8-curl-x -> api.github.com (140.82.112.5:443) DROPPED by rule api.github.com may be reached only by /usr/bin/gh, not /usr/bin/curl from /usr/bin/curl"
+               (line (gr8s.controllers::egress-flow-object
+                      "10.80.32.7" "api.github.com" "140.82.112.5" 443 nil
+                      "api.github.com may be reached only by /usr/bin/gh, not /usr/bin/curl" "/usr/bin/curl"))))
     (is (equal "01:02:03.456 worker-a: gr8/gr8-curl-x -> GET example.com/a 200 injected gr8/p/r AUDIT: Host x is not example.com"
                (line (gr8s.controllers::egress-request-flow-object
                       "10.80.32.7" "example.com" "104.20.23.154" 443 "GET" "/a?q=1" 200 "gr8/p/r"

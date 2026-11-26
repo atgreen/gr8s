@@ -249,6 +249,40 @@ the Pod's edge to the site it named, refusals in red:
 That is the per-run audit trail: what this agent asked for, and what it was
 refused.
 
+## Binary-scoped rules
+
+Policy says where a sandbox may go. A SandboxProfile can also say which of its programs
+may go there (podster-wv1w.13):
+
+```yaml
+spec:
+  commands: [claude]
+  egress:
+    binaries:
+    - hosts: [api.github.com, "*.githubusercontent.com"]
+      paths: [/usr/bin/gh, /usr/bin/git]
+```
+
+A host an entry names may be reached only by a connection whose program, or one of its
+parents within the Pod, matches one of the entry's paths (`*` within a path segment,
+`**` across them). Hosts no entry names are left to policy, which always decides first:
+a binaries rule only narrows. Under `enforcement: Audit` a mismatch is reported in
+`l7.audit` and allowed.
+
+The node finds the program from the Pod's own `/proc`. The proxy knows the client's
+address and port; in the Pod's network namespace, `/proc/PID/net/tcp` gives the
+socket's inode for that pair; among the processes in the Pod's containers' cgroups,
+the one holding `socket:[inode]` opened it, and `/proc/PID/exe` names its program,
+then its parents'. A lookup that finds nothing matches no path. Each connection event
+names the program (`l7.process`), so `gr8s doctor observe` shows which program in a
+sandbox reached what.
+
+A path is the program's real file as the sandbox sees it, with symlinks resolved:
+`/usr/bin/gh`, or for a Homebrew curl `/home/linuxbrew/.linuxbrew/Cellar/curl/*/bin/curl`
+(`/proc/PID/exe` names the file run, not the link the shell found). A script runs as
+its interpreter: name `/usr/bin/python3*`, not the script. The program is identified by path, not by content; a sandbox that can write a
+file at a listed path could run its own program there, so list paths it can't write.
+
 ## OAuth refresh at the proxy
 
 An OAuth login's access token expires, and the client refreshes it with its refresh

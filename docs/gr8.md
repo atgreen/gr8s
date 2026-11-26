@@ -218,12 +218,21 @@ spec:
     tls: Terminate               # the default; or Passthrough
     passthroughHosts: ["*.pinned.example"]
     enforcement: Enforce         # the default; or Audit
+    binaries:                    # only these programs may reach these hosts
+    - hosts: [api.github.com]
+      paths: [/usr/bin/gh, /usr/bin/git]
 ```
 
 - `home` paths are relative to `$HOME` and may not climb out of it.
 - `egress.enforcement: Audit` reports a request that breaks a rule and forwards
   it: a `Host` other than the name the connection was admitted by (domain
   fronting), or a stand-in nothing injects. `Enforce` refuses such a request.
+- `egress.binaries` narrows a host to the programs that may reach it:
+  `[{hosts: [api.github.com], paths: [/usr/bin/gh, /usr/bin/git]}]` lets only `gh`,
+  `git` and what they run reach api.github.com, so `curl` inside the sandbox can't.
+  Paths are the program's real file as the sandbox sees it, symlinks resolved
+  (`readlink -f $(which gh)`); `*` matches within a path segment and `**` across
+  them. Every connection event names the program that opened it.
 - `namespaceSelector` limits the profile to the gr8 Pods of the namespaces it
   selects. For a command, a profile whose selector matches wins over one without
   a selector, then the first by name. gr8 and the node choose the same profile:

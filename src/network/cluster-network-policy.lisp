@@ -350,6 +350,13 @@ the first by name; else NIL. Chosen by what the node sees, so a Pod can't pick i
                                (string< (gethash "name" (gethash "metadata" a)) (gethash "name" (gethash "metadata" b)))
                                a-scoped))))))))))
 
+(defun gr8-sandbox-enforcement (pod sandbox-profiles &optional (namespace-labels (make-hash-table :test #'equal)))
+  "Whether a rule gr8 sandbox POD's egress breaks is refused (:enforce, the default) or
+only reported (:audit), as its SandboxProfile's spec.egress.enforcement says."
+  (let* ((profile (gr8-sandbox-profile pod sandbox-profiles namespace-labels))
+         (egress (and profile (gethash "egress" (gethash "spec" profile (core-object))))))
+    (if (and (hash-table-p egress) (equal "Audit" (gethash "enforcement" egress))) :audit :enforce)))
+
 (defun gr8-sandbox-inspection (pod sandbox-profiles host &optional (namespace-labels (make-hash-table :test #'equal)))
   "How the node egress proxy treats gr8 sandbox POD's connection to HOST (podster-wv1w.11):
 NIL to relay it undecrypted, else a plist (:enforcement :enforce|:audit) to terminate its
