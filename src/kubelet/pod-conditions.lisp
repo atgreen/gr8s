@@ -161,6 +161,13 @@ list as 'nothing is running': Sonobuoy's worker takes it to mean all containers 
                 (if gates
                     (condition "Ready" "False" "ReadinessGatesNotReady" gates)
                     (condition "Ready" readiness reason message)))
+              ;; A gate's condition the node itself reports, such as gr8s.io/NetworkReady, is
+              ;; shown like the rest.
+              (dolist (type (pod-readiness-gate-types pod))
+                (let ((reported (find-pod-condition incoming type)))
+                  (when (and reported (stringp (gethash "status" reported)))
+                    (condition type (gethash "status" reported)
+                               (gethash "reason" reported) (gethash "message" reported)))))
               (let ((pending (find-pod-condition incoming "PodResizePending")))
                 (cond (pending
                        (condition "PodResizePending" "True" (gethash "reason" pending) (gethash "message" pending)))

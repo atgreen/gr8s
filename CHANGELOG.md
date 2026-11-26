@@ -9,6 +9,14 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- `gr8 --allow NAME` lets one run reach a hostname (repeatable; `*.example.com` for
+  subdomains) through a ClusterNetworkPolicy that selects only that run's Pod and is
+  deleted with it (podster-xazj). It needs permission to create ClusterNetworkPolicies.
+
+- A Pod can wait for its node to enforce its network policy with the readiness gate
+  `gr8s.io/NetworkReady`, which the node reports. gr8 Pods use it, so a command no
+  longer starts before its allowlist is in place (podster-ae08).
+
 - A gr8 sandbox, any Pod labelled `gr8s.io/gr8-command`, is always on synthetic
   DNS, and anything its policies don't allow is denied (podster-1mzb). Its DNS
   answers only the names a ClusterNetworkPolicy accepts for it (none: `REFUSED`).
@@ -106,6 +114,13 @@ the Kubernetes API version with a gr8s release suffix (see
   still serves Hubble's Observer API for the `hubble` CLI.
 
 ### Fixed
+
+- A new Pod is in a ClusterNetworkPolicy's subject from the snapshot that assigns it,
+  not one after its address reaches the control plane, so its first connections are
+  not decided without the policy (podster-ae08).
+
+- A node no longer resolves a new Pod's policy with the labels of a deleted Pod whose
+  address it reused (podster-ae08).
 
 - Egress capture works on a real node (podster-uevw). It validated the service
   load balancer's pinned maps against the CNI policy maps' layouts, so every write

@@ -220,11 +220,12 @@ destination Pod's own number for it, so such a rule becomes one per Pod defining
                 (when (null ports) (return-from resolve-cnp-rule nil)))
               (list (rule-object (append networks pod-cidrs) domains ports))))))))
 
-(defun resolve-cluster-network-policy (object pods namespace-labels nodes)
+(defun resolve-cluster-network-policy (object pods namespace-labels nodes &key (subjects pods))
   "A copy of ClusterNetworkPolicy OBJECT a node can enforce: its subject as the selected
-Pods' \"namespace/name\" and every rule's peers as networks and domainNames."
+Pods' \"namespace/name\" from SUBJECTS and every rule's peers as networks and
+domainNames from PODS."
   (let* ((spec (gethash "spec" object (core-object)))
-         (subject (cnp-subject-pods (gethash "subject" spec (core-object)) pods namespace-labels))
+         (subject (cnp-subject-pods (gethash "subject" spec (core-object)) subjects namespace-labels))
          (resolved (core-object "tier" (gethash "tier" spec)
                                 "priority" (gethash "priority" spec)
                                 "subjectPods" (coerce (sort (mapcar (lambda (pod) (format nil "~A/~A" (np-pod-namespace pod)
@@ -258,10 +259,15 @@ the InternalIP it reports."
 Namespaces and Nodes."
   (let ((policies (list-core-resources store "clusternetworkpolicies")))
     (when policies
+      ;; A subject is chosen by labels, so a Pod is in it before it has an address: the
+      ;; snapshot that assigns a Pod to its node already says which policies select it,
+      ;; rather than one after its address has made the round trip (podster-ae08).
       (let ((pods (cons (node-dns-policy-peer) (network-policy-cluster-pods store)))
+            (subjects (cons (node-dns-policy-peer) (network-policy-cluster-pods store :addressed nil)))
             (namespace-labels (network-policy-namespace-labels store))
             (nodes (ignore-errors (cluster-network-policy-nodes store))))
-        (mapcar (lambda (object) (resolve-cluster-network-policy object pods namespace-labels nodes))
+        (mapcar (lambda (object)
+                  (resolve-cluster-network-policy object pods namespace-labels nodes :subjects subjects))
                 policies)))))
 
 ;;; ---------------------------------------------------------------------------

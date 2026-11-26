@@ -60,6 +60,24 @@
           (is (search "the status of pod readiness gate \"k8s.io/test-condition1\" is not \"True\", but False"
                       (gethash "message" false))))))))
 
+(test a-gate-condition-the-node-reports-readies-the-pod-and-is-shown
+  ;; gr8s.io/NetworkReady comes from the node, not an API client (podster-ae08).
+  (with-temporary-store (store path)
+    (values path)
+    (let ((pod (create-pod store (parse-pod (gated-pod-json "gated" :node "worker-a"
+                                                            :gates '("gr8s.io/NetworkReady"))))))
+      (flet ((reported (value)
+               (let ((status (running-status-for-test "web")))
+                 (setf (gethash "conditions" status)
+                       (vector (gr8s.resources::core-object "type" "gr8s.io/NetworkReady" "status" value)))
+                 (gr8s.kubelet::add-pod-status-conditions store pod status))))
+        (let ((pending (reported "False")))
+          (is (equal "False" (gethash "status" (condition-status-for-test pending "Ready"))))
+          (is (equal "False" (gethash "status" (condition-status-for-test pending "gr8s.io/NetworkReady")))))
+        (let ((ready (reported "True")))
+          (is (equal "True" (gethash "status" (condition-status-for-test ready "Ready"))))
+          (is (equal "True" (gethash "status" (condition-status-for-test ready "gr8s.io/NetworkReady")))))))))
+
 (test strategic-status-patches-merge-conditions-by-type
   (with-core-api (store path)
     (values path)

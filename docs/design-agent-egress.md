@@ -265,6 +265,20 @@ trail: what this agent asked for, and what it was refused.
   the cluster zone and it reaches only the egress proxy. Its host-redirect table holds
   the proxy alone: the API server and the node's own addresses, which other Pods reach
   past policy (podster-5hv.10), are decided by policy for it.
+- **`gr8 --allow NAME`** (podster-xazj) creates a ClusterNetworkPolicy named after the
+  run's Pod that accepts NAME for that Pod alone, selected by its `gr8s.io/gr8-run`
+  label, and deletes it when the Pod goes. Whether a user may is RBAC on
+  `clusternetworkpolicies`; nothing on the Pod widens its own egress.
+- **The command waits for its policy** (podster-ae08). A gr8 Pod has the readiness gate
+  `gr8s.io/NetworkReady`. The node reports it True once the view its policy, capture and
+  DNS gate are written from has the Pod's address, and gr8 starts the command when the
+  Pod is Ready. Before, a command's first lookups could fail for up to half a second.
+  gr8 gives a node that never reports the condition two seconds. Two things made that
+  window: the control plane resolved a policy's subject only from Pods with an address,
+  so the node learned a new Pod was selected one round trip after its address; and a
+  deleted Pod's address, already given to a new Pod, could still resolve to the old
+  Pod. A subject is now resolved from every nonterminal Pod, and a live Pod owns an
+  address over one being deleted or finished.
 - **Capture is IPv4.** A captured Pod's IPv6 TCP is left to address policy.
   Private, shared and link-local destinations are exempt from capture (address policy
   applies to them as before), and a captured Pod can't reach a public address by IP
