@@ -96,39 +96,38 @@
   <div class="hero">
     <div class="eyebrow">gr8s browser nodes demo</div>
     <h1>A cluster whose nodes are <span>browser tabs</span></h1>
-    <p class="lede">Open the join page and your tab becomes a worker node of a real, Kubernetes-compatible
-      cluster. The scheduler sends it Pods; each one runs in its own Linux VM inside your browser, on the
-      cluster's Pod network, talking peer to peer with Pods in other visitors' tabs. Nothing is installed on
-      your machine, and closing the tab leaves the cluster.</p>
+    <p class="lede">Open the join page, and your tab becomes a worker node of a real, Kubernetes-compatible
+      cluster. The scheduler sends it Pods. Each Pod runs in its own Linux VM inside your browser, on the
+      cluster's Pod network, and talks peer to peer with Pods in other visitors' tabs. You install nothing,
+      and when you close the tab, it leaves the cluster.</p>
     <div class="actions">
       <a class="button primary" href="https://join.demo.gr8s.io/">Join with this tab →</a>
       <a class="button" href="https://tabs.demo.gr8s.io/">See the page tabs serve</a>
       <a class="button" href="https://github.com/atgreen/gr8s">Source on GitHub</a>
     </div>
-    <p class="note">Use a current desktop browser; a tab is a node only while it stays open.</p>
+    <p class="note">Use a current desktop browser. A tab is a node only while it stays open.</p>
   </div>
 
   <section id="gr8s">
     <h2>What is gr8s?</h2>
-    <p><a href="https://github.com/atgreen/gr8s">gr8s</a> is a Kubernetes-compatible cluster in one executable,
-      written from scratch in Common Lisp, with Prolog for the rules behind its <code>gr8s doctor</code>. The API
-      server, scheduler, controllers, node agent, networking (an eBPF dataplane), DNS, Gateway, storage and the
-      Raft-replicated datastore are all in that one binary. You drive it with <code>kubectl</code> and ordinary
+    <p><a href="https://github.com/atgreen/gr8s">gr8s</a> is a Kubernetes-compatible cluster in one executable.
+      It is written from scratch in Common Lisp, and its <code>gr8s doctor</code> reasons with rules in Prolog.
+      The one binary holds the API server, scheduler, controllers, node agent, networking (an eBPF dataplane),
+      DNS, Gateway, storage and the Raft-replicated datastore. You use it with <code>kubectl</code> and ordinary
       manifests, and it passes the upstream Kubernetes conformance tests.</p>
     <div class="grid2">
-      <div class="card"><h3>Ordinary nodes</h3><p>On a Linux machine, a gr8s node runs Pods the way Kubernetes
-        does, with containerd and runc. This demo's own server is one: it serves this page.</p></div>
-      <div class="card"><h3>Browser tab nodes</h3><p>What's new is a node that is a browser tab. It joins the
-        same cluster, takes Pods from the same scheduler, and puts them on the same Pod network, each Pod in a
-        Linux VM compiled to WebAssembly.</p></div>
-      <div class="card"><h3>A real Pod network</h3><p>Pods in your browser have cluster addresses on a network
-        shared with every other node. Tabs connect peer to peer, punching a hole through each other's home
-        routers, so Pods in two visitors' browsers talk directly.</p></div>
-      <div class="card"><h3>Images over BitTorrent</h3><p>Container image layers travel between nodes over the
-        BitTorrent protocol, tab to tab as between ordinary nodes, each piece checked against the layer's
-        digest.</p></div>
+      <div class="card"><h3>Ordinary nodes</h3><p>On a Linux machine, a gr8s node runs Pods as Kubernetes does,
+        with containerd and runc. This demo's own server is such a node, and it serves this page.</p></div>
+      <div class="card"><h3>Browser tab nodes</h3><p>A browser tab can also be a node. It joins the same cluster
+        and takes Pods from the same scheduler. Its Pods join the same Pod network, each in a Linux VM compiled
+        to WebAssembly.</p></div>
+      <div class="card"><h3>A real Pod network</h3><p>Pods in your browser have cluster addresses on a network that
+        every node shares. Tabs punch holes through each other's home routers and connect peer to peer, so Pods
+        in two visitors' browsers talk directly.</p></div>
+      <div class="card"><h3>Images over BitTorrent</h3><p>Nodes share container image layers over the BitTorrent
+        protocol, tabs as well as ordinary nodes. Every piece is checked against the layer's digest.</p></div>
     </div>
-    <p class="note">gr8s is an experiment: a new Kubernetes-compatible implementation, not a supported product.</p>
+    <p class="note">gr8s is an experiment: a new Kubernetes-compatible implementation. It is not a supported product.</p>
   </section>
 
   <section id="how">
@@ -136,16 +135,16 @@
     <p>One small server in Nuremberg runs <a href="https://github.com/atgreen/gr8s">gr8s</a>: the API server,
       the scheduler, the controllers, a Gateway and a STUN responder. Everything else happens in visitors' tabs.</p>
     <div class="steps">
-      <div class="step"><h3>You join</h3><p>The join page connects to the server over a WebSocket and proves who it is with
-        a key your browser keeps. A reload is the same node; a closed tab is a node that has gone.</p></div>
+      <div class="step"><h3>You join</h3><p>The join page connects to the server over a WebSocket. It proves who it is with a
+        key that your browser keeps. If you reload, you are the same node. If you close the tab, the node goes.</p></div>
       <div class="step"><h3>The server makes you a node</h3><p>Your tab appears in <code>kubectl get nodes</code> as
-        <code>browser-…</code>, <code>arm64</code>, with the capacity it offers. The kubelet's half of the work stays
-        on the server; your tab only runs containers.</p></div>
-      <div class="step"><h3>Pods arrive</h3><p>A DaemonSet puts a web server Pod on every tab. Its image's layers come
-        from other tabs where they can, checked piece by piece, and it boots in a
+        <code>browser-…</code>, <code>arm64</code>, with the capacity it offers. The server does the kubelet's half
+        of the work. Your tab only runs containers.</p></div>
+      <div class="step"><h3>Pods arrive</h3><p>A DaemonSet puts a web server Pod on every tab. The tab gets the image's
+        layers from other tabs where it can, and checks each piece. Then the Pod boots in a
         <a href="https://github.com/pithings/unkernel">Linux VM compiled to WebAssembly</a>.</p></div>
-      <div class="step"><h3>It serves the world</h3><p>Anyone opening <a href="https://tabs.demo.gr8s.io/">tabs.demo.gr8s.io</a>
-        gets a page from one of those tabs, after the server has checked it against the image.</p></div>
+      <div class="step"><h3>It serves the world</h3><p>Anyone who opens <a href="https://tabs.demo.gr8s.io/">tabs.demo.gr8s.io</a>
+        gets a page from one of those tabs. The server first checks the page against the image.</p></div>
     </div>
 
     <figure>
@@ -225,7 +224,7 @@
         <text class="lbl" x="560" y="478" fill="var(--warn)">HTTPS</text>
       </svg>
       <div class="legend">
-        <span><i style="border-color: var(--accent)"></i>A tab's WebSocket to the server (joining, and Pod traffic that can't go direct); dotted: STUN</span>
+        <span><i style="border-color: var(--accent)"></i>A tab's WebSocket to the server, for joining and for Pod traffic that can't go direct. Dotted: STUN</span>
         <span><i style="border-color: var(--ok); border-top-style: dashed"></i>Directly between tabs</span>
         <span><i style="border-color: var(--warn)"></i>A web visitor, served by a tab</span>
       </div>
@@ -236,84 +235,85 @@
 
   <section id="tab">
     <h2>What runs in your tab</h2>
-    <p>The sample app is an ordinary container image: <a href="https://github.com/atgreen/gr8s/tree/main/examples/browser-demo">a
-      small page</a> on <a href="https://hummingbird-project.io/">Project Hummingbird</a>'s minimal, hardened nginx,
-      the same build Red Hat ships, for ARM64 (<code>linux/arm64</code>). Nothing about it is made for browsers.</p>
+    <p>The sample app is an ordinary container image for ARM64 (<code>linux/arm64</code>). It is
+      <a href="https://github.com/atgreen/gr8s/tree/main/examples/browser-demo">a small page</a> on
+      <a href="https://hummingbird-project.io/">Project Hummingbird</a>'s minimal, hardened nginx, the same build
+      that Red Hat ships. Nothing in it is made for browsers.</p>
     <div class="grid2">
       <div class="card"><h3>A Linux kernel, compiled to WebAssembly</h3><p>Each Pod boots its own
         <a href="https://github.com/pithings/unkernel">unkernel</a>: Linux itself, built as one WebAssembly module.
-        Its scheduler, memory management, file systems and TCP/IP run as compiled code, not emulated, so nginx gets
-        Linux's own behaviour.</p></div>
+        Its scheduler, memory management, file systems and TCP/IP are compiled code. Nothing in the kernel is
+        emulated, so nginx gets Linux's own behaviour.</p></div>
       <div class="card"><h3>ARM64 programs, JIT-compiled to WebAssembly</h3><p>The image's programs are unmodified
-        ARM64 binaries. An ARM64 CPU built into that kernel runs them, and compiles their hot code to WebAssembly
-        as they run, so the nginx you get a page from is the very binary in the image.</p></div>
+        ARM64 binaries. An ARM64 CPU built into that kernel runs them. It compiles their hot code to WebAssembly
+        as they run. So the nginx that serves you a page is the same binary that is in the image.</p></div>
     </div>
   </section>
 
   <section id="p2p">
     <h2>Peer to peer</h2>
-    <p>The server introduces tabs to each other, and from then on they talk directly where they can:
-      in this demo, every tab may connect to every other.</p>
+    <p>The server introduces tabs to each other. After that, they talk directly where they can. In this demo,
+      every tab may connect to every other.</p>
     <div class="grid2">
       <div class="card"><h3>Getting through home routers</h3><p>A tab behind a home router doesn't know its own public
         address. It asks the server's STUN responder, which answers with the address the request came from. Two tabs
-        swap those addresses through the server and send to each other at the same moment, so each router lets the
-        other's packets in.</p></div>
-      <div class="card"><h3>Pod traffic</h3><p>When a Pod in your tab talks to a Pod in another tab, its packets ride a
-        WebRTC data channel straight there, encrypted. Services work the same way: your tab picks a backend and
-        rewrites the address, as a node's kernel would.</p></div>
-      <div class="card"><h3>Image layers, shared like torrents</h3><p>Each layer of a container image is a torrent in
-        the same BitTorrent protocol gr8s's own nodes use. A tab fetches pieces from other tabs, rarest first, checks
-        each one against its digest, and passes on what it has. The server seeds every piece too, so a layer always
-        arrives.</p></div>
+        swap those addresses through the server. Then they send to each other at the same moment, so each router
+        lets the other's packets in.</p></div>
+      <div class="card"><h3>Pod traffic</h3><p>When a Pod in your tab talks to a Pod in another tab, its packets go
+        straight there over an encrypted WebRTC data channel. Services work the same way. Your tab picks a backend
+        and rewrites the address, as a node's kernel would.</p></div>
+      <div class="card"><h3>Image layers, shared like torrents</h3><p>Each layer of a container image is a torrent, in the
+        same BitTorrent protocol that gr8s's own nodes use. A tab gets pieces from other tabs, rarest first, and
+        checks each one against its digest. It also gives other tabs the pieces it has. The server seeds every piece
+        too, so a layer always arrives.</p></div>
       <div class="card"><h3>When direct fails</h3><p>Some networks, mobile ones especially, won't let two tabs connect.
-        Then traffic simply goes through the server, as it did before the tabs met. Nothing breaks; it takes the long
-        way.</p></div>
+        Then the traffic goes through the server, as it did before the tabs met. It still arrives, by a longer
+        path.</p></div>
     </div>
   </section>
 
   <section id="checked">
     <h2>Checked content</h2>
-    <p>Whoever runs a tab controls it, and could make its Pod serve anything. So the page at
-      <a href="https://tabs.demo.gr8s.io/">tabs.demo.gr8s.io</a> isn't passed on blindly. The server pulled the
-      image itself and knows every file in it. For each request it asks one tab's Pod, and passes the answer on only
-      when it is that file, byte for byte. A tab that answers anything else is refused, and its node is tainted so
-      its Pods leave.</p>
-    <p>The page then says which tab served it, which browser, and how long it has been up: facts the server
-      fills in after the check, not the tab.</p>
+    <p>Whoever runs a tab controls it, and could make its Pod serve anything. So the server checks the page at
+      <a href="https://tabs.demo.gr8s.io/">tabs.demo.gr8s.io</a> before it passes it on. The server pulled the
+      image itself, so it knows every file in it. For each request, it asks one tab's Pod for the page. It passes
+      the answer on only when the answer is that file, byte for byte. If a tab answers with anything else, the
+      server refuses the answer and taints the tab's node, so its Pods leave.</p>
+    <p>The page then says which tab served it, in which browser, and how long that tab has been up. The server
+      fills in these facts after the check. The tab does not.</p>
   </section>
 
   <section id="safety">
     <h2>Safety and privacy</h2>
     <ul class="points">
-      <li><b>Your machine stays yours.</b> Pods run in VMs inside your browser's sandbox, with no access to your
-        files or other tabs. Close the tab and they are gone.</li>
-      <li><b>Pods can't reach the internet.</b> In this demo they reach only each other and cluster DNS, so a tab
-        is no relay for anyone.</li>
+      <li><b>Your machine stays yours.</b> Pods run in VMs inside your browser's sandbox. They can't reach your
+        files or your other tabs. When you close the tab, they are gone.</li>
+      <li><b>Pods can't reach the internet.</b> In this demo, they reach only each other and cluster DNS. So nobody
+        can use a tab to relay traffic.</li>
       <li><b>Tabs get no secrets.</b> Browser nodes refuse Pods that bring Kubernetes Secrets, host paths or
-        privileges. Private images are pulled by the server; their credentials never reach a tab.</li>
+        privileges. The server pulls private images itself, so their credentials never reach a tab.</li>
       <li><b>Other tabs see your public address.</b> Tabs that connect directly learn each other's public IP
         address, as any WebRTC call does. The join page says so.</li>
       <li><b>Tab owners don't see web visitors' addresses.</b> Your tab's Pod logs which browser asked for a page,
-        but not who: the server doesn't forward visitors' IP addresses to tabs.</li>
-      <li><b>It's a demo.</b> At most 64 tabs at once, and 4 from one address. It may be restarted at any time;
-        tabs rejoin by themselves.</li>
+        but not who asked. The server doesn't send visitors' IP addresses to tabs.</li>
+      <li><b>It's a demo.</b> It takes at most 64 tabs at once, and 4 from one address. It can restart at any time.
+        When it does, tabs rejoin by themselves.</li>
     </ul>
   </section>
 
   <section>
     <h2>Try it</h2>
-    <p>Open <a href="https://join.demo.gr8s.io/">join.demo.gr8s.io</a> in a tab and leave it open. Under each Pod,
-      “Logs and console” shows what it prints and its Linux VM booting, read from your tab. Then open
-      <a href="https://tabs.demo.gr8s.io/">tabs.demo.gr8s.io</a> in another tab and reload: the page names the tab
-      that served it, sometimes yours.</p>
+    <p>Open <a href="https://join.demo.gr8s.io/">join.demo.gr8s.io</a> in a tab, and leave it open. Under each Pod,
+      "Logs and console" shows what the Pod prints and how its Linux VM booted, read from your tab. Then open
+      <a href="https://tabs.demo.gr8s.io/">tabs.demo.gr8s.io</a> in another tab and reload it a few times. The page
+      names the tab that served it, which is sometimes yours.</p>
     <p>To run browser nodes on your own cluster, see
       <a href="https://github.com/atgreen/gr8s/blob/main/docs/browser-nodes.md">running browser nodes</a> and the
       <a href="https://github.com/atgreen/gr8s/blob/main/docs/design-browser-nodes.md">design</a>.</p>
   </section>
 
   <footer>gr8s browser nodes demo, created by Anthony Green. gr8s is Open Source (Apache 2.0) and available on
-    <a href="https://github.com/atgreen/gr8s">GitHub</a>. This page is served by the demo's own server, not by a tab.</footer>
+    <a href="https://github.com/atgreen/gr8s">GitHub</a>. The demo's own server serves this page, not a tab.</footer>
 </main>
 </body>
 </html>
