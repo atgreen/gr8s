@@ -1,0 +1,141 @@
+# demo.gr8s.io, as deployed: a single-node `gr8s serve` whose browser join listener
+# (--browser-listen 78.18.12.235:8099 --browser-distro ...) sits behind the Gateway.
+# Visitors' tabs join at https://demo.gr8s.io/ and each runs the page in this
+# directory, which https://tab.demo.gr8s.io/ serves after checking it against the image.
+# For another host, change the hostnames, the EndpointSlice address and the email.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata: {name: gr8s}
+spec: {controllerName: gr8s.io/gateway-controller}
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: demo}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: {name: demo, namespace: demo}
+spec:
+  gatewayClassName: gr8s
+  listeners:
+  - {name: http-apex, protocol: HTTP, port: 80, hostname: demo.gr8s.io, allowedRoutes: {namespaces: {from: Same}}}
+  - {name: http-sub, protocol: HTTP, port: 80, hostname: "*.demo.gr8s.io", allowedRoutes: {namespaces: {from: Same}}}
+  - name: https-apex
+    protocol: HTTPS
+    port: 443
+    hostname: demo.gr8s.io
+    tls: {mode: Terminate, certificateRefs: [{name: demo-tls}]}
+    allowedRoutes: {namespaces: {from: Same}}
+  - name: https-sub
+    protocol: HTTPS
+    port: 443
+    hostname: "*.demo.gr8s.io"
+    tls: {mode: Terminate, certificateRefs: [{name: demo-tls}]}
+    allowedRoutes: {namespaces: {from: Same}}
+---
+# Let's Encrypt over HTTP-01, answered by the Gateway's port-80 listeners.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata: {name: letsencrypt}
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: hostmaster@gr8s.io
+    privateKeySecretRef: {name: letsencrypt-account}
+    solvers:
+    - http01:
+        gatewayHTTPRoute:
+          parentRefs: [{name: demo, namespace: demo}]
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata: {name: demo, namespace: demo}
+spec:
+  secretName: demo-tls
+  dnsNames: [demo.gr8s.io, tab.demo.gr8s.io]
+  issuerRef: {name: letsencrypt, kind: ClusterIssuer}
+---
+# Plain HTTP only redirects (ACME challenges are answered before this).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: to-https, namespace: demo}
+spec:
+  parentRefs: [{name: demo, sectionName: http-apex}, {name: demo, sectionName: http-sub}]
+  rules: [{filters: [{type: RequestRedirect, requestRedirect: {scheme: https, statusCode: 301}}]}]
+---
+# The join page and sessions: serve's --browser-listen on this host.
+apiVersion: v1
+kind: Service
+metadata: {name: join, namespace: demo}
+spec:
+  ports: [{name: http, port: 80, targetPort: 8099, protocol: TCP}]
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: join-demo
+  namespace: demo
+  labels: {kubernetes.io/service-name: join}
+addressType: IPv4
+ports: [{name: http, port: 8099, protocol: TCP}]
+endpoints: [{addresses: ["78.18.12.235"], conditions: {ready: true}}]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: join, namespace: demo}
+spec:
+  parentRefs: [{name: demo, sectionName: https-apex}]
+  hostnames: [demo.gr8s.io]
+  rules: [{backendRefs: [{name: join, port: 80}]}]
+---
+# Every visitor's tab runs the page's web server.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: tab-web, namespace: demo}
+spec:
+  selector: {matchLabels: {app: tab-web}}
+  template:
+    metadata: {labels: {app: tab-web}}
+    spec:
+      nodeSelector: {gr8s.io/browser: "true"}
+      tolerations: [{key: gr8s.io/browser, operator: Exists}]
+      automountServiceAccountToken: false
+      containers:
+      - name: web
+        image: ghcr.io/atgreen/gr8s-browser-demo:2
+        ports: [{containerPort: 8080}]
+---
+# What those tabs serve is checked against the image's nginx root before anyone sees it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: tab-web
+  namespace: demo
+  annotations: {gr8s.io/verified-content-root: /usr/share/nginx/html}
+spec:
+  selector: {app: tab-web}
+  ports: [{name: http, port: 80, targetPort: 8080}]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: tab-web, namespace: demo}
+spec:
+  parentRefs: [{name: demo, sectionName: https-sub}]
+  hostnames: [tab.demo.gr8s.io]
+  rules:
+  - filters: [{type: URLRewrite, urlRewrite: {path: {type: ReplacePrefixMatch, replacePrefixMatch: /verified/demo/tab-web/}}}]
+    backendRefs: [{name: join, port: 80}]
+---
+# Visitors control their tabs, so a Pod there can send whatever it likes. Pods in this
+# namespace reach only each other and cluster DNS: never the internet, so the host's
+# address is no relay for anyone.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: no-internet, namespace: demo}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+  - to: [{podSelector: {}}]
+  - to: [{ipBlock: {cidr: 169.254.1.1/32}}]
+    ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
