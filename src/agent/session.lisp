@@ -137,6 +137,11 @@ has its own.")
   "The function sending NODE-NAME's credential rotations, or NIL between its sessions."
   (gethash node-name *credential-rotation-senders*))
 
+(defvar *virtual-agents* (make-hash-table :test #'equal :synchronized t)
+  "The node names whose agent here is virtual, a browser node's (podster-57fv): it reports
+no underlay address of its own, since its Pods are reached through the node hosting it,
+and the address it dials from is that node's.")
+
 (defvar *agent-capacities* (make-hash-table :test #'equal :synchronized t)
   "By node name, the capacity an agent in this process advertises for its node, as protocol
 map entries, when not this host's: a browser node offers what its browser does.")
@@ -922,7 +927,9 @@ node-pressure signals the control plane surfaces as the kubelet Node conditions.
                               :agent-architecture (or (gethash node-name *agent-architectures*)
                                                       (gr8s.resources::native-node-architecture))
                               :underlay-address
-                              (or underlay-address (node-channel-underlay-address channel))
+                              (if (gethash node-name *virtual-agents*)
+                                  ""
+                                  (or underlay-address (node-channel-underlay-address channel)))
                               :capabilities (node-session-capabilities capabilities gateway-config-handler one-shot-p)
                               :capacity (or (gethash node-name *agent-capacities*)
                                             (node-reported-capacity-entries))
