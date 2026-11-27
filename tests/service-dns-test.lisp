@@ -141,7 +141,21 @@
           (is-true handled) (is (null answers)) (is (eql 3 rcode)))
         ;; Outside the serve zone -> declined so the proxy forwards it (handled NIL).
         (destructuring-bind (answers handled rcode) (answer "grafana.other.example.net")
-          (declare (ignore answers rcode)) (is (null handled)))))))
+          (declare (ignore answers rcode)) (is (null handled)))
+        ;; A node that is up but not serving the Gateway sends clients to the nodes
+        ;; that are, as the Gateway's status reports them.
+        (let ((gr8s.resources::*typed-api-status-write* t))
+         (gr8s.resources::update-core-resource
+         store "gateways" "infra" "gw"
+         (lambda (gateway)
+           (setf (gethash "status" gateway)
+                 (gr8s.resources::core-object
+                  "addresses" (vector (gr8s.resources::core-object "type" "IPAddress" "value" "10.77.77.21"))))
+           gateway)))
+        (destructuring-bind (answers handled rcode) (answer "grafana.lab.example.net")
+          (declare (ignore rcode))
+          (is-true handled)
+          (is (equal '((10 77 77 21)) (mapcar (lambda (a) (coerce (0conf:a-address a) 'list)) answers))))))))
 
 (test service-dns-public-projection-and-durable-withdrawal
   (with-temporary-store (store directory)

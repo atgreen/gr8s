@@ -528,10 +528,26 @@ kept), HTTPRoute hostnames, and Ingress rule hosts."
               do (add (gethash "host" rule)))))
     hostnames))
 
+(defun store-gateway-serving-addresses (store name)
+  "The IPv4 addresses the Gateways whose listeners serve NAME report serving it from, in
+their status: the nodes actually running them."
+  (let ((addresses nil))
+    (dolist (gateway (ignore-errors (list-core-resources store "gateways")))
+      (when (some (lambda (listener)
+                    (let ((hostname (gethash "hostname" listener)))
+                      (or (not (stringp hostname)) (dns-name-serves-hostname-p name hostname))))
+                  (gethash "listeners" (gethash "spec" gateway (core-object)) #()))
+        (loop for address across (gethash "addresses" (gethash "status" gateway (core-object)) #())
+              for value = (gethash "value" address)
+              when (parse-dns-ipv4-octets value) do (pushnew value addresses :test #'equal))))
+    (nreverse addresses)))
+
 (defun external-zone-answer (store serve-zones node-address question)
   "Authoritatively answer QUESTION when its name is in a configured external
 SERVE-ZONE: an A record of NODE-ADDRESS (this node's IPv4 gateway address) when the
-name matches a served Gateway/route/ingress hostname, NXDOMAIN when it is in a zone
+name matches a served Gateway/route/ingress hostname -- or, when the Gateways serving
+the name report addresses and this node is not among them, A records of those, so a
+node that is up but not serving them sends no one to itself -- NXDOMAIN when it is in a zone
 but matches nothing, NODATA for a matched name whose type we do not serve. Returns
 (values answers handled-p rcode), or (nil nil nil) when the name is in no serve-zone
 so the proxy forwards it upstream as usual."
@@ -540,10 +556,15 @@ so the proxy forwards it upstream as usual."
                (some (lambda (zone) (dns-name-in-zone-p name zone)) serve-zones))
       (if (some (lambda (host) (dns-name-serves-hostname-p name host))
                 (store-external-served-hostnames store))
-          (let ((octets (and (= (0conf:question-qtype question) 0conf:+type-a+)
-                             (parse-dns-ipv4-octets node-address))))
-            (values (when octets
-                      (list (make-instance '0conf:a-record :name name :address octets :ttl 30)))
+          (let* ((serving (store-gateway-serving-addresses store name))
+                 (addresses (if (or (null serving) (member node-address serving :test #'equal))
+                                (list node-address)
+                                serving)))
+            (values (when (= (0conf:question-qtype question) 0conf:+type-a+)
+                      (loop for address in addresses
+                            for octets = (parse-dns-ipv4-octets address)
+                            when octets
+                              collect (make-instance '0conf:a-record :name name :address octets :ttl 30)))
                     t 0))
           (values nil t +dns-name-error+)))))
 
