@@ -16,6 +16,11 @@ the Kubernetes API version with a gr8s release suffix (see
 - Browser tabs rejoin on their own when their server restarts or is upgraded, and
   always on the server's current page and runtime: the page is never cached and loads
   the runtime at a URL naming its hash (podster-w22b).
+- Limits on browser joins: `serve --browser-max-nodes N` (default 64) and
+  `--browser-max-per-client N` (default 4, by the client address the Gateway forwards
+  in `X-Forwarded-For`). A browser past either is told why and doesn't join.
+- [docs/browser-nodes.md](docs/browser-nodes.md): how to offer browser nodes from a
+  cluster (podster-931v).
 - The browser node join page shows each Pod's container logs and its VM's boot console
   in a drop-down under the Pod, read from the tab itself with no traffic to the server
   (podster-y81l).

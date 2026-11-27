@@ -300,11 +300,21 @@ browser-b93021   Ready    <none>   2m    v1.37.2-…
   them land there, and they refuse Pods that would bring Secrets, host paths or
   privileges. A tab proves a non-extractable key, so a reload is the same node;
   every frame it sends must come from an address the server gave it.
-- **Visible.** The join page shows the node, its Pods and the cluster; `/metrics`
-  reports every browser node's Pods, latency, traffic and memory.
+- **Tab to tab.** Tabs reach each other's Pods over WebRTC, across NATs with the
+  server's own STUN responder, and share image layers over the agents' BitTorrent
+  protocol; whatever can't connect directly goes through the server.
+- **Checked content.** A tab's web page can be served to the world only after the
+  server checks it, byte for byte, against the image it pulled.
+- **GPUs.** A tab with a WebGPU GPU offers `gr8s.io/gpu`, and a Pod that asks for
+  it gets Vulkan on the visitor's GPU.
+- **Visible.** The join page shows the node, its Pods and the cluster, and each Pod's
+  logs and console, read from the tab; `/metrics` reports every browser node's Pods,
+  latency, traffic and memory.
 
-Closing the tab removes the node, and its Pods are rescheduled. See
-[docs/design-browser-nodes.md](docs/design-browser-nodes.md).
+Closing the tab removes the node, and its Pods are rescheduled; a server restart or
+upgrade brings tabs back on their own. See [docs/browser-nodes.md](docs/browser-nodes.md)
+to run them and [docs/design-browser-nodes.md](docs/design-browser-nodes.md) for the
+design.
 
 ## Dashboard
 
