@@ -646,8 +646,10 @@ pass on the comma-joined line its HTTP client makes of several, Expires dates an
                       (is (string-equal "Upgrade" (gw-head-header *gw-ws-backend-request* "Connection")))
                       (is (equal "ws.example.com" (gw-head-header *gw-ws-backend-request* "X-Forwarded-Host")))
                       (is (equal "127.0.0.1" (gw-head-header *gw-ws-backend-request* "X-Forwarded-For")))
-                      ;; Quiet past the listener's read timeout, then bytes still flow both ways.
-                      (sleep 2.5)
+                      ;; Quiet past the listener's read timeout, and past the 10 s the
+                      ;; backend's socket was given to connect (on SBCL also a read timeout),
+                      ;; then bytes still flow both ways.
+                      (sleep 11)
                       (let ((payload (trivial-utf-8:string-to-utf-8-bytes "frame-bytes")))
                         (write-sequence payload stream)
                         (finish-output stream)

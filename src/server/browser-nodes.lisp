@@ -17,6 +17,9 @@
 (defparameter +browser-node-request-seconds+ 120
   "How long a request waits for the browser: an ensure may boot a VM and fetch an image.")
 
+(defvar *browser-session-call-seconds* +browser-node-request-seconds+
+  "How long BROWSER-SESSION-CALL waits for the browser's answer.")
+
 (defstruct (browser-session (:constructor %make-browser-session (stream)))
   "One browser's connection: its raw WebSocket STREAM, outstanding requests by id, and
 the handler for the messages it sends unasked."
@@ -66,7 +69,7 @@ the browser doesn't answer in time or goes away."
           (remhash id (browser-session-replies session)))
         (error 'runtime-error :message (format nil "The browser node is disconnected: ~A" condition))))
     (let ((deadline (+ (get-internal-real-time)
-                       (* +browser-node-request-seconds+ internal-time-units-per-second))))
+                       (* *browser-session-call-seconds* internal-time-units-per-second))))
       (bt:with-lock-held ((browser-session-lock session))
         (loop for reply = (gethash id (browser-session-replies session))
               until (or (not (eq reply :waiting)) (browser-session-closed session)
@@ -622,22 +625,31 @@ ask it for RUNTIME's statistics, timing the answer."
    (lambda ()
      (loop for tick from 0
            until (browser-session-closed session)
-           do (handler-case (let ((info (browser-node-info store name)))
-                              (setf (gethash "podProxy" info) (and pod-proxy t))
-                              (when (and acceptor runtime)
-                                (setf (gethash "peers" info) (browser-node-peers acceptor name)
-                                      (gethash "iceServers" info) (browser-join-ice-servers acceptor)
-                                      (gethash "stunPort" info) (let ((stun (browser-join-stun acceptor)))
-                                                                  (if stun (browser-stun-port stun) 'null))
-                                      (gethash "peering" info) (string-downcase (browser-join-peering acceptor))
-                                      (gethash "ingressPolicy" info) (browser-node-ingress-policy runtime)
-                                      (gethash "serviceCidrs" info) (coerce (browser-service-cidrs store) 'vector)))
-                              (browser-session-send session info))
-                (error () (return)))
+           ;; A tick whose summary can't be made, as while the leader checkpoints and
+           ;; the store refuses access for a second, is skipped: the next one tells the
+           ;; browser. Only a browser that can't be told ends the reporter.
+           do (let ((info (ignore-errors
+                           (let ((info (browser-node-info store name)))
+                             (setf (gethash "podProxy" info) (and pod-proxy t))
+                             (when (and acceptor runtime)
+                               (setf (gethash "peers" info) (browser-node-peers acceptor name)
+                                     (gethash "iceServers" info) (browser-join-ice-servers acceptor)
+                                     (gethash "stunPort" info) (let ((stun (browser-join-stun acceptor)))
+                                                                 (if stun (browser-stun-port stun) 'null))
+                                     (gethash "peering" info) (string-downcase (browser-join-peering acceptor))
+                                     (gethash "ingressPolicy" info) (browser-node-ingress-policy runtime)
+                                     (gethash "serviceCidrs" info) (coerce (browser-service-cidrs store) 'vector)))
+                             info))))
+                (when info
+                  (handler-case (browser-session-send session info)
+                    (error () (return)))))
               (when (and runtime (zerop (mod tick (ceiling +browser-node-stats-seconds+ +browser-node-info-seconds+))))
                 (let ((started (get-internal-real-time)))
                   (handler-case
-                      (let ((stats (browser-session-call session "stats")))
+                      ;; Counters, answered at once: a browser that doesn't mustn't hold up
+                      ;; the reports.
+                      (let ((stats (let ((*browser-session-call-seconds* 5))
+                                     (browser-session-call session "stats"))))
                         (setf (browser-runtime-rtt runtime)
                               (/ (- (get-internal-real-time) started) (float internal-time-units-per-second 1d0))
                               (browser-runtime-stats runtime) stats))

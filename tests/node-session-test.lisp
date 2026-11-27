@@ -2201,6 +2201,50 @@ them. A node can't claim another's address or name."
           (is (equal '("10.96.0.11" 80 "10.80.32.3" 40001 t t) (funcall describe (gethash "reply" result))))
           (is (equal '("10.80.16.2" 8080 "10.80.32.3" 50000 t t) (funcall describe (gethash "other" result))))))))
 
+(test browser-nodes-keep-reporting-through-a-checkpoint
+  ;; The leader blocks store access for a moment at each checkpoint (podster-0hp0). A
+  ;; summary that can't be made then is skipped; the browser still hears afterwards.
+  (with-temporary-store (store path)
+    (let* ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" path)))
+           (server (gr8s.apiserver::start-node-grpc-server store :host "127.0.0.1" :port 0 :pki pki))
+           (host (gr8s.server::make-virtual-node-host store server pki (merge-pathnames "virtual/" path)))
+           (listener (gr8s.server::start-browser-join-listener host "127.0.0.1" 0))
+           (socket nil) (reader nil)
+           (infos 0) (lock (bt:make-lock)))
+      (unwind-protect
+           (multiple-value-bind (stream connection) (browser-node-test-connect (hunchentoot:acceptor-port listener))
+             (setf socket connection)
+             (browser-node-test-join stream)
+             (setf reader (bt:make-thread
+                           (lambda ()
+                             (handler-case
+                                 (loop for message = (browser-node-test-read stream)
+                                       do (cond ((null message))
+                                                ((equal "info" (gethash "op" message))
+                                                 (bt:with-lock-held (lock) (incf infos)))
+                                                ;; Answer what the server asks, as a browser does.
+                                                ((gethash "id" message)
+                                                 (browser-node-test-send
+                                                  stream (gr8s.resources::core-object
+                                                          "id" (gethash "id" message)
+                                                          "result" (gr8s.resources::core-object))))))
+                               (error () nil)))))
+             (flet ((infos () (bt:with-lock-held (lock) infos)))
+               (is-true (wait-until (lambda () (plusp (infos))) :timeout 10))
+               ;; Blocked for longer than a report's interval.
+               (gr8s.store::quiesce-store-access store :timeout 5)
+               (unwind-protect (sleep (* 2 gr8s.server::+browser-node-info-seconds+))
+                 (gr8s.store::resume-store-access store))
+               (let ((before (infos)))
+                 (is-true (wait-until (lambda () (> (infos) before))
+                                      :timeout (* 3 gr8s.server::+browser-node-info-seconds+))
+                          "the browser heard nothing after the store came back"))))
+        (when socket (ignore-errors (usocket:socket-close socket)))
+        ;; Closing the socket doesn't wake a read already blocked on it.
+        (when (and reader (bt:thread-alive-p reader)) (ignore-errors (bt:destroy-thread reader)))
+        (hunchentoot:stop listener)
+        (gr8s.apiserver::stop-node-grpc-server server)))))
+
 (test browser-stun-names-the-address-a-request-came-from
   ;; RFC 5769's sample: 192.0.2.1 port 32853 is XOR-MAPPED-ADDRESS port a147, address e112a643.
   (let* ((request (concatenate '(vector (unsigned-byte 8))
