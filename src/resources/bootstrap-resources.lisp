@@ -183,6 +183,18 @@
          (when hostnames
            (bootstrap-string-array hostnames "spec.hostnames")))))))
 
+(defun certificate-duration-seconds (value)
+  "Parse a cert-manager/Go-ish duration (e.g. \"2160h\", \"30m\", \"10s\", \"90d\")
+   or a plain integer number of seconds. Returns seconds, or NIL."
+  (cond ((integerp value) value)
+        ((and (stringp value) (plusp (length value)))
+         (multiple-value-bind (n end) (ignore-errors (parse-integer value :junk-allowed t))
+           (when (and n (plusp n))
+             (case (char value (1- (length value)))
+               (#\h (* n 3600)) (#\m (* n 60)) (#\s n) (#\d (* n 86400))
+               (t (and (eql end (length value)) n))))))
+        (t nil)))
+
 (defun validate-acme-issuer-spec (acme)
   "The ACME issuer gr8s implements: an https directory, an account key Secret and
    HTTP-01 solvers answered by the Gateway. DNS-01, Ingress solvers and external
@@ -256,6 +268,11 @@
                unless (certificate-ip-address-octets address)
                  do (core-resource-error 422 "Invalid"
                                          "spec.ipAddresses: ~S is not a valid IP address" address))
+         ;; cert-manager's rule; the 90d default duration applies when it is absent.
+         (let ((duration (or (certificate-duration-seconds (gethash "duration" spec)) (* 90 24 60 60)))
+               (renew-before (certificate-duration-seconds (gethash "renewBefore" spec))))
+           (when (and renew-before (>= renew-before duration))
+             (core-resource-error 422 "Invalid" "spec.renewBefore must be shorter than spec.duration")))
          (unless (or (plusp alt-names)
                      (and (stringp common-name) (plusp (length common-name))))
            (core-resource-error 422 "Invalid"

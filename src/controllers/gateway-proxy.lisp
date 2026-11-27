@@ -441,43 +441,95 @@ Named, as OTel's HTTP conventions ask, by the method and the route that matched.
 
 ;;; ---------------------------------------------------------------------------
 ;;; ACME HTTP-01 answers. The cert-manager ACME issuer writes a Challenge; the
-;;; node's Gateway view carries it here, and every listener answers its token
-;;; for its dnsName before route matching, as an http01 gatewayHTTPRoute solver
-;;; would. No solver Pod or HTTPRoute is needed.
+;;; node's Gateway view carries it here. A listener answers its token before
+;;; route matching only where an HTTPRoute from the Challenge's namespace, with
+;;; the solver's parentRefs, could attach and serve its dnsName -- the access an
+;;; upstream http01 gatewayHTTPRoute solver route would have. No solver Pod or
+;;; HTTPRoute is needed.
 
 (defparameter +gateway-acme-challenge-prefix+ "/.well-known/acme-challenge/"
   "The RFC 8555 section 8.3 path an ACME server fetches a key authorization from.")
 
-(defvar *gateway-acme-challenges* (make-hash-table :test 'equal)
-  "Token -> (dnsName . key authorization) for this node's pending HTTP-01
-   Challenges. Replaced whole, never mutated, so listener threads read it unlocked.")
+(defvar *gateway-acme-challenges* (make-hash-table)
+  "Listener port -> token -> (dnsName . key authorization) for this node's
+   pending HTTP-01 Challenges. Replaced whole, never mutated, so listener
+   threads read it unlocked.")
+
+(defun gateway-acme-solver-parent-refs (challenge)
+  "The parentRefs of the solver CHALLENGE was presented for, as a list."
+  (let* ((solver (gethash "solver" (gethash "spec" challenge)))
+         (http01 (and (hash-table-p solver) (gethash "http01" solver)))
+         (route (and (hash-table-p http01) (gethash "gatewayHTTPRoute" http01)))
+         (refs (and (hash-table-p route) (gethash "parentRefs" route))))
+    (if (vectorp refs) (coerce refs 'list) '())))
+
+(defun gateway-acme-listener-serves-p (store entry challenge)
+  "True when ENTRY's listener could carry a solver HTTPRoute for CHALLENGE: it
+   covers the dnsName, admits routes from the Challenge's namespace, and is
+   one of the solver's parentRefs when the solver names any."
+  (let* ((listener (gateway-listener-entry-listener entry))
+         (owner (gateway-listener-entry-owner entry))
+         (owner-metadata (gethash "metadata" owner))
+         (namespace (gethash "namespace" (gethash "metadata" challenge)))
+         (host (gethash "dnsName" (gethash "spec" challenge)))
+         (refs (gateway-acme-solver-parent-refs challenge)))
+    (and (null (gateway-listener-entry-error entry))
+         (member (gethash "protocol" listener) '("HTTP" "HTTPS") :test #'equal)
+         (let ((covered (gateway-hostname-intersection (gethash "hostname" listener) host)))
+           (and (stringp covered) (string-equal host covered)))
+         (gateway-listener-allows-route-p
+          store (core-object "kind" "HTTPRoute" "metadata" (core-object "namespace" namespace))
+          (gethash "namespace" owner-metadata) listener)
+         (or (null refs)
+             (some (lambda (ref)
+                     (gateway-parent-matches-p ref namespace
+                                               (gethash "namespace" owner-metadata) (gethash "name" owner-metadata)
+                                               (gethash "name" listener) (gethash "port" listener)
+                                               (or (gethash "kind" owner) "Gateway")
+                                               (gateway-listener-owner-group owner)))
+                   refs)))))
 
 (defun gateway-acme-challenge-table (store)
-  "Index the HTTP-01 Challenges in the Gateway view STORE by token."
-  (let ((table (make-hash-table :test 'equal)))
-    (dolist (challenge (ignore-errors (list-core-resources store "challenges")))
-      (let ((spec (gethash "spec" challenge)))
-        (when (and (hash-table-p spec) (equal "HTTP-01" (gethash "type" spec)))
-          (let ((token (gethash "token" spec)) (host (gethash "dnsName" spec)) (key (gethash "key" spec)))
-            (when (and (stringp token) (stringp host) (stringp key))
-              (setf (gethash token table) (cons host key)))))))
+  "Index the HTTP-01 Challenges in the Gateway view STORE by the listener
+   ports allowed to answer them, then by token."
+  (let ((table (make-hash-table))
+        (challenges (remove-if-not
+                     (lambda (challenge)
+                       (let ((spec (gethash "spec" challenge)))
+                         (and (hash-table-p spec) (equal "HTTP-01" (gethash "type" spec))
+                              (every (lambda (field) (stringp (gethash field spec))) '("dnsName" "token" "key")))))
+                     (ignore-errors (list-core-resources store "challenges")))))
+    (when challenges
+      (let ((listener-sets (ignore-errors (list-core-resources store "listenersets"))))
+        (dolist (gateway (list-core-resources store "gateways"))
+          (when (gateway-controlled-p store gateway)
+            (dolist (entry (gateway-listener-entries store gateway listener-sets))
+              (dolist (challenge challenges)
+                (when (gateway-acme-listener-serves-p store entry challenge)
+                  (let ((spec (gethash "spec" challenge))
+                        (port (gethash "port" (gateway-listener-entry-listener entry))))
+                    (setf (gethash (gethash "token" spec)
+                                   (or (gethash port table)
+                                       (setf (gethash port table) (make-hash-table :test 'equal))))
+                          (cons (gethash "dnsName" spec) (gethash "key" spec)))))))))))
     table))
 
-(defun gateway-acme-challenge-answer (request)
-  "The key authorization REQUEST asks for, or NIL when it is not a GET for a
-   pending token whose dnsName is the request's host."
-  (let ((path (hunchentoot:script-name request)))
-    (when (and (member (hunchentoot:request-method request) '(:get :head))
+(defun gateway-acme-challenge-answer (acceptor request)
+  "The key authorization REQUEST asks ACCEPTOR's port for, or NIL when it is
+   not a GET for a token this port may answer for the request's host."
+  (let ((path (hunchentoot:script-name request))
+        (tokens (gethash (hunchentoot:acceptor-port acceptor) *gateway-acme-challenges*)))
+    (when (and tokens
+               (member (hunchentoot:request-method request) '(:get :head))
                (uiop:string-prefix-p +gateway-acme-challenge-prefix+ path))
-      (let ((entry (gethash (subseq path (length +gateway-acme-challenge-prefix+))
-                            *gateway-acme-challenges*))
+      (let ((entry (gethash (subseq path (length +gateway-acme-challenge-prefix+)) tokens))
             (host (gateway-request-host request)))
         (when (and entry host (string-equal host (car entry)))
           (cdr entry))))))
 
 (defmethod hunchentoot:acceptor-dispatch-request :around ((acceptor gateway-acceptor) request)
   (let ((answer (and (plusp (hash-table-count *gateway-acme-challenges*))
-                     (gateway-acme-challenge-answer request))))
+                     (gateway-acme-challenge-answer acceptor request))))
     (if answer
         (progn (setf (hunchentoot:return-code*) 200
                      (hunchentoot:content-type*) "text/plain")

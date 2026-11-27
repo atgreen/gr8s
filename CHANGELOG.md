@@ -19,8 +19,14 @@ the Kubernetes API version with a gr8s release suffix (see
   chain and RSA key land in the Certificate's `kubernetes.io/tls` Secret for an
   HTTPS listener, and renew like other issuers' certificates. Failed orders back
   off from 5 minutes, doubling to a day, and a server's `Retry-After` defers the
-  next step. DNS-01, Ingress solvers and external account binding are rejected at
-  admission.
+  next step. A listener answers a Challenge only where an HTTPRoute from the
+  Certificate's namespace could attach for its host (hostname, `allowedRoutes`,
+  the solver's `parentRefs`), and the issuer refuses authorizations for names the
+  Certificate does not list, so a tenant cannot validate another's hostnames.
+  Steps run off the reconcile pass with bounded requests over verified TLS. DNS-01,
+  Ingress solvers and external account binding are rejected at admission.
+  A Certificate's `renewBefore` must now be shorter than its `duration`, and one
+  not shorter than the validity the issuer chose falls back to a third of it.
 
 - Browser nodes, first steps (podster-57fv, docs/design-browser-nodes.md): `serve`
   can run node agents for nodes whose containers live elsewhere ("virtual nodes",

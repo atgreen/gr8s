@@ -60,14 +60,7 @@
 (defun cm-parse-duration (value)
   "Parse a cert-manager/Go-ish duration (e.g. \"2160h\", \"30m\", \"10s\", \"90d\")
    or a plain integer number of seconds. Returns seconds, or NIL."
-  (cond ((integerp value) value)
-        ((and (stringp value) (plusp (length value)))
-         (multiple-value-bind (n end) (ignore-errors (parse-integer value :junk-allowed t))
-           (when (and n (plusp n))
-             (case (char value (1- (length value)))
-               (#\h (* n 3600)) (#\m (* n 60)) (#\s n) (#\d (* n 86400))
-               (t (and (eql end (length value)) n))))))
-        (t nil)))
+  (gr8s.resources::certificate-duration-seconds value))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Leaf issuance (reuses the gr8s PKI signing primitives).
@@ -235,9 +228,13 @@
           (create-core-resource store "secrets" object namespace)))))
 
 (defun cm-renewal-time (spec not-before not-after)
-  "RENEWAL-TIME = not-after - renewBefore (default renewBefore = 1/3 of the validity)."
+  "RENEWAL-TIME = not-after - renewBefore. renewBefore defaults to 1/3 of the
+   validity, and falls back to that when it is not shorter than the validity
+   the issuer actually chose (an ACME server ignores spec.duration), as
+   cert-manager does; otherwise every pass would reissue."
   (let* ((validity (- not-after not-before))
-         (renew-before (or (cm-parse-duration (gethash "renewBefore" spec)) (floor validity 3))))
+         (requested (cm-parse-duration (gethash "renewBefore" spec)))
+         (renew-before (if (and requested (< requested validity)) requested (floor validity 3))))
     (- not-after renew-before)))
 
 (defun cm-set-ready-status (store namespace name not-before not-after renewal-time)
@@ -311,15 +308,22 @@
                                    (cm-renewal-time spec not-before not-after))
               t)))))))
 
+(defvar *cm-acme-active* nil
+  "During a reconcile pass, the UIDs of Certificates the acme issuer is working on.")
+
 (defun reconcile-certificates (store pki)
   "Control-plane reconcile: issue/renew every Certificate whose Secret is missing
    or due. Fail-soft per Certificate, like the other control-plane reconcilers."
-  (let ((certificates (list-core-resources store "certificates")))
-    (dolist (certificate certificates)
+  (let ((*cm-acme-active* '()))
+    (dolist (certificate (list-core-resources store "certificates"))
       (handler-case
           (when (cm-certificate-needs-issue-p store certificate)
             (cm-issue-certificate store pki certificate))
         (error (condition)
           (format *error-output* "gr8s: Certificate reconcile failed: ~A~%" condition))))
-    (cm-acme-forget-orders-except certificates))
+    ;; Orders the acme issuer no longer works on, and their Challenges, go.
+    (cm-acme-retire-orders *cm-acme-active*)
+    (handler-case (cm-acme-delete-orphaned-challenges store)
+      (error (condition)
+        (format *error-output* "gr8s: ACME Challenge cleanup failed: ~A~%" condition))))
   store)

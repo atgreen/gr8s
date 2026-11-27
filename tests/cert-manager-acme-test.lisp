@@ -70,22 +70,85 @@
                     (remove-if (lambda (resource) (find #\/ (gethash "name" resource)))
                                (gethash "resources" (check-core-status 200 "/apis/acme.cert-manager.io/v1"))))))))
 
+(defun acme-gateway-view (&rest objects)
+  "A node Gateway view holding the GatewayClass, Gateways and Challenges OBJECTS."
+  (let ((resources (make-hash-table :test 'equal)))
+    (dolist (object objects)
+      (let ((metadata (gethash "metadata" object)))
+        (setf (gethash (list (cond ((equal "GatewayClass" (gethash "kind" object)) "gatewayclasses")
+                                   ((equal "Gateway" (gethash "kind" object)) "gateways")
+                                   (t "challenges"))
+                             (gethash "namespace" metadata) (gethash "name" metadata))
+                       resources)
+              object)))
+    (gr8s.agent::make-gateway-projection-store (gr8s.agent::gateway-resource-index resources))))
+
+(defun acme-gateway (&key (name "web") (namespace "certs") (hostname "*.example.com") (from "Same"))
+  (cm-parse (format nil "{\"apiVersion\":\"gateway.networking.k8s.io/v1\",\"kind\":\"Gateway\",
+    \"metadata\":{\"name\":\"~A\",\"namespace\":\"~A\"},
+    \"spec\":{\"gatewayClassName\":\"gr8s\",\"listeners\":[
+      {\"name\":\"http\",\"port\":80,\"protocol\":\"HTTP\",\"hostname\":\"~A\",
+       \"allowedRoutes\":{\"namespaces\":{\"from\":\"~A\"}}},
+      {\"name\":\"other\",\"port\":8080,\"protocol\":\"HTTP\",\"hostname\":\"elsewhere.test\"}]}}"
+                    name namespace hostname from)))
+
+(defun acme-gateway-class ()
+  (let ((class (cm-parse "{\"apiVersion\":\"gateway.networking.k8s.io/v1\",\"kind\":\"GatewayClass\",
+                           \"metadata\":{\"name\":\"gr8s\"},\"spec\":{}}")))
+    (setf (gethash "controllerName" (gethash "spec" class)) gr8s.controllers::*gateway-controller-name*)
+    class))
+
+(defun acme-challenge-with-parents (challenge parent-refs-json)
+  (setf (gethash "solver" (gethash "spec" challenge))
+        (cm-parse (format nil "{\"http01\":{\"gatewayHTTPRoute\":{\"parentRefs\":~A}}}" parent-refs-json)))
+  challenge)
+
 (test acme-challenges-reach-the-agent-gateway-view
   (with-temporary-store (store path)
     (values path)
-    (gr8s.resources::create-core-resource store "challenges" (acme-challenge-object) "certs")
+    (gr8s.resources::create-core-resource
+     store "challenges" (acme-challenge-with-parents (acme-challenge-object) "[{\"name\":\"web\"}]") "certs")
     (let* ((projection (gr8s.kubelet::service-discovery-projection store))
            (resources (gr8s.kubelet::decode-service-discovery-projection projection))
            (public (gethash '("challenges" "certs" "demo-1") resources)))
       (is (hash-table-p public))
       ;; Only what the listener needs crosses to the node.
-      (is (equal '("dnsName" "key" "token" "type")
+      (is (equal '("dnsName" "key" "solver" "token" "type")
                  (sort (alexandria:hash-table-keys (gethash "spec" public)) #'string<)))
-      (let* ((view (gr8s.agent::make-gateway-projection-store (gr8s.agent::gateway-resource-index resources)))
-             (table (gr8s.controllers::gateway-acme-challenge-table view)))
-        (is (equal '("demo.example.com" . "tok-1.thumb") (gethash "tok-1" table)))))
+      (let ((table (gr8s.controllers::gateway-acme-challenge-table
+                    (apply #'acme-gateway-view (acme-gateway-class) (acme-gateway)
+                           (alexandria:hash-table-values resources)))))
+        ;; Port 80 covers the host and admits the namespace; port 8080 does neither.
+        (is (equal '("demo.example.com" . "tok-1.thumb") (gethash "tok-1" (gethash 80 table))))
+        (is (null (gethash 8080 table)))))
     ;; A Challenge change rides the Gateway delta path, not a full node snapshot.
     (is (member "challenges" gr8s.protocol::+gateway-config-resources+ :test #'equal))))
+
+(test acme-challenges-answer-only-where-a-solver-route-could-attach
+  (flet ((ports (gateway challenge)
+           (let ((table (gr8s.controllers::gateway-acme-challenge-table
+                         (acme-gateway-view (acme-gateway-class) gateway challenge))))
+             (sort (loop for port being the hash-keys of table collect port) #'<))))
+    (is (equal '(80) (ports (acme-gateway) (acme-challenge-object))))
+    ;; Another tenant's namespace is not admitted by allowedRoutes: Same.
+    (let ((foreign (acme-challenge-object)))
+      (setf (gethash "namespace" (gethash "metadata" foreign)) "intruder")
+      (is (null (ports (acme-gateway) foreign)))
+      (is (equal '(80) (ports (acme-gateway :from "All") foreign))))
+    ;; A host no listener covers is answered nowhere.
+    (is (null (ports (acme-gateway) (acme-challenge-object :host "victim.org"))))
+    (is (equal '(80) (ports (acme-gateway :hostname "demo.example.com") (acme-challenge-object))))
+    ;; The solver's parentRefs pick the Gateway and the listener.
+    (is (equal '(80) (ports (acme-gateway)
+                            (acme-challenge-with-parents (acme-challenge-object)
+                                                         "[{\"name\":\"web\",\"sectionName\":\"http\"}]"))))
+    (is (null (ports (acme-gateway)
+                     (acme-challenge-with-parents (acme-challenge-object) "[{\"name\":\"another\"}]"))))
+    ;; A Gateway of another controller is not ours to answer on.
+    (let ((class (acme-gateway-class)))
+      (setf (gethash "controllerName" (gethash "spec" class)) "example.com/other")
+      (is (zerop (hash-table-count (gr8s.controllers::gateway-acme-challenge-table
+                                    (acme-gateway-view class (acme-gateway) (acme-challenge-object)))))))))
 
 (test gateway-listener-answers-acme-http01-before-routing
   (let* ((router (lambda (&rest arguments) (declare (ignore arguments)) nil))
@@ -94,8 +157,9 @@
          (port (hunchentoot:acceptor-port gateway))
          (previous gr8s.controllers::*gateway-acme-challenges*))
     (unwind-protect
-         (let ((table (make-hash-table :test 'equal)))
-           (setf (gethash "tok-1" table) (cons "demo.example.com" "tok-1.thumb")
+         (let ((table (make-hash-table)) (tokens (make-hash-table :test 'equal)))
+           (setf (gethash "tok-1" tokens) (cons "demo.example.com" "tok-1.thumb")
+                 (gethash port table) tokens
                  gr8s.controllers::*gateway-acme-challenges* table)
            (multiple-value-bind (code headers body)
                (gw-raw-request port "demo.example.com:80" "/.well-known/acme-challenge/tok-1")
@@ -106,20 +170,87 @@
            (is (= 404 (gw-raw-request port "other.example.com" "/.well-known/acme-challenge/tok-1")))
            (is (= 404 (gw-raw-request port "demo.example.com" "/.well-known/acme-challenge/nope")))
            (is (= 404 (gw-raw-request port "demo.example.com" "/.well-known/acme-challenge/tok-1"
-                                      :method "POST" :body "x"))))
+                                      :method "POST" :body "x")))
+           ;; A token for another listener port is not this one's to answer.
+           (remhash port table)
+           (setf (gethash (1+ port) table) tokens)
+           (is (= 404 (gw-raw-request port "demo.example.com" "/.well-known/acme-challenge/tok-1"))))
       (setf gr8s.controllers::*gateway-acme-challenges* previous)
       (gr8s.controllers::stop-gateway-listener gateway))))
 
+;;; --- The real client's transport, against a stand-in server -----------------
+
+(defun acme-test-client ()
+  (let ((client (pure-tls/acme:make-acme-client
+                 :directory-url "https://acme.test/directory"
+                 :store (pure-tls/acme::%make-cert-store :account-key (ironclad:generate-key-pair :secp256r1)))))
+    (setf (pure-tls/acme::acme-client-directory client)
+          '((:new-order . "https://acme.test/new-order") (:new-nonce . "https://acme.test/nonce"))
+          (pure-tls/acme::acme-client-account-url client) "https://acme.test/acct/1"
+          (pure-tls/acme::acme-client-nonce client) "nonce-1")
+    client))
+
+(test acme-transport-verifies-tls-and-honours-long-retry-after
+  (let* ((requests '())
+         (gr8s.controllers::*cm-acme-transport*
+           (lambda (url &rest arguments)
+             (push (cons url arguments) requests)
+             (cond ((search "new-order" url)
+                    (values "{\"type\":\"urn:ietf:params:acme:error:rateLimited\",\"detail\":\"too many orders\"}"
+                            429 '((:retry-after . "7200") (:replay-nonce . "nonce-2"))))
+                   (t (values "{\"type\":\"urn:ietf:params:acme:error:malformed\",\"detail\":\"no such authorization\"}"
+                              404 '((:replay-nonce . "nonce-3"))))))))
+    ;; Two hours is past the client's own 120s budget; it is still a deferral.
+    (let ((condition (handler-case (progn (gr8s.controllers::cm-acme-new-order
+                                           :pure-tls (acme-test-client) '("demo.example.com") nil)
+                                          nil)
+                       (gr8s.controllers::cm-acme-deferred (condition) condition))))
+      (is (typep condition 'gr8s.controllers::cm-acme-deferred))
+      (is (= 7200 (gr8s.controllers::cm-acme-deferred-seconds condition))))
+    (let ((request (find "https://acme.test/new-order" requests :key #'first :test #'equal)))
+      (is (eq :required (getf (rest request) :verify)))
+      ;; No profile is sent unless the issuer names one.
+      (is (not (search "profile" (trivial-utf-8:utf-8-bytes-to-string (pure-tls/acme::base64url-decode
+                                  (cdr (assoc :payload (cl-json:decode-json-from-string
+                                                        (getf (rest request) :content))))))))))
+    ;; An error reply to a fetch is an error, not an authorization still pending.
+    (signals error (gr8s.controllers::cm-acme-fetch :pure-tls (acme-test-client) "https://acme.test/authz/9"))
+    ;; skipTLSVerify alone turns verification off.
+    (let ((client (acme-test-client)))
+      (setf (pure-tls/acme::acme-client-skip-tls-verify client) t)
+      (ignore-errors (gr8s.controllers::cm-acme-fetch :pure-tls client "https://acme.test/authz/9"))
+      (is (null (getf (rest (first requests)) :verify :absent))))))
+
+(test acme-transport-bounds-a-server-that-never-answers
+  (let* ((listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t))
+         (port (usocket:get-local-port listener))
+         (held nil)
+         (acceptor (bt:make-thread (lambda () (setf held (ignore-errors (usocket:socket-accept listener))))
+                                   :name "silent ACME server")))
+    (unwind-protect
+         (let ((gr8s.controllers::*cm-acme-request-deadline* 1)
+               (started (get-internal-real-time)))
+           (signals error (gr8s.controllers::cm-acme-http-request (format nil "http://127.0.0.1:~D/directory" port)))
+           (is (< (/ (- (get-internal-real-time) started) internal-time-units-per-second) 10)))
+      (ignore-errors (bt:join-thread acceptor))
+      (when held (ignore-errors (usocket:socket-close held)))
+      (usocket:socket-close listener))))
+
 ;;; --- The order state machine against a scripted ACME server -----------------
 
+;;; Its methods ASSERT rather than IS: a step may run on its own thread, where
+;;; FiveAM has no current test.
 (defclass fake-acme ()
   ((orders :initform 0 :accessor fake-acme-orders)
    (responded :initform nil :accessor fake-acme-responded)
    (validations :initform 0 :accessor fake-acme-validations
                 :documentation "Authorization polls after the response before it settles.")
    (outcome :initarg :outcome :initform "valid" :accessor fake-acme-outcome)
+   (identifier :initarg :identifier :initform "demo.example.com" :accessor fake-acme-identifier)
+   (wrong-key :initarg :wrong-key :initform nil :accessor fake-acme-wrong-key)
    (csr :initform nil :accessor fake-acme-csr)
-   (defer :initform nil :accessor fake-acme-defer)))
+   (defer :initform nil :accessor fake-acme-defer)
+   (defer-authorization :initform nil :accessor fake-acme-defer-authorization)))
 
 (defmethod gr8s.controllers::cm-acme-account ((acme fake-acme) server email key &key skip-tls-verify)
   (declare (ignore server email key skip-tls-verify))
@@ -129,7 +260,7 @@
   (declare (ignore client profile))
   (when (fake-acme-defer acme)
     (error 'gr8s.controllers::cm-acme-deferred :seconds (shiftf (fake-acme-defer acme) nil)))
-  (is (equal '("demo.example.com") domains))
+  (assert (equal '("demo.example.com") domains))
   (incf (fake-acme-orders acme))
   (setf (fake-acme-responded acme) nil (fake-acme-csr acme) nil)
   (values '((:status . "pending") (:finalize . "https://acme.test/finalize/1")
@@ -142,7 +273,7 @@
       `((:status . ,(cond ((not (fake-acme-responded acme)) "pending")
                           ((plusp (fake-acme-validations acme)) (decf (fake-acme-validations acme)) "pending")
                           (t (fake-acme-outcome acme))))
-        (:identifier (:type . "dns") (:value . "demo.example.com"))
+        (:identifier (:type . "dns") (:value . ,(fake-acme-identifier acme)))
         (:challenges ((:type . "dns-01") (:url . "https://acme.test/chall/dns") (:token . "dns-token"))
                      ((:type . "http-01") (:url . "https://acme.test/chall/1") (:token . "tok-1")
                       ,@(when (equal "invalid" (fake-acme-outcome acme))
@@ -153,29 +284,56 @@
 
 (defmethod gr8s.controllers::cm-acme-key-authorization ((acme fake-acme) client token)
   (declare (ignore client))
+  (when (fake-acme-defer-authorization acme)
+    (error 'gr8s.controllers::cm-acme-deferred :seconds (shiftf (fake-acme-defer-authorization acme) nil)))
   (format nil "~A.thumb" token))
 
 (defmethod gr8s.controllers::cm-acme-respond ((acme fake-acme) client url)
   (declare (ignore client))
-  (is (equal "https://acme.test/chall/1" url))
+  (assert (equal "https://acme.test/chall/1" url))
   (setf (fake-acme-responded acme) t))
 
 (defmethod gr8s.controllers::cm-acme-finalize ((acme fake-acme) client url csr)
   (declare (ignore client))
-  (is (equal "https://acme.test/finalize/1" url))
+  (assert (equal "https://acme.test/finalize/1" url))
   (setf (fake-acme-csr acme) csr)
   '((:status . "processing")))
 
+(defun acme-test-leaf-pem (subject-public-key-info)
+  "A leaf for demo.example.com carrying SUBJECT-PUBLIC-KEY-INFO, as a CA would
+   issue for the CSR; who signs it is beside the point here."
+  (let* ((signer (ironclad:generate-key-pair :secp256r1))
+         (now (get-universal-time))
+         (subject (pure-tls/acme::encode-subject "demo.example.com"))
+         (algorithm (pure-tls/acme::encode-sequence
+                     (pure-tls/acme::encode-oid pure-tls/acme::*oid-ecdsa-with-sha256*)))
+         (tbs (pure-tls/acme::encode-sequence
+               (pure-tls/acme::encode-context-tag 0 (pure-tls/acme::encode-integer 2))
+               (pure-tls/acme::encode-integer 7) algorithm subject
+               (pure-tls/acme::encode-validity (- now 60) (+ now (* 90 24 60 60)))
+               subject subject-public-key-info)))
+    (pure-tls/acme::wrap-pem "CERTIFICATE"
+                             (pure-tls/acme::encode-sequence
+                              tbs algorithm
+                              (pure-tls/acme::encode-bit-string (gr8s.controllers::ecdsa-sign-der signer tbs))))))
+
 (defmethod gr8s.controllers::cm-acme-download ((acme fake-acme) client url)
   (declare (ignore client))
-  (is (equal "https://acme.test/cert/1" url))
-  (values (gr8s.controllers::cm-issue-leaf :dns-names '("demo.example.com"))))
+  (assert (equal "https://acme.test/cert/1" url))
+  (if (fake-acme-wrong-key acme)
+      (values (gr8s.controllers::cm-issue-leaf :dns-names '("demo.example.com")))
+      (let ((order (first (alexandria:hash-table-values gr8s.controllers::*cm-acme-orders*))))
+        (acme-test-leaf-pem (pure-tls/acme::encode-rsa-public-key
+                             (gr8s.controllers::cm-acme-order-leaf-private-key order)
+                             (gr8s.controllers::cm-acme-order-leaf-public-key order))))))
 
 (defmacro with-fake-acme ((acme clock &rest initargs) &body body)
-  "Run BODY with a scripted ACME server ACME and a settable clock CLOCK (a cons)."
+  "Run BODY with a scripted ACME server ACME and a settable clock CLOCK (a cons).
+   Steps run in the caller's thread, so each pass completes before the next."
   `(let* ((,acme (make-instance 'fake-acme ,@initargs))
           (,clock (list 3900000000))
           (gr8s.controllers::*cm-acme-backend* ,acme)
+          (gr8s.controllers::*cm-acme-run-step* 'funcall)
           (gr8s.controllers::*cm-acme-orders* (make-hash-table :test 'equal))
           (gr8s.controllers::*cm-acme-clients* (make-hash-table :test 'equal))
           (gr8s.controllers::*cert-manager-clock* (lambda () (car ,clock))))
@@ -298,3 +456,128 @@
       (gr8s.controllers::reconcile-certificates store nil)
       (is (= 0 (fake-acme-orders acme)))
       (is (search "DNS-01" (gethash "message" (acme-certificate-condition store "Ready")))))))
+
+(test acme-issuer-refuses-an-authorization-for-a-name-it-did-not-ask-for
+  ;; A server (a tenant's own, say) that answers with another host's
+  ;; authorization must not get a Challenge for that host presented.
+  (with-temporary-store (store path)
+    (values path)
+    (with-fake-acme (acme clock :identifier "victim.example.org")
+      (gr8s.resources::create-core-resource store "clusterissuers" (cm-parse *acme-issuer*) nil)
+      (gr8s.resources::create-core-resource store "certificates" (cm-parse *acme-certificate*) "certs")
+      (gr8s.controllers::reconcile-certificates store nil)
+      (is (null (gr8s.resources::list-core-resources store "challenges")))
+      (is (search "victim.example.org" (gethash "message" (acme-certificate-condition store "Ready")))))))
+
+(test acme-issuer-refuses-a-certificate-without-the-order-key
+  (with-temporary-store (store path)
+    (values path)
+    (with-fake-acme (acme clock :wrong-key t)
+      (gr8s.resources::create-core-resource store "clusterissuers" (cm-parse *acme-issuer*) nil)
+      (gr8s.resources::create-core-resource store "certificates" (cm-parse *acme-certificate*) "certs")
+      (flet ((reconcile-after (&optional (seconds 0))
+               (incf (car clock) seconds)
+               (gr8s.controllers::reconcile-certificates store nil)))
+        (reconcile-after) (reconcile-after 10) (reconcile-after 5) (reconcile-after 5)
+        (is (null (ignore-errors (gr8s.resources::get-core-resource store "secrets" "certs" "demo-tls"))))
+        (is (search "order's key" (gethash "message" (acme-certificate-condition store "Ready"))))))))
+
+(test acme-issuer-deletes-challenges-no-order-owns
+  (with-temporary-store (store path)
+    (values path)
+    (with-fake-acme (acme clock)
+      (gr8s.resources::create-core-resource store "clusterissuers" (cm-parse *acme-issuer*) nil)
+      (gr8s.resources::create-core-resource store "certificates" (cm-parse *acme-certificate*) "certs")
+      (gr8s.controllers::reconcile-certificates store nil)
+      (is (= 1 (length (gr8s.resources::list-core-resources store "challenges" "certs"))))
+      ;; A restart or leader change loses the order; its Challenge must not outlive it.
+      (clrhash gr8s.controllers::*cm-acme-orders*)
+      (setf (fake-acme-defer acme) 600)            ; and the next order waits
+      (gr8s.controllers::reconcile-certificates store nil)
+      (is (null (gr8s.resources::list-core-resources store "challenges" "certs")))
+      ;; A Challenge nobody owns is left to whoever wrote it.
+      (gr8s.resources::create-core-resource store "challenges" (acme-challenge-object :name "manual") "certs")
+      (gr8s.controllers::reconcile-certificates store nil)
+      (is (= 1 (length (gr8s.resources::list-core-resources store "challenges" "certs"))))
+      ;; Moving the Certificate to a non-ACME issuer retires its order and Challenges.
+      (gr8s.resources::delete-core-resource store "challenges" "certs" "manual")
+      (setf (fake-acme-defer acme) nil)
+      (incf (car clock) 700)
+      (gr8s.controllers::reconcile-certificates store nil)
+      (is (= 1 (length (gr8s.resources::list-core-resources store "challenges" "certs"))))
+      (gr8s.resources::create-core-resource store "clusterissuers" (cm-parse *cm-selfsigned-issuer*) nil)
+      (gr8s.resources::update-core-resource store "certificates" "certs" "demo"
+        (lambda (certificate)
+          (setf (gethash "name" (gethash "issuerRef" (gethash "spec" certificate))) "selfsigned")
+          certificate))
+      (gr8s.controllers::reconcile-certificates store nil)
+      (is (null (gr8s.resources::list-core-resources store "challenges" "certs")))
+      (is (zerop (hash-table-count gr8s.controllers::*cm-acme-orders*))))))
+
+(test acme-steps-run-off-the-reconcile-thread
+  (with-temporary-store (store path)
+    (values path)
+    (with-fake-acme (acme clock)
+      (let* ((release (bt:make-semaphore))
+             (threads '())
+             (gr8s.controllers::*cm-acme-run-step*
+               (lambda (thunk)
+                 (push (bt:make-thread (lambda () (bt:wait-on-semaphore release :timeout 10) (funcall thunk))
+                                       :name "test ACME step")
+                       threads))))
+        (gr8s.resources::create-core-resource store "clusterissuers" (cm-parse *acme-issuer*) nil)
+        (gr8s.resources::create-core-resource store "certificates" (cm-parse *acme-certificate*) "certs")
+        ;; The pass returns while the step waits on its "server", and the next
+        ;; pass does not start a second step for the same order.
+        (gr8s.controllers::reconcile-certificates store nil)
+        (gr8s.controllers::reconcile-certificates store nil)
+        (is (= 1 (length threads)))
+        (is (= 0 (fake-acme-orders acme)))
+        (bt:signal-semaphore release)
+        (bt:join-thread (first threads))
+        (is (= 1 (fake-acme-orders acme)))
+        (is (= 1 (length (gr8s.resources::list-core-resources store "challenges" "certs"))))))))
+
+(test certificate-renewal-clamps-renew-before-to-the-real-validity
+  (let ((day (* 24 60 60)))
+    ;; The CA chose 7 days whatever spec.duration said; renewBefore 30d would
+    ;; put renewal before issuance and reissue on every pass.
+    (is (= (+ 1000 (* 14/3 day))
+           (gr8s.controllers::cm-renewal-time (cm-parse "{\"renewBefore\":\"720h\"}") 1000 (+ 1000 (* 7 day)))))
+    (is (= (+ 1000 (* 6 day))
+           (gr8s.controllers::cm-renewal-time (cm-parse "{\"renewBefore\":\"24h\"}") 1000 (+ 1000 (* 7 day)))))))
+
+(test certificate-renew-before-must-be-shorter-than-duration
+  (with-core-api (store directory)
+    (values store directory)
+    (check-core-status 201 "/api/v1/namespaces" :method :post
+                       :object (cm-parse "{\"apiVersion\":\"v1\",\"kind\":\"Namespace\",\"metadata\":{\"name\":\"certs\"}}"))
+    (flet ((post (name spec-extra)
+             (let ((certificate (cm-parse *acme-certificate*)))
+               (setf (gethash "name" (gethash "metadata" certificate)) name)
+               (maphash (lambda (key value) (setf (gethash key (gethash "spec" certificate)) value))
+                        (cm-parse spec-extra))
+               certificate)))
+      (check-core-status 422 "/apis/cert-manager.io/v1/namespaces/certs/certificates" :method :post
+                         :object (post "a" "{\"duration\":\"24h\",\"renewBefore\":\"24h\"}"))
+      (check-core-status 422 "/apis/cert-manager.io/v1/namespaces/certs/certificates" :method :post
+                         :object (post "b" "{\"renewBefore\":\"2400h\"}"))
+      (check-core-status 201 "/apis/cert-manager.io/v1/namespaces/certs/certificates" :method :post
+                         :object (post "c" "{\"duration\":\"24h\",\"renewBefore\":\"8h\"}")))))
+
+(test acme-issuer-resumes-an-order-deferred-part-way
+  (with-temporary-store (store path)
+    (values path)
+    (with-fake-acme (acme clock)
+      (setf (fake-acme-defer-authorization acme) 20)
+      (gr8s.resources::create-core-resource store "clusterissuers" (cm-parse *acme-issuer*) nil)
+      (gr8s.resources::create-core-resource store "certificates" (cm-parse *acme-certificate*) "certs")
+      (gr8s.controllers::reconcile-certificates store nil)
+      (is (= 1 (fake-acme-orders acme)))
+      (incf (car clock) 21)
+      (gr8s.controllers::reconcile-certificates store nil)
+      ;; The same order carries on: no second order, one Challenge.
+      (is (= 1 (fake-acme-orders acme)))
+      (is (= 1 (length (gr8s.resources::list-core-resources store "challenges" "certs"))))
+      (is (= 1 (length (gr8s.controllers::cm-acme-order-challenges
+                        (first (alexandria:hash-table-values gr8s.controllers::*cm-acme-orders*)))))))))
