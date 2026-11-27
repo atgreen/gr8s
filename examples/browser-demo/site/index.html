@@ -89,7 +89,6 @@
       <a href="#how">How it works</a>
       <a href="#tab">In your tab</a>
       <a href="#p2p">Peer to peer</a>
-      <a href="#checked">Checked content</a>
       <a href="#safety">Safety and privacy</a>
     </nav>
   </header>
@@ -277,17 +276,6 @@
         Then the traffic goes through the server, as it did before the tabs met. It still arrives, by a longer
         path.</p></div>
     </div>
-  </section>
-
-  <section id="checked">
-    <h2>Checked content</h2>
-    <p>Whoever runs a tab controls it, and could make its Pod serve anything. So the server checks the page at
-      <a href="https://tabs.demo.gr8s.io/">tabs.demo.gr8s.io</a> before it passes it on. The server pulled the
-      image itself, so it knows every file in it. For each request, it asks one tab's Pod for the page. It passes
-      the answer on only when the answer is that file, byte for byte. If a tab answers with anything else, the
-      server refuses the answer and taints the tab's node, so its Pods leave.</p>
-    <p>The page then says which tab served it, in which browser, and how long that tab has been up. The server
-      fills in these facts after the check. The tab does not.</p>
   </section>
 
   <section id="safety">
