@@ -24,6 +24,14 @@ the Kubernetes API version with a gr8s release suffix (see
   logs showed the gr8s server and drakma for every visitor (podster-6bss). A tab's
   owner reads its Pod's logs, so `serve --browser-forward-client-address false` keeps
   visitors' addresses from strangers' tabs.
+- A node's agent no longer rejects every desired-state snapshot while a browser node is
+  hosted on one of its peers (podster-epec). The leader routes a browser node's Pod CIDR
+  through the node hosting it, so that node's route carries two CIDRs, and the agent
+  allowed one per address family: it refused the whole snapshot, its session ended and
+  started again about once a second, and node operations (stats, logs, exec) failed, so
+  `metrics.k8s.io` and Headlamp showed nothing. Peers also had no route to the browser
+  node's Pods. A route may now carry further CIDRs after the peer's own, each inside the
+  cluster's Pod range and overlapping nothing else the node routes.
 
 ## [v1.37.2-gr8s.9] — 2026-11-27
 
