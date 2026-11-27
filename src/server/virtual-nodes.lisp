@@ -23,22 +23,25 @@
   name directory worker)
 
 (defstruct (virtual-node-host (:constructor %make-virtual-node-host
-                                  (store server pki state-root host-node)))
+                                  (store server pki state-root host-node endpoint-slot)))
   "The virtual nodes one server hosts, each with its state under STATE-ROOT/NAME/.
 HOST-NODE names the node of this process, through which their Pods are routed."
-  store server pki state-root host-node
+  store server pki state-root host-node endpoint-slot
   (nodes (make-hash-table :test #'equal))
   (lock (bt:make-lock "gr8s virtual nodes")))
 
-(defun make-virtual-node-host (store server pki state-root &key host-node)
+(defun make-virtual-node-host (store server pki state-root &key host-node endpoint)
   "A host for virtual nodes enrolled through the node SERVER with PKI, storing each
 one's agent state under STATE-ROOT. HOST-NODE, the node this process runs as, carries
-their Pods' traffic: the cluster routes their Pod CIDRs to it."
-  (%make-virtual-node-host store server pki (uiop:ensure-directory-pathname state-root) host-node))
+their Pods' traffic: the cluster routes their Pod CIDRs to it. ENDPOINT, (address port), is
+where the node server listens for agents, loopback by default."
+  (%make-virtual-node-host store server pki (uiop:ensure-directory-pathname state-root) host-node endpoint))
 
 (defun virtual-node-host-endpoint (host)
-  "The loopback endpoint (HOST PORT) of the node server its virtual nodes dial."
-  (list "127.0.0.1" (node-grpc-server-port (virtual-node-host-server host))))
+  "The endpoint (ADDRESS PORT) of the node server its virtual nodes dial: the one it was
+given, which follows serve's --node-listen, else loopback."
+  (or (virtual-node-host-endpoint-slot host)
+      (list "127.0.0.1" (node-grpc-server-port (virtual-node-host-server host)))))
 
 (defun start-virtual-node (host name &key labels taints runtime-options)
   "Enroll NAME, set its LABELS (a hash; derived ones are left alone) and TAINTS (a
