@@ -38,6 +38,28 @@ a new watch epoch can reduce the history gauges.
 
 These metrics complement API server, scheduler, dataplane, storage, gateway,
 and process metrics.
+
+## Browser nodes
+
+A process running `serve --browser-listen` also reports the browser nodes it hosts
+(docs/design-browser-nodes.md). Node and Pod labels come and go with the tabs.
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `gr8s_browser_nodes` | Gauge | Browser nodes connected to this process |
+| `gr8s_browser_node_joins_total` | Counter | Browsers that have joined through this process |
+| `gr8s_browser_node_pods{node=...}` | Gauge | Pods each browser node runs |
+| `gr8s_browser_node_rtt_seconds{node=...}` | Gauge | How long the browser last took to answer the server |
+| `gr8s_browser_node_host_cpus{node=...}` | Gauge | CPUs the browser's machine reports |
+| `gr8s_browser_node_js_heap_bytes{node=...}` | Gauge | The tab's JavaScript heap, where the browser tells |
+| `gr8s_browser_node_frames_total{node=...,direction=...}` | Counter | Frames relayed `to_pods` and `from_pods` |
+| `gr8s_browser_node_frames_dropped_total{node=...,direction=...}` | Counter | Frames the Pods' NetworkPolicy or address check dropped |
+| `gr8s_browser_pod_memory_limit_bytes{node,namespace,pod}` | Gauge | Memory the Pod's VM has |
+| `gr8s_browser_pod_memory_used_bytes{node,namespace,pod}` | Gauge | Memory in use in the Pod's VM, as its guest reports (sampled every 15 s) |
+| `gr8s_browser_pod_uptime_seconds{node,namespace,pod}` | Gauge | How long the Pod's VM has run |
+
+The browser reports its Pods' figures every 10 seconds; they are what the browser says,
+not measurements the server can check.
 The sections below cover Raft health, disk/inode capacity, datastore file
 growth, and reconciliation convergence. Each family describes a local
 observation with the sampling limits documented for that collector.

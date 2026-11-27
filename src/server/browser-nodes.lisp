@@ -134,6 +134,10 @@ join listener, which also serves this runtime's exec streams."
   ;; The server's image cache (browser-images.lisp), or NIL: containers then run in the
   ;; tab's own root file system.
   (images nil)
+  ;; The cluster store, for Pods' pull Secrets.
+  (store nil)
+  ;; What the browser last reported (its "stats" answer) and how long asking took.
+  (stats nil) (rtt nil)
   (execs (make-hash-table :test #'equal :synchronized t))
   ;; "namespace/name" -> uid, for the Pod proxy.
   (names (make-hash-table :test #'equal :synchronized t)))
@@ -162,16 +166,31 @@ the runtime doesn't hold is ignored: the browser can't add Pods of its own."
           (setf (gr8s.runtime::runtime-pod-phase pod) phase)))
       (setf (gr8s.runtime::runtime-pod-status pod) status))))
 
-(defun browser-pod-request (pod &optional images)
+(defun browser-pod-pull-credential (store pod image)
+  "The first credential POD's imagePullSecrets hold for IMAGE, as (username . password), or
+NIL. It is the server's to use and never goes to the browser."
+  (let ((entries
+          (loop for reference across (gethash "imagePullSecrets" (gethash "spec" (gr8s.model::pod-to-object pod)) #())
+                for name = (gethash "name" reference "")
+                for secret = (and store (plusp (length name))
+                                  (ignore-errors (gr8s.resources::get-core-resource
+                                                  store "secrets" (gr8s.model::pod-namespace pod) name)))
+                when secret
+                  append (ignore-errors (gr8s.kubelet::pull-secret-entries secret)))))
+    (first (gr8s.kubelet::matching-registry-credentials entries (gr8s.kubelet::image-repository image)))))
+
+(defun browser-pod-request (pod &optional images store)
   "What the browser needs to run POD: its identity and its spec, a copy, with each
-container's image resolved through IMAGES when there are any."
+container's image resolved through IMAGES, with POD's pull credentials from STORE, when
+there are any."
   (let* ((object (gr8s.model::pod-to-object pod))
          (spec (gr8s.resources::copy-core-object (gethash "spec" object))))
     (when images
       (loop for container across (concatenate 'vector (gethash "initContainers" spec #())
                                               (gethash "containers" spec #()))
             do (setf (gethash "imageInfo" container)
-                     (resolve-browser-image images (gethash "image" container)))))
+                     (resolve-browser-image images (gethash "image" container)
+                                            (browser-pod-pull-credential store pod (gethash "image" container))))))
     (core-object "uid" (gr8s.model::pod-uid pod)
                  "name" (gethash "name" (gethash "metadata" object))
                  "namespace" (gethash "namespace" (gethash "metadata" object))
@@ -180,7 +199,7 @@ container's image resolved through IMAGES when there are any."
 (defmethod gr8s.runtime::runtime-ensure ((runtime browser-runtime) pod)
   (let* ((network (browser-runtime-network runtime))
          (address (and network (browser-network-address network (gr8s.model::pod-uid pod))))
-         (request (browser-pod-request pod (browser-runtime-images runtime)))
+         (request (browser-pod-request pod (browser-runtime-images runtime) (browser-runtime-store runtime)))
          (result (progn
                    (when address
                      (setf (gethash "network" request)
@@ -452,16 +471,50 @@ A browser node is untrusted, so of other nodes and workloads it learns only tota
                 "pods" (length pods)
                 "runningPods" running))))
 
-(defun start-browser-node-reporter (session store name &key pod-proxy)
-  "Tell SESSION's browser how its node NAME and the cluster are doing until it goes, and
-whether its Pods' ports are reachable through POD-PROXY."
+(defun start-browser-policy-refresher (session network runtime store)
+  "Keep NETWORK's policy for RUNTIME's Pods current with STORE's NetworkPolicies, Pods and
+Namespaces, until SESSION ends."
   (bt:make-thread
    (lambda ()
      (loop until (browser-session-closed session)
+           do (handler-case
+                  (browser-policy-update
+                   (browser-network-policy network) store
+                   (loop for key being the hash-keys of (browser-runtime-names runtime) using (hash-value uid)
+                         for address = (bt:with-lock-held ((browser-network-lock network))
+                                         (gethash uid (browser-network-addresses network)))
+                         for slash = (position #\/ key)
+                         for pod = (and address (ignore-errors (gr8s.store:get-pod store (subseq key 0 slash)
+                                                                                    (subseq key (1+ slash)))))
+                         when pod collect (cons address (gr8s.model::pod-to-object pod))))
+                (error (condition)
+                  (format *error-output* "gr8s browser network policy: ~A~%" condition)))
+              (loop repeat 20 until (browser-session-closed session) do (sleep 0.1))))
+   :name "gr8s browser network policy"))
+
+(defparameter +browser-node-stats-seconds+ 10
+  "How often the server asks a browser for its Pods' VM statistics, for /metrics.")
+
+(defun start-browser-node-reporter (session store name &key pod-proxy runtime)
+  "Tell SESSION's browser how its node NAME and the cluster are doing until it goes, and
+whether its Pods' ports are reachable through POD-PROXY; every +BROWSER-NODE-STATS-SECONDS+,
+ask it for RUNTIME's statistics, timing the answer."
+  (bt:make-thread
+   (lambda ()
+     (loop for tick from 0
+           until (browser-session-closed session)
            do (handler-case (let ((info (browser-node-info store name)))
                               (setf (gethash "podProxy" info) (and pod-proxy t))
                               (browser-session-send session info))
                 (error () (return)))
+              (when (and runtime (zerop (mod tick (ceiling +browser-node-stats-seconds+ +browser-node-info-seconds+))))
+                (let ((started (get-internal-real-time)))
+                  (handler-case
+                      (let ((stats (browser-session-call session "stats")))
+                        (setf (browser-runtime-rtt runtime)
+                              (/ (- (get-internal-real-time) started) (float internal-time-units-per-second 1d0))
+                              (browser-runtime-stats runtime) stats))
+                    (error () nil))))
               (loop repeat (* 10 +browser-node-info-seconds+)
                     until (browser-session-closed session) do (sleep 0.1))))
    :name "gr8s browser node reporter"))
@@ -491,6 +544,8 @@ who can reach the listener reaches those ports, so it is off unless asked for.")
 to a TAP device on this host (browser-network.lisp). It needs CAP_NET_ADMIN.")
    (images :initarg :images :initform nil :reader browser-join-images
            :documentation "The image cache browser Pods' layers come from, or NIL.")
+   (joins :initform 0 :accessor browser-join-joins
+          :documentation "How many browsers have joined through this listener.")
    (sessions :initform (make-hash-table :test #'equal :synchronized t) :reader browser-join-sessions
              :documentation "Each connected browser node's session, by node name.")
    (epochs :initform (make-hash-table :test #'equal :synchronized t) :reader browser-join-epochs
@@ -599,7 +654,8 @@ stops with the session."
                                                              :architecture architecture
                                                              :capacity (browser-node-capacity hello)))
                    (setf (gethash name (browser-join-runtimes acceptor)) runtime
-                         (browser-runtime-images runtime) (browser-join-images acceptor))
+                         (browser-runtime-images runtime) (browser-join-images acceptor)
+                         (browser-runtime-store runtime) (virtual-node-host-store host))
                    ;; Its Pods' network: the node's Pod CIDR, routed to a device here.
                    (let* ((node (gr8s.controllers::get-node (virtual-node-host-store host) name))
                           (cidr (find-if (lambda (cidr) (not (find #\: cidr)))
@@ -610,14 +666,19 @@ stops with the session."
                                        (lambda (frame) (browser-session-send-frame session frame)))))
                          (when network
                            (setf (browser-runtime-network runtime) network
+                                 (browser-network-policy network) (make-browser-policy)
                                  (browser-session-on-frame session)
-                                 (lambda (frame) (browser-network-receive network frame)))))))
+                                 (lambda (frame) (browser-network-receive network frame)))
+                           (start-browser-policy-refresher session network runtime
+                                                           (virtual-node-host-store host))))))
                    (browser-session-send session (core-object "op" "welcome" "node" name
                                                               "epoch" (browser-session-epoch session)
                                                               "podProxy" (and (browser-join-pod-proxy acceptor) t)))
                    (format t "gr8s browser node ~A joined~%" name)
+                   (incf (browser-join-joins acceptor))
                    (start-browser-node-reporter session (virtual-node-host-store host) name
-                                                :pod-proxy (browser-join-pod-proxy acceptor))
+                                                :pod-proxy (browser-join-pod-proxy acceptor)
+                                                :runtime runtime)
                    (run-browser-session session))))
            (error (condition)
              (format *error-output* "gr8s browser node~@[ ~A~]: ~A~%" name condition)))
@@ -708,14 +769,99 @@ to the Pod's PORT, and relay the response."
                   do (setf (hunchentoot:header-out header) (aref pair 1)))
           (cl-base64:base64-string-to-usb8-array (gethash "body" result "")))))))
 
+(defvar *browser-join-listeners* '()
+  "The join listeners this process runs, whose browser nodes /metrics reports.")
+
+(defun browser-node-metrics-text ()
+  "Prometheus families for the browser nodes this process hosts: how many are connected
+and have joined, and for each node its Pods, the time its browser takes to answer, its
+machine's CPUs and tab heap, and the frames relayed to and from its Pods and dropped by their policy; for
+each Pod, its VM's memory and uptime as the browser reports them. Empty when this
+process hosts none."
+  (let ((listeners (remove-if-not #'hunchentoot:started-p *browser-join-listeners*)))
+    (if (null listeners)
+        ""
+        (with-output-to-string (out)
+          (let ((nodes '()) (pods '()))
+            (dolist (listener listeners)
+              (loop for name being the hash-keys of (browser-join-runtimes listener) using (hash-value runtime)
+                    do (push (cons name runtime) nodes)
+                       (let ((stats (browser-runtime-stats runtime)))
+                         (when (hash-table-p stats)
+                           (loop for key being the hash-keys of (browser-runtime-names runtime) using (hash-value uid)
+                                 for pod = (gethash uid (gethash "pods" stats (core-object)))
+                                 for slash = (position #\/ key)
+                                 when (hash-table-p pod)
+                                   do (push (list (list (cons "namespace" (subseq key 0 slash)) (cons "node" name)
+                                                        (cons "pod" (subseq key (1+ slash))))
+                                                  pod)
+                                            pods))))))
+            (flet ((family (name help type samples)
+                     ;; What the browser sends is JSON: whole numbers may arrive as doubles.
+                     (gr8s.kubelet::write-prometheus-family
+                      out name help type
+                      (mapcar (lambda (sample)
+                                (destructuring-bind (labels value) sample
+                                  (list labels (if (and (floatp value) (< (abs value) 1d15) (= value (fround value)))
+                                                   (round value) value))))
+                              samples)))
+                   (node-label (entry) (list (cons "node" (car entry))))
+                   (network (entry) (browser-runtime-network (cdr entry))))
+              (family "gr8s_browser_nodes" "Browser nodes connected to this process." "gauge"
+                      (list (list nil (length nodes))))
+              (family "gr8s_browser_node_joins_total" "Browsers that have joined through this process." "counter"
+                      (list (list nil (reduce #'+ listeners :key #'browser-join-joins))))
+              (family "gr8s_browser_node_pods" "Pods each browser node runs." "gauge"
+                      (loop for entry in nodes
+                            collect (list (node-label entry)
+                                          (hash-table-count (gr8s.runtime::fake-runtime-pods (cdr entry))))))
+              (family "gr8s_browser_node_rtt_seconds" "How long each browser last took to answer the server." "gauge"
+                      (loop for entry in nodes
+                            when (browser-runtime-rtt (cdr entry))
+                              collect (list (node-label entry) (browser-runtime-rtt (cdr entry)))))
+              (family "gr8s_browser_node_host_cpus" "CPUs each browser's machine reports having." "gauge"
+                      (loop for entry in nodes
+                            for stats = (browser-runtime-stats (cdr entry))
+                            for cores = (and (hash-table-p stats) (gethash "cores" (gethash "tab" stats (core-object))))
+                            when (integerp cores) collect (list (node-label entry) cores)))
+              (family "gr8s_browser_node_js_heap_bytes" "Each browser tab's JavaScript heap, where the browser tells." "gauge"
+                      (loop for entry in nodes
+                            for stats = (browser-runtime-stats (cdr entry))
+                            for heap = (and (hash-table-p stats) (gethash "jsHeapBytes" (gethash "tab" stats (core-object))))
+                            when (realp heap) collect (list (node-label entry) heap)))
+              (dolist (counter '(("gr8s_browser_node_frames_total" "Ethernet frames relayed to and from each browser node's Pods."
+                                  browser-network-frames-in browser-network-frames-out)
+                                 ("gr8s_browser_node_frames_dropped_total" "Frames each browser node's Pod NetworkPolicy dropped."
+                                  browser-network-dropped-in browser-network-dropped-out)))
+                (destructuring-bind (name help in out-reader) counter
+                  (family name help "counter"
+                          (loop for entry in nodes
+                                for network = (network entry)
+                                when network
+                                  collect (list (cons (cons "direction" "to_pods") (node-label entry))
+                                                (funcall in network))
+                                  and collect (list (cons (cons "direction" "from_pods") (node-label entry))
+                                                    (funcall out-reader network))))))
+              (dolist (gauge '(("gr8s_browser_pod_memory_limit_bytes" "Memory each browser Pod's VM has." "memoryLimitBytes")
+                               ("gr8s_browser_pod_memory_used_bytes" "Memory in use in each browser Pod's VM, as its guest reports." "memoryUsedBytes")
+                               ("gr8s_browser_pod_uptime_seconds" "How long each browser Pod's VM has run." "uptimeSeconds")))
+                (destructuring-bind (name help field) gauge
+                  (family name help "gauge"
+                          (loop for (labels pod) in pods
+                                for value = (gethash field pod)
+                                when (realp value) collect (list labels value)))))))))))
+
 (defun start-browser-join-listener (nodes address port &key distro pod-proxy pod-network images)
   "Listen on ADDRESS:PORT for browsers joining as nodes on NODES, serving the join page and
 DISTRO, the root image file Pods boot from, and with POD-PROXY, HTTP to their Pods. With
 POD-NETWORK, their Pods join the cluster network through this host. Returns the acceptor."
-  (hunchentoot:start (make-instance 'browser-join-acceptor
+  (let ((acceptor (make-instance 'browser-join-acceptor
                                     :address address :port port :nodes nodes :pod-proxy pod-proxy
                                     :pod-network pod-network
                                     :images (and images (make-browser-images images))
                                     :distro (and distro (pathname distro))
                                     :access-log-destination nil
                                     :message-log-destination *error-output*)))
+    (hunchentoot:start acceptor)
+    (push acceptor *browser-join-listeners*)
+    acceptor))

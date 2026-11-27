@@ -224,12 +224,19 @@ podster-135e and podster-i8my) still help native nodes.
   Pods' virtual NICs. The guest NIC offloads TCP and UDP checksums, so the tab
   finishes them. The node's CIDR rides on the hosting node's route
   (`gr8s.io/virtual-host`), and virtual nodes are no overlay peers. The packets cross
-  the hosting node's kernel, but the eBPF programs gr8s attaches to Pod veths are not
-  attached to the TAP device, so NetworkPolicy does not yet apply to browser Pods.
+  the hosting node's kernel, but not the veth where gr8s's eBPF guards stand. So the
+  frame relay enforces each browser Pod's NetworkPolicy itself, from the same resolved
+  projection the nodes get, with a userspace flow table for replies. It also drops any
+  frame whose source isn't an address the server gave one of that browser's Pods.
+  Flow events for browser Pods are not recorded yet.
+- **DNS.** Each container root gets the kubelet's `/etc/resolv.conf` (the hosting
+  node's 169.254.1.1, searches from the Pod's namespace) and an `/etc/hosts`.
 - **Images** (`src/server/browser-images.lisp`). Not erofs: the server resolves the
   linux/arm64 manifest and serves layers from a digest-checked cache, and the tab
   unpacks them into an in-memory file system mounted in the guest over 9p, where the
-  container runs chrooted. zstd layers and private registries are not supported yet.
+  container runs chrooted. A Pod's `imagePullSecrets` authenticate the server's
+  registry requests and never reach the browser. zstd layers are decompressed on the
+  server.
 - **Trust.** Browser nodes refuse Pods that bring a Secret (volume, projection or
   environment), a host path, privileges or host namespaces, in the scheduler and in
   node admission. ServiceAccount token volumes pass, because the browser runtime
