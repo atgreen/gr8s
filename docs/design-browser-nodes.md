@@ -239,6 +239,11 @@ podster-135e and podster-i8my) still help native nodes.
   Pod in the tab. So Service traffic takes direct links too, and the server's egress
   policy judges the backend, as a native node's does. A tab learns the backends only
   of the Services its Pods use. Session affinity isn't kept.
+- **Logs and console on the page** (podster-y81l). Each Pod's card on the join page
+  has a drop-down with a view per container's log and one of its VM's console from boot
+  (unkernel's `vm.output`), each the last 1 MiB, read from the tab's memory through
+  `joinCluster(...).output(namespace, name)`. Nothing is fetched from the server, and
+  nothing new is disclosed: the tab's owner holds the VMs anyway.
 - **DNS.** Each container root gets the kubelet's `/etc/resolv.conf` (the hosting
   node's 169.254.1.1, searches from the Pod's namespace) and an `/etc/hosts`.
 - **Images** (`src/server/browser-images.lisp`). Not erofs: the server resolves the

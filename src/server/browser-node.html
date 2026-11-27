@@ -70,6 +70,15 @@
   .ip { font: 13px var(--mono); color: var(--muted); margin-right: 8px; }
   .port { font-weight: 600; color: var(--accent); text-decoration: none; border: 1px solid var(--accent); border-radius: 999px; padding: 0 10px; }
   .port:hover { background: var(--accent-soft); }
+  .output { margin-top: 10px; }
+  .output summary { cursor: pointer; font-size: 13px; color: var(--accent); font-weight: 600; user-select: none; }
+  .views { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 6px; }
+  .views button { font: 12px var(--mono); border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+                  border-radius: 999px; padding: 2px 10px; cursor: pointer; }
+  .views button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+  .output pre { margin: 0; max-height: 320px; overflow: auto; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
+                background: var(--panel); font: 12px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .output .note { font-size: 12px; color: var(--faint); margin-top: 6px; }
   .empty { color: var(--muted); text-align: center; padding: 28px 12px; border: 1px dashed var(--line); border-radius: 12px; }
   .empty code { font-family: var(--mono); font-size: 13px; color: var(--fg); }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
@@ -166,6 +175,63 @@
     return "starting";
   }
 
+  // Each Pod's card, and under it a drop-down of what the Pod wrote: a view per
+  // container's log, and its VM's console from boot. They come from this tab's memory
+  // (tab.output), never the server, and refresh while the drop-down is open.
+  let tab = null;
+  const cards = new Map(); // "namespace/name" -> card
+  const plain = (text) => text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/\r(?!\n)/g, "");
+
+  function makeCard(namespace, name) {
+    const element = document.createElement("div");
+    element.className = "pod";
+    element.innerHTML = `<div class="pod-summary"></div>
+      <details class="output"><summary>Logs and console</summary>
+        <div class="views"></div><pre></pre>
+        <div class="note">Read from this tab: nothing is fetched from the cluster.</div>
+      </details>`;
+    const [summary, details] = element.children;
+    const buttons = details.querySelector(".views");
+    const pre = details.querySelector("pre");
+    let names = [], selected = null, shown = null;
+    const card = {
+      element, summary,
+      views(containers) {
+        const next = [...containers, "console"];
+        if (next.join("\n") === names.join("\n")) return;
+        names = next;
+        if (!names.includes(selected)) selected = names[0];
+        buttons.innerHTML = names.map((view) => `<button type="button" data-view="${esc(view)}" aria-pressed="${view === selected}">
+          ${view === "console" ? "console" : `log: ${esc(view)}`}</button>`).join("");
+      },
+      refresh() {
+        if (!details.open || !tab) return;
+        const output = tab.output(namespace, name);
+        const text = !output ? "" : selected === "console" ? plain(output.console)
+          : output.containers.find((c) => c.name === selected)?.log ?? "";
+        const shownText = text || (selected === "console" ? "(nothing on the console yet)" : "(no output yet)");
+        if (shownText === shown) return;
+        // Follow the end, unless the reader has scrolled up.
+        const following = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
+        pre.textContent = shown = shownText;
+        if (following) pre.scrollTop = pre.scrollHeight;
+      },
+    };
+    buttons.onclick = (event) => {
+      const view = event.target.closest("button")?.dataset.view;
+      if (!view) return;
+      selected = view;
+      for (const button of buttons.children) button.setAttribute("aria-pressed", String(button.dataset.view === view));
+      shown = null;
+      pre.scrollTop = pre.scrollHeight;
+      card.refresh();
+    };
+    details.ontoggle = () => { shown = null; card.refresh(); pre.scrollTop = pre.scrollHeight; };
+    cards.set(`${namespace}/${name}`, card);
+    return card;
+  }
+  setInterval(() => { for (const card of cards.values()) card.refresh(); }, 1000);
+
   function render(info) {
     const { node, cluster, pods } = info;
     created = node.created || created;
@@ -185,11 +251,24 @@
     $("pods-sub").textContent = pods.length ? `${pods.length} Pod${pods.length === 1 ? "" : "s"}` : "";
     const hint = `kubectl run hello --image=busybox --overrides='{"spec":{"nodeName":"${node.name}","tolerations":[{"key":"gr8s.io/browser","operator":"Exists"}]}}' -- sh -c 'echo hi; sleep 3600'`;
     if (!pods.length) {
+      cards.clear();
       $("pods").innerHTML = `<div class="empty">Nothing scheduled here yet. Pods that tolerate
         <code>gr8s.io/browser</code> can land on this node:<br><br><code>${esc(hint)}</code></div>`;
     } else {
-      $("pods").innerHTML = pods.map((pod) => `
-        <div class="pod">
+      // One card per Pod, kept from tick to tick so an open log stays open and scrolled.
+      const seen = new Set();
+      $("pods").querySelector(".empty")?.remove();
+      let previous = null;
+      for (const pod of pods) {
+        const key = `${pod.namespace}/${pod.name}`;
+        seen.add(key);
+        let card = cards.get(key);
+        if (!card) card = makeCard(pod.namespace, pod.name);
+        // Moved only when out of place: moving an element resets its log's scrolling.
+        const there = previous ? previous.nextElementSibling : $("pods").firstElementChild;
+        if (there !== card.element) $("pods").insertBefore(card.element, there);
+        previous = card.element;
+        card.summary.innerHTML = `
           <div class="pod-head">
             <div class="pod-name"><span>${esc(pod.namespace)}/</span>${esc(pod.name)}</div>
             <span>${pod.podIP ? `<code class="ip">${esc(pod.podIP)}</code> ` : ""}<span class="badge ${esc(pod.phase)}">${esc(pod.phase)}</span></span>
@@ -201,8 +280,10 @@
               <span>restarts <code>${esc(c.restartCount)}</code></span>
               ${(c.ports ?? []).map((port) => info.podProxy
                 ? `<a class="port" target="_blank" href="pods/${encodeURIComponent(pod.namespace)}/${encodeURIComponent(pod.name)}/${port}/">open port ${port} ↗</a>`
-                : `<span>port <code>${port}</code></span>`).join("")}</div>`).join("")}
-        </div>`).join("");
+                : `<span>port <code>${port}</code></span>`).join("")}</div>`).join("")}`;
+        card.views(pod.containers.map((c) => c.name));
+      }
+      for (const [key, card] of cards) if (!seen.has(key)) { card.element.remove(); cards.delete(key); }
     }
     const labels = Object.entries(node.labels ?? {}).map(([k, v]) => `<span class="chip">${esc(k)}=${esc(v)}</span>`);
     const taints = (node.taints ?? []).map((t) => `<span class="chip taint">${esc(t.key)}=${esc(t.value ?? "")}:${esc(t.effect)}</span>`);
@@ -215,7 +296,7 @@
     const { createKernel, MemoryFs } = await import(SDK);
     const socket = new URL("socket", location.href);
     socket.protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    const node = joinCluster({
+    const node = tab = joinCluster({
       url: socket.href,
       createKernel,
       MemoryFs,
