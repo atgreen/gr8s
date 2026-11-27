@@ -116,10 +116,11 @@
 
   <section id="gr8s">
     <h2>What is gr8s?</h2>
-    <p><a href="https://github.com/atgreen/gr8s">gr8s</a> is a Kubernetes-compatible cluster in one Common Lisp
-      executable, written from scratch. The one binary holds the API server, scheduler, controllers, node agent, networking (an eBPF dataplane),
+    <p><a href="https://github.com/atgreen/gr8s">gr8s</a> is really just an eBPF experiment that got out of hand,
+      100% coded by Agents. It's a Kubernetes-compatible cluster in one Common Lisp executable, written from scratch.
+      The one binary holds the API server, scheduler, controllers, node agent, networking (an eBPF dataplane),
       DNS, Gateway, storage and the Raft-replicated datastore. You use it with <code>kubectl</code> and ordinary
-      manifests, and it passes the upstream Kubernetes conformance tests.</p>
+      manifests, and it passes 100% of the Kubernetes 1.37 conformance tests, the suite behind Kubernetes certification.</p>
     <div class="grid2">
       <div class="card"><h3>Ordinary nodes</h3><p>On a Linux machine, a gr8s node runs Pods as Kubernetes does,
         with containerd and runc. This demo's own server is such a node, and it serves this page.</p></div>
@@ -132,7 +133,6 @@
       <div class="card"><h3>Images over BitTorrent</h3><p>Nodes share container image layers over the BitTorrent
         protocol, tabs as well as ordinary nodes. Every piece is checked against the layer's digest.</p></div>
     </div>
-    <p class="note">gr8s is an experiment: a new Kubernetes-compatible implementation, 100% coded by Agents. gr8s is really just an eBPF experiment that got out of hand.</p>
   </section>
 
   <section id="how">
