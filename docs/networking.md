@@ -518,10 +518,14 @@ Supported today:
 - **Public certificates from Let's Encrypt** (or any ACME server), through the
   built-in cert-manager `acme` issuer with HTTP-01 validation. The issuer's
   Challenges (`acme.cert-manager.io/v1`) reach every node with the Gateway
-  configuration, and every Gateway listener answers
+  configuration. A Gateway listener answers
   `GET /.well-known/acme-challenge/<token>` for the Challenge's host before any
-  route matching, so no solver Pod or HTTPRoute is created. The Gateway needs an
-  `HTTP` listener on port 80 that the public name reaches; see the example below.
+  route matching, but only where the solver HTTPRoute cert-manager would create
+  could attach: the listener's hostname covers the host, its `allowedRoutes`
+  admit the Certificate's namespace, and it is one of the solver's
+  `gatewayHTTPRoute.parentRefs` when those are given. No solver Pod or HTTPRoute
+  is created. The Gateway needs an `HTTP` listener on port 80 that the public
+  name reaches; see the example below.
 - **L4 routing** for TCPRoute (TCP splice) and TLSRoute/GRPCRoute (SNI
   passthrough: the TLS ClientHello SNI is peeked without terminating and used to
   pick the backend). The agent opens its own connection to the backend, so the
@@ -566,12 +570,26 @@ exists. `kubectl get challenges` shows validations in progress, and the
 Certificate's `Issuing` and `Ready` conditions say why one failed. After a
 failure the issuer waits 5 minutes before a new order, doubling up to a day
 (`status.failedIssuanceAttempts`, `status.lastFailureTime`), and it defers to a
-`Retry-After` from the server, so a broken setup stays inside Let's Encrypt's
-rate limits. Renewal follows `renewBefore` (default: the last third of the
-validity). The leaf key is RSA 2048. HTTP-01 cannot validate wildcard names, and
-dnsNames are the only identifiers the issuer accepts. Anyone who can write a
-Challenge can answer validations for any host the Gateway serves, as anyone
-who can attach a route there could; keep `acme.cert-manager.io` writes with
+`Retry-After` from the server, however long, so a broken setup stays inside Let's
+Encrypt's rate limits. Each order step runs off the control plane's reconcile
+pass, every request has a 30-second total deadline, and the server's TLS
+certificate is verified unless the issuer sets `skipTLSVerify` (for a test
+server such as Pebble). Renewal follows `renewBefore` (default: the last third
+of the validity); a `renewBefore` not shorter than the validity the server
+actually issued falls back to the default, and admission rejects one not
+shorter than `duration`. The leaf key is RSA 2048, and the issuer refuses a
+downloaded certificate that does not carry it. HTTP-01 cannot validate wildcard
+names, and dnsNames are the only identifiers the issuer accepts.
+
+Who can get a certificate for a host is who could route it. The issuer refuses
+an authorization for any name the Certificate does not list, whatever its ACME
+server says, and a Challenge is answered only on listeners that would admit an
+HTTPRoute from the Certificate's namespace for that host. So a tenant whose
+namespace a Gateway listener does not admit cannot validate that listener's
+hostnames, even through a shared ClusterIssuer or its own Issuer and server.
+Challenges the controller wrote are deleted when their order ends or is lost
+(restart, leader change, a changed issuer). Writing Challenges directly grants
+the same reach as attaching a route, so keep `acme.cert-manager.io` writes with
 cluster administrators.
 
 ### Gateway tracing (OpenTelemetry)

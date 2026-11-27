@@ -123,11 +123,21 @@
              (gethash "data" result) (copy-core-object (gethash "data" object))))
       ((equal kind "Challenge")
        ;; A Gateway HTTP listener answers an ACME HTTP-01 validation for dnsName
-       ;; with the key authorization. All three fields are what the ACME server
-       ;; fetches from the public URL anyway; nothing else crosses.
-       (let ((spec (core-object)))
+       ;; with the key authorization, on the listeners the solver's parentRefs
+       ;; may attach to. The key authorization is what the ACME server fetches
+       ;; from the public URL anyway; nothing else crosses.
+       (let* ((source-spec (gethash "spec" object))
+              (solver (gethash "solver" source-spec))
+              (http01 (and (hash-table-p solver) (gethash "http01" solver)))
+              (route (and (hash-table-p http01) (gethash "gatewayHTTPRoute" http01)))
+              (refs (and (hash-table-p route) (gethash "parentRefs" route)))
+              (spec (core-object)))
          (dolist (key '("type" "dnsName" "token" "key"))
-           (setf (gethash key spec) (gethash key (gethash "spec" object))))
+           (setf (gethash key spec) (gethash key source-spec)))
+         (when (vectorp refs)
+           (setf (gethash "solver" spec)
+                 (core-object "http01" (core-object "gatewayHTTPRoute"
+                                                    (core-object "parentRefs" (copy-core-object refs))))))
          (setf (gethash "spec" result) spec)))
       ((equal kind "ClusterTrustBundle")
        ;; Trust anchors a node needs for the clusterTrustBundle projected volume
