@@ -2346,6 +2346,36 @@ Returns the server's next message."
       (sb-bsd-sockets:socket-close socket)
       (gr8s.server::stop-browser-stun stun))))
 
+(test checked-content-tells-the-pod-about-the-visitor
+  ;; Its nginx logged the gr8s server, with drakma's User-Agent, for every visitor
+  ;; (podster-6bss). Tell it what a reverse proxy would; the visitor's address only when
+  ;; the cluster lets it, as the tab's owner reads the Pod's logs.
+  (let ((request (gr8s.resources::core-object "REFERER" "https://demo.gr8s.io/"
+                                              "ACCEPT-LANGUAGE" "en-CA"
+                                              "X-FORWARDED-PROTO" "https"
+                                              "HOST" "tab.demo.gr8s.io")))
+    (flet ((header (name) (gethash (symbol-name name) request)))
+      (is (equal '(("Referer" . "https://demo.gr8s.io/") ("Accept-Language" . "en-CA")
+                   ("X-Forwarded-Proto" . "https") ("X-Forwarded-Host" . "tab.demo.gr8s.io")
+                   ("X-Forwarded-For" . "203.0.113.7") ("X-Real-IP" . "203.0.113.7"))
+                 (gr8s.server::browser-content-forwarded-headers #'header "203.0.113.7")))
+      ;; Without the address, the rest still goes.
+      (is (equal '(("Referer" . "https://demo.gr8s.io/") ("Accept-Language" . "en-CA")
+                   ("X-Forwarded-Proto" . "https") ("X-Forwarded-Host" . "tab.demo.gr8s.io"))
+                 (gr8s.server::browser-content-forwarded-headers #'header nil)))
+      ;; The Gateway's own X-Forwarded-Host wins over Host.
+      (setf (gethash "X-FORWARDED-HOST" request) "tab.example.org")
+      (is (equal "tab.example.org"
+                 (cdr (assoc "X-Forwarded-Host" (gr8s.server::browser-content-forwarded-headers #'header nil)
+                             :test #'equal))))))
+  ;; On by default; serve --browser-forward-client-address false turns it off.
+  (flet ((forwarding (arguments)
+           (getf (gr8s.server::parse-serve-options arguments) :browser-forward-client-address)))
+    (is (null (forwarding '())))
+    (is (eq :no (forwarding '("--browser-forward-client-address" "false"))))
+    (is (eq :yes (forwarding '("--browser-forward-client-address" "true"))))
+    (signals error (forwarding '("--browser-forward-client-address" "maybe")))))
+
 (test browser-peering-says-which-tabs-connect-directly
   ;; Tabs that connect directly learn each other's public address, so by default only
   ;; tabs from one network do; the others still reach each other through the server.

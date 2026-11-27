@@ -16,6 +16,14 @@ the Kubernetes API version with a gr8s release suffix (see
   endpoints. Deleting such a Pod also works now: it failed with "Node … was not found",
   even with `--force --grace-period=0`, because the deletion tried to tell the absent
   Node to stop the Pod.
+### Added
+
+- Checked content tells the browser Pod about the visitor, as a reverse proxy would:
+  their `User-Agent`, `Referer` and `Accept-Language`, `X-Forwarded-Proto` and
+  `X-Forwarded-Host`, and their address as `X-Forwarded-For` and `X-Real-IP`. The Pod's
+  logs showed the gr8s server and drakma for every visitor (podster-6bss). A tab's
+  owner reads its Pod's logs, so `serve --browser-forward-client-address false` keeps
+  visitors' addresses from strangers' tabs.
 
 ## [v1.37.2-gr8s.9] — 2026-11-27
 

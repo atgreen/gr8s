@@ -29,6 +29,7 @@ gr8s serve --browser-listen 127.0.0.1:8099 --browser-distro /var/lib/gr8s/browse
 | `--browser-stun-listen HOST:PORT` | Answer the tabs' STUN requests on UDP, so tabs behind NATs connect directly. |
 | `--browser-ice-server URL` | Also give tabs this `stun:` or `turn:` server. Repeatable. |
 | `--browser-peering MODE` | Which tabs connect directly: `all`, `same-network` (the default) or `none`. |
+| `--browser-forward-client-address BOOL` | Whether checked content tells the Pod the visitor's address (default `true`). See below. |
 
 The node agent must be enabled (it is by default): browser Pods get their
 addresses through a TAP device on the serving host, which needs
@@ -119,6 +120,16 @@ image the server pulled. A tab that answers anything else fails the request and
 its node is tainted `gr8s.io/tampered:NoExecute`. The server can fill in
 `<!--gr8s:node-->`, `<!--gr8s:pod-->`, `<!--gr8s:image-->` and similar
 placeholders after the check.
+
+The Pod is asked as a reverse proxy would ask it: with the visitor's `User-Agent`,
+`Referer` and `Accept-Language`, `X-Forwarded-Proto` and `X-Forwarded-Host`, and the
+visitor's address as `X-Forwarded-For` and `X-Real-IP`. A web server logs the
+connection's own address, the gateway on the tab's network device, unless told to
+believe those headers from it (nginx: `set_real_ip_from` the Pod range and
+`real_ip_header X-Forwarded-For`). The tab's owner can read its Pod's logs, so on a
+cluster whose tabs are strangers', as a public demo's are, run `serve` with
+`--browser-forward-client-address false`: the Pod is then not told who the visitor is,
+only what browser they use.
 
 ## GPUs
 
