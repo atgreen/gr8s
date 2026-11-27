@@ -33,6 +33,15 @@ the Kubernetes API version with a gr8s release suffix (see
   writes them (`2160h0m0s`), and the `renewBefore` rule applies only when a
   Certificate's spec changes.
 
+- Browser nodes share image layers over the agents' BitTorrent protocol (podster-9mio):
+  each layer is a BEP 52 torrent, the very torrent agents build for it (a zstd layer,
+  served decompressed, gets one bound to the bytes served), described to tabs at
+  `/torrents/DIGEST` on the join listener. Tabs speak the standard peer wire, byte for
+  byte as cl-torrent does, over WebRTC data channels: they fetch pieces rarest first from
+  up to 8 tabs that hold a layer or are still downloading it, check each piece against
+  its Merkle root, share pieces while downloading, and drop a peer at its first bad
+  piece. The server seeds every piece over HTTP ranges, so a layer always arrives. The
+  whole-layer tab-to-tab transfer it replaces is gone.
 - Browser nodes connect across NATs (podster-zra1): `serve --browser-stun-listen
   HOST:PORT` answers STUN binding requests on UDP, so each tab learns the public
   address its NAT gives it and tabs on different networks connect directly, with no

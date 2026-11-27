@@ -875,6 +875,17 @@ stops with the session."
                  (progn (setf (hunchentoot:return-code*) hunchentoot:+http-not-found+
                               (hunchentoot:content-type*) "text/plain")
                         "no such layer"))))
+          ((and (uiop:string-prefix-p "/torrents/" path) (browser-join-images acceptor))
+           (let ((torrent (handler-case (browser-image-torrent (browser-join-images acceptor) (subseq path 10))
+                            (error (condition)
+                              (format *error-output* "gr8s browser layer torrent ~A: ~A~%" (subseq path 10) condition)
+                              nil))))
+             (setf (hunchentoot:content-type*) "application/json")
+             (if torrent
+                 (progn (setf (hunchentoot:header-out :cache-control) "max-age=31536000, immutable")
+                        (com.inuoe.jzon:stringify torrent))
+                 (progn (setf (hunchentoot:return-code*) hunchentoot:+http-not-found+)
+                        "{}"))))
           ((equal path "/browser-node-runtime.mjs")
            (setf (hunchentoot:content-type*) "text/javascript; charset=utf-8")
            +browser-node-runtime-js+)

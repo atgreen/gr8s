@@ -229,29 +229,124 @@ async function sha256Matches(digest, bytes) {
   return digest.slice(7) === [...hash].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-// A layer's bytes: from the cache when held and intact, else from a peer tab that
-// holds it (podster-57fv.12) or the server, checked against its digest, then kept.
-async function layerBytes(layer, base, log, fromPeer) {
+// BitTorrent between tabs (podster-9mio): the protocol gr8s's agents share image
+// layers with (BEP 52 torrents, the standard peer wire), byte for byte, carried over
+// WebRTC data channels, since a tab can't open TCP connections. Each layer is a
+// torrent the server describes (piece length, each piece's Merkle root); a tab fetches
+// pieces from tabs that hold them, rarest first, checks each piece as it arrives,
+// shares the pieces it has while still downloading, and drops a peer at its first bad
+// piece. The server seeds every piece too, so a layer always arrives.
+export const bittorrent = (() => {
+  const BLOCK = 16384;
+  const NAME = new TextEncoder().encode("BitTorrent protocol");
+  const KINDS = ["choke", "unchoke", "interested", "not-interested", "have", "bitfield", "request", "piece", "cancel"];
+  const hex = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  const unhex = (text) => Uint8Array.from(text.match(/../g) ?? [], (pair) => parseInt(pair, 16));
+  const u32 = (bytes, at) => ((bytes[at] << 24) | (bytes[at + 1] << 16) | (bytes[at + 2] << 8) | bytes[at + 3]) >>> 0;
+  const putU32 = (bytes, at, value) => {
+    bytes[at] = value >>> 24; bytes[at + 1] = (value >>> 16) & 255; bytes[at + 2] = (value >>> 8) & 255; bytes[at + 3] = value & 255;
+  };
+  // The handshake: the protocol name, eight reserved bytes (none set, as the agents
+  // send them), the first 20 bytes of the v2 infohash, and the peer id.
+  function handshake(infohash, peerId) {
+    const bytes = new Uint8Array(68);
+    bytes[0] = NAME.length;
+    bytes.set(NAME, 1);
+    bytes.set(unhex(infohash).subarray(0, 20), 28);
+    bytes.set(peerId, 48);
+    return bytes;
+  }
+  function parseHandshake(bytes) {
+    if (bytes.length !== 68 || bytes[0] !== NAME.length || hex(bytes.subarray(1, 20)) !== hex(NAME)) {
+      throw new Error("not a BitTorrent handshake");
+    }
+    return { infohash: hex(bytes.subarray(28, 48)), peerId: bytes.slice(48, 68) };
+  }
+  function message(kind, { piece = 0, begin = 0, length = 0, payload = new Uint8Array(0) } = {}) {
+    const size = kind === "have" ? 4 : kind === "bitfield" ? payload.length
+      : kind === "request" || kind === "cancel" ? 12 : kind === "piece" ? 8 + payload.length : 0;
+    const bytes = new Uint8Array(5 + size);
+    putU32(bytes, 0, 1 + size);
+    bytes[4] = KINDS.indexOf(kind);
+    if (kind === "have") putU32(bytes, 5, piece);
+    else if (kind === "bitfield") bytes.set(payload, 5);
+    else if (kind === "request" || kind === "cancel") { putU32(bytes, 5, piece); putU32(bytes, 9, begin); putU32(bytes, 13, length); }
+    else if (kind === "piece") { putU32(bytes, 5, piece); putU32(bytes, 9, begin); bytes.set(payload, 13); }
+    return bytes;
+  }
+  function parseMessage(bytes) {
+    if (bytes.length < 4 || u32(bytes, 0) + 4 !== bytes.length) throw new Error("bad BitTorrent message length");
+    if (bytes.length === 4) return { kind: "keepalive" };
+    const kind = KINDS[bytes[4]];
+    if (!kind) throw new Error(`unknown BitTorrent message ${bytes[4]}`);
+    const m = { kind };
+    if (kind === "have") m.piece = u32(bytes, 5);
+    else if (kind === "bitfield") m.payload = bytes.slice(5);
+    else if (kind === "request" || kind === "cancel") { m.piece = u32(bytes, 5); m.begin = u32(bytes, 9); m.length = u32(bytes, 13); }
+    else if (kind === "piece") { m.piece = u32(bytes, 5); m.begin = u32(bytes, 9); m.payload = bytes.slice(13); }
+    return m;
+  }
+  // What arrives on a channel, as a byte stream, back to frames: the handshake, then
+  // length-prefixed messages, whatever the channel's message boundaries.
+  function framer(onFrame) {
+    let buffer = new Uint8Array(0);
+    let handshaken = false;
+    return (chunk) => {
+      const joined = new Uint8Array(buffer.length + chunk.length);
+      joined.set(buffer);
+      joined.set(chunk, buffer.length);
+      buffer = joined;
+      for (;;) {
+        const need = handshaken ? (buffer.length >= 4 ? 4 + u32(buffer, 0) : Infinity) : 68;
+        if (need !== Infinity && need > 1 << 20) throw new Error("BitTorrent frame too long");
+        if (buffer.length < need) return;
+        const frame = buffer.slice(0, need);
+        buffer = buffer.slice(need);
+        if (handshaken) onFrame(parseMessage(frame), false);
+        else { handshaken = true; onFrame(parseHandshake(frame), true); }
+      }
+    };
+  }
+  function bitfield(have) {
+    const bytes = new Uint8Array(Math.ceil(have.length / 8));
+    have.forEach((held, index) => { if (held) bytes[index >> 3] |= 0x80 >> (index & 7); });
+    return bytes;
+  }
+  const fromBitfield = (bytes, count) => Uint8Array.from({ length: count }, (_, i) => (bytes[i >> 3] >> (7 - (i & 7))) & 1);
+  const sha256 = async (bytes) => new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  // A piece's BEP 52 Merkle root: SHA-256 of each 16 KiB block, a short last piece
+  // padded with zero leaves, hashed pairwise up to one.
+  async function pieceRoot(bytes, pieceLength) {
+    let level = [];
+    for (let at = 0; at < bytes.length; at += BLOCK) level.push(await sha256(bytes.subarray(at, Math.min(at + BLOCK, bytes.length))));
+    while (level.length < pieceLength / BLOCK) level.push(new Uint8Array(32));
+    while (level.length > 1) {
+      const next = [];
+      for (let i = 0; i < level.length; i += 2) {
+        const pair = new Uint8Array(64);
+        pair.set(level[i]);
+        pair.set(level[i + 1], 32);
+        next.push(await sha256(pair));
+      }
+      level = next;
+    }
+    return hex(level[0]);
+  }
+  return { BLOCK, hex, unhex, handshake, parseHandshake, message, parseMessage, framer, bitfield, fromBitfield, pieceRoot };
+})();
+
+// A layer's bytes: from the cache when held and intact, else from SWARM, which gets
+// its pieces from other tabs and the server and checks each; then kept.
+async function layerBytes(layer, base, log, swarm) {
   const verify = !layer.decompressed;
   const cached = await layerCache.get(layer.digest);
   if (cached && (!verify || (await sha256Matches(layer.digest, cached)))) {
     log(`layer ${layer.digest.slice(7, 19)} from the tab's cache`);
     return cached;
   }
-  if (verify && fromPeer) {
-    for (const peer of layer.peers ?? []) {
-      const bytes = await fromPeer(peer, layer.digest).catch(() => null);
-      if (bytes && (await sha256Matches(layer.digest, bytes))) {
-        log(`layer ${layer.digest.slice(7, 19)} from ${peer}`);
-        await layerCache.put(layer.digest, bytes);
-        return bytes;
-      }
-    }
-  }
-  const response = await fetch(new URL(`blobs/${layer.digest}`, base));
-  if (!response.ok) throw new Error(`layer ${layer.digest}: HTTP ${response.status}`);
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (verify && !(await sha256Matches(layer.digest, bytes))) throw new Error(`layer ${layer.digest} did not match its digest`);
+  const torrent = await swarm.torrent(layer.digest);
+  const bytes = await swarm.download(layer.digest, torrent, layer.peers ?? []);
+  if (!(await sha256Matches(torrent.content, bytes))) throw new Error(`layer ${layer.digest} did not match its digest`);
   await layerCache.put(layer.digest, bytes);
   return bytes;
 }
@@ -337,6 +432,208 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
   // through the server as before. The server introduces the peers and relays their
   // signals; what arrives is taken only from the peer's own CIDR, and only as this
   // tab's Pods' ingress policy admits it, or as a reply to what they sent.
+  // Layers as torrents shared with other tabs (podster-9mio).
+  const swarm = (() => {
+    const peerId = new Uint8Array(20);
+    peerId.set(new TextEncoder().encode("-GR0001-"));
+    crypto.getRandomValues(peerId.subarray(8));
+    const base = url.replace(/^ws/, "http");
+    const torrents = new Map(); // digest -> Promise of its description
+    const partial = new Map(); // digest -> { torrent, bytes, have, seeders }
+    const bt = bittorrent;
+    const pieceSize = (torrent, index) => Math.min(torrent.pieceLength, torrent.length - index * torrent.pieceLength);
+    const timeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error("timed out")), ms));
+
+    function torrent(digest) {
+      if (!torrents.has(digest)) {
+        torrents.set(digest, fetch(new URL(`torrents/${digest}`, base)).then((response) => {
+          if (!response.ok) throw new Error(`layer ${digest}: no torrent (HTTP ${response.status})`);
+          return response.json();
+        }));
+        torrents.get(digest).catch(() => torrents.delete(digest));
+      }
+      return torrents.get(digest);
+    }
+
+    // Give a peer that asks on CHANNEL the pieces of layer DIGEST this tab holds.
+    async function serve(channel, digest) {
+      channel.binaryType = "arraybuffer";
+      // The peer speaks as soon as the channel opens: keep what it says until this tab
+      // knows what it holds.
+      const early = [];
+      channel.onmessage = (event) => early.push(new Uint8Array(event.data));
+      let source = partial.get(digest);
+      if (!source) {
+        const [bytes, description] = await Promise.all([layerCache.get(digest), torrent(digest).catch(() => null)]);
+        if (!bytes || !description) { channel.close(); return; }
+        source = { torrent: description, bytes, have: new Uint8Array(description.pieces.length).fill(1), seeders: new Set() };
+      }
+      const { torrent: description } = source;
+      const sendFrame = async (frame) => {
+        while (channel.bufferedAmount > 1 << 22) await new Promise((r) => setTimeout(r, 20));
+        if (channel.readyState === "open") channel.send(frame);
+      };
+      const onHave = (index) => sendFrame(bt.message("have", { piece: index }));
+      const receive = bt.framer((frame, first) => {
+        if (first) {
+          if (frame.infohash !== description.infohash.slice(0, 40)) { channel.close(); return; }
+          sendFrame(bt.handshake(description.infohash, peerId));
+          sendFrame(bt.message("bitfield", { payload: bt.bitfield(source.have) }));
+          source.seeders.add(onHave);
+        } else if (frame.kind === "interested") {
+          sendFrame(bt.message("unchoke"));
+        } else if (frame.kind === "request") {
+          const { piece, begin, length } = frame;
+          if (piece >= description.pieces.length || !source.have[piece] || length > bt.BLOCK
+              || begin + length > pieceSize(description, piece)) return;
+          const at = piece * description.pieceLength + begin;
+          sendFrame(bt.message("piece", { piece, begin, payload: source.bytes.subarray(at, at + length) }));
+        }
+      });
+      const take = (chunk) => { try { receive(chunk); } catch { channel.close(); } };
+      channel.onmessage = (event) => take(new Uint8Array(event.data));
+      early.splice(0).forEach(take);
+      channel.onclose = () => source.seeders.delete(onHave);
+    }
+
+    // Layer DIGEST, whose torrent is DESCRIPTION, from the tabs PEERS and the server.
+    async function download(digest, description, peers) {
+      const count = description.pieces.length;
+      const job = {
+        bytes: new Uint8Array(description.length), have: new Uint8Array(count), inflight: new Set(),
+        availability: new Uint16Array(count), seeders: new Set(), from: new Map(), left: count,
+      };
+      let finished;
+      const done = new Promise((r) => { finished = r; });
+      if (count === 0) return job.bytes;
+      partial.set(digest, { torrent: description, bytes: job.bytes, have: job.have, seeders: job.seeders });
+      peering.announce();
+      // Keep a piece whose Merkle root is the torrent's; false when it isn't.
+      const accept = async (index, bytes, source) => {
+        if (job.have[index]) return true;
+        if ((await bt.pieceRoot(bytes, description.pieceLength)) !== description.pieces[index]) return false;
+        if (job.have[index]) return true;
+        job.bytes.set(bytes, index * description.pieceLength);
+        job.have[index] = 1;
+        job.inflight.delete(index);
+        job.from.set(source, (job.from.get(source) ?? 0) + 1);
+        job.seeders.forEach((tell) => tell(index));
+        if (--job.left === 0) finished();
+        return true;
+      };
+      // The next piece for a source with HELD pieces: the rarest one nobody is
+      // fetching; once all are being fetched, any still missing (the endgame).
+      const pick = (held, fromEnd) => {
+        let best = -1;
+        for (let step = 0; step < count; step++) {
+          const i = fromEnd ? count - 1 - step : step;
+          if (job.have[i] || job.inflight.has(i) || (held && !held[i])) continue;
+          if (best < 0 || job.availability[i] < job.availability[best]) best = i;
+        }
+        if (best < 0) {
+          for (let step = 0; step < count; step++) {
+            const i = fromEnd ? count - 1 - step : step;
+            if (!job.have[i] && (!held || held[i])) return i;
+          }
+        }
+        return best;
+      };
+
+      async function fromPeer(node) {
+        const channel = await peering.channel(node, `bt:${digest}`);
+        if (!channel) return;
+        const held = new Uint8Array(count);
+        const pending = new Map();
+        let handshake, unchoke;
+        const shook = new Promise((r) => { handshake = r; });
+        const unchoked = new Promise((r) => { unchoke = r; });
+        const receive = bt.framer((frame, first) => {
+          if (first) { if (frame.infohash === description.infohash.slice(0, 40)) handshake(); else channel.close(); return; }
+          if (frame.kind === "bitfield") {
+            bt.fromBitfield(frame.payload, count).forEach((h, i) => { if (h && !held[i]) { held[i] = 1; job.availability[i]++; } });
+          } else if (frame.kind === "have" && frame.piece < count && !held[frame.piece]) {
+            held[frame.piece] = 1; job.availability[frame.piece]++;
+          } else if (frame.kind === "unchoke") unchoke();
+          else if (frame.kind === "piece") pending.get(`${frame.piece}:${frame.begin}`)?.(frame.payload);
+        });
+        channel.onmessage = (event) => { try { receive(new Uint8Array(event.data)); } catch { channel.close(); } };
+        try {
+          channel.send(bt.handshake(description.infohash, peerId));
+          await Promise.race([shook, timeout(10000)]);
+          channel.send(bt.message("interested"));
+          await Promise.race([unchoked, timeout(10000)]);
+          while (job.left > 0 && channel.readyState === "open") {
+            const index = pick(held, false);
+            if (index < 0) { await new Promise((r) => setTimeout(r, 250)); continue; }
+            job.inflight.add(index);
+            const size = pieceSize(description, index);
+            const blocks = [];
+            for (let begin = 0; begin < size; begin += bt.BLOCK) {
+              const length = Math.min(bt.BLOCK, size - begin);
+              blocks.push(new Promise((r) => pending.set(`${index}:${begin}`, r)));
+              channel.send(bt.message("request", { piece: index, begin, length }));
+            }
+            let parts;
+            try {
+              parts = await Promise.race([Promise.all(blocks), timeout(20000)]);
+            } catch {
+              job.inflight.delete(index);
+              break;
+            }
+            const piece = new Uint8Array(size);
+            parts.forEach((part, i) => piece.set(part, i * bt.BLOCK));
+            if (!(await accept(index, piece, node))) {
+              // A bad piece: this peer is done with.
+              log(`layer ${digest.slice(7, 19)}: ${node} sent a bad piece; dropped it`);
+              job.inflight.delete(index);
+              break;
+            }
+          }
+        } catch {
+          // A peer that doesn't answer is simply not used.
+        } finally {
+          held.forEach((h, i) => { if (h) job.availability[i]--; });
+          channel.close();
+        }
+      }
+
+      // The server seeds every piece; it takes pieces from the end, so tabs, which
+      // start from the rarest, are used first where they can serve.
+      async function fromServer() {
+        if (peers.length) await new Promise((r) => setTimeout(r, 1500));
+        while (job.left > 0) {
+          const index = pick(null, true);
+          if (index < 0) { await new Promise((r) => setTimeout(r, 100)); continue; }
+          job.inflight.add(index);
+          const start = index * description.pieceLength;
+          const response = await fetch(new URL(`blobs/${digest}`, base), {
+            headers: { Range: `bytes=${start}-${start + pieceSize(description, index) - 1}` },
+          });
+          if (!response.ok) throw new Error(`layer ${digest}: HTTP ${response.status}`);
+          if (!(await accept(index, new Uint8Array(await response.arrayBuffer()), "the server"))) {
+            throw new Error(`layer ${digest}: the server's piece ${index} did not match`);
+          }
+        }
+      }
+
+      try {
+        const server = fromServer();
+        peers.slice(0, 8).forEach((node) => fromPeer(node));
+        await Promise.race([done, server.then(() => done)]);
+      } finally {
+        partial.delete(digest);
+        peering.announce();
+      }
+      const fromTabs = [...job.from].filter(([source]) => source !== "the server");
+      log(`layer ${digest.slice(7, 19)}: ${count} piece${count === 1 ? "" : "s"}, `
+          + (fromTabs.length ? fromTabs.map(([node, n]) => `${n} from ${node}`).join(", ") + ", " : "")
+          + `${job.from.get("the server") ?? 0} from the server`);
+      return job.bytes;
+    }
+
+    return { torrent, serve, download, downloading: () => [...partial.keys()] };
+  })();
+
   const peering = (() => {
     const available = typeof RTCPeerConnection !== "undefined";
     let self = null, peers = [], iceServers = [], policy = {};
@@ -401,20 +698,6 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
     }
 
     // Layers a peer asks for: from the cache, in chunks, then an end marker.
-    function serveLayers(channel) {
-      channel.onmessage = async (event) => {
-        if (typeof event.data !== "string") return;
-        const { want } = JSON.parse(event.data);
-        const bytes = await layerCache.get(want);
-        if (!bytes) { channel.send(JSON.stringify({ missing: want })); return; }
-        for (let at = 0; at < bytes.length; at += 16384) {
-          while (channel.bufferedAmount > 1 << 22) await new Promise((r) => setTimeout(r, 20));
-          channel.send(bytes.subarray(at, at + 16384));
-        }
-        channel.send(JSON.stringify({ done: want, size: bytes.length }));
-      };
-    }
-
     function link(node) {
       let l = links.get(node);
       if (l) return l;
@@ -433,8 +716,8 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
           channel.onopen = () => { l.ready = true; log(`direct link to ${node}`); l.waiters.splice(0).forEach((w) => w()); };
           channel.onmessage = (event) => receivePacket(node, event.data);
           if (channel.readyState === "open") channel.onopen();
-        } else if (channel.label === "serve-layers") {
-          serveLayers(channel);
+        } else if (channel.label.startsWith("bt:")) {
+          swarm.serve(channel, channel.label.slice(3));
         }
       };
       l.pc.ondatachannel = (event) => adopt(event.channel);
@@ -471,12 +754,17 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
         // Link up with peers as soon as they are known, so a Pod's first packets
         // needn't detour through the server.
         for (const peer of peers.slice(0, 32)) connect(peer.node);
-        // Which layers this tab can give its peers, whenever that changes.
+        this.announce();
+      },
+      // Which layers this tab can give its peers, held or still arriving, whenever
+      // that changes.
+      announce() {
         layerCache.digests().then((digests) => {
-          const listed = digests.sort().join(",");
+          const all = [...new Set([...digests, ...swarm.downloading()])].sort();
+          const listed = all.join(",");
           if (listed !== this.reported) {
             this.reported = listed;
-            send({ op: "have", digests });
+            send({ op: "have", digests: all });
           }
         });
       },
@@ -508,33 +796,23 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
         l.pods.send(packet.slice());
         return true;
       },
-      // A layer from the peer NODE, which said it holds it; NIL-ish on any failure.
-      async fetchLayer(node, digest) {
+      // A new reliable channel LABEL to the peer NODE, open, or null when there is no
+      // direct link to it.
+      async channel(node, label) {
         if (!available) return null;
         connect(node);
         const l = links.get(node);
         if (!l) return null;
         if (!l.ready) await Promise.race([new Promise((r) => l.waiters.push(r)), new Promise((r) => setTimeout(r, 5000))]);
         if (!l.ready) return null;
-        const run = l.queue.then(() => new Promise((resolve) => {
-          const channel = l.pc.createDataChannel("serve-layers");
-          const parts = [];
-          channel.binaryType = "arraybuffer";
-          channel.onopen = () => channel.send(JSON.stringify({ want: digest }));
-          channel.onmessage = (event) => {
-            if (typeof event.data !== "string") { parts.push(new Uint8Array(event.data)); return; }
-            const message = JSON.parse(event.data);
-            channel.close();
-            if (!message.done) return resolve(null);
-            const bytes = new Uint8Array(message.size);
-            let at = 0;
-            for (const part of parts) { bytes.set(part, at); at += part.length; }
-            resolve(at === message.size ? bytes : null);
-          };
-          setTimeout(() => { channel.close(); resolve(null); }, 60000);
-        }));
-        l.queue = run.catch(() => {});
-        return run;
+        const channel = l.pc.createDataChannel(label);
+        channel.binaryType = "arraybuffer";
+        const opened = await Promise.race([
+          new Promise((r) => { channel.onopen = () => r(true); }),
+          new Promise((r) => setTimeout(() => r(false), 10000)),
+        ]);
+        if (!opened) { channel.close(); return null; }
+        return channel;
       },
     };
   })();
@@ -709,7 +987,7 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
     const fs = new MemoryFs();
     const base = url.replace(/^ws/, "http");
     for (const layer of info.layers) {
-      const bytes = await layerBytes(layer, base, log, peering.fetchLayer);
+      const bytes = await layerBytes(layer, base, log, swarm);
       await unpackLayer(fs, new Response(bytes), layer.mediaType ?? "");
     }
     for (const dir of ["/proc", "/dev", "/tmp", "/etc"]) fs.mkdirp(dir);
