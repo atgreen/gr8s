@@ -254,6 +254,18 @@ podster-135e and podster-i8my) still help native nodes.
   also `no-store`, so a reload always runs the current runtime; the unkernel SDK (an
   exact CDN version) and the layer cache stay cached. The welcome names the runtime's
   hash, and a tab running another one reloads.
+- **GPUs** (podster-tr2r). A tab with a hardware WebGPU adapter (not SwiftShader or a
+  fallback adapter) describes it in its hello, and its node gets capacity
+  `gr8s.io/gpu: 1` (the page has one WebGPU device) and labels `gr8s.io/gpu-vendor` and
+  `gr8s.io/gpu-architecture`. Like the rest of its capacity, that is the browser's
+  claim. A Pod whose container limits `gr8s.io/gpu` gets a VM with unkernel's guest
+  Vulkan (`vk: true`: Vulkan 1.2 on the page's WebGPU device, shaders translated to
+  WGSL), and each container root gets the driver as NVIDIA's toolkit gives its own: a
+  loader manifest in `/etc/vulkan/icd.d/` and the base's `/usr/lib/kw` bound in. The
+  image brings the Vulkan loader (`libvulkan1`). The driver needs only `libc.so.6`, so
+  glibc images work; Alpine ones would need gcompat. Measured on an RTX PRO 2000
+  (Blackwell): a compute shader at about 820 GFLOP/s, with about 13 ms per submit and
+  about 80 MB/s between guest and page for host-visible buffers.
 - **DNS.** Each container root gets the kubelet's `/etc/resolv.conf` (the hosting
   node's 169.254.1.1, searches from the Pod's namespace) and an `/etc/hosts`.
 - **Images** (`src/server/browser-images.lisp`). Not erofs: the server resolves the

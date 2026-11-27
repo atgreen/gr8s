@@ -797,13 +797,32 @@ so a browser's tabs share one failure domain. Signals when the proof fails."
                (if (and (stringp value) (cl-ppcre:scan "^[0-9]+$" value))
                    (princ-to-string (min (max 1 (parse-integer value)) limit))
                    default))))
-      (list (cons "cpu" (bounded "cpu" "1" 8))
-            (cons "memory" (let ((value (gethash "memory" offered)))
-                             (if (and (stringp value) (cl-ppcre:scan "^[0-9]{1,5}Mi$" value)
-                                      (<= 64 (parse-integer value :junk-allowed t) 8192))
-                                 value
-                                 "1024Mi")))
-            (cons "pods" (bounded "pods" "4" 16))))))
+      (append
+       (list (cons "cpu" (bounded "cpu" "1" 8))
+             (cons "memory" (let ((value (gethash "memory" offered)))
+                              (if (and (stringp value) (cl-ppcre:scan "^[0-9]{1,5}Mi$" value)
+                                       (<= 64 (parse-integer value :junk-allowed t) 8192))
+                                  value
+                                  "1024Mi")))
+             (cons "pods" (bounded "pods" "4" 16)))
+       ;; One GPU: the page's WebGPU device, which one Pod's VM has at a time.
+       (when (browser-node-gpu hello) (list (cons "gr8s.io/gpu" "1")))))))
+
+(defun browser-label-value (text)
+  "TEXT as a label value: letters, digits, '-', '_' and '.', at most 63, starting and
+ending with a letter or digit; NIL when nothing is left."
+  (let* ((cleaned (substitute-if #\- (lambda (c) (not (or (alphanumericp c) (find c "-_.")))) (string-downcase text)))
+         (cleaned (string-trim "-_." (subseq cleaned 0 (min 63 (length cleaned))))))
+    (and (plusp (length cleaned)) (every (lambda (c) (< (char-code c) 128)) cleaned) cleaned)))
+
+(defun browser-node-gpu (hello)
+  "The GPU HELLO offers, a hardware WebGPU adapter, as a plist of :vendor and
+:architecture label values; NIL when it offers none. Like its capacity, it is what the
+browser said: a tab could claim a GPU it hasn't, and a Pod given it would fail there."
+  (let ((gpu (gethash "gpu" hello)))
+    (when (hash-table-p gpu)
+      (list :vendor (or (browser-label-value (princ-to-string (gethash "vendor" gpu ""))) "unknown")
+            :architecture (or (browser-label-value (princ-to-string (gethash "architecture" gpu ""))) "unknown")))))
 
 (defun fence-browser-node (acceptor name)
   "End NAME's earlier session, if one is still open, and wait for its node to stop, so a
@@ -848,9 +867,14 @@ stops with the session."
                  (let ((runtime (make-browser-runtime session (browser-join-exec-endpoint acceptor)))
                        (architecture (if (equal "amd64" (gethash "arch" hello)) "amd64" "arm64")))
                    (start-virtual-node host name
-                                       :labels (core-object "gr8s.io/browser" "true"
-                                                            "gr8s.io/runtime" "unkernel"
-                                                            "topology.kubernetes.io/zone" (gethash "zone" hello))
+                                       :labels (let ((labels (core-object "gr8s.io/browser" "true"
+                                                                          "gr8s.io/runtime" "unkernel"
+                                                                          "topology.kubernetes.io/zone" (gethash "zone" hello)))
+                                                     (gpu (browser-node-gpu hello)))
+                                                 (when gpu
+                                                   (setf (gethash "gr8s.io/gpu-vendor" labels) (getf gpu :vendor)
+                                                         (gethash "gr8s.io/gpu-architecture" labels) (getf gpu :architecture)))
+                                                 labels)
                                        :taints (vector (apply #'core-object +browser-node-taint+))
                                        :runtime-options (list :runtime "browser" :runtime-object runtime
                                                              :architecture architecture

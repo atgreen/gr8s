@@ -1722,15 +1722,16 @@ them. A node can't claim another's address or name."
   (multiple-value-bind (opcode payload) (gr8s.protocol::read-websocket-frame stream)
     (and (= opcode 1) (com.inuoe.jzon:parse payload))))
 
-(defun browser-node-test-join (stream &key (key (ironclad:generate-key-pair :secp256r1)) (tab "0a0b") wrong-key)
-  "Join as a browser would: hello with KEY's public half and TAB, then sign the challenge
-(with WRONG-KEY instead, to fail). Returns the server's next message."
+(defun browser-node-test-join (stream &key (key (ironclad:generate-key-pair :secp256r1)) (tab "0a0b") wrong-key gpu)
+  "Join as a browser would: hello with KEY's public half and TAB, and GPU (a description of
+a WebGPU adapter) when given, then sign the challenge (with WRONG-KEY instead, to fail).
+Returns the server's next message."
   (multiple-value-bind (private public) (if (consp key) (values (car key) (cdr key)) (ironclad:generate-key-pair :secp256r1))
     (declare (ignorable public))
     (let ((public (if (consp key) (cdr key) public)))
       (browser-node-test-send
        stream (gr8s.resources::core-object
-               "op" "hello" "arch" "arm64"
+               "op" "hello" "arch" "arm64" "gpu" (or gpu 'null)
                "capacity" (gr8s.resources::core-object "cpu" "3" "memory" "2048Mi" "pods" "40")
                "identity" (gr8s.resources::core-object
                            "publicKey" (cl-base64:usb8-array-to-base64-string (getf (ironclad:destructure-public-key public) :y))
@@ -2276,6 +2277,44 @@ them. A node can't claim another's address or name."
                (is-true (search "export function joinCluster" (if (stringp body) body (sb-ext:octets-to-string body :external-format :utf-8))))))
         (hunchentoot:stop listener)
         (gr8s.apiserver::stop-node-grpc-server server)))))
+
+(test browser-nodes-lend-their-gpus
+  ;; A tab with a hardware WebGPU adapter offers it (podster-tr2r): its node has one
+  ;; gr8s.io/gpu and labels naming the GPU, as the browser described it.
+  (let ((gpu (gr8s.resources::core-object "vendor" "NVIDIA" "architecture" "Blackwell (GB206)" "description" "")))
+    (is (equal '(:vendor "nvidia" :architecture "blackwell--gb206")
+               (gr8s.server::browser-node-gpu (gr8s.resources::core-object "gpu" gpu))))
+    (is (equal "1" (cdr (assoc "gr8s.io/gpu" (gr8s.server::browser-node-capacity (gr8s.resources::core-object "gpu" gpu))
+                               :test #'equal))))
+    ;; Without one, none.
+    (is (null (gr8s.server::browser-node-gpu (gr8s.resources::core-object "gpu" 'null))))
+    (is (null (assoc "gr8s.io/gpu" (gr8s.server::browser-node-capacity (gr8s.resources::core-object)) :test #'equal)))
+    ;; A label value is whatever is left of the browser's words that a label may hold.
+    (is (equal "unknown" (getf (gr8s.server::browser-node-gpu
+                                (gr8s.resources::core-object "gpu" (gr8s.resources::core-object "vendor" "日本")))
+                               :vendor)))
+    (is (= 63 (length (gr8s.server::browser-label-value (make-string 80 :initial-element #\a)))))
+    ;; And on a node that joins.
+    (with-temporary-store (store path)
+      (let* ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" path)))
+             (server (gr8s.apiserver::start-node-grpc-server store :host "127.0.0.1" :port 0 :pki pki))
+             (host (gr8s.server::make-virtual-node-host store server pki (merge-pathnames "virtual/" path)))
+             (listener (gr8s.server::start-browser-join-listener host "127.0.0.1" 0))
+             (socket nil))
+        (unwind-protect
+             (multiple-value-bind (stream connection) (browser-node-test-connect (hunchentoot:acceptor-port listener))
+               (setf socket connection)
+               (let ((name (gethash "node" (browser-node-test-join stream :gpu gpu))))
+                 (is-true (wait-until (lambda () (ignore-errors
+                                                  (equal "1" (gethash "gr8s.io/gpu" (gr8s.model::node-record-capacity
+                                                                                    (gr8s.controllers::get-node store name))))))
+                                      :timeout 20))
+                 (let ((labels (gr8s.kubelet::node-labels (gr8s.controllers::get-node store name))))
+                   (is (equal "nvidia" (gethash "gr8s.io/gpu-vendor" labels)))
+                   (is (equal "blackwell--gb206" (gethash "gr8s.io/gpu-architecture" labels))))))
+          (when socket (ignore-errors (usocket:socket-close socket)))
+          (hunchentoot:stop listener)
+          (gr8s.apiserver::stop-node-grpc-server server))))))
 
 (test browser-stun-names-the-address-a-request-came-from
   ;; RFC 5769's sample: 192.0.2.1 port 32853 is XOR-MAPPED-ADDRESS port a147, address e112a643.
