@@ -2028,6 +2028,22 @@ them. A node can't claim another's address or name."
       (is (null (received "browser-a")))
       (is (equal (list digest) (gethash "browser-a" (gr8s.server::browser-join-holdings listener)))))))
 
+(test browser-exec-streams-are-served-on-loopback
+  ;; The kubelet takes only loopback streaming URLs, so a join listener on another address
+  ;; serves its exec streams on a loopback listener of its own, and not publicly.
+  (let ((public (gr8s.server::start-browser-join-listener nil "127.0.0.2" 0)))
+    (unwind-protect
+         (destructuring-bind (address port) (gr8s.server::browser-join-exec-endpoint public)
+           (is (equal "127.0.0.1" address))
+           (is (/= port (usocket:get-local-port (hunchentoot::acceptor-listen-socket public))))
+           (is (= 404 (nth-value 1 (drakma:http-request (format nil "http://127.0.0.1:~D/" port))))))
+      (hunchentoot:stop public :soft nil)
+      (setf gr8s.server::*browser-join-listeners* (remove public gr8s.server::*browser-join-listeners*))))
+  (is (gr8s.server::loopback-address-p "127.0.0.1"))
+  (is (gr8s.server::loopback-address-p "0.0.0.0"))
+  (is (not (gr8s.server::loopback-address-p "127.0.0.2")))
+  (is (not (gr8s.server::loopback-address-p "78.18.12.235"))))
+
 (test browser-joins-are-limited-in-all-and-per-client
   ;; A public join page must not take every browser that comes: at most so many nodes,
   ;; and so many from one address. A node already connected may always come back.
