@@ -840,6 +840,24 @@ reconnecting browser never shares its node with the session it replaces."
           while (member name (virtual-node-names (browser-join-nodes acceptor)) :test #'equal)
           do (sleep 0.1))))
 
+(defun browser-origin-allowed-p (origin hosts)
+  "Whether a WebSocket with ORIGIN (its Origin header, or NIL) may join through a join page
+reached as one of HOSTS (Host and X-Forwarded-Host values, NILs ignored). A browser always
+sends Origin, and a page can't forge it, so only the join page's own origin passes:
+another site can neither frame the page nor run the runtime itself to recruit its
+visitors (podster-zar9). A client that sends none isn't a browser, and passes."
+  (or (null origin)
+      (let ((authority (and (or (uiop:string-prefix-p "https://" origin) (uiop:string-prefix-p "http://" origin))
+                            (subseq origin (1+ (position #\/ origin :start (1+ (position #\/ origin))))))))
+        (flet ((bare (authority)
+                 ;; The default ports name the same host.
+                 (string-downcase
+                  (cond ((uiop:string-suffix-p authority ":443") (subseq authority 0 (- (length authority) 4)))
+                        ((uiop:string-suffix-p authority ":80") (subseq authority 0 (- (length authority) 3)))
+                        (t authority)))))
+          (and authority (plusp (length authority)) (not (find #\/ authority))
+               (some (lambda (host) (and host (string= (bare host) (bare authority)))) hosts))))))
+
 (defun accept-browser-node (acceptor request)
   "Run one browser's session on REQUEST's upgraded connection: read its hello, make it a
 node, answer with the node's name, and serve its runtime until the browser goes. The node
@@ -949,12 +967,21 @@ stops with the session."
            (serve-browser-exec (subseq path 6)))
           ((and (equal path "/socket")
                 (string-equal (hunchentoot:header-in :upgrade request) "websocket"))
-           (accept-browser-node acceptor request)
-           "")
+           (cond ((browser-origin-allowed-p (hunchentoot:header-in :origin request)
+                                            (list (hunchentoot:header-in :host request)
+                                                  (hunchentoot:header-in :x-forwarded-host request)))
+                  (accept-browser-node acceptor request)
+                  "")
+                 (t (setf (hunchentoot:return-code*) hunchentoot:+http-forbidden+
+                          (hunchentoot:content-type*) "text/plain")
+                    "a browser joins only from this server's own join page")))
           ((equal path "/")
            ;; Never cached: after an upgrade, a reload must get the new page and runtime.
+           ;; Never framed: another site must not make its visitors nodes unseen.
            (setf (hunchentoot:content-type*) "text/html; charset=utf-8"
-                 (hunchentoot:header-out :cache-control) "no-store")
+                 (hunchentoot:header-out :cache-control) "no-store"
+                 (hunchentoot:header-out "Content-Security-Policy") "frame-ancestors 'none'"
+                 (hunchentoot:header-out "X-Frame-Options") "DENY")
            +browser-node-html+)
           ((and (uiop:string-prefix-p "/blobs/" path) (browser-join-images acceptor))
            (let ((file (handler-case (browser-image-layer-file (browser-join-images acceptor) (subseq path 7))

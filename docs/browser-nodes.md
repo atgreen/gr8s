@@ -36,6 +36,9 @@ addresses through a TAP device on the serving host, which needs
 `CAP_NET_ADMIN`. Without it, browser nodes still run Pods, but the Pods have no
 network address.
 
+Other sites can't make their visitors nodes: the join page refuses to be framed, and its WebSocket accepts only
+the join page's own origin (clients that aren't browsers send none, and are let in).
+
 A browser past the limits is told why on the join page and doesn't join. The
 client address is the one the Gateway forwards in `X-Forwarded-For`, so put the
 join listener behind the Gateway rather than exposing it directly.
@@ -97,7 +100,9 @@ images work: the server pulls them with the Pod's `imagePullSecrets`, which neve
 reach the browser.
 
 Browser Pods use cluster DNS and reach Services by name or ClusterIP, and other
-Pods by address. NetworkPolicy applies to them, with one gap: traffic sent
+Pods by address, over IPv4 only: the server passes a tab's IPv4 from its Pods'
+own addresses, and ARP for them, and drops everything else, IPv6 included.
+NetworkPolicy applies to them, with one gap: traffic sent
 directly between tabs is checked against the receiving Pod's ingress policy, but
 not yet the sending Pod's egress policy.
 
@@ -116,8 +121,11 @@ metadata:
 The join listener then serves it at `/verified/NAMESPACE/SERVICE/`; route a
 hostname there with an HTTPRoute `URLRewrite` (`ReplacePrefixMatch`). Each
 response passes only if it is byte for byte the file under that directory in the
-image the server pulled. A tab that answers anything else fails the request and
-its node is tainted `gr8s.io/tampered:NoExecute`. The server can fill in
+image the server pulled. Only files the image holds are asked for, by their plain
+path; anything else is answered 404 without asking a tab. A tab that answers 200
+with other bytes fails the request and its node is tainted
+`gr8s.io/tampered:NoExecute`; any other answer (an error, a redirect) just fails
+the request, as an honest tab can give one. The server can fill in
 `<!--gr8s:node-->`, `<!--gr8s:pod-->`, `<!--gr8s:image-->` and similar
 placeholders after the check.
 

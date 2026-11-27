@@ -150,6 +150,27 @@ of path -> hex digest. Computed from the cached layers once and remembered."
 
 ;;; Serving
 
+(defun browser-content-path-p (segments)
+  "Whether SEGMENTS, the request path after /verified/NAMESPACE/SERVICE/, is one a tab may
+be asked for: each segment a plain name (no empty segment, except the last for a
+directory's index, no . or .., nothing escaped), so the path the Pod's web server sees
+names the file the server checks."
+  (loop for (segment . more) on segments
+        always (if (zerop (length segment))
+                   (null more)
+                   (and (not (member segment '("." "..") :test #'string=))
+                        (every (lambda (char) (and (graphic-char-p char) (char/= char #\\) (char/= char #\%)))
+                               segment)))))
+
+(defun browser-content-verdict (expected status digest)
+  "What a tab's answer proves, for a file the image holds as EXPECTED (a SHA-256 in hex):
+:serve when it answered 200 with that file; :tampered when it answered 200 with anything
+else, as only a tab serving what its image doesn't hold does; :unavailable for any other
+status, which an honest tab can give (busy, restarting), so it is no proof."
+  (cond ((/= status 200) :unavailable)
+        ((string= digest expected) :serve)
+        (t :tampered)))
+
 (defun html-escape (text)
   (with-output-to-string (out)
     (loop for char across text
@@ -246,8 +267,9 @@ larger than the limit."
 
 (defun serve-browser-content (acceptor request path)
   "Answer REQUEST for /verified/NAMESPACE/SERVICE/REST from one of SERVICE's browser Pods,
-when what the Pod answers is the file its image holds there; fail it, and taint the Pod's
-node, when it is anything else."
+when what the Pod answers is the file its image holds there. Only a file the image holds
+is asked for; a Pod that answers 200 with anything else has its node tainted, and any
+other answer just fails the request."
   (destructuring-bind (&optional namespace name &rest rest)
       (uiop:split-string (subseq path (length "/verified/")) :separator '(#\/))
     (flet ((fail (code text)
@@ -268,6 +290,7 @@ node, when it is anything else."
              (backends (and root port (browser-content-backends acceptor service)))
              (request-path (format nil "/~{~A~^/~}" rest)))
         (unless root (fail 404 "no Service here serves checked content by that name"))
+        (unless (browser-content-path-p rest) (fail 404 "not found"))
         (unless backends (fail 503 "no browser is serving this right now; open the join page in one"))
         (destructuring-bind (runtime node pod address) (elt backends (random (length backends)))
           (let* ((reference (browser-content-image pod port))
@@ -278,6 +301,9 @@ node, when it is anything else."
                           (error (condition) (fail 502 (format nil "~A: ~A" reference condition)))))
                  (file (browser-content-file root request-path))
                  (expected (gethash file files)))
+            ;; Only a file the image holds is asked for: what a tab answers for anything
+            ;; else proves nothing, and must not cost it its Pods (podster-k8oi).
+            (unless expected (fail 404 "not found"))
             (multiple-value-bind (status body content-type)
                 (handler-case (fetch-browser-pod
                                address port request-path
@@ -288,36 +314,37 @@ node, when it is anything else."
                                               (browser-join-client-address acceptor request))))
                   (error (condition) (fail 502 (format nil "the browser didn't answer: ~A" condition))))
               (let ((digest (ironclad:byte-array-to-hex-string (ironclad:digest-sequence :sha256 body))))
-                (cond ((and (null expected) (= status 404))
-                       (fail 404 "not found"))
-                      ((not (and expected (= status 200) (string= digest expected)))
-                       (taint-tampered-browser-node
-                        acceptor node (format nil "~A answered ~D for ~A, which ~:[isn't in ~A~;doesn't match ~A~]"
-                                              (gr8s.model::pod-name pod) status file expected reference))
-                       (fail 502 "The browser serving this answered with something other than what its image holds, so it was turned away. Reload to be served by another."))
-                      (t
-                       (incf (browser-join-verified acceptor))
-                       (setf (hunchentoot:content-type*) (or content-type "application/octet-stream")
-                             (hunchentoot:header-out "X-Gr8s-Content-Digest") (format nil "sha256:~A" digest)
-                             (hunchentoot:header-out "X-Gr8s-Served-By") node
-                             (hunchentoot:header-out "Cache-Control") "no-store")
-                       (if (search "text/html" (or content-type ""))
-                           (fill-browser-content
-                            (trivial-utf-8:utf-8-bytes-to-string body)
-                            (list (cons "node" node)
-                                  (cons "pod" (format nil "~A/~A" namespace (gr8s.model::pod-name pod)))
-                                  (cons "browser" (or (browser-runtime-browser runtime) "a web browser"))
-                                  (cons "image" reference)
-                                  (cons "image-digest" (gethash "digest" image ""))
-                                  (cons "image-base" (format nil "~@[~A~]~@[ ~A~]" (gethash "name" labels) (gethash "version" labels)))
-                                  (cons "image-summary" (gethash "summary" labels ""))
-                                  (cons "digest" (format nil "sha256:~A" digest))
-                                  (cons "file" file)
-                                  (cons "up" (let ((seconds (- (get-universal-time) (browser-runtime-joined runtime))))
-                                               (format nil "~D min ~D s" (floor seconds 60) (mod seconds 60))))
-                                  (cons "served-at" (multiple-value-bind (s m h) (decode-universal-time (get-universal-time) 0)
-                                                      (format nil "~2,'0D:~2,'0D:~2,'0D UTC" h m s)))))
-                           body)))))))))))
+                (ecase (browser-content-verdict expected status digest)
+                  (:unavailable
+                   (fail 502 (format nil "The browser serving this couldn't answer (HTTP ~D). Reload to be served by another." status)))
+                  (:tampered
+                   (taint-tampered-browser-node
+                    acceptor node (format nil "~A answered ~A with something that doesn't match ~A"
+                                          (gr8s.model::pod-name pod) file reference))
+                   (fail 502 "The browser serving this answered with something other than what its image holds, so it was turned away. Reload to be served by another."))
+                  (:serve
+                   (incf (browser-join-verified acceptor))
+                   (setf (hunchentoot:content-type*) (or content-type "application/octet-stream")
+                         (hunchentoot:header-out "X-Gr8s-Content-Digest") (format nil "sha256:~A" digest)
+                         (hunchentoot:header-out "X-Gr8s-Served-By") node
+                         (hunchentoot:header-out "Cache-Control") "no-store")
+                   (if (search "text/html" (or content-type ""))
+                       (fill-browser-content
+                        (trivial-utf-8:utf-8-bytes-to-string body)
+                        (list (cons "node" node)
+                              (cons "pod" (format nil "~A/~A" namespace (gr8s.model::pod-name pod)))
+                              (cons "browser" (or (browser-runtime-browser runtime) "a web browser"))
+                              (cons "image" reference)
+                              (cons "image-digest" (gethash "digest" image ""))
+                              (cons "image-base" (format nil "~@[~A~]~@[ ~A~]" (gethash "name" labels) (gethash "version" labels)))
+                              (cons "image-summary" (gethash "summary" labels ""))
+                              (cons "digest" (format nil "sha256:~A" digest))
+                              (cons "file" file)
+                              (cons "up" (let ((seconds (- (get-universal-time) (browser-runtime-joined runtime))))
+                                           (format nil "~D min ~D s" (floor seconds 60) (mod seconds 60))))
+                              (cons "served-at" (multiple-value-bind (s m h) (decode-universal-time (get-universal-time) 0)
+                                                  (format nil "~2,'0D:~2,'0D:~2,'0D UTC" h m s)))))
+                       body)))))))))))
 
 (defparameter +browser-names+ '("Chrome" "Chromium" "Edge" "Firefox" "Safari" "Opera" "Brave" "Vivaldi" "Samsung Internet")
   "The browser names a tab may say it is.")

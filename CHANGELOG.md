@@ -7,6 +7,20 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ## [Unreleased]
 
+### Security
+
+- Checked content no longer lets plain requests evict honest browser nodes
+  (podster-k8oi). A tab was tainted `gr8s.io/tampered:NoExecute` for any answer but
+  the expected file, so a directory without its slash (a redirect), a path with `//`,
+  or an honest error cost it its Pods. Now only files the image holds are asked for,
+  by their plain path, and only a 200 with other bytes taints.
+- A browser node's frames pass to the server only as IPv4 from its Pods' own
+  addresses, or as ARP for them (podster-vlnv). Every other kind, IPv6 included,
+  passed with no NetworkPolicy or source-address check; and without a policy in
+  place, IPv4 wasn't checked for its source either.
+- Another site can't make its visitors browser nodes (podster-zar9): the join page
+  can't be framed, and its WebSocket accepts only the join page's own origin.
+
 ### Fixed
 
 - Pods bound to a Node that no longer exists are deleted, as Kubernetes' Pod garbage

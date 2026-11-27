@@ -1965,7 +1965,7 @@ Returns the server's next message."
          (policy (gr8s.server::make-browser-policy))
          (pod (gr8s.server::browser-network-address network "pod-a")))
     (flet ((admit (direction &rest flow)
-             (gr8s.server::browser-policy-admit-p policy network (apply #'browser-test-frame flow) direction)))
+             (gr8s.server::browser-frame-admit-p policy network (apply #'browser-test-frame flow) direction)))
       ;; Unisolated: anything, but only from the Pod's own address.
       (is-true (admit :egress 6 pod 40000 "10.88.9.9" 443))
       (is-false (admit :egress 6 "10.88.2.77" 40000 "10.88.9.9" 443))
@@ -1981,10 +1981,33 @@ Returns the server's next message."
       (is-true (admit :egress 6 pod 41000 "10.88.3.5" 443))
       (is-true (admit :ingress 6 "10.88.3.5" 443 pod 41000))
       (is-true (admit :ingress 6 (gr8s.server::browser-network-gateway network) 6000 pod 22))
-      ;; Not IPv4 (ARP): passes.
-      (let ((arp (make-array 42 :element-type '(unsigned-byte 8) :initial-element 0)))
-        (setf (aref arp 12) #x08 (aref arp 13) #x06)
-        (is-true (gr8s.server::browser-policy-admit-p policy network arp :egress))))))
+      ;; Only IPv4 and ARP pass, and ARP only for the browser's own Pods (podster-vlnv).
+      (flet ((arp (sender)
+               (let ((frame (make-array 42 :element-type '(unsigned-byte 8) :initial-element 0)))
+                 (replace frame #(#x08 #x06 0 1 #x08 0 6 4 0 1) :start1 12)
+                 (loop for part in (uiop:split-string sender :separator '(#\.)) for i from 28
+                       do (setf (aref frame i) (parse-integer part)))
+                 frame))
+             (passes (frame direction) (gr8s.server::browser-frame-admit-p policy network frame direction)))
+        (is-true (passes (arp pod) :egress))
+        (is-true (passes (arp "0.0.0.0") :egress) "a probe")
+        (is-false (passes (arp (gr8s.server::browser-network-gateway network)) :egress) "the gateway's address")
+        (is-false (passes (arp "10.88.2.77") :egress))
+        (is-true (passes (arp (gr8s.server::browser-network-gateway network)) :ingress))
+        (let ((short (subseq (arp pod) 0 30)))
+          (is-false (passes short :egress)))
+        (let ((ipv6 (make-array 74 :element-type '(unsigned-byte 8) :initial-element 0)))
+          (setf (aref ipv6 12) #x86 (aref ipv6 13) #xdd (aref ipv6 14) #x60)
+          (is-false (passes ipv6 :egress))
+          (is-false (passes ipv6 :ingress)))
+        (let ((tagged (browser-test-frame 6 pod 40000 "10.88.9.9" 443)))
+          (setf (aref tagged 12) #x81 (aref tagged 13) #x00)
+          (is-false (passes tagged :egress) "a VLAN tag"))
+        (let ((truncated (subseq (browser-test-frame 6 pod 40000 "10.88.9.9" 443) 0 20)))
+          (is-false (passes truncated :egress)))
+        ;; Without a policy the same checks hold.
+        (is-false (gr8s.server::browser-frame-admit-p nil network (browser-test-frame 6 "10.88.2.77" 1 "10.88.9.9" 443) :egress))
+        (is-true (gr8s.server::browser-frame-admit-p nil network (browser-test-frame 6 pod 1 "10.88.9.9" 443) :egress))))))
 
 (test daemonsets-skip-browser-nodes-they-could-not-run-on
   ;; A node-exporter tolerating every taint but using the host must not be made for each
@@ -2375,6 +2398,43 @@ Returns the server's next message."
     (is (eq :no (forwarding '("--browser-forward-client-address" "false"))))
     (is (eq :yes (forwarding '("--browser-forward-client-address" "true"))))
     (signals error (forwarding '("--browser-forward-client-address" "maybe")))))
+
+(test checked-content-taints-only-a-tab-that-serves-the-wrong-file
+  ;; Plain requests must not cost an honest tab its Pods (podster-k8oi): a tab is asked
+  ;; only for a file its image holds, by a path its web server reads as that file, and
+  ;; only a 200 with other bytes proves it serves what its image doesn't hold.
+  (flet ((path-p (path) (gr8s.server::browser-content-path-p (uiop:split-string path :separator "/"))))
+    (is (path-p "index.html"))
+    (is (path-p "docs/a.css"))
+    (is (path-p "docs/"))
+    (is (path-p ""))
+    (is (not (path-p "docs//a.css")))
+    (is (not (path-p "/index.html")))
+    (is (not (path-p "docs/../index.html")))
+    (is (not (path-p "./index.html")))
+    (is (not (path-p "%2e%2e/index.html")))
+    (is (not (path-p "docs\\a.css"))))
+  (let ((expected "ab12"))
+    (is (eq :serve (gr8s.server::browser-content-verdict expected 200 "ab12")))
+    (is (eq :tampered (gr8s.server::browser-content-verdict expected 200 "ffff")))
+    (dolist (status '(301 304 404 500 503))
+      (is (eq :unavailable (gr8s.server::browser-content-verdict expected status "ffff"))))))
+
+(test only-the-join-page-itself-may-make-a-browser-a-node
+  ;; Another site must not recruit its visitors (podster-zar9): by framing the join page,
+  ;; or by running the runtime itself against this server. Browsers send Origin on a
+  ;; WebSocket and pages can't forge it; a client that sends none isn't a browser.
+  (flet ((allowed (origin &rest hosts) (gr8s.server::browser-origin-allowed-p origin hosts)))
+    (is (allowed nil "join.demo.gr8s.io"))
+    (is (allowed "https://join.demo.gr8s.io" "join.demo.gr8s.io"))
+    (is (allowed "https://join.demo.gr8s.io" "join.demo.gr8s.io:443"))
+    (is (allowed "https://JOIN.demo.gr8s.io" nil "join.demo.gr8s.io") "behind the Gateway")
+    (is (allowed "http://127.0.0.1:8099" "127.0.0.1:8099"))
+    (is (not (allowed "https://evil.example" "join.demo.gr8s.io")))
+    (is (not (allowed "https://join.demo.gr8s.io.evil.example" "join.demo.gr8s.io")))
+    (is (not (allowed "http://127.0.0.1:8100" "127.0.0.1:8099")))
+    (is (not (allowed "null" "join.demo.gr8s.io")) "a sandboxed frame")
+    (is (not (allowed "https://join.demo.gr8s.io" nil nil)))))
 
 (test browser-peering-says-which-tabs-connect-directly
   ;; Tabs that connect directly learn each other's public address, so by default only
