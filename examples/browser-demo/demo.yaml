@@ -2,7 +2,6 @@
 # (--browser-listen 78.18.12.235:8099 --browser-distro ... --browser-peering all
 # --browser-forward-client-address false) sits behind the Gateway.
 #   https://demo.gr8s.io/       the overview page in site/, served from the demo's own node
-#   https://demo.gr8s.io/k9s/   what the overview's k9s boots, and its tunnels: k9s/
 #   https://join.demo.gr8s.io/  the join page: a tab that opens it becomes a node
 #   https://tabs.demo.gr8s.io/  the page in www/, which every tab serves, checked by the server
 #   https://gr8s.io/            redirects to demo.gr8s.io
@@ -126,81 +125,7 @@ metadata: {name: overview, namespace: demo}
 spec:
   parentRefs: [{name: demo, sectionName: https-apex}]
   hostnames: [demo.gr8s.io]
-  rules:
-  - matches: [{path: {type: PathPrefix, value: /k9s/}}]
-    backendRefs: [{name: k9s, port: 80}]
-  - backendRefs: [{name: overview, port: 80}]
----
-# The overview's k9s (k9s/): the relay serves what the page boots, and passes the reads of
-# k9s in visitors' tabs to the API server as this ServiceAccount. It reads the demo's
-# namespace and the nodes, and nothing else; no Secrets anywhere.
-apiVersion: v1
-kind: ServiceAccount
-metadata: {name: k9s, namespace: demo}
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata: {name: demo-k9s-cluster}
-rules:
-- apiGroups: [""]
-  resources: [nodes, namespaces]
-  verbs: [get, list, watch]
-- apiGroups: [metrics.k8s.io]
-  resources: [nodes]
-  verbs: [get, list]
-- apiGroups: [apiextensions.k8s.io]
-  resources: [customresourcedefinitions]
-  verbs: [get, list, watch]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata: {name: demo-k9s-cluster}
-roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: demo-k9s-cluster}
-subjects: [{kind: ServiceAccount, name: k9s, namespace: demo}]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata: {name: k9s, namespace: demo}
-rules:
-- apiGroups: [""]
-  resources: [pods, pods/log, services, endpoints, events, configmaps, serviceaccounts, persistentvolumeclaims]
-  verbs: [get, list, watch]
-- apiGroups: [apps, batch, autoscaling, policy, discovery.k8s.io, networking.k8s.io, gateway.networking.k8s.io, events.k8s.io]
-  resources: ["*"]
-  verbs: [get, list, watch]
-- apiGroups: [metrics.k8s.io]
-  resources: [pods]
-  verbs: [get, list]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata: {name: k9s, namespace: demo}
-roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: k9s}
-subjects: [{kind: ServiceAccount, name: k9s, namespace: demo}]
----
-apiVersion: apps/v1
-kind: Deployment
-metadata: {name: k9s, namespace: demo}
-spec:
-  selector: {matchLabels: {app: k9s}}
-  template:
-    metadata: {labels: {app: k9s}}
-    spec:
-      nodeSelector: {kubernetes.io/hostname: demo}
-      serviceAccountName: k9s
-      containers:
-      - name: relay
-        image: ghcr.io/atgreen/gr8s-demo-k9s:2
-        ports: [{containerPort: 8080}]
-        readinessProbe: {httpGet: {path: /healthz, port: 8080}}
-        resources: {limits: {memory: 256Mi}}
----
-apiVersion: v1
-kind: Service
-metadata: {name: k9s, namespace: demo}
-spec:
-  selector: {app: k9s}
-  ports: [{name: http, port: 80, targetPort: 8080}]
+  rules: [{backendRefs: [{name: overview, port: 80}]}]
 ---
 # The join page and sessions: serve's --browser-listen on this host.
 apiVersion: v1

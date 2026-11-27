@@ -78,12 +78,6 @@
   ul.points li { margin: 6px 0; }
   ul.points b { color: var(--fg); font-weight: 600; }
   footer { margin-top: 36px; font-size: 14px; color: var(--faint); text-align: center; }
-  #k9s-term { margin-top: 16px; height: 560px; border-radius: 12px; overflow: hidden; background: #0b1020; padding: 8px; }
-  #k9s-term[hidden] { display: none; }
-  .k9s-bar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-top: 16px; }
-  .k9s-bar .note { margin: 0; }
-  button.button { font: inherit; font-weight: 600; cursor: pointer; }
-  button.button:disabled { opacity: .6; cursor: default; transform: none; }
 </style>
 </head>
 <body>
@@ -94,7 +88,6 @@
       <a href="#gr8s">What is gr8s?</a>
       <a href="#how">How it works</a>
       <a href="#tab">In your tab</a>
-      <a href="#k9s">k9s</a>
       <a href="#p2p">Peer to peer</a>
       <a href="#checked">Checked content</a>
       <a href="#safety">Safety and privacy</a>
@@ -246,22 +239,6 @@
     </figure>
   </section>
 
-  <section id="k9s">
-    <h2>Watch the cluster with k9s</h2>
-    <p><a href="https://k9scli.io/">k9s</a> is a popular terminal UI for Kubernetes. The button below runs it in this
-      tab: the unmodified <code>linux/arm64</code> k9s release, in its own Linux VM compiled to WebAssembly, as tabs
-      run Pods. It can read the demo's namespace and its nodes, but not change anything, so you can watch tabs join,
-      Pods start and logs scroll by. The first start downloads up to about 50 MB.</p>
-    <div class="k9s-bar">
-      <button id="k9s-start" class="button primary" type="button">Start k9s</button>
-      <span id="k9s-status" class="note"></span>
-    </div>
-    <div id="k9s-term" hidden></div>
-    <p class="note">Type <code>:nodes</code>, <code>:pods</code>, <code>:deploy</code> or <code>:events</code> and
-      Enter to switch views. Enter opens a row, <code>l</code> shows a Pod's logs, Esc goes back and <code>?</code>
-      lists the other keys. It works best in a desktop browser.</p>
-  </section>
-
   <section id="tab">
     <h2>What runs in your tab</h2>
     <p>The sample app is an ordinary container image for ARM64 (<code>linux/arm64</code>). It is
@@ -344,52 +321,5 @@
   <footer>gr8s browser nodes demo, created by Anthony Green. gr8s is Open Source (Apache 2.0) and available on
     <a href="https://github.com/atgreen/gr8s">GitHub</a>. The demo's own server serves this page, not a tab.</footer>
 </main>
-<script type="module">
-  // k9s (examples/browser-demo/k9s): xterm.js from a CDN, the VM and k9s from /k9s/.
-  const button = document.getElementById("k9s-start");
-  const status = document.getElementById("k9s-status");
-  const box = document.getElementById("k9s-term");
-  const say = (text) => { status.textContent = text; };
-  const script = (src) => new Promise((resolve, reject) => {
-    const s = document.createElement("script");
-    s.src = src; s.onload = resolve; s.onerror = () => reject(new Error(`could not load ${src}`));
-    document.head.append(s);
-  });
-  const clicked = () => new Promise((resolve) => button.addEventListener("click", resolve, { once: true }));
-  (async () => {
-    await clicked();
-    button.disabled = true;
-    try {
-      say("Loading the terminal…");
-      await script("https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js");
-      await script("https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js");
-      const css = document.createElement("link");
-      css.rel = "stylesheet"; css.href = "https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css";
-      document.head.append(css);
-      box.hidden = false;
-      const term = new Terminal({ fontSize: 13, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-                                  theme: { background: "#0b1020" } });
-      const fit = new FitAddon.FitAddon();
-      term.loadAddon(fit);
-      term.open(box);
-      fit.fit();
-      new ResizeObserver(() => fit.fit()).observe(box);
-      const { runK9s } = await import("/k9s/k9s.mjs?v=2");
-      const k9s = await runK9s(term, say);
-      for (;;) {
-        term.focus();
-        await k9s.start();
-        say("k9s has exited.");
-        button.textContent = "Restart k9s";
-        button.disabled = false;
-        await clicked();
-        button.disabled = true;
-        term.reset();
-      }
-    } catch (e) {
-      say(e.message);
-    }
-  })();
-</script>
 </body>
 </html>

@@ -1,6 +1,0 @@
-k9s:
-  readOnly: true
-  skipLatestRevCheck: true
-  refreshRate: 2
-  ui:
-    enableMouse: true
