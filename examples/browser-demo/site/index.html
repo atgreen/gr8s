@@ -36,7 +36,8 @@
   .eyebrow { text-transform: uppercase; letter-spacing: .08em; font-size: 13px; font-weight: 600; color: var(--muted); }
   h1 { font-size: clamp(30px, 5vw, 46px); line-height: 1.12; letter-spacing: -.025em; margin: 8px 0 16px; }
   h1 span { background: linear-gradient(135deg, var(--accent), var(--accent-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
-  .lede { font-size: 19px; color: var(--muted); max-width: 720px; margin: 0; }
+  .lede { font-size: 19px; color: var(--muted); max-width: 720px; margin: 0 0 12px; }
+  .lede:first-of-type { color: var(--fg); }
   .actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 28px; }
   .button { display: inline-flex; align-items: center; gap: 8px; padding: 12px 20px; border-radius: 12px; font-weight: 600;
             text-decoration: none; border: 1px solid var(--line); background: var(--panel); color: var(--fg); box-shadow: var(--shadow); }
@@ -96,10 +97,13 @@
   <div class="hero">
     <div class="eyebrow">gr8s browser nodes demo</div>
     <h1>A cluster whose nodes are <span>browser tabs</span></h1>
-    <p class="lede">Open the join page, and your tab becomes a worker node of a real, Kubernetes-compatible
-      cluster. The scheduler sends it Pods. Each Pod runs in its own Linux VM inside your browser, on the
-      cluster's Pod network, and talks peer to peer with Pods in other visitors' tabs. You install nothing,
-      and when you close the tab, it leaves the cluster.</p>
+    <p class="lede">This is a demonstration of <a href="https://github.com/atgreen/gr8s">gr8s</a>, a
+      Kubernetes-compatible cluster in one executable, and of its ability to run worker nodes in your browser!
+      OK, maybe not so practical, but definitely fun.</p>
+    <p class="lede">Open the join page, and your tab becomes a worker node of the cluster. The scheduler sends it
+      Pods. Each Pod runs in its own Linux VM inside your browser, on the cluster's Pod network, and talks peer to
+      peer with Pods in other visitors' tabs. You install nothing, and when you close the tab, it leaves the
+      cluster.</p>
     <div class="actions">
       <a class="button primary" href="https://join.demo.gr8s.io/">Join with this tab →</a>
       <a class="button" href="https://tabs.demo.gr8s.io/">See the page tabs serve</a>
@@ -110,9 +114,8 @@
 
   <section id="gr8s">
     <h2>What is gr8s?</h2>
-    <p><a href="https://github.com/atgreen/gr8s">gr8s</a> is a Kubernetes-compatible cluster in one executable.
-      It is written from scratch in Common Lisp, and its <code>gr8s doctor</code> reasons with rules in Prolog.
-      The one binary holds the API server, scheduler, controllers, node agent, networking (an eBPF dataplane),
+    <p><a href="https://github.com/atgreen/gr8s">gr8s</a> is a Kubernetes-compatible cluster in one executable,
+      written from scratch in Common Lisp. The one binary holds the API server, scheduler, controllers, node agent, networking (an eBPF dataplane),
       DNS, Gateway, storage and the Raft-replicated datastore. You use it with <code>kubectl</code> and ordinary
       manifests, and it passes the upstream Kubernetes conformance tests.</p>
     <div class="grid2">
