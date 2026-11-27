@@ -645,6 +645,7 @@ pass on the comma-joined line its HTTP client makes of several, Expires dates an
                       (is (search "GET /ws?src=cam HTTP/1.1" *gw-ws-backend-request*))
                       (is (string-equal "Upgrade" (gw-head-header *gw-ws-backend-request* "Connection")))
                       (is (equal "ws.example.com" (gw-head-header *gw-ws-backend-request* "X-Forwarded-Host")))
+                      (is (equal "127.0.0.1" (gw-head-header *gw-ws-backend-request* "X-Forwarded-For")))
                       ;; Quiet past the listener's read timeout, then bytes still flow both ways.
                       (sleep 2.5)
                       (let ((payload (trivial-utf-8:string-to-utf-8-bytes "frame-bytes")))

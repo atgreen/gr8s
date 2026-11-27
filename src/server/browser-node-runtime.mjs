@@ -535,8 +535,9 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
     };
     return nic;
   }
-  let resolveNode, resolveClosed;
-  const node = new Promise((resolve) => (resolveNode = resolve));
+  let resolveNode, rejectNode, resolveClosed;
+  let refusal = null;
+  const node = new Promise((resolve, reject) => { resolveNode = resolve; rejectNode = reject; });
   const closed = new Promise((resolve) => (resolveClosed = resolve));
 
   const send = (message) => {
@@ -561,6 +562,7 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
   };
   socket.onclose = async () => {
     for (const uid of [...pods.keys()]) await deletePod(uid);
+    rejectNode(new Error(refusal ?? "the cluster closed the connection"));
     resolveClosed();
   };
   socket.onmessage = async (event) => {
@@ -587,6 +589,10 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
       const signature = new Uint8Array(await crypto.subtle.sign(
         { name: "ECDSA", hash: "SHA-256" }, pair.privateKey, fromBase64(message.nonce)));
       send({ op: "proof", signature: toBase64(signature) });
+      return;
+    }
+    if (message.op === "refused") {
+      refusal = message.reason;
       return;
     }
     if (message.op === "welcome") {

@@ -81,7 +81,7 @@
                                                (uiop:split-string connection :separator ",")))
                       (when (assoc "transfer-encoding" headers :test #'string-equal) '("content-length"))
                       (when request '("host" "content-length" "content-type"
-                                      "x-forwarded-host" "x-forwarded-uri" "x-forwarded-proto"))
+                                      "x-forwarded-for" "x-forwarded-host" "x-forwarded-uri" "x-forwarded-proto"))
                       (when (and request consume-credential) '("authorization")))))
     (remove-if (lambda (header) (member (car header) hop :test #'string-equal)) headers)))
 

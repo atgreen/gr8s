@@ -2028,6 +2028,23 @@ them. A node can't claim another's address or name."
       (is (null (received "browser-a")))
       (is (equal (list digest) (gethash "browser-a" (gr8s.server::browser-join-holdings listener)))))))
 
+(test browser-joins-are-limited-in-all-and-per-client
+  ;; A public join page must not take every browser that comes: at most so many nodes,
+  ;; and so many from one address. A node already connected may always come back.
+  (let ((acceptor (make-instance 'gr8s.server::browser-join-acceptor :nodes nil :max-nodes 3 :max-per-client 2)))
+    (flet ((connect (name client)
+             (setf (gethash name (gr8s.server::browser-join-sessions acceptor)) t
+                   (gethash name (gr8s.server::browser-join-clients acceptor)) client)))
+      (is (null (gr8s.server::browser-join-refusal acceptor "browser-a" "198.51.100.1")))
+      (connect "browser-a" "198.51.100.1")
+      (connect "browser-b" "198.51.100.1")
+      (is (search "this network" (gr8s.server::browser-join-refusal acceptor "browser-c" "198.51.100.1")))
+      (is (null (gr8s.server::browser-join-refusal acceptor "browser-a" "198.51.100.1")))
+      (is (null (gr8s.server::browser-join-refusal acceptor "browser-c" "203.0.113.9")))
+      (connect "browser-c" "203.0.113.9")
+      (is (search "as many browser nodes as it takes"
+                  (gr8s.server::browser-join-refusal acceptor "browser-d" "203.0.113.10"))))))
+
 (test a-gone-virtual-node-is-removed-after-its-grace
   ;; A browser node whose tab has gone must not stay a NotReady Node forever; within the
   ;; grace it is kept for a reload. Other hosts' nodes and running ones are left alone.

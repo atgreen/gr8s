@@ -256,6 +256,10 @@ names its node, not a Pod."
          (orig-host (hunchentoot:header-in* :host))
          (scheme (if (hunchentoot:acceptor-ssl-p hunchentoot:*acceptor*) "https" "http")))
     (append (list (cons "Host" (or (and rewrite (getf rewrite :hostname)) orig-host))
+                  ;; The client, after any proxies before this one that said so.
+                  (cons "X-Forwarded-For"
+                        (format nil "~@[~A, ~]~A" (hunchentoot:header-in* :x-forwarded-for request)
+                                (hunchentoot:remote-addr request)))
                   (cons "X-Forwarded-Host" orig-host)
                   (cons "X-Forwarded-Proto" scheme)
                   (cons "X-Forwarded-Uri" (hunchentoot:script-name request)))
