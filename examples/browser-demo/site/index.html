@@ -374,7 +374,7 @@
       term.open(box);
       fit.fit();
       new ResizeObserver(() => fit.fit()).observe(box);
-      const { runK9s } = await import("/k9s/k9s.mjs");
+      const { runK9s } = await import("/k9s/k9s.mjs?v=2");
       const k9s = await runK9s(term, say);
       for (;;) {
         term.focus();

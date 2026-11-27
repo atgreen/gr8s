@@ -73,6 +73,21 @@ function tunnelBackend(url) {
   };
 }
 
+// The kernel, downloaded whole and then compiled: compiling as it streams pauses the
+// download, and a pause the server times out can end it early yet cleanly. A copy that
+// does not compile is fetched once more past the browser's cache.
+async function loadKernel(url) {
+  for (const cache of ["default", "reload"]) {
+    const response = await fetch(url, { cache });
+    if (!response.ok) throw new Error(`Downloading the kernel failed: HTTP ${response.status}`);
+    try {
+      return await WebAssembly.compile(await response.arrayBuffer());
+    } catch (e) {
+      if (cache === "reload") throw new Error(`The kernel did not compile: ${e.message}`);
+    }
+  }
+}
+
 // Boots the VM and runs k9s in TERM (an xterm.js Terminal, already open and fitted).
 // status(text) reports progress. Resolves with { restart, stop } once k9s runs.
 export async function runK9s(term, status) {
@@ -81,8 +96,11 @@ export async function runK9s(term, status) {
   const base = new URL(".", import.meta.url);
   const tunnel = new URL("tunnel", base);
   tunnel.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  status("Downloading Linux…");
+  const kernel = await loadKernel(new URL("unkernel/unkernel.wasm", base).href);
   status("Starting Linux…");
   const vm = await createKernel({
+    kernel,
     distro: new URL("k9s.erofs", base).href,
     memoryMiB: 384,
     net: tunnelBackend(tunnel.href),
