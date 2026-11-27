@@ -30,6 +30,8 @@ the handler for the messages it sends unasked."
   (next-id 0)
   (replies (make-hash-table))
   (closed nil)
+  ;; When a frame last came from the browser, in internal real time.
+  (heard (get-internal-real-time))
   ;; This session's epoch: every request carries it, and the browser acts only on its own.
   (epoch 0)
   (on-message nil)
@@ -107,6 +109,7 @@ and wake every waiting request. Returns when the connection has ended."
          (handler-case
              (loop
                (multiple-value-bind (opcode payload) (gr8s.protocol::read-websocket-frame stream)
+                 (setf (browser-session-heard session) (get-internal-real-time))
                  (case opcode
                    (1 (let ((message (ignore-errors (com.inuoe.jzon:parse payload))))
                         (when (hash-table-p message) (browser-session-receive session message))))
@@ -123,6 +126,35 @@ and wake every waiting request. Returns when the connection has ended."
         (setf (browser-session-closed session) t)
         (bt:condition-notify (browser-session-changed session)))
       (ignore-errors (close stream)))))
+
+(defparameter +browser-session-silence-seconds+ 10
+  "How long a browser may say nothing, not even answer a ping, before its session ends.")
+
+(defun start-browser-session-watchdog (session silence)
+  "Ping SESSION's browser every half of SILENCE seconds, and end the session once nothing
+has come from it for SILENCE seconds: a tab whose machine slept or lost its network
+leaves no closed connection behind for a long while. A browser answers pings by itself,
+however busy or hidden its page is."
+  (bt:make-thread
+   (lambda ()
+     (loop until (browser-session-closed session)
+           do (loop repeat (round (* 10 silence) 2)
+                    until (browser-session-closed session) do (sleep 0.1))
+              (when (browser-session-closed session) (return))
+              (when (> (- (get-internal-real-time) (browser-session-heard session))
+                       (* silence internal-time-units-per-second))
+                (format t "gr8s browser session silent for ~Ds; ending it~%" silence)
+                (ignore-errors (stop-reading-websocket (browser-session-stream session)))
+                (return))
+              (handler-case
+                  (bt:with-lock-held ((browser-session-write-lock session))
+                    (gr8s.protocol::write-websocket-frame (browser-session-stream session) 9
+                                                          (make-array 0 :element-type '(unsigned-byte 8)))
+                    (force-output (browser-session-stream session)))
+                (error ()
+                  (ignore-errors (stop-reading-websocket (browser-session-stream session)))
+                  (return)))))
+   :name "gr8s browser session watchdog"))
 
 ;;; The runtime
 
@@ -708,6 +740,12 @@ others go through this host.")
            :documentation "The last epoch each node's session had.")
    (runtimes :initform (make-hash-table :test #'equal :synchronized t) :reader browser-join-runtimes
              :documentation "Each connected browser node's runtime, by node name.")
+   (silence-seconds :initarg :silence-seconds :initform +browser-session-silence-seconds+
+                    :reader browser-join-silence-seconds
+                    :documentation "How long a browser may say nothing before its session ends, or NIL.")
+   (stopping :initform nil :accessor browser-join-stopping
+             :documentation "Whether this listener is stopping: its sessions end with the server,
+and their nodes are only stopped, for their tabs to come back to.")
    (max-nodes :initarg :max-nodes :initform 64 :reader browser-join-max-nodes
               :documentation "How many browser nodes may be connected at once.")
    (max-per-client :initarg :max-per-client :initform 4 :reader browser-join-max-per-client
@@ -940,6 +978,8 @@ stops with the session."
                    (start-browser-node-reporter session (virtual-node-host-store host) name
                                                 :pod-proxy (browser-join-pod-proxy acceptor)
                                                 :runtime runtime :acceptor acceptor)
+                   (when (browser-join-silence-seconds acceptor)
+                     (start-browser-session-watchdog session (browser-join-silence-seconds acceptor)))
                    (run-browser-session session))))
            (error (condition)
              (format *error-output* "gr8s browser node~@[ ~A~]: ~A~%" name condition)))
@@ -952,9 +992,17 @@ stops with the session."
           (when (and runtime (browser-runtime-network runtime))
             (stop-browser-network-device (browser-runtime-network runtime))))
         (remhash name (browser-join-runtimes acceptor))
-        (stop-virtual-node host name)
+        ;; The tab has stopped its Pods as it went, so its node goes with them, unless the
+        ;; server is the one stopping.
+        (if (or (browser-join-stopping acceptor) (virtual-node-host-stopping host))
+            (stop-virtual-node host name)
+            (remove-virtual-node host name))
         (format t "gr8s browser node ~A left~%" name))
       (ignore-errors (close stream)))))
+
+(defmethod hunchentoot:stop :before ((acceptor browser-join-acceptor) &key soft)
+  (declare (ignore soft))
+  (setf (browser-join-stopping acceptor) t))
 
 (defmethod hunchentoot:acceptor-dispatch-request ((acceptor browser-join-acceptor) request)
   (let ((path (hunchentoot:script-name request)))
@@ -1149,18 +1197,21 @@ process hosts none."
 (defun start-browser-join-listener (nodes address port &key distro pod-proxy pod-network images
                                                              (max-nodes 64) (max-per-client 4)
                                                              (peering :same-network) ice-servers stun
-                                                             (forward-client-address t))
+                                                             (forward-client-address t)
+                                                             (silence-seconds +browser-session-silence-seconds+))
   "Listen on ADDRESS:PORT for browsers joining as nodes on NODES, serving the join page and
 DISTRO, the root image file Pods boot from, and with POD-PROXY, HTTP to their Pods. With
 POD-NETWORK, their Pods join the cluster network through this host. At most MAX-NODES are
 connected at once, MAX-PER-CLIENT of them from one address. PEERING says which tabs connect
 directly; they find each other with ICE-SERVERS (URLs) and, with STUN, (address port), a
 STUN responder this listener runs. FORWARD-CLIENT-ADDRESS says whether checked content tells
-a browser Pod the visitor's address. Returns the acceptor."
+a browser Pod the visitor's address. A browser silent for SILENCE-SECONDS (NIL: however
+long) is taken to have gone. Returns the acceptor."
   (let ((acceptor (make-instance 'browser-join-acceptor
                                     :address address :port port :nodes nodes :pod-proxy pod-proxy
                                     :max-nodes max-nodes :max-per-client max-per-client :peering peering
                                     :forward-client-address forward-client-address
+                                    :silence-seconds silence-seconds
                                     :ice-servers (map 'vector (lambda (url) (core-object "urls" url)) ice-servers)
                                     :pod-network pod-network
                                     :images (and images (make-browser-images images))

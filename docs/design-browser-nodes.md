@@ -64,7 +64,12 @@ events are the code native nodes already run, and the browser can't see or bypas
 them.
 
 The scheduler, leases, cordon and drain, DaemonSets, affinity, topology spread and
-Jobs all work unchanged. A closed tab is a node whose lease expires.
+Jobs all work unchanged. A tab that closes takes its node with it: when its session
+ends, the server deletes the Node, then its Pods, so their controllers place
+replacements on other nodes within seconds. The tab has already stopped those Pods as
+it went. A tab that stops answering is taken to have closed: the server pings each
+tab every 5 s and ends a session that has been silent for 10 s. A server that stops
+leaves its tabs' nodes for them to come back to.
 
 ### Registration
 

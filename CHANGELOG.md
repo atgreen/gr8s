@@ -23,6 +23,11 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- A browser node whose tab closes is deleted at once, with its Pods, so their
+  controllers start replacements elsewhere within seconds (podster-yucg). The Node
+  used to stay until its lease lapsed and the Pod garbage collector caught up. A tab
+  that stops answering pings for 10 s, because its machine slept or lost its
+  network, counts as closed.
 - Pods bound to a Node that no longer exists are deleted, as Kubernetes' Pod garbage
   collector does, once the Node has been gone 40 s, so their controllers replace them
   (podster-k988). A browser node whose tab closed left its Pods bound for good, not
