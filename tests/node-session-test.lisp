@@ -2028,6 +2028,27 @@ them. A node can't claim another's address or name."
       (is (null (received "browser-a")))
       (is (equal (list digest) (gethash "browser-a" (gr8s.server::browser-join-holdings listener)))))))
 
+(test a-gone-virtual-node-is-removed-after-its-grace
+  ;; A browser node whose tab has gone must not stay a NotReady Node forever; within the
+  ;; grace it is kept for a reload. Other hosts' nodes and running ones are left alone.
+  (with-temporary-store (store path)
+    (let ((host (gr8s.server::make-virtual-node-host store nil nil (merge-pathnames "virtual/" path)
+                                                     :host-node "host")))
+      (flet ((node (name cidr labels)
+               (gr8s.controllers::register-node
+                store (gr8s.model::make-node-record :id name :name name :pod-cidr cidr))
+               (gr8s.resources::set-node-labels-and-taints store name labels #())))
+        (node "browser-gone" "10.88.1.0/24" (gr8s.resources::core-object "gr8s.io/virtual" "true" "gr8s.io/virtual-host" "host"))
+        (node "browser-elsewhere" "10.88.2.0/24" (gr8s.resources::core-object "gr8s.io/virtual" "true" "gr8s.io/virtual-host" "other"))
+        (node "worker" "10.88.3.0/24" (gr8s.resources::core-object))
+        (ensure-directories-exist (merge-pathnames "virtual/browser-gone/node.crt" path))
+        (is (null (gr8s.server::virtual-node-host-sweep host :now 1000 :grace 300)))
+        (is (null (gr8s.server::virtual-node-host-sweep host :now 1299 :grace 300)))
+        (is (equal '("browser-gone") (gr8s.server::virtual-node-host-sweep host :now 1300 :grace 300)))
+        (is (equal '("browser-elsewhere" "worker")
+                   (mapcar #'gr8s.model::node-record-name (gr8s.controllers::list-nodes store))))
+        (is (null (probe-file (merge-pathnames "virtual/browser-gone/" path))))))))
+
 (test control-plane-logs-come-from-the-assigned-remote-agent
   (with-temporary-store (store path)
     (gr8s.controllers::register-node

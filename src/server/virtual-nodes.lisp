@@ -28,7 +28,10 @@
 HOST-NODE names the node of this process, through which their Pods are routed."
   store server pki state-root host-node endpoint-slot
   (nodes (make-hash-table :test #'equal))
-  (lock (bt:make-lock "gr8s virtual nodes")))
+  (lock (bt:make-lock "gr8s virtual nodes"))
+  ;; Nodes of this host found gone, by name, with when they were first found so.
+  (gone (make-hash-table :test #'equal))
+  sweeper (stopping nil))
 
 (defun make-virtual-node-host (store server pki state-root &key host-node endpoint)
   "A host for virtual nodes enrolled through the node SERVER with PKI, storing each
@@ -96,6 +99,58 @@ node that stops does. Returns true when NAME was running here."
         #'string<))
 
 (defun stop-virtual-nodes (host)
-  "Stop every node HOST runs."
+  "Stop every node HOST runs, and its sweeper."
+  (setf (virtual-node-host-stopping host) t)
   (dolist (name (virtual-node-names host))
     (stop-virtual-node host name)))
+
+;;; A browser node is as lasting as its tab: every new tab or browser is a new node, so
+;;; one that is gone must not stay a NotReady Node forever. A node this host carried that
+;;; is no longer running here and not Ready is removed once it has stayed so for a grace
+;;; period, in which a reloaded tab comes back as the same node, and its enrollment goes
+;;; with it. Its Pods were already rescheduled when it went NotReady.
+
+(defparameter +virtual-node-grace-seconds+ 300
+  "How long a virtual node that has gone stays a Node, for its browser to come back.")
+
+(defun virtual-node-host-sweep (host &key (now (get-universal-time)) (grace +virtual-node-grace-seconds+))
+  "Remove HOST's virtual nodes that have been gone, not running here and not Ready, for
+GRACE seconds by NOW, with their agent state. Returns the names removed."
+  (let* ((store (virtual-node-host-store host))
+         (running (virtual-node-names host))
+         (gone (virtual-node-host-gone host))
+         (removed '()))
+    (dolist (node (gr8s.controllers::list-nodes store))
+      (let* ((name (gr8s.model::node-record-name node))
+             (labels (or (gr8s.model::node-record-labels node) (core-object)))
+             (ours (and (equal "true" (gethash "gr8s.io/virtual" labels))
+                        (equal (virtual-node-host-host-node host) (gethash "gr8s.io/virtual-host" labels)))))
+        (cond ((or (not ours) (member name running :test #'equal) (gr8s.model::node-record-ready-p node))
+               (remhash name gone))
+              ((null (gethash name gone))
+               (setf (gethash name gone) now))
+              ((>= (- now (gethash name gone)) grace)
+               (with-store-lock (store)
+                 (let ((current (gr8s.controllers::get-node-unlocked store name)))
+                   (when current (gr8s.apiserver::remove-node-unlocked store current))))
+               (ignore-errors
+                (uiop:delete-directory-tree
+                 (merge-pathnames (format nil "~A/" name) (virtual-node-host-state-root host))
+                 :validate t :if-does-not-exist :ignore))
+               (remhash name gone)
+               (push name removed)))))
+    (dolist (name removed)
+      (format t "gr8s virtual node ~A removed after ~Ds gone~%" name grace))
+    removed))
+
+(defun start-virtual-node-sweeper (host &key (interval 60))
+  "Sweep HOST's gone virtual nodes every INTERVAL seconds until its nodes are stopped."
+  (setf (virtual-node-host-sweeper host)
+        (bt:make-thread
+         (lambda ()
+           (loop until (virtual-node-host-stopping host)
+                 do (handler-case (virtual-node-host-sweep host)
+                      (error (condition)
+                        (format *error-output* "gr8s virtual node sweep: ~A~%" condition)))
+                    (loop repeat (* 10 interval) until (virtual-node-host-stopping host) do (sleep 0.1))))
+         :name "gr8s virtual node sweeper")))
