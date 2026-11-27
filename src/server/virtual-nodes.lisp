@@ -73,7 +73,7 @@ enrollment fails. Returns the virtual-node."
     (let ((node (%make-virtual-node
                  name directory
                  (start-local-node-agent (virtual-node-host-server host) pki name directory
-                                         (or runtime-options (list :runtime "fake"))
+                                         (list* :virtual t (or runtime-options (list :runtime "fake")))
                                          :endpoints (list (virtual-node-host-endpoint host))))))
       (bt:with-lock-held ((virtual-node-host-lock host))
         (setf (gethash name (virtual-node-host-nodes host)) node))

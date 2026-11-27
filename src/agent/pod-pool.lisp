@@ -201,11 +201,17 @@ when the link still exists -- what `gr8s doctor --fix` uses to recognize gr8s-ow
                              (handler-case (funcall link-reader (getf route :index))
                                (rtnetlink-error (condition)
                                  (if (= 19 (rtnetlink-error-errno condition)) :gone nil)))))
-               (allowed (and identities attributes
+               (allowed (or
+                         ;; A browser node's device on the node hosting it (podster-57fv):
+                         ;; its serve owns the device and the route to that node's Pod CIDR.
+                         (and (hash-table-p attributes)
+                              (uiop:string-prefix-p "gb-" (or (netlink-link-name attributes) ""))
+                              (gr8s.network::network-link-kind-p attributes "tun"))
+                         (and identities attributes
                              (or (eq :gone attributes)
                                  (some (lambda (identity)
                                          (route-link-matches-identity-p attributes identity))
-                                       identities)))))
+                                       identities))))))
           (unless allowed
             (push (list :cidr (getf route :cidr) :table (getf route :table)
                         :index (getf route :index 0)
