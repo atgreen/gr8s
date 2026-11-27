@@ -257,6 +257,10 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- A browser tab no longer retries a direct link to a peer it can't reach on every
+  packet (podster-99q4): after a failure it waits 10 s, doubling up to 10 minutes,
+  and meanwhile sends that peer's traffic and layer requests through the server
+  without waiting on a link.
 - A followed flow stream (the dashboard's Network tab, `gr8s doctor observe -f`) no
   longer loses a node for good when that node's stream ends, as when its agent
   restarts in a rolling upgrade: the node is asked again every 2 seconds, resuming
