@@ -120,9 +120,9 @@ there is no arm64 image."
       (multiple-value-bind (registry repository tag) (parse-image-reference reference)
         (let* ((token (list nil credential))
                (accept (format nil "~{~A~^, ~}" +browser-image-manifest-types+))
-               (manifest (com.inuoe.jzon:parse
-                          (registry-fetch registry repository (format nil "/v2/~A/manifests/~A" repository tag)
-                                          accept token))))
+               (bytes (registry-fetch registry repository (format nil "/v2/~A/manifests/~A" repository tag)
+                                      accept token))
+               (manifest (com.inuoe.jzon:parse bytes)))
           (when (gethash "manifests" manifest)
             (let ((entry (find-if (lambda (entry)
                                     (let ((platform (gethash "platform" entry)))
@@ -132,10 +132,10 @@ there is no arm64 image."
                                   (gethash "manifests" manifest))))
               (unless entry
                 (error 'runtime-error :message (format nil "~A has no linux/arm64 image" reference)))
-              (setf manifest (com.inuoe.jzon:parse
-                              (registry-fetch registry repository
-                                              (format nil "/v2/~A/manifests/~A" repository (gethash "digest" entry))
-                                              accept token)))))
+              (setf bytes (registry-fetch registry repository
+                                          (format nil "/v2/~A/manifests/~A" repository (gethash "digest" entry))
+                                          accept token)
+                    manifest (com.inuoe.jzon:parse bytes))))
           (let* ((config (com.inuoe.jzon:parse
                           (registry-fetch registry repository
                                           (format nil "/v2/~A/blobs/~A" repository
@@ -153,6 +153,12 @@ there is no arm64 image."
                                                        (core-object "digest" (gethash "digest" layer)
                                                                     "mediaType" type))))
                                        (gethash "layers" manifest #()))
+                         ;; The arm64 manifest's digest, from the bytes the server read, and the
+                         ;; image's labels: what a page from it may say about it.
+                         "digest" (format nil "sha256:~(~A~)" (ironclad:byte-array-to-hex-string
+                                                               (ironclad:digest-sequence :sha256 (coerce bytes (quote (simple-array (unsigned-byte 8) (*)))))))
+                         "labels" (let ((labels (gethash "Labels" run)))
+                                    (if (hash-table-p labels) labels (core-object)))
                          "config" (core-object "Entrypoint" (gethash "Entrypoint" run 'null)
                                                "Cmd" (gethash "Cmd" run 'null)
                                                "Env" (gethash "Env" run #())
