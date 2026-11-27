@@ -638,6 +638,9 @@ others go through this host.")
               :documentation "How many browser nodes may be connected at once.")
    (max-per-client :initarg :max-per-client :initform 4 :reader browser-join-max-per-client
                    :documentation "How many of them may come from one client address.")
+   (exec-listener :initform nil :accessor browser-join-exec-listener
+                  :documentation "The loopback listener serving this listener's exec streams, when
+this one listens elsewhere: the kubelet takes only loopback streaming URLs.")
    (clients :initform (make-hash-table :test #'equal :synchronized t) :reader browser-join-clients
             :documentation "The client address of each connected browser node, by node name.")
    (verified :initform 0 :accessor browser-join-verified
@@ -762,11 +765,7 @@ stops with the session."
                                (1+ (gethash name (browser-join-epochs acceptor) 0)))
                          (gethash name (browser-join-sessions acceptor)) session)
                    (setf (gethash "zone" hello) zone))
-                 (let ((runtime (make-browser-runtime
-                                 session (list (let ((address (hunchentoot:acceptor-address acceptor)))
-                                                 (if (member address '(nil "0.0.0.0") :test #'equal)
-                                                     "127.0.0.1" address))
-                                               (hunchentoot:acceptor-port acceptor))))
+                 (let ((runtime (make-browser-runtime session (browser-join-exec-endpoint acceptor)))
                        (architecture (if (equal "amd64" (gethash "arch" hello)) "amd64" "arm64")))
                    (start-virtual-node host name
                                        :labels (core-object "gr8s.io/browser" "true"
@@ -836,7 +835,7 @@ stops with the session."
            (serve-browser-content acceptor request path))
           ((and (uiop:string-prefix-p "/pods/" path) (browser-join-pod-proxy acceptor))
            (proxy-browser-pod acceptor request path))
-          ((and (uiop:string-prefix-p "/exec/" path)
+          ((and (uiop:string-prefix-p "/exec/" path) (null (browser-join-exec-listener acceptor))
                 (string-equal (hunchentoot:header-in :upgrade request) "SPDY/3.1"))
            (serve-browser-exec (subseq path 6)))
           ((and (equal path "/socket")
@@ -1012,5 +1011,40 @@ connected at once, MAX-PER-CLIENT of them from one address. Returns the acceptor
                                     :access-log-destination nil
                                     :message-log-destination *error-output*)))
     (hunchentoot:start acceptor)
+    (unless (loopback-address-p address)
+      (let ((exec (make-instance 'browser-exec-acceptor :address "127.0.0.1" :port 0
+                                                        :access-log-destination nil
+                                                        :message-log-destination *error-output*)))
+        (hunchentoot:start exec)
+        (setf (browser-join-exec-listener acceptor) exec)))
     (push acceptor *browser-join-listeners*)
     acceptor))
+
+(defun loopback-address-p (address)
+  "Whether a listener on ADDRESS is reached at a streaming URL the kubelet takes
+(gr8s.protocol's: 127.0.0.1 or localhost), as one on all addresses is."
+  (member address '(nil "0.0.0.0" "127.0.0.1" "localhost") :test #'equal))
+
+(defclass browser-exec-acceptor (hunchentoot:easy-acceptor) ()
+  (:documentation "Serves browser Pods' exec streams on loopback, for the kubelet."))
+
+(defmethod hunchentoot:acceptor-dispatch-request ((acceptor browser-exec-acceptor) request)
+  (let ((path (hunchentoot:script-name request)))
+    (if (and (uiop:string-prefix-p "/exec/" path)
+             (string-equal (hunchentoot:header-in :upgrade request) "SPDY/3.1"))
+        (serve-browser-exec (subseq path 6))
+        (progn (setf (hunchentoot:return-code*) 404) ""))))
+
+(defun browser-join-exec-endpoint (acceptor)
+  "Where ACCEPTOR's exec streams are served, as (address port): always a loopback address."
+  (let ((exec (browser-join-exec-listener acceptor)))
+    (if exec
+        (list "127.0.0.1" (usocket:get-local-port (hunchentoot::acceptor-listen-socket exec)))
+        (list (let ((address (hunchentoot:acceptor-address acceptor)))
+                (if (member address '(nil "0.0.0.0") :test #'equal) "127.0.0.1" address))
+              (hunchentoot:acceptor-port acceptor)))))
+
+(defmethod hunchentoot:stop :after ((acceptor browser-join-acceptor) &key soft)
+  (declare (ignore soft))
+  (let ((exec (shiftf (browser-join-exec-listener acceptor) nil)))
+    (when exec (ignore-errors (hunchentoot:stop exec :soft nil)))))
