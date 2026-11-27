@@ -244,6 +244,16 @@ podster-135e and podster-i8my) still help native nodes.
   (unkernel's `vm.output`), each the last 1 MiB, read from the tab's memory through
   `joinCluster(...).output(namespace, name)`. Nothing is fetched from the server, and
   nothing new is disclosed: the tab's owner holds the VMs anyway.
+- **Restarts and upgrades** (podster-w22b). When its session ends without the tab
+  leaving, as when the server restarts, the page waits for the server to answer (2 s
+  doubling to a minute, with jitter so tabs don't return at once) and then reloads, so
+  it rejoins under the same identity on whatever the server now runs. It waits first
+  because a reload while the server is down would leave the browser's error page with
+  nothing to try again. The page is served `Cache-Control: no-store` and loads the
+  runtime at `browser-node-runtime.mjs?v=HASH`, the first 16 hex digits of its SHA-256,
+  also `no-store`, so a reload always runs the current runtime; the unkernel SDK (an
+  exact CDN version) and the layer cache stay cached. The welcome names the runtime's
+  hash, and a tab running another one reloads.
 - **DNS.** Each container root gets the kubelet's `/etc/resolv.conf` (the hosting
   node's 169.254.1.1, searches from the Pod's namespace) and an `/etc/hosts`.
 - **Images** (`src/server/browser-images.lisp`). Not erofs: the server resolves the
