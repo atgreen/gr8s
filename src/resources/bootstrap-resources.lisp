@@ -183,6 +183,36 @@
          (when hostnames
            (bootstrap-string-array hostnames "spec.hostnames")))))))
 
+(defun validate-acme-issuer-spec (acme)
+  "The ACME issuer gr8s implements: an https directory, an account key Secret and
+   HTTP-01 solvers answered by the Gateway. DNS-01, Ingress solvers and external
+   account binding fail closed rather than being silently ignored."
+  (let ((server (require-nonempty-string (gethash "server" acme) "spec.acme.server")))
+    (unless (uiop:string-prefix-p "https://" server)
+      (core-resource-error 422 "Invalid" "spec.acme.server must be an https:// URL")))
+  ;; Optional upstream; the pure-tls client always registers a contact address.
+  (require-nonempty-string (gethash "email" acme) "spec.acme.email")
+  (let ((profile (gethash "profile" acme)))
+    (when profile (require-nonempty-string profile "spec.acme.profile")))
+  (let ((skip (gethash "skipTLSVerify" acme)))
+    (unless (member skip '(nil t))
+      (core-resource-error 422 "Invalid" "spec.acme.skipTLSVerify must be a boolean")))
+  (when (gethash "externalAccountBinding" acme)
+    (core-resource-error 422 "Invalid" "spec.acme.externalAccountBinding is not implemented"))
+  (require-nonempty-string (gethash "name" (require-object (gethash "privateKeySecretRef" acme)
+                                                           "spec.acme.privateKeySecretRef"))
+                           "spec.acme.privateKeySecretRef.name")
+  (let ((solvers (gethash "solvers" acme)))
+    (unless (and (vectorp solvers) (not (stringp solvers)) (plusp (length solvers)))
+      (core-resource-error 422 "Invalid" "spec.acme.solvers must be a nonempty array"))
+    (loop for solver across solvers
+          for http01 = (gethash "http01" (require-object solver "spec.acme.solvers[]"))
+          do (when (gethash "dns01" solver)
+               (core-resource-error 422 "Invalid" "spec.acme.solvers[].dns01 is not implemented"))
+             (unless (and (hash-table-p http01) (hash-table-p (gethash "gatewayHTTPRoute" http01)))
+               (core-resource-error 422 "Invalid"
+                                    "spec.acme.solvers[] must configure http01.gatewayHTTPRoute; other solvers are not implemented")))))
+
 (defun validate-cert-manager-resource (resource object)
   "Validate a cert-manager.io/v1 object against the subset gr8s implements. Fails
    closed (422) on unsupported issuer types or missing required fields."
@@ -203,7 +233,14 @@
              ((equal type "ca")
               (let ((ca (require-object (gethash "ca" spec) "spec.ca")))
                 (require-nonempty-string (gethash "secretName" ca) "spec.ca.secretName")))
+             ((equal type "acme")
+              (validate-acme-issuer-spec (require-object (gethash "acme" spec) "spec.acme")))
              (t (core-resource-error 422 "Invalid" "Issuer type ~A is not implemented" type))))))
+      ((equal resource "challenges")
+       (dolist (field '("url" "authorizationURL" "dnsName" "type" "token" "key"))
+         (require-nonempty-string (gethash field spec) (format nil "spec.~A" field)))
+       (unless (equal (gethash "type" spec) "HTTP-01")
+         (core-resource-error 422 "Invalid" "spec.type: only HTTP-01 challenges are implemented")))
       ((equal resource "certificates")
        (require-nonempty-string (gethash "secretName" spec) "spec.secretName")
        (let ((ref (require-object (gethash "issuerRef" spec) "spec.issuerRef")))
@@ -341,7 +378,7 @@
                                            "tcproutes" "tlsroutes" "grpcroutes") :test #'equal)
                         '("spec" "status"))
                        ((member resource '("issuers" "clusterissuers"
-                                           "certificates" "certificaterequests") :test #'equal)
+                                           "certificates" "certificaterequests" "challenges") :test #'equal)
                         '("spec" "status"))
                        ;; ClusterTrustBundle carries only a spec (signerName +
                        ;; trustBundle PEM); it has no status subresource.
@@ -410,7 +447,7 @@
        (validate-gateway-resource resource object)
        (when (gateway-status-resource-p resource)
          (normalize-gateway-status resource object name namespace store)))
-      ((member resource '("issuers" "clusterissuers" "certificates" "certificaterequests")
+      ((member resource '("issuers" "clusterissuers" "certificates" "certificaterequests" "challenges")
                :test #'equal)
        (validate-cert-manager-resource resource object))
       ((equal resource "clustertrustbundles")
@@ -479,7 +516,8 @@
     ("issuers" () ("cert-manager"))
     ("clusterissuers" () ("cert-manager"))
     ("certificates" ("cert" "certs") ("cert-manager"))
-    ("certificaterequests" ("cr" "crs") ("cert-manager")))
+    ("certificaterequests" ("cr" "crs") ("cert-manager"))
+    ("challenges" () ("cert-manager" "cert-manager-acme")))
   "Each entry: resource, short names, categories, as Kubernetes v1.36 publishes them in
 api/discovery. Clients resolve `kubectl get ns` and `kubectl get all` through these alone.")
 

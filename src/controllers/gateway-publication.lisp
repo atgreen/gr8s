@@ -13,7 +13,8 @@
     (let ((sequence (incf (control-plane-runtime-gateway-change-sequence runtime))))
       (dolist (change changes)
         (let ((resource (gethash "resource" change)))
-          (when (member resource '("gatewayclasses" "gateways" "httproutes" "tcproutes" "tlsroutes" "grpcroutes")
+          (when (member resource '("gatewayclasses" "gateways" "httproutes" "tcproutes" "tlsroutes" "grpcroutes"
+                                     "challenges")
                         :test #'equal)
             (let* ((new (gethash "new" change))
                    (object (if (hash-table-p new) new (gethash "old" change)))

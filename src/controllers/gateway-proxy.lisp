@@ -435,6 +435,51 @@ Named, as OTel's HTTP conventions ask, by the method and the route that matched.
             (error condition)
             (gateway-error-response 502 "the gateway backend connection failed: ~A" condition))))))
 
+;;; ---------------------------------------------------------------------------
+;;; ACME HTTP-01 answers. The cert-manager ACME issuer writes a Challenge; the
+;;; node's Gateway view carries it here, and every listener answers its token
+;;; for its dnsName before route matching, as an http01 gatewayHTTPRoute solver
+;;; would. No solver Pod or HTTPRoute is needed.
+
+(defparameter +gateway-acme-challenge-prefix+ "/.well-known/acme-challenge/"
+  "The RFC 8555 section 8.3 path an ACME server fetches a key authorization from.")
+
+(defvar *gateway-acme-challenges* (make-hash-table :test 'equal)
+  "Token -> (dnsName . key authorization) for this node's pending HTTP-01
+   Challenges. Replaced whole, never mutated, so listener threads read it unlocked.")
+
+(defun gateway-acme-challenge-table (store)
+  "Index the HTTP-01 Challenges in the Gateway view STORE by token."
+  (let ((table (make-hash-table :test 'equal)))
+    (dolist (challenge (ignore-errors (list-core-resources store "challenges")))
+      (let ((spec (gethash "spec" challenge)))
+        (when (and (hash-table-p spec) (equal "HTTP-01" (gethash "type" spec)))
+          (let ((token (gethash "token" spec)) (host (gethash "dnsName" spec)) (key (gethash "key" spec)))
+            (when (and (stringp token) (stringp host) (stringp key))
+              (setf (gethash token table) (cons host key)))))))
+    table))
+
+(defun gateway-acme-challenge-answer (request)
+  "The key authorization REQUEST asks for, or NIL when it is not a GET for a
+   pending token whose dnsName is the request's host."
+  (let ((path (hunchentoot:script-name request)))
+    (when (and (member (hunchentoot:request-method request) '(:get :head))
+               (uiop:string-prefix-p +gateway-acme-challenge-prefix+ path))
+      (let ((entry (gethash (subseq path (length +gateway-acme-challenge-prefix+))
+                            *gateway-acme-challenges*))
+            (host (gateway-request-host request)))
+        (when (and entry host (string-equal host (car entry)))
+          (cdr entry))))))
+
+(defmethod hunchentoot:acceptor-dispatch-request :around ((acceptor gateway-acceptor) request)
+  (let ((answer (and (plusp (hash-table-count *gateway-acme-challenges*))
+                     (gateway-acme-challenge-answer request))))
+    (if answer
+        (progn (setf (hunchentoot:return-code*) 200
+                     (hunchentoot:content-type*) "text/plain")
+               answer)
+        (call-next-method))))
+
 (defmethod hunchentoot:acceptor-dispatch-request ((acceptor gateway-acceptor) request)
   (let* ((dispatch (gateway-dispatch-for-request acceptor request))
          (started (get-internal-real-time))

@@ -7,7 +7,7 @@
 
 (defparameter +gateway-config-resources+
   '("gatewayclasses" "gateways" "httproutes" "tcproutes" "tlsroutes" "grpcroutes"
-    "services" "endpointslices" "secrets" "ingressclasses" "ingresses"))
+    "services" "endpointslices" "secrets" "ingressclasses" "ingresses" "challenges"))
 
 (defun gateway-resource-change-key (change)
   "Validate a public Gateway resource key and return (resource namespace name)."

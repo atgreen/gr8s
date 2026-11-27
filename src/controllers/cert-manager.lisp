@@ -11,11 +11,21 @@
 ;;;; before expiry. The resulting Secret is exactly what a Gateway HTTPS listener
 ;;;; consumes, so a Certificate closes the TLS loop end to end.
 ;;;;
-;;;; Scope: this is a compatible subset, not full cert-manager. selfSigned and ca
-;;;; issuers are implemented; acme/vault/venafi are rejected at admission. The ca
+;;;; Scope: this is a compatible subset, not full cert-manager. selfSigned, ca and
+;;;; acme issuers are implemented; vault/venafi are rejected at admission. The ca
 ;;;; issuer signs from the gr8s cluster CA rather than an arbitrary Secret-held CA
 ;;;; (reusing the in-image PKI); Secret-sourced CAs and standalone
 ;;;; CertificateRequest issuance are tracked follow-ups.
+;;;;
+;;;; The acme issuer (Let's Encrypt or any RFC 8555 server) supports HTTP-01
+;;;; through http01.gatewayHTTPRoute solvers only. It drives the pure-tls ACME
+;;;; client one step per reconcile pass, keeps the account key in the Secret
+;;;; named by privateKeySecretRef, and writes an acme.cert-manager.io/v1
+;;;; Challenge per pending authorization. Challenges travel to every node in the
+;;;; Gateway projection, where the Gateway listeners answer
+;;;; /.well-known/acme-challenge/<token> before route matching. Order progress
+;;;; lives in memory: a restart or leader change abandons it and starts a new
+;;;; order, which the ACME server satisfies from its still-valid authorizations.
 
 (in-package #:gr8s.controllers)
 
@@ -142,8 +152,8 @@
 ;;; Issuer resolution.
 
 (defun cm-resolve-issuer-spec (store namespace issuer-ref)
-  "Return the issuer spec object for a Certificate's issuerRef, or NIL when the
-   referenced Issuer/ClusterIssuer does not exist."
+  "Return the issuer spec object for a Certificate's issuerRef, and the issuer
+   itself, or NIL when the referenced Issuer/ClusterIssuer does not exist."
   (let ((name (and issuer-ref (gethash "name" issuer-ref)))
         (kind (or (and issuer-ref (gethash "kind" issuer-ref)) "Issuer")))
     (when name
@@ -151,7 +161,7 @@
                      (if (equal kind "ClusterIssuer")
                          (get-core-resource store "clusterissuers" nil name)
                          (get-core-resource store "issuers" namespace name)))))
-        (and object (gethash "spec" object))))))
+        (and object (values (gethash "spec" object) object))))))
 
 (defun cm-issuer-signer (pki issuer-spec)
   "Classify an issuer spec. Returns :self-signed, or (values ca-subject-der
@@ -274,38 +284,42 @@
 (defun cm-issue-certificate (store pki certificate)
   "Issue (or reissue) CERTIFICATE through its referenced issuer and persist the
    Secret and status. Returns T when it issued, NIL when it could not (missing or
-   unsupported issuer)."
+   unsupported issuer, or an ACME order still in progress)."
   (let* ((metadata (gethash "metadata" certificate))
          (namespace (gethash "namespace" metadata))
          (name (gethash "name" metadata))
          (spec (gethash "spec" certificate))
-         (secret-name (gethash "secretName" spec))
-         (issuer-spec (cm-resolve-issuer-spec store namespace (gethash "issuerRef" spec))))
-    (when issuer-spec
-      (multiple-value-bind (issuer-subject-der signer-key issuer-certificate) (cm-issuer-signer pki issuer-spec)
-        (when issuer-subject-der                       ; NIL => unsupported issuer type
-          (multiple-value-bind (cert-pem key-pem not-before not-after)
-              (cm-issue-leaf :common-name (gethash "commonName" spec)
-                             :dns-names (cm-string-list spec "dnsNames")
-                             :ip-addresses (cm-string-list spec "ipAddresses")
-                             :uris (cm-string-list spec "uris")
-                             :email-addresses (cm-string-list spec "emailAddresses")
-                             :duration-seconds (cm-parse-duration (gethash "duration" spec))
-                             :issuer-subject-der (unless (eq issuer-subject-der :self-signed) issuer-subject-der)
-                             :signer-key (unless (eq issuer-subject-der :self-signed) signer-key)
-                             :issuer-certificate issuer-certificate)
-            (cm-write-tls-secret store namespace secret-name cert-pem key-pem certificate)
-            (cm-set-ready-status store namespace name not-before not-after
-                                 (cm-renewal-time spec not-before not-after))
-            t))))))
+         (secret-name (gethash "secretName" spec)))
+    (multiple-value-bind (issuer-spec issuer) (cm-resolve-issuer-spec store namespace (gethash "issuerRef" spec))
+      (when (and issuer-spec (gethash "acme" issuer-spec))
+        (return-from cm-issue-certificate (cm-acme-reconcile store certificate issuer)))
+      (when issuer-spec
+        (multiple-value-bind (issuer-subject-der signer-key issuer-certificate) (cm-issuer-signer pki issuer-spec)
+          (when issuer-subject-der                       ; NIL => unsupported issuer type
+            (multiple-value-bind (cert-pem key-pem not-before not-after)
+                (cm-issue-leaf :common-name (gethash "commonName" spec)
+                               :dns-names (cm-string-list spec "dnsNames")
+                               :ip-addresses (cm-string-list spec "ipAddresses")
+                               :uris (cm-string-list spec "uris")
+                               :email-addresses (cm-string-list spec "emailAddresses")
+                               :duration-seconds (cm-parse-duration (gethash "duration" spec))
+                               :issuer-subject-der (unless (eq issuer-subject-der :self-signed) issuer-subject-der)
+                               :signer-key (unless (eq issuer-subject-der :self-signed) signer-key)
+                               :issuer-certificate issuer-certificate)
+              (cm-write-tls-secret store namespace secret-name cert-pem key-pem certificate)
+              (cm-set-ready-status store namespace name not-before not-after
+                                   (cm-renewal-time spec not-before not-after))
+              t)))))))
 
 (defun reconcile-certificates (store pki)
   "Control-plane reconcile: issue/renew every Certificate whose Secret is missing
    or due. Fail-soft per Certificate, like the other control-plane reconcilers."
-  (dolist (certificate (list-core-resources store "certificates"))
-    (handler-case
-        (when (cm-certificate-needs-issue-p store certificate)
-          (cm-issue-certificate store pki certificate))
-      (error (condition)
-        (format *error-output* "gr8s: Certificate reconcile failed: ~A~%" condition))))
+  (let ((certificates (list-core-resources store "certificates")))
+    (dolist (certificate certificates)
+      (handler-case
+          (when (cm-certificate-needs-issue-p store certificate)
+            (cm-issue-certificate store pki certificate))
+        (error (condition)
+          (format *error-output* "gr8s: Certificate reconcile failed: ~A~%" condition))))
+    (cm-acme-forget-orders-except certificates))
   store)

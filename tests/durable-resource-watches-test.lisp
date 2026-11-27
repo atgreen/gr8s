@@ -171,6 +171,11 @@
            (setf (gethash "spec" object)
                  (gr8s.resources::core-object "issuerRef" (gr8s.resources::core-object "name" "watched")
                                     "request" "Zm9v")))
+          ((equal resource "challenges")
+           (setf (gethash "spec" object)
+                 (gr8s.resources::core-object "url" "https://acme.test/chall/1" "authorizationURL" "https://acme.test/authz/1"
+                                    "dnsName" "watched.example.com" "type" "HTTP-01"
+                                    "token" "watched" "key" "watched.thumb")))
           ((equal resource "clusternetworkpolicies")
            (setf (gethash "spec" object)
                  (gr8s.resources::core-object "tier" "Baseline" "priority" 10

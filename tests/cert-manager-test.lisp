@@ -62,7 +62,7 @@
     (check-core-status 201 "/api/v1/namespaces" :method :post
                        :object (cm-parse "{\"apiVersion\":\"v1\",\"kind\":\"Namespace\",\"metadata\":{\"name\":\"certs\"}}"))
     (flet ((bad (collection json) (check-core-status 422 collection :method :post :object (cm-parse json))))
-      ;; Issuer with no configured type, two types, or an unimplemented type.
+      ;; Issuer with no configured type, two types, or an incomplete acme issuer.
       (bad "/apis/cert-manager.io/v1/clusterissuers"
            "{\"apiVersion\":\"cert-manager.io/v1\",\"kind\":\"ClusterIssuer\",\"metadata\":{\"name\":\"empty\"},\"spec\":{}}")
       (bad "/apis/cert-manager.io/v1/clusterissuers"

@@ -4129,8 +4129,11 @@ upstream CRDs.
 - **cert-manager (`cert-manager.io/v1`): built in.** gr8s implements Issuer,
   ClusterIssuer, Certificate and CertificateRequest with a native controller --
   do NOT install upstream cert-manager or its CRDs. It is a compatible subset:
-  `selfSigned` and `ca` issuers only (acme/vault/venafi are rejected at
-  admission), and a `ca` issuer signs from the gr8s cluster CA, not from a
+  `selfSigned`, `ca` and `acme` issuers (vault/venafi are rejected at
+  admission). `acme` (e.g. Let's Encrypt) validates with HTTP-01 through
+  `http01.gatewayHTTPRoute` solvers only: the Gateway's port-80 HTTP listener
+  answers the `acme.cert-manager.io/v1` Challenges itself, so give the Gateway an
+  HTTP listener on 80 and create no solver routes. A `ca` issuer signs from the gr8s cluster CA, not from a
   Secret-held CA (any `spec.ca.secretName` is ignored). A Certificate's issued
   key pair is written to its `spec.secretName` as a `kubernetes.io/tls` Secret,
   so a Gateway/Ingress TLS listener can reference it directly. To give services
