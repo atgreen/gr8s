@@ -21,6 +21,15 @@ has just joined does not vote yet, and the others cannot elect a leader without 
                        (getf (gr8s.ha:ha-control-plane-membership hcp) :members))))
     (and (= count (length roles)) (every (lambda (role) (eq :voter role)) roles))))
 
+(defun every-member-sees-voters-p (members count)
+  "Whether each control plane in MEMBERS, in its own view, has COUNT members that all vote.
+A member's view changes only when it applies the configuration entry, and a
+follower learns that the entry is committed from the leader's next message. Until
+then a joiner is still a learner to itself and to the other followers, so if the
+leader stops first, the survivors cannot elect anyone. Wait on every view, not
+only the leader's, before stopping the leader."
+  (every (lambda (member) (control-plane-voters-p member count)) members))
+
 (defun configmap-input (name key value)
   (com.inuoe.jzon:parse
    (format nil "{\"apiVersion\":\"v1\",\"kind\":\"ConfigMap\",\"metadata\":{\"name\":\"~A\",\"namespace\":\"default\"},\"data\":{\"~A\":\"~A\"}}"

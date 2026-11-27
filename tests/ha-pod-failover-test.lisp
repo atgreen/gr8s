@@ -298,7 +298,7 @@
                        (is (eq t committed))
                        (is (equal '(:pod-conflict) result))))
                    ;; Kill the leader; a survivor still has the Pod, same UID.
-                   (is (poll-until (lambda () (control-plane-voters-p h1 3)) :timeout 20)
+                   (is (poll-until (lambda () (every-member-sees-voters-p (list h1 h2 h3) 3)) :timeout 20)
                        "both joiners vote before the leader is stopped")
                    (gr8s.ha::stop-ha-control-plane h1)
                    (setf h1 nil)

@@ -116,7 +116,7 @@
                      "promotion installs one active CA and retiring key on every voter")
                  ;; A member that has just joined does not vote yet. Without both
                  ;; votes the survivors cannot elect anyone, however long they wait.
-                 (is (poll-until (lambda () (control-plane-voters-p founder 3)) :timeout 20)
+                 (is (poll-until (lambda () (every-member-sees-voters-p (list founder h2 h3) 3)) :timeout 20)
                      "both joiners have become voters")
                  (gr8s.ha::stop-ha-control-plane founder)
                  (is (poll-until
