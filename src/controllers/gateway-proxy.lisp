@@ -443,9 +443,9 @@ Named, as OTel's HTTP conventions ask, by the method and the route that matched.
 ;;; ACME HTTP-01 answers. The cert-manager ACME issuer writes a Challenge; the
 ;;; node's Gateway view carries it here. A listener answers its token before
 ;;; route matching only where an HTTPRoute from the Challenge's namespace, with
-;;; the solver's parentRefs, could attach and serve its dnsName -- the access an
-;;; upstream http01 gatewayHTTPRoute solver route would have. No solver Pod or
-;;; HTTPRoute is needed.
+;;; the solver's parentRefs, could attach and would be the one serving its
+;;; dnsName -- the access an upstream http01 gatewayHTTPRoute solver route would
+;;; have. No solver Pod or HTTPRoute is needed.
 
 (defparameter +gateway-acme-challenge-prefix+ "/.well-known/acme-challenge/"
   "The RFC 8555 section 8.3 path an ACME server fetches a key authorization from.")
@@ -464,34 +464,52 @@ Named, as OTel's HTTP conventions ask, by the method and the route that matched.
     (if (vectorp refs) (coerce refs 'list) '())))
 
 (defun gateway-acme-listener-serves-p (store entry challenge)
-  "True when ENTRY's listener could carry a solver HTTPRoute for CHALLENGE: it
-   covers the dnsName, admits routes from the Challenge's namespace, and is
-   one of the solver's parentRefs when the solver names any."
+  "True when a solver HTTPRoute for CHALLENGE could attach to ENTRY's listener:
+   the listener admits routes from the Challenge's namespace and is one of the
+   solver's parentRefs. With no parentRefs the route attaches nowhere, and so
+   does the answer. Whether ENTRY is the listener that serves the host is the
+   caller's question."
   (let* ((listener (gateway-listener-entry-listener entry))
          (owner (gateway-listener-entry-owner entry))
          (owner-metadata (gethash "metadata" owner))
-         (namespace (gethash "namespace" (gethash "metadata" challenge)))
-         (host (gethash "dnsName" (gethash "spec" challenge)))
-         (refs (gateway-acme-solver-parent-refs challenge)))
-    (and (null (gateway-listener-entry-error entry))
-         (member (gethash "protocol" listener) '("HTTP" "HTTPS") :test #'equal)
-         (let ((covered (gateway-hostname-intersection (gethash "hostname" listener) host)))
-           (and (stringp covered) (string-equal host covered)))
-         (gateway-listener-allows-route-p
+         (namespace (gethash "namespace" (gethash "metadata" challenge))))
+    (and (gateway-listener-allows-route-p
           store (core-object "kind" "HTTPRoute" "metadata" (core-object "namespace" namespace))
           (gethash "namespace" owner-metadata) listener)
-         (or (null refs)
-             (some (lambda (ref)
-                     (gateway-parent-matches-p ref namespace
-                                               (gethash "namespace" owner-metadata) (gethash "name" owner-metadata)
-                                               (gethash "name" listener) (gethash "port" listener)
-                                               (or (gethash "kind" owner) "Gateway")
-                                               (gateway-listener-owner-group owner)))
-                   refs)))))
+         (some (lambda (ref)
+                 (gateway-parent-matches-p ref namespace
+                                           (gethash "namespace" owner-metadata) (gethash "name" owner-metadata)
+                                           (gethash "name" listener) (gethash "port" listener)
+                                           (or (gethash "kind" owner) "Gateway")
+                                           (gateway-listener-owner-group owner)))
+               (gateway-acme-solver-parent-refs challenge)))))
+
+(defun gateway-acme-port-indexes (store)
+  "Port -> hostname index of the HTTP listener entries on it, in the order the
+   listener planner admits them, as the router's HTTP snapshot indexes them, so
+   a host selects the listener real requests for it would reach. HTTP-01 is
+   plain HTTP, so HTTPS listeners never answer."
+  (let ((entries-by-port (make-hash-table))
+        (listener-sets (ignore-errors (list-core-resources store "listenersets"))))
+    (dolist (gateway (list-core-resources store "gateways"))
+      (when (gateway-controlled-p store gateway)
+        (dolist (entry (gateway-listener-entries store gateway listener-sets))
+          (let ((listener (gateway-listener-entry-listener entry)))
+            (when (and (null (gateway-listener-entry-error entry))
+                       (equal "HTTP" (gethash "protocol" listener)))
+              (push (list (gethash "hostname" listener) entry)
+                    (gethash (gethash "port" listener) entries-by-port)))))))
+    (let ((indexes (make-hash-table)))
+      (maphash (lambda (port entries)
+                 (setf (gethash port indexes) (make-gateway-certificate-index (nreverse entries))))
+               entries-by-port)
+      indexes)))
 
 (defun gateway-acme-challenge-table (store)
   "Index the HTTP-01 Challenges in the Gateway view STORE by the listener
-   ports allowed to answer them, then by token."
+   ports allowed to answer them, then by token. On each port, only the
+   listener that wins the Challenge's dnsName, as the router picks it, may
+   answer, and only if a solver route could attach to it."
   (let ((table (make-hash-table))
         (challenges (remove-if-not
                      (lambda (challenge)
@@ -500,18 +518,16 @@ Named, as OTel's HTTP conventions ask, by the method and the route that matched.
                               (every (lambda (field) (stringp (gethash field spec))) '("dnsName" "token" "key")))))
                      (ignore-errors (list-core-resources store "challenges")))))
     (when challenges
-      (let ((listener-sets (ignore-errors (list-core-resources store "listenersets"))))
-        (dolist (gateway (list-core-resources store "gateways"))
-          (when (gateway-controlled-p store gateway)
-            (dolist (entry (gateway-listener-entries store gateway listener-sets))
-              (dolist (challenge challenges)
-                (when (gateway-acme-listener-serves-p store entry challenge)
-                  (let ((spec (gethash "spec" challenge))
-                        (port (gethash "port" (gateway-listener-entry-listener entry))))
-                    (setf (gethash (gethash "token" spec)
-                                   (or (gethash port table)
-                                       (setf (gethash port table) (make-hash-table :test 'equal))))
-                          (cons (gethash "dnsName" spec) (gethash "key" spec)))))))))))
+      (maphash (lambda (port index)
+                 (dolist (challenge challenges)
+                   (let* ((spec (gethash "spec" challenge))
+                          (winner (gateway-certificate-for-host index (gethash "dnsName" spec))))
+                     (when (and winner (gateway-acme-listener-serves-p store winner challenge))
+                       (setf (gethash (gethash "token" spec)
+                                      (or (gethash port table)
+                                          (setf (gethash port table) (make-hash-table :test 'equal))))
+                             (cons (gethash "dnsName" spec) (gethash "key" spec)))))))
+               (gateway-acme-port-indexes store)))
     table))
 
 (defun gateway-acme-challenge-answer (acceptor request)

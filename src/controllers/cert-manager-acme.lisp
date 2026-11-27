@@ -96,6 +96,27 @@
   "Stand in for the client's sleep: give up the step and come back later."
   (error 'cm-acme-deferred :seconds (max 1 (ceiling (or seconds 1)))))
 
+(define-condition cm-acme-fenced (error) ()
+  (:report "the control-plane leadership this ACME step began under has ended"))
+
+(defun cm-acme-check-fence ()
+  "Refuse a store write from a step whose leadership has ended: a demoted
+   leader's writes are forwarded to the new one and would race its orders."
+  (unless (funcall *cm-acme-fence*)
+    (error 'cm-acme-fenced)))
+
+(defvar *cm-acme-leadership-generation* nil
+  "The leadership generation the in-memory orders and clients belong to.")
+
+(defun cm-acme-note-leadership (generation)
+  "Forget every order and client from an earlier leadership: steps still
+   running under it are fenced, and whatever they left is cleaned up."
+  (bt:with-lock-held (*cm-acme-lock*)
+    (unless (eql generation *cm-acme-leadership-generation*)
+      (clrhash *cm-acme-orders*)
+      (clrhash *cm-acme-clients*)
+      (setf *cm-acme-leadership-generation* generation))))
+
 (defvar *cm-acme-tls-verify* :required
   "The drakma :verify for ACME requests: :required unless the issuer sets
    skipTLSVerify (for a test server such as Pebble).")
@@ -126,7 +147,9 @@
                       (lambda (condition)
                         (cm-acme-defer (max *cm-acme-rate-limit-floor*
                                             (or (pure-tls/acme:acme-http-error-retry-after condition) 0))))))
-       ,@body)))
+       ;; One request at a time per client: they share its nonce and account URL.
+       (bt:with-lock-held ((pure-tls/acme::acme-client-lock ,client))
+         ,@body))))
 
 (defun cm-acme-check-status (what response status &optional (ok '(200 201)))
   "Signal unless STATUS is one of OK, naming WHAT and the server's problem."
@@ -224,6 +247,7 @@
         (let* ((key (ironclad:generate-key-pair :secp256r1))
                (pem (ag-grpc:base64-encode (trivial-utf-8:string-to-utf-8-bytes
                                             (pure-tls/acme::encode-ec-private-key-pem key)))))
+          (cm-acme-check-fence)
           (if secret
               (update-core-resource store "secrets" namespace name
                 (lambda (existing)
@@ -231,11 +255,18 @@
                     (setf (gethash "data" existing) (core-object)))
                   (setf (gethash field (gethash "data" existing)) pem)
                   existing))
-              (create-core-resource store "secrets"
-                                    (core-object "apiVersion" "v1" "kind" "Secret"
-                                                 "metadata" (core-object "name" name "namespace" namespace)
-                                                 "type" "Opaque" "data" (core-object field pem))
-                                    namespace))
+              (handler-case
+                  (create-core-resource store "secrets"
+                                        (core-object "apiVersion" "v1" "kind" "Secret"
+                                                     "metadata" (core-object "name" name "namespace" namespace)
+                                                     "type" "Opaque" "data" (core-object field pem))
+                                        namespace)
+                ;; Issuers sharing the Secret share the account: another step's
+                ;; key won the race, so use that one.
+                (kubernetes-error (condition)
+                  (if (ignore-errors (get-core-resource store "secrets" namespace name))
+                      (return-from cm-acme-account-key (cm-acme-account-key store issuer))
+                      (error condition)))))
           key))))
 
 (defvar *cm-acme-clients* (make-hash-table :test 'equal)
@@ -255,6 +286,7 @@
   "Report the registered account on the issuer, as cert-manager does, once."
   (let ((metadata (gethash "metadata" issuer)))
     (unless (equal account-url (cm-acme-field-of-status issuer))
+      (cm-acme-check-fence)
       (ignore-errors
        (update-core-resource store (cm-acme-issuer-resource issuer)
                              (gethash "namespace" metadata) (gethash "name" metadata)
@@ -275,18 +307,37 @@
   "Guards *cm-acme-orders* and *cm-acme-clients*, shared by the reconcile pass
    and the step threads.")
 
+(defvar *cm-acme-registration-locks* (make-hash-table :test 'equal)
+  "Issuer identity -> the lock held while that issuer's client registers, so
+   concurrent steps for one issuer register once and other issuers never wait.")
+
+(defun cm-acme-registration-lock (identity)
+  (bt:with-lock-held (*cm-acme-lock*)
+    (or (gethash identity *cm-acme-registration-locks*)
+        (setf (gethash identity *cm-acme-registration-locks*)
+              (bt:make-lock "gr8s ACME registration")))))
+
+(defun cm-acme-cached-client (identity)
+  (bt:with-lock-held (*cm-acme-lock*) (gethash identity *cm-acme-clients*)))
+
 (defun cm-acme-client (store issuer)
-  "A registered client for ISSUER, cached across passes."
+  "A registered client for ISSUER, cached across passes. Only a registration
+   waits, and only for another registration of the same issuer."
   (let ((identity (cm-acme-issuer-identity issuer)))
-    (or (bt:with-lock-held (*cm-acme-lock*) (gethash identity *cm-acme-clients*))
-        (let ((acme (gethash "acme" (gethash "spec" issuer))))
-          (multiple-value-bind (client account-url)
-              (cm-acme-account *cm-acme-backend* (gethash "server" acme) (gethash "email" acme)
-                               (cm-acme-account-key store issuer)
-                               :skip-tls-verify (gethash "skipTLSVerify" acme))
-            (cm-acme-record-account store issuer account-url)
-            (bt:with-lock-held (*cm-acme-lock*)
-              (setf (gethash identity *cm-acme-clients*) client)))))))
+    (or (cm-acme-cached-client identity)
+        (bt:with-lock-held ((cm-acme-registration-lock identity))
+          (cm-acme-client-locked store issuer identity)))))
+
+(defun cm-acme-client-locked (store issuer identity)
+  (or (cm-acme-cached-client identity)
+      (let ((acme (gethash "acme" (gethash "spec" issuer))))
+        (multiple-value-bind (client account-url)
+            (cm-acme-account *cm-acme-backend* (gethash "server" acme) (gethash "email" acme)
+                             (cm-acme-account-key store issuer)
+                             :skip-tls-verify (gethash "skipTLSVerify" acme))
+          (cm-acme-record-account store issuer account-url)
+          (bt:with-lock-held (*cm-acme-lock*)
+            (setf (gethash identity *cm-acme-clients*) client))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Challenges.
@@ -299,11 +350,42 @@
                   0 10)))
 
 (defun cm-acme-http01-solver (issuer)
-  "The first http01 gatewayHTTPRoute solver; selectors are not implemented."
+  "The first http01 gatewayHTTPRoute solver with parentRefs; selectors are not
+   implemented. A solver route without parents attaches to no listener, so its
+   challenges could never validate."
   (find-if (lambda (solver)
-             (let ((http01 (gethash "http01" solver)))
-               (and (hash-table-p http01) (hash-table-p (gethash "gatewayHTTPRoute" http01)))))
+             (let* ((http01 (gethash "http01" solver))
+                    (route (and (hash-table-p http01) (gethash "gatewayHTTPRoute" http01)))
+                    (refs (and (hash-table-p route) (gethash "parentRefs" route))))
+               (and (vectorp refs) (not (stringp refs)) (plusp (length refs)))))
            (gethash "solvers" (gethash "acme" (gethash "spec" issuer)) #())))
+
+(defparameter +cm-acme-no-solver-message+
+  "No http01.gatewayHTTPRoute solver names parentRefs, so no Gateway listener would answer its challenges"
+  "Why an acme issuer places no orders.")
+
+(defun cm-acme-report-unusable-issuer (store issuer certificate)
+  "Say on ISSUER and CERTIFICATE, once, why no order is placed for it."
+  (let ((metadata (gethash "metadata" issuer)))
+    (unless (equal +cm-acme-no-solver-message+
+                   (let ((condition (cm-acme-status-condition issuer "Ready")))
+                     (and condition (gethash "message" condition))))
+      (cm-acme-check-fence)
+      (ignore-errors
+       (update-core-resource store (cm-acme-issuer-resource issuer)
+                             (gethash "namespace" metadata) (gethash "name" metadata)
+         (lambda (object)
+           (unless (hash-table-p (gethash "status" object))
+             (setf (gethash "status" object) (core-object)))
+           (cm-acme-set-condition (gethash "status" object) "Ready" "False" "NoUsableSolver"
+                                  +cm-acme-no-solver-message+)
+           object)))))
+  (unless (equal +cm-acme-no-solver-message+
+                 (let ((condition (cm-acme-status-condition certificate "Ready")))
+                   (and condition (gethash "message" condition))))
+    (cm-acme-update-status store certificate
+      (lambda (status)
+        (cm-acme-set-condition status "Ready" "False" "NoUsableSolver" +cm-acme-no-solver-message+)))))
 
 (defun cm-acme-write-challenge (store certificate issuer authorization-url dns-name challenge key)
   "Create the Challenge the Gateway answers for DNS-NAME's pending authorization;
@@ -333,11 +415,13 @@
                           "issuerRef" (copy-core-object (gethash "issuerRef" (gethash "spec" certificate))))
                   "status" (core-object "processing" t "presented" t "state" "pending"))))
     (unless (ignore-errors (get-core-resource store "challenges" namespace name))
+      (cm-acme-check-fence)
       (create-core-resource store "challenges" object namespace))
     name))
 
 (defun cm-acme-delete-challenges (store namespace names)
   (dolist (name names)
+    (cm-acme-check-fence)
     (ignore-errors (delete-core-resource store "challenges" namespace name))))
 
 (defun cm-acme-challenge-owner-uid (challenge)
@@ -364,6 +448,7 @@
 (defun cm-acme-update-status (store certificate function)
   "Apply FUNCTION to CERTIFICATE's stored status object (created when absent)."
   (let ((metadata (gethash "metadata" certificate)))
+    (cm-acme-check-fence)
     (ignore-errors
      (update-core-resource store "certificates" (gethash "namespace" metadata) (gethash "name" metadata)
        (lambda (object)
@@ -451,8 +536,17 @@
          (client (cm-acme-client store issuer))
          (backend *cm-acme-backend*))
     (unless (cm-acme-http01-solver issuer)
-      (error "the issuer has no http01 gatewayHTTPRoute solver"))
+      (error "~A" +cm-acme-no-solver-message+))
     (unless (cm-acme-order-order-url order)
+      ;; The pass may have read the Certificate before another step issued it.
+      (let* ((metadata (gethash "metadata" certificate))
+             (current (ignore-errors (get-core-resource store "certificates" (gethash "namespace" metadata)
+                                                        (gethash "name" metadata)))))
+        (unless (and current
+                     (equal (gethash "uid" metadata) (gethash "uid" (gethash "metadata" current)))
+                     (cm-certificate-needs-issue-p store current))
+          (setf (cm-acme-order-next order) (+ now *cm-acme-poll-interval*))
+          (return-from cm-acme-start-order nil)))
       ;; A new order answers only its own tokens: clear any an earlier one left.
       (let ((uid (gethash "uid" (gethash "metadata" certificate))))
         (dolist (challenge (list-core-resources store "challenges" (gethash "namespace" (gethash "metadata" certificate))))
@@ -512,7 +606,9 @@
          (leaf (first certificates))
          (not-before (pure-tls:certificate-not-before leaf))
          (not-after (pure-tls:certificate-not-after leaf)))
+    (cm-acme-check-fence)
     (cm-write-tls-secret store namespace (gethash "secretName" spec) pem key-pem certificate)
+    (cm-acme-check-fence)
     (cm-set-ready-status store namespace (gethash "name" metadata) not-before not-after
                          (cm-renewal-time spec not-before not-after))
     (cm-acme-delete-challenges store namespace (mapcar #'first (cm-acme-order-challenges order)))
@@ -618,11 +714,27 @@
     (cm-acme-deferred (condition)
       (setf (cm-acme-order-next order) (+ now (cm-acme-deferred-seconds condition)))
       nil)
+    (cm-acme-fenced ()
+      (cm-acme-forget certificate order))
     (sb-sys:deadline-timeout ()
-      (cm-acme-fail store certificate order
-                    (format nil "an ACME step took longer than ~D seconds" *cm-acme-step-deadline*) now))
+      (cm-acme-fail-unless-fenced store certificate order
+                                  (format nil "an ACME step took longer than ~D seconds" *cm-acme-step-deadline*)
+                                  now))
     (error (condition)
-      (cm-acme-fail store certificate order condition now))))
+      (cm-acme-fail-unless-fenced store certificate order condition now))))
+
+(defun cm-acme-forget (certificate order)
+  "Drop ORDER from memory without touching the store."
+  (let ((uid (gethash "uid" (gethash "metadata" certificate))))
+    (bt:with-lock-held (*cm-acme-lock*)
+      (when (eq order (gethash uid *cm-acme-orders*))
+        (remhash uid *cm-acme-orders*))))
+  nil)
+
+(defun cm-acme-fail-unless-fenced (store certificate order condition now)
+  "Record the failure, unless leadership ended first: then only forget ORDER."
+  (handler-case (cm-acme-fail store certificate order condition now)
+    (cm-acme-fenced () (cm-acme-forget certificate order))))
 
 (defun cm-acme-run-step-in-thread (thunk)
   (bt:make-thread thunk :name "gr8s ACME step"))
@@ -637,6 +749,10 @@
          (stale nil)
          (order nil))
     (push uid *cm-acme-active*)
+    ;; An issuer that can't validate anything places no orders and burns no backoff.
+    (unless (cm-acme-http01-solver issuer)
+      (cm-acme-report-unusable-issuer store issuer certificate)
+      (return-from cm-acme-reconcile nil))
     (bt:with-lock-held (*cm-acme-lock*)
       (setf order (gethash uid *cm-acme-orders*))
       (when (and order (cm-acme-order-running order))
@@ -653,9 +769,9 @@
       (when (< now (cm-acme-order-next order))
         (return-from cm-acme-reconcile nil))
       (setf (cm-acme-order-running order) t))
-    (let ((backend *cm-acme-backend*) (clock *cert-manager-clock*))
+    (let ((backend *cm-acme-backend*) (clock *cert-manager-clock*) (fence *cm-acme-fence*))
       (funcall *cm-acme-run-step*
                (lambda ()
-                 (let ((*cm-acme-backend* backend) (*cert-manager-clock* clock))
+                 (let ((*cm-acme-backend* backend) (*cert-manager-clock* clock) (*cm-acme-fence* fence))
                    (unwind-protect (cm-acme-step store certificate issuer order now)
                      (setf (cm-acme-order-running order) nil))))))))

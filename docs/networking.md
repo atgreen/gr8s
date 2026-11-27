@@ -521,10 +521,12 @@ Supported today:
   configuration. A Gateway listener answers
   `GET /.well-known/acme-challenge/<token>` for the Challenge's host before any
   route matching, but only where the solver HTTPRoute cert-manager would create
-  could attach: the listener's hostname covers the host, its `allowedRoutes`
-  admit the Certificate's namespace, and it is one of the solver's
-  `gatewayHTTPRoute.parentRefs` when those are given. No solver Pod or HTTPRoute
-  is created. The Gateway needs an `HTTP` listener on port 80 that the public
+  would serve the host: on each HTTP port, the HTTP listener that wins the host (exact
+  hostname, then the longest wildcard, then one with no hostname, as requests
+  are routed) must admit the Certificate's namespace in its `allowedRoutes` and
+  be one of the solver's `gatewayHTTPRoute.parentRefs`. Admission requires
+  `parentRefs`: a solver route with none attaches nowhere. No solver Pod or
+  HTTPRoute is created. The Gateway needs an `HTTP` listener on port 80 that the public
   name reaches; see the example below.
 - **L4 routing** for TCPRoute (TCP splice) and TLSRoute/GRPCRoute (SNI
   passthrough: the TLS ClientHello SNI is peeked without terminating and used to
@@ -583,12 +585,14 @@ names, and dnsNames are the only identifiers the issuer accepts.
 
 Who can get a certificate for a host is who could route it. The issuer refuses
 an authorization for any name the Certificate does not list, whatever its ACME
-server says, and a Challenge is answered only on listeners that would admit an
-HTTPRoute from the Certificate's namespace for that host. So a tenant whose
-namespace a Gateway listener does not admit cannot validate that listener's
-hostnames, even through a shared ClusterIssuer or its own Issuer and server.
-Challenges the controller wrote are deleted when their order ends or is lost
-(restart, leader change, a changed issuer). Writing Challenges directly grants
+server says, and a Challenge is answered only by the listener that serves its
+host, and only when that listener would admit an HTTPRoute from the
+Certificate's namespace. So a tenant whose namespace a Gateway listener does not
+admit cannot validate that listener's hostnames, even when a broader listener on
+the same port admits it, and even through a shared ClusterIssuer or its own
+Issuer and server. Challenges the controller wrote are deleted when their order
+ends or is lost (restart, leader change, a changed issuer), and an order's
+background step stops writing as soon as this control plane stops leading. Writing Challenges directly grants
 the same reach as attaching a route, so keep `acme.cert-manager.io` writes with
 cluster administrators.
 
