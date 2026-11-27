@@ -276,3 +276,59 @@
     (gr8s.resources::update-core-resource store "deployments" "alpha" "web"
       (lambda (object) (setf (gethash "finalizers" (gethash "metadata" object)) #()) object))
     (signals kubernetes-error (gr8s.resources::get-core-resource store "deployments" "alpha" "web"))))
+
+(defun pod-on-node-that-leaves (store name node)
+  "Register NODE, bind a new Pod NAME to it, then remove NODE as the virtual-node sweeper
+does. Returns the Pod."
+  (gr8s.controllers::register-node store (gr8s.model::make-node-record :id (format nil "~A-id" node) :name node
+                                                                      :pod-cidr "10.88.0.0/24"))
+  (let ((object (com.inuoe.jzon:parse *valid-pod-json*)))
+    (setf (gethash "name" (gethash "metadata" object)) name)
+    (let ((pod (create-pod store (parse-pod object))))
+      (gr8s.controllers::persist-pod-assignment store pod node)
+      (gr8s.store:with-store-lock (store)
+        (gr8s.apiserver::remove-node-unlocked store (gr8s.controllers::get-node-unlocked store node)))
+      pod)))
+
+(test a-pod-on-a-node-that-is-gone-can-be-deleted
+  ;; Deleting one told its node to stop it, and the node's absence aborted the delete,
+  ;; even with --force --grace-period=0 (podster-k988).
+  (with-temporary-store (store path)
+    (values path)
+    (let* ((server (gr8s.apiserver::%make-node-grpc-server :store store))
+           (reconciler (make-reconciler store (gr8s.controllers::make-control-plane-runtime store server)))
+           (pod (pod-on-node-that-leaves store "stranded" "gone")))
+      (finishes (gr8s.kubelet::delete-reconciled-pod reconciler (pod-namespace pod) "stranded"))
+      (is (null (ignore-errors (get-pod store (pod-namespace pod) "stranded")))))))
+
+(test pods-on-a-node-that-is-gone-are-collected-after-a-quarantine
+  ;; As Kubernetes' Pod garbage collector does: nothing runs them and no agent reports
+  ;; them, so their controllers must make replacements (podster-k988).
+  (with-temporary-store (store path)
+    (values path)
+    (clrhash gr8s.controllers::*absent-nodes-first-seen*)
+    (let* ((server (gr8s.apiserver::%make-node-grpc-server :store store))
+           (reconciler (make-reconciler store (gr8s.controllers::make-control-plane-runtime store server)))
+           (stranded (pod-on-node-that-leaves store "stranded" "gone"))
+           (namespace (pod-namespace stranded)))
+      ;; A Pod on a Node that is still there stays.
+      (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "here-id" :name "here"
+                                                                          :pod-cidr "10.88.1.0/24"))
+      (let ((object (com.inuoe.jzon:parse *valid-pod-json*)))
+        (setf (gethash "name" (gethash "metadata" object)) "placed")
+        (gr8s.controllers::persist-pod-assignment store (create-pod store (parse-pod object)) "here"))
+      ;; Within the quarantine, nothing goes.
+      (is (= 0 (gr8s.controllers::collect-pods-on-absent-nodes reconciler :now 1000)))
+      (is (= 0 (gr8s.controllers::collect-pods-on-absent-nodes reconciler :now 1039)))
+      (is-true (get-pod store namespace "stranded"))
+      ;; After it, the stranded Pod goes and the placed one stays.
+      (is (= 1 (gr8s.controllers::collect-pods-on-absent-nodes reconciler :now 1040)))
+      (is (null (ignore-errors (get-pod store namespace "stranded"))))
+      (is-true (get-pod store namespace "placed"))
+      ;; A Node that comes back within the quarantine keeps its Pods.
+      (let ((returning (pod-on-node-that-leaves store "returning" "flapping")))
+        (is (= 0 (gr8s.controllers::collect-pods-on-absent-nodes reconciler :now 2000)))
+        (gr8s.controllers::register-node store (gr8s.model::make-node-record :id "flapping-id" :name "flapping"
+                                                                            :pod-cidr "10.88.2.0/24"))
+        (is (= 0 (gr8s.controllers::collect-pods-on-absent-nodes reconciler :now 2100)))
+        (is-true (get-pod store namespace (pod-name returning)))))))
